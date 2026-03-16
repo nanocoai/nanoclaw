@@ -1,0 +1,13 @@
+[Unit]
+Description=Fix Docker bridge routing when Tailscale exit node is active
+After=network.target tailscaled.service docker.service
+Wants=tailscaled.service docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c '/sbin/ip rule show | grep -q "5269.*172.16.0.0/12" || /sbin/ip rule add to 172.16.0.0/12 lookup main priority 5269'
+ExecStop=/sbin/ip rule del to 172.16.0.0/12 lookup main priority 5269
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
