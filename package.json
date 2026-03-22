@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^11.8.1",
+    "grammy": "^1.39.3",
     "cron-parser": "^5.5.0",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",

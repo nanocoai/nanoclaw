@@ -1,0 +1,214 @@
+name: Sync upstream & merge-forward skill branches
+
+on:
+  # Triggered by upstream repo via repository_dispatch
+  repository_dispatch:
+    types: [upstream-main-updated]
+  # Fallback: run on a schedule in case dispatch isn't configured
+  schedule:
+    - cron: '0 */6 * * *'  # every 6 hours
+  # Also run when fork's main is pushed directly
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: true
+
+jobs:
+  sync-and-merge:
+    if: github.repository != 'qwibitai/nanoclaw'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync with upstream main
+        id: sync
+        run: |
+          # Add upstream remote
+          git remote add upstream https://github.com/qwibitai/nanoclaw.git
+          git fetch upstream main
+
+          # Check if upstream has new commits
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date with upstream main."
+            echo "synced=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Merge upstream main into fork's main
+          if ! git merge upstream/main --no-edit; then
+            echo "::error::Failed to merge upstream/main into fork main — conflicts detected"
+            git merge --abort
+            echo "synced=false" >> "$GITHUB_OUTPUT"
+            echo "sync_failed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Validate build
+          npm ci
+          if ! npm run build; then
+            echo "::error::Build failed after merging upstream/main"
+            git reset --hard "origin/main"
+            echo "synced=false" >> "$GITHUB_OUTPUT"
+            echo "sync_failed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! npm test 2>/dev/null; then
+            echo "::error::Tests failed after merging upstream/main"
+            git reset --hard "origin/main"
+            echo "synced=false" >> "$GITHUB_OUTPUT"
+            echo "sync_failed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git push origin main
+          echo "synced=true" >> "$GITHUB_OUTPUT"
+
+      - name: Merge main into skill branches
+        id: merge
+        run: |
+          # Re-fetch to pick up any changes pushed since job start
+          git fetch origin
+
+          FAILED=""
+          SUCCEEDED=""
+
+          # List all remote skill branches
+          SKILL_BRANCHES=$(git branch -r --list 'origin/skill/*' | sed 's|origin/||' | xargs)
+
+          if [ -z "$SKILL_BRANCHES" ]; then
+            echo "No skill branches found."
+            exit 0
+          fi
+
+          for BRANCH in $SKILL_BRANCHES; do
+            SKILL_NAME=$(echo "$BRANCH" | sed 's|skill/||')
+            echo ""
+            echo "=== Processing $BRANCH ==="
+
+            git checkout -B "$BRANCH" "origin/$BRANCH"
+
+            if ! git merge main --no-edit; then
+              echo "::warning::Merge conflict in $BRANCH"
+              git merge --abort
+              FAILED="$FAILED $SKILL_NAME"
+              continue
+            fi
+
+            # Check if there's anything new to push
+            if git diff --quiet "origin/$BRANCH"; then
+              echo "$BRANCH is already up to date with main."
+              SUCCEEDED="$SUCCEEDED $SKILL_NAME"
+              continue
+            fi
+
+            npm ci
+
+            if ! npm run build; then
+              echo "::warning::Build failed for $BRANCH"
+              git reset --hard "origin/$BRANCH"
+              FAILED="$FAILED $SKILL_NAME"
+              continue
+            fi
+
+            if ! npm test 2>/dev/null; then
+              echo "::warning::Tests failed for $BRANCH"
+              git reset --hard "origin/$BRANCH"
+              FAILED="$FAILED $SKILL_NAME"
+              continue
+            fi
+
+            git push origin "$BRANCH"
+            SUCCEEDED="$SUCCEEDED $SKILL_NAME"
+            echo "$BRANCH merged and pushed successfully."
+          done
+
+          echo ""
+          echo "=== Results ==="
+          echo "Succeeded: $SUCCEEDED"
+          echo "Failed: $FAILED"
+
+          echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
+          echo "succeeded=$SUCCEEDED" >> "$GITHUB_OUTPUT"
+
+      - name: Open issue for upstream sync failure
+        if: steps.sync.outputs.sync_failed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Upstream sync failed — merge conflict or build failure`,
+              body: [
+                'The automated sync with `qwibitai/nanoclaw` main failed.',
+                '',
+                'This usually means upstream made changes that conflict with this fork\'s channel code.',
+                '',
+                'To resolve manually:',
+                '```bash',
+                'git fetch upstream main',
+                'git merge upstream/main',
+                '# resolve conflicts',
+                'npm run build && npm test',
+                'git push',
+                '```',
+              ].join('\n'),
+              labels: ['upstream-sync']
+            });
+
+      - name: Open issue for failed skill merges
+        if: steps.merge.outputs.failed != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const failed = '${{ steps.merge.outputs.failed }}'.trim().split(/\s+/);
+            const body = [
+              `The merge-forward workflow failed to merge \`main\` into the following skill branches:`,
+              '',
+              ...failed.map(s => `- \`skill/${s}\`: merge conflict, build failure, or test failure`),
+              '',
+              'Please resolve manually:',
+              '```bash',
+              ...failed.map(s => [
+                `git checkout skill/${s}`,
+                `git merge main`,
+                `# resolve conflicts, then: git push`,
+                ''
+              ]).flat(),
+              '```',
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Merge-forward failed for ${failed.length} skill branch(es)`,
+              body,
+              labels: ['skill-maintenance']
+            });
