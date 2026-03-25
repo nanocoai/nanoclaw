@@ -52,10 +52,27 @@ jobs:
 
             # Attempt merge
             if ! git merge main --no-edit; then
-              echo "::warning::Merge conflict in $BRANCH"
-              git merge --abort
-              FAILED="$FAILED $SKILL_NAME"
-              continue
+              # Auto-resolve trivial conflicts
+              CONFLICTED=$(git diff --name-only --diff-filter=U)
+              CAN_AUTO=true
+              for f in $CONFLICTED; do
+                case "$f" in
+                  package-lock.json|package.json|repo-tokens/badge.svg)
+                    git checkout --theirs "$f"
+                    git add "$f"
+                    ;;
+                  *)
+                    CAN_AUTO=false
+                    ;;
+                esac
+              done
+              if [ "$CAN_AUTO" = false ]; then
+                echo "::warning::Merge conflict in $BRANCH"
+                git merge --abort
+                FAILED="$FAILED $SKILL_NAME"
+                continue
+              fi
+              git commit --no-edit
             fi
 
             # Check if there's anything new to push

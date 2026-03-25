@@ -1,7 +1,7 @@
 # NanoClaw Agent Container
 # Runs Claude Agent SDK in isolated Linux VM with browser automation
 
-FROM node:22-slim
+FROM node:24-slim
 
 # Install system dependencies for Chromium
 RUN apt-get update && apt-get install -y \

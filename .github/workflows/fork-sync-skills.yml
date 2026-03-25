@@ -62,14 +62,34 @@ jobs:
 
           # Merge upstream main into fork's main
           if ! git merge upstream/main --no-edit; then
-            echo "::error::Failed to merge upstream/main into fork main — conflicts detected"
-            git merge --abort
-            echo "synced=false" >> "$GITHUB_OUTPUT"
-            echo "sync_failed=true" >> "$GITHUB_OUTPUT"
-            exit 0
+            # Auto-resolve trivial conflicts (lockfile, badge, package.json version)
+            CONFLICTED=$(git diff --name-only --diff-filter=U)
+            AUTO_RESOLVABLE=true
+            for f in $CONFLICTED; do
+              case "$f" in
+                package-lock.json|package.json|repo-tokens/badge.svg)
+                  git checkout --theirs "$f"
+                  git add "$f"
+                  ;;
+                *)
+                  AUTO_RESOLVABLE=false
+                  ;;
+              esac
+            done
+
+            if [ "$AUTO_RESOLVABLE" = false ]; then
+              echo "::error::Failed to merge upstream/main into fork main — non-trivial conflicts detected"
+              git merge --abort
+              echo "synced=false" >> "$GITHUB_OUTPUT"
+              echo "sync_failed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            git commit --no-edit
+            echo "Auto-resolved lockfile/badge/version conflicts"
           fi
 
-          # Validate build
+          # Regenerate lockfile to match merged package.json
           npm ci
           if ! npm run build; then
             echo "::error::Build failed after merging upstream/main"
@@ -115,10 +135,27 @@ jobs:
             git checkout -B "$BRANCH" "origin/$BRANCH"
 
             if ! git merge main --no-edit; then
-              echo "::warning::Merge conflict in $BRANCH"
-              git merge --abort
-              FAILED="$FAILED $SKILL_NAME"
-              continue
+              # Auto-resolve trivial conflicts
+              CONFLICTED=$(git diff --name-only --diff-filter=U)
+              CAN_AUTO=true
+              for f in $CONFLICTED; do
+                case "$f" in
+                  package-lock.json|package.json|repo-tokens/badge.svg)
+                    git checkout --theirs "$f"
+                    git add "$f"
+                    ;;
+                  *)
+                    CAN_AUTO=false
+                    ;;
+                esac
+              done
+              if [ "$CAN_AUTO" = false ]; then
+                echo "::warning::Merge conflict in $BRANCH"
+                git merge --abort
+                FAILED="$FAILED $SKILL_NAME"
+                continue
+              fi
+              git commit --no-edit
             fi
 
             # Check if there's anything new to push

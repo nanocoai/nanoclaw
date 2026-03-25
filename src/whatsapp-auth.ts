@@ -9,6 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import pino from 'pino';
+// @ts-expect-error no type declarations
 import qrcode from 'qrcode-terminal';
 import readline from 'readline';
 

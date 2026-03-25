@@ -1,6 +1,6 @@
 {
   "name": "nanoclaw",
-  "version": "1.2.14",
+  "version": "1.2.26",
   "description": "Personal Claude assistant. Lightweight, secure, customizable.",
   "type": "module",
   "main": "dist/index.js",
@@ -19,19 +19,19 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "better-sqlite3": "^11.8.1",
-    "cron-parser": "^5.5.0",
+    "@whiskeysockets/baileys": "^6.7.16",
+    "better-sqlite3": "11.10.0",
+    "cron-parser": "5.5.0",
+    "grammy": "^1.41.1",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",
-    "yaml": "^2.8.2",
-    "@whiskeysockets/baileys": "^7.0.0-rc.9",
-    "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
+    "sharp": "^0.33.0",
+    "yaml": "^2.8.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
-    "@types/qrcode-terminal": "^0.12.0",
     "@types/node": "^22.10.0",
     "@vitest/coverage-v8": "^4.0.18",
     "husky": "^9.1.7",
