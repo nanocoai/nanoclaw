@@ -1,0 +1,33 @@
+name: Sync upstream & deploy
+
+on:
+  schedule:
+    - cron: '0 4 * * *' # 매일 오후 1시 (KST)
+  workflow_dispatch: # 수동 실행 가능
+
+jobs:
+  sync-and-deploy:
+    runs-on: [self-hosted, nanoclaw]
+    steps:
+      - name: Sync upstream
+        working-directory: /home/jhjeon/nanoclaw
+        run: |
+          git fetch upstream
+          git merge upstream/main --no-edit || {
+            echo "::error::Merge conflict detected"
+            git merge --abort
+            exit 1
+          }
+          git push origin main
+
+      - name: Build & restart
+        working-directory: /home/jhjeon/nanoclaw
+        run: |
+          export PATH="/home/jhjeon/.nvm/versions/node/v22.22.2/bin:$PATH"
+          npm install --ignore-scripts
+          npm rebuild better-sqlite3
+          npm run build
+          export XDG_RUNTIME_DIR=/run/user/$(id -u)
+          systemctl --user restart nanoclaw
+          sleep 3
+          systemctl --user is-active nanoclaw
