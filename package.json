@@ -23,7 +23,8 @@
   "dependencies": {
     "@onecli-sh/sdk": "^0.2.0",
     "better-sqlite3": "11.10.0",
-    "cron-parser": "5.5.0"
+    "cron-parser": "5.5.0",
+    "discord.js": "^14.18.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
