@@ -4,6 +4,7 @@
  */
 import { ChildProcess, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -157,15 +158,47 @@ function buildVolumeMounts(
     );
   }
 
-  // Sync skills from container/skills/ into each group's .claude/skills/
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
+  // Sync skills into each group's .claude/skills/
+  // Order: host user skills first (gstack etc.), then NanoClaw container skills on top.
+  // NanoClaw skills take priority on name collision. Stale skills are cleaned up.
   const skillsDst = path.join(groupSessionsDir, 'skills');
-  if (fs.existsSync(skillsSrc)) {
-    for (const skillDir of fs.readdirSync(skillsSrc)) {
-      const srcDir = path.join(skillsSrc, skillDir);
+  const naноclawSkillsSrc = path.join(process.cwd(), 'container', 'skills');
+  const hostSkillsSrc = path.join(os.homedir(), '.claude', 'skills');
+
+  // Collect canonical skill names from both sources
+  const canonicalSkills = new Set<string>();
+
+  // 1. Copy host user skills (gstack etc.) — provides base set
+  if (fs.existsSync(hostSkillsSrc)) {
+    for (const entry of fs.readdirSync(hostSkillsSrc)) {
+      const srcDir = path.join(hostSkillsSrc, entry);
       if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
+      canonicalSkills.add(entry);
+      const dstDir = path.join(skillsDst, entry);
       fs.cpSync(srcDir, dstDir, { recursive: true });
+    }
+  }
+
+  // 2. Copy NanoClaw container skills — overwrites any host skill with same name
+  if (fs.existsSync(naноclawSkillsSrc)) {
+    for (const entry of fs.readdirSync(naноclawSkillsSrc)) {
+      const srcDir = path.join(naноclawSkillsSrc, entry);
+      if (!fs.statSync(srcDir).isDirectory()) continue;
+      canonicalSkills.add(entry);
+      const dstDir = path.join(skillsDst, entry);
+      fs.cpSync(srcDir, dstDir, { recursive: true });
+    }
+  }
+
+  // 3. Remove stale skills that no longer exist in either source
+  if (fs.existsSync(skillsDst)) {
+    for (const entry of fs.readdirSync(skillsDst)) {
+      if (!canonicalSkills.has(entry)) {
+        const stalePath = path.join(skillsDst, entry);
+        if (fs.statSync(stalePath).isDirectory()) {
+          fs.rmSync(stalePath, { recursive: true });
+        }
+      }
     }
   }
   mounts.push({
