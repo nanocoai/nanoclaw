@@ -36,7 +36,7 @@ interface ContainerInput {
 }
 
 interface ContainerOutput {
-  status: 'success' | 'error' | 'max_turns';
+  status: 'success' | 'error' | 'max_turns' | 'continuing';
   result: string | null;
   newSessionId?: string;
   error?: string;
@@ -60,6 +60,10 @@ interface SDKUserMessage {
   session_id: string;
 }
 
+const MAX_AUTO_CONTINUATIONS = parseInt(
+  process.env.MAX_AUTO_CONTINUATIONS || '3',
+  10,
+);
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
@@ -382,6 +386,7 @@ async function runQuery(
   newSessionId?: string;
   lastAssistantUuid?: string;
   closedDuringQuery: boolean;
+  hitMaxTurns: boolean;
 }> {
   const stream = new MessageStream();
   stream.push(prompt);
@@ -411,6 +416,7 @@ async function runQuery(
   let lastAssistantUuid: string | undefined;
   let messageCount = 0;
   let resultCount = 0;
+  let hitMaxTurns = false;
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
@@ -526,6 +532,7 @@ async function runQuery(
     if (message.type === 'result') {
       resultCount++;
       const isMaxTurns = message.subtype === 'error_max_turns';
+      if (isMaxTurns) hitMaxTurns = true;
       const textResult =
         'result' in message ? (message as { result?: string }).result : null;
       log(
@@ -533,7 +540,7 @@ async function runQuery(
       );
       writeOutput({
         status: isMaxTurns ? 'max_turns' : 'success',
-        result: textResult || (isMaxTurns ? '작업이 최대 턴 수에 도달하여 중단되었습니다. 이어서 진행하려면 다시 메시지를 보내주세요.' : null),
+        result: textResult || null,
         newSessionId,
       });
     }
@@ -543,7 +550,7 @@ async function runQuery(
   log(
     `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`,
   );
-  return { newSessionId, lastAssistantUuid, closedDuringQuery };
+  return { newSessionId, lastAssistantUuid, closedDuringQuery, hitMaxTurns };
 }
 
 interface ScriptResult {
@@ -678,10 +685,11 @@ async function main(): Promise<void> {
 
   // Query loop: run query → wait for IPC message → run new query → repeat
   let resumeAt: string | undefined;
+  let autoContinuationCount = 0;
   try {
     while (true) {
       log(
-        `Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`,
+        `Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'}${autoContinuationCount > 0 ? `, autoContinuation: ${autoContinuationCount}` : ''})...`,
       );
 
       const queryResult = await runQuery(
@@ -706,6 +714,39 @@ async function main(): Promise<void> {
         log('Close sentinel consumed during query, exiting');
         break;
       }
+
+      // Auto-continuation: if max_turns was hit and we have budget, restart immediately
+      if (
+        queryResult.hitMaxTurns &&
+        autoContinuationCount < MAX_AUTO_CONTINUATIONS
+      ) {
+        autoContinuationCount++;
+        log(
+          `Auto-continuing (${autoContinuationCount}/${MAX_AUTO_CONTINUATIONS})`,
+        );
+        writeOutput({
+          status: 'continuing',
+          result: `작업이 진행 중입니다. 자동으로 이어서 작업합니다. (${autoContinuationCount}/${MAX_AUTO_CONTINUATIONS})`,
+          newSessionId: sessionId,
+        });
+        prompt = '이전 작업을 이어서 진행해 주세요. 중단된 부분부터 계속하세요.';
+        continue;
+      }
+
+      // If max_turns but exhausted auto-continuations, notify user
+      if (queryResult.hitMaxTurns) {
+        log(
+          `Auto-continuation limit reached (${MAX_AUTO_CONTINUATIONS}), waiting for user`,
+        );
+        writeOutput({
+          status: 'max_turns',
+          result: `작업이 최대 턴 수에 도달하여 중단되었습니다 (자동 재시도 ${MAX_AUTO_CONTINUATIONS}회 완료). 이어서 진행하려면 다시 메시지를 보내주세요.`,
+          newSessionId: sessionId,
+        });
+      }
+
+      // Reset auto-continuation counter on normal completion
+      autoContinuationCount = 0;
 
       // Emit session update so host can track it
       writeOutput({ status: 'success', result: null, newSessionId: sessionId });

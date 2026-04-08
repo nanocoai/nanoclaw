@@ -185,6 +185,13 @@ async function runTask(
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
+        // Auto-continuation in progress — notify user but don't close or mark idle
+        if (streamedOutput.status === 'continuing') {
+          if (streamedOutput.result) {
+            await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          }
+          return;
+        }
         if (streamedOutput.result) {
           result = streamedOutput.result;
           // Forward result to user (sendMessage handles formatting)

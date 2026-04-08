@@ -303,6 +303,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       resetIdleTimer();
     }
 
+    // Auto-continuation in progress — send notification, keep typing indicator on
+    if (result.status === 'continuing') {
+      if (result.result) {
+        await channel.sendMessage(chatJid, result.result);
+      }
+      await channel.setTyping?.(chatJid, true);
+      return;
+    }
+
     if (result.status === 'success' || result.status === 'max_turns') {
       queue.notifyIdle(chatJid);
     }
