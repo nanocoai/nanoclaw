@@ -294,6 +294,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
+        // Stop typing indicator before sending — the response is ready
+        await channel.setTyping?.(chatJid, false);
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
@@ -301,7 +303,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       resetIdleTimer();
     }
 
-    if (result.status === 'success') {
+    if (result.status === 'success' || result.status === 'max_turns') {
       queue.notifyIdle(chatJid);
     }
 
@@ -519,9 +521,11 @@ async function startMessageLoop(): Promise<void> {
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
             );
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
-            saveState();
+            // Save cursor before pipe — if container dies, processGroupMessages
+            // will roll back its own cursor, and these messages will be re-discovered
+            // on the next message loop iteration since they're still in the DB.
+            // Don't advance cursor here; let the streaming callback handle it
+            // when the agent actually processes and responds to the piped message.
             // Show typing indicator while the container processes the piped message
             channel
               .setTyping?.(chatJid, true)
@@ -687,8 +691,15 @@ async function main(): Promise<void> {
       );
       continue;
     }
-    channels.push(channel);
-    await channel.connect();
+    try {
+      await channel.connect();
+      channels.push(channel);
+    } catch (err) {
+      logger.error(
+        { channel: channelName, err },
+        'Channel failed to connect — skipping',
+      );
+    }
   }
   if (channels.length === 0) {
     logger.fatal('No channels connected');

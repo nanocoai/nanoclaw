@@ -46,7 +46,7 @@ export interface ContainerInput {
 }
 
 export interface ContainerOutput {
-  status: 'success' | 'error';
+  status: 'success' | 'error' | 'max_turns';
   result: string | null;
   newSessionId?: string;
   error?: string;
@@ -355,6 +355,9 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
+    container.stdin.on('error', (err) => {
+      logger.warn({ group: group.name, err: err.message }, 'Container stdin error (EPIPE)');
+    });
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();
 
@@ -463,10 +466,12 @@ export async function runContainerAgent(
 
     let timeout = setTimeout(killOnTimeout, timeoutMs);
 
-    // Reset the timeout whenever there's activity (streaming output)
+    // Reset idle timeout on activity. Use IDLE_TIMEOUT + grace (not the full
+    // timeoutMs) so chatty agents can't extend the hard limit indefinitely.
+    const activityTimeoutMs = IDLE_TIMEOUT + 30_000;
     const resetTimeout = () => {
       clearTimeout(timeout);
-      timeout = setTimeout(killOnTimeout, timeoutMs);
+      timeout = setTimeout(killOnTimeout, activityTimeoutMs);
     };
 
     container.on('close', (code) => {
@@ -503,6 +508,9 @@ export async function runContainerAgent(
               result: null,
               newSessionId,
             });
+          }).catch((err) => {
+            logger.error({ group: group.name, err }, 'Output chain error during idle cleanup');
+            resolve({ status: 'success', result: null, newSessionId });
           });
           return;
         }
@@ -621,6 +629,9 @@ export async function runContainerAgent(
             result: null,
             newSessionId,
           });
+        }).catch((err) => {
+          logger.error({ group: group.name, err }, 'Output chain error');
+          resolve({ status: 'error', result: null, error: `Output callback error: ${err}` });
         });
         return;
       }

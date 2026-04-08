@@ -36,7 +36,7 @@ interface ContainerInput {
 }
 
 interface ContainerOutput {
-  status: 'success' | 'error';
+  status: 'success' | 'error' | 'max_turns';
   result: string | null;
   newSessionId?: string;
   error?: string;
@@ -471,6 +471,7 @@ async function runQuery(
         'mcp__nanoclaw__*',
       ],
       env: sdkEnv,
+      maxTurns: parseInt(process.env.MAX_AGENT_TURNS || '50', 10),
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       settingSources: ['project', 'user'],
@@ -524,14 +525,15 @@ async function runQuery(
 
     if (message.type === 'result') {
       resultCount++;
+      const isMaxTurns = message.subtype === 'error_max_turns';
       const textResult =
         'result' in message ? (message as { result?: string }).result : null;
       log(
-        `Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
+        `Result #${resultCount}: subtype=${message.subtype}${isMaxTurns ? ' (max turns reached)' : ''}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
       );
       writeOutput({
-        status: 'success',
-        result: textResult || null,
+        status: isMaxTurns ? 'max_turns' : 'success',
+        result: textResult || (isMaxTurns ? '작업이 최대 턴 수에 도달하여 중단되었습니다. 이어서 진행하려면 다시 메시지를 보내주세요.' : null),
         newSessionId,
       });
     }

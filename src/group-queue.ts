@@ -347,19 +347,27 @@ export class GroupQueue {
   async shutdown(_gracePeriodMs: number): Promise<void> {
     this.shuttingDown = true;
 
-    // Count active containers but don't kill them — they'll finish on their own
-    // via idle timeout or container timeout. The --rm flag cleans them up on exit.
-    // This prevents WhatsApp reconnection restarts from killing working agents.
+    // Write _close sentinels so containers exit their IPC polling loop gracefully.
+    // Previously containers were detached without signaling, causing zombie processes.
     const activeContainers: string[] = [];
     for (const [_jid, state] of this.groups) {
       if (state.process && !state.process.killed && state.containerName) {
         activeContainers.push(state.containerName);
+        if (state.groupFolder) {
+          const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
+          try {
+            fs.mkdirSync(inputDir, { recursive: true });
+            fs.writeFileSync(path.join(inputDir, '_close'), '');
+          } catch {
+            // best-effort
+          }
+        }
       }
     }
 
     logger.info(
-      { activeCount: this.activeCount, detachedContainers: activeContainers },
-      'GroupQueue shutting down (containers detached, not killed)',
+      { activeCount: this.activeCount, closedContainers: activeContainers },
+      'GroupQueue shutting down (close sentinels written)',
     );
   }
 }
