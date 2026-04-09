@@ -18,6 +18,7 @@ interface GroupState {
   active: boolean;
   idleWaiting: boolean;
   isTaskContainer: boolean;
+  isMain: boolean;
   runningTaskId: string | null;
   pendingMessages: boolean;
   pendingTasks: QueuedTask[];
@@ -42,6 +43,7 @@ export class GroupQueue {
         active: false,
         idleWaiting: false,
         isTaskContainer: false,
+        isMain: false,
         runningTaskId: null,
         pendingMessages: false,
         pendingTasks: [],
@@ -59,6 +61,17 @@ export class GroupQueue {
     this.processMessagesFn = fn;
   }
 
+  /** Mark a group as main so it always gets a container slot. */
+  markMain(groupJid: string): void {
+    this.getGroup(groupJid).isMain = true;
+  }
+
+  private onRetryExhausted: ((groupJid: string) => void) | null = null;
+
+  setOnRetryExhausted(fn: (groupJid: string) => void): void {
+    this.onRetryExhausted = fn;
+  }
+
   enqueueMessageCheck(groupJid: string): void {
     if (this.shuttingDown) return;
 
@@ -70,7 +83,8 @@ export class GroupQueue {
       return;
     }
 
-    if (this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
+    // Main group always gets a slot — never queued behind other groups
+    if (!state.isMain && this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
       state.pendingMessages = true;
       if (!this.waitingGroups.includes(groupJid)) {
         this.waitingGroups.push(groupJid);
@@ -267,6 +281,7 @@ export class GroupQueue {
         { groupJid, retryCount: state.retryCount },
         'Max retries exceeded, dropping messages (will retry on next incoming message)',
       );
+      this.onRetryExhausted?.(groupJid);
       state.retryCount = 0;
       return;
     }
@@ -354,7 +369,12 @@ export class GroupQueue {
       if (state.process && !state.process.killed && state.containerName) {
         activeContainers.push(state.containerName);
         if (state.groupFolder) {
-          const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
+          const inputDir = path.join(
+            DATA_DIR,
+            'ipc',
+            state.groupFolder,
+            'input',
+          );
           try {
             fs.mkdirSync(inputDir, { recursive: true });
             fs.writeFileSync(path.join(inputDir, '_close'), '');

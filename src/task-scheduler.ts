@@ -73,6 +73,7 @@ export interface SchedulerDependencies {
     groupFolder: string,
   ) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendAlert?: (message: string) => void;
 }
 
 async function runTask(
@@ -225,6 +226,9 @@ async function runTask(
     if (closeTimer) clearTimeout(closeTimer);
     error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, error }, 'Task failed');
+    deps.sendAlert?.(
+      `[스케줄 태스크] ${task.group_folder} 실패: ${error.slice(0, 100)}`,
+    );
   }
 
   const durationMs = Date.now() - startTime;

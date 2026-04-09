@@ -26,7 +26,10 @@ const MAX_ATTACHMENT_SIZE = 20 * 1024 * 1024; // 20MB
  * Download a Discord CDN attachment to a local path.
  * Returns true on success, false if skipped (too large) or failed.
  */
-async function downloadAttachment(url: string, destPath: string): Promise<boolean> {
+async function downloadAttachment(
+  url: string,
+  destPath: string,
+): Promise<boolean> {
   try {
     const res = await fetch(url);
     if (!res.ok) {
@@ -35,12 +38,18 @@ async function downloadAttachment(url: string, destPath: string): Promise<boolea
     }
     const contentLength = res.headers.get('content-length');
     if (contentLength && parseInt(contentLength, 10) > MAX_ATTACHMENT_SIZE) {
-      logger.warn({ url, size: contentLength }, 'Attachment too large, skipping download');
+      logger.warn(
+        { url, size: contentLength },
+        'Attachment too large, skipping download',
+      );
       return false;
     }
     const buffer = Buffer.from(await res.arrayBuffer());
     if (buffer.byteLength > MAX_ATTACHMENT_SIZE) {
-      logger.warn({ url, size: buffer.byteLength }, 'Attachment too large after download, discarding');
+      logger.warn(
+        { url, size: buffer.byteLength },
+        'Attachment too large after download, discarding',
+      );
       return false;
     }
     fs.mkdirSync(path.dirname(destPath), { recursive: true });
@@ -56,7 +65,12 @@ async function downloadAttachment(url: string, destPath: string): Promise<boolea
  * Sanitize a filename to prevent path traversal.
  */
 function sanitizeFilename(name: string): string {
-  return path.basename(name).replace(/[^a-zA-Z0-9._\-가-힣]/g, '_').slice(0, 200) || 'file';
+  return (
+    path
+      .basename(name)
+      .replace(/[^a-zA-Z0-9._\-가-힣]/g, '_')
+      .slice(0, 200) || 'file'
+  );
 }
 
 export interface DiscordChannelOpts {
@@ -174,7 +188,11 @@ export class DiscordChannel implements Channel {
 
       // Handle attachments — download from Discord CDN into group folder
       if (message.attachments.size > 0) {
-        const attachmentsDir = path.join(GROUPS_DIR, group.folder, 'attachments');
+        const attachmentsDir = path.join(
+          GROUPS_DIR,
+          group.folder,
+          'attachments',
+        );
         const attachmentDescriptions: string[] = [];
 
         for (const att of message.attachments.values()) {
@@ -190,11 +208,18 @@ export class DiscordChannel implements Channel {
 
           if (downloaded) {
             if (contentType.startsWith('image/')) {
-              attachmentDescriptions.push(`[Image: ${rawName} — saved to ${containerPath}]`);
+              attachmentDescriptions.push(
+                `[Image: ${rawName} — saved to ${containerPath}]`,
+              );
             } else {
-              attachmentDescriptions.push(`[File: ${rawName} — saved to ${containerPath}]`);
+              attachmentDescriptions.push(
+                `[File: ${rawName} — saved to ${containerPath}]`,
+              );
             }
-            logger.info({ file: safeFilename, group: group.folder }, 'Attachment saved');
+            logger.info(
+              { file: safeFilename, group: group.folder },
+              'Attachment saved',
+            );
           } else {
             // Fallback to placeholder if download failed
             if (contentType.startsWith('image/')) {

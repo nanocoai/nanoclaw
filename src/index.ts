@@ -80,6 +80,18 @@ const queue = new GroupQueue();
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 
+function sendAlert(message: string): void {
+  const mainJid = Object.keys(registeredGroups).find(
+    (jid) => registeredGroups[jid]?.isMain,
+  );
+  if (!mainJid) return;
+  const channel = findChannel(channels, mainJid);
+  if (!channel) return;
+  channel
+    .sendMessage(mainJid, `⚠️ ${message}`)
+    .catch((err) => logger.debug({ err }, 'Failed to send alert'));
+}
+
 function ensureOneCLIAgent(jid: string, group: RegisteredGroup): void {
   if (group.isMain) return;
   const identifier = group.folder.toLowerCase().replace(/_/g, '-');
@@ -293,9 +305,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
+      await channel.setTyping?.(chatJid, false);
       if (text) {
-        // Stop typing indicator before sending — the response is ready
-        await channel.setTyping?.(chatJid, false);
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
@@ -313,6 +324,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
 
     if (result.status === 'success' || result.status === 'max_turns') {
+      await channel.setTyping?.(chatJid, false);
       queue.notifyIdle(chatJid);
     }
 
@@ -435,10 +447,18 @@ async function runAgent(
         deleteSession(group.folder);
       }
 
+      const errorStr = typeof output.error === 'string' ? output.error : 'unknown';
+      const isOverloaded = /overloaded|529|too many requests|rate.limit|hit your limit/i.test(errorStr);
       logger.error(
         { group: group.name, error: output.error },
         'Container agent error',
       );
+      if (isOverloaded) {
+        const ch = findChannel(channels, chatJid);
+        ch?.sendMessage(chatJid, 'API가 일시적으로 과부하 상태예요. 잠시 후 자동으로 재시도합니다.').catch(() => {});
+      } else {
+        sendAlert(`[${group.name}] 에이전트 오류: ${errorStr.slice(0, 100)}`);
+      }
       return 'error';
     }
 
@@ -731,6 +751,7 @@ async function main(): Promise<void> {
       const text = formatOutbound(rawText);
       if (text) await channel.sendMessage(jid, text);
     },
+    sendAlert,
   });
   startIpcWatcher({
     sendMessage: (jid, text) => {
@@ -769,6 +790,17 @@ async function main(): Promise<void> {
   });
   startSessionCleanup();
   queue.setProcessMessagesFn(processGroupMessages);
+  for (const [jid, group] of Object.entries(registeredGroups)) {
+    if (group.isMain) queue.markMain(jid);
+  }
+  queue.setOnRetryExhausted((groupJid) => {
+    const group = registeredGroups[groupJid];
+    const ch = findChannel(channels, groupJid);
+    if (ch && group) {
+      ch.sendMessage(groupJid, '재시도 한도에 도달했어요. 다시 메시지를 보내주시면 처리할게요.').catch(() => {});
+      sendAlert(`[${group.name}] 재시도 5회 소진 — 메시지 대기 중`);
+    }
+  });
   recoverPendingMessages();
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');
