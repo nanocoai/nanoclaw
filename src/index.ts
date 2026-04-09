@@ -447,15 +447,22 @@ async function runAgent(
         deleteSession(group.folder);
       }
 
-      const errorStr = typeof output.error === 'string' ? output.error : 'unknown';
-      const isOverloaded = /overloaded|529|too many requests|rate.limit|hit your limit/i.test(errorStr);
+      const errorStr =
+        typeof output.error === 'string' ? output.error : 'unknown';
+      const isOverloaded =
+        /overloaded|529|too many requests|rate.limit|hit your limit/i.test(
+          errorStr,
+        );
       logger.error(
         { group: group.name, error: output.error },
         'Container agent error',
       );
       if (isOverloaded) {
         const ch = findChannel(channels, chatJid);
-        ch?.sendMessage(chatJid, 'API가 일시적으로 과부하 상태예요. 잠시 후 자동으로 재시도합니다.').catch(() => {});
+        ch?.sendMessage(
+          chatJid,
+          'API가 일시적으로 과부하 상태예요. 잠시 후 자동으로 재시도합니다.',
+        ).catch(() => {});
       } else {
         sendAlert(`[${group.name}] 에이전트 오류: ${errorStr.slice(0, 100)}`);
       }
@@ -797,7 +804,10 @@ async function main(): Promise<void> {
     const group = registeredGroups[groupJid];
     const ch = findChannel(channels, groupJid);
     if (ch && group) {
-      ch.sendMessage(groupJid, '재시도 한도에 도달했어요. 다시 메시지를 보내주시면 처리할게요.').catch(() => {});
+      ch.sendMessage(
+        groupJid,
+        '재시도 한도에 도달했어요. 다시 메시지를 보내주시면 처리할게요.',
+      ).catch(() => {});
       sendAlert(`[${group.name}] 재시도 5회 소진 — 메시지 대기 중`);
     }
   });
