@@ -23,9 +23,14 @@ import {
   TIMEZONE,
 } from './config.js';
 import { materializeContainerJson } from './container-config.js';
-import { getContainerConfig } from './db/container-configs.js';
-import { updateContainerConfigScalars } from './db/container-configs.js';
-import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import { getContainerConfig, updateContainerConfigScalars } from './db/container-configs.js';
+import {
+  CONTAINER_RUNTIME_BIN,
+  hostGatewayArgs,
+  isRootlessPodman,
+  readonlyMountArgs,
+  stopContainer,
+} from './container-runtime.js';
 import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from './egress-lockdown.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
@@ -469,10 +474,28 @@ async function buildContainerArgs(
     args.push(...hostGatewayArgs());
   }
 
-  // User mapping
+  // User mapping. Two regimes:
+  //
+  // 1. Rootless podman → map the image's USER directive (node, uid 1000)
+  //    to the host running user via `--userns=keep-id:uid=1000,gid=1000`.
+  //    Container processes run as `node` and writes show up as owned by
+  //    whoever invoked podman, regardless of whether their host uid is
+  //    1000 or not. Without this flag podman's default rootless mapping
+  //    puts the host running user at container uid 0 and the image's
+  //    `node` user (uid 1000) lands in subuid range, unable to write
+  //    host files (symptom: EACCES / "readonly database" inside the
+  //    container despite the host user owning the bind-mounted files).
+  //
+  // 2. Rootful Docker → no user namespace exists. A container process
+  //    running as `node` (uid 1000) writes files owned by host uid 1000.
+  //    Force `--user $hostUid:$hostGid` when the operator's host uid
+  //    isn't 1000 (and isn't root) to make writes show up as the host
+  //    user.
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
-  if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
+  if (isRootlessPodman()) {
+    args.push('--userns=keep-id:uid=1000,gid=1000');
+  } else if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');
   }

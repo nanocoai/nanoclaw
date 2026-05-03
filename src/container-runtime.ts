@@ -25,6 +25,38 @@ export function readonlyMountArgs(hostPath: string, containerPath: string): stri
   return ['-v', `${hostPath}:${containerPath}:ro`];
 }
 
+/**
+ * True iff the container runtime is rootless podman. Cached — `info` is
+ * non-trivial. Safe against real Docker: the `Host.Security.Rootless`
+ * template field is podman-only, so `docker info` returns an empty string
+ * and the helper returns false.
+ *
+ * Used to decide whether the spawn args need an explicit `--user` flag.
+ * Rootful Docker has no user namespace mapping, so files written by a
+ * container process are owned by whatever uid that process runs as on
+ * the host — passing `--user $hostUid:$hostGid` is the only way to make
+ * the container's writes show up as the host user. Rootless podman has
+ * its own user-namespace mapping that maps the image's USER directive
+ * to the host running user automatically; passing `--user` there breaks
+ * that mapping and routes writes through subuids, which don't own host
+ * files.
+ */
+let cachedRootlessPodman: boolean | undefined;
+export function isRootlessPodman(): boolean {
+  if (cachedRootlessPodman !== undefined) return cachedRootlessPodman;
+  try {
+    const out = execSync(`${CONTAINER_RUNTIME_BIN} info --format '{{.Host.Security.Rootless}}'`, {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 5000,
+    });
+    cachedRootlessPodman = out.trim() === 'true';
+  } catch {
+    cachedRootlessPodman = false;
+  }
+  return cachedRootlessPodman;
+}
+
 /** Stop a container by name. Uses execFileSync to avoid shell injection. */
 export function stopContainer(name: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
