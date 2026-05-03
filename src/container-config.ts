@@ -16,10 +16,36 @@ import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
 
-export interface McpServerConfig {
+/**
+ * MCP server configuration. Mirrors the transports the Claude Agent SDK
+ * supports — stdio (default, in-container subprocess), http and sse
+ * (external server reached by URL).
+ *
+ * `instructions` is host-side only; the host writes it to
+ * `.claude-fragments/mcp-<name>.md` at spawn and imports it into the
+ * composed CLAUDE.md (see `claude-md-compose.ts`).
+ */
+export type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig | McpSseServerConfig;
+
+export interface McpStdioServerConfig {
+  type?: 'stdio';
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  instructions?: string;
+}
+
+export interface McpHttpServerConfig {
+  type: 'http';
+  url: string;
+  headers?: Record<string, string>;
+  instructions?: string;
+}
+
+export interface McpSseServerConfig {
+  type: 'sse';
+  url: string;
+  headers?: Record<string, string>;
   instructions?: string;
 }
 
