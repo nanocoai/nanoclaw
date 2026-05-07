@@ -17,6 +17,7 @@ If all of the following are already present, skip to **Configuration**:
 
 - `src/providers/opencode.ts`
 - `container/agent-runner/src/providers/opencode.ts`
+- `container/agent-runner/src/providers/skill-catalog.ts` (shared with `/add-codex`)
 - `import './opencode.js';` line in `src/providers/index.ts`
 - `import './opencode.js';` line in `container/agent-runner/src/providers/index.ts`
 - `@opencode-ai/sdk` in `container/agent-runner/package.json`
@@ -40,7 +41,11 @@ git show origin/providers:container/agent-runner/src/providers/opencode.ts      
 git show origin/providers:container/agent-runner/src/providers/mcp-to-opencode.ts      > container/agent-runner/src/providers/mcp-to-opencode.ts
 git show origin/providers:container/agent-runner/src/providers/mcp-to-opencode.test.ts > container/agent-runner/src/providers/mcp-to-opencode.test.ts
 git show origin/providers:container/agent-runner/src/providers/opencode.factory.test.ts > container/agent-runner/src/providers/opencode.factory.test.ts
+git show origin/providers:container/agent-runner/src/providers/skill-catalog.ts        > container/agent-runner/src/providers/skill-catalog.ts
+git show origin/providers:container/agent-runner/src/providers/skill-catalog.test.ts   > container/agent-runner/src/providers/skill-catalog.test.ts
 ```
+
+`skill-catalog.ts` is a small shared helper used by every non-Claude provider (it builds a discovery list of installed Claude Code skills so Codex / OpenCode / etc. can `Read` and follow them). Idempotent — if `/add-codex` already copied it, this just rewrites the identical bytes.
 
 ### 3. Append the self-registration imports
 

@@ -21,6 +21,7 @@ If all of the following are already present, skip to **Configuration**:
 - `container/agent-runner/src/providers/codex.ts`
 - `container/agent-runner/src/providers/codex-app-server.ts`
 - `container/agent-runner/src/providers/codex.factory.test.ts`
+- `container/agent-runner/src/providers/skill-catalog.ts` (shared with `/add-opencode`)
 - `import './codex.js';` line in `src/providers/index.ts`
 - `import './codex.js';` line in `container/agent-runner/src/providers/index.ts`
 - `ARG CODEX_VERSION` and `"@openai/codex@${CODEX_VERSION}"` in the pnpm global-install block in `container/Dockerfile`
@@ -42,7 +43,11 @@ git show origin/providers:src/providers/codex.ts                                
 git show origin/providers:container/agent-runner/src/providers/codex.ts               > container/agent-runner/src/providers/codex.ts
 git show origin/providers:container/agent-runner/src/providers/codex-app-server.ts    > container/agent-runner/src/providers/codex-app-server.ts
 git show origin/providers:container/agent-runner/src/providers/codex.factory.test.ts  > container/agent-runner/src/providers/codex.factory.test.ts
+git show origin/providers:container/agent-runner/src/providers/skill-catalog.ts       > container/agent-runner/src/providers/skill-catalog.ts
+git show origin/providers:container/agent-runner/src/providers/skill-catalog.test.ts  > container/agent-runner/src/providers/skill-catalog.test.ts
 ```
+
+`skill-catalog.ts` is a small shared helper used by every non-Claude provider (it builds a discovery list of installed Claude Code skills so Codex / OpenCode / etc. can `Read` and follow them). Idempotent — if `/add-opencode` already copied it, this just rewrites the identical bytes.
 
 ### 3. Append the self-registration imports
 
