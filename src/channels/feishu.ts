@@ -734,7 +734,19 @@ export class FeishuChannel implements Channel {
   async sendDirectMessage(jid: string, text: string): Promise<void> {
     const chatId = chatIdFromJid(jid);
     const groupFolder = this.getGroupFolder(jid);
-    await this.extractAndSendMedia(chatId, text, groupFolder);
+    // 读取 pendingUsage/thinkingMode 给最终回复附加 usage footer
+    // （send_message MCP 走此路径，不经过 sendMessage 的 [reply] 清理链路）
+    const usage = this.pendingUsage.get(jid);
+    const thinking = this.thinkingMode.get(jid);
+    if (usage) {
+      logger.info({ jid, hasUsage: true, thinking }, '[sendDirect] 读取 pendingUsage');
+    }
+    await this.extractAndSendMedia(chatId, text, groupFolder, usage, thinking);
+    // 消费后清理，避免下条消息重复附加
+    if (usage) {
+      this.pendingUsage.delete(jid);
+      this.thinkingMode.delete(jid);
+    }
   }
 
   /** 修改飞书群名称，同时生成缩略字头像（仅群聊生效） */

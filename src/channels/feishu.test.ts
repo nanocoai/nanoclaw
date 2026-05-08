@@ -686,4 +686,89 @@ describe('FeishuChannel', () => {
       expect(result).toBeNull();
     });
   });
+
+  describe('sendDirectMessage — usage footer', () => {
+    beforeEach(() => {
+      mockCreate.mockClear();
+    });
+
+    it('有 pendingUsage 时，sendDirectMessage 附加 usage footer', async () => {
+      const jid = 'fs:oc_test_direct';
+      // 先 setUsage
+      channel.setUsage(jid, {
+        inputTokens: 1000,
+        outputTokens: 200,
+        cacheReadInputTokens: 500,
+        cacheCreationInputTokens: 0,
+        numTurns: 3,
+        durationMs: 5000,
+        totalCostUsd: 0.05,
+        model: 'claude-opus-4-6',
+        lastTurnContext: 1500,
+      }, 'adaptive');
+
+      // 用 sendDirectMessage 发消息（长文本触发卡片）
+      const longText = '结果已发送。' + 'x'.repeat(500);
+      await (channel as any).sendDirectMessage(jid, longText);
+
+      // 验证调用了 interactive 卡片
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            msg_type: 'interactive',
+          }),
+        }),
+      );
+
+      // 验证卡片内容包含 usage footer（cost、model 等）
+      const callArg = mockCreate.mock.calls[0][0];
+      const content = JSON.parse(callArg.data.content);
+      const elements = content.body?.elements || content.elements || [];
+      const hasUsageFooter = elements.some(
+        (el: any) => el.tag === 'markdown' && el.content?.includes('💰'),
+      );
+      expect(hasUsageFooter).toBe(true);
+
+      // 验证 pendingUsage 被消费（不重复附加）
+      expect((channel as any).pendingUsage.has(jid)).toBe(false);
+    });
+
+    it('无 pendingUsage 时，sendDirectMessage 不附加 footer', async () => {
+      const jid = 'fs:oc_test_no_usage';
+      // 不设 usage，直接发
+      await (channel as any).sendDirectMessage(jid, 'hello');
+
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            msg_type: 'text',
+            content: JSON.stringify({ text: 'hello' }),
+          }),
+        }),
+      );
+    });
+
+    it('sendDirectMessage 消费 usage 后，cleanupProgressCard 不重复使用', async () => {
+      const jid = 'fs:oc_test_cleanup';
+      channel.setUsage(jid, {
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+        numTurns: 1,
+        durationMs: 1000,
+        totalCostUsd: 0.01,
+        model: 'claude-opus-4-6',
+        lastTurnContext: 100,
+      }, 'adaptive');
+
+      // sendDirectMessage 消费 usage
+      await (channel as any).sendDirectMessage(jid, 'x'.repeat(500));
+      expect((channel as any).pendingUsage.has(jid)).toBe(false);
+
+      // cleanupProgressCard 不应该再有 usage（已被消费）
+      await channel.cleanupProgressCard(jid);
+      // 不报错即通过（没有 progressCard 会 early return）
+    });
+  });
 });
