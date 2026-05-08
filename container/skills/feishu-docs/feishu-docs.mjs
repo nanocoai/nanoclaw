@@ -7,7 +7,7 @@
  * 命令:
  *   feishu-docs read <url_or_id>           读取文档内容（返回 markdown）
  *   feishu-docs create <title> [content]   创建文档（content 可从 stdin 读取）
- *   feishu-docs upload <file_path>         上传文件到应用云盘
+ *   feishu-docs upload <file_path> [--folder name]  上传文件到用户云盘（可指定目录）
  *   feishu-docs search <query>             搜索文档
  */
 
@@ -435,7 +435,65 @@ async function downloadFile(fileToken) {
 
 // ---- 上传文件 ----
 
-async function uploadFile(filePath) {
+// ---- 云盘文件夹管理 ----
+
+/** 获取用户云盘根目录下的文件/文件夹列表 */
+async function listFolder(folderToken) {
+  const token = folderToken || '';
+  const resp = await api('GET', `/drive/v1/files?folder_token=${token}&page_size=200`);
+  return resp?.data?.files || [];
+}
+
+/** 在指定父目录下创建文件夹 */
+async function createFolder(name, parentToken) {
+  const resp = await api('POST', '/drive/v1/files/create_folder', {
+    name,
+    folder_token: parentToken || '',
+  });
+  return resp?.data?.token || null;
+}
+
+// 已知的 nanoclaw 云盘文件夹 token（根目录有多个同名文件夹，用固定 token 消歧）
+const KNOWN_FOLDER_TOKENS = {
+  'nanoclaw': 'VRDBfRD3FlkA90d3or8cnkCHnhd',
+};
+
+/** 查找或创建指定名称的文件夹，支持多级路径（如 "nanoclaw/子目录"） */
+async function findOrCreateFolder(folderName) {
+  const segments = folderName.split('/').filter(Boolean);
+  let parentToken = '';
+
+  for (const seg of segments) {
+    // 根目录下的已知文件夹直接用固定 token，跳过搜索（避免同名文件夹歧义）
+    if (!parentToken && KNOWN_FOLDER_TOKENS[seg]) {
+      parentToken = KNOWN_FOLDER_TOKENS[seg];
+      continue;
+    }
+
+    const files = await listFolder(parentToken);
+    const existing = files.find(f => f.name === seg && f.type === 'folder');
+    if (existing) {
+      parentToken = existing.token;
+    } else {
+      const newToken = await createFolder(seg, parentToken);
+      if (!newToken) {
+        console.error('创建文件夹失败:', seg, '(父目录:', parentToken || '根目录', ')');
+        return null;
+      }
+      parentToken = newToken;
+    }
+  }
+  return parentToken;
+}
+
+// ---- 构建云盘文件链接 ----
+
+function buildDriveFileUrl(fileToken) {
+  // 飞书云盘文件的通用链接格式
+  return `https://poizon.feishu.cn/file/${fileToken}`;
+}
+
+async function uploadFile(filePath, folderName) {
   if (!_fs.existsSync(filePath)) {
     console.error('文件不存在:', filePath);
     process.exit(1);
@@ -447,6 +505,13 @@ async function uploadFile(filePath) {
 
   const token = await getToken();
   if (!token) authRequiredExit('上传文件需要飞书授权');
+
+  // 如果指定了文件夹，先找到或创建它
+  let parentNode = '';
+  if (folderName) {
+    parentNode = await findOrCreateFolder(folderName) || '';
+  }
+
   const boundary = '----FormBoundary' + Date.now().toString(36);
 
   // 构建 multipart/form-data
@@ -454,10 +519,10 @@ async function uploadFile(filePath) {
 
   // file_name
   parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="file_name"\r\n\r\n${fileName}`);
-  // parent_type (explorer = 应用云盘)
+  // parent_type (explorer = 云盘)
   parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="parent_type"\r\n\r\nexplorer`);
-  // parent_node (空 = 根目录)
-  parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="parent_node"\r\n\r\n`);
+  // parent_node (文件夹 token，空 = 根目录)
+  parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="parent_node"\r\n\r\n${parentNode}`);
   // size
   parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="size"\r\n\r\n${fileSize}`);
 
@@ -488,11 +553,14 @@ async function uploadFile(filePath) {
   }
 
   const fileToken = data.data?.file_token;
+  const fileUrl = buildDriveFileUrl(fileToken);
   console.log(JSON.stringify({
     file_token: fileToken,
     file_name: fileName,
     size: fileSize,
-    message: '文件已上传到应用云盘',
+    url: fileUrl,
+    folder: folderName || '(根目录)',
+    message: `文件已上传到云盘${folderName ? ' ' + folderName + '/' : ''}`,
   }));
 }
 
@@ -552,10 +620,14 @@ switch (command) {
     break;
   }
 
-  case 'upload':
-    if (!args[0]) { console.error('用法: feishu-docs upload <file_path>'); process.exit(1); }
-    await uploadFile(args[0]);
+  case 'upload': {
+    if (!args[0]) { console.error('用法: feishu-docs upload <file_path> [--folder name]'); process.exit(1); }
+    const folderIdx = args.indexOf('--folder');
+    const folder = folderIdx >= 0 ? args[folderIdx + 1] : undefined;
+    const uploadPath = folderIdx >= 0 && args[0] === '--folder' ? args[2] : args[0];
+    await uploadFile(uploadPath, folder);
     break;
+  }
 
   case 'search':
     if (!args[0]) { console.error('用法: feishu-docs search <query>'); process.exit(1); }
@@ -568,13 +640,13 @@ switch (command) {
 命令:
   feishu-docs read <url_or_id>         读取文档内容（输出 markdown）
   feishu-docs create <title> [content] 创建文档（content 可从 stdin 管道输入）
-  feishu-docs upload <file_path>       上传文件到应用云盘
+  feishu-docs upload <file_path> [--folder name]  上传文件到用户云盘
   feishu-docs search <query>           搜索文档
 
 示例:
   feishu-docs read https://xxx.feishu.cn/docx/ABC123
   feishu-docs create "会议纪要" "# 今日议题\\n- 项目进度"
   cat report.md | feishu-docs create "项目报告"
-  feishu-docs upload ./output.csv
+  feishu-docs upload ./output.csv --folder nanoclaw
   feishu-docs search "项目规划"`);
 }
