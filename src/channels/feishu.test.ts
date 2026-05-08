@@ -449,6 +449,55 @@ describe('FeishuChannel', () => {
       expect(mockPatch).not.toHaveBeenCalled();
       expect(mockMessageDelete).not.toHaveBeenCalled();
     });
+
+    it('有 pendingUsage 时完成卡片包含 usage footer', async () => {
+      injectProgressCard('msg_card_usage', [{ title: '⚙️ Bash: ls' }]);
+      // 注入 pendingUsage（模拟 setUsage 已被调用）
+      (channel as any).pendingUsage.set(jid, {
+        inputTokens: 1000,
+        outputTokens: 500,
+        cacheReadInputTokens: 200,
+        cacheCreationInputTokens: 50,
+        numTurns: 3,
+        durationMs: 5000,
+        totalCostUsd: 0.05,
+        model: 'claude-opus-4-6',
+      });
+      (channel as any).thinkingMode.set(jid, 'adaptive');
+      mockPatch.mockResolvedValueOnce({});
+
+      await channel.cleanupProgressCard(jid);
+
+      // patch 被调用，且 content 中包含 usage 信息（cost、model 等）
+      expect(mockPatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          path: { message_id: 'msg_card_usage' },
+          data: expect.objectContaining({
+            content: expect.stringContaining('opus-4-6'),
+          }),
+        }),
+      );
+      // usage 和 thinkingMode 被清理
+      expect((channel as any).pendingUsage.has(jid)).toBe(false);
+      expect((channel as any).thinkingMode.has(jid)).toBe(false);
+    });
+
+    it('无 pendingUsage 时完成卡片不包含 usage footer', async () => {
+      injectProgressCard('msg_card_no_usage', [{ title: '⚙️ Bash: ls' }]);
+      mockPatch.mockResolvedValueOnce({});
+
+      await channel.cleanupProgressCard(jid);
+
+      // patch 被调用，但 content 中不包含 cost 信息
+      expect(mockPatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          path: { message_id: 'msg_card_no_usage' },
+          data: expect.objectContaining({
+            content: expect.not.stringContaining('💰'),
+          }),
+        }),
+      );
+    });
   });
 
   describe('sendMessage 返回飞书 message_id', () => {

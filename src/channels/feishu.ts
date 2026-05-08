@@ -759,7 +759,9 @@ export class FeishuChannel implements Channel {
   /** 清理进度卡片（撤回或转完成卡片）+ 清理 pendingUsage/thinkingMode。
    *  用于 agent 结束但无正式回复的场景（如 send_message 已发内容，result 为空）。 */
   async cleanupProgressCard(jid: string): Promise<void> {
-    // 清理独立状态 Map
+    // 先读取 usage/thinking（buildCompletedCard 需要），再清理
+    const usage = this.pendingUsage.get(jid);
+    const thinking = this.thinkingMode.get(jid);
     this.pendingUsage.delete(jid);
     this.thinkingMode.delete(jid);
 
@@ -800,9 +802,10 @@ export class FeishuChannel implements Channel {
             data: {
               content: buildCompletedCard(
                 progressEntry.steps,
-                undefined,
+                usage,
                 progressEntry.startTime,
                 progressEntry.sessionId,
+                thinking,
               ),
             },
           });
