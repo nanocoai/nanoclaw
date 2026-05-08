@@ -364,7 +364,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const allowlistCfg = loadSenderAllowlist();
     const hasTrigger = missedMessages.some(
       (m) =>
-        m.is_from_me || // 跨群/系统消息直接绕过 trigger 检查
+        m.id.startsWith('ipc_') || // 跨群 IPC 消息直接绕过 trigger 检查
         (triggerPattern.test(m.content.trim()) &&
           isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
     );
@@ -412,7 +412,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
-  let outputSentToUser = false;
+  let outputSentToUser = false; // 当前 query 是否发过消息（每轮重置）
+  let everSentToUser = false; // 整个 agent 生命周期是否发过消息（不重置，error handler 用）
   let streamingRateLimitDetected = false;
 
   // R8.1: 收集 Agent 回复文本（用于记忆更新）
@@ -515,6 +516,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           const feishuMsgId = await channel.sendMessage(chatJid, text);
           if (feishuMsgId) lastFeishuMsgId = feishuMsgId;
           outputSentToUser = true;
+          everSentToUser = true;
           agentReplies.push(text);
 
           // 实时索引聊天记录（不等 agent 退出，因为 agent 可能跑数小时）
@@ -539,17 +541,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       }
 
       if (result.status === 'success') {
-        // 无论是否有文本输出，确保 typing/spinner/进度卡片被清理
-        // （agent 可能只通过 send_message 发了结果，最终 result 为空或被 <internal> 包裹）
+        // 每轮 query 结束时，确保 typing/spinner/进度卡片被清理
+        // IPC pipe 模式下多轮 query 共享同一个闭包，必须每轮都清理
+        // （之前只在 !outputSentToUser 时清理，导致第一轮设了 true 后后续轮次卡片永远不关）
         if (!outputSentToUser) {
           await channel.setTyping?.(chatJid, false);
-          // 清理孤儿进度卡片（sendMessage 未被调用时，卡片不会被自动清理）
-          if ('cleanupProgressCard' in channel) {
-            await (
-              channel as { cleanupProgressCard: (jid: string) => Promise<void> }
-            ).cleanupProgressCard(chatJid);
-          }
         }
+        // 无条件清理进度卡片（cleanupProgressCard 内部会检查卡片是否存在，不存在则 no-op）
+        if ('cleanupProgressCard' in channel) {
+          await (
+            channel as { cleanupProgressCard: (jid: string) => Promise<void> }
+          ).cleanupProgressCard(chatJid);
+        }
+        // 重置状态：IPC pipe 模式下下一轮 query 需要从干净状态开始
+        outputSentToUser = false;
 
         // R8.1 实时记忆入队：agent 回复完成后立即入队，不等进程退出
         // agent-runner 完成回复后会进入 IPC 等待循环（可达 8 小时），
@@ -625,6 +630,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               const retryFmid = await channel.sendMessage(chatJid, text);
               if (retryFmid) lastFeishuMsgId = retryFmid;
               outputSentToUser = true;
+              everSentToUser = true;
               agentReplies.push(text);
             }
           }
@@ -662,7 +668,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (output.status === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
-    if (outputSentToUser) {
+    if (everSentToUser) {
       // error 但已有回复发给用户：推进 cursor（防止重启后重复回复）+ 入队记忆
       lastAgentTimestamp[chatJid] = newCursor;
       saveState();
@@ -1093,7 +1099,7 @@ async function startMessageLoop(): Promise<void> {
             const allowlistCfg = loadSenderAllowlist();
             const hasTrigger = groupMessages.some(
               (m) =>
-                m.is_from_me || // 跨群/系统消息直接绕过 trigger 检查
+                m.id.startsWith('ipc_') || // 跨群 IPC 消息直接绕过 trigger 检查
                 (triggerPattern.test(m.content.trim()) &&
                   isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
             );
