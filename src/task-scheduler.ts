@@ -185,10 +185,32 @@ async function runTask(
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
+        // 进度消息（tool_use/thinking 等）不转发给用户，定时任务只发最终结果
+        logger.info(
+          {
+            taskId: task.id,
+            status: streamedOutput.status,
+            hasResult: !!streamedOutput.result,
+            resultLen: streamedOutput.result?.toString().slice(0, 80),
+            progressType: streamedOutput.progressType,
+          },
+          '[task] onOutput received',
+        );
+        if (streamedOutput.status === 'progress') {
+          return;
+        }
         if (streamedOutput.result) {
-          result = streamedOutput.result;
-          // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          const raw =
+            typeof streamedOutput.result === 'string'
+              ? streamedOutput.result
+              : JSON.stringify(streamedOutput.result);
+          // 剥掉 <internal> 标签
+          const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+          if (text) {
+            result = text;
+            // Forward result to user (sendMessage handles formatting)
+            await deps.sendMessage(task.chat_jid, text);
+          }
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {

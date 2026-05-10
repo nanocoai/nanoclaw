@@ -277,7 +277,7 @@ export function prepareGroupSession(groupFolder: string): string {
       settingsFile,
       JSON.stringify(
         {
-          model: 'claude-opus-4-7',
+          model: 'claude-opus-4-6',
           env: {
             CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
             CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
@@ -728,10 +728,11 @@ export async function runContainerAgent(
             const gap = ((now - lastOutputTime) / 1000).toFixed(1);
             lastOutputTime = now;
             hadStreamingOutput = true;
-            logger.debug(
+            logger.info(
               {
                 group: group.name,
                 status: parsed.status,
+                progressType: parsed.progressType,
                 gap: `${gap}s`,
                 resultLen: parsed.result?.length,
               },
@@ -759,12 +760,15 @@ export async function runContainerAgent(
       const lines = chunk.trim().split('\n');
       for (const line of lines) {
         if (line) {
-          // model-override 和 query-start 日志用 info 级别确保可见
+          // 关键事件日志用 info 级别确保可见
           if (
             line.includes('[model-override]') ||
             line.includes('[query-start]') ||
             line.includes('[result]') ||
-            line.includes('[text-block]')
+            line.includes('[text-block]') ||
+            line.includes('Archived conversation') ||
+            line.includes('Failed to archive') ||
+            line.includes('context_management')
           ) {
             logger.info({ agent: group.folder }, line);
           } else {
