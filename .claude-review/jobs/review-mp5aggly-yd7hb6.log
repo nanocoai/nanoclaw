@@ -1,0 +1,7 @@
+[2026-05-14T09:31:03.703Z] [review-mp5aggly-yd7hb6] [INFO] Starting review (agentic-safe) with claude-opus-4-7/high
+[2026-05-14T09:31:03.730Z] [review-mp5aggly-yd7hb6] [INFO] Context mode: full (25294 bytes)
+[2026-05-14T09:31:03.866Z] [review-mp5aggly-yd7hb6] [INFO] Prompt/context built
+[2026-05-14T09:31:03.897Z] [review-mp5aggly-yd7hb6] [INFO] Budget cap: $8.00
+[2026-05-14T09:31:03.948Z] [review-mp5aggly-yd7hb6] [INFO] Claude invocation built; prompt saved to /Users/dajay/AI_Workspace/nanoclaw/.claude-review/jobs/review-mp5aggly-yd7hb6.prompt.md
+[2026-05-14T09:31:04.083Z] [review-mp5aggly-yd7hb6] [INFO] Claude process spawned pid=undefined
+[2026-05-14T09:31:04.216Z] [review-mp5aggly-yd7hb6] [ERROR] Failed: Claude invocation failed (non_zero_exit). spawn claude EACCES
