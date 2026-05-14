@@ -834,6 +834,7 @@ async function runAgent(
         assistantName: ASSISTANT_NAME,
         modelOverride,
         senderId: memorySenderId,
+        useCliMode: group.containerConfig?.useCliMode,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),

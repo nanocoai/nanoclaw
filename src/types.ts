@@ -30,6 +30,8 @@ export interface AllowedRoot {
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
+  /** 启用 CLI 模式：spawn claude CLI 替代 Agent SDK，走交互式配额 */
+  useCliMode?: boolean;
 }
 
 export interface RegisteredGroup {

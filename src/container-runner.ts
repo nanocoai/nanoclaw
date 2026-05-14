@@ -192,6 +192,8 @@ export interface ContainerInput {
   script?: string;
   /** 触发本次对话的用户 ID（飞书 open_id），传给 agent-runner 用于记忆读写 */
   senderId?: string;
+  /** 启用 CLI 模式：spawn claude CLI 替代 Agent SDK，走交互式配额 */
+  useCliMode?: boolean;
   /** 单次模型/思考模式覆盖，不持久化 */
   modelOverride?: {
     model?: string;

@@ -23,6 +23,7 @@ import {
   PreCompactHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { runCliQuery } from './cli-runner.js';
 
 interface ContainerInput {
   prompt: string;
@@ -33,6 +34,8 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
+  /** 启用 CLI 模式：spawn claude CLI 替代 Agent SDK */
+  useCliMode?: boolean;
   modelOverride?: {
     model?: string;
     thinking?: 'adaptive' | 'disabled';
@@ -1135,6 +1138,109 @@ async function main(): Promise<void> {
     prompt = `[SCHEDULED TASK]\n\nScript output:\n${JSON.stringify(scriptResult.data, null, 2)}\n\nInstructions:\n${containerInput.prompt}`;
   }
 
+  // ---- CLI 模式 vs SDK 模式分叉 ----
+  if (containerInput.useCliMode) {
+    log('[mode] CLI mode enabled — spawning claude CLI per turn');
+
+    // 加载全局上下文（SOUL.md + TOOLS.md + CLAUDE.md）用于 --append-system-prompt
+    const globalDir = PATHS.global;
+    const contextParts: string[] = [];
+    const soulPath = globalDir ? path.join(globalDir, 'SOUL.md') : undefined;
+    if (soulPath && fs.existsSync(soulPath)) {
+      contextParts.push(fs.readFileSync(soulPath, 'utf-8'));
+    }
+    const toolsPath = globalDir ? path.join(globalDir, 'TOOLS.md') : undefined;
+    if (toolsPath && fs.existsSync(toolsPath)) {
+      contextParts.push(fs.readFileSync(toolsPath, 'utf-8'));
+    }
+    const globalClaudeMdPath = PATHS.globalClaudeMd;
+    if (globalClaudeMdPath && fs.existsSync(globalClaudeMdPath)) {
+      contextParts.push(fs.readFileSync(globalClaudeMdPath, 'utf-8'));
+    }
+    const systemPromptAppend = contextParts.length > 0 ? contextParts.join('\n\n---\n\n') : undefined;
+
+    // 发现额外目录（与 SDK 模式一致）
+    const extraDirs: string[] = [];
+    const extraBase = PATHS.extra;
+    if (extraBase && fs.existsSync(extraBase)) {
+      for (const entry of fs.readdirSync(extraBase)) {
+        const fullPath = path.join(extraBase, entry);
+        if (fs.statSync(fullPath).isDirectory()) {
+          extraDirs.push(fullPath);
+        }
+      }
+    }
+
+    try {
+      while (true) {
+        log(`[cli-mode] Starting CLI query (session: ${sessionId || 'new'})...`);
+
+        const override = containerInput.modelOverride;
+        const cliResult = await runCliQuery(
+          {
+            prompt,
+            sessionId,
+            model: override?.model || undefined,
+            mcpServerPath,
+            chatJid: containerInput.chatJid,
+            groupFolder: containerInput.groupFolder,
+            isMain: containerInput.isMain,
+            ipcDir: PATHS.ipc,
+            cwd: PATHS.queryCwd || PATHS.group,
+            env: sdkEnv,
+            additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
+            systemPromptAppend,
+          },
+          writeOutput,
+          log,
+        );
+
+        if (cliResult.newSessionId) {
+          sessionId = cliResult.newSessionId;
+        }
+
+        // 检查 _close 信号
+        if (shouldClose()) {
+          log('[cli-mode] Close sentinel detected, exiting');
+          break;
+        }
+
+        // runCliQuery 内部已发送 success result，这里只发 session 更新（result=null 表示仅更新 session）
+        if (sessionId && !cliResult.result) {
+          writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+        }
+
+        log('[cli-mode] Query ended, waiting for next IPC message...');
+
+        const nextMessage = await waitForIpcMessage();
+        if (nextMessage === null) {
+          log('[cli-mode] Close sentinel received, exiting');
+          break;
+        }
+
+        log(`[cli-mode] Got new message (${nextMessage.text.length} chars)`);
+        prompt = prependContext(nextMessage.text, nextMessage.context);
+        if (nextMessage.modelOverride) {
+          containerInput.modelOverride = nextMessage.modelOverride;
+        } else {
+          containerInput.modelOverride = undefined;
+        }
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log(`[cli-mode] Agent error: ${errorMessage}`);
+      writeOutput({
+        status: 'error',
+        result: null,
+        newSessionId: sessionId,
+        error: errorMessage,
+      });
+      process.exit(1);
+    }
+    return;
+  }
+
+  // ---- SDK 模式（原路径） ----
   // Query loop: run query → wait for IPC message → run new query → repeat
   let resumeAt: string | undefined;
   try {
