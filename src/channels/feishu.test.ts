@@ -252,6 +252,36 @@ describe('FeishuChannel', () => {
       expect(result.text).toBe('仅标题');
       expect(result.imageKeys).toEqual([]);
     });
+
+    it('提取 at 标签生成 mention 占位符', () => {
+      const parsed = {
+        content: [
+          [
+            { tag: 'img', image_key: 'img_abc' },
+            { tag: 'at', user_id: 'ou_test123' },
+            { tag: 'text', text: ' 帮我看看' },
+          ],
+        ],
+      };
+      const result = channel.extractPostContent(parsed);
+      expect(result.text).toBe('@_at_ou_test123 帮我看看');
+      expect(result.imageKeys).toEqual(['img_abc']);
+    });
+
+    it('多个 at 标签都生成占位符', () => {
+      const parsed = {
+        content: [
+          [
+            { tag: 'at', user_id: 'ou_user1' },
+            { tag: 'text', text: ' ' },
+            { tag: 'at', user_id: 'ou_user2' },
+            { tag: 'text', text: ' 你们看看' },
+          ],
+        ],
+      };
+      const result = channel.extractPostContent(parsed);
+      expect(result.text).toBe('@_at_ou_user1 @_at_ou_user2 你们看看');
+    });
   });
 
   describe('factory 注册', () => {
@@ -348,8 +378,8 @@ describe('FeishuChannel', () => {
       // 模拟 progressDone 已标记（正式回复已到达）
       (channel as any).progressDone.add(jid);
 
-      // 发送进度消息（emoji 开头）
-      await channel.sendMessage(jid, '⚙️ 正在处理...');
+      // 发送进度消息（显式标记 isProgress）
+      await channel.sendMessage(jid, '⚙️ 正在处理...', { isProgress: true });
 
       // 不应调用 create（被忽略）
       expect(mockCreate).not.toHaveBeenCalled();
@@ -360,7 +390,7 @@ describe('FeishuChannel', () => {
       // 确保没有 progressDone 标记
       (channel as any).progressDone.delete(jid);
 
-      await channel.sendMessage(jid, '💭 这是内部思考');
+      await channel.sendMessage(jid, '💭 这是内部思考', { isProgress: true });
 
       // 应该调用 create 发送（而非 patch 卡片）
       expect(mockCreate).toHaveBeenCalledWith(
@@ -450,7 +480,7 @@ describe('FeishuChannel', () => {
       expect(mockMessageDelete).not.toHaveBeenCalled();
     });
 
-    it('有 pendingUsage 时完成卡片包含 usage footer', async () => {
+    it('完成卡片不包含 usage footer（usage 只在正式回复上）', async () => {
       injectProgressCard('msg_card_usage', [{ title: '⚙️ Bash: ls' }]);
       // 注入 pendingUsage（模拟 setUsage 已被调用）
       (channel as any).pendingUsage.set(jid, {
@@ -468,15 +498,14 @@ describe('FeishuChannel', () => {
 
       await channel.cleanupProgressCard(jid);
 
-      // patch 被调用，且 content 中包含 usage 信息（cost、model 等）
+      // patch 被调用，但 content 中不包含 usage 信息（不含 model 名）
       expect(mockPatch).toHaveBeenCalledWith(
         expect.objectContaining({
           path: { message_id: 'msg_card_usage' },
-          data: expect.objectContaining({
-            content: expect.stringContaining('opus-4-6'),
-          }),
         }),
       );
+      const patchContent = mockPatch.mock.calls[0][0].data.content;
+      expect(patchContent).not.toContain('opus-4-6');
       // usage 和 thinkingMode 被清理
       expect((channel as any).pendingUsage.has(jid)).toBe(false);
       expect((channel as any).thinkingMode.has(jid)).toBe(false);
@@ -507,13 +536,21 @@ describe('FeishuChannel', () => {
       expect(msgId).toBe('om_reply_001');
     });
 
+    it('✅ 开头的正式回复不被误判为进度消息', async () => {
+      mockCreate.mockResolvedValueOnce({ data: { message_id: 'om_emoji_reply' } });
+      const msgId = await channel.sendMessage('fs:oc_123', '✅ 任务已完成，结果如下...');
+      // 不传 isProgress → 走正式回复路径，正常发送
+      expect(msgId).toBe('om_emoji_reply');
+      expect(mockCreate).toHaveBeenCalled();
+    });
+
     it('进度消息返回 undefined', async () => {
-      const msgId = await channel.sendMessage('fs:oc_123', '🔧 Bash: ls -la');
+      const msgId = await channel.sendMessage('fs:oc_123', '🔧 Bash: ls -la', { isProgress: true });
       expect(msgId).toBeUndefined();
     });
 
     it('💭 思考消息返回 undefined', async () => {
-      const msgId = await channel.sendMessage('fs:oc_123', '💭 正在分析代码结构...');
+      const msgId = await channel.sendMessage('fs:oc_123', '💭 正在分析代码结构...', { isProgress: true });
       expect(msgId).toBeUndefined();
     });
 

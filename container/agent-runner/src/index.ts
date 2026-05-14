@@ -694,7 +694,7 @@ async function runQuery(
 
   // 应用模型/思考覆盖：有 override → 切换；无 override → 用 settings.json 默认模型显式恢复
   // 读取 settings.json 中的默认模型（setModel(undefined) 可能不可靠）
-  let defaultModel = 'claude-opus-4-7';
+  let defaultModel = 'claude-opus-4-6';
   try {
     const settingsPath = path.join(PATHS.group, '..', '..', 'data', 'sessions', containerInput.groupFolder, '.claude', 'settings.json');
     if (fs.existsSync(settingsPath)) {
@@ -839,15 +839,18 @@ async function runQuery(
           // 推理文本 → 💭 普通消息（不加入进度卡片）
           // 延迟 500ms 发送：如果 500ms 内收到 result 且文本匹配，说明是最终回答，跳过 💭。
           if (block.type === 'text' && block.text) {
-            const trimmed = block.text.trim();
-            if (trimmed.length > 5) {
+            // 剥掉 <internal> 标签后判断是否有可见内容；纯 internal 文本不缓存为 thought，
+            // 避免与 result 文本匹配导致 dedup 误杀合法回复
+            const stripped = block.text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+            if (stripped.length > 5) {
               // 先 flush 之前缓存的 thought（如果有的话）
               flushPendingThought();
-              const short = trimmed.slice(0, 80) + (trimmed.length > 80 ? '...' : '');
+              // 用剥掉 internal 标签后的可见文本做缓存和比较
+              const short = stripped.slice(0, 80) + (stripped.length > 80 ? '...' : '');
               pendingThought = {
-                text: trimmed,
+                text: stripped,
                 short,
-                detail: trimmed.length > 80 ? trimmed : undefined,
+                detail: stripped.length > 80 ? stripped : undefined,
                 timer: setTimeout(flushPendingThought, 500),
               };
             }
@@ -927,9 +930,10 @@ async function runQuery(
         'result' in message ? (message as { result?: string }).result : null;
 
       // 💭 去重：如果 result 文本和缓存的 thought 相同，取消 💭
+      // 比较前剥掉 <internal> 标签，避免 internal 包裹导致误匹配
       if (pendingThought && textResult) {
-        const resultTrimmed = textResult.trim();
-        if (resultTrimmed === pendingThought.text) {
+        const resultTrimmed = textResult.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+        if (resultTrimmed && resultTrimmed === pendingThought.text) {
           clearTimeout(pendingThought.timer);
           pendingThought = null;
           log('[text-block] deduped: result matches pending thought, skipping 💭');

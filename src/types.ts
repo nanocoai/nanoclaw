@@ -88,6 +88,8 @@ export interface TaskRunLog {
 export interface SendMessageOptions {
   // 命令回复：跳过进度卡片清理等副作用，避免打断正在运行的 agent
   isCommandReply?: boolean;
+  // 调用方显式标记为进度消息，不再依赖 emoji 猜测
+  isProgress?: boolean;
 }
 
 export interface Channel {
