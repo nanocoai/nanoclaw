@@ -36,6 +36,7 @@ import {
 import {
   ContainerOutput,
   detectRateLimit,
+  getSecretCount,
   rotateAccount,
   runContainerAgent,
   writeGroupsSnapshot,
@@ -451,7 +452,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         const payload = result.detail
           ? JSON.stringify({ title: result.result, detail: result.detail })
           : result.result;
-        await channel.sendMessage(chatJid, payload);
+        await channel.sendMessage(chatJid, payload, { isProgress: true });
         // tool_use 摘要存入 messages.db（供巡检和搜索使用）
         // result.result 格式如 "🔧 Bash: ls -la"，已含工具名和简短输入
         if (result.progressType === 'tool_use' && result.result) {
@@ -506,8 +507,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           streamingRateLimitDetected = true;
           logger.warn(
             { group: group.name, text: raw.slice(0, 200) },
-            'Streaming 输出检测到限流文本，抑制发送',
+            'Streaming 输出检测到限流文本，抑制发送，关闭 stdin 触发退出',
           );
+          // 立即关闭 stdin 让 agent 进程退出，否则 IPC pipe 模式下会等 8h idle timeout
+          queue.closeStdin(chatJid);
           return;
         }
 
@@ -590,7 +593,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     },
     latestUserMessage,
     memorySenderId,
-    undefined, // isRetry
+    0, // retryCount
     modelOverride,
   );
 
@@ -598,31 +601,79 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (idleTimer) clearTimeout(idleTimer);
 
   // Streaming 模式下限流检测：onOutput 回调中发现 "hit your limit" 等文本
-  // 轮换账号并立即重试（保留 session 上下文）
+  // 轮换账号并重试，runAgent 内部会继续轮换直到试完所有账号
   if (streamingRateLimitDetected && !output.rotatedTo) {
     const agentId = group.folder.toLowerCase().replace(/_/g, '-');
     logger.warn(
       { group: group.name, agentId },
-      'Streaming 输出包含限流文本，尝试轮换账号并重试',
+      '[rate-limit] Streaming 输出包含限流文本，尝试轮换账号',
     );
     const rotateResult = rotateAccount(agentId, group.folder);
     if (rotateResult?.success) {
       output.rotatedTo = rotateResult.newSecretName;
-      // 重试：用新账号重跑，保留 session 上下文
       logger.info(
-        { group: group.name, newSecret: rotateResult.newSecretName },
-        'Streaming 限流，已轮换账号，重试中',
+        { group: group.name, oldAgentId: agentId, newSecret: rotateResult.newSecretName },
+        '[rate-limit] 已轮换账号，开始重试',
       );
+      // 重试：复用原始 onOutput 回调，确保 progress/usage/reply 全链路完整
       const retryOutput = await runAgent(
         group,
         prompt,
         chatJid,
         async (result) => {
+          // 进度消息 — 与原始回调完全一致
+          if (result.status === 'progress' && result.result) {
+            const payload = result.detail
+              ? JSON.stringify({ title: result.result, detail: result.detail })
+              : result.result;
+            await channel.sendMessage(chatJid, payload, { isProgress: true });
+            if (result.progressType === 'tool_use' && result.result) {
+              try {
+                storeMessageDirect({
+                  id: `tool_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                  chat_jid: chatJid,
+                  sender: ASSISTANT_NAME,
+                  sender_name: ASSISTANT_NAME,
+                  content: result.result,
+                  timestamp: new Date().toISOString(),
+                  is_from_me: true,
+                  is_bot_message: true,
+                });
+              } catch { /* 入库失败不影响主流程 */ }
+            }
+            return;
+          }
+
+          // usage 传递
+          if (result.usage && 'setUsage' in channel) {
+            (
+              channel as {
+                setUsage: (
+                  jid: string,
+                  usage: typeof result.usage,
+                  thinking?: 'adaptive' | 'disabled',
+                ) => void;
+              }
+            ).setUsage(
+              chatJid,
+              result.usage,
+              modelOverride?.thinking === 'disabled' ? 'disabled' : 'adaptive',
+            );
+          }
+
+          // 正式回复（过滤限流文本，由 runAgent 内部处理重试）
           if (result.result) {
             const raw =
               typeof result.result === 'string'
                 ? result.result
                 : JSON.stringify(result.result);
+            if (detectRateLimit(raw)) {
+              logger.warn(
+                { group: group.name },
+                '[rate-limit] 重试回复包含限流文本，抑制发送',
+              );
+              return;
+            }
             const text = raw
               .replace(/<internal>[\s\S]*?<\/internal>/g, '')
               .trim();
@@ -635,6 +686,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             }
           }
           if (result.status === 'success') {
+            // 重试成功后也要清理进度卡片和 typing 状态
+            if (!outputSentToUser) {
+              await channel.setTyping?.(chatJid, false);
+            }
+            if ('cleanupProgressCard' in channel) {
+              await (
+                channel as { cleanupProgressCard: (jid: string) => Promise<void> }
+              ).cleanupProgressCard(chatJid);
+            }
             queue.notifyIdle(chatJid);
           }
           if (result.status === 'error') {
@@ -643,26 +703,48 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         },
         latestUserMessage,
         memorySenderId,
-        true,
+        1, // retryCount=1，runAgent 内部会继续轮换
         modelOverride,
       );
       // 合并重试结果
       if (retryOutput.status === 'error') hadError = true;
-    } else if (rotateResult && !rotateResult.success) {
-      output.allExhausted = true;
+      if (retryOutput.allExhausted) output.allExhausted = true;
+      if (retryOutput.rotatedTo) output.rotatedTo = retryOutput.rotatedTo;
+      logger.info(
+        { group: group.name, retryStatus: retryOutput.status },
+        '[rate-limit] 重试完成',
+      );
+    } else {
+      // rotateAccount 返回 null（未开启/onecli 错误/单账号）
+      logger.warn(
+        { group: group.name, rotateResult },
+        '[rate-limit] 轮换未执行（onecli 错误/单账号）',
+      );
     }
   }
 
   // 轮换通知
   if (output.rotatedTo) {
+    logger.info(
+      { group: group.name, rotatedTo: output.rotatedTo },
+      '[rate-limit] 发送轮换通知给用户',
+    );
     channel
       .sendMessage(chatJid, `🔄 当前额度已满，已自动切换到备用账号 (${output.rotatedTo})`, { isCommandReply: true })
-      .catch(() => {});
+      .catch((err) => {
+        logger.error({ err, group: group.name }, '[rate-limit] 轮换通知发送失败');
+      });
   }
   if (output.allExhausted) {
+    logger.warn(
+      { group: group.name },
+      '[rate-limit] 发送配额耗尽通知给用户',
+    );
     channel
       .sendMessage(chatJid, '⚠️ 所有账号配额已耗尽，请等待恢复或添加新账号')
-      .catch(() => {});
+      .catch((err) => {
+        logger.error({ err, group: group.name }, '[rate-limit] 耗尽通知发送失败');
+      });
   }
 
   if (output.status === 'error' || hadError) {
@@ -770,9 +852,10 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
   latestUserMessage?: string,
   memorySenderId?: string,
-  isRetry?: boolean,
+  retryCount = 0,
   modelOverride?: { model?: string; thinking?: 'adaptive' | 'disabled' },
 ): Promise<RunAgentResult> {
+  const maxRetries = getSecretCount() - 1; // 最多试完所有账号
   const isMain = group.isMain === true;
   const sessionId = sessions[group.folder];
 
@@ -872,24 +955,19 @@ async function runAgent(
         deleteSession(group.folder);
       }
 
-      // 429 检测 + 自动轮换
-      if (!isRetry && output.error && detectRateLimit(output.error)) {
+      // 429 检测 + 自动轮换（试完所有账号才放弃）
+      if (retryCount < maxRetries && output.error && detectRateLimit(output.error)) {
         const agentId = group.folder.toLowerCase().replace(/_/g, '-');
         logger.warn(
-          { group: group.name, agentId, error: output.error?.slice(0, 200) },
-          '检测到限流错误，尝试轮换账号',
+          { group: group.name, agentId, retryCount, maxRetries, error: output.error?.slice(0, 200) },
+          '[rate-limit] Agent 退出错误包含限流关键词，尝试轮换',
         );
         const rotateResult = rotateAccount(agentId, group.folder);
 
-        if (rotateResult && !rotateResult.success) {
-          logger.warn({ group: group.name }, '所有账号配额已耗尽');
-          return { status: 'error', allExhausted: true };
-        }
-
-        if (rotateResult && rotateResult.success) {
+        if (rotateResult?.success) {
           logger.info(
-            { group: group.name, newSecret: rotateResult.newSecretName },
-            '429 检测到，已轮换账号，重试中（保留 session）',
+            { group: group.name, newSecret: rotateResult.newSecretName, retryCount: retryCount + 1 },
+            '[rate-limit] 已轮换账号，重试中',
           );
           return runAgent(
             group,
@@ -898,19 +976,28 @@ async function runAgent(
             onOutput,
             latestUserMessage,
             memorySenderId,
-            true,
+            retryCount + 1,
             modelOverride,
           ).then((retryResult) => ({
             ...retryResult,
-            rotatedTo: rotateResult.newSecretName,
+            rotatedTo: retryResult.rotatedTo || rotateResult.newSecretName,
           }));
         }
 
-        // rotateAccount 返回 null（未开启/防抖/onecli 错误等）
+        // rotateAccount 返回 null（未开启/onecli 错误/单账号）
         logger.warn(
-          { group: group.name, agentId },
-          '轮换未执行（可能：防抖中/onecli 错误/单账号），按原错误处理',
+          { group: group.name, agentId, rotateResult },
+          '[rate-limit] 轮换未执行，按原错误处理',
         );
+      }
+
+      // 已试完所有账号仍然限流（maxRetries > 0 才算"全部耗尽"，否则只是普通错误）
+      if (retryCount >= maxRetries && maxRetries > 0 && output.error && detectRateLimit(output.error)) {
+        logger.warn(
+          { group: group.name, retryCount, maxRetries },
+          '[rate-limit] 所有账号均被限流',
+        );
+        return { status: 'error', allExhausted: true };
       }
 
       logger.error(
@@ -922,23 +1009,18 @@ async function runAgent(
 
     // Claude Code 有时以 status=success 返回限流消息（"You've hit your limit"）
     // 检查 result 文本以捕获这种假成功
-    if (!isRetry && output.result && detectRateLimit(output.result)) {
+    if (retryCount < maxRetries && output.result && detectRateLimit(output.result)) {
       const agentId = group.folder.toLowerCase().replace(/_/g, '-');
       logger.warn(
-        { group: group.name, agentId, result: output.result?.slice(0, 200) },
-        '检测到假成功限流（result 包含 rate limit 关键词），尝试轮换',
+        { group: group.name, agentId, retryCount, maxRetries, result: output.result?.slice(0, 200) },
+        '[rate-limit] 假成功（result 包含限流关键词），尝试轮换',
       );
       const rotateResult = rotateAccount(agentId, group.folder);
 
-      if (rotateResult && !rotateResult.success) {
-        logger.warn({ group: group.name }, '所有账号配额已耗尽');
-        return { status: 'error', allExhausted: true };
-      }
-
-      if (rotateResult && rotateResult.success) {
+      if (rotateResult?.success) {
         logger.info(
-          { group: group.name, newSecret: rotateResult.newSecretName },
-          '假成功限流检测到，已轮换账号，重试中（保留 session）',
+          { group: group.name, newSecret: rotateResult.newSecretName, retryCount: retryCount + 1 },
+          '[rate-limit] 假成功已轮换账号，重试中',
         );
         return runAgent(
           group,
@@ -947,11 +1029,11 @@ async function runAgent(
           onOutput,
           latestUserMessage,
           memorySenderId,
-          true,
+          retryCount + 1,
           modelOverride,
         ).then((retryResult) => ({
           ...retryResult,
-          rotatedTo: rotateResult.newSecretName,
+          rotatedTo: retryResult.rotatedTo || rotateResult.newSecretName,
         }));
       }
 
@@ -961,6 +1043,15 @@ async function runAgent(
         '假成功限流但轮换未执行，将限流消息当错误返回',
       );
       return { status: 'error' };
+    }
+
+    // 试完所有账号仍然假成功限流
+    if (retryCount >= maxRetries && maxRetries > 0 && output.result && detectRateLimit(output.result)) {
+      logger.warn(
+        { group: group.name, retryCount },
+        '[rate-limit] 假成功：所有账号均被限流',
+      );
+      return { status: 'error', allExhausted: true };
     }
 
     return { status: 'success' };

@@ -186,6 +186,7 @@ registerCommand({
     { usage: '/usage', description: '查当前账号配额' },
     { usage: '/usage all', description: '查所有账号配额' },
     { usage: '/usage <name>', description: '查指定账号配额' },
+    { usage: '/usage delete <name>', description: '删除 OAuth 凭证' },
   ],
   handler: async (ctx) => {
     const { args, chatJid, channel, registeredGroups } = ctx;
@@ -197,6 +198,22 @@ registerCommand({
       getUsageAll,
       getUsageForSecret,
     } = await import('../usage-api.js');
+
+    if (args?.startsWith('delete ')) {
+      const name = args.slice('delete '.length).trim();
+      if (!name) {
+        await channel.sendMessage(chatJid, '⚠️ 用法: /usage delete <name>');
+        return;
+      }
+      const { deleteOAuthCredential, getOAuthCredential } = await import('../db.js');
+      if (!getOAuthCredential(name)) {
+        await channel.sendMessage(chatJid, `⚠️ ${name}: 未找到该 OAuth 凭证`);
+        return;
+      }
+      deleteOAuthCredential(name);
+      await channel.sendMessage(chatJid, `✅ 已删除 ${name} 的 OAuth 凭证`);
+      return;
+    }
 
     if (args === 'all') {
       const results = await getUsageAll();

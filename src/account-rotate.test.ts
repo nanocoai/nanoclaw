@@ -6,10 +6,8 @@ import {
   setRotateEnabled,
   getRotateIndex,
   setRotateIndex,
-  getLastRotateAt,
-  setLastRotateAt,
 } from './db.js';
-import { detectRateLimit, rotateAccount } from './container-runner.js';
+import { detectRateLimit, getSecretCount, rotateAccount } from './container-runner.js';
 
 // Mock config
 vi.mock('./config.js', () => ({
@@ -189,16 +187,6 @@ describe('account_rotate_config DB', () => {
     expect(getRotateIndex()).toBe(3);
   });
 
-  it('默认 lastRotateAt = null', () => {
-    expect(getLastRotateAt()).toBeNull();
-  });
-
-  it('setLastRotateAt → getLastRotateAt 保持一致', () => {
-    const ts = Date.now();
-    setLastRotateAt(ts);
-    expect(getLastRotateAt()).toBe(ts);
-  });
-
   // --- per-group 隔离测试 ---
 
   it('per-group rotateIndex 互不干扰', () => {
@@ -208,17 +196,6 @@ describe('account_rotate_config DB', () => {
     expect(getRotateIndex('group_b')).toBe(5);
     // 无 groupFolder 的全局值不受影响
     expect(getRotateIndex()).toBe(0);
-  });
-
-  it('per-group lastRotateAt 互不干扰', () => {
-    const tsA = Date.now() - 1000;
-    const tsB = Date.now() - 2000;
-    setLastRotateAt(tsA, 'group_a');
-    setLastRotateAt(tsB, 'group_b');
-    expect(getLastRotateAt('group_a')).toBe(tsA);
-    expect(getLastRotateAt('group_b')).toBe(tsB);
-    // 无 groupFolder 的全局值不受影响
-    expect(getLastRotateAt()).toBeNull();
   });
 });
 
@@ -235,16 +212,9 @@ describe('rotateAccount', () => {
     expect(rotateAccount('test-agent', 'test_group')).toBeNull();
   });
 
-  it('60 秒内防抖返回 null（per-group）', () => {
-    setRotateEnabled(true);
-    setLastRotateAt(Date.now() - 30_000, 'test_group'); // 30 秒前
-    expect(rotateAccount('test-agent', 'test_group')).toBeNull();
-  });
-
-  it('成功轮换到下一个 secret', () => {
+  it('成功轮换到下一个 secret（无防抖）', () => {
     setRotateEnabled(true);
     setRotateIndex(0, 'test_group');
-    setLastRotateAt(Date.now() - 120_000, 'test_group');
 
     const secrets = [
       { id: 'sec-1', name: 'account-a' },
@@ -256,48 +226,18 @@ describe('rotateAccount', () => {
     ];
 
     mockExecSync
-      .mockReturnValueOnce(JSON.stringify(secrets)) // secrets list
-      .mockReturnValueOnce(JSON.stringify(agents)) // agents list
-      .mockReturnValueOnce(''); // set-secrets
+      .mockReturnValueOnce(JSON.stringify(secrets))
+      .mockReturnValueOnce(JSON.stringify(agents))
+      .mockReturnValueOnce('');
 
     const result = rotateAccount('test-agent', 'test_group');
     expect(result).toEqual({ success: true, newSecretName: 'account-b' });
     expect(getRotateIndex('test_group')).toBe(1);
-    expect(getLastRotateAt('test_group')).toBeGreaterThan(0);
   });
 
-  it('轮换一圈后检测全部耗尽', () => {
+  it('连续轮换走完一圈回到 index 0', () => {
     setRotateEnabled(true);
     setRotateIndex(2, 'test_group');
-    setLastRotateAt(Date.now() - 5 * 60 * 1000, 'test_group');
-
-    const secrets = [
-      { id: 'sec-1', name: 'account-a' },
-      { id: 'sec-2', name: 'account-b' },
-      { id: 'sec-3', name: 'account-c' },
-    ];
-
-    mockExecSync.mockReturnValueOnce(JSON.stringify(secrets));
-
-    const result = rotateAccount('test-agent', 'test_group');
-    expect(result).toEqual({ success: false, newSecretName: '' });
-  });
-
-  it('只有一个 secret 时返回 null', () => {
-    setRotateEnabled(true);
-    setLastRotateAt(Date.now() - 120_000, 'test_group');
-
-    mockExecSync.mockReturnValueOnce(
-      JSON.stringify([{ id: 'sec-1', name: 'account-a' }]),
-    );
-
-    expect(rotateAccount('test-agent', 'test_group')).toBeNull();
-  });
-
-  it('cooldown 过期后允许再次轮换到 index 0', () => {
-    setRotateEnabled(true);
-    setRotateIndex(2, 'test_group');
-    setLastRotateAt(Date.now() - 15 * 60 * 1000, 'test_group');
 
     const secrets = [
       { id: 'sec-1', name: 'account-a' },
@@ -318,11 +258,18 @@ describe('rotateAccount', () => {
     expect(getRotateIndex('test_group')).toBe(0);
   });
 
-  // --- 新增：防止全局污染的核心测试 ---
-
-  it('identifier 不匹配且有 Default Agent → 返回 null（不 fallback）', () => {
+  it('只有一个 secret 时返回 null', () => {
     setRotateEnabled(true);
-    setLastRotateAt(Date.now() - 120_000, 'test_group');
+
+    mockExecSync.mockReturnValueOnce(
+      JSON.stringify([{ id: 'sec-1', name: 'account-a' }]),
+    );
+
+    expect(rotateAccount('test-agent', 'test_group')).toBeNull();
+  });
+
+  it('identifier 不匹配 → 返回 null（不 fallback 到 Default）', () => {
+    setRotateEnabled(true);
 
     const secrets = [
       { id: 'sec-1', name: 'account-a' },
@@ -337,48 +284,15 @@ describe('rotateAccount', () => {
       .mockReturnValueOnce(JSON.stringify(secrets))
       .mockReturnValueOnce(JSON.stringify(agents));
 
-    // 'test-agent' 不匹配任何 agent identifier，应返回 null
     const result = rotateAccount('test-agent', 'test_group');
     expect(result).toBeNull();
-    // 不应调用 set-secrets（只调了 secrets list + agents list = 2 次）
     expect(mockExecSync).toHaveBeenCalledTimes(2);
-  });
-
-  it('per-group 防抖隔离：A 群防抖不影响 B 群', () => {
-    setRotateEnabled(true);
-    // A 群刚轮换过（防抖中）
-    setLastRotateAt(Date.now() - 30_000, 'group_a');
-    // B 群很久没轮换
-    setLastRotateAt(Date.now() - 120_000, 'group_b');
-
-    const secrets = [
-      { id: 'sec-1', name: 'account-a' },
-      { id: 'sec-2', name: 'account-b' },
-    ];
-    const agents = [
-      { id: 'agent-a', identifier: 'group-a', isDefault: false },
-      { id: 'agent-b', identifier: 'group-b', isDefault: false },
-    ];
-
-    // A 群应该被防抖
-    expect(rotateAccount('group-a', 'group_a')).toBeNull();
-
-    // B 群应该正常轮换
-    mockExecSync
-      .mockReturnValueOnce(JSON.stringify(secrets))
-      .mockReturnValueOnce(JSON.stringify(agents))
-      .mockReturnValueOnce('');
-
-    const result = rotateAccount('group-b', 'group_b');
-    expect(result).toEqual({ success: true, newSecretName: 'account-b' });
   });
 
   it('per-group index 隔离：各群独立维护轮换位置', () => {
     setRotateEnabled(true);
     setRotateIndex(0, 'group_a');
     setRotateIndex(1, 'group_b');
-    setLastRotateAt(Date.now() - 120_000, 'group_a');
-    setLastRotateAt(Date.now() - 120_000, 'group_b');
 
     const secrets = [
       { id: 'sec-1', name: 'account-a' },
@@ -410,5 +324,62 @@ describe('rotateAccount', () => {
 
     // 互不干扰
     expect(getRotateIndex('group_a')).toBe(1);
+  });
+
+  it('连续调用无防抖：可以立即再次轮换', () => {
+    setRotateEnabled(true);
+    setRotateIndex(0, 'test_group');
+
+    const secrets = [
+      { id: 'sec-1', name: 'account-a' },
+      { id: 'sec-2', name: 'account-b' },
+      { id: 'sec-3', name: 'account-c' },
+    ];
+    const agents = [
+      { id: 'agent-1', identifier: 'test-agent', isDefault: false },
+    ];
+
+    // 第一次轮换 0 → 1
+    mockExecSync
+      .mockReturnValueOnce(JSON.stringify(secrets))
+      .mockReturnValueOnce(JSON.stringify(agents))
+      .mockReturnValueOnce('');
+    const r1 = rotateAccount('test-agent', 'test_group');
+    expect(r1?.newSecretName).toBe('account-b');
+
+    // 立即第二次轮换 1 → 2（无防抖）
+    mockExecSync
+      .mockReturnValueOnce(JSON.stringify(secrets))
+      .mockReturnValueOnce(JSON.stringify(agents))
+      .mockReturnValueOnce('');
+    const r2 = rotateAccount('test-agent', 'test_group');
+    expect(r2?.newSecretName).toBe('account-c');
+
+    // 立即第三次轮换 2 → 0
+    mockExecSync
+      .mockReturnValueOnce(JSON.stringify(secrets))
+      .mockReturnValueOnce(JSON.stringify(agents))
+      .mockReturnValueOnce('');
+    const r3 = rotateAccount('test-agent', 'test_group');
+    expect(r3?.newSecretName).toBe('account-a');
+  });
+});
+
+describe('getSecretCount', () => {
+  it('返回 secrets 数量', () => {
+    mockExecSync.mockReturnValueOnce(
+      JSON.stringify([
+        { id: 'sec-1', name: 'a' },
+        { id: 'sec-2', name: 'b' },
+      ]),
+    );
+    expect(getSecretCount()).toBe(2);
+  });
+
+  it('onecli 失败时返回 1', () => {
+    mockExecSync.mockImplementationOnce(() => {
+      throw new Error('onecli not found');
+    });
+    expect(getSecretCount()).toBe(1);
   });
 });

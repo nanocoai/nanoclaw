@@ -191,7 +191,10 @@ async function fetchUsage(
 export async function getUsageForSecret(
   secretName: string,
 ): Promise<UsageResult> {
-  const cred = getOAuthCredential(secretName);
+  // OneCLI secret 名和 OAuth DB 的 secret_name 可能不一致（如 tian vs anthropic-tian）
+  const cred =
+    getOAuthCredential(secretName) ||
+    getOAuthCredential(`anthropic-${secretName}`);
   if (!cred) {
     return { secretName, rateLimits: null, error: 'no_credentials' };
   }

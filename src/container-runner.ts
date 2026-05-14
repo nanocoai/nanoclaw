@@ -22,10 +22,8 @@ import { RegisteredGroup } from './types.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 import {
-  getLastRotateAt,
   getRotateEnabled,
   getRotateIndex,
-  setLastRotateAt,
   setRotateIndex,
 } from './db.js';
 
@@ -79,17 +77,24 @@ export function detectRateLimit(text: string): boolean {
   return patterns.some((p) => p.test(text));
 }
 
-// 全部耗尽后的 cooldown（10 分钟）
-const EXHAUSTED_COOLDOWN_MS = 10 * 60 * 1000;
-// 单次轮换防抖（60 秒）
-const ROTATE_DEBOUNCE_MS = 60 * 1000;
+/**
+ * 获取可用账号数量（用于确定最大重试次数）。
+ */
+export function getSecretCount(): number {
+  try {
+    const secrets = JSON.parse(
+      execSync('onecli secrets list', { encoding: 'utf-8', timeout: 5000 }),
+    );
+    return secrets.length;
+  } catch {
+    return 1;
+  }
+}
 
 /**
- * 尝试轮换到下一个 Anthropic 账号。
- * 返回 { success, newSecretName } 或 null（未开启/防抖/全部耗尽）。
- *
- * agentId: OneCLI agent identifier（group.folder 派生）
- * groupFolder: 群目录名，用于 per-group 防抖和 index 隔离
+ * 切换到下一个 Anthropic 账号。
+ * 返回 { success, newSecretName } 或 null（未开启/onecli 错误/单账号）。
+ * 无防抖、无 cooldown — 调用方通过 retryCount 控制重试上限。
  */
 export function rotateAccount(
   agentId: string,
@@ -99,13 +104,6 @@ export function rotateAccount(
   newSecretName: string;
 } | null {
   if (!getRotateEnabled()) return null;
-
-  const now = Date.now();
-  const lastRotate = getLastRotateAt(groupFolder);
-  if (lastRotate && now - lastRotate < ROTATE_DEBOUNCE_MS) {
-    logger.info({ groupFolder }, '轮换防抖中，跳过');
-    return null;
-  }
 
   let secrets: Array<{ id: string; name: string }>;
   try {
@@ -125,15 +123,6 @@ export function rotateAccount(
   const currentIndex = getRotateIndex(groupFolder);
   const nextIndex = (currentIndex + 1) % secrets.length;
 
-  if (
-    nextIndex === 0 &&
-    lastRotate &&
-    now - lastRotate < EXHAUSTED_COOLDOWN_MS
-  ) {
-    logger.warn({ groupFolder }, '所有账号配额已耗尽');
-    return { success: false, newSecretName: '' };
-  }
-
   let agents: Array<{ id: string; identifier: string; isDefault?: boolean }>;
   try {
     agents = JSON.parse(
@@ -144,13 +133,12 @@ export function rotateAccount(
     return null;
   }
 
-  // 严格匹配 identifier，不 fallback 到 Default Agent（防止误改全局）
   const agent = agents.find((a) => a.identifier === agentId);
 
   if (!agent) {
     logger.error(
       { agentId, groupFolder },
-      'rotateAccount: 找不到匹配的 agent（不 fallback 到 Default，避免全局污染）',
+      'rotateAccount: 找不到匹配的 agent',
     );
     return null;
   }
@@ -167,7 +155,6 @@ export function rotateAccount(
   }
 
   setRotateIndex(nextIndex, groupFolder);
-  setLastRotateAt(now, groupFolder);
 
   logger.info(
     { agent: agent.id, secret: nextSecret.name, index: nextIndex, groupFolder },
