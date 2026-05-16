@@ -35,10 +35,8 @@ export function resolveCliMode(config?: ContainerConfig): CliMode {
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 import {
-  getLastRotateAt,
   getRotateEnabled,
   getRotateIndex,
-  setLastRotateAt,
   setRotateIndex,
 } from './db.js';
 
@@ -92,17 +90,24 @@ export function detectRateLimit(text: string): boolean {
   return patterns.some((p) => p.test(text));
 }
 
-// 全部耗尽后的 cooldown（10 分钟）
-const EXHAUSTED_COOLDOWN_MS = 10 * 60 * 1000;
-// 单次轮换防抖（60 秒）
-const ROTATE_DEBOUNCE_MS = 60 * 1000;
+/**
+ * 获取可用账号数量（用于确定最大重试次数）。
+ */
+export function getSecretCount(): number {
+  try {
+    const secrets = JSON.parse(
+      execSync('onecli secrets list', { encoding: 'utf-8', timeout: 5000 }),
+    );
+    return secrets.length;
+  } catch {
+    return 1;
+  }
+}
 
 /**
- * 尝试轮换到下一个 Anthropic 账号。
- * 返回 { success, newSecretName } 或 null（未开启/防抖/全部耗尽）。
- *
- * agentId: OneCLI agent identifier（group.folder 派生）
- * groupFolder: 群目录名，用于 per-group 防抖和 index 隔离
+ * 切换到下一个 Anthropic 账号。
+ * 返回 { success, newSecretName } 或 null（未开启/onecli 错误/单账号）。
+ * 无防抖、无 cooldown — 调用方通过 retryCount 控制重试上限。
  */
 export function rotateAccount(
   agentId: string,
@@ -113,13 +118,6 @@ export function rotateAccount(
   oldSecretName?: string;
 } | null {
   if (!getRotateEnabled()) return null;
-
-  const now = Date.now();
-  const lastRotate = getLastRotateAt(groupFolder);
-  if (lastRotate && now - lastRotate < ROTATE_DEBOUNCE_MS) {
-    logger.info({ groupFolder }, '轮换防抖中，跳过');
-    return null;
-  }
 
   let secrets: Array<{ id: string; name: string }>;
   try {
@@ -139,15 +137,6 @@ export function rotateAccount(
   const currentIndex = getRotateIndex(groupFolder);
   const nextIndex = (currentIndex + 1) % secrets.length;
 
-  if (
-    nextIndex === 0 &&
-    lastRotate &&
-    now - lastRotate < EXHAUSTED_COOLDOWN_MS
-  ) {
-    logger.warn({ groupFolder }, '所有账号配额已耗尽');
-    return { success: false, newSecretName: '' };
-  }
-
   let agents: Array<{ id: string; identifier: string; isDefault?: boolean }>;
   try {
     agents = JSON.parse(
@@ -158,13 +147,12 @@ export function rotateAccount(
     return null;
   }
 
-  // 严格匹配 identifier，不 fallback 到 Default Agent（防止误改全局）
   const agent = agents.find((a) => a.identifier === agentId);
 
   if (!agent) {
     logger.error(
       { agentId, groupFolder },
-      'rotateAccount: 找不到匹配的 agent（不 fallback 到 Default，避免全局污染）',
+      'rotateAccount: 找不到匹配的 agent',
     );
     return null;
   }
@@ -182,7 +170,6 @@ export function rotateAccount(
   }
 
   setRotateIndex(nextIndex, groupFolder);
-  setLastRotateAt(now, groupFolder);
 
   logger.info(
     { agent: agent.id, secret: nextSecret.name, oldSecret: oldSecret?.name, index: nextIndex, groupFolder },
@@ -294,7 +281,7 @@ export function prepareGroupSession(groupFolder: string): string {
       settingsFile,
       JSON.stringify(
         {
-          model: 'claude-opus-4-7',
+          model: 'claude-opus-4-6',
           env: {
             CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
             CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
@@ -745,10 +732,11 @@ export async function runContainerAgent(
             const gap = ((now - lastOutputTime) / 1000).toFixed(1);
             lastOutputTime = now;
             hadStreamingOutput = true;
-            logger.debug(
+            logger.info(
               {
                 group: group.name,
                 status: parsed.status,
+                progressType: parsed.progressType,
                 gap: `${gap}s`,
                 resultLen: parsed.result?.length,
               },
@@ -776,12 +764,15 @@ export async function runContainerAgent(
       const lines = chunk.trim().split('\n');
       for (const line of lines) {
         if (line) {
-          // model-override 和 query-start 日志用 info 级别确保可见
+          // 关键事件日志用 info 级别确保可见
           if (
             line.includes('[model-override]') ||
             line.includes('[query-start]') ||
             line.includes('[result]') ||
-            line.includes('[text-block]')
+            line.includes('[text-block]') ||
+            line.includes('Archived conversation') ||
+            line.includes('Failed to archive') ||
+            line.includes('context_management')
           ) {
             logger.info({ agent: group.folder }, line);
           } else {

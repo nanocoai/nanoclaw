@@ -204,15 +204,20 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   await deps.sendMessage(data.chatJid, data.text);
                   // 存入 messages.db，供巡检和搜索使用
                   try {
+                    // 跨群消息：is_from_me=false + sender_name 带源群标识
+                    // 让目标 agent 视为「其他群 agent 发来的用户消息」而非自己的历史
+                    // trigger 检查由 ipc_ ID 前缀绕过（见 index.ts），不再靠 is_from_me
+                    const crossGroupSender = isCrossGroup
+                      ? `${ASSISTANT_NAME}(${sourceGroup})`
+                      : (data.sender || ASSISTANT_NAME);
                     storeMessageDirect({
                       id: `ipc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
                       chat_jid: data.chatJid,
-                      sender: data.sender || ASSISTANT_NAME,
-                      sender_name: data.sender || ASSISTANT_NAME,
+                      sender: crossGroupSender,
+                      sender_name: crossGroupSender,
                       content: data.text,
                       timestamp: data.timestamp || new Date().toISOString(),
-                      // 跨群消息：is_from_me=true 绕过 trigger 检查，is_bot_message=false 让 agent 处理
-                      is_from_me: true,
+                      is_from_me: !isCrossGroup,
                       is_bot_message: !isCrossGroup,
                     });
                   } catch (storeErr) {

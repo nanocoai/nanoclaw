@@ -29,7 +29,6 @@ const JID_PREFIX = 'fs:';
 const TYPING_EMOJI = 'OnIt'; // 飞书内置 emoji key
 const CARD_THRESHOLD = 500;
 const MD_PATTERN = /```|\*\*|^##?\s|^\|.*\||\*[^*\s]|^[-*+]\s|^>\s/m;
-const PROGRESS_EMOJI_PATTERN = /^[🔧📖✏️🔍🌐📋⚙️⏳💭✅]/u;
 const PROGRESS_JSON_PATTERN = /^\{"title":"[🔧📖✏️🔍🌐📋⚙️⏳💭✅]/u;
 const THINKING_PHRASES = ['思考中', '分析中', '处理中', '推理中'];
 
@@ -80,6 +79,14 @@ function chatIdFromJid(jid: string): string {
 /** 判断文本是否应该用卡片发送 */
 function shouldUseCard(text: string): boolean {
   return text.length > CARD_THRESHOLD || MD_PATTERN.test(text);
+}
+
+/** 按 ## 标题拆分 markdown（卡片 400 时用于拆分成多个 markdown 元素重试） */
+function splitMarkdownByHeadings(text: string): string[] {
+  const parts = text.split(/(?=^##\s)/m);
+  // 过滤空段落，保留原文如果拆不开
+  const chunks = parts.map((p) => p.trim()).filter(Boolean);
+  return chunks.length > 0 ? chunks : [text];
 }
 
 /** 构建飞书交互卡片 JSON */
@@ -489,10 +496,9 @@ export class FeishuChannel implements Channel {
       return;
     }
 
-    // 进度消息 → 聚合到进度卡片（支持 JSON 格式含 detail，或纯文本 emoji 开头）
-    const isProgressJson = PROGRESS_JSON_PATTERN.test(text);
-    const isProgressEmoji = PROGRESS_EMOJI_PATTERN.test(text);
-    if (isProgressJson || isProgressEmoji) {
+    // 进度消息 → 聚合到进度卡片（由调用方通过 isProgress 显式标记）
+    if (options?.isProgress) {
+      const isProgressJson = PROGRESS_JSON_PATTERN.test(text);
       let title = text;
       let detail: string | undefined;
       if (isProgressJson) {
@@ -734,7 +740,19 @@ export class FeishuChannel implements Channel {
   async sendDirectMessage(jid: string, text: string): Promise<void> {
     const chatId = chatIdFromJid(jid);
     const groupFolder = this.getGroupFolder(jid);
-    await this.extractAndSendMedia(chatId, text, groupFolder);
+    // 读取 pendingUsage/thinkingMode 给最终回复附加 usage footer
+    // （send_message MCP 走此路径，不经过 sendMessage 的 [reply] 清理链路）
+    const usage = this.pendingUsage.get(jid);
+    const thinking = this.thinkingMode.get(jid);
+    if (usage) {
+      logger.info({ jid, hasUsage: true, thinking }, '[sendDirect] 读取 pendingUsage');
+    }
+    await this.extractAndSendMedia(chatId, text, groupFolder, usage, thinking);
+    // 消费后清理，避免下条消息重复附加
+    if (usage) {
+      this.pendingUsage.delete(jid);
+      this.thinkingMode.delete(jid);
+    }
   }
 
   /** 修改飞书群名称，同时生成缩略字头像（仅群聊生效） */
@@ -757,9 +775,11 @@ export class FeishuChannel implements Channel {
   }
 
   /** 清理进度卡片（撤回或转完成卡片）+ 清理 pendingUsage/thinkingMode。
-   *  用于 agent 结束但无正式回复的场景（如 send_message 已发内容，result 为空）。 */
+   *  用于 agent 结束但无正式回复的场景（如 send_message 已发内容，result 为空）。
+   *  注意：usage footer 只在正式回复上显示，完成卡片不带 usage。 */
   async cleanupProgressCard(jid: string): Promise<void> {
-    // 清理独立状态 Map
+    // 清理 pendingUsage/thinkingMode（usage 留给正式回复的 sendPlainOrCard 使用）
+    // 注意：正式回复路径在调用此方法前已读取了 pendingUsage
     this.pendingUsage.delete(jid);
     this.thinkingMode.delete(jid);
 
@@ -803,6 +823,7 @@ export class FeishuChannel implements Channel {
                 undefined,
                 progressEntry.startTime,
                 progressEntry.sessionId,
+                undefined,
               ),
             },
           });
@@ -850,8 +871,35 @@ export class FeishuChannel implements Channel {
         });
         return resp?.data?.message_id;
       } catch (cardErr) {
-        // 卡片发送失败（如 invalid image keys），降级为纯文本
-        logger.warn({ err: cardErr }, '飞书卡片发送失败，降级为纯文本');
+        // 卡片发送失败 → 拆分 markdown 元素重试（长内容/复杂表格常触发飞书 400）
+        logger.warn({ err: cardErr }, '飞书卡片发送失败，尝试拆分 markdown 重试');
+        const chunks = splitMarkdownByHeadings(text);
+        if (chunks.length > 1) {
+          try {
+            const splitElements: unknown[] = chunks.map((chunk) => ({
+              tag: 'markdown',
+              content: chunk,
+              text_size: 'normal',
+            }));
+            if (usage) appendUsageFooter(splitElements, usage, thinking);
+            const resp = await this.client.im.message.create({
+              data: {
+                receive_id: chatId,
+                msg_type: 'interactive',
+                content: JSON.stringify({
+                  schema: '2.0',
+                  body: { elements: splitElements },
+                }),
+              },
+              params: { receive_id_type: 'chat_id' },
+            });
+            logger.info('飞书卡片拆分 markdown 重试成功');
+            return resp?.data?.message_id;
+          } catch (splitErr) {
+            logger.warn({ err: splitErr }, '飞书卡片拆分重试也失败，降级为纯文本');
+          }
+        }
+        // 最终降级：纯文本
         const resp = await this.client.im.message.create({
           data: {
             receive_id: chatId,
@@ -1507,7 +1555,14 @@ export class FeishuChannel implements Channel {
     if (title) parts.push(title);
 
     const content = parsed.content as
-      | Array<Array<{ tag: string; text?: string; image_key?: string }>>
+      | Array<
+          Array<{
+            tag: string;
+            text?: string;
+            image_key?: string;
+            user_id?: string;
+          }>
+        >
       | undefined;
     if (!content) return { text: parts.join('\n'), imageKeys };
 
@@ -1516,6 +1571,9 @@ export class FeishuChannel implements Channel {
       for (const el of line) {
         if ((el.tag === 'text' || el.tag === 'a') && el.text) {
           lineTexts.push(el.text);
+        } else if (el.tag === 'at' && el.user_id) {
+          // 飞书 post 中 @mention 是独立 at 元素，输出占位符供下游替换
+          lineTexts.push(`@_at_${el.user_id}`);
         } else if (el.tag === 'img' && el.image_key) {
           imageKeys.push(el.image_key);
         }
@@ -2042,13 +2100,18 @@ export class FeishuChannel implements Channel {
     }
 
     // 替换 @mention 标记为名称；@机器人 → @ASSISTANT_NAME（匹配触发词）
+    // text 消息用 m.key（如 @_user_1），post 消息用 @_at_{open_id} 占位符
     if (message.mentions) {
       for (const m of message.mentions) {
         const isBotMention = this.botOpenId && m.id.open_id === this.botOpenId;
-        text = text.replace(
-          m.key,
-          isBotMention ? `@${ASSISTANT_NAME}` : `@${m.name}`,
-        );
+        const replacement = isBotMention
+          ? `@${ASSISTANT_NAME}`
+          : `@${m.name}`;
+        text = text.replace(m.key, replacement);
+        // post 消息中 at 元素生成的占位符（extractPostContent 输出）
+        if (m.id.open_id) {
+          text = text.replace(`@_at_${m.id.open_id}`, replacement);
+        }
       }
     }
 

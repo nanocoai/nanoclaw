@@ -152,7 +152,7 @@ export class TapProxy extends EventEmitter {
     this.server = http.createServer();
 
     // 处理 CONNECT 隧道请求
-    this.server.on('connect', (req, clientSocket, head) => {
+    this.server.on('connect', (req, clientSocket: net.Socket, head) => {
       this.handleConnect(req, clientSocket, head);
     });
 

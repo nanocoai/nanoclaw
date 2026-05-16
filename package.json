@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cd container/agent-runner && npm run build",
     "build:agent": "cd container/agent-runner && npm run build",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",

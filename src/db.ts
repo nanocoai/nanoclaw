@@ -858,7 +858,7 @@ export function getFeishuTokenByUserId(
 export function getAllFeishuTokenUsers(): { user_id: string }[] {
   return db
     .prepare(
-      'SELECT DISTINCT user_id FROM feishu_tokens WHERE user_id != ""',
+      "SELECT DISTINCT user_id FROM feishu_tokens WHERE user_id != ''",
     )
     .all() as { user_id: string }[];
 }
