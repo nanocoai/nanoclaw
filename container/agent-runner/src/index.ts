@@ -24,6 +24,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 import { runCliQuery } from './cli-runner.js';
+import { runInteractiveQuery, cleanupInteractiveResources } from './interactive-cli-runner.js';
 
 interface ContainerInput {
   prompt: string;
@@ -34,8 +35,8 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
-  /** 启用 CLI 模式：spawn claude CLI 替代 Agent SDK */
-  useCliMode?: boolean;
+  /** CLI 执行模式：sdk（默认）| print | interactive */
+  cliMode?: 'sdk' | 'print' | 'interactive';
   modelOverride?: {
     model?: string;
     thinking?: 'adaptive' | 'disabled';
@@ -1171,9 +1172,12 @@ async function main(): Promise<void> {
     prompt = `[SCHEDULED TASK]\n\nScript output:\n${JSON.stringify(scriptResult.data, null, 2)}\n\nInstructions:\n${containerInput.prompt}`;
   }
 
-  // ---- CLI 模式 vs SDK 模式分叉 ----
-  if (containerInput.useCliMode) {
-    log('[mode] CLI mode enabled — spawning claude CLI per turn');
+  // ---- 模式分叉：sdk / print / interactive ----
+  const cliMode = containerInput.cliMode || 'sdk';
+  log(`[mode] cliMode=${cliMode}`);
+
+  if (cliMode === 'print') {
+    log('[mode] print mode — spawning claude --print per turn');
 
     // 加载全局上下文（SOUL.md + TOOLS.md + CLAUDE.md）用于 --append-system-prompt
     const globalDir = PATHS.global;
@@ -1289,7 +1293,137 @@ async function main(): Promise<void> {
     return;
   }
 
-  // ---- SDK 模式（原路径） ----
+  if (cliMode === 'interactive') {
+    log('[mode] interactive mode — tmux + tap proxy');
+
+    // 加载全局上下文（与 print 模式一致）
+    const globalDir = PATHS.global;
+    const iContextParts: string[] = [];
+    const iSoulPath = globalDir ? path.join(globalDir, 'SOUL.md') : undefined;
+    if (iSoulPath && fs.existsSync(iSoulPath)) {
+      iContextParts.push(fs.readFileSync(iSoulPath, 'utf-8'));
+    }
+    const iToolsPath = globalDir ? path.join(globalDir, 'TOOLS.md') : undefined;
+    if (iToolsPath && fs.existsSync(iToolsPath)) {
+      iContextParts.push(fs.readFileSync(iToolsPath, 'utf-8'));
+    }
+    const iGlobalClaudeMdPath = PATHS.globalClaudeMd;
+    if (iGlobalClaudeMdPath && fs.existsSync(iGlobalClaudeMdPath)) {
+      iContextParts.push(fs.readFileSync(iGlobalClaudeMdPath, 'utf-8'));
+    }
+    const iSystemPromptAppend = iContextParts.length > 0 ? iContextParts.join('\n\n---\n\n') : undefined;
+
+    // 额外目录
+    const iExtraDirs: string[] = [];
+    const iExtraBase = PATHS.extra;
+    if (iExtraBase && fs.existsSync(iExtraBase)) {
+      for (const entry of fs.readdirSync(iExtraBase)) {
+        const fullPath = path.join(iExtraBase, entry);
+        if (fs.statSync(fullPath).isDirectory()) {
+          iExtraDirs.push(fullPath);
+        }
+      }
+    }
+
+    // 需要从环境变量中提取 OneCLI 上游代理信息
+    const upstreamProxy = sdkEnv.HTTPS_PROXY || sdkEnv.https_proxy || '';
+    const upstreamCaCert = sdkEnv.NODE_EXTRA_CA_CERTS
+      ? (fs.existsSync(sdkEnv.NODE_EXTRA_CA_CERTS) ? fs.readFileSync(sdkEnv.NODE_EXTRA_CA_CERTS, 'utf-8') : undefined)
+      : undefined;
+
+    if (!upstreamProxy) {
+      writeOutput({
+        status: 'error',
+        result: null,
+        error: 'Interactive mode requires HTTPS_PROXY (OneCLI proxy) to be configured',
+      });
+      return;
+    }
+
+    // 对话记录
+    const iTranscript: ParsedMessage[] = [];
+
+    try {
+      while (true) {
+        log(`[interactive] Starting query (session: ${sessionId || 'new'})...`);
+        iTranscript.push({ role: 'user', content: prompt });
+
+        const override = containerInput.modelOverride;
+        const result = await runInteractiveQuery(
+          {
+            prompt,
+            sessionId,
+            model: override?.model || undefined,
+            mcpServerPath,
+            chatJid: containerInput.chatJid,
+            groupFolder: containerInput.groupFolder,
+            isMain: containerInput.isMain,
+            ipcDir: PATHS.ipc,
+            cwd: PATHS.queryCwd || PATHS.group,
+            env: sdkEnv,
+            additionalDirectories: iExtraDirs.length > 0 ? iExtraDirs : undefined,
+            systemPromptAppend: iSystemPromptAppend,
+            upstreamProxy,
+            upstreamCaCert,
+          },
+          writeOutput,
+          log,
+        );
+
+        if (result.newSessionId) {
+          sessionId = result.newSessionId;
+        }
+
+        if (result.result) {
+          iTranscript.push({ role: 'assistant', content: result.result });
+        }
+
+        // 检查 _close 信号
+        if (shouldClose()) {
+          log('[interactive] Close sentinel detected, exiting');
+          break;
+        }
+
+        if (sessionId && !result.result) {
+          writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+        }
+
+        log('[interactive] Query ended, waiting for next IPC message...');
+
+        const nextMessage = await waitForIpcMessage();
+        if (nextMessage === null) {
+          log('[interactive] Close sentinel received, exiting');
+          break;
+        }
+
+        log(`[interactive] Got new message (${nextMessage.text.length} chars)`);
+        prompt = prependContext(nextMessage.text, nextMessage.context);
+        if (nextMessage.modelOverride) {
+          containerInput.modelOverride = nextMessage.modelOverride;
+        } else {
+          containerInput.modelOverride = undefined;
+        }
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log(`[interactive] Agent error: ${errorMessage}`);
+      writeOutput({
+        status: 'error',
+        result: null,
+        newSessionId: sessionId,
+        error: errorMessage,
+      });
+      archiveCliTranscript(iTranscript, containerInput.assistantName);
+      await cleanupInteractiveResources(log);
+      process.exit(1);
+    }
+
+    archiveCliTranscript(iTranscript, containerInput.assistantName);
+    await cleanupInteractiveResources(log);
+    return;
+  }
+
+  // ---- SDK 模式（默认路径） ----
   // Query loop: run query → wait for IPC message → run new query → repeat
   let resumeAt: string | undefined;
   try {

@@ -27,10 +27,15 @@ export interface AllowedRoot {
   description?: string;
 }
 
+/** CLI 执行模式 */
+export type CliMode = 'sdk' | 'print' | 'interactive';
+
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
-  /** 启用 CLI 模式：spawn claude CLI 替代 Agent SDK，走交互式配额 */
+  /** CLI 执行模式：sdk（默认）| print（--print spawn）| interactive（tmux + tap proxy） */
+  cliMode?: CliMode;
+  /** @deprecated 使用 cliMode: 'print' 替代。向后兼容：useCliMode: true 等同于 cliMode: 'print' */
   useCliMode?: boolean;
 }
 

@@ -475,3 +475,32 @@ describe('CLI 模式集成场景', () => {
     expect(args).toContain('--mcp-config');
   });
 });
+
+// ---- resolveCliMode ----
+
+import { resolveCliMode } from './container-runner.js';
+
+describe('resolveCliMode', () => {
+  it('默认返回 sdk', () => {
+    expect(resolveCliMode()).toBe('sdk');
+    expect(resolveCliMode({})).toBe('sdk');
+  });
+
+  it('直接返回有效 cliMode', () => {
+    expect(resolveCliMode({ cliMode: 'print' })).toBe('print');
+    expect(resolveCliMode({ cliMode: 'interactive' })).toBe('interactive');
+    expect(resolveCliMode({ cliMode: 'sdk' })).toBe('sdk');
+  });
+
+  it('useCliMode 向后兼容映射为 print', () => {
+    expect(resolveCliMode({ useCliMode: true })).toBe('print');
+  });
+
+  it('cliMode 优先于 useCliMode', () => {
+    expect(resolveCliMode({ cliMode: 'interactive', useCliMode: true })).toBe('interactive');
+  });
+
+  it('非法 cliMode 抛错', () => {
+    expect(() => resolveCliMode({ cliMode: 'typo' as any })).toThrow('Invalid cliMode');
+  });
+});
