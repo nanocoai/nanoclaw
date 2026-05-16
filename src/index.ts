@@ -490,6 +490,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           );
       }
 
+      // kill 后可能还有残余 chunk 在 outputChain 里排队，直接丢弃
+      if (streamingRateLimitDetected) return;
+
       // Streaming output callback — called for each agent result
       if (result.result) {
         const raw =
@@ -501,13 +504,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
 
         // Streaming 模式下检测限流文本（"You've hit your limit" 等）
-        // 检测到后不发给用户，后续补偿轮换+重试
+        // 检测到后抑制发送 + 立即 kill 子进程，让 runContainerAgent resolve
+        // 之后由 runAgent 返回后的 streamingRateLimitDetected 轮换逻辑执行切账号+重试
         if (detectRateLimit(raw)) {
           streamingRateLimitDetected = true;
           logger.warn(
             { group: group.name, text: raw.slice(0, 200) },
-            'Streaming 输出检测到限流文本，抑制发送',
+            'Streaming 输出检测到限流文本，抑制发送并 kill 子进程触发轮换',
           );
+          // kill 子进程，让 runContainerAgent 的 Promise resolve
+          // 这样 runAgent 返回后的轮换逻辑能立即执行
+          queue.killGroup(chatJid);
           return;
         }
 
@@ -620,12 +627,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               typeof result.result === 'string'
                 ? result.result
                 : JSON.stringify(result.result);
-            // 重试也可能再次限流，必须检查并抑制
+            // 重试也可能再次限流，必须检查并抑制 + kill 子进程避免死锁
             if (detectRateLimit(raw)) {
               logger.warn(
                 { group: group.name, text: raw.slice(0, 200) },
-                'Retry 输出仍包含限流文本，抑制发送',
+                'Retry 输出仍包含限流文本，抑制发送并 kill 子进程',
               );
+              queue.killGroup(chatJid);
               return;
             }
             const text = raw
