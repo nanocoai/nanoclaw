@@ -202,18 +202,8 @@ export function mapToContainerOutput(
         });
       }
 
-      if (block.type === 'text' && block.text) {
-        const trimmed = block.text.trim();
-        if (trimmed.length > 5) {
-          const short = trimmed.slice(0, 80) + (trimmed.length > 80 ? '...' : '');
-          outputs.push({
-            status: 'progress',
-            result: `💭 ${short}`,
-            progressType: 'thinking',
-            detail: trimmed.length > 80 ? trimmed : undefined,
-          });
-        }
-      }
+      // text block 不映射为 output — 同一文本会在 result 消息中完整返回，
+      // 这里再发会导致用户收到两条重复消息
     }
 
     return outputs;

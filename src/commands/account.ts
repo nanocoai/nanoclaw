@@ -1,6 +1,6 @@
 import { execSync } from 'child_process';
 import { logger } from '../logger.js';
-import { getRotateEnabled, setRotateEnabled } from '../db.js';
+import { getRotateEnabled, setRotateEnabled, setLastRotateAt, setRotateIndex } from '../db.js';
 import { registerCommand } from './registry.js';
 
 // /account — 列出/切换 Anthropic 账号
@@ -155,6 +155,12 @@ registerCommand({
           logger.error({ err }, '/account: 切换账号失败');
           await channel.sendMessage(chatJid, '❌ 账号切换失败');
           return;
+        }
+        // 同步 rotateIndex + 防抖时间戳，阻止 auto-rotate 覆盖手动切换
+        if (group) {
+          const targetIndex = secrets.findIndex((s) => s.id === target.id);
+          if (targetIndex >= 0) setRotateIndex(targetIndex, group.folder);
+          setLastRotateAt(Date.now(), group.folder);
         }
         // 杀掉旧容器，让新消息用新 key 起新容器
         // 保留 session（内存+DB），新容器用旧 sessionId 恢复上下文

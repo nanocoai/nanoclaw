@@ -603,6 +603,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const rotateResult = rotateAccount(agentId, group.folder);
     if (rotateResult?.success) {
       output.rotatedTo = rotateResult.newSecretName;
+      output.rotatedFrom = rotateResult.oldSecretName;
       // 重试：用新账号重跑，保留 session 上下文
       logger.info(
         { group: group.name, newSecret: rotateResult.newSecretName },
@@ -618,6 +619,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               typeof result.result === 'string'
                 ? result.result
                 : JSON.stringify(result.result);
+            // 重试也可能再次限流，必须检查并抑制
+            if (detectRateLimit(raw)) {
+              logger.warn(
+                { group: group.name, text: raw.slice(0, 200) },
+                'Retry 输出仍包含限流文本，抑制发送',
+              );
+              return;
+            }
             const text = raw
               .replace(/<internal>[\s\S]*?<\/internal>/g, '')
               .trim();
@@ -650,7 +659,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // 轮换通知
   if (output.rotatedTo) {
     channel
-      .sendMessage(chatJid, `🔄 当前额度已满，已自动切换到备用账号 (${output.rotatedTo})`, { isCommandReply: true })
+      .sendMessage(chatJid, `🔄 ${output.rotatedFrom || '当前账号'}额度已满，已自动切换到 ${output.rotatedTo}`, { isCommandReply: true })
       .catch(() => {});
   }
   if (output.allExhausted) {
@@ -754,6 +763,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 interface RunAgentResult {
   status: 'success' | 'error';
   rotatedTo?: string; // 轮换到的新 secret 名称（用于通知用户）
+  rotatedFrom?: string; // 轮换前的旧 secret 名称
   allExhausted?: boolean; // 所有账号配额耗尽
 }
 
@@ -898,6 +908,7 @@ async function runAgent(
           ).then((retryResult) => ({
             ...retryResult,
             rotatedTo: rotateResult.newSecretName,
+            rotatedFrom: rotateResult.oldSecretName,
           }));
         }
 
@@ -947,6 +958,7 @@ async function runAgent(
         ).then((retryResult) => ({
           ...retryResult,
           rotatedTo: rotateResult.newSecretName,
+          rotatedFrom: rotateResult.oldSecretName,
         }));
       }
 

@@ -231,7 +231,7 @@ describe('mapToContainerOutput', () => {
     expect(outputs[0].result).toContain('echo hello');
   });
 
-  it('assistant text 映射为 thinking progress', () => {
+  it('assistant text block 不产生 output（避免与 result 重复发送）', () => {
     const msg = {
       type: 'assistant' as const,
       message: {
@@ -239,13 +239,10 @@ describe('mapToContainerOutput', () => {
       },
     };
     const outputs = mapToContainerOutput(msg);
-    expect(outputs).toHaveLength(1);
-    expect(outputs[0].status).toBe('progress');
-    expect(outputs[0].progressType).toBe('thinking');
-    expect(outputs[0].result).toContain('💭');
+    expect(outputs).toHaveLength(0);
   });
 
-  it('短文本（<=5字符）不产生输出', () => {
+  it('assistant 短文本同样不产生 output', () => {
     const msg = {
       type: 'assistant' as const,
       message: {
@@ -323,7 +320,35 @@ describe('mapToContainerOutput', () => {
     expect(mapToContainerOutput(msg)).toEqual([]);
   });
 
-  it('assistant 混合 text + tool_use 全部返回', () => {
+  it('assistant text + result 不会产生重复内容（回归测试）', () => {
+    const answerText = '昨天 GMV 是 2304 万元，同比增长 5%';
+
+    // assistant 消息包含最终回答文本
+    const assistantMsg = {
+      type: 'assistant' as const,
+      message: {
+        content: [{ type: 'text', text: answerText }],
+      },
+    };
+    const assistantOutputs = mapToContainerOutput(assistantMsg);
+    expect(assistantOutputs).toHaveLength(0);
+
+    // result 消息包含同一文本
+    const resultMsg = {
+      type: 'result' as const,
+      result: answerText,
+      session_id: 'sess-1',
+    };
+    const resultOutputs = mapToContainerOutput(resultMsg);
+    expect(resultOutputs).toHaveLength(1);
+    expect(resultOutputs[0].result).toBe(answerText);
+
+    // 总共只有 1 条输出（来自 result），不会重复
+    const allOutputs = [...assistantOutputs, ...resultOutputs];
+    expect(allOutputs).toHaveLength(1);
+  });
+
+  it('assistant 混合 text + tool_use 只返回 tool_use', () => {
     const msg = {
       type: 'assistant' as const,
       message: {
@@ -334,9 +359,8 @@ describe('mapToContainerOutput', () => {
       },
     };
     const outputs = mapToContainerOutput(msg);
-    expect(outputs).toHaveLength(2);
-    expect(outputs[0].progressType).toBe('thinking');
-    expect(outputs[1].progressType).toBe('tool_use');
+    expect(outputs).toHaveLength(1);
+    expect(outputs[0].progressType).toBe('tool_use');
   });
 
   it('工具名 emoji 映射正确', () => {
@@ -429,11 +453,10 @@ describe('CLI 模式集成场景', () => {
     }
 
     expect(sessionId).toBe('s1');
-    expect(allOutputs).toHaveLength(3); // thinking + tool_use + result
-    expect(allOutputs[0].progressType).toBe('thinking');
-    expect(allOutputs[1].progressType).toBe('tool_use');
-    expect(allOutputs[2].status).toBe('success');
-    expect(allOutputs[2].result).toBe('完成');
+    expect(allOutputs).toHaveLength(2); // tool_use + result（text block 不再生成 output）
+    expect(allOutputs[0].progressType).toBe('tool_use');
+    expect(allOutputs[1].status).toBe('success');
+    expect(allOutputs[1].result).toBe('完成');
   });
 
   it('buildCliArgs + buildMcpConfig 组合使用', () => {

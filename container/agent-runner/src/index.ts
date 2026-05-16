@@ -251,12 +251,45 @@ function createPreCompactHook(assistantName?: string): HookCallback {
   };
 }
 
+/**
+ * CLI 模式对话归档 — 退出时将累积的对话写入 conversations/
+ */
+function archiveCliTranscript(messages: ParsedMessage[], assistantName?: string): void {
+  if (messages.length === 0) {
+    log('[cli-archive] No messages to archive');
+    return;
+  }
+
+  try {
+    const conversationsDir = PATHS.conversations;
+    fs.mkdirSync(conversationsDir, { recursive: true });
+
+    // 从第一条用户消息提取摘要（取前 80 字符）
+    const firstUserMsg = messages.find(m => m.role === 'user');
+    const summary = firstUserMsg
+      ? firstUserMsg.content.slice(0, 80).replace(/\n/g, ' ').trim()
+      : null;
+    const name = summary ? sanitizeFilename(summary) : generateFallbackName();
+
+    const date = new Date().toISOString().split('T')[0];
+    const filename = `${date}-${name}.md`;
+    const filePath = path.join(conversationsDir, filename);
+
+    const markdown = formatTranscriptMarkdown(messages, summary, assistantName);
+    fs.writeFileSync(filePath, markdown);
+    log(`[cli-archive] Archived ${messages.length} messages to ${filePath}`);
+  } catch (err) {
+    log(`[cli-archive] Failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 function sanitizeFilename(summary: string): string {
-  return summary
+  const sanitized = summary
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/[^a-z0-9一-鿿㐀-䶿]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 50);
+  return sanitized || generateFallbackName();
 }
 
 function generateFallbackName(): string {
@@ -1075,7 +1108,7 @@ async function main(): Promise<void> {
       globalClaudeMd: wp.global ? path.join(wp.global, 'CLAUDE.md') : undefined,
     };
 
-    log(`Received input for group: ${containerInput.groupFolder}`);
+    log(`Received input for group: ${containerInput.groupFolder} (useCliMode=${containerInput.useCliMode})`);
   } catch (err) {
     writeOutput({
       status: 'error',
@@ -1171,9 +1204,15 @@ async function main(): Promise<void> {
       }
     }
 
+    // 累积对话记录，退出时归档到 conversations/
+    const cliTranscript: ParsedMessage[] = [];
+
     try {
       while (true) {
         log(`[cli-mode] Starting CLI query (session: ${sessionId || 'new'})...`);
+
+        // 记录用户消息
+        cliTranscript.push({ role: 'user', content: prompt });
 
         const override = containerInput.modelOverride;
         const cliResult = await runCliQuery(
@@ -1197,6 +1236,11 @@ async function main(): Promise<void> {
 
         if (cliResult.newSessionId) {
           sessionId = cliResult.newSessionId;
+        }
+
+        // 记录助手回复
+        if (cliResult.result) {
+          cliTranscript.push({ role: 'assistant', content: cliResult.result });
         }
 
         // 检查 _close 信号
@@ -1235,8 +1279,13 @@ async function main(): Promise<void> {
         newSessionId: sessionId,
         error: errorMessage,
       });
+      // 即使出错也尝试归档
+      archiveCliTranscript(cliTranscript, containerInput.assistantName);
       process.exit(1);
     }
+
+    // 正常退出时归档对话
+    archiveCliTranscript(cliTranscript, containerInput.assistantName);
     return;
   }
 

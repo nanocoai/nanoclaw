@@ -261,7 +261,7 @@ describe('rotateAccount', () => {
       .mockReturnValueOnce(''); // set-secrets
 
     const result = rotateAccount('test-agent', 'test_group');
-    expect(result).toEqual({ success: true, newSecretName: 'account-b' });
+    expect(result).toEqual({ success: true, newSecretName: 'account-b', oldSecretName: 'account-a' });
     expect(getRotateIndex('test_group')).toBe(1);
     expect(getLastRotateAt('test_group')).toBeGreaterThan(0);
   });
@@ -314,7 +314,7 @@ describe('rotateAccount', () => {
       .mockReturnValueOnce('');
 
     const result = rotateAccount('test-agent', 'test_group');
-    expect(result).toEqual({ success: true, newSecretName: 'account-a' });
+    expect(result).toEqual({ success: true, newSecretName: 'account-a', oldSecretName: 'account-c' });
     expect(getRotateIndex('test_group')).toBe(0);
   });
 
@@ -370,7 +370,7 @@ describe('rotateAccount', () => {
       .mockReturnValueOnce('');
 
     const result = rotateAccount('group-b', 'group_b');
-    expect(result).toEqual({ success: true, newSecretName: 'account-b' });
+    expect(result).toEqual({ success: true, newSecretName: 'account-b', oldSecretName: 'account-a' });
   });
 
   it('per-group index 隔离：各群独立维护轮换位置', () => {

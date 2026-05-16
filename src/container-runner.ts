@@ -97,6 +97,7 @@ export function rotateAccount(
 ): {
   success: boolean;
   newSecretName: string;
+  oldSecretName?: string;
 } | null {
   if (!getRotateEnabled()) return null;
 
@@ -155,6 +156,7 @@ export function rotateAccount(
     return null;
   }
 
+  const oldSecret = secrets[currentIndex];
   const nextSecret = secrets[nextIndex];
   try {
     execSync(
@@ -170,11 +172,11 @@ export function rotateAccount(
   setLastRotateAt(now, groupFolder);
 
   logger.info(
-    { agent: agent.id, secret: nextSecret.name, index: nextIndex, groupFolder },
+    { agent: agent.id, secret: nextSecret.name, oldSecret: oldSecret?.name, index: nextIndex, groupFolder },
     '账号已自动轮换',
   );
 
-  return { success: true, newSecretName: nextSecret.name };
+  return { success: true, newSecretName: nextSecret.name, oldSecretName: oldSecret?.name };
 }
 
 // Sentinel markers for robust output parsing (must match agent-runner)
