@@ -5,6 +5,7 @@ import fs from 'fs';
 import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
 import {
   ContainerOutput,
+  resolveCliMode,
   runContainerAgent,
   writeTasksSnapshot,
 } from './container-runner.js';
@@ -181,7 +182,7 @@ async function runTask(
         isScheduledTask: true,
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
-        useCliMode: group.containerConfig?.useCliMode,
+        cliMode: resolveCliMode(group.containerConfig),
       },
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),

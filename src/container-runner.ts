@@ -18,7 +18,20 @@ import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { readEnvFile } from './env.js';
 import { OneCLI } from '@onecli-sh/sdk';
-import { RegisteredGroup } from './types.js';
+import { CliMode, ContainerConfig, RegisteredGroup } from './types.js';
+
+/** 从 ContainerConfig 解析 cliMode，向后兼容 useCliMode */
+export function resolveCliMode(config?: ContainerConfig): CliMode {
+  if (config?.cliMode) {
+    const validModes: CliMode[] = ['sdk', 'print', 'interactive'];
+    if (!validModes.includes(config.cliMode)) {
+      throw new Error(`Invalid cliMode: "${config.cliMode}". Valid values: ${validModes.join(', ')}`);
+    }
+    return config.cliMode;
+  }
+  if (config?.useCliMode) return 'print';
+  return 'sdk';
+}
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 import {
@@ -192,8 +205,8 @@ export interface ContainerInput {
   script?: string;
   /** 触发本次对话的用户 ID（飞书 open_id），传给 agent-runner 用于记忆读写 */
   senderId?: string;
-  /** 启用 CLI 模式：spawn claude CLI 替代 Agent SDK，走交互式配额 */
-  useCliMode?: boolean;
+  /** CLI 执行模式：sdk（默认）| print | interactive */
+  cliMode?: import('./types.js').CliMode;
   /** 单次模型/思考模式覆盖，不持久化 */
   modelOverride?: {
     model?: string;

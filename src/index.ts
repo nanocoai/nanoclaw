@@ -36,6 +36,7 @@ import {
 import {
   ContainerOutput,
   detectRateLimit,
+  resolveCliMode,
   rotateAccount,
   runContainerAgent,
   writeGroupsSnapshot,
@@ -834,7 +835,7 @@ async function runAgent(
         assistantName: ASSISTANT_NAME,
         modelOverride,
         senderId: memorySenderId,
-        useCliMode: group.containerConfig?.useCliMode,
+        cliMode: resolveCliMode(group.containerConfig),
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
