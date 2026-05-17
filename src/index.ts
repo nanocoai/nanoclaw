@@ -983,6 +983,33 @@ async function runAgent(
         deleteSession(group.folder);
       }
 
+      // API 瞬时错误自动重试（500/502/503/fetch failed）
+      // 这些是上游临时故障，不需要轮换账号，等几秒重试即可
+      const API_ERROR_MAX_RETRIES = 2;
+      const isApiTransientError =
+        output.error &&
+        /API Error:\s*5\d{2}\b|fetch failed|Internal server error|overloaded|ECONNRESET|ETIMEDOUT/i.test(
+          output.error,
+        );
+      if (isApiTransientError && retryCount < API_ERROR_MAX_RETRIES) {
+        const delayMs = (retryCount + 1) * 3000; // 3s, 6s
+        logger.warn(
+          { group: group.name, retryCount, delayMs, error: output.error?.slice(0, 200) },
+          '[api-error] 上游 API 瞬时错误，延迟后重试',
+        );
+        await new Promise((r) => setTimeout(r, delayMs));
+        return runAgent(
+          group,
+          prompt,
+          chatJid,
+          onOutput,
+          latestUserMessage,
+          memorySenderId,
+          retryCount + 1,
+          modelOverride,
+        );
+      }
+
       // 429 检测 + 自动轮换（试完所有账号才放弃）
       if (retryCount < maxRetries && output.error && detectRateLimit(output.error)) {
         const agentId = group.folder.toLowerCase().replace(/_/g, '-');

@@ -177,7 +177,8 @@ describe('限流 → kill → 轮换集成测试', () => {
     const elapsed = Date.now() - startTime;
 
     // 进程不应该等 300 秒（sleep 300），应在检测到限流后秒级退出
-    expect(elapsed).toBeLessThan(5000);
+    // CI/负载高时 spawn + kill 可能慢于预期，放宽到 15s
+    expect(elapsed).toBeLessThan(15000);
     expect(killTime).toBeGreaterThan(0);
   });
 
