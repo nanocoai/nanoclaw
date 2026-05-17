@@ -109,6 +109,8 @@ export interface TapSubscription {
   onEvent: (event: SseEvent) => void;
   onError: (error: Error) => void;
   onEnd: () => void;
+  /** SSE 流数量变化通知（+1 开始新流，-1 流结束） */
+  onActiveStreamsChange?: (activeCount: number) => void;
 }
 
 // ---- Tap Proxy 主类 ----
@@ -118,6 +120,8 @@ export interface TapProxyConfig {
   upstreamProxy: string;
   /** 上游代理的 CA 证书 PEM（信任 OneCLI 的自签 CA） */
   upstreamCaCert?: string;
+  /** Credential Proxy（cli-proxy-api）— 直接 HTTP 转发，用 OAuth 凭证调 API */
+  credentialProxy?: { url: string; apiKey: string };
   /** 日志函数 */
   log: (message: string) => void;
 }
@@ -129,8 +133,10 @@ export class TapProxy extends EventEmitter {
   private caKey = '';
   private serverCertCache = new Map<string, { cert: string; key: string }>();
   private subscriptions = new Map<string, TapSubscription>();
+  private activeSseStreams = new Map<string, number>();
   private upstreamProxy: URL;
   private upstreamCaCert?: string;
+  private credentialProxy?: { url: URL; apiKey: string };
   private log: (message: string) => void;
   // 运行时可更新的上游 token（按 session 标识）
   private upstreamTokenOverrides = new Map<string, string>();
@@ -139,6 +145,12 @@ export class TapProxy extends EventEmitter {
     super();
     this.upstreamProxy = new URL(config.upstreamProxy);
     this.upstreamCaCert = config.upstreamCaCert;
+    if (config.credentialProxy) {
+      this.credentialProxy = {
+        url: new URL(config.credentialProxy.url),
+        apiKey: config.credentialProxy.apiKey,
+      };
+    }
     this.log = config.log;
   }
 
@@ -434,20 +446,193 @@ export class TapProxy extends EventEmitter {
     headers: Record<string, string>,
     body: string,
   ): void {
-    const isMessagesApi = path.includes('/v1/messages');
+    // 只拦截 POST /v1/messages（真正的 prompt 请求）
+    // GET /v1/messages、PUT /v1/messages 等不拦截
+    const isMessagesApi = method === 'POST' && path.includes('/v1/messages');
     const subscription = this.subscriptions.get(sessionToken);
     const shouldIntercept = isMessagesApi && subscription;
 
     if (shouldIntercept) {
-      this.log(`[tap-proxy] intercepting ${method} ${path}`);
+      this.log(`[tap-proxy] intercepting ${method} ${path} (body: ${Buffer.byteLength(body || '', 'utf-8')} bytes)`);
     }
 
-    // 获取上游 token（可能被运行时更新过）
+    // 优先走 credential proxy（直接 HTTP 转发，OAuth 凭证）
+    if (this.credentialProxy) {
+      this.forwardViaCredentialProxy(
+        clientTlsSocket, sessionToken, method, path, headers, body,
+        shouldIntercept ? subscription : null,
+      );
+      return;
+    }
+
+    // 回退：走 CONNECT 隧道到上游代理
+    this.forwardViaConnectTunnel(
+      clientTlsSocket, hostname, port, sessionToken, method, path, headers, body,
+      shouldIntercept ? subscription : null,
+    );
+  }
+
+  /** 通过 credential proxy（如 cli-proxy-api）直接 HTTP 转发 */
+  private forwardViaCredentialProxy(
+    clientTlsSocket: tls.TLSSocket,
+    sessionToken: string,
+    method: string,
+    path: string,
+    headers: Record<string, string>,
+    body: string,
+    subscription: TapSubscription | null,
+  ): void {
+    const proxy = this.credentialProxy!;
+    const proxyHost = proxy.url.hostname;
+    const proxyPort = parseInt(proxy.url.port) || 8317;
+
+    // 替换 auth header 为 credential proxy 的 API key
+    const reqHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(headers)) {
+      const lk = k.toLowerCase();
+      // 跳过 CLI 自带的 auth header、proxy header 和 content-length（需重新计算）
+      if (lk === 'x-api-key' || lk === 'authorization' || lk === 'proxy-authorization' || lk === 'content-length') continue;
+      reqHeaders[k] = v;
+    }
+    reqHeaders['x-api-key'] = proxy.apiKey;
+    reqHeaders['host'] = `${proxyHost}:${proxyPort}`;
+    // body 经过 chunk.toString() 拼接后字节数可能和原始 Content-Length 不一致，重新计算
+    if (body) {
+      reqHeaders['content-length'] = String(Buffer.byteLength(body, 'utf-8'));
+    }
+
+    this.log(`[tap-proxy] credential proxy → ${method} ${path} (body: ${Buffer.byteLength(body || '', 'utf-8')} bytes, host: ${reqHeaders['host']}, content-type: ${reqHeaders['content-type'] || 'N/A'})`);
+
+    // 直接 HTTP 请求到 credential proxy（必须绕过 http_proxy 环境变量）
+    const reqOptions: http.RequestOptions = {
+      hostname: proxyHost,
+      port: proxyPort,
+      path,
+      method,
+      headers: reqHeaders,
+      agent: new http.Agent(), // 绕过 EnvHttpProxyAgent，直连 localhost
+    };
+
+    const proxyReq = http.request(reqOptions, (proxyRes) => {
+      const ct = proxyRes.headers['content-type'] || '';
+      this.log(`[tap-proxy] credential proxy ← ${proxyRes.statusCode} ${proxyRes.statusMessage} (content-type: ${ct}, subscription: ${!!subscription})`);
+      // 构建 HTTP 响应发回客户端（CLI 期望 HTTPS 响应格式）
+      // 注意：Node.js http module 自动解码 chunked encoding，
+      // proxyRes.on('data') 给的是原始数据而非 chunked 编码的数据。
+      // 因此必须过滤 transfer-encoding 和 content-length，避免客户端解析错误。
+      let responseHeader = `HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage}\r\n`;
+      for (const [key, value] of Object.entries(proxyRes.headers)) {
+        const lk = key.toLowerCase();
+        // 过滤掉 transfer-encoding（Node.js 已解码）和 content-length（流式不知道总长度）
+        if (lk === 'transfer-encoding' || lk === 'content-length') continue;
+        if (Array.isArray(value)) {
+          for (const v of value) responseHeader += `${key}: ${v}\r\n`;
+        } else if (value) {
+          responseHeader += `${key}: ${value}\r\n`;
+        }
+      }
+      responseHeader += '\r\n';
+
+      try { clientTlsSocket.write(responseHeader); } catch { /* client gone */ }
+
+      const isSSE = ct.includes('text/event-stream');
+      let sseLineBuffer = '';
+      let currentSseBlock: string[] = [];
+      let chunkCount = 0;
+
+      // 追踪活跃 SSE 流数量
+      if (subscription && isSSE) {
+        const count = (this.activeSseStreams.get(sessionToken) || 0) + 1;
+        this.activeSseStreams.set(sessionToken, count);
+        subscription.onActiveStreamsChange?.(count);
+      }
+
+      proxyRes.on('data', (chunk: Buffer) => {
+        chunkCount++;
+        // 始终透传给客户端
+        try { clientTlsSocket.write(chunk); } catch { /* client gone */ }
+
+        if (!subscription || !isSSE) return;
+        if (chunkCount <= 2) {
+          this.log(`[tap-proxy] SSE chunk #${chunkCount} (${chunk.length} bytes): ${chunk.toString().slice(0, 100).replace(/\n/g, '\\n')}`);
+        }
+
+        // 解析 SSE
+        const result = this.processSseChunk(
+          chunk.toString(), sseLineBuffer, currentSseBlock, subscription,
+        );
+        sseLineBuffer = result.lineBuffer;
+        currentSseBlock = result.block;
+      });
+
+      proxyRes.on('end', () => {
+        try { clientTlsSocket.end(); } catch { /* ignore */ }
+        // 只对 SSE 流触发 subscription 回调；非 SSE 响应的 end 不应终结 subscription
+        if (subscription && isSSE) {
+          if (currentSseBlock.length > 0) {
+            const parsed = parseSseLines(currentSseBlock);
+            if (parsed) {
+              const event = parseSseEvent(parsed.event, parsed.data);
+              if (event) subscription.onEvent(event);
+            }
+          }
+          // 递减活跃流计数，通知 subscription
+          const remaining = Math.max(0, (this.activeSseStreams.get(sessionToken) || 1) - 1);
+          this.activeSseStreams.set(sessionToken, remaining);
+          subscription.onActiveStreamsChange?.(remaining);
+          subscription.onEnd();
+        }
+      });
+
+      proxyRes.on('error', (err) => {
+        this.log(`[tap-proxy] credential proxy response error: ${err.message}`);
+        if (subscription && isSSE) {
+          // 递减活跃流计数
+          const remaining = Math.max(0, (this.activeSseStreams.get(sessionToken) || 1) - 1);
+          this.activeSseStreams.set(sessionToken, remaining);
+          subscription.onActiveStreamsChange?.(remaining);
+          subscription.onError(err);
+        }
+        try { clientTlsSocket.destroy(); } catch { /* ignore */ }
+      });
+    });
+
+    proxyReq.on('error', (err: NodeJS.ErrnoException) => {
+      this.log(`[tap-proxy] credential proxy request error: ${err.message} (code: ${err.code || 'N/A'}, hostname: ${proxyHost}:${proxyPort})`);
+      if (subscription) subscription.onError(err);
+      clientTlsSocket.destroy();
+    });
+
+    proxyReq.on('socket', (socket) => {
+      socket.on('connect', () => {
+        this.log(`[tap-proxy] credential proxy TCP connected to ${socket.remoteAddress}:${socket.remotePort}`);
+      });
+    });
+
+    if (body) proxyReq.write(body);
+    proxyReq.end();
+
+    clientTlsSocket.on('close', () => {
+      proxyReq.destroy();
+    });
+  }
+
+  /** 通过 CONNECT 隧道转发到上游代理（原逻辑） */
+  private forwardViaConnectTunnel(
+    clientTlsSocket: tls.TLSSocket,
+    hostname: string,
+    port: number,
+    sessionToken: string,
+    method: string,
+    path: string,
+    headers: Record<string, string>,
+    body: string,
+    subscription: TapSubscription | null,
+  ): void {
     const upstreamToken = this.upstreamTokenOverrides.get(sessionToken) || this.upstreamProxy.password;
     const upstreamHost = this.upstreamProxy.hostname;
     const upstreamPort = parseInt(this.upstreamProxy.port) || 10254;
 
-    // 通过上游代理发送 CONNECT + 实际请求
     const proxySocket = net.connect(upstreamPort, upstreamHost, () => {
       const auth = Buffer.from(`x:${upstreamToken}`).toString('base64');
       proxySocket.write(
@@ -463,12 +648,11 @@ export class TapProxy extends EventEmitter {
     let upstreamTlsSocket: tls.TLSSocket | null = null;
 
     proxySocket.on('data', (data: Buffer) => {
-      if (proxyConnected) return; // TLS 接管后不再处理
+      if (proxyConnected) return;
 
       proxyHeaderBuffer += data.toString();
       if (!proxyHeaderBuffer.includes('\r\n\r\n')) return;
 
-      // 校验上游 CONNECT 响应状态码
       const statusLine = proxyHeaderBuffer.split('\r\n')[0];
       if (!statusLine.includes(' 200 ')) {
         this.log(`[tap-proxy] upstream CONNECT failed for ${hostname}: ${statusLine}`);
@@ -480,7 +664,6 @@ export class TapProxy extends EventEmitter {
 
       proxyConnected = true;
 
-      // 建立到上游的 TLS 连接
       const tlsOptions: tls.ConnectionOptions = {
         socket: proxySocket,
         servername: hostname,
@@ -492,9 +675,8 @@ export class TapProxy extends EventEmitter {
       };
 
       upstreamTlsSocket = tls.connect(tlsOptions, () => {
-        // TLS 握手成功，发送实际 HTTP 请求
         const reqHeaders = { ...headers };
-        delete reqHeaders['proxy-authorization']; // 不转发 proxy auth
+        delete reqHeaders['proxy-authorization'];
         reqHeaders['host'] = hostname;
 
         let reqStr = `${method} ${path} HTTP/1.1\r\n`;
@@ -508,11 +690,10 @@ export class TapProxy extends EventEmitter {
           upstreamTlsSocket!.write(body);
         }
 
-        // 读取上游响应
         this.readUpstreamResponse(
           upstreamTlsSocket!,
           clientTlsSocket,
-          shouldIntercept ? subscription : null,
+          subscription,
         );
       });
 
@@ -528,7 +709,6 @@ export class TapProxy extends EventEmitter {
       clientTlsSocket.destroy();
     });
 
-    // 客户端断开时清理上游连接
     clientTlsSocket.on('close', () => {
       if (upstreamTlsSocket) upstreamTlsSocket.destroy();
       proxySocket.destroy();

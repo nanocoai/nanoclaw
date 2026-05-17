@@ -210,6 +210,11 @@ export function accumulateSseEvent(
   switch (event.type) {
     case 'message_start': {
       const data = event.data as MessageStartData;
+      // 新消息开始：重置 done 和 blocks，保留已累积的 usage（跨请求合计）
+      next.done = false;
+      next.stopReason = '';
+      next.error = '';
+      next.blocks = new Map();
       next.model = data.message?.model || '';
       next.messageId = data.message?.id || '';
       if (data.message?.usage) {
@@ -314,7 +319,7 @@ export interface ContainerOutput {
 
 /**
  * 从 SSE 事件生成实时 ContainerOutput（工具调用进度）
- * 在 content_block_start type=tool_use 时触发
+ * 在 content_block_start type=tool_use 时触发（轻量版，无输入详情）
  */
 export function mapSseEventToProgress(event: SseEvent): ContainerOutput | null {
   if (event.type !== 'content_block_start') return null;
@@ -323,16 +328,63 @@ export function mapSseEventToProgress(event: SseEvent): ContainerOutput | null {
   if (data.content_block?.type !== 'tool_use') return null;
 
   const name = data.content_block.name || 'unknown';
-  const emoji = name === 'Bash' ? '🔧' :
-                name === 'Read' ? '📖' :
-                name === 'Write' || name === 'Edit' ? '✏️' :
-                name === 'Grep' ? '🔍' :
-                name === 'Glob' ? '📋' : '⚙️';
+  const emoji = toolEmoji(name);
 
   return {
     status: 'progress',
     result: `${emoji} ${name}`,
     progressType: 'tool_use',
+  };
+}
+
+/** 工具名 → emoji */
+function toolEmoji(name: string): string {
+  return name === 'Bash' ? '🔧' :
+         name === 'Read' ? '📖' :
+         name === 'Write' || name === 'Edit' ? '✏️' :
+         name === 'Grep' ? '🔍' :
+         name === 'Glob' ? '📋' :
+         name === 'WebSearch' || name === 'WebFetch' ? '🌐' :
+         name === 'Agent' ? '🤖' : '⚙️';
+}
+
+/**
+ * 从已完成的 ToolUseBlock 生成富进度（包含命令/文件等详情）
+ * 在 content_block_stop 时调用，此时 inputJson 已完整累积
+ */
+export function buildToolUseProgress(block: ToolUseBlock): ContainerOutput | null {
+  const name = block.name;
+  const emoji = toolEmoji(name);
+
+  let shortInput: string = name;
+  let detail: string | undefined;
+
+  try {
+    const input = JSON.parse(block.inputJson) as Record<string, unknown>;
+    const inputStr = (input.command as string || input.file_path as string ||
+                      input.query as string || input.pattern as string || name);
+    shortInput = typeof inputStr === 'string' ? inputStr.slice(0, 60) : name;
+
+    if (name === 'Edit' && input.old_string && input.new_string) {
+      const file = ((input.file_path as string) || '').split('/').pop() || 'file';
+      const oldLines = (input.old_string as string).slice(0, 300).split('\n').map((l: string) => `- ${l}`).join('\n');
+      const newLines = (input.new_string as string).slice(0, 300).split('\n').map((l: string) => `+ ${l}`).join('\n');
+      detail = `**${file}**\n${oldLines}\n${newLines}`;
+    } else if (name === 'Bash' && input.command) {
+      detail = `\`\`\`bash\n${(input.command as string).slice(0, 500)}\n\`\`\``;
+    } else if (name === 'Write' && input.file_path) {
+      const c = (input.content as string || '').slice(0, 300);
+      detail = `**${input.file_path}**\n\`\`\`\n${c}${c.length >= 300 ? '\n...' : ''}\n\`\`\``;
+    }
+  } catch {
+    // inputJson 解析失败，用裸工具名
+  }
+
+  return {
+    status: 'progress',
+    result: `${emoji} ${name}: ${shortInput}`,
+    progressType: 'tool_use',
+    detail,
   };
 }
 

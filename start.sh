@@ -14,4 +14,8 @@ if [ ! -f "$BINDING" ]; then
   echo "[start.sh] restored."
 fi
 
+# Credential Proxy（cli-proxy-api）— interactive 模式用 OAuth 凭证走订阅配额
+export CREDENTIAL_PROXY_URL="http://localhost:8317"
+export CREDENTIAL_PROXY_API_KEY="oc-dog-666"
+
 exec "$NODE" "$DIR/dist/index.js"

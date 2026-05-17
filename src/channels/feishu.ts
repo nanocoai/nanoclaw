@@ -612,6 +612,7 @@ export class FeishuChannel implements Channel {
     );
     // cleanupProgressCard 会清理 pendingUsage/thinkingMode/progressCards
     await this.cleanupProgressCard(jid);
+    logger.info({ jid, chatId }, '[reply] cleanupProgressCard 完成');
 
     // 统一媒体提取与发送（图片/文件标记提取、文本发送、媒体上传，互不阻塞）
     const groupFolder = this.getGroupFolder(jid);
@@ -655,6 +656,7 @@ export class FeishuChannel implements Channel {
     ].map((m) => m[1]);
 
     const hasMedia = imageMatches.length > 0 || fileMatches.length > 0;
+    logger.info({ chatId, textLen: text.length, hasMedia, images: imageMatches.length, files: fileMatches.length }, '[reply] extractAndSendMedia 入口');
 
     // 无标记 → 直接发文本
     if (!hasMedia) {
@@ -852,6 +854,7 @@ export class FeishuChannel implements Channel {
     usage?: ContainerOutput['usage'],
     thinking?: 'adaptive' | 'disabled',
   ): Promise<string | undefined> {
+    logger.info({ chatId, textLen: text.length, hasUsage: !!usage, thinking }, '[sendPlainOrCard] 准备发送');
     if (usage || shouldUseCard(text)) {
       const elements: unknown[] = [
         { tag: 'markdown', content: text, text_size: 'normal' },
@@ -869,6 +872,7 @@ export class FeishuChannel implements Channel {
           },
           params: { receive_id_type: 'chat_id' },
         });
+        logger.info({ chatId, msgId: resp?.data?.message_id }, '[sendPlainOrCard] 卡片发送成功');
         return resp?.data?.message_id;
       } catch (cardErr) {
         // 卡片发送失败 → 拆分 markdown 元素重试（长内容/复杂表格常触发飞书 400）
@@ -919,6 +923,7 @@ export class FeishuChannel implements Channel {
         },
         params: { receive_id_type: 'chat_id' },
       });
+      logger.info({ chatId, msgId: resp?.data?.message_id }, '[sendPlainOrCard] 纯文本发送成功');
       return resp?.data?.message_id;
     }
   }

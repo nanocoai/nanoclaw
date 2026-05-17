@@ -514,6 +514,10 @@ async function buildLocalEnv(
 
     // Agent SDK 配置 — 与 settings.json 双保险
     CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+
+    // Credential Proxy（cli-proxy-api）— interactive 模式用 OAuth 凭证走订阅配额
+    CREDENTIAL_PROXY_URL: process.env.CREDENTIAL_PROXY_URL,
+    CREDENTIAL_PROXY_API_KEY: process.env.CREDENTIAL_PROXY_API_KEY,
   };
 }
 

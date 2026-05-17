@@ -19,7 +19,7 @@ import {
 import {
   accumulateSseEvent,
   createMessageAccumulator,
-  mapSseEventToProgress,
+  buildToolUseProgress,
   mapAccumulatorToResult,
   type SseEvent,
   type ContainerOutput,
@@ -46,6 +46,8 @@ export interface InteractiveCliConfig {
   upstreamProxy: string;
   /** OneCLI CA 证书 PEM */
   upstreamCaCert?: string;
+  /** Credential Proxy（如 cli-proxy-api），直接 HTTP 转发走 OAuth 凭证 */
+  credentialProxy?: { url: string; apiKey: string };
   /** 响应超时 ms（默认 10 分钟） */
   timeoutMs?: number;
 }
@@ -62,6 +64,7 @@ let tmuxManager: TmuxSessionManager | null = null;
 async function getOrCreateTapProxy(
   upstreamProxy: string,
   upstreamCaCert: string | undefined,
+  credentialProxy: { url: string; apiKey: string } | undefined,
   log: (msg: string) => void,
 ): Promise<TapProxy> {
   if (tapProxy) return tapProxy;
@@ -71,6 +74,7 @@ async function getOrCreateTapProxy(
       const proxy = new TapProxy({
         upstreamProxy,
         upstreamCaCert,
+        credentialProxy,
         log,
       });
       await proxy.start();
@@ -109,6 +113,7 @@ export async function runInteractiveQuery(
   const proxy = await getOrCreateTapProxy(
     config.upstreamProxy,
     config.upstreamCaCert,
+    config.credentialProxy,
     log,
   );
 
@@ -132,14 +137,13 @@ export async function runInteractiveQuery(
   );
   fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig));
 
-  // 构建 CLI 参数
+  // 构建 CLI 参数（交互模式不传 --resume，tmux session 本身就是会话持久化）
   const cliArgs = buildInteractiveCliArgs({
     model: config.model,
     mcpConfigPath,
     dangerouslySkipPermissions: config.dangerouslySkipPermissions ?? true,
     additionalDirectories: config.additionalDirectories,
     systemPromptAppend: config.systemPromptAppend,
-    sessionId: config.sessionId,
   });
 
   // 构建环境变量（指向 Tap Proxy 而非直接 OneCLI）
@@ -161,10 +165,25 @@ export async function runInteractiveQuery(
     HTTP_PROXY: tapProxyUrl,
     http_proxy: tapProxyUrl,
     NODE_EXTRA_CA_CERTS: combinedCaPath,
+    // undici 的 proxy CONNECT 隧道不信任 NODE_EXTRA_CA_CERTS 中的自签 CA
+    NODE_TLS_REJECT_UNAUTHORIZED: '0',
+    // 跳过 onboarding 向导（主题选择等），直接进入输入提示
+    CLAUDE_CODE_SIMPLE: '1',
+    // 禁用遥测：防止 CLI 向 api.anthropic.com/api/event_logging/batch 发送遥测事件
+    // （遥测会包含 terminal:tmux 等异常信号，存在风控隐患）
+    DISABLE_TELEMETRY: '1',
   };
-  // 清除 Agent SDK 标识
+  // 清除 Agent SDK 标识（interactive 模式不走 SDK）
   delete cliEnv.CLAUDE_AGENT_SDK_CLIENT_APP;
   delete cliEnv.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
+  if (config.credentialProxy) {
+    // credential proxy 模式：设置占位 API key 让 CLI 进入 "API key" 认证模式并发起请求，
+    // TapProxy MITM 会拦截并替换为 credential proxy 的真实 key
+    cliEnv.ANTHROPIC_API_KEY = 'sk-ant-placeholder-for-credential-proxy';
+  } else {
+    // 非 credential proxy 模式：删除 API key，CLI 走 OAuth token（Keychain）
+    delete cliEnv.ANTHROPIC_API_KEY;
+  }
 
   // 获取或创建 tmux session
   let tmuxSession;
@@ -182,12 +201,21 @@ export async function runInteractiveQuery(
     throw err;
   }
 
+  // 新创建的 session 需要等 CLI 就绪（跳过 onboarding、等待输入提示）
+  const isNewSession = (Date.now() - tmuxSession.createdAt) < 5000;
+  if (isNewSession) {
+    log('[interactive] waiting for CLI to become ready...');
+    await tmux.waitForReady(tmuxSession.name, 60_000);
+  }
+
   // 注册 SSE 订阅
   return new Promise<{ newSessionId?: string; result?: string }>((resolve) => {
     let acc = createMessageAccumulator();
     let resolved = false;
     let numTurns = 0;
     const startTime = Date.now();
+    // CLI 会先用 haiku 做 context caching（预热缓存），再用目标模型做真正 prompt。
+    // 过滤掉 haiku context caching 流的结果，只 emit 真正 prompt 的结果。
 
     const cleanup = () => {
       proxy.unsubscribe(sessionToken);
@@ -220,16 +248,54 @@ export async function runInteractiveQuery(
       finish();
     }, timeoutMs);
 
+    // 跟踪是否收到过有意义的 SSE 事件（message_start / content_block_*）
+    let hasReceivedSseData = false;
+    // CLI 可能发多个 SSE 流（context caching + 真正 prompt），
+    // 只保留最后一个完整结果（覆盖式），当所有流结束后 flush
+    let pendingOutput: ContainerOutput | null = null;
+    let pendingResult: string | undefined;
+    let pendingFinishTimer: NodeJS.Timeout | null = null;
+    let activeSseStreams = 0;
+    const FINISH_DEBOUNCE_MS = 2000; // 最后一个 message_stop 后等 2s（CLI 重试间隔 ~1s）
+
+    const flushPending = () => {
+      if (resolved || !pendingOutput) return;
+      if (pendingFinishTimer) { clearTimeout(pendingFinishTimer); pendingFinishTimer = null; }
+      writeOutput(pendingOutput);
+      finish(pendingResult);
+      pendingOutput = null;
+      pendingResult = undefined;
+    };
+
+    const schedulePendingFlush = () => {
+      if (pendingFinishTimer) clearTimeout(pendingFinishTimer);
+      pendingFinishTimer = setTimeout(flushPending, FINISH_DEBOUNCE_MS);
+    };
+
     const subscription: TapSubscription = {
       onEvent: (event: SseEvent) => {
-        // 实时发送工具调用进度
-        const progress = mapSseEventToProgress(event);
-        if (progress) {
-          writeOutput(progress);
+        hasReceivedSseData = true;
+
+        // message_start 表示新 SSE 流开始 → 取消待发结果（前一个流的结果被覆盖）
+        if (event.type === 'message_start' && pendingFinishTimer) {
+          clearTimeout(pendingFinishTimer);
+          pendingFinishTimer = null;
+          pendingOutput = null;
+          pendingResult = undefined;
         }
 
-        // 累积事件
+        // 累积事件（先累积再判断，确保 content_block_stop 时 inputJson 已完整）
         acc = accumulateSseEvent(acc, event);
+
+        // content_block_stop → 工具调用参数已完整，发送富进度（含命令/文件详情）
+        if (event.type === 'content_block_stop') {
+          const stopData = event.data as { index: number };
+          const block = acc.blocks.get(stopData.index);
+          if (block && block.type === 'tool_use') {
+            const progress = buildToolUseProgress(block);
+            if (progress) writeOutput(progress);
+          }
+        }
 
         // message_stop 且 stop_reason 是 end_turn → 最终结果
         if (acc.done) {
@@ -240,34 +306,44 @@ export async function runInteractiveQuery(
             return;
           }
 
+          // 过滤 context caching 流：CLI 用 haiku 预热缓存，结果无意义，跳过
+          if (acc.model && acc.model.includes('haiku')) {
+            log(`[interactive] skipping context-caching result (model: ${acc.model})`);
+            acc = { ...acc, done: false, stopReason: '', blocks: new Map() };
+            return;
+          }
+
           numTurns++;
           const durationMs = Date.now() - startTime;
           const output = mapAccumulatorToResult(acc, config.sessionId || sessionToken, numTurns, durationMs);
-          writeOutput(output);
-          finish(output.result || undefined);
+          // 不立刻 emit — 存起来等所有流结束或超时后 flush
+          pendingOutput = output;
+          pendingResult = output.result || undefined;
+          schedulePendingFlush();
         }
       },
       onError: (err: Error) => {
-        log(`[interactive] SSE error: ${err.message}`);
-        writeOutput({
-          status: 'error',
-          result: null,
-          error: `SSE stream error: ${err.message}`,
-        });
-        finish();
+        // SSE 流中断（EPIPE / ECONNRESET / aborted）是常见的瞬态错误。
+        // CLI 自带重试机制（"Retrying in 1s · attempt 1/10"），
+        // 不应在此时放弃 — 让 CLI 重试，用 timeout 兜底。
+        log(`[interactive] SSE error: ${err.message} (hasData: ${hasReceivedSseData}, hasPending: ${!!pendingOutput})`);
+        // 重置 hasReceivedSseData：当前流中断了，等下一个流的数据
+        hasReceivedSseData = false;
       },
       onEnd: () => {
-        // 流结束但没收到 message_stop — 可能是连接断开
-        if (!resolved) {
-          log('[interactive] SSE stream ended without message_stop');
-          if (acc.blocks.size > 0) {
-            // 有部分数据，发送出去
-            const output = mapAccumulatorToResult(acc, config.sessionId || sessionToken, numTurns, Date.now() - startTime);
-            writeOutput(output);
-            finish(output.result || undefined);
-          } else {
-            finish();
-          }
+        // 单个 SSE 流结束 — 不直接 finish
+        // CLI 可能有多个并发 SSE 流，且可能自动重试
+        if (resolved) return;
+        log(`[interactive] SSE stream ended (active: ${activeSseStreams}, hasPending: ${!!pendingOutput})`);
+      },
+      onActiveStreamsChange: (count: number) => {
+        activeSseStreams = count;
+        log(`[interactive] active SSE streams: ${count}`);
+        // 当最后一个流结束（count→0）且有待发结果 → 安排 flush
+        // 不立刻 flush，给 CLI 1s 时间开新的重试流
+        if (count <= 0 && pendingOutput && !resolved) {
+          log('[interactive] all streams closed, scheduling flush');
+          schedulePendingFlush();
         }
       },
     };

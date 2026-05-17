@@ -284,6 +284,44 @@ function archiveCliTranscript(messages: ParsedMessage[], assistantName?: string)
   }
 }
 
+/**
+ * Interactive 模式增量归档 — 每轮查询结束后追加写入，不依赖进程退出
+ * 每天一个文件，按日期命名，追加写入当轮的用户消息和助手回复
+ */
+function appendInteractiveTranscript(
+  userMsg: string,
+  assistantMsg: string | null,
+  assistantName?: string,
+): void {
+  try {
+    const conversationsDir = PATHS.conversations;
+    fs.mkdirSync(conversationsDir, { recursive: true });
+
+    const date = new Date().toISOString().split('T')[0];
+    const filename = `${date}-interactive.md`;
+    const filePath = path.join(conversationsDir, filename);
+
+    const exists = fs.existsSync(filePath);
+    const now = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+    const name = assistantName || '二狗';
+
+    let content = '';
+    if (!exists) {
+      content += `# Interactive 对话记录 — ${date}\n\n`;
+    }
+    content += `---\n\n**[${now}]**\n\n`;
+    content += `**User**: ${userMsg.slice(0, 2000)}\n\n`;
+    if (assistantMsg) {
+      content += `**${name}**: ${assistantMsg.slice(0, 5000)}\n\n`;
+    }
+
+    fs.appendFileSync(filePath, content);
+    log(`[cli-archive] Appended interactive turn to ${filename}`);
+  } catch (err) {
+    log(`[cli-archive] Append failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 function sanitizeFilename(summary: string): string {
   const sanitized = summary
     .toLowerCase()
@@ -1335,11 +1373,16 @@ async function main(): Promise<void> {
       ? (fs.existsSync(sdkEnv.NODE_EXTRA_CA_CERTS) ? fs.readFileSync(sdkEnv.NODE_EXTRA_CA_CERTS, 'utf-8') : undefined)
       : undefined;
 
-    if (!upstreamProxy) {
+    // credential proxy 模式不需要 OneCLI 上游代理（直接 HTTP 转发到 cli-proxy-api）
+    const credentialProxyUrl = sdkEnv.CREDENTIAL_PROXY_URL || process.env.CREDENTIAL_PROXY_URL;
+    const credentialProxyKey = sdkEnv.CREDENTIAL_PROXY_API_KEY || process.env.CREDENTIAL_PROXY_API_KEY;
+    const hasCredentialProxy = !!(credentialProxyUrl && credentialProxyKey);
+
+    if (!upstreamProxy && !hasCredentialProxy) {
       writeOutput({
         status: 'error',
         result: null,
-        error: 'Interactive mode requires HTTPS_PROXY (OneCLI proxy) to be configured',
+        error: 'Interactive mode requires HTTPS_PROXY (OneCLI proxy) or CREDENTIAL_PROXY_URL to be configured',
       });
       return;
     }
@@ -1353,6 +1396,12 @@ async function main(): Promise<void> {
         iTranscript.push({ role: 'user', content: prompt });
 
         const override = containerInput.modelOverride;
+        // credential proxy 变量已在循环外声明
+        const credentialProxy = hasCredentialProxy
+          ? { url: credentialProxyUrl!, apiKey: credentialProxyKey! }
+          : undefined;
+        log(`[interactive] credentialProxy: ${credentialProxy ? credentialProxy.url : 'not configured'} (env: ${credentialProxyUrl || 'N/A'})`);
+
         const result = await runInteractiveQuery(
           {
             prompt,
@@ -1369,6 +1418,7 @@ async function main(): Promise<void> {
             systemPromptAppend: iSystemPromptAppend,
             upstreamProxy,
             upstreamCaCert,
+            credentialProxy,
           },
           writeOutput,
           log,
@@ -1381,6 +1431,9 @@ async function main(): Promise<void> {
         if (result.result) {
           iTranscript.push({ role: 'assistant', content: result.result });
         }
+
+        // 增量归档：每轮查询结束立即写入磁盘，不依赖进程退出
+        appendInteractiveTranscript(prompt, result.result || null, containerInput.assistantName);
 
         // 检查 _close 信号
         if (shouldClose()) {

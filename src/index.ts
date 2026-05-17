@@ -523,6 +523,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         if (text) {
           await channel.setTyping?.(chatJid, false);
           const feishuMsgId = await channel.sendMessage(chatJid, text);
+          logger.info({ group: group.name, feishuMsgId, textLen: text.length }, '[reply] sendMessage 返回');
           if (feishuMsgId) lastFeishuMsgId = feishuMsgId;
           outputSentToUser = true;
           everSentToUser = true;
