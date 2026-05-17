@@ -417,6 +417,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let outputSentToUser = false; // 当前 query 是否发过消息（每轮重置）
   let everSentToUser = false; // 整个 agent 生命周期是否发过消息（不重置，error handler 用）
   let streamingRateLimitDetected = false;
+  // SDK 把 fetch failed / API Error: 5xx 误包成 status:success + result 文本时
+  // 由主 onOutput 拦截并设置此 flag，runAgent 返回后触发 API error 重试 loop
+  let streamingApiErrorDetected = false;
+  let streamingApiErrorText = '';
 
   // R8.1: 收集 Agent 回复文本（用于记忆更新）
   const agentReplies: string[] = [];
@@ -443,11 +447,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const latestUserMessage =
     recallParts.length > 0 ? recallParts.join('\n') : undefined;
 
-  const output = await runAgent(
-    group,
-    prompt,
-    chatJid,
-    async (result) => {
+  // 主 onOutput 回调（提取为命名 const 以便 API error 重试 loop 复用）
+  const mainOnOutput = async (result: ContainerOutput) => {
       // 进度消息 — 转发给 channel 显示进度卡片
       if (result.status === 'progress' && result.result) {
         const payload = result.detail
@@ -529,7 +530,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           return;
         }
         if (text && /^(?:fetch failed|API Error:\s*\d{3}\b)/i.test(text)) {
-          logger.warn({ group: group.name, text: text.slice(0, 200) }, 'SDK 错误消息被拦截，不发给用户');
+          // SDK 把上游 API 瞬时错误（fetch failed / 5xx）包成 status:success + result 文本
+          // 这条文本不能发给用户，且必须触发外层重试（不是简单 silent return）
+          streamingApiErrorDetected = true;
+          streamingApiErrorText = text.slice(0, 200);
+          logger.warn(
+            { group: group.name, text: text.slice(0, 200), chatJid },
+            '[api-error] SDK 把 API 瞬时错误包成 success result，标记重试并 kill 子进程',
+          );
+          // kill 子进程，让 runContainerAgent resolve，由 runAgent 返回后的 API error 重试 loop 接管
+          queue.killGroup(chatJid);
           return;
         }
 
@@ -610,7 +620,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       if (result.status === 'error') {
         hadError = true;
       }
-    },
+  };
+
+  const output = await runAgent(
+    group,
+    prompt,
+    chatJid,
+    mainOnOutput,
     latestUserMessage,
     memorySenderId,
     0, // retryCount
@@ -619,6 +635,92 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
+
+  // SDK 假成功 API 瞬时错误（fetch failed / API Error: 5xx）重试 loop
+  // onOutput 主回调拦截到这类文本后，已 kill 子进程并 set streamingApiErrorDetected
+  // 此处带延迟重试（3s/6s），不轮换账号（API 瞬时错误不是账号问题）
+  const API_ERROR_MAX_RETRIES = 2;
+  let apiErrorAttempt = 0;
+  while (streamingApiErrorDetected && apiErrorAttempt < API_ERROR_MAX_RETRIES) {
+    apiErrorAttempt++;
+    const delayMs = apiErrorAttempt * 3000; // 3s, 6s
+    logger.warn(
+      {
+        group: group.name,
+        attempt: apiErrorAttempt,
+        maxAttempts: API_ERROR_MAX_RETRIES,
+        delayMs,
+        detectedText: streamingApiErrorText,
+      },
+      '[api-error] SDK 假成功（fetch failed/5xx），延迟后重试',
+    );
+    await new Promise((r) => setTimeout(r, delayMs));
+    // 重置 flag 准备重试（重试时若再次拦截会重新 set）
+    streamingApiErrorDetected = false;
+    streamingApiErrorText = '';
+    try {
+      await runAgent(
+        group,
+        prompt,
+        chatJid,
+        mainOnOutput,
+        latestUserMessage,
+        memorySenderId,
+        0, // retryCount 从 0 起，让 runAgent 内 1ef031b 重试链路也可独立工作
+        modelOverride,
+      );
+      logger.info(
+        {
+          group: group.name,
+          attempt: apiErrorAttempt,
+          stillFailed: streamingApiErrorDetected,
+        },
+        '[api-error] 重试 runAgent 返回',
+      );
+    } catch (err) {
+      logger.error(
+        {
+          err,
+          errMessage: (err as Error)?.message,
+          errStack: (err as Error)?.stack,
+          group: group.name,
+          attempt: apiErrorAttempt,
+        },
+        '[api-error] 重试调用 runAgent 抛错',
+      );
+      hadError = true;
+      break;
+    }
+  }
+  if (streamingApiErrorDetected) {
+    // 试完所有重试仍失败，通知用户
+    logger.error(
+      {
+        group: group.name,
+        attempts: apiErrorAttempt,
+        detectedText: streamingApiErrorText,
+        chatJid,
+      },
+      '[api-error] 重试 2 次仍失败，发送错误通知给用户',
+    );
+    await channel
+      .sendMessage(
+        chatJid,
+        '⚠️ 上游 API 暂时不可用（已自动重试 2 次失败），请稍后重发消息',
+      )
+      .catch((err) => {
+        logger.error(
+          { err, errMessage: (err as Error)?.message, group: group.name },
+          '[api-error] 错误通知发送失败',
+        );
+      });
+    hadError = true;
+  } else if (apiErrorAttempt > 0) {
+    logger.info(
+      { group: group.name, attempts: apiErrorAttempt },
+      '[api-error] 重试成功，agent 恢复响应',
+    );
+  }
 
   // Streaming 模式下限流检测：onOutput 回调中发现 "hit your limit" 等文本
   // 轮换账号并重试，runAgent 内部会继续轮换直到试完所有账号
@@ -701,8 +803,24 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               .replace(/<internal>[\s\S]*?<\/internal>/g, '')
               .trim();
             // SDK 系统消息过滤（同主回调）
-            if (text && /^(?:🔄\s*)?New session:\s*[0-9a-f-]+$/i.test(text)) return;
-            if (text && /^(?:fetch failed|API Error:\s*\d{3}\b)/i.test(text)) return;
+            if (text && /^(?:🔄\s*)?New session:\s*[0-9a-f-]+$/i.test(text)) {
+              logger.warn(
+                { group: group.name, text, chatJid },
+                '[rate-limit-retry] SDK 系统消息被拦截（New session），不发给用户',
+              );
+              return;
+            }
+            if (text && /^(?:fetch failed|API Error:\s*\d{3}\b)/i.test(text)) {
+              // 限流重试期间也可能遇到 SDK 假成功 API 错误，同样标记触发外层 API error 重试
+              streamingApiErrorDetected = true;
+              streamingApiErrorText = text.slice(0, 200);
+              logger.warn(
+                { group: group.name, text: text.slice(0, 200), chatJid },
+                '[api-error] 限流重试期间检测到 API 瞬时错误，标记重试并 kill',
+              );
+              queue.killGroup(chatJid);
+              return;
+            }
             if (text) {
               const retryFmid = await channel.sendMessage(chatJid, text);
               if (retryFmid) lastFeishuMsgId = retryFmid;
@@ -994,8 +1112,15 @@ async function runAgent(
       if (isApiTransientError && retryCount < API_ERROR_MAX_RETRIES) {
         const delayMs = (retryCount + 1) * 3000; // 3s, 6s
         logger.warn(
-          { group: group.name, retryCount, delayMs, error: output.error?.slice(0, 200) },
-          '[api-error] 上游 API 瞬时错误，延迟后重试',
+          {
+            group: group.name,
+            chatJid,
+            retryCount,
+            maxRetries: API_ERROR_MAX_RETRIES,
+            delayMs,
+            error: output.error?.slice(0, 200),
+          },
+          '[api-error] 上游 API 瞬时错误（output.error 路径），延迟后重试',
         );
         await new Promise((r) => setTimeout(r, delayMs));
         return runAgent(
@@ -1007,6 +1132,18 @@ async function runAgent(
           memorySenderId,
           retryCount + 1,
           modelOverride,
+        );
+      }
+      if (isApiTransientError && retryCount >= API_ERROR_MAX_RETRIES) {
+        logger.error(
+          {
+            group: group.name,
+            chatJid,
+            retryCount,
+            maxRetries: API_ERROR_MAX_RETRIES,
+            error: output.error?.slice(0, 200),
+          },
+          '[api-error] 上游 API 瞬时错误（output.error 路径）重试上限耗尽，放弃',
         );
       }
 
@@ -1113,7 +1250,19 @@ async function runAgent(
 
     return { status: 'success' };
   } catch (err) {
-    logger.error({ group: group.name, err }, 'Agent error');
+    logger.error(
+      {
+        err,
+        errMessage: (err as Error)?.message,
+        errName: (err as Error)?.name,
+        errStack: (err as Error)?.stack,
+        group: group.name,
+        chatJid,
+        retryCount,
+        sessionId,
+      },
+      '[runAgent] runContainerAgent 抛错',
+    );
     return { status: 'error' };
   }
 }
