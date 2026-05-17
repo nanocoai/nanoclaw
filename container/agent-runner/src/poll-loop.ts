@@ -549,30 +549,35 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
  * that appear inside ``` fenced blocks or single-line `inline` code spans.
  * Returns the index of the `<` of `</message>`, or -1 if none found.
  *
+ * Jumps via `indexOf` between candidate close-tags and backticks so the cost
+ * is dominated by the (sparse) backtick spans rather than walking each char.
+ *
  * Exported for unit testing.
  */
 export function findClosingMessageTag(text: string, start: number): number {
   const CLOSE = '</message>';
   let i = start;
   while (i < text.length) {
-    // Triple-backtick fence — skip to matching ```
-    if (text.startsWith('```', i)) {
-      const end = text.indexOf('```', i + 3);
+    const close = text.indexOf(CLOSE, i);
+    if (close === -1) return -1;
+    const tick = text.indexOf('`', i);
+    if (tick === -1 || close < tick) return close;
+    // Tick comes first — figure out if it's a triple-backtick fence or an
+    // inline single-tick span, then skip past the matching close marker.
+    if (text.startsWith('```', tick)) {
+      const end = text.indexOf('```', tick + 3);
       if (end === -1) return -1; // unterminated fence — give up
       i = end + 3;
       continue;
     }
-    // Inline backtick — skip to matching ` on the same line
-    if (text[i] === '`') {
-      const nl = text.indexOf('\n', i + 1);
-      const end = text.indexOf('`', i + 1);
-      if (end !== -1 && (nl === -1 || end < nl)) {
-        i = end + 1;
-        continue;
-      }
+    const nl = text.indexOf('\n', tick + 1);
+    const inlineEnd = text.indexOf('`', tick + 1);
+    if (inlineEnd !== -1 && (nl === -1 || inlineEnd < nl)) {
+      i = inlineEnd + 1;
+    } else {
+      // Lone backtick with no closer on the same line — treat as plain text
+      i = tick + 1;
     }
-    if (text.startsWith(CLOSE, i)) return i;
-    i++;
   }
   return -1;
 }
