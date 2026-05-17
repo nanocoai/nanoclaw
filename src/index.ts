@@ -520,6 +520,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           return;
         }
 
+        // SDK 系统消息过滤：拦截不应发给用户的内部信息
+        // - "New session: UUID" — session 被强制重置时 SDK 输出
+        // - "fetch failed" / "API Error: 5xx" — API 调用失败被包装成 success
+        // - 纯 UUID 行 — session ID 泄露
+        if (text && /^(?:🔄\s*)?New session:\s*[0-9a-f-]+$/i.test(text)) {
+          logger.warn({ group: group.name, text }, 'SDK 系统消息被拦截（New session），不发给用户');
+          return;
+        }
+        if (text && /^(?:fetch failed|API Error:\s*\d{3}\b)/i.test(text)) {
+          logger.warn({ group: group.name, text: text.slice(0, 200) }, 'SDK 错误消息被拦截，不发给用户');
+          return;
+        }
+
         if (text) {
           await channel.setTyping?.(chatJid, false);
           const feishuMsgId = await channel.sendMessage(chatJid, text);
@@ -687,6 +700,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             const text = raw
               .replace(/<internal>[\s\S]*?<\/internal>/g, '')
               .trim();
+            // SDK 系统消息过滤（同主回调）
+            if (text && /^(?:🔄\s*)?New session:\s*[0-9a-f-]+$/i.test(text)) return;
+            if (text && /^(?:fetch failed|API Error:\s*\d{3}\b)/i.test(text)) return;
             if (text) {
               const retryFmid = await channel.sendMessage(chatJid, text);
               if (retryFmid) lastFeishuMsgId = retryFmid;
