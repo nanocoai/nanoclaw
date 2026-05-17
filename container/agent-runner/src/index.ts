@@ -745,7 +745,7 @@ async function runQuery(
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
-      settingSources: ['project', 'user'],
+      settingSources: ['project'],  // 不读 ~/.claude.json，防止全局 MCP 污染
       mcpServers: {
         nanoclaw: {
           command: 'node',
