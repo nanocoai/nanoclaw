@@ -548,8 +548,10 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
  * Find the next `</message>` close tag starting from `start`, ignoring any
  * that appear inside ``` fenced blocks or single-line `inline` code spans.
  * Returns the index of the `<` of `</message>`, or -1 if none found.
+ *
+ * Exported for unit testing.
  */
-function findClosingMessageTag(text: string, start: number): number {
+export function findClosingMessageTag(text: string, start: number): number {
   const CLOSE = '</message>';
   let i = start;
   while (i < text.length) {
