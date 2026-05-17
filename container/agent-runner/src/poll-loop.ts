@@ -492,20 +492,31 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * blocks, even with a single destination. Bare text is scratchpad only.
  */
 function dispatchResultText(text: string, routing: RoutingContext): { sent: number; hasUnwrapped: boolean } {
-  const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
+  const OPEN_RE = /<message\s+to="([^"]+)"\s*>/g;
 
   let match: RegExpExecArray | null;
   let sent = 0;
   let lastIndex = 0;
   const scratchpadParts: string[] = [];
 
-  while ((match = MESSAGE_RE.exec(text)) !== null) {
+  while ((match = OPEN_RE.exec(text)) !== null) {
     if (match.index > lastIndex) {
       scratchpadParts.push(text.slice(lastIndex, match.index));
     }
     const toName = match[1];
-    const body = match[2].trim();
-    lastIndex = MESSAGE_RE.lastIndex;
+    const bodyStart = OPEN_RE.lastIndex;
+    // Find the matching </message>, ignoring any inside ``` fences or `inline`
+    // code spans so example tags in proposals/code don't truncate the body.
+    const closeIdx = findClosingMessageTag(text, bodyStart);
+    if (closeIdx === -1) {
+      // Unclosed — treat remainder as scratchpad and stop scanning
+      scratchpadParts.push(text.slice(match.index));
+      lastIndex = text.length;
+      break;
+    }
+    const body = text.slice(bodyStart, closeIdx).trim();
+    lastIndex = closeIdx + '</message>'.length;
+    OPEN_RE.lastIndex = lastIndex;
 
     const dest = findByName(toName);
     if (!dest) {
@@ -531,6 +542,37 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
   }
   return { sent, hasUnwrapped };
+}
+
+/**
+ * Find the next `</message>` close tag starting from `start`, ignoring any
+ * that appear inside ``` fenced blocks or single-line `inline` code spans.
+ * Returns the index of the `<` of `</message>`, or -1 if none found.
+ */
+function findClosingMessageTag(text: string, start: number): number {
+  const CLOSE = '</message>';
+  let i = start;
+  while (i < text.length) {
+    // Triple-backtick fence — skip to matching ```
+    if (text.startsWith('```', i)) {
+      const end = text.indexOf('```', i + 3);
+      if (end === -1) return -1; // unterminated fence — give up
+      i = end + 3;
+      continue;
+    }
+    // Inline backtick — skip to matching ` on the same line
+    if (text[i] === '`') {
+      const nl = text.indexOf('\n', i + 1);
+      const end = text.indexOf('`', i + 1);
+      if (end !== -1 && (nl === -1 || end < nl)) {
+        i = end + 1;
+        continue;
+      }
+    }
+    if (text.startsWith(CLOSE, i)) return i;
+    i++;
+  }
+  return -1;
 }
 
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
