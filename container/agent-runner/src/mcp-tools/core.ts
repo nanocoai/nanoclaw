@@ -11,7 +11,7 @@ import path from 'path';
 
 import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
-import { getCurrentInReplyTo } from '../db/session-state.js';
+import { getCurrentInReplyTo, recordTurnSentPayload } from '../db/session-state.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -103,6 +103,7 @@ export const sendMessage: McpToolDefinition = {
       content: JSON.stringify({ text }),
     });
 
+    recordTurnSentPayload(text);
     log(`send_message: #${seq} → ${routing.resolvedName}`);
     return ok(`Message sent to ${routing.resolvedName} (id: ${seq})`);
   },
@@ -152,6 +153,10 @@ export const sendFile: McpToolDefinition = {
       content: JSON.stringify({ text: (args.text as string) || '', files: [filename] }),
     });
 
+    // send_file's text is optional and often just a caption; record only when present.
+    // The duplicate we're trying to suppress is the text-blob mirror, not the file itself.
+    const fileText = (args.text as string) || '';
+    if (fileText) recordTurnSentPayload(fileText);
     log(`send_file: ${id} → ${routing.resolvedName} (${filename})`);
     return ok(`File sent to ${routing.resolvedName} (id: ${id}, filename: ${filename})`);
   },

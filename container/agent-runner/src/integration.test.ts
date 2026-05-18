@@ -3,10 +3,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
-import { getContinuation, setContinuation } from './db/session-state.js';
+import { getContinuation, setContinuation, clearTurnSentPayloads } from './db/session-state.js';
 import { MockProvider } from './providers/mock.js';
 import type { ProviderExchange } from './providers/types.js';
-import { runPollLoop } from './poll-loop.js';
+import { runPollLoop, isVerbatimDuplicate } from './poll-loop.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -586,6 +586,131 @@ describe('poll loop — slash command during active query', () => {
     30000,
   );
 });
+
+describe('isVerbatimDuplicate — duplicate-suppression predicate', () => {
+  // The pure predicate that decides whether a parsed <message> block body
+  // is a verbatim match for something send_message / send_file already
+  // shipped this turn. dispatchResultText calls this per block to filter
+  // duplicates. Pure function — no DB, no MockProvider needed.
+
+  it('matches identical strings', () => {
+    expect(isVerbatimDuplicate('hello', ['hello'])).toBe(true);
+  });
+
+  it('does not match distinct strings (false-positive guard for taslim case)', () => {
+    // send_message("looking up your calendar") + result "Tomorrow 2pm free"
+    // must NOT match — this is the bug the boolean version had.
+    expect(isVerbatimDuplicate('Tomorrow 2pm free', ['looking up your calendar'])).toBe(false);
+  });
+
+  it('returns false when no payloads have been recorded', () => {
+    expect(isVerbatimDuplicate('anything', [])).toBe(false);
+  });
+
+  it('matches against any payload in the list (multi-send turn)', () => {
+    // Agent may call send_message twice in a single turn — the result block
+    // can duplicate either one.
+    expect(isVerbatimDuplicate('second', ['first', 'second'])).toBe(true);
+    expect(isVerbatimDuplicate('third', ['first', 'second'])).toBe(false);
+  });
+
+  it('normalizes whitespace: collapses runs of whitespace to a single space', () => {
+    // Sent "hello world" (one space); result emits "hello\nworld" or
+    // "hello  world" (multiple spaces or newline) — should still match.
+    expect(isVerbatimDuplicate('hello\nworld', ['hello world'])).toBe(true);
+    expect(isVerbatimDuplicate('hello  world', ['hello world'])).toBe(true);
+    expect(isVerbatimDuplicate('hello\tworld', ['hello world'])).toBe(true);
+  });
+
+  it('normalizes whitespace symmetrically (sent side also normalized)', () => {
+    // If the sent payload itself has weird whitespace, the body should
+    // still match the canonical-spaced form.
+    expect(isVerbatimDuplicate('hello world', ['hello\nworld'])).toBe(true);
+  });
+
+  it('trims leading/trailing whitespace', () => {
+    expect(isVerbatimDuplicate('  hello  ', ['hello'])).toBe(true);
+    expect(isVerbatimDuplicate('hello', ['  hello  '])).toBe(true);
+  });
+
+  it('does not collapse content semantics — distinct words still distinct', () => {
+    // Sanity: normalization is whitespace-only, not content-fuzzy.
+    expect(isVerbatimDuplicate('hello world!', ['hello world'])).toBe(false);
+    expect(isVerbatimDuplicate('hello there', ['hello'])).toBe(false);
+  });
+
+  it('is case-sensitive', () => {
+    // Tool-shipped text and result text come from the same model in the same
+    // turn, so casing should be consistent. If they differ, that's a signal
+    // it's not a true duplicate.
+    expect(isVerbatimDuplicate('Hello', ['hello'])).toBe(false);
+  });
+
+  it('handles multiline content', () => {
+    // The SDK can wrap multi-paragraph text. Normalization collapses
+    // intra-block whitespace including newlines.
+    const sent = 'line one\nline two\nline three';
+    const body = 'line one line two line three';
+    expect(isVerbatimDuplicate(body, [sent])).toBe(true);
+  });
+
+  it('handles empty body and empty payload', () => {
+    expect(isVerbatimDuplicate('', [''])).toBe(true);
+    expect(isVerbatimDuplicate('', ['x'])).toBe(false);
+    expect(isVerbatimDuplicate('x', [''])).toBe(false);
+  });
+});
+
+describe('poll loop — suppress duplicate send (end-to-end wiring)', () => {
+  // The unit tests above cover the duplicate predicate; these two cover the
+  // wiring through runPollLoop → dispatchResultText, focused on cases where
+  // the runPollLoop-start clearTurnSentPayloads() doesn't interfere because
+  // there are no payloads to begin with.
+
+  it('delivers a result block normally when no payloads were recorded this turn', async () => {
+    clearTurnSentPayloads();
+
+    insertMessage('m-empty-1', { sender: 'Alice', text: 'go' });
+    const provider = new MockProvider({}, () => '<message to="discord-test">untouched</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('untouched');
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('does not regress add_reaction-style turns (reaction + summary is valid)', async () => {
+    // add_reaction does NOT call recordTurnSentPayload, so a turn that uses
+    // only add_reaction + a closing summary should deliver the summary as
+    // normal. Guards against a future refactor accidentally treating
+    // reactions as if they were sends.
+    clearTurnSentPayloads();
+
+    insertMessage('m-react-1', { sender: 'Alice', text: 'looks good?' });
+    const provider = new MockProvider(
+      {},
+      () => '<message to="discord-test">Yes, this looks correct.</message>',
+    );
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('Yes, this looks correct.');
+
+    await loopPromise.catch(() => {});
+  });
+});
+
 
 /**
  * Provider whose query never completes until ended/aborted — for testing how

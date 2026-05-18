@@ -121,3 +121,43 @@ export function getCurrentInReplyTo(): string | null {
   if (!Number.isFinite(age) || age > IN_REPLY_TO_MAX_AGE_MS) return null;
   return row.value;
 }
+
+// turn_sent_payloads: the text payloads send_message / send_file delivered
+// this turn. Used by dispatchResultText to suppress a parsed <message> block
+// body that's a verbatim duplicate of something the agent already shipped via
+// a tool — without dropping distinct content the agent emits as part of the
+// same final result (e.g. send_message("looking it up"), then a result with
+// the actual answer).
+//
+// MUST be in SQLite. The nanoclaw MCP server (which owns send_message and
+// send_file) runs in a separate process from the poll-loop: index.ts spawns
+// it via `bun run mcp-tools/index.ts` and connects over stdio. SQLite is
+// the only IPC channel between the two processes. A module-level variable
+// here is invisible across the process boundary — appended in the MCP server
+// process, the poll-loop reads an empty list, and the suppression is dead
+// code.
+//
+// SIGKILL-mid-turn (where the row would otherwise stick at the prior turn's
+// payloads into the next container's first turn) is handled by clearing the
+// list at the top of runPollLoop() alongside clearStaleProcessingAcks — see
+// poll-loop.ts.
+const TURN_SENT_PAYLOADS_KEY = 'turn_sent_payloads';
+
+export function recordTurnSentPayload(text: string): void {
+  const current = getTurnSentPayloads();
+  current.push(text);
+  setValue(TURN_SENT_PAYLOADS_KEY, JSON.stringify(current));
+}
+export function getTurnSentPayloads(): string[] {
+  const raw = getValue(TURN_SENT_PAYLOADS_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+export function clearTurnSentPayloads(): void {
+  deleteValue(TURN_SENT_PAYLOADS_KEY);
+}
