@@ -16,6 +16,15 @@
  * - forbidden: provider/model not allowed for this agent group. 403.
  * - fallback: no override — use the existing provider config fn / env
  *   path. Trunk's default resolver always returns this.
+ *
+ * Field-name convention: `gateway_secret` and `native_auth_bundle` use
+ * `providerId` because the value is a registry key (looked up against
+ * `GATEWAY_ENV_MAP` and the provider-routes registry). `connect_required`
+ * and `forbidden` use `provider` because the value is surfaced verbatim
+ * in error envelopes (`{ type: 'forbidden', provider: '...' }`) — it is
+ * a message-facing label, not a registry lookup. Resolver authors can
+ * use the same string for both when their concept of "provider" is
+ * unified; the two names exist to keep the two roles legible.
  */
 export type CredentialDecision =
   | {
@@ -23,6 +32,15 @@ export type CredentialDecision =
       providerId: string;
       secretRef?: string;
       baseUrl?: string;
+      /**
+       * Value the container sees in env (`OPENAI_API_KEY=…`,
+       * `ANTHROPIC_AUTH_TOKEN=…`). The gateway rewrites the real
+       * Authorization header on the wire. If omitted, `applyCredentialDecisions`
+       * substitutes the literal string `'placeholder'` — fine for SDKs
+       * that just need a non-empty token to send. Set it explicitly when
+       * a specific sentinel is meaningful (e.g. OAuth exchange flows that
+       * key on a known placeholder).
+       */
       placeholderToken?: string;
       injection?: {
         header: 'authorization' | 'x-api-key' | string;
