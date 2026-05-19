@@ -38,6 +38,9 @@ import {
   type ProviderContainerContribution,
   type VolumeMount,
 } from './providers/provider-container-registry.js';
+import { applyCredentialDecisions, resolveCredential, type CredentialDecision } from './credentials/index.js';
+import type { CredentialRefusal } from './credentials/apply.js';
+import { getClaudeContribution } from './providers/claude.js';
 import {
   heartbeatPath,
   markContainerRunning,
@@ -129,7 +132,15 @@ async function spawnContainer(session: Session): Promise<void> {
   // Resolve the effective provider + any host-side contribution it declares
   // (extra mounts, env passthrough). Computed once and threaded through both
   // buildMounts and buildContainerArgs so side effects (mkdir, etc.) fire once.
-  const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
+  const { provider, contribution, refusal } = await resolveProviderContribution(session, agentGroup, containerConfig);
+  if (refusal) {
+    log.warn('Refusing to spawn — credential resolver returned refusal', {
+      sessionId: session.id,
+      provider,
+      refusal,
+    });
+    return;
+  }
 
   const mounts = buildMounts(agentGroup, session, containerConfig, contribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
@@ -222,21 +233,103 @@ export function resolveProviderName(
   return (sessionProvider || containerConfigProvider || 'claude').toLowerCase();
 }
 
-function resolveProviderContribution(
+export interface BuildContributionInput {
+  provider: string;
+  modelProvider?: string;
+  modelId?: string;
+  authMode?: 'auto' | 'api_key' | 'subscription' | 'oauth' | 'native';
+  sessionDir: string;
+  agentGroupId: string;
+  hostEnv: NodeJS.ProcessEnv;
+}
+
+export interface BuildContributionResult {
+  contribution: ProviderContainerContribution;
+  refusal: CredentialRefusal | null;
+}
+
+/**
+ * Build the merged provider contribution for a container spawn.
+ *
+ * Order:
+ *   1. Call the credential resolver hook. Default returns `fallback`.
+ *   2. If hook returned a refusal (`forbidden` / `connect_required`),
+ *      short-circuit. Caller must refuse to spawn.
+ *   3. Otherwise apply the decision via applyCredentialDecisions. Empty
+ *      contribution if `fallback`.
+ *   4. Merge with the provider-specific contribution:
+ *        - claude  -> getClaudeContribution (async; runs the resolver
+ *          again internally, which is cheap and lets the .env fallback
+ *          path fire when no hook is installed)
+ *        - others  -> registered ProviderContainerConfigFn (existing
+ *          path, preserves opencode/codex/etc.)
+ *
+ * Pure: no DB reads, no process.env reads. Caller passes everything in.
+ */
+export async function buildContributionForSpawn(
+  input: BuildContributionInput,
+): Promise<BuildContributionResult> {
+  const decision: CredentialDecision = await resolveCredential({
+    agentGroupId: input.agentGroupId,
+    runtimeProvider: input.provider,
+    modelProvider: input.modelProvider,
+    modelId: input.modelId,
+    authMode: input.authMode,
+  });
+
+  const applied = applyCredentialDecisions([decision], input.sessionDir, input.hostEnv);
+  if (applied.refusal) {
+    return { contribution: { mounts: [], env: {} }, refusal: applied.refusal };
+  }
+
+  let providerContribution: ProviderContainerContribution = {};
+  if (input.provider === 'claude') {
+    providerContribution = await getClaudeContribution({
+      sessionDir: input.sessionDir,
+      agentGroupId: input.agentGroupId,
+      hostEnv: input.hostEnv,
+    });
+  } else {
+    const fn = getProviderContainerConfig(input.provider);
+    if (fn) {
+      providerContribution = fn({
+        sessionDir: input.sessionDir,
+        agentGroupId: input.agentGroupId,
+        hostEnv: input.hostEnv,
+      });
+    }
+  }
+
+  return {
+    contribution: mergeContributions(applied.contribution, providerContribution),
+    refusal: null,
+  };
+}
+
+function mergeContributions(
+  a: ProviderContainerContribution,
+  b: ProviderContainerContribution,
+): ProviderContainerContribution {
+  return {
+    mounts: [...(a.mounts ?? []), ...(b.mounts ?? [])],
+    env: { ...(a.env ?? {}), ...(b.env ?? {}) },
+  };
+}
+
+async function resolveProviderContribution(
   session: Session,
   agentGroup: AgentGroup,
   containerConfig: import('./container-config.js').ContainerConfig,
-): { provider: string; contribution: ProviderContainerContribution } {
+): Promise<{ provider: string; contribution: ProviderContainerContribution; refusal: CredentialRefusal | null }> {
   const provider = resolveProviderName(session.agent_provider, containerConfig.provider);
-  const fn = getProviderContainerConfig(provider);
-  const contribution = fn
-    ? fn({
-        sessionDir: sessionDir(agentGroup.id, session.id),
-        agentGroupId: agentGroup.id,
-        hostEnv: process.env,
-      })
-    : {};
-  return { provider, contribution };
+  const built = await buildContributionForSpawn({
+    provider,
+    modelId: containerConfig.model,
+    sessionDir: sessionDir(agentGroup.id, session.id),
+    agentGroupId: agentGroup.id,
+    hostEnv: process.env,
+  });
+  return { provider, contribution: built.contribution, refusal: built.refusal };
 }
 
 function buildMounts(
