@@ -81,7 +81,19 @@ export function applyCredentialDecisions(
         if (result.ok) {
           mounts.push(result.mount);
         }
+        // Soft-fail: a missing bundle (missing host file, unsupported scheme,
+        // copy error) skips the mount but never aborts the session. The
+        // vendor runtime inside the container will surface the missing-auth
+        // error in its own terms; aborting here would mask it behind a
+        // generic "credential resolver failed."
         break;
+      }
+      default: {
+        // Compile-time exhaustiveness check. If a new CredentialDecision
+        // kind is added to types.ts, TypeScript will fail this assignment
+        // and force a corresponding case here. Runtime no-op.
+        const _exhaustive: never = decision;
+        void _exhaustive;
       }
     }
   }
