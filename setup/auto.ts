@@ -39,7 +39,9 @@ import { runTelegramChannel } from './channels/telegram.js';
 import { runWhatsAppChannel } from './channels/whatsapp.js';
 import { pingCliAgent, type PingResult } from './lib/agent-ping.js';
 import { brightSelect } from './lib/bright-select.js';
-import { offerClaudeOnFailure } from './lib/claude-handoff.js';
+import { offerAiCodingCliOnFailure } from './lib/cli-handoff.js';
+import { listAiCodingClis } from './lib/ai-coding-cli/index.js';
+import type { AiCodingCli } from './lib/ai-coding-cli/types.js';
 import {
   applyToEnv,
   parseFlags,
@@ -51,7 +53,7 @@ import { runWindowedStep } from './lib/windowed-runner.js';
 import { detectRegisteredGroups, detectExistingDisplayName } from './environment.js';
 import { pollHealth } from './onecli.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
-import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-claude.js';
+import { resolveTimezoneViaCli, aiCodingCliAvailable } from './lib/tz-from-cli.js';
 import * as setupLog from './logs.js';
 import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
 import { emit as phEmit } from './lib/diagnostics.js';
@@ -74,7 +76,15 @@ async function main(): Promise<void> {
   // Parse CLI flags first — `--help` short-circuits before we render anything,
   // and flag values get folded into process.env so existing step code reading
   // NANOCLAW_* sees them unchanged.
-  const flagResult = parseFlags(process.argv.slice(2));
+  //
+  // `--reconfigure-cli` is a meta-mode that re-prompts for the setup-helper
+  // CLI (Claude Code or OpenAI Codex) and exits without running setup.
+  // We strip it before passing argv to parseFlags since it isn't in the
+  // config registry.
+  const rawArgv = process.argv.slice(2);
+  const reconfigureCli = rawArgv.includes('--reconfigure-cli');
+  const filteredArgv = rawArgv.filter((a) => a !== '--reconfigure-cli');
+  const flagResult = parseFlags(filteredArgv);
   if (flagResult.help) {
     printHelp();
     process.exit(0);
@@ -87,6 +97,13 @@ async function main(): Promise<void> {
   }
   let configValues = { ...readFromEnv(), ...flagResult.values };
   applyToEnv(configValues);
+
+  if (reconfigureCli) {
+    p.intro('Reconfigure setup-helper CLI');
+    await pickAiCodingCli({ force: true });
+    p.outro(brandBody('Done — your next setup run (or step failure) will use the chosen CLI.'));
+    process.exit(0);
+  }
 
   printIntro();
   initProgressionLog();
@@ -113,6 +130,12 @@ async function main(): Promise<void> {
     configValues = await runAdvancedScreen(configValues);
     applyToEnv(configValues);
   }
+
+  // Pick the AI-coding CLI helper (Claude Code or OpenAI Codex) before any
+  // step that might call into cli-handoff/cli-assist on failure. Once
+  // chosen the value is persisted to .env (NANOCLAW_AI_CODING_CLI=…) so
+  // subsequent runs skip the prompt.
+  await pickAiCodingCli();
 
   const skip = new Set(
     (process.env.NANOCLAW_SKIP ?? '')
@@ -416,7 +439,7 @@ async function main(): Promise<void> {
       } else {
         phEmit('first_chat_failed', { reason: ping });
         renderPingFailureNote(ping);
-        await offerClaudeOnFailure({
+        await offerAiCodingCliOnFailure({
           stepName: 'cli-agent',
           msg:
             ping === 'socket_error'
@@ -518,7 +541,7 @@ async function main(): Promise<void> {
         note(notes.join('\n'), "What's left");
       }
       // "What's left" is a soft failure — we don't abort like fail(), but the
-      // user is still stuck and a fix is exactly what claude-assist is for.
+      // user is still stuck and a fix is exactly what cli-assist is for.
       const summary = notes
         .map((n) => n.replace(/^•\s*/, '').split('\n')[0].trim())
         .filter(Boolean)
@@ -528,7 +551,7 @@ async function main(): Promise<void> {
         service_running: res.terminal?.fields.SERVICE === 'running',
         has_credentials: res.terminal?.fields.CREDENTIALS === 'configured',
       });
-      await offerClaudeOnFailure({
+      await offerAiCodingCliOnFailure({
         stepName: 'verify',
         msg: summary || 'Verification completed with unresolved issues.',
         hint: `Terminal block: ${JSON.stringify(res.terminal?.fields ?? {})}`,
@@ -930,6 +953,122 @@ async function runCustomEndpointAuth(
   appendProviderImport('./claude.js');
 }
 
+/**
+ * Pick the setup-helper CLI (Claude Code or OpenAI Codex) and persist
+ * the choice to `.env` as `NANOCLAW_AI_CODING_CLI=<name>`. Three paths:
+ *
+ *   1. Already-configured: `NANOCLAW_AI_CODING_CLI` is set, the named
+ *      adapter exists, and the binary is installed → skip the prompt.
+ *      If the configured CLI is missing (env var stale, or the user
+ *      uninstalled it), fall through and re-pick with a warning.
+ *   2. Auto-pick: exactly one CLI installed → silently persist that
+ *      choice and continue.
+ *   3. Picker: zero or two-or-more installed. With ≥2 we ask which
+ *      one. With 0 we offer to install Claude Code via its install
+ *      script (Codex has no scriptable installer in this fork) and
+ *      bail if declined.
+ *
+ * `opts.force` skips path 1 (always re-prompt or auto-pick from current
+ * install state). Used by the `--reconfigure-cli` mode.
+ */
+async function pickAiCodingCli(opts: { force?: boolean } = {}): Promise<void> {
+  const installed = listAiCodingClis().filter((c) => c.isInstalled());
+  const configured = (process.env.NANOCLAW_AI_CODING_CLI ?? '').toLowerCase().trim();
+
+  // Path 1: already-configured + still installed (skipped under --force).
+  if (configured && !opts.force) {
+    const match = installed.find((c) => c.name === configured);
+    if (match) {
+      setupLog.userInput('setup_cli', `${match.name} (preconfigured)`);
+      return;
+    }
+    p.log.warn(
+      brandBody(
+        `NANOCLAW_AI_CODING_CLI is set to "${configured}" but that CLI isn't installed. Re-picking.`,
+      ),
+    );
+  }
+
+  // Path 3a: nothing installed — offer Claude Code's install script.
+  if (installed.length === 0) {
+    const claude = listAiCodingClis().find((c) => c.installScript);
+    if (!claude) {
+      p.log.warn(
+        brandBody(
+          'No setup-helper CLI is installed and none of the registered adapters has a scriptable installer. ' +
+            'Install Claude Code or OpenAI Codex manually, then re-run setup.',
+        ),
+      );
+      return;
+    }
+    const install = ensureAnswer(
+      await p.confirm({
+        message: `No setup-helper CLI found. Install ${claude.displayName} now?`,
+        initialValue: true,
+      }),
+    );
+    if (!install) {
+      p.log.warn(
+        brandBody(
+          `Continuing without a setup-helper. If a step fails I won't be able to hand you off — install ${claude.displayName} or OpenAI Codex and re-run setup to enable that.`,
+        ),
+      );
+      return;
+    }
+    if (!claude.installScript) return;
+    const code = spawnSync('bash', [claude.installScript], {
+      cwd: process.cwd(),
+      stdio: 'inherit',
+    }).status;
+    if (code !== 0 || !claude.isInstalled()) {
+      p.log.error(`Couldn't install ${claude.displayName}.`);
+      return;
+    }
+    p.log.success(`${claude.displayName} installed.`);
+    persistAiCodingCli(claude);
+    return;
+  }
+
+  // Path 2: exactly one installed — auto-pick silently. Under --force
+  // we surface a one-line confirmation since the user explicitly asked
+  // to reconfigure and would otherwise see nothing happen.
+  if (installed.length === 1) {
+    persistAiCodingCli(installed[0]);
+    setupLog.userInput('setup_cli', `${installed[0].name} (auto-picked)`);
+    if (opts.force) {
+      p.log.success(
+        brandBody(`Only ${installed[0].displayName} is installed — keeping it as the setup-helper CLI.`),
+      );
+    }
+    return;
+  }
+
+  // Path 3b: ≥2 installed — ask which one. Default to the currently-
+  // configured CLI if it's still installed (so under --force the user
+  // can hit Enter to keep their existing pick).
+  const initial = installed.find((c) => c.name === configured)?.name ?? installed[0].name;
+  const pick = ensureAnswer(
+    await brightSelect<string>({
+      message: 'Which coding-assistant CLI should setup use for diagnostics?',
+      options: installed.map((c) => ({
+        value: c.name,
+        label: c.displayName,
+        hint: c.binary,
+      })),
+      initialValue: initial,
+    }),
+  ) as string;
+  const chosen = installed.find((c) => c.name === pick);
+  if (!chosen) return;
+  persistAiCodingCli(chosen);
+  setupLog.userInput('setup_cli', `${chosen.name} (picked)`);
+}
+
+function persistAiCodingCli(cli: AiCodingCli): void {
+  process.env.NANOCLAW_AI_CODING_CLI = cli.name;
+  writeEnvLine('NANOCLAW_AI_CODING_CLI', cli.name);
+}
+
 function writeEnvLine(key: string, value: string): void {
   const envFile = path.join(process.cwd(), '.env');
   const content = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf-8') : '';
@@ -1029,13 +1168,13 @@ async function runTimezoneStep(): Promise<void> {
 
   let tz: string | null = isValidTimezone(raw) ? raw : null;
   if (!tz) {
-    if (claudeCliAvailable()) {
-      tz = await resolveTimezoneViaClaude(raw);
+    if (aiCodingCliAvailable()) {
+      tz = await resolveTimezoneViaCli(raw);
     } else {
       p.log.warn(
         brandBody(
           wrapForGutter(
-            "That's not a standard IANA zone and I can't call Claude to interpret it here — try again with a zone like `America/New_York` or `Europe/London`.",
+            "That's not a standard IANA zone and I don't have a setup-helper CLI installed to interpret it here — try again with a zone like `America/New_York` or `Europe/London`.",
             4,
           ),
         ),

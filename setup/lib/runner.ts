@@ -18,7 +18,7 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import * as setupLog from '../logs.js';
-import { offerClaudeOnFailure } from './claude-handoff.js';
+import { offerAiCodingCliOnFailure } from './cli-handoff.js';
 import { emit as phEmit } from './diagnostics.js';
 import { brandBody, fitToWidth, fmtDuration } from './theme.js';
 
@@ -350,7 +350,7 @@ export function dumpTranscriptOnFailure(transcript: string): void {
  * progression log. Takes the step name explicitly so callers are clear
  * about which step they're failing from — no hidden module state.
  *
- * Before aborting we offer Claude-assisted debugging. Callers must
+ * Before aborting we offer AI-coding CLI-assisted debugging. Callers must
  * `await fail(...)` so the offer can actually run before we call
  * process.exit. The return type is `Promise<never>`; control-flow
  * narrowing still works after `await`.
@@ -367,9 +367,9 @@ export async function fail(
   if (hint) p.log.message(k.dim(hint));
   p.log.message(k.dim('Logs: logs/setup.log · Raw: logs/setup-steps/'));
 
-  const ranFix = await offerClaudeOnFailure({ stepName, msg, hint, rawLogPath });
+  const ranFix = await offerAiCodingCliOnFailure({ stepName, msg, hint, rawLogPath });
 
-  // If the user just ran a Claude-suggested fix, offer to resume the flow
+  // If the user just ran a CLI-suggested fix, offer to resume the flow
   // at the step that failed instead of aborting. We re-exec via spawnSync
   // and pass NANOCLAW_SKIP with every step that already completed so the
   // child skips them and picks up where we left off.

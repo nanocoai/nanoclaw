@@ -1,43 +1,41 @@
 /**
- * Headless Claude fallback for timezone resolution.
+ * Headless AI-coding CLI fallback for timezone resolution.
  *
  * When the user answers the UTC-confirmation prompt with something that
  * isn't a valid IANA zone ("NYC", "Jerusalem time", "eastern"), spawn
- * `claude -p` with a narrow prompt asking for a single IANA string and
- * validate the reply with `isValidTimezone` before returning it.
+ * the configured setup-helper CLI (Claude Code, OpenAI Codex, …) in
+ * headless mode with a narrow prompt asking for a single IANA string,
+ * and validate the reply with `isValidTimezone` before returning it.
  *
- * Gated on claude being on PATH — if the user did the paste-OAuth or
- * paste-API auth path they may not have the CLI installed. Returns null
- * in that case so the caller can ask them to try again with a canonical
- * zone string.
+ * Gated on a CLI being available — if the user did the paste-OAuth or
+ * paste-API auth path they may not have any setup-helper CLI installed.
+ * Returns null in that case so the caller can ask them to try again
+ * with a canonical zone string.
  */
-import { execSync, spawn } from 'child_process';
+import { spawn } from 'child_process';
 
 import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { isValidTimezone } from '../../src/timezone.js';
+import { resolveAiCodingCli } from './ai-coding-cli/index.js';
 import { fitToWidth, fmtDuration } from './theme.js';
 
-export function claudeCliAvailable(): boolean {
-  try {
-    execSync('command -v claude', { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
+export function aiCodingCliAvailable(): boolean {
+  return resolveAiCodingCli() !== null;
 }
 
 /**
- * Ask headless Claude to map a free-text location/timezone description to
- * a valid IANA zone. Shows a spinner with elapsed time. Returns the
- * resolved zone string on success, or null if the CLI is missing, Claude
- * errored, or the reply wasn't a valid IANA zone.
+ * Ask the configured headless AI-coding CLI to map a free-text location
+ * description to a valid IANA zone. Shows a spinner with elapsed time.
+ * Returns the resolved zone string on success, or null if no CLI is
+ * available, the CLI errored, or the reply wasn't a valid IANA zone.
  */
-export async function resolveTimezoneViaClaude(
+export async function resolveTimezoneViaCli(
   input: string,
 ): Promise<string | null> {
-  if (!claudeCliAvailable()) return null;
+  const cli = resolveAiCodingCli();
+  if (!cli) return null;
 
   const prompt = buildPrompt(input);
 
@@ -50,7 +48,7 @@ export async function resolveTimezoneViaClaude(
     s.message(`${fitToWidth(label, suffix)}${k.dim(suffix)}`);
   }, 1000);
 
-  const reply = await queryClaude(prompt);
+  const reply = await queryCli(cli.binary, cli.headless(prompt).args);
 
   clearInterval(tick);
   const suffix = ` (${fmtDuration(Date.now() - start)})`;
@@ -84,10 +82,10 @@ function buildPrompt(input: string): string {
   ].join('\n');
 }
 
-function queryClaude(prompt: string): Promise<string | null> {
+function queryCli(binary: string, args: string[]): Promise<string | null> {
   return new Promise((resolve) => {
-    const child = spawn('claude', ['-p', '--output-format', 'text'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
+    const child = spawn(binary, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
     let settled = false;
@@ -104,14 +102,10 @@ function queryClaude(prompt: string): Promise<string | null> {
       settle(code === 0 && stdout.trim() ? stdout : null);
     });
     child.on('error', () => settle(null));
-
-    child.stdin.end(prompt);
   });
 }
 
 function extractTimezone(reply: string): string | null {
-  // Claude occasionally prefixes with a backtick or wraps in quotes despite
-  // instructions; take the first line that looks like a zone.
   const lines = reply
     .split('\n')
     .map((l) => l.trim().replace(/^["'`]+|["'`]+$/g, ''))

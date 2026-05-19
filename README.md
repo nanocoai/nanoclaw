@@ -31,7 +31,7 @@ cd nanoclaw-v2
 bash nanoclaw.sh
 ```
 
-`nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It installs Node, pnpm, and Docker if missing, registers your Anthropic credential with OneCLI, builds the agent container, and pairs your first channel (Telegram, Discord, WhatsApp, or a local CLI). If a step fails, Claude Code is invoked automatically to diagnose and resume from where it broke.
+`nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It installs Node, pnpm, and Docker if missing, registers your Anthropic credential with OneCLI, builds the agent container, and pairs your first channel (Telegram, Discord, WhatsApp, or a local CLI). If a step fails, your chosen coding-assistant CLI (Claude Code or OpenAI Codex — setup asks which on first run, then remembers it) is invoked automatically to diagnose and resume from where it broke. To switch later, run `pnpm exec tsx setup/auto.ts --reconfigure-cli`.
 
 <details>
 <summary><strong>Migrating from NanoClaw v1?</strong></summary>

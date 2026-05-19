@@ -19,6 +19,9 @@
 #   NANOCLAW_SKIP  comma-separated setup:auto step names to skip
 #   SECRET_NAME    OneCLI secret name (default: Anthropic)
 #   HOST_PATTERN   OneCLI host pattern (default: api.anthropic.com)
+#
+# Reconfigure the setup-helper CLI (Claude Code ↔ OpenAI Codex):
+#   pnpm exec tsx setup/auto.ts --reconfigure-cli
 
 set -euo pipefail
 

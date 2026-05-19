@@ -11,7 +11,8 @@
  *   1. Print a clack note with the exact sub-steps and the portal URL.
  *   2. Ask for the value(s) that step yields (App ID, secret, tenant, etc.).
  *   3. At every step boundary, offer `stepGate` — a Done / Stuck / Show-again
- *      select. "Stuck" hands off to interactive Claude with full context.
+ *      select. "Stuck" hands off to the configured AI-coding CLI with full
+ *      context.
  *
  * Text/password prompts also accept `?` as an answer to trigger the handoff,
  * so the operator can escape at any paste point without scrolling back to a
@@ -35,10 +36,10 @@ import { brightSelect } from '../lib/bright-select.js';
 import { confirmThenOpen } from '../lib/browser.js';
 import {
   isHelpEscape,
-  offerClaudeHandoff,
+  offerAiCodingCliHandoff,
   validateWithHelpEscape,
   type HandoffContext,
-} from '../lib/claude-handoff.js';
+} from '../lib/cli-handoff.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
 import { buildTeamsAppPackage } from '../lib/teams-manifest.js';
 import { note } from '../lib/theme.js';
@@ -130,7 +131,7 @@ function printIntro(): void {
       '7 steps across the Azure portal and Teams admin.',
       '',
       k.dim("At any prompt you can type '?' and press Enter to hand off"),
-      k.dim("to Claude interactive mode with your current progress."),
+      k.dim("to your AI-coding CLI in interactive mode with your current progress."),
       k.dim("You can also pick 'Stuck' at any Done/Stuck/Show-again prompt."),
     ].join('\n'),
     'Microsoft Teams setup',
@@ -160,7 +161,7 @@ async function confirmPrereqs(args: { collected: Collected; completed: string[] 
         message: 'How did that go?',
         options: [
           { value: 'done', label: "Done — let's continue" },
-          { value: 'help', label: 'Stuck — hand me off to Claude' },
+          { value: 'help', label: 'Stuck — hand me off for help' },
           { value: 'reshow', label: 'Show me the steps again' },
           { value: 'back', label: '← Back to channel selection' },
         ],
@@ -307,7 +308,7 @@ async function askAppType(args: {
             label: 'Multi tenant',
             hint: 'any Microsoft 365 tenant can install the bot',
           },
-          { value: 'help', label: 'Stuck — hand me off to Claude' },
+          { value: 'help', label: 'Stuck — hand me off for help' },
         ],
       }),
     );
@@ -574,7 +575,7 @@ async function installAdapter(collected: Collected): Promise<void> {
   }
 }
 
-// ─── post-install: hand off to Claude for the final wiring ────────────
+// ─── post-install: hand off for the final wiring ──────────────────────
 
 async function finishWithHandoff(
   collected: Collected,
@@ -586,7 +587,7 @@ async function finishWithHandoff(
       '',
       "One thing left: your Teams bot's platform ID (which NanoClaw needs",
       'to wire to an agent group) only becomes known after you DM the bot',
-      'for the first time. Claude can walk you through that interactively —',
+      'for the first time. Your AI-coding CLI can walk you through that interactively —',
       'watch the logs for your first inbound, find the auto-created',
       'messaging group in the DB, run scripts/init-first-agent.ts with',
       'the right flags, and verify end-to-end.',
@@ -600,7 +601,7 @@ async function finishWithHandoff(
       options: [
         {
           value: 'handoff',
-          label: 'Hand me off to Claude to walk me through it',
+          label: 'Hand me off to walk me through it',
           hint: 'recommended',
         },
         { value: 'self', label: "I'll do it myself" },
@@ -624,7 +625,7 @@ async function finishWithHandoff(
     return;
   }
 
-  await offerClaudeHandoff({
+  await offerAiCodingCliHandoff({
     channel: CHANNEL,
     step: 'teams-finish-wiring',
     stepDescription:
@@ -655,7 +656,7 @@ async function stepGate(args: {
         message: 'How did that go?',
         options: [
           { value: 'done', label: "Done — let's continue" },
-          { value: 'help', label: 'Stuck — hand me off to Claude' },
+          { value: 'help', label: 'Stuck — hand me off for help' },
           { value: 'reshow', label: 'Show me the steps again' },
           { value: 'back', label: '← Back to channel selection' },
         ],
@@ -690,7 +691,7 @@ async function offerHandoff(args: {
     collectedValues: redactCollected(args.args.collected),
     files: ['setup/channels/teams.ts', 'setup/add-teams.sh'],
   };
-  await offerClaudeHandoff(ctx);
+  await offerAiCodingCliHandoff(ctx);
 }
 
 function redactCollected(c: Collected): Record<string, string> {

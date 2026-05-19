@@ -149,11 +149,17 @@ export function printHelp(stream: NodeJS.WritableStream = process.stdout): void 
   lines.push('Usage: bash nanoclaw.sh [flags...]');
   lines.push('');
   lines.push('Flags:');
-  const width = Math.max(...CONFIG.map((e) => flagFor(e).length));
+  const width = Math.max(
+    ...CONFIG.map((e) => flagFor(e).length),
+    '--reconfigure-cli'.length,
+  );
   for (const e of CONFIG) {
     const flag = flagFor(e).padEnd(width + 2);
     lines.push(`  ${flag}${e.help}`);
   }
+  lines.push(
+    `  ${'--reconfigure-cli'.padEnd(width + 2)}re-prompt for the setup-helper CLI (Claude Code or Codex) and exit`,
+  );
   lines.push('');
   lines.push('Each flag also reads from its corresponding NANOCLAW_<KEY> env var.');
   lines.push('Run without flags for the default interactive flow.');

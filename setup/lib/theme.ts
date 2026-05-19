@@ -113,7 +113,7 @@ export function wrapForGutter(text: string, gutter: number): string {
  * Wrap multi-line explanatory prose to the clack gutter. Previously
  * dimmed its output (hence the name) — that made body copy hard to read
  * against dark terminals. Dim is now reserved for preview/debug blocks
- * (failure transcript tails, claude-assist streams); prose renders at
+ * (failure transcript tails, cli-assist output); prose renders at
  * the terminal's regular weight.
  */
 export function dimWrap(text: string, gutter: number): string {
