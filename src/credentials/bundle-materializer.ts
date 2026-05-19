@@ -48,11 +48,14 @@ export function materializeNativeAuthBundle(
     return { ok: false, reason: 'missing_source', detail: expanded };
   }
 
+  // mkdir + copy share one try/catch so the function is fully non-throwing.
+  // Otherwise a broken session-dir (permissions, exhausted inodes) would
+  // surface as an unhandled exception, surprising callers that branch on
+  // `MaterializeResult.ok`.
   const bundleDir = path.join(sessionDir, 'credentials', decision.providerId);
-  fs.mkdirSync(bundleDir, { recursive: true });
   const dest = path.join(bundleDir, path.basename(decision.mountPath));
-
   try {
+    fs.mkdirSync(bundleDir, { recursive: true });
     fs.copyFileSync(expanded, dest);
   } catch (err) {
     return { ok: false, reason: 'copy_failed', detail: String(err) };
