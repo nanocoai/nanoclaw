@@ -224,3 +224,61 @@ leaking the token to disk outweighs the debugging value.
 - **Structured output from `register-claude-token.sh`.** The interactive
   step emits no machine-readable status today. Future could add a
   post-interaction status block with the method used.
+
+## Setup flexibility
+
+First-time setup presents three explicit choices.
+
+### 1. AI-coding-CLI picker
+
+`pnpm exec tsx setup/auto.ts` prompts which AI coding CLI should drive
+the setup helper (timezone parsing, headless diagnostics, interactive
+failure handoff). Choices: **Claude Code** and **OpenAI Codex**.
+
+- Always prompts on first setup, even when only one CLI is installed.
+- Choice persisted to `.env` as `NANOCLAW_AI_CODING_CLI`.
+- Subsequent runs skip the prompt; clear the env var or run
+  `pnpm exec tsx setup/auto.ts --reconfigure-cli` to re-prompt.
+
+### 2. Credential-mode picker
+
+After CLI selection, setup asks how NanoClaw should manage provider
+credentials:
+
+- **Native credential proxy** (recommended for solo installs) — built-in
+  proxy reads from `.env`. No extra daemon. The credential abstraction
+  layer (`src/credentials/`) routes decisions through this proxy.
+- **OneCLI Agent Vault** — encrypted secrets store with a web UI,
+  per-agent scoping, request-approval flow.
+
+Choice persisted as `NANOCLAW_CREDENTIAL_MODE=native|onecli`. Bypass
+with `NANOCLAW_SKIP=credential-mode`. When mode is `native`, the OneCLI
+install step is skipped.
+
+### 3. macOS Keychain pre-flight
+
+On macOS the credential-mode prompt probes:
+
+1. `~/.claude/.credentials.json` (Claude Code CLI's credentials file)
+2. macOS Keychain entry `Claude Code-credentials`
+
+If either is found, the native-mode option is labeled with a hint
+mentioning the detected source so the operator knows a token is already
+available without re-pasting.
+
+### Reconfiguring later
+
+- AI-coding-CLI: `pnpm exec tsx setup/auto.ts --reconfigure-cli`
+- Credential mode: clear `NANOCLAW_CREDENTIAL_MODE` from `.env` and
+  re-run setup, OR re-run with `NANOCLAW_SKIP=` (empty) to re-prompt
+  every step.
+
+### Reference
+
+- Upstream PR for the AI-coding-CLI picker: `nanocoai/nanoclaw#2474`
+- Credential-mode prompt + Keychain pre-flight ported from
+  `chiptoe-svg/nanoclaw_gccourse` (main branch, `setup/auto.ts`).
+- Module locations:
+  - `setup/lib/ai-coding-cli/` — adapter registry (Claude, Codex)
+  - `setup/lib/credential-mode.ts` — credential-mode picker
+  - `setup/lib/claude-oauth-detect.ts` — Keychain / credentials file probe
