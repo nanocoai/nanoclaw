@@ -31,4 +31,19 @@ describe('runCredentialModeStep', () => {
     const nativeOption = callArgs.options.find((o) => o.value === 'native');
     expect(nativeOption?.hint).toMatch(/credentials\.json/);
   });
+
+  it('pre-set NANOCLAW_CREDENTIAL_MODE=native is respected when step would be skipped', async () => {
+    // Scenario: credential-mode step was run previously and wrote NANOCLAW_CREDENTIAL_MODE=native to .env.
+    // On a subsequent setup run with NANOCLAW_SKIP=credential-mode, the step is not called at all
+    // in auto.ts, but this test documents that pickCredentialMode returns the pre-set value immediately
+    // without prompting (this is what happens if the step were to be called with a pre-set env).
+    vi.spyOn(oauthDetect, 'detectClaudeOAuthToken').mockReturnValue(null);
+    const brightSelectSpy = vi.spyOn(brightSelectModule, 'brightSelect');
+    const env = { NANOCLAW_CREDENTIAL_MODE: 'native' } as NodeJS.ProcessEnv;
+    const result = await runCredentialModeStep(env);
+    // brightSelect should NOT be called — pickCredentialMode returns early because the mode is valid
+    expect(brightSelectSpy).not.toHaveBeenCalled();
+    // The result reflects the pre-set mode and correctly maps to skipOneCli=true
+    expect(result).toEqual({ mode: 'native', skipOneCli: true });
+  });
 });
