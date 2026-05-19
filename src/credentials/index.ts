@@ -15,3 +15,5 @@ export { registerProviderRoute, getProviderRoute, listProviderRoutes } from './p
 export type { ProviderRoute } from './provider-routes.js';
 export { materializeNativeAuthBundle } from './bundle-materializer.js';
 export type { MaterializeResult } from './bundle-materializer.js';
+export { applyCredentialDecisions } from './apply.js';
+export type { ApplyResult, CredentialRefusal } from './apply.js';
