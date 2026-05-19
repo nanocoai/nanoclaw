@@ -10,4 +10,4 @@ export {
 } from './headers.js';
 export type { HeaderMap } from './headers.js';
 export { HTTP_STATUS_CONNECT_REQUIRED, HTTP_STATUS_FORBIDDEN, serializeCredentialError } from './errors.js';
-export type { CredentialErrorBody, SerializedCredentialError } from './errors.js';
+export type { CredentialErrorBody, CredentialErrorStatus, SerializedCredentialError } from './errors.js';

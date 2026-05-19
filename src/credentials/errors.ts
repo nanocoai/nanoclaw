@@ -12,16 +12,19 @@ import type { CredentialDecision } from './types.js';
 export const HTTP_STATUS_CONNECT_REQUIRED = 402;
 export const HTTP_STATUS_FORBIDDEN = 403;
 
+export type CredentialErrorStatus = typeof HTTP_STATUS_CONNECT_REQUIRED | typeof HTTP_STATUS_FORBIDDEN;
+
 export type CredentialErrorBody = {
   type: 'connect_required' | 'forbidden';
   provider: string;
   message?: string;
+  /** Wire format: snake_case for JSON interop. CredentialDecision uses `connectUrl` in TS. */
   connect_url?: string;
   reason?: string;
 };
 
 export interface SerializedCredentialError {
-  status: number;
+  status: CredentialErrorStatus;
   body: CredentialErrorBody;
 }
 
@@ -29,6 +32,9 @@ export function serializeCredentialError(
   decision: Extract<CredentialDecision, { kind: 'connect_required' | 'forbidden' }>,
 ): SerializedCredentialError {
   if (decision.kind === 'connect_required') {
+    // `message` is required on the connect_required CredentialDecision variant,
+    // so it is always set — unlike connect_url / reason which are optional and
+    // conditionally added below.
     const body: CredentialErrorBody = {
       type: 'connect_required',
       provider: decision.provider,

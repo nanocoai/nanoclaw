@@ -51,4 +51,15 @@ describe('credential error envelopes', () => {
     expect(body).toEqual({ type: 'forbidden', provider: 'codex' });
     expect('reason' in body).toBe(false);
   });
+
+  it('omits connect_url when connectUrl is undefined', () => {
+    const decision: CredentialDecision = {
+      kind: 'connect_required',
+      provider: 'codex',
+      message: 'Sign in',
+    };
+    const { body } = serializeCredentialError(decision);
+    expect(body).toEqual({ type: 'connect_required', provider: 'codex', message: 'Sign in' });
+    expect('connect_url' in body).toBe(false);
+  });
 });
