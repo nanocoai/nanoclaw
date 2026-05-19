@@ -968,99 +968,146 @@ async function runCustomEndpointAuth(
 
 /**
  * Pick the setup-helper CLI (Claude Code or OpenAI Codex) and persist
- * the choice to `.env` as `NANOCLAW_AI_CODING_CLI=<name>`. Two paths:
+ * the choice to `.env` as `NANOCLAW_AI_CODING_CLI=<name>`. Flow:
  *
  *   1. Already-configured: `NANOCLAW_AI_CODING_CLI` is set, the named
- *      adapter exists, and the binary is installed → skip the prompt.
- *      If the configured CLI is missing (env var stale, or the user
- *      uninstalled it), fall through and re-pick with a warning.
- *   2. Picker: always prompt on first setup (operator preference — the
- *      upstream PR auto-picks when exactly one is installed, but we want
- *      the choice to be explicit). With 0 installed we offer to install
- *      Claude Code via its install script (Codex has no scriptable
- *      installer in this fork) and bail if declined.
+ *      adapter exists, and the binary is installed → skip the prompt,
+ *      fall through to auth check. If the configured CLI is missing
+ *      (env var stale, or the user uninstalled it), fall through and
+ *      re-pick with a warning.
+ *   2. Picker: show ALL registered CLIs (installed + not-installed).
+ *      Installed ones show their binary path as a hint; uninstalled
+ *      ones show "not installed". The operator makes an explicit choice.
+ *   3. After pick:
+ *      a. Not installed + has installScript: offer to run it. If
+ *         install fails → bail (process.exit(0)).
+ *      b. Not installed + no installScript: show installInstructions
+ *         and exit setup (process.exit(0)).
+ *      c. Installed: fall through to auth check.
+ *   4. Auth check:
+ *      - true:      log success.
+ *      - false:     run cli.login() if available, else show loginInstructions.
+ *      - undefined: log a soft warning and proceed.
  *
- * `opts.force` skips path 1 (always re-prompt from current install
- * state). Used by the `--reconfigure-cli` mode.
+ * `opts.force` skips path 1 (always re-prompt). Used by `--reconfigure-cli`.
  */
 async function pickAiCodingCli(opts: { force?: boolean } = {}): Promise<void> {
-  const installed = listAiCodingClis().filter((c) => c.isInstalled());
+  const all = listAiCodingClis();
   const configured = (process.env.NANOCLAW_AI_CODING_CLI ?? '').toLowerCase().trim();
 
   // Path 1: already-configured + still installed (skipped under --force).
   if (configured && !opts.force) {
-    const match = installed.find((c) => c.name === configured);
+    const match = all.find((c) => c.name === configured && c.isInstalled());
     if (match) {
       setupLog.userInput('setup_cli', `${match.name} (preconfigured)`);
+      await checkAiCodingCliAuth(match);
       return;
     }
-    p.log.warn(
-      brandBody(
-        `NANOCLAW_AI_CODING_CLI is set to "${configured}" but that CLI isn't installed. Re-picking.`,
-      ),
-    );
-  }
-
-  // Path 3a: nothing installed — offer Claude Code's install script.
-  if (installed.length === 0) {
-    const claude = listAiCodingClis().find((c) => c.installScript);
-    if (!claude) {
+    if (all.find((c) => c.name === configured)) {
       p.log.warn(
         brandBody(
-          'No setup-helper CLI is installed and none of the registered adapters has a scriptable installer. ' +
-            'Install Claude Code or OpenAI Codex manually, then re-run setup.',
+          `NANOCLAW_AI_CODING_CLI is set to "${configured}" but that CLI isn't installed. Re-picking.`,
         ),
       );
-      return;
     }
-    const install = ensureAnswer(
-      await p.confirm({
-        message: `No setup-helper CLI found. Install ${claude.displayName} now?`,
-        initialValue: true,
-      }),
-    );
-    if (!install) {
-      p.log.warn(
-        brandBody(
-          `Continuing without a setup-helper. If a step fails I won't be able to hand you off — install ${claude.displayName} or OpenAI Codex and re-run setup to enable that.`,
-        ),
-      );
-      return;
-    }
-    if (!claude.installScript) return;
-    const code = spawnSync('bash', [claude.installScript], {
-      cwd: process.cwd(),
-      stdio: 'inherit',
-    }).status;
-    if (code !== 0 || !claude.isInstalled()) {
-      p.log.error(`Couldn't install ${claude.displayName}.`);
-      return;
-    }
-    p.log.success(`${claude.displayName} installed.`);
-    persistAiCodingCli(claude);
-    return;
   }
 
-  // Path 2: always prompt so the operator makes an explicit choice,
-  // even when only one CLI is installed. Subsequent runs skip this
-  // (Path 1 above) once NANOCLAW_AI_CODING_CLI is persisted in .env.
-  // Under --force, default to the current pick so Enter keeps it.
-  const initial = installed.find((c) => c.name === configured)?.name ?? installed[0].name;
+  // Path 2: prompt — show all CLIs, mark installed vs not.
+  const initial =
+    all.find((c) => c.name === configured)?.name ??
+    all.find((c) => c.isInstalled())?.name ??
+    all[0]?.name;
+
   const pick = ensureAnswer(
     await brightSelect<string>({
       message: 'Which coding-assistant CLI should setup use for diagnostics?',
-      options: installed.map((c) => ({
+      options: all.map((c) => ({
         value: c.name,
         label: c.displayName,
-        hint: c.binary,
+        hint: c.isInstalled() ? c.binary : 'not installed',
       })),
       initialValue: initial,
     }),
   ) as string;
-  const chosen = installed.find((c) => c.name === pick);
+
+  const chosen = all.find((c) => c.name === pick);
   if (!chosen) return;
+
+  // Path 3: handle not-installed case.
+  if (!chosen.isInstalled()) {
+    if (chosen.installScript) {
+      // 3a: has install script — offer to run it.
+      const install = ensureAnswer(
+        await p.confirm({
+          message: `${chosen.displayName} is not installed. Install it now?`,
+          initialValue: true,
+        }),
+      );
+      if (!install) {
+        p.log.warn(
+          brandBody(
+            `Continuing without a setup-helper. Install ${chosen.displayName} and re-run setup to enable it.`,
+          ),
+        );
+        return;
+      }
+      const code = spawnSync('bash', [chosen.installScript], {
+        cwd: process.cwd(),
+        stdio: 'inherit',
+      }).status;
+      if (code !== 0 || !chosen.isInstalled()) {
+        p.log.error(`Couldn't install ${chosen.displayName}.`);
+        p.log.warn(brandBody(chosen.installInstructions));
+        p.log.info('Re-run setup after installing.');
+        process.exit(0);
+      }
+      p.log.success(`${chosen.displayName} installed.`);
+    } else {
+      // 3b: no install script — show manual instructions and exit.
+      p.log.warn(brandBody(chosen.installInstructions));
+      p.log.info('Re-run setup after installing.');
+      process.exit(0);
+    }
+  }
+
   persistAiCodingCli(chosen);
   setupLog.userInput('setup_cli', `${chosen.name} (picked)`);
+
+  // Path 4: auth check.
+  await checkAiCodingCliAuth(chosen);
+}
+
+/**
+ * Check auth status for the given CLI and prompt login if needed.
+ */
+async function checkAiCodingCliAuth(cli: AiCodingCli): Promise<void> {
+  const authed = cli.isAuthenticated();
+  if (authed === true) {
+    p.log.success(brandBody(`${cli.displayName} is authenticated.`));
+  } else if (authed === false) {
+    p.log.warn(brandBody(`${cli.displayName} is not authenticated. Starting login...`));
+    const loginArgs = cli.login();
+    if (loginArgs !== null) {
+      spawnSync(cli.binary, loginArgs.args, { stdio: 'inherit' });
+      const recheck = cli.isAuthenticated();
+      if (!recheck) {
+        p.log.warn(
+          brandBody(
+            `Login may not have completed. You may need to re-authenticate: ${cli.loginInstructions}`,
+          ),
+        );
+      }
+    } else {
+      p.log.warn(brandBody(`To authenticate: ${cli.loginInstructions}`));
+    }
+  } else {
+    // undefined — CLI has no fast offline probe; proceed and let it surface errors.
+    p.log.warn(
+      brandBody(
+        `Couldn't verify ${cli.displayName} auth status — proceeding. If requests fail, run: ${cli.loginInstructions}`,
+      ),
+    );
+  }
 }
 
 function persistAiCodingCli(cli: AiCodingCli): void {

@@ -60,6 +60,11 @@ export const codexCli: AiCodingCli = {
   isInstalled,
   isAuthenticated,
   installScript: null,
+  installInstructions: 'npm install -g @openai/codex   (or: pnpm install -g @openai/codex)',
+  login(): null {
+    return null;
+  },
+  loginInstructions: 'Set OPENAI_API_KEY in your environment, or run: codex (it will prompt on first use)',
   headless,
   handoff,
 };

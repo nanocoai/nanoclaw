@@ -56,6 +56,22 @@ describe('claude adapter shape', () => {
   it('declares its install script', () => {
     expect(claudeCli.installScript).toBe('setup/install-claude.sh');
   });
+
+  it('installInstructions is a non-empty string', () => {
+    expect(typeof claudeCli.installInstructions).toBe('string');
+    expect(claudeCli.installInstructions.length).toBeGreaterThan(0);
+  });
+
+  it('login() returns SpawnArgs with args containing ["auth", "login"]', () => {
+    const result = claudeCli.login();
+    expect(result).not.toBeNull();
+    expect(result!.args).toEqual(['auth', 'login']);
+  });
+
+  it('loginInstructions is a non-empty string', () => {
+    expect(typeof claudeCli.loginInstructions).toBe('string');
+    expect(claudeCli.loginInstructions.length).toBeGreaterThan(0);
+  });
 });
 
 describe('codex adapter shape', () => {
@@ -88,5 +104,19 @@ describe('codex adapter shape', () => {
     } else {
       expect(codexCli.isAuthenticated()).toBe(false);
     }
+  });
+
+  it('installInstructions is a non-empty string', () => {
+    expect(typeof codexCli.installInstructions).toBe('string');
+    expect(codexCli.installInstructions.length).toBeGreaterThan(0);
+  });
+
+  it('login() returns null (no programmatic login command)', () => {
+    expect(codexCli.login()).toBeNull();
+  });
+
+  it('loginInstructions is a non-empty string', () => {
+    expect(typeof codexCli.loginInstructions).toBe('string');
+    expect(codexCli.loginInstructions.length).toBeGreaterThan(0);
   });
 });

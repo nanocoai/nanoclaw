@@ -81,4 +81,24 @@ export interface AiCodingCli {
    * an opening message; the agent then runs interactively.
    */
   handoff(prompt: string): SpawnArgs;
+
+  /**
+   * Human-readable install instructions shown when the binary is missing
+   * and no `installScript` is available. Used as a fallback "install manually,
+   * then re-run setup" message.
+   */
+  installInstructions: string;
+
+  /**
+   * Build argv for an interactive login flow. Return null if this CLI
+   * has no programmatic login command — setup will show `loginInstructions`
+   * instead.
+   */
+  login(): SpawnArgs | null;
+
+  /**
+   * Human-readable login instructions shown after login() returns null
+   * or when the user should know the command for future use.
+   */
+  loginInstructions: string;
 }

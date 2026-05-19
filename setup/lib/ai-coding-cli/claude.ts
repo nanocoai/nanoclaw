@@ -63,6 +63,11 @@ export const claudeCli: AiCodingCli = {
   isInstalled,
   isAuthenticated,
   installScript: path.join('setup', 'install-claude.sh'),
+  installInstructions: 'Run the install script at setup/install-claude.sh, or visit https://claude.ai/download',
+  login(): SpawnArgs {
+    return { args: ['auth', 'login'], stdin: 'inherit', output: 'inherit' };
+  },
+  loginInstructions: 'claude auth login',
   headless,
   handoff,
 };
