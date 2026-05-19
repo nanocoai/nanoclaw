@@ -13,8 +13,8 @@
  *                          channel flow). The CLI scratch agent is always
  *                          "Terminal Agent".
  *   NANOCLAW_SKIP          comma-separated step names to skip
- *                          (environment|container|onecli|auth|mounts|
- *                           service|cli-agent|timezone|channel|
+ *                          (environment|container|credential-mode|onecli|
+ *                           auth|mounts|service|cli-agent|timezone|channel|
  *                           verify|first-chat)
  *
  * Timezone is auto-detected after the CLI agent step. UTC resolves are
@@ -39,6 +39,7 @@ import { runTelegramChannel } from './channels/telegram.js';
 import { runWhatsAppChannel } from './channels/whatsapp.js';
 import { pingCliAgent, type PingResult } from './lib/agent-ping.js';
 import { brightSelect } from './lib/bright-select.js';
+import { runCredentialModeStep } from './lib/credential-mode.js';
 import { offerAiCodingCliOnFailure } from './lib/cli-handoff.js';
 import { listAiCodingClis } from './lib/ai-coding-cli/index.js';
 import type { AiCodingCli } from './lib/ai-coding-cli/types.js';
@@ -198,7 +199,19 @@ async function main(): Promise<void> {
     maybeReexecUnderSg();
   }
 
-  if (!skip.has('onecli')) {
+  let skipOneCli = false;
+  if (!skip.has('credential-mode')) {
+    const credResult = await runCredentialModeStep(process.env);
+    process.env.NANOCLAW_CREDENTIAL_MODE = credResult.mode;
+    writeEnvLine('NANOCLAW_CREDENTIAL_MODE', credResult.mode);
+    setupLog.userInput('setup_credential_mode', credResult.mode);
+    if (credResult.skipOneCli) {
+      p.log.success(brandBody('Using built-in native credential proxy — skipping OneCLI install.'));
+      skipOneCli = true;
+    }
+  }
+
+  if (!skipOneCli && !skip.has('onecli')) {
     p.log.message(
       brandBody(
         dimWrap(

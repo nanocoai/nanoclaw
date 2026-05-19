@@ -38,4 +38,37 @@ describe('pickCredentialMode', () => {
     expect(result).toBe('onecli');
     promptSpy.mockRestore();
   });
+
+  it('hint reflects keychain detection when oauthSource is "keychain"', async () => {
+    const spy = vi
+      .spyOn(brightSelectModule, 'brightSelect')
+      .mockResolvedValue('native' satisfies CredentialMode);
+    await pickCredentialMode({} as NodeJS.ProcessEnv, { oauthSource: 'keychain' });
+    const callArgs = spy.mock.calls[0][0] as { options: { value: string; hint?: string }[] };
+    const nativeOption = callArgs.options.find((o) => o.value === 'native');
+    expect(nativeOption?.hint).toMatch(/Keychain/);
+    spy.mockRestore();
+  });
+
+  it('hint reflects file detection when oauthSource is "file"', async () => {
+    const spy = vi
+      .spyOn(brightSelectModule, 'brightSelect')
+      .mockResolvedValue('native' satisfies CredentialMode);
+    await pickCredentialMode({} as NodeJS.ProcessEnv, { oauthSource: 'file' });
+    const callArgs = spy.mock.calls[0][0] as { options: { value: string; hint?: string }[] };
+    const nativeOption = callArgs.options.find((o) => o.value === 'native');
+    expect(nativeOption?.hint).toMatch(/credentials\.json/);
+    spy.mockRestore();
+  });
+
+  it('hint falls back to generic text when oauthSource is undefined', async () => {
+    const spy = vi
+      .spyOn(brightSelectModule, 'brightSelect')
+      .mockResolvedValue('native' satisfies CredentialMode);
+    await pickCredentialMode({} as NodeJS.ProcessEnv, { oauthSource: undefined });
+    const callArgs = spy.mock.calls[0][0] as { options: { value: string; hint?: string }[] };
+    const nativeOption = callArgs.options.find((o) => o.value === 'native');
+    expect(nativeOption?.hint).toMatch(/no extra daemon/);
+    spy.mockRestore();
+  });
 });
