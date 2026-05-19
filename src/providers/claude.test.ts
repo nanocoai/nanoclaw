@@ -73,4 +73,21 @@ describe('claude provider container config', () => {
       }),
     ).rejects.toThrow(/forbidden/i);
   });
+
+  it('hook returning connect_required surfaces as a thrown error', async () => {
+    vi.spyOn(envModule, 'readEnvFile').mockReturnValue({});
+    setCredentialResolverHook(async () => ({
+      kind: 'connect_required',
+      provider: 'anthropic',
+      message: 'Sign in to Anthropic',
+    }));
+    const { getClaudeContribution } = await import('../providers/claude.js');
+    await expect(
+      getClaudeContribution({
+        sessionDir: '/tmp/session',
+        agentGroupId: 'g1',
+        hostEnv: {} as NodeJS.ProcessEnv,
+      }),
+    ).rejects.toThrow(/account connect/i);
+  });
 });
