@@ -46,11 +46,28 @@ import {
   markContainerRunning,
   markContainerStopped,
   sessionDir,
+  writeOutboundDirect,
   writeSessionRouting,
 } from './session-manager.js';
+import { getMessagingGroup } from './db/messaging-groups.js';
 import type { AgentGroup, Session } from './types.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
+
+/**
+ * Format a credential refusal into a plain-text user-visible error message.
+ * Pure function — no side effects, exported for testing.
+ */
+export function formatRefusalMessage(provider: string, refusal: import('./credentials/apply.js').CredentialRefusal): string {
+  if (refusal.kind === 'connect_required') {
+    const parts = [`⚠️ Cannot start agent: authentication required for ${provider}.`, refusal.message];
+    if (refusal.connectUrl) parts.push(refusal.connectUrl);
+    return parts.join(' ');
+  }
+  // forbidden
+  const base = `⚠️ Cannot start agent: access denied for provider ${provider}.`;
+  return refusal.reason ? `${base} ${refusal.reason}` : base;
+}
 
 /** Active containers tracked by session ID. */
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
@@ -139,6 +156,32 @@ async function spawnContainer(session: Session): Promise<void> {
       provider,
       refusal,
     });
+
+    // Surface the refusal to the user via the outbound DB so the delivery
+    // poller can route it back through the channel adapter.
+    try {
+      let channelType: string | null = null;
+      try {
+        if (session.messaging_group_id) {
+          const mg = getMessagingGroup(session.messaging_group_id);
+          if (mg) channelType = mg.channel_type;
+        }
+      } catch (lookupErr) {
+        log.warn('Failed to look up messaging group for refusal message', { sessionId: session.id, lookupErr });
+      }
+
+      writeOutboundDirect(agentGroup.id, session.id, {
+        id: `refusal-${session.id}-${Date.now()}`,
+        kind: 'reply',
+        platformId: null,
+        channelType,
+        threadId: session.thread_id,
+        content: formatRefusalMessage(provider, refusal),
+      });
+    } catch (writeErr) {
+      log.warn('Failed to write refusal message to outbound DB', { sessionId: session.id, writeErr });
+    }
+
     return;
   }
 

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { setCredentialResolverHook, resetCredentialResolverHook } from './credentials/index.js';
-import { buildContributionForSpawn, resolveProviderName } from './container-runner.js';
+import { buildContributionForSpawn, formatRefusalMessage, resolveProviderName } from './container-runner.js';
 
 describe('resolveProviderName', () => {
   it('prefers session over container config', () => {
@@ -90,6 +90,22 @@ describe('container-runner credential integration', () => {
     });
   });
 
+  it('with hook returning connect_required, refusal is surfaced', async () => {
+    setCredentialResolverHook(async () => ({
+      kind: 'connect_required',
+      provider: 'claude',
+      message: 'Please authenticate via the web UI.',
+      connectUrl: 'http://127.0.0.1:10254',
+    }));
+    const result = await buildContributionForSpawn({
+      provider: 'claude',
+      sessionDir: '/tmp/sess',
+      agentGroupId: 'g1',
+      hostEnv: {} as NodeJS.ProcessEnv,
+    });
+    expect(result.refusal?.kind).toBe('connect_required');
+  });
+
   it('credential resolver hook fires exactly once per spawn for the claude provider', async () => {
     let callCount = 0;
     setCredentialResolverHook(async () => {
@@ -103,5 +119,53 @@ describe('container-runner credential integration', () => {
       hostEnv: {} as NodeJS.ProcessEnv,
     });
     expect(callCount).toBe(1);
+  });
+});
+
+describe('formatRefusalMessage', () => {
+  it('formats connect_required with message and connectUrl', () => {
+    const msg = formatRefusalMessage('claude', {
+      kind: 'connect_required',
+      provider: 'claude',
+      message: 'Please authenticate via the web UI.',
+      connectUrl: 'http://127.0.0.1:10254',
+    });
+    expect(msg).toContain('claude');
+    expect(msg).toContain('authentication required');
+    expect(msg).toContain('Please authenticate via the web UI.');
+    expect(msg).toContain('http://127.0.0.1:10254');
+  });
+
+  it('formats connect_required without connectUrl', () => {
+    const msg = formatRefusalMessage('opencode', {
+      kind: 'connect_required',
+      provider: 'opencode',
+      message: 'Run onecli auth login first.',
+    });
+    expect(msg).toContain('opencode');
+    expect(msg).toContain('authentication required');
+    expect(msg).toContain('Run onecli auth login first.');
+    expect(msg).not.toContain('undefined');
+  });
+
+  it('formats forbidden with reason', () => {
+    const msg = formatRefusalMessage('claude', {
+      kind: 'forbidden',
+      provider: 'claude',
+      reason: 'classroom policy',
+    });
+    expect(msg).toContain('claude');
+    expect(msg).toContain('access denied');
+    expect(msg).toContain('classroom policy');
+  });
+
+  it('formats forbidden without reason', () => {
+    const msg = formatRefusalMessage('claude', {
+      kind: 'forbidden',
+      provider: 'claude',
+    });
+    expect(msg).toContain('claude');
+    expect(msg).toContain('access denied');
+    expect(msg).not.toContain('undefined');
   });
 });
