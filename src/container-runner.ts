@@ -58,7 +58,10 @@ const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
  * Format a credential refusal into a plain-text user-visible error message.
  * Pure function — no side effects, exported for testing.
  */
-export function formatRefusalMessage(provider: string, refusal: import('./credentials/apply.js').CredentialRefusal): string {
+export function formatRefusalMessage(
+  provider: string,
+  refusal: import('./credentials/apply.js').CredentialRefusal,
+): string {
   if (refusal.kind === 'connect_required') {
     const parts = [`⚠️ Cannot start agent: authentication required for ${provider}.`, refusal.message];
     if (refusal.connectUrl) parts.push(refusal.connectUrl);
