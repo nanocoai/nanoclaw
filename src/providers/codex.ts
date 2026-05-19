@@ -11,10 +11,18 @@
  *   wake with container-appropriate MCP server paths, without racing
  *   other sessions or leaking per-session paths back to the host.
  *
- * Env passthrough covers the two knobs that are read at runtime:
- *   OPENAI_API_KEY  — fallback auth when auth.json isn't a subscription token
- *   CODEX_MODEL     — model override if the user wants something other than the default
- *   OPENAI_BASE_URL — rare, but supports API-compatible alternates
+ * Auth modes:
+ *   - Subscription / native: auth.json is copied from ~/.codex and mounted
+ *     into the container (file mount, no plaintext secret in env).
+ *   - API-key: handled entirely by the credential resolver. When the resolver
+ *     returns `{ kind: 'gateway_secret', providerId: 'openai' }`,
+ *     `applyCredentialDecisions` sets OPENAI_BASE_URL=<gateway> and
+ *     OPENAI_API_KEY=placeholder in the container env. This provider must NOT
+ *     pass through OPENAI_API_KEY or OPENAI_BASE_URL from hostEnv — doing so
+ *     would override the placeholder set by the resolver and leak the real key
+ *     into the container environment (merge order: provider contribution wins).
+ *
+ * Only CODEX_MODEL is passed through (it is not a secret).
  */
 import fs from 'fs';
 import path from 'path';
@@ -37,7 +45,7 @@ registerProviderContainerConfig('codex', (ctx) => {
   }
 
   const env: Record<string, string> = {};
-  for (const key of ['OPENAI_API_KEY', 'CODEX_MODEL', 'OPENAI_BASE_URL'] as const) {
+  for (const key of ['CODEX_MODEL'] as const) {
     const value = ctx.hostEnv[key];
     if (value) env[key] = value;
   }
