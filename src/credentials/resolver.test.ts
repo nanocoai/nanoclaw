@@ -51,7 +51,13 @@ describe('credential resolver', () => {
       runtimeProvider: 'codex',
       authMode: 'subscription',
     });
-    expect(decision.kind).toBe('native_auth_bundle');
+    expect(decision).toEqual({
+      kind: 'native_auth_bundle',
+      providerId: 'codex',
+      bundleRef: 'host:~/.codex/auth.json',
+      mountPath: '/home/node/.codex/auth.json',
+      refreshPolicy: 'runtime',
+    });
   });
 
   it('resetCredentialResolverHook restores fallback', async () => {
