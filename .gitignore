@@ -37,5 +37,7 @@ groups/*
 
 # Skills system (local per-installation state)
 .nanoclaw/
+.agents/
+plugins/
 
 agents-sdk-docs
