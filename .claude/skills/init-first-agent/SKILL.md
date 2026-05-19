@@ -9,7 +9,7 @@ Stand up the first NanoClaw agent for a channel and verify end-to-end delivery b
 
 ## Prerequisites
 
-- **Service running.** Check: `launchctl list | grep nanoclaw` (macOS) or `systemctl --user status nanoclaw` (Linux). If stopped, tell the user to run `/setup` first.
+- **Service running.** Check: `launchctl list | grep "$(. setup/lib/install-slug.sh && launchd_label)"` (macOS) or `systemctl --user status "$(. setup/lib/install-slug.sh && systemd_unit)"` (Linux). If stopped, tell the user to run `/setup` first.
 - **Target channel installed.** At least one `/add-<channel>` skill has run, credentials are in `.env`, and the adapter is uncommented in `src/channels/index.ts`.
 - **Adapter connected.** Tail `logs/nanoclaw.log` — look for a recent `channel setup` / `adapter connected` line for the target channel.
 

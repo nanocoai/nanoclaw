@@ -92,7 +92,6 @@ onecli agents list
 
 ```bash
 grep -q 'CALENDAR_MCP_VERSION' container/Dockerfile && \
-grep -q "mcp__calendar__\*" container/agent-runner/src/providers/claude.ts && \
 echo "ALREADY APPLIED — skip to Phase 3"
 ```
 
@@ -121,9 +120,7 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "@cocal/google-calendar-mcp@${CALENDAR_MCP_VERSION}"
 ```
 
-### Add tools to allowlist
-
-Edit `container/agent-runner/src/providers/claude.ts`. Add `'mcp__calendar__*'` to `TOOL_ALLOWLIST` after `'mcp__nanoclaw__*'` (or after `'mcp__gmail__*'` if present).
+**No `TOOL_ALLOWLIST` edit needed.** `container/agent-runner/src/providers/claude.ts` derives the allow-pattern dynamically from each group's `mcpServers` map (`Object.keys(this.mcpServers).map(mcpAllowPattern)`), so registering `calendar` in Phase 3 automatically allows `mcp__calendar__*`. Earlier versions of this skill instructed a static `TOOL_ALLOWLIST` edit — that's now redundant.
 
 ### Rebuild the container image
 
@@ -133,40 +130,59 @@ Edit `container/agent-runner/src/providers/claude.ts`. Add `'mcp__calendar__*'` 
 
 ## Phase 3: Wire Per-Agent-Group
 
-For each agent group, merge into `groups/<folder>/container.json`:
+For each agent group, persist two changes to the **central DB** (`data/v2.db`): the `mcpServers.calendar` entry and an `additionalMounts` entry for `.calendar-mcp`. Both flow through `materializeContainerJson` on every spawn, so editing `groups/<folder>/container.json` by hand does **not** stick — that file is regenerated from the DB.
 
-```jsonc
-{
-  "mcpServers": {
-    "calendar": {
-      "command": "google-calendar-mcp",
-      "args": [],
-      "env": {
-        "GOOGLE_OAUTH_CREDENTIALS": "/workspace/extra/.calendar-mcp/gcp-oauth.keys.json",
-        "GOOGLE_CALENDAR_MCP_TOKEN_PATH": "/workspace/extra/.calendar-mcp/credentials.json"
-      }
-    }
-  },
-  "additionalMounts": [
-    {
-      "hostPath": "/home/<user>/.calendar-mcp",
-      "containerPath": ".calendar-mcp",
-      "readonly": false
-    }
-  ]
-}
+### Register the MCP server
+
+For each chosen `<group-id>` (use `ncl groups list` to enumerate):
+
+```bash
+ncl groups config add-mcp-server \
+  --id <group-id> \
+  --name calendar \
+  --command google-calendar-mcp \
+  --args '[]' \
+  --env '{"GOOGLE_OAUTH_CREDENTIALS":"/workspace/extra/.calendar-mcp/gcp-oauth.keys.json","GOOGLE_CALENDAR_MCP_TOKEN_PATH":"/workspace/extra/.calendar-mcp/credentials.json"}'
 ```
 
-Substitute `<user>` with `echo $HOME`. `containerPath` is relative (mount-security rejects absolute paths — additional mounts land at `/workspace/extra/<relative>`).
+Approval behaviour depends on where you run it: from inside an agent's container `ncl` write verbs are approval-gated (admin approves before it lands); from a host operator shell with full scope, it executes immediately. Either way, the response tells you which path it took.
 
-**Same-group-as-gmail tip:** if this group already has the gmail MCP + `.gmail-mcp` mount, **merge, don't replace** — both entries coexist in `mcpServers` and `additionalMounts`.
+### Add the `.calendar-mcp` mount
+
+There is no `ncl groups config add-mount` verb yet (tracked in [#2395](https://github.com/nanocoai/nanoclaw/issues/2395)). Until that ships, edit the DB directly via the in-tree wrapper (`scripts/q.ts` — `setup/verify.ts:5` codifies that NanoClaw avoids depending on the `sqlite3` CLI binary, so don't shell out to it):
+
+```bash
+GROUP_ID='<group-id>'
+HOST_PATH="$HOME/.calendar-mcp"
+MOUNT=$(jq -cn --arg h "$HOST_PATH" '{hostPath:$h, containerPath:".calendar-mcp", readonly:false}')
+pnpm exec tsx scripts/q.ts data/v2.db "UPDATE container_configs \
+  SET additional_mounts = json_insert(additional_mounts, '\$[#]', json('$MOUNT')), \
+      updated_at = datetime('now') \
+  WHERE agent_group_id = '$GROUP_ID';"
+```
+
+Run from your NanoClaw project root (where `data/v2.db` lives). The `$[#]` placeholder is SQLite JSON1's append-to-end notation; it's `\$`-escaped so bash doesn't arithmetic-expand it before sqlite sees it. `updated_at` is ISO-string everywhere else in the schema, so use `datetime('now')` — not `strftime('%s','now')`, which would silently mix epoch ints into a column of YYYY-MM-DD HH:MM:SS strings.
+
+**Switch to `ncl groups config add-mount` once #2395 lands.** Update this skill at that time.
+
+`containerPath` is relative (mount-security rejects absolute paths — additional mounts land at `/workspace/extra/<relative>`).
+
+**Why this can't be `groups/<folder>/container.json`:** post-migration `014-container-configs`, `materializeContainerJson` in `src/container-config.ts` rewrites that file from the DB on every spawn. Anything hand-edited there is silently overwritten on next restart.
+
+**Same-group-as-gmail tip:** if this group already has the gmail MCP + `.gmail-mcp` mount, both coexist — `ncl groups config add-mcp-server` only updates the named entry, and `json_insert` appends to `additional_mounts` without disturbing existing entries.
 
 ## Phase 4: Build and Restart
 
 ```bash
 pnpm run build
-systemctl --user restart nanoclaw   # Linux
-# launchctl kickstart -k gui/$(id -u)/com.nanoclaw   # macOS
+```
+
+Run from your NanoClaw project root:
+
+```bash
+source setup/lib/install-slug.sh
+launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
+systemctl --user restart $(systemd_unit)              # Linux
 ```
 
 Kill any existing agent containers so they respawn with the new mcpServers config:
@@ -193,15 +209,27 @@ Common signals:
 - `command not found: google-calendar-mcp` → image not rebuilt.
 - `ENOENT ...credentials.json` → mount missing. Check the mount allowlist.
 - `401 Unauthorized` from `*.googleapis.com` → OneCLI isn't injecting; verify agent's secret mode and that Google Calendar is connected.
-- Agent says "I don't have calendar tools" → `mcp__calendar__*` missing from `TOOL_ALLOWLIST`, or image cache stale (`./container/build.sh` again).
+- Agent says "I don't have calendar tools" → the `calendar` MCP server isn't registered in this group's `mcpServers` (re-run the `ncl groups config add-mcp-server` step in Phase 3 for that group and restart it), or the agent-runner image is stale (`./container/build.sh`, `--no-cache` if suspicious).
 
 ## Removal
 
-1. Delete `"calendar"` from `mcpServers` and the `.calendar-mcp` mount from `additionalMounts` in each group's `container.json`.
-2. Remove `'mcp__calendar__*'` from `TOOL_ALLOWLIST`.
+1. For each group that had Calendar wired, remove the MCP server from the DB:
+   ```bash
+   ncl groups config remove-mcp-server --id <group-id> --name calendar
+   ```
+2. Remove the `.calendar-mcp` mount from the DB (no `remove-mount` verb yet — same #2395 dependency):
+   ```bash
+   pnpm exec tsx scripts/q.ts data/v2.db "UPDATE container_configs \
+     SET additional_mounts = (SELECT json_group_array(value) FROM json_each(additional_mounts) \
+                              WHERE json_extract(value, '\$.containerPath') != '.calendar-mcp'), \
+         updated_at = datetime('now') \
+     WHERE agent_group_id = '<group-id>';"
+   ```
 3. Remove `CALENDAR_MCP_VERSION` ARG and the calendar package from the Dockerfile install block.
-4. `pnpm run build && ./container/build.sh && systemctl --user restart nanoclaw`.
+4. `pnpm run build && ./container/build.sh && systemctl --user restart "$(. setup/lib/install-slug.sh && systemd_unit)"`.
 5. Optional: `rm -rf ~/.calendar-mcp/` and `onecli apps disconnect --provider google-calendar`.
+
+No `TOOL_ALLOWLIST` removal step — Phase 2 no longer edits it.
 
 ## Credits & references
 

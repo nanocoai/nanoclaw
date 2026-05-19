@@ -82,12 +82,15 @@ Sync to container: `mkdir -p data/env && cp .env data/env/env`
 
 ### 2. Start the service and scan the QR
 
-Restart NanoClaw:
+Restart NanoClaw.
+
+Run from your NanoClaw project root:
 
 ```bash
-systemctl --user restart nanoclaw   # Linux
+source setup/lib/install-slug.sh
+systemctl --user restart $(systemd_unit)              # Linux
 # or
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw   # macOS
+launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
 ```
 
 The adapter will print a **QR URL** to the logs and save it to `data/wechat/qr.txt`:

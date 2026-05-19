@@ -31,6 +31,8 @@
  * Affected call sites today (keep this list honest if you add more):
  *   - src/delivery.ts::handleSystemAction case 'create_agent'
  *   - src/db/messaging-groups.ts::createMessagingGroupAgent
+ *   - src/cli/resources/destinations.ts::add / remove (admin-time `ncl destinations`
+ *     — iterates over `getSessionsByAgentGroup(agentGroupId)`)
  */
 import type { AgentDestination } from '../../../types.js';
 import { getDb } from '../../../db/connection.js';

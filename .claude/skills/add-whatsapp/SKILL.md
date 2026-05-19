@@ -244,12 +244,15 @@ rm -rf store/auth/ && pnpm exec tsx setup/index.ts --step whatsapp-auth -- --met
 
 ### "waiting for this message" on reactions
 
-Signal sessions corrupted from rapid restarts. Clear sessions:
+Signal sessions corrupted from rapid restarts. Clear sessions.
+
+Run from your NanoClaw project root:
 
 ```bash
-systemctl --user stop nanoclaw
+source setup/lib/install-slug.sh
+systemctl --user stop $(systemd_unit)
 rm store/auth/session-*.json
-systemctl --user start nanoclaw
+systemctl --user start $(systemd_unit)
 ```
 
 ### Bot not responding
@@ -257,7 +260,7 @@ systemctl --user start nanoclaw
 1. Auth exists: `test -f store/auth/creds.json`
 2. Connected: `grep "Connected to WhatsApp" logs/nanoclaw.log | tail -1`
 3. Channel wired: `pnpm exec tsx scripts/q.ts data/v2.db "SELECT mg.platform_id, mg.name FROM messaging_groups mg JOIN messaging_group_agents mga ON mg.id=mga.messaging_group_id WHERE mg.channel_type='whatsapp'"`
-4. Service running: `systemctl --user status nanoclaw`
+4. Service running: `systemctl --user status "$(. setup/lib/install-slug.sh && systemd_unit)"`
 
 ### "conflict" disconnection
 

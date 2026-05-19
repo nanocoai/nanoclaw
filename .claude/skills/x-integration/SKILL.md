@@ -38,6 +38,8 @@ Before using this skill, ensure:
 
 ## Quick Start
 
+Run from your NanoClaw project root:
+
 ```bash
 # 1. Setup authentication (interactive)
 pnpm exec dotenv -e .env -- pnpm exec tsx .claude/skills/x-integration/scripts/setup.ts
@@ -49,9 +51,10 @@ pnpm exec dotenv -e .env -- pnpm exec tsx .claude/skills/x-integration/scripts/s
 
 # 3. Rebuild host and restart service
 pnpm run build
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # macOS
-# Linux: systemctl --user restart nanoclaw
-# Verify: launchctl list | grep nanoclaw (macOS) or systemctl --user status nanoclaw (Linux)
+source setup/lib/install-slug.sh
+launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
+# Linux: systemctl --user restart $(systemd_unit)
+# Verify: launchctl list | grep "$(launchd_label)" (macOS) or systemctl --user status $(systemd_unit) (Linux)
 ```
 
 ## Configuration
@@ -270,16 +273,23 @@ cat data/x-auth.json  # Should show {"authenticated": true, ...}
 
 ### 4. Restart Service
 
+Run from your NanoClaw project root:
+
 ```bash
 pnpm run build
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # macOS
-# Linux: systemctl --user restart nanoclaw
+source setup/lib/install-slug.sh
+launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
+# Linux: systemctl --user restart $(systemd_unit)
 ```
 
-**Verify success:**
+**Verify success.**
+
+Run from your NanoClaw project root:
+
 ```bash
-launchctl list | grep nanoclaw  # macOS — should show PID and exit code 0 or -
-# Linux: systemctl --user status nanoclaw
+source setup/lib/install-slug.sh
+launchctl list | grep "$(launchd_label)"  # macOS — should show PID and exit code 0 or -
+# Linux: systemctl --user status $(systemd_unit)
 ```
 
 ## Usage via WhatsApp
@@ -343,10 +353,13 @@ echo '{"content":"Test"}' | pnpm exec tsx .claude/skills/x-integration/scripts/p
 
 ### Authentication Expired
 
+Run from your NanoClaw project root:
+
 ```bash
 pnpm exec dotenv -e .env -- pnpm exec tsx .claude/skills/x-integration/scripts/setup.ts
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # macOS
-# Linux: systemctl --user restart nanoclaw
+source setup/lib/install-slug.sh
+launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
+# Linux: systemctl --user restart $(systemd_unit)
 ```
 
 ### Browser Lock Files

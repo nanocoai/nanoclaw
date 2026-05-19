@@ -136,7 +136,15 @@ Use `per-thread` session mode so each PR/issue gets its own agent session.
 
 If you're in the middle of `/setup`, return to the setup flow now.
 
-Otherwise, restart the service (`systemctl --user restart nanoclaw` or `launchctl kickstart -k gui/$(id -u)/com.nanoclaw`) to pick up the new channel.
+Otherwise, restart the service to pick up the new channel.
+
+Run from your NanoClaw project root:
+
+```bash
+source setup/lib/install-slug.sh
+launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
+systemctl --user restart $(systemd_unit)              # Linux
+```
 
 ## Channel Info
 

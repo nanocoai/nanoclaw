@@ -1,5 +1,31 @@
-import { getDb } from '../../db/connection.js';
+import { getDb, hasTable } from '../../db/connection.js';
+import { getSessionsByAgentGroup } from '../../db/sessions.js';
+import { log } from '../../log.js';
 import { registerResource } from '../crud.js';
+
+/**
+ * Project the agent's central `agent_destinations` rows into every active
+ * session's `inbound.db`. The agent-to-agent module is optional, so we guard
+ * on `hasTable('agent_destinations')` and load `writeDestinations` lazily —
+ * same pattern as container-runner.ts on container wake.
+ *
+ * Called from both `add` and `remove` so the live container picks up the
+ * change without waiting for the next spawn. Without this, send_message to
+ * the new local_name silently drops with "unknown destination" until restart.
+ * See the destination-projection invariant in
+ * src/modules/agent-to-agent/db/agent-destinations.ts.
+ */
+async function projectDestinationsToSessions(agentGroupId: string): Promise<void> {
+  if (!hasTable(getDb(), 'agent_destinations')) return;
+  const { writeDestinations } = await import('../../modules/agent-to-agent/write-destinations.js');
+  for (const session of getSessionsByAgentGroup(agentGroupId)) {
+    try {
+      writeDestinations(agentGroupId, session.id);
+    } catch (err) {
+      log.warn('Failed to project destinations to session inbound.db', { agentGroupId, sessionId: session.id, err });
+    }
+  }
+}
 
 registerResource({
   name: 'destination',
@@ -56,6 +82,7 @@ registerResource({
              VALUES (?, ?, ?, ?, datetime('now'))`,
           )
           .run(agentGroupId, localName, targetType, targetId);
+        await projectDestinationsToSessions(agentGroupId);
         return { agent_group_id: agentGroupId, local_name: localName, target_type: targetType, target_id: targetId };
       },
     },
@@ -71,6 +98,7 @@ registerResource({
           .prepare('DELETE FROM agent_destinations WHERE agent_group_id = ? AND local_name = ?')
           .run(agentGroupId, localName);
         if (result.changes === 0) throw new Error('destination not found');
+        await projectDestinationsToSessions(agentGroupId);
         return { removed: { agent_group_id: agentGroupId, local_name: localName } };
       },
     },

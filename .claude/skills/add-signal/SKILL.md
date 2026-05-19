@@ -90,17 +90,21 @@ No output = success.
 
 > ⚠ Stop NanoClaw before running signal-cli commands — the daemon holds an exclusive lock on its data directory while running.
 
+Run from your NanoClaw project root:
+
 ```bash
+source setup/lib/install-slug.sh
+
 # macOS
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
+launchctl unload ~/Library/LaunchAgents/$(launchd_label).plist
 signal-cli -a +1YOURNUMBER updateProfile --name "YourBotName"
 # optionally: --avatar /path/to/avatar.jpg
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
+launchctl load ~/Library/LaunchAgents/$(launchd_label).plist
 
 # Linux
-systemctl --user stop nanoclaw
+systemctl --user stop $(systemd_unit)
 signal-cli -a +1YOURNUMBER updateProfile --name "YourBotName"
-systemctl --user start nanoclaw
+systemctl --user start $(systemd_unit)
 ```
 
 ### Path B: Link as secondary device
@@ -185,12 +189,16 @@ Sync to container: `mkdir -p data/env && cp .env data/env/env`
 
 ### Restart
 
+Run from your NanoClaw project root:
+
 ```bash
+source setup/lib/install-slug.sh
+
 # macOS
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw
+launchctl kickstart -k gui/$(id -u)/$(launchd_label)
 
 # Linux
-systemctl --user restart nanoclaw
+systemctl --user restart $(systemd_unit)
 ```
 
 ## Wiring
@@ -283,7 +291,7 @@ If you see `Signal daemon not reachable at 127.0.0.1:7583` and `SIGNAL_MANAGE_DA
 
 1. Channel initialized: `grep "Signal channel connected" logs/nanoclaw.log | tail -1`
 2. Channel wired: `pnpm exec tsx scripts/q.ts data/v2.db "SELECT mg.platform_id, mg.name FROM messaging_groups mg JOIN messaging_group_agents mga ON mg.id = mga.messaging_group_id WHERE mg.channel_type='signal'"`
-3. Service running: `launchctl print gui/$(id -u)/com.nanoclaw` (macOS) / `systemctl --user status nanoclaw` (Linux)
+3. Service running: `launchctl print gui/$(id -u)/"$(. setup/lib/install-slug.sh && launchd_label)"` (macOS) / `systemctl --user status "$(. setup/lib/install-slug.sh && systemd_unit)"` (Linux)
 4. **Check for duplicate service instances** — if `logs/nanoclaw.error.log` shows `No adapter for channel type channelType="signal"` despite the adapter starting, two NanoClaw processes are racing. See the `/debug` skill section "No adapter for channel type / Messages silently lost" for the full fix.
 
 ### Messages delivered but never arrive (null platformMsgId)

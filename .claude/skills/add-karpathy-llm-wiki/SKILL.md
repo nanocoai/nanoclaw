@@ -75,9 +75,12 @@ If yes, ask the agent to schedule the lint task using the `schedule_task` MCP to
 
 ## Step 6: Restart
 
+Run from your NanoClaw project root:
+
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # macOS
-# Linux: systemctl --user restart nanoclaw
+source setup/lib/install-slug.sh
+launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
+systemctl --user restart $(systemd_unit)              # Linux
 ```
 
 Tell the user to test by sending a source to the wiki group.

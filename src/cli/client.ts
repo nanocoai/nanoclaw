@@ -21,6 +21,7 @@ import { formatResponse } from './format.js';
 import type { RequestFrame } from './frame.js';
 import { SocketTransport } from './socket-client.js';
 import type { Transport } from './transport.js';
+import { formatTransportError } from './transport-errors.js';
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
@@ -103,21 +104,6 @@ function printUsage(): void {
       '',
     ].join('\n'),
   );
-}
-
-function formatTransportError(e: unknown): string {
-  const msg = e instanceof Error ? e.message : String(e);
-  if (msg.includes('ENOENT') || msg.includes('ECONNREFUSED')) {
-    return [
-      `ncl: cannot reach NanoClaw host (${msg}).`,
-      `Is the host running? Start it with: pnpm run dev`,
-      `Or, if installed as a service:`,
-      `  macOS:  launchctl kickstart -k gui/$(id -u)/com.nanoclaw`,
-      `  Linux:  systemctl --user restart nanoclaw`,
-      ``,
-    ].join('\n');
-  }
-  return `ncl: transport error: ${msg}\n`;
 }
 
 main().catch((err) => {

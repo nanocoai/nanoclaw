@@ -229,19 +229,22 @@ echo '{}' | docker run -i --entrypoint /bin/echo nanoclaw-agent:latest "Containe
 
 ### 7. Restart Service
 
-Rebuild the main app and restart:
+Rebuild the main app and restart.
+
+Run from your NanoClaw project root:
 
 ```bash
 pnpm run build
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # macOS
-# Linux: systemctl --user restart nanoclaw
+source setup/lib/install-slug.sh
+launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
+# Linux: systemctl --user restart $(systemd_unit)
 ```
 
 Wait 3 seconds for service to start, then verify:
 ```bash
 sleep 3
-launchctl list | grep nanoclaw  # macOS
-# Linux: systemctl --user status nanoclaw
+launchctl list | grep "$(. setup/lib/install-slug.sh && launchd_label)"  # macOS
+# Linux: systemctl --user status "$(. setup/lib/install-slug.sh && systemd_unit)"
 ```
 
 ### 8. Test Integration
@@ -287,4 +290,4 @@ To remove Parallel AI integration:
 2. Revert changes to container-runner.ts and agent-runner/src/index.ts
 3. Remove Web Research Tools section from groups/main/CLAUDE.md
 4. Rebuild: `./container/build.sh && pnpm run build`
-5. Restart: `launchctl kickstart -k gui/$(id -u)/com.nanoclaw` (macOS) or `systemctl --user restart nanoclaw` (Linux)
+5. Restart: `source setup/lib/install-slug.sh && launchctl kickstart -k gui/$(id -u)/$(launchd_label)` (macOS) or `source setup/lib/install-slug.sh && systemctl --user restart $(systemd_unit)` (Linux)

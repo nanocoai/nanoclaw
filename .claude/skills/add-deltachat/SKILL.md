@@ -98,12 +98,16 @@ The `/set-avatar` command (send an image with that caption) is the easiest way t
 
 ### Restart
 
+Run from your NanoClaw project root:
+
 ```bash
+source setup/lib/install-slug.sh
+
 # Linux
-systemctl --user restart nanoclaw
+systemctl --user restart $(systemd_unit)
 
 # macOS
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw
+launchctl kickstart -k gui/$(id -u)/$(launchd_label)
 ```
 
 On first start the adapter configures the email account (IMAP/SMTP credentials, calls `configure()`). Subsequent starts skip straight to `startIo()`. Account data is stored in `dc-account/` in the project root (or your `DC_ACCOUNT_DIR`).
@@ -232,7 +236,7 @@ Set `DC_SMTP_SECURITY=1` and `DC_SMTP_PORT=465` in `.env`, then restart.
 
 ```bash
 rm -f dc-account/accounts.lock
-systemctl --user restart nanoclaw
+systemctl --user restart "$(. setup/lib/install-slug.sh && systemd_unit)"
 ```
 
 ### Bot not responding after restart
