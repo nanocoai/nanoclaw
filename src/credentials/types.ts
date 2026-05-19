@@ -11,7 +11,7 @@
  *   auth.json, future Pi auth bundle). Materialized to a per-session path
  *   and mounted into the container. Runtime refreshes its own state.
  * - connect_required: caller (user/agent group) must connect a provider
- *   account first. Surfaces as 402 (or 409) on the proxy and as a spawn
+ *   account first. Surfaces as 402 on the proxy and as a spawn
  *   refusal in container-runner.
  * - forbidden: provider/model not allowed for this agent group. 403.
  * - fallback: no override — use the existing provider config fn / env
