@@ -39,7 +39,7 @@ describe('end-to-end: Codex API-key mode via gateway resolver', () => {
     expect(result.contribution.env.OPENAI_API_KEY).toBe('placeholder');
 
     // The real key must never reach the container env.
-    const allEnvValues = Object.values(result.contribution.env);
+    const allEnvValues = Object.values(result.contribution.env ?? {});
     expect(allEnvValues).not.toContain('sk-real-secret-do-not-leak');
   });
 });

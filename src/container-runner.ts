@@ -244,7 +244,11 @@ export interface BuildContributionInput {
 }
 
 export interface BuildContributionResult {
-  contribution: ProviderContainerContribution;
+  /**
+   * Always has both `mounts` and `env` defined — buildContributionForSpawn
+   * normalises the result. Refusal path returns empty arrays/objects too.
+   */
+  contribution: Required<Pick<ProviderContainerContribution, 'mounts' | 'env'>>;
   refusal: CredentialRefusal | null;
 }
 
@@ -311,7 +315,7 @@ export async function buildContributionForSpawn(input: BuildContributionInput): 
 function mergeContributions(
   a: ProviderContainerContribution,
   b: ProviderContainerContribution,
-): ProviderContainerContribution {
+): Required<Pick<ProviderContainerContribution, 'mounts' | 'env'>> {
   return {
     mounts: [...(a.mounts ?? []), ...(b.mounts ?? [])],
     env: { ...(a.env ?? {}), ...(b.env ?? {}) },
