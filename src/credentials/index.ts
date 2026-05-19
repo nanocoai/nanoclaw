@@ -13,3 +13,5 @@ export { HTTP_STATUS_CONNECT_REQUIRED, HTTP_STATUS_FORBIDDEN, serializeCredentia
 export type { CredentialErrorBody, CredentialErrorStatus, SerializedCredentialError } from './errors.js';
 export { registerProviderRoute, getProviderRoute, listProviderRoutes } from './provider-routes.js';
 export type { ProviderRoute } from './provider-routes.js';
+export { materializeNativeAuthBundle } from './bundle-materializer.js';
+export type { MaterializeResult } from './bundle-materializer.js';
