@@ -968,21 +968,20 @@ async function runCustomEndpointAuth(
 
 /**
  * Pick the setup-helper CLI (Claude Code or OpenAI Codex) and persist
- * the choice to `.env` as `NANOCLAW_AI_CODING_CLI=<name>`. Three paths:
+ * the choice to `.env` as `NANOCLAW_AI_CODING_CLI=<name>`. Two paths:
  *
  *   1. Already-configured: `NANOCLAW_AI_CODING_CLI` is set, the named
  *      adapter exists, and the binary is installed → skip the prompt.
  *      If the configured CLI is missing (env var stale, or the user
  *      uninstalled it), fall through and re-pick with a warning.
- *   2. Auto-pick: exactly one CLI installed → silently persist that
- *      choice and continue.
- *   3. Picker: zero or two-or-more installed. With ≥2 we ask which
- *      one. With 0 we offer to install Claude Code via its install
- *      script (Codex has no scriptable installer in this fork) and
- *      bail if declined.
+ *   2. Picker: always prompt on first setup (operator preference — the
+ *      upstream PR auto-picks when exactly one is installed, but we want
+ *      the choice to be explicit). With 0 installed we offer to install
+ *      Claude Code via its install script (Codex has no scriptable
+ *      installer in this fork) and bail if declined.
  *
- * `opts.force` skips path 1 (always re-prompt or auto-pick from current
- * install state). Used by the `--reconfigure-cli` mode.
+ * `opts.force` skips path 1 (always re-prompt from current install
+ * state). Used by the `--reconfigure-cli` mode.
  */
 async function pickAiCodingCli(opts: { force?: boolean } = {}): Promise<void> {
   const installed = listAiCodingClis().filter((c) => c.isInstalled());
