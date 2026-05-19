@@ -19,13 +19,26 @@ import { readEnvFile } from '../env.js';
 import { applyCredentialDecisions, resolveCredential, type CredentialDecision } from '../credentials/index.js';
 import type { ProviderContainerContext, ProviderContainerContribution } from './provider-container-registry.js';
 
-export async function getClaudeContribution(ctx: ProviderContainerContext): Promise<ProviderContainerContribution> {
-  const decision = await resolveCredential({
-    agentGroupId: ctx.agentGroupId,
-    runtimeProvider: 'claude',
-    modelProvider: 'anthropic',
-    authMode: 'auto',
-  });
+/**
+ * @param ctx - Per-session container context.
+ * @param preResolved - Optional already-resolved credential decision. Pass this
+ *   when the caller (typically `buildContributionForSpawn`) has already invoked
+ *   `resolveCredential` for the session — avoids firing the resolver hook twice
+ *   per spawn, which matters for any future stateful hook (rate-limited,
+ *   one-shot provisioner, side-effecting).
+ */
+export async function getClaudeContribution(
+  ctx: ProviderContainerContext,
+  preResolved?: CredentialDecision,
+): Promise<ProviderContainerContribution> {
+  const decision =
+    preResolved ??
+    (await resolveCredential({
+      agentGroupId: ctx.agentGroupId,
+      runtimeProvider: 'claude',
+      modelProvider: 'anthropic',
+      authMode: 'auto',
+    }));
 
   const effective: CredentialDecision = decision.kind === 'fallback' ? defaultDecisionFromEnv() : decision;
 

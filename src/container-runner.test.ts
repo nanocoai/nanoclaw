@@ -89,4 +89,19 @@ describe('container-runner credential integration', () => {
       OPENAI_API_KEY: 'placeholder',
     });
   });
+
+  it('credential resolver hook fires exactly once per spawn for the claude provider', async () => {
+    let callCount = 0;
+    setCredentialResolverHook(async () => {
+      callCount += 1;
+      return { kind: 'fallback' };
+    });
+    await buildContributionForSpawn({
+      provider: 'claude',
+      sessionDir: '/tmp/sess',
+      agentGroupId: 'g1',
+      hostEnv: {} as NodeJS.ProcessEnv,
+    });
+    expect(callCount).toBe(1);
+  });
 });

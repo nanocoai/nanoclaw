@@ -258,17 +258,16 @@ export interface BuildContributionResult {
  *   3. Otherwise apply the decision via applyCredentialDecisions. Empty
  *      contribution if `fallback`.
  *   4. Merge with the provider-specific contribution:
- *        - claude  -> getClaudeContribution (async; runs the resolver
- *          again internally, which is cheap and lets the .env fallback
- *          path fire when no hook is installed)
+ *        - claude  -> getClaudeContribution, passing the already-resolved
+ *          decision so the resolver hook fires exactly once per spawn.
+ *          When the hook returns `fallback`, getClaudeContribution falls
+ *          back to reading ANTHROPIC_BASE_URL from .env.
  *        - others  -> registered ProviderContainerConfigFn (existing
  *          path, preserves opencode/codex/etc.)
  *
  * Pure: no DB reads, no process.env reads. Caller passes everything in.
  */
-export async function buildContributionForSpawn(
-  input: BuildContributionInput,
-): Promise<BuildContributionResult> {
+export async function buildContributionForSpawn(input: BuildContributionInput): Promise<BuildContributionResult> {
   const decision: CredentialDecision = await resolveCredential({
     agentGroupId: input.agentGroupId,
     runtimeProvider: input.provider,
@@ -284,11 +283,14 @@ export async function buildContributionForSpawn(
 
   let providerContribution: ProviderContainerContribution = {};
   if (input.provider === 'claude') {
-    providerContribution = await getClaudeContribution({
-      sessionDir: input.sessionDir,
-      agentGroupId: input.agentGroupId,
-      hostEnv: input.hostEnv,
-    });
+    providerContribution = await getClaudeContribution(
+      {
+        sessionDir: input.sessionDir,
+        agentGroupId: input.agentGroupId,
+        hostEnv: input.hostEnv,
+      },
+      decision,
+    );
   } else {
     const fn = getProviderContainerConfig(input.provider);
     if (fn) {
