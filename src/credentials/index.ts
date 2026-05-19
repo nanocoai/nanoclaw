@@ -1,2 +1,11 @@
 export type { CredentialDecision, CredentialResolverInput, CredentialResolverHook } from './types.js';
 export { resolveCredential, setCredentialResolverHook, resetCredentialResolverHook } from './resolver.js';
+export {
+  NANOCLAW_HEADER_AGENT_GROUP,
+  NANOCLAW_HEADER_RUNTIME_PROVIDER,
+  NANOCLAW_HEADER_MODEL_PROVIDER,
+  NANOCLAW_HEADER_MODEL,
+  NANOCLAW_INTERNAL_HEADERS,
+  stripNanoclawHeaders,
+} from './headers.js';
+export type { HeaderMap } from './headers.js';
