@@ -37,6 +37,8 @@ export interface ContainerConfig {
   additionalMounts: AdditionalMountConfig[];
   skills: string[] | 'all';
   provider?: string;
+  modelProvider?: string;
+  authMode?: 'auto' | 'api_key' | 'subscription' | 'oauth' | 'native';
   groupName?: string;
   assistantName?: string;
   agentGroupId?: string;
@@ -57,6 +59,8 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     additionalMounts: JSON.parse(row.additional_mounts) as AdditionalMountConfig[],
     skills: JSON.parse(row.skills) as string[] | 'all',
     provider: row.provider ?? undefined,
+    modelProvider: row.model_provider ?? undefined,
+    authMode: row.auth_mode ?? undefined,
     groupName: group.name,
     assistantName: row.assistant_name ?? group.name,
     agentGroupId: group.id,

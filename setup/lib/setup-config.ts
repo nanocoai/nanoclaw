@@ -59,8 +59,7 @@ interface IntEntry extends BaseEntry {
 
 export type Entry = StringEntry | EnumEntry | BoolEntry | IntEntry;
 
-const httpUrl = (v: string): string | undefined =>
-  /^https?:\/\/\S+/.test(v) ? undefined : 'Must be http(s)://…';
+const httpUrl = (v: string): string | undefined => (/^https?:\/\/\S+/.test(v) ? undefined : 'Must be http(s)://…');
 
 export const CONFIG: Entry[] = [
   {
@@ -122,6 +121,35 @@ export const CONFIG: Entry[] = [
     help: 'Skip the "what should your assistant call you?" prompt.',
     surface: 'flag',
     type: 'string',
+  },
+  {
+    key: 'agentProvider',
+    envVar: 'NANOCLAW_AGENT_PROVIDER',
+    label: 'Agent provider',
+    help: 'Default agent provider to install and use: claude, codex, or both.',
+    surface: 'flag+ui',
+    group: 'Agents',
+    type: 'enum',
+    options: [
+      { value: 'claude', label: 'Claude' },
+      { value: 'codex', label: 'Codex' },
+      { value: 'both', label: 'Both' },
+    ],
+    default: 'claude',
+  },
+  {
+    key: 'codexAuthMode',
+    envVar: 'NANOCLAW_CODEX_AUTH_MODE',
+    label: 'Codex auth mode',
+    help: 'How Codex agents should authenticate when Codex is selected: subscription, api, or skip.',
+    surface: 'flag+ui',
+    group: 'Agents',
+    type: 'enum',
+    options: [
+      { value: 'subscription', label: 'ChatGPT subscription' },
+      { value: 'api', label: 'OpenAI API key' },
+      { value: 'skip', label: 'Skip' },
+    ],
   },
   {
     key: 'assistMode',

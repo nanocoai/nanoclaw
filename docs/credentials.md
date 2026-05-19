@@ -51,9 +51,13 @@ setCredentialResolverHook(fn): void;
 resolveCredential(input): Promise<CredentialDecision>;
 ```
 
-Trunk's default hook returns `{ kind: 'fallback' }` — same behaviour
-as before this abstraction landed. Multi-tenant / classroom / per-user
-installs register a real resolver.
+Trunk's default hook returns `{ kind: 'fallback' }` except for the
+built-in Codex OpenAI API-key path (`runtimeProvider: "codex"`,
+`modelProvider: "openai"`, `authMode: "api_key"`). That path returns a
+gateway decision so the container sees `OPENAI_BASE_URL=https://api.openai.com/v1`
+and `OPENAI_API_KEY=placeholder`; OneCLI injects the real key on the
+wire. Multi-tenant / classroom / per-user installs can still register a
+real resolver.
 
 **Hooks must be idempotent and side-effect-free.** The resolver fires
 exactly once per container spawn for the active provider — but it is
@@ -63,22 +67,22 @@ token mint, one-shot provisioner) is not currently supported.
 
 ## Decision kinds
 
-| Kind | When | Effect |
-|------|------|--------|
-| `gateway_secret` | API-key / bearer / OAuth provider with placeholder injection | Env carries baseUrl + placeholder; OneCLI rewrites Authorization on wire |
-| `native_auth_bundle` | Codex subscription, future Pi subscription | Bundle materialized + mounted; runtime owns refresh |
-| `connect_required` | User/agent group needs to connect a provider account | 402 envelope from gateway; spawn refusal from container-runner |
-| `forbidden` | Policy denies this combination | 403 envelope; spawn refusal |
-| `fallback` | No override — use existing path | Provider config fn / .env / OneCLI default routing |
+| Kind                 | When                                                         | Effect                                                                   |
+| -------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| `gateway_secret`     | API-key / bearer / OAuth provider with placeholder injection | Env carries baseUrl + placeholder; OneCLI rewrites Authorization on wire |
+| `native_auth_bundle` | Codex subscription, future Pi subscription                   | Bundle materialized + mounted; runtime owns refresh                      |
+| `connect_required`   | User/agent group needs to connect a provider account         | 402 envelope from gateway; spawn refusal from container-runner           |
+| `forbidden`          | Policy denies this combination                               | 403 envelope; spawn refusal                                              |
+| `fallback`           | No override — use existing path                              | Provider config fn / .env / OneCLI default routing                       |
 
 Env wiring for `gateway_secret` is keyed by `providerId`:
 
-| providerId | base URL env var | token env var |
-|------------|-----------------|---------------|
-| anthropic | `ANTHROPIC_BASE_URL` | `ANTHROPIC_AUTH_TOKEN` |
-| openai | `OPENAI_BASE_URL` | `OPENAI_API_KEY` |
-| openrouter | `OPENROUTER_BASE_URL` | `OPENROUTER_API_KEY` |
-| google | `GOOGLE_BASE_URL` | `GOOGLE_API_KEY` |
+| providerId | base URL env var      | token env var          |
+| ---------- | --------------------- | ---------------------- |
+| anthropic  | `ANTHROPIC_BASE_URL`  | `ANTHROPIC_AUTH_TOKEN` |
+| openai     | `OPENAI_BASE_URL`     | `OPENAI_API_KEY`       |
+| openrouter | `OPENROUTER_BASE_URL` | `OPENROUTER_API_KEY`   |
+| google     | `GOOGLE_BASE_URL`     | `GOOGLE_API_KEY`       |
 
 Other `providerId` values pass through silently — the provider's
 registered container config fn is responsible for SDK env wiring.

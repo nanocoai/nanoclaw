@@ -10,10 +10,9 @@
  * probe in <1s. Treat as `undefined` — setup will proceed and let
  * actual usage surface the error if auth is broken.
  *
- * Install: codex has no scriptable installer in this fork yet (the
- * upstream `/add-codex` skill installs it via pnpm global). Returning
- * `null` for installScript means setup tells the user to install
- * manually rather than trying to auto-install.
+ * Install: setup installs the pinned Codex CLI through pnpm global so
+ * Codex-only users do not need Claude Code just to recover from setup
+ * failures or run the subscription login flow.
  */
 import { execSync } from 'child_process';
 
@@ -59,7 +58,7 @@ export const codexCli: AiCodingCli = {
   binary: 'codex',
   isInstalled,
   isAuthenticated,
-  installScript: null,
+  installScript: 'setup/install-codex-cli.sh',
   installInstructions: 'npm install -g @openai/codex   (or: pnpm install -g @openai/codex)',
   login(): null {
     return null;

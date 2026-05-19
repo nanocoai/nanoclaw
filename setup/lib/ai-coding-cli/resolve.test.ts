@@ -17,6 +17,7 @@
  *   ✓ NANOCLAW_AI_CODING_CLI=mystery (unknown) → falls through to first-installed
  *   ✓ NANOCLAW_AI_CODING_CLI=codex but codex NOT installed → falls through
  *   ✓ env var is case-insensitive
+ *   ✓ blank process env masks local .env configuration
  */
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 
@@ -34,7 +35,7 @@ function setInstalled(adapter: { isInstalled: () => boolean }, value: boolean) {
 
 beforeEach(() => {
   // Reset .env-read cache — readEnvFile reads the file each call so no cache to bust.
-  delete process.env.NANOCLAW_AI_CODING_CLI;
+  process.env.NANOCLAW_AI_CODING_CLI = '';
   // Default: all uninstalled.
   setInstalled(claudeCli, false);
   setInstalled(codexCli, false);
@@ -43,7 +44,7 @@ beforeEach(() => {
 afterEach(() => {
   claudeCli.isInstalled = originals.claude;
   codexCli.isInstalled = originals.codex;
-  delete process.env.NANOCLAW_AI_CODING_CLI;
+  process.env.NANOCLAW_AI_CODING_CLI = '';
 });
 
 describe('resolveAiCodingCli — auto-pick from install state', () => {
@@ -101,5 +102,12 @@ describe('resolveAiCodingCli — NANOCLAW_AI_CODING_CLI env var', () => {
     setInstalled(codexCli, false);
     process.env.NANOCLAW_AI_CODING_CLI = 'codex';
     expect(resolveAiCodingCli()).toBeNull();
+  });
+
+  it('treats a blank process env value as unset without falling back to .env', () => {
+    setInstalled(claudeCli, true);
+    setInstalled(codexCli, true);
+    process.env.NANOCLAW_AI_CODING_CLI = '';
+    expect(resolveAiCodingCli()?.name).toBe('claude');
   });
 });

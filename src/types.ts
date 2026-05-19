@@ -14,6 +14,8 @@ export interface AgentGroup {
 export interface ContainerConfigRow {
   agent_group_id: string;
   provider: string | null;
+  model_provider: string | null;
+  auth_mode: 'auto' | 'api_key' | 'subscription' | 'oauth' | 'native' | null;
   model: string | null;
   effort: string | null;
   image_tag: string | null;

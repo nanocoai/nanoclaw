@@ -90,6 +90,35 @@ describe('container-runner credential integration', () => {
     });
   });
 
+  it('passes model provider and auth mode from the materialized container config into the resolver', async () => {
+    const seen: Array<{ runtimeProvider: string; modelProvider?: string; authMode?: string }> = [];
+    setCredentialResolverHook(async (input) => {
+      seen.push({
+        runtimeProvider: input.runtimeProvider,
+        modelProvider: input.modelProvider,
+        authMode: input.authMode,
+      });
+      return {
+        kind: 'gateway_secret',
+        providerId: 'openai',
+        baseUrl: 'https://gw.example/openai/v1',
+        placeholderToken: 'placeholder',
+        refreshPolicy: 'gateway',
+      };
+    });
+    const result = await buildContributionForSpawn({
+      provider: 'codex',
+      modelProvider: 'openai',
+      authMode: 'api_key',
+      sessionDir: '/tmp/sess',
+      agentGroupId: 'g1',
+      hostEnv: {} as NodeJS.ProcessEnv,
+    });
+
+    expect(result.refusal).toBeNull();
+    expect(seen).toEqual([{ runtimeProvider: 'codex', modelProvider: 'openai', authMode: 'api_key' }]);
+  });
+
   it('with hook returning connect_required, refusal is surfaced', async () => {
     setCredentialResolverHook(async () => ({
       kind: 'connect_required',

@@ -15,12 +15,16 @@
  * Usage:
  *   pnpm exec tsx scripts/init-cli-agent.ts \
  *     --display-name "Gavriel" \
- *     [--agent-name "Andy"]
+ *     [--agent-name "Andy"] \
+ *     [--provider claude|codex] \
+ *     [--model-provider openai] \
+ *     [--auth-mode api_key|subscription]
  */
 import path from 'path';
 
 import { DATA_DIR } from '../src/config.js';
-import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
+import { createAgentGroup, getAgentGroupByFolder, updateAgentGroup } from '../src/db/agent-groups.js';
+import { updateContainerConfigScalars } from '../src/db/container-configs.js';
 import { initDb } from '../src/db/connection.js';
 import {
   createMessagingGroup,
@@ -42,12 +46,18 @@ interface Args {
   displayName: string;
   agentName: string;
   folder?: string;
+  provider?: string;
+  modelProvider?: string;
+  authMode?: 'auto' | 'api_key' | 'subscription' | 'oauth' | 'native';
 }
 
 function parseArgs(argv: string[]): Args {
   let displayName: string | undefined;
   let agentName: string | undefined;
   let folder: string | undefined;
+  let provider: string | undefined;
+  let modelProvider: string | undefined;
+  let authMode: Args['authMode'] | undefined;
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i];
     const val = argv[i + 1];
@@ -59,6 +69,18 @@ function parseArgs(argv: string[]): Args {
       i++;
     } else if (key === '--folder') {
       folder = val;
+      i++;
+    } else if (key === '--provider') {
+      provider = val;
+      i++;
+    } else if (key === '--model-provider') {
+      modelProvider = val;
+      i++;
+    } else if (key === '--auth-mode') {
+      if (!['auto', 'api_key', 'subscription', 'oauth', 'native'].includes(val)) {
+        throw new Error('--auth-mode must be one of: auto, api_key, subscription, oauth, native');
+      }
+      authMode = val as Args['authMode'];
       i++;
     }
   }
@@ -73,6 +95,9 @@ function parseArgs(argv: string[]): Args {
     displayName,
     agentName: agentName?.trim() || displayName,
     folder,
+    provider: provider?.trim() || undefined,
+    modelProvider: modelProvider?.trim() || undefined,
+    authMode,
   };
 }
 
@@ -109,13 +134,17 @@ async function main(): Promise<void> {
       id: agId,
       name: args.agentName,
       folder,
-      agent_provider: null,
+      agent_provider: args.provider ?? null,
       created_at: now,
     });
     ag = getAgentGroupByFolder(folder)!;
     console.log(`Created agent group: ${ag.id} (${folder})`);
   } else {
     console.log(`Reusing agent group: ${ag.id} (${folder})`);
+    if (args.provider && ag.agent_provider !== args.provider) {
+      updateAgentGroup(ag.id, { agent_provider: args.provider });
+      ag = getAgentGroupByFolder(folder)!;
+    }
   }
   initGroupFilesystem(ag, {
     instructions:
@@ -123,6 +152,13 @@ async function main(): Promise<void> {
       `You are ${args.agentName}, a personal NanoClaw agent for ${args.displayName}. ` +
       'When the user first reaches out, introduce yourself briefly and invite them to chat. Keep replies concise.',
   });
+  if (args.provider) {
+    updateContainerConfigScalars(ag.id, {
+      provider: args.provider,
+      model_provider: args.modelProvider,
+      auth_mode: args.authMode,
+    });
+  }
 
   // 3. CLI messaging group + wiring.
   let cliMg: MessagingGroup | undefined = getMessagingGroupByPlatform(CLI_CHANNEL, CLI_PLATFORM_ID);
@@ -161,10 +197,11 @@ async function main(): Promise<void> {
 
   console.log('');
   console.log('Init complete.');
-  console.log(
-    `  owner:   ${CLI_SYNTHETIC_USER_ID}${promotedToOwner ? ' (promoted on first owner)' : ''}`,
-  );
+  console.log(`  owner:   ${CLI_SYNTHETIC_USER_ID}${promotedToOwner ? ' (promoted on first owner)' : ''}`);
   console.log(`  agent:   ${ag.name} [${ag.id}] @ groups/${folder}`);
+  if (args.provider) console.log(`  provider: ${args.provider}`);
+  if (args.modelProvider) console.log(`  model provider: ${args.modelProvider}`);
+  if (args.authMode) console.log(`  auth mode: ${args.authMode}`);
   console.log(`  channel: cli/${CLI_PLATFORM_ID}`);
   console.log('');
   console.log('Run `pnpm run chat hi` to talk to your agent.');

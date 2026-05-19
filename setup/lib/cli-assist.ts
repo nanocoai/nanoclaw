@@ -4,8 +4,7 @@
  * Flow:
  *   1. Resolve the configured AI-coding CLI via `resolveAiCodingCli()`.
  *      Check it's installed; if not, offer to install it via the
- *      adapter's `installScript` (Claude Code only — Codex has no
- *      scriptable installer in this fork). Check auth via the
+ *      adapter's `installScript`. Check auth via the
  *      adapter's `isAuthenticated()` probe; if not signed in (Claude
  *      only), offer to run `claude setup-token`. Other CLIs are
  *      expected to be authenticated by the operator outside setup.
@@ -55,16 +54,14 @@ export interface AssistContext {
 export const STEP_FILES: Record<string, string[]> = {
   bootstrap: ['setup.sh', 'setup/install-node.sh', 'nanoclaw.sh'],
   environment: ['setup/environment.ts'],
-  container: [
-    'setup/container.ts',
-    'setup/install-docker.sh',
-    'container/Dockerfile',
-  ],
+  container: ['setup/container.ts', 'setup/install-docker.sh', 'container/Dockerfile'],
   onecli: ['setup/onecli.ts'],
   auth: [
     'setup/auth.ts',
     'setup/register-claude-token.sh',
     'setup/install-claude.sh',
+    'setup/lib/codex-auth.ts',
+    'setup/install-codex-cli.sh',
   ],
   mounts: ['setup/mounts.ts'],
   service: ['setup/service.ts'],
@@ -80,14 +77,10 @@ export const STEP_FILES: Record<string, string[]> = {
   'slack-install': ['setup/add-slack.sh', 'setup/channels/slack.ts'],
   'slack-validate': ['setup/channels/slack.ts'],
   'imessage-install': ['setup/add-imessage.sh', 'setup/channels/imessage.ts'],
-  'imessage': ['setup/channels/imessage.ts'],
+  imessage: ['setup/channels/imessage.ts'],
   'teams-install': ['setup/add-teams.sh', 'setup/channels/teams.ts'],
   'teams-manifest': ['setup/lib/teams-manifest.ts', 'setup/channels/teams.ts'],
-  'init-first-agent': [
-    'scripts/init-first-agent.ts',
-    'setup/channels/telegram.ts',
-    'setup/channels/discord.ts',
-  ],
+  'init-first-agent': ['scripts/init-first-agent.ts', 'setup/channels/telegram.ts', 'setup/channels/discord.ts'],
 };
 
 export const BIG_PICTURE_FILES = ['README.md', 'setup/auto.ts'];
@@ -127,10 +120,7 @@ export async function offerAiCodingCliAssist(
     return false;
   }
 
-  note(
-    `${parsed.reason}\n\n${k.cyan('$')} ${parsed.command}`,
-    `${cli.displayName}'s suggestion`,
-  );
+  note(`${parsed.reason}\n\n${k.cyan('$')} ${parsed.command}`, `${cli.displayName}'s suggestion`);
 
   const run = ensureAnswer(
     await p.confirm({
@@ -238,7 +228,9 @@ async function runClaudeSetupToken(projectRoot: string, cli: AiCodingCli): Promi
     const isUtilLinux = (() => {
       try {
         return execSync('script --version 2>&1', { encoding: 'utf-8' }).includes('util-linux');
-      } catch { return false; }
+      } catch {
+        return false;
+      }
     })();
     const scriptArgs = isUtilLinux
       ? ['-q', '-c', 'claude setup-token', tmpfile]
@@ -251,16 +243,16 @@ async function runClaudeSetupToken(projectRoot: string, cli: AiCodingCli): Promi
 
     if (cli.isAuthenticated() === false && fs.existsSync(tmpfile)) {
       const raw = fs.readFileSync(tmpfile, 'utf-8');
-      const stripped = raw
-        .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-        .replace(/[\n\r]/g, '');
+      const stripped = raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/[\n\r]/g, '');
       const matches = stripped.match(/(sk-ant-oat[A-Za-z0-9_-]{80,500}AA)/g);
       if (matches) {
         process.env.CLAUDE_CODE_OAUTH_TOKEN = matches[matches.length - 1];
       }
     }
   } finally {
-    try { fs.unlinkSync(tmpfile); } catch {}
+    try {
+      fs.unlinkSync(tmpfile);
+    } catch {}
   }
 
   if (cli.isAuthenticated() === false) {
@@ -277,9 +269,7 @@ function buildPrompt(ctx: AssistContext, projectRoot: string): string {
     ...BIG_PICTURE_FILES,
     ...stepRefs,
     'logs/setup.log',
-    ctx.rawLogPath
-      ? path.relative(projectRoot, ctx.rawLogPath)
-      : 'logs/setup-steps/',
+    ctx.rawLogPath ? path.relative(projectRoot, ctx.rawLogPath) : 'logs/setup-steps/',
   ].filter((v, i, a) => a.indexOf(v) === i);
 
   const hintLine = ctx.hint ? `Hint shown to the user: ${ctx.hint}\n` : '';
@@ -317,11 +307,7 @@ function buildPrompt(ctx: AssistContext, projectRoot: string): string {
  * cutting the CLI off mid-investigation is worse than letting the
  * spinner run. The user can Ctrl-C if they want to abort.
  */
-async function queryCliUnderSpinner(
-  cli: AiCodingCli,
-  prompt: string,
-  projectRoot: string,
-): Promise<string | null> {
+async function queryCliUnderSpinner(cli: AiCodingCli, prompt: string, projectRoot: string): Promise<string | null> {
   const spawnArgs = cli.headless(prompt, { tools: true });
 
   const s = p.spinner();
@@ -347,10 +333,7 @@ async function queryCliUnderSpinner(
         s.stop(`${brandBody(fitToWidth(`${cli.displayName} replied.`, suffix))}${k.dim(suffix)}`);
         resolve(payload);
       } else {
-        s.stop(
-          `${fitToWidth(`${cli.displayName} couldn't help here.`, suffix)}${k.dim(suffix)}`,
-          1,
-        );
+        s.stop(`${fitToWidth(`${cli.displayName} couldn't help here.`, suffix)}${k.dim(suffix)}`, 1);
         const tail = stderr.trim().split('\n').slice(-3).join('\n');
         if (tail) p.log.message(k.dim(tail));
         resolve(null);
@@ -376,9 +359,7 @@ async function queryCliUnderSpinner(
   });
 }
 
-function parseResponse(
-  raw: string,
-): { reason: string; command: string } | null {
+function parseResponse(raw: string): { reason: string; command: string } | null {
   // Accept the fields anywhere in the output — the CLI sometimes wraps
   // the answer in a trailing explanation we can safely ignore.
   const reasonMatch = raw.match(/^\s*REASON:\s*(.+?)\s*$/m);

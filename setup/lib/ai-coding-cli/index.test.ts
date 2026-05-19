@@ -94,8 +94,8 @@ describe('codex adapter shape', () => {
     expect(spawn.output).toBe('inherit');
   });
 
-  it('declares no scriptable install (fork installs via /add-codex skill)', () => {
-    expect(codexCli.installScript).toBeNull();
+  it('declares a scriptable installer', () => {
+    expect(codexCli.installScript).toBe('setup/install-codex-cli.sh');
   });
 
   it('isAuthenticated returns undefined when installed (no fast offline probe)', () => {

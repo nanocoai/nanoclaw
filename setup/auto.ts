@@ -43,14 +43,23 @@ import { runCredentialModeStep } from './lib/credential-mode.js';
 import { offerAiCodingCliOnFailure } from './lib/cli-handoff.js';
 import { listAiCodingClis } from './lib/ai-coding-cli/index.js';
 import type { AiCodingCli } from './lib/ai-coding-cli/types.js';
-import {
-  applyToEnv,
-  parseFlags,
-  printHelp,
-  readFromEnv,
-} from './lib/setup-config-parse.js';
+import { applyToEnv, parseFlags, printHelp, readFromEnv } from './lib/setup-config-parse.js';
 import { runAdvancedScreen } from './lib/setup-config-screen.js';
 import { runWindowedStep } from './lib/windowed-runner.js';
+import {
+  defaultRuntimeProvider,
+  includesCodex,
+  parseAgentProviderChoice,
+  type AgentProviderChoice,
+} from './lib/agent-provider-choice.js';
+import { buildCliAgentStepArgs } from './lib/cli-agent-args.js';
+import {
+  buildOpenAiSecretCreateArgs,
+  hasOpenAiSecret,
+  parseCodexAuthMode,
+  type CodexAuthMode,
+  type OnecliSecretSummary,
+} from './lib/codex-auth.js';
 import { detectRegisteredGroups, detectExistingDisplayName } from './environment.js';
 import { pollHealth } from './onecli.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
@@ -58,7 +67,17 @@ import { resolveTimezoneViaCli, aiCodingCliAvailable } from './lib/tz-from-cli.j
 import * as setupLog from './logs.js';
 import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
 import { emit as phEmit } from './lib/diagnostics.js';
-import { accentGreen, brandBody, brandBold, brandChip, dimWrap, fitToWidth, fmtDuration, note, wrapForGutter } from './lib/theme.js';
+import {
+  accentGreen,
+  brandBody,
+  brandBold,
+  brandChip,
+  dimWrap,
+  fitToWidth,
+  fmtDuration,
+  note,
+  wrapForGutter,
+} from './lib/theme.js';
 import { isValidTimezone } from '../src/timezone.js';
 
 const CLI_AGENT_NAME = 'Terminal Agent';
@@ -138,12 +157,15 @@ async function main(): Promise<void> {
   // subsequent runs skip the prompt.
   await pickAiCodingCli();
 
+  const agentProviderChoice = await pickAgentProvider();
+
   const skip = new Set(
     (process.env.NANOCLAW_SKIP ?? '')
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
   );
+  let credentialMode = process.env.NANOCLAW_CREDENTIAL_MODE === 'native' ? 'native' : 'onecli';
 
   if (!skip.has('environment')) {
     const res = await runQuietStep('environment', {
@@ -159,8 +181,14 @@ async function main(): Promise<void> {
     }
   }
 
+  if (includesCodex(agentProviderChoice) && !skip.has('codex-provider')) {
+    await ensureCodexProviderInstalled();
+  }
+
   if (!skip.has('container')) {
-    p.log.message(brandBody(dimWrap('Your assistant lives in its own sandbox. It can only see what you explicitly share.', 4)));
+    p.log.message(
+      brandBody(dimWrap('Your assistant lives in its own sandbox. It can only see what you explicitly share.', 4)),
+    );
     p.log.message(
       brandBody(
         dimWrap(
@@ -202,6 +230,7 @@ async function main(): Promise<void> {
   let skipOneCli = false;
   if (!skip.has('credential-mode')) {
     const credResult = await runCredentialModeStep(process.env);
+    credentialMode = credResult.mode;
     process.env.NANOCLAW_CREDENTIAL_MODE = credResult.mode;
     writeEnvLine('NANOCLAW_CREDENTIAL_MODE', credResult.mode);
     setupLog.userInput('setup_credential_mode', credResult.mode);
@@ -288,9 +317,7 @@ async function main(): Promise<void> {
       const res = await runQuietStep(
         'onecli',
         {
-          running: reuse
-            ? 'Hooking up to your existing OneCLI…'
-            : "Setting up OneCLI, your agent's vault…",
+          running: reuse ? 'Hooking up to your existing OneCLI…' : "Setting up OneCLI, your agent's vault…",
           done: 'OneCLI vault ready.',
         },
         reuse ? ['--reuse'] : [],
@@ -314,7 +341,7 @@ async function main(): Promise<void> {
   }
 
   if (!skip.has('auth')) {
-    await runAuthStep();
+    await runProviderAuthStep(agentProviderChoice, credentialMode);
   }
 
   if (!skip.has('mounts')) {
@@ -373,7 +400,13 @@ async function main(): Promise<void> {
         running: 'Bringing your assistant online…',
         done: 'Assistant wired up.',
       },
-      ['--display-name', displayName!, '--agent-name', CLI_AGENT_NAME, '--folder', '_ping-test'],
+      buildCliAgentStepArgs({
+        displayName: displayName!,
+        agentName: CLI_AGENT_NAME,
+        folder: '_ping-test',
+        agentProvider: defaultRuntimeProvider(agentProviderChoice),
+        ...codexCliAgentAuthArgs(agentProviderChoice, credentialMode),
+      }),
     );
     if (!res.ok) {
       await fail(
@@ -437,7 +470,17 @@ async function main(): Promise<void> {
           const createRes = await runQuietChild(
             'create-terminal-agent',
             'pnpm',
-            ['exec', 'tsx', 'scripts/init-cli-agent.ts', '--display-name', displayName!, '--agent-name', terminalAgentName],
+            [
+              'exec',
+              'tsx',
+              'scripts/init-cli-agent.ts',
+              ...buildCliAgentStepArgs({
+                displayName: displayName!,
+                agentName: terminalAgentName,
+                agentProvider: defaultRuntimeProvider(agentProviderChoice),
+                ...codexCliAgentAuthArgs(agentProviderChoice, credentialMode),
+              }),
+            ],
             { running: `Creating ${terminalAgentName}…`, done: `${terminalAgentName} is ready.` },
           );
           if (!createRes.ok) {
@@ -740,6 +783,27 @@ function sendChatMessage(message: string): Promise<void> {
 
 // ─── auth step (select → branch) ────────────────────────────────────────
 
+async function runProviderAuthStep(
+  agentProviderChoice: AgentProviderChoice,
+  credentialMode: 'native' | 'onecli',
+): Promise<void> {
+  if (agentProviderChoice === 'codex') {
+    await runCodexAuthStep(credentialMode);
+    return;
+  }
+
+  await runAuthStep();
+
+  if (agentProviderChoice !== 'both') return;
+  const configureCodex = ensureAnswer(
+    await p.confirm({
+      message: 'Configure Codex auth now too?',
+      initialValue: true,
+    }),
+  );
+  if (configureCodex) await runCodexAuthStep(credentialMode);
+}
+
 async function runAuthStep(): Promise<void> {
   if (anthropicSecretExists()) {
     p.log.success(brandBody('Your Claude account is already connected.'));
@@ -800,11 +864,7 @@ async function runAuthStep(): Promise<void> {
       return runAuthStep();
     }
     setupLog.step('auth', 'skipped', 0, { REASON: 'user-skipped' });
-    p.log.warn(
-      brandBody(
-        'Claude sign-in skipped. Re-run setup or run `bash nanoclaw.sh` to finish later.',
-      ),
-    );
+    p.log.warn(brandBody('Claude sign-in skipped. Re-run setup or run `bash nanoclaw.sh` to finish later.'));
     return;
   }
 
@@ -812,6 +872,138 @@ async function runAuthStep(): Promise<void> {
     await runSubscriptionAuth();
   } else {
     await runPasteAuth(method);
+  }
+}
+
+async function runCodexAuthStep(credentialMode: 'native' | 'onecli'): Promise<void> {
+  if (codexAuthJsonExists()) {
+    p.log.success(brandBody('Codex subscription auth is already connected.'));
+    setupLog.step('auth', 'skipped', 0, { PROVIDER: 'codex', REASON: 'codex-auth-json-present' });
+    return;
+  }
+
+  if (credentialMode === 'onecli' && openAiSecretExists()) {
+    p.log.success(brandBody('OpenAI API key is already connected in OneCLI.'));
+    setupLog.step('auth', 'skipped', 0, { PROVIDER: 'codex', REASON: 'openai-secret-present' });
+    return;
+  }
+
+  const configured = parseCodexAuthMode(process.env.NANOCLAW_CODEX_AUTH_MODE);
+  const method =
+    configured ??
+    (ensureAnswer(
+      await brightSelect<CodexAuthMode>({
+        message: 'How would you like to connect Codex?',
+        options: [
+          {
+            value: 'subscription',
+            label: 'Sign in with my ChatGPT subscription',
+            hint: '~/.codex/auth.json',
+          },
+          ...(credentialMode === 'onecli'
+            ? [
+                {
+                  value: 'api' as const,
+                  label: 'Paste an OpenAI API key',
+                  hint: 'stored in OneCLI',
+                },
+              ]
+            : []),
+          {
+            value: 'skip',
+            label: "Skip — I'll connect later",
+            hint: 'the Codex agent will not reply until auth is configured',
+          },
+        ],
+      }),
+    ) as CodexAuthMode);
+
+  setupLog.userInput('codex_auth_method', method);
+  phEmit('auth_method_chosen', { provider: 'codex', method });
+
+  if (method === 'skip') {
+    setupLog.step('auth', 'skipped', 0, { PROVIDER: 'codex', REASON: 'user-skipped' });
+    p.log.warn(brandBody('Codex sign-in skipped. Re-run setup or run `codex login` later.'));
+    return;
+  }
+
+  if (method === 'subscription') {
+    await runCodexSubscriptionAuth();
+    return;
+  }
+
+  if (credentialMode !== 'onecli') {
+    await fail(
+      'auth',
+      'Codex OpenAI API-key auth requires OneCLI.',
+      'Choose OneCLI Agent Vault for credential mode, or use Codex subscription auth.',
+    );
+  }
+
+  await runOpenAiApiKeyAuth(credentialMode);
+}
+
+async function runCodexSubscriptionAuth(): Promise<void> {
+  if (!commandExists('codex')) {
+    await fail('auth', 'Codex CLI is not installed.', 'Install Codex or choose OpenAI API-key auth, then retry.');
+  }
+
+  p.log.step(brandBody('Opening the Codex sign-in flow…'));
+  console.log(k.dim('   (this part is interactive; Codex writes ~/.codex/auth.json)'));
+  console.log();
+  const start = Date.now();
+  const code = await runInheritScript('codex', ['login']);
+  const durationMs = Date.now() - start;
+  console.log();
+  if (code !== 0 || !codexAuthJsonExists()) {
+    setupLog.step('auth', 'failed', durationMs, {
+      PROVIDER: 'codex',
+      METHOD: 'subscription',
+      EXIT_CODE: code,
+    });
+    await fail(
+      'auth',
+      "Couldn't complete the Codex sign-in.",
+      'Re-run setup and try again, or choose OpenAI API-key auth instead.',
+    );
+  }
+  setupLog.step('auth', 'interactive', durationMs, { PROVIDER: 'codex', METHOD: 'subscription' });
+  p.log.success(brandBody('Codex account connected.'));
+}
+
+async function runOpenAiApiKeyAuth(credentialMode: 'native' | 'onecli'): Promise<void> {
+  const answer = ensureAnswer(
+    await p.password({
+      message: 'Paste your OpenAI API key',
+      clearOnError: true,
+      validate: (v) => {
+        const cleaned = (v ?? '').replace(/\s+/g, '');
+        if (!cleaned) return 'Required';
+        if (!cleaned.startsWith('sk-')) return 'Should start with sk-';
+        return undefined;
+      },
+    }),
+  );
+  const token = (answer as string).replace(/\s+/g, '');
+
+  const res = await runQuietChild(
+    'auth',
+    'onecli',
+    buildOpenAiSecretCreateArgs(token),
+    {
+      running: 'Saving your OpenAI API key to your OneCLI vault…',
+      done: 'OpenAI API key connected.',
+    },
+    {
+      extraFields: { PROVIDER: 'codex', METHOD: 'openai-api-key' },
+    },
+  );
+  if (!res.ok) {
+    await fail(
+      'auth',
+      "Couldn't save your OpenAI API key to the vault.",
+      'Make sure OneCLI is running (`onecli version`), then retry.',
+    );
   }
 }
 
@@ -905,19 +1097,12 @@ async function runPasteAuth(method: 'oauth' | 'api'): Promise<void> {
  * Authorization header on the wire — the container only ever sees
  * ANTHROPIC_BASE_URL + a placeholder bearer.
  */
-async function runCustomEndpointAuth(
-  baseUrl: string,
-  token: string,
-): Promise<void> {
+async function runCustomEndpointAuth(baseUrl: string, token: string): Promise<void> {
   let host: string;
   try {
     host = new URL(baseUrl).hostname;
   } catch {
-    await fail(
-      'auth',
-      `Invalid Anthropic base URL: ${baseUrl}`,
-      'Check --anthropic-base-url and retry.',
-    );
+    await fail('auth', `Invalid Anthropic base URL: ${baseUrl}`, 'Check --anthropic-base-url and retry.');
     return;
   }
 
@@ -1005,18 +1190,14 @@ async function pickAiCodingCli(opts: { force?: boolean } = {}): Promise<void> {
     }
     if (all.find((c) => c.name === configured)) {
       p.log.warn(
-        brandBody(
-          `NANOCLAW_AI_CODING_CLI is set to "${configured}" but that CLI isn't installed. Re-picking.`,
-        ),
+        brandBody(`NANOCLAW_AI_CODING_CLI is set to "${configured}" but that CLI isn't installed. Re-picking.`),
       );
     }
   }
 
   // Path 2: prompt — show all CLIs, mark installed vs not.
   const initial =
-    all.find((c) => c.name === configured)?.name ??
-    all.find((c) => c.isInstalled())?.name ??
-    all[0]?.name;
+    all.find((c) => c.name === configured)?.name ?? all.find((c) => c.isInstalled())?.name ?? all[0]?.name;
 
   const pick = ensureAnswer(
     await brightSelect<string>({
@@ -1045,9 +1226,7 @@ async function pickAiCodingCli(opts: { force?: boolean } = {}): Promise<void> {
       );
       if (!install) {
         p.log.warn(
-          brandBody(
-            `Continuing without a setup-helper. Install ${chosen.displayName} and re-run setup to enable it.`,
-          ),
+          brandBody(`Continuing without a setup-helper. Install ${chosen.displayName} and re-run setup to enable it.`),
         );
         return;
       }
@@ -1077,6 +1256,46 @@ async function pickAiCodingCli(opts: { force?: boolean } = {}): Promise<void> {
   await checkAiCodingCliAuth(chosen);
 }
 
+async function pickAgentProvider(): Promise<AgentProviderChoice> {
+  const configured = parseAgentProviderChoice(process.env.NANOCLAW_AGENT_PROVIDER);
+  if (configured) {
+    setupLog.userInput('agent_provider', `${configured} (preconfigured)`);
+    return configured;
+  }
+
+  const choice = ensureAnswer(
+    await brightSelect<AgentProviderChoice>({
+      message: 'Which agent provider should NanoClaw install for your assistants?',
+      options: [
+        { value: 'claude', label: 'Claude only', hint: 'default' },
+        { value: 'codex', label: 'Codex only', hint: 'ChatGPT subscription or OpenAI API key' },
+        { value: 'both', label: 'Both Claude and Codex', hint: 'Claude default; Codex available per group' },
+      ],
+      initialValue: process.env.NANOCLAW_AI_CODING_CLI === 'codex' ? 'codex' : 'claude',
+    }),
+  ) as AgentProviderChoice;
+
+  process.env.NANOCLAW_AGENT_PROVIDER = choice;
+  writeEnvLine('NANOCLAW_AGENT_PROVIDER', choice);
+  setupLog.userInput('agent_provider', `${choice} (picked)`);
+  return choice;
+}
+
+async function ensureCodexProviderInstalled(): Promise<void> {
+  const res = await runQuietChild('codex-provider', 'pnpm', ['exec', 'tsx', 'setup/install-codex-provider.ts'], {
+    running: 'Installing Codex agent provider…',
+    done: 'Codex provider ready.',
+    failed: "Couldn't install the Codex provider.",
+  });
+  if (!res.ok) {
+    await fail(
+      'codex-provider',
+      "Couldn't install the Codex provider.",
+      'See logs/setup-steps/ for details, then retry.',
+    );
+  }
+}
+
 /**
  * Check auth status for the given CLI and prompt login if needed.
  */
@@ -1092,9 +1311,7 @@ async function checkAiCodingCliAuth(cli: AiCodingCli): Promise<void> {
       const recheck = cli.isAuthenticated();
       if (!recheck) {
         p.log.warn(
-          brandBody(
-            `Login may not have completed. You may need to re-authenticate: ${cli.loginInstructions}`,
-          ),
+          brandBody(`Login may not have completed. You may need to re-authenticate: ${cli.loginInstructions}`),
         );
       }
     } else {
@@ -1113,6 +1330,24 @@ async function checkAiCodingCliAuth(cli: AiCodingCli): Promise<void> {
 function persistAiCodingCli(cli: AiCodingCli): void {
   process.env.NANOCLAW_AI_CODING_CLI = cli.name;
   writeEnvLine('NANOCLAW_AI_CODING_CLI', cli.name);
+}
+
+function codexCliAgentAuthArgs(
+  choice: AgentProviderChoice,
+  credentialMode: 'native' | 'onecli',
+): {
+  modelProvider?: string;
+  authMode?: 'api_key' | 'subscription';
+} {
+  if (defaultRuntimeProvider(choice) !== 'codex') return {};
+  if (parseCodexAuthMode(process.env.NANOCLAW_CODEX_AUTH_MODE) === 'api') {
+    if (credentialMode !== 'onecli') return { authMode: 'subscription' };
+    return { modelProvider: 'openai', authMode: 'api_key' };
+  }
+  if (credentialMode === 'onecli' && openAiSecretExists()) {
+    return { modelProvider: 'openai', authMode: 'api_key' };
+  }
+  return { authMode: 'subscription' };
 }
 
 function writeEnvLine(key: string, value: string): void {
@@ -1333,7 +1568,10 @@ async function askOtherChannelName(): Promise<void | typeof BACK_TO_CHANNEL_SELE
       placeholder: 'e.g. matrix, github, linear, webex',
     }),
   );
-  const name = (answer as string).trim().toLowerCase().replace(/^\/?(add-)?/, '');
+  const name = (answer as string)
+    .trim()
+    .toLowerCase()
+    .replace(/^\/?(add-)?/, '');
   setupLog.userInput('other_channel', name);
   phEmit('channel_other_named', { channel: name });
   p.log.info(
@@ -1367,6 +1605,33 @@ function anthropicSecretExists(): boolean {
   } catch {
     return false;
   }
+}
+
+function codexAuthJsonExists(): boolean {
+  const home = process.env.HOME || os.homedir();
+  return fs.existsSync(path.join(home, '.codex', 'auth.json'));
+}
+
+function openAiSecretExists(): boolean {
+  try {
+    const res = spawnSync('onecli', ['secrets', 'list'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (res.status !== 0) return false;
+    try {
+      const parsed = JSON.parse(res.stdout ?? '{}') as { data?: unknown };
+      return Array.isArray(parsed.data) && hasOpenAiSecret(parsed.data as OnecliSecretSummary[]);
+    } catch {
+      return /openai|api\.openai\.com/i.test(res.stdout ?? '');
+    }
+  } catch {
+    return false;
+  }
+}
+
+function commandExists(cmd: string): boolean {
+  return spawnSync('sh', ['-lc', `command -v ${cmd}`], { stdio: 'ignore' }).status === 0;
 }
 
 /**
@@ -1433,7 +1698,10 @@ function maybeReexecUnderSg(): void {
   if (spawnSync('which', ['sg'], { stdio: 'ignore' }).status !== 0) return;
 
   p.log.warn(brandBody('Docker socket not accessible in current group. Re-executing under `sg docker`.'));
-  const existingSkip = (process.env.NANOCLAW_SKIP ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  const existingSkip = (process.env.NANOCLAW_SKIP ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
   const skipList = [...new Set([...existingSkip, ...setupLog.completedStepNames()])].join(',');
   const res = spawnSync('sg', ['docker', '-c', 'pnpm run setup:auto'], {
     stdio: 'inherit',

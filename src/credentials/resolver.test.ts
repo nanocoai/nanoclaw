@@ -12,6 +12,24 @@ describe('credential resolver', () => {
     expect(decision).toEqual({ kind: 'fallback' });
   });
 
+  it('default hook maps Codex OpenAI API-key mode to OneCLI gateway placeholder auth', async () => {
+    const decision = await resolveCredential({
+      agentGroupId: 'g1',
+      runtimeProvider: 'codex',
+      modelProvider: 'openai',
+      authMode: 'api_key',
+    });
+
+    expect(decision).toEqual({
+      kind: 'gateway_secret',
+      providerId: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      placeholderToken: 'placeholder',
+      injection: { header: 'authorization', scheme: 'Bearer' },
+      refreshPolicy: 'gateway',
+    });
+  });
+
   it('custom hook can return gateway_secret', async () => {
     setCredentialResolverHook(async (input) => ({
       kind: 'gateway_secret',

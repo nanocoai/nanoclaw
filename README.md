@@ -31,7 +31,7 @@ cd nanoclaw-v2
 bash nanoclaw.sh
 ```
 
-`nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It installs Node, pnpm, and Docker if missing, registers your Anthropic credential with OneCLI, builds the agent container, and pairs your first channel (Telegram, Discord, WhatsApp, or a local CLI). If a step fails, your chosen coding-assistant CLI (Claude Code or OpenAI Codex — setup asks which on first run, then remembers it) is invoked automatically to diagnose and resume from where it broke. To switch later, run `pnpm exec tsx setup/auto.ts --reconfigure-cli`.
+`nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It installs Node, pnpm, and Docker if missing, asks whether assistants should use Claude, Codex, or both, registers the matching provider credential, builds the agent container, and pairs your first channel (Telegram, Discord, WhatsApp, or a local CLI). If a step fails, your chosen coding-assistant CLI (Claude Code or OpenAI Codex — setup asks which on first run, then remembers it) is invoked automatically to diagnose and resume from where it broke. To switch later, run `pnpm exec tsx setup/auto.ts --reconfigure-cli`.
 
 <details>
 <summary><strong>Migrating from NanoClaw v1?</strong></summary>
@@ -50,7 +50,7 @@ Run the script directly, not from inside a Claude session — the deterministic 
 
 **What it does:** merges `.env`, seeds the v2 DB from `registered_groups`, copies group folders + session data + scheduled tasks, installs the channel adapters you select, copies channel auth state (including Baileys keystore + LID mappings for WhatsApp), builds the agent container.
 
-**What it doesn't:** flip the system service. Pick *"switch to v2"* at the prompt, or do it manually after testing — your v1 install is left untouched.
+**What it doesn't:** flip the system service. Pick _"switch to v2"_ at the prompt, or do it manually after testing — your v1 install is left untouched.
 
 See [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) for what's different and [docs/migration-dev.md](docs/migration-dev.md) for development notes.
 
@@ -93,6 +93,7 @@ Talk to your assistant with the trigger word (default: `@Andy`):
 ```
 
 From a channel you own or administer, you can manage groups and tasks:
+
 ```
 @Andy list all scheduled tasks across groups
 @Andy pause the Monday briefing task
@@ -125,6 +126,7 @@ This keeps trunk as pure registry and infra, and every fork stays lean — users
 Skills we'd like to see:
 
 **Communication Channels**
+
 - `/add-signal` — Add Signal as a channel
 
 ## Requirements
@@ -147,6 +149,7 @@ Two SQLite files per session, each with exactly one writer — no cross-mount co
 For the full architecture writeup see [docs/architecture.md](docs/architecture.md); for the three-level isolation model see [docs/isolation-model.md](docs/isolation-model.md).
 
 Key files:
+
 - `src/index.ts` — entry point: DB init, channel adapters, delivery polls, sweep
 - `src/router.ts` — inbound routing: messaging group → agent group → session → `inbound.db`
 - `src/delivery.ts` — polls `outbound.db`, delivers via adapter, handles system actions

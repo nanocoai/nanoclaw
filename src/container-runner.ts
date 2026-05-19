@@ -376,7 +376,9 @@ async function resolveProviderContribution(
   const provider = resolveProviderName(session.agent_provider, containerConfig.provider);
   const built = await buildContributionForSpawn({
     provider,
+    modelProvider: containerConfig.modelProvider,
     modelId: containerConfig.model,
+    authMode: containerConfig.authMode,
     sessionDir: sessionDir(agentGroup.id, session.id),
     agentGroupId: agentGroup.id,
     hostEnv: process.env,

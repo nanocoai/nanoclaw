@@ -10,19 +10,19 @@ Every setup step produces output at **three distinct levels**. They have
 different audiences, go to different places, and are formatted differently.
 Don't conflate them.
 
-| Level | Audience | Destination | Format |
-|---|---|---|---|
-| 1. User-facing | The operator running setup | Terminal (via clack) | Branded, concise, informational — "product content" |
-| 2. Progression | Future debuggers, AI agents reviewing a failed run, release support | `logs/setup.log` (one file, append-only) | Structured per-step blocks, linear chronology, human + machine readable |
-| 3. Raw | Whoever is deep-debugging a specific step | `logs/setup-steps/NN-step-name.log` (one file per step) | Full raw child stdout + stderr, verbatim |
+| Level          | Audience                                                            | Destination                                             | Format                                                                  |
+| -------------- | ------------------------------------------------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------- |
+| 1. User-facing | The operator running setup                                          | Terminal (via clack)                                    | Branded, concise, informational — "product content"                     |
+| 2. Progression | Future debuggers, AI agents reviewing a failed run, release support | `logs/setup.log` (one file, append-only)                | Structured per-step blocks, linear chronology, human + machine readable |
+| 3. Raw         | Whoever is deep-debugging a specific step                           | `logs/setup-steps/NN-step-name.log` (one file per step) | Full raw child stdout + stderr, verbatim                                |
 
 Think of it as: the user sees a **summary**, the progression log is an
 **index with key facts**, the raw logs are the **evidence**.
 
 ### Level 1: user-facing (clack)
 
-Rendered by `setup/auto.ts` via `@clack/prompts`. This is our *product
-surface* for setup — every line should read as if we designed it for a
+Rendered by `setup/auto.ts` via `@clack/prompts`. This is our _product
+surface_ for setup — every line should read as if we designed it for a
 stranger on day one.
 
 - Clack spinners for in-progress work. Show elapsed time.
@@ -35,6 +35,7 @@ stranger on day one.
   cyan fallback otherwise, plain text when piped / `NO_COLOR`.
 
 Rules:
+
 - **No discontinuity.** Every sub-step belongs to the same visual flow.
   The only exception is Anthropic credential registration (see below).
 - **No raw child output.** Never `stdio: 'inherit'` a child whose output
@@ -75,6 +76,7 @@ Entry format:
 ```
 
 Design constraints:
+
 - Start-time timestamp (UTC, ISO-8601) on the opening line so a `grep`
   gives you the sequence.
 - Duration in seconds with one decimal — fast steps read as "0.5s", not
@@ -160,18 +162,21 @@ installer invoked from `auto.ts`), it must:
 The driver handles the rest: spinner in level 1, structured append to
 level 2, raw capture to level 3.
 
-## The Anthropic exception
+## Provider-auth interactive exceptions
 
-Anthropic credential registration (`setup/register-claude-token.sh`) is
-the **one** permitted break in the visual flow. Why:
+Provider subscription sign-in is the permitted break in the visual flow.
+Today that covers Claude subscription auth (`setup/register-claude-token.sh`)
+and Codex subscription auth (`codex login`). Why:
 
 - `claude setup-token` opens a browser, runs its own OAuth prompt, and
   prints the token. It owns the TTY via `script(1)`.
-- We don't want to re-implement the OAuth device flow ourselves.
-- We don't want to intercept / mirror the token (it appears in the
-  user's terminal already — mirroring it adds attack surface).
+- `codex login` owns its browser/device sign-in and writes
+  `~/.codex/auth.json`.
+- We don't want to re-implement vendor OAuth/device flows ourselves.
+- We don't want to intercept / mirror tokens or auth bundles.
 
 So during this step:
+
 - The clack flow explicitly pauses (a `p.log.step` marker says "this
   part is interactive, you're handing off to Anthropic").
 - The child inherits stdio fully.
@@ -185,16 +190,16 @@ leaking the token to disk outweighs the debugging value.
 
 ## File reference
 
-| File | Role |
-|---|---|
-| `nanoclaw.sh` | Top-level wrapper. Phase 1 (bootstrap) and phase 2 (setup:auto) orchestration. Writes bootstrap's raw log + progression entry. |
-| `setup.sh` | Phase 1 bootstrap: Node, pnpm, native-module verify. Emits its own `BOOTSTRAP` status block (historically printed to stdout; now goes to the bootstrap raw log). |
-| `setup/auto.ts` | Phase 2 driver. Orchestrates the clack UI, step execution, user prompts, and writes to all three log levels for every step it spawns. |
-| `setup/logs.ts` | The logging primitives (`logStep`, `logUserInput`, `logComplete`, `stepRawLog`, `initSetupLog`). Single source of truth for level 2/3 formatting and file paths. |
-| `setup/<step>.ts` | Individual step implementations. Must emit one terminal status block; must not write directly to the terminal. |
-| `setup/register-claude-token.sh` | The Anthropic exception. Inherits stdio, prints its own UI, returns a status to the driver. |
-| `setup/add-telegram.sh` | Non-interactive adapter installer. Reads `TELEGRAM_BOT_TOKEN` from env; never prompts. User-facing bits live in `auto.ts`. |
-| `setup/pair-telegram.ts` | Emits `PAIR_TELEGRAM_CODE` / `PAIR_TELEGRAM_ATTEMPT` / `PAIR_TELEGRAM` status blocks. Never prints UI. The driver renders it via clack notes. |
+| File                             | Role                                                                                                                                                             |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `nanoclaw.sh`                    | Top-level wrapper. Phase 1 (bootstrap) and phase 2 (setup:auto) orchestration. Writes bootstrap's raw log + progression entry.                                   |
+| `setup.sh`                       | Phase 1 bootstrap: Node, pnpm, native-module verify. Emits its own `BOOTSTRAP` status block (historically printed to stdout; now goes to the bootstrap raw log). |
+| `setup/auto.ts`                  | Phase 2 driver. Orchestrates the clack UI, step execution, user prompts, and writes to all three log levels for every step it spawns.                            |
+| `setup/logs.ts`                  | The logging primitives (`logStep`, `logUserInput`, `logComplete`, `stepRawLog`, `initSetupLog`). Single source of truth for level 2/3 formatting and file paths. |
+| `setup/<step>.ts`                | Individual step implementations. Must emit one terminal status block; must not write directly to the terminal.                                                   |
+| `setup/register-claude-token.sh` | Claude subscription auth exception. Inherits stdio, prints its own UI, returns a status to the driver.                                                           |
+| `setup/add-telegram.sh`          | Non-interactive adapter installer. Reads `TELEGRAM_BOT_TOKEN` from env; never prompts. User-facing bits live in `auto.ts`.                                       |
+| `setup/pair-telegram.ts`         | Emits `PAIR_TELEGRAM_CODE` / `PAIR_TELEGRAM_ATTEMPT` / `PAIR_TELEGRAM` status blocks. Never prints UI. The driver renders it via clack notes.                    |
 
 ## Common pitfalls
 

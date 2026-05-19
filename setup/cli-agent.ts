@@ -9,6 +9,7 @@
  *   --display-name <name>   (required) operator's display name
  *   --agent-name   <name>   (optional) agent persona name, defaults to display-name
  *   --folder       <name>   (optional) explicit folder name, defaults to cli-with-<normalized-display-name>
+ *   --provider     <name>   (optional) runtime provider for this agent group
  */
 import { execFileSync } from 'child_process';
 import path from 'path';
@@ -20,10 +21,12 @@ function parseArgs(args: string[]): {
   displayName: string;
   agentName?: string;
   folder?: string;
+  provider?: string;
 } {
   let displayName: string | undefined;
   let agentName: string | undefined;
   let folder: string | undefined;
+  let provider: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     const key = args[i];
@@ -41,6 +44,10 @@ function parseArgs(args: string[]): {
         folder = val;
         i++;
         break;
+      case '--provider':
+        provider = val;
+        i++;
+        break;
     }
   }
 
@@ -53,11 +60,11 @@ function parseArgs(args: string[]): {
     process.exit(2);
   }
 
-  return { displayName, agentName, folder };
+  return { displayName, agentName, folder, provider };
 }
 
 export async function run(args: string[]): Promise<void> {
-  const { displayName, agentName, folder } = parseArgs(args);
+  const { displayName, agentName, folder, provider } = parseArgs(args);
 
   const projectRoot = process.cwd();
   const script = path.join(projectRoot, 'scripts', 'init-cli-agent.ts');
@@ -65,8 +72,9 @@ export async function run(args: string[]): Promise<void> {
   const scriptArgs = ['exec', 'tsx', script, '--display-name', displayName];
   if (agentName) scriptArgs.push('--agent-name', agentName);
   if (folder) scriptArgs.push('--folder', folder);
+  if (provider) scriptArgs.push('--provider', provider);
 
-  log.info('Invoking init-cli-agent', { displayName, agentName });
+  log.info('Invoking init-cli-agent', { displayName, agentName, provider });
 
   try {
     execFileSync('pnpm', scriptArgs, {
@@ -94,6 +102,7 @@ export async function run(args: string[]): Promise<void> {
     DISPLAY_NAME: displayName,
     AGENT_NAME: agentName || displayName,
     CHANNEL: 'cli/local',
+    PROVIDER: provider || '',
     STATUS: 'success',
     LOG: 'logs/setup.log',
   });

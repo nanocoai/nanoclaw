@@ -1,9 +1,9 @@
 /**
  * Provider-agnostic credential resolver hook.
  *
- * Trunk default returns `{ kind: 'fallback' }` so solo installs behave
- * exactly like they do today: container-runner falls back to the existing
- * provider config fn + OneCLI gateway. Course / classroom / multi-tenant
+ * Trunk default returns `{ kind: 'fallback' }` except for the built-in Codex
+ * OpenAI API-key path, where it asks the gateway to inject the real key while
+ * the container sees only a placeholder. Course / classroom / multi-tenant
  * skills register a real resolver via `setCredentialResolverHook`.
  *
  * The hook is process-global. Process-global is correct for the single-host
@@ -16,7 +16,19 @@
  */
 import type { CredentialDecision, CredentialResolverHook, CredentialResolverInput } from './types.js';
 
-const defaultHook: CredentialResolverHook = async () => ({ kind: 'fallback' });
+const defaultHook: CredentialResolverHook = async (input) => {
+  if (input.runtimeProvider === 'codex' && input.modelProvider === 'openai' && input.authMode === 'api_key') {
+    return {
+      kind: 'gateway_secret',
+      providerId: 'openai',
+      baseUrl: 'https://api.openai.com/v1',
+      placeholderToken: 'placeholder',
+      injection: { header: 'authorization', scheme: 'Bearer' },
+      refreshPolicy: 'gateway',
+    };
+  }
+  return { kind: 'fallback' };
+};
 
 let activeHook: CredentialResolverHook = defaultHook;
 

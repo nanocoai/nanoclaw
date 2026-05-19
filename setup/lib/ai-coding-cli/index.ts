@@ -47,7 +47,8 @@ export function getAiCodingCli(name: string | null | undefined): AiCodingCli | u
  */
 export function resolveAiCodingCli(): AiCodingCli | null {
   const env = readEnvFile(['NANOCLAW_AI_CODING_CLI']);
-  const configured = process.env.NANOCLAW_AI_CODING_CLI || env.NANOCLAW_AI_CODING_CLI;
+  const configured =
+    process.env.NANOCLAW_AI_CODING_CLI !== undefined ? process.env.NANOCLAW_AI_CODING_CLI : env.NANOCLAW_AI_CODING_CLI;
   if (configured) {
     const a = registry.get(configured.toLowerCase());
     if (a && a.isInstalled()) return a;
