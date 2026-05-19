@@ -11,3 +11,5 @@ export {
 export type { HeaderMap } from './headers.js';
 export { HTTP_STATUS_CONNECT_REQUIRED, HTTP_STATUS_FORBIDDEN, serializeCredentialError } from './errors.js';
 export type { CredentialErrorBody, CredentialErrorStatus, SerializedCredentialError } from './errors.js';
+export { registerProviderRoute, getProviderRoute, listProviderRoutes } from './provider-routes.js';
+export type { ProviderRoute } from './provider-routes.js';
