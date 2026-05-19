@@ -1029,23 +1029,10 @@ async function pickAiCodingCli(opts: { force?: boolean } = {}): Promise<void> {
     return;
   }
 
-  // Path 2: exactly one installed — auto-pick silently. Under --force
-  // we surface a one-line confirmation since the user explicitly asked
-  // to reconfigure and would otherwise see nothing happen.
-  if (installed.length === 1) {
-    persistAiCodingCli(installed[0]);
-    setupLog.userInput('setup_cli', `${installed[0].name} (auto-picked)`);
-    if (opts.force) {
-      p.log.success(
-        brandBody(`Only ${installed[0].displayName} is installed — keeping it as the setup-helper CLI.`),
-      );
-    }
-    return;
-  }
-
-  // Path 3b: ≥2 installed — ask which one. Default to the currently-
-  // configured CLI if it's still installed (so under --force the user
-  // can hit Enter to keep their existing pick).
+  // Path 2: always prompt so the operator makes an explicit choice,
+  // even when only one CLI is installed. Subsequent runs skip this
+  // (Path 1 above) once NANOCLAW_AI_CODING_CLI is persisted in .env.
+  // Under --force, default to the current pick so Enter keeps it.
   const initial = installed.find((c) => c.name === configured)?.name ?? installed[0].name;
   const pick = ensureAnswer(
     await brightSelect<string>({
