@@ -4,3 +4,6 @@
 // needs (claude, mock) don't appear here.
 //
 // Skills add a new provider by appending one import line below.
+
+import './codex.js';
+import './opencode.js';
