@@ -1,28 +1,56 @@
 /**
- * Claude provider container config — only registered when the user has
- * configured a custom Anthropic-compatible endpoint via setup. Setup
- * appends `import './claude.js'` to providers/index.ts at that point;
- * standard installs hitting api.anthropic.com don't need this file
- * loaded.
+ * Claude provider container config.
  *
- * The real auth token never enters the container. Setup creates an
- * OneCLI generic secret (host-pattern = base URL hostname, header-name
- * = Authorization, value-format = "Bearer {value}") so the proxy
- * rewrites the Authorization header on the wire. The container only
- * needs:
- *   - ANTHROPIC_BASE_URL — so the SDK knows where to call
- *   - ANTHROPIC_AUTH_TOKEN=placeholder — so the SDK adds an
- *     Authorization: Bearer header for OneCLI to overwrite
+ * Routes the credential decision through the credential resolver so installs
+ * can override behaviour via `setCredentialResolverHook`. Default (no hook
+ * registered) preserves today's behaviour exactly:
+ *   - read ANTHROPIC_BASE_URL from .env
+ *   - if set, write ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN=placeholder
+ *   - if absent, no env contribution (SDK uses its built-in defaults)
+ *
+ * The real auth token never enters the container regardless of mode — OneCLI
+ * proxy rewrites the Authorization header on the wire.
+ *
+ * Container-runner calls `getClaudeContribution` directly for the `claude`
+ * provider — we do not self-register via `registerProviderContainerConfig`
+ * because the registry interface is sync and the resolver is async.
  */
 import { readEnvFile } from '../env.js';
-import { registerProviderContainerConfig } from './provider-container-registry.js';
+import { applyCredentialDecisions, resolveCredential, type CredentialDecision } from '../credentials/index.js';
+import type { ProviderContainerContext, ProviderContainerContribution } from './provider-container-registry.js';
 
-registerProviderContainerConfig('claude', () => {
-  const dotenv = readEnvFile(['ANTHROPIC_BASE_URL']);
-  const env: Record<string, string> = {};
-  if (dotenv.ANTHROPIC_BASE_URL) {
-    env.ANTHROPIC_BASE_URL = dotenv.ANTHROPIC_BASE_URL;
-    env.ANTHROPIC_AUTH_TOKEN = 'placeholder';
+export async function getClaudeContribution(ctx: ProviderContainerContext): Promise<ProviderContainerContribution> {
+  const decision = await resolveCredential({
+    agentGroupId: ctx.agentGroupId,
+    runtimeProvider: 'claude',
+    modelProvider: 'anthropic',
+    authMode: 'auto',
+  });
+
+  const effective: CredentialDecision = decision.kind === 'fallback' ? defaultDecisionFromEnv() : decision;
+
+  const result = applyCredentialDecisions([effective], ctx.sessionDir, ctx.hostEnv);
+
+  if (result.refusal) {
+    if (result.refusal.kind === 'forbidden') {
+      throw new Error(
+        `Claude provider forbidden for agent group ${ctx.agentGroupId}: ${result.refusal.reason ?? 'no reason given'}`,
+      );
+    }
+    throw new Error(`Claude provider requires account connect (${result.refusal.provider}): ${result.refusal.message}`);
   }
-  return { env };
-});
+
+  return result.contribution;
+}
+
+function defaultDecisionFromEnv(): CredentialDecision {
+  const dotenv = readEnvFile(['ANTHROPIC_BASE_URL']);
+  if (!dotenv.ANTHROPIC_BASE_URL) return { kind: 'fallback' };
+  return {
+    kind: 'gateway_secret',
+    providerId: 'anthropic',
+    baseUrl: dotenv.ANTHROPIC_BASE_URL,
+    placeholderToken: 'placeholder',
+    refreshPolicy: 'gateway',
+  };
+}
