@@ -26,6 +26,7 @@ import { BACK_TO_CHANNEL_SELECTION, type ChannelFlowResult } from '../lib/back-n
 import { confirmThenOpen, formatNoteLink, openUrl } from '../lib/browser.js';
 import { brightSelect } from '../lib/bright-select.js';
 import { askOperatorRole } from '../lib/role-prompt.js';
+import { buildFirstAgentStepArgs, type FirstAgentProviderOptions } from '../lib/first-agent-args.js';
 import {
   type Block,
   type StepResult,
@@ -41,7 +42,10 @@ import { accentGreen, brandBold, fitToWidth, fmtDuration, note } from '../lib/th
 
 const DEFAULT_AGENT_NAME = 'Nano';
 
-export async function runTelegramChannel(displayName: string): Promise<ChannelFlowResult> {
+export async function runTelegramChannel(
+  displayName: string,
+  providerOptions: FirstAgentProviderOptions = {},
+): Promise<ChannelFlowResult> {
   const tokenOrBack = await collectTelegramToken();
   if (tokenOrBack === 'back') return BACK_TO_CHANNEL_SELECTION;
   const token = tokenOrBack;
@@ -133,15 +137,15 @@ export async function runTelegramChannel(displayName: string): Promise<ChannelFl
   const init = await runQuietChild(
     'init-first-agent',
     'pnpm',
-    [
-      'exec', 'tsx', 'scripts/init-first-agent.ts',
-      '--channel', 'telegram',
-      '--user-id', pairedUserId,
-      '--platform-id', platformId,
-      '--display-name', displayName,
-      '--agent-name', agentName,
-      '--role', role,
-    ],
+    buildFirstAgentStepArgs({
+      channel: 'telegram',
+      userId: pairedUserId,
+      platformId,
+      displayName,
+      agentName,
+      role,
+      ...providerOptions,
+    }),
     {
       running: `Connecting ${agentName} to your Telegram chat…`,
       done: `${agentName} is ready. Check Telegram for a welcome message.`,

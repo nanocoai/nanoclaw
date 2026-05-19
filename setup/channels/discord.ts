@@ -31,6 +31,7 @@ import { BACK_TO_CHANNEL_SELECTION, type ChannelFlowResult } from '../lib/back-n
 import { brightSelect } from '../lib/bright-select.js';
 import { confirmThenOpen, formatNoteLink } from '../lib/browser.js';
 import { askOperatorRole } from '../lib/role-prompt.js';
+import { buildFirstAgentStepArgs, type FirstAgentProviderOptions } from '../lib/first-agent-args.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
 import { readEnvKey } from '../environment.js';
 import { accentGreen, brandBody, fmtDuration, note } from '../lib/theme.js';
@@ -49,7 +50,10 @@ interface AppInfo {
   owner: { id: string; username: string } | null;
 }
 
-export async function runDiscordChannel(displayName: string): Promise<ChannelFlowResult> {
+export async function runDiscordChannel(
+  displayName: string,
+  providerOptions: FirstAgentProviderOptions = {},
+): Promise<ChannelFlowResult> {
   const choice = await askHasBotToken();
   if (choice === 'back') return BACK_TO_CHANNEL_SELECTION;
   const hasBot = choice === 'yes';
@@ -115,15 +119,15 @@ export async function runDiscordChannel(displayName: string): Promise<ChannelFlo
   const init = await runQuietChild(
     'init-first-agent',
     'pnpm',
-    [
-      'exec', 'tsx', 'scripts/init-first-agent.ts',
-      '--channel', 'discord',
-      '--user-id', `discord:${ownerUserId}`,
-      '--platform-id', platformId,
-      '--display-name', displayName,
-      '--agent-name', agentName,
-      '--role', role,
-    ],
+    buildFirstAgentStepArgs({
+      channel: 'discord',
+      userId: `discord:${ownerUserId}`,
+      platformId,
+      displayName,
+      agentName,
+      role,
+      ...providerOptions,
+    }),
     {
       running: `Connecting ${agentName} to your Discord DMs…`,
       done: `${agentName} is ready. Check Discord for a welcome message.`,
@@ -525,4 +529,3 @@ async function resolveAgentName(): Promise<string> {
   setupLog.userInput('agent_name', value);
   return value;
 }
-

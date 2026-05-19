@@ -46,11 +46,15 @@ import {
   writeStepEntry,
 } from '../lib/runner.js';
 import { askOperatorRole } from '../lib/role-prompt.js';
+import { buildFirstAgentStepArgs, type FirstAgentProviderOptions } from '../lib/first-agent-args.js';
 import { accentGreen, fmtDuration, note } from '../lib/theme.js';
 
 const DEFAULT_AGENT_NAME = 'Nano';
 
-export async function runSignalChannel(displayName: string): Promise<ChannelFlowResult> {
+export async function runSignalChannel(
+  displayName: string,
+  providerOptions: FirstAgentProviderOptions = {},
+): Promise<ChannelFlowResult> {
   note(
     [
       "NanoClaw links to Signal as a *secondary* device on your existing",
@@ -129,15 +133,15 @@ export async function runSignalChannel(displayName: string): Promise<ChannelFlow
   const init = await runQuietChild(
     'init-first-agent',
     'pnpm',
-    [
-      'exec', 'tsx', 'scripts/init-first-agent.ts',
-      '--channel', 'signal',
-      '--user-id', account!,
-      '--platform-id', account!,
-      '--display-name', displayName,
-      '--agent-name', agentName,
-      '--role', role,
-    ],
+    buildFirstAgentStepArgs({
+      channel: 'signal',
+      userId: account!,
+      platformId: account!,
+      displayName,
+      agentName,
+      role,
+      ...providerOptions,
+    }),
     {
       running: `Connecting ${agentName} to Signal…`,
       done: `${agentName} is ready. Check Signal for a welcome message.`,

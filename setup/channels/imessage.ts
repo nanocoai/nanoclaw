@@ -36,6 +36,7 @@ import * as setupLog from '../logs.js';
 import { BACK_TO_CHANNEL_SELECTION, type ChannelFlowResult } from '../lib/back-nav.js';
 import { brightSelect } from '../lib/bright-select.js';
 import { askOperatorRole } from '../lib/role-prompt.js';
+import { buildFirstAgentStepArgs, type FirstAgentProviderOptions } from '../lib/first-agent-args.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
 import { accentGreen, note, wrapForGutter } from '../lib/theme.js';
 import { readEnvKey } from '../environment.js';
@@ -49,7 +50,10 @@ interface RemoteCreds {
   apiKey: string;
 }
 
-export async function runIMessageChannel(displayName: string): Promise<ChannelFlowResult> {
+export async function runIMessageChannel(
+  displayName: string,
+  providerOptions: FirstAgentProviderOptions = {},
+): Promise<ChannelFlowResult> {
   const isMac = os.platform() === 'darwin';
 
   const mode = await askMode(isMac);
@@ -110,15 +114,15 @@ export async function runIMessageChannel(displayName: string): Promise<ChannelFl
   const init = await runQuietChild(
     'init-first-agent',
     'pnpm',
-    [
-      'exec', 'tsx', 'scripts/init-first-agent.ts',
-      '--channel', 'imessage',
-      '--user-id', handle,
-      '--platform-id', handle,
-      '--display-name', displayName,
-      '--agent-name', agentName,
-      '--role', role,
-    ],
+    buildFirstAgentStepArgs({
+      channel: 'imessage',
+      userId: handle,
+      platformId: handle,
+      displayName,
+      agentName,
+      role,
+      ...providerOptions,
+    }),
     {
       running: `Connecting ${agentName} to iMessage…`,
       done: `${agentName} is ready. Check iMessage for a welcome message.`,

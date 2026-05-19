@@ -30,6 +30,7 @@ import { brightSelect } from '../lib/bright-select.js';
 import { openUrl } from '../lib/browser.js';
 import { isHeadless } from '../platform.js';
 import { askOperatorRole } from '../lib/role-prompt.js';
+import { buildFirstAgentStepArgs, type FirstAgentProviderOptions } from '../lib/first-agent-args.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
 import { readEnvKey } from '../environment.js';
 import { accentGreen, fmtDuration, note, wrapForGutter } from '../lib/theme.js';
@@ -45,7 +46,10 @@ interface WorkspaceInfo {
   botUserId: string;
 }
 
-export async function runSlackChannel(displayName: string): Promise<ChannelFlowResult> {
+export async function runSlackChannel(
+  displayName: string,
+  providerOptions: FirstAgentProviderOptions = {},
+): Promise<ChannelFlowResult> {
   const intro = await walkThroughAppCreation();
   if (intro === 'back') return BACK_TO_CHANNEL_SELECTION;
 
@@ -93,15 +97,15 @@ export async function runSlackChannel(displayName: string): Promise<ChannelFlowR
   const init = await runQuietChild(
     'init-first-agent',
     'pnpm',
-    [
-      'exec', 'tsx', 'scripts/init-first-agent.ts',
-      '--channel', 'slack',
-      '--user-id', `slack:${ownerUserId}`,
-      '--platform-id', platformId,
-      '--display-name', displayName,
-      '--agent-name', agentName,
-      '--role', role,
-    ],
+    buildFirstAgentStepArgs({
+      channel: 'slack',
+      userId: `slack:${ownerUserId}`,
+      platformId,
+      displayName,
+      agentName,
+      role,
+      ...providerOptions,
+    }),
     {
       running: `Wiring ${agentName} to your Slack DMs…`,
       done: 'Agent wired.',

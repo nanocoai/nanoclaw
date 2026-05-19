@@ -531,21 +531,25 @@ async function main(): Promise<void> {
       if (channelChoice !== 'skip' && channelChoice !== 'other') {
         await resolveDisplayName();
       }
+      const firstAgentProviderOptions = {
+        agentProvider: defaultRuntimeProvider(agentProviderChoice),
+        ...codexCliAgentAuthArgs(agentProviderChoice, credentialMode),
+      };
       let result: void | typeof BACK_TO_CHANNEL_SELECTION;
       if (channelChoice === 'telegram') {
-        result = await runTelegramChannel(displayName!);
+        result = await runTelegramChannel(displayName!, firstAgentProviderOptions);
       } else if (channelChoice === 'discord') {
-        result = await runDiscordChannel(displayName!);
+        result = await runDiscordChannel(displayName!, firstAgentProviderOptions);
       } else if (channelChoice === 'whatsapp') {
-        result = await runWhatsAppChannel(displayName!);
+        result = await runWhatsAppChannel(displayName!, firstAgentProviderOptions);
       } else if (channelChoice === 'signal') {
-        result = await runSignalChannel(displayName!);
+        result = await runSignalChannel(displayName!, firstAgentProviderOptions);
       } else if (channelChoice === 'teams') {
         result = await runTeamsChannel(displayName!);
       } else if (channelChoice === 'slack') {
-        result = await runSlackChannel(displayName!);
+        result = await runSlackChannel(displayName!, firstAgentProviderOptions);
       } else if (channelChoice === 'imessage') {
-        result = await runIMessageChannel(displayName!);
+        result = await runIMessageChannel(displayName!, firstAgentProviderOptions);
       } else if (channelChoice === 'other') {
         result = await askOtherChannelName();
       } else {

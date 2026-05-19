@@ -36,6 +36,7 @@ import * as setupLog from '../logs.js';
 import { BACK_TO_CHANNEL_SELECTION, type ChannelFlowResult } from '../lib/back-nav.js';
 import { brightSelect } from '../lib/bright-select.js';
 import { getLaunchdLabel, getSystemdUnit } from '../../src/install-slug.js';
+import { buildFirstAgentStepArgs, type FirstAgentProviderOptions } from '../lib/first-agent-args.js';
 import {
   type Block,
   type StepResult,
@@ -54,7 +55,10 @@ const AUTH_CREDS_PATH = path.join(process.cwd(), 'store', 'auth', 'creds.json');
 
 type AuthMethod = 'qr' | 'pairing-code';
 
-export async function runWhatsAppChannel(displayName: string): Promise<ChannelFlowResult> {
+export async function runWhatsAppChannel(
+  displayName: string,
+  providerOptions: FirstAgentProviderOptions = {},
+): Promise<ChannelFlowResult> {
   const method = await askAuthMethod();
   if (method === 'back') return BACK_TO_CHANNEL_SELECTION;
   const phone = method === 'pairing-code' ? await askPhoneNumber() : undefined;
@@ -116,15 +120,15 @@ export async function runWhatsAppChannel(displayName: string): Promise<ChannelFl
   const init = await runQuietChild(
     'init-first-agent',
     'pnpm',
-    [
-      'exec', 'tsx', 'scripts/init-first-agent.ts',
-      '--channel', 'whatsapp',
-      '--user-id', platformId,
-      '--platform-id', platformId,
-      '--display-name', displayName,
-      '--agent-name', agentName,
-      '--role', role,
-    ],
+    buildFirstAgentStepArgs({
+      channel: 'whatsapp',
+      userId: platformId,
+      platformId,
+      displayName,
+      agentName,
+      role,
+      ...providerOptions,
+    }),
     {
       running: `Connecting ${agentName} to WhatsApp…`,
       done: isDedicated

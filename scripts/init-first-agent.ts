@@ -26,6 +26,9 @@
  *     [--agent-name "Andy"] \
  *     [--welcome "System instruction: ..."] \
  *     [--role owner|admin|member]    # default: owner
+ *     [--provider codex] \
+ *     [--model-provider openai] \
+ *     [--auth-mode api_key|subscription|oauth|native|auto]
  *
  * For direct-addressable channels (telegram, whatsapp, etc.), --platform-id
  * is typically the same as the handle in --user-id, with the channel prefix.
@@ -62,6 +65,9 @@ interface Args {
   agentName: string;
   welcome: string;
   role: Role;
+  provider?: string;
+  modelProvider?: string;
+  authMode?: 'auto' | 'api_key' | 'subscription' | 'oauth' | 'native';
 }
 
 const DEFAULT_WELCOME =
@@ -111,6 +117,32 @@ function parseArgs(argv: string[]): Args {
         i++;
         break;
       }
+      case '--provider':
+        out.provider = val;
+        i++;
+        break;
+      case '--model-provider':
+        out.modelProvider = val;
+        i++;
+        break;
+      case '--auth-mode': {
+        const raw = (val ?? '').toLowerCase();
+        if (
+          raw !== 'auto' &&
+          raw !== 'api_key' &&
+          raw !== 'subscription' &&
+          raw !== 'oauth' &&
+          raw !== 'native'
+        ) {
+          console.error(
+            `Invalid --auth-mode: ${raw} (expected 'auto', 'api_key', 'subscription', 'oauth', or 'native')`,
+          );
+          process.exit(2);
+        }
+        out.authMode = raw;
+        i++;
+        break;
+      }
     }
   }
 
@@ -132,6 +164,9 @@ function parseArgs(argv: string[]): Args {
     agentName: out.agentName?.trim() || out.displayName!,
     welcome: out.welcome?.trim() || DEFAULT_WELCOME,
     role: out.role ?? DEFAULT_ROLE,
+    provider: out.provider?.trim() || undefined,
+    modelProvider: out.modelProvider?.trim() || undefined,
+    authMode: out.authMode,
   };
 }
 
@@ -196,7 +231,7 @@ async function main(): Promise<void> {
       id: agId,
       name: args.agentName,
       folder,
-      agent_provider: null,
+      agent_provider: args.provider ?? null,
       created_at: now,
     });
     ag = getAgentGroupByFolder(folder)!;
@@ -210,6 +245,13 @@ async function main(): Promise<void> {
       `You are ${args.agentName}, a personal NanoClaw agent for ${args.displayName}. ` +
       'When the user first reaches out (or you receive a system welcome prompt), introduce yourself briefly and invite them to chat. Keep replies concise.',
   });
+  if (args.provider) {
+    updateContainerConfigScalars(ag.id, {
+      provider: args.provider,
+      model_provider: args.modelProvider,
+      auth_mode: args.authMode,
+    });
+  }
 
   // 2b. Assign the user a role for this agent group. The caller picks via
   // --role; the channel drivers default to 'owner' for the self-host case.
