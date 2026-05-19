@@ -286,6 +286,7 @@ This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspac
 | [docs/setup-wiring.md](docs/setup-wiring.md) | What's wired, what's open in the setup flow |
 | [docs/architecture-diagram.md](docs/architecture-diagram.md) | Diagram version of the architecture |
 | [docs/build-and-runtime.md](docs/build-and-runtime.md) | Runtime split (Node host + Bun container), lockfiles, image build surface, CI, key invariants |
+| [docs/credentials.md](docs/credentials.md) | Credential abstraction — gateway-injected vs native bundle, resolver hook |
 | [docs/v1-to-v2-changes.md](docs/v1-to-v2-changes.md) | v1→v2 architecture diff — vocabulary for where v1 things moved |
 | [docs/migration-dev.md](docs/migration-dev.md) | Migration development guide — testing, debugging, dev loop |
 
