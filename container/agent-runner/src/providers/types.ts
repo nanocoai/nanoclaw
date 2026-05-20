@@ -89,9 +89,29 @@ export interface AgentQuery {
   abort(): void;
 }
 
+/**
+ * Per-turn token usage reported by the provider's underlying SDK. The
+ * poll-loop reads this off `result` events and surfaces a context-usage
+ * line into the next turn's system prompt — same signal Claude Code's
+ * "Context: X/Y (Z%)" footer uses, so the agent gets the same self-awareness
+ * users have. `totalContextTokens` sums input + cache_read + cache_creation,
+ * which approximates the context window's current fill at the moment of the
+ * API call. Output tokens are tracked separately for cost telemetry but
+ * intentionally excluded from `totalContextTokens` — the next turn re-reads
+ * the assistant message from the transcript, where it's already counted
+ * under input on the next call.
+ */
+export interface ContextUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  totalContextTokens: number;
+}
+
 export type ProviderEvent =
   | { type: 'init'; continuation: string }
-  | { type: 'result'; text: string | null }
+  | { type: 'result'; text: string | null; usage?: ContextUsage }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
   /**

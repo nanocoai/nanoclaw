@@ -13,10 +13,20 @@ import {
   stripInternalTags,
   type RoutingContext,
 } from './formatter.js';
-import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
+import type { AgentProvider, AgentQuery, ContextUsage, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
+
+/**
+ * Default context-window size assumed when no `CLAUDE_CODE_CONTEXT_WINDOW`
+ * override is provided by the bootstrap. Matches the Claude 4.x family's
+ * standard 200K window. The auto-compact trigger
+ * (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, default 165K) lives in the Claude
+ * provider — this constant is the *display denominator*, not the compaction
+ * threshold.
+ */
+const DEFAULT_CONTEXT_WINDOW_TOKENS = 200000;
 
 /**
  * Slash commands that warrant the highest reasoning-effort tier for the
@@ -50,6 +60,38 @@ export interface PollLoopConfig {
   systemContext?: {
     instructions?: string;
   };
+  /**
+   * Total context-window size in tokens, used as the denominator for the
+   * `Current context usage: X / Y (Z%)` line injected into each turn's
+   * system prompt. Defaults to {@link DEFAULT_CONTEXT_WINDOW_TOKENS}. Set
+   * this when the provider is configured for a non-default window (e.g.,
+   * the 1M-context Sonnet beta) so the displayed percentage matches the
+   * model's actual budget.
+   */
+  contextWindowTokens?: number;
+}
+
+/**
+ * Append a `Current context usage:` line to the per-turn system-prompt
+ * instructions so the agent sees the same signal Claude Code surfaces in
+ * its UI footer. The line is built from the most recent `result` event's
+ * `usage` field, so it reports the context fill at the *end of the prior
+ * turn* — the standard one-turn lag inherent to any post-hoc API-usage
+ * read. On the first turn (no prior usage), the base instructions pass
+ * through unchanged.
+ */
+export function buildDynamicSystemContext(
+  base: { instructions?: string } | undefined,
+  usage: ContextUsage | undefined,
+  windowTokens: number,
+): { instructions?: string } | undefined {
+  if (!usage) return base;
+  const total = usage.totalContextTokens;
+  const pct = windowTokens > 0 ? ((total / windowTokens) * 100).toFixed(1) : '0.0';
+  const line = `Current context usage: ${total.toLocaleString()} / ${windowTokens.toLocaleString()} tokens (${pct}%) as of the prior turn's API response.`;
+  const existing = base?.instructions?.trim();
+  const combined = existing ? `${existing}\n\n${line}` : line;
+  return { instructions: combined };
 }
 
 /**
@@ -77,6 +119,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // Clear leftover 'processing' acks from a previous crashed container.
   // This lets the new container re-process those messages.
   clearStaleProcessingAcks();
+
+  const contextWindowTokens = config.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS;
+
+  // Most recent token-usage snapshot reported by the provider on a `result`
+  // event. Used to compose the `Current context usage:` line appended to the
+  // next turn's system prompt. Stays undefined until the first turn completes.
+  let lastContextUsage: ContextUsage | undefined;
 
   let pollCount = 0;
   let isFirstPoll = true;
@@ -183,11 +232,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         (effortOverride ? ` (effort override: ${effortOverride})` : ''),
     );
 
+    const dynamicSystemContext = buildDynamicSystemContext(
+      config.systemContext,
+      lastContextUsage,
+      contextWindowTokens,
+    );
+
     const query = config.provider.query({
       prompt,
       continuation,
       cwd: config.cwd,
-      systemContext: config.systemContext,
+      systemContext: dynamicSystemContext,
       effortOverride,
     });
 
@@ -202,6 +257,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
+      }
+      if (result.usage) {
+        lastContextUsage = result.usage;
+        const pct = ((result.usage.totalContextTokens / contextWindowTokens) * 100).toFixed(1);
+        log(`Context usage: ${result.usage.totalContextTokens.toLocaleString()}/${contextWindowTokens.toLocaleString()} (${pct}%)`);
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -293,6 +353,14 @@ export function detectEffortOverride(messages: MessageInRow[]): string | undefin
 
 interface QueryResult {
   continuation?: string;
+  /**
+   * Latest token-usage snapshot reported during the query. The outer loop
+   * carries this forward into the next turn's system-prompt injection so
+   * the agent sees a `Current context usage:` line matching what the SDK
+   * reported on the prior turn's API response. Undefined if no `result`
+   * event with a usage payload arrived (e.g., stream closed early).
+   */
+  usage?: ContextUsage;
 }
 
 async function processQuery(
@@ -302,6 +370,7 @@ async function processQuery(
   providerName: string,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
+  let latestUsage: ContextUsage | undefined;
   let done = false;
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
@@ -413,6 +482,9 @@ async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        if (event.usage) {
+          latestUsage = event.usage;
+        }
         if (event.text) {
           dispatchResultText(event.text, routing);
         }
@@ -440,7 +512,7 @@ async function processQuery(
     clearInterval(pollHandle);
   }
 
-  return { continuation: queryContinuation };
+  return { continuation: queryContinuation, usage: latestUsage };
 }
 
 function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {

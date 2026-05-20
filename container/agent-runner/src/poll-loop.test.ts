@@ -4,7 +4,7 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { detectEffortOverride } from './poll-loop.js';
+import { buildDynamicSystemContext, detectEffortOverride } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 
 beforeEach(() => {
@@ -424,5 +424,47 @@ describe('detectEffortOverride', () => {
   it('ignores non-chat messages (task rows never carry slash commands)', () => {
     insertMessage('m1', 'task', { prompt: '/council pretend this is heavy' });
     expect(detectEffortOverride(getPendingMessages())).toBeUndefined();
+  });
+});
+
+describe('buildDynamicSystemContext', () => {
+  const usage = {
+    inputTokens: 1000,
+    outputTokens: 500,
+    cacheCreationTokens: 4000,
+    cacheReadTokens: 35000,
+    totalContextTokens: 40000,
+  };
+
+  it('returns the base context unchanged when no usage is available yet', () => {
+    const base = { instructions: 'base instructions' };
+    expect(buildDynamicSystemContext(base, undefined, 200000)).toBe(base);
+  });
+
+  it('returns undefined when neither base nor usage is provided', () => {
+    expect(buildDynamicSystemContext(undefined, undefined, 200000)).toBeUndefined();
+  });
+
+  it('appends a context-usage line to existing instructions', () => {
+    const out = buildDynamicSystemContext({ instructions: 'base instructions' }, usage, 200000);
+    expect(out?.instructions).toContain('base instructions');
+    expect(out?.instructions).toContain('Current context usage: 40,000 / 200,000 tokens (20.0%)');
+  });
+
+  it('creates instructions when base is empty', () => {
+    const out = buildDynamicSystemContext(undefined, usage, 200000);
+    expect(out?.instructions).toBe(
+      "Current context usage: 40,000 / 200,000 tokens (20.0%) as of the prior turn's API response.",
+    );
+  });
+
+  it('honors a non-default context window', () => {
+    const out = buildDynamicSystemContext(undefined, usage, 1000000);
+    expect(out?.instructions).toContain('40,000 / 1,000,000 tokens (4.0%)');
+  });
+
+  it('survives a zero-window edge case without dividing by zero', () => {
+    const out = buildDynamicSystemContext(undefined, usage, 0);
+    expect(out?.instructions).toContain('(0.0%)');
   });
 });

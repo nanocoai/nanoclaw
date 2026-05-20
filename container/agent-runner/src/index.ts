@@ -95,11 +95,23 @@ async function main(): Promise<void> {
     effort: config.effort,
   });
 
+  // Context-window override: lets operators retarget the
+  // `Current context usage: X / Y (Z%)` denominator when running with a
+  // non-default window (e.g. 1M-context Sonnet beta). Falls back to the
+  // poll-loop's DEFAULT_CONTEXT_WINDOW_TOKENS when unset or unparseable.
+  const contextWindowEnv = process.env.CLAUDE_CODE_CONTEXT_WINDOW;
+  const parsedContextWindow = contextWindowEnv ? Number.parseInt(contextWindowEnv, 10) : NaN;
+  const contextWindowTokens = Number.isFinite(parsedContextWindow) && parsedContextWindow > 0 ? parsedContextWindow : undefined;
+  if (contextWindowTokens !== undefined) {
+    log(`Context-window override: ${contextWindowTokens.toLocaleString()} tokens`);
+  }
+
   await runPollLoop({
     provider,
     providerName,
     cwd: CWD,
     systemContext: { instructions },
+    contextWindowTokens,
   });
 }
 
