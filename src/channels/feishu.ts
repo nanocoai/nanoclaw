@@ -6,7 +6,7 @@ import path from 'path';
 import * as lark from '@larksuiteoapi/node-sdk';
 
 import { ASSISTANT_NAME } from '../config.js';
-import type { ContainerOutput } from '../container-runner.js';
+import { resolveCliMode, type ContainerOutput } from '../container-runner.js';
 import { getMessageById } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
@@ -26,7 +26,8 @@ import { registerChannel, ChannelOpts } from './registry.js';
 // ---- 配置 ----
 
 const JID_PREFIX = 'fs:';
-const TYPING_EMOJI = 'OnIt'; // 飞书内置 emoji key
+const TYPING_EMOJI = 'HAUGHTY'; // 飞书内置 emoji key — 白眼（所有模式统一）
+const CLI_TYPING_EMOJI = 'HAUGHTY'; // CLI 模式群也用白眼
 const CARD_THRESHOLD = 500;
 const MD_PATTERN = /```|\*\*|^##?\s|^\|.*\||\*[^*\s]|^[-*+]\s|^>\s/m;
 const PROGRESS_JSON_PATTERN = /^\{"title":"[🔧📖✏️🔍🌐📋⚙️⏳💭✅]/u;
@@ -974,12 +975,15 @@ export class FeishuChannel implements Channel {
       if (isTyping) {
         // 新对话开始，清除上一轮的 progressDone 标记
         this.progressDone.delete(jid);
-        // 添加 emoji reaction 到用户消息
+        // 添加 emoji reaction 到用户消息（CLI 模式群用白眼，其他用在做了）
         const lastMsgId = this.getLastMessageId(jid);
-        logger.info({ jid, lastMsgId }, '[typing] 开始加 emoji reaction');
+        const group = this.opts.registeredGroups()[jid];
+        const cliMode = resolveCliMode(group?.containerConfig);
+        const emoji = cliMode !== 'sdk' ? CLI_TYPING_EMOJI : TYPING_EMOJI;
+        logger.info({ jid, lastMsgId, emoji }, '[typing] 开始加 emoji reaction');
         if (lastMsgId) {
           const resp = await this.client.im.messageReaction.create({
-            data: { reaction_type: { emoji_type: TYPING_EMOJI } },
+            data: { reaction_type: { emoji_type: emoji } },
             path: { message_id: lastMsgId },
           });
           const reactionId = resp?.data?.reaction_id;
