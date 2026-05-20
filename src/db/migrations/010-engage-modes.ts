@@ -1,26 +1,11 @@
 /**
  * Replace `trigger_rules` (opaque JSON) + `response_scope` (conflated axis)
- * with four explicit orthogonal columns on messaging_group_agents:
- *
- *   engage_mode            'pattern' | 'mention' | 'mention-sticky'
- *   engage_pattern         regex string (required when engage_mode='pattern';
- *                          '.' means "match everything" — the "always" flavor)
- *   sender_scope           'all' | 'known'
- *   ignored_message_policy 'drop' | 'accumulate'
- *
- * Backfill rules (applied per-row, reading the old JSON):
- *   - If trigger_rules.pattern is a non-empty string → engage_mode='pattern',
- *     engage_pattern = that value
- *   - Else if trigger_rules.requiresTrigger === false OR response_scope='all'
- *     → engage_mode='pattern', engage_pattern='.'
- *   - Else (requires trigger but no pattern specified) → engage_mode='mention'
- *   - sender_scope: 'known' when response_scope was 'allowlisted', 'all' otherwise
- *   - ignored_message_policy: 'drop' (conservative default; no old-schema analog)
+ * with four explicit orthogonal columns on messaging_group_agents.
  */
-import type Database from 'better-sqlite3';
-import type { Migration } from './index.js';
-
 import { log } from '../../log.js';
+import type { ICentralDb } from '../central/types.js';
+import type { Migration } from './index.js';
+import { colText, hasColumn, type MigrationContext } from './helpers.js';
 
 interface LegacyRow {
   id: string;
@@ -64,17 +49,21 @@ function backfill(row: LegacyRow): {
 export const migration010: Migration = {
   version: 10,
   name: 'engage-modes',
-  up: (db: Database.Database) => {
-    // Add the four new columns alongside the existing two. SQLite ALTER ADD
-    // is cheap and non-rewriting.
-    db.exec(`
-      ALTER TABLE messaging_group_agents ADD COLUMN engage_mode            TEXT;
-      ALTER TABLE messaging_group_agents ADD COLUMN engage_pattern         TEXT;
-      ALTER TABLE messaging_group_agents ADD COLUMN sender_scope           TEXT;
-      ALTER TABLE messaging_group_agents ADD COLUMN ignored_message_policy TEXT;
-    `);
+  up: (db: ICentralDb, ctx: MigrationContext) => {
+    const txt = colText(ctx);
+    if (!hasColumn(db, ctx, 'messaging_group_agents', 'engage_mode')) {
+      db.exec(`ALTER TABLE messaging_group_agents ADD COLUMN engage_mode ${txt}`);
+    }
+    if (!hasColumn(db, ctx, 'messaging_group_agents', 'engage_pattern')) {
+      db.exec(`ALTER TABLE messaging_group_agents ADD COLUMN engage_pattern ${txt}`);
+    }
+    if (!hasColumn(db, ctx, 'messaging_group_agents', 'sender_scope')) {
+      db.exec(`ALTER TABLE messaging_group_agents ADD COLUMN sender_scope ${txt}`);
+    }
+    if (!hasColumn(db, ctx, 'messaging_group_agents', 'ignored_message_policy')) {
+      db.exec(`ALTER TABLE messaging_group_agents ADD COLUMN ignored_message_policy ${txt}`);
+    }
 
-    // Backfill existing rows in JS (parsing JSON per-row is painful in pure SQL).
     const rows = db
       .prepare('SELECT id, trigger_rules, response_scope FROM messaging_group_agents')
       .all() as LegacyRow[];
@@ -91,12 +80,17 @@ export const migration010: Migration = {
       update.run(v.engage_mode, v.engage_pattern, v.sender_scope, v.ignored_message_policy, row.id);
     }
 
-    // Drop the legacy columns. DROP COLUMN requires SQLite 3.35+ (2021); our
-    // better-sqlite3 ships a current build.
-    db.exec(`
-      ALTER TABLE messaging_group_agents DROP COLUMN trigger_rules;
-      ALTER TABLE messaging_group_agents DROP COLUMN response_scope;
-    `);
+    if (ctx.dialect === 'mysql') {
+      db.exec(`
+        ALTER TABLE messaging_group_agents DROP COLUMN trigger_rules;
+        ALTER TABLE messaging_group_agents DROP COLUMN response_scope;
+      `);
+    } else {
+      db.exec(`
+        ALTER TABLE messaging_group_agents DROP COLUMN trigger_rules;
+        ALTER TABLE messaging_group_agents DROP COLUMN response_scope;
+      `);
+    }
 
     log.info('engage-modes migration: backfilled rows', { count: rows.length });
   },

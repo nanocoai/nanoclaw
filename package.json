@@ -25,16 +25,20 @@
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:seekdb": "SEEKDB_INTEGRATION=1 vitest run src/db/seekdb-central.test.ts",
+    "test:seekdb:server": "SEEKDB_INTEGRATION=1 SEEKDB_SERVER=1 vitest run src/db/seekdb-central.test.ts"
   },
   "dependencies": {
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
     "@onecli-sh/sdk": "^0.5.0",
+    "@seekdb/js-bindings": "1.2.0",
     "better-sqlite3": "11.10.0",
     "chat": "^4.24.0",
     "cron-parser": "5.5.0",
-    "kleur": "^4.1.5"
+    "kleur": "^4.1.5",
+    "seekdb": "1.2.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",

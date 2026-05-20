@@ -1,4 +1,5 @@
-export { initDb, initTestDb, getDb, closeDb } from './connection.js';
+export { initDb, initTestDb, getDb, closeDb, getCentralDbDialect, ensureCentralDatabaseExists } from './connection.js';
+export type { ICentralDb, CentralDbDialect } from './central/types.js';
 export { runMigrations } from './migrations/index.js';
 export {
   createAgentGroup,

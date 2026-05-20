@@ -10,6 +10,7 @@ dist/
 store/
 data/
 logs/
+seekdb.db
 
 # Groups - per-installation state, not tracked
 groups/*

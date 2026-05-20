@@ -6,9 +6,9 @@
  */
 import crypto from 'crypto';
 
-import type Database from 'better-sqlite3';
 import type { StateAdapter, QueueEntry } from 'chat';
 
+import type { ICentralDb } from './db/central/types.js';
 import { getDb } from './db/connection.js';
 
 interface Lock {
@@ -18,7 +18,7 @@ interface Lock {
 }
 
 export class SqliteStateAdapter implements StateAdapter {
-  private db!: Database.Database;
+  private db!: ICentralDb;
 
   async connect(): Promise<void> {
     this.db = getDb();

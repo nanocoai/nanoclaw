@@ -1,41 +1,33 @@
+import type { ICentralDb } from '../central/types.js';
 import type { Migration } from './index.js';
+import { colId, colJson, colLongText, colText, tableSuffix, type MigrationContext } from './helpers.js';
 
-/**
- * `pending_approvals` table — host-side records for any approval-requiring
- * request. Used by:
- *   - install_packages / add_mcp_server  (session-bound, `session_id` set,
- *     status stays at default 'pending' until handled)
- *   - OneCLI credential approvals from the SDK `configureManualApproval`
- *     callback (session_id may be null, action='onecli_credential').
- *
- * The OneCLI-specific columns (`agent_group_id`, `channel_type`, `platform_id`,
- * `platform_message_id`, `expires_at`, `status`) let the host edit the admin
- * card when a request expires and sweep stale rows on startup.
- */
-// Retains the original `name` ('pending-approvals') so existing DBs that
-// already recorded this migration under that name don't re-run it. The
-// module- prefix lives on the filename / export identifier only.
 export const moduleApprovalsPendingApprovals: Migration = {
   version: 3,
   name: 'pending-approvals',
-  up(db) {
+  up(db: ICentralDb, ctx: MigrationContext) {
+    const id = colId(ctx);
+    const txt = colText(ctx);
+    const long = colLongText(ctx);
+    const json = colJson(ctx);
+    const t = tableSuffix(ctx);
     db.exec(`
       CREATE TABLE pending_approvals (
-        approval_id         TEXT PRIMARY KEY,
-        session_id          TEXT REFERENCES sessions(id),
-        request_id          TEXT NOT NULL,
-        action              TEXT NOT NULL,
-        payload             TEXT NOT NULL,
-        created_at          TEXT NOT NULL,
-        agent_group_id      TEXT REFERENCES agent_groups(id),
-        channel_type        TEXT,
-        platform_id         TEXT,
-        platform_message_id TEXT,
-        expires_at          TEXT,
-        status              TEXT NOT NULL DEFAULT 'pending',
-        title               TEXT NOT NULL DEFAULT '',
-        options_json        TEXT NOT NULL DEFAULT '[]'
-      );
+        approval_id         ${id} PRIMARY KEY,
+        session_id          ${id} REFERENCES sessions(id),
+        request_id          ${id} NOT NULL,
+        action              ${txt} NOT NULL,
+        payload             ${long} NOT NULL,
+        created_at          ${txt} NOT NULL,
+        agent_group_id      ${id} REFERENCES agent_groups(id),
+        channel_type        ${txt},
+        platform_id         ${txt},
+        platform_message_id ${txt},
+        expires_at          ${txt},
+        status              ${txt} NOT NULL DEFAULT 'pending',
+        title               ${txt} NOT NULL DEFAULT '',
+        options_json        ${json} NOT NULL DEFAULT '[]'
+      )${t};
 
       CREATE INDEX idx_pending_approvals_action_status
         ON pending_approvals(action, status);

@@ -10,7 +10,8 @@ import { backfillContainerConfigs } from './backfill-container-configs.js';
 import { DATA_DIR } from './config.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
-import { initDb } from './db/connection.js';
+import { CENTRAL_DB_BACKEND, getSeekDbCentralDbOptions } from './config.js';
+import { ensureCentralDatabaseExists, getCentralDbDialect, initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
 import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
@@ -69,11 +70,19 @@ async function main(): Promise<void> {
   // 0. Circuit breaker — backoff on rapid restarts
   await enforceStartupBackoff();
 
-  // 1. Init central DB
+  // 1. Init central DB (SQLite file or SeekDB over MySQL protocol — see docs/db-seekdb.md)
   const dbPath = path.join(DATA_DIR, 'v2.db');
+  ensureCentralDatabaseExists(dbPath);
   const db = initDb(dbPath);
   runMigrations(db);
-  log.info('Central DB ready', { path: dbPath });
+  const seekdbOpts = CENTRAL_DB_BACKEND === 'seekdb' ? getSeekDbCentralDbOptions() : null;
+  log.info('Central DB ready', {
+    backend: CENTRAL_DB_BACKEND,
+    dialect: getCentralDbDialect(),
+    path: CENTRAL_DB_BACKEND === 'sqlite' ? dbPath : undefined,
+    seekdbMode: seekdbOpts?.mode,
+    seekdbPath: seekdbOpts?.mode === 'embedded' ? seekdbOpts.path : undefined,
+  });
 
   // 1b. Backfill container_configs from legacy container.json files.
   // Idempotent — skips groups that already have a config row.
