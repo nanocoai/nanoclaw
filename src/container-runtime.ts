@@ -11,13 +11,46 @@ import { log } from './log.js';
 /** The container runtime binary name. */
 export const CONTAINER_RUNTIME_BIN = 'docker';
 
+let cachedIsPodman: boolean | null = null;
+
+/** Whether the active runtime is rootless Podman (e.g. via a docker-shim). */
+export function isPodman(): boolean {
+  if (cachedIsPodman !== null) return cachedIsPodman;
+  try {
+    const out = execSync(`${CONTAINER_RUNTIME_BIN} --version`, {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5000,
+    });
+    cachedIsPodman = /podman/i.test(out);
+  } catch {
+    cachedIsPodman = false;
+  }
+  return cachedIsPodman;
+}
+
+/**
+ * Rootless Podman: keep host uid mapped to itself so `--user $hostUid:$hostGid`
+ * makes the container process run as the host user. Without this, the
+ * container's uid lands in a subuid range and writes to host-owned bind
+ * mounts fail with SQLite "attempt to write a readonly database". No-op
+ * on Docker.
+ */
+export function userNamespaceArgs(): string[] {
+  return isPodman() ? ['--userns=keep-id'] : [];
+}
+
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
-  // On Linux, host.docker.internal isn't built-in — add it explicitly
-  if (os.platform() === 'linux') {
-    return ['--add-host=host.docker.internal:host-gateway'];
+  if (os.platform() !== 'linux') return [];
+  if (isPodman()) {
+    // Rootless podman: slirp4netns + allow_host_loopback makes the host's
+    // loopback-bound services reachable at the slirp gateway IP (10.0.2.2).
+    // Plain --add-host=host-gateway resolves to the host's primary interface,
+    // where OneCLI (bound to 127.0.0.1) isn't listening — so requests fail.
+    return ['--network=slirp4netns:allow_host_loopback=true', '--add-host=host.docker.internal:10.0.2.2'];
   }
-  return [];
+  return ['--add-host=host.docker.internal:host-gateway'];
 }
 
 /** Returns CLI args for a readonly bind mount. */
