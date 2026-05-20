@@ -25,8 +25,8 @@ import net from 'net';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-const VERSION = '2.0.0';
-const RECV_TIMEOUT_MS = 60_000;
+export const VERSION = '2.0.0';
+export const RECV_TIMEOUT_MS = 60_000;
 const verbose = process.argv.includes('-v') || process.argv.includes('--verbose');
 
 if (process.argv.includes('-h') || process.argv.includes('--help')) {
@@ -73,12 +73,12 @@ function findNanoclawDir(): string {
 
 const NANOCLAW_DIR = findNanoclawDir();
 const SOCK_PATH = path.join(NANOCLAW_DIR, 'data', 'cli.sock');
-const FS_ROOT = process.env.NANOCLAW_FS_ROOT ?? process.env.HOME ?? '/home';
+export const FS_ROOT = process.env.NANOCLAW_FS_ROOT ?? process.env.HOME ?? '/home';
 
 // ── Line reader ───────────────────────────────────────────────────────────────
 // Same pattern as container/agent-runner/src/providers/acp-client.ts:LineReader
 
-class LineReader {
+export class LineReader {
   private buf = '';
   private lines: string[] = [];
   private waiters: Array<(line: string | null) => void> = [];
@@ -109,34 +109,65 @@ class LineReader {
   }
 }
 
-// ── Stdout writer ─────────────────────────────────────────────────────────────
+// ── CLI transport abstraction ─────────────────────────────────────────────────
 
-function writeAcp(obj: object): void {
-  const line = JSON.stringify(obj);
-  dbg('→', line);
-  process.stdout.write(line + '\n');
-}
-
-function respond(id: number, result: object): void {
-  writeAcp({ jsonrpc: '2.0', id, result });
-}
-
-function respondError(id: number, code: number, message: string): void {
-  writeAcp({ jsonrpc: '2.0', id, error: { code, message } });
-}
-
-function notify(method: string, params: object): void {
-  writeAcp({ jsonrpc: '2.0', method, params });
+export interface CliTransport {
+  reader: LineReader;
+  write: (msg: string) => void;
+  close: () => void;
 }
 
 // ── ACP Bridge ────────────────────────────────────────────────────────────────
 
-class AcpBridge {
-  private sock: net.Socket | null = null;
-  private sockReader: LineReader | null = null;
+export interface AcpBridgeOpts {
+  input?: LineReader;
+  output?: (line: string) => void;
+  connectCli?: () => Promise<CliTransport>;
+  recvTimeoutMs?: number;
+  fsRoot?: string;
+}
+
+export class AcpBridge {
+  private cli: CliTransport | null = null;
+  private readonly out: (line: string) => void;
+  private readonly recvTimeoutMs: number;
+  private readonly fsRoot: string;
+
+  constructor(private readonly opts: AcpBridgeOpts = {}) {
+    this.out = opts.output ?? ((line) => process.stdout.write(line + '\n'));
+    this.recvTimeoutMs = opts.recvTimeoutMs ?? RECV_TIMEOUT_MS;
+    this.fsRoot = opts.fsRoot ?? FS_ROOT;
+  }
+
+  // ── Output helpers ────────────────────────────────────────────────────────
+
+  private write(obj: object): void {
+    const line = JSON.stringify(obj);
+    dbg('→', line);
+    this.out(line);
+  }
+
+  private respond(id: number, result: object): void {
+    this.write({ jsonrpc: '2.0', id, result });
+  }
+
+  private respondError(id: number, code: number, message: string): void {
+    this.write({ jsonrpc: '2.0', id, error: { code, message } });
+  }
+
+  private notify(method: string, params: object): void {
+    this.write({ jsonrpc: '2.0', method, params });
+  }
+
+  // ── CLI socket ────────────────────────────────────────────────────────────
 
   async connect(): Promise<void> {
-    if (this.sock) return;
+    if (this.cli) return;
+
+    if (this.opts.connectCli) {
+      this.cli = await this.opts.connectCli();
+      return;
+    }
 
     if (!fs.existsSync(SOCK_PATH)) {
       throw new Error(
@@ -161,22 +192,28 @@ class AcpBridge {
       reader.end();
     });
 
-    this.sock = sock;
-    this.sockReader = reader;
+    this.cli = {
+      reader,
+      write: (msg) => sock.write(msg, 'utf8'),
+      close: () => {
+        reader.end();
+        try { sock.destroy(); } catch { /* swallow */ }
+      },
+    };
     dbg('connected to', SOCK_PATH);
   }
 
   private sendCli(text: string): void {
     const msg = JSON.stringify({ text }) + '\n';
     dbg('cli→', msg.trimEnd());
-    this.sock!.write(msg, 'utf8');
+    this.cli!.write(msg);
   }
 
   private async recvCli(): Promise<string> {
     const deadline = new Promise<never>((_, reject) =>
       setTimeout(
-        () => reject(new Error(`NanoClaw response timeout after ${RECV_TIMEOUT_MS / 1000}s`)),
-        RECV_TIMEOUT_MS,
+        () => reject(new Error(`NanoClaw response timeout after ${this.recvTimeoutMs / 1000}s`)),
+        this.recvTimeoutMs,
       )
     );
     return Promise.race([this._recvCliLoop(), deadline]);
@@ -184,7 +221,7 @@ class AcpBridge {
 
   private async _recvCliLoop(): Promise<string> {
     while (true) {
-      const line = await this.sockReader!.readLine();
+      const line = await this.cli!.reader.readLine();
       if (line === null) throw new Error('NanoClaw CLI socket closed unexpectedly');
       dbg('cli←', line);
       try {
@@ -197,16 +234,14 @@ class AcpBridge {
   }
 
   close(): void {
-    this.sockReader?.end();
-    this.sockReader = null;
-    try { this.sock?.destroy(); } catch { /* swallow */ }
-    this.sock = null;
+    this.cli?.close();
+    this.cli = null;
   }
 
   // ── ACP method handlers ───────────────────────────────────────────────────
 
-  private handleInitialize(id: number): void {
-    respond(id, {
+  handleInitialize(id: number): void {
+    this.respond(id, {
       protocolVersion: 1,
       agentCapabilities: {
         promptCapabilities: {
@@ -219,11 +254,11 @@ class AcpBridge {
     });
   }
 
-  private handleSessionNew(id: number): void {
-    respond(id, { sessionId: randomUUID() });
+  handleSessionNew(id: number): void {
+    this.respond(id, { sessionId: randomUUID() });
   }
 
-  private async handleSessionPrompt(
+  async handleSessionPrompt(
     id: number,
     params: Record<string, unknown>,
   ): Promise<void> {
@@ -235,7 +270,7 @@ class AcpBridge {
       .trim();
 
     if (!text) {
-      respond(id, { stopReason: 'end_turn' });
+      this.respond(id, { stopReason: 'end_turn' });
       return;
     }
 
@@ -244,7 +279,7 @@ class AcpBridge {
       this.sendCli(text);
       const response = await this.recvCli();
 
-      notify('session/update', {
+      this.notify('session/update', {
         sessionId: params.sessionId ?? '',
         update: {
           sessionUpdate: 'agent_message_chunk',
@@ -252,24 +287,24 @@ class AcpBridge {
         },
       });
 
-      respond(id, { stopReason: 'end_turn' });
+      this.respond(id, { stopReason: 'end_turn' });
     } catch (err) {
       this.close();
-      respondError(id, -32000, err instanceof Error ? err.message : String(err));
+      this.respondError(id, -32000, err instanceof Error ? err.message : String(err));
     }
   }
 
-  private handleSessionCancel(id: number): void {
+  handleSessionCancel(id: number): void {
     this.close();
-    respond(id, {});
+    this.respond(id, {});
   }
 
-  private handleSessionClose(id: number): void {
+  handleSessionClose(id: number): void {
     this.close();
-    respond(id, {});
+    this.respond(id, {});
   }
 
-  private handleFsReadTextFile(id: number, params: Record<string, unknown>): void {
+  handleFsReadTextFile(id: number, params: Record<string, unknown>): void {
     const { path: filePath, line: startLine, limit } = params as {
       path?: string;
       sessionId?: string;
@@ -277,12 +312,12 @@ class AcpBridge {
       limit?: number;
     };
     if (!filePath) {
-      respondError(id, -32602, 'Missing required param: path');
+      this.respondError(id, -32602, 'Missing required param: path');
       return;
     }
     const resolved = path.resolve(filePath);
-    if (!resolved.startsWith(FS_ROOT + path.sep) && resolved !== FS_ROOT) {
-      respondError(id, -32000, `Path outside allowed root (${FS_ROOT}): ${resolved}`);
+    if (!resolved.startsWith(this.fsRoot + path.sep) && resolved !== this.fsRoot) {
+      this.respondError(id, -32000, `Path outside allowed root (${this.fsRoot}): ${resolved}`);
       return;
     }
     try {
@@ -291,22 +326,28 @@ class AcpBridge {
         const lines = raw.split('\n');
         const start = Math.max(0, (startLine ?? 1) - 1);
         const slice = limit !== undefined ? lines.slice(start, start + limit) : lines.slice(start);
-        respond(id, { content: slice.join('\n') });
+        this.respond(id, { content: slice.join('\n') });
       } else {
-        respond(id, { content: raw });
+        this.respond(id, { content: raw });
       }
     } catch (err) {
-      respondError(id, -32000, err instanceof Error ? err.message : String(err));
+      this.respondError(id, -32000, err instanceof Error ? err.message : String(err));
     }
   }
 
   // ── Main stdin loop ───────────────────────────────────────────────────────
 
   async run(): Promise<void> {
-    const stdinReader = new LineReader();
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (chunk: string) => stdinReader.feed(chunk));
-    process.stdin.on('end', () => stdinReader.end());
+    let stdinReader: LineReader;
+
+    if (this.opts.input) {
+      stdinReader = this.opts.input;
+    } else {
+      stdinReader = new LineReader();
+      process.stdin.setEncoding('utf8');
+      process.stdin.on('data', (chunk: string) => stdinReader.feed(chunk));
+      process.stdin.on('end', () => stdinReader.end());
+    }
 
     try {
       while (true) {
@@ -338,7 +379,7 @@ class AcpBridge {
         } else if (method === 'fs/read_text_file') {
           this.handleFsReadTextFile(id!, params);
         } else if (id !== undefined) {
-          respondError(id, -32601, `Method not found: ${method}`);
+          this.respondError(id, -32601, `Method not found: ${method}`);
         }
         // Notifications (no id): silently ignored
       }
@@ -350,22 +391,24 @@ class AcpBridge {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-if (process.stdin.isTTY) {
-  process.stderr.write('claw-acp: NanoClaw ACP server bridge\n');
-  process.stderr.write(`  NanoClaw directory : ${NANOCLAW_DIR}\n`);
-  process.stderr.write(`  CLI socket         : ${SOCK_PATH}\n`);
-  process.stderr.write(`  File system root   : ${FS_ROOT}\n`);
-  process.stderr.write('  Waiting for ACP JSON-RPC on stdin… (Ctrl-C to exit)\n\n');
-  process.stderr.write('  Quick test — paste these lines one at a time:\n');
-  process.stderr.write(
-    '  {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientInfo":{"name":"test"},"capabilities":{}}}\n',
-  );
-  process.stderr.write(
-    '  {"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}\n',
-  );
-  process.stderr.write(
-    '  {"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s1","prompt":[{"type":"text","text":"Hello!"}]}}\n\n',
-  );
-}
+if (import.meta.main) {
+  if (process.stdin.isTTY) {
+    process.stderr.write('claw-acp: NanoClaw ACP server bridge\n');
+    process.stderr.write(`  NanoClaw directory : ${NANOCLAW_DIR}\n`);
+    process.stderr.write(`  CLI socket         : ${SOCK_PATH}\n`);
+    process.stderr.write(`  File system root   : ${FS_ROOT}\n`);
+    process.stderr.write('  Waiting for ACP JSON-RPC on stdin… (Ctrl-C to exit)\n\n');
+    process.stderr.write('  Quick test — paste these lines one at a time:\n');
+    process.stderr.write(
+      '  {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientInfo":{"name":"test"},"capabilities":{}}}\n',
+    );
+    process.stderr.write(
+      '  {"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}\n',
+    );
+    process.stderr.write(
+      '  {"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s1","prompt":[{"type":"text","text":"Hello!"}]}}\n\n',
+    );
+  }
 
-await new AcpBridge().run();
+  await new AcpBridge().run();
+}
