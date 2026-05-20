@@ -629,16 +629,24 @@ async function runQuery(
   let lastAssistantUsage: { inputTokens: number; outputTokens: number } | undefined;
 
   // 💭 延迟去重：缓存最后一条 text block，等 500ms 看是否紧跟 result
+  // SDK 模式（runQuery）下不输出 thinking progress — 主进程会过滤 progressType=thinking，
+  // 但在源头抑制更干净，避免无意义的 IPC 传输和日志噪音
+  const isSdkMode = containerInput.cliMode === 'sdk' || !containerInput.cliMode;
   let pendingThought: { text: string; short: string; detail: string | undefined; timer: ReturnType<typeof setTimeout> } | null = null;
   const flushPendingThought = () => {
     if (pendingThought) {
-      writeOutput({
-        status: 'progress',
-        result: `💭 ${pendingThought.short}`,
-        progressType: 'thinking',
-        detail: pendingThought.detail,
-        newSessionId: undefined,
-      });
+      if (isSdkMode) {
+        // SDK 模式：不发送 thinking progress，仅记录日志
+        log(`[thinking-suppressed] SDK 模式跳过 thinking 输出: ${pendingThought.short}`);
+      } else {
+        writeOutput({
+          status: 'progress',
+          result: `💭 ${pendingThought.short}`,
+          progressType: 'thinking',
+          detail: pendingThought.detail,
+          newSessionId: undefined,
+        });
+      }
       pendingThought = null;
     }
   };

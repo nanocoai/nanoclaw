@@ -28,6 +28,7 @@ import {
   TIMEZONE,
 } from './config.js';
 import { getChatIndex } from './chat-index.js';
+import { shouldFilterProgress, isModelRefusal } from './output-filters.js';
 import './channels/index.js';
 import {
   getChannelFactory,
@@ -451,6 +452,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const mainOnOutput = async (result: ContainerOutput) => {
       // 进度消息 — 转发给 channel 显示进度卡片
       if (result.status === 'progress' && result.result) {
+        // thinking 类型的 progress 不发给用户（模型内部思考过程，发出去会触发死循环）
+        if (shouldFilterProgress(result.progressType)) {
+          logger.info({ chatJid, text: result.result.slice(0, 100) }, '[progress] thinking 类型，跳过发送');
+          return;
+        }
         const payload = result.detail
           ? JSON.stringify({ title: result.result, detail: result.detail })
           : result.result;
@@ -540,6 +546,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           );
           // kill 子进程，让 runContainerAgent resolve，由 runAgent 返回后的 API error 重试 loop 接管
           queue.killGroup(chatJid);
+          return;
+        }
+
+        // 模型拒绝回复文本过滤 — "No response requested." 等不应发给用户（会触发死循环）
+        if (text && isModelRefusal(text)) {
+          logger.warn({ chatJid, text: text.slice(0, 100) }, '[reply] 模型拒绝文本被拦截，不发给用户');
           return;
         }
 
@@ -746,6 +758,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         async (result) => {
           // 进度消息 — 与原始回调完全一致
           if (result.status === 'progress' && result.result) {
+            // thinking 类型的 progress 不发给用户（同主回调逻辑）
+            if (shouldFilterProgress(result.progressType)) {
+              logger.info({ chatJid, text: result.result.slice(0, 100) }, '[retry-progress] thinking 类型，跳过发送');
+              return;
+            }
             const payload = result.detail
               ? JSON.stringify({ title: result.result, detail: result.detail })
               : result.result;
@@ -819,6 +836,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 '[api-error] 限流重试期间检测到 API 瞬时错误，标记重试并 kill',
               );
               queue.killGroup(chatJid);
+              return;
+            }
+            // 模型拒绝回复文本过滤（同主回调逻辑）
+            if (text && isModelRefusal(text)) {
+              logger.warn({ chatJid, text: text.slice(0, 100) }, '[retry-reply] 模型拒绝文本被拦截，不发给用户');
               return;
             }
             if (text) {
