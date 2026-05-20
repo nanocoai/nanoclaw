@@ -235,18 +235,25 @@ export async function runInteractiveQuery(
       });
     };
 
-    // 超时控制
-    const timer = setTimeout(() => {
-      if (resolved) return;
-      log(`[interactive] response timeout after ${timeoutMs}ms`);
-      writeOutput({
-        status: 'error',
-        result: null,
-        error: `Response timeout (${Math.round(timeoutMs / 1000)}s)`,
-        newSessionId: config.sessionId || sessionToken,
-      });
-      finish();
-    }, timeoutMs);
+    // 超时控制 — 活动超时：每次收到 SSE 事件时重置计时器。
+    // CLI 多轮 tool_use 场景下，API 调用之间有工具执行的静默期（几十秒到几分钟），
+    // 但只要 SSE 数据持续流入就说明 CLI 还在正常工作，不应超时。
+    let timer: NodeJS.Timeout;
+    const resetTimeout = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (resolved) return;
+        log(`[interactive] response timeout after ${timeoutMs}ms of inactivity`);
+        writeOutput({
+          status: 'error',
+          result: null,
+          error: `Response timeout (${Math.round(timeoutMs / 1000)}s inactivity)`,
+          newSessionId: config.sessionId || sessionToken,
+        });
+        finish();
+      }, timeoutMs);
+    };
+    resetTimeout();
 
     // 跟踪是否收到过有意义的 SSE 事件（message_start / content_block_*）
     let hasReceivedSseData = false;
@@ -275,6 +282,7 @@ export async function runInteractiveQuery(
     const subscription: TapSubscription = {
       onEvent: (event: SseEvent) => {
         hasReceivedSseData = true;
+        resetTimeout(); // SSE 数据到达 → 重置超时
 
         // message_start 表示新 SSE 流开始 → 取消待发结果（前一个流的结果被覆盖）
         if (event.type === 'message_start' && pendingFinishTimer) {
@@ -339,6 +347,7 @@ export async function runInteractiveQuery(
       onActiveStreamsChange: (count: number) => {
         activeSseStreams = count;
         log(`[interactive] active SSE streams: ${count}`);
+        if (count > 0) resetTimeout(); // 新 SSE 流开始 → CLI 还在活跃
         // 当最后一个流结束（count→0）且有待发结果 → 安排 flush
         // 不立刻 flush，给 CLI 1s 时间开新的重试流
         if (count <= 0 && pendingOutput && !resolved) {

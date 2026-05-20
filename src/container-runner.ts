@@ -740,6 +740,7 @@ export async function runContainerAgent(
               {
                 group: group.name,
                 status: parsed.status,
+                error: parsed.error || undefined,
                 progressType: parsed.progressType,
                 gap: `${gap}s`,
                 resultLen: parsed.result?.length,

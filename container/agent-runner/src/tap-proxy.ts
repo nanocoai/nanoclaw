@@ -247,9 +247,11 @@ export class TapProxy extends EventEmitter {
     const proxyAuth = req.headers['proxy-authorization'];
     let sessionToken = '';
     if (proxyAuth) {
-      // Basic base64(user:password)
+      // Basic base64(user:password) — password 可能包含冒号（如 chatJid 中的 "fs:oc_xxx"），
+      // 所以只按第一个冒号分割（user:rest），rest 整体作为 sessionToken。
       const decoded = Buffer.from(proxyAuth.replace('Basic ', ''), 'base64').toString();
-      sessionToken = decoded.split(':')[1] || '';
+      const colonIdx = decoded.indexOf(':');
+      sessionToken = colonIdx >= 0 ? decoded.slice(colonIdx + 1) : '';
     }
 
     this.log(`[tap-proxy] CONNECT ${target} (session: ${sessionToken.slice(0, 8)}...)`);
