@@ -132,6 +132,9 @@ export class AcpBridge {
   private readonly out: (line: string) => void;
   private readonly recvTimeoutMs: number;
   private readonly fsRoot: string;
+  // Outgoing requests we sent to the IDE, waiting for responses
+  private readonly pending = new Map<number, (result: unknown, error?: unknown) => void>();
+  private nextId = 1000;
 
   constructor(private readonly opts: AcpBridgeOpts = {}) {
     this.out = opts.output ?? ((line) => process.stdout.write(line + '\n'));
@@ -157,6 +160,45 @@ export class AcpBridge {
 
   private notify(method: string, params: object): void {
     this.write({ jsonrpc: '2.0', method, params });
+  }
+
+  // Send a request to the IDE and wait for its response (e.g. fs/read_text_file)
+  private requestIde<T>(method: string, params: object): Promise<T> {
+    const id = this.nextId++;
+    return new Promise((resolve, reject) => {
+      this.pending.set(id, (result, error) => {
+        if (error) reject(new Error(typeof error === 'object' ? JSON.stringify(error) : String(error)));
+        else resolve(result as T);
+      });
+      this.write({ jsonrpc: '2.0', id, method, params });
+    });
+  }
+
+  // Resolve resource_link blocks by asking the IDE to read the files
+  private async resolveResources(
+    blocks: Array<Record<string, unknown>>,
+    sessionId: string,
+  ): Promise<string> {
+    const parts: string[] = [];
+    for (const block of blocks) {
+      if (block.type === 'text' && typeof block.text === 'string') {
+        parts.push(block.text as string);
+      } else if (block.type === 'resource_link' || block.type === 'resource') {
+        const uri = (block.uri ?? block.url) as string | undefined;
+        if (!uri) continue;
+        const filePath = uri.startsWith('file://') ? uri.slice(7) : uri;
+        try {
+          const result = await this.requestIde<{ content: string }>(
+            'fs/read_text_file',
+            { sessionId, path: filePath },
+          );
+          parts.push(`\n---\n${filePath}\n---\n${result.content}`);
+        } catch (err) {
+          dbg('resource fetch failed:', filePath, err instanceof Error ? err.message : String(err));
+        }
+      }
+    }
+    return parts.join('').trim();
   }
 
   // ── CLI socket ────────────────────────────────────────────────────────────
@@ -263,11 +305,8 @@ export class AcpBridge {
     params: Record<string, unknown>,
   ): Promise<void> {
     const blocks = (params.prompt as Array<Record<string, unknown>> | undefined) ?? [];
-    const text = blocks
-      .filter(b => b.type === 'text' && typeof b.text === 'string')
-      .map(b => b.text as string)
-      .join('')
-      .trim();
+    const sessionId = (params.sessionId as string | undefined) ?? '';
+    const text = await this.resolveResources(blocks, sessionId);
 
     if (!text) {
       this.respond(id, { stopReason: 'end_turn' });
@@ -366,12 +405,26 @@ export class AcpBridge {
         const method = msg.method as string | undefined;
         const params = (msg.params ?? {}) as Record<string, unknown>;
 
+        // Response to one of our outgoing requests (e.g. fs/read_text_file we sent to IDE)
+        if (id !== undefined && !method && (msg.result !== undefined || msg.error !== undefined)) {
+          const handler = this.pending.get(id as number);
+          if (handler) {
+            this.pending.delete(id as number);
+            handler(msg.result, msg.error);
+            continue;
+          }
+        }
+
         if (method === 'initialize') {
           this.handleInitialize(id!);
         } else if (method === 'session/new') {
           this.handleSessionNew(id!);
         } else if (method === 'session/prompt') {
-          await this.handleSessionPrompt(id!, params);
+          // Don't await — the loop must keep running to process IDE responses
+          // (e.g. fs/read_text_file replies) while the prompt is in flight.
+          this.handleSessionPrompt(id!, params).catch(err =>
+            this.respondError(id!, -32000, err instanceof Error ? err.message : String(err))
+          );
         } else if (method === 'session/cancel') {
           this.handleSessionCancel(id!);
         } else if (method === 'session/close') {
