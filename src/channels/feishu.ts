@@ -26,8 +26,8 @@ import { registerChannel, ChannelOpts } from './registry.js';
 // ---- 配置 ----
 
 const JID_PREFIX = 'fs:';
-const TYPING_EMOJI = 'HAUGHTY'; // 飞书内置 emoji key — 白眼（所有模式统一）
-const CLI_TYPING_EMOJI = 'HAUGHTY'; // CLI 模式群也用白眼
+const TYPING_EMOJI = 'OnIt'; // SDK 模式：在做了（后台异步执行）
+const CLI_TYPING_EMOJI = 'HAUGHTY'; // CLI 交互模式：白眼（区分两种模式）
 const CARD_THRESHOLD = 500;
 const MD_PATTERN = /```|\*\*|^##?\s|^\|.*\||\*[^*\s]|^[-*+]\s|^>\s/m;
 const PROGRESS_JSON_PATTERN = /^\{"title":"[🔧📖✏️🔍🌐📋⚙️⏳💭💬✅]/u;
