@@ -465,6 +465,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           ? JSON.stringify({ title: result.result, detail: result.detail })
           : result.result;
         await channel.sendMessage(chatJid, payload, { isProgress: true });
+        everSentToUser = true; // CLI interactive 模式下中间消息也算"发过消息"
         // tool_use 摘要存入 messages.db（供巡检和搜索使用）
         // result.result 格式如 "🔧 Bash: ls -la"，已含工具名和简短输入
         if (result.progressType === 'tool_use' && result.result) {
@@ -595,6 +596,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // （之前只在 !outputSentToUser 时清理，导致第一轮设了 true 后后续轮次卡片永远不关）
         if (!outputSentToUser) {
           await channel.setTyping?.(chatJid, false);
+        }
+        // CLI interactive 模式：文本已通过中间 progress/send_message 发出，
+        // success 到达时 text 为空，但 pendingUsage 还在 → 单独发 usage-only 卡片。
+        // 必须在 cleanupProgressCard 之前调用（cleanup 会清理 pendingUsage）
+        if (everSentToUser && 'sendUsageOnly' in channel) {
+          await (
+            channel as { sendUsageOnly: (jid: string) => Promise<void> }
+          ).sendUsageOnly(chatJid);
         }
         // 无条件清理进度卡片（cleanupProgressCard 内部会检查卡片是否存在，不存在则 no-op）
         if ('cleanupProgressCard' in channel) {
@@ -775,6 +784,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               ? JSON.stringify({ title: result.result, detail: result.detail })
               : result.result;
             await channel.sendMessage(chatJid, payload, { isProgress: true });
+            everSentToUser = true; // CLI interactive 模式下中间消息也算"发过消息"
             if (result.progressType === 'tool_use' && result.result) {
               try {
                 storeMessageDirect({
@@ -863,6 +873,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             // 重试成功后也要清理进度卡片和 typing 状态
             if (!outputSentToUser) {
               await channel.setTyping?.(chatJid, false);
+            }
+            // CLI interactive: usage-only 卡片（同主回调，在 cleanup 之前）
+            if (everSentToUser && 'sendUsageOnly' in channel) {
+              await (
+                channel as { sendUsageOnly: (jid: string) => Promise<void> }
+              ).sendUsageOnly(chatJid);
             }
             if ('cleanupProgressCard' in channel) {
               await (

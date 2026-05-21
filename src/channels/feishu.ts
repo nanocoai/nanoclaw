@@ -749,6 +749,32 @@ export class FeishuChannel implements Channel {
     return textMsgId;
   }
 
+  /** 发送仅含 usage footer 的小卡片（CLI interactive 模式：文本已通过中间消息发出，success 无文本载体） */
+  async sendUsageOnly(jid: string): Promise<void> {
+    const usage = this.pendingUsage.get(jid);
+    if (!usage) return;
+    const thinking = this.thinkingMode.get(jid);
+    const chatId = chatIdFromJid(jid);
+    const elements: unknown[] = [];
+    appendUsageFooter(elements, usage, thinking);
+    if (elements.length === 0) return;
+    try {
+      await this.client.im.message.create({
+        data: {
+          receive_id: chatId,
+          msg_type: 'interactive',
+          content: JSON.stringify({ schema: '2.0', body: { elements } }),
+        },
+        params: { receive_id_type: 'chat_id' },
+      });
+      logger.info({ jid, chatId }, '[sendUsageOnly] usage-only 卡片发送成功');
+    } catch (err) {
+      logger.warn({ jid, err }, '[sendUsageOnly] usage-only 卡片发送失败');
+    }
+    this.pendingUsage.delete(jid);
+    this.thinkingMode.delete(jid);
+  }
+
   /** IPC send_message 专用：直接发消息，不触发进度卡片清理逻辑 */
   async sendDirectMessage(jid: string, text: string): Promise<void> {
     const chatId = chatIdFromJid(jid);
