@@ -377,6 +377,14 @@ async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        // Thinking-only end_turn: model produced reasoning but no text. Clear
+        // the continuation so the next turn starts fresh — resuming an empty-
+        // reply session loops on more empty replies.
+        if (event.thinkingOnly) {
+          log('Thinking-only result: clearing continuation anchor');
+          clearContinuation(providerName);
+          queryContinuation = undefined;
+        }
         if (event.text) {
           const { hasUnwrapped } = dispatchResultText(event.text, routing);
           if (hasUnwrapped && !unwrappedNudged) {

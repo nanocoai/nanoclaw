@@ -231,6 +231,26 @@ function createPreCompactHook(assistantName?: string): HookCallback {
   };
 }
 
+// ── Thinking-only end_turn detection ──
+
+/**
+ * Returns true when the SDK result message represents a thinking-only end_turn:
+ * the model produced thinking blocks but no text output. The caller should
+ * clear the continuation anchor so the next turn starts fresh instead of
+ * resuming a session that will loop on empty replies.
+ */
+export function isThinkingOnlyEndTurn(message: unknown): boolean {
+  if (typeof message !== 'object' || message === null) return false;
+  const m = message as Record<string, unknown>;
+  return (
+    m.type === 'result' &&
+    m.subtype === 'success' &&
+    m.stop_reason === 'end_turn' &&
+    typeof m.result === 'string' &&
+    (m.result as string).trim() === ''
+  );
+}
+
 // ── Provider ──
 
 /**
@@ -328,7 +348,11 @@ export class ClaudeProvider implements AgentProvider {
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'result') {
           const text = 'result' in message ? (message as { result?: string }).result ?? null : null;
-          yield { type: 'result', text };
+          const thinkingOnly = isThinkingOnlyEndTurn(message);
+          if (thinkingOnly) {
+            log('Thinking-only end_turn detected — caller will clear continuation anchor');
+          }
+          yield { type: 'result', text, thinkingOnly };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
