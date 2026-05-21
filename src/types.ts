@@ -45,6 +45,19 @@ export interface RegisteredGroup {
 export interface ImageAttachment {
   mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
   data: string; // base64, already resized + encoded by the inbound channel
+  // Optional inbox-relative path (e.g. "inbox/2026-05-20T143012Z-F012345.jpg")
+  // populated when the channel materializes the image to /workspace/group/.
+  // Agents read the path from the in-message marker block, not this field —
+  // it exists for tests and future channel parity.
+  path?: string;
+}
+
+export interface VideoAttachment {
+  mediaType: 'video/mp4' | 'video/quicktime';
+  // Inbox-relative path (e.g. "inbox/2026-05-20T143012Z-F012345.mp4").
+  // Required: videos always travel via disk; there is no inline-base64 form.
+  path: string;
+  sizeBytes: number;
 }
 
 export interface NewMessage {
@@ -61,6 +74,7 @@ export interface NewMessage {
   reply_to_message_content?: string;
   reply_to_sender_name?: string;
   images?: ImageAttachment[];
+  videos?: VideoAttachment[];
 }
 
 export interface ScheduledTask {
