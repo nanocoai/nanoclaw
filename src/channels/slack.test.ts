@@ -9,6 +9,7 @@ vi.mock('./registry.js', () => ({ registerChannel: vi.fn() }));
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Jonesy',
   TRIGGER_PATTERN: /^@Jonesy\b/i,
+  GROUPS_DIR: '/tmp/test-groups',
 }));
 
 // Mock logger
@@ -42,6 +43,41 @@ vi.mock('../image.js', () => ({
       'image/heif',
       'image/avif',
     ].includes(m),
+}));
+
+// Mock media — keep tests off real disk by stubbing materializeAttachment.
+const materializeMock = vi.hoisted(() =>
+  vi.fn(async (opts: { relName: string }) => `inbox/${opts.relName}`),
+);
+vi.mock('../media.js', () => ({
+  isSupportedVideoMime: (m: string) =>
+    ['video/mp4', 'video/quicktime'].includes(m),
+  mediaExtForMime: (m: string) => {
+    const map: Record<string, string> = {
+      'image/jpeg': '.jpg',
+      'image/png': '.jpg',
+      'image/gif': '.jpg',
+      'image/webp': '.jpg',
+      'image/heic': '.jpg',
+      'image/heif': '.jpg',
+      'image/avif': '.jpg',
+      'video/mp4': '.mp4',
+      'video/quicktime': '.mov',
+    };
+    const ext = map[m];
+    if (!ext) throw new Error(`mock: bad mime ${m}`);
+    return ext;
+  },
+  inboxFilename: (opts: { timestamp: Date; fileId: string; mime: string }) => {
+    if (!/^[A-Z0-9]+$/.test(opts.fileId)) throw new Error('mock: bad file ID');
+    const extMap: Record<string, string> = {
+      'video/mp4': '.mp4',
+      'video/quicktime': '.mov',
+    };
+    return `mock-${opts.fileId}${extMap[opts.mime] ?? '.jpg'}`;
+  },
+  materializeAttachment: materializeMock,
+  MAX_VIDEO_BYTES: 100 * 1024 * 1024,
 }));
 
 // Mock fs — sendImage uses fs.createReadStream to attach files to uploadV2.
@@ -917,7 +953,7 @@ describe('SlackChannel', () => {
       });
     }
 
-    it('delivers an images-only message (no text, one image)', async () => {
+    it('delivers an images-only message with marker block and materialized path', async () => {
       okFetch();
       const opts = createTestOpts();
       const channel = new SlackChannel(opts);
@@ -940,8 +976,14 @@ describe('SlackChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'slack:C0123456789',
         expect.objectContaining({
-          content: '',
-          images: [{ mediaType: 'image/jpeg', data: 'ZmFrZS1iYXNlNjQ=' }],
+          content: expect.stringContaining('[Attached files in inbox/:]'),
+          images: [
+            expect.objectContaining({
+              mediaType: 'image/jpeg',
+              data: 'ZmFrZS1iYXNlNjQ=',
+              path: expect.stringMatching(/^inbox\/mock-F1\.jpg$/),
+            }),
+          ],
         }),
       );
     });
@@ -1095,6 +1137,361 @@ describe('SlackChannel', () => {
             Authorization: 'Bearer xoxb-test-token',
           }),
         }),
+      );
+    });
+  });
+
+  // --- Video inbound + mixed media + marker block ---
+
+  describe('video inbound', () => {
+    function okFetchVideo(bytes = 1024) {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-length': String(bytes) }),
+        arrayBuffer: async () => new ArrayBuffer(bytes),
+      });
+    }
+
+    it('accepts a video/mp4 and materializes it under inbox/', async () => {
+      okFetchVideo();
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          text: 'extend this',
+          files: [
+            {
+              id: 'F999',
+              mimetype: 'video/mp4',
+              url_private_download: 'https://files.slack.com/F999/download',
+              name: 'clip.mp4',
+            },
+          ],
+        }),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          content: expect.stringContaining('[Attached files in inbox/:]'),
+          videos: [
+            expect.objectContaining({
+              mediaType: 'video/mp4',
+              path: expect.stringMatching(/^inbox\/mock-F999\.mp4$/),
+            }),
+          ],
+        }),
+      );
+      // No inline base64 for video
+      const payload = (
+        opts.onMessage as unknown as { mock: { calls: unknown[][] } }
+      ).mock.calls[0][1] as { images?: unknown };
+      expect(payload.images).toBeUndefined();
+    });
+
+    it('accepts a video/quicktime (iPhone .mov)', async () => {
+      okFetchVideo();
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          text: 'animate this',
+          files: [
+            {
+              id: 'F123',
+              mimetype: 'video/quicktime',
+              url_private_download: 'https://u/v',
+              name: 'IMG_1234.MOV',
+            },
+          ],
+        }),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          videos: [
+            expect.objectContaining({
+              mediaType: 'video/quicktime',
+              path: expect.stringMatching(/^inbox\/mock-F123\.mov$/),
+            }),
+          ],
+        }),
+      );
+    });
+
+    it('delivers a mixed image+video message with both in the marker', async () => {
+      okFetchVideo();
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          text: 'use these',
+          files: [
+            {
+              id: 'F1',
+              mimetype: 'image/jpeg',
+              url_private_download: 'https://u/img',
+              name: 'a.jpg',
+            },
+            {
+              id: 'F2',
+              mimetype: 'video/mp4',
+              url_private_download: 'https://u/vid',
+              name: 'b.mp4',
+            },
+          ],
+        }),
+      );
+
+      const payload = (
+        opts.onMessage as unknown as { mock: { calls: unknown[][] } }
+      ).mock.calls[0][1] as {
+        content: string;
+        images?: unknown[];
+        videos?: unknown[];
+      };
+      expect(payload.images?.length).toBe(1);
+      expect(payload.videos?.length).toBe(1);
+      expect(payload.content).toContain('use these');
+      expect(payload.content).toContain('[Attached files in inbox/:]');
+      expect(payload.content).toContain('inbox/mock-F1.jpg');
+      expect(payload.content).toContain('inbox/mock-F2.mp4');
+    });
+
+    it('skips video/webm with a warn log (unsupported MIME)', async () => {
+      okFetchVideo();
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          text: 'try this',
+          files: [
+            {
+              id: 'F1',
+              mimetype: 'video/webm',
+              url_private_download: 'https://u/v',
+            },
+          ],
+        }),
+      );
+
+      const payload = (
+        opts.onMessage as unknown as { mock: { calls: unknown[][] } }
+      ).mock.calls[0][1] as { content: string; videos?: unknown[] };
+      expect(payload.videos).toBeUndefined();
+      // Text preserved, no marker (nothing materialized, no oversize)
+      expect(payload.content).toBe('try this');
+    });
+
+    it('rejects oversize videos via Content-Length without consuming body', async () => {
+      const oversize = 200 * 1024 * 1024;
+      const arrayBufferMock = vi.fn(async () => new ArrayBuffer(1));
+      fetchMock.mockResolvedValue({
+        ok: true,
+        headers: new Headers({ 'content-length': String(oversize) }),
+        arrayBuffer: arrayBufferMock,
+      });
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          text: 'big one',
+          files: [
+            {
+              id: 'F1',
+              mimetype: 'video/mp4',
+              url_private_download: 'https://u/v',
+            },
+          ],
+        }),
+      );
+
+      // Body never consumed when Content-Length exceeds cap
+      expect(arrayBufferMock).not.toHaveBeenCalled();
+
+      const payload = (
+        opts.onMessage as unknown as { mock: { calls: unknown[][] } }
+      ).mock.calls[0][1] as { content: string; videos?: unknown[] };
+      expect(payload.videos).toBeUndefined();
+      expect(payload.content).toContain('attachment skipped: too large');
+    });
+
+    it('rejects oversize videos via buffer-size fallback when Content-Length is missing', async () => {
+      const oversizeBytes = 200 * 1024 * 1024;
+      fetchMock.mockResolvedValue({
+        ok: true,
+        headers: new Headers(),
+        arrayBuffer: async () => new ArrayBuffer(oversizeBytes),
+      });
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          text: 'huge',
+          files: [
+            {
+              id: 'F1',
+              mimetype: 'video/mp4',
+              url_private_download: 'https://u/v',
+            },
+          ],
+        }),
+      );
+
+      const payload = (
+        opts.onMessage as unknown as { mock: { calls: unknown[][] } }
+      ).mock.calls[0][1] as { content: string; videos?: unknown[] };
+      expect(payload.videos).toBeUndefined();
+      expect(payload.content).toContain('attachment skipped: too large');
+    });
+
+    it('skips files with path-traversal-shaped file IDs (inboxFilename throws)', async () => {
+      okFetchVideo();
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          text: 'evil',
+          files: [
+            {
+              id: '../escape',
+              mimetype: 'video/mp4',
+              url_private_download: 'https://u/v',
+            },
+          ],
+        }),
+      );
+
+      // File ID rejected -> no video pushed, content unchanged.
+      const payload = (
+        opts.onMessage as unknown as { mock: { calls: unknown[][] } }
+      ).mock.calls[0][1] as { content: string; videos?: unknown[] };
+      expect(payload.videos).toBeUndefined();
+      expect(payload.content).toBe('evil');
+    });
+
+    it('uses bot token Bearer auth for the video fetch', async () => {
+      okFetchVideo();
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          text: 'x',
+          files: [
+            {
+              id: 'F999',
+              mimetype: 'video/mp4',
+              url_private_download: 'https://u/v',
+            },
+          ],
+        }),
+      );
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'https://u/v',
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: 'Bearer xoxb-test-token',
+          }),
+        }),
+      );
+    });
+
+    it('drops messages with no text, no images, no videos, no oversize skips', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          text: undefined as unknown as string,
+          files: [
+            {
+              id: 'F1',
+              mimetype: 'video/webm', // unsupported
+              url_private_download: 'https://u/v',
+            },
+          ],
+        }),
+      );
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('passes the registered group folder to materializeAttachment', async () => {
+      okFetchVideo();
+      materializeMock.mockClear();
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          text: 'x',
+          files: [
+            {
+              id: 'F1',
+              mimetype: 'video/mp4',
+              url_private_download: 'https://u/v',
+            },
+          ],
+        }),
+      );
+
+      expect(materializeMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          groupFolder: 'test-channel',
+          groupsRoot: '/tmp/test-groups',
+        }),
+      );
+    });
+
+    it('marker block has the expected shape for a single video', async () => {
+      okFetchVideo(8192);
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({
+          text: 'see',
+          files: [
+            {
+              id: 'F1',
+              mimetype: 'video/mp4',
+              url_private_download: 'https://u/v',
+            },
+          ],
+        }),
+      );
+
+      const payload = (
+        opts.onMessage as unknown as { mock: { calls: unknown[][] } }
+      ).mock.calls[0][1] as { content: string };
+      // Trailing block, blank line separator, single bullet line.
+      const lines = payload.content.split('\n');
+      expect(lines[0]).toBe('see');
+      expect(lines[1]).toBe('');
+      expect(lines[2]).toBe('[Attached files in inbox/:]');
+      expect(lines[3]).toMatch(
+        /^- inbox\/mock-F1\.mp4 \(video\/mp4, [\d.]+ KB\)$/,
       );
     });
   });

@@ -4,11 +4,17 @@ import path from 'path';
 import { App, LogLevel } from '@slack/bolt';
 import type { GenericMessageEvent, BotMessageEvent } from '@slack/types';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import { updateChatName } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { processImageBuffer, isSupportedImageMime } from '../image.js';
 import { logger } from '../logger.js';
+import {
+  MAX_VIDEO_BYTES,
+  inboxFilename,
+  isSupportedVideoMime,
+  materializeAttachment,
+} from '../media.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
@@ -16,11 +22,21 @@ import {
   OnChatMetadata,
   RegisteredGroup,
   ImageAttachment,
+  VideoAttachment,
 } from '../types.js';
 
 // Slack's chat.postMessage API limits text to ~4000 characters per call.
 // Messages exceeding this are split into sequential chunks.
 const MAX_MESSAGE_LENGTH = 4000;
+
+// Human-friendly byte size for the inbox marker block. Two-decimal precision
+// keeps small files distinguishable (8.2 KB vs 8.5 KB) without overstating
+// precision on large ones.
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 // The message subtypes we process. Bolt delivers all subtypes via app.event('message');
 // we filter to regular messages (GenericMessageEvent, subtype undefined) and bot messages
@@ -142,9 +158,12 @@ export class SlackChannel implements Channel {
         }
       }
 
-      // Process image attachments. Slack delivers files[] on the message event;
-      // we download each supported image via url_private_download (requires the
-      // bot token as bearer auth) and pass it through the shared image pipeline.
+      // Process file attachments. Slack delivers files[] on the message event;
+      // each supported file (image or video) is downloaded via url_private_download
+      // (requires the bot token as bearer auth), materialized to the per-group
+      // inbox/ directory (so Veo scripts can read it by path), and listed in a
+      // trailing marker block appended to the message content so the agent can
+      // find the paths in its prompt context.
       const files =
         (
           msg as {
@@ -157,21 +176,57 @@ export class SlackChannel implements Channel {
           }
         ).files ?? [];
       const images: ImageAttachment[] = [];
+      const videos: VideoAttachment[] = [];
+      const markerEntries: Array<{
+        path: string;
+        mime: string;
+        sizeBytes: number;
+      }> = [];
+      let oversizeSkipCount = 0;
+      const groupFolder = groups[jid].folder;
+      const msgTimestamp = new Date(parseFloat(msg.ts) * 1000);
+
       for (const file of files) {
-        if (!file.mimetype || !isSupportedImageMime(file.mimetype)) {
+        const mime = file.mimetype;
+        if (
+          !mime ||
+          (!isSupportedImageMime(mime) && !isSupportedVideoMime(mime))
+        ) {
           // Surface at warn level so silent file drops are visible in
-          // info-level logs. The agent sees zero images when this fires;
+          // info-level logs. The agent sees zero attachments when this fires;
           // without the log, that looks indistinguishable from "user
           // attached nothing", which is impossible to debug after the fact.
           logger.warn(
-            { fileId: file.id, fileName: file.name, mime: file.mimetype },
-            file.mimetype
+            { fileId: file.id, fileName: file.name, mime },
+            mime
               ? 'Slack attachment skipped: unsupported MIME type'
               : 'Slack attachment skipped: no MIME type reported',
           );
           continue;
         }
-        if (!file.url_private_download) continue;
+        if (!file.url_private_download || !file.id) continue;
+
+        const isVideo = isSupportedVideoMime(mime);
+
+        // Synthesize the inbox filename from sanitized inputs (timestamp +
+        // Slack file ID + MIME-derived extension). inboxFilename throws on a
+        // file ID that doesn't match Slack's uppercase-alphanumeric shape,
+        // which closes the path-injection vector before any fetch happens.
+        let relName: string;
+        try {
+          relName = inboxFilename({
+            timestamp: msgTimestamp,
+            fileId: file.id,
+            mime,
+          });
+        } catch (err) {
+          logger.warn(
+            { fileId: file.id, mime, err },
+            'Slack attachment skipped: invalid file ID',
+          );
+          continue;
+        }
+
         try {
           const res = await fetch(file.url_private_download, {
             headers: { Authorization: `Bearer ${this.botToken}` },
@@ -179,31 +234,144 @@ export class SlackChannel implements Channel {
           if (!res.ok) {
             logger.warn(
               { fileId: file.id, status: res.status },
-              'Slack image fetch failed',
+              'Slack attachment fetch failed',
             );
             continue;
           }
+
+          // Pre-buffer Content-Length check for videos so we don't pay the
+          // download cost when Slack already tells us the file is over cap.
+          if (isVideo) {
+            const cl = res.headers.get('content-length');
+            if (cl && Number(cl) > MAX_VIDEO_BYTES) {
+              logger.warn(
+                { fileId: file.id, contentLength: cl, max: MAX_VIDEO_BYTES },
+                'Slack video skipped: exceeds size cap (Content-Length)',
+              );
+              oversizeSkipCount++;
+              continue;
+            }
+          }
+
           const buf = Buffer.from(await res.arrayBuffer());
-          const att = await processImageBuffer(buf, file.mimetype);
-          if (att) images.push(att);
+
+          if (isVideo) {
+            // Belt-and-suspenders for when Content-Length is missing or lying.
+            if (buf.byteLength > MAX_VIDEO_BYTES) {
+              logger.warn(
+                {
+                  fileId: file.id,
+                  bytes: buf.byteLength,
+                  max: MAX_VIDEO_BYTES,
+                },
+                'Slack video skipped: exceeds size cap (buffer)',
+              );
+              oversizeSkipCount++;
+              continue;
+            }
+
+            const relPath = await materializeAttachment({
+              bytes: buf,
+              relName,
+              groupFolder,
+              groupsRoot: GROUPS_DIR,
+            });
+            videos.push({
+              mediaType: mime as VideoAttachment['mediaType'],
+              path: relPath,
+              sizeBytes: buf.byteLength,
+            });
+            markerEntries.push({
+              path: relPath,
+              mime,
+              sizeBytes: buf.byteLength,
+            });
+          } else {
+            // Image branch: keep the existing base64 pipeline for the SDK
+            // content block AND materialize the resized JPEG to disk so Veo
+            // scripts can use it as a -i reference.
+            const att = await processImageBuffer(buf, mime);
+            if (!att) continue;
+            try {
+              const jpegBytes = Buffer.from(att.data, 'base64');
+              const relPath = await materializeAttachment({
+                bytes: jpegBytes,
+                relName,
+                groupFolder,
+                groupsRoot: GROUPS_DIR,
+              });
+              images.push({ ...att, path: relPath });
+              markerEntries.push({
+                path: relPath,
+                mime: att.mediaType,
+                sizeBytes: jpegBytes.byteLength,
+              });
+            } catch (err) {
+              // Disk write failed but the inline base64 still works for the
+              // model — push the image without a path rather than dropping it.
+              logger.warn(
+                { fileId: file.id, err },
+                'Slack image materialization failed, delivering inline only',
+              );
+              images.push(att);
+            }
+          }
         } catch (err) {
-          logger.warn({ fileId: file.id, err }, 'Slack image processing error');
+          logger.warn(
+            { fileId: file.id, err },
+            'Slack attachment processing error',
+          );
         }
       }
 
-      // If nothing survived (no text AND no images), silently drop to match pre-image behavior.
-      if (!msg.text && images.length === 0) return;
+      // Build the trailing marker block (if any media materialized or any
+      // oversize skip happened) so the agent can see the inbox paths in the
+      // prompt and call generate_video.py -i / extract_frame.py --input.
+      const markerLines: string[] = [];
+      if (markerEntries.length) {
+        markerLines.push('[Attached files in inbox/:]');
+        for (const entry of markerEntries) {
+          markerLines.push(
+            `- ${entry.path} (${entry.mime}, ${formatBytes(entry.sizeBytes)})`,
+          );
+        }
+      }
+      if (oversizeSkipCount) {
+        markerLines.push(
+          `[${oversizeSkipCount} attachment${
+            oversizeSkipCount === 1 ? '' : 's'
+          } skipped: too large (limit 100 MB)]`,
+        );
+      }
+
+      let finalContent = content ?? '';
+      if (markerLines.length) {
+        const marker = markerLines.join('\n');
+        finalContent = finalContent ? `${finalContent}\n\n${marker}` : marker;
+      }
+
+      // Drop silently when there is genuinely nothing for the agent to see:
+      // no text, no successfully materialized media, and no oversize notice.
+      if (
+        !msg.text &&
+        images.length === 0 &&
+        videos.length === 0 &&
+        oversizeSkipCount === 0
+      ) {
+        return;
+      }
 
       this.opts.onMessage(jid, {
         id: msg.ts,
         chat_jid: jid,
         sender: msg.user || msg.bot_id || '',
         sender_name: senderName,
-        content: content ?? '',
+        content: finalContent,
         timestamp,
         is_from_me: isBotMessage,
         is_bot_message: isBotMessage,
         images: images.length ? images : undefined,
+        videos: videos.length ? videos : undefined,
       });
     });
   }
