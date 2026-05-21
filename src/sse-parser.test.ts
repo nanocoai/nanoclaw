@@ -9,11 +9,16 @@ import {
   createMessageAccumulator,
   mapSseEventToProgress,
   mapAccumulatorToResult,
+  buildTextProgress,
+  buildToolUseProgress,
+  decideTextBlockAction,
   type SseEvent,
   type MessageStartData,
   type ContentBlockStartData,
   type ContentBlockDeltaData,
   type MessageDeltaData,
+  type TextBlock,
+  type ToolUseBlock,
 } from '../container/agent-runner/src/sse-parser.js';
 
 // ---- parseSseLines ----
@@ -359,6 +364,234 @@ describe('mapSseEventToProgress', () => {
       },
     });
     expect(result?.result).toBe('⚙️ CustomTool');
+  });
+});
+
+// ---- buildTextProgress（assistant 中间叙述 → 💬 progress）----
+
+describe('buildTextProgress', () => {
+  it('普通文本生成 💬 progress，progressType=text', () => {
+    const block: TextBlock = { type: 'text', text: '让我看下这块代码' };
+    const result = buildTextProgress(block);
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe('progress');
+    expect(result!.progressType).toBe('text');
+    expect(result!.result).toBe('💬 让我看下这块代码');
+  });
+
+  it('空文本返回 null', () => {
+    expect(buildTextProgress({ type: 'text', text: '' })).toBeNull();
+  });
+
+  it('剥掉 <internal> 标签后长度 ≤ 5 返回 null（视为无可见内容）', () => {
+    expect(buildTextProgress({ type: 'text', text: '<internal>大段内部独白文本</internal>' })).toBeNull();
+    expect(buildTextProgress({ type: 'text', text: '<internal>x</internal>hi' })).toBeNull();
+    expect(buildTextProgress({ type: 'text', text: '12345' })).toBeNull();
+  });
+
+  it('剥掉 <internal> 标签后还有可见文本 → emit', () => {
+    const block: TextBlock = { type: 'text', text: '<internal>thinking</internal>这是用户可见的回复内容' };
+    const result = buildTextProgress(block);
+    expect(result).not.toBeNull();
+    expect(result!.result).toBe('💬 这是用户可见的回复内容');
+  });
+
+  it('超长文本截断 short 到 80 字符 + 完整 text 进 detail', () => {
+    const longText = 'A'.repeat(200);
+    const result = buildTextProgress({ type: 'text', text: longText });
+    expect(result).not.toBeNull();
+    expect(result!.result).toBe('💬 ' + 'A'.repeat(80) + '...');
+    expect(result!.detail).toBe(longText);
+  });
+
+  it('短文本（>5 且 ≤80 字符）detail 为 undefined', () => {
+    const result = buildTextProgress({ type: 'text', text: '这是一段短回复' });
+    expect(result).not.toBeNull();
+    expect(result!.detail).toBeUndefined();
+  });
+
+  it('progressType MUST 为 text（不是 thinking）— 防止被 shouldFilterProgress 误杀', () => {
+    // 回归测试：曾经的 bug 是用 'thinking'，被主进程 shouldFilterProgress 过滤
+    const result = buildTextProgress({ type: 'text', text: '正常的中间叙述文本' });
+    expect(result!.progressType).toBe('text');
+    expect(result!.progressType).not.toBe('thinking');
+  });
+
+  it('💬 emoji 前缀 — 飞书 channel 通过此 emoji 识别独立消息路径', () => {
+    const result = buildTextProgress({ type: 'text', text: '一些回复内容' });
+    expect(result!.result?.startsWith('💬 ')).toBe(true);
+  });
+});
+
+// ---- buildToolUseProgress ----
+
+describe('buildToolUseProgress', () => {
+  it('Bash 工具 + command → 富进度含 ```bash``` 块', () => {
+    const block: ToolUseBlock = {
+      type: 'tool_use',
+      id: 'toolu_01',
+      name: 'Bash',
+      inputJson: JSON.stringify({ command: 'ls -la' }),
+    };
+    const result = buildToolUseProgress(block);
+    expect(result).not.toBeNull();
+    expect(result!.progressType).toBe('tool_use');
+    expect(result!.result).toContain('Bash');
+    expect(result!.detail).toContain('```bash');
+    expect(result!.detail).toContain('ls -la');
+  });
+
+  it('Edit 工具 + old/new_string → diff 风格 detail', () => {
+    const block: ToolUseBlock = {
+      type: 'tool_use',
+      id: 'toolu_02',
+      name: 'Edit',
+      inputJson: JSON.stringify({
+        file_path: '/a/b/c.ts',
+        old_string: 'foo',
+        new_string: 'bar',
+      }),
+    };
+    const result = buildToolUseProgress(block);
+    expect(result!.detail).toContain('**c.ts**');
+    expect(result!.detail).toContain('- foo');
+    expect(result!.detail).toContain('+ bar');
+  });
+
+  it('inputJson 解析失败 → 仅工具名（不抛错）', () => {
+    const block: ToolUseBlock = {
+      type: 'tool_use',
+      id: 'toolu_03',
+      name: 'Bash',
+      inputJson: 'not-valid-json{',
+    };
+    const result = buildToolUseProgress(block);
+    expect(result).not.toBeNull();
+    expect(result!.progressType).toBe('tool_use');
+    expect(result!.result).toContain('Bash');
+  });
+});
+
+// ---- decideTextBlockAction ----
+//
+// 这组测试锁定 interactive 模式 stop_reason 决断分支 — Agent Review #6 提的"集成层零覆盖"缺口
+// 任何对 stop_reason 处理逻辑的改动都会被这些断言拦截，防止再次悄无声息回归
+
+describe('decideTextBlockAction', () => {
+  it('stop_reason=tool_use, 非 haiku → flush（中间叙述应发给用户）', () => {
+    const action = decideTextBlockAction({ stopReason: 'tool_use', isHaikuPreheat: false });
+    expect(action).toBe('flush');
+  });
+
+  it('stop_reason=end_turn, 非 haiku → drop（已含在最终 result，不重复发）', () => {
+    const action = decideTextBlockAction({ stopReason: 'end_turn', isHaikuPreheat: false });
+    expect(action).toBe('drop');
+  });
+
+  it('stop_reason=max_tokens → drop（被截断的最终回复也会走 result 路径）', () => {
+    const action = decideTextBlockAction({ stopReason: 'max_tokens', isHaikuPreheat: false });
+    expect(action).toBe('drop');
+  });
+
+  it('stop_reason=stop_sequence → drop', () => {
+    const action = decideTextBlockAction({ stopReason: 'stop_sequence', isHaikuPreheat: false });
+    expect(action).toBe('drop');
+  });
+
+  it('haiku 预热流 + stop_reason=tool_use → drop（haiku 优先级高，预热噪音不展示）', () => {
+    const action = decideTextBlockAction({ stopReason: 'tool_use', isHaikuPreheat: true });
+    expect(action).toBe('drop');
+  });
+
+  it('haiku 预热流 + stop_reason=end_turn → drop', () => {
+    const action = decideTextBlockAction({ stopReason: 'end_turn', isHaikuPreheat: true });
+    expect(action).toBe('drop');
+  });
+
+  it('空 stop_reason → drop（防御默认值，不应该误 flush）', () => {
+    const action = decideTextBlockAction({ stopReason: '', isHaikuPreheat: false });
+    expect(action).toBe('drop');
+  });
+});
+
+// ---- interactive SSE 事件流端到端集成 ----
+//
+// 喂完整 SSE 事件序列给 accumulateSseEvent，验证 acc 状态 + 应用 decideTextBlockAction
+// 端到端验证："text block → tool_use → text block → message_stop(stop_reason=tool_use)"
+// 这种典型多块场景下 flush/drop 决策正确
+
+describe('interactive SSE 事件流集成', () => {
+  function feedEvents(events: SseEvent[]) {
+    let acc = createMessageAccumulator();
+    for (const ev of events) {
+      acc = accumulateSseEvent(acc, ev);
+    }
+    return acc;
+  }
+
+  it('text → tool_use → message_stop(stop_reason=tool_use) → flush 决策', () => {
+    const acc = feedEvents([
+      { type: 'message_start', data: { type: 'message_start', message: { id: 'msg_1', model: 'claude-sonnet-4-6', usage: { input_tokens: 100, output_tokens: 0 } } } },
+      { type: 'content_block_start', data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } },
+      { type: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '让我看下这块代码' } } },
+      { type: 'content_block_stop', data: { type: 'content_block_stop', index: 0 } },
+      { type: 'content_block_start', data: { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'toolu_01', name: 'Read', input: {} } } },
+      { type: 'content_block_stop', data: { type: 'content_block_stop', index: 1 } },
+      { type: 'message_delta', data: { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 20 } } },
+      { type: 'message_stop', data: { type: 'message_stop' } },
+    ]);
+
+    expect(acc.done).toBe(true);
+    expect(acc.stopReason).toBe('tool_use');
+    expect(acc.blocks.get(0)?.type).toBe('text');
+    expect((acc.blocks.get(0) as TextBlock).text).toBe('让我看下这块代码');
+    expect(acc.blocks.get(1)?.type).toBe('tool_use');
+
+    // 应用决策：tool_use → flush
+    const action = decideTextBlockAction({
+      stopReason: acc.stopReason,
+      isHaikuPreheat: false,
+    });
+    expect(action).toBe('flush');
+  });
+
+  it('text → message_stop(stop_reason=end_turn) → drop 决策', () => {
+    const acc = feedEvents([
+      { type: 'message_start', data: { type: 'message_start', message: { id: 'msg_2', model: 'claude-sonnet-4-6', usage: { input_tokens: 100, output_tokens: 0 } } } },
+      { type: 'content_block_start', data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } },
+      { type: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '搞定了' } } },
+      { type: 'content_block_stop', data: { type: 'content_block_stop', index: 0 } },
+      { type: 'message_delta', data: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5 } } },
+      { type: 'message_stop', data: { type: 'message_stop' } },
+    ]);
+
+    expect(acc.done).toBe(true);
+    expect(acc.stopReason).toBe('end_turn');
+
+    const action = decideTextBlockAction({
+      stopReason: acc.stopReason,
+      isHaikuPreheat: false,
+    });
+    expect(action).toBe('drop');
+  });
+
+  it('haiku 预热流 + text + stop_reason=end_turn → drop 决策（haiku 优先级覆盖）', () => {
+    const acc = feedEvents([
+      { type: 'message_start', data: { type: 'message_start', message: { id: 'msg_3', model: 'claude-haiku-4-5-20251001', usage: { input_tokens: 50, output_tokens: 0 } } } },
+      { type: 'content_block_start', data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } },
+      { type: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '预热缓存的副产物文本' } } },
+      { type: 'content_block_stop', data: { type: 'content_block_stop', index: 0 } },
+      { type: 'message_delta', data: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 10 } } },
+      { type: 'message_stop', data: { type: 'message_stop' } },
+    ]);
+
+    expect(acc.model).toContain('haiku');
+
+    const action = decideTextBlockAction({
+      stopReason: acc.stopReason,
+      isHaikuPreheat: acc.model.includes('haiku'),
+    });
+    expect(action).toBe('drop');
   });
 });
 

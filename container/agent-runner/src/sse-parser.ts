@@ -303,7 +303,7 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
-  progressType?: 'tool_use' | 'tool_result' | 'thinking';
+  progressType?: 'tool_use' | 'tool_result' | 'thinking' | 'text';
   detail?: string;
   usage?: {
     inputTokens: number;
@@ -346,6 +346,59 @@ function toolEmoji(name: string): string {
          name === 'Glob' ? '📋' :
          name === 'WebSearch' || name === 'WebFetch' ? '🌐' :
          name === 'Agent' ? '🤖' : '⚙️';
+}
+
+/**
+ * 从已完成的 TextBlock 生成 💬 进度（assistant 中间叙述文字）
+ *
+ * 触发场景：agent 在工具调用之间产生的文本块（"让我看下这块代码"等）
+ * 飞书 channel handleProgress 看到 💬 前缀会走"独立消息、不进进度卡片"路径
+ *
+ * 返回 null 的情况：
+ *  - 空文本
+ *  - 剥掉 <internal>...</internal> 标签后长度 <= 5（视为无可见内容）
+ */
+export function buildTextProgress(block: TextBlock): ContainerOutput | null {
+  if (!block.text) return null;
+  // 剥掉内部独白标签，只用可见文本判断/展示
+  const stripped = block.text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+  if (stripped.length <= 5) return null;
+  const short = stripped.slice(0, 80) + (stripped.length > 80 ? '...' : '');
+  return {
+    status: 'progress',
+    result: `💬 ${short}`,
+    progressType: 'text',
+    detail: stripped.length > 80 ? stripped : undefined,
+  };
+}
+
+/**
+ * pendingTextBlocks 决断动作
+ *  - flush: 把缓冲的 text 全部 emit 成 💬 进度（中间叙述）
+ *  - drop:  丢弃缓冲（已含在最终 result，或属于 haiku 预热流）
+ */
+export type TextBlockAction = 'flush' | 'drop';
+
+/**
+ * 决定 interactive 模式 message_stop 时 pendingTextBlocks 的命运。
+ *
+ * 规则（按优先级）：
+ *  1. haiku 预热流（context-caching，模型名含 'haiku'）→ drop
+ *     用户根本不该看到，无论 stopReason 是什么
+ *  2. stopReason === 'tool_use'（本轮要继续调用工具）→ flush
+ *     缓冲的 text 是工具调用前的叙述，必须发给用户
+ *  3. 其他（end_turn / max_tokens / stop_sequence）→ drop
+ *     最终回复通过 mapAccumulatorToResult 走正式路径，重复发会冗余
+ *
+ * 抽成纯函数便于单测 — 防止 stop_reason 分支被悄悄改动而无 assertion 拦截。
+ */
+export function decideTextBlockAction(input: {
+  stopReason: string;
+  isHaikuPreheat: boolean;
+}): TextBlockAction {
+  if (input.isHaikuPreheat) return 'drop';
+  if (input.stopReason === 'tool_use') return 'flush';
+  return 'drop';
 }
 
 /**

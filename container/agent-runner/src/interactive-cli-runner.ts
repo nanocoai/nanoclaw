@@ -20,9 +20,12 @@ import {
   accumulateSseEvent,
   createMessageAccumulator,
   buildToolUseProgress,
+  buildTextProgress,
+  decideTextBlockAction,
   mapAccumulatorToResult,
   type SseEvent,
   type ContainerOutput,
+  type TextBlock,
 } from './sse-parser.js';
 import { buildMcpConfig } from './cli-runner.js';
 
@@ -243,7 +246,11 @@ export async function runInteractiveQuery(
       clearTimeout(timer);
       timer = setTimeout(() => {
         if (resolved) return;
-        log(`[interactive] response timeout after ${timeoutMs}ms of inactivity`);
+        log(`[interactive] response timeout after ${timeoutMs}ms of inactivity (pendingTextBlocks: ${pendingTextBlocks.length})`);
+        // 超时前把 buffered 的中间叙述先发出去，避免静默吞没
+        if (pendingTextBlocks.length > 0) {
+          flushPendingTextBlocks('inactivity timeout');
+        }
         writeOutput({
           status: 'error',
           result: null,
@@ -279,6 +286,31 @@ export async function runInteractiveQuery(
       pendingFinishTimer = setTimeout(flushPending, FINISH_DEBOUNCE_MS);
     };
 
+    // ---- 中间叙述 text block 缓冲 ----
+    //
+    // Anthropic SSE 流里 assistant 一轮的 content 通常是 [text, tool_use, text, tool_use, ...]：
+    //   - text 在 tool_use 之间 → 中间叙述（"让我先看下这块代码"），用户应该看到
+    //   - text 在最后（stop_reason=end_turn）→ 最终回复，会走 mapAccumulatorToResult，
+    //     若也作为 progress 发送会和正式回复重复
+    //
+    // 策略：content_block_stop 收到 text 时先存起来，根据后续事件决定 emit 还是 drop：
+    //   - 后面来了 tool_use 块（同一 message 内）→ flush（确认是中间叙述）
+    //   - message_stop & stop_reason === 'tool_use'（本轮要继续）→ flush 剩余 text
+    //   - message_stop & stop_reason === 'end_turn'（本轮结束）→ drop（最终回复在 result 里）
+    let pendingTextBlocks: TextBlock[] = [];
+    const flushPendingTextBlocks = (reason: string) => {
+      if (pendingTextBlocks.length === 0) return;
+      log(`[interactive] flushing ${pendingTextBlocks.length} pending text block(s) (reason=${reason})`);
+      for (const tb of pendingTextBlocks) {
+        const progress = buildTextProgress(tb);
+        if (progress) {
+          log(`[interactive] emit 💬 text progress: "${(progress.result || '').slice(0, 80)}"`);
+          writeOutput(progress);
+        }
+      }
+      pendingTextBlocks = [];
+    };
+
     const subscription: TapSubscription = {
       onEvent: (event: SseEvent) => {
         hasReceivedSseData = true;
@@ -295,27 +327,48 @@ export async function runInteractiveQuery(
         // 累积事件（先累积再判断，确保 content_block_stop 时 inputJson 已完整）
         acc = accumulateSseEvent(acc, event);
 
-        // content_block_stop → 工具调用参数已完整，发送富进度（含命令/文件详情）
+        // content_block_stop → 块累积完成，按类型分发
         if (event.type === 'content_block_stop') {
           const stopData = event.data as { index: number };
           const block = acc.blocks.get(stopData.index);
-          if (block && block.type === 'tool_use') {
+          if (block?.type === 'tool_use') {
+            // tool_use 出现 → 之前缓冲的 text 一定是中间叙述（在工具调用前发生），flush
+            flushPendingTextBlocks('tool_use block follows');
             const progress = buildToolUseProgress(block);
-            if (progress) writeOutput(progress);
+            if (progress) {
+              log(`[interactive] emit 🔧 tool_use progress: ${block.name}`);
+              writeOutput(progress);
+            }
+          } else if (block?.type === 'text') {
+            // text 块结束 → 暂存，等下一个 tool_use 或 message_stop 决定命运
+            log(`[interactive] buffering text block (len=${block.text.length}, idx=${stopData.index})`);
+            pendingTextBlocks.push(block);
           }
         }
 
-        // message_stop 且 stop_reason 是 end_turn → 最终结果
+        // message_stop → 用 decideTextBlockAction 决定 pendingTextBlocks 命运（纯函数，可单测）
         if (acc.done) {
+          const isHaikuPreheat = !!(acc.model && acc.model.includes('haiku'));
+          const action = decideTextBlockAction({
+            stopReason: acc.stopReason,
+            isHaikuPreheat,
+          });
+
+          if (action === 'flush') {
+            flushPendingTextBlocks(`decideTextBlockAction(stop=${acc.stopReason}, haiku=${isHaikuPreheat}) → flush`);
+          } else if (pendingTextBlocks.length > 0) {
+            log(`[interactive] dropping ${pendingTextBlocks.length} pending text block(s) (stop=${acc.stopReason}, haiku=${isHaikuPreheat}) — included in final result or haiku preheat noise`);
+            pendingTextBlocks = [];
+          }
+
           if (acc.stopReason === 'tool_use') {
-            // Claude 使用工具后会继续，重置状态等待下一轮
+            // Claude 使用工具后会继续，本轮没结束 — 复用 accumulator
             numTurns++;
             acc = { ...acc, done: false, stopReason: '', blocks: new Map() };
             return;
           }
 
-          // 过滤 context caching 流：CLI 用 haiku 预热缓存，结果无意义，跳过
-          if (acc.model && acc.model.includes('haiku')) {
+          if (isHaikuPreheat) {
             log(`[interactive] skipping context-caching result (model: ${acc.model})`);
             acc = { ...acc, done: false, stopReason: '', blocks: new Map() };
             return;
@@ -334,7 +387,12 @@ export async function runInteractiveQuery(
         // SSE 流中断（EPIPE / ECONNRESET / aborted）是常见的瞬态错误。
         // CLI 自带重试机制（"Retrying in 1s · attempt 1/10"），
         // 不应在此时放弃 — 让 CLI 重试，用 timeout 兜底。
-        log(`[interactive] SSE error: ${err.message} (hasData: ${hasReceivedSseData}, hasPending: ${!!pendingOutput})`);
+        log(`[interactive] SSE error: ${err.message} (hasData: ${hasReceivedSseData}, hasPending: ${!!pendingOutput}, pendingTextBlocks: ${pendingTextBlocks.length})`);
+        // 流中断 → 之前缓冲的 text 必然永远收不到后续 tool_use/message_stop 决断，
+        // 主动 flush 给用户看（否则中间叙述永久丢失，无任何日志/告警）
+        if (pendingTextBlocks.length > 0) {
+          flushPendingTextBlocks('SSE error');
+        }
         // 重置 hasReceivedSseData：当前流中断了，等下一个流的数据
         hasReceivedSseData = false;
       },
@@ -342,7 +400,12 @@ export async function runInteractiveQuery(
         // 单个 SSE 流结束 — 不直接 finish
         // CLI 可能有多个并发 SSE 流，且可能自动重试
         if (resolved) return;
-        log(`[interactive] SSE stream ended (active: ${activeSseStreams}, hasPending: ${!!pendingOutput})`);
+        log(`[interactive] SSE stream ended (active: ${activeSseStreams}, hasPending: ${!!pendingOutput}, pendingTextBlocks: ${pendingTextBlocks.length})`);
+        // 流结束但还没 message_stop 决断 → 同 onError 处理，flush 防丢失
+        // （正常 message_stop 已经清空 pendingTextBlocks，这里只是 belt-and-suspenders）
+        if (pendingTextBlocks.length > 0) {
+          flushPendingTextBlocks('SSE stream ended without message_stop');
+        }
       },
       onActiveStreamsChange: (count: number) => {
         activeSseStreams = count;

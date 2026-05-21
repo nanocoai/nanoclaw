@@ -30,7 +30,7 @@ const TYPING_EMOJI = 'HAUGHTY'; // 飞书内置 emoji key — 白眼（所有模
 const CLI_TYPING_EMOJI = 'HAUGHTY'; // CLI 模式群也用白眼
 const CARD_THRESHOLD = 500;
 const MD_PATTERN = /```|\*\*|^##?\s|^\|.*\||\*[^*\s]|^[-*+]\s|^>\s/m;
-const PROGRESS_JSON_PATTERN = /^\{"title":"[🔧📖✏️🔍🌐📋⚙️⏳💭✅]/u;
+const PROGRESS_JSON_PATTERN = /^\{"title":"[🔧📖✏️🔍🌐📋⚙️⏳💭💬✅]/u;
 const THINKING_PHRASES = ['思考中', '分析中', '处理中', '推理中'];
 
 // ---- 多媒体安全限制 ----
@@ -526,13 +526,23 @@ export class FeishuChannel implements Channel {
         return;
       }
 
-      // 💭 消息：只单独发出，不加入进度卡片步骤（无论卡片是否已创建）
-      if (title.startsWith('💭')) {
-        const fullText = (detail ?? title).replace(/^💭\s*/, '').trim();
+      // 💬 / 💭 消息：assistant 中间叙述（agent 在工具调用之间说的话）
+      //   - 💬 progressType='text'  → 模型输出的可见文本块（"让我看下这块代码"）
+      //   - 💭 progressType='thinking' → 模型内部独白（当前 agent-runner 不主动发，但兼容历史）
+      // 都走"独立消息、不进进度卡片"路径，让用户实时看到 agent 的思考过程
+      if (title.startsWith('💬') || title.startsWith('💭')) {
+        const fullText = (detail ?? title).replace(/^(?:💬|💭)\s*/u, '').trim();
+        // emoji 是 surrogate pair，charAt(0) 只返回高位 surrogate（会在日志里乱码），
+        // 用 startsWith 判断后直接给字面 emoji 字符
+        const emoji = title.startsWith('💬') ? '💬' : '💭';
+        logger.info(
+          { jid, emoji, len: fullText.length, preview: fullText.slice(0, 80) },
+          '[progress] 中间叙述消息，独立发送（不进进度卡片）',
+        );
         if (fullText) {
           const chatId = chatIdFromJid(jid);
           this.sendPlainOrCard(chatId, fullText).catch((err) =>
-            logger.debug({ err }, '💭 消息发送失败'),
+            logger.debug({ err, jid }, '中间叙述消息发送失败'),
           );
         }
         return;

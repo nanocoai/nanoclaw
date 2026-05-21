@@ -217,7 +217,7 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string | null;
   error?: string;
-  progressType?: 'tool_use' | 'tool_result' | 'thinking';
+  progressType?: 'tool_use' | 'tool_result' | 'thinking' | 'text';
   /** 步骤标题（进度推送用） */
   title?: string;
   /** 可折叠面板的展开内容（markdown 格式） */

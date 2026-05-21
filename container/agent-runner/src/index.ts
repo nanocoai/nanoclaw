@@ -57,7 +57,7 @@ interface ContainerOutput {
   newSessionId?: string;
   error?: string;
   /** progress 消息的子类型 */
-  progressType?: 'tool_use' | 'tool_result' | 'thinking';
+  progressType?: 'tool_use' | 'tool_result' | 'thinking' | 'text';
   /** 可折叠面板的展开内容（markdown 格式） */
   detail?: string;
   /** token 用量（仅 result 消息） */
@@ -628,25 +628,41 @@ async function runQuery(
   let resultCount = 0;
   let lastAssistantUsage: { inputTokens: number; outputTokens: number } | undefined;
 
-  // 💭 延迟去重：缓存最后一条 text block，等 500ms 看是否紧跟 result
-  // SDK 模式（runQuery）下不输出 thinking progress — 主进程会过滤 progressType=thinking，
-  // 但在源头抑制更干净，避免无意义的 IPC 传输和日志噪音
-  const isSdkMode = containerInput.cliMode === 'sdk' || !containerInput.cliMode;
+  // 💬 事件驱动去重：缓存当前 assistant message 的最后一段 text block，等下一个 message 决定命运
+  //
+  // 背景：assistant message.content 数组里有两种"非工具调用"块：
+  //   - block.type === 'text'     → 模型给用户看的回复内容（含工具调用之间的叙述性文字）
+  //   - block.type === 'thinking' → 模型内部独白（reasoning），accumulateSseEvent 不累积
+  //
+  // 这里缓存的全是 text block — 历史变量名叫 pendingThought 是误导，实际语义是
+  // "可能是中间叙述也可能是最终回复的一段文本"。决策时机（按到达顺序优先级）：
+  //   1. 下一个 message.type === 'user'（tool_result）→ flushPendingThought
+  //      （前面的 text 一定是中间叙述，因为后面还有工具执行）
+  //   2. 下一个 message.type === 'result' 且文本完全相等 → drop
+  //      （这段就是最终回复，会通过正式回复路径发送，不重复）
+  //   3. 下一个 message.type === 'result' 且文本不等 → flushPendingThought
+  //      （罕见：result 跟最后一段 text 不一致，至少把 text 发出来）
+  //   4. 30s 兜底 timer → flushPendingThought
+  //      （仅 abort/error/SDK 异常退出会触发，避免 pending text 永远沉默）
+  //
+  // ⚠️ 历史教训（ea21e58 引入的 bug）：曾用 isSdkMode 把 SDK 模式整段抑制并打 progressType='thinking'，
+  //   主进程 shouldFilterProgress('thinking') 又过滤一次 — 双重抑制导致用户完全看不到
+  //   agent 中间的叙述文字。现修复：统一发 progressType='text'，飞书 channel 通过 💬 emoji
+  //   走"独立消息、不进进度卡片"路径（feishu.ts handleProgress）。
+  //
+  // ⚠️ 不要回退成 500ms 时间窗口去重（旧实现）：SDK 事件循环偶尔延迟 > 500ms 时会让中间 text
+  //   先 emit progress 再 emit 最终 result，导致重复（Codex review 提出的 race condition）。
   let pendingThought: { text: string; short: string; detail: string | undefined; timer: ReturnType<typeof setTimeout> } | null = null;
   const flushPendingThought = () => {
     if (pendingThought) {
-      if (isSdkMode) {
-        // SDK 模式：不发送 thinking progress，仅记录日志
-        log(`[thinking-suppressed] SDK 模式跳过 thinking 输出: ${pendingThought.short}`);
-      } else {
-        writeOutput({
-          status: 'progress',
-          result: `💭 ${pendingThought.short}`,
-          progressType: 'thinking',
-          detail: pendingThought.detail,
-          newSessionId: undefined,
-        });
-      }
+      log(`[text-block] flush → emit 💬 progress (len=${pendingThought.text.length}, short="${pendingThought.short}")`);
+      writeOutput({
+        status: 'progress',
+        result: `💬 ${pendingThought.short}`,
+        progressType: 'text',
+        detail: pendingThought.detail,
+        newSessionId: undefined,
+      });
       pendingThought = null;
     }
   };
@@ -808,6 +824,7 @@ async function runQuery(
     log(`[model-override] applyFlagSettings FAILED: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  try {
   for await (const message of q) {
     messageCount++;
     const msgType =
@@ -919,22 +936,28 @@ async function runQuery(
             });
           }
 
-          // 推理文本 → 💭 普通消息（不加入进度卡片）
-          // 延迟 500ms 发送：如果 500ms 内收到 result 且文本匹配，说明是最终回答，跳过 💭。
+          // assistant text block → 💬 中间消息（不加入进度卡片，走 feishu 独立消息路径）
+          // 事件驱动去重：tool_result 到达即 flush（中间叙述）；result 到达即 drop（已含在最终回复）
           if (block.type === 'text' && block.text) {
-            // 剥掉 <internal> 标签后判断是否有可见内容；纯 internal 文本不缓存为 thought，
+            // 剥掉 <internal> 标签后判断是否有可见内容；纯 internal 文本不缓存
             // 避免与 result 文本匹配导致 dedup 误杀合法回复
             const stripped = block.text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+            log(`[text-block] received (raw_len=${block.text.length}, stripped_len=${stripped.length})`);
             if (stripped.length > 5) {
-              // 先 flush 之前缓存的 thought（如果有的话）
+              // 先 flush 之前缓存的（如果有的话）— 同一个 message 可能有多段 text
               flushPendingThought();
-              // 用剥掉 internal 标签后的可见文本做缓存和比较
+              // 用剥掉 internal 标签后的可见文本做缓存
               const short = stripped.slice(0, 80) + (stripped.length > 80 ? '...' : '');
+              log(`[text-block] cached pending (will flush on tool_result, drop on result, or 30s fallback): "${short}"`);
+              // timer 30s 仅作 fallback —— 正常路径下 tool_result message 或 result message
+              // 到达时会主动 flush/dedup。timer 触发说明流被中断（abort/error/SDK 异常退出），
+              // 此时 pending 的 text 也应该 emit 让用户看到（否则永远沉默）。
+              // ⚠️ runQuery finally 中会 clearTimeout + 清空 pendingThought 防止跨会话泄漏
               pendingThought = {
                 text: stripped,
                 short,
                 detail: stripped.length > 80 ? stripped : undefined,
-                timer: setTimeout(flushPendingThought, 500),
+                timer: setTimeout(flushPendingThought, 30_000),
               };
             }
           }
@@ -944,6 +967,14 @@ async function runQuery(
 
     // 工具执行结果 — 从 user 消息的 content 中提取 tool_result
     if (message.type === 'user') {
+      // 关键去重：tool_result message 到达 → 前面 pending 的 text 必然是中间叙述（不是最终回复），
+      // 主动 flush 比等 500ms timer 更稳健。否则 result message 若延迟到达 > 500ms 会和 text
+      // 双发（Codex review 指出的 race）。timer 仍保留作为 fallback（中断/error 不会泄漏）。
+      if (pendingThought) {
+        log('[text-block] tool_result arrived → flush pending text (it is interim narration, not final)');
+        clearTimeout(pendingThought.timer);
+        flushPendingThought();
+      }
       const userMsg = message as { message?: { content?: unknown[] } };
       const content = userMsg.message?.content;
       if (Array.isArray(content)) {
@@ -1012,18 +1043,22 @@ async function runQuery(
       const textResult =
         'result' in message ? (message as { result?: string }).result : null;
 
-      // 💭 去重：如果 result 文本和缓存的 thought 相同，取消 💭
-      // 比较前剥掉 <internal> 标签，避免 internal 包裹导致误匹配
-      if (pendingThought && textResult) {
-        const resultTrimmed = textResult.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-        if (resultTrimmed && resultTrimmed === pendingThought.text) {
+      // 💬 去重：result message 必然包含 SDK 这一轮的最终 assistant 文本（textResult 即正式回复）
+      // pendingThought 缓存的"最后一段 text block"会通过正式回复路径发送，drop 避免重复
+      // 与 interactive 模式 stop_reason='end_turn' 的 drop 语义对齐
+      // 例外：textResult 为空（错误/截断），flush pendingThought 让用户至少看到中间叙述
+      if (pendingThought) {
+        const hasFinalText = !!textResult && textResult.trim().length > 0;
+        if (hasFinalText) {
+          log('[text-block] result arrived → drop pending (included in final result)');
           clearTimeout(pendingThought.timer);
           pendingThought = null;
-          log('[text-block] deduped: result matches pending thought, skipping 💭');
+        } else {
+          log('[text-block] result is empty/null → flush pending so user sees interim narration');
+          clearTimeout(pendingThought.timer);
+          flushPendingThought();
         }
       }
-      // flush 不匹配的缓存 thought
-      flushPendingThought();
 
       // 提取 token 用量
       const msg = message as Record<string, unknown>;
@@ -1072,8 +1107,18 @@ async function runQuery(
       });
     }
   }
-
-  ipcPolling = false;
+  } finally {
+    // 防御性清理：无论 for-await 正常结束、throw、还是 SDK 异常退出，
+    // 都要清掉 pendingThought 的 timer，否则 30s 后 fallback timer 可能在
+    // runQuery 已退出（下一轮 query 可能已开始）的情况下触发 writeOutput，
+    // 把上一轮的 💬 串到下一个会话。
+    ipcPolling = false;
+    if (pendingThought) {
+      log('[text-block] runQuery exiting → clear pending timer (avoid cross-session leak)');
+      clearTimeout(pendingThought.timer);
+      pendingThought = null;
+    }
+  }
   const totalElapsed = ((Date.now() - queryStartTime) / 1000).toFixed(1);
   log(
     `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, totalTime: ${totalElapsed}s`,

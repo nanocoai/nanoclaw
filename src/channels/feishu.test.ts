@@ -401,6 +401,52 @@ describe('FeishuChannel', () => {
         }),
       );
     });
+
+    // 回归保护：assistant text block 走 💬 progress，必须像 💭 那样独立发送（不进卡片）
+    it('💬 消息（assistant 中间叙述）单独发送不加入卡片', async () => {
+      const jid = 'fs:oc_text_block';
+      (channel as any).progressDone.delete(jid);
+
+      await channel.sendMessage(jid, '💬 让我先看下这块代码', { isProgress: true });
+
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            receive_id: 'oc_text_block',
+          }),
+        }),
+      );
+    });
+
+    it('💬 JSON 进度（带 detail）剥掉前缀后取 detail 完整文本', async () => {
+      const jid = 'fs:oc_text_detail';
+      (channel as any).progressDone.delete(jid);
+
+      const fullText = 'A'.repeat(200);
+      const payload = JSON.stringify({
+        title: '💬 ' + 'A'.repeat(80) + '...',
+        detail: fullText,
+      });
+      await channel.sendMessage(jid, payload, { isProgress: true });
+
+      // 调用 create 时携带的内容应该是 detail 全文，而不是被截断的 title
+      const callArg = mockCreate.mock.calls[0]?.[0];
+      const sentContent = JSON.parse(callArg?.data?.content ?? '{}');
+      // content 是 markdown card JSON，其中应包含原文
+      const serialized = JSON.stringify(sentContent);
+      expect(serialized).toContain(fullText);
+      // 不应包含 💬 emoji 前缀（已被 replace 剥掉）
+      expect(serialized).not.toContain('💬');
+    });
+
+    it('💬 progressDone 后忽略（已收到正式回复）', async () => {
+      const jid = 'fs:oc_text_late';
+      (channel as any).progressDone.add(jid);
+
+      await channel.sendMessage(jid, '💬 迟到的中间消息', { isProgress: true });
+
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
   });
 
   describe('cleanupProgressCard', () => {

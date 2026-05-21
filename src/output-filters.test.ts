@@ -17,6 +17,13 @@ describe('shouldFilterProgress', () => {
     expect(shouldFilterProgress('tool_use')).toBe(false);
   });
 
+  // 回归保护：ea21e58 引入的 bug 是把 assistant text block 用 'thinking' 类型抑制，
+  // 导致用户看不到 agent 在工具调用之间的叙述文字。现在 text block 用 'text' 类型，
+  // 必须放行 — 这条 assertion 是为防止有人再次把 text 误归类为 thinking。
+  it('不过滤 text 类型（assistant 中间叙述，用户应看到）', () => {
+    expect(shouldFilterProgress('text')).toBe(false);
+  });
+
   it('不过滤 undefined', () => {
     expect(shouldFilterProgress(undefined)).toBe(false);
   });

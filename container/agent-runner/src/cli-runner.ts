@@ -42,7 +42,7 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
-  progressType?: 'tool_use' | 'tool_result' | 'thinking';
+  progressType?: 'tool_use' | 'tool_result' | 'thinking' | 'text';
   detail?: string;
   usage?: {
     inputTokens: number;
@@ -202,8 +202,16 @@ export function mapToContainerOutput(
         });
       }
 
-      // text block 不映射为 output — 同一文本会在 result 消息中完整返回，
-      // 这里再发会导致用户收到两条重复消息
+      // text block 不映射为 output — print 模式（claude --print）是一次性运行，
+      // result 消息会包含**最终回复**文本，但**不包含中间 assistant 轮次的 text block**
+      // （那些被认为是"调用工具前的简短叙述"，print 模式默认不暴露）。
+      //
+      // ⚠️ TODO（与 SDK / interactive 模式不一致）：SDK 和 interactive 模式已在
+      //   `index.ts` 和 `interactive-cli-runner.ts` 补了中间叙述 → 💬 进度，
+      //   print 模式如果未来重新启用，应同样补 text block 处理（建议复用
+      //   `sse-parser.ts` 的 `buildTextProgress`）。当前 print 模式没有活跃用户路径，
+      //   优先不动以减少 PR 范围。如果发现 print 模式被使用且用户反馈"看不到中间叙述"，
+      //   补这里即可。
     }
 
     return outputs;

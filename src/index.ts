@@ -457,6 +457,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           logger.info({ chatJid, text: result.result.slice(0, 100) }, '[progress] thinking 类型，跳过发送');
           return;
         }
+        logger.info(
+          { chatJid, progressType: result.progressType, preview: result.result.slice(0, 80) },
+          '[progress] 转发到 channel',
+        );
         const payload = result.detail
           ? JSON.stringify({ title: result.result, detail: result.detail })
           : result.result;
@@ -763,6 +767,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               logger.info({ chatJid, text: result.result.slice(0, 100) }, '[retry-progress] thinking 类型，跳过发送');
               return;
             }
+            logger.info(
+              { chatJid, progressType: result.progressType, preview: result.result.slice(0, 80) },
+              '[retry-progress] 转发到 channel',
+            );
             const payload = result.detail
               ? JSON.stringify({ title: result.result, detail: result.detail })
               : result.result;
