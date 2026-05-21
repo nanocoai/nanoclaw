@@ -42,6 +42,31 @@ The `veo` skill ships three scripts. Read `/app/skills/veo/SKILL.md` for the ful
 
 **Delivery.** After any script prints `MEDIA: <path>` on its final stdout line, call the `send_video` MCP tool with that path. Only `.mp4` files are accepted. The container holds the file briefly — don't delete it right after the call (delivery may be queued during reconnects).
 
+## Inbound Media (`inbox/`)
+
+When the Boss attaches an image or video to a Slack message, the orchestrator downloads it and writes it to `inbox/` inside your workspace. You'll see a marker block at the end of the message:
+
+```
+[Attached files in inbox/:]
+- inbox/2026-05-20T143012Z-F012345.jpg (image/jpeg, 184.0 KB)
+- inbox/2026-05-20T143012Z-F012346.mp4 (video/mp4, 8.2 MB)
+```
+
+The paths are relative to your working directory (`/workspace/group/`). To use an attachment as a Veo reference:
+
+| Attachment kind | What to do |
+|---|---|
+| **Image** | Pass the path to `generate_video.py -i`. Up to 3 image refs per call. Pair with `--last-frame` for first/last-frame interpolation. |
+| **Video** | Veo cannot ingest video directly. First extract a frame: `extract_frame.py --input inbox/{...}.mp4 --mode last --filename ref-last.png`. Then pass `ref-last.png` to `generate_video.py -i`. |
+
+**Images are also inline.** Image attachments arrive both as a content block you can describe AND as a file in `inbox/`. The inline view and the file hold the same JPEG (the resized version — long edge ≤1568 px). For most Veo workflows the resized JPEG is plenty.
+
+**Lifecycle.** Files in `inbox/` persist; nothing auto-deletes them. The Boss may want to reference them later, so prefer to leave them.
+
+**Oversize markers.** If you see `[N attachment(s) skipped: too large (limit 100 MB)]`, the file exceeded the 100 MB cap. Apologize and ask the Boss to compress or trim before re-sending.
+
+**Supported types inbound:** images (`jpeg/png/gif/webp/heic/heif/avif`) and videos (`video/mp4`, `video/quicktime`). Anything else is dropped with a warn log on the orchestrator side — you won't see it.
+
 ## Communication
 
 Your output is sent to the user or group.
