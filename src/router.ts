@@ -89,3 +89,42 @@ export function findChannel(
 ): Channel | undefined {
   return channels.find((c) => c.ownsJid(jid));
 }
+
+// User-facing apology messages for the three silent-failure modes the
+// orchestrator can detect when running an agent turn.
+//
+// - 'pre'    : the agent errored before streaming any output to the user.
+//              They saw "Got it, working on it..." and then silence.
+// - 'mid'    : the agent streamed something useful, then errored. They saw
+//              partial output and the rest never landed.
+// - 'silent' : the agent reported success but never emitted any text. They
+//              saw "Got it, working on it..." and then a graceful return
+//              with no follow-up — indistinguishable from a hang.
+//
+// The orchestrator dispatches via this lookup so the failure pathway
+// stays out of the per-channel handlers and is unit-testable in isolation.
+export type FailureKind = 'pre' | 'mid' | 'silent';
+
+const FAILURE_COPY: Record<FailureKind, string> = {
+  pre: '⚠️ Something broke on my end before I could finish. Try again?',
+  mid: '⚠️ Got cut off mid-reply. Want me to retry?',
+  silent:
+    "⚠️ I'm here, but nothing useful came back from that run. Mind rephrasing or trying again?",
+};
+
+export function failureNoticeText(kind: FailureKind): string {
+  return FAILURE_COPY[kind];
+}
+
+export async function routeFailureNotice(
+  channels: Channel[],
+  jid: string,
+  kind: FailureKind,
+): Promise<void> {
+  const channel = channels.find((c) => c.ownsJid(jid) && c.isConnected());
+  // Swallow when the channel is unreachable — the failure notice is a
+  // best-effort overlay on top of an already-failed turn. Logging is the
+  // caller's responsibility so the error path stays narrow here.
+  if (!channel) return;
+  await channel.sendMessage(jid, failureNoticeText(kind));
+}

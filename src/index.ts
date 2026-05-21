@@ -53,6 +53,7 @@ import {
   findChannel,
   formatMessages,
   formatOutbound,
+  routeFailureNotice,
   routeOutboundImage,
   routeOutboundVideo,
 } from './router.js';
@@ -361,6 +362,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
+    // Always tell the user something broke — the orchestrator already sent
+    // "Got it, working on it..." on line 323, so silent failure looks like
+    // ghosting. Best-effort: if the channel itself is unreachable
+    // routeFailureNotice no-ops, and we still want to roll back state.
+    await routeFailureNotice(
+      channels,
+      chatJid,
+      outputSentToUser ? 'mid' : 'pre',
+    ).catch((err) =>
+      logger.error(
+        { group: group.name, err },
+        'Failed to send failure notice to user',
+      ),
+    );
+
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
@@ -378,6 +394,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       'Agent error, rolled back message cursor for retry',
     );
     return false;
+  }
+
+  // The agent reported success but never streamed any text. The user saw
+  // "Got it, working on it..." and then a graceful return with no follow-up
+  // — indistinguishable from a hang from their point of view. Surface it.
+  if (!outputSentToUser) {
+    logger.warn(
+      { group: group.name },
+      'Agent completed without streaming any user-visible output',
+    );
+    await routeFailureNotice(channels, chatJid, 'silent').catch((err) =>
+      logger.error(
+        { group: group.name, err },
+        'Failed to send silent-output notice to user',
+      ),
+    );
   }
 
   return true;

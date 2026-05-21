@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import { _initTestDatabase, storeChatMetadata } from './db.js';
 import { getAvailableGroups, _setRegisteredGroups } from './index.js';
-import { routeOutboundImage, routeOutboundVideo } from './router.js';
+import {
+  failureNoticeText,
+  routeFailureNotice,
+  routeOutboundImage,
+  routeOutboundVideo,
+} from './router.js';
 
 beforeEach(() => {
   _initTestDatabase();
@@ -263,5 +268,78 @@ describe('routeOutboundVideo', () => {
     await expect(
       routeOutboundVideo([ch], 'slack:C1', ['/abs/clip.mp4']),
     ).rejects.toThrow(/No channel/);
+  });
+});
+
+// --- failureNoticeText / routeFailureNotice ---
+
+describe('failureNoticeText', () => {
+  it('returns a pre-output apology mentioning a retry', () => {
+    const text = failureNoticeText('pre');
+    expect(text).toMatch(/⚠️/);
+    expect(text.toLowerCase()).toMatch(/(try again|retry)/);
+  });
+  it('returns a mid-stream apology mentioning a retry', () => {
+    const text = failureNoticeText('mid');
+    expect(text).toMatch(/⚠️/);
+    expect(text.toLowerCase()).toMatch(/(cut off|retry)/);
+  });
+  it('returns a silent-output apology mentioning rephrase or retry', () => {
+    const text = failureNoticeText('silent');
+    expect(text).toMatch(/⚠️/);
+    expect(text.toLowerCase()).toMatch(/(rephras|try again|retry)/);
+  });
+  it('returns distinct copy for each kind', () => {
+    const pre = failureNoticeText('pre');
+    const mid = failureNoticeText('mid');
+    const silent = failureNoticeText('silent');
+    expect(new Set([pre, mid, silent]).size).toBe(3);
+  });
+});
+
+describe('routeFailureNotice', () => {
+  function makeChannel(owns: (j: string) => boolean, connected = true) {
+    return {
+      name: 'test',
+      ownsJid: owns,
+      isConnected: () => connected,
+      sendMessage: vi.fn(async () => undefined),
+      connect: async () => undefined,
+      disconnect: async () => undefined,
+    } as unknown as import('./types.js').Channel;
+  }
+
+  it('sends the failure notice via the owning channel', async () => {
+    const ch = makeChannel((j) => j === 'slack:C1');
+    await routeFailureNotice([ch], 'slack:C1', 'pre');
+    expect(ch.sendMessage).toHaveBeenCalledWith(
+      'slack:C1',
+      failureNoticeText('pre'),
+    );
+  });
+
+  it('uses the mid-stream copy when kind is mid', async () => {
+    const ch = makeChannel((j) => j === 'slack:C1');
+    await routeFailureNotice([ch], 'slack:C1', 'mid');
+    expect(ch.sendMessage).toHaveBeenCalledWith(
+      'slack:C1',
+      failureNoticeText('mid'),
+    );
+  });
+
+  it('silently no-ops when no channel owns the jid', async () => {
+    const ch = makeChannel(() => false);
+    await expect(
+      routeFailureNotice([ch], 'slack:C1', 'pre'),
+    ).resolves.toBeUndefined();
+    expect(ch.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('silently no-ops when the owning channel is disconnected', async () => {
+    const ch = makeChannel((j) => j === 'slack:C1', false);
+    await expect(
+      routeFailureNotice([ch], 'slack:C1', 'pre'),
+    ).resolves.toBeUndefined();
+    expect(ch.sendMessage).not.toHaveBeenCalled();
   });
 });
