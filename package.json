@@ -22,6 +22,7 @@
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "better-sqlite3": "^11.8.1",
     "cron-parser": "^5.5.0",
+    "grammy": "^1.39.3",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",
     "qrcode": "^1.5.4",

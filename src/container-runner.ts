@@ -209,6 +209,7 @@ function readSecrets(): Record<string, string> {
     'ANTHROPIC_API_KEY',
     'ANTHROPIC_BASE_URL',
     'ANTHROPIC_AUTH_TOKEN',
+    'ANTHROPIC_MODEL',
   ]);
 }
 
@@ -300,6 +301,7 @@ export async function runContainerAgent(
 
     // Pass secrets via stdin (never written to disk or mounted as files)
     input.secrets = readSecrets();
+    logger.debug({ secrets: Object.keys(input.secrets) }, 'Secrets loaded');
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();
     // Remove secrets from input so they don't appear in logs
