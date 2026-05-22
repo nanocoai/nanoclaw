@@ -82,10 +82,11 @@ export function isRunnerCommand(msg: MessageInRow): boolean {
 function extractSenderId(msg: MessageInRow, content: any): string | null {
   const raw: string | null = content?.senderId || content?.author?.userId || null;
   if (!raw) return null;
-  // Already namespaced (e.g. "telegram:123") — use as-is.
-  if (raw.includes(':')) return raw;
-  // Raw platform id from chat-sdk serialization — prefix with channel type.
   if (!msg.channel_type) return raw;
+  // Already namespaced for this channel — use as-is. `includes(':')` would be
+  // wrong here: Teams Bot Framework user ids like `29:1abc...` natively
+  // contain a colon and would slip through unprefixed.
+  if (raw.startsWith(`${msg.channel_type}:`)) return raw;
   return `${msg.channel_type}:${raw}`;
 }
 

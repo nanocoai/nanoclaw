@@ -143,7 +143,7 @@ function stranger(text: string) {
       id: `stranger-${Math.random().toString(36).slice(2, 8)}`,
       kind: 'chat' as const,
       content: JSON.stringify({
-        senderId: 'tg:stranger',
+        senderId: 'stranger-tg-id',
         senderName: 'Stranger',
         text,
       }),
@@ -220,7 +220,7 @@ describe('unknown-sender request_approval flow', () => {
     // Member row added for the stranger against the wired agent group.
     const member = getDb()
       .prepare('SELECT 1 AS x FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?')
-      .get('tg:stranger', 'ag-1');
+      .get('telegram:stranger-tg-id', 'ag-1');
     expect(member).toBeDefined();
 
     // Pending row cleared.
@@ -258,7 +258,7 @@ describe('unknown-sender request_approval flow', () => {
     expect(count).toBe(0);
     const member = getDb()
       .prepare('SELECT 1 AS x FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?')
-      .get('tg:stranger', 'ag-1');
+      .get('telegram:stranger-tg-id', 'ag-1');
     expect(member).toBeUndefined();
   });
 
@@ -292,7 +292,7 @@ describe('unknown-sender request_approval flow', () => {
     // No member added for the stranger.
     const member = getDb()
       .prepare('SELECT 1 AS x FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?')
-      .get('tg:stranger', 'ag-1');
+      .get('telegram:stranger-tg-id', 'ag-1');
     expect(member).toBeUndefined();
 
     // Pending row is still there — a legitimate approver can still act on it.
@@ -338,7 +338,7 @@ describe('unknown-sender request_approval flow', () => {
     // Stranger admitted thanks to the admin's authority.
     const member = getDb()
       .prepare('SELECT 1 AS x FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?')
-      .get('tg:stranger', 'ag-1');
+      .get('telegram:stranger-tg-id', 'ag-1');
     expect(member).toBeDefined();
   });
 });
