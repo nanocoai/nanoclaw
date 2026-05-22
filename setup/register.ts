@@ -194,7 +194,12 @@ export async function run(args: string[]): Promise<void> {
 
   // 4. Send onboarding message — only on first wiring, not re-registration
   if (newlyWired) {
-    const { session } = resolveSession(agentGroup.id, messagingGroup.id, null, parsed.sessionMode as 'shared' | 'per-thread' | 'agent-shared');
+    const { session } = resolveSession(
+      agentGroup.id,
+      messagingGroup.id,
+      null,
+      parsed.sessionMode as 'shared' | 'per-thread' | 'agent-shared',
+    );
     writeSessionMessage(agentGroup.id, session.id, {
       id: generateId('onboard'),
       kind: 'task',
@@ -208,40 +213,38 @@ export async function run(args: string[]): Promise<void> {
     log.info('Onboarding message written', { sessionId: session.id, channel: parsed.channel });
   }
 
-  // 5. Update assistant name in CLAUDE.md files if different from default
+  // 5. Apply assistant name to JUST the group being registered.
+  //
+  // Earlier behavior did a project-wide find-replace of "Andy" across every
+  // `groups/*/CLAUDE.md` and overwrote `.env`'s `ASSISTANT_NAME`, which
+  // caused two real-world problems:
+  //   - registering a second agent (e.g. "Homie") clobbered the unrelated
+  //     primary agent's CLAUDE.md (replacing "Andy" with "Homie" in
+  //     groups/diddyclaw/CLAUDE.md when Diddyclaw was already in place);
+  //   - the global `.env` ASSISTANT_NAME flipped to the most recently-
+  //     registered agent, which then became the install-wide default
+  //     trigger for any *new* group registered without an explicit
+  //     `--assistant-name`.
+  // Both were unintentional global side-effects of a per-agent operation.
+  // Scope is now strictly: only the freshly-registered agent's own
+  // `groups/<folder>/CLAUDE.md`.
   let nameUpdated = false;
   if (parsed.assistantName !== 'Andy') {
-    log.info('Updating assistant name', { from: 'Andy', to: parsed.assistantName });
-
-    const groupsDir = path.join(projectRoot, 'groups');
-    const mdFiles = fs
-      .readdirSync(groupsDir)
-      .map((d) => path.join(groupsDir, d, 'CLAUDE.md'))
-      .filter((f) => fs.existsSync(f));
-
-    for (const mdFile of mdFiles) {
-      let content = fs.readFileSync(mdFile, 'utf-8');
-      content = content.replace(/^# Andy$/m, `# ${parsed.assistantName}`);
-      content = content.replace(/You are Andy/g, `You are ${parsed.assistantName}`);
-      fs.writeFileSync(mdFile, content);
-      log.info('Updated CLAUDE.md', { file: mdFile });
-    }
-
-    // Update .env
-    const envFile = path.join(projectRoot, '.env');
-    if (fs.existsSync(envFile)) {
-      let envContent = fs.readFileSync(envFile, 'utf-8');
-      if (envContent.includes('ASSISTANT_NAME=')) {
-        envContent = envContent.replace(/^ASSISTANT_NAME=.*$/m, `ASSISTANT_NAME="${parsed.assistantName}"`);
-      } else {
-        envContent += `\nASSISTANT_NAME="${parsed.assistantName}"`;
+    const mdFile = path.join(projectRoot, 'groups', parsed.folder, 'CLAUDE.md');
+    if (fs.existsSync(mdFile)) {
+      const before = fs.readFileSync(mdFile, 'utf-8');
+      const after = before
+        .replace(/^# Andy$/m, `# ${parsed.assistantName}`)
+        .replace(/You are Andy/g, `You are ${parsed.assistantName}`);
+      if (after !== before) {
+        fs.writeFileSync(mdFile, after);
+        log.info('Updated assistant name in registered group only', {
+          file: mdFile,
+          to: parsed.assistantName,
+        });
+        nameUpdated = true;
       }
-      fs.writeFileSync(envFile, envContent);
-    } else {
-      fs.writeFileSync(envFile, `ASSISTANT_NAME="${parsed.assistantName}"\n`);
     }
-    log.info('Set ASSISTANT_NAME in .env');
-    nameUpdated = true;
   }
 
   emitStatus('REGISTER_CHANNEL', {

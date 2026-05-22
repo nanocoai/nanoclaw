@@ -354,7 +354,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
     if (!adapter) return true;
 
     const agentGroups = getAllAgentGroups();
-    const options = buildAgentSelectionOptions(agentGroups);
+    const options = buildAgentSelectionOptions(agentGroups, approverId);
     const title = '📋 Choose an agent';
     updatePendingChannelApprovalCard(row.messaging_group_id, title, JSON.stringify(options));
 
@@ -436,6 +436,14 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         targetAgentGroupId,
       });
       deletePendingChannelApproval(row.messaging_group_id);
+      return true;
+    }
+    if (!hasAdminPrivilege(approverId, targetAgentGroupId)) {
+      log.warn('Channel registration: target agent group rejected for unauthorized approver', {
+        messagingGroupId: row.messaging_group_id,
+        targetAgentGroupId,
+        approverId,
+      });
       return true;
     }
   } else {
