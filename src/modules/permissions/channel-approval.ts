@@ -55,6 +55,7 @@ import type { InboundEvent } from '../../channels/adapter.js';
 import type { AgentGroup } from '../../types.js';
 import { pickApprovalDelivery, pickApprover } from '../approvals/primitive.js';
 import { createPendingChannelApproval, hasInFlightChannelApproval } from './db/pending-channel-approvals.js';
+import { hasAdminPrivilege } from './db/user-roles.js';
 
 // ── Value constants (response handler in index.ts parses these) ──
 
@@ -76,15 +77,24 @@ function toFolder(name: string): string {
 
 // ── Card builders ──
 
-function buildApprovalOptions(agentGroups: AgentGroup[]): RawOption[] {
+function visibleAgentGroupsForApprover(
+  agentGroups: AgentGroup[],
+  approverUserId: string | null | undefined,
+): AgentGroup[] {
+  if (!approverUserId) return agentGroups;
+  return agentGroups.filter((agentGroup) => hasAdminPrivilege(approverUserId, agentGroup.id));
+}
+
+function buildApprovalOptions(agentGroups: AgentGroup[], approverUserId?: string | null): RawOption[] {
+  const visibleAgentGroups = visibleAgentGroupsForApprover(agentGroups, approverUserId);
   const options: RawOption[] = [];
-  if (agentGroups.length === 1) {
+  if (visibleAgentGroups.length === 1) {
     options.push({
-      label: `Connect to ${agentGroups[0].name}`,
-      selectedLabel: `✅ Connected to ${agentGroups[0].name}`,
-      value: `${CONNECT_PREFIX}${agentGroups[0].id}`,
+      label: `Connect to ${visibleAgentGroups[0].name}`,
+      selectedLabel: `✅ Connected to ${visibleAgentGroups[0].name}`,
+      value: `${CONNECT_PREFIX}${visibleAgentGroups[0].id}`,
     });
-  } else {
+  } else if (visibleAgentGroups.length > 1) {
     options.push({
       label: 'Choose existing agent',
       selectedLabel: '📋 Choosing…',
@@ -194,7 +204,7 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
   const channelName = originMg?.name ?? null;
   const title = isGroup ? '📣 Bot mentioned in new channel' : '💬 New direct message';
   const question = buildQuestionText(isGroup, senderName, channelName, originChannelType);
-  const options = normalizeOptions(buildApprovalOptions(agentGroups));
+  const options = normalizeOptions(buildApprovalOptions(agentGroups, delivery.userId));
 
   createPendingChannelApproval({
     messaging_group_id: messagingGroupId,
@@ -241,8 +251,12 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
 /**
  * Build normalized options for the agent-selection follow-up card.
  */
-export function buildAgentSelectionOptions(agentGroups: AgentGroup[]): NormalizedOption[] {
-  const options: RawOption[] = agentGroups.map((ag) => ({
+export function buildAgentSelectionOptions(
+  agentGroups: AgentGroup[],
+  approverUserId?: string | null,
+): NormalizedOption[] {
+  const visibleAgentGroups = visibleAgentGroupsForApprover(agentGroups, approverUserId);
+  const options: RawOption[] = visibleAgentGroups.map((ag) => ({
     label: ag.name,
     selectedLabel: `✅ Connected to ${ag.name}`,
     value: `${CONNECT_PREFIX}${ag.id}`,

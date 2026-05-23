@@ -1,6 +1,6 @@
 {
   "name": "nanoclaw",
-  "version": "2.0.64",
+  "version": "2.0.69",
   "description": "Personal Claude assistant. Lightweight, secure, customizable.",
   "type": "module",
   "packageManager": "pnpm@10.33.0",

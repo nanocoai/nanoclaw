@@ -36,6 +36,7 @@ const LINK_TIMEOUT_MS = 180_000;
 const DEFAULT_DEVICE_NAME = 'NanoClaw';
 
 interface SignalAccount {
+  number?: string;
   account?: string;
   registered?: boolean;
 }
@@ -59,7 +60,7 @@ function listAccounts(): string[] {
     const parsed = JSON.parse(res.stdout || '[]') as SignalAccount[];
     return parsed
       .filter((a) => a.registered !== false)
-      .map((a) => a.account ?? '')
+      .map((a) => a.number ?? a.account ?? '')
       .filter(Boolean);
   } catch {
     return [];

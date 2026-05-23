@@ -155,16 +155,15 @@ export function formatMessages(messages: MessageInRow[]): string {
 }
 
 function formatChatMessages(messages: MessageInRow[]): string {
-  if (messages.length === 1) {
-    return formatSingleChat(messages[0]);
-  }
-
-  const lines = ['<messages>'];
-  for (const msg of messages) {
-    lines.push(formatSingleChat(msg));
-  }
-  lines.push('</messages>');
-  return lines.join('\n');
+  // Each `<message id="..." from="...">...</message>` block is self-contained;
+  // concatenating them reads to the agent as a sequence of distinct messages.
+  // Earlier revisions wrapped multi-message batches in an outer `<messages>`
+  // envelope, but the Claude Agent SDK responded to that shape with a
+  // synthetic stub (`model: "<synthetic>"`, `content: "No response
+  // requested."`) instead of calling the API — see #2555 for the full trace.
+  // The fix is simply to drop the wrapper; the single-message path (which
+  // already worked) is now just the N=1 case of the same code.
+  return messages.map(formatSingleChat).join('\n');
 }
 
 function formatSingleChat(msg: MessageInRow): string {

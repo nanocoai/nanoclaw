@@ -20,6 +20,7 @@ Skip to **Credentials** if all of these are already in place:
 - `setup/whatsapp-auth.ts` and `setup/groups.ts` both exist
 - `setup/index.ts`'s `STEPS` map contains both `'whatsapp-auth':` and `groups:`
 - `@whiskeysockets/baileys`, `qrcode`, `pino` are listed in `package.json` dependencies
+- `.claude/skills/add-whatsapp/scripts/wa-qr-browser.ts` exists (ships with this skill)
 
 Otherwise continue. Every step below is safe to re-run.
 
@@ -95,7 +96,7 @@ If IS_HEADLESS=true AND not WSL → AskUserQuestion: How do you want to authenti
 - **QR code in terminal** - Displays QR code in the terminal (can be too small on some displays)
 
 Otherwise (macOS, desktop Linux, or WSL) → AskUserQuestion: How do you want to authenticate WhatsApp?
-- **QR code in browser** (Recommended) - Opens a browser window with a large, scannable QR code
+- **QR code in browser** (Recommended) - Runs a small local HTTP server that renders the rotating QR as a PNG and auto-opens your default browser
 - **Pairing code** - Enter a numeric code on your phone (no camera needed, requires phone number)
 - **QR code in terminal** - Displays QR code in the terminal (can be too small on some displays)
 
@@ -114,10 +115,12 @@ rm -rf store/auth/
 For QR code in browser (recommended):
 
 ```bash
-pnpm exec tsx setup/index.ts --step whatsapp-auth -- --method qr-browser
+pnpm exec tsx .claude/skills/add-whatsapp/scripts/wa-qr-browser.ts
 ```
 
 (Bash timeout: 150000ms)
+
+The wrapper spawns `setup/index.ts --step whatsapp-auth -- --method qr`, parses each rotating QR from its `WHATSAPP_AUTH_QR` status blocks, and serves the current QR as a PNG on a local HTTP server (default port `8765`, falls back to a free port). Flags: `--clean` (wipes `store/auth/` before spawning) and `--port N`.
 
 Tell the user:
 
@@ -130,10 +133,12 @@ Tell the user:
 For QR code in terminal:
 
 ```bash
-pnpm exec tsx setup/index.ts --step whatsapp-auth -- --method qr-terminal
+pnpm exec tsx setup/index.ts --step whatsapp-auth -- --method qr
 ```
 
 (Bash timeout: 150000ms)
+
+The setup driver emits each rotating QR as a `WHATSAPP_AUTH_QR` status block; when run directly (not through `setup:auto`) the raw QR string is printed and your terminal must render it as ASCII. If your terminal can't render it readably, use the browser method above.
 
 Tell the user:
 
@@ -220,10 +225,10 @@ Not supported (WhatsApp linked device limitation): edit messages, delete message
 
 ### QR code expired
 
-QR codes expire after ~60 seconds. Re-run the auth command:
+QR codes expire after ~60 seconds. The browser wrapper rotates automatically as long as it's running; if it was stopped, re-run with `--clean`:
 
 ```bash
-rm -rf store/auth/ && pnpm exec tsx setup/index.ts --step whatsapp-auth -- --method qr-browser
+pnpm exec tsx .claude/skills/add-whatsapp/scripts/wa-qr-browser.ts --clean
 ```
 
 ### Pairing code not working
@@ -236,10 +241,10 @@ rm -rf store/auth/ && pnpm exec tsx setup/index.ts --step whatsapp-auth -- --met
 
 Ensure: digits only (no `+`), phone has internet, WhatsApp is updated.
 
-If pairing code keeps failing, switch to QR-browser auth instead:
+WhatsApp's pairing-code flow occasionally rejects valid codes with "Couldn't link device — An error happened. Please try again." This is a server-side rejection unrelated to the code itself; we've seen it happen twice in a row on fresh dedicated numbers. If you hit it more than once, switch to QR-browser auth — it has a noticeably higher success rate:
 
 ```bash
-rm -rf store/auth/ && pnpm exec tsx setup/index.ts --step whatsapp-auth -- --method qr-browser
+pnpm exec tsx .claude/skills/add-whatsapp/scripts/wa-qr-browser.ts --clean
 ```
 
 ### "waiting for this message" on reactions
