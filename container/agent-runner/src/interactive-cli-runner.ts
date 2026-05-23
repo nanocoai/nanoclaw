@@ -275,6 +275,22 @@ export async function runInteractiveQuery(
     const flushPending = () => {
       if (resolved || !pendingOutput) return;
       if (pendingFinishTimer) { clearTimeout(pendingFinishTimer); pendingFinishTimer = null; }
+      // auto-compact 总结 → 换发一条友好提示，不暴露 <analysis> 原文
+      // mapAccumulatorToResult 已识别并把 result 置 null + 设 flag
+      if (pendingOutput.isCompactSummary) {
+        log('[interactive] auto-compact summary detected → emit friendly notice instead of raw <analysis>');
+        const notice: ContainerOutput = {
+          status: 'success',
+          result: '📦 上下文已自动压缩\n本轮对话历史较长，系统已整理为摘要继续会话。工具调用、记忆、Wiki 等不受影响。',
+          newSessionId: pendingOutput.newSessionId,
+          usage: pendingOutput.usage,
+        };
+        writeOutput(notice);
+        finish(notice.result || undefined);
+        pendingOutput = null;
+        pendingResult = undefined;
+        return;
+      }
       writeOutput(pendingOutput);
       finish(pendingResult);
       pendingOutput = null;

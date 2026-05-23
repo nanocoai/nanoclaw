@@ -305,6 +305,18 @@ export interface ContainerOutput {
   error?: string;
   progressType?: 'tool_use' | 'tool_result' | 'thinking' | 'text';
   detail?: string;
+  /**
+   * CLI interactive 模式专用：标识本次响应是 Claude Code auto-compact 产生的
+   * 会话总结（被 `<analysis>` 包裹 + 后续 summary 文本），而不是给用户的真正回复。
+   *
+   * 上层（interactive-cli-runner）看到此 flag 应：
+   *   1. 丢弃 result 内容（不发给用户）
+   *   2. 改发一条"系统已完成上下文压缩"的提示消息
+   *
+   * 设计理由：SDK 模式下 SDK 内部消化 compact 不暴露给宿主；
+   *           CLI 模式直接拦截 SSE 协议，<analysis> 会泄漏，必须在解析层识别。
+   */
+  isCompactSummary?: boolean;
   usage?: {
     inputTokens: number;
     outputTokens: number;
@@ -360,6 +372,8 @@ function toolEmoji(name: string): string {
  */
 export function buildTextProgress(block: TextBlock): ContainerOutput | null {
   if (!block.text) return null;
+  // auto-compact 总结块（`<analysis>...` 开头）不该作为中间叙述发给用户
+  if (isCompactSummary(block.text)) return null;
   // 剥掉内部独白标签，只用可见文本判断/展示
   const stripped = block.text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
   if (stripped.length <= 5) return null;
@@ -442,6 +456,31 @@ export function buildToolUseProgress(block: ToolUseBlock): ContainerOutput | nul
 }
 
 /**
+ * 识别 Claude Code auto-compact 产生的会话总结。
+ *
+ * 触发场景：CLI interactive 模式下，长对话接近 context 上限时 Claude Code 内部
+ * 触发自动压缩 — 让模型用 `<analysis>` 包裹分析过程 + 输出最终 summary。这段
+ * 文字是给"下一轮自己看的"，不是给用户的回复。
+ *
+ * 识别规则（任一命中即判定为 compact）：
+ *   1. trim 后以 `<analysis>` 开头 — 这是 claude.exe 二进制内嵌的强制模板
+ *   2. 含 "chronologically analyze" 特征串 — compact prompt 模板的关键指令
+ *
+ * 设计理由：Claude Code 自身落盘 jsonl 时也用 `<analysis>[\s\S]*?<\/analysis>`
+ *           正则剥离 analysis 段，这里直接对齐它的判定。
+ *
+ * 抽成纯函数便于单测 — 误判会导致正常回复被吞，规则需要严格 assertion 拦截。
+ */
+export function isCompactSummary(text: string | null | undefined): boolean {
+  if (!text) return false;
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith('<analysis>')) return true;
+  // 第二道防线：模板里这串非常稳定，且正常回复不可能逐字出现
+  if (trimmed.includes('chronologically analyze each message')) return true;
+  return false;
+}
+
+/**
  * 从完成的 MessageAccumulator 生成最终 ContainerOutput
  */
 export function mapAccumulatorToResult(
@@ -466,10 +505,31 @@ export function mapAccumulatorToResult(
       textParts.push(block.text);
     }
   }
+  const joined = textParts.join('');
+
+  // 识别 auto-compact 总结：result 置 null + 设 flag，上层据此换提示消息
+  if (isCompactSummary(joined)) {
+    return {
+      status: 'success',
+      result: null,
+      isCompactSummary: true,
+      newSessionId: sessionId,
+      usage: {
+        inputTokens: acc.usage.inputTokens,
+        outputTokens: acc.usage.outputTokens,
+        cacheReadInputTokens: acc.usage.cacheReadInputTokens,
+        cacheCreationInputTokens: acc.usage.cacheCreationInputTokens,
+        numTurns: numTurns || 0,
+        durationMs: durationMs || 0,
+        totalCostUsd: 0,
+        model: acc.model || undefined,
+      },
+    };
+  }
 
   return {
     status: 'success',
-    result: textParts.join('') || null,
+    result: joined || null,
     newSessionId: sessionId,
     usage: {
       inputTokens: acc.usage.inputTokens,

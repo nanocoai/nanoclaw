@@ -759,7 +759,7 @@ async function runQuery(
         'TaskStop',
         'TeamCreate',
         'TeamDelete',
-        'SendMessage',
+        // SendMessage 是 SDK 内部 inbox，不经过飞书通道，用 mcp__nanoclaw__send_message 替代
         'TodoWrite',
         'ToolSearch',
         'Skill',
