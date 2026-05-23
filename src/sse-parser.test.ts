@@ -12,6 +12,7 @@ import {
   buildTextProgress,
   buildToolUseProgress,
   decideTextBlockAction,
+  isCompactSummary,
   type SseEvent,
   type MessageStartData,
   type ContentBlockStartData,
@@ -670,5 +671,103 @@ describe('mapAccumulatorToResult', () => {
 
     const result = mapAccumulatorToResult(acc);
     expect(result.result).toBe('Hello World');
+  });
+
+  it('auto-compact summary（<analysis> 开头）→ isCompactSummary=true，result=null', () => {
+    let acc = createMessageAccumulator();
+    acc = accumulateSseEvent(acc, {
+      type: 'content_block_start',
+      data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    });
+    acc = accumulateSseEvent(acc, {
+      type: 'content_block_delta',
+      data: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: '<analysis>\nThe user wants me to...\n</analysis>\n\n摘要内容' },
+      },
+    });
+    const result = mapAccumulatorToResult(acc, 'session_x');
+    expect(result.status).toBe('success');
+    expect(result.isCompactSummary).toBe(true);
+    expect(result.result).toBeNull();
+    expect(result.newSessionId).toBe('session_x');
+  });
+
+  it('auto-compact summary（chronologically analyze 关键词）→ isCompactSummary=true', () => {
+    let acc = createMessageAccumulator();
+    acc = accumulateSseEvent(acc, {
+      type: 'content_block_start',
+      data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    });
+    acc = accumulateSseEvent(acc, {
+      type: 'content_block_delta',
+      data: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'Let me chronologically analyze each message in detail...' },
+      },
+    });
+    const result = mapAccumulatorToResult(acc);
+    expect(result.isCompactSummary).toBe(true);
+    expect(result.result).toBeNull();
+  });
+});
+
+// ---- isCompactSummary ----
+
+describe('isCompactSummary', () => {
+  it('<analysis> 开头 → true', () => {
+    expect(isCompactSummary('<analysis>\n...\n</analysis>\n\nsummary')).toBe(true);
+  });
+
+  it('前置空白后仍以 <analysis> 开头 → true', () => {
+    expect(isCompactSummary('   \n<analysis>x</analysis>')).toBe(true);
+  });
+
+  it('包含 chronologically analyze each message → true', () => {
+    expect(isCompactSummary('I will chronologically analyze each message below.')).toBe(true);
+  });
+
+  it('null / undefined / 空字符串 → false', () => {
+    expect(isCompactSummary(null)).toBe(false);
+    expect(isCompactSummary(undefined)).toBe(false);
+    expect(isCompactSummary('')).toBe(false);
+  });
+
+  it('普通文本 → false', () => {
+    expect(isCompactSummary('这是一段正常的助手回复')).toBe(false);
+    expect(isCompactSummary('Hello World')).toBe(false);
+  });
+
+  it('文本中间出现 <analysis>（不在开头）→ false（避免误杀）', () => {
+    expect(isCompactSummary('我们讨论的 <analysis> 标签其实是 Claude 内部用的')).toBe(false);
+  });
+});
+
+// ---- buildTextProgress + 补充 compact case ----
+
+describe('buildTextProgress compact-summary 过滤', () => {
+  it('text 以 <analysis> 开头 → 返回 null（不让 raw 摘要泄漏到飞书）', () => {
+    const block: TextBlock = {
+      type: 'text',
+      text: '<analysis>\nThe primary intent was to...\n</analysis>\n\n[summary]',
+    };
+    expect(buildTextProgress(block)).toBeNull();
+  });
+
+  it('text 含 chronologically analyze 关键词 → 返回 null', () => {
+    const block: TextBlock = {
+      type: 'text',
+      text: 'I will chronologically analyze each message below to ensure...',
+    };
+    expect(buildTextProgress(block)).toBeNull();
+  });
+
+  it('普通文本不受影响 → 正常 emit', () => {
+    const block: TextBlock = { type: 'text', text: '这是一段正常的助手回复内容' };
+    const result = buildTextProgress(block);
+    expect(result).not.toBeNull();
+    expect(result!.result?.startsWith('💬 ')).toBe(true);
   });
 });
