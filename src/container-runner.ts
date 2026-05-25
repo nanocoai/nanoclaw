@@ -432,6 +432,16 @@ async function buildContainerArgs(
   }
   log.info('OneCLI gateway applied', { containerName });
 
+  // Explicitly assign all vault secrets to this agent.
+  // OneCLI's mode:all credential injection uses a regex built from the stored
+  // host pattern. Hyphens in hostnames (e.g. public-api.granola.ai) can cause
+  // the regex to fail to match even when the entry exists. Explicit assignment
+  // via set-secrets bypasses the pattern matching so every vault secret is
+  // injected regardless of hostname format.
+  if (agentIdentifier) {
+    assignVaultSecretsToAgent(agentIdentifier, containerName);
+  }
+
   // Host gateway
   args.push(...hostGatewayArgs());
 
@@ -462,6 +472,58 @@ async function buildContainerArgs(
   args.push('-c', 'exec bun run /app/src/index.ts');
 
   return args;
+}
+
+/**
+ * Assign all vault secrets to the OneCLI agent identified by `agentIdentifier`.
+ * OneCLI creates agents in selective mode; the mode:all host-pattern regex
+ * fails for hostnames that contain hyphens. Explicit assignment bypasses regex
+ * matching so the proxy injects credentials for every configured host.
+ *
+ * Silently no-ops when onecli is not installed or not reachable.
+ */
+function assignVaultSecretsToAgent(agentIdentifier: string, containerName: string): void {
+  // Include ~/.local/bin so the binary is found even when the service PATH is minimal.
+  const binDir = process.env.HOME ? `${process.env.HOME}/.local/bin` : '';
+  const onecliEnv = {
+    ...process.env,
+    PATH: binDir ? `${binDir}:${process.env.PATH ?? ''}` : (process.env.PATH ?? ''),
+  };
+
+  let agentId: string | undefined;
+  try {
+    const out = execFileSync('onecli', ['agents', 'list'], { encoding: 'utf8', env: onecliEnv });
+    const { data: agents = [] } = JSON.parse(out) as { data?: { id: string; identifier: string }[] };
+    agentId = agents.find((a) => a.identifier === agentIdentifier)?.id;
+  } catch {
+    return; // onecli not available or not reachable
+  }
+  if (!agentId) return;
+
+  try {
+    const secretsOut = execFileSync('onecli', ['secrets', 'list'], { encoding: 'utf8', env: onecliEnv });
+    const { data: secrets = [] } = JSON.parse(secretsOut) as { data?: { id: string }[] };
+    const allIds = secrets.map((s) => s.id);
+    if (allIds.length === 0) return;
+
+    const currentOut = execFileSync('onecli', ['agents', 'secrets', '--id', agentId], {
+      encoding: 'utf8',
+      env: onecliEnv,
+    });
+    const { data: current = [] } = JSON.parse(currentOut) as { data?: string[] };
+
+    // set-secrets replaces the list — merge to preserve manually assigned secrets.
+    const merged = [...new Set([...current, ...allIds])];
+    execFileSync('onecli', ['agents', 'set-secrets', '--id', agentId, '--secret-ids', merged.join(',')], {
+      env: onecliEnv,
+    });
+    log.info('OneCLI vault secrets assigned to agent', { containerName, count: merged.length });
+  } catch (err) {
+    log.warn('OneCLI vault secret assignment failed — hyphenated hosts may lack credentials', {
+      containerName,
+      err,
+    });
+  }
 }
 
 /** Build a per-agent-group Docker image with custom packages. */
