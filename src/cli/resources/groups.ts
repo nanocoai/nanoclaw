@@ -9,6 +9,7 @@ import {
   updateContainerConfigScalars,
   updateContainerConfigJson,
 } from '../../db/container-configs.js';
+import { initGroupFilesystem } from '../../group-init.js';
 import type { ContainerConfigRow } from '../../types.js';
 import { registerResource } from '../crud.js';
 
@@ -62,6 +63,15 @@ registerResource({
   // DELETE violates FK constraints (see #2525). The cascading handler is
   // provided as `customOperations.delete` below.
   operations: { list: 'open', get: 'open', create: 'approval', update: 'approval' },
+  afterCreate: async (result) => {
+    initGroupFilesystem({
+      id: result.id as string,
+      name: result.name as string,
+      folder: result.folder as string,
+      agent_provider: null,
+      created_at: result.created_at as string,
+    });
+  },
   customOperations: {
     delete: {
       access: 'approval',

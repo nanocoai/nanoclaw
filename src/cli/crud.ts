@@ -69,6 +69,8 @@ export interface ResourceDef {
   };
   /** Non-standard verbs (grant, revoke, add, remove, restart, etc.). */
   customOperations?: Record<string, CustomOperation>;
+  /** Called after a successful create with the inserted row values. */
+  afterCreate?: (result: Record<string, unknown>) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +160,7 @@ function genericCreate(def: ResourceDef) {
     getDb()
       .prepare(`INSERT INTO ${def.table} (${colNames.join(', ')}) VALUES (${placeholders.join(', ')})`)
       .run(values);
+    if (def.afterCreate) await def.afterCreate(values);
     return values;
   };
 }
