@@ -91,6 +91,41 @@ describe('createChatSdkBridge', () => {
     });
     expect(typeof bridge.subscribe).toBe('function');
   });
+
+  it('without channelType override, name and channelType default to adapter.name', () => {
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ name: 'teams' }),
+      supportsThreads: true,
+    });
+    expect(bridge.name).toBe('teams');
+    expect(bridge.channelType).toBe('teams');
+  });
+
+  it('with channelType override, returned name and channelType reflect the override', () => {
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ name: 'teams' }),
+      channelType: 'teams-alpha',
+      supportsThreads: true,
+    });
+    expect(bridge.name).toBe('teams-alpha');
+    expect(bridge.channelType).toBe('teams-alpha');
+  });
+
+  it('two bridges of the same adapter type get distinct channelTypes when overrides differ', () => {
+    const a = createChatSdkBridge({
+      adapter: stubAdapter({ name: 'teams' }),
+      channelType: 'teams-alpha',
+      supportsThreads: true,
+    });
+    const b = createChatSdkBridge({
+      adapter: stubAdapter({ name: 'teams' }),
+      channelType: 'teams-beta',
+      supportsThreads: true,
+    });
+    expect(a.channelType).toBe('teams-alpha');
+    expect(b.channelType).toBe('teams-beta');
+    expect(a.name).not.toBe(b.name);
+  });
 });
 
 describe('createChatSdkBridge.deliver — display cards (send_card)', () => {

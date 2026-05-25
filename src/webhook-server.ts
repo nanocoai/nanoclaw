@@ -2,10 +2,12 @@
  * Minimal HTTP server for Chat SDK adapter webhooks.
  *
  * Starts lazily on first adapter registration. Routes requests by path:
- *   /webhook/{adapterName} → chat.webhooks[adapterName](request)
+ *   /webhook/{routingPath} → entry.chat.webhooks[entry.adapterName](request)
  *
- * Multiple Chat instances can register adapters — each adapter name maps
- * to its owning Chat instance.
+ * The routing path defaults to `adapterName` (single-instance channels).
+ * Multi-instance channels (e.g. multi-workspace Slack, multi-bot Teams)
+ * pass a distinct `routingPath` per registration so each instance gets its
+ * own URL while still resolving the same `chat.webhooks[adapterName]` handler.
  */
 import http from 'http';
 
@@ -69,11 +71,18 @@ async function fromWebResponse(webRes: Response, nodeRes: http.ServerResponse): 
 /**
  * Register a webhook adapter on the shared server.
  * Starts the server lazily on first call.
+ *
+ * `adapterName` is the key into `chat.webhooks` (the Chat SDK adapter's
+ * internal name). `routingPath`, when provided, becomes the URL path segment
+ * after `/webhook/`; otherwise it defaults to `adapterName`. Override
+ * `routingPath` when registering multiple bridges sharing the same Chat SDK
+ * adapter type under distinct URLs.
  */
-export function registerWebhookAdapter(chat: Chat, adapterName: string): void {
-  routes.set(adapterName, { chat, adapterName });
+export function registerWebhookAdapter(chat: Chat, adapterName: string, routingPath?: string): void {
+  const route = routingPath ?? adapterName;
+  routes.set(route, { chat, adapterName });
   ensureServer();
-  log.info('Webhook adapter registered', { adapter: adapterName, path: `/webhook/${adapterName}` });
+  log.info('Webhook adapter registered', { adapter: adapterName, path: `/webhook/${route}` });
 }
 
 function ensureServer(): void {
@@ -84,7 +93,7 @@ function ensureServer(): void {
   server = http.createServer(async (req, res) => {
     const url = req.url || '/';
 
-    // Route: /webhook/{adapterName}
+    // Route: /webhook/{routingPath}
     const match = url.match(/^\/webhook\/([^/?]+)/);
     if (!match) {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -92,11 +101,11 @@ function ensureServer(): void {
       return;
     }
 
-    const adapterName = match[1];
-    const entry = routes.get(adapterName);
+    const route = match[1];
+    const entry = routes.get(route);
     if (!entry) {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end(`Unknown adapter: ${adapterName}`);
+      res.end(`Unknown route: ${route}`);
       return;
     }
 
@@ -112,14 +121,14 @@ function ensureServer(): void {
       });
       await fromWebResponse(webRes, res);
     } catch (err) {
-      log.error('Webhook handler error', { adapter: adapterName, url: req.url, err });
+      log.error('Webhook handler error', { route, adapter: entry.adapterName, url: req.url, err });
       res.writeHead(500, { 'Content-Type': 'text/plain' });
       res.end('Internal Server Error');
     }
   });
 
   server.listen(port, '0.0.0.0', () => {
-    log.info('Webhook server started', { port, adapters: [...routes.keys()] });
+    log.info('Webhook server started', { port, routes: [...routes.keys()] });
   });
 }
 
