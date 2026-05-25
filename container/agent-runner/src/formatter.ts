@@ -188,7 +188,10 @@ function formatSingleChat(msg: MessageInRow): string {
  */
 function originAttr(msg: MessageInRow): string {
   const fromDest = findByRouting(msg.channel_type, msg.platform_id);
-  if (fromDest) return ` from="${escapeXml(fromDest.name)}"`;
+  if (fromDest) {
+    const channelAttr = fromDest.channelType ? ` from-channel="${escapeXml(fromDest.channelType)}"` : '';
+    return ` from="${escapeXml(fromDest.name)}"${channelAttr} from-type="${fromDest.type}"`;
+  }
   if (msg.channel_type || msg.platform_id) {
     return ` from="unknown:${escapeXml(msg.channel_type || '')}:${escapeXml(msg.platform_id || '')}"`;
   }
