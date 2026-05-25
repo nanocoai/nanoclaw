@@ -5,8 +5,10 @@
 import { createSlackAdapter } from '@chat-adapter/slack';
 
 import { readEnvFile } from '../env.js';
+import { log } from '../log.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
+import { createThreadParentFetcher } from './slack-thread-parent.js';
 
 registerChannelAdapter('slack', {
   factory: () => {
@@ -25,6 +27,10 @@ registerChannelAdapter('slack', {
         return null;
       }
     };
+    bridge.fetchThreadParent = createThreadParentFetcher({
+      botToken: env.SLACK_BOT_TOKEN,
+      log: (msg, meta) => log.warn(msg, meta),
+    });
     return bridge;
   },
 });
