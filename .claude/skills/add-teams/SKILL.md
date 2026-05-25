@@ -55,6 +55,47 @@ pnpm run build
 
 ## Credentials
 
+Two paths — manual (Azure Portal) or auto (Teams CLI).
+
+### Auto: Teams CLI
+
+Requires Node.js 18+, a Microsoft 365 account with sideloading permissions, and a public HTTPS endpoint (ngrok, Cloudflare Tunnel, or similar).
+
+1. Install the CLI:
+
+   ```bash
+   npm install -g @microsoft/teams.cli@preview
+   ```
+
+2. Sign in and verify:
+
+   ```bash
+   teams login
+   teams status
+   ```
+
+3. Create the Entra app, client secret, and bot registration:
+
+   ```bash
+   teams app create \
+     --name "NanoClaw" \
+     --endpoint "https://your-domain/api/webhooks/teams"
+   ```
+
+   The CLI prints the credentials as `CLIENT_ID`, `CLIENT_SECRET`, and `TENANT_ID`. Map them to NanoClaw's env keys:
+
+   - `CLIENT_ID` → `TEAMS_APP_ID`
+   - `CLIENT_SECRET` → `TEAMS_APP_PASSWORD`
+   - `TENANT_ID` → `TEAMS_APP_TENANT_ID`
+
+4. Pick **Install in Teams** from the post-create menu and confirm in the Teams dialog.
+
+Continue to [Configure environment](#configure-environment).
+
+---
+
+The steps below describe the **manual Azure Portal path**.
+
 ### Step 1: Create an Azure AD App Registration
 
 1. Go to [Azure Portal](https://portal.azure.com) > **App registrations** > **New registration**
