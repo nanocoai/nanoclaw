@@ -149,6 +149,24 @@ export interface ChannelAdapter {
   subscribe?(platformId: string, threadId: string): Promise<void>;
 
   /**
+   * Fetch the parent message of a thread for context-seeding on the first
+   * inbound that creates a per-thread session. Without this, the agent
+   * wakes in a brand-new session with no idea what message its user is
+   * replying to. Implementations should return the originating top-level
+   * message of the thread (not the most recent reply). Returns null when
+   * the parent can't be retrieved (deleted, missing scopes, transient
+   * platform error) — the router fails open and routes the reply with no
+   * extra context.
+   *
+   * Optional. Adapters that don't implement this leave the agent without
+   * parent-message context on fresh thread sessions.
+   */
+  fetchThreadParent?(
+    platformId: string,
+    threadId: string,
+  ): Promise<{ id: string; sender: string; text: string } | null>;
+
+  /**
    * Open (or fetch) a DM with this user, returning the platform_id of the
    * resulting DM channel. Called by the host on demand to initiate cold
    * DMs — approvals, pairing handshakes, host-initiated notifications — to
