@@ -9,20 +9,15 @@ This guide covers debugging the containerized agent execution system.
 
 ## Architecture Overview
 
-```
-Host (macOS)                          Container (Linux VM)
-─────────────────────────────────────────────────────────────
-src/container-runner.ts               container/agent-runner/
-    │                                      │
-    │ spawns container                      │ runs Claude Agent SDK
-    │ with volume mounts                   │ with MCP servers
-    │                                      │
-    ├── data/env/env ──────────────> /workspace/env-dir/env
-    ├── groups/{folder} ───────────> /workspace/group
-    ├── data/ipc/{folder} ────────> /workspace/ipc
-    ├── data/sessions/{folder}/.claude/ ──> /home/node/.claude/ (isolated per-group)
-    └── (main only) project root ──> /workspace/project
-```
+The host process (`container-runner.ts`) spawns a Linux container running the Claude Agent SDK with MCP servers. They're connected via these volume mounts:
+
+- `data/env/env` → `/workspace/env-dir/env`
+- `groups/{folder}` → `/workspace/group`
+- `data/ipc/{folder}` → `/workspace/ipc`
+- `data/sessions/{folder}/.claude/` → `/home/node/.claude/`
+- Project root → `/workspace/project` (main group only)
+
+This setup keeps each group's session isolated while sharing the same project and env config.
 
 **Important:** The container runs as user `node` with `HOME=/home/node`. Session files must be mounted to `/home/node/.claude/` (not `/root/.claude/`) for session resumption to work.
 
