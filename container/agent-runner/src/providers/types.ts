@@ -6,6 +6,13 @@ export interface AgentProvider {
    */
   readonly supportsNativeSlashCommands: boolean;
 
+  /**
+   * True unless the provider can only process one complete prompt at a time.
+   * When false, the poll loop leaves new messages pending until the current
+   * query finishes instead of pushing them into an active query.
+   */
+  readonly supportsActivePush?: boolean;
+
   /** Start a new query. Returns a handle for streaming input and output. */
   query(input: QueryInput): AgentQuery;
 
