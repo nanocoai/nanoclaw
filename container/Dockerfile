@@ -10,7 +10,7 @@
 # bind mount at runtime (see src/container-runner.ts). Source-only changes
 # never require an image rebuild.
 
-FROM node:22-slim
+FROM node:22-trixie-slim
 
 # ---- Build-time arguments ----------------------------------------------------
 # CJK fonts add ~200MB. Opt in only if you render Chinese/Japanese/Korean text.
@@ -19,10 +19,10 @@ ARG INSTALL_CJK_FONTS=false
 # Pin CLI versions for reproducibility. Bump deliberately — unpinned installs
 # mean every rebuild silently picks up the latest and can break in lockstep
 # across all users.
-ARG CLAUDE_CODE_VERSION=2.1.128
+ARG CLAUDE_CODE_VERSION=2.1.138
 ARG AGENT_BROWSER_VERSION=latest
-ARG VERCEL_VERSION=52.2.1
-ARG BUN_VERSION=1.3.12
+ARG VERCEL_VERSION=53.1.1
+ARG BUN_VERSION=1.3.13
 
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
@@ -54,7 +54,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && if [ "$INSTALL_CJK_FONTS" = "true" ]; then \
         apt-get install -y --no-install-recommends fonts-noto-cjk; \
        fi \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /usr/share/icons/Adwaita /usr/share/doc/*
 
 # Chromium path for agent-browser / Playwright consumers
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
@@ -78,7 +79,8 @@ WORKDIR /app
 COPY agent-runner/package.json agent-runner/bun.lock ./
 
 RUN --mount=type=cache,target=/root/.bun/install/cache \
-    bun install --frozen-lockfile
+    bun install --frozen-lockfile --production \
+    && rm -rf /app/node_modules/@anthropic-ai/claude-agent-sdk-*-musl
 
 # ---- pnpm + global Node CLIs -------------------------------------------------
 # Most stable first, most frequently bumped last. Bumping claude-code
@@ -102,13 +104,61 @@ RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     echo "only-built-dependencies[]=agent-browser" > /root/.npmrc && \
     echo "only-built-dependencies[]=@anthropic-ai/claude-code" >> /root/.npmrc && \
-    pnpm install -g "vercel@${VERCEL_VERSION}"
+    pnpm install -g "vercel@${VERCEL_VERSION}" \
+    && rm -rf /pnpm/store
 
+# agent-browser ships all 7 OS+arch binaries (~62MB) inside the package; keep
+# only the one matching the build host. Mapping: dpkg amd64 → linux-x64,
+# dpkg arm64 → linux-arm64. ~50MB saved.
 RUN --mount=type=cache,target=/root/.cache/pnpm \
-    pnpm install -g "agent-browser@${AGENT_BROWSER_VERSION}"
+    pnpm install -g "agent-browser@${AGENT_BROWSER_VERSION}" \
+    && rm -rf /pnpm/store \
+    && case "$(dpkg --print-architecture)" in \
+         arm64) AB_BIN=agent-browser-linux-arm64 ;; \
+         amd64) AB_BIN=agent-browser-linux-x64 ;; \
+         *) echo "unknown arch: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+       esac \
+    && find /pnpm/global/5/.pnpm/agent-browser@*/node_modules/agent-browser/bin \
+         -mindepth 1 -type f \
+         ! -name "$AB_BIN" ! -name 'agent-browser.js' ! -name '.install-method' \
+         -delete
 
+# claude-code is installed LAST so its cleanup persists. Each `pnpm install -g`
+# resyncs the shared global lockfile and would re-fetch any package directory
+# missing from disk; doing the dup-cleanup in any earlier RUN gets reverted.
+#
+# claude-code's postinstall copies the native binary from the variant package
+# (e.g. @anthropic-ai/claude-code-linux-arm64) into bin/claude.exe in the
+# wrapper. After that copy, the variant package directory is a ~238MB dead
+# duplicate. Remove it and the now-dangling symlink in the wrapper.
+#
+# The wrapper's bin/claude.exe (~249MB) is also byte-identical to the SDK's
+# native binary at /app/node_modules/@anthropic-ai/claude-agent-sdk-linux-*/claude
+# whenever the SDK and CLI carry the same upstream claude-code version.
+# Replace it with a symlink to save another ~249MB. Done in the same RUN as
+# the install so the postinstall-copied binary never persists into the layer.
+# A SHA256 mismatch fails the build — that means @anthropic-ai/claude-agent-sdk
+# in container/agent-runner/package.json has drifted from CLAUDE_CODE_VERSION
+# and must be re-aligned.
 RUN --mount=type=cache,target=/root/.cache/pnpm \
-    pnpm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+    pnpm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && rm -rf /pnpm/store \
+    && rm -rf /pnpm/global/5/.pnpm/@anthropic-ai+claude-code-linux-*@* \
+    && rm -f /pnpm/global/5/.pnpm/@anthropic-ai+claude-code@*/node_modules/@anthropic-ai/claude-code-linux-* \
+    && case "$(dpkg --print-architecture)" in \
+         arm64) SDK_ARCH=linux-arm64 ;; \
+         amd64) SDK_ARCH=linux-x64 ;; \
+         *) echo "unknown arch: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+       esac \
+    && SDK_BIN="/app/node_modules/@anthropic-ai/claude-agent-sdk-${SDK_ARCH}/claude" \
+    && CLI_BIN=$(ls /pnpm/global/5/.pnpm/@anthropic-ai+claude-code@*/node_modules/@anthropic-ai/claude-code/bin/claude.exe) \
+    && [ "$(sha256sum "$SDK_BIN" | cut -d' ' -f1)" = "$(sha256sum "$CLI_BIN" | cut -d' ' -f1)" ] \
+       || { echo "ERROR: claude-agent-sdk native binary != claude-code wrapper binary." >&2; \
+            echo "  SDK : $SDK_BIN" >&2; echo "  CLI : $CLI_BIN" >&2; \
+            echo "  Bump @anthropic-ai/claude-agent-sdk in container/agent-runner/package.json" >&2; \
+            echo "  to match CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} (so both ship the same native bin)." >&2; \
+            exit 1; } \
+    && ln -sf "$SDK_BIN" "$CLI_BIN"
 
 # ---- ncl CLI wrapper ----------------------------------------------------------
 # Actual script lives in the mounted source at /app/src/cli/ncl.ts.

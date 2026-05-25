@@ -9,8 +9,8 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.128",
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.138",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "cron-parser": "^5.0.0",
     "zod": "^4.0.0"
   },
