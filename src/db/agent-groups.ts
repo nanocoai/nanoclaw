@@ -39,6 +39,26 @@ export function updateAgentGroup(id: string, updates: Partial<Pick<AgentGroup, '
     .run(values);
 }
 
-export function deleteAgentGroup(id: string): void {
-  getDb().prepare('DELETE FROM agent_groups WHERE id = ?').run(id);
+/**
+ * Deletes the agent group and all rows that reference it. The original FK
+ * declarations were authored without ON DELETE CASCADE, so this function
+ * walks every dependent table in one transaction. An agent group with a
+ * dangling session/wiring/member/role row is unusable anyway — the container,
+ * inbound/outbound DBs, and routing config are all gone.
+ */
+export function deleteAgentGroup(id: string): number {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM sessions WHERE agent_group_id = ?').run(id);
+    db.prepare('DELETE FROM messaging_group_agents WHERE agent_group_id = ?').run(id);
+    db.prepare('DELETE FROM agent_group_members WHERE agent_group_id = ?').run(id);
+    db.prepare('DELETE FROM user_roles WHERE agent_group_id = ?').run(id);
+    db.prepare('DELETE FROM agent_destinations WHERE agent_group_id = ?').run(id);
+    db.prepare('UPDATE pending_approvals SET agent_group_id = NULL WHERE agent_group_id = ?').run(id);
+    db.prepare('DELETE FROM unregistered_senders WHERE agent_group_id = ?').run(id);
+    db.prepare('DELETE FROM pending_sender_approvals WHERE agent_group_id = ?').run(id);
+    db.prepare('DELETE FROM pending_channel_approvals WHERE agent_group_id = ?').run(id);
+    return db.prepare('DELETE FROM agent_groups WHERE id = ?').run(id).changes as number;
+  });
+  return tx() as number;
 }

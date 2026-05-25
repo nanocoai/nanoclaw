@@ -69,6 +69,21 @@ export interface ResourceDef {
   };
   /** Non-standard verbs (grant, revoke, add, remove, restart, etc.). */
   customOperations?: Record<string, CustomOperation>;
+  /**
+   * Override the default DELETE for this resource. Use when the row has
+   * dependents that aren't covered by ON DELETE CASCADE — e.g. agent_groups
+   * has FK references from sessions/wirings/members/roles that need to be
+   * walked in one transaction. Called with the validated `id`; returns the
+   * number of rows removed from the primary table (0 means "not found").
+   */
+  customDelete?: (id: string) => number;
+  /**
+   * Prefix prepended to auto-generated IDs. Use when downstream systems
+   * constrain the ID format — e.g. OneCLI requires agent identifiers to
+   * start with a letter, so groups uses `ag-` to keep `randomUUID()` output
+   * valid. Resources without a prefix still get a raw UUID.
+   */
+  idPrefix?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +148,11 @@ function genericCreate(def: ResourceDef) {
     for (const col of def.columns) {
       if (col.generated) {
         if (col.name === def.idColumn) {
-          values[col.name] = randomUUID();
+          // Honor an explicit --id if the caller provides one; otherwise
+          // auto-generate. The prefix lets resources (e.g. groups) keep
+          // auto-IDs compatible with downstream identifier constraints.
+          const provided = args[col.name];
+          values[col.name] = provided !== undefined ? String(provided) : `${def.idPrefix ?? ''}${randomUUID()}`;
         } else if (col.name.endsWith('_at')) {
           values[col.name] = new Date().toISOString();
         }
@@ -201,8 +220,10 @@ function genericDelete(def: ResourceDef) {
   return async (args: Record<string, unknown>) => {
     const id = args.id as string;
     if (!id) throw new Error(`${def.name} id is required`);
-    const result = getDb().prepare(`DELETE FROM ${def.table} WHERE ${def.idColumn} = ?`).run(id);
-    if (result.changes === 0) throw new Error(`${def.name} not found: ${id}`);
+    const changes = def.customDelete
+      ? def.customDelete(id)
+      : getDb().prepare(`DELETE FROM ${def.table} WHERE ${def.idColumn} = ?`).run(id).changes;
+    if (changes === 0) throw new Error(`${def.name} not found: ${id}`);
     return { deleted: id };
   };
 }

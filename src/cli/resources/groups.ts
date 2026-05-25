@@ -9,6 +9,7 @@ import {
   updateContainerConfigJson,
 } from '../../db/container-configs.js';
 import type { ContainerConfigRow } from '../../types.js';
+import { deleteAgentGroup } from '../../db/agent-groups.js';
 import { registerResource } from '../crud.js';
 
 /** Deserialize JSON columns for display. */
@@ -58,6 +59,8 @@ registerResource({
     { name: 'created_at', type: 'string', description: 'Auto-set.', generated: true },
   ],
   operations: { list: 'open', get: 'open', create: 'approval', update: 'approval', delete: 'approval' },
+  customDelete: deleteAgentGroup,
+  idPrefix: 'ag-',
   customOperations: {
     restart: {
       access: 'approval',

@@ -105,6 +105,48 @@ describe('agent groups', () => {
     createAgentGroup(ag());
     expect(() => createAgentGroup({ ...ag(), id: 'ag-dup' })).toThrow();
   });
+
+  it('cascades through sessions and wirings on delete', () => {
+    createAgentGroup(ag());
+    createMessagingGroup({
+      id: 'mg-1',
+      channel_type: 'discord',
+      platform_id: 'chan-1',
+      name: 'Gen',
+      is_group: 1,
+      unknown_sender_policy: 'strict',
+      created_at: now(),
+    });
+    createMessagingGroupAgent({
+      id: 'mga-1',
+      messaging_group_id: 'mg-1',
+      agent_group_id: 'ag-1',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: now(),
+    });
+    createSession({
+      id: 'sess-1',
+      agent_group_id: 'ag-1',
+      messaging_group_id: 'mg-1',
+      thread_id: null,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: now(),
+      created_at: now(),
+    });
+
+    // Without cascade, the session FK alone would block this.
+    expect(() => deleteAgentGroup('ag-1')).not.toThrow();
+    expect(getAgentGroup('ag-1')).toBeUndefined();
+    expect(getSession('sess-1')).toBeUndefined();
+    expect(getMessagingGroupAgents('mg-1')).toHaveLength(0);
+  });
 });
 
 // ── Messaging Groups ──
