@@ -53,7 +53,32 @@ Fetch:
 List all upstream skill branches:
 - `git branch -r --list 'upstream/skill/*'`
 
-For each `upstream/skill/<name>`:
+## Step 1a: Filter out branches abandoned on an older major version
+
+Many `skill/*` branches stop receiving updates when the repo crosses a major-version boundary (the v1→v2 rewrite is the prominent example). Their tip commits target an architecture the user no longer has, so merging them produces nonsense conflicts and broken builds. Filter these out before presenting candidates.
+
+Determine the local major version:
+```
+LOCAL_MAJOR=$(grep -m1 '"version"' package.json | sed 's/.*"version": *"\([0-9]*\)\..*/\1/')
+```
+
+For each `upstream/skill/<name>`, read the `package.json` at the branch tip:
+```
+BRANCH_VERSION=$(git show upstream/skill/<name>:package.json 2>/dev/null \
+  | grep -m1 '"version"' \
+  | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+BRANCH_MAJOR=${BRANCH_VERSION%%.*}
+```
+
+Decision:
+- If `BRANCH_VERSION` is empty (no `package.json` on the branch, or no `"version"` line): include the branch and warn — it might be a docs-only skill.
+- If `BRANCH_MAJOR != LOCAL_MAJOR`: **exclude the branch** from the candidate list.
+  - In the summary at Step 2, mention these as "abandoned (last seen on v<BRANCH_MAJOR>, you're on v<LOCAL_MAJOR>)" so the user knows they exist but the skill is intentionally skipping them.
+- Otherwise: include normally.
+
+Continue with detection on the filtered set.
+
+For each remaining `upstream/skill/<name>`:
 1. Check if the user has merged this skill branch before:
    - `git merge-base --is-ancestor upstream/skill/<name>~1 HEAD` — if this succeeds (exit 0) for any ancestor commit of the skill branch, the user has merged it at some point. A simpler check: `git log --oneline --merges --grep="skill/<name>" HEAD` to see if there's a merge commit referencing this branch.
    - Alternative: `MERGE_BASE=$(git merge-base HEAD upstream/skill/<name>)` — if the merge base is NOT the initial commit and the merge base includes commits unique to the skill branch, it has been merged.
