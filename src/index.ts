@@ -62,6 +62,7 @@ import { startCliServer, stopCliServer } from './cli/socket-server.js';
 
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
 import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from './channels/channel-registry.js';
+import { getNetworkPolicyProvider } from './modules/network/index.js';
 
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
@@ -81,6 +82,9 @@ async function main(): Promise<void> {
 
   // 1c. One-time filesystem cutover — idempotent, no-op after first run.
   migrateGroupsToClaudeLocal();
+
+  // 1c. Set up network policy if provider is registered; no-op is default.
+  await getNetworkPolicyProvider()?.ensure?.();
 
   // 2. Container runtime
   ensureContainerRuntimeRunning();

@@ -6,6 +6,7 @@ export interface AgentGroup {
   folder: string;
   /** @deprecated Use container_configs.provider instead. */
   agent_provider: string | null;
+  internet_access_policy?: string | null;
   created_at: string;
 }
 
