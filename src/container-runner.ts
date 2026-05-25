@@ -435,7 +435,11 @@ async function buildContainerArgs(
   // Host gateway
   args.push(...hostGatewayArgs());
 
-  // User mapping
+  // User mapping. The base image has no USER directive — containers start as
+  // root by default so the entrypoint can `mount --bind /dev/null` over a
+  // project-mounted .env (Apple Container can't do file-level bind mounts).
+  // We pass --user only when the host has a non-standard uid, mirroring what
+  // entrypoint.sh's setpriv branch would do.
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
   if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
@@ -489,7 +493,8 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
     const allowlist = npmPackages.map((p) => `echo 'only-built-dependencies[]=${p}' >> /root/.npmrc`).join(' && ');
     dockerfile += `RUN ${allowlist} && pnpm install -g ${npmPackages.join(' ')}\n`;
   }
-  dockerfile += 'USER node\n';
+  // No USER directive — main-group containers start as root so the entrypoint
+  // can `mount --bind /dev/null` over .env. Mirrors the base image's behavior.
 
   const imageTag = `${CONTAINER_IMAGE_BASE}:${agentGroupId}`;
 

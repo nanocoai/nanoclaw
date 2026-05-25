@@ -27,6 +27,9 @@ ARG BUN_VERSION=1.3.12
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
 # SIGTERM instead of being orphaned by the shell entrypoint.
+# util-linux: provides `setpriv` and `mount` used by the Apple Container
+# entrypoint to shadow .env and drop privileges (main-group containers start
+# as root because Apple Container doesn't support file-level bind mounts).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -51,6 +54,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         git \
         tini \
         unzip \
+        util-linux \
     && if [ "$INSTALL_CJK_FONTS" = "true" ]; then \
         apt-get install -y --no-install-recommends fonts-noto-cjk; \
        fi \
@@ -124,7 +128,11 @@ RUN mkdir -p /workspace/group /workspace/extra && \
     chown -R node:node /workspace && \
     chmod 777 /home/node
 
-USER node
+# No USER directive — main-group containers start as root so the entrypoint
+# can `mount --bind /dev/null` over the host project's .env (Apple Container
+# doesn't support file-level bind mounts the way Docker does). The entrypoint
+# then drops to RUN_UID/RUN_GID via setpriv before exec'ing the agent-runner.
+# Non-main containers are started with --user node by the host runtime.
 WORKDIR /workspace/group
 
 # tini is PID 1, reaps zombies, forwards signals cleanly. entrypoint.sh does
