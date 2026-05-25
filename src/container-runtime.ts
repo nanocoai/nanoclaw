@@ -40,9 +40,14 @@ export function hostGatewayArgs(): string[] {
   return [];
 }
 
-/** Returns CLI args for a readonly bind mount. */
+/** Returns CLI args for a readonly bind mount.
+ *
+ * Uses `-v src:dst:ro` instead of `--mount type=bind` because Apple Container's
+ * `--mount` rejects file (non-directory) sources ("path '...' is not a directory"),
+ * while `-v` accepts both files and directories. Readonly is enforced for both.
+ */
 export function readonlyMountArgs(hostPath: string, containerPath: string): string[] {
-  return ['--mount', `type=bind,source=${hostPath},target=${containerPath},readonly`];
+  return ['-v', `${hostPath}:${containerPath}:ro`];
 }
 
 /** Stop a container by name. Uses execFileSync to avoid shell injection. */
