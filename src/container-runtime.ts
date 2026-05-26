@@ -2,7 +2,7 @@
  * Container runtime abstraction for NanoClaw.
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import os from 'os';
 
 import { CONTAINER_INSTALL_LABEL } from './config.js';
@@ -23,6 +23,23 @@ export function hostGatewayArgs(): string[] {
 /** Returns CLI args for a readonly bind mount. */
 export function readonlyMountArgs(hostPath: string, containerPath: string): string[] {
   return ['-v', `${hostPath}:${containerPath}:ro`];
+}
+
+/**
+ * Check if a container image is present locally. Returns false on any failure
+ * — missing image, runtime not running, timeout. Cheap (~10ms when present).
+ *
+ * Used by the spawn path to self-heal when an external tool (e.g. Dokploy's
+ * "Daily Docker Cleanup", a stray `docker system prune -a`) deletes the
+ * agent image out from under us. Without this check the host crash-loops
+ * with code=125 until somebody re-runs `container/build.sh`.
+ */
+export function imageExists(tag: string): boolean {
+  const result = spawnSync(CONTAINER_RUNTIME_BIN, ['image', 'inspect', tag], {
+    stdio: 'pipe',
+    timeout: 10_000,
+  });
+  return result.status === 0;
 }
 
 /** Stop a container by name. Uses execFileSync to avoid shell injection. */
