@@ -3,6 +3,7 @@
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
 import { execSync } from 'child_process';
+import fs from 'fs';
 import os from 'os';
 
 import { CONTAINER_INSTALL_LABEL } from './config.js';
@@ -13,8 +14,15 @@ export const CONTAINER_RUNTIME_BIN = 'docker';
 
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
-  // On Linux, host.docker.internal isn't built-in — add it explicitly
   if (os.platform() === 'linux') {
+    // NixOS: the docker bridge network often lacks a usable host gateway
+    // address, so `--add-host=...:host-gateway` doesn't resolve. Share the
+    // host network namespace instead — services on localhost become reachable
+    // at 127.0.0.1 from inside the container.
+    if (fs.existsSync('/etc/NIXOS')) {
+      return ['--network=host'];
+    }
+    // Other Linux distros: host.docker.internal isn't built-in — add it explicitly
     return ['--add-host=host.docker.internal:host-gateway'];
   }
   return [];

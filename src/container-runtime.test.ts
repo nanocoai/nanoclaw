@@ -17,8 +17,23 @@ vi.mock('child_process', () => ({
   execSync: (...args: unknown[]) => mockExecSync(...args),
 }));
 
+// Mock fs.existsSync for /etc/NIXOS detection in hostGatewayArgs
+const mockExistsSync = vi.fn();
+vi.mock('fs', () => ({
+  default: { existsSync: (path: string) => mockExistsSync(path) },
+  existsSync: (path: string) => mockExistsSync(path),
+}));
+
+// Mock os.platform for hostGatewayArgs branching
+const mockPlatform = vi.fn();
+vi.mock('os', () => ({
+  default: { platform: () => mockPlatform() },
+  platform: () => mockPlatform(),
+}));
+
 import {
   CONTAINER_RUNTIME_BIN,
+  hostGatewayArgs,
   readonlyMountArgs,
   stopContainer,
   ensureContainerRuntimeRunning,
@@ -32,6 +47,37 @@ beforeEach(() => {
 });
 
 // --- Pure functions ---
+
+describe('hostGatewayArgs', () => {
+  it('returns --add-host on non-NixOS Linux', () => {
+    mockPlatform.mockReturnValue('linux');
+    mockExistsSync.mockReturnValue(false);
+
+    expect(hostGatewayArgs()).toEqual(['--add-host=host.docker.internal:host-gateway']);
+    expect(mockExistsSync).toHaveBeenCalledWith('/etc/NIXOS');
+  });
+
+  it('returns --network=host on NixOS Linux', () => {
+    mockPlatform.mockReturnValue('linux');
+    mockExistsSync.mockImplementation((p: string) => p === '/etc/NIXOS');
+
+    expect(hostGatewayArgs()).toEqual(['--network=host']);
+  });
+
+  it('returns empty args on macOS', () => {
+    mockPlatform.mockReturnValue('darwin');
+
+    expect(hostGatewayArgs()).toEqual([]);
+    // NixOS check is not even reached on non-Linux
+    expect(mockExistsSync).not.toHaveBeenCalled();
+  });
+
+  it('returns empty args on Windows', () => {
+    mockPlatform.mockReturnValue('win32');
+
+    expect(hostGatewayArgs()).toEqual([]);
+  });
+});
 
 describe('readonlyMountArgs', () => {
   it('returns -v flag with :ro suffix', () => {
