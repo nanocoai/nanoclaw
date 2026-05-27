@@ -64,8 +64,23 @@ const TOOL_ALLOWLIST = [
 // MCP server names are sanitized by the SDK when forming tool prefixes:
 // any character outside [A-Za-z0-9_-] becomes '_'. Mirror that here so our
 // allowlist patterns match what the SDK actually exposes.
+function sanitizeMcpServerName(serverName: string): string {
+  return serverName.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
 function mcpAllowPattern(serverName: string): string {
-  return `mcp__${serverName.replace(/[^a-zA-Z0-9_-]/g, '_')}__*`;
+  return `mcp__${sanitizeMcpServerName(serverName)}__*`;
+}
+
+/**
+ * Per-server disallow patterns from `McpServerConfig.disabledTools`. Tool
+ * names are concatenated as-is — the SDK exposes MCP tools with their
+ * original names after the `mcp__<server>__` prefix.
+ */
+export function mcpDisallowPatterns(serverName: string, disabledTools: string[] | undefined): string[] {
+  if (!disabledTools || disabledTools.length === 0) return [];
+  const sanitized = sanitizeMcpServerName(serverName);
+  return disabledTools.map((tool) => `mcp__${sanitized}__${tool}`);
 }
 
 interface SDKUserMessage {
@@ -155,29 +170,35 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
 /**
  * PreToolUse hook: record the current tool + its declared timeout so the host
  * sweep can widen its stuck tolerance while Bash is running a long-declared
- * script. Defense-in-depth: if SDK_DISALLOWED_TOOLS slips through somehow,
- * block the call here instead of letting the agent hang.
+ * script. Defense-in-depth: if the SDK's disallowedTools filter slips through
+ * somehow, block the call here instead of letting the agent hang.
+ *
+ * `disallowed` is the merged list of SDK_DISALLOWED_TOOLS plus any per-server
+ * patterns derived from `McpServerConfig.disabledTools`. Captured by closure
+ * so the hook stays a single HookCallback the SDK can invoke directly.
  */
-const preToolUseHook: HookCallback = async (input) => {
-  const i = input as { tool_name?: string; tool_input?: Record<string, unknown> };
-  const toolName = i.tool_name ?? '';
-  if (SDK_DISALLOWED_TOOLS.includes(toolName)) {
-    return {
-      decision: 'block',
-      stopReason: `Tool '${toolName}' is not available in this environment — use the nanoclaw equivalent.`,
-    } as unknown as ReturnType<HookCallback>;
-  }
-  // Bash exposes its timeout via the tool_input.timeout field (ms). Any other
-  // tool: no declared timeout.
-  const declaredTimeoutMs =
-    toolName === 'Bash' && typeof i.tool_input?.timeout === 'number' ? (i.tool_input.timeout as number) : null;
-  try {
-    setContainerToolInFlight(toolName, declaredTimeoutMs);
-  } catch (err) {
-    log(`PreToolUse: failed to record container_state: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  return { continue: true };
-};
+function createPreToolUseHook(disallowed: ReadonlySet<string>): HookCallback {
+  return async (input) => {
+    const i = input as { tool_name?: string; tool_input?: Record<string, unknown> };
+    const toolName = i.tool_name ?? '';
+    if (disallowed.has(toolName)) {
+      return {
+        decision: 'block',
+        stopReason: `Tool '${toolName}' is not available in this environment — use the nanoclaw equivalent.`,
+      } as unknown as ReturnType<HookCallback>;
+    }
+    // Bash exposes its timeout via the tool_input.timeout field (ms). Any other
+    // tool: no declared timeout.
+    const declaredTimeoutMs =
+      toolName === 'Bash' && typeof i.tool_input?.timeout === 'number' ? (i.tool_input.timeout as number) : null;
+    try {
+      setContainerToolInFlight(toolName, declaredTimeoutMs);
+    } catch (err) {
+      log(`PreToolUse: failed to record container_state: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return { continue: true };
+  };
+}
 
 /** Clear in-flight tool on PostToolUse / PostToolUseFailure. */
 const postToolUseHook: HookCallback = async () => {
@@ -396,6 +417,12 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
 
+    const perServerDisallow = Object.entries(this.mcpServers).flatMap(([name, cfg]) =>
+      mcpDisallowPatterns(name, cfg.disabledTools),
+    );
+    const disallowedTools = [...SDK_DISALLOWED_TOOLS, ...perServerDisallow];
+    const disallowedSet = new Set(disallowedTools);
+
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {
@@ -408,7 +435,7 @@ export class ClaudeProvider implements AgentProvider {
           ...TOOL_ALLOWLIST,
           ...Object.keys(this.mcpServers).map(mcpAllowPattern),
         ],
-        disallowedTools: SDK_DISALLOWED_TOOLS,
+        disallowedTools,
         env: this.env,
         model: this.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -418,7 +445,7 @@ export class ClaudeProvider implements AgentProvider {
         settingSources: ['project', 'user', 'local'],
         mcpServers: this.mcpServers,
         hooks: {
-          PreToolUse: [{ hooks: [preToolUseHook] }],
+          PreToolUse: [{ hooks: [createPreToolUseHook(disallowedSet)] }],
           PostToolUse: [{ hooks: [postToolUseHook] }],
           PostToolUseFailure: [{ hooks: [postToolUseHook] }],
           PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],

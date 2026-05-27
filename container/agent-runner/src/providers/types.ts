@@ -78,6 +78,13 @@ export interface McpServerConfig {
   command: string;
   args: string[];
   env: Record<string, string>;
+  /**
+   * Optional list of tool names to disable from this MCP server. Tools
+   * are matched against the SDK's exposed name (the part after
+   * `mcp__<server>__`). Disabled tools are added to the SDK's
+   * `disallowedTools` list and also blocked by the PreToolUse hook.
+   */
+  disabledTools?: string[];
 }
 
 export interface AgentQuery {
