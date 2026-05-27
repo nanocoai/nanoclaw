@@ -227,7 +227,11 @@ export const addReaction: McpToolDefinition = {
       type: 'object' as const,
       properties: {
         messageId: { type: 'integer', description: 'Message ID (the numeric id shown in messages)' },
-        emoji: { type: 'string', description: 'Emoji name (e.g., thumbs_up, heart, check)' },
+        emoji: {
+          type: 'string',
+          description:
+            'Emoji character (e.g. "👍", "❤️", "✅"). Pass the unicode character itself — shortcode names like "thumbs_up" only render on Slack and do NOT render on WhatsApp, Discord, Telegram, Teams, or Google Chat.',
+        },
       },
       required: ['messageId', 'emoji'],
     },

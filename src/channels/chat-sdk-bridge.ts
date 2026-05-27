@@ -13,6 +13,7 @@ import {
   Actions,
   Button,
   LinkButton,
+  defaultEmojiResolver,
   type CardChild,
   type Adapter,
   type ConcurrencyStrategy,
@@ -379,7 +380,17 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       }
 
       if (content.operation === 'reaction' && content.messageId && content.emoji) {
-        await adapter.addReaction(tid, content.messageId as string, content.emoji as string);
+        // The MCP add_reaction tool asks agents for unicode characters (e.g. "👍"),
+        // which is what WhatsApp / Discord / Telegram / Teams / Google Chat all
+        // expect. Slack is the outlier: it expects a shortcode name ("+1",
+        // "thumbsup"). Translate via the SDK's emoji map so a single unicode
+        // character renders correctly on every channel. Unknown emoji round-trip
+        // unchanged (fromGChat returns the raw value when unmapped, and toSlack
+        // returns the name verbatim when no Slack format exists).
+        const rawEmoji = content.emoji as string;
+        const emoji =
+          adapter.name === 'slack' ? defaultEmojiResolver.toSlack(defaultEmojiResolver.fromGChat(rawEmoji)) : rawEmoji;
+        await adapter.addReaction(tid, content.messageId as string, emoji);
         return;
       }
 
