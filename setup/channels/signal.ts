@@ -26,6 +26,7 @@
  */
 import { spawnSync } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import * as p from '@clack/prompts';
@@ -360,18 +361,79 @@ function writeSignalAccount(account: string): void {
   setupLog.userInput('signal_account', account);
 }
 
-async function restartService(): Promise<void> {
+/**
+ * Probe whether a launchd service is currently loaded in the given domain.
+ * `launchctl print <service-target>` exits 0 when loaded, non-zero otherwise.
+ */
+export function probeLaunchdLoaded(serviceTarget: string): boolean {
+  const r = spawnSync('launchctl', ['print', serviceTarget], { stdio: 'ignore' });
+  return !r.error && r.status === 0;
+}
+
+/** Wait up to `timeoutMs` for `data/cli.sock` to appear. Returns true if it did. */
+async function waitForCliSocket(timeoutMs: number): Promise<boolean> {
+  const sockPath = path.join(process.cwd(), 'data', 'cli.sock');
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      fs.statSync(sockPath);
+      return true;
+    } catch {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+  return false;
+}
+
+export async function restartService(): Promise<void> {
   const s = p.spinner();
   s.start('Restarting NanoClaw so it sees your Signal account…');
   const start = Date.now();
   const platform = process.platform;
   try {
     if (platform === 'darwin') {
-      spawnSync(
-        'launchctl',
-        ['kickstart', '-k', `gui/${process.getuid?.() ?? 501}/${getLaunchdLabel()}`],
-        { stdio: 'ignore' },
-      );
+      const uid = process.getuid?.() ?? 501;
+      const label = getLaunchdLabel();
+      const serviceTarget = `gui/${uid}/${label}`;
+      if (probeLaunchdLoaded(serviceTarget)) {
+        // Service is loaded — restart it in place.
+        const kick = spawnSync(
+          'launchctl',
+          ['kickstart', '-k', serviceTarget],
+          { stdio: 'ignore' },
+        );
+        if (kick.status !== 0) {
+          throw new Error(
+            `launchctl kickstart ${serviceTarget} exited ${kick.status ?? 'null'}`,
+          );
+        }
+      } else {
+        // Service is unloaded (likely from a prior `launchctl unload` in
+        // peer-cleanup) — bootstrap it back. `kickstart` would silently
+        // no-op here, leaving the wizard saying "restarted" while the
+        // next init-first-agent step fails with ENOENT data/cli.sock.
+        const plistPath = path.join(
+          os.homedir(),
+          'Library',
+          'LaunchAgents',
+          `${label}.plist`,
+        );
+        if (!fs.existsSync(plistPath)) {
+          throw new Error(
+            `launchd plist missing at ${plistPath} — run ncl install first`,
+          );
+        }
+        const boot = spawnSync(
+          'launchctl',
+          ['bootstrap', `gui/${uid}`, plistPath],
+          { stdio: 'ignore' },
+        );
+        if (boot.status !== 0) {
+          throw new Error(
+            `launchctl bootstrap gui/${uid} ${plistPath} exited ${boot.status ?? 'null'}`,
+          );
+        }
+      }
     } else if (platform === 'linux') {
       const unit = getSystemdUnit();
       const user = spawnSync('systemctl', ['--user', 'restart', unit], {
@@ -382,19 +444,30 @@ async function restartService(): Promise<void> {
       }
     }
     // Give the adapter a moment to connect to signal-cli before
-    // init-first-agent's welcome DM hits the delivery path.
-    await new Promise((r) => setTimeout(r, 5000));
+    // init-first-agent's welcome DM hits the delivery path. On darwin we
+    // also use this window to verify the socket actually appeared — that's
+    // the user-observable signal the service is alive.
+    if (platform === 'darwin') {
+      const sockUp = await waitForCliSocket(5000);
+      if (!sockUp) {
+        throw new Error(
+          'data/cli.sock did not appear within 5s — service may not have started',
+        );
+      }
+    } else {
+      await new Promise((r) => setTimeout(r, 5000));
+    }
     s.stop(`NanoClaw restarted. ${k.dim(`(${fmtDuration(Date.now() - start)})`)}`);
     setupLog.step('signal-restart', 'success', Date.now() - start, {
       PLATFORM: platform,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    s.stop(`Restart may have failed: ${message}`, 1);
+    s.stop(`Restart failed: ${message}`, 1);
     setupLog.step('signal-restart', 'failed', Date.now() - start, {
       ERROR: message,
     });
-    // Non-fatal — the user can restart manually if init-first-agent fails.
+    throw err;
   }
 }
 
