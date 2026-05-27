@@ -1,0 +1,31 @@
+{
+  "name": "street-wind-shadow-map",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@turf/turf": "^7.2.0",
+    "leaflet": "^1.9.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-leaflet": "^5.0.0",
+    "suncalc": "^1.9.0"
+  },
+  "devDependencies": {
+    "@types/leaflet": "^1.9.20",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.1.6",
+    "@types/react-dom": "^19.1.5",
+    "@types/suncalc": "^1.9.2",
+    "@vitejs/plugin-react": "^4.5.1",
+    "typescript": "~5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^3.1.4"
+  }
+}
