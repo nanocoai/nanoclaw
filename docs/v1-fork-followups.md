@@ -32,11 +32,11 @@ cp ~/.gmail-mcp/credentials.json ~/.gmail-mcp/tokens.json
 
 # 3. per group (replace <ID>)
 ncl groups config add-package --id <ID> --npm '@gongrzhe/server-gmail-autoauth-mcp@1.1.11'
+ncl groups config add-mount --id <ID> \
+  --host /Users/eva/.gmail-mcp --container gmail-mcp --readonly false
 ncl groups config add-mcp-server --id <ID> --name gmail \
   --command gmail-mcp --args '[]' \
   --env '{"GMAIL_CREDENTIALS_PATH":"/workspace/extra/gmail-mcp/tokens.json","GMAIL_OAUTH_PATH":"/workspace/extra/gmail-mcp/gcp-oauth.keys.json"}'
-# additional_mounts is not exposed by ncl yet; set via SQL
-pnpm exec tsx scripts/q.ts data/v2.db "UPDATE container_configs SET additional_mounts='[{\"hostPath\":\"/Users/eva/.gmail-mcp\",\"containerPath\":\"gmail-mcp\",\"readonly\":false}]' WHERE agent_group_id='<ID>'"
 ncl groups restart --id <ID> --rebuild
 ```
 

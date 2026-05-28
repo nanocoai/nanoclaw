@@ -1,4 +1,5 @@
-import type { McpServerConfig } from '../../container-config.js';
+import type { AdditionalMountConfig, McpServerConfig } from '../../container-config.js';
+import { validateMount } from '../../modules/mount-security/index.js';
 import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { getDb, hasTable } from '../../db/connection.js';
@@ -383,6 +384,75 @@ registerResource({
           removed: { apt: apt || null, npm: npm || null },
           note: 'Image rebuild required for package changes to take effect.',
         };
+      },
+    },
+    'config add-mount': {
+      access: 'approval',
+      description:
+        'Add an additional host→container mount to a group. Requires `ncl groups restart` to take effect. ' +
+        'The container path is forced under `/workspace/extra/` and must be relative (no leading "/", no ".."). ' +
+        'The host path is validated against the mount allowlist (`~/.config/nanoclaw/mount-allowlist.json`). ' +
+        'Use --id <group-id> --host <abs-host-path> --container <relpath> [--readonly true|false].',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+        const hostPath = args.host as string;
+        if (!hostPath) throw new Error('--host is required');
+        const containerPath = args.container as string;
+        if (!containerPath) throw new Error('--container is required');
+        const readonlyRaw = args.readonly as string | boolean | undefined;
+        const readonly = readonlyRaw === undefined ? true : readonlyRaw === true || readonlyRaw === 'true';
+
+        const row = getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
+
+        // Reject up front instead of letting spawn-time validateAdditionalMounts
+        // silently drop the mount with a WARN buried in the error log.
+        const check = validateMount({ hostPath, containerPath, readonly });
+        if (!check.allowed) {
+          throw new Error(`Mount rejected: ${check.reason}`);
+        }
+
+        const mounts = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
+        const existingIdx = mounts.findIndex((m) => m.containerPath === containerPath);
+        const mount: AdditionalMountConfig = { hostPath, containerPath, readonly };
+        if (existingIdx >= 0) {
+          mounts[existingIdx] = mount;
+        } else {
+          mounts.push(mount);
+        }
+        updateContainerConfigJson(id, 'additional_mounts', mounts);
+
+        return {
+          [existingIdx >= 0 ? 'updated' : 'added']: mount,
+          effectiveContainerPath: `/workspace/extra/${containerPath}`,
+          allowlist: check.reason,
+          mounts,
+        };
+      },
+    },
+    'config remove-mount': {
+      access: 'approval',
+      description:
+        'Remove an additional mount from a group by its container path (the relative form, e.g. "gmail-mcp"). ' +
+        'Requires `ncl groups restart` to take effect. Use --id <group-id> --container <relpath>.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+        const containerPath = args.container as string;
+        if (!containerPath) throw new Error('--container is required');
+
+        const row = getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
+
+        const mounts = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
+        const filtered = mounts.filter((m) => m.containerPath !== containerPath);
+        if (filtered.length === mounts.length) {
+          throw new Error(`Mount with containerPath "${containerPath}" not found`);
+        }
+        updateContainerConfigJson(id, 'additional_mounts', filtered);
+
+        return { removed: containerPath, mounts: filtered };
       },
     },
   },
