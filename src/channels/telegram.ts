@@ -15,6 +15,7 @@ import { sanitizeTelegramLegacyMarkdown } from './telegram-markdown-sanitize.js'
 import { registerChannelAdapter } from './channel-registry.js';
 import type { ChannelAdapter, ChannelSetup, InboundMessage } from './adapter.js';
 import { tryConsume } from './telegram-pairing.js';
+import { initPool, poolSize, sendViaPool } from './telegram-swarm.js';
 
 /**
  * Retry a one-shot operation that can fail on transient network errors at
@@ -197,7 +198,7 @@ function createPairingInterceptor(
 
 registerChannelAdapter('telegram', {
   factory: () => {
-    const env = readEnvFile(['TELEGRAM_BOT_TOKEN']);
+    const env = readEnvFile(['TELEGRAM_BOT_TOKEN', 'TELEGRAM_BOT_POOL']);
     if (!env.TELEGRAM_BOT_TOKEN) return null;
     const token = env.TELEGRAM_BOT_TOKEN;
     const telegramAdapter = createTelegramAdapter({
@@ -215,8 +216,28 @@ registerChannelAdapter('telegram', {
 
     const botUsernamePromise = fetchBotUsername(token);
 
+    // Fire-and-forget pool init. Send-only multiplexing for agent teams; see
+    // telegram-swarm.ts.
+    if (env.TELEGRAM_BOT_POOL) {
+      initPool(env.TELEGRAM_BOT_POOL).catch((err) => log.warn('Telegram pool init failed', { err }));
+    }
+
     const wrapped: ChannelAdapter = {
       ...bridge,
+      async deliver(platformId, threadId, message) {
+        const content = message.content as { text?: string; sender?: string } | undefined;
+        // Swarm path: agent set a `sender` on a plain-text message and the
+        // pool is up. Route through the pool bot so the persona's display
+        // identity is preserved in Telegram. Falls back to the primary
+        // bot on any failure (the pool is best-effort, not load-bearing).
+        if (content?.sender && content.text && poolSize() > 0 && !('operation' in (content as object))) {
+          const text = sanitizeTelegramLegacyMarkdown(content.text);
+          const id = await sendViaPool(platformId, content.sender, text);
+          if (id !== undefined) return id;
+          log.info('Telegram pool send failed — falling back to primary bot', { sender: content.sender });
+        }
+        return bridge.deliver(platformId, threadId, message);
+      },
       resolveChannelName: async (platformId: string) => {
         const chatId = platformId.split(':').slice(1).join(':');
         if (!chatId) return null;
