@@ -1,5 +1,6 @@
 import * as turf from "@turf/turf";
 import { demoOSMData } from "../data/offlineDemo";
+import { endpointName, OVERPASS_ENDPOINTS } from "./endpoints";
 import type {
   BuildingFeature,
   HeightSource,
@@ -14,7 +15,7 @@ type OverpassElement = {
   type: "way";
   id: number;
   tags?: Record<string, string>;
-  geometry?: Array<{ lat: number; lon: number }>;
+  geometry?: Array<{ lat: number; lon: number } | null>;
 };
 
 type OverpassResponse = {
@@ -26,14 +27,6 @@ const resolvedOverpassCache = new Map<string, OSMData>();
 const MAX_RENDER_BUILDINGS = 650;
 const MAX_RENDER_ROADS = 240;
 const OVERPASS_TIMEOUT_MS = 14_000;
-const OVERPASS_ENDPOINTS = [
-  "https://overpass-api.de/api/interpreter",
-  "https://overpass.private.coffee/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
-  "https://api.openstreetmap.fr/oapi/interpreter",
-  "https://overpass.osm.vi-di.fr/api/interpreter",
-  "https://overpass.osm.rambler.ru/cgi/interpreter",
-];
 
 function parseMetricHeight(raw?: string) {
   if (!raw) {
@@ -69,7 +62,9 @@ export function resolveBuildingHeight(tags: Record<string, string>) {
 }
 
 function positions(element: OverpassElement) {
-  return (element.geometry ?? []).map(({ lon, lat }) => [lon, lat]);
+  return (element.geometry ?? [])
+    .filter((point): point is { lat: number; lon: number } => Boolean(point))
+    .map(({ lon, lat }) => [lon, lat]);
 }
 
 function closeRing(coordinates: number[][]) {
@@ -132,7 +127,7 @@ function queryFor(center: LatLng) {
   way["building"](${bbox});
   way["highway"]["area"!="yes"]["highway"!~"footway|path|steps|cycleway|track|corridor|construction|proposed"](${bbox});
 );
-out tags geom;`;
+out tags geom(${bbox});`;
 }
 
 async function postToOverpass(endpoint: string, query: string) {
@@ -151,10 +146,6 @@ async function postToOverpass(endpoint: string, query: string) {
   } finally {
     window.clearTimeout(timeout);
   }
-}
-
-function endpointName(endpoint: string) {
-  return new URL(endpoint).hostname;
 }
 
 function emptyErrorData(warning: string, errors: string[]): OSMData {
@@ -221,6 +212,11 @@ function parseOverpassPayload(payload: OverpassResponse, endpoint: string, error
 async function fetchFromOverpass(center: LatLng): Promise<OSMData> {
   const query = queryFor(center);
   const errors: string[] = [];
+  const proxiedData = await fetchFromProxy(query, errors);
+
+  if (proxiedData) {
+    return proxiedData;
+  }
 
   for (const endpoint of OVERPASS_ENDPOINTS) {
     let response: Response;
@@ -233,7 +229,9 @@ async function fetchFromOverpass(center: LatLng): Promise<OSMData> {
     }
 
     if (!response.ok) {
-      errors.push(`${endpointName(endpoint)}: HTTP ${response.status}`);
+      const detail = await response.text().catch(() => "");
+      const suffix = detail ? ` ${detail.replace(/\s+/g, " ").slice(0, 180)}` : "";
+      errors.push(`${endpointName(endpoint)}: HTTP ${response.status}${suffix}`);
       continue;
     }
 
@@ -248,6 +246,55 @@ async function fetchFromOverpass(center: LatLng): Promise<OSMData> {
   }
 
   throw Object.assign(new Error("All Overpass endpoints failed."), { errors });
+}
+
+async function fetchFromProxy(query: string, errors: string[]) {
+  try {
+    const response = await fetch("/api/overpass", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query }),
+    });
+
+    if (response.status === 404) {
+      return null;
+    }
+
+    const data = (await response.json()) as {
+      endpoint?: string;
+      errors?: string[];
+      payload?: OverpassResponse;
+    };
+
+    if (data.errors?.length) {
+      errors.push(...data.errors.map((error) => `proxy ${error}`));
+    }
+
+    if (!response.ok || !data.endpoint || !data.payload) {
+      errors.push(`proxy: HTTP ${response.status}`);
+      if (import.meta.env.PROD) {
+        throw Object.assign(new Error("Overpass proxy failed."), { errors });
+      }
+      return null;
+    }
+
+    const parsed = parseOverpassPayload(data.payload, data.endpoint, errors);
+
+    if (parsed.counts.buildingsReturned === 0 && parsed.counts.roadsReturned === 0) {
+      errors.push(`proxy ${endpointName(data.endpoint)}: empty OSM response for this bbox`);
+      return null;
+    }
+
+    return parsed;
+  } catch (error) {
+    errors.push(`proxy: ${error instanceof Error ? error.message : String(error)}`);
+    if (import.meta.env.PROD) {
+      throw Object.assign(new Error("Overpass proxy failed."), { errors });
+    }
+    return null;
+  }
 }
 
 export function fetchOSMData(center: LatLng) {

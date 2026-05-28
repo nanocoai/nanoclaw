@@ -203,6 +203,17 @@ input:focus {
   gap: 1px;
 }
 
+.status-warning {
+  background: rgb(242 187 104 / 14%);
+  border: 1px solid rgb(242 187 104 / 30%);
+  border-radius: 6px;
+  color: #ffd99f;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  margin: 0 0 7px;
+  padding: 8px;
+}
+
 .toggle-row {
   align-items: center;
   border-radius: 6px;

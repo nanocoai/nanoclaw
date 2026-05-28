@@ -42,6 +42,11 @@ export default function ControlsPanel({
   const [query, setQuery] = useState("Nevsky Prospect, Saint Petersburg");
   const [searchState, setSearchState] = useState<"idle" | "searching">("idle");
   const [searchError, setSearchError] = useState<string>();
+  const noRenderedOsmData =
+    !loadingOSM &&
+    osmData.counts.buildingsRendered === 0 &&
+    osmData.counts.roadsRendered === 0;
+  const noWindModel = !loadingOSM && !loadingWeather && renderStats.windSegments === 0;
 
   async function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -104,6 +109,17 @@ export default function ControlsPanel({
       </section>
 
       <section className="panel-section layer-controls">
+        {noRenderedOsmData ? (
+          <p className="status-warning">
+            OSM data did not load for this area. Wind and shadows need live building and road
+            geometry.
+          </p>
+        ) : null}
+        {noWindModel && !noRenderedOsmData ? (
+          <p className="status-warning">
+            Wind model has no road segments yet. Check weather and OSM counts below.
+          </p>
+        ) : null}
         {(
           [
             ["buildings", "Buildings"],
