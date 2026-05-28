@@ -48,29 +48,6 @@ Host side: `src/modules/pages/applescript.ts` is the v1 osascript helper module 
 
 Module self-registers via `src/modules/index.js` import. No DB schema or container_configs changes needed — works for any group as long as the host runs macOS with Pages.app installed.
 
-## ~~To port — Gmail MCP tool (deferred)~~
-
-Upstream `/add-gmail-tool` skill expects OneCLI's TLS-MITM proxy to inject Bearer tokens into outbound `gmail.googleapis.com` requests. Without OneCLI, two viable paths exist:
-
-1. **v1-style tokens-in-container** (~15 min if not for mount-security). Mount `~/.gmail-mcp/` read-write into the container; install `@gongrzhe/server-gmail-autoauth-mcp@1.1.11` per group; register as an MCP server with `GMAIL_CREDENTIALS_PATH` env pointing at a non-blocked filename. Blockers:
-   - Mount-security in `src/modules/mount-security/index.ts` blocks `credentials` substring matches → must rename `~/.gmail-mcp/credentials.json` to `~/.gmail-mcp/tokens.json` (gmail-mcp supports `GMAIL_CREDENTIALS_PATH` override per dist inspection).
-   - Per-group npm install means rebuilding the image with `ncl groups restart --rebuild`.
-   - Real OAuth refresh + access tokens live in container memory during sessions — same trade-off v1 accepted.
-2. **TLS MITM proxy on host** (essentially a mini-OneCLI). Generate a CA cert, install in container trust store, terminate TLS for `gmail.googleapis.com` and `accounts.google.com`, inject Bearer, re-encrypt to upstream. Hours of work; gives full credential isolation. Probably not worth it for a single-user install.
-
-Working refresh tokens already exist at `~/.gmail-mcp/credentials.json` from v1.
-
-## To port — Apple Pages MCP tool (deferred)
-
-v1's design: agent writes a Pages request to `DATA_DIR/ipc/<groupFolder>/messages/<requestId>.json`, a host poller (`ipc.ts handlePagesIpc`) calls `osascript`, writes the response to `groups/<groupFolder>/pages/.responses/<requestId>.json`. v2's invariant is that all host↔container IO goes through the session DB (`inbound.db` + `outbound.db`) — there is no `DATA_DIR/ipc/` pattern any more. A direct port doesn't fit the architecture.
-
-Two v2-shaped designs:
-
-1. **Pages-as-system-action on `messages_out`**. Container's Pages MCP tools write a `kind = 'system-action', action = 'pages.<verb>'` message to `outbound.db`. Host's delivery loop has a `register-system-action` registry (already used for scheduling / approvals); add a `pages` handler that calls osascript and writes the result back to `inbound.db` for the agent to read. Cleanest fit.
-2. **On-host Unix socket bridge**. Mount a host socket into the container, container makes RPC calls. Simpler to write but breaks the "DB is the sole IO surface" invariant.
-
-Source to port is intact at `/Users/eva/nanoclaw/src/pages.ts` (~519 LOC), `/Users/eva/nanoclaw/src/pages.test.ts` (~283 LOC, 76 tests). MCP tool names: pages_create, pages_open, pages_save, pages_close, pages_get_text, pages_insert_text, pages_replace_text, pages_format_paragraph, pages_export_pdf, pages_list, pages_delete. Plus `pagesInstalled()` host check.
-
 ## 8-persona sub-agent dispatcher
 
 The `@seo / @runcoach / @rehabcoach / @security / @businesscoach / @research / @strengthcoach / @thesis` trigger-prefix routing is preserved verbatim in `groups/telegram_main/CLAUDE.local.md` (paths fixed to `/workspace/agent/*_agent.md`). It works at the CLAUDE.md instruction level — no src-level routing change needed. If v2 grows native sub-agent routing, reconsider whether to migrate.
