@@ -120,12 +120,12 @@ COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # ---- Workspace + permissions -------------------------------------------------
-RUN mkdir -p /workspace/group /workspace/extra && \
+RUN mkdir -p /workspace/agent /workspace/extra && \
     chown -R node:node /workspace && \
     chmod 777 /home/node
 
 USER node
-WORKDIR /workspace/group
+WORKDIR /workspace/agent
 
 # tini is PID 1, reaps zombies, forwards signals cleanly. entrypoint.sh does
 # `exec bun ...` so bun runs as tini's direct child.

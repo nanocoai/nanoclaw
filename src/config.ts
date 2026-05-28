@@ -14,6 +14,7 @@ const envConfig = readEnvFile([
   'TZ',
   'CREDENTIAL_PROXY_HOST',
   'CREDENTIAL_PROXY_PORT',
+  'CONTAINER_HOST_GATEWAY',
 ]);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -61,6 +62,14 @@ export const CREDENTIAL_PROXY_PORT = parseInt(
  */
 export const CREDENTIAL_PROXY_HOST =
   process.env.CREDENTIAL_PROXY_HOST || envConfig.CREDENTIAL_PROXY_HOST || '127.0.0.1';
+/**
+ * Host address that containers use to reach back to the host (for the
+ * credential proxy). Docker on macOS auto-resolves `host.docker.internal`;
+ * Apple Container does NOT, so the bridge100 gateway IP (e.g. 192.168.64.1)
+ * must be set explicitly in .env on those hosts.
+ */
+export const CONTAINER_HOST_GATEWAY =
+  process.env.CONTAINER_HOST_GATEWAY || envConfig.CONTAINER_HOST_GATEWAY || 'host.docker.internal';
 export const MAX_MESSAGES_PER_PROMPT = Math.max(1, parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10);
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5);

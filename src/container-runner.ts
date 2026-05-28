@@ -10,6 +10,7 @@ import path from 'path';
 import { OneCLI } from '@onecli-sh/sdk';
 
 import {
+  CONTAINER_HOST_GATEWAY,
   CONTAINER_IMAGE,
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
@@ -430,13 +431,17 @@ async function buildContainerArgs(
     // network. Docker on macOS auto-resolves host.docker.internal; Apple
     // Container requires either the bridge100 gateway IP or that the proxy
     // binds to 0.0.0.0 with an external interface IP the container can reach.
-    const proxyHost = process.env.CONTAINER_HOST_GATEWAY || 'host.docker.internal';
-    args.push('-e', `ANTHROPIC_BASE_URL=http://${proxyHost}:${CREDENTIAL_PROXY_PORT}`);
+    args.push('-e', `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`);
     const authMode = detectAuthMode();
     if (authMode === 'api-key') {
       args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
     } else {
-      args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+      // ANTHROPIC_AUTH_TOKEN (not CLAUDE_CODE_OAUTH_TOKEN): the Claude CLI
+      // sends it as a plain Bearer header on /v1/messages without first
+      // exchanging it for a temp API key via /api/oauth/claude_cli/create_api_key.
+      // Many Pro-tier OAuth tokens lack the `org:create_api_key` scope, so
+      // the exchange returns 403; direct Bearer auth works regardless.
+      args.push('-e', 'ANTHROPIC_AUTH_TOKEN=placeholder');
     }
     log.info('Native credential proxy wired into container', { containerName, authMode });
   } else {

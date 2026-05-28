@@ -34,9 +34,9 @@ beforeEach(() => {
 // --- Pure functions ---
 
 describe('readonlyMountArgs', () => {
-  it('returns --mount bind with readonly flag', () => {
+  it('returns -v with :ro suffix (works for files + dirs in Apple Container)', () => {
     const args = readonlyMountArgs('/host/path', '/container/path');
-    expect(args).toEqual(['--mount', 'type=bind,source=/host/path,target=/container/path,readonly']);
+    expect(args).toEqual(['-v', '/host/path:/container/path:ro']);
   });
 });
 
