@@ -480,6 +480,11 @@ async function buildContainerArgs(
     }
   }
 
+  // Memory cap. Both Docker and Apple Container accept `-m <N>MiB`.
+  if (containerConfig.memoryMb && containerConfig.memoryMb > 0) {
+    args.push('-m', `${containerConfig.memoryMb}MiB`);
+  }
+
   // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
   args.push('--entrypoint', 'bash');
 
