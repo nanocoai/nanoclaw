@@ -247,6 +247,36 @@ function formatAttachments(attachments: any[] | undefined): string {
     const type = a.type || 'file';
     const localPath = a.localPath ? `/workspace/${a.localPath}` : '';
     const url = a.url || '';
+
+    // Voice attachments: prefer the host-preprocessed Whisper transcription
+    // when present. Renders inline so the agent reads the text directly
+    // rather than having to Read+decode the audio file (no whisper in the
+    // container). On transcription failure, `a.transcriptionError` carries
+    // the reason so the agent can surface it instead of staying silent.
+    if (typeof a.transcription === 'string' && a.transcription.length > 0) {
+      const head = `[voice: ${escapeXml(name)}` + (localPath ? ` — saved to ${escapeXml(localPath)}]` : `]`);
+      return `${head}\nTranscription: ${escapeXml(a.transcription)}`;
+    }
+    if (typeof a.transcriptionError === 'string' && a.transcriptionError.length > 0) {
+      const head = `[voice: ${escapeXml(name)}` + (localPath ? ` — saved to ${escapeXml(localPath)}]` : `]`);
+      return `${head}\nTranscription failed: ${escapeXml(a.transcriptionError)}`;
+    }
+
+    // PDF attachments: prefer the host-preprocessed extracted text when
+    // present (host runs `pdftotext` on the spilled file). Keeps the path
+    // available too so the agent can fetch raw bytes if it needs to.
+    if (typeof a.extractedText === 'string' && a.extractedText.length > 0) {
+      const head = `[pdf: ${escapeXml(name)}` + (localPath ? ` — saved to ${escapeXml(localPath)}]` : `]`);
+      // Don't escapeXml the body — agents read it as the literal text;
+      // host already constrained it to UTF-8 text from pdftotext.
+      const body = a.extractedText.replace(/]]>/g, ']]&gt;');
+      return `${head}\n<pdf_text><![CDATA[${body}]]></pdf_text>`;
+    }
+    if (typeof a.pdfExtractionError === 'string' && a.pdfExtractionError.length > 0) {
+      const head = `[pdf: ${escapeXml(name)}` + (localPath ? ` — saved to ${escapeXml(localPath)}]` : `]`);
+      return `${head}\nPDF extraction failed: ${escapeXml(a.pdfExtractionError)}`;
+    }
+
     if (localPath) {
       return `[${type}: ${escapeXml(name)} — saved to ${escapeXml(localPath)}]`;
     }

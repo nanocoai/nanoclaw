@@ -6,7 +6,15 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type {
+  AgentProvider,
+  AgentQuery,
+  ContentBlock,
+  McpServerConfig,
+  ProviderEvent,
+  ProviderOptions,
+  QueryInput,
+} from './types.js';
 
 function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
@@ -70,13 +78,18 @@ function mcpAllowPattern(serverName: string): string {
 
 interface SDKUserMessage {
   type: 'user';
-  message: { role: 'user'; content: string };
+  message: { role: 'user'; content: string | ContentBlock[] };
   parent_tool_use_id: null;
   session_id: string;
 }
 
 /**
  * Push-based async iterable for streaming user messages to the Claude SDK.
+ *
+ * `push()` sends a plain-text turn; `pushBlocks()` sends a content-block
+ * turn (used for image attachments). Mirrors the v1 pattern of one text
+ * SDKUserMessage followed by a separate multimodal SDKUserMessage so the
+ * SDK delivers them as two consecutive user turns.
  */
 class MessageStream {
   private queue: SDKUserMessage[] = [];
@@ -87,6 +100,17 @@ class MessageStream {
     this.queue.push({
       type: 'user',
       message: { role: 'user', content: text },
+      parent_tool_use_id: null,
+      session_id: '',
+    });
+    this.waiting?.();
+  }
+
+  pushBlocks(blocks: ContentBlock[]): void {
+    if (blocks.length === 0) return;
+    this.queue.push({
+      type: 'user',
+      message: { role: 'user', content: blocks },
       parent_tool_use_id: null,
       session_id: '',
     });
@@ -330,6 +354,7 @@ const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not fou
 
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
+  readonly supportsMultimodalContent = true;
 
   private assistantName?: string;
   private mcpServers: Record<string, McpServerConfig>;
@@ -460,6 +485,7 @@ export class ClaudeProvider implements AgentProvider {
 
     return {
       push: (msg) => stream.push(msg),
+      pushBlocks: (blocks) => stream.pushBlocks(blocks),
       end: () => stream.end(),
       events: translateEvents(),
       abort: () => {

@@ -22,6 +22,8 @@ import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { getAskQuestionRender } from '../db/sessions.js';
+import { isPdfMime, extractPdfText, PdfExtractionError } from '../pdf-extract.js';
+import { isTranscribableMime, transcribeAudio, TranscriptionError } from '../transcription.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelSetup, InboundMessage } from './adapter.js';
 
@@ -103,6 +105,96 @@ function resolveSelectedOption(
   return candidate;
 }
 
+/**
+ * Synthetic chat-sdk inbound for a reaction event. Mirrors v1's
+ * pattern (src/v1/index.ts:1077) where a reaction lands as a chat-like row
+ * the agent reads. The text is human-readable; the structured `reaction`
+ * payload is preserved so a future `mcp__nanoclaw__query_reactions` tool
+ * can filter on `targetMessageId` + `added`.
+ *
+ * `isMention=false` deliberately — reactions can't @-mention. Channels
+ * that require a trigger pattern therefore do NOT wake on bare reactions;
+ * the router stores them as `trigger=0` context and they ride along the
+ * next real wake. Channels in always-engage mode (e.g. main) treat them
+ * as normal inbound and may wake the agent.
+ */
+export interface ReactionInboundInput {
+  emoji: string;
+  rawEmoji: string;
+  added: boolean;
+  targetMessageId: string;
+  threadId: string;
+  userId: string;
+  userName: string;
+  now: () => Date;
+  idGen: () => string;
+}
+
+export function buildReactionInbound(input: ReactionInboundInput): InboundMessage {
+  const verb = input.added ? 'reacted' : 'removed reaction';
+  const text = `[${input.userName} ${verb} ${input.emoji} on message ${input.targetMessageId}]`;
+  return {
+    id: input.idGen(),
+    kind: 'chat-sdk',
+    content: {
+      text,
+      sender: input.userName,
+      senderId: input.userId,
+      reaction: {
+        emoji: input.emoji,
+        rawEmoji: input.rawEmoji,
+        added: input.added,
+        targetMessageId: input.targetMessageId,
+        threadId: input.threadId,
+        userId: input.userId,
+      },
+    },
+    timestamp: input.now().toISOString(),
+    isMention: false,
+    isGroup: true,
+  };
+}
+
+/**
+ * Run host-side Whisper transcription on a voice attachment and stamp the
+ * result onto the attachment entry. Mutates `entry` in place. Failures are
+ * captured on `entry.transcriptionError` instead of throwing — the agent
+ * gets to see why transcription was skipped rather than receiving a silent
+ * voice note with no text.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function maybeTranscribe(entry: Record<string, any>, buffer: Buffer): Promise<void> {
+  const mime = typeof entry.mimeType === 'string' ? entry.mimeType : '';
+  if (!isTranscribableMime(mime)) return;
+  const filename = (typeof entry.name === 'string' && entry.name) || 'voice';
+  try {
+    const result = await transcribeAudio(buffer, filename, mime);
+    entry.transcription = result.text;
+  } catch (err) {
+    const msg = err instanceof TranscriptionError ? err.message : err instanceof Error ? err.message : String(err);
+    entry.transcriptionError = msg;
+    log.warn('Voice transcription failed', { filename, mime, err: msg });
+  }
+}
+
+/**
+ * Run host-side `pdftotext` on a PDF attachment and stamp the result onto
+ * the attachment entry. Same error contract as `maybeTranscribe`.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function maybePdfExtract(entry: Record<string, any>, buffer: Buffer): Promise<void> {
+  const mime = typeof entry.mimeType === 'string' ? entry.mimeType : '';
+  if (!isPdfMime(mime)) return;
+  try {
+    const text = await extractPdfText(buffer);
+    entry.extractedText = text;
+  } catch (err) {
+    const msg = err instanceof PdfExtractionError ? err.message : err instanceof Error ? err.message : String(err);
+    entry.pdfExtractionError = msg;
+    log.warn('PDF extraction failed', { filename: entry.name, mime, err: msg });
+  }
+}
+
 export function splitForLimit(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
@@ -135,7 +227,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const serialized = message.toJSON() as Record<string, any>;
 
-    // Download attachment data before serialization loses fetchData()
+    // Download attachment data before serialization loses fetchData().
+    // For voice notes and PDFs we also pre-process the bytes on the host —
+    // voice → Whisper transcription, PDF → pdftotext text — and stamp the
+    // result back onto the entry. The container's formatter renders these
+    // inline so the agent reads the spoken/written words directly.
     if (message.attachments && message.attachments.length > 0) {
       const enriched = [];
       for (const att of message.attachments) {
@@ -149,11 +245,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           height: (att as unknown as Record<string, unknown>).height,
         };
         if (att.fetchData) {
+          let buffer: Buffer | null = null;
           try {
-            const buffer = await att.fetchData();
+            buffer = await att.fetchData();
             entry.data = buffer.toString('base64');
           } catch (err) {
             log.warn('Failed to download attachment', { type: att.type, err });
+          }
+          if (buffer) {
+            await maybeTranscribe(entry, buffer);
+            await maybePdfExtract(entry, buffer);
           }
         }
         enriched.push(entry);
@@ -264,6 +365,55 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const channelId = adapter.channelIdFromThreadId(thread.id);
         await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, false, true));
       });
+
+      // Reactions. Mirrors v1's onReaction (src/v1/index.ts:1077): the
+      // reaction lands as a chat-sdk inbound row so it threads through the
+      // router exactly like any other message. The router decides whether
+      // to wake the agent based on per-channel engage settings; bare
+      // reactions don't carry an @-mention, so trigger-required channels
+      // accumulate them as context and only ride along when something else
+      // wakes the agent. The agent's own reactions are filtered here
+      // because reactor === bot would otherwise produce an inbound on the
+      // bot's own outbound, looping if the agent ever reacts.
+      if (typeof chat.onReaction === 'function') {
+        chat.onReaction(async (event) => {
+          try {
+            const reactor = event.user as { userId?: string; fullName?: string; userName?: string } | undefined;
+            const userId = reactor?.userId || '';
+            // Best-effort self-reaction filter: chat-sdk doesn't expose a
+            // bot-identity field uniformly across adapters, so we rely on
+            // the SDK to NOT fire onReaction for the bot's own reactions
+            // (which it does on Slack — `event.user` is always the human
+            // reactor). Belt-and-braces: skip rows where userId is empty.
+            if (!userId) return;
+            const userName = reactor?.fullName ?? reactor?.userName ?? userId;
+            const channelId = adapter.channelIdFromThreadId(event.threadId);
+            const inbound = buildReactionInbound({
+              emoji: String(event.emoji),
+              rawEmoji: event.rawEmoji ?? String(event.emoji),
+              added: event.added !== false,
+              targetMessageId: event.messageId,
+              threadId: event.threadId,
+              userId,
+              userName,
+              now: () => new Date(),
+              idGen: () => `rxn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            });
+            await setupConfig.onInbound(channelId, event.threadId, inbound);
+          } catch (err) {
+            log.error('Failed to route reaction inbound', {
+              adapter: adapter.name,
+              messageId: event.messageId,
+              emoji: String(event.emoji),
+              err,
+            });
+          }
+        });
+      } else {
+        log.info('Adapter does not expose chat.onReaction; skipping reaction subscription', {
+          adapter: adapter.name,
+        });
+      }
 
       // Handle button clicks (ask_user_question)
       chat.onAction(async (event) => {

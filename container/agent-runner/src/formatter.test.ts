@@ -165,6 +165,115 @@ describe('XML escaping', () => {
   });
 });
 
+describe('attachments rendering', () => {
+  it('renders a plain attachment with localPath', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'here is a doc',
+      attachments: [{ type: 'document', name: 'spec.pdf', localPath: 'inbox/m1/spec.pdf' }],
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('[document: spec.pdf — saved to /workspace/inbox/m1/spec.pdf]');
+  });
+
+  it('renders inline transcription when a voice attachment has it', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: '',
+      attachments: [
+        {
+          type: 'voice',
+          name: 'voice.ogg',
+          localPath: 'inbox/m1/voice.ogg',
+          mimeType: 'audio/ogg',
+          transcription: 'Hello, can you check the deploy?',
+        },
+      ],
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('[voice: voice.ogg');
+    expect(result).toContain('Transcription: Hello, can you check the deploy?');
+  });
+
+  it('renders transcription error message when whisper failed', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: '',
+      attachments: [
+        {
+          type: 'voice',
+          name: 'voice.ogg',
+          mimeType: 'audio/ogg',
+          localPath: 'inbox/m1/voice.ogg',
+          transcriptionError: 'OPENAI_API_KEY not set',
+        },
+      ],
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('Transcription failed: OPENAI_API_KEY not set');
+  });
+
+  it('renders extracted PDF text inside a CDATA-wrapped <pdf_text> block', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'see the PDF',
+      attachments: [
+        {
+          type: 'document',
+          name: 'spec.pdf',
+          mimeType: 'application/pdf',
+          localPath: 'inbox/m1/spec.pdf',
+          extractedText: 'Chapter 1\nIntroduction\n\nThis document describes the system.',
+        },
+      ],
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('[pdf: spec.pdf');
+    expect(result).toContain('<pdf_text><![CDATA[Chapter 1');
+    expect(result).toContain('This document describes the system.');
+    expect(result).toContain(']]></pdf_text>');
+  });
+
+  it('escapes embedded "]]>" sequences in PDF text so CDATA stays well-formed', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: '',
+      attachments: [
+        {
+          type: 'document',
+          name: 'evil.pdf',
+          mimeType: 'application/pdf',
+          localPath: 'inbox/m1/evil.pdf',
+          extractedText: 'before ]]> after',
+        },
+      ],
+    });
+    const result = formatMessages(getPendingMessages());
+    // The literal "]]>" inside the CDATA body must be neutralised; the
+    // closing CDATA terminator at the end of the block is still present.
+    expect(result).toContain('before ]]&gt; after');
+    expect(result).toContain(']]></pdf_text>');
+  });
+
+  it('renders PDF extraction error inline when extraction failed', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: '',
+      attachments: [
+        {
+          type: 'document',
+          name: 'spec.pdf',
+          mimeType: 'application/pdf',
+          localPath: 'inbox/m1/spec.pdf',
+          pdfExtractionError: 'pdftotext not installed',
+        },
+      ],
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('PDF extraction failed: pdftotext not installed');
+  });
+});
+
 describe('stripInternalTags', () => {
   it('strips single-line internal tags and trims', () => {
     expect(stripInternalTags('hello <internal>secret</internal> world')).toBe('hello  world');

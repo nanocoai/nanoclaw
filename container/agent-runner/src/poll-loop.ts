@@ -13,6 +13,7 @@ import {
   stripInternalTags,
   type RoutingContext,
 } from './formatter.js';
+import { extractImageBlocks } from './multimodal.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -211,6 +212,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       systemContext: config.systemContext,
     });
 
+    // Deliver image attachments as multimodal content blocks on a separate
+    // user turn (Claude SDK accepts a content-block array on the user
+    // message). Mirrors v1's `pushMultimodal` after the initial text prompt.
+    if (config.provider.supportsMultimodalContent) {
+      const initialBlocks = extractImageBlocks(keep);
+      if (initialBlocks.length > 0) {
+        log(`Pushing ${initialBlocks.length} initial image block(s) to the active query`);
+        query.pushBlocks(initialBlocks);
+      }
+    }
+
     // Process the query while concurrently polling for new messages
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
@@ -218,7 +230,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
+      const result = await processQuery(
+        query,
+        routing,
+        processingIds,
+        config.providerName,
+        config.provider.supportsMultimodalContent,
+      );
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -299,6 +317,7 @@ async function processQuery(
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
+  supportsMultimodal: boolean,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -379,6 +398,16 @@ async function processQuery(
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
         query.push(prompt);
+        // Follow-up images: same pattern as the initial batch — separate
+        // user-turn message with the content-block array. Guarded by the
+        // provider capability flag so non-multimodal providers no-op.
+        if (supportsMultimodal) {
+          const followUpBlocks = extractImageBlocks(keep);
+          if (followUpBlocks.length > 0) {
+            log(`Pushing ${followUpBlocks.length} follow-up image block(s) into active query`);
+            query.pushBlocks(followUpBlocks);
+          }
+        }
         markCompleted(keptIds);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { buildReactionInbound, createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
 
 function stubAdapter(partial: Partial<Adapter>): Adapter {
   return { name: 'stub', ...partial } as unknown as Adapter;
@@ -203,5 +203,71 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(calls).toHaveLength(1);
     const msg = calls[0].message as { markdown?: string };
     expect(msg.markdown).toBe('plain hello');
+  });
+});
+
+describe('buildReactionInbound', () => {
+  // Reactions are routed via chat.onReaction → buildReactionInbound →
+  // setupConfig.onInbound. The inbound shape must: (a) produce a
+  // human-readable `text` so the formatter renders verbatim, (b) preserve
+  // the structured reaction payload so a future query_reactions tool can
+  // filter on targetMessageId/added, and (c) carry isMention=false so
+  // mention-required channels store-as-context without waking the agent.
+
+  const base = {
+    emoji: '👍',
+    rawEmoji: '+1',
+    added: true,
+    targetMessageId: '1700000000.000300',
+    threadId: 'C-CHAN-1',
+    userId: 'U01HJOHN',
+    userName: 'John',
+    now: () => new Date('2026-05-22T12:34:56Z'),
+    idGen: () => 'rxn-test-1',
+  } as const;
+
+  it('produces a chat-sdk message with isMention=false and isGroup=true', () => {
+    const inbound = buildReactionInbound({ ...base });
+    expect(inbound.kind).toBe('chat-sdk');
+    expect(inbound.isMention).toBe(false);
+    expect(inbound.isGroup).toBe(true);
+    expect(inbound.id).toBe('rxn-test-1');
+    expect(inbound.timestamp).toBe('2026-05-22T12:34:56.000Z');
+  });
+
+  it('renders the added text with the emoji, reactor, and target id', () => {
+    const inbound = buildReactionInbound({ ...base });
+    const content = inbound.content as { text: string };
+    expect(content.text).toBe('[John reacted 👍 on message 1700000000.000300]');
+  });
+
+  it('renders the removed text when added=false', () => {
+    const inbound = buildReactionInbound({ ...base, added: false });
+    const content = inbound.content as { text: string };
+    expect(content.text).toBe('[John removed reaction 👍 on message 1700000000.000300]');
+  });
+
+  it('embeds the structured reaction payload under content.reaction', () => {
+    const inbound = buildReactionInbound({ ...base });
+    const content = inbound.content as {
+      reaction: {
+        emoji: string;
+        rawEmoji: string;
+        added: boolean;
+        targetMessageId: string;
+        threadId: string;
+        userId: string;
+      };
+      sender: string;
+      senderId: string;
+    };
+    expect(content.reaction.emoji).toBe('👍');
+    expect(content.reaction.rawEmoji).toBe('+1');
+    expect(content.reaction.added).toBe(true);
+    expect(content.reaction.targetMessageId).toBe('1700000000.000300');
+    expect(content.reaction.threadId).toBe('C-CHAN-1');
+    expect(content.reaction.userId).toBe('U01HJOHN');
+    expect(content.sender).toBe('John');
+    expect(content.senderId).toBe('U01HJOHN');
   });
 });

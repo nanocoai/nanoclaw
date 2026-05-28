@@ -1,5 +1,5 @@
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type { AgentProvider, AgentQuery, ContentBlock, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
 /**
  * Mock provider for testing. Returns canned responses.
@@ -7,6 +7,7 @@ import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryIn
  */
 export class MockProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
+  readonly supportsMultimodalContent = true;
 
   private responseFactory: (prompt: string) => string;
 
@@ -59,6 +60,16 @@ export class MockProvider implements AgentProvider {
     return {
       push(message: string) {
         pending.push(message);
+        waiting?.();
+      },
+      pushBlocks(blocks: ContentBlock[]) {
+        // Mirror the v1 pattern: surface a synthetic text turn that summarizes
+        // the block array so tests can assert against the prompt path without
+        // pulling base64 binary data through the mock.
+        const summary = blocks
+          .map((b) => (b.type === 'image' ? `[image:${b.source.media_type}]` : b.text))
+          .join(' ');
+        pending.push(`__BLOCKS__ ${summary}`);
         waiting?.();
       },
       end() {
