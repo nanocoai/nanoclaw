@@ -15,7 +15,40 @@ Done during the 2026-05-28 migration; this file lists v1 fork customizations sti
 
 v1 didn't actually construct multimodal blocks for the agent — its photo handling appended a file path as text. v2 stock keeps the file payload (base64) in the inbound attachment but the agent formatter only references it as `[file: name — saved to /workspace/...]`. If real vision is wanted, that's a new feature, not a port: build a multimodal content-block path in the agent-runner provider layer.
 
-## To port — Gmail MCP tool (deferred)
+## Gmail MCP tool — ported (v1-style pragmatic)
+
+`@gongrzhe/server-gmail-autoauth-mcp@1.1.11` installed per group via the per-group npm package mechanism. `~/.gmail-mcp/` allowlisted (RW) and mounted into the container at `/workspace/extra/gmail-mcp/` (the mount-security layer forces additional_mounts under `/workspace/extra/` and rejects absolute containerPaths). `credentials.json` blocks the mount-security `credentials` substring pattern, so the file was duplicated as `tokens.json` and the MCP server is configured with `GMAIL_CREDENTIALS_PATH=/workspace/extra/gmail-mcp/tokens.json`. Real OAuth refresh + access tokens live in the container during sessions — same trade-off v1 made.
+
+To replicate the wiring on a fresh install:
+
+```bash
+# 1. allowlist ~/.gmail-mcp
+cat > ~/.config/nanoclaw/mount-allowlist.json <<'EOF'
+{ "allowedRoots":[{"path":"/Users/eva/.gmail-mcp","allowReadWrite":true}], "blockedPatterns":[], "nonMainReadOnly":true }
+EOF
+
+# 2. duplicate credentials.json under a non-blocked name
+cp ~/.gmail-mcp/credentials.json ~/.gmail-mcp/tokens.json
+
+# 3. per group (replace <ID>)
+ncl groups config add-package --id <ID> --npm '@gongrzhe/server-gmail-autoauth-mcp@1.1.11'
+ncl groups config add-mcp-server --id <ID> --name gmail \
+  --command gmail-mcp --args '[]' \
+  --env '{"GMAIL_CREDENTIALS_PATH":"/workspace/extra/gmail-mcp/tokens.json","GMAIL_OAUTH_PATH":"/workspace/extra/gmail-mcp/gcp-oauth.keys.json"}'
+# additional_mounts is not exposed by ncl yet; set via SQL
+pnpm exec tsx scripts/q.ts data/v2.db "UPDATE container_configs SET additional_mounts='[{\"hostPath\":\"/Users/eva/.gmail-mcp\",\"containerPath\":\"gmail-mcp\",\"readonly\":false}]' WHERE agent_group_id='<ID>'"
+ncl groups restart --id <ID> --rebuild
+```
+
+## Apple Pages MCP tool — ported (system-action bridge)
+
+Container side: 11 MCP tools (`pages_create`, `pages_open`, `pages_save`, `pages_close`, `pages_get_text`, `pages_insert_text`, `pages_replace_text`, `pages_format_paragraph`, `pages_export_pdf`, `pages_list`, `pages_delete`) in `container/agent-runner/src/mcp-tools/pages.ts`. Each tool writes a `kind='system', action='pages_request', requestId, verb, args` to outbound.db, then polls inbound.db for a matching `pages_response`. Same correlation pattern as `cli_request` in `cli/ncl.ts`.
+
+Host side: `src/modules/pages/applescript.ts` is the v1 osascript helper module ported verbatim except for the v2 logger + import path swaps (v1's pino-style `logger.info({obj}, 'msg')` → v2's `log.info('msg', {obj})`). `src/modules/pages/index.ts` registers `registerDeliveryAction('pages_request', …)` which dispatches verb → AppleScript helper → response frame; `getAgentGroup(session.agent_group_id)` provides the sandbox folder. All sandboxing logic from v1 (filename allowlist regex, path-escape check, group-folder resolution) ported intact.
+
+Module self-registers via `src/modules/index.js` import. No DB schema or container_configs changes needed — works for any group as long as the host runs macOS with Pages.app installed.
+
+## ~~To port — Gmail MCP tool (deferred)~~
 
 Upstream `/add-gmail-tool` skill expects OneCLI's TLS-MITM proxy to inject Bearer tokens into outbound `gmail.googleapis.com` requests. Without OneCLI, two viable paths exist:
 
