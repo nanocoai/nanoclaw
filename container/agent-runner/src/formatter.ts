@@ -245,6 +245,13 @@ function formatAttachments(attachments: any[] | undefined): string {
   const parts = attachments.map((a) => {
     const name = a.name || a.filename || 'attachment';
     const type = a.type || 'file';
+    if (a.error === 'too_big') {
+      const sizeNote = typeof a.size === 'number' ? ` (~${Math.round(a.size / 1024 / 1024)} MB)` : '';
+      return `[${type}: ${escapeXml(name)}${sizeNote} — too large to download (over the bot's getFile limit); ask the user to share a smaller file or a download link]`;
+    }
+    if (a.error === 'download_failed') {
+      return `[${type}: ${escapeXml(name)} — download failed; ask the user to resend or share another way]`;
+    }
     const localPath = a.localPath ? `/workspace/${a.localPath}` : '';
     const url = a.url || '';
     if (localPath) {
