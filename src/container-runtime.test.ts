@@ -108,10 +108,7 @@ describe('cleanupOrphans', () => {
 
     cleanupOrphans();
 
-    expect(mockExecSync).toHaveBeenCalledWith(
-      `${CONTAINER_RUNTIME_BIN} ls --all --format json`,
-      expect.any(Object),
-    );
+    expect(mockExecSync).toHaveBeenCalledWith(`${CONTAINER_RUNTIME_BIN} ls --all --format json`, expect.any(Object));
   });
 
   it('stops orphaned nanoclaw containers matching the install label (object label form)', () => {

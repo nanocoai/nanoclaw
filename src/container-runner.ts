@@ -13,12 +13,15 @@ import {
   CONTAINER_IMAGE,
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
+  CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
   ONECLI_URL,
   TIMEZONE,
+  USE_NATIVE_CREDENTIAL_PROXY,
 } from './config.js';
+import { detectAuthMode } from './credential-proxy.js';
 import { materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars, updateContainerConfigJson } from './db/container-configs.js';
@@ -418,19 +421,39 @@ async function buildContainerArgs(
     }
   }
 
-  // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
-  // are routed through the agent vault for credential injection. Treated as
-  // a transient hard failure: if we can't wire the gateway, we don't spawn.
-  // The caller (router or host-sweep) catches the throw, leaves the inbound
-  // message pending, and the next sweep tick retries.
-  if (agentIdentifier) {
-    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+  if (USE_NATIVE_CREDENTIAL_PROXY) {
+    // Native credential proxy — containers point their Anthropic SDK at the
+    // host-side proxy, which injects the real API key / OAuth token from
+    // .env. Containers see only a placeholder.
+    //
+    // The host portion of the URL must be reachable from the container's
+    // network. Docker on macOS auto-resolves host.docker.internal; Apple
+    // Container requires either the bridge100 gateway IP or that the proxy
+    // binds to 0.0.0.0 with an external interface IP the container can reach.
+    const proxyHost = process.env.CONTAINER_HOST_GATEWAY || 'host.docker.internal';
+    args.push('-e', `ANTHROPIC_BASE_URL=http://${proxyHost}:${CREDENTIAL_PROXY_PORT}`);
+    const authMode = detectAuthMode();
+    if (authMode === 'api-key') {
+      args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+    } else {
+      args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+    }
+    log.info('Native credential proxy wired into container', { containerName, authMode });
+  } else {
+    // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
+    // are routed through the agent vault for credential injection. Treated as
+    // a transient hard failure: if we can't wire the gateway, we don't spawn.
+    // The caller (router or host-sweep) catches the throw, leaves the inbound
+    // message pending, and the next sweep tick retries.
+    if (agentIdentifier) {
+      await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+    }
+    const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+    if (!onecliApplied) {
+      throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
+    }
+    log.info('OneCLI gateway applied', { containerName });
   }
-  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
-  if (!onecliApplied) {
-    throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
-  }
-  log.info('OneCLI gateway applied', { containerName });
 
   // Host gateway
   args.push(...hostGatewayArgs());

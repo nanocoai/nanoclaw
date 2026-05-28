@@ -6,7 +6,15 @@ import { getContainerImageBase, getDefaultContainerImage, getInstallSlug } from 
 import { isValidTimezone } from './timezone.js';
 
 // Read config values from .env (falls back to process.env).
-const envConfig = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER', 'ONECLI_URL', 'ONECLI_API_KEY', 'TZ']);
+const envConfig = readEnvFile([
+  'ASSISTANT_NAME',
+  'ASSISTANT_HAS_OWN_NUMBER',
+  'ONECLI_URL',
+  'ONECLI_API_KEY',
+  'TZ',
+  'CREDENTIAL_PROXY_HOST',
+  'CREDENTIAL_PROXY_PORT',
+]);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
 export const ASSISTANT_HAS_OWN_NUMBER =
@@ -35,6 +43,24 @@ export const CONTAINER_TIMEOUT = parseInt(process.env.CONTAINER_TIMEOUT || '1800
 export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760', 10); // 10MB default
 export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
 export const ONECLI_API_KEY = process.env.ONECLI_API_KEY || envConfig.ONECLI_API_KEY;
+/**
+ * When ONECLI_URL is unset we fall back to the in-process credential proxy.
+ * The proxy reads ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN from .env and
+ * injects them on every container API request.
+ */
+export const USE_NATIVE_CREDENTIAL_PROXY = !ONECLI_URL;
+export const CREDENTIAL_PROXY_PORT = parseInt(
+  process.env.CREDENTIAL_PROXY_PORT || envConfig.CREDENTIAL_PROXY_PORT || '3001',
+  10,
+);
+/**
+ * Address the proxy binds to. Default 127.0.0.1 is safe for Docker (containers
+ * reach via host.docker.internal). For Apple Container, containers live on a
+ * separate bridge network — set CREDENTIAL_PROXY_HOST=0.0.0.0 (and firewall
+ * port 3001 from the LAN) or bind to the bridge100 IP after it appears.
+ */
+export const CREDENTIAL_PROXY_HOST =
+  process.env.CREDENTIAL_PROXY_HOST || envConfig.CREDENTIAL_PROXY_HOST || '127.0.0.1';
 export const MAX_MESSAGES_PER_PROMPT = Math.max(1, parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10);
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5);
