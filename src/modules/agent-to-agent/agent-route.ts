@@ -27,7 +27,13 @@ import { getInboundSourceSessionId, getMostRecentPeerSourceSessionId } from '../
 import { getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
 import { log } from '../../log.js';
-import { openInboundDb, resolveSession, sessionDir, writeSessionMessage } from '../../session-manager.js';
+import {
+  openInboundDb,
+  resolveSafeInboxDir,
+  resolveSession,
+  sessionDir,
+  writeSessionMessage,
+} from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { hasDestination } from './db/agent-destinations.js';
 
@@ -66,8 +72,15 @@ export function forwardAttachedFiles(
     return [];
   }
 
-  const targetInboxDir = path.join(sessionDir(target.agentGroupId, target.sessionId), 'inbox', target.messageId);
-  fs.mkdirSync(targetInboxDir, { recursive: true });
+  const safeInbox = resolveSafeInboxDir(target.agentGroupId, target.sessionId, target.messageId);
+  if (!safeInbox) {
+    log.warn('agent-route: rejecting unsafe target inbox, no files forwarded', {
+      targetMsgId: target.messageId,
+      targetSessionId: target.sessionId,
+    });
+    return [];
+  }
+  const targetInboxDir = safeInbox.inboxDir;
 
   const attachments: ForwardedAttachment[] = [];
   for (const filename of source.filenames) {

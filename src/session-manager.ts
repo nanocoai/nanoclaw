@@ -43,6 +43,77 @@ function isPathInside(parent: string, child: string): boolean {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
+function resolveSafeInboxRoot(
+  agentGroupId: string,
+  sessionId: string,
+): { inboxRoot: string; realInboxRoot: string } | null {
+  const dir = sessionDir(agentGroupId, sessionId);
+  const inboxRoot = path.join(dir, 'inbox');
+
+  try {
+    if (fs.existsSync(inboxRoot)) {
+      const stat = fs.lstatSync(inboxRoot);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        log.warn('Rejecting unsafe inbox root', { agentGroupId, sessionId, inboxRoot });
+        return null;
+      }
+    } else {
+      fs.mkdirSync(inboxRoot, { recursive: true });
+    }
+
+    const realSessionDir = fs.realpathSync(dir);
+    const realInboxRoot = fs.realpathSync(inboxRoot);
+    if (!isPathInside(realSessionDir, realInboxRoot)) {
+      log.warn('Inbox root escaped session directory', { agentGroupId, sessionId, inboxRoot });
+      return null;
+    }
+    return { inboxRoot, realInboxRoot };
+  } catch (err) {
+    log.warn('Failed to inspect inbox root', { agentGroupId, sessionId, inboxRoot, err });
+    return null;
+  }
+}
+
+export function resolveSafeInboxDir(
+  agentGroupId: string,
+  sessionId: string,
+  messageId: string,
+): { inboxDir: string; realInboxDir: string } | null {
+  if (!isSafeAttachmentName(messageId)) {
+    log.warn('Rejecting unsafe inbound message id', { messageId });
+    return null;
+  }
+
+  const root = resolveSafeInboxRoot(agentGroupId, sessionId);
+  if (!root) return null;
+
+  const inboxDir = path.join(root.inboxRoot, messageId);
+
+  try {
+    // Refuse to mkdir through a symlink that the container may have pre placed
+    // at inboxDir. With recursive:true, mkdirSync would silently no op on a
+    // pre existing symlink and the subsequent writeFileSync would follow it.
+    if (fs.existsSync(inboxDir)) {
+      const stat = fs.lstatSync(inboxDir);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        log.warn('Rejecting unsafe inbox directory', { messageId, inboxDir });
+        return null;
+      }
+    }
+    fs.mkdirSync(inboxDir, { recursive: true });
+
+    const realInboxDir = fs.realpathSync(inboxDir);
+    if (!isPathInside(root.realInboxRoot, realInboxDir)) {
+      log.warn('Inbox directory escaped session inbox root', { messageId, inboxDir });
+      return null;
+    }
+    return { inboxDir, realInboxDir };
+  } catch (err) {
+    log.warn('Failed to inspect inbox directory', { messageId, inboxDir, err });
+    return null;
+  }
+}
+
 /** Root directory for all session data. */
 export function sessionsBaseDir(): string {
   return path.join(DATA_DIR, 'v2-sessions');
@@ -283,14 +354,13 @@ function extractAttachmentFiles(
   const attachments = parsed.attachments as Array<Record<string, unknown>> | undefined;
   if (!Array.isArray(attachments)) return contentStr;
 
-  if (!isSafeAttachmentName(messageId)) {
-    log.warn('Rejecting unsafe inbound message id', { messageId });
-    return contentStr;
-  }
-
+  let safeInbox: ReturnType<typeof resolveSafeInboxDir> | null = null;
   let changed = false;
   for (const att of attachments) {
     if (typeof att.data !== 'string') continue;
+
+    safeInbox ??= resolveSafeInboxDir(agentGroupId, sessionId, messageId);
+    if (!safeInbox) return contentStr;
 
     const rawName = deriveAttachmentName(att);
     const filename = isSafeAttachmentName(rawName) ? rawName : `attachment-${Date.now()}`;
@@ -302,34 +372,7 @@ function extractAttachmentFiles(
       });
     }
 
-    const inboxDir = path.join(sessionDir(agentGroupId, sessionId), 'inbox', messageId);
-
-    // Refuse to mkdir through a symlink that the container may have pre placed
-    // at inboxDir. With recursive:true, mkdirSync would silently no op on a
-    // pre existing symlink and the subsequent writeFileSync would follow it.
-    if (fs.existsSync(inboxDir)) {
-      const stat = fs.lstatSync(inboxDir);
-      if (stat.isSymbolicLink() || !stat.isDirectory()) {
-        log.warn('Rejecting unsafe inbox directory', { messageId, inboxDir });
-        continue;
-      }
-    }
-    fs.mkdirSync(inboxDir, { recursive: true });
-
-    let realInboxDir: string;
-    try {
-      realInboxDir = fs.realpathSync(inboxDir);
-    } catch (err) {
-      log.warn('Failed to resolve inbox directory', { messageId, err });
-      continue;
-    }
-    const inboxRoot = path.join(sessionDir(agentGroupId, sessionId), 'inbox');
-    if (!isPathInside(fs.realpathSync(inboxRoot), realInboxDir)) {
-      log.warn('Inbox directory escaped session inbox root', { messageId, inboxDir });
-      continue;
-    }
-
-    const filePath = path.join(inboxDir, filename);
+    const filePath = path.join(safeInbox.inboxDir, filename);
     try {
       // wx = exclusive create. Refuses to follow a pre existing symlink or
       // overwrite any existing file. The host expects to be the sole writer

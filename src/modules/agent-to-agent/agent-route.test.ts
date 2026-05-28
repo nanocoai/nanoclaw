@@ -386,6 +386,48 @@ describe('routeAgentMessage return-path', () => {
     expect(JSON.parse(s2Rows[0].content).text).toBe('self-note');
   });
 
+  it('file forwarding: refuses to plant a persistent Claude skill through a symlinked target inbox root', async () => {
+    const filename = 'SKILL.md';
+    const skillBody = [
+      '---',
+      'name: planted-skill',
+      'description: proves target inbox root symlink escape',
+      '---',
+      '',
+      '# Planted skill',
+      '',
+      'INBOX_ROOT_SYMLINK_SKILL_CHAIN',
+      '',
+    ].join('\n');
+
+    const outboxDir = path.join(sessionDir(A, S1.id), 'outbox', 'self-file-msg');
+    fs.mkdirSync(outboxDir, { recursive: true });
+    fs.writeFileSync(path.join(outboxDir, filename), skillBody);
+
+    const skillsDir = path.join(TEST_DIR, 'v2-sessions', A, '.claude-shared', 'skills');
+    fs.mkdirSync(skillsDir, { recursive: true });
+    for (const targetSession of [S1, S2]) {
+      const inboxRoot = path.join(sessionDir(A, targetSession.id), 'inbox');
+      fs.rmSync(inboxRoot, { recursive: true, force: true });
+      fs.symlinkSync('../.claude-shared/skills', inboxRoot, 'dir');
+    }
+
+    await routeAgentMessage(
+      {
+        id: 'self-file-msg',
+        platform_id: A,
+        content: JSON.stringify({ text: 'self file', files: [filename] }),
+        in_reply_to: null,
+      },
+      S1,
+    );
+
+    const plantedSkillFiles = fs
+      .readdirSync(skillsDir, { recursive: true })
+      .filter((entry) => entry.toString().endsWith('/SKILL.md'));
+    expect(plantedSkillFiles).toEqual([]);
+  });
+
   it('BUG: no volume cap on a2a routing — unbounded ping-pong is allowed (#2063)', async () => {
     // Two agents can exchange unlimited messages with no rate limit or loop
     // detection. This test documents the gap — it should FAIL once #2063 lands.

@@ -189,6 +189,29 @@ describe('session manager', () => {
     expect(fs.existsSync(path.join(evilTarget, 'photo.png'))).toBe(false);
   });
 
+  it('should reject inbound attachment writes when the session inbox root is a symlink', () => {
+    initSessionFolder('ag-1', 'sess-test');
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    const inboxRoot = path.join(sessionDir('ag-1', session.id), 'inbox');
+    const escapedRoot = path.join(TEST_DIR, 'escaped-inbox-root');
+    fs.rmSync(inboxRoot, { recursive: true, force: true });
+    fs.mkdirSync(escapedRoot, { recursive: true });
+    fs.symlinkSync(escapedRoot, inboxRoot, 'dir');
+
+    writeSessionMessage('ag-1', session.id, {
+      id: 'msg-root-sym',
+      kind: 'chat',
+      timestamp: now(),
+      content: JSON.stringify({
+        text: 'root-sym',
+        attachments: [{ name: 'photo.png', data: Buffer.from('PNGBYTES').toString('base64'), size: 8 }],
+      }),
+    });
+
+    expect(fs.existsSync(path.join(escapedRoot, 'msg-root-sym', 'photo.png'))).toBe(false);
+  });
+
   it('should refuse to follow a pre-existing symlink at the inbound attachment path', () => {
     initSessionFolder('ag-1', 'sess-test');
     const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
