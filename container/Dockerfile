@@ -63,6 +63,13 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 # ~300MB Chromium. We've already installed the system one above.
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
+# Bump the transcript rotation age. Default is 14 days; that's too short
+# when a freshly migrated install has v1 sessions that are 2+ weeks old
+# (their last activity could easily be just over the cap). 180 keeps
+# multi-month context alive across sleep / vacation gaps; transcripts
+# still rotate on size cap.
+ENV CLAUDE_TRANSCRIPT_ROTATE_AGE_DAYS=180
+
 # ---- Bun runtime -------------------------------------------------------------
 # Install via the official script (handles multi-arch detection), then move
 # the binary to /usr/local/bin so the non-root `node` user can execute it.
