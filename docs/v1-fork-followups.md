@@ -6,27 +6,37 @@ Done during the 2026-05-28 migration; this file lists v1 fork customizations sti
 
 - **Runtime → Apple Container** (commit `179edc7`). Replaces Docker because the host runs Apple Container at `/opt/homebrew/bin/container`.
 - **Credentials → native proxy** (commit `b833f80`). Drops the OneCLI/docker-compose dependency. Reads `CLAUDE_CODE_OAUTH_TOKEN` from `.env` and forwards to `api.anthropic.com` with the token injected as `Authorization: Bearer`. Container env uses `ANTHROPIC_AUTH_TOKEN=placeholder` (not `CLAUDE_CODE_OAUTH_TOKEN`) so the CLI uses Bearer directly and skips the `create_api_key` exchange that fails on Pro-tier tokens.
+- **Container memory tuning**. Added `memory_mb` column to `container_configs`, exposed via `ncl groups config update --memory-mb <N>`; passed to the runtime as `-m <N>MiB` at spawn time. Both groups set to 2048 MiB to prevent Chromium OOM kills.
+- **Telegram file-too-big**. `src/channels/chat-sdk-bridge.ts` now tags failed `fetchData()` with `entry.error = 'too_big' | 'download_failed'`; `container/agent-runner/src/formatter.ts` renders an explanatory `[type: name (~N MB) — too large to download …]` marker so the agent can give the user clear guidance.
+- **Telegram reply context**. Already supported in v2 stock via `extractReplyContext` (`src/channels/telegram.ts:42-49`) — feeds into chat-sdk-bridge's `serialized.replyTo`. Nothing more to port.
+- **Telegram 4-bot swarm**. New `src/channels/telegram-swarm.ts` parses `TELEGRAM_BOT_POOL`, init-validates via getMe, picks a bot sticky-per-(platformId, sender) on first use, renames it via `setMyName(sender)` so the persona shows up in Telegram. `src/channels/telegram.ts` wraps `deliver`: when outbound content has both `text` and `sender` and the pool is up, route via the pool; fall back to the primary bot on any failure. `mcp__nanoclaw__send_message` (`container/agent-runner/src/mcp-tools/core.ts`) accepts a new optional `sender` arg that flows through into the content JSON.
 
-## To port — Telegram channel customizations
+## Not ported — image vision
 
-Stock `/add-telegram` is wired and answering live. The fork's Telegram extensions still need porting on top of `src/channels/telegram.ts`:
+v1 didn't actually construct multimodal blocks for the agent — its photo handling appended a file path as text. v2 stock keeps the file payload (base64) in the inbound attachment but the agent formatter only references it as `[file: name — saved to /workspace/...]`. If real vision is wanted, that's a new feature, not a port: build a multimodal content-block path in the agent-runner provider layer.
 
-- **Image vision / photo handling** — v1 downloads photos and constructs multimodal content blocks so the agent can see them. Without this, photo messages are silently dropped or sent as text-only.
-- **4-bot swarm multiplexing** — v1 uses `TELEGRAM_BOT_POOL` (4 tokens) and round-robins outbound messages to dodge per-bot rate limits. The pool variable still lives in `.env`. Stock v2 only reads `TELEGRAM_BOT_TOKEN` (single bot). Reference: how the v1 outbound code picks a bot per message.
-- **Reply / quoted-message context capture** — v1 includes the quoted message in the agent's prompt when the user replies to a previous bot message. v2 currently ignores the reply chain.
-- **File-too-big graceful handling** — v1 sends a clear "file too big" message instead of crashing the adapter when a large attachment arrives.
+## To port — Gmail MCP tool (deferred)
 
-## To port — Apple Pages MCP tools
+Upstream `/add-gmail-tool` skill expects OneCLI's TLS-MITM proxy to inject Bearer tokens into outbound `gmail.googleapis.com` requests. Without OneCLI, two viable paths exist:
 
-Custom local-only skill (`/add-pages`) — not in upstream, lives only on `skill/add-pages` in the v1 repo. Approximate scope: ~470 LOC `src/pages.ts` + 19 unit tests + 11 MCP tool registrations. In v2 these belong under `container/agent-runner/src/mcp-tools/pages.ts` following the split-file pattern of `core.ts`, `interactive.ts`, etc.
+1. **v1-style tokens-in-container** (~15 min if not for mount-security). Mount `~/.gmail-mcp/` read-write into the container; install `@gongrzhe/server-gmail-autoauth-mcp@1.1.11` per group; register as an MCP server with `GMAIL_CREDENTIALS_PATH` env pointing at a non-blocked filename. Blockers:
+   - Mount-security in `src/modules/mount-security/index.ts` blocks `credentials` substring matches → must rename `~/.gmail-mcp/credentials.json` to `~/.gmail-mcp/tokens.json` (gmail-mcp supports `GMAIL_CREDENTIALS_PATH` override per dist inspection).
+   - Per-group npm install means rebuilding the image with `ncl groups restart --rebuild`.
+   - Real OAuth refresh + access tokens live in container memory during sessions — same trade-off v1 accepted.
+2. **TLS MITM proxy on host** (essentially a mini-OneCLI). Generate a CA cert, install in container trust store, terminate TLS for `gmail.googleapis.com` and `accounts.google.com`, inject Bearer, re-encrypt to upstream. Hours of work; gives full credential isolation. Probably not worth it for a single-user install.
 
-## To port — Gmail tool
+Working refresh tokens already exist at `~/.gmail-mcp/credentials.json` from v1.
 
-`/add-gmail-tool` upstream skill exists; v1 wired it locally with the OneCLI OAuth flow. Re-evaluate whether it still works with the native credential proxy or needs a parallel path.
+## To port — Apple Pages MCP tool (deferred)
 
-## To port — Container memory tuning
+v1's design: agent writes a Pages request to `DATA_DIR/ipc/<groupFolder>/messages/<requestId>.json`, a host poller (`ipc.ts handlePagesIpc`) calls `osascript`, writes the response to `groups/<groupFolder>/pages/.responses/<requestId>.json`. v2's invariant is that all host↔container IO goes through the session DB (`inbound.db` + `outbound.db`) — there is no `DATA_DIR/ipc/` pattern any more. A direct port doesn't fit the architecture.
 
-v1 set Docker container memory to ≥2 GB so Chromium (used by `agent-browser`) wouldn't OOM. v2's `container_configs` table (`pnpm exec tsx scripts/q.ts data/v2.db "PRAGMA table_info(container_configs)"`) has no `memory` column today; `src/container-runner.ts` never passes `--memory` to the runtime. If agent-browser OOMs, expose a column and wire `--memory <size>` into `buildContainerArgs`.
+Two v2-shaped designs:
+
+1. **Pages-as-system-action on `messages_out`**. Container's Pages MCP tools write a `kind = 'system-action', action = 'pages.<verb>'` message to `outbound.db`. Host's delivery loop has a `register-system-action` registry (already used for scheduling / approvals); add a `pages` handler that calls osascript and writes the result back to `inbound.db` for the agent to read. Cleanest fit.
+2. **On-host Unix socket bridge**. Mount a host socket into the container, container makes RPC calls. Simpler to write but breaks the "DB is the sole IO surface" invariant.
+
+Source to port is intact at `/Users/eva/nanoclaw/src/pages.ts` (~519 LOC), `/Users/eva/nanoclaw/src/pages.test.ts` (~283 LOC, 76 tests). MCP tool names: pages_create, pages_open, pages_save, pages_close, pages_get_text, pages_insert_text, pages_replace_text, pages_format_paragraph, pages_export_pdf, pages_list, pages_delete. Plus `pagesInstalled()` host check.
 
 ## 8-persona sub-agent dispatcher
 
