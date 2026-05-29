@@ -38,13 +38,23 @@ async function withRetry<T>(fn: () => Promise<T>, label: string, maxAttempts = 5
   throw lastErr;
 }
 
+// Resolved once at setup via getMe; used to recognise reply-to-bot precisely.
+let resolvedBotUsername: string | null = null;
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
   if (!raw.reply_to_message) return null;
   const reply = raw.reply_to_message;
+  // Reply-to-bot: the quoted message is from a bot. If we've resolved our own
+  // username, require an exact match; until then, any bot counts (our bot is
+  // the only one expected to post in wired chats).
+  const from = reply.from;
+  const isReplyToBot =
+    from?.is_bot === true && (resolvedBotUsername == null || from?.username === resolvedBotUsername);
   return {
     text: reply.text || reply.caption || '',
-    sender: reply.from?.first_name || reply.from?.username || 'Unknown',
+    sender: from?.first_name || from?.username || 'Unknown',
+    isReplyToBot,
   };
 }
 
@@ -214,6 +224,9 @@ registerChannelAdapter('telegram', {
     });
 
     const botUsernamePromise = fetchBotUsername(token);
+    void botUsernamePromise.then((u) => {
+      resolvedBotUsername = u;
+    });
 
     const wrapped: ChannelAdapter = {
       ...bridge,
