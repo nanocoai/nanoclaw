@@ -39,6 +39,8 @@ interface GatewayAdapter extends Adapter {
 export interface ReplyContext {
   text: string;
   sender: string;
+  /** True when the quoted message was authored by this bot (reply-to-bot). */
+  isReplyToBot?: boolean;
 }
 
 /** Extract reply context from a platform-specific raw message. Return null if no reply. */

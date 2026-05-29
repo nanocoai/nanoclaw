@@ -143,7 +143,12 @@ export function setChannelRequestGate(fn: ChannelRequestGateFn): void {
   channelRequestGate = fn;
 }
 
-function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string } {
+function safeParseContent(raw: string): {
+  text?: string;
+  sender?: string;
+  senderId?: string;
+  replyTo?: { isReplyToBot?: boolean };
+} {
   try {
     return JSON.parse(raw);
   } catch {
@@ -269,6 +274,11 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   //    avoids the extra await).
   const parsed = safeParseContent(event.message.content);
   const messageText = parsed.text ?? '';
+  // "Addressed" = the bot was directly engaged: @mention / DM (isMention) or a
+  // reply to one of the bot's own messages. Pattern/mention wirings treat this
+  // as a trigger in addition to their regex.
+  const replyToBot = parsed.replyTo?.isReplyToBot === true;
+  const addressed = isMention || replyToBot;
 
   let engagedCount = 0;
   let accumulatedCount = 0;
@@ -278,7 +288,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const agentGroup = getAgentGroup(agent.agent_group_id);
     if (!agentGroup) continue;
 
-    const engages = evaluateEngage(agent, messageText, isMention, mg, event.threadId);
+    const engages = evaluateEngage(agent, messageText, addressed, mg, event.threadId);
 
     const accessOk = engages && (!accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed);
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
@@ -364,7 +374,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
 function evaluateEngage(
   agent: MessagingGroupAgent,
   text: string,
-  isMention: boolean,
+  addressed: boolean,
   mg: MessagingGroup,
   threadId: string | null,
 ): boolean {
@@ -372,6 +382,9 @@ function evaluateEngage(
     case 'pattern': {
       const pat = agent.engage_pattern ?? '.';
       if (pat === '.') return true;
+      // Engage when directly addressed (mention / DM / reply-to-bot) OR when
+      // the message text matches the wiring's pattern (e.g. the agent's name).
+      if (addressed) return true;
       try {
         return new RegExp(pat).test(text);
       } catch {
@@ -380,9 +393,9 @@ function evaluateEngage(
       }
     }
     case 'mention':
-      return isMention;
+      return addressed;
     case 'mention-sticky': {
-      if (isMention) return true;
+      if (addressed) return true;
       // Sticky follow-up: session already exists for this (agent, mg, thread)
       // — the thread was activated before, keep firing.
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
