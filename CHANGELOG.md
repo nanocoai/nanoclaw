@@ -2,6 +2,16 @@
 
 All notable changes to NanoClaw will be documented in this file.
 
+## [Unreleased]
+
+- **Per-agent-group message context window (`context_messages`).** When an agent in a group chat is triggered (e.g. `@mention`), it can now receive the last N unseen messages from that chat as context, so it can answer with awareness of the surrounding conversation. Opt-in, capped, and gated by an admin-only `context_messages_max`.
+  - `ncl groups config update <id> --context-messages 20 --context-messages-max 30` — set count + cap. Both fields take effect immediately (no container restart required). System hard cap: 50.
+  - Newly-created agent groups default to `context_messages=10`, `context_messages_max=20`. Existing groups on upgrade keep `0/0` (no behavior change without explicit opt-in).
+  - Includes the agent's own past replies in the block, marked `[bot, HH:MM]`; other agents in the same chat get `[bot:Name]`. Inbound messages render as `[<sender>, HH:MM]`. Media-only rows render as `[image/file]`. Per-message text capped at 500 chars.
+  - Dedup is per `(agent_group, messaging_group, thread)` — each trigger advances the cursor so the next trigger only includes chatter since the last engagement.
+  - New central-DB tables: `messaging_group_messages` (all observed messages per messaging group, retention 5000 rows per group, swept hourly), `agent_group_message_cursors` (per-agent high-water mark).
+  - New columns on `container_configs`: `context_messages`, `context_messages_max`.
+
 ## [2.0.64] - 2026-05-18
 
 - **`ncl destinations add` and `remove` through the approval flow now reach the receiver immediately.** Approved destinations weren't being projected into the receiving agent's local session state, so a freshly-added destination silently failed at `send_message` with `unknown destination`, and a removed destination stayed resolvable until the next container restart. Both now take effect the moment the approval executes. Direct (non-approval) calls were unaffected.

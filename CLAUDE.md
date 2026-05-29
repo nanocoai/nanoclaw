@@ -141,6 +141,8 @@ Per-agent-group container runtime config (provider, model, packages, MCP servers
 
 Key files: `src/db/container-configs.ts`, `src/container-config.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/claude-md-compose.ts` (instructions exclusion).
 
+**`context_messages` / `context_messages_max`** — opt-in per-agent-group context window. When set to N>0, the router prepends the last N unseen messages from the same chat to each triggering message as a `[Context — last N messages]` block. Read by the host router (`src/router.ts`), so changes take effect immediately — no container restart needed. `context_messages_max` is the admin-only cap; the agent can self-tune `context_messages` (via `ncl groups config update --context-messages N`) up to but not above that cap. Hard system cap: 50. New agent groups default to 10/20; existing groups upgrading from a pre-feature install keep 0/0 (no behavior change). Underlying log: `messaging_group_messages` + `agent_group_message_cursors`. See `src/db/messaging-group-messages.ts` and `src/context-builder.ts`.
+
 ## Container Restart
 
 `ncl groups restart --id <group-id> [--rebuild] [--message <text>]`. Kills running containers; if `--message` is provided, writes an `on_wake` message and respawns via `onExit` callback. Without `--message`, containers come back on the next user message. From inside a container, `--id` is auto-filled and only the calling session is restarted.

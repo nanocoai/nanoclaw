@@ -1030,3 +1030,158 @@ describe('delivery', () => {
     expect(JSON.parse(undelivered[0].content).text).toBe('Agent response');
   });
 });
+
+describe('router context_messages prepend', () => {
+  beforeEach(() => {
+    createAgentGroup({ id: 'ag-cm', name: 'Andy', folder: 'andy', agent_provider: null, created_at: now() });
+    createMessagingGroup({
+      id: 'mg-cm',
+      channel_type: 'discord',
+      platform_id: 'chan-cm',
+      name: 'Group',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    createMessagingGroupAgent({
+      id: 'mga-cm',
+      messaging_group_id: 'mg-cm',
+      agent_group_id: 'ag-cm',
+      engage_mode: 'mention',
+      engage_pattern: null,
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: now(),
+    });
+  });
+
+  async function setContextMessages(n: number, max: number = 50) {
+    getDb()
+      .prepare(
+        `INSERT INTO container_configs (agent_group_id, context_messages, context_messages_max, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(agent_group_id) DO UPDATE SET
+           context_messages = excluded.context_messages,
+           context_messages_max = excluded.context_messages_max,
+           updated_at = excluded.updated_at`,
+      )
+      .run('ag-cm', n, max, now());
+  }
+
+  async function chatter(id: string, sender: string, text: string) {
+    const { routeInbound } = await import('./router.js');
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-cm',
+      threadId: null,
+      message: {
+        id,
+        kind: 'chat',
+        content: JSON.stringify({ sender, text }),
+        timestamp: now(),
+      },
+    });
+  }
+
+  async function mention(id: string, sender: string, text: string) {
+    const { routeInbound } = await import('./router.js');
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-cm',
+      threadId: null,
+      message: {
+        id,
+        kind: 'chat',
+        isMention: true,
+        content: JSON.stringify({ sender, text }),
+        timestamp: now(),
+      },
+    });
+  }
+
+  function lastInboundMessage(): { id: string; content: string; trigger: number } | undefined {
+    const session = findSession('mg-cm', null);
+    if (!session) return undefined;
+    const db = new Database(inboundDbPath('ag-cm', session.id));
+    const rows = db
+      .prepare('SELECT id, content, trigger FROM messages_in ORDER BY rowid DESC LIMIT 1')
+      .all() as Array<{ id: string; content: string; trigger: number }>;
+    db.close();
+    return rows[0];
+  }
+
+  it('baseline: context_messages=0 → no prepend, message arrives unchanged', async () => {
+    await setContextMessages(0);
+    // Non-mention chatter is dropped (engage_mode=mention). To trigger the agent
+    // we need a mention. Use a single mention as the trigger.
+    await mention('trig-baseline', 'Yair', 'Hello bot');
+    const msg = lastInboundMessage();
+    expect(msg).toBeDefined();
+    const text = JSON.parse(msg!.content).text;
+    expect(text).toBe('Hello bot');
+    expect(text).not.toContain('[Context');
+  });
+
+  it('with N=5 and 3 prior chatter messages, prepends [Context — last 3 messages] including chatter', async () => {
+    await setContextMessages(5);
+    // Three chatter messages (engage_mode='mention' → won't trigger, but still
+    // recorded in messaging_group_messages by the pre-fanout logger).
+    await chatter('c1', 'Alice', 'msg one');
+    await chatter('c2', 'Bob', 'msg two');
+    await chatter('c3', 'Alice', 'msg three');
+    // Mention triggers the agent.
+    await mention('trig-1', 'Yair', 'what did Alice say?');
+
+    const msg = lastInboundMessage();
+    expect(msg).toBeDefined();
+    const text = JSON.parse(msg!.content).text;
+    expect(text).toContain('[Context — last 3 messages]');
+    expect(text).toContain('[Alice');
+    expect(text).toContain('msg one');
+    expect(text).toContain('msg three');
+    expect(text).toContain('[End context]');
+    // Trigger message body must still come after the block.
+    expect(text.endsWith('what did Alice say?')).toBe(true);
+  });
+
+  it('dedup: second trigger does NOT include messages already in first trigger context', async () => {
+    await setContextMessages(10);
+    await chatter('c1', 'Alice', 'msg1');
+    await chatter('c2', 'Alice', 'msg2');
+    await mention('trig-A', 'Yair', 'first ask');
+
+    const first = lastInboundMessage()!;
+    const firstText = JSON.parse(first.content).text;
+    expect(firstText).toContain('msg1');
+    expect(firstText).toContain('msg2');
+
+    // More chatter, then second mention. Only msg3 should appear in the
+    // second trigger's context (msg1/msg2/trig-A already past the cursor).
+    await chatter('c3', 'Bob', 'msg3');
+    await mention('trig-B', 'Yair', 'second ask');
+
+    const second = lastInboundMessage()!;
+    const secondText = JSON.parse(second.content).text;
+    expect(secondText).toContain('msg3');
+    expect(secondText).not.toContain('msg1');
+    expect(secondText).not.toContain('msg2');
+    expect(secondText).not.toContain('first ask');
+  });
+
+  it('cap N=2 with 5 chatter rows takes only the 2 most-recent preceding', async () => {
+    await setContextMessages(2);
+    for (let i = 1; i <= 5; i++) {
+      await chatter(`c${i}`, 'Alice', `n${i}`);
+    }
+    await mention('trig-cap', 'Yair', 'ask');
+    const text = JSON.parse(lastInboundMessage()!.content).text;
+    expect(text).toContain('n4');
+    expect(text).toContain('n5');
+    expect(text).not.toContain('n1');
+    expect(text).not.toContain('n2');
+    expect(text).not.toContain('n3');
+    expect(text).toContain('[Context — last 2 messages]');
+  });
+});

@@ -19,8 +19,18 @@
  */
 import { getChannelAdapter } from './channels/channel-registry.js';
 import { gateCommand } from './command-gate.js';
+import { formatContextBlock } from './context-builder.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { getContainerConfig } from './db/container-configs.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
+import {
+  fetchContextRows,
+  findLogRowByPlatformId,
+  getAgentMessageCursor,
+  HARD_CAP,
+  recordIncomingMessage,
+  upsertAgentMessageCursor,
+} from './db/messaging-group-messages.js';
 import {
   createMessagingGroup,
   getMessagingGroupAgents,
@@ -143,7 +153,12 @@ export function setChannelRequestGate(fn: ChannelRequestGateFn): void {
   channelRequestGate = fn;
 }
 
-function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string } {
+function safeParseContent(raw: string): {
+  text?: string;
+  sender?: string;
+  senderId?: string;
+  replyTo?: { isReplyToBot?: boolean };
+} {
   try {
     return JSON.parse(raw);
   } catch {
@@ -203,6 +218,29 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   } else {
     mg = found.mg;
     agentCount = found.agentCount;
+  }
+
+  // 1a. Record this message into the per-messaging-group log so future agent
+  //     engagements can include it in their prepended context block. Done
+  //     before any agent fan-out so even chatter that triggers no agent is
+  //     captured. Best-effort: a write failure must not block routing.
+  try {
+    const parsedForLog = safeParseContent(event.message.content);
+    const hasAttachments =
+      Array.isArray((parsedForLog as { attachments?: unknown[] }).attachments) &&
+      ((parsedForLog as { attachments?: unknown[] }).attachments?.length ?? 0) > 0;
+    recordIncomingMessage({
+      messaging_group_id: mg.id,
+      thread_id: event.threadId,
+      source_id: event.message.id ?? null,
+      sender_name: parsedForLog.sender ?? null,
+      sender_id: parsedForLog.senderId ?? null,
+      text: parsedForLog.text ?? null,
+      has_attachments: hasAttachments ? 1 : 0,
+      ts: event.message.timestamp,
+    });
+  } catch (err) {
+    log.warn('Failed to record inbound message in log', { messagingGroupId: mg.id, err });
   }
 
   // 1b. No wirings — either silent drop (plain chatter / denied channel) or
@@ -269,6 +307,11 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   //    avoids the extra await).
   const parsed = safeParseContent(event.message.content);
   const messageText = parsed.text ?? '';
+  // "Addressed" = the bot was directly engaged: @mention / DM (isMention) or a
+  // reply to one of the bot's own messages. Pattern/mention wirings treat this
+  // as a trigger in addition to their regex.
+  const replyToBot = parsed.replyTo?.isReplyToBot === true;
+  const addressed = isMention || replyToBot;
 
   let engagedCount = 0;
   let accumulatedCount = 0;
@@ -278,7 +321,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const agentGroup = getAgentGroup(agent.agent_group_id);
     if (!agentGroup) continue;
 
-    const engages = evaluateEngage(agent, messageText, isMention, mg, event.threadId);
+    const engages = evaluateEngage(agent, messageText, addressed, mg, event.threadId);
 
     const accessOk = engages && (!accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed);
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
@@ -364,7 +407,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
 function evaluateEngage(
   agent: MessagingGroupAgent,
   text: string,
-  isMention: boolean,
+  addressed: boolean,
   mg: MessagingGroup,
   threadId: string | null,
 ): boolean {
@@ -372,6 +415,9 @@ function evaluateEngage(
     case 'pattern': {
       const pat = agent.engage_pattern ?? '.';
       if (pat === '.') return true;
+      // Engage when directly addressed (mention / DM / reply-to-bot) OR when
+      // the message text matches the wiring's pattern (e.g. the agent's name).
+      if (addressed) return true;
       try {
         return new RegExp(pat).test(text);
       } catch {
@@ -380,9 +426,9 @@ function evaluateEngage(
       }
     }
     case 'mention':
-      return isMention;
+      return addressed;
     case 'mention-sticky': {
-      if (isMention) return true;
+      if (addressed) return true;
       // Sticky follow-up: session already exists for this (agent, mg, thread)
       // — the thread was activated before, keep firing.
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
@@ -447,6 +493,42 @@ async function deliverToAgent(
     }
   }
 
+  // Context-messages prepend: only on trigger (wake). Reads the agent group's
+  // configured count, fetches unseen rows from messaging_group_messages
+  // (capped by the agent's own context_messages_max which is enforced at
+  // write time in the CLI), formats a block, and prepends to the message's
+  // text field. Advances the per-agent cursor to mark these rows as seen.
+  let finalContent = event.message.content;
+  if (wake) {
+    try {
+      const cfg = getContainerConfig(agent.agent_group_id);
+      const n = Math.min(cfg?.context_messages ?? 0, HARD_CAP);
+      if (n > 0) {
+        const threadKey = event.threadId ?? '';
+        const cursor = getAgentMessageCursor(agent.agent_group_id, mg.id, threadKey);
+        const lastSeenId = cursor?.last_seen_id ?? 0;
+        const triggerRow = event.message.id
+          ? findLogRowByPlatformId(mg.id, event.message.id, 'in')
+          : undefined;
+        const beforeId = triggerRow?.id ?? Number.MAX_SAFE_INTEGER;
+        const rows = fetchContextRows(mg.id, event.threadId, lastSeenId, beforeId, n);
+        if (rows.length > 0) {
+          const block = formatContextBlock(rows, agent.agent_group_id);
+          if (block) {
+            const parsed = safeParseContent(event.message.content);
+            const newText = parsed.text ? `${block}\n\n${parsed.text}` : block;
+            finalContent = JSON.stringify({ ...parsed, text: newText });
+          }
+        }
+        if (triggerRow) {
+          upsertAgentMessageCursor(agent.agent_group_id, mg.id, threadKey, triggerRow.id);
+        }
+      }
+    } catch (err) {
+      log.warn('Failed to build context block', { agentGroupId: agent.agent_group_id, err });
+    }
+  }
+
   writeSessionMessage(session.agent_group_id, session.id, {
     id: messageIdForAgent(event.message.id, agent.agent_group_id),
     kind: event.message.kind,
@@ -454,7 +536,7 @@ async function deliverToAgent(
     platformId: deliveryAddr.platformId,
     channelType: deliveryAddr.channelType,
     threadId: deliveryAddr.threadId,
-    content: event.message.content,
+    content: finalContent,
     trigger: wake ? 1 : 0,
   });
 

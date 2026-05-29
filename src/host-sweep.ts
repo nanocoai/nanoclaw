@@ -43,6 +43,7 @@ import {
   type ContainerState,
 } from './db/session-db.js';
 import { log } from './log.js';
+import { sweepRetention as sweepContextLogRetention } from './db/messaging-group-messages.js';
 import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
 import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
 import type { Session } from './types.js';
@@ -59,6 +60,7 @@ export function parseSqliteUtc(s: string): number {
 }
 
 const SWEEP_INTERVAL_MS = 60_000;
+const CONTEXT_LOG_RETENTION_SWEEP_MS = 60 * 60 * 1000; // hourly
 // Absolute idle ceiling for a running container. If the heartbeat file hasn't
 // been touched in this long, the container is either stuck or doing genuinely
 // nothing — kill and restart on the next inbound.
@@ -118,15 +120,26 @@ export function decideStuckAction(args: {
 }
 
 let running = false;
+let contextRetentionTimer: NodeJS.Timeout | null = null;
 
 export function startHostSweep(): void {
   if (running) return;
   running = true;
   sweep();
+  // Hourly retention sweep for the messaging_group_messages context log.
+  // Independent cadence from the main session sweep — cheap (one COUNT
+  // per group, one DELETE per group over cap), no need to run every minute.
+  if (!contextRetentionTimer) {
+    contextRetentionTimer = setInterval(sweepContextLogRetention, CONTEXT_LOG_RETENTION_SWEEP_MS);
+  }
 }
 
 export function stopHostSweep(): void {
   running = false;
+  if (contextRetentionTimer) {
+    clearInterval(contextRetentionTimer);
+    contextRetentionTimer = null;
+  }
 }
 
 async function sweep(): Promise<void> {

@@ -218,3 +218,80 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
     expect((resp as { ok: false; error: { code: string; message: string } }).error.message).toMatch(/not found/i);
   });
 });
+
+describe('groups CLI config update — context-messages flags', () => {
+  beforeEach(() => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    const db = initTestDb();
+    runMigrations(db);
+    createAgentGroup({ id: 'ag-cm', name: 'CM', folder: 'cm', agent_provider: null, created_at: now() });
+    // Seed a container_config row at the migration defaults (0/0).
+    getDb().prepare(`INSERT INTO container_configs (agent_group_id, updated_at) VALUES (?, ?)`).run('ag-cm', now());
+  });
+
+  afterEach(() => {
+    closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+  });
+
+  async function update(args: Record<string, unknown>) {
+    return dispatch({ id: 'r', command: 'groups-config-update', args: { id: 'ag-cm', ...args } }, { caller: 'host' });
+  }
+
+  it('accepts integer values for both flags when within cap', async () => {
+    // Raise max first then current — current must be <= max at final state.
+    const r1 = await update({ 'context-messages-max': 20 });
+    expect(r1.ok).toBe(true);
+    const r2 = await update({ 'context-messages': 15 });
+    expect(r2.ok).toBe(true);
+
+    const got = (r2 as { ok: true; data: Record<string, unknown> }).data;
+    expect(got.context_messages).toBe(15);
+    expect(got.context_messages_max).toBe(20);
+  });
+
+  it('accepts 0 (turns off)', async () => {
+    const r = await update({ 'context-messages': 0 });
+    expect(r.ok).toBe(true);
+    expect((r as { ok: true; data: Record<string, unknown> }).data.context_messages).toBe(0);
+  });
+
+  it('rejects a value exceeding the system hard cap of 50', async () => {
+    const r = await update({ 'context-messages': 51 });
+    expect(r.ok).toBe(false);
+    expect((r as { ok: false; error: { message: string } }).error.message).toMatch(/system cap/);
+  });
+
+  it('rejects a negative value', async () => {
+    const r = await update({ 'context-messages': -1 });
+    expect(r.ok).toBe(false);
+    expect((r as { ok: false; error: { message: string } }).error.message).toMatch(/integer >= 0/);
+  });
+
+  it('rejects a non-integer value', async () => {
+    const r = await update({ 'context-messages': 'abc' });
+    expect(r.ok).toBe(false);
+    expect((r as { ok: false; error: { message: string } }).error.message).toMatch(/integer >= 0/);
+  });
+
+  it('rejects context_messages > context_messages_max (consistency check)', async () => {
+    await update({ 'context-messages-max': 10 });
+    const r = await update({ 'context-messages': 15 });
+    expect(r.ok).toBe(false);
+    expect((r as { ok: false; error: { message: string } }).error.message).toMatch(/cannot exceed/);
+  });
+
+  it('accepts simultaneous update of both fields when consistent', async () => {
+    const r = await update({ 'context-messages': 20, 'context-messages-max': 25 });
+    expect(r.ok).toBe(true);
+    const got = (r as { ok: true; data: Record<string, unknown> }).data;
+    expect(got.context_messages).toBe(20);
+    expect(got.context_messages_max).toBe(25);
+  });
+
+  it('rejects simultaneous update where current > max', async () => {
+    const r = await update({ 'context-messages': 30, 'context-messages-max': 20 });
+    expect(r.ok).toBe(false);
+  });
+});

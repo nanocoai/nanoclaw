@@ -313,12 +313,63 @@ CREATE TABLE container_configs (
   packages_npm           TEXT NOT NULL DEFAULT '[]',
   additional_mounts      TEXT NOT NULL DEFAULT '[]',
   cli_scope              TEXT NOT NULL DEFAULT 'group',   -- disabled | group | global
+  context_messages       INTEGER NOT NULL DEFAULT 0,      -- 0 = off; N>0 = prepend last N unseen chatter messages on trigger
+  context_messages_max   INTEGER NOT NULL DEFAULT 0,      -- admin-only cap on context_messages (agent can self-tune up to this). System hard cap: 50.
   updated_at             TEXT NOT NULL
 );
 ```
 
-- **Readers:** `src/container-config.ts`, `src/container-runner.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/claude-md-compose.ts`
+- **Readers:** `src/container-config.ts`, `src/container-runner.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/claude-md-compose.ts`, `src/router.ts` (reads `context_messages` per trigger)
 - **Writers:** `src/db/container-configs.ts`, `src/modules/self-mod/apply.ts`, `src/backfill-container-configs.ts`
+
+Notes:
+- `context_messages` and `context_messages_max` are host-side fields read by the router; updates take effect on the next trigger with no container restart required (in contrast to the rest of `container_configs`).
+- New agent groups created post-migration default to `10`/`20` (set in `ensureContainerConfig`). Existing groups on an upgrading install fall through the column DEFAULT and stay `0`/`0` — backwards-compatible.
+
+### 1.16 `messaging_group_messages`
+
+Per-messaging-group append-only log of every observed message (chatter + bot replies). Drives the `context_messages` feature in `src/router.ts` — at engage time the router fetches the last N unseen rows from this table and prepends them to the trigger message as a `[Context — last N messages]` block.
+
+```sql
+CREATE TABLE messaging_group_messages (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  messaging_group_id  TEXT NOT NULL REFERENCES messaging_groups(id) ON DELETE CASCADE,
+  thread_id           TEXT,                 -- nullable on non-threaded platforms
+  direction           TEXT NOT NULL,        -- 'in' | 'out'
+  source_id           TEXT,                 -- platform msg id (in) or messages_out.id (out)
+  sender_name         TEXT,
+  sender_id           TEXT,
+  agent_group_id      TEXT REFERENCES agent_groups(id) ON DELETE SET NULL,  -- direction='out' origin
+  text                TEXT,                 -- capped at 500 chars at insert time
+  has_attachments     INTEGER NOT NULL DEFAULT 0,
+  ts                  TEXT NOT NULL,
+  UNIQUE(messaging_group_id, source_id, direction)
+);
+CREATE INDEX idx_mgm_lookup    ON messaging_group_messages(messaging_group_id, thread_id, id);
+CREATE INDEX idx_mgm_retention ON messaging_group_messages(messaging_group_id, id);
+```
+
+- **Writers:** `src/router.ts` (inbound, before agent fan-out so non-triggered chatter is captured too); `src/delivery.ts` (outbound, after successful platform delivery).
+- **Readers:** `src/router.ts` (in `deliverToAgent`, when the agent is being woken with `context_messages > 0`).
+- **Retention:** swept hourly by `src/host-sweep.ts`. Per-group cap = `RETENTION_PER_GROUP` (5000 rows), enforced by `sweepRetention()` in `src/db/messaging-group-messages.ts`.
+
+### 1.17 `agent_group_message_cursors`
+
+Per-`(agent_group, messaging_group, thread)` high-water mark into `messaging_group_messages.id`. Each trigger advances the cursor to the trigger row's id; the next trigger only fetches rows with `id > last_seen_id`.
+
+```sql
+CREATE TABLE agent_group_message_cursors (
+  agent_group_id      TEXT NOT NULL REFERENCES agent_groups(id) ON DELETE CASCADE,
+  messaging_group_id  TEXT NOT NULL REFERENCES messaging_groups(id) ON DELETE CASCADE,
+  thread_id           TEXT NOT NULL DEFAULT '',  -- '' sentinel since PK uniqueness treats NULLs as distinct
+  last_seen_id        INTEGER NOT NULL,
+  updated_at          TEXT NOT NULL,
+  PRIMARY KEY (agent_group_id, messaging_group_id, thread_id)
+);
+```
+
+- **Readers + Writers:** `src/db/messaging-group-messages.ts` only (`getAgentMessageCursor` / `upsertAgentMessageCursor`).
+- The upsert clause is `WHERE excluded.last_seen_id > last_seen_id`, so cursors never regress.
 
 ---
 
@@ -341,6 +392,7 @@ Migrations live in `src/db/migrations/`, one file per migration. Runner: `runMig
 | 009 | `009-drop-pending-credentials.ts` | Drop the defunct `pending_credentials` table |
 | 014 | `014-container-configs.ts` | `container_configs` — per-agent-group container runtime config |
 | 015 | `015-cli-scope.ts` | `ALTER TABLE container_configs ADD COLUMN cli_scope` |
+| 016 | `016-context-messages.ts` | `ALTER TABLE container_configs ADD COLUMN context_messages`, `context_messages_max`; `CREATE TABLE messaging_group_messages` + indexes + `UNIQUE(mg, source_id, direction)`; `CREATE TABLE agent_group_message_cursors` |
 
 Numbers 005 and 006 are intentionally absent — migrations were renumbered during early development.
 

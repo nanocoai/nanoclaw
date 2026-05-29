@@ -9,6 +9,7 @@ import {
   updateContainerConfigScalars,
   updateContainerConfigJson,
 } from '../../db/container-configs.js';
+import { HARD_CAP as CONTEXT_HARD_CAP } from '../../db/messaging-group-messages.js';
 import type { ContainerConfigRow } from '../../types.js';
 import { registerResource } from '../crud.js';
 
@@ -28,6 +29,8 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     packages_npm: JSON.parse(row.packages_npm),
     additional_mounts: JSON.parse(row.additional_mounts),
     cli_scope: row.cli_scope,
+    context_messages: row.context_messages,
+    context_messages_max: row.context_messages_max,
     updated_at: row.updated_at,
   };
 }
@@ -212,8 +215,13 @@ registerResource({
     'config update': {
       access: 'approval',
       description:
-        'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',
+        'Update container config scalar fields. Most changes are saved but do NOT take effect until you run `ncl groups restart` ' +
+        '(exceptions: --context-messages and --context-messages-max are read by the host router, take effect immediately). ' +
+        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, ' +
+        '--cli-scope, --context-messages, --context-messages-max. ' +
+        '--context-messages = N most-recent unseen messages from the same chat prepended to each trigger (0 = off). ' +
+        '--context-messages-max = admin-only cap; the agent itself may self-tune --context-messages up to this value. ' +
+        `Hard system cap on either: ${CONTEXT_HARD_CAP}.`,
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -223,7 +231,15 @@ registerResource({
         const updates: Partial<
           Pick<
             ContainerConfigRow,
-            'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope'
+            | 'provider'
+            | 'model'
+            | 'effort'
+            | 'image_tag'
+            | 'assistant_name'
+            | 'max_messages_per_prompt'
+            | 'cli_scope'
+            | 'context_messages'
+            | 'context_messages_max'
           >
         > = {};
         if (args.provider !== undefined) updates.provider = args.provider as string;
@@ -240,10 +256,44 @@ registerResource({
           }
           updates.cli_scope = scope;
         }
+        if (args['context-messages'] !== undefined || args.context_messages !== undefined) {
+          const raw = args['context-messages'] ?? args.context_messages;
+          const n = Number(raw);
+          if (!Number.isInteger(n) || n < 0) {
+            throw new Error('--context-messages must be an integer >= 0');
+          }
+          if (n > CONTEXT_HARD_CAP) {
+            throw new Error(`--context-messages cannot exceed system cap ${CONTEXT_HARD_CAP} (got ${n})`);
+          }
+          updates.context_messages = n;
+        }
+        if (args['context-messages-max'] !== undefined || args.context_messages_max !== undefined) {
+          const raw = args['context-messages-max'] ?? args.context_messages_max;
+          const n = Number(raw);
+          if (!Number.isInteger(n) || n < 0) {
+            throw new Error('--context-messages-max must be an integer >= 0');
+          }
+          if (n > CONTEXT_HARD_CAP) {
+            throw new Error(`--context-messages-max cannot exceed system cap ${CONTEXT_HARD_CAP} (got ${n})`);
+          }
+          updates.context_messages_max = n;
+        }
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --context-messages, --context-messages-max',
+          );
+        }
+
+        // Enforce context_messages <= context_messages_max once we know the
+        // *final* state of both fields (whether each came from this update or
+        // is pre-existing on the row).
+        const finalCurrent = updates.context_messages ?? row.context_messages;
+        const finalMax = updates.context_messages_max ?? row.context_messages_max;
+        if (finalCurrent > finalMax) {
+          throw new Error(
+            `--context-messages (${finalCurrent}) cannot exceed --context-messages-max (${finalMax}). ` +
+              'Raise the max first, or lower the current value in the same call.',
           );
         }
 

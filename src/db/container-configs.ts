@@ -9,6 +9,8 @@ const SCALAR_COLUMNS = new Set([
   'assistant_name',
   'max_messages_per_prompt',
   'cli_scope',
+  'context_messages',
+  'context_messages_max',
 ]);
 const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages_npm', 'additional_mounts']);
 
@@ -29,24 +31,39 @@ export function createContainerConfig(config: ContainerConfigRow): void {
       `INSERT INTO container_configs (
         agent_group_id, provider, model, effort, image_tag, assistant_name,
         max_messages_per_prompt, skills, mcp_servers, packages_apt, packages_npm,
-        additional_mounts, updated_at
+        additional_mounts, cli_scope, context_messages, context_messages_max, updated_at
       ) VALUES (
         @agent_group_id, @provider, @model, @effort, @image_tag, @assistant_name,
         @max_messages_per_prompt, @skills, @mcp_servers, @packages_apt, @packages_npm,
-        @additional_mounts, @updated_at
+        @additional_mounts, @cli_scope, @context_messages, @context_messages_max, @updated_at
       )`,
     )
     .run(config);
 }
 
+/**
+ * Default context-message settings for newly-created agent groups. Existing
+ * rows on an upgrading install fall through the migration's column DEFAULT
+ * (0/0) and are unaffected. New groups created post-migration get these
+ * values so group chats work usefully out of the box.
+ */
+export const DEFAULT_NEW_GROUP_CONTEXT_MESSAGES = 10;
+export const DEFAULT_NEW_GROUP_CONTEXT_MESSAGES_MAX = 20;
+
 /** Create an empty config row with sensible defaults. Idempotent — no-ops if row exists. */
 export function ensureContainerConfig(agentGroupId: string): void {
   getDb()
     .prepare(
-      `INSERT OR IGNORE INTO container_configs (agent_group_id, updated_at)
-       VALUES (?, ?)`,
+      `INSERT OR IGNORE INTO container_configs
+         (agent_group_id, context_messages, context_messages_max, updated_at)
+       VALUES (?, ?, ?, ?)`,
     )
-    .run(agentGroupId, new Date().toISOString());
+    .run(
+      agentGroupId,
+      DEFAULT_NEW_GROUP_CONTEXT_MESSAGES,
+      DEFAULT_NEW_GROUP_CONTEXT_MESSAGES_MAX,
+      new Date().toISOString(),
+    );
 }
 
 /** Update scalar fields on a config row. Only touches fields present in `updates`. */
@@ -55,7 +72,15 @@ export function updateContainerConfigScalars(
   updates: Partial<
     Pick<
       ContainerConfigRow,
-      'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope'
+      | 'provider'
+      | 'model'
+      | 'effort'
+      | 'image_tag'
+      | 'assistant_name'
+      | 'max_messages_per_prompt'
+      | 'cli_scope'
+      | 'context_messages'
+      | 'context_messages_max'
     >
   >,
 ): void {

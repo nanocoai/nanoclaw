@@ -12,6 +12,7 @@ import type Database from 'better-sqlite3';
 import { getRunningSessions, getActiveSessions, createPendingQuestion } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
+import { recordOutgoingMessage } from './db/messaging-group-messages.js';
 import { getMessagingGroupByPlatform } from './db/messaging-groups.js';
 import {
   getDueOutboundMessages,
@@ -368,6 +369,26 @@ async function deliverMessage(
     platformMsgId,
     fileCount: files?.length,
   });
+
+  // Best-effort: record this outbound turn in the per-messaging-group log so
+  // future agent triggers can include it in their prepended context block
+  // labeled `[bot]` or `[bot:Name]`.
+  try {
+    const mg = getMessagingGroupByPlatform(msg.channel_type, msg.platform_id);
+    if (mg) {
+      recordOutgoingMessage({
+        messaging_group_id: mg.id,
+        thread_id: msg.thread_id,
+        source_id: msg.id,
+        agent_group_id: session.agent_group_id,
+        text: typeof content.text === 'string' ? content.text : null,
+        has_attachments: Array.isArray(content.files) && content.files.length > 0 ? 1 : 0,
+        ts: new Date().toISOString(),
+      });
+    }
+  } catch (err) {
+    log.warn('Failed to record outbound message in log', { id: msg.id, err });
+  }
 
   clearOutbox(session.agent_group_id, session.id, msg.id);
 

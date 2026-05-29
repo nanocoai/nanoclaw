@@ -25,6 +25,15 @@ export interface ContainerConfigRow {
   packages_npm: string; // JSON: string[]
   additional_mounts: string; // JSON: AdditionalMountConfig[]
   cli_scope: string; // 'disabled' | 'group' | 'global'
+  /** N most-recent unseen messages from the same channel prepended to each
+   *  trigger. 0 = off (default for backwards compat on upgrade). The agent
+   *  itself may tune this up to context_messages_max from inside the container
+   *  via `ncl groups config update --context-messages`. */
+  context_messages: number;
+  /** Admin-only cap on context_messages. The agent can self-tune up to this
+   *  value but not above. 0 means "no agent self-tuning allowed; only admin
+   *  can set context_messages". Hard system cap: 50. */
+  context_messages_max: number;
   updated_at: string;
 }
 
