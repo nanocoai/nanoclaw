@@ -294,7 +294,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           log.warn('Failed to update card after action', { err });
         }
 
-        setupConfig.onAction(questionId, selectedOption, userId);
+        const threadId = event.threadId;
+        const channelId = adapter.channelIdFromThreadId(threadId);
+        setupConfig.onAction(questionId, selectedOption, userId, channelId, threadId);
       });
 
       await chat.initialize();
@@ -661,7 +663,9 @@ async function handleForwardedEvent(
 
       // Dispatch to host
       if (questionId && selectedOption) {
-        setupConfig.onAction(questionId, selectedOption, user?.id || '');
+        const threadId = (interaction.channel_id as string | undefined) ?? '';
+        const channelId = threadId ? adapter.channelIdFromThreadId(threadId) : '';
+        setupConfig.onAction(questionId, selectedOption, user?.id || '', channelId, threadId || null);
       }
       return;
     }

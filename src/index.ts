@@ -123,17 +123,14 @@ async function main(): Promise<void> {
           isGroup,
         });
       },
-      onAction(questionId, selectedOption, userId) {
+      onAction(questionId, selectedOption, userId, platformId, threadId) {
         dispatchResponse({
           questionId,
           value: selectedOption,
           userId,
           channelType: adapter.channelType,
-          // platformId/threadId aren't surfaced by the current onAction
-          // signature — registered handlers look them up from the
-          // pending_question / pending_approval row.
-          platformId: '',
-          threadId: null,
+          platformId,
+          threadId,
         }).catch((err) => {
           log.error('Failed to handle question response', { questionId, err });
         });
