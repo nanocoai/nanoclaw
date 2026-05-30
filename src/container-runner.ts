@@ -274,24 +274,28 @@ function buildMounts(
   // Agent group folder at /workspace/agent (RW for working files + CLAUDE.local.md)
   mounts.push({ hostPath: groupDir, containerPath: '/workspace/agent', readonly: false });
 
-  // container.json — nested RO mount on top of RW group dir so the agent
-  // can read its config but cannot modify it.
-  const containerJsonPath = path.join(groupDir, 'container.json');
-  if (fs.existsSync(containerJsonPath)) {
-    mounts.push({ hostPath: containerJsonPath, containerPath: '/workspace/agent/container.json', readonly: true });
-  }
-
-  // Composer-managed CLAUDE.md artifacts — nested RO mounts. These are
-  // regenerated from the shared base + fragments on every spawn; any
-  // agent-side writes would be clobbered, so enforce read-only. Only
-  // CLAUDE.local.md (per-group memory) remains RW via the group-dir mount.
-  // `.claude-shared.md` is a symlink whose target (`/app/CLAUDE.md`) is
-  // already RO-mounted, so writes through it fail regardless — no need for
-  // a nested mount there.
-  const composedClaudeMd = path.join(groupDir, 'CLAUDE.md');
-  if (fs.existsSync(composedClaudeMd)) {
-    mounts.push({ hostPath: composedClaudeMd, containerPath: '/workspace/agent/CLAUDE.md', readonly: true });
-  }
+  // NOTE (local fix 2026-05-30): The "nested RO file mount on top of RW group
+  // dir" pattern below was originally used to expose container.json and
+  // CLAUDE.md as read-only. On Apple Container runtime the file-level bind
+  // mounts produce inodes that cannot be read (EACCES even as root),
+  // effectively hiding the file. The directory mount at line 275 already
+  // exposes both files inside the container — we just lose the read-only
+  // guarantee. That's acceptable because:
+  //   - container.json is re-materialized from the central DB on every
+  //     spawn, so any agent writes get clobbered.
+  //   - CLAUDE.md is recomposed from CLAUDE.local.md + skill fragments on
+  //     every spawn for the same reason.
+  // If/when Apple Container fixes file-mount semantics (or v2 detects the
+  // runtime and only skips this on Apple Container), restore the mounts.
+  //
+  // const containerJsonPath = path.join(groupDir, 'container.json');
+  // if (fs.existsSync(containerJsonPath)) {
+  //   mounts.push({ hostPath: containerJsonPath, containerPath: '/workspace/agent/container.json', readonly: true });
+  // }
+  // const composedClaudeMd = path.join(groupDir, 'CLAUDE.md');
+  // if (fs.existsSync(composedClaudeMd)) {
+  //   mounts.push({ hostPath: composedClaudeMd, containerPath: '/workspace/agent/CLAUDE.md', readonly: true });
+  // }
   const fragmentsDir = path.join(groupDir, '.claude-fragments');
   if (fs.existsSync(fragmentsDir)) {
     mounts.push({ hostPath: fragmentsDir, containerPath: '/workspace/agent/.claude-fragments', readonly: true });
