@@ -75,7 +75,7 @@ Stop and wait for the user to confirm before continuing.
 
 ### Remote Mode (Photon API)
 
-1. Set up a [Photon](https://photon.im) account
+1. Set up a [Photon](https://photon.codes) account
 2. Get your server URL and API key
 
 ### Configure environment

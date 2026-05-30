@@ -247,7 +247,7 @@ async function collectRemoteCreds(): Promise<RemoteCreds> {
       "Photon is a separate service that owns an iMessage account and",
       "exposes it over HTTP. NanoClaw will talk to it via its API.",
       '',
-      '  1. Set up a Photon server: https://photon.im',
+      '  1. Set up a Photon server: https://photon.codes',
       '  2. Copy the server URL and API key from your Photon dashboard',
     ].join('\n'),
     'Remote iMessage via Photon',

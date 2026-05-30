@@ -51,14 +51,43 @@ describe('context timezone header', () => {
     expect(result).toContain(`<context timezone="${TIMEZONE}"`);
   });
 
-  it('header comes before the <messages> block', () => {
+  it('header comes before the first <message> block when multiple are present', () => {
     insertMessage('m1', 'chat', { sender: 'Alice', text: 'one' });
     insertMessage('m2', 'chat', { sender: 'Bob', text: 'two' });
     const result = formatMessages(getPendingMessages());
     const ctxIdx = result.indexOf('<context');
-    const msgsIdx = result.indexOf('<messages>');
+    const firstMsgIdx = result.indexOf('<message ');
     expect(ctxIdx).toBeGreaterThanOrEqual(0);
-    expect(msgsIdx).toBeGreaterThan(ctxIdx);
+    expect(firstMsgIdx).toBeGreaterThan(ctxIdx);
+  });
+});
+
+describe('multi-message chat batches', () => {
+  // Regression guard for #2555: an outer `<messages>` envelope around
+  // multiple chat messages caused the Claude Agent SDK to emit a synthetic
+  // `No response requested.` stub instead of calling the API. Each
+  // `<message>` block is self-contained; concatenating them is enough.
+  it('does NOT wrap multiple chat messages in an outer <messages> envelope', () => {
+    insertMessage('m1', 'chat', { sender: 'Alice', text: 'one' });
+    insertMessage('m2', 'chat', { sender: 'Bob', text: 'two' });
+    const result = formatMessages(getPendingMessages());
+    expect(result).not.toContain('<messages>');
+    expect(result).not.toContain('</messages>');
+  });
+
+  it('emits one <message> block per inbound row, in order', () => {
+    insertMessage('m1', 'chat', { sender: 'Alice', text: 'first' });
+    insertMessage('m2', 'chat', { sender: 'Bob', text: 'second' });
+    insertMessage('m3', 'chat', { sender: 'Carol', text: 'third' });
+    const result = formatMessages(getPendingMessages());
+    const matches = result.match(/<message [^>]*>/g) ?? [];
+    expect(matches.length).toBe(3);
+    const firstIdx = result.indexOf('first');
+    const secondIdx = result.indexOf('second');
+    const thirdIdx = result.indexOf('third');
+    expect(firstIdx).toBeGreaterThan(0);
+    expect(secondIdx).toBeGreaterThan(firstIdx);
+    expect(thirdIdx).toBeGreaterThan(secondIdx);
   });
 });
 
