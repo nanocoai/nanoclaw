@@ -14,8 +14,10 @@ if [ ! -f "$BINDING" ]; then
   echo "[start.sh] restored."
 fi
 
-# Credential Proxy（cli-proxy-api）— interactive 模式用 OAuth 凭证走订阅配额
-export CREDENTIAL_PROXY_URL="http://localhost:8317"
-export CREDENTIAL_PROXY_API_KEY="oc-dog-666"
+# Credential Proxy（cli-proxy-api，已废弃）已停用：interactive 模式改走 OneCLI 上游（HTTPS_PROXY → 10255），
+# OneCLI 支持 opus-4-8 等新模型，cli-proxy-api(8317) 的 provider 映射不认 4.8。
+# 如需恢复 cli-proxy-api，取消下面两行注释即可。
+# export CREDENTIAL_PROXY_URL="http://localhost:8317"
+# export CREDENTIAL_PROXY_API_KEY="oc-dog-666"
 
 exec "$NODE" "$DIR/dist/index.js"

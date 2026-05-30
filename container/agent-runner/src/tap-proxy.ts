@@ -21,6 +21,7 @@ import net from 'net';
 import tls from 'tls';
 import { EventEmitter } from 'events';
 import { URL } from 'url';
+import { StringDecoder } from 'string_decoder';
 import {
   parseSseLines,
   parseSseEvent,
@@ -357,17 +358,19 @@ export class TapProxy extends EventEmitter {
     port: number,
     sessionToken: string,
   ): void {
-    let requestBuffer = '';
+    // 使用 Buffer 收集 body，避免 chunk.toString() 截断多字节 UTF-8 字符
+    let headerBuffer = Buffer.alloc(0);
     let inBody = false;
     let contentLength = 0;
     let bodyReceived = 0;
     let currentMethod = '';
     let currentPath = '';
     let currentHeaders: Record<string, string> = {};
-    let bodyParts: string[] = [];
+    let bodyParts: Buffer[] = [];
+    const CRLFCRLF = Buffer.from('\r\n\r\n');
 
     const resetRequest = () => {
-      requestBuffer = '';
+      headerBuffer = Buffer.alloc(0);
       inBody = false;
       contentLength = 0;
       bodyReceived = 0;
@@ -378,17 +381,15 @@ export class TapProxy extends EventEmitter {
     };
 
     tlsSocket.on('data', (chunk: Buffer) => {
-      const data = chunk.toString();
-
       if (!inBody) {
-        requestBuffer += data;
+        headerBuffer = Buffer.concat([headerBuffer, chunk]);
 
-        // 检查是否收到完整 header
-        const headerEnd = requestBuffer.indexOf('\r\n\r\n');
+        // 在原始 Buffer 中查找 header 边界
+        const headerEnd = headerBuffer.indexOf(CRLFCRLF);
         if (headerEnd === -1) return;
 
-        // 解析 header
-        const headerStr = requestBuffer.slice(0, headerEnd);
+        // 解析 header（HTTP header 是 ASCII，string 转换安全）
+        const headerStr = headerBuffer.subarray(0, headerEnd).toString('ascii');
         const lines = headerStr.split('\r\n');
         const [method, path] = (lines[0] || '').split(' ');
         currentMethod = method || '';
@@ -406,20 +407,21 @@ export class TapProxy extends EventEmitter {
         contentLength = parseInt(currentHeaders['content-length'] || '0');
         inBody = true;
 
-        // 剩余数据作为 body 的一部分
-        const bodyStart = requestBuffer.slice(headerEnd + 4);
+        // 剩余数据作为 body 的一部分（保持 Buffer，不做 string 转换）
+        const bodyStart = headerBuffer.subarray(headerEnd + 4);
         if (bodyStart.length > 0) {
-          bodyParts.push(bodyStart);
-          bodyReceived += Buffer.byteLength(bodyStart);
+          bodyParts.push(Buffer.from(bodyStart));
+          bodyReceived += bodyStart.length;
         }
       } else {
-        bodyParts.push(data);
-        bodyReceived += Buffer.byteLength(data);
+        bodyParts.push(chunk);
+        bodyReceived += chunk.length;
       }
 
       // body 收完了，转发请求
+      // 此时 Buffer.concat 再 toString('utf-8') 一次性转换，不会截断多字节字符
       if (inBody && (bodyReceived >= contentLength || contentLength === 0)) {
-        const body = bodyParts.join('');
+        const body = Buffer.concat(bodyParts).toString('utf-8');
         this.forwardAndIntercept(
           tlsSocket, hostname, port, sessionToken,
           currentMethod, currentPath, currentHeaders, body,
@@ -493,7 +495,9 @@ export class TapProxy extends EventEmitter {
     for (const [k, v] of Object.entries(headers)) {
       const lk = k.toLowerCase();
       // 跳过 CLI 自带的 auth header、proxy header 和 content-length（需重新计算）
+      // 当拦截 SSE 时也跳过 accept-encoding，避免压缩数据无法解析
       if (lk === 'x-api-key' || lk === 'authorization' || lk === 'proxy-authorization' || lk === 'content-length') continue;
+      if (lk === 'accept-encoding' && subscription) continue;
       reqHeaders[k] = v;
     }
     reqHeaders['x-api-key'] = proxy.apiKey;
@@ -681,6 +685,16 @@ export class TapProxy extends EventEmitter {
         delete reqHeaders['proxy-authorization'];
         reqHeaders['host'] = hostname;
 
+        // 当需要拦截 SSE 响应时，移除 accept-encoding 让 API 返回明文
+        // 否则 gzip 压缩数据无法作为 SSE 文本解析
+        if (subscription) {
+          for (const k of Object.keys(reqHeaders)) {
+            if (k.toLowerCase() === 'accept-encoding') {
+              delete reqHeaders[k];
+            }
+          }
+        }
+
         let reqStr = `${method} ${path} HTTP/1.1\r\n`;
         for (const [k, v] of Object.entries(reqHeaders)) {
           reqStr += `${k}: ${v}\r\n`;
@@ -724,13 +738,16 @@ export class TapProxy extends EventEmitter {
     subscription: TapSubscription | null,
   ): void {
     let headerDone = false;
-    let headerBuffer = '';
+    let headerRawBuf = Buffer.alloc(0);
     let isSSE = false;
     let sseLineBuffer = '';
     let currentSseBlock: string[] = [];
+    // StringDecoder 会缓存不完整的多字节 UTF-8 序列，等下一个 chunk 补齐后再输出
+    // 避免 chunk.toString() 在字符边界处截断导致乱码，进而破坏 SSE 解析
+    const decoder = new StringDecoder('utf-8');
 
     upstream.on('data', (chunk: Buffer) => {
-      // 始终透传给客户端
+      // 始终透传给客户端（原始 Buffer，不经过解码）
       try {
         client.write(chunk);
       } catch {
@@ -739,23 +756,23 @@ export class TapProxy extends EventEmitter {
 
       if (!subscription) return;
 
-      const data = chunk.toString();
-
       if (!headerDone) {
-        headerBuffer += data;
-        const headerEnd = headerBuffer.indexOf('\r\n\r\n');
+        headerRawBuf = Buffer.concat([headerRawBuf, chunk]);
+        const CRLFCRLF = Buffer.from('\r\n\r\n');
+        const headerEnd = headerRawBuf.indexOf(CRLFCRLF);
         if (headerEnd === -1) return;
 
-        // 检查是否是 SSE 响应
-        const headerStr = headerBuffer.slice(0, headerEnd).toLowerCase();
+        // HTTP 响应头是 ASCII，直接 toString 安全
+        const headerStr = headerRawBuf.subarray(0, headerEnd).toString('ascii').toLowerCase();
         isSSE = headerStr.includes('text/event-stream');
         headerDone = true;
 
         if (!isSSE) return;
 
-        // 剩余数据作为 SSE 内容（直接调用 processSseChunk 并更新闭包状态）
-        const sseData = headerBuffer.slice(headerEnd + 4);
-        if (sseData) {
+        // 剩余数据作为 SSE 内容，通过 StringDecoder 安全解码
+        const sseRaw = headerRawBuf.subarray(headerEnd + 4);
+        if (sseRaw.length > 0) {
+          const sseData = decoder.write(sseRaw);
           const result = this.processSseChunk(sseData, sseLineBuffer, currentSseBlock, subscription);
           sseLineBuffer = result.lineBuffer;
           currentSseBlock = result.block;
@@ -765,10 +782,13 @@ export class TapProxy extends EventEmitter {
 
       if (!isSSE) return;
 
-      // 处理 SSE 数据
-      const result = this.processSseChunk(data, sseLineBuffer, currentSseBlock, subscription);
-      sseLineBuffer = result.lineBuffer;
-      currentSseBlock = result.block;
+      // 通过 StringDecoder 安全解码，处理跨 chunk 的多字节字符
+      const data = decoder.write(chunk);
+      if (data) {
+        const result = this.processSseChunk(data, sseLineBuffer, currentSseBlock, subscription);
+        sseLineBuffer = result.lineBuffer;
+        currentSseBlock = result.block;
+      }
     });
 
     upstream.on('end', () => {
@@ -777,7 +797,14 @@ export class TapProxy extends EventEmitter {
       } catch { /* ignore */ }
 
       if (subscription) {
-        // 处理残留数据
+        // flush StringDecoder 残留的不完整字符
+        const remaining = decoder.end();
+        if (remaining && isSSE) {
+          const result = this.processSseChunk(remaining, sseLineBuffer, currentSseBlock, subscription);
+          sseLineBuffer = result.lineBuffer;
+          currentSseBlock = result.block;
+        }
+        // 处理残留的 SSE block
         if (currentSseBlock.length > 0) {
           const parsed = parseSseLines(currentSseBlock);
           if (parsed) {
@@ -790,6 +817,7 @@ export class TapProxy extends EventEmitter {
     });
 
     upstream.on('error', (err) => {
+      this.log(`[tap-proxy] upstream response error: ${err.message}`);
       if (subscription) {
         subscription.onError(err);
       }
@@ -807,7 +835,6 @@ export class TapProxy extends EventEmitter {
     lineBuffer += data;
     const lines = lineBuffer.split('\n');
     lineBuffer = lines.pop() || ''; // 最后一行可能不完整
-
     for (const line of lines) {
       const trimmed = line.replace(/\r$/, '');
 

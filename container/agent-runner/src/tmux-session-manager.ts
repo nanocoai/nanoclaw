@@ -28,12 +28,15 @@ export function shellQuote(s: string): string {
 }
 
 /**
- * 生成 tmux session 名称
- * 格式：nanoclaw-<chatJid 前 8 位>-<时间戳>
+ * 生成 tmux session 名称（与群绑定的固定名，不含时间戳）
+ *
+ * 用 chatJid 清洗后的完整标识做名字，保证同一个群每次都拿到同一个 session 名，
+ * 便于跨进程/重启复用已存在的 tmux session（见 getOrCreate）。
+ * 格式：nanoclaw-<chatJid 去掉非字母数字后的完整串>
  */
 export function buildTmuxSessionName(chatJid: string): string {
-  const prefix = chatJid.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8) || 'unknown';
-  return `nanoclaw-${prefix}-${Date.now()}`;
+  const id = chatJid.replace(/[^a-zA-Z0-9]/g, '') || 'unknown';
+  return `nanoclaw-${id}`;
 }
 
 /**
@@ -141,7 +144,10 @@ export class TmuxSessionManager {
 
   /** 获取或创建 tmux session */
   async getOrCreate(config: TmuxSessionConfig): Promise<TmuxSession> {
-    // 检查是否已有该 chatJid 的活跃 session
+    // session 名是与群绑定的固定名，进程重启后仍能算出同一个名字
+    const sessionName = buildTmuxSessionName(config.chatJid);
+
+    // 1) 内存 Map 命中且存活 → 直接复用
     const existing = this.sessions.get(config.chatJid);
     if (existing) {
       const alive = await this.isAlive(existing.name);
@@ -152,23 +158,40 @@ export class TmuxSessionManager {
       this.sessions.delete(config.chatJid);
     }
 
-    // 创建新 session
-    const sessionName = buildTmuxSessionName(config.chatJid);
+    // 2) 内存 miss（如主进程刚重启），但 tmux 里固定名 session 还活着
+    //    此时 session 里的 claude 进程 env（HTTPS_PROXY 端口、API key 等）可能已过期，
+    //    因为每次 agent-runner 启动会创建新 TapProxy（随机端口）。
+    //    必须 kill 旧 session 并创建新的，否则 CLI 永远指向已死的旧代理端口。
+    if (await this.isAlive(sessionName)) {
+      this.log(`[tmux] found stale session ${sessionName} from previous process, killing to recreate with fresh env`);
+      try {
+        await this.exec('tmux', ['kill-session', '-t', sessionName]);
+      } catch { /* ignore if already dead */ }
+    }
+
+    // 3) 都没有 → 创建新 session
 
     // 构建 claude 启动命令（单引号包裹防止 shell 元字符展开）
     const claudeCmd = ['claude', ...config.cliArgs].map(arg =>
       shellQuote(arg)
     ).join(' ');
 
-    // 构建环境变量导出命令（单引号包裹值防止注入）
+    // 构建环境变量命令：
+    // - undefined 值 → unset（覆盖父进程继承的环境变量）
+    // - 有值 → export（单引号包裹值防止注入）
+    const envUnsets = Object.entries(config.env)
+      .filter(([, v]) => v === undefined)
+      .map(([k]) => `unset ${k}`)
+      .join('; ');
     const envExports = Object.entries(config.env)
       .filter(([, v]) => v !== undefined)
       .map(([k, v]) => `export ${k}=${shellQuote(String(v))}`)
       .join('; ');
+    const envSetup = [envUnsets, envExports].filter(Boolean).join('; ');
 
     // 用 script 捕获终端输出（保留 pty），方便诊断 CLI 退出原因
     const diagLog = `/tmp/nanoclaw-cli-diag-${Date.now()}.log`;
-    const shellCmd = `${envExports}; cd "${config.cwd}" && script -q ${diagLog} ${claudeCmd}`;
+    const shellCmd = `${envSetup}; cd "${config.cwd}" && script -q ${diagLog} ${claudeCmd}`;
     this.log(`[tmux] diag log: ${diagLog}`);
 
     const args = buildTmuxCommand('new-session', sessionName, [shellCmd]);

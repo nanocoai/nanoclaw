@@ -177,15 +177,26 @@ export async function runInteractiveQuery(
     DISABLE_TELEMETRY: '1',
   };
   // 清除 Agent SDK 标识（interactive 模式不走 SDK）
-  delete cliEnv.CLAUDE_AGENT_SDK_CLIENT_APP;
-  delete cliEnv.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
+  // 注意：必须用 = undefined 而非 delete，这样 key 仍保留在 Object.entries 中，
+  // tmux-session-manager 才能生成 unset 命令来覆盖父进程继承的环境变量。
+  cliEnv.CLAUDE_AGENT_SDK_CLIENT_APP = undefined;
+  cliEnv.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = undefined;
   if (config.credentialProxy) {
     // credential proxy 模式：设置占位 API key 让 CLI 进入 "API key" 认证模式并发起请求，
     // TapProxy MITM 会拦截并替换为 credential proxy 的真实 key
     cliEnv.ANTHROPIC_API_KEY = 'sk-ant-placeholder-for-credential-proxy';
+  } else if (config.upstreamProxy) {
+    // OneCLI 代理模式：CLI 必须走 OAuth Bearer token 模式（不是 API key 模式），
+    // 因为 OneCLI MITM 只替换 Authorization: Bearer header，不替换 x-api-key header。
+    // 用 ANTHROPIC_AUTH_TOKEN（而非 CLAUDE_CODE_OAUTH_TOKEN）传占位 Bearer token：
+    // - CLAUDE_CODE_OAUTH_TOKEN 会做 JWT 格式校验，占位值过不了 → "Not logged in"
+    // - ANTHROPIC_AUTH_TOKEN 直接设置 Authorization: Bearer header，无格式校验
+    cliEnv.ANTHROPIC_API_KEY = undefined;
+    cliEnv.CLAUDE_CODE_OAUTH_TOKEN = undefined;
+    cliEnv.ANTHROPIC_AUTH_TOKEN = 'placeholder_for_proxy_injection';
   } else {
-    // 非 credential proxy 模式：删除 API key，CLI 走 OAuth token（Keychain）
-    delete cliEnv.ANTHROPIC_API_KEY;
+    // 无代理模式：删除 API key，CLI 走 OAuth token（Keychain）
+    cliEnv.ANTHROPIC_API_KEY = undefined;
   }
 
   // 获取或创建 tmux session
