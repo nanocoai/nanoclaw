@@ -55,7 +55,7 @@ export interface InteractiveCliConfig {
   timeoutMs?: number;
 }
 
-const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 分钟
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 分钟（Opus 4.8 extended thinking 可达 10+ 分钟）
 
 // ---- 全局单例 ----
 
