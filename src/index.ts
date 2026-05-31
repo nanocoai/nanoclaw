@@ -591,6 +591,29 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       }
 
       if (result.status === 'success') {
+        // thinking-only 空结果检测与自动重试：
+        // 模型偶尔会只产出 thinking tokens（extended thinking）但没有 text 输出就 end_turn，
+        // 表现为 result 为空但 outputTokens > 0。此时自动 pipe 一条重试消息让模型继续回答。
+        const outputTokens = result.usage?.outputTokens ?? 0;
+        const hasText = !!result.result && result.result.trim().length > 0;
+        if (!hasText && !outputSentToUser && outputTokens > 0) {
+          logger.warn(
+            { group: group.name, chatJid, outputTokens, cost: result.usage?.totalCostUsd },
+            '[thinking-only] 模型仅产出 thinking 无 text，自动重试',
+          );
+          // 通知用户
+          channel.sendMessage(chatJid, '⚠️ 模型开了个小差（只有 thinking 没有输出），自动重试中...', { isCommandReply: true })
+            .catch((err) => logger.warn({ err }, '[thinking-only] 通知发送失败'));
+          // pipe 重试消息到同一个 session
+          const retryMsg = '你刚才的回复只有 thinking 没有 text 输出，用户什么都没收到。请重新回答上一个问题。';
+          if (!queue.sendMessage(chatJid, retryMsg)) {
+            logger.warn({ chatJid }, '[thinking-only] pipe 重试失败（容器可能已退出），入队重新处理');
+            queue.enqueueMessageCheck(chatJid);
+          }
+          // 不清理进度卡片、不重置状态，等重试结果回来再清理
+          return;
+        }
+
         // 每轮 query 结束时，确保 typing/spinner/进度卡片被清理
         // IPC pipe 模式下多轮 query 共享同一个闭包，必须每轮都清理
         // （之前只在 !outputSentToUser 时清理，导致第一轮设了 true 后后续轮次卡片永远不关）
