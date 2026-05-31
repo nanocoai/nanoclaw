@@ -1591,13 +1591,29 @@ async function startMessageLoop(): Promise<void> {
  */
 function recoverPendingMessages(): void {
   for (const [chatJid, group] of Object.entries(registeredGroups)) {
+    const cursor = getOrRecoverCursor(chatJid);
     const pending = getMessagesSince(
       chatJid,
-      getOrRecoverCursor(chatJid),
+      cursor,
       ASSISTANT_NAME,
       MAX_MESSAGES_PER_PROMPT,
     );
     if (pending.length > 0) {
+      // 防重启循环：如果 bot 在最后一条 pending 消息之后已有回复，
+      // 说明 agent 处理过了但光标没来得及推进（比如执行重启被杀），
+      // 直接推进光标，不再重复处理。
+      const lastPendingTs = pending[pending.length - 1].timestamp;
+      const lastBotTs = getLastBotMessageTimestamp(chatJid, ASSISTANT_NAME);
+      if (lastBotTs && lastBotTs > lastPendingTs) {
+        logger.info(
+          { group: group.name, pendingCount: pending.length, lastBotTs },
+          'Recovery: bot already replied after pending messages, advancing cursor (skip re-processing)',
+        );
+        lastAgentTimestamp[chatJid] = lastBotTs;
+        saveState();
+        continue;
+      }
+
       logger.info(
         { group: group.name, pendingCount: pending.length },
         'Recovery: found unprocessed messages',
