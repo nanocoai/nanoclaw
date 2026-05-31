@@ -27,6 +27,10 @@ export interface AllowedRoot {
   path: string;
   allowReadWrite: boolean;
   description?: string;
+  // When true, this root is auto-mounted into EVERY group's container (unless
+  // the group already declares the same containerPath, or the host path is
+  // missing). Used for shared creds/data like notebooklm auth and webdav-data.
+  autoMount?: boolean;
 }
 
 // Cache the allowlist in memory - only reloads on process restart
@@ -304,6 +308,29 @@ export function validateMount(mount: AdditionalMount): MountValidationResult {
     resolvedContainerPath: containerPath,
     effectiveReadonly,
   };
+}
+
+/**
+ * Auto-mounts declared in the allowlist (entries with `autoMount: true`).
+ * Mounted into EVERY group's container. Filtered to host paths that currently
+ * exist so optional creds (e.g. notebooklm) don't break container startup when
+ * absent. Reuses validateAdditionalMounts so the same security checks apply and
+ * containerPath is resolved to /workspace/extra/<basename>.
+ */
+export function getAutoMounts(groupName: string): Array<{
+  hostPath: string;
+  containerPath: string;
+  readonly: boolean;
+}> {
+  const allowlist = loadMountAllowlist();
+  if (!allowlist) {
+    return [];
+  }
+  const autoEntries: AdditionalMount[] = allowlist.allowedRoots
+    .filter((r) => r.autoMount === true)
+    .filter((r) => fs.existsSync(expandPath(r.path)))
+    .map((r) => ({ hostPath: r.path, readonly: !r.allowReadWrite }));
+  return validateAdditionalMounts(autoEntries, groupName);
 }
 
 /**

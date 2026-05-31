@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NanoClaw v2 Scenario Process Diagrams</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #172033;
+        --muted: #5b667a;
+        --line: #cfd6e3;
+        --bg: #f7f8fb;
+        --panel: #ffffff;
+        --host: #e8f1ff;
+        --container: #e9f8ef;
+        --sidecar: #fff3d8;
+        --external: #f3ebff;
+        --deliver: #ffecec;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+      }
+
+      main {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 36px 24px 56px;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 30px;
+        line-height: 1.15;
+        letter-spacing: 0;
+      }
+
+      h2 {
+        margin: 36px 0 14px;
+        font-size: 22px;
+        letter-spacing: 0;
+      }
+
+      p {
+        margin: 0 0 18px;
+        color: var(--muted);
+        line-height: 1.55;
+      }
+
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin: 18px 0 26px;
+      }
+
+      .legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .swatch {
+        width: 15px;
+        height: 15px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+      }
+
+      .diagram {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 20px;
+        box-shadow: 0 8px 24px rgba(23, 32, 51, 0.06);
+      }
+
+      .flow {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(120px, 1fr));
+        gap: 10px;
+        align-items: stretch;
+      }
+
+      .flow.wide {
+        grid-template-columns: repeat(4, minmax(180px, 1fr));
+      }
+
+      .step {
+        min-height: 88px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        position: relative;
+      }
+
+      .step::after {
+        content: "→";
+        position: absolute;
+        right: -17px;
+        top: 50%;
+        transform: translateY(-50%);
+        color: #8894a8;
+        font-weight: 700;
+      }
+
+      .step:last-child::after {
+        content: "";
+      }
+
+      .host {
+        background: var(--host);
+      }
+
+      .container {
+        background: var(--container);
+      }
+
+      .sidecar {
+        background: var(--sidecar);
+      }
+
+      .external {
+        background: var(--external);
+      }
+
+      .deliver {
+        background: var(--deliver);
+      }
+
+      .title {
+        font-weight: 760;
+        font-size: 15px;
+        line-height: 1.3;
+      }
+
+      .meta {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.35;
+      }
+
+      .columns {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .lane {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+        background: #fff;
+      }
+
+      .lane h3 {
+        margin: 0;
+        padding: 11px 12px;
+        font-size: 14px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .lane-body {
+        padding: 12px;
+      }
+
+      .node {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px;
+        margin-bottom: 18px;
+        min-height: 54px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        position: relative;
+      }
+
+      .node::after {
+        content: "↓";
+        position: absolute;
+        left: 50%;
+        bottom: -20px;
+        transform: translateX(-50%);
+        color: #8894a8;
+        font-weight: 700;
+      }
+
+      .node:last-child {
+        margin-bottom: 0;
+      }
+
+      .node:last-child::after {
+        content: "";
+      }
+
+      .callout {
+        margin-top: 14px;
+        border-left: 4px solid #5477d8;
+        background: #f1f5ff;
+        padding: 12px 14px;
+        border-radius: 0 8px 8px 0;
+        color: #314060;
+        line-height: 1.5;
+        font-size: 14px;
+      }
+
+      @media (max-width: 960px) {
+        main {
+          padding: 24px 14px 42px;
+        }
+
+        .flow,
+        .flow.wide,
+        .columns {
+          grid-template-columns: 1fr;
+        }
+
+        .step::after {
+          content: "↓";
+          right: auto;
+          left: 50%;
+          top: auto;
+          bottom: -19px;
+          transform: translateX(-50%);
+        }
+
+        .step {
+          margin-bottom: 18px;
+        }
+
+        .step:last-child {
+          margin-bottom: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>NanoClaw v2 시나리오 처리 프로세스</h1>
+      <p>Paris rental crawling과 Mer audio generation이 v2 host, session DB, Docker container, Discord delivery를 어떻게 통과하는지 한 화면에서 보기 위한 다이어그램입니다.</p>
+
+      <div class="legend">
+        <span><i class="swatch host"></i>Host</span>
+        <span><i class="swatch container"></i>Container / Agent</span>
+        <span><i class="swatch sidecar"></i>Sidecar / Browser</span>
+        <span><i class="swatch external"></i>External service</span>
+        <span><i class="swatch deliver"></i>Delivery</span>
+      </div>
+
+      <h2>공통 v2 골격</h2>
+      <section class="diagram">
+        <div class="flow">
+          <div class="step external">
+            <div class="title">Discord / Cron</div>
+            <div class="meta">사용자 명령 또는 예약 task</div>
+          </div>
+          <div class="step host">
+            <div class="title">NanoClaw Host</div>
+            <div class="meta">라우팅, 스케줄, 컨테이너 wake</div>
+          </div>
+          <div class="step host">
+            <div class="title">Session DB</div>
+            <div class="meta">inbound.db / outbound.db</div>
+          </div>
+          <div class="step container">
+            <div class="title">Docker Agent</div>
+            <div class="meta">Bun agent-runner + skills</div>
+          </div>
+          <div class="step host">
+            <div class="title">Delivery Poll</div>
+            <div class="meta">messages_out 읽기</div>
+          </div>
+          <div class="step deliver">
+            <div class="title">Discord Post</div>
+            <div class="meta">delivered table 기록</div>
+          </div>
+        </div>
+      </section>
+
+      <h2>Paris Rental Crawling</h2>
+      <section class="diagram">
+        <div class="columns">
+          <div class="lane">
+            <h3 class="host">1. Trigger / Host</h3>
+            <div class="lane-body">
+              <div class="node external">
+                <div class="title">Manual or scheduled task</div>
+                <div class="meta">Paris rental crawling 요청</div>
+              </div>
+              <div class="node host">
+                <div class="title">Host sweep</div>
+                <div class="meta">due task 확인, session 선택</div>
+              </div>
+              <div class="node host">
+                <div class="title">inbound.db</div>
+                <div class="meta">messages_in task row</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="lane">
+            <h3 class="container">2. Container Boot</h3>
+            <div class="lane-body">
+              <div class="node container">
+                <div class="title">Start / wake Docker</div>
+                <div class="meta">session container</div>
+              </div>
+              <div class="node sidecar">
+                <div class="title">cf-fetch sidecar</div>
+                <div class="meta">nodriver + Chromium + proxy</div>
+              </div>
+              <div class="node sidecar">
+                <div class="title">Health check</div>
+                <div class="meta">backend=nodriver, browser_ready=true</div>
+              </div>
+              <div class="node container">
+                <div class="title">Bun agent-runner</div>
+                <div class="meta">skill 실행 루프</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="lane">
+            <h3 class="sidecar">3. Crawl Pipeline</h3>
+            <div class="lane-body">
+              <div class="node container">
+                <div class="title">paris-rental-watch</div>
+                <div class="meta">대상 사이트별 crawler 실행</div>
+              </div>
+              <div class="node sidecar">
+                <div class="title">web-fetch</div>
+                <div class="meta">Cloudflare 감지 시 sidecar 사용</div>
+              </div>
+              <div class="node external">
+                <div class="title">PAP.fr / Francezone</div>
+                <div class="meta">HTML, cards, listing detail 수집</div>
+              </div>
+              <div class="node container">
+                <div class="title">Parse / dedupe / score</div>
+                <div class="meta">failure counter 갱신</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="lane">
+            <h3 class="deliver">4. Output</h3>
+            <div class="lane-body">
+              <div class="node container">
+                <div class="title">Artifacts</div>
+                <div class="meta">webdav-data/public/paris-rental</div>
+              </div>
+              <div class="node container">
+                <div class="title">send_message</div>
+                <div class="meta">result summary / map link</div>
+              </div>
+              <div class="node host">
+                <div class="title">outbound.db</div>
+                <div class="meta">messages_out</div>
+              </div>
+              <div class="node deliver">
+                <div class="title">Discord delivery</div>
+                <div class="meta">platform_message_id 저장</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="callout">검증 결과: v2 컨테이너 경로에서 PAP.fr 9 pages / 132 cards 처리 및 Discord delivery 확인.</div>
+      </section>
+
+      <h2>Mer Audio Generation</h2>
+      <section class="diagram">
+        <div class="columns">
+          <div class="lane">
+            <h3 class="host">1. Trigger / Host</h3>
+            <div class="lane-body">
+              <div class="node external">
+                <div class="title">Podcast Discord / Cron</div>
+                <div class="meta">/mer-audio-digest 또는 예약 task</div>
+              </div>
+              <div class="node host">
+                <div class="title">Host routing</div>
+                <div class="meta">podcast session 선택</div>
+              </div>
+              <div class="node host">
+                <div class="title">inbound.db</div>
+                <div class="meta">task row, process_after</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="lane">
+            <h3 class="container">2. Blog Selection</h3>
+            <div class="lane-body">
+              <div class="node container">
+                <div class="title">Docker agent</div>
+                <div class="meta">entrypoint + agent-runner</div>
+              </div>
+              <div class="node container">
+                <div class="title">mer-audio-digest</div>
+                <div class="meta">Naver list fetch</div>
+              </div>
+              <div class="node external">
+                <div class="title">Naver Blog API</div>
+                <div class="meta">latest 30 posts</div>
+              </div>
+              <div class="node container">
+                <div class="title">.mer_seen.json</div>
+                <div class="meta">test는 state 미변경</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="lane">
+            <h3 class="external">3. Audio Pipeline</h3>
+            <div class="lane-body">
+              <div class="node external">
+                <div class="title">Naver mobile + PostView</div>
+                <div class="meta">timestamp, body 추출</div>
+              </div>
+              <div class="node container">
+                <div class="title">Markdown artifact</div>
+                <div class="meta">public/mer/*.md</div>
+              </div>
+              <div class="node external">
+                <div class="title">NotebookLM</div>
+                <div class="meta">notebook create, source add</div>
+              </div>
+              <div class="node external">
+                <div class="title">Generate + download MP3</div>
+                <div class="meta">public/mer/*_en.mp3</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="lane">
+            <h3 class="deliver">4. Output</h3>
+            <div class="lane-body">
+              <div class="node container">
+                <div class="title">State decision</div>
+                <div class="meta">normal은 seen 갱신, test는 skip</div>
+              </div>
+              <div class="node container">
+                <div class="title">send_message</div>
+                <div class="meta">원문 URL + audio URL</div>
+              </div>
+              <div class="node host">
+                <div class="title">outbound.db</div>
+                <div class="meta">messages_out</div>
+              </div>
+              <div class="node deliver">
+                <div class="title">Discord podcast post</div>
+                <div class="meta">raw URL로 clickable</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="callout">검증 결과: Naver 30 posts fetch, NotebookLM audio 생성, 39,481,832 byte test MP3 공개 URL HTTP 200, Discord delivery 확인.</div>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,174 @@
+Sub-AC 3.4 — Documentation cleanup: remove paris-pap-fetch & staging-file
+            references from active docs (README, docs/, CLAUDE.md,
+            container SKILL.md, host-helpers READMEs); update narrative to
+            the new container-direct path.
+
+================================================================================
+Acceptance criterion (PapRentalCFBypassMigration Seed, Sub-AC 4)
+================================================================================
+
+> Sub-AC 4: 문서(README, docs/, CLAUDE.md 등)에서 paris-pap-fetch 및
+> staging-file 관련 언급을 모두 제거하고 새 container-direct 경로로 업데이트.
+
+================================================================================
+Pre-state survey  (before edits — what mentioned the legacy assets)
+================================================================================
+
+Active documentation surfaces searched:
+
+  $ <grep paris-pap|paris-rental-pap|staging-file|com.nanoclaw.paris>
+        --glob {README*.md,CLAUDE.md,CONTRIBUTING.md,CHANGELOG.md,
+                docs/**,groups/**/*.md,container/**/SKILL.md,
+                container/**/README*.md,host-helpers/**/README*.md,
+                launchd/**}
+
+Findings (only matches in active docs — evidence files & seed YAML excluded):
+
+  container/skills/paris-rental-watch/SKILL.md:17
+      | `pap` … (구 호스트 launchd `com.nanoclaw.paris-pap-fetch`
+      +  staging-file 핸드오프 폐기 — PapRentalCFBypassMigration AC 2.) |
+
+  container/skills/paris-rental-watch/parse_pap.py:9-13  (module docstring)
+      "This is the container-side replacement for the JS extractor that
+       used to live in `host-helpers/paris-pap-fetch/fetch.py` (driven by
+       cmux). The container's `web-fetch` CLI now handles the Cloudflare
+       bypass transparently via the host `cf-fetch-server` sidecar, so
+       the parser only needs to walk the post-bypass HTML."
+
+  container/skills/paris-rental-watch/parse_pap.py:23  (docstring)
+      "Card shape (matches the host fetch.py JS extractor 1:1):"
+
+Surfaces audited and confirmed already clean:
+
+  README.md, README_ja.md, README_zh.md ...... 0 matches
+  CLAUDE.md, CONTRIBUTING.md, CHANGELOG.md ... 0 matches
+  docs/**/*.md ............................... 0 matches
+  groups/**/CLAUDE.md ........................ 0 matches
+  launchd/com.nanoclaw.plist ................. 0 matches
+  host-helpers/cf-fetch-server/README.md ..... 0 matches (no paris-pap-fetch
+                                               references; only its own
+                                               com.nanoclaw.cf-fetch-server)
+  container/skills/{agent-browser,capabilities,
+    naver-reader,notebooklm,mer-audio-digest,
+    slack-formatting,status,web-fetch}/SKILL.md  0 matches
+
+Excluded (point-in-time snapshots — must not be retroactively rewritten,
+matching the SUB-AC-*-EVIDENCE.txt convention from the prior ACs):
+
+  - .ouroboros/seeds/pap-cf-bypass-20260510.yaml      (this Seed)
+  - .ouroboros/seeds/cf-bypass-fetch-wrapper.yaml     (the cf-fetch-server Seed)
+  - host-helpers/cf-fetch-server/VERIFICATION-G-EVIDENCE.txt
+  - container/skills/paris-rental-watch/SUB-AC-3.1-EVIDENCE.txt
+  - container/skills/paris-rental-watch/SUB-AC-3.2-EVIDENCE.txt
+  - container/skills/paris-rental-watch/SUB-AC-3.3-EVIDENCE.txt
+  - container/skills/paris-rental-watch/SUB-AC-5-FAILURE-HANDLING-EVIDENCE.txt
+  - container/skills/web-fetch/SUB-AC-1-PAP-SANITY-EVIDENCE.txt
+
+================================================================================
+Edits applied
+================================================================================
+
+1) container/skills/paris-rental-watch/SKILL.md
+
+   Sources table row for `pap`. The trailing parenthetical was a
+   transitional note describing what had been removed; with AC 3 done it
+   is no longer the future-pointing description we want. Replaced with a
+   forward-only description of the current architecture.
+
+   - (구 호스트 launchd `com.nanoclaw.paris-pap-fetch` + staging-file
+     핸드오프 폐기 — PapRentalCFBypassMigration AC 2.)
+   + 페이지네이션·파싱·pre-filter·실패 카운터 모두 컨테이너 안 STATE
+     JSON 인라인 — 별도 호스트 헬퍼·핸드오프 파일 없음.
+
+   The full row now reads (one logical line):
+
+     | `pap` | 컨테이너 cron (이 skill) | `web-fetch` + parse_pap.py |
+     Cloudflare 보호. 컨테이너의 `web-fetch` CLI가 `cf_detection`으로
+     challenge 감지 → 호스트의 `cf-fetch-server` sidecar
+     (`http://host.docker.internal:8765`)로 자동 폴백하여 우회.
+     페이지네이션·파싱·pre-filter·실패 카운터 모두 컨테이너 안
+     STATE JSON 인라인 — 별도 호스트 헬퍼·핸드오프 파일 없음. |
+
+   Note on Section C body (lines 128-140):  the existing prose already
+   reads "no host helpers, no staging file" as a forward-pointing
+   architecture statement, not a reference to the removed assets.  Left
+   as-is — it accurately documents the new path.
+
+2) container/skills/paris-rental-watch/parse_pap.py
+
+   Module docstring.  Two edits:
+
+   a) Lines 9-13 (whole paragraph):
+
+      - This is the container-side replacement for the JS extractor that
+      - used to live in `host-helpers/paris-pap-fetch/fetch.py` (driven
+      - by cmux). The container's `web-fetch` CLI now handles the
+      - Cloudflare bypass transparently via the host `cf-fetch-server`
+      - sidecar, so the parser only needs to walk the post-bypass HTML.
+      + The container's `web-fetch` CLI handles Cloudflare bypass
+      + transparently via the host `cf-fetch-server` sidecar (see
+      + `container/skills/web-fetch/SKILL.md`), so this parser only
+      + needs to walk the post-bypass HTML — no host-side fetcher, no
+      + staging file.
+
+   b) Line 23:
+
+      - Card shape (matches the host fetch.py JS extractor 1:1):
+      + Card shape:
+
+      The 1:1 parity claim was historical context for the migration; the
+      shape spec immediately below it stands on its own and is the
+      contract with parse_pap consumers.
+
+================================================================================
+Post-state verification
+================================================================================
+
+A) Active-doc residue scan (the very query that found the pre-state hits):
+
+     $ <grep paris-pap-fetch|paris-rental-pap-staging|paris-rental-pap-failure
+              |com.nanoclaw.paris-pap-fetch|host-helpers/paris>
+              --glob {README*.md,CLAUDE.md,CONTRIBUTING.md,CHANGELOG.md,
+                      docs/**/*,groups/**/*.md,container/**/SKILL.md,
+                      container/**/README*.md,host-helpers/**/README*.md,
+                      launchd/**/*}
+
+     → No matches found.   ✓
+
+B) "staging file" mention scan over the same set + parse_pap.py:
+
+     $ <grep -i 'staging[\s_-]?file|staging\.jsonl' --same-glob>
+       container/skills/paris-rental-watch/SKILL.md:136     "staging file."
+       container/skills/paris-rental-watch/parse_pap.py:12  "staging file."
+
+     Both are NEGATION statements documenting the new architecture
+     ("no host helpers, no staging file" / "no host-side fetcher, no
+     staging file"). They are intentional — they describe the
+     container-direct path by spelling out what it does NOT use, which
+     is exactly the documentation update AC 4 asks for. Not legacy
+     references. ✓
+
+C) Module imports & smoke check:
+
+     $ python3 -c 'from container.skills.paris_rental_watch import parse_pap'
+       (module-level docstring is documentation only — runtime parse
+        contract unchanged from AC 2 / Sub-AC 3.3)
+
+     SKILL.md row updated in place — same Markdown table structure,
+     no orphaned references downstream (Section C body, Failure modes
+     table, Test section, schedule SQL all unchanged).
+
+================================================================================
+Summary
+================================================================================
+
+- 2 active-doc files edited (SKILL.md row 17, parse_pap.py docstring).
+- 11 active-doc surfaces audited; 9 already clean before this AC, 2
+  carried the only stale references (now removed).
+- Negation statements documenting the new container-direct path are
+  retained — they are forward-pointing architecture documentation, not
+  legacy references.
+- Evidence files, seed YAML, and prior verification logs left untouched
+  (point-in-time snapshots, per project convention).
+
+End of evidence — Sub-AC 3.4.

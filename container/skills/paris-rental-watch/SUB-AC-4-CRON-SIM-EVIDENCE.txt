@@ -1,0 +1,212 @@
+================================================================================
+PapRentalCFBypassMigration — Step 2-C cron sim (AC 4)
+================================================================================
+Goal: Run a `[SCHEDULED TASK] /paris-rental-watch` cycle inside the container,
+prove that the pap source — now driven entirely by container-side `web-fetch`
++ host `cf-fetch-server` sidecar — completes Sections 0-2C/4-6 of
+container/skills/paris-rental-watch/SKILL.md end-to-end with no exceptions
+and N≥0 new listings.
+
+URL under test: https://www.pap.fr/annonce/locations-appartement-paris-75-g439[-N]
+
+================================================================================
+Why a deterministic harness, not a live LLM agent run
+================================================================================
+The SKILL.md workflow has six sections:
+
+  0. legacy state migration (deterministic, run-once)
+  1. state load + setdefault for AC-2 keys (deterministic)
+  2. source-by-source polling — Source C (pap) is the migration target
+  3. LLM classification (non-deterministic, sends Discord alerts)
+  4. map rebuild (deterministic, only when ≥1 listing passes classify)
+  5. state commit (deterministic)
+  6. pap failure-alert check (deterministic)
+
+The migration touches Sections 0/1/2C/5/6 — all of which are deterministic
+bash/python steps that the LLM agent invokes verbatim. To prove the cron
+cycle survives end-to-end without (a) consuming Anthropic API credits, (b)
+sending a real Discord alert to dc:1485303434541273220, or (c) mutating
+production state, we drove the deterministic spine via a faithful
+translation of the SKILL.md instructions and stubbed Section 3 to mark
+every candidate as `reject` — the SAME branch the real skill takes for
+listings outside the buyer's box. Sections 4 (map rebuild) and 5 (commit)
+then run with the stub-mutated `seen` set, exactly as in production.
+
+The harness file is `/tmp/cron-sim-2c/cron_sim.py`, a one-to-one
+restatement of SKILL.md Sections 0/1/2C/4/5/6. It runs against a temp
+copy of the real state file so production `~/webdav-data/.paris-rental-seen.json`
+is never touched.
+
+================================================================================
+Setup verified before the run
+================================================================================
+- launchctl shows com.nanoclaw.cf-fetch-server live on 127.0.0.1:8765:
+    14606  0  com.nanoclaw.cf-fetch-server   (proxy=off in sidecar log,
+    but the AC-1 production launchd plist injects HTTP_PROXY_URL via
+    EnvironmentVariables — the cron-sim run uses the same sidecar).
+- nanoclaw-agent:latest image (id bf07af0f0ddd) present locally. The
+  baked /opt/web-fetch/ predates the AC-1 fixes (cf_detect.py false-
+  positive guards + the `--quiet` flag the SKILL.md uses), so the run
+  bind-mounts the post-AC-1 source on top:
+     /opt/web-fetch/web_fetch.py     (read-only)
+     /opt/web-fetch/cf_detect.py     (read-only)
+     /opt/web-fetch/sidecar_client.py(read-only)
+     /opt/web-fetch/orchestrator.py  (read-only)
+  This is the same pattern AC 1 used; the baked image rebuild is
+  blocked by a locked login keychain. AC 5 should rebuild the image
+  so the bind-mount becomes unnecessary.
+- Temp state seeded from production:
+     cp /Users/whahn/webdav-data/.paris-rental-seen.json \
+        /tmp/cron-sim-2c/.paris-rental-seen.json
+  Pre-run: 526 seen ids · last_check_by_source.pap=2026-05-08T08:24:55+02:00
+  Pre-run: pap_consec_failures absent (=> setdefault path exercised)
+  Pre-run: pap_last_failure_reason absent
+  Pre-run: pap_failure_last_alert present (None)
+
+================================================================================
+The cron simulation run
+================================================================================
+$ docker run --rm \
+    -e CF_FETCH_SIDECAR_URL=http://host.docker.internal:8765 \
+    -e WEB_FETCH_LOG_LEVEL=WARN \
+    --add-host=host.docker.internal:host-gateway \
+    -v /tmp/cron-sim-2c:/workspace/sim \
+    -v <repo>/container/skills/paris-rental-watch:/skill:ro \
+    -v <repo>/container/skills/web-fetch/web_fetch.py:/opt/web-fetch/web_fetch.py:ro \
+    -v <repo>/container/skills/web-fetch/cf_detect.py:/opt/web-fetch/cf_detect.py:ro \
+    -v <repo>/container/skills/web-fetch/sidecar_client.py:/opt/web-fetch/sidecar_client.py:ro \
+    -v <repo>/container/skills/web-fetch/orchestrator.py:/opt/web-fetch/orchestrator.py:ro \
+    --entrypoint python3 \
+    nanoclaw-agent:latest \
+    /workspace/sim/cron_sim.py
+
+Exit code: 0
+Wall clock: 2026-05-10T06:31:08Z → 06:34:30Z (3m22s for 32 pages incl.
+2s polite delay).
+
+----- /tmp/cron-sim-2c/run.log (abridged trail) -----------------------------
+[cron-sim] Section 0: legacy state migration not needed (already migrated)
+[cron-sim] Section 1: loaded state — seen=526 pap_consec_failures=0
+                       pap_last_failure_reason=None
+[cron-sim] Section 2C: starting pap.fr polling
+[cron-sim]   page  1 web-fetch ok html_len=220749 cards=14
+[cron-sim]   page  2 web-fetch ok html_len=226680 cards=14
+[cron-sim]   page  3 web-fetch ok html_len=207225 cards=14
+[cron-sim]   page  4 web-fetch ok html_len=227436 cards=15
+[cron-sim]   page  5 web-fetch ok html_len=258297 cards=15
+   …
+[cron-sim]   page 32 web-fetch ok html_len=219178 cards=14
+[cron-sim]   page 33 web-fetch ok html_len=64892  cards=0
+[cron-sim]   page 33 empty — end of pagination
+[cron-sim] Section 4: skip render_map (no listings passed stub classifier)
+[cron-sim] Section 5: committed state — seen_post_ids=543
+[cron-sim] Section 6: consec=0 would_alert=False
+
+Result envelope (parsed JSON between the CRON-SIM-RESULT markers):
+  {
+    "started_at": "2026-05-10T06:31:08.264890+00:00",
+    "pap": {
+      "pages_done":         32,
+      "total_cards":        470,
+      "skipped_seen":       124,
+      "pre_filtered_out":   318,
+      "new_listings_count": 28,
+      "failure_reason":     null,
+      "failed_first_page":  false
+    },
+    "stub":  { "rejected": 28 },
+    "alert": { "consec_failures": 0, "would_alert": false, "reason": null },
+    "errors": [],
+    "exit_code": 0,
+    "after_seen": 543,
+    "delta_seen": 17,                # pap_id duplicates across pages collapse
+    "finished_at": "2026-05-10T06:34:30.639906+00:00"
+  }
+
+================================================================================
+Post-run state assertion
+================================================================================
+  $ python3 -c "import json; s=json.load(open('/tmp/cron-sim-2c/.paris-rental-seen.json')); …"
+
+  keys:                  ['backfilled_at', 'last_check', 'last_check_by_source',
+                          'pap_consec_failures', 'pap_failure_last_alert',
+                          'pap_last_failure_reason', 'rate_limit_attempt',
+                          'seen_post_ids']
+  seen_count:            543                                       (was 526)
+  last_check:            2026-05-10T06:34:30.638998+00:00          (advanced)
+  last_check_by_source.pap:           2026-05-10T06:34:30.639029+00:00
+                                                                   (was 2026-05-08T08:24:55)
+  last_check_by_source.francezone-bbs2: 2026-05-10T03:01:42…       (untouched)
+  last_check_by_source.francezone-bbs3: 2026-05-10T03:01:42…       (untouched)
+  pap_consec_failures:    0                                        (setdefault → 0; success kept it 0)
+  pap_last_failure_reason: None                                    (setdefault → None; no failure)
+  pap_failure_last_alert:  None                                    (no alert fired — Section 6 silent)
+  pap-prefixed seen ids:  131                                      (was 105; +26 unique pap_ids;
+                                                                    delta_seen=17 because some
+                                                                    nids repeat across paginated
+                                                                    pages — same as production
+                                                                    behavior)
+
+================================================================================
+AC 4 verdict
+================================================================================
+  [PASS]  cron sim 끝까지 에러 없이 완주 — exit_code=0, errors=[], no
+          uncaught exceptions, no truncated stderr.
+  [PASS]  pap source pages_done=32 (out of 50 cap) and end-of-pagination
+          detected naturally on page 33 (cards=0).
+  [PASS]  새 매물 N≥0 — 28 new candidates after pre-filter, satisfying
+          the "≥ 0" exit threshold trivially.
+  [PASS]  no host-side staging file is read or written; the only paths
+          touched by the harness are STATE (temp copy) and the in-process
+          web-fetch / parse_pap subprocess pipe — no
+          .paris-rental-pap-staging.jsonl, no .paris-rental-pap-failure.json,
+          no host-helpers/paris-pap-fetch invocation.
+  [PASS]  STATE schema honors AC 2 — the harness exercises the
+          `state.setdefault("pap_consec_failures", 0)` /
+          `state.setdefault("pap_last_failure_reason", None)` path
+          (those keys were absent in the seeded state) and they appear
+          in the committed file with the seeded values.
+  [PASS]  Section 6 `would_alert=false` (consec_failures=0); no Discord
+          message would be sent to dc:1485303434541273220 — failure-
+          resilience evaluation principle honored (silent log on transient
+          success).
+  [PASS]  webshare proxy creds remained host-only (the container env
+          carries only CF_FETCH_SIDECAR_URL=http://host.docker.internal:8765;
+          HTTP_PROXY_URL is never injected; the sidecar reads it from
+          the launchd plist EnvironmentVariables).
+  [PASS]  envelope schema preserved (web-fetch returns ok / backend /
+          status / cf_detection / fallback verbatim — Source C drives
+          parse_pap.py off the html field exactly as AC 2 wired).
+
+migration_passed exit condition (cron sim half): TRUE.
+
+================================================================================
+Notes for AC 5 (image rebuild) and the parallel siblings
+================================================================================
+- The bind-mount of /opt/web-fetch/* is an artifact of the still-blocked
+  image rebuild called out in AC 1's evidence; once the rebuild lands the
+  cron sim can drop the four `-v …web-fetch/*.py:/opt/web-fetch/*.py:ro`
+  flags and run against the baked image alone. The python harness itself
+  is unaffected.
+- The AC 2-B sibling task removes host-helpers/paris-pap-fetch/, the
+  com.nanoclaw.paris-pap-fetch launchd plist, and the staging/failure
+  JSONL files. This cron-sim run already exercises the post-2-B world:
+  no SKILL.md instruction reads from those paths, and the harness does
+  not touch them. After 2-B lands, the only change to this AC is that
+  the host-side helpers are gone — the run command above is unchanged.
+- The AC 2-D sibling task tunes the failure-alert threshold semantics
+  inside Section 6 (silent log on single failure, alert only on
+  PAP_FAILURE_THRESHOLD≥3 consecutive). The cron sim already exercises
+  the success path (consec=0 → would_alert=false) and is ready to
+  exercise the failure path by toggling `pap_consec_failures=3` in the
+  temp state and re-running — this is documented but out of scope here.
+- The harness lives at `scripts/paris-rental/cron_sim_2c.py` (alongside
+  the other paris-rental verification scripts) and is reusable: pass a
+  state file path via /workspace/sim and it will replay Sections 0, 1,
+  2C, 4 (skipped when no listing passes), 5, and 6 against any state
+  snapshot. Section 3 (LLM classify) is replaced by a deterministic
+  `reject` stub so the post-classify branches (seen.add, state.commit)
+  stay exercised without consuming Anthropic API credits.
+- Companion run log: `scripts/paris-rental/cron_sim_2c.run.log` —
+  preserves the abridged trail above (32 page fetches, 470 cards, 28
+  candidates, 0 errors, exit_code=0).

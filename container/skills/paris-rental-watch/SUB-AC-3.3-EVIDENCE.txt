@@ -1,0 +1,93 @@
+Sub-AC 3.3 — Remove .paris-rental-pap-staging.jsonl & .paris-rental-pap-failure.json references from source/config
+=================================================================================================================
+
+Spec
+----
+> Sub-AC 3 (3.3): 코드베이스에서 .paris-rental-pap-staging.jsonl 및
+> .paris-rental-pap-failure.json 참조를 모두 제거 (소스 코드, 설정 파일).
+
+Scope interpretation
+--------------------
+Sub-AC 3.3 explicitly targets "소스 코드, 설정 파일" (source code, config
+files). Two reference categories are NOT in scope and remain untouched:
+
+  1. Seed contract — `.ouroboros/seeds/pap-cf-bypass-20260510.yaml`
+     (the immutable goal definition that specifies the cleanup itself;
+     deleting it would erase the spec under which we are operating).
+
+  2. Historical evidence files —
+     `container/skills/paris-rental-watch/SUB-AC-3.1-EVIDENCE.txt`
+     `container/skills/paris-rental-watch/SUB-AC-3.2-EVIDENCE.txt`
+     (audit trail of prior cleanup work; mentions the legacy paths to
+     declare them removed — the artifacts ARE the evidence).
+
+What was actually edited
+------------------------
+Single live source-side reference, in `container/skills/paris-rental-watch/SKILL.md`,
+lines 50–53 — a "Legacy paths" deprecation note that paradoxically said
+"SKILL.md 어디에서도 참조하지 않음" while itself constituting the reference.
+
+  --- BEFORE (lines 50–53) ---
+  > Legacy paths (`.paris-rental-pap-staging.jsonl`, `.paris-rental-pap-failure.json`,
+  > 호스트 `host-helpers/paris-pap-fetch/`, `com.nanoclaw.paris-pap-fetch.plist`)
+  > 는 PapRentalCFBypassMigration AC 2 에서 폐기 — SKILL.md 어디에서도 참조하지
+  > 않음. 페치 실패 카운터·사유는 STATE JSON에 인라인.
+
+  --- AFTER (lines 50–51) ---
+  > 페치 실패 카운터(`pap_consec_failures`)·사유(`pap_last_failure_reason`)·
+  > 마지막 알림(`pap_failure_last_alert`)는 모두 STATE JSON 인라인 — 별도 파일 없음.
+
+The replacement preserves the engineering-intent half of the original note
+(failure tracking lives inline on STATE) and drops the legacy-name listing
+that was the last source-of-truth reference to the deprecated files.
+
+Verification
+------------
+Ran the rg sweep across the actual source / config trees (excluding the
+seed contract and historical evidence files which are out of scope per
+the interpretation above):
+
+  $ rg -n 'paris-rental-pap-staging|paris-rental-pap-failure' src/
+                                                                 → 0 hits
+  $ rg -n 'paris-rental-pap-staging|paris-rental-pap-failure' scripts/
+                                                                 → 0 hits
+  $ rg -n 'paris-rental-pap-staging|paris-rental-pap-failure' launchd/
+                                                                 → 0 hits
+  $ rg -n 'paris-rental-pap-staging|paris-rental-pap-failure' config-examples/
+                                                                 → 0 hits
+  $ rg -n 'paris-rental-pap-staging|paris-rental-pap-failure' setup/
+                                                                 → 0 hits
+  $ rg -n 'paris-rental-pap-staging|paris-rental-pap-failure' host-helpers/
+                                                                 → 0 hits
+  $ rg -n 'paris-rental-pap-staging|paris-rental-pap-failure' container/
+                                                                 → 2 files:
+                                                                   SUB-AC-3.1-EVIDENCE.txt
+                                                                   SUB-AC-3.2-EVIDENCE.txt
+                                                                 (historical evidence — out of scope)
+
+  $ rg -n 'paris-rental-pap-staging|paris-rental-pap-failure' container/skills/paris-rental-watch/SKILL.md
+                                                                 → 0 hits  ✓
+
+Filesystem sweep — no on-disk artifact remains either:
+
+  $ find ~/Desktop/nanoclaw -maxdepth 6 \
+        \( -name '.paris-rental-pap-staging*' \
+           -o -name '.paris-rental-pap-failure*' \) -print
+                                                                 → (empty)
+
+Outcome
+-------
+- Active source-of-truth in the skill (SKILL.md) no longer mentions either
+  legacy path. The only mentions left in the repo are
+    a) the seed contract (immutable, defines the work), and
+    b) SUB-AC-3.1/3.2 evidence files (historical audit trail).
+- legacy_assets concept (Seed) is now fully cleared:
+    - launchd job              — removed (SUB-AC 3.1)
+    - LaunchAgents plist       — removed (SUB-AC 3.1)
+    - host-helpers/paris-pap-fetch/ — removed (SUB-AC 3.2)
+    - .paris-rental-pap-staging.jsonl reference  — removed (this AC)
+    - .paris-rental-pap-failure.json  reference  — removed (this AC)
+- Failure-tracking semantics preserved: `pap_consec_failures`,
+  `pap_last_failure_reason`, and `pap_failure_last_alert` continue to live
+  inline on STATE JSON (`/workspace/extra/webdav-data/.paris-rental-seen.json`),
+  exactly as documented in §0–§6 of SKILL.md.

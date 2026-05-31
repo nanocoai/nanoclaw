@@ -1,0 +1,166 @@
+Sub-AC 3 — Structured logging in the wrapper CLI
+=================================================
+
+Requirement
+-----------
+> Add structured logging in the wrapper CLI (always-on attempt trace plus
+> --verbose detail) that records each attempt's runtime, the detected CF
+> signal, and the fallback decision so verification can confirm the
+> sequence from logs.
+
+Decisions
+---------
+The orchestrator (Sub-AC 2.4) already emits structured JSON log lines to
+stderr at INFO level for the always-on attempt trace. Sub-AC 3 closes the
+loop by:
+
+  1. Exposing two CLI flags on `web_fetch.py` so an operator can adjust
+     the threshold for one call without exporting an env var:
+
+       --verbose / -v   →  WEB_FETCH_LOG_LEVEL=DEBUG   (adds detail)
+       --quiet   / -q   →  WEB_FETCH_QUIET=1           (silences trail)
+
+     Precedence: --verbose wins over --quiet (explicit per-call opt-in
+     beats the silencer); both flags scrub conflicting ambient env so a
+     stale `WEB_FETCH_QUIET=1` doesn't muzzle an explicit --verbose.
+
+  2. Threading the resulting env into `orchestrator.run_fetch(env=...)`
+     via `_build_orchestrator_env`. When neither flag is passed the
+     ambient env is forwarded unchanged so persistent
+     `WEB_FETCH_LOG_LEVEL` exports keep working.
+
+  3. Documenting the verbosity contract in SKILL.md, including the
+     mandated three fields (runtime, CF signal, fallback decision) and
+     where each one lands on the structured log.
+
+The "always-on attempt trace" was already in place from Sub-AC 2.4 — the
+INFO-level events `fetch.start`, `primary.complete`, `fallback.decision`,
+`sidecar.start`, `sidecar.complete`, and `fetch.complete` are emitted on
+every invocation regardless of flags. Sub-AC 3 simply makes the CLI
+expose the verbosity knob and pins the contract under tests.
+
+Files modified
+--------------
+- container/skills/web-fetch/web_fetch.py
+    * Imported `ENV_LOG_LEVEL` / `ENV_LOG_QUIET` from orchestrator.
+    * Added `--verbose` / `-v` and `--quiet` / `-q` to argparse.
+    * Added `_build_orchestrator_env()` helper that translates the flags
+      into the env the orchestrator's structured logger reads, with
+      defensive precedence rules.
+    * `main()` now hands the resulting env to `_orchestrator_run`.
+
+- container/skills/web-fetch/test_web_fetch.py
+    * New `VerbosityFlagsCli` class — pins the env-translation policy:
+      default no-op, --verbose=DEBUG, --quiet=QUIET=1, verbose-wins-over-
+      quiet, verbose-overrides-ambient, short-form CLI shapes, end-to-end
+      threading from `main()` to `_orchestrator_run`, --help text
+      advertises both flags.
+    * New `AlwaysOnAttemptTraceContract` class — drives `run_fetch` with
+      the env that `_build_orchestrator_env` would have produced, parses
+      the JSON lines emitted to stderr by `make_stderr_logger`, and
+      asserts:
+        - default INFO trace records all 6 events with runtime
+          (`elapsed_s`), CF signal (`cf_is_challenge` /
+          `cf_confidence` / `cf_signals` on primary.complete), and
+          fallback decision (`fire` / `reason` on fallback.decision);
+        - --verbose adds `sidecar.attempt.start` /
+          `sidecar.attempt.end` without dropping any always-on event;
+        - --quiet produces zero log lines on stderr.
+
+- container/skills/web-fetch/test_orchestrator.py
+    * `test_cli_surface_has_no_sidecar_selector_flag` updated: its
+      `recognised` set now includes `verbose` and `quiet` (annotated as
+      Sub-AC 3 verbosity knobs that NEVER select a backend).
+
+- container/skills/web-fetch/SKILL.md
+    * Added rows for `--verbose` / `--quiet` to the Arguments table.
+    * Added a "Verbosity flags (Sub-AC 3)" subsection that names the
+      three mandated fields, where each lives, and the precedence
+      rules. Includes example invocations.
+
+Test results
+------------
+$ cd container/skills/web-fetch
+$ python3 -m unittest test_web_fetch test_orchestrator test_cf_detect test_sidecar_client
+...
+Ran 132 tests in 0.011s
+
+OK
+
+The new Sub-AC 3 tests live under `VerbosityFlagsCli` (8 tests) and
+`AlwaysOnAttemptTraceContract` (3 tests).
+
+Live demonstration
+------------------
+A driver script wired CF-blocked-primary + ok-sidecar fixtures into the
+orchestrator with the env that each flag combination produces. The
+structured-log trail captured from stderr:
+
+==================== Default (always-on INFO trace) ====================
+{"event": "fetch.start", "url": "https://utoon.net/", "method": "GET",
+ "timeout": 30.0, "primary_budget": 18.0, "primary_pct": 0.6, ...}
+{"event": "primary.complete", "ok": true, "status": 403, "elapsed_s": 0.0,
+ "cf_is_challenge": true, "cf_confidence": "high",
+ "cf_signals": ["title:just a moment"], ...}
+{"event": "fallback.decision", "fire": true,
+ "reason": "cf_detection.is_challenge=True (confidence='high', signals=[title:just a moment])",
+ "primary_signals": ["title:just a moment"], ...}
+{"event": "sidecar.start", "sidecar_url": "http://host.docker.internal:8765",
+ "sidecar_budget": 30.0, "retry_count": 1, "retry_delay": 1.0, ...}
+{"event": "sidecar.complete", "ok": true, "sidecar_backend": "nodriver",
+ "sidecar_http_status": 200, "sidecar_attempts": 1, "elapsed_s": 0.0, ...}
+{"event": "fetch.complete", "tier": "sidecar", "ok": true, "exit_code": 0,
+ "served_by": "nodriver", "primary_elapsed_s": 0.0,
+ "sidecar_elapsed_s": 0.0, "total_elapsed_s": 0.0, ...}
+
+  Three required fields visible on the always-on trace:
+    - runtime           → `elapsed_s` on primary.complete, sidecar.complete,
+                          fetch.complete
+    - CF signal         → `cf_is_challenge`, `cf_confidence`, `cf_signals`
+                          on primary.complete
+    - fallback decision → `fire`, `reason`, `primary_signals`
+                          on fallback.decision
+
+======================== --verbose (DEBUG trace) ========================
+env LOG_LEVEL = DEBUG
+
+{"event": "fetch.start", ...}
+{"event": "primary.complete", ...}
+{"event": "fallback.decision", ...}
+{"event": "sidecar.start", ...}
+{"level": "DEBUG", "event": "sidecar.attempt.start", "attempt": 1,
+ "max_attempts": 2, "timeout": 29.99...,
+ "sidecar_url": "http://host.docker.internal:8765"}
+{"level": "DEBUG", "event": "sidecar.attempt.end", "attempt": 1,
+ "ok": true, "sidecar_backend": "nodriver", "sidecar_http_status": 200,
+ "elapsed_s": 0.0}
+{"event": "sidecar.complete", ...}
+{"event": "fetch.complete", ...}
+
+  --verbose ADDS sidecar.attempt.start and sidecar.attempt.end at DEBUG;
+  the always-on INFO trace is unaffected.
+
+============================ --quiet (silenced) ===========================
+env QUIET = 1
+captured stderr: ''
+
+  Empty stderr — the stdout envelope is unaffected.
+
+How verification reads the sequence
+-----------------------------------
+A single grep over stderr at default verbosity yields the deciding trail:
+
+    web-fetch <url> 2> >(jq -c 'select(.event)') > /tmp/page.json
+
+The events appear in order:
+
+    fetch.start → primary.complete → fallback.decision → sidecar.start
+    → sidecar.complete → fetch.complete
+
+For each event the runtime / CF-signal / decision fields are the first
+keys after `event`, so a verification grep does NOT need to walk into
+nested structures to confirm the sequence. The same flag manipulates
+both the threshold and the contract so future ACs can keep adding events
+without touching the CLI surface.
+
+[AC_COMPLETE: 3]

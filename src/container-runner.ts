@@ -10,6 +10,8 @@ import path from 'path';
 import { OneCLI } from '@onecli-sh/sdk';
 
 import {
+  CF_FETCH_SIDECAR_ENABLED,
+  CF_FETCH_SIDECAR_URL,
   CONTAINER_IMAGE,
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
@@ -29,7 +31,7 @@ import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
-import { validateAdditionalMounts } from './modules/mount-security/index.js';
+import { getAutoMounts, validateAdditionalMounts } from './modules/mount-security/index.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
 import './providers/index.js';
@@ -154,7 +156,10 @@ async function spawnContainer(session: Session): Promise<void> {
   // immediate kill before the new container touches the file itself.
   fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
 
-  const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const container = spawn(CONTAINER_RUNTIME_BIN, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: buildContainerRuntimeEnv(),
+  });
 
   activeContainers.set(session.id, { process: container, containerName });
   markContainerRunning(session.id);
@@ -166,8 +171,11 @@ async function spawnContainer(session: Session): Promise<void> {
     }
   });
 
-  // stdout is unused in v2 (all IO is via session DB)
-  container.stdout?.on('data', () => {});
+  container.stdout?.on('data', (data) => {
+    for (const line of data.toString().trim().split('\n')) {
+      if (line) log.debug(line, { container: agentGroup.folder });
+    }
+  });
 
   // No host-side idle timeout. Stale/stuck detection is driven by the host
   // sweep reading heartbeat mtime + processing_ack claim age + container_state
@@ -220,6 +228,10 @@ export function resolveProviderName(
   containerConfigProvider: string | null | undefined,
 ): string {
   return (sessionProvider || containerConfigProvider || 'claude').toLowerCase();
+}
+
+export function buildContainerRuntimeEnv(): NodeJS.ProcessEnv {
+  return { ...process.env };
 }
 
 function resolveProviderContribution(
@@ -326,12 +338,25 @@ function buildMounts(
     mounts.push(...validated);
   }
 
+  // Auto-mounts declared in the allowlist (autoMount: true) — into every group.
+  // Explicit additionalMounts (pushed above) win on containerPath collision.
+  mounts.push(...getAutoMounts(agentGroup.name));
+
   // Provider-contributed mounts (e.g. opencode-xdg)
   if (providerContribution.mounts) {
     mounts.push(...providerContribution.mounts);
   }
 
-  return mounts;
+  // Dedupe by containerPath, keeping the first occurrence so explicit
+  // additionalMounts take precedence over allowlist auto-mounts.
+  const seenContainerPaths = new Set<string>();
+  return mounts.filter((m) => {
+    if (seenContainerPaths.has(m.containerPath)) {
+      return false;
+    }
+    seenContainerPaths.add(m.containerPath);
+    return true;
+  });
 }
 
 /**
@@ -396,7 +421,7 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
   }
 }
 
-async function buildContainerArgs(
+export async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   agentGroup: AgentGroup,
@@ -410,6 +435,11 @@ async function buildContainerArgs(
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
+  args.push('-e', `CF_FETCH_SIDECAR_URL=${CF_FETCH_SIDECAR_URL}`);
+  args.push('-e', `CF_FETCH_SIDECAR_ENABLED=${CF_FETCH_SIDECAR_ENABLED}`);
+  if (process.env.HTTP_PROXY_URL) {
+    args.push('-e', 'HTTP_PROXY_URL');
+  }
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
@@ -452,14 +482,9 @@ async function buildContainerArgs(
     }
   }
 
-  // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
-  args.push('--entrypoint', 'bash');
-
   // Use per-agent-group image if one has been built, otherwise base image
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
   args.push(imageTag);
-
-  args.push('-c', 'exec bun run /app/src/index.ts');
 
   return args;
 }

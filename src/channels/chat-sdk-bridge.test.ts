@@ -204,4 +204,43 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     const msg = calls[0].message as { markdown?: string };
     expect(msg.markdown).toBe('plain hello');
   });
+
+  it('can post plain outbound text through the raw path for adapters that should not reparse Markdown', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      outboundTextFormat: 'raw',
+    });
+    await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: { text: 'audio https://example.com/file.mp3' },
+    });
+    expect(calls).toHaveLength(1);
+    const msg = calls[0].message as { raw?: string; markdown?: string };
+    expect(msg).toEqual({ raw: 'audio https://example.com/file.mp3' });
+  });
+
+  it('uses the raw path for outbound text edits when configured', async () => {
+    const edits: PostCall[] = [];
+    const editMessage = async (threadId: string, messageId: string, message: PostCall['message']) => {
+      edits.push({ threadId, message });
+      return { id: messageId, threadId, raw: {} };
+    };
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ editMessage }),
+      supportsThreads: false,
+      outboundTextFormat: 'raw',
+    });
+    await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: 'msg-1',
+        text: 'audio https://example.com/file.mp3',
+      },
+    });
+    expect(edits).toHaveLength(1);
+    expect(edits[0].message).toEqual({ raw: 'audio https://example.com/file.mp3' });
+  });
 });

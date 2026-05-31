@@ -1,0 +1,172 @@
+=== Sub-AC 2.2.1 — Agent-browser invocation step ===
+
+Goal
+----
+Implement an agent-browser invocation step in the wrapper CLI that
+shells out to the existing agent-browser command with the user's
+URL/options and captures stdout, stderr, exit code, and response body
+for downstream inspection.
+
+Deliverable
+-----------
+container/skills/web-fetch/web_fetch.py
+    Public structures (sub-private — leading underscore — to mark them
+    as wrapper-internal contract surfaces, not CLI-stable public API):
+
+        @dataclass(frozen=True)
+        class _AgentBrowserInvocation:
+            cli_args:      tuple[str, ...]   # argv handed to agent-browser (no bin)
+            exit_code:     int               # subprocess return code (124 timeout, 127 missing)
+            stdout:        str               # captured stdout (raw)
+            stderr:        str               # captured stderr (raw, or synthetic on timeout / missing-bin)
+            duration_s:    float             # wall-clock time for the invocation
+            response_body: str               # caller-supplied interpretation of stdout
+                                             # (= decoded HTML / fetch() body for eval calls;
+                                             #   = raw stdout for `open` / `get` / `close`)
+
+            def to_dict(self) -> dict[str, Any]: ...   # JSON-serialisable form
+
+        @dataclass
+        class _AgentBrowserInvocationLog:
+            invocations: list[_AgentBrowserInvocation]
+
+            def record(inv) -> _AgentBrowserInvocation: ...
+            def to_list() -> list[dict[str, Any]]: ...
+
+        def _run_agent_browser(bin_path, cli_args, *, timeout,
+                               recorder=None, response_body=None
+                              ) -> _AgentBrowserInvocation: ...
+
+        def _replace_response_body(inv, response_body) -> _AgentBrowserInvocation: ...
+
+How the four required artefacts are captured
+--------------------------------------------
+1. STDOUT
+   - subprocess.run(..., capture_output=True, text=True)   → proc.stdout
+   - On timeout: TimeoutExpired.stdout (partial, may be "")
+   - On missing binary: ""
+   - Surfaced verbatim on `_AgentBrowserInvocation.stdout`.
+   - web_fetch.py:_run_agent_browser
+
+2. STDERR
+   - proc.stderr on success; synthetic strings on timeout / missing-binary
+     so callers can branch uniformly without needing to special-case
+     subprocess exceptions:
+       * timeout: "agent-browser timed out after Ns"
+       * missing: "agent-browser binary not found: <strerror>"
+
+3. EXIT CODE
+   - proc.returncode on normal completion
+   - 124 synthesised on TimeoutExpired (matches GNU `timeout`'s exit code)
+   - 127 synthesised on FileNotFoundError (matches POSIX "command not found")
+
+4. RESPONSE BODY
+   - Defaults to stdout when caller doesn't override.
+   - For `eval` invocations, _fetch_get / _fetch_non_get post-process
+     the eval-quoted stdout (json.loads) and patch the recorder's last
+     entry via `_replace_response_body` so the per-invocation
+     `response_body` matches the assembled envelope's `html` field.
+   - This means the FULL response body is captured per invocation
+     even though agent-browser returns HTML/JSON via stdout-as-string.
+
+User URL / options flow through verbatim
+----------------------------------------
+The `cli_args` tuple is the exact argv passed to agent-browser (after
+the binary). No escaping, no substitution. Verified by
+`test_user_url_and_options_flow_through_verbatim`:
+
+    _run_agent_browser("agent-browser",
+                       ["open", "https://utoon.net/?a=1&b=2"], timeout=12)
+    → subprocess.run called with
+      ["agent-browser", "open", "https://utoon.net/?a=1&b=2"]
+      timeout=12.0
+
+Downstream inspection
+---------------------
+The full invocation chain is surfaced on the response envelope under
+`agent_browser_invocations` (a list of dicts, one per shell-out, in
+chronological order). The GET path issues five invocations
+(open + eval(html) + get(title) + get(url) + close); the non-GET path
+issues three (open(about:blank) + eval(fetch) + close).
+
+Any downstream consumer can read the chain directly:
+
+  CF detection (cf_detect.py)
+      Could examine stderr for proxy-error markers without re-running
+      the request — current heuristic doesn't yet, but the data is
+      now present for a future heuristic.
+
+  Orchestrator structured logger (orchestrator.py)
+      Can extract per-step durations / exit codes from the envelope's
+      `agent_browser_invocations` list when emitting `primary.complete`.
+
+  Operator post-mortem
+      `jq '.agent_browser_invocations' web-fetch-output.json` shows the
+      full subprocess trail — argv, exit codes, stdouts, stderrs — for
+      any reproducible failure.
+
+Schema parity
+-------------
+Every primary-tier envelope shape now carries `agent_browser_invocations`:
+  - success path:     populated with full chain (5 entries for GET, 3 for non-GET)
+  - _fail():          populated with whatever was recorded before the failure
+  - _primary_exception_envelope (orchestrator):  empty list (runner raised before recorder ran)
+  - main()'s catastrophic envelope:              empty list (orchestrator itself raised)
+
+Downstream consumers can index into the key unconditionally without
+needing to check for its presence.
+
+Test evidence
+-------------
+$ cd container/skills/web-fetch && python3 -m unittest test_web_fetch -v
+    Ran 18 tests in 0.003s
+    OK
+
+The unittest suite covers:
+  - InvocationDataclass (4 tests)
+      - all required fields present
+      - cli_args serialises as list (tuple in memory, list on the wire)
+      - dataclass is frozen (mutation raises FrozenInstanceError)
+      - _replace_response_body returns a new object
+  - InvocationLog (2 tests)
+      - record appends in order
+      - to_list serialises every entry
+  - RunAgentBrowserCaptures (7 tests)
+      - captures stdout/stderr/exit_code on success
+      - records into recorder when supplied
+      - does not record when recorder is None
+      - timeout surfaced as synthetic 124
+      - missing binary surfaced as synthetic 127
+      - caller-supplied response_body preserved
+      - user URL / options flow through verbatim
+  - EnvelopeSurfacesInvocations (4 tests)
+      - GET path envelope carries 5-step invocation chain
+      - failed open envelope still carries invocation chain
+      - non-GET path envelope carries 3-step invocation chain
+      - invocation list is JSON-serialisable (round-trips through json.dumps)
+  - FailureEnvelopeSchemaParity (1 test)
+      - _fail envelope has agent_browser_invocations key (empty list)
+
+Full suite (no regression)
+--------------------------
+$ cd container/skills/web-fetch && python3 -m unittest discover
+    Ran 100 tests in 0.007s
+    OK
+    (was 82 before this sub-AC; 18 new tests added.)
+
+Files
+-----
+- container/skills/web-fetch/web_fetch.py
+    + _AgentBrowserInvocation dataclass
+    + _AgentBrowserInvocationLog accumulator
+    + _run_agent_browser refactored to return the dataclass
+    + _fetch_via_agent_browser threads a recorder + attaches to envelope
+    + _fetch_get / _fetch_non_get use invocation objects + patch
+      response_body for eval calls
+    + _fail / _primary_exception_envelope / catastrophic envelope:
+      schema parity
+- container/skills/web-fetch/orchestrator.py
+    + _primary_exception_envelope: schema parity
+- container/skills/web-fetch/test_web_fetch.py  (NEW — 18 tests)
+
+[SUB-AC 2.2.1 COMPLETE]

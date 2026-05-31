@@ -15,7 +15,9 @@ import {
   LinkButton,
   type CardChild,
   type Adapter,
+  type AdapterPostableMessage,
   type ConcurrencyStrategy,
+  type FileUpload,
   type Message as ChatMessage,
 } from 'chat';
 import { log } from '../log.js';
@@ -65,6 +67,7 @@ export interface ChatSdkBridgeConfig {
    * quirk (e.g. Telegram's legacy Markdown parse mode).
    */
   transformOutboundText?: (text: string) => string;
+  outboundTextFormat?: 'markdown' | 'raw';
   /**
    * Maximum text length the underlying adapter accepts in a single message.
    * When set, the bridge splits outbound text longer than this on paragraph
@@ -119,9 +122,17 @@ export function splitForLimit(text: string, limit: number): string[] {
   return chunks;
 }
 
+function createTextPostable(text: string, format: 'markdown' | 'raw', files?: FileUpload[]): AdapterPostableMessage {
+  if (format === 'raw') {
+    return files ? { raw: text, files } : { raw: text };
+  }
+  return files ? { markdown: text, files } : { markdown: text };
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
+  const outboundTextFormat = config.outboundTextFormat ?? 'markdown';
   let chat: Chat;
   let state: SqliteStateAdapter;
   let setupConfig: ChannelSetup;
@@ -372,9 +383,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       const content = message.content as Record<string, unknown>;
 
       if (content.operation === 'edit' && content.messageId) {
-        await adapter.editMessage(tid, content.messageId as string, {
-          markdown: transformText((content.text as string) || (content.markdown as string) || ''),
-        });
+        const rawEditText = (content.text as string) || (content.markdown as string) || '';
+        await adapter.editMessage(
+          tid,
+          content.messageId as string,
+          createTextPostable(transformText(rawEditText), outboundTextFormat),
+        );
         return;
       }
 
@@ -474,7 +488,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       const text = rawText ? transformText(rawText) : rawText;
       if (text) {
         // Attach files if present (FileUpload format: { data, filename })
-        const fileUploads = message.files?.map((f: { data: Buffer; filename: string }) => ({
+        const fileUploads: FileUpload[] | undefined = message.files?.map((f: { data: Buffer; filename: string }) => ({
           data: f.data,
           filename: f.filename,
         }));
@@ -487,11 +501,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         let firstId: string | undefined;
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
-          const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
-          const result = await adapter.postMessage(
-            tid,
-            attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
-          );
+          const files = i === 0 && fileUploads && fileUploads.length > 0 ? fileUploads : undefined;
+          const result = await adapter.postMessage(tid, createTextPostable(chunk, outboundTextFormat, files));
           if (i === 0) firstId = result?.id;
         }
         return firstId;

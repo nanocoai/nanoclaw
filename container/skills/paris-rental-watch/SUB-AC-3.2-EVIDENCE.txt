@@ -1,0 +1,111 @@
+Sub-AC 3.2 — Remove host-helpers/paris-pap-fetch/ directory
+==================================================================
+
+Seed: pap-cf-bypass-20260510 / PapRentalCFBypassMigration / Step 2-B
+
+> Sub-AC 2: host-helpers/paris-pap-fetch/ 디렉토리 전체 삭제
+> (legacy_assets concept — host-side fetcher 흔적 zero-state).
+
+Pre-conditions (carried over from SUB-AC-3.1)
+----------------------------------------------
+- com.nanoclaw.paris-pap-fetch launchd job already unloaded
+  (`launchctl list | grep paris-pap-fetch` → empty).
+- ~/Library/LaunchAgents/com.nanoclaw.paris-pap-fetch.plist already removed
+  (`ls` → No such file or directory).
+- Container path migrated to web-fetch + parse_pap.py (SUB-AC 2-A wiring).
+
+  → Deletion is safe: nothing live (launchd, src/, scripts/, container code)
+    referenced the directory anymore — only doc/spec/evidence files did.
+
+1. Pre-deletion manifest (snapshot before rm -rf)
+--------------------------------------------------
+$ ls -la host-helpers/paris-pap-fetch/
+  total 48
+  drwxr-xr-x@ 3 whahn  staff     96 May  9 17:28 __pycache__
+  drwxr-xr-x@ 7 whahn  staff    224 May  9 17:28 .
+  drwxr-xr-x@ 9 whahn  staff    288 May  9 21:29 ..
+  -rwxr-xr-x@ 1 whahn  staff  11284 May  9 17:28 fetch.py
+  -rwxr-xr-x@ 1 whahn  staff   2554 May  8 04:33 install.sh
+  -rw-r--r--@ 1 whahn  staff   1514 May  8 04:33 launchd.plist.template
+  -rw-r--r--@ 1 whahn  staff   3249 May  8 04:33 README.md
+
+$ md5 -q host-helpers/paris-pap-fetch/{fetch.py,install.sh,launchd.plist.template,README.md}
+  2723edfba1f29562078981df22f793b3   fetch.py
+  d27672d44f25d64611475ef995308b61   install.sh
+  fee4196399bf6b59ef68ed164101e42c   launchd.plist.template
+  c632ddbd5c55cc6b26d7dbf1442d6994   README.md
+
+$ git status --short host-helpers/paris-pap-fetch/
+  ?? host-helpers/paris-pap-fetch/      (untracked — deletion has no git impact)
+
+2. Pre-deletion live-reference audit
+-------------------------------------
+$ grep -R paris-pap-fetch <repo>     →   11 hits across 11 files (pre-deletion)
+   Live (would break if deleted):  host-helpers/cf-fetch-server/README.md
+                                   ("Layout follows the host-helpers/paris-pap-fetch/ precedent")
+   Historical (past-tense / spec / evidence — fine to keep):
+     container/skills/paris-rental-watch/SUB-AC-3.1-EVIDENCE.txt
+     container/skills/paris-rental-watch/SKILL.md             (구/폐기)
+     container/skills/paris-rental-watch/parse_pap.py         ("used to live in")
+     host-helpers/cf-fetch-server/VERIFICATION-G-EVIDENCE.txt (point-in-time evidence)
+     .ouroboros/seeds/pap-cf-bypass-20260510.yaml             (the migration spec itself)
+     .ouroboros/seeds/cf-bypass-fetch-wrapper.yaml            (sibling seed)
+   Self-referential (about to be deleted):
+     host-helpers/paris-pap-fetch/{fetch.py,README.md,install.sh,launchd.plist.template}
+
+   → Edited the one live reference (cf-fetch-server/README.md) to drop the
+     dangling "follows the paris-pap-fetch precedent" line and replace it with
+     a self-contained description of the host-helper layout convention.
+
+3. Deletion
+------------
+$ rm -rf host-helpers/paris-pap-fetch
+$ ls -la host-helpers/paris-pap-fetch
+  ls: /Users/whahn/Desktop/nanoclaw/host-helpers/paris-pap-fetch:
+       No such file or directory
+$ ls -la host-helpers/
+  total 0
+  drwxr-xr-x@ cf-fetch-server
+  drwxr-xr-x@ iphone-magicdns-verify
+  drwxr-xr-x@ iphone-tailscale-ssh-verify
+  drwxr-xr-x@ lan-ssh-verify
+  drwxr-xr-x@ tailscale-ssh-acl
+  drwxr-xr-x@ tailscale-ssh-enable
+  (paris-pap-fetch absent ✓)
+
+4. Post-deletion live-reference audit
+--------------------------------------
+$ grep -R paris-pap-fetch <repo>
+  6 files (down from 11) — all are doc/spec/evidence; zero live code paths:
+    container/skills/paris-rental-watch/SUB-AC-3.1-EVIDENCE.txt   evidence
+    container/skills/paris-rental-watch/SKILL.md                  legacy notice
+    container/skills/paris-rental-watch/parse_pap.py              docstring history
+    host-helpers/cf-fetch-server/VERIFICATION-G-EVIDENCE.txt      point-in-time
+    .ouroboros/seeds/pap-cf-bypass-20260510.yaml                  spec
+    .ouroboros/seeds/cf-bypass-fetch-wrapper.yaml                 spec
+$ grep -R paris-pap-fetch src/        →  no files found
+$ grep -R paris-pap-fetch scripts/    →  no files found
+$ grep -R paris-pap-fetch launchd/    →  no files found
+
+5. Launchd state (sanity)
+--------------------------
+$ launchctl list | grep -E 'paris-pap|cf-fetch'
+  34166  0  com.nanoclaw.cf-fetch-server
+  (paris-pap-fetch entry absent ✓ — only the new sidecar remains)
+
+Outcome
+-------
+- host-helpers/paris-pap-fetch/ removed in entirety (4 files + __pycache__).
+- Single dangling live reference (cf-fetch-server/README.md) re-worded into
+  a self-contained layout description.
+- Remaining mentions are intentional historical/spec references and do not
+  require any path on disk.
+- Combined with SUB-AC 3.1 (launchd unload + plist remove), the legacy host
+  fetcher is now fully retired:
+    - launchd job        — removed (SUB-AC 3.1)
+    - LaunchAgents plist — removed (SUB-AC 3.1)
+    - host-helpers dir   — removed (this AC)
+- legacy_assets concept (Seed) → cleared on the host-fetcher axis.
+  Remaining legacy_assets to verify in subsequent ACs:
+    - .paris-rental-pap-staging.jsonl  (staging file under webdav-data)
+    - .paris-rental-pap-failure.json   (failure counter file)

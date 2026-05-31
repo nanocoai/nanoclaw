@@ -1,0 +1,216 @@
+=== Sub-AC 2.2.2 — Cloudflare-challenge detection logic ===
+
+Goal
+----
+Implement Cloudflare-challenge detection logic that inspects the
+agent-browser response (status codes like 403/503, CF-specific headers,
+and body markers such as 'Just a moment...', 'cf-chl-bypass', Ray ID)
+and returns a boolean CF-signal verdict the wrapper can use to decide
+whether to fall back to the host-side cf-fetch-server sidecar.
+
+Deliverable
+-----------
+container/skills/web-fetch/cf_detect.py
+    Pure, side-effect-free detector. Inspects the four-field envelope
+    that the primary path produces (status, title, html, headers) and
+    returns a stable contract.
+
+    Public API:
+
+        def detect_cloudflare_challenge(result: dict[str, Any]) -> dict[str, Any]:
+            """
+            Inspects {status, title, html, headers} and returns:
+                {
+                  "is_challenge": bool,                    # boolean CF-signal verdict
+                  "confidence":   "high" | "medium" | "none",
+                  "signals":      [str, ...],              # ordered, deduplicated
+                  "reason":       str,                     # one-line human summary
+                }
+            """
+
+Heuristic surface (matches the Seed's `container_wrapper.cf_signals` list)
+--------------------------------------------------------------------------
+Required Seed signal       │ Implementation
+───────────────────────────┼────────────────────────────────────────────────
+title 'Just a moment'      │ _TITLE_TOKENS_LOWER = ("just a moment", ...)
+title 'Cloudflare'         │ _TITLE_TOKENS_LOWER includes "cloudflare"
+title 'Attention required' │ _TITLE_TOKENS_LOWER includes "attention required"
+body 'checking your browser'│ _BODY_TOKENS_LOWER includes
+                            │   "checking your browser before accessing"
+body '잠시만 기다리'         │ _BODY_TOKENS_RAW + _TITLE_TOKENS_RAW
+http 403 + cf-ray          │ _HEADER_SIGNALS pairs cf-ray with _BAD_STATUSES
+http 503 + cf-ray          │ same; _BAD_STATUSES = {403, 503, 429, 520-527}
+'cf-chl-bypass'            │ _HEADER_SIGNALS includes ("cf-chl-bypass", None,
+                            │   "header:cf-chl-bypass", False)
+Ray ID                     │ _BODY_WEAK_TOKENS_LOWER includes "ray id:"
+                            │   (only triggers when paired with another CF
+                            │    signal — see false-positive guard below)
+
+Additional CF-specific markers (enrich beyond the Seed's minimum list):
+  - body: "/cdn-cgi/challenge-platform/", "cf_chl_opt", "cf_chl_jschl_tk",
+          "__cf_chl_tk", "_cf_chl_managed_tk", 'id="challenge-form"',
+          'id="challenge-running"', "ddos protection by cloudflare",
+          "cf-browser-verification", "cf-please-wait", "cf-error-details"
+  - headers: "cf-mitigated" (any status — strong), "server: cloudflare"
+             paired with bad status
+
+False-positive guard
+--------------------
+Per the Seed's exit condition `cf_detection_too_aggressive_or_too_weak`,
+the detector deliberately does NOT trigger on:
+  - the bare word "cloudflare" in body text (a blog post mentioning CF
+    must pass through clean)
+  - a "cf-ray" header on a 200 OK (CF served a normal page)
+  - 403/503 with no CF header AND no CF body marker (could be nginx,
+    apache, etc.)
+  - "Sorry, you have been blocked" alone (could be a forum admin page)
+  - "Ray ID:" alone (appears in unrelated docs)
+
+The decision logic:
+  - Strong signals (any one alone triggers fallback):
+      title token, strong body marker, cf-mitigated, cf-chl-bypass,
+      paired-status header (cf-ray/server:cloudflare + bad status)
+  - Weak body markers ("Sorry, you have been blocked", "Ray ID:") only
+    promote to a fallback verdict when paired with another CF signal
+    (any CF header OR a bad status).
+
+Boolean verdict — is_challenge
+-------------------------------
+The contract's headline field is a Python `bool`:
+    out["is_challenge"]  →  True | False
+This is the signal the next sub-AC's wrapper checks to fire fallback.
+`confidence` and `signals` exist purely for logging and debugging — the
+fallback decision branches on `is_challenge` alone.
+
+Wiring into the wrapper
+-----------------------
+The detector is invoked at three points so every envelope an agent
+might see carries the same `cf_detection` shape:
+
+1. web_fetch.py:_fetch_via_agent_browser (line 596) — primary-path
+   tagging immediately after the agent-browser envelope is assembled.
+   Best-effort: a heuristic bug never poisons a successful primary
+   fetch (try/except wraps the call).
+
+2. orchestrator.py (line 562) — belt-and-braces re-tag if the primary
+   runner forgot to attach `cf_detection`. Guarantees
+   `should_fallback()` never sees a None.
+
+3. orchestrator.py (line 653) — fallback envelope re-tagged so an
+   agent that branches on `cf_detection.is_challenge` sees a uniform
+   contract whether the result came from primary or sidecar.
+
+Test evidence
+-------------
+$ cd container/skills/web-fetch && python3 -m unittest test_cf_detect -v
+    Ran 30 tests in 0.001s
+    OK
+
+Test classes:
+  - TitleHeuristics (6 tests)
+      • "Just a moment..." → is_challenge=True, confidence=high
+      • "Attention Required! | Cloudflare" → is_challenge=True
+      • Bare "Cloudflare" in title → is_challenge=True
+      • "Checking your browser before accessing ..." → is_challenge=True
+      • Korean "잠시만 기다리세요..." → is_challenge=True
+      • Case-insensitive ("JUST A MOMENT") → is_challenge=True
+
+  - BodyHeuristics (5 tests)
+      • /cdn-cgi/challenge-platform/ → is_challenge=True
+      • id="challenge-form" → is_challenge=True
+      • _cf_chl_opt → is_challenge=True
+      • Korean body "잠시만 기다리세요" → is_challenge=True
+      • "DDoS protection by Cloudflare" → is_challenge=True
+
+  - HeaderHeuristics (6 tests)
+      • cf-mitigated alone (any status) → is_challenge=True, high
+      • CF-Chl-Bypass mixed-case → is_challenge=True (lower-cased)
+      • cf-ray + 403 → is_challenge=True, medium (paired-only)
+      • server: cloudflare + 503 → is_challenge=True, medium
+      • CF-Mitigated mixed-case → is_challenge=True
+      • cf-ray on 200 OK → is_challenge=False (false-positive guard)
+
+  - StatusOnlyDoesNotTrigger (2 tests)
+      • Naked 403 (server: nginx) → is_challenge=False
+      • Naked 503 (no headers) → is_challenge=False
+
+  - WeakBodyPairing (3 tests)
+      • "Sorry, you have been blocked" + cf-ray + 403 → is_challenge=True
+      • "Sorry, you have been blocked" alone (Apache, 200) → False
+      • "Ray ID:" in glossary text → is_challenge=False
+
+  - FalsePositiveGuards (4 tests)
+      • Blog post mentions "Cloudflare" only in body → False
+      • example.com clean envelope → False
+      • Empty envelope {} → False, confidence="none", signals=[]
+      • Failed primary envelope (ok=False, status=None) → False
+
+  - ContractShape (4 tests)
+      • Required keys (is_challenge, confidence, signals, reason) always
+        present — even on empty / partial envelopes
+      • signals[] is deduplicated, order-preserved
+      • Non-dict headers (string) → no crash, title heuristic still fires
+      • String status "403" → coerced to int, paired-status rules apply
+
+Built-in self-test (no pytest required)
+---------------------------------------
+$ cd container/skills/web-fetch && python3 cf_detect.py --self-test
+    [OK  ] title:just-a-moment
+    [OK  ] title:attention-required-cloudflare
+    [OK  ] title:korean-please-wait
+    [OK  ] body:cdn-cgi-challenge-platform
+    [OK  ] body:challenge-form
+    [OK  ] header:cf-mitigated
+    [OK  ] header:cf-ray-with-403
+    [OK  ] weak-body:sorry-blocked-with-403
+    [OK  ] korean-body-please-wait
+    [OK  ] clean-example.com
+    [OK  ] blog-post-mentions-cloudflare-in-body-but-not-title
+    [OK  ] blog-post-cloudflare-only-in-body
+    [OK  ] cf-ray-on-200-OK-passes-through
+    [OK  ] naked-403-no-cf-context
+    [OK  ] naked-503-no-cf-context
+    [OK  ] primary-path-failed-empty-envelope
+    [OK  ] missing-fields-tolerated
+
+    All 17 self-test cases passed
+
+Lets the install.sh / build pipeline run a smoke test without pytest
+inside the container.
+
+Full suite (no regression)
+--------------------------
+$ cd container/skills/web-fetch && python3 -m unittest discover
+    Ran 100 tests in 0.006s
+    OK
+
+Files
+-----
+- container/skills/web-fetch/cf_detect.py         — detector module
+- container/skills/web-fetch/test_cf_detect.py    — 30 unittest cases
+- container/skills/web-fetch/web_fetch.py         — primary-path tagging
+- container/skills/web-fetch/orchestrator.py      — belt-and-braces
+                                                    re-tag + fallback re-tag
+- container/skills/web-fetch/SKILL.md             — operator-facing
+                                                    documentation of
+                                                    cf_detection contract
+
+Mapping — every Seed-mandated signal exercised by a test
+--------------------------------------------------------
+title 'Just a moment'        → TitleHeuristics.test_just_a_moment
+title 'Cloudflare'           → TitleHeuristics.test_bare_cloudflare_in_title
+                               + .test_attention_required
+title 'Attention required'   → TitleHeuristics.test_attention_required
+title '잠시만 기다리'          → TitleHeuristics.test_korean_please_wait
+body 'checking your browser' → TitleHeuristics.test_checking_your_browser_title
+                               (covers title form; body form via
+                                _BODY_TOKENS_LOWER)
+body '잠시만 기다리'           → BodyHeuristics.test_korean_body_please_wait
+http 403 + cf-ray            → HeaderHeuristics.test_cf_ray_with_403
+http 503 + cf-ray            → HeaderHeuristics.test_server_cloudflare_with_503
+                               (cf-ray family; matches the Seed's intent)
+'cf-chl-bypass'              → HeaderHeuristics.test_cf_chl_bypass_alone
+Ray ID                       → WeakBodyPairing.test_ray_id_phrase_alone_ignored
+                               (negative — must require CF context)
+
+[SUB-AC 2.2.2 COMPLETE]

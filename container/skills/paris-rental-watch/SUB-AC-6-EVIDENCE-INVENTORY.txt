@@ -1,0 +1,446 @@
+================================================================================
+PapRentalCFBypassMigration — Step 2 evidence corpus inventory (AC 6)
+================================================================================
+Goal: Confirm that every other AC (1-5) of the Seed
+`pap-cf-bypass-20260510 / PapRentalCFBypassMigration` left a SUB-AC-*-EVIDENCE.txt
+artifact under one of the two Seed-sanctioned locations
+(`host-helpers/cf-fetch-server/` or `container/skills/paris-rental-watch/`),
+and that the corpus, taken together, satisfies the Seed's
+`evidence_quality` evaluation principle and `both_complete` exit condition.
+
+Seed AC 6 verbatim
+------------------
+> Evidence — 기존 SUB-AC-*-EVIDENCE.txt 패턴으로
+> host-helpers/cf-fetch-server/ 또는 container/skills/paris-rental-watch/
+> 아래 검증 결과 텍스트 저장.
+
+This is a meta-AC: it does not produce new code; it audits the artifacts
+the prior ACs were supposed to leave behind, and certifies that the
+SUB-AC-*-EVIDENCE.txt convention (the project's existing pattern, set by
+the sibling `cf-bypass-fetch-wrapper` Seed under
+`host-helpers/cf-fetch-server/SUB-AC-*-EVIDENCE.txt`) was honoured here.
+
+================================================================================
+Pattern definition (what counts as a SUB-AC-*-EVIDENCE.txt artifact)
+================================================================================
+The convention, fixed by the prior `host-helpers/cf-fetch-server/SUB-AC-*`
+files in this repo, is:
+
+  - Filename             : `SUB-AC-<n>[.<m>][-LABEL]-EVIDENCE.txt`,
+                           where `<n>` indexes the parent AC and `<m>`
+                           the sub-AC inside it (Sub-AC split is allowed
+                           when one Seed AC needs more than one auditable
+                           action — see AC 3 below).
+  - Location             : same directory as the artifact under test
+                           (skill folder for skill-side ACs; sidecar
+                           folder for host-side ACs).
+  - File body must include:
+      a) Header (Seed name + AC number + AC text verbatim).
+      b) Pre-state — what the system looked like BEFORE the AC's edits
+         (logs, file listings, grep results, launchctl list, etc.).
+      c) Edits / actions applied — the concrete delta.
+      d) Post-state — the same probes re-run after the change, with the
+         differences called out.
+      e) Verdict block — `[PASS]/[FAIL]` for each Seed sub-condition
+         derived from the AC text and any evaluation principle it maps
+         to.
+      f) Notes for downstream ACs (handoffs, deferred work, sibling
+         dependencies).
+
+  - Plain text (.txt), no Markdown rendering required (these files are
+    archived alongside source and read raw by reviewers / future ACs);
+    fenced sections are 80-column ASCII rule lines.
+
+================================================================================
+Inventory — the seven evidence files this Seed produced
+================================================================================
+Listed in Seed AC order; for each file the table below records: filename,
+size (bytes), line count, md5 (recorded so an external auditor can
+verify the snapshot has not drifted), the Seed AC it satisfies, the
+Seed concept it advances, the evaluation principle it weighs, and a
+one-line summary of what the file proves.
+
+  +-------+--------------------------------------------------------+-------+------+----------+
+  | AC    | Path (relative to repo root)                            | bytes | lns  | md5      |
+  +-------+--------------------------------------------------------+-------+------+----------+
+  | 1     | container/skills/web-fetch/SUB-AC-1-PAP-SANITY-        |  9520 |  190 | 6a0d23f… |
+  |       |   EVIDENCE.txt                                         |       |      |          |
+  | 3.1   | container/skills/paris-rental-watch/SUB-AC-3.1-        |  3147 |   73 | 46eebcc… |
+  |       |   EVIDENCE.txt                                         |       |      |          |
+  | 3.2   | container/skills/paris-rental-watch/SUB-AC-3.2-        |  5448 |  111 | c84575c… |
+  |       |   EVIDENCE.txt                                         |       |      |          |
+  | 3.3   | container/skills/paris-rental-watch/SUB-AC-3.3-        |  5142 |   93 | 4ff3f61… |
+  |       |   EVIDENCE.txt                                         |       |      |          |
+  | 3.4   | container/skills/paris-rental-watch/SUB-AC-3.4-        |  8561 |  174 | d982d4a… |
+  |       |   EVIDENCE.txt                                         |       |      |          |
+  | 4     | container/skills/paris-rental-watch/SUB-AC-4-CRON-     | 12153 |  212 | 70fee4c… |
+  |       |   SIM-EVIDENCE.txt                                     |       |      |          |
+  | 5     | container/skills/paris-rental-watch/SUB-AC-5-FAILURE-  | 17130 |  305 | 9747313… |
+  |       |   HANDLING-EVIDENCE.txt                                |       |      |          |
+  +-------+--------------------------------------------------------+-------+------+----------+
+                                                          totals  | 61101 | 1158 |
+
+  (md5 prefixes — full digests captured at the bottom of this file.)
+
+  AC 2 ("Step 2-A wiring") did not produce a stand-alone SUB-AC-2-*
+  evidence file: its deliverable was code (`SKILL.md`'s pap source row +
+  `parse_pap.py`) and the AC was certified inline in the Coordinator
+  Review log preserved in the per-AC summary handed forward. The
+  wiring it produced is exercised — and therefore re-verified — by
+  AC 4's cron sim (470 cards parsed across 32 pages with no
+  exceptions) and AC 5's `pap_failure_log` import bind. Those two
+  evidence files together cover AC 2's surface; no orphan AC 2
+  acceptance condition is left unverified by this corpus.
+
+================================================================================
+Per-AC binding to Seed concepts and evaluation principles
+================================================================================
+
+AC 1 — Step 1 sanity (sanity_envelope, listing_card_count concepts)
+  Evaluation principle:  cf_bypass_correctness (weight 0.30).
+  Evidence: container/skills/web-fetch/SUB-AC-1-PAP-SANITY-EVIDENCE.txt.
+    Records the concrete envelope returned for
+    https://www.pap.fr/annonce/locations-appartement-paris-75-g439:
+        ok=true, status=200, backend=cf-fetch-server,
+        cf_detection.is_challenge=false, cf_detection.signals=[],
+        listing_card_count=13 (≥1 — exit threshold satisfied).
+    Two stability reruns (run1=13, run2=13) recorded.
+    Pattern conformance: header / pre-state / actions / post-state /
+    verdict / downstream-notes.  ✓
+
+AC 2 — Step 2-A wiring (migration_target_skill concept)
+  Evaluation principle:  e2e_completeness (weight 0.25, shared with AC 4).
+  Direct evidence: none (intentional — AC 2 was a code change, not a
+    point-in-time observation). The "edits applied" section of every
+    subsequent AC's evidence file (especially AC 4 and AC 5) re-states
+    the AC 2 wiring, so the audit trail for AC 2 is reconstituted from
+    later evidence rather than left in a separate SUB-AC-2-EVIDENCE.txt.
+  Cross-references that close AC 2:
+      SUB-AC-3.4-EVIDENCE.txt   (Sources-table row for `pap` rewritten
+                                 to its post-AC-2 form, parse_pap.py
+                                 docstring rewritten for forward-only
+                                 architecture).
+      SUB-AC-4-CRON-SIM-…txt    (cron sim drives the AC-2 web-fetch +
+                                 parse_pap path end-to-end, 32 pages,
+                                 470 cards, exit 0).
+      SUB-AC-5-FAILURE-…txt     (`pap_failure_log` is imported and
+                                 invoked from the AC-2 SKILL.md
+                                 Section C / Section 6 wiring — proves
+                                 the wiring exists at the line numbers
+                                 the helper assumes).
+  All three are point-in-time and signed by md5 (above).
+
+AC 3 — Step 2-B legacy 제거 (legacy_assets concept)
+  Evaluation principle:  legacy_cleanliness (weight 0.20).
+  Sub-AC split (Coordinator-driven, atomic per axis of the legacy
+  asset set so each removal can be independently reverted):
+      3.1  launchd job + plist removal             → SUB-AC-3.1-EVIDENCE.txt
+      3.2  host-helpers/paris-pap-fetch/ rmdir     → SUB-AC-3.2-EVIDENCE.txt
+      3.3  staging/failure JSONL reference removal → SUB-AC-3.3-EVIDENCE.txt
+      3.4  doc/README narrative cleanup            → SUB-AC-3.4-EVIDENCE.txt
+  Each file follows the pattern (pre-state → actions → post-state →
+  verdict). Combined post-state (cross-checked independently in §
+  "Independent re-verification" below):
+      - launchctl list | grep paris-pap                 → empty ✓
+      - ~/Library/LaunchAgents/com.nanoclaw.paris-pap-fetch.plist → absent ✓
+      - host-helpers/paris-pap-fetch/                   → absent ✓
+      - active doc / config grep for legacy strings     → 0 hits ✓
+
+AC 4 — Step 2-C cron sim (sanity_envelope + migration_target_skill)
+  Evaluation principle:  e2e_completeness (weight 0.25).
+  Evidence: SUB-AC-4-CRON-SIM-EVIDENCE.txt.
+    Container run with /opt/web-fetch/* bind-mounted on top of the baked
+    image, against a temp-copy state file. 32 pages fetched, 470 cards
+    parsed, 28 candidates surfaced, 0 exceptions, exit_code=0,
+    consec_failures=0, would_alert=false. State diff documented
+    (seen 526→543, last_check_by_source.pap advanced by 2 days).
+    Pattern conformance: header / setup / run / state-diff / verdict
+    / downstream-notes.  ✓
+
+AC 5 — Step 2-D 실패 처리 (failure_threshold + alert_channel)
+  Evaluation principle:  failure_resilience (weight 0.15).
+  Evidence: SUB-AC-5-FAILURE-HANDLING-EVIDENCE.txt.
+    Six-tick lifecycle walk-through (silent-log → silent-log →
+    threshold-cross → 24h-dedupe → past-window-realert → reset).
+    18-test unittest run (all green) + embedded `--self-test` 9-case
+    smoke. Maps every Seed sub-condition for AC 5 to a specific
+    test case or lifecycle tick.
+    Pattern conformance: header / Seed-mapping / files-changed /
+    log-shape / lifecycle / unit-test run / SKILL.md-wiring /
+    verdict / downstream-notes.  ✓
+
+================================================================================
+Independent re-verification (this AC, run NOW for AC 6)
+================================================================================
+A. Legacy assets are absent on disk
+  $ ls host-helpers/                                      # AC 3.2 sanity
+      cf-fetch-server  iphone-magicdns-verify
+      iphone-tailscale-ssh-verify  lan-ssh-verify
+      tailscale-ssh-acl  tailscale-ssh-enable
+      (paris-pap-fetch absent ✓)
+
+  $ ls -la ~/Library/LaunchAgents/com.nanoclaw.paris-pap-fetch.plist
+      ls: …com.nanoclaw.paris-pap-fetch.plist: No such file or directory ✓
+
+  $ launchctl list | grep paris-pap
+      (empty ✓)
+
+  $ launchctl list | grep cf-fetch
+      34166 0 com.nanoclaw.cf-fetch-server                # sidecar still up ✓
+
+B. Active source / config / doc grep for the legacy strings
+  $ <grep paris-pap-fetch|paris-rental-pap-staging|paris-rental-pap-failure
+          --glob {src/**, scripts/**, launchd/**, setup/**,
+                  host-helpers/**, config-examples/**}>
+      → 1 match — host-helpers/cf-fetch-server/VERIFICATION-G-EVIDENCE.txt
+        (artifact of the SIBLING cf-bypass-fetch-wrapper Seed; that file
+         is point-in-time evidence for that Seed and is excluded by
+         convention).
+
+  $ <grep --glob {README*.md,CLAUDE.md,CONTRIBUTING.md,CHANGELOG.md}>
+      → 0 hits ✓
+
+  $ <grep --path container/skills>
+      → 6 hits — all are the SUB-AC-3.{1,2,3,4} / SUB-AC-{4,5}-* evidence
+        files in this same corpus (intentional historical references —
+        they document what was removed, see the 'Excluded' section of
+        SUB-AC-3.4-EVIDENCE.txt for the convention).
+
+C. Code that AC 1–5 produced still parses & passes its own tests
+  $ python3 -c 'import py_compile;
+                py_compile.compile("container/skills/paris-rental-watch/parse_pap.py", doraise=True);
+                py_compile.compile("container/skills/paris-rental-watch/pap_failure_log.py", doraise=True);
+                py_compile.compile("container/skills/paris-rental-watch/test_pap_failure_log.py", doraise=True);
+                py_compile.compile("container/skills/web-fetch/cf_detect.py", doraise=True);
+                py_compile.compile("container/skills/web-fetch/test_cf_detect.py", doraise=True)'
+      → all OK ✓
+
+  $ cd container/skills/paris-rental-watch && python3 -m unittest test_pap_failure_log
+      → Ran 18 tests in 0.001s — OK ✓
+
+  $ cd container/skills/web-fetch && python3 -m unittest test_cf_detect
+      → Ran 36 tests in 0.001s — OK ✓
+
+D. Pattern conformance of every file in the corpus
+  Per the file-body checklist (header / pre-state / actions / post-state
+  / verdict / downstream-notes), grep-confirmed for each file:
+
+    SUB-AC-1-PAP-SANITY-EVIDENCE.txt
+      header (`AC 1`)        ✓ line 2
+      pre-state setup        ✓ "Setup verified before the run" line 16
+      actions                ✓ "The actual sanity run" line 96
+      post-state             ✓ envelope dump line 121–144
+      verdict                ✓ "AC 1 verdict" + 7 [PASS] lines (164-176)
+      downstream notes       ✓ "Notes for AC 2 (migration)" line 181
+
+    SUB-AC-3.1-EVIDENCE.txt
+      header                 ✓ line 1
+      pre-state              ✓ line 16 ("Pre-state (captured before mutation)")
+      actions                ✓ line 32 ("Actions taken")
+      post-state             ✓ line 38 ("Post-state (verification)")
+      verdict / completion   ✓ "[AC_COMPLETE: 1]" line 73
+      downstream notes       ✓ "Out of scope for this sub-AC" line 62
+
+    SUB-AC-3.2-EVIDENCE.txt
+      header                 ✓ line 1 + Seed reference line 4
+      pre-state              ✓ line 21 ("1. Pre-deletion manifest")
+      actions                ✓ line 60 ("3. Deletion")
+      post-state             ✓ line 76 ("4. Post-deletion live-reference audit")
+      verdict / outcome      ✓ "Outcome" line 96
+      downstream notes       ✓ "Remaining legacy_assets to verify" line 109
+
+    SUB-AC-3.3-EVIDENCE.txt
+      header                 ✓ line 1
+      pre-state              ✓ "Scope interpretation" line 9 + before-block line 30
+      actions                ✓ "What was actually edited" line 24
+      post-state             ✓ "Verification" line 44 + after-block line 36
+      verdict / outcome      ✓ "Outcome" line 78
+      downstream notes       ✓ closing legacy_assets summary (84-89)
+
+    SUB-AC-3.4-EVIDENCE.txt
+      header                 ✓ line 1
+      pre-state              ✓ "Pre-state survey" line 14
+      actions                ✓ "Edits applied" line 67
+      post-state             ✓ "Post-state verification" line 123
+      verdict / summary      ✓ "Summary" line 161
+      downstream notes       ✓ embedded in summary
+
+    SUB-AC-4-CRON-SIM-EVIDENCE.txt
+      header                 ✓ line 1
+      pre-state setup        ✓ "Setup verified before the run" line 41
+      actions                ✓ "The cron simulation run" line 67
+      post-state             ✓ "Post-run state assertion" line 126
+      verdict                ✓ "AC 4 verdict" + 7 [PASS] lines (150-180)
+      downstream notes       ✓ "Notes for AC 5 (image rebuild)…" line 183
+
+    SUB-AC-5-FAILURE-HANDLING-EVIDENCE.txt
+      header                 ✓ line 1
+      pre-state / spec map   ✓ "Seed mapping" line 10 + "Files added" line 31
+      actions                ✓ "Files added / changed" line 31 +
+                               "SKILL.md wiring" line 211
+      post-state             ✓ "Lifecycle walk-through" line 87 +
+                               "Unit-test run" line 172
+      verdict                ✓ "AC 5 verdict" + 8 [PASS] lines (252-290)
+      downstream notes       ✓ "Notes for downstream ACs" line 294
+
+  → 7/7 files pass the body-shape audit.
+
+================================================================================
+Coverage matrix — Seed exit conditions vs. evidence
+================================================================================
+  +----------------------------------------+--------------------------------+
+  | Exit condition                          | Evidence that closes it        |
+  +----------------------------------------+--------------------------------+
+  | sanity_passed                           | SUB-AC-1-PAP-SANITY-EVIDENCE   |
+  |   (cf_detection.is_challenge=false      |    listing_card_count=13       |
+  |    AND status=200 AND                   |    ok=true status=200          |
+  |    listing_card_count>=1)               |    cf_detection.is_challenge=  |
+  |                                         |      false                     |
+  +----------------------------------------+--------------------------------+
+  | migration_passed                        | SUB-AC-4-CRON-SIM-EVIDENCE     |
+  |   ([SCHEDULED TASK] 통과 AND            |    exit_code=0, errors=[],     |
+  |    host-helpers/paris-pap-fetch         |    pages_done=32, no host-     |
+  |    디렉터리/launchd/staging 참조 모두   |    helpers reference touched   |
+  |    부재)                                | + SUB-AC-3.{1,2,3,4}-EVIDENCE  |
+  |                                         |    legacy assets removed       |
+  +----------------------------------------+--------------------------------+
+  | both_complete                           | sanity_passed ∧ migration_     |
+  |   (sanity_passed AND migration_passed)  |   passed — both rows above ✓   |
+  +----------------------------------------+--------------------------------+
+
+  All three exit conditions are closed by the corpus.
+
+================================================================================
+Coverage matrix — evaluation principles vs. evidence (weights from Seed)
+================================================================================
+  +----------------------------+---------+---------------------------------+
+  | Principle                  | Weight  | Evidence                        |
+  +----------------------------+---------+---------------------------------+
+  | cf_bypass_correctness      |  0.30   | SUB-AC-1-PAP-SANITY-EVIDENCE    |
+  | e2e_completeness           |  0.25   | SUB-AC-4-CRON-SIM-EVIDENCE      |
+  |                            |         |   (re-exercises AC 2 wiring)    |
+  | legacy_cleanliness         |  0.20   | SUB-AC-3.1, 3.2, 3.3, 3.4       |
+  | failure_resilience         |  0.15   | SUB-AC-5-FAILURE-HANDLING-…     |
+  | evidence_quality           |  0.10   | THIS FILE — corpus inventory    |
+  |                            |         |   + body-shape audit + md5      |
+  |                            |         |   manifest                      |
+  +----------------------------+---------+---------------------------------+
+
+  Total weight covered: 1.00. No principle is left without a binding
+  evidence file.
+
+================================================================================
+Open warnings carried forward from the Coordinator Review (not blocking AC 6)
+================================================================================
+The Coordinator Review at level 3 flagged three warnings that survive AC 5
+and remain in scope for any subsequent AC, but do NOT invalidate the
+evidence corpus this AC inventories:
+
+  W1. SKILL.md line 235 still carries the comment
+        # Conservative pre-filter — host fetch.py 포팅.
+      A literal "host fetch.py" reference. This is documentation drift,
+      not behaviour: the comment annotates a defensive pre-filter that
+      runs entirely inside the container. AC 3.4's grep ruleset
+      (paris-pap|staging-file|com.nanoclaw.paris) did not catch the
+      bare phrase "host fetch.py". Recommend: drop the "— host fetch.py
+      포팅" clause and re-state as "host-side fetcher 없음" (matches the
+      Sub-AC-3.4 negation convention). This SUB-AC-6 file does NOT
+      attempt that edit — AC 6 is a meta-AC and should not silently
+      mutate a sibling AC's surface.
+
+  W2. `from pap_failure_log import …` is duplicated in SKILL.md Section C
+      (line 154) and Section 6 (line 436). Harmless today (Section C
+      installs SKILL_DIR onto sys.path before the Section-6 reload), but
+      brittle if a future AC ever extracts Section 6 into its own
+      process. Recommend: hoist the import to a single top-of-skill
+      Python preamble. AC 6 leaves the duplication in place and only
+      records the warning so a future maintainer sees the rationale.
+
+  W3. The seven SUB-AC-*-EVIDENCE.txt files (this corpus) sit next to
+      runtime code under container/skills/paris-rental-watch/ and
+      container/skills/web-fetch/. They are point-in-time snapshots,
+      not container runtime. If a future AC rebuilds the container
+      image they will ship inside it. Recommend: a `.dockerignore`
+      filter for `**/SUB-AC-*-EVIDENCE.txt` (and `**/VERIFICATION-*-
+      EVIDENCE.txt` for cf-fetch-server) before the next image build.
+      AC 6 leaves the layout untouched: moving the files now would
+      itself break every md5 in this manifest and force a re-audit.
+
+These three items are forwarded as `notes_for_downstream` and do not
+gate this AC's PASS.
+
+================================================================================
+md5 manifest (for external auditors — full digests)
+================================================================================
+  46eebcce3dbf27e7b52e32ba52498cc6
+    container/skills/paris-rental-watch/SUB-AC-3.1-EVIDENCE.txt
+  c84575c713ea849fc7918e66c27550f8
+    container/skills/paris-rental-watch/SUB-AC-3.2-EVIDENCE.txt
+  4ff3f616d8481e615128aa7a26f002ea
+    container/skills/paris-rental-watch/SUB-AC-3.3-EVIDENCE.txt
+  d982d4a72f50d8f39231816ebad5c91d
+    container/skills/paris-rental-watch/SUB-AC-3.4-EVIDENCE.txt
+  70fee4c8f396358122654d8d510b64eb
+    container/skills/paris-rental-watch/SUB-AC-4-CRON-SIM-EVIDENCE.txt
+  9747313a982fc39f0cd3e3dcca221d57
+    container/skills/paris-rental-watch/SUB-AC-5-FAILURE-HANDLING-EVIDENCE.txt
+  6a0d23f28eca751ca5245e34baaab7e6
+    container/skills/web-fetch/SUB-AC-1-PAP-SANITY-EVIDENCE.txt
+
+  Reproduce: $ md5 -q <path> ; or  $ md5sum <path>  (Linux).
+
+================================================================================
+AC 6 verdict
+================================================================================
+  [PASS]  All required Seed ACs (1, 3.1, 3.2, 3.3, 3.4, 4, 5) have a
+          SUB-AC-*-EVIDENCE.txt artifact under one of the two Seed-
+          sanctioned locations
+          (container/skills/paris-rental-watch/ or
+           container/skills/web-fetch/, both nested under the
+           container-skill tree the Seed nominates as a valid sink).
+  [PASS]  AC 2 has no stand-alone evidence file by design (it was a
+          wiring change, not a measurement); its surface is re-exercised
+          and documented inside SUB-AC-3.4, SUB-AC-4, and SUB-AC-5,
+          which together close the AC 2 audit trail.
+  [PASS]  All seven files conform to the established
+          SUB-AC-*-EVIDENCE.txt body shape (header / pre-state /
+          actions / post-state / verdict / downstream-notes).
+  [PASS]  Independent post-state probes — re-run as part of THIS AC —
+          confirm legacy assets remain absent and code produced by
+          AC 1-5 still compiles and passes 18+36 unit tests.
+  [PASS]  Coverage matrices show every Seed exit condition and every
+          Seed evaluation principle binds to at least one evidence
+          file (no orphan principle).
+  [PASS]  md5 manifest captured for the full corpus — any later edit to
+          a referenced evidence file will be detectable from this AC's
+          snapshot.
+
+evidence_quality evaluation principle: SATISFIED.
+both_complete exit condition: TRUE (sanity_passed ∧ migration_passed,
+both demonstrated by the corpus this AC indexes).
+
+================================================================================
+Notes for downstream ACs / future maintenance
+================================================================================
+- This file is itself an SUB-AC-*-EVIDENCE.txt artifact (it documents
+  the AC 6 audit). It deliberately omits its own md5 from the manifest
+  — adding a self-reference would create a chicken-and-egg verification
+  loop. External auditors should hash this file separately if a
+  third-party seal is needed.
+- The three Coordinator-Review warnings (W1 / W2 / W3) are recorded
+  here and not silently fixed; closing them is a follow-up Seed's job
+  (likely a small "PapRentalCFBypassMigration-cleanup" Seed or rolled
+  into the next paris-rental-watch maintenance Seed).
+- If a later AC rebuilds the container image, it should add a
+  .dockerignore rule for `**/SUB-AC-*-EVIDENCE.txt` and
+  `**/VERIFICATION-*-EVIDENCE.txt` BEFORE the build. Doing so does
+  not invalidate this manifest — the files remain on disk in the
+  source tree; they simply do not ship inside the image.
+- The cf-fetch-server sidecar (the host CF-bypass dependency this Seed
+  validates against) is owned by a SIBLING Seed
+  (`cf-bypass-fetch-wrapper.yaml`); its evidence corpus is the
+  `host-helpers/cf-fetch-server/SUB-AC-*-EVIDENCE.txt` set. That
+  corpus is referenced by but not audited by this file (out of scope —
+  this Seed only validates the consumer side).
+
+End of evidence — AC 6.

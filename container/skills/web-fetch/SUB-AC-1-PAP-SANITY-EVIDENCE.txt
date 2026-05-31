@@ -1,0 +1,190 @@
+================================================================================
+PapRentalCFBypassMigration — Step 1 sanity (AC 1)
+================================================================================
+Goal: Run the container's `web-fetch` against the pap.fr listings index and
+confirm the returned envelope satisfies all four AC sub-conditions:
+
+  1. ok=true
+  2. status=200
+  3. cf_detection.is_challenge=false
+  4. listing card (€ price + m² area paired) count ≥ 1
+
+URL under test: https://www.pap.fr/annonce/locations-appartement-paris-75-g439
+
+================================================================================
+Setup verified before the run
+================================================================================
+- launchctl list shows com.nanoclaw.cf-fetch-server running on 127.0.0.1:8765:
+    49758  0  com.nanoclaw.cf-fetch-server
+- HTTP_PROXY_URL set in the launchd plist EnvironmentVariables only — never
+  exported into the container env (constraint: webshare creds host-only).
+- nanoclaw-agent:latest image present locally; container reaches the host
+  sidecar via host.docker.internal:8765 (Docker host-gateway alias).
+
+----- /tmp/cf-fetch-server.log (sidecar startup) ---------------------------
+[cf-fetch-server] launching persistent nodriver browser...
+[cf-fetch-server] proxy configured (rotating per-tab): http://wu***@p.webshare.io:80
+[cf-fetch-server] nodriver browser ready (proxy=on)
+[cf-fetch-server] warm browser ready in 3.2s
+[cf-fetch-server] watchdog started (interval=30.0s)
+[cf-fetch-server] concurrency gate: max=3, queue_wait=30.0s, drain=10.0s
+[cf-fetch-server] starting on http://127.0.0.1:8765 (pid=34166)
+
+================================================================================
+Pre-fix issue: nodriver verify_cf() failing for missing opencv-python
+================================================================================
+The sidecar's nodriver backend requires opencv-python (cv2) to locate the
+Turnstile checkbox via template matching. The pre-fix venv at
+~/Library/Caches/com.nanoclaw.cf-fetch-server/venv/ did not have it, so
+verify_cf() raised "cannot unpack non-iterable NoneType object" and gave up
+after 10s, returning a near-empty page (552B head only).
+
+Remediation (executed before the test):
+  $ ~/Library/Caches/com.nanoclaw.cf-fetch-server/venv/bin/pip install opencv-python
+  Successfully installed numpy-2.4.4 opencv-python-4.13.0.92
+  $ launchctl kickstart -k gui/$(id -u)/com.nanoclaw.cf-fetch-server
+
+After the install, sidecar log shows verify_cf() returning cleanly:
+  [cf-fetch-server] CF challenge detected; title='Just a moment...'.
+  [cf-fetch-server] verify_cf() returned
+  [cf-fetch-server] CF cleared after 10.0s; title='Location appartement Paris (75) - …'
+
+================================================================================
+Pre-fix issue: cf_detect.py false-positives on cleared post-bypass page
+================================================================================
+On a successfully bypassed pap.fr page the body still contained TWO benign
+CF artefacts that triggered cf_detect false positives:
+
+  1. URL-encoded analytics referer echo. Piano tracking URLs include
+        href="…/redirect?ref=https%3A%2F%2Fwww.pap.fr%2F…%3F__cf_chl_tk%3D…"
+     which has the URL-encoded form of the original CF challenge URL
+     (with the token in a `ref=` query value). cf_detect.py's
+     `__cf_chl_tk` / `cf_chl_opt` substring matchers fired on these
+     echoes even though no active challenge was running.
+
+  2. CF JavaScript Detection (JSD) telemetry script:
+        <script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js">
+     Cloudflare injects this telemetry on EVERY page it fronts, including
+     fully cleared post-bypass pages. The bare substring
+     `/cdn-cgi/challenge-platform/` therefore was not specific to an
+     active challenge.
+
+Both made cf_detection.is_challenge=true on a real listings page,
+violating AC sub-condition 3.
+
+Fix (container/skills/web-fetch/cf_detect.py):
+  - URL-shaped tokens (__cf_chl_tk / cf_chl_opt / cf_chl_jschl_tk /
+    _cf_chl_managed_tk) now require at least one RAW (non-URL-encoded)
+    occurrence before counting. URL-encoded analytics echoes are
+    rejected by `_token_has_raw_occurrence` (lookbehind for `%[0-9a-f]{2}`).
+  - `/cdn-cgi/challenge-platform/` now requires at least one occurrence
+    NOT followed by a benign sub-path (`scripts/jsd/`,
+    `scripts/invisible.js`). Real challenge sub-paths
+    (`/h/g/…`, `/h/b/…`) still fire.
+
+Test coverage added in container/skills/web-fetch/test_cf_detect.py:
+  test_url_encoded_cf_chl_tk_echo_in_analytics_referer
+  test_raw_cf_chl_tk_still_detected
+  test_mixed_raw_and_encoded_token_still_detected
+  test_cdn_cgi_jsd_telemetry_only_does_not_trigger
+  test_cdn_cgi_real_challenge_path_still_fires
+  test_cdn_cgi_jsd_telemetry_plus_real_challenge_fires
+
+  Result: 36 cases pass (was 30); cf_detect.py --self-test 17 cases pass.
+
+================================================================================
+The actual sanity run
+================================================================================
+$ docker run --rm \
+    --entrypoint /bin/bash \
+    -e CF_FETCH_SIDECAR_URL=http://host.docker.internal:8765 \
+    -e WEB_FETCH_LOG_LEVEL=INFO \
+    --add-host=host.docker.internal:host-gateway \
+    -v /Users/whahn/Desktop/nanoclaw/container/skills/web-fetch/cf_detect.py:/opt/web-fetch/cf_detect.py:ro \
+    nanoclaw-agent:latest \
+    -lc 'web-fetch --timeout 120 https://www.pap.fr/annonce/locations-appartement-paris-75-g439'
+
+Exit code: 0
+
+Structured log (web-fetch INFO trail, /tmp/pap_envelope.err — abridged):
+  fetch.start          url=https://www.pap.fr/annonce/locations-appartement-paris-75-g439
+  primary.complete     ok=true status=200 cf_is_challenge=true
+                       cf_signals=[title:just a moment, body:cdn-cgi-challenge-platform,
+                                   body:cf_chl_opt, body:__cf_chl_tk]
+  fallback.decision    fire=true
+  sidecar.start        sidecar_url=http://host.docker.internal:8765 retry_count=1
+  sidecar.complete     ok=true sidecar_backend=nodriver sidecar_http_status=200
+                       sidecar_attempts=1 elapsed_s=2.294
+  fetch.complete       tier=sidecar ok=true exit_code=0 total_elapsed_s=3.869
+
+Envelope (parsed from stdout JSON, /tmp/pap_envelope.json):
+
+  {
+    "ok": true,
+    "backend": "cf-fetch-server",
+    "status": 200,
+    "title": "Location appartement Paris (75) - Louer un appartement à Paris | Particulier à Particulier - PAP",
+    "url": "https://www.pap.fr/annonce/locations-appartement-paris-75-g439",
+    "cf_detection": {
+      "is_challenge": false,
+      "confidence": "none",
+      "signals": [],
+      "reason": "no Cloudflare challenge signals detected"
+    },
+    "fallback": {
+      "fired": true,
+      "sidecar_backend": "nodriver",
+      "sidecar_http_status": 200,
+      "proxy_auth_wired": true,
+      "primary_backend": "agent-browser",
+      "primary_status": 200,
+      "primary_signals": ["title:just a moment", "body:cdn-cgi-challenge-platform",
+                          "body:cf_chl_opt", "body:__cf_chl_tk"]
+    }
+  }
+
+  html_len: 221268 bytes
+  listing_card_count: 13   (matched on item-price € paired with li m² inside the same card)
+  first_three_cards (price_eur / area_m2):
+    1.900 € / 50 m²
+    1.030 € / 95 m²
+    1.593 € / 42 m²
+
+Card detection regex (anchored on .item-price followed by sibling <li>… m²):
+    r'class="item-price">\s*([\d\.\,  ]+)&nbsp;€.*?<li>(\d+)&nbsp;m²'
+
+================================================================================
+Stability — two additional reruns
+================================================================================
+  run1: ok=true status=200 backend=cf-fetch-server cf_is_challenge=false
+        cf_signals=[] html_len=221909 listing_card_count=13
+  run2: ok=true status=200 backend=cf-fetch-server cf_is_challenge=false
+        cf_signals=[] html_len=221427 listing_card_count=13
+
+================================================================================
+AC 1 verdict
+================================================================================
+  [PASS]  ok = true
+  [PASS]  status = 200
+  [PASS]  cf_detection.is_challenge = false
+  [PASS]  listing_card_count = 13   (≥ 1 required)
+  [PASS]  envelope schema preserved (ok / backend / status / cf_detection /
+          fallback) — constraint honoured.
+  [PASS]  webshare proxy creds host-only (HTTP_PROXY_URL only in launchd
+          plist EnvironmentVariables; never exported into container env).
+  [PASS]  container reaches sidecar via host.docker.internal:8765
+          (loopback bind preserved on host).
+
+sanity_passed exit condition: TRUE.
+
+================================================================================
+Notes for AC 2 (migration)
+================================================================================
+- The cf_detect.py fix lives on the host source tree; for the verification
+  above it was bind-mounted into /opt/web-fetch/. The image rebuild was
+  blocked by a locked login keychain at the time of the run
+  (`./container/build.sh` failed at FROM node:22-slim metadata pull).
+  AC 2 should rebuild the image so the baked /opt/web-fetch/cf_detect.py
+  carries the fix without the bind-mount.
+- `__pycache__/cf_detect*.pyc` will be regenerated by the next interpreter
+  load; bind-mount overrides the cached module on every container start.

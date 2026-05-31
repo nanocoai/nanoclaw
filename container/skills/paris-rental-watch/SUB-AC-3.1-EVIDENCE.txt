@@ -1,0 +1,73 @@
+Sub-AC 3.1 — Remove com.nanoclaw.paris-pap-fetch launchd service
+=================================================================
+
+Requirement
+-----------
+> Sub-AC 1: com.nanoclaw.paris-pap-fetch launchd 서비스 unload 및
+> plist 파일 제거 (~/Library/LaunchAgents/com.nanoclaw.paris-pap-fetch.plist)
+
+This is the first cleanup sub-AC under AC 3 (legacy_cleanliness). With
+AC 2 having migrated `paris-rental-watch` to the container-direct
+web-fetch path, the host-side cron job that produced the staging JSONL
+is no longer wired into anything — it can be removed without breaking
+the skill.
+
+Pre-state (captured before mutation)
+------------------------------------
+$ launchctl list | grep -i paris-pap
+-       2       com.nanoclaw.paris-pap-fetch
+
+$ ls -la ~/Library/LaunchAgents/com.nanoclaw.paris-pap-fetch.plist
+-rw-r--r--@ 1 whahn  staff  1530 May  8 04:47
+  /Users/whahn/Library/LaunchAgents/com.nanoclaw.paris-pap-fetch.plist
+
+The plist was a StartCalendarInterval job that ran six times per day
+(KST 00:55 / 04:55 / 08:55 / 12:55 / 16:55 / 20:55) invoking
+/Users/whahn/Desktop/nanoclaw/host-helpers/paris-pap-fetch/fetch.py
+under /usr/bin/python3, writing logs to /tmp/paris-pap-fetch.{log,err}.
+Reference copy of the manifest is preserved in this evidence file
+above for archival purposes; the plist itself has been deleted.
+
+Actions taken
+-------------
+1. `launchctl unload ~/Library/LaunchAgents/com.nanoclaw.paris-pap-fetch.plist`
+   — exit 0.
+2. `rm ~/Library/LaunchAgents/com.nanoclaw.paris-pap-fetch.plist`
+   — exit 0.
+
+Post-state (verification)
+-------------------------
+$ launchctl list | grep -i paris-pap || echo "Service confirmed not loaded"
+Service confirmed not loaded
+
+$ ls -la ~/Library/LaunchAgents/com.nanoclaw.paris-pap-fetch.plist \
+    || echo "plist file successfully removed"
+ls: /Users/whahn/Library/LaunchAgents/com.nanoclaw.paris-pap-fetch.plist:
+    No such file or directory
+plist file successfully removed
+
+$ ls -la ~/Library/LaunchAgents/
+total 64
+-rw-r--r--@  1 whahn  staff  2223 Mar 22 23:57 ai.openclaw.gateway.plist
+-rw-r--r--@  1 whahn  staff   872 Feb  9 21:43 com.google.GoogleUpdater.wake.plist
+-rw-r--r--@  1 whahn  staff   181 Feb  9 21:43 com.google.keystone.agent.plist
+-rw-r--r--@  1 whahn  staff   181 Feb  9 21:43 com.google.keystone.xpcservice.plist
+-rw-------@  1 whahn  staff  4783 May 10 02:44 com.nanoclaw.cf-fetch-server.plist
+-rw-r--r--   1 whahn  staff  1004 Mar 30 02:06 com.nanoclaw.plist
+-rw-r--r--   1 whahn  staff   745 Mar  1 01:58 com.whahn.vaultbackup.plist
+
+The cf-fetch-server plist (sidecar required by the new container path)
+is intentionally preserved.
+
+Out of scope for this sub-AC
+----------------------------
+- host-helpers/paris-pap-fetch/ directory — to be removed in a later
+  sub-AC under AC 3.
+- .paris-rental-pap-staging.jsonl / .paris-rental-pap-failure.json
+  staging artifacts — to be removed in a later sub-AC under AC 3.
+
+Both are now orphaned (no launchd job will write to them), but
+deletion is sequenced separately so each removal is auditable on its
+own and can be reverted independently if regression is observed.
+
+[AC_COMPLETE: 1]

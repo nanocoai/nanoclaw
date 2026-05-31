@@ -1,0 +1,305 @@
+================================================================================
+PapRentalCFBypassMigration — Step 2-D failure handling (AC 5)
+================================================================================
+Goal: Verify that paris-rental-watch's pap source treats a single web-fetch
+ok=false / rc≠0 tick as a structured-log-only event, escalates to the
+Discord alert channel only when consecutive failures reach the threshold
+(N=3), dedupes additional alerts within 24h, and resets the counter on
+the next successful pap fetch.
+
+Seed mapping
+------------
+  Concept           Source
+  ─────────────     ────────────────────────────────────────────
+  failure_threshold container/skills/paris-rental-watch/SKILL.md
+                      → PAP_FAILURE_THRESHOLD = 3 (Config block)
+                    container/skills/paris-rental-watch/pap_failure_log.py
+                      → DEFAULT_DEDUPE_WINDOW_S = 86400 (24h)
+  alert_channel     dc:1485303434541273220 (TARGET_JID; SKILL.md L9, L30)
+  legacy_assets     n/a — failure tracking lives on STATE JSON inline,
+                    no separate `.paris-rental-pap-failure.json` (AC 2-B
+                    sibling task removed it).
+
+Evaluation principle covered: `failure_resilience` —
+  cf_bypass_correctness    AC 1
+  e2e_completeness         AC 2 + AC 4 (cron sim, sibling)
+  legacy_cleanliness       AC 2-B (sibling, removed host-helpers + plist)
+  failure_resilience       this AC
+  evidence_quality         this file (matches SUB-AC-* pattern)
+
+================================================================================
+Files added / changed for this AC
+================================================================================
+  + container/skills/paris-rental-watch/pap_failure_log.py
+      Helper module — single source of truth for the failure-log shape,
+      threshold logic, and 24h Discord-alert dedupe.
+
+  + container/skills/paris-rental-watch/test_pap_failure_log.py
+      18 unittest cases covering single-failure / threshold-crossing /
+      dedupe / recovery / reason-truncation / legacy-ISO parsing / event
+      emission. Stdlib-only — runs inside the container with no extra
+      deps.
+
+  ~ container/skills/paris-rental-watch/SKILL.md
+      Section C (pap polling loop) imports the helper, replaces inline
+      counter mutation with `log_pap_fetch_failure(...)` /
+      `reset_pap_fetch_counter(...)`. Section 6 replaces the inline
+      threshold-and-dedupe arithmetic with `evaluate_pap_alert` +
+      `mark_pap_alert_sent`. Failure-modes table updated to reference
+      the new structured-log event names.
+
+================================================================================
+Structured-log shape
+================================================================================
+Every web-fetch ok=false (or rc≠0) tick emits ONE line to stderr:
+
+  {
+    "event":            "paris-rental-watch.pap.fetch.failure",
+    "ts":               "<ISO 8601 UTC>",
+    "consec_failures":  <int — post-increment>,
+    "threshold":        <int — PAP_FAILURE_THRESHOLD, default 3>,
+    "reason":           "<truncated 300ch, newlines collapsed>",
+    "will_alert":       <bool — true iff this tick will fire Discord>
+  }
+
+Ratings:
+  * `event` is unique → `grep '"event":"paris-rental-watch.pap.fetch.failure"'`
+    surfaces every transient pap failure across all skills.
+  * `will_alert` is informational; the actual decision is the return value
+    of `evaluate_pap_alert(...)` in Section 6 (single source of truth so
+    a SKILL.md drift can not cause a silent miss).
+  * Newlines are collapsed → one failure = one log line, regardless of
+    web-fetch's stderr (which may carry multi-line tracebacks).
+  * Reason truncation cap: `REASON_MAX_CHARS = 300`.
+  * Encoding: `ensure_ascii=False` — Korean / French diagnostics stay
+    readable.
+
+Escalation event (Section 6, fired only when consec ≥ threshold AND no
+alert in last 24h):
+
+  {
+    "event":            "paris-rental-watch.pap.fetch.alert",
+    "ts":               "<ISO 8601 UTC>",
+    "consec_failures":  <int>,
+    "reason":           "<truncated reason>"
+  }
+
+================================================================================
+Lifecycle walk-through (`python3 - <<EOF` against the helper)
+================================================================================
+Six cron ticks against an empty state, threshold=3, default 24h dedupe.
+Each step prints the structured log record `log_pap_fetch_failure`
+emitted, the `evaluate_pap_alert` decision, and the resulting state.
+
+──────────────────────────────────────────────────────────────────────────────
+# Cron tick 1 — first transient failure (12:00)
+──────────────────────────────────────────────────────────────────────────────
+  -> log: {"event":"paris-rental-watch.pap.fetch.failure",
+           "ts":"2026-05-10T12:00:00+00:00",
+           "consec_failures":1,"threshold":3,
+           "reason":"page 1 web-fetch rc=3: sidecar 503",
+           "will_alert":false}
+  -> evaluate_pap_alert: should_alert=False, message=None
+  state.pap_consec_failures   = 1
+  state.pap_last_failure_reason = 'page 1 web-fetch rc=3: sidecar 503'
+  state.pap_failure_last_alert  = None
+
+──────────────────────────────────────────────────────────────────────────────
+# Cron tick 2 — second transient failure (13:00)
+──────────────────────────────────────────────────────────────────────────────
+  -> log: {"event":"paris-rental-watch.pap.fetch.failure",
+           "ts":"2026-05-10T13:00:00+00:00",
+           "consec_failures":2,"threshold":3,
+           "reason":"page 1 web-fetch rc=3: sidecar 503",
+           "will_alert":false}
+  -> evaluate_pap_alert: should_alert=False, message=None
+  state.pap_consec_failures   = 2
+
+──────────────────────────────────────────────────────────────────────────────
+# Cron tick 3 — threshold reached (14:00) — ALERT FIRES
+──────────────────────────────────────────────────────────────────────────────
+  -> log: {"event":"paris-rental-watch.pap.fetch.failure",
+           "ts":"2026-05-10T14:00:00+00:00",
+           "consec_failures":3,"threshold":3,
+           "reason":"page 1 web-fetch rc=3: sidecar 503",
+           "will_alert":true}
+  -> evaluate_pap_alert: should_alert=True
+     message='⚠️ pap.fr 페치 3회 연속 실패 (≥3). cf-fetch-server 점검 필요.\n
+              사유: page 1 web-fetch rc=3: sidecar 503'
+  -> [SKILL Section 6] send_message(dc:1485303434541273220, ...)
+  -> [SKILL Section 6] mark_pap_alert_sent → emits
+     {"event":"paris-rental-watch.pap.fetch.alert",
+      "ts":"2026-05-10T14:00:00+00:00","consec_failures":3,
+      "reason":"page 1 web-fetch rc=3: sidecar 503"}
+  state.pap_consec_failures   = 3
+  state.pap_failure_last_alert  = '2026-05-10T14:00:00+00:00'
+
+──────────────────────────────────────────────────────────────────────────────
+# Cron tick 4 — within 24h dedupe (15:00) — LOG ONLY, NO RE-ALERT
+──────────────────────────────────────────────────────────────────────────────
+  -> log: {"event":"paris-rental-watch.pap.fetch.failure",
+           "ts":"2026-05-10T15:00:00+00:00",
+           "consec_failures":4,"threshold":3,
+           "reason":"page 1 web-fetch rc=3: sidecar 503",
+           "will_alert":false}    ← dedupe holds
+  -> evaluate_pap_alert: should_alert=False (dedupe)
+  state.pap_consec_failures   = 4
+  state.pap_failure_last_alert  = '2026-05-10T14:00:00+00:00'  ← unchanged
+
+──────────────────────────────────────────────────────────────────────────────
+# Cron tick 5 — 24h+1s past last alert (next-day 14:00:01) — RE-ALERT
+──────────────────────────────────────────────────────────────────────────────
+  -> log: {"event":"paris-rental-watch.pap.fetch.failure",
+           "ts":"2026-05-11T14:00:01+00:00",
+           "consec_failures":5,"threshold":3,
+           "reason":"page 1 web-fetch rc=3: sidecar 503",
+           "will_alert":true}
+  -> evaluate_pap_alert: should_alert=True
+  -> [SKILL Section 6] send_message(...) + mark_pap_alert_sent
+  state.pap_failure_last_alert  = '2026-05-11T14:00:01+00:00'
+
+──────────────────────────────────────────────────────────────────────────────
+# Cron tick 6 — pap fetch SUCCEEDS → reset counter
+──────────────────────────────────────────────────────────────────────────────
+  reset_pap_fetch_counter(state)
+  state.pap_consec_failures   = 0           ← cleared
+  state.pap_last_failure_reason = None      ← cleared
+  state.pap_failure_last_alert  = '2026-05-11T14:00:01+00:00'
+                                            ← preserved (flap protection)
+  -> evaluate_pap_alert: should_alert=False
+     (next failure resumes counting from 0, alert only at 3)
+
+================================================================================
+Unit-test run (stdlib unittest — runs inside the container)
+================================================================================
+$ cd container/skills/paris-rental-watch
+$ python3 -m unittest test_pap_failure_log -v
+
+test_alert_event_emitted_to_stderr (AlertEventLog) ........................ ok
+test_after_reset_alert_not_fired (CounterReset) ........................... ok
+test_reset_clears_counter_and_reason (CounterReset) ....................... ok
+test_reset_preserves_alert_timestamp (CounterReset) ....................... ok
+test_three_consecutive_failures_cross_threshold (CrossingThreshold) ....... ok
+test_threshold_two_alerts_on_second_failure (CrossingThreshold) ........... ok
+test_alert_dedup_within_24h_window (DedupeBehavior) ....................... ok
+test_alert_realerts_past_dedupe_window (DedupeBehavior) ................... ok
+test_custom_dedupe_window (DedupeBehavior) ................................ ok
+test_legacy_z_suffix_iso_parses (DedupeBehavior) .......................... ok
+test_naive_iso_treated_as_utc (DedupeBehavior) ............................ ok
+test_default_is_24h (DefaultDedupeWindow) ................................. ok
+test_log_line_is_single_line_json (ReasonHandling) ........................ ok
+test_newlines_collapsed (ReasonHandling) .................................. ok
+test_none_reason_falls_back_to_question_mark (ReasonHandling) ............. ok
+test_reason_truncation (ReasonHandling) ................................... ok
+test_first_failure_evaluate_alert_returns_false (SingleFailure) ........... ok
+test_first_failure_logs_but_does_not_alert (SingleFailure) ................ ok
+
+----------------------------------------------------------------------
+Ran 18 tests in 0.001s
+
+OK
+
+================================================================================
+Embedded self-test (smoke check; mirrors install.sh CI hook)
+================================================================================
+$ python3 container/skills/paris-rental-watch/pap_failure_log.py --self-test
+{"event":"paris-rental-watch.pap.fetch.alert",
+ "ts":"2026-05-10T14:00:00+00:00","consec_failures":3,
+ "reason":"page 1 web-fetch rc=3: bla"}
+pap_failure_log self-test: OK (9 cases)
+
+================================================================================
+SKILL.md wiring (relevant excerpts)
+================================================================================
+Section C (pap polling loop) — top of the inline Python block:
+
+    import json, subprocess, sys, time
+    SKILL_DIR = "/home/node/.claude/skills/paris-rental-watch"
+    if SKILL_DIR not in sys.path:
+        sys.path.insert(0, SKILL_DIR)
+    from pap_failure_log import (
+        log_pap_fetch_failure,
+        reset_pap_fetch_counter,
+    )
+
+Section C — after the page loop ends:
+
+    if pap_pages_done > 0:
+        reset_pap_fetch_counter(state)
+    elif pap_failed_first_page or pap_failure_reason:
+        log_pap_fetch_failure(
+            pap_failure_reason,
+            state=state,
+            threshold=PAP_FAILURE_THRESHOLD,
+            now_iso=now_iso(),
+        )
+    else:
+        reset_pap_fetch_counter(state)
+
+Section 6 — alert-decision (only place that talks to Discord):
+
+    from pap_failure_log import evaluate_pap_alert, mark_pap_alert_sent
+    should_alert, alert_msg = evaluate_pap_alert(
+        state=state,
+        threshold=PAP_FAILURE_THRESHOLD,
+        now_iso=now_iso(),
+    )
+    if should_alert:
+        send_message(TARGET_JID, alert_msg)   # dc:1485303434541273220
+        mark_pap_alert_sent(state, now_iso())
+        json.dump(state, open(STATE, "w"), ensure_ascii=False, indent=2)
+
+================================================================================
+AC 5 verdict
+================================================================================
+  [PASS]  Single web-fetch ok=false → structured log only.
+            Verified: lifecycle ticks 1, 2 emit
+              event="paris-rental-watch.pap.fetch.failure"
+              will_alert=false
+            evaluate_pap_alert returns (False, None).
+
+  [PASS]  consec_failures ≥ 3 → Discord alert to dc:1485303434541273220.
+            Verified: lifecycle tick 3 emits will_alert=true,
+            evaluate_pap_alert returns (True, "⚠️ pap.fr 페치 3회 연속 실패…"),
+            mark_pap_alert_sent emits paris-rental-watch.pap.fetch.alert
+            event and stamps state.pap_failure_last_alert.
+
+  [PASS]  24h dedupe holds.
+            Verified: lifecycle tick 4 (1h after alert) returns
+            should_alert=False; tick 5 (24h+1s later) returns
+            should_alert=True.
+
+  [PASS]  Counter resets on successful pap fetch (pages_done > 0).
+            Verified: lifecycle tick 6 — reset_pap_fetch_counter clears
+            consec + reason but preserves the dedupe stamp (flap
+            protection).
+
+  [PASS]  Threshold configurable via PAP_FAILURE_THRESHOLD.
+            Verified: test_threshold_two_alerts_on_second_failure (the
+            same helper alerts at consec=2 when threshold=2).
+
+  [PASS]  Reason newline-collapse + 300ch cap.
+            Verified: test_newlines_collapsed, test_reason_truncation.
+
+  [PASS]  Pre-AC2 state shapes (Z-suffix, naive ISO) parse correctly.
+            Verified: test_legacy_z_suffix_iso_parses,
+            test_naive_iso_treated_as_utc.
+
+  [PASS]  No legacy assets reintroduced — counter/reason/alert-ts all
+            live on the STATE JSON; no .paris-rental-pap-failure.json,
+            no host-helpers reference.
+
+failure_resilience exit condition: TRUE.
+
+================================================================================
+Notes for downstream ACs
+================================================================================
+- The structured-log event name `paris-rental-watch.pap.fetch.failure` is
+  stable; an operator can grep it across nanoclaw container stderr to find
+  every transient pap failure, even when no Discord alert was fired.
+- `pap_failure_log` has no network deps and only stdlib imports (json,
+  datetime, sys) — safe to import inside the container's existing skill
+  set without rebuilding the image.
+- Sibling AC tasks (Step 2-B legacy removal, Step 2-C cron sim) do not
+  collide with this AC's surface — they touch host-helpers + cron tables,
+  not the paris-rental-watch skill source.

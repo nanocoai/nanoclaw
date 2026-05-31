@@ -12,6 +12,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$SCRIPT_DIR"
 
+REQUIRED_RUNTIME_FILES=(
+    "sidecars/cf-fetch-server/server.py"
+    "skills/web-fetch/web_fetch.py"
+    "skills/web-fetch/cf_detect.py"
+    "skills/web-fetch/sidecar_client.py"
+    "skills/web-fetch/orchestrator.py"
+)
+
+for required in "${REQUIRED_RUNTIME_FILES[@]}"; do
+    if [ ! -f "$required" ]; then
+        echo "Missing required container runtime file: $required" >&2
+        exit 1
+    fi
+done
+
+if [ "${1:-}" = "dryrun-web-fetch-guard" ] || [ "${1:-}" = "dryrun-runtime-guard" ]; then
+    echo "web-fetch and cf-fetch sidecar runtime files present"
+    exit 0
+fi
+
 # Derive the image name from the project root so two NanoClaw installs on the
 # same host don't overwrite each other's `nanoclaw-agent:latest` tag. Matches
 # setup/lib/install-slug.sh + src/install-slug.ts.
@@ -42,4 +62,4 @@ echo "Build complete!"
 echo "Image: ${IMAGE_NAME}:${TAG}"
 echo ""
 echo "Test with:"
-echo "  echo '{\"prompt\":\"What is 2+2?\",\"groupFolder\":\"test\",\"chatJid\":\"test@g.us\",\"isMain\":false}' | ${CONTAINER_RUNTIME} run -i ${IMAGE_NAME}:${TAG}"
+echo "  ${CONTAINER_RUNTIME} run --rm --entrypoint web-fetch ${IMAGE_NAME}:${TAG} --help"

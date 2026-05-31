@@ -1,0 +1,202 @@
+=== Sub-AC 2.2.3 — Transparent sidecar fallback path ===
+
+Goal
+----
+Implement a transparent sidecar fallback path that, when the CF signal
+is true, re-issues the same request against the host sidecar HTTP
+service and returns its response in the same output format as the
+agent-browser path, with no manual flag required.
+
+Deliverable
+-----------
+The fallback path is composed of three modules wired through one
+orchestrator entry point:
+
+  container/skills/web-fetch/sidecar_client.py
+      should_fallback(primary_envelope, *, env=None) -> (bool, str)
+          The auto-detection decision. Fallback fires iff
+          primary_envelope["cf_detection"]["is_challenge"] is True.
+          NO CLI flag and NO env knob is consulted on the CF path —
+          $CF_FALLBACK_ON_PRIMARY_FAILURE is opt-in for non-CF
+          failures only and defaults to off.
+
+      fetch_via_sidecar(*, url, method, headers, body, timeout,
+                        sidecar_url, fallback_reason, primary_result,
+                        opener=None) -> dict
+          Re-issues the request against the host sidecar's HTTP /fetch
+          endpoint (POST application/json). The request payload
+          carries url + headers + timeout — every field is the same
+          one that came in to the wrapper.
+
+      _reshape_to_wrapper_envelope(...)
+          Translates the sidecar's JSON body into the wrapper's
+          canonical envelope shape (same keys as the agent-browser
+          path) plus an additive `fallback` diagnostic record.
+
+      _build_unreachable_envelope(...)
+          Even when the sidecar can't be reached at all, the returned
+          envelope is shape-compatible with the success envelope so
+          the agent's parser never special-cases failure.
+
+  container/skills/web-fetch/orchestrator.py
+      run_fetch(req, *, primary_runner, sidecar_runner=None, ...)
+          Top-level state machine:
+            1. Run the primary tier.
+            2. Re-tag cf_detection if the primary forgot.
+            3. Call should_fallback(); if False → return primary
+               envelope.
+            4. If True → resolve the sidecar URL, call the sidecar
+               runner, re-detect cf_detection on its envelope, and
+               return that envelope as the wrapper's response.
+          The CLI's --timeout is a TOTAL budget; the orchestrator
+          splits it (default 60% primary / 40% sidecar) so a slow
+          primary can never starve the fallback.
+
+  container/skills/web-fetch/web_fetch.py
+      main(argv) → orchestrator.run_fetch(...)
+          The CLI surface (argparse) exposes:
+            url, --method, --header, --body, --body-file, --timeout,
+            --output, --agent-browser-bin
+          Notice the absence of any --use-sidecar / --backend /
+          --force-sidecar / --via-sidecar / --cf-bypass switch.
+          That absence is the "no manual flag required" clause.
+
+Verbatim AC mapping
+-------------------
+AC clause                                   │ Implementation site
+────────────────────────────────────────────┼──────────────────────────
+"when the CF signal is true"                │ sidecar_client.should_fallback
+                                            │     branches on
+                                            │     cf_detection.is_challenge
+                                            │     (no other gate, on the
+                                            │      CF path).
+"re-issues the same request"                │ orchestrator.run_fetch passes
+                                            │     req.url / req.method /
+                                            │     req.headers / req.body
+                                            │     verbatim into the sidecar
+                                            │     runner; sidecar_client.
+                                            │     _build_request packs the
+                                            │     same url+timeout+headers
+                                            │     into the sidecar's POST
+                                            │     /fetch body.
+"against the host sidecar HTTP service"     │ sidecar_client.resolve_sidecar_url
+                                            │     defaults to
+                                            │     http://host.docker.internal:8765
+                                            │     and the wire request is a
+                                            │     plain HTTP POST.
+"in the same output format as the           │ sidecar_client.
+ agent-browser path"                        │     _reshape_to_wrapper_envelope
+                                            │     returns the canonical
+                                            │     keyset
+                                            │     (ok, backend, status, url,
+                                            │      title, html, headers, error,
+                                            │      elapsed_s, cf_detection)
+                                            │     and only the `backend`
+                                            │     value differs; an additive
+                                            │     `fallback` diagnostic
+                                            │     record records the trail.
+"with no manual flag required"              │ web_fetch._parse_args defines
+                                            │     ZERO arguments that select
+                                            │     a backend. The orchestrator
+                                            │     decides; the agent calls
+                                            │     ONE command.
+
+Test evidence
+-------------
+
+1) Focused Sub-AC 2.2.3 unit tests (new):
+
+    $ cd container/skills/web-fetch && \
+      python3 -m unittest test_orchestrator.SubAc223TransparentFallback -v
+
+    test_cf_signal_true_triggers_fallback_with_no_flags ...                ok
+    test_cli_surface_has_no_sidecar_selector_flag ...                       ok
+    test_fallback_envelope_carries_uniform_cf_detection ...                 ok
+    test_fallback_envelope_has_same_key_set_as_primary ...                  ok
+    test_request_is_reissued_verbatim_to_sidecar ...                        ok
+    test_cf_signal_false_never_triggers_fallback ...                        ok
+
+    Ran 6 tests in 0.002s
+    OK
+
+2) Full container-skill suite (no regression):
+
+    $ cd container/skills/web-fetch && python3 -m unittest discover
+
+    Ran 106 tests in 0.007s
+    OK
+
+   (100 tests previously passing + 6 new Sub-AC 2.2.3 focused tests.)
+
+3) Live transparent-fallback verification against the running host
+   sidecar (com.nanoclaw.cf-fetch-server, PID 14606, listening on
+   127.0.0.1:8765). The primary tier is stubbed to return a CF-blocked
+   envelope; the orchestrator MUST auto-detect the CF signal, re-issue
+   the request to the real sidecar, and return a wrapper-shape envelope
+   with `backend='cf-fetch-server'`. No CLI flag is set.
+
+    $ python3 - <<'EOF'
+    ...stub primary returns CF_BLOCKED_ENVELOPE; orchestrator wires
+    sidecar_runner=fetch_via_sidecar against $CF_FETCH_SIDECAR_URL=
+    http://127.0.0.1:8765...
+    EOF
+
+    Decision trail (stderr JSON):
+
+      fetch.start            url=https://example.com/, method=GET,
+                              timeout=20.0, primary_budget=12.0
+      primary.complete       ok=true, status=403,
+                              cf_is_challenge=true,
+                              cf_signals=["title:just a moment"]
+      fallback.decision      fire=true,
+                              reason="cf_detection.is_challenge=True
+                              (confidence='high',
+                               signals=[title:just a moment])"
+      sidecar.start          sidecar_url=http://127.0.0.1:8765,
+                              sidecar_budget=20.0
+      sidecar.complete       ok=true, sidecar_backend=nodriver,
+                              sidecar_http_status=200,
+                              sidecar_attempts=1, elapsed_s=0.622
+      fetch.complete         tier=sidecar, ok=true, exit_code=0,
+                              total_elapsed_s=0.622
+
+    Returned wrapper envelope:
+
+      exit_code=0  (EXIT_OK)
+      backend='cf-fetch-server'
+      ok=True  status=200
+      title='Example Domain'
+      html_prefix='<html lang="en"><head><title>Example Domain</title>...'
+      keys=['backend','cf_detection','elapsed_s','error','fallback',
+            'headers','html','ok','status','title','url']
+      fallback.fired=True
+      fallback.sidecar_backend='nodriver'
+      fallback.sidecar_http_status=200
+      fallback.primary_signals=['title:just a moment']
+
+    ✅ Sub-AC 2.2.3 live transparent-fallback verification PASSED
+
+Files
+-----
+- container/skills/web-fetch/sidecar_client.py
+    auto-detection (should_fallback), wire layer (fetch_via_sidecar),
+    envelope reshape, unreachable envelope.
+- container/skills/web-fetch/orchestrator.py
+    end-to-end state machine — primary then fallback, exception-safe,
+    timeout-split.
+- container/skills/web-fetch/web_fetch.py
+    CLI shell — argparse surface has NO backend selector; one command.
+- container/skills/web-fetch/test_orchestrator.py
+    + 6 Sub-AC 2.2.3 focused tests (class SubAc223TransparentFallback).
+- container/skills/web-fetch/SKILL.md
+    Operator-facing contract: "Sidecar fallback (Sub-AC 2.3)" section
+    documents `cf_detection`-driven auto-fallback and envelope parity.
+
+What this AC explicitly does NOT touch (out-of-scope guard)
+-----------------------------------------------------------
+- agent-browser primary path (Sub-AC 2.1) — unchanged.
+- Cloudflare-detection heuristics (Sub-AC 2.2.2) — unchanged.
+- Host sidecar internals — unchanged.
+- container Dockerfile / npm deps / src/container-runner.ts — unchanged.
+
+[SUB-AC 2.2.3 COMPLETE]

@@ -1,0 +1,228 @@
+=== Sub-AC 2.2.4 — Single control-flow entrypoint with structured
+    runtime-served logging, error propagation when both paths fail,
+    and a debug opt-out env var ===
+
+Goal
+----
+Wire the three steps (primary agent-browser → CF detection → sidecar
+fallback) into a single control-flow entrypoint in the wrapper CLI
+with:
+  * structured logging of which runtime served the request,
+  * error propagation when both paths fail,
+  * an opt-out env var for debugging.
+
+Deliverables (all four sub-clauses)
+-----------------------------------
+
+1) Single control-flow entrypoint
+   ───────────────────────────────
+   The CLI is a thin shell over `orchestrator.run_fetch()`. The agent
+   calls ONE command (`web-fetch <url>`); the orchestrator owns the
+   primary → CF-detect → fallback decision flow. There is no public
+   "primary-only" entrypoint and no public "sidecar-only" entrypoint —
+   that would split the agent's contract in two. The unit test
+   `test_run_fetch_is_the_only_orchestration_entrypoint` asserts the
+   thin-shell delegation directly:
+
+       web_fetch._orchestrator_run is orchestrator.run_fetch  ✅
+
+   The state-machine order (fetch.start → primary.complete →
+   fallback.decision → sidecar.complete → fetch.complete) is asserted
+   in `test_three_steps_run_in_order_in_a_single_call`.
+
+2) Structured logging of which runtime served the request
+   ───────────────────────────────────────────────────────
+   Every `fetch.complete` event now carries a uniform `served_by`
+   field that names the runtime that produced the response:
+
+     tier=primary       → served_by="agent-browser"
+     tier=sidecar       → served_by=<sidecar_backend>
+                          (e.g. "nodriver", "stub", "queue-full")
+     tier=sidecar-failed → served_by="none"
+
+   A single grep pulls "which runtime served?" out of the log:
+
+     jq -c 'select(.event=="fetch.complete") | {tier,served_by,ok}'
+
+   Cross-channel consistency: the response envelope's `backend` field
+   (`agent-browser` vs `cf-fetch-server`) is the LLM-readable signal,
+   and the log's `served_by` is the operator-readable signal. The
+   wrapper cannot tell the agent one runtime and the operator another
+   — `test_envelope_backend_field_matches_served_by_log_field`
+   guards the schema against drift.
+
+3) Error propagation when both paths fail
+   ───────────────────────────────────────
+   When the primary fails AND the sidecar fallback also fails:
+
+     • Exit code: EXIT_FETCH_FAILED (3) — the CLI's primary
+       error-propagation channel for shell composition.
+     • Envelope: ok=false with a clear error string — the JSON-parsing
+       agent's error-propagation channel.
+     • Log: a single, dedicated `both_paths_failed` (level=ERROR)
+       event with BOTH tiers' errors side-by-side, so an operator
+       finds true outages instantly without correlating two events:
+
+         {
+           "event": "both_paths_failed",
+           "level": "ERROR",
+           "primary_ok": false,
+           "primary_backend": "agent-browser",
+           "primary_error": "agent-browser binary missing",
+           "primary_signals": [],
+           "sidecar_backend": "queue-full",
+           "sidecar_http_status": 503,
+           "sidecar_attempts": 1,
+           "sidecar_error": "sidecar 503: queue full",
+           "note": "both primary and sidecar fallback failed —
+                    EXIT_FETCH_FAILED returned to caller"
+         }
+
+   The `both_paths_failed` event is emitted ONLY when both paths
+   failed — `test_both_paths_failed_not_emitted_when_sidecar_succeeds`
+   guards against false alarms.
+
+4) Opt-out env var for debugging
+   ──────────────────────────────
+   `WEB_FETCH_DISABLE_FALLBACK=<truthy>` short-circuits the sidecar
+   tier even when `cf_detection.is_challenge=True`. The orchestrator:
+     • returns the primary envelope as-is (CF detection field
+       preserved so the detector's verdict stays visible),
+     • emits a single `fallback.skipped.opt_out` (level=WARNING)
+       event with the env-var name and value,
+     • adds `decision="fallback disabled by $WEB_FETCH_DISABLE_FALLBACK"`
+       to the `fetch.complete` event.
+
+   Truthy vocabulary (centralised in `_is_truthy_env`):
+     `1`, `true`, `True`, `TRUE`, `yes`, `on` (whitespace tolerated)
+
+   Anything else (unset, `0`, `false`, `no`, `off`, `""`) keeps
+   fallback enabled — production behaviour is the default.
+
+   The opt-out is a debugging convenience, NOT a runtime mode-switch:
+     * The envelope schema is unchanged
+       (`test_disable_fallback_does_not_change_envelope_schema`).
+     * The exit-code policy is unchanged — the opt-out propagates
+       the primary's failure unchanged
+       (`test_disable_fallback_propagates_primary_failure_exit_code`).
+     * The CLI surface is unchanged — no `--disable-fallback` flag
+       was added; opt-out is env-only so an LLM can't accidentally
+       toggle it on.
+
+Verbatim AC mapping
+-------------------
+AC clause                                           │ Implementation site
+────────────────────────────────────────────────────┼─────────────────────────
+"Wire the three steps into a single control-flow   │ orchestrator.run_fetch
+ entrypoint in the wrapper CLI"                     │ + web_fetch.main thin
+                                                    │ shell delegating to it
+                                                    │ via _orchestrator_run.
+"with structured logging of which runtime served   │ fetch.complete event's
+ the request"                                       │ `served_by` field; the
+                                                    │ envelope's `backend`
+                                                    │ field cross-validates.
+"error propagation when both paths fail"           │ EXIT_FETCH_FAILED (3) +
+                                                    │ envelope.ok=false +
+                                                    │ both_paths_failed log
+                                                    │ event with both errors.
+"an opt-out env var for debugging"                 │ WEB_FETCH_DISABLE_FALLBACK
+                                                    │ env var, parsed by
+                                                    │ _is_truthy_env, gated
+                                                    │ before should_fallback().
+
+Test evidence
+-------------
+
+1) Focused Sub-AC 2.2.4 unit tests (new):
+
+   $ cd container/skills/web-fetch && \
+     python3 -m unittest test_orchestrator.SubAc224ControlFlowEntrypoint -v
+
+   test_both_paths_failed_logs_dedicated_event ............... ok
+   test_both_paths_failed_not_emitted_when_sidecar_succeeds .. ok
+   test_disable_fallback_accepts_truthy_strings .............. ok
+   test_disable_fallback_default_off ......................... ok
+   test_disable_fallback_does_not_change_envelope_schema ..... ok
+   test_disable_fallback_env_skips_sidecar_even_when_cf_detected ok
+   test_disable_fallback_propagates_primary_failure_exit_code  ok
+   test_envelope_backend_field_matches_served_by_log_field ... ok
+   test_exit_code_propagates_failure_when_both_paths_fail .... ok
+   test_fetch_complete_logs_tier_and_served_by_primary ....... ok
+   test_fetch_complete_logs_tier_and_served_by_sidecar ....... ok
+   test_is_truthy_env_helper ................................. ok
+   test_run_fetch_is_the_only_orchestration_entrypoint ....... ok
+   test_three_steps_run_in_order_in_a_single_call ............ ok
+
+   Ran 14 tests in 0.002s
+   OK
+
+2) Full container-skill suite (no regression):
+
+   $ cd container/skills/web-fetch && python3 -m unittest discover
+
+   Ran 120 tests in 0.008s
+   OK
+
+   (106 tests previously passing + 14 new Sub-AC 2.2.4 focused tests.)
+
+3) Live end-to-end demonstration of all four scenarios
+   (stubbed primary/sidecar runners; orchestrator drives state machine):
+
+   === A: CF-blocked primary → sidecar fallback (production) ===
+     exit_code            = 0
+     envelope.backend     = 'cf-fetch-server'
+     envelope.ok          = True
+     log.fetch.complete   = tier='sidecar', served_by='nodriver'
+
+   === B: WEB_FETCH_DISABLE_FALLBACK=1 (debug opt-out) ===
+     exit_code            = 0
+     envelope.backend     = 'agent-browser'
+     envelope.ok          = True
+     log.fetch.complete   = tier='primary', served_by='agent-browser'
+     log.opt_out.fired    = env_var=WEB_FETCH_DISABLE_FALLBACK, value='1'
+
+   === C: Both paths failed → EXIT_FETCH_FAILED + both_paths_failed event ===
+     exit_code            = 3
+     envelope.backend     = 'cf-fetch-server'
+     envelope.ok          = False
+     log.fetch.complete   = tier='sidecar-failed', served_by='none'
+     log.both_paths_failed= primary_error='agent-browser binary missing'
+                            sidecar_error='sidecar 503: queue full'
+
+   === D: Clean primary (no CF) → sidecar NOT called ===
+     exit_code            = 0
+     envelope.backend     = 'agent-browser'
+     envelope.ok          = True
+     log.fetch.complete   = tier='primary', served_by='agent-browser'
+
+   ✅ All four Sub-AC 2.2.4 scenarios verified.
+
+Files modified
+--------------
+- container/skills/web-fetch/orchestrator.py
+    Added ENV_DISABLE_FALLBACK constant + _is_truthy_env helper.
+    Added the opt-out branch in run_fetch (before should_fallback).
+    Added served_by field to every fetch.complete event.
+    Added both_paths_failed (level=ERROR) event for the dual-failure case.
+    Updated module docstring to document the new behaviour.
+- container/skills/web-fetch/test_orchestrator.py
+    Imported ENV_DISABLE_FALLBACK and _is_truthy_env.
+    Added SubAc224ControlFlowEntrypoint test class (14 focused tests).
+- container/skills/web-fetch/SKILL.md
+    Documented WEB_FETCH_DISABLE_FALLBACK env var.
+    Added fallback.skipped.opt_out and both_paths_failed events to the
+      structured-log table; clarified fetch.complete's served_by/tier
+      semantics; added the "single-line which-runtime-served?" jq recipe.
+
+What this AC explicitly does NOT touch (out-of-scope guard)
+-----------------------------------------------------------
+- agent-browser primary path internals (Sub-AC 2.1) — unchanged.
+- Cloudflare-detection heuristics (Sub-AC 2.2.2) — unchanged.
+- Sidecar HTTP wire format / sidecar_client internals — unchanged.
+- Host sidecar (host-helpers/cf-fetch-server/) — unchanged.
+- container Dockerfile / npm deps / src/container-runner.ts — unchanged.
+- LLM-facing CLI surface (argparse) — unchanged. The opt-out is
+  env-only so the LLM can never accidentally toggle production
+  behaviour off.
+
+[SUB-AC 2.2.4 COMPLETE]

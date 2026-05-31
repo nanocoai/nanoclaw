@@ -49,8 +49,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ca-certificates \
         curl \
         git \
+        python3 \
+        python3-pip \
         tini \
         unzip \
+        xvfb \
     && if [ "$INSTALL_CJK_FONTS" = "true" ]; then \
         apt-get install -y --no-install-recommends fonts-noto-cjk; \
        fi \
@@ -62,6 +65,11 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 # Belt-and-braces: prevent Playwright's postinstall from downloading its own
 # ~300MB Chromium. We've already installed the system one above.
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
+ENV CF_FETCH_SIDECAR_URL=http://127.0.0.1:8765
+ENV CF_FETCH_SIDECAR_ENABLED=1
+ENV WEB_FETCH_HOME=/opt/web-fetch
+ENV NOTEBOOKLM_HOME=/workspace/extra/.notebooklm
 
 # ---- Bun runtime -------------------------------------------------------------
 # Install via the official script (handles multi-arch detection), then move
@@ -110,6 +118,23 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
+# ---- Python: notebooklm-py + baked web-fetch CLI -----------------------------
+# notebooklm-py provides the `notebooklm` CLI (used by notebooklm/mer-audio
+# skills). node:22-slim is Debian (PEP-668) so --break-system-packages is needed.
+RUN python3 -m pip install --break-system-packages --no-cache-dir \
+    "nodriver==0.46" \
+    pyvirtualdisplay \
+    notebooklm-py
+
+# Bake the web-fetch wrapper at a fixed path so a bare `web-fetch <url>` is on
+# $PATH regardless of the runtime skills mount. The 4 modules sibling-import via
+# __file__, so the shim must be a script (not a symlink). Build context is
+# container/, so skills/web-fetch/ is in scope.
+COPY sidecars/cf-fetch-server /opt/cf-fetch-server
+COPY skills/web-fetch /opt/web-fetch
+RUN printf '#!/bin/sh\nexec python3 /opt/web-fetch/web_fetch.py "$@"\n' > /usr/local/bin/web-fetch && \
+    chmod +x /usr/local/bin/web-fetch
+
 # ---- ncl CLI wrapper ----------------------------------------------------------
 # Actual script lives in the mounted source at /app/src/cli/ncl.ts.
 RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \
@@ -127,6 +152,4 @@ RUN mkdir -p /workspace/group /workspace/extra && \
 USER node
 WORKDIR /workspace/group
 
-# tini is PID 1, reaps zombies, forwards signals cleanly. entrypoint.sh does
-# `exec bun ...` so bun runs as tini's direct child.
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]

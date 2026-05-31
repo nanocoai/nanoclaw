@@ -1,0 +1,127 @@
+=== Sub-AC 2.1 — Cloudflare challenge detection in the wrapper CLI ===
+
+Goal
+----
+Implement Cloudflare-challenge detection logic in the wrapper CLI that
+inspects the agent-browser response (status codes 403/503, CF-specific
+headers like cf-mitigated/cf-ray, challenge HTML markers) and returns a
+boolean signal so the wrapper can decide whether to fall back to the
+host-side cf-fetch-server sidecar.
+
+Deliverable
+-----------
+container/skills/web-fetch/cf_detect.py
+    Public API:
+        detect_cloudflare_challenge(result: dict) -> dict
+    Returns:
+        {
+          "is_challenge":  bool,                   # the boolean signal
+          "confidence":    "high"|"medium"|"none",
+          "signals":       [str, ...],
+          "reason":        str,
+        }
+
+How the four required input axes are inspected
+----------------------------------------------
+1. STATUS CODES (403 / 503 / etc.)
+   - _BAD_STATUSES = {403, 503, 429, 520..527}
+   - status alone is NOT a CF signal; it only counts when paired with a
+     CF header (cf-ray / server:cloudflare) or a CF body marker — exactly
+     to avoid false-positives on nginx 403 / origin 503.
+   - cf_detect.py:140 (table) and cf_detect.py:330 (pairing logic).
+
+2. CF-SPECIFIC HEADERS
+   - cf-mitigated         → unpaired, status-independent (high confidence)
+   - cf-chl-bypass        → unpaired, status-independent (high confidence)
+   - cf-ray + bad status  → paired, medium confidence
+   - server: cloudflare + bad status → paired, medium confidence
+   - Header keys are normalised to lower-case so both "Cf-Ray" and
+     "cf-ray" match (cf_detect.py:275).
+   - cf_detect.py:129 (_HEADER_SIGNALS table).
+
+3. CHALLENGE HTML MARKERS (body)
+   - /cdn-cgi/challenge-platform/
+   - cf_chl_opt, cf_chl_jschl_tk, __cf_chl_tk, _cf_chl_managed_tk
+   - id="challenge-form" / id="challenge-running"
+   - "DDoS protection by Cloudflare"
+   - "checking your browser before accessing"
+   - "잠시만 기다리"  (Korean CF interstitial)
+   - cf_detect.py:97 (_BODY_TOKENS_LOWER + _BODY_TOKENS_RAW).
+
+4. PAGE TITLE (additional axis above and beyond what the seed enumerated;
+   the Seed lists "title contains Just a moment / Cloudflare /
+   Attention required" as required signals)
+   - "just a moment", "attention required", "cloudflare",
+     "checking your browser", "잠시만 기다리"
+   - cf_detect.py:76 (_TITLE_TOKENS_LOWER + _TITLE_TOKENS_RAW).
+
+Boolean signal contract
+-----------------------
+Live verification (run from container/skills/web-fetch/):
+
+    $ python3 -c "from cf_detect import detect_cloudflare_challenge; ..."
+
+    'CF 403 with cf-ray header'      -> is_challenge=True (type=bool) confidence=medium
+    'CF 503 with cf-mitigated'       -> is_challenge=True (type=bool) confidence=high
+    'CF interstitial HTML markers'   -> is_challenge=True (type=bool) confidence=high
+    'Clean 200 OK'                   -> is_challenge=False (type=bool) confidence=none
+    'Naked 403 from nginx'           -> is_challenge=False (type=bool) confidence=none
+
+`is_challenge` is always a Python `bool`. The wrapper branches on it
+exactly once (web_fetch.py / orchestrator.py — see "Wrapper integration"
+below); the LLM agent never has to inspect the field directly.
+
+Wrapper integration
+-------------------
+Tier 1 (primary path — agent-browser):
+    web_fetch.py:460  result["cf_detection"] = detect_cloudflare_challenge(result)
+
+Tier 2 fallback decision:
+    sidecar_client.should_fallback(result, env) reads
+    result["cf_detection"]["is_challenge"] and triggers the host-side
+    cf-fetch-server when True.
+
+Orchestrator belt-and-braces:
+    orchestrator.py:562  if cf_detection is missing/malformed, re-runs
+    the detector so should_fallback() never sees a None.
+    orchestrator.py:653  re-tags the sidecar envelope with the same
+    detector so downstream consumers see a uniform contract.
+
+False-positive guards (deliberately do NOT trigger)
+---------------------------------------------------
+- Bare word "cloudflare" in body prose (a blog post mentioning CF passes
+  through clean): test_blog_post_mentions_cloudflare_in_body_only
+- cf-ray header with HTTP 200 (CF-fronted origin served a normal page):
+  test_cf_ray_on_200_does_not_trigger
+- 403/503 with no CF header AND no CF body marker:
+  test_naked_403_nginx, test_naked_503_no_headers
+- "Sorry, you have been blocked" without any other CF signal (could be
+  any backend's admin-banned-user page): test_sorry_blocked_alone_ignored
+
+Test evidence
+-------------
+$ cd container/skills/web-fetch && python3 -m unittest test_cf_detect -v
+    Ran 30 tests in 0.000s
+    OK
+
+$ python3 cf_detect.py --self-test
+    All 17 self-test cases passed
+
+The unittest suite covers:
+  - 6 title heuristic cases (TitleHeuristics)
+  - 5 body heuristic cases (BodyHeuristics)
+  - 6 header heuristic cases (HeaderHeuristics)
+  - 2 status-only-doesn't-trigger cases (StatusOnlyDoesNotTrigger)
+  - 3 weak body pairing cases (WeakBodyPairing)
+  - 4 false-positive guard cases (FalsePositiveGuards)
+  - 4 contract shape cases (ContractShape)
+
+Files
+-----
+- container/skills/web-fetch/cf_detect.py        (deliverable, 618 lines)
+- container/skills/web-fetch/test_cf_detect.py   (unit tests, 30 cases)
+- container/skills/web-fetch/web_fetch.py        (CLI integration)
+- container/skills/web-fetch/orchestrator.py     (orchestration glue)
+- container/skills/web-fetch/sidecar_client.py   (consumes is_challenge in should_fallback)
+
+[SUB-AC 2.1 COMPLETE]
