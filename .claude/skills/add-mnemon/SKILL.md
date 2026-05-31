@@ -57,26 +57,33 @@ ENV MNEMON_DATA_DIR=/home/node/.claude/mnemon
 
 `MNEMON_DATA_DIR` points into the per-agent-group `.claude/` mount so memory persists across container restarts. No extra volume mounts needed.
 
-### 2. Entrypoint — run mnemon setup on each container start
+### 2. Boot hook — run mnemon setup when the agent boots
 
-`mnemon setup` is idempotent. Edit `container/entrypoint.sh` to run it right after `set -e`, before the `cat` that captures stdin:
+**Not** `container/entrypoint.sh`. The host spawns every container with `--entrypoint bash -c 'exec bun run /app/src/index.ts'`, so the image ENTRYPOINT never runs — anything added to `entrypoint.sh` is dead code. Put the setup call at the top of `main()` in `container/agent-runner/src/index.ts` (the real boot path) instead. That source is bind-mounted fresh into each container, so the change takes effect on the next spawn with no image rebuild.
 
-```bash
-#!/bin/bash
-# NanoClaw agent container entrypoint.
-#
-# ...existing header comment...
+Add the import alongside the existing ones:
 
-set -e
-
-mnemon setup --target claude-code --yes --global >/dev/stderr 2>&1
-
-cat > /tmp/input.json
-
-exec bun run /app/src/index.ts < /tmp/input.json
+```ts
+import { execSync } from 'child_process';
 ```
 
-`>/dev/stderr 2>&1` routes all mnemon output to stderr (docker logs) so it doesn't interfere with the JSON stdin handshake between host and agent-runner.
+Then, right after the `Starting v2 agent-runner` log line inside `main()`:
+
+```ts
+// mnemon persistent memory: register Claude Code hooks before the first query()
+// runs, so the SDK's settingSources picks them up. Claude provider only;
+// idempotent; no-op when the mnemon binary isn't baked into the image.
+if (providerName === 'claude' && fs.existsSync('/usr/local/bin/mnemon')) {
+  try {
+    execSync('mnemon setup --target claude-code --yes --global', { stdio: ['ignore', 2, 2] });
+    log('mnemon memory hooks registered');
+  } catch (err) {
+    log(`mnemon setup failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+```
+
+Run it inside `main()`, **not** the spawn command: setup must run *after* the agent process boots, otherwise the container has no heartbeat yet and the host kills it as orphaned before it can reply.
 
 ### 3. Rebuild and smoke-test the image
 
@@ -171,9 +178,14 @@ RUN ARCH=$(dpkg --print-architecture) && \
 ENV MNEMON_DATA_DIR=/home/node/.claude/mnemon
 ```
 
-**`container/entrypoint.sh` — add after `set -e`:**
-```bash
-mnemon setup --target claude-code --yes --global >/dev/stderr 2>&1
+**`container/agent-runner/src/index.ts` — in `main()`, after the `Starting v2 agent-runner` log** (the image ENTRYPOINT is bypassed at spawn, so this can't live in `entrypoint.sh`):
+```ts
+import { execSync } from 'child_process'; // alongside the other imports
+// inside main(), after the startup log line:
+if (providerName === 'claude' && fs.existsSync('/usr/local/bin/mnemon')) {
+  try { execSync('mnemon setup --target claude-code --yes --global', { stdio: ['ignore', 2, 2] }); }
+  catch (err) { log(`mnemon setup failed: ${err}`); }
+}
 ```
 
 ## Troubleshooting
