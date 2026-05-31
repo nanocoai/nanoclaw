@@ -7,6 +7,7 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getLastBotMessageTimestamp,
+  getMessageContext,
   getMessagesSince,
   getNewMessages,
   getTaskById,
@@ -648,5 +649,154 @@ describe('registered group isMain', () => {
     const group = groups['group@g.us'];
     expect(group).toBeDefined();
     expect(group.isMain).toBeUndefined();
+  });
+});
+
+// --- getMessageContext ---
+
+// 批量写入消息的辅助函数
+function seedMessages(chatJid: string, count: number, baseTime = '2024-06-01T10:00:00.000Z') {
+  storeChatMetadata(chatJid, baseTime);
+  const base = new Date(baseTime).getTime();
+  for (let i = 0; i < count; i++) {
+    const ts = new Date(base + i * 60_000).toISOString(); // 每条间隔 1 分钟
+    storeMessage({
+      id: `ctx-${chatJid}-${i}`,
+      chat_jid: chatJid,
+      sender: i % 2 === 0 ? 'alice@s' : 'bob@s',
+      sender_name: i % 2 === 0 ? 'Alice' : 'Bob',
+      content: `消息 #${i}`,
+      timestamp: ts,
+      is_from_me: i % 2 === 1,
+    });
+  }
+  return base;
+}
+
+describe('getMessageContext', () => {
+  const JID = 'test-ctx@g.us';
+
+  it('精确命中锚点，返回前后各 N 条', () => {
+    const base = seedMessages(JID, 11); // msg-0 ~ msg-10
+    const anchorTs = new Date(base + 5 * 60_000).toISOString();
+
+    const result = getMessageContext(JID, anchorTs, 3, 3);
+
+    expect(result.anchor).not.toBeNull();
+    expect(result.anchor!.content).toBe('消息 #5');
+    expect(result.before).toHaveLength(3);
+    expect(result.before.map(m => m.content)).toEqual(['消息 #2', '消息 #3', '消息 #4']);
+    expect(result.after).toHaveLength(3);
+    expect(result.after.map(m => m.content)).toEqual(['消息 #6', '消息 #7', '消息 #8']);
+  });
+
+  it('锚点在两条消息之间时，命中最近的一条', () => {
+    const base = seedMessages(JID, 5);
+    // +2min30s+1ms：距 msg-2(+2min)=30s1ms，距 msg-3(+3min)=29s999ms → 命中 msg-3
+    const betweenTs = new Date(base + 2.5 * 60_000 + 1).toISOString();
+
+    const result = getMessageContext(JID, betweenTs, 2, 2);
+
+    expect(result.anchor).not.toBeNull();
+    expect(result.anchor!.content).toBe('消息 #3');
+  });
+
+  it('锚点是第一条消息时 before 为空', () => {
+    const base = seedMessages(JID, 5);
+    const firstTs = new Date(base).toISOString();
+
+    const result = getMessageContext(JID, firstTs, 5, 2);
+
+    expect(result.anchor!.content).toBe('消息 #0');
+    expect(result.before).toHaveLength(0);
+    expect(result.after).toHaveLength(2);
+  });
+
+  it('锚点是最后一条消息时 after 为空', () => {
+    const base = seedMessages(JID, 5);
+    const lastTs = new Date(base + 4 * 60_000).toISOString();
+
+    const result = getMessageContext(JID, lastTs, 2, 5);
+
+    expect(result.anchor!.content).toBe('消息 #4');
+    expect(result.after).toHaveLength(0);
+    expect(result.before).toHaveLength(2);
+  });
+
+  it('空聊天记录返回 null anchor', () => {
+    storeChatMetadata(JID, '2024-01-01T00:00:00.000Z');
+    const result = getMessageContext(JID, '2024-06-01T10:05:00.000Z');
+
+    expect(result.anchor).toBeNull();
+    expect(result.before).toHaveLength(0);
+    expect(result.after).toHaveLength(0);
+  });
+
+  it('不同 chat_jid 之间互不干扰', () => {
+    seedMessages('group-a@g.us', 5);
+    seedMessages('group-b@g.us', 3);
+
+    const base = new Date('2024-06-01T10:00:00.000Z').getTime();
+    const ts = new Date(base + 2 * 60_000).toISOString();
+
+    const resultA = getMessageContext('group-a@g.us', ts, 5, 5);
+    const resultB = getMessageContext('group-b@g.us', ts, 5, 5);
+
+    expect(resultA.anchor!.content).toBe('消息 #2');
+    expect(resultA.before).toHaveLength(2);
+    expect(resultA.after).toHaveLength(2);
+
+    expect(resultB.anchor!.content).toBe('消息 #2');
+    expect(resultB.before).toHaveLength(2);
+    expect(resultB.after).toHaveLength(0); // group-b 只有 3 条
+  });
+
+  it('默认前后各 5 条', () => {
+    seedMessages(JID, 20);
+    const base = new Date('2024-06-01T10:00:00.000Z').getTime();
+    const ts = new Date(base + 10 * 60_000).toISOString();
+
+    const result = getMessageContext(JID, ts);
+
+    expect(result.anchor!.content).toBe('消息 #10');
+    expect(result.before).toHaveLength(5);
+    expect(result.after).toHaveLength(5);
+  });
+
+  it('空内容消息被过滤', () => {
+    storeChatMetadata(JID, '2024-06-01T10:00:00.000Z');
+    const base = new Date('2024-06-01T10:00:00.000Z').getTime();
+
+    for (let i = 0; i < 5; i++) {
+      storeMessage({
+        id: `empty-${i}`,
+        chat_jid: JID,
+        sender: 'alice@s',
+        sender_name: 'Alice',
+        content: i === 2 ? '' : `消息 #${i}`,
+        timestamp: new Date(base + i * 60_000).toISOString(),
+        is_from_me: false,
+      });
+    }
+
+    // 锚点 msg-3，before 应跳过空的 msg-2
+    const ts = new Date(base + 3 * 60_000).toISOString();
+    const result = getMessageContext(JID, ts, 3, 3);
+
+    expect(result.anchor!.content).toBe('消息 #3');
+    expect(result.before.map(m => m.content)).toEqual(['消息 #0', '消息 #1']);
+    expect(result.after).toHaveLength(1); // 只有 msg-4
+  });
+
+  it('before 按时间正序排列', () => {
+    seedMessages(JID, 10);
+    const base = new Date('2024-06-01T10:00:00.000Z').getTime();
+    const ts = new Date(base + 7 * 60_000).toISOString();
+
+    const result = getMessageContext(JID, ts, 5, 0);
+
+    for (let i = 1; i < result.before.length; i++) {
+      expect(result.before[i].timestamp > result.before[i - 1].timestamp).toBe(true);
+    }
   });
 });

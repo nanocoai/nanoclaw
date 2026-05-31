@@ -649,7 +649,7 @@ server.tool(
 
 server.tool(
   'search_chat',
-  '搜索聊天历史记录。支持自然语言语义搜索和关键词搜索，双路融合排序。用于查找之前的对话内容。',
+  '搜索聊天历史记录。支持自然语言语义搜索和关键词搜索，双路融合排序。用于查找之前的对话内容。可按时间区间精确过滤。',
   {
     query: z.string().describe('搜索关键词或自然语言描述'),
     group: z
@@ -657,7 +657,9 @@ server.tool(
       .optional()
       .describe('限定搜索的群组 folder，默认搜索所有群'),
     sender: z.string().optional().describe('按发送人名称过滤'),
-    days: z.number().optional().describe('限定最近 N 天'),
+    days: z.number().optional().describe('限定最近 N 天（与 startTime/endTime 互斥，优先使用后者）'),
+    startTime: z.string().optional().describe('起始时间（ISO 8601），如 "2026-05-15T00:00:00"'),
+    endTime: z.string().optional().describe('截止时间（ISO 8601），如 "2026-05-20T23:59:59"'),
     limit: z.number().optional().default(10).describe('返回条数，默认 10'),
   },
   async (args) => {
@@ -670,6 +672,8 @@ server.tool(
         group: args.group,
         sender: args.sender,
         days: args.days,
+        startTime: args.startTime,
+        endTime: args.endTime,
         limit: args.limit,
       },
       groupFolder,
@@ -690,6 +694,54 @@ server.tool(
           {
             type: 'text' as const,
             text: `聊天搜索失败: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────
+// Chat context — 根据锚点时间戳获取前后 N 条消息
+// ─────────────────────────────────────────────────────────────
+
+server.tool(
+  'get_chat_context',
+  '获取指定消息前后的聊天记录。先用 search_chat 找到目标消息，再用此工具展开上下文，查看完整对话。',
+  {
+    chat_jid: z.string().describe('消息所在的会话 JID（从 search_chat 结果的 chat_jid 字段获取）'),
+    timestamp: z.string().describe('锚点消息的时间戳（ISO 8601），从 search_chat 结果的 time_range 获取'),
+    before: z.number().optional().default(5).describe('锚点前 N 条消息，默认 5'),
+    after: z.number().optional().default(5).describe('锚点后 N 条消息，默认 5'),
+  },
+  async (args) => {
+    const requestId = crypto.randomUUID();
+    writeIpcFile(TASKS_DIR, {
+      type: 'get_chat_context',
+      requestId,
+      chat_jid: args.chat_jid,
+      timestamp: args.timestamp,
+      before: args.before,
+      after: args.after,
+      groupFolder,
+      senderId,
+      timestamp_now: new Date().toISOString(),
+    });
+
+    try {
+      const response = await waitForResponse(requestId);
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(response, null, 2) },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `获取上下文失败: ${err instanceof Error ? err.message : String(err)}`,
           },
         ],
         isError: true,

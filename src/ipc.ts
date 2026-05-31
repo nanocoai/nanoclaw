@@ -14,7 +14,7 @@ import {
 } from './config.js';
 import { getChatIndex } from './chat-index.js';
 import { AvailableGroup, getFeishuToken } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, storeMessageDirect, updateTask } from './db.js';
+import { createTask, deleteTask, getMessageContext, getTaskById, storeMessageDirect, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { withLogContext } from './log-context.js';
@@ -813,6 +813,8 @@ export async function processTaskIpc(
             group: options?.group as string | undefined,
             sender: options?.sender as string | undefined,
             days: options?.days as number | undefined,
+            startTime: options?.startTime as string | undefined,
+            endTime: options?.endTime as string | undefined,
             limit: options?.limit as number | undefined,
           }),
           new Promise<never>((_, reject) =>
@@ -831,6 +833,50 @@ export async function processTaskIpc(
         logger.error({ err, sourceGroup }, 'search_chat failed');
         writeIpcResponse(sourceGroup, requestId, {
           results: [],
+          error: String(err),
+        });
+      }
+      break;
+    }
+
+    case 'get_chat_context': {
+      const requestId = data.requestId as string;
+      if (!requestId) {
+        logger.warn({ sourceGroup }, 'get_chat_context missing requestId');
+        break;
+      }
+
+      const raw = data as Record<string, unknown>;
+      const chatJid = raw.chat_jid as string;
+      const timestamp = raw.timestamp as string;
+      if (!chatJid || !timestamp) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Missing chat_jid or timestamp parameter',
+        });
+        break;
+      }
+
+      try {
+        const before = (raw.before as number) || 5;
+        const after = (raw.after as number) || 5;
+        const result = getMessageContext(chatJid, timestamp, before, after);
+        writeIpcResponse(sourceGroup, requestId, result);
+        logger.info(
+          {
+            sourceGroup,
+            chatJid: chatJid.slice(0, 20),
+            timestamp,
+            beforeCount: result.before.length,
+            afterCount: result.after.length,
+          },
+          'Chat context via IPC',
+        );
+      } catch (err) {
+        logger.error({ err, sourceGroup }, 'get_chat_context failed');
+        writeIpcResponse(sourceGroup, requestId, {
+          before: [],
+          anchor: null,
+          after: [],
           error: String(err),
         });
       }

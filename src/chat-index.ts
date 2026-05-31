@@ -43,7 +43,9 @@ export interface EnqueueItem {
 export interface SearchOptions {
   group?: string; // group_folder 过滤
   sender?: string; // sender_names 过滤
-  days?: number; // 最近 N 天
+  days?: number; // 最近 N 天（与 startTime/endTime 互斥，后者优先）
+  startTime?: string; // ISO 8601 起始时间
+  endTime?: string; // ISO 8601 截止时间
   limit?: number; // 返回条数，默认 10
 }
 
@@ -51,8 +53,11 @@ export interface SearchResult {
   chunk_text: string;
   score: number;
   group_folder: string;
+  chat_jid: string;
   sender_names: string;
   time_range: string;
+  start_time: string;
+  end_time: string;
   message_count: number;
 }
 
@@ -471,7 +476,13 @@ export class ChatIndex {
               match: { value: options.group },
             });
           }
-          if (options.days) {
+          // 时间过滤：startTime/endTime 优先于 days
+          if (options.startTime || options.endTime) {
+            const range: Record<string, string> = {};
+            if (options.startTime) range.gte = options.startTime;
+            if (options.endTime) range.lte = options.endTime;
+            must.push({ key: 'start_time', range });
+          } else if (options.days) {
             const since = new Date(
               Date.now() - options.days * 86400000,
             ).toISOString();
@@ -515,7 +526,7 @@ export class ChatIndex {
     try {
       const db = getDb();
       let sql = `
-        SELECT c.id, c.chunk_text, c.group_folder, c.sender_names, c.start_time, c.end_time,
+        SELECT c.id, c.chunk_text, c.group_folder, c.chat_jid, c.sender_names, c.start_time, c.end_time,
                c.message_ids, bm25(chat_chunks_fts) as bm25_score
         FROM chat_chunks_fts fts
         JOIN chat_chunks c ON c.rowid = fts.rowid
@@ -529,7 +540,17 @@ export class ChatIndex {
         sql += ' AND c.group_folder = ?';
         params.push(options.group);
       }
-      if (options.days) {
+      // 时间过滤：startTime/endTime 优先于 days
+      if (options.startTime || options.endTime) {
+        if (options.startTime) {
+          sql += ' AND c.start_time >= ?';
+          params.push(options.startTime);
+        }
+        if (options.endTime) {
+          sql += ' AND c.end_time <= ?';
+          params.push(options.endTime);
+        }
+      } else if (options.days) {
         const since = new Date(
           Date.now() - options.days * 86400000,
         ).toISOString();
@@ -544,6 +565,7 @@ export class ChatIndex {
         id: string;
         chunk_text: string;
         group_folder: string;
+        chat_jid: string;
         sender_names: string;
         start_time: string;
         end_time: string;
@@ -558,6 +580,7 @@ export class ChatIndex {
         createdAt: r.start_time,
         metadata: {
           group_folder: r.group_folder,
+          chat_jid: r.chat_jid,
           sender_names: r.sender_names,
           start_time: r.start_time,
           end_time: r.end_time,
@@ -595,12 +618,17 @@ export class ChatIndex {
       const messageIds = meta.message_ids
         ? JSON.parse(String(meta.message_ids))
         : [];
+      const startTime = String(meta.start_time || '');
+      const endTime = String(meta.end_time || '');
       return {
         chunk_text: r.content,
         score: r.score,
         group_folder: String(meta.group_folder || ''),
+        chat_jid: String(meta.chat_jid || ''),
         sender_names: String(meta.sender_names || ''),
-        time_range: `${meta.start_time || ''} ~ ${meta.end_time || ''}`,
+        time_range: `${startTime} ~ ${endTime}`,
+        start_time: startTime,
+        end_time: endTime,
         message_count: Array.isArray(messageIds) ? messageIds.length : 0,
       };
     });

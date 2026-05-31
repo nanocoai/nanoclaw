@@ -489,6 +489,72 @@ export function getLastBotMessageTimestamp(
   return row?.ts ?? undefined;
 }
 
+/** 消息上下文行（精简字段，用于 get_chat_context 返回） */
+export interface ContextMessage {
+  sender_name: string;
+  content: string;
+  timestamp: string;
+  is_from_me: boolean;
+}
+
+/**
+ * 获取锚点时间戳前后 N 条消息。
+ * 返回 { before, anchor, after }，anchor 是最接近锚点的那条消息。
+ */
+export function getMessageContext(
+  chatJid: string,
+  anchorTimestamp: string,
+  beforeCount: number = 5,
+  afterCount: number = 5,
+): { before: ContextMessage[]; anchor: ContextMessage | null; after: ContextMessage[] } {
+  // 锚点：最接近指定时间戳的消息
+  const anchorRow = db.prepare(`
+    SELECT sender_name, content, timestamp, is_from_me
+    FROM messages
+    WHERE chat_jid = ? AND content != '' AND content IS NOT NULL
+    ORDER BY ABS(julianday(timestamp) - julianday(?))
+    LIMIT 1
+  `).get(chatJid, anchorTimestamp) as ContextMessage | undefined;
+
+  if (!anchorRow) {
+    logger.info({ chatJid, anchorTimestamp }, '[get_chat_context] 未找到锚点消息');
+    return { before: [], anchor: null, after: [] };
+  }
+
+  const actualAnchorTs = anchorRow.timestamp;
+
+  // 锚点前 N 条
+  const beforeRows = db.prepare(`
+    SELECT * FROM (
+      SELECT sender_name, content, timestamp, is_from_me
+      FROM messages
+      WHERE chat_jid = ? AND timestamp < ? AND content != '' AND content IS NOT NULL
+      ORDER BY timestamp DESC
+      LIMIT ?
+    ) ORDER BY timestamp
+  `).all(chatJid, actualAnchorTs, beforeCount) as ContextMessage[];
+
+  // 锚点后 N 条
+  const afterRows = db.prepare(`
+    SELECT sender_name, content, timestamp, is_from_me
+    FROM messages
+    WHERE chat_jid = ? AND timestamp > ? AND content != '' AND content IS NOT NULL
+    ORDER BY timestamp
+    LIMIT ?
+  `).all(chatJid, actualAnchorTs, afterCount) as ContextMessage[];
+
+  logger.info(
+    { chatJid, anchorTimestamp: actualAnchorTs, before: beforeRows.length, after: afterRows.length },
+    '[get_chat_context] 上下文查询完成',
+  );
+
+  return {
+    before: beforeRows,
+    anchor: anchorRow,
+    after: afterRows,
+  };
+}
+
 export function createTask(
   task: Omit<ScheduledTask, 'last_run' | 'last_result'>,
 ): void {

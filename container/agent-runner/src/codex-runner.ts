@@ -251,6 +251,14 @@ export async function runCodexQuery(
   log(`[codex-runner] spawning: codex ${args.slice(0, -1).join(' ')} <prompt>`);
   log(`[codex-runner] cwd=${config.cwd}, sessionId=${config.sessionId || 'new'}, CODEX_HOME=${config.codexHome}`);
 
+  // 诊断：把本轮 codex 原始 stderr 落盘（每轮截断覆盖），主进程日志走 debug 级别看不到
+  const stderrLogPath = path.join(config.codexHome, 'last-codex-stderr.log');
+  try {
+    fs.writeFileSync(stderrLogPath, `[spawn ${new Date().toISOString()}] codex ${args.slice(0, -1).join(' ')}\n`);
+  } catch {
+    /* ignore */
+  }
+
   return new Promise((resolve, reject) => {
     const child: ChildProcess = spawn('codex', args, {
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -263,6 +271,7 @@ export async function runCodexQuery(
     let usage: ContainerOutput['usage'] | undefined;
     let sentSuccess = false;
     let lineBuffer = '';
+    let stderrAccum = '';
 
     // prompt 已通过 arg 传入，关闭 stdin 避免 codex 等待
     child.stdin!.end();
@@ -313,13 +322,25 @@ export async function runCodexQuery(
     });
 
     child.stderr!.on('data', (data: Buffer) => {
-      log(`[codex-stderr] ${data.toString().trim()}`);
+      const text = data.toString();
+      stderrAccum += text;
+      log(`[codex-stderr] ${text.trim()}`);
+      try {
+        fs.appendFileSync(stderrLogPath, text);
+      } catch {
+        /* ignore */
+      }
     });
 
     child.on('close', (code) => {
       if (lineBuffer.trim()) handleLine(lineBuffer);
 
       log(`[codex-runner] process exited code=${code}`);
+      try {
+        fs.appendFileSync(stderrLogPath, `\n[exit code=${code} at ${new Date().toISOString()}]\n`);
+      } catch {
+        /* ignore */
+      }
 
       // 没有正常 turn.completed 但有 agent_message → 兜底发 success
       if (!sentSuccess && lastAgentMessage) {
@@ -330,6 +351,24 @@ export async function runCodexQuery(
           usage,
         });
         sentSuccess = true;
+      }
+
+      // resume 指向的 rollout 不存在（如从 SDK 模式切到 codex，继承了 Claude 的 session
+      // UUID；或 codex rollout 被删/过期）→ 丢弃坏 session，用新 thread 重跑一次。
+      // 这不是降级：无法 resume 的 session id 是无效输入，开新会话是唯一正确动作。
+      const resumeRolloutMissing =
+        code !== 0 &&
+        !sentSuccess &&
+        !!config.sessionId &&
+        /no rollout found|thread\/resume failed/i.test(stderrAccum);
+      if (resumeRolloutMissing) {
+        log(
+          `[codex-runner] resume 失败（rollout 不存在: ${config.sessionId}），改用新 thread 重跑`,
+        );
+        runCodexQuery({ ...config, sessionId: undefined }, writeOutput, log)
+          .then(resolve)
+          .catch(reject);
+        return;
       }
 
       if (code !== 0 && !sentSuccess) {
