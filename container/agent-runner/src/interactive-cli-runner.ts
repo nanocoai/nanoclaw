@@ -302,6 +302,7 @@ export async function runInteractiveQuery(
         pendingResult = undefined;
         return;
       }
+      log(`[interactive] flushPending: resultLen=${pendingResult?.length ?? 0}, status=${pendingOutput.status}`);
       writeOutput(pendingOutput);
       finish(pendingResult);
       pendingOutput = null;
@@ -404,6 +405,10 @@ export async function runInteractiveQuery(
           numTurns++;
           const durationMs = Date.now() - startTime;
           const output = mapAccumulatorToResult(acc, config.sessionId || sessionToken, numTurns, durationMs);
+          log(`[interactive] mapAccumulatorToResult: status=${output.status}, resultLen=${output.result?.length ?? 0}, blocks=${acc.blocks.size}, stopReason=${acc.stopReason}, model=${acc.model || 'unknown'}, outputTokens=${acc.usage.outputTokens}`);
+          if (!output.result && acc.usage.outputTokens > 0) {
+            log(`[interactive] ⚠️ result 为空但有 ${acc.usage.outputTokens} output tokens — TapProxy 可能漏拦 SSE 文本`);
+          }
           // 不立刻 emit — 存起来等所有流结束或超时后 flush
           pendingOutput = output;
           pendingResult = output.result || undefined;
@@ -447,6 +452,7 @@ export async function runInteractiveQuery(
       },
     };
 
+    log(`[interactive] subscribing to SSE (session: ${sessionToken.slice(0, 8)}...)`);
     proxy.subscribe(sessionToken, subscription);
 
     // 注入消息

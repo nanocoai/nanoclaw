@@ -777,7 +777,10 @@ export async function runContainerAgent(
             line.includes('[text-block]') ||
             line.includes('Archived conversation') ||
             line.includes('Failed to archive') ||
-            line.includes('context_management')
+            line.includes('context_management') ||
+            line.includes('[interactive]') ||
+            line.includes('[health]') ||
+            line.includes('[tap-proxy]')
           ) {
             logger.info({ agent: group.folder }, line);
           } else {

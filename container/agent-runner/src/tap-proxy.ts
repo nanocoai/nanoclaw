@@ -458,6 +458,8 @@ export class TapProxy extends EventEmitter {
 
     if (shouldIntercept) {
       this.log(`[tap-proxy] intercepting ${method} ${path} (body: ${Buffer.byteLength(body || '', 'utf-8')} bytes)`);
+    } else if (isMessagesApi && !subscription) {
+      this.log(`[tap-proxy] ⚠️ messages API 请求未匹配 subscription (session: ${sessionToken.slice(0, 8)}..., 已注册: [${[...this.subscriptions.keys()].map(k => k.slice(0, 8)).join(', ')}])`);
     }
 
     // 优先走 credential proxy（直接 HTTP 转发，OAuth 凭证）
@@ -551,6 +553,8 @@ export class TapProxy extends EventEmitter {
         const count = (this.activeSseStreams.get(sessionToken) || 0) + 1;
         this.activeSseStreams.set(sessionToken, count);
         subscription.onActiveStreamsChange?.(count);
+      } else if (!subscription && isSSE) {
+        this.log(`[tap-proxy] ⚠️ SSE 响应到达但无 subscription (session: ${sessionToken.slice(0, 8)}..., 已注册: [${[...this.subscriptions.keys()].map(k => k.slice(0, 8)).join(', ')}])`);
       }
 
       proxyRes.on('data', (chunk: Buffer) => {
