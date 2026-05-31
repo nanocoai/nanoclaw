@@ -12,30 +12,31 @@ import {
 } from '../container/agent-runner/src/tmux-session-manager.js';
 
 describe('buildTmuxSessionName', () => {
-  it('从 chatJid 提取前 8 位字母数字', () => {
+  it('过滤非字母数字字符，拼接完整 id', () => {
     const name = buildTmuxSessionName('fs_oc_e6ce3bf2d85d6c9ec049a96e1219c7d6');
-    expect(name).toMatch(/^nanoclaw-fsoce6ce-\d+$/);
+    expect(name).toBe('nanoclaw-fsoce6ce3bf2d85d6c9ec049a96e1219c7d6');
   });
 
   it('短 chatJid 使用全部', () => {
     const name = buildTmuxSessionName('abc');
-    expect(name).toMatch(/^nanoclaw-abc-\d+$/);
+    expect(name).toBe('nanoclaw-abc');
   });
 
   it('空 chatJid 使用 unknown', () => {
     const name = buildTmuxSessionName('');
-    expect(name).toMatch(/^nanoclaw-unknown-\d+$/);
+    expect(name).toBe('nanoclaw-unknown');
   });
 
   it('特殊字符被过滤', () => {
     const name = buildTmuxSessionName('fs:oc_123');
-    expect(name).toMatch(/^nanoclaw-fsoc123-\d+$/);
+    expect(name).toBe('nanoclaw-fsoc123');
   });
 
-  it('全局唯一（时间戳不同）', () => {
+  it('相同输入返回相同结果（确定性）', () => {
     const name1 = buildTmuxSessionName('test');
-    // 同 ms 内可能相同，这里只验证格式
-    expect(name1).toMatch(/^nanoclaw-test-\d{13}$/);
+    const name2 = buildTmuxSessionName('test');
+    expect(name1).toBe('nanoclaw-test');
+    expect(name1).toBe(name2);
   });
 });
 
@@ -139,14 +140,14 @@ describe('buildTmuxCommand', () => {
     ]);
   });
 
-  it('send-keys', () => {
+  it('send-keys 显式指定 window 0', () => {
     const args = buildTmuxCommand('send-keys', 'my-session', ['-l', 'hello']);
-    expect(args).toEqual(['tmux', 'send-keys', '-t', 'my-session', '-l', 'hello']);
+    expect(args).toEqual(['tmux', 'send-keys', '-t', 'my-session:0', '-l', 'hello']);
   });
 
-  it('send-keys Enter', () => {
+  it('send-keys Enter 也指定 window 0', () => {
     const args = buildTmuxCommand('send-keys', 'my-session', ['Enter']);
-    expect(args).toEqual(['tmux', 'send-keys', '-t', 'my-session', 'Enter']);
+    expect(args).toEqual(['tmux', 'send-keys', '-t', 'my-session:0', 'Enter']);
   });
 
   it('kill-session', () => {
@@ -169,9 +170,14 @@ describe('buildTmuxCommand', () => {
     expect(args).toEqual(['tmux', 'load-buffer', '/tmp/msg.txt']);
   });
 
-  it('paste-buffer', () => {
+  it('paste-buffer 显式指定 window 0', () => {
     const args = buildTmuxCommand('paste-buffer', 'my-session');
-    expect(args).toEqual(['tmux', 'paste-buffer', '-t', 'my-session']);
+    expect(args).toEqual(['tmux', 'paste-buffer', '-t', 'my-session:0']);
+  });
+
+  it('capture-pane 显式指定 window 0', () => {
+    const args = buildTmuxCommand('capture-pane', 'my-session', ['-S', '-50']);
+    expect(args).toEqual(['tmux', 'capture-pane', '-t', 'my-session:0', '-p', '-S', '-50']);
   });
 });
 

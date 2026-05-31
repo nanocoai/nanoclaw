@@ -239,6 +239,23 @@ export class GroupQueue {
       );
       return false;
     }
+
+    // 消息驱动健康检查：写 IPC 前确认 runner 子进程还活着
+    if (state.process?.pid) {
+      try {
+        process.kill(state.process.pid, 0); // 不发信号，仅检查进程存在
+      } catch {
+        // 进程已死，标记为非活跃，让调用方走 enqueueMessageCheck 起新 runner
+        logger.warn(
+          { groupJid, pid: state.process.pid },
+          'queue.sendMessage: runner 进程已死，标记非活跃',
+        );
+        state.active = false;
+        state.process = null;
+        return false;
+      }
+    }
+
     state.idleWaiting = false; // Agent is about to receive work, no longer idle
 
     const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');

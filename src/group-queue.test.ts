@@ -433,6 +433,57 @@ describe('GroupQueue', () => {
     await vi.advanceTimersByTimeAsync(10);
   });
 
+  // --- sendMessage 进程存活检查 ---
+
+  it('sendMessage 检测到 runner 进程死亡时返回 false 并标记非活跃', async () => {
+    let resolveProcess: () => void;
+    const processMessages = vi.fn(async () => {
+      await new Promise<void>((resolve) => { resolveProcess = resolve; });
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // 注册一个带有不存在 PID 的进程
+    const fakeProcess = { pid: 999999 } as any; // 不存在的 PID
+    queue.registerProcess('group1@g.us', fakeProcess, 'container-1', 'test-group');
+
+    // sendMessage 应检测到进程死亡，返回 false
+    const result = queue.sendMessage('group1@g.us', 'hello');
+    expect(result).toBe(false);
+
+    // 再次调用 isActive 应为 false
+    expect(queue.isActive('group1@g.us')).toBe(false);
+
+    resolveProcess!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('sendMessage 对存活进程正常写 IPC 文件', async () => {
+    let resolveProcess: () => void;
+    const processMessages = vi.fn(async () => {
+      await new Promise<void>((resolve) => { resolveProcess = resolve; });
+      return true;
+    });
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    // 用当前进程 PID（必定存活）
+    const realProcess = { pid: process.pid } as any;
+    queue.registerProcess('group1@g.us', realProcess, 'container-1', 'test-group');
+
+    // sendMessage 应成功
+    const result = queue.sendMessage('group1@g.us', 'hello');
+    expect(result).toBe(true);
+
+    resolveProcess!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
   it('preempts when idle arrives with pending tasks', async () => {
     const fs = await import('fs');
     let resolveProcess: () => void;

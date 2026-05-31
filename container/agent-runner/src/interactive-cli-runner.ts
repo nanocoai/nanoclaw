@@ -474,3 +474,85 @@ export async function cleanupInteractiveResources(log: (msg: string) => void): P
     log('[interactive] cleanup: tap proxy stopped, tmux sessions preserved');
   }
 }
+
+// ---- 环境健康检查（消息驱动，不用定时器） ----
+
+export interface CliHealthResult {
+  healthy: boolean;
+  error?: string;
+}
+
+/**
+ * 检查 CLI 交互环境是否正常。用户发消息时调用（不用定时器）。
+ *
+ * 检查三项：
+ * 1. tmux session 存在
+ * 2. window 0 有 CLI 进程（❯ 提示符）
+ * 3. TapProxy 端口可连
+ *
+ * 不尝试自恢复——如果环境坏了，返回 healthy: false，
+ * 让主循环 break 退出，主进程会起新 runner（新 runner 自然重建一切）。
+ * TapProxy 挂了是个例外：重置单例即可，下次 runInteractiveQuery 会自动重建。
+ */
+export async function checkCliHealth(
+  chatJid: string,
+  log: (msg: string) => void,
+): Promise<CliHealthResult> {
+  const tmux = tmuxManager;
+  if (!tmux) {
+    // 还没初始化过 tmux manager（首轮 query 还没跑），跳过
+    return { healthy: true };
+  }
+
+  // 1. 检查 tmux session
+  const session = tmux.getSession(chatJid);
+  if (!session) {
+    // 首次启动或进程刚重启，跳过
+    return { healthy: true };
+  }
+
+  const alive = await tmux.isAlive(session.name);
+  if (!alive) {
+    log(`[health] tmux session ${session.name} 不存在`);
+    return { healthy: false, error: 'tmux session 不存在' };
+  }
+
+  // 2. 检查 window 0 有没有 CLI 进程
+  try {
+    const pane = await tmux.capturePane(session.name);
+    // 检测 CLI 是否活着：空闲提示符 / 启动 banner / thinking 状态 / 工具执行
+    const hasCliIndicator = pane.includes('❯') || pane.includes('Claude Code') || pane.includes('claude')
+      || pane.includes('Thinking') || pane.includes('⏺') || pane.includes('✻');
+    if (!hasCliIndicator) {
+      const lastLines = pane.split('\n').filter(l => l.trim()).slice(-5).join(' | ');
+      log(`[health] window 0 无 CLI 进程: ${lastLines}`);
+      return { healthy: false, error: `CLI 进程不存在 (pane: ${lastLines})` };
+    }
+  } catch (err) {
+    // capturePane 失败可能是瞬态错误，不判定为不健康
+    log(`[health] capturePane 异常（忽略）: ${err instanceof Error ? err.message : err}`);
+  }
+
+  // 3. 检查 TapProxy 端口
+  if (tapProxy) {
+    const port = tapProxy.getPort();
+    try {
+      const net = await import('net');
+      await new Promise<void>((resolve, reject) => {
+        const sock = net.createConnection({ host: '127.0.0.1', port }, () => {
+          sock.destroy();
+          resolve();
+        });
+        sock.on('error', reject);
+        sock.setTimeout(3000, () => { sock.destroy(); reject(new Error('timeout')); });
+      });
+    } catch {
+      // TapProxy 挂了不能自恢复——新 proxy 端口会变，但旧 tmux session 的
+      // HTTPS_PROXY 环境变量还指向旧端口。必须退出 runner 重建一切。
+      log(`[health] TapProxy 端口 ${port} 不可连`);
+      return { healthy: false, error: `TapProxy 端口 ${port} 不可连` };
+    }
+  }
+
+  return { healthy: true };
+}
