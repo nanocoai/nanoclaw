@@ -24,7 +24,8 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 import { runCliQuery } from './cli-runner.js';
-import { runInteractiveQuery, cleanupInteractiveResources } from './interactive-cli-runner.js';
+import { runCodexQuery } from './codex-runner.js';
+import { runInteractiveQuery, cleanupInteractiveResources, checkCliHealth } from './interactive-cli-runner.js';
 
 interface ContainerInput {
   prompt: string;
@@ -35,8 +36,10 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   script?: string;
-  /** CLI 执行模式：sdk（默认）| print | interactive */
-  cliMode?: 'sdk' | 'print' | 'interactive';
+  /** 触发用户 ID（飞书 open_id），传给 MCP server 用于记忆读写 */
+  senderId?: string;
+  /** CLI 执行模式：sdk（默认）| print | interactive | codex */
+  cliMode?: 'sdk' | 'print' | 'interactive' | 'codex';
   modelOverride?: {
     model?: string;
     thinking?: 'adaptive' | 'disabled';
@@ -1388,6 +1391,107 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cliMode === 'codex') {
+    log('[mode] codex mode — spawning codex exec per turn');
+
+    // 加载全局上下文（SOUL.md + TOOLS.md + CLAUDE.md）拼进首轮 prompt 前缀。
+    // codex 没有 --append-system-prompt，且读 AGENTS.md 不读 CLAUDE.md，
+    // 故 PoC 阶段把人设/规范作为首轮前缀注入（后续轮靠 resume 保留上下文）。
+    const cxGlobalDir = PATHS.global;
+    const cxContextParts: string[] = [];
+    const cxSoulPath = cxGlobalDir ? path.join(cxGlobalDir, 'SOUL.md') : undefined;
+    if (cxSoulPath && fs.existsSync(cxSoulPath)) {
+      cxContextParts.push(fs.readFileSync(cxSoulPath, 'utf-8'));
+    }
+    const cxToolsPath = cxGlobalDir ? path.join(cxGlobalDir, 'TOOLS.md') : undefined;
+    if (cxToolsPath && fs.existsSync(cxToolsPath)) {
+      cxContextParts.push(fs.readFileSync(cxToolsPath, 'utf-8'));
+    }
+    const cxClaudeMdPath = PATHS.globalClaudeMd;
+    if (cxClaudeMdPath && fs.existsSync(cxClaudeMdPath)) {
+      cxContextParts.push(fs.readFileSync(cxClaudeMdPath, 'utf-8'));
+    }
+    const cxSystemPrefix = cxContextParts.length > 0
+      ? `[系统人设与规范，必须遵守]\n\n${cxContextParts.join('\n\n---\n\n')}\n\n[以上为系统设定，以下是用户消息]\n\n`
+      : '';
+
+    // per-group CODEX_HOME（持久，保留 session 文件供 resume）
+    const codexHome = path.join(PATHS.group, '.codex-home');
+
+    const cxTranscript: ParsedMessage[] = [];
+    let cxFirstTurn = true;
+
+    try {
+      while (true) {
+        log(`[codex-mode] Starting codex query (session: ${sessionId || 'new'})...`);
+
+        const turnPrompt = cxFirstTurn ? cxSystemPrefix + prompt : prompt;
+        cxFirstTurn = false;
+        cxTranscript.push({ role: 'user', content: prompt });
+
+        const override = containerInput.modelOverride;
+        const cxResult = await runCodexQuery(
+          {
+            prompt: turnPrompt,
+            sessionId,
+            model: override?.model || undefined,
+            mcpServerPath,
+            chatJid: containerInput.chatJid,
+            groupFolder: containerInput.groupFolder,
+            isMain: containerInput.isMain,
+            senderId: containerInput.senderId,
+            ipcDir: PATHS.ipc,
+            cwd: PATHS.queryCwd || PATHS.group,
+            env: sdkEnv,
+            codexHome,
+          },
+          writeOutput,
+          log,
+        );
+
+        if (cxResult.newSessionId) {
+          sessionId = cxResult.newSessionId;
+        }
+        if (cxResult.result) {
+          cxTranscript.push({ role: 'assistant', content: cxResult.result });
+        }
+
+        if (shouldClose()) {
+          log('[codex-mode] Close sentinel detected, exiting');
+          break;
+        }
+
+        log('[codex-mode] Query ended, waiting for next IPC message...');
+        const nextMessage = await waitForIpcMessage();
+        if (nextMessage === null) {
+          log('[codex-mode] Close sentinel received, exiting');
+          break;
+        }
+        log(`[codex-mode] Got new message (${nextMessage.text.length} chars)`);
+        prompt = prependContext(nextMessage.text, nextMessage.context);
+        if (nextMessage.modelOverride) {
+          containerInput.modelOverride = nextMessage.modelOverride;
+        } else {
+          containerInput.modelOverride = undefined;
+        }
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log(`[codex-mode] Agent error: ${errorMessage}`);
+      writeOutput({
+        status: 'error',
+        result: null,
+        newSessionId: sessionId,
+        error: errorMessage,
+      });
+      archiveCliTranscript(cxTranscript, containerInput.assistantName);
+      process.exit(1);
+    }
+
+    archiveCliTranscript(cxTranscript, containerInput.assistantName);
+    return;
+  }
+
   if (cliMode === 'interactive') {
     log('[mode] interactive mode — tmux + tap proxy');
 
@@ -1507,6 +1611,19 @@ async function main(): Promise<void> {
         }
 
         log(`[interactive] Got new message (${nextMessage.text.length} chars)`);
+
+        // 消息驱动健康检查：发消息时才检查环境，不用定时器
+        const health = await checkCliHealth(containerInput.chatJid, log);
+        if (!health.healthy) {
+          log(`[interactive] 环境异常，退出 runner: ${health.error}`);
+          writeOutput({
+            status: 'error',
+            result: null,
+            error: `CLI 环境异常 (${health.error})，正在重启...`,
+          });
+          break;
+        }
+
         prompt = prependContext(nextMessage.text, nextMessage.context);
         if (nextMessage.modelOverride) {
           containerInput.modelOverride = nextMessage.modelOverride;

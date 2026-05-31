@@ -23,7 +23,7 @@ import { CliMode, ContainerConfig, RegisteredGroup } from './types.js';
 /** 从 ContainerConfig 解析 cliMode，向后兼容 useCliMode */
 export function resolveCliMode(config?: ContainerConfig): CliMode {
   if (config?.cliMode) {
-    const validModes: CliMode[] = ['sdk', 'print', 'interactive'];
+    const validModes: CliMode[] = ['sdk', 'print', 'interactive', 'codex'];
     if (!validModes.includes(config.cliMode)) {
       throw new Error(`Invalid cliMode: "${config.cliMode}". Valid values: ${validModes.join(', ')}`);
     }

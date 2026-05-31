@@ -28,7 +28,7 @@ export interface AllowedRoot {
 }
 
 /** CLI 执行模式 */
-export type CliMode = 'sdk' | 'print' | 'interactive';
+export type CliMode = 'sdk' | 'print' | 'interactive' | 'codex';
 
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
