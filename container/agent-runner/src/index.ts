@@ -1099,8 +1099,12 @@ async function runQuery(
           }
         : undefined;
 
+      const hasResult = !!textResult && textResult.trim().length > 0;
+      if (!hasResult && (rawUsage?.output_tokens ?? 0) > 0) {
+        log(`[result] ⚠️ result 为空但有 ${rawUsage?.output_tokens} output tokens — 模型可能仅产出 thinking 无 text content`);
+      }
       log(
-        `[result] #${resultCount} model=${lastAssistantModel || 'unknown'} input=${rawUsage?.input_tokens ?? '?'} output=${rawUsage?.output_tokens ?? '?'} turns=${(msg.num_turns as number) ?? '?'} cost=$${((msg.total_cost_usd as number) ?? 0).toFixed(3)}`,
+        `[result] #${resultCount} model=${lastAssistantModel || 'unknown'} input=${rawUsage?.input_tokens ?? '?'} output=${rawUsage?.output_tokens ?? '?'} turns=${(msg.num_turns as number) ?? '?'} cost=$${((msg.total_cost_usd as number) ?? 0).toFixed(3)} hasResult=${hasResult}`,
       );
       writeOutput({
         status: 'success',
