@@ -771,3 +771,204 @@ describe('buildTextProgress compact-summary 过滤', () => {
     expect(result!.result?.startsWith('💬 ')).toBe(true);
   });
 });
+
+// ---- 并发 SSE 流竞态场景 ----
+
+describe('并发 SSE 流共享 accumulator 竞态', () => {
+  // 复现线上 bug：haiku 预热流和 opus 主流几乎同时到达，
+  // 共享一个 acc 累积器。第二个流的 message_start 重置 blocks，
+  // 导致第一个流累积的 text block 丢失。
+  //
+  // 预期：两个流交错时，message_start 会清空已有 blocks，
+  // 这是 accumulateSseEvent 的正确行为（message_start 代表新消息开始）。
+  // bug 在调用侧没有为每个流维护独立 accumulator。
+
+  // 辅助函数：构造完整的 SSE 事件序列
+  function makeTextStream(model: string, text: string): SseEvent[] {
+    return [
+      {
+        type: 'message_start',
+        data: {
+          message: {
+            id: `msg_${model}`,
+            model,
+            usage: { input_tokens: 10, output_tokens: 0 },
+          },
+        },
+      },
+      {
+        type: 'content_block_start',
+        data: { index: 0, content_block: { type: 'text', text: '' } },
+      },
+      {
+        type: 'content_block_delta',
+        data: { index: 0, delta: { type: 'text_delta', text } },
+      },
+      { type: 'content_block_stop', data: { index: 0 } },
+      {
+        type: 'message_delta',
+        data: { delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 50 } },
+      },
+      { type: 'message_stop', data: {} },
+    ];
+  }
+
+  it('单流完整事件序列 → mapAccumulatorToResult 有文本', () => {
+    let acc = createMessageAccumulator();
+    for (const event of makeTextStream('claude-opus-4-8', '你好世界')) {
+      acc = accumulateSseEvent(acc, event);
+    }
+    const result = mapAccumulatorToResult(acc, 'session-1');
+    expect(result.status).toBe('success');
+    expect(result.result).toBe('你好世界');
+    expect(acc.blocks.size).toBe(1);
+  });
+
+  it('两个流顺序执行（先 haiku 后 opus）→ 第二个流的文本保留', () => {
+    let acc = createMessageAccumulator();
+
+    // 第一个流（haiku 预热）完整跑完
+    for (const event of makeTextStream('claude-3-5-haiku', '预热文本')) {
+      acc = accumulateSseEvent(acc, event);
+    }
+    expect(acc.done).toBe(true);
+    expect(acc.model).toBe('claude-3-5-haiku');
+
+    // 第二个流开始 → message_start 重置 blocks
+    for (const event of makeTextStream('claude-opus-4-8', '正式回复')) {
+      acc = accumulateSseEvent(acc, event);
+    }
+    const result = mapAccumulatorToResult(acc, 'session-1');
+    expect(result.result).toBe('正式回复');
+    expect(acc.model).toBe('claude-opus-4-8');
+  });
+
+  it('两个流交错（复现竞态 bug）→ message_start 清空已有 blocks', () => {
+    let acc = createMessageAccumulator();
+
+    const haikuEvents = makeTextStream('claude-3-5-haiku', '预热');
+    const opusEvents = makeTextStream('claude-opus-4-8', '正式回复');
+
+    // 模拟交错：haiku 先收到 message_start 和 content_block_start
+    acc = accumulateSseEvent(acc, haikuEvents[0]); // haiku message_start
+    acc = accumulateSseEvent(acc, haikuEvents[1]); // haiku content_block_start
+    acc = accumulateSseEvent(acc, haikuEvents[2]); // haiku content_block_delta（text="预热"）
+    expect(acc.blocks.size).toBe(1);
+
+    // opus message_start 到达 → 重置 blocks（haiku 的 text 丢了）
+    acc = accumulateSseEvent(acc, opusEvents[0]); // opus message_start
+    expect(acc.blocks.size).toBe(0); // ← 这就是 bug 的根源
+    expect(acc.model).toBe('claude-opus-4-8');
+
+    // haiku 的 content_block_stop 到达 → acc.blocks 里没有 index=0
+    acc = accumulateSseEvent(acc, haikuEvents[3]); // haiku content_block_stop
+    // content_block_stop 不做任何事，不会报错
+
+    // haiku 的 message_delta + message_stop
+    acc = accumulateSseEvent(acc, haikuEvents[4]); // haiku message_delta (end_turn)
+    acc = accumulateSseEvent(acc, haikuEvents[5]); // haiku message_stop → done=true
+    expect(acc.done).toBe(true);
+    expect(acc.stopReason).toBe('end_turn');
+
+    // 此时 mapAccumulatorToResult → blocks=0, result=null
+    const earlyResult = mapAccumulatorToResult(acc, 'session-1');
+    expect(earlyResult.result).toBeNull(); // ← 竞态导致空回复
+
+    // opus 后续事件到达
+    acc = accumulateSseEvent(acc, opusEvents[1]); // opus content_block_start
+    acc = accumulateSseEvent(acc, opusEvents[2]); // opus delta
+    acc = accumulateSseEvent(acc, opusEvents[3]); // opus block_stop
+    acc = accumulateSseEvent(acc, opusEvents[4]); // opus message_delta
+    acc = accumulateSseEvent(acc, opusEvents[5]); // opus message_stop
+
+    // 但 done 已经在 haiku 的 message_stop 时置为 true，
+    // opus 的 message_start 把它重置为 false，
+    // opus 的 message_stop 再次置为 true。
+    // 如果调用侧在 haiku 的 done=true 时就取了结果，opus 的文本永远看不到
+    const lateResult = mapAccumulatorToResult(acc, 'session-1');
+    expect(lateResult.result).toBe('正式回复'); // opus 的文本在后面的事件里
+  });
+
+  it('并发流中 content_block_delta 到已被清空的 index → 不报错不累积', () => {
+    let acc = createMessageAccumulator();
+
+    // 流 A：创建 block index=0
+    acc = accumulateSseEvent(acc, {
+      type: 'content_block_start',
+      data: { index: 0, content_block: { type: 'text', text: '' } },
+    });
+    acc = accumulateSseEvent(acc, {
+      type: 'content_block_delta',
+      data: { index: 0, delta: { type: 'text_delta', text: '部分' } },
+    });
+    expect(acc.blocks.get(0)!.type).toBe('text');
+    expect((acc.blocks.get(0) as TextBlock).text).toBe('部分');
+
+    // 流 B 的 message_start 清空 blocks
+    acc = accumulateSseEvent(acc, {
+      type: 'message_start',
+      data: { message: { id: 'msg_b', model: 'opus', usage: { input_tokens: 5, output_tokens: 0 } } },
+    });
+    expect(acc.blocks.size).toBe(0);
+
+    // 流 A 的后续 delta 到达 → index=0 不存在，静默跳过
+    acc = accumulateSseEvent(acc, {
+      type: 'content_block_delta',
+      data: { index: 0, delta: { type: 'text_delta', text: '文本' } },
+    });
+    expect(acc.blocks.size).toBe(0); // 不应创建新 block
+  });
+
+  it('interactive-cli-runner 调用侧模拟：pendingTextBlocks 被 drop + mapResult 空 = 空回复', () => {
+    // 模拟 interactive-cli-runner.ts 的事件处理逻辑
+    let acc = createMessageAccumulator();
+    const pendingTextBlocks: TextBlock[] = [];
+
+    const haikuEvents = makeTextStream('claude-3-5-haiku', '预热文本');
+    const opusEvents = makeTextStream('claude-opus-4-8', '正式回复');
+
+    // 按实际交错顺序处理
+    acc = accumulateSseEvent(acc, haikuEvents[0]); // haiku message_start
+    acc = accumulateSseEvent(acc, opusEvents[0]);  // opus message_start（清空 blocks）
+    acc = accumulateSseEvent(acc, haikuEvents[1]);  // haiku block_start
+    acc = accumulateSseEvent(acc, haikuEvents[2]);  // haiku delta
+
+    // haiku block_stop → 调用侧取 acc.blocks.get(0)
+    acc = accumulateSseEvent(acc, haikuEvents[3]);
+    const haikuBlock = acc.blocks.get(0); // 这里取到的是 haiku 的 block
+    if (haikuBlock?.type === 'text') {
+      pendingTextBlocks.push(haikuBlock);
+    }
+
+    // haiku message_delta + message_stop → done=true
+    acc = accumulateSseEvent(acc, haikuEvents[4]);
+    acc = accumulateSseEvent(acc, haikuEvents[5]);
+
+    // 调用侧检查 acc.done → true
+    expect(acc.done).toBe(true);
+
+    // decideTextBlockAction(end_turn, false) → drop
+    const action = decideTextBlockAction({
+      stopReason: acc.stopReason,
+      isHaikuPreheat: acc.model.includes('haiku'),
+    });
+    // 注意：此时 acc.model 已被 opus message_start 覆盖为 'claude-opus-4-8'
+    // 所以 isHaikuPreheat=false，action=drop
+    expect(acc.model).toBe('claude-opus-4-8'); // ← 模型已被覆盖
+    expect(action).toBe('drop');
+
+    // drop pendingTextBlocks
+    pendingTextBlocks.length = 0;
+
+    // mapAccumulatorToResult → blocks 里只有 haiku 写的 block
+    const result = mapAccumulatorToResult(acc, 'session-1');
+
+    // blocks 里有 haiku 的 text（因为 haiku block_start 在 opus message_start 之后）
+    // 但 acc.model 是 opus → 不会被识别为 haiku 预热
+    // 如果 block 刚好存在，result 可能不为空
+    // 关键是 pendingTextBlocks 已被 drop 了，中间文本丢失
+
+    // 这是竞态的另一种表现：haiku 的 text 被当成 opus 的回复
+    // 真正的 opus 文本还没到，用户看到的是 haiku 预热文本或空
+  });
+});

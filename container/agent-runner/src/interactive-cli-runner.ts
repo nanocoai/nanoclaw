@@ -26,6 +26,7 @@ import {
   type SseEvent,
   type ContainerOutput,
   type TextBlock,
+  type MessageAccumulator,
 } from './sse-parser.js';
 import { buildMcpConfig } from './cli-runner.js';
 
@@ -339,26 +340,60 @@ export async function runInteractiveQuery(
       pendingTextBlocks = [];
     };
 
+    // 并发 SSE 流隔离：每个 message_start 创建独立 accumulator，按 messageId 路由。
+    // 背景：CLI 会同时发 haiku 预热请求和 opus 主请求，两个 SSE 流并发到达。
+    // 如果共享一个 acc，后到的 message_start 会清空先到流的 blocks，导致空回复。
+    const accMap = new Map<string, MessageAccumulator>();
+    let currentMessageId = ''; // 最近收到事件的 message，用于 content 事件路由
+
     const subscription: TapSubscription = {
       onEvent: (event: SseEvent) => {
         hasReceivedSseData = true;
         resetTimeout(); // SSE 数据到达 → 重置超时
 
-        // message_start 表示新 SSE 流开始 → 取消待发结果（前一个流的结果被覆盖）
-        if (event.type === 'message_start' && pendingFinishTimer) {
-          clearTimeout(pendingFinishTimer);
-          pendingFinishTimer = null;
-          pendingOutput = null;
-          pendingResult = undefined;
+        // message_start → 为新流创建独立 accumulator
+        if (event.type === 'message_start') {
+          const startData = event.data as { message?: { id?: string; model?: string } };
+          const msgId = startData.message?.id || `anon-${Date.now()}`;
+          currentMessageId = msgId;
+
+          // 创建新 accumulator 并累积 message_start
+          let msgAcc = createMessageAccumulator();
+          msgAcc = accumulateSseEvent(msgAcc, event);
+          accMap.set(msgId, msgAcc);
+
+          // 同步到主 acc（保持 usage 累积等向后兼容）
+          acc = msgAcc;
+
+          log(`[interactive] message_start: id=${msgId.slice(0, 12)}, model=${msgAcc.model}, streams=${accMap.size}`);
+
+          // 取消待发结果（新流开始意味着前一个流的结果可能被覆盖）
+          if (pendingFinishTimer) {
+            clearTimeout(pendingFinishTimer);
+            pendingFinishTimer = null;
+            pendingOutput = null;
+            pendingResult = undefined;
+          }
+          return;
         }
 
-        // 累积事件（先累积再判断，确保 content_block_stop 时 inputJson 已完整）
-        acc = accumulateSseEvent(acc, event);
+        // content 事件路由到当前 message 的 accumulator
+        const targetId = currentMessageId;
+        let msgAcc = accMap.get(targetId);
+        if (!msgAcc) {
+          // 没有对应的 message_start（不应该发生），用全局 acc 兜底
+          msgAcc = acc;
+        }
+
+        // 累积事件
+        msgAcc = accumulateSseEvent(msgAcc, event);
+        accMap.set(targetId, msgAcc);
+        acc = msgAcc; // 同步到主 acc
 
         // content_block_stop → 块累积完成，按类型分发
         if (event.type === 'content_block_stop') {
           const stopData = event.data as { index: number };
-          const block = acc.blocks.get(stopData.index);
+          const block = msgAcc.blocks.get(stopData.index);
           if (block?.type === 'tool_use') {
             // tool_use 出现 → 之前缓冲的 text 一定是中间叙述（在工具调用前发生），flush
             flushPendingTextBlocks('tool_use block follows');
@@ -374,40 +409,44 @@ export async function runInteractiveQuery(
           }
         }
 
-        // message_stop → 用 decideTextBlockAction 决定 pendingTextBlocks 命运（纯函数，可单测）
-        if (acc.done) {
-          const isHaikuPreheat = !!(acc.model && acc.model.includes('haiku'));
+        // message_stop → 用 decideTextBlockAction 决定 pendingTextBlocks 命运
+        if (msgAcc.done) {
+          // 用这条消息自己的 model 判断是否 haiku 预热（不受并发流覆盖）
+          const isHaikuPreheat = !!(msgAcc.model && msgAcc.model.includes('haiku'));
           const action = decideTextBlockAction({
-            stopReason: acc.stopReason,
+            stopReason: msgAcc.stopReason,
             isHaikuPreheat,
           });
 
           if (action === 'flush') {
-            flushPendingTextBlocks(`decideTextBlockAction(stop=${acc.stopReason}, haiku=${isHaikuPreheat}) → flush`);
+            flushPendingTextBlocks(`decideTextBlockAction(stop=${msgAcc.stopReason}, haiku=${isHaikuPreheat}) → flush`);
           } else if (pendingTextBlocks.length > 0) {
-            log(`[interactive] dropping ${pendingTextBlocks.length} pending text block(s) (stop=${acc.stopReason}, haiku=${isHaikuPreheat}) — included in final result or haiku preheat noise`);
+            log(`[interactive] dropping ${pendingTextBlocks.length} pending text block(s) (stop=${msgAcc.stopReason}, haiku=${isHaikuPreheat}) — included in final result or haiku preheat noise`);
             pendingTextBlocks = [];
           }
 
-          if (acc.stopReason === 'tool_use') {
-            // Claude 使用工具后会继续，本轮没结束 — 复用 accumulator
+          // 清理已完成的 accumulator
+          accMap.delete(targetId);
+
+          if (msgAcc.stopReason === 'tool_use') {
+            // Claude 使用工具后会继续，本轮没结束
             numTurns++;
-            acc = { ...acc, done: false, stopReason: '', blocks: new Map() };
+            acc = { ...msgAcc, done: false, stopReason: '', blocks: new Map() };
             return;
           }
 
           if (isHaikuPreheat) {
-            log(`[interactive] skipping context-caching result (model: ${acc.model})`);
-            acc = { ...acc, done: false, stopReason: '', blocks: new Map() };
+            log(`[interactive] skipping context-caching result (model: ${msgAcc.model})`);
+            acc = { ...msgAcc, done: false, stopReason: '', blocks: new Map() };
             return;
           }
 
           numTurns++;
           const durationMs = Date.now() - startTime;
-          const output = mapAccumulatorToResult(acc, config.sessionId || sessionToken, numTurns, durationMs);
-          log(`[interactive] mapAccumulatorToResult: status=${output.status}, resultLen=${output.result?.length ?? 0}, blocks=${acc.blocks.size}, stopReason=${acc.stopReason}, model=${acc.model || 'unknown'}, outputTokens=${acc.usage.outputTokens}`);
-          if (!output.result && acc.usage.outputTokens > 0) {
-            log(`[interactive] ⚠️ result 为空但有 ${acc.usage.outputTokens} output tokens — TapProxy 可能漏拦 SSE 文本`);
+          const output = mapAccumulatorToResult(msgAcc, config.sessionId || sessionToken, numTurns, durationMs);
+          log(`[interactive] mapAccumulatorToResult: status=${output.status}, resultLen=${output.result?.length ?? 0}, blocks=${msgAcc.blocks.size}, stopReason=${msgAcc.stopReason}, model=${msgAcc.model || 'unknown'}, outputTokens=${msgAcc.usage.outputTokens}`);
+          if (!output.result && msgAcc.usage.outputTokens > 0) {
+            log(`[interactive] ⚠️ result 为空但有 ${msgAcc.usage.outputTokens} output tokens — SSE 文本可能丢失`);
           }
           // 不立刻 emit — 存起来等所有流结束或超时后 flush
           pendingOutput = output;
