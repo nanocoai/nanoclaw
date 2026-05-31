@@ -239,7 +239,7 @@ function buildProgressCard(
 
 /** 各模型 context window 的兜底值（当 SDK 未返回时使用） */
 const CLAUDE_CONTEXT_WINDOW_FALLBACK: Record<string, number> = {
-  'claude-opus-4': 1_000_000, // opus-4-6 官方确认 1M context
+  'claude-opus-4': 1_000_000, // opus-4-8 为 1M context（CLI 二进制确认）
   'claude-sonnet-4': 200_000,
   'claude-haiku-4': 200_000,
   'claude-3-5-sonnet': 200_000,
@@ -282,11 +282,22 @@ function appendUsageFooter(
   }
 
   // 兜底表：对每个模型名查表，取更大值（修正 SDK 返回偏小的情况）
+  // 来源 1: modelContextWindows 的 key（SDK 模式）
   for (const [fallbackModel, fallbackWindow] of Object.entries(
     CLAUDE_CONTEXT_WINDOW_FALLBACK,
   )) {
     if (modelNames.some((k) => k.includes(fallbackModel))) {
       maxContextTokens = Math.max(maxContextTokens, fallbackWindow);
+    }
+  }
+  // 来源 2: usage.model（CLI 模式下 modelContextWindows 为空，但 model 字段有值）
+  if (usage.model) {
+    for (const [fallbackModel, fallbackWindow] of Object.entries(
+      CLAUDE_CONTEXT_WINDOW_FALLBACK,
+    )) {
+      if (usage.model.includes(fallbackModel)) {
+        maxContextTokens = Math.max(maxContextTokens, fallbackWindow);
+      }
     }
   }
 

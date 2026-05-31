@@ -102,7 +102,8 @@ export function buildTmuxCommand(
     case 'new-session':
       return ['tmux', 'new-session', '-d', '-s', sessionName, '-x', '200', '-y', '50', ...(extraArgs || [])];
     case 'send-keys':
-      return ['tmux', 'send-keys', '-t', sessionName, ...(extraArgs || [])];
+      // 显式指定 :0 窗口，防止用户手动开新窗口后 active window 不是 CLI 所在的 window 0
+      return ['tmux', 'send-keys', '-t', `${sessionName}:0`, ...(extraArgs || [])];
     case 'kill-session':
       return ['tmux', 'kill-session', '-t', sessionName];
     case 'has-session':
@@ -112,9 +113,11 @@ export function buildTmuxCommand(
     case 'load-buffer':
       return ['tmux', 'load-buffer', ...(extraArgs || [])];
     case 'paste-buffer':
-      return ['tmux', 'paste-buffer', '-t', sessionName];
+      // 显式指定 :0 窗口
+      return ['tmux', 'paste-buffer', '-t', `${sessionName}:0`];
     case 'capture-pane':
-      return ['tmux', 'capture-pane', '-t', sessionName, '-p', ...(extraArgs || [])];
+      // 显式指定 :0 窗口
+      return ['tmux', 'capture-pane', '-t', `${sessionName}:0`, '-p', ...(extraArgs || [])];
   }
 }
 
