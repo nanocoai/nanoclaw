@@ -25,12 +25,45 @@ export function readonlyMountArgs(hostPath: string, containerPath: string): stri
   return ['-v', `${hostPath}:${containerPath}:ro`];
 }
 
+/**
+ * Last-resort teardown for hosts where the daemon can't signal containers.
+ *
+ * On some setups — notably docker running inside an unprivileged LXC/VM —
+ * the daemon (even as root) is denied the ability to signal container PIDs:
+ * `docker stop`/`kill` return "permission denied" and the container keeps
+ * running forever, so orphans accumulate across host restarts. Our agent
+ * containers run PID 1 as the host user, so we can signal that PID directly
+ * from the host; the kernel allows same-uid kills. Returns true if the
+ * container's host PID was found and signalled.
+ */
+function killByHostPid(name: string): boolean {
+  try {
+    const pidStr = execSync(`${CONTAINER_RUNTIME_BIN} inspect --format '{{.State.Pid}}' ${name}`, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+    }).trim();
+    const pid = Number(pidStr);
+    if (!Number.isInteger(pid) || pid <= 1) return false;
+    process.kill(pid, 'SIGKILL');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Stop a container by name. Uses execFileSync to avoid shell injection. */
 export function stopContainer(name: string): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
     throw new Error(`Invalid container name: ${name}`);
   }
-  execSync(`${CONTAINER_RUNTIME_BIN} stop -t 1 ${name}`, { stdio: 'pipe' });
+  try {
+    execSync(`${CONTAINER_RUNTIME_BIN} stop -t 1 ${name}`, { stdio: 'pipe' });
+  } catch (err) {
+    // The daemon refused to stop it (e.g. docker-in-LXC "permission denied").
+    // Fall back to signalling the container's host-side PID directly. If that
+    // also fails, rethrow so callers see the real failure instead of a no-op.
+    if (!killByHostPid(name)) throw err;
+  }
 }
 
 /** Ensure the container runtime is running, starting it if needed. */
@@ -74,15 +107,26 @@ export function cleanupOrphans(): void {
       },
     );
     const orphans = output.trim().split('\n').filter(Boolean);
+    const stopped: string[] = [];
+    const failed: string[] = [];
     for (const name of orphans) {
       try {
         stopContainer(name);
+        stopped.push(name);
       } catch {
-        /* already stopped */
+        failed.push(name);
       }
     }
-    if (orphans.length > 0) {
-      log.info('Stopped orphaned containers', { count: orphans.length, names: orphans });
+    if (stopped.length > 0) {
+      log.info('Stopped orphaned containers', { count: stopped.length, names: stopped });
+    }
+    if (failed.length > 0) {
+      // These will keep polling the session DB and racing live containers —
+      // surface loudly rather than masking as "already stopped".
+      log.error('Failed to stop orphaned containers — they are still running', {
+        count: failed.length,
+        names: failed,
+      });
     }
   } catch (err) {
     log.warn('Failed to clean up orphaned containers', { err });
