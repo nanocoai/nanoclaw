@@ -584,7 +584,7 @@ async function runQuery(
   // q 引用在 query() 创建后赋值，pollIpc 中用于 setModel
   let queryRef: Awaited<ReturnType<typeof query>> | null = null;
 
-  const pollIpcDuringQuery = () => {
+  const pollIpcDuringQuery = async () => {
     if (!ipcPolling) return;
     if (shouldClose()) {
       log('Close sentinel detected during query, ending stream');
@@ -596,22 +596,27 @@ async function runQuery(
     const messages = drainIpcInput();
     for (const msg of messages) {
       log(`Piping IPC message into active query (${msg.text.length} chars)${msg.modelOverride ? ` modelOverride=${JSON.stringify(msg.modelOverride)}` : ''}`);
-      // 在 push 消息前切模型（stream.push 后 SDK 会立即开始处理）
+      // 在 push 消息前切模型 + 切 thinking。
+      // ⚠️ 必须 await：applyFlagSettings 的 flag settings 是「读取时」生效的，
+      //   而 stream.push 会让 SDK 立即开始处理消息并读取当前配置。若不 await，
+      //   push 会抢在 setModel/applyFlagSettings 写入之前触发 query，本轮仍用旧配置。
+      //   踩过的坑：thinking-only 重试时 pipe 了 thinking=disabled，日志也打了
+      //   「piped thinking disabled」，但同轮 assistant 的 contentTypes 仍是 thinking
+      //   —— 因为 push 抢跑，disabled 只对再下一轮生效，而那时已到重试上限被放弃。
       if (queryRef) {
         const targetModel = msg.modelOverride?.model || defaultModel;
-        queryRef.setModel(targetModel).then(() => {
+        try {
+          await queryRef.setModel(targetModel);
           log(`[model-override] piped setModel(${targetModel})${msg.modelOverride?.model ? ' (override)' : ' (default)'}`);
-        }).catch((err: unknown) => {
+        } catch (err: unknown) {
           log(`[model-override] piped setModel FAILED: ${err instanceof Error ? err.message : String(err)}`);
-        });
-        if (msg.modelOverride?.thinking === 'disabled') {
-          (queryRef as any).applyFlagSettings({ thinking: { type: 'disabled' } } as Record<string, unknown>).then(() => {
-            log('[model-override] piped thinking disabled (applyFlagSettings)');
-          }).catch(() => {});
-        } else {
-          (queryRef as any).applyFlagSettings({ thinking: { type: 'adaptive' } } as Record<string, unknown>).then(() => {
-            log('[model-override] piped thinking adaptive (applyFlagSettings)');
-          }).catch(() => {});
+        }
+        const thinkingDisabled = msg.modelOverride?.thinking === 'disabled';
+        try {
+          await (queryRef as any).applyFlagSettings({ thinking: { type: thinkingDisabled ? 'disabled' : 'adaptive' } } as Record<string, unknown>);
+          log(`[model-override] piped thinking ${thinkingDisabled ? 'disabled' : 'adaptive'} (applyFlagSettings)`);
+        } catch (err: unknown) {
+          log(`[model-override] piped applyFlagSettings FAILED: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
       const pushText = prependContext(msg.text, msg.context);
