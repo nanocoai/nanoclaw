@@ -90,6 +90,7 @@ import {
   parseModelPrefix,
   getAvailableGroups,
   _setRegisteredGroups,
+  decideThinkingOnlyAction,
 } from './index.js';
 import { buildTriggerPattern } from './config.js';
 
@@ -265,5 +266,71 @@ describe('buildTriggerPattern', () => {
   it('后面无空格/标点也匹配（行尾）', () => {
     const pattern = buildTriggerPattern('@大狗');
     expect(pattern.test('@大狗')).toBe(true);
+  });
+});
+
+// ---- decideThinkingOnlyAction ----
+
+describe('decideThinkingOnlyAction', () => {
+  const base = {
+    hasText: false,
+    outputSentToUser: false,
+    outputTokens: 100,
+    retryCount: 0,
+    maxRetries: 1,
+  };
+
+  it('thinking-only 且未重试过 → retry', () => {
+    expect(decideThinkingOnlyAction(base)).toBe('retry');
+  });
+
+  it('thinking-only 且已达上限 → giveup（防死循环）', () => {
+    expect(decideThinkingOnlyAction({ ...base, retryCount: 1 })).toBe('giveup');
+  });
+
+  it('thinking-only 且超过上限 → giveup', () => {
+    expect(decideThinkingOnlyAction({ ...base, retryCount: 5 })).toBe('giveup');
+  });
+
+  it('有 text 输出 → none（正常结果，不重试）', () => {
+    expect(decideThinkingOnlyAction({ ...base, hasText: true })).toBe('none');
+  });
+
+  it('本轮已发过消息（CLI 流式）→ none，即使无 text', () => {
+    expect(
+      decideThinkingOnlyAction({ ...base, outputSentToUser: true }),
+    ).toBe('none');
+  });
+
+  it('outputTokens 为 0 → none（空 turn，非 thinking-only）', () => {
+    expect(decideThinkingOnlyAction({ ...base, outputTokens: 0 })).toBe('none');
+  });
+
+  it('maxRetries=0 时首次就 giveup（禁用重试）', () => {
+    expect(
+      decideThinkingOnlyAction({ ...base, retryCount: 0, maxRetries: 0 }),
+    ).toBe('giveup');
+  });
+
+  it('边界：retryCount 正好等于 maxRetries → giveup', () => {
+    expect(
+      decideThinkingOnlyAction({ ...base, retryCount: 2, maxRetries: 2 }),
+    ).toBe('giveup');
+  });
+
+  it('边界：retryCount 比 maxRetries 小 1 → retry', () => {
+    expect(
+      decideThinkingOnlyAction({ ...base, retryCount: 1, maxRetries: 2 }),
+    ).toBe('retry');
+  });
+
+  it('混合态：hasText 且 outputSentToUser 都为 true → none', () => {
+    expect(
+      decideThinkingOnlyAction({
+        ...base,
+        hasText: true,
+        outputSentToUser: true,
+      }),
+    ).toBe('none');
   });
 });
