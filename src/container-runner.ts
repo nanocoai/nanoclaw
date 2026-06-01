@@ -3,7 +3,7 @@
  * Spawns agent containers with session folder + agent group folder mounts.
  * The container runs the v2 agent-runner which polls the session DB.
  */
-import { ChildProcess, execSync, spawn } from 'child_process';
+import { ChildProcess, execSync, spawn, spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -22,7 +22,13 @@ import {
 import { materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars, updateContainerConfigJson } from './db/container-configs.js';
-import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import {
+  CONTAINER_RUNTIME_BIN,
+  hostGatewayArgs,
+  imageExists,
+  readonlyMountArgs,
+  stopContainer,
+} from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
@@ -61,6 +67,13 @@ const activeContainers = new Map<string, { process: ChildProcess; containerName:
  * racy double-replies.
  */
 const wakePromises = new Map<string, Promise<boolean>>();
+
+/**
+ * In-flight image rebuilds, keyed by tag. When multiple sessions wake
+ * concurrently after an external prune (e.g. Dokploy's daily cleanup), they
+ * all detect the same missing image — we want one shared rebuild, not N races.
+ */
+const imageRebuildLocks = new Map<string, Promise<void>>();
 
 export function getActiveContainerCount(): number {
   return activeContainers.size;
@@ -125,6 +138,14 @@ async function spawnContainer(session: Session): Promise<void> {
   // the config object, threaded through provider resolution, buildMounts,
   // and buildContainerArgs so we don't re-read.
   const containerConfig = materializeContainerJson(agentGroup.id);
+
+  // Self-heal if the image was deleted out from under us by an external
+  // tool. `docker run` with a missing tag would otherwise exit 125 every
+  // poll forever. `imageExists` is ~10ms when the image is present.
+  const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
+  if (!imageExists(imageTag)) {
+    await ensureImage(imageTag, agentGroup.id);
+  }
 
   // Resolve the effective provider + any host-side contribution it declares
   // (extra mounts, env passthrough). Computed once and threaded through both
@@ -462,6 +483,44 @@ async function buildContainerArgs(
   args.push('-c', 'exec bun run /app/src/index.ts');
 
   return args;
+}
+
+/**
+ * Rebuild a missing image, deduping concurrent callers via `imageRebuildLocks`.
+ * Per-group images FROM CONTAINER_IMAGE — if both are missing, base goes first.
+ */
+async function ensureImage(tag: string, agentGroupId: string): Promise<void> {
+  const existing = imageRebuildLocks.get(tag);
+  if (existing) return existing;
+  const promise = rebuildImage(tag, agentGroupId).finally(() => {
+    imageRebuildLocks.delete(tag);
+  });
+  imageRebuildLocks.set(tag, promise);
+  return promise;
+}
+
+async function rebuildImage(tag: string, agentGroupId: string): Promise<void> {
+  if (tag !== CONTAINER_IMAGE && !imageExists(CONTAINER_IMAGE)) {
+    await ensureImage(CONTAINER_IMAGE, agentGroupId);
+  }
+  if (tag === CONTAINER_IMAGE) {
+    log.warn('Base container image missing — running container/build.sh', { tag });
+    const projectRoot = path.dirname(DATA_DIR);
+    const result = spawnSync('bash', [path.join(projectRoot, 'container', 'build.sh')], {
+      cwd: projectRoot,
+      stdio: 'pipe',
+      timeout: 1_800_000,
+    });
+    if (result.status !== 0) {
+      const stderr = result.stderr?.toString() || '';
+      const stdout = result.stdout?.toString() || '';
+      throw new Error(`container/build.sh failed:\n${stderr || stdout}`);
+    }
+    log.info('Base container image rebuilt', { tag });
+    return;
+  }
+  log.warn('Per-group container image missing — rebuilding', { tag, agentGroupId });
+  await buildAgentGroupImage(agentGroupId);
 }
 
 /** Build a per-agent-group Docker image with custom packages. */
