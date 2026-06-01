@@ -281,7 +281,7 @@ export function prepareGroupSession(groupFolder: string): string {
       settingsFile,
       JSON.stringify(
         {
-          model: 'claude-opus-4-6',
+          model: 'claude-opus-4-8',
           env: {
             CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
             CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
