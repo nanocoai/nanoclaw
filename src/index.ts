@@ -415,6 +415,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   await channel.setTyping?.(chatJid, true);
   let hadError = false;
+  // thinking-only 自动重试计数（不每轮重置，成功产出 text 后清零）。
+  // 上限防止模型持续只 thinking 不输出时无限重试刷屏 + 烧钱。
+  const THINKING_ONLY_MAX_RETRIES = 1;
+  let thinkingOnlyRetryCount = 0;
   let outputSentToUser = false; // 当前 query 是否发过消息（每轮重置）
   let everSentToUser = false; // 整个 agent 生命周期是否发过消息（不重置，error handler 用）
   let streamingRateLimitDetected = false;
@@ -597,21 +601,38 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         const outputTokens = result.usage?.outputTokens ?? 0;
         const hasText = !!result.result && result.result.trim().length > 0;
         if (!hasText && !outputSentToUser && outputTokens > 0) {
-          logger.warn(
-            { group: group.name, chatJid, outputTokens, cost: result.usage?.totalCostUsd },
-            '[thinking-only] 模型仅产出 thinking 无 text，自动重试',
-          );
-          // 通知用户
-          channel.sendMessage(chatJid, '⚠️ 模型开了个小差（只有 thinking 没有输出），自动重试中...', { isCommandReply: true })
-            .catch((err) => logger.warn({ err }, '[thinking-only] 通知发送失败'));
-          // pipe 重试消息到同一个 session
-          const retryMsg = '你刚才的回复只有 thinking 没有 text 输出，用户什么都没收到。请重新回答上一个问题。';
-          if (!queue.sendMessage(chatJid, retryMsg)) {
-            logger.warn({ chatJid }, '[thinking-only] pipe 重试失败（容器可能已退出），入队重新处理');
-            queue.enqueueMessageCheck(chatJid);
+          if (thinkingOnlyRetryCount >= THINKING_ONLY_MAX_RETRIES) {
+            // 已达重试上限：放弃并提示用户，避免无限循环刷屏烧钱。
+            // 不 return —— 继续往下走正常清理（关 typing / 清进度卡片）。
+            logger.warn(
+              { group: group.name, chatJid, outputTokens, retries: thinkingOnlyRetryCount },
+              '[thinking-only] 重试已达上限，放弃并提示用户',
+            );
+            channel.sendMessage(chatJid, '⚠️ 模型连续多次只思考、不输出内容，已停止自动重试。请重新发条消息或换个问法。', { isCommandReply: true })
+              .catch((err) => logger.warn({ err }, '[thinking-only] 放弃通知发送失败'));
+            thinkingOnlyRetryCount = 0;
+          } else {
+            thinkingOnlyRetryCount++;
+            logger.warn(
+              { group: group.name, chatJid, outputTokens, cost: result.usage?.totalCostUsd, retry: thinkingOnlyRetryCount },
+              '[thinking-only] 模型仅产出 thinking 无 text，自动重试（关闭 thinking 强制输出）',
+            );
+            // 通知用户
+            channel.sendMessage(chatJid, '⚠️ 模型开了个小差（只有 thinking 没有输出），自动重试中...', { isCommandReply: true })
+              .catch((err) => logger.warn({ err }, '[thinking-only] 通知发送失败'));
+            // pipe 重试消息到同一个 session，关闭 thinking 强制模型直接输出 text，
+            // 否则 adaptive thinking 可能再次把整轮耗在 thinking 上、又是空结果。
+            const retryMsg = '你刚才的回复只有 thinking 没有 text 输出，用户什么都没收到。请直接用文字重新回答上一个问题，不要只思考。';
+            if (!queue.sendMessage(chatJid, retryMsg, { thinking: 'disabled' })) {
+              logger.warn({ chatJid }, '[thinking-only] pipe 重试失败（容器可能已退出），入队重新处理');
+              queue.enqueueMessageCheck(chatJid);
+            }
+            // 不清理进度卡片、不重置状态，等重试结果回来再清理
+            return;
           }
-          // 不清理进度卡片、不重置状态，等重试结果回来再清理
-          return;
+        } else if (hasText) {
+          // 成功产出 text → 清零重试计数，下次 thinking-only 重新计
+          thinkingOnlyRetryCount = 0;
         }
 
         // 每轮 query 结束时，确保 typing/spinner/进度卡片被清理
