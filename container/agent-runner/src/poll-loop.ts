@@ -218,13 +218,6 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
-    const query = config.provider.query({
-      prompt,
-      continuation,
-      cwd: config.cwd,
-      systemContext: config.systemContext,
-    });
-
     // Process the query while concurrently polling for new messages
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
@@ -232,10 +225,32 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
-      if (result.continuation && result.continuation !== continuation) {
-        continuation = result.continuation;
-        setContinuation(config.providerName, continuation);
+      // Retry-once on a poisoned resume: resuming a corrupt transcript yields a
+      // 400 surfaced as a *result* (not a throw), so the catch-path below never
+      // sees it and the session would crash-loop on every wake. Clear the
+      // continuation and re-run the same turn from a fresh session. Bounded to
+      // one retry and gated on having actually resumed — a fresh session that
+      // still poisons can't loop.
+      for (let attempt = 0; ; attempt++) {
+        const usedContinuation = continuation;
+        const query = config.provider.query({
+          prompt,
+          continuation,
+          cwd: config.cwd,
+          systemContext: config.systemContext,
+        });
+        const result = await processQuery(query, routing, processingIds, config.providerName, config.provider);
+        if (result.poisoned && usedContinuation && attempt === 0) {
+          log(`Poisoned resume (${usedContinuation}) — clearing continuation and retrying fresh`);
+          clearContinuation(config.providerName);
+          continuation = undefined;
+          continue;
+        }
+        if (result.continuation && result.continuation !== continuation) {
+          continuation = result.continuation;
+          setContinuation(config.providerName, continuation);
+        }
+        break;
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -306,6 +321,12 @@ function formatMessagesWithCommands(messages: MessageInRow[], nativeSlashCommand
 
 interface QueryResult {
   continuation?: string;
+  /**
+   * True if a result event reported a corrupt/poisoned resume (see
+   * AgentProvider.isPoisonedResume). The raw error text was suppressed rather
+   * than dispatched; the caller clears the continuation and retries fresh.
+   */
+  poisoned?: boolean;
 }
 
 async function processQuery(
@@ -313,10 +334,12 @@ async function processQuery(
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
+  provider: AgentProvider,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  let poisoned = false;
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -454,7 +477,14 @@ async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
-        if (event.text) {
+        if (event.text && provider.isPoisonedResume?.(event.text)) {
+          // The resumed transcript is corrupt (e.g. unmodifiable thinking
+          // blocks). Suppress the raw API-error text — dispatching it would
+          // only land as scratchpad and trigger a pointless unwrapped nudge —
+          // and signal the caller to clear the continuation and retry fresh.
+          log('Poisoned resume detected in result — suppressing error text, will retry fresh');
+          poisoned = true;
+        } else if (event.text) {
           const { hasUnwrapped } = dispatchResultText(event.text, routing);
           if (hasUnwrapped && !unwrappedNudged) {
             unwrappedNudged = true;
@@ -475,7 +505,7 @@ async function processQuery(
     clearInterval(pollHandle);
   }
 
-  return { continuation: queryContinuation };
+  return { continuation: queryContinuation, poisoned };
 }
 
 function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {

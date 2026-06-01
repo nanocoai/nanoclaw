@@ -29,6 +29,18 @@ export interface AgentProvider {
    * before it ever replies. Providers without an on-disk transcript omit this.
    */
   maybeRotateContinuation?(continuation: string, cwd: string): string | null;
+
+  /**
+   * True if this result-event text means the resumed transcript is corrupt and
+   * unusable — e.g. Claude's "`thinking`/`redacted_thinking` blocks in the
+   * latest assistant message cannot be modified" 400, which the SDK surfaces as
+   * a result (not a thrown error), so the catch-block isSessionInvalid path
+   * never sees it. When true, the poll-loop clears the continuation and retries
+   * the turn once from a fresh session, turning a permanent crash-loop into one
+   * dropped turn. Optional so providers without an on-disk transcript (and
+   * out-of-tree providers) need no change.
+   */
+  isPoisonedResume?(text: string): boolean;
 }
 
 /**

@@ -328,6 +328,17 @@ const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WIN
  */
 const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
 
+/**
+ * Poisoned-resume detection. When a turn is interrupted mid-stream (the host
+ * kills a stale container, or it crashes) while an assistant message with
+ * thinking blocks is still streaming, a partial message lands in the resumed
+ * .jsonl. The next request can't append to those blocks and the API returns a
+ * 400 — but the SDK surfaces it as a *result*, not a thrown error, so the
+ * isSessionInvalid catch-path never fires and the session crash-loops on every
+ * wake. Match the stable phrase so the poll-loop clears the continuation.
+ */
+const POISON_RESUME_RE = /blocks in the latest assistant message cannot be modified/i;
+
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
 
@@ -353,6 +364,10 @@ export class ClaudeProvider implements AgentProvider {
   isSessionInvalid(err: unknown): boolean {
     const msg = err instanceof Error ? err.message : String(err);
     return STALE_SESSION_RE.test(msg);
+  }
+
+  isPoisonedResume(text: string): boolean {
+    return POISON_RESUME_RE.test(text);
   }
 
   maybeRotateContinuation(continuation: string): string | null {

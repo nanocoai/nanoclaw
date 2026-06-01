@@ -411,6 +411,39 @@ describe('poll loop — /clear command', () => {
   });
 });
 
+describe('poll loop — poisoned-resume self-heal', () => {
+  it('clears continuation and retries fresh when a result reports a poisoned resume', async () => {
+    // Seed the continuation the runner will resume from. The provider emits the
+    // thinking-block 400 *as a result* (not a throw) whenever it is resumed,
+    // mirroring the real crash-loop. On a fresh start (no continuation) it
+    // returns a normal message.
+    setContinuation('mock', 'poisoned-resume-session');
+
+    insertMessage('m1', { sender: 'Alice', text: 'morning briefing' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new PoisonResumeProvider();
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 3000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    // The fresh retry's clean reply was delivered — the raw API error was suppressed.
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('recovered');
+    expect(JSON.parse(out[0].content).text).not.toContain('API Error');
+
+    // The poisoned continuation was cleared and replaced by the fresh session id.
+    expect(getContinuation('mock')).toBe('fresh-session');
+
+    const pending = getPendingMessages();
+    expect(pending).toHaveLength(0);
+
+    await loopPromise.catch(() => {});
+  });
+});
+
 /**
  * Provider that throws on every query, simulating API failures.
  */
@@ -458,6 +491,48 @@ class InvalidSessionProvider {
       events: (async function* () {
         yield { type: 'init' as const, continuation: 'doomed-session' };
         throw new Error('session not found');
+      })(),
+    };
+  }
+}
+
+/**
+ * Provider that emits the thinking-block 400 as a *result* (not a throw) when
+ * resumed from a continuation — the real poison signature — and returns a clean
+ * message when started fresh (no continuation). isPoisonedResume recognizes the
+ * error text so the poll-loop clears the continuation and retries.
+ */
+class PoisonResumeProvider {
+  readonly supportsNativeSlashCommands = false;
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  isPoisonedResume(text: string): boolean {
+    return /blocks in the latest assistant message cannot be modified/i.test(text);
+  }
+
+  query(input: { prompt: string; cwd: string; continuation?: string }) {
+    const resumed = Boolean(input.continuation);
+    return {
+      push() {},
+      end() {},
+      abort() {},
+      events: (async function* () {
+        if (resumed) {
+          yield { type: 'init' as const, continuation: 'poisoned-resume-session' };
+          yield {
+            type: 'result' as const,
+            text:
+              'API Error: 400 messages.9.content.16: `thinking` or `redacted_thinking` blocks in ' +
+              'the latest assistant message cannot be modified. These blocks must remain as they ' +
+              'were in the original response.',
+          };
+          return;
+        }
+        yield { type: 'init' as const, continuation: 'fresh-session' };
+        yield { type: 'result' as const, text: '<message to="discord-test">recovered</message>' };
       })(),
     };
   }
