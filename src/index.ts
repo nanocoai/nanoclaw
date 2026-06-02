@@ -18,6 +18,7 @@ import type { MessageContext } from './memory/index.js';
 import {
   ASSISTANT_NAME,
   CHAT_INDEX_ENABLED,
+  DATA_DIR,
   DEFAULT_TRIGGER,
   getTriggerPattern,
   GROUPS_DIR,
@@ -630,7 +631,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         const hasText = !!result.result && result.result.trim().length > 0;
         const thinkingOnlyAction = decideThinkingOnlyAction({
           hasText,
-          outputSentToUser,
+          outputSentToUser: outputSentToUser || everSentToUser,
           outputTokens,
           retryCount: thinkingOnlyRetryCount,
           maxRetries: THINKING_ONLY_MAX_RETRIES,
@@ -1208,12 +1209,42 @@ async function runAgent(
       // The session .jsonl can go missing after a crash mid-write, manual
       // deletion, or disk-full. The existing backoff in group-queue.ts
       // handles the retry; we just need to remove the broken session ID.
-      const isStaleSession =
+      const errorLooksStale =
         sessionId &&
         output.error &&
         /no conversation found|ENOENT.*\.jsonl|session.*not found/i.test(
           output.error,
         );
+
+      // 加固：错误信息匹配 stale 模式 ≠ session 真失效。query 崩溃（如 resume 大会话时
+      // setModel 抢跑）也会吐出假的 "no conversation found"，此时 .jsonl 其实健在。
+      // 删指针前必须确认文件真的不存在，否则会误删健康会话指针、导致历史上下文丢失
+      // （2026-06-02 大会话上下文被误删事故根因）。
+      const sessionFileExists = (() => {
+        if (!errorLooksStale) return false;
+        const projectsDir = path.join(
+          DATA_DIR,
+          'sessions',
+          group.folder,
+          '.claude',
+          'projects',
+        );
+        if (!fs.existsSync(projectsDir)) return false;
+        return fs
+          .readdirSync(projectsDir)
+          .some((sub) =>
+            fs.existsSync(path.join(projectsDir, sub, `${sessionId}.jsonl`)),
+          );
+      })();
+
+      const isStaleSession = errorLooksStale && !sessionFileExists;
+
+      if (errorLooksStale && sessionFileExists) {
+        logger.warn(
+          { group: group.name, sessionId, error: output.error },
+          'Session error 匹配 stale 模式但 .jsonl 文件健在 — 保留指针（疑似 query 崩溃而非真失效）',
+        );
+      }
 
       if (isStaleSession) {
         logger.warn(

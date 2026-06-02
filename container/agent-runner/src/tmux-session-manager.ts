@@ -342,8 +342,12 @@ export class TmuxSessionManager {
     // 需要先用方向键选择再 Enter 确认的对话框
     // keys: 在按 Enter 之前发送的 tmux 按键序列
     const selectAndConfirmPatterns: { match: string; keys: string[] }[] = [
-      { match: 'No, exit', keys: ['Down'] },              // Bypass Permissions：默认 "No, exit"，Down 到 "Yes, I accept"
+      // 注意：顺序决定优先级（Array.find 取第一个命中）。
+      // Workspace trust 对话框里 "No, exit" 也可见（它是选项 2），如果 "No, exit" 排在前面
+      // 会被误判为 Bypass Permissions 对话框然后发 Down+Enter 选中 "No, exit" 退出 CLI。
+      // 必须把更具体的模式排在前面。
       { match: 'Is this a project', keys: [] },            // Workspace trust：默认 "Yes"，直接 Enter
+      { match: 'No, exit', keys: ['Down'] },              // Bypass Permissions：默认 "No, exit"，Down 到 "Yes, I accept"
       { match: 'Do you want to use this API key', keys: ['Up'] }, // Custom API key：默认 "No"，Up 到 "Yes"
     ];
 
