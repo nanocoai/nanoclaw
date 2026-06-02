@@ -342,6 +342,8 @@ Everything below is handled by the agent-runner, not the provider.
 
 **Concurrent polling during active query:** While the provider is running a query, the agent-runner continues polling messages_in on a short interval (~500ms). New pending messages are formatted and pushed into the active query via `provider.push()`. This lets follow-up messages arrive while the agent is processing — Claude handles this natively, Codex/OpenCode handle it via abort+restart internally.
 
+**Runtime status message policy:** Long-running turns may emit short `runtime_status` messages to user-facing channels so the user can see that the runtime is still active. These messages are runtime UI state, not persona output from the agent. Keep them mechanical and label-like (`thinking…`, `still thinking…`, `still working…`, `stopped`): no first-person voice, apologies, explanatory prose, or agent-specific personality. Never emit runtime status to internal agent-to-agent channels (`agent`, `remote_cody`) because those messages can be routed back into the agent and create self-loops. Change status timing via the `NANOCLAW_*_STATUS_MS` / `NANOCLAW_HARD_STOP_MS` env vars and change copy via the `RUNTIME_STATUS_TEXT` table in `container/agent-runner/src/poll-loop.ts`.
+
 **Idle behavior:** When no messages are pending and no query is active, the agent-runner sleeps briefly (1s) and re-polls. The container stays warm until the host kills it (idle timeout).
 
 **Idle detection exceptions:** The container should NOT be considered idle when:

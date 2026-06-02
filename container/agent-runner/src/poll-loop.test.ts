@@ -4,7 +4,7 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { isCorruptionError } from './poll-loop.js';
+import { canSendRuntimeStatus, isCorruptionError, isInterruptMessage, runtimeStatusContent } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 
 beforeEach(() => {
@@ -393,5 +393,56 @@ describe('isCorruptionError', () => {
     expect(isCorruptionError('database is locked')).toBe(false);
     expect(isCorruptionError('no such table: messages_in')).toBe(false);
     expect(isCorruptionError('')).toBe(false);
+  });
+});
+
+describe('runtime status policy', () => {
+  it('uses mechanical status labels, not persona copy', () => {
+    expect(runtimeStatusContent('first')).toEqual({ type: 'runtime_status', text: 'thinking…' });
+    expect(runtimeStatusContent('progress')).toEqual({ type: 'runtime_status', text: 'still thinking…' });
+    expect(runtimeStatusContent('partial')).toEqual({ type: 'runtime_status', text: 'still working…' });
+    expect(runtimeStatusContent('stopped')).toEqual({ type: 'runtime_status', text: 'stopped' });
+  });
+
+  it('only emits runtime status to user-facing channels', () => {
+    expect(canSendRuntimeStatus({ platformId: 'telegram:1', channelType: 'telegram' })).toBe(true);
+    expect(canSendRuntimeStatus({ platformId: 'C123', channelType: 'slack' })).toBe(true);
+    expect(canSendRuntimeStatus({ platformId: 'ag-1', channelType: 'agent' })).toBe(false);
+    expect(canSendRuntimeStatus({ platformId: 'ag-1', channelType: 'remote_cody' })).toBe(false);
+    expect(canSendRuntimeStatus({ platformId: null, channelType: 'telegram' })).toBe(false);
+    expect(canSendRuntimeStatus({ platformId: 'telegram:1', channelType: null })).toBe(false);
+  });
+});
+
+describe('isInterruptMessage', () => {
+  function msg(text: string) {
+    return {
+      id: 'm',
+      seq: 1,
+      kind: 'chat',
+      timestamp: new Date().toISOString(),
+      status: 'pending',
+      process_after: null,
+      recurrence: null,
+      tries: 0,
+      trigger: 1,
+      platform_id: 'telegram:1',
+      channel_type: 'telegram',
+      thread_id: 'telegram:1',
+      content: JSON.stringify({ text }),
+    };
+  }
+
+  it('detects correction and frustration messages as interrupts', () => {
+    expect(isInterruptMessage(msg('그럴 거면 내가 그냥 보지. 안 그래?'))).toBe(true);
+    expect(isInterruptMessage(msg('방법을 찾는 게 네 일이야.'))).toBe(true);
+    expect(isInterruptMessage(msg('그렇게 일을 순환시키는 방법은 효율적이지 않아.'))).toBe(true);
+    expect(isInterruptMessage(msg('그 작업 중단하고 지금 내 말에 답해.'))).toBe(true);
+  });
+
+  it('does not treat ordinary follow-up context as an interrupt', () => {
+    expect(isInterruptMessage(msg('로그인 정보 줄까?'))).toBe(false);
+    expect(isInterruptMessage(msg('구글 로그인이기는 한데'))).toBe(false);
+    expect(isInterruptMessage(msg('find a way that you can do'))).toBe(false);
   });
 });

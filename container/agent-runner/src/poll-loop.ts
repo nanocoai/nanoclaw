@@ -17,6 +17,32 @@ import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
+const FIRST_STATUS_MS = Number(process.env.NANOCLAW_FIRST_STATUS_MS ?? 10_000);
+const PROGRESS_STATUS_MS = Number(process.env.NANOCLAW_PROGRESS_STATUS_MS ?? 30_000);
+const PARTIAL_STATUS_MS = Number(process.env.NANOCLAW_PARTIAL_STATUS_MS ?? 90_000);
+const HARD_STOP_MS = Number(process.env.NANOCLAW_HARD_STOP_MS ?? 180_000);
+
+export const RUNTIME_STATUS_TEXT = {
+  first: 'thinking…',
+  progress: 'still thinking…',
+  partial: 'still working…',
+  stopped: 'stopped',
+} as const;
+
+export type RuntimeStatusStage = keyof typeof RUNTIME_STATUS_TEXT;
+
+export function runtimeStatusContent(stage: RuntimeStatusStage): { type: 'runtime_status'; text: string } {
+  return { type: 'runtime_status', text: RUNTIME_STATUS_TEXT[stage] };
+}
+
+export function canSendRuntimeStatus(routing: Pick<RoutingContext, 'platformId' | 'channelType'>): boolean {
+  return Boolean(
+    routing.platformId &&
+      routing.channelType &&
+      routing.channelType !== 'agent' &&
+      routing.channelType !== 'remote_cody',
+  );
+}
 
 /**
  * Number of consecutive `database disk image is malformed` errors after which
@@ -303,6 +329,67 @@ async function processQuery(
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  let turnHasResult = false;
+  let activeInReplyTo = routing.inReplyTo;
+  let turnTimers: Array<ReturnType<typeof setTimeout>> = [];
+
+  const clearTurnTimers = () => {
+    for (const timer of turnTimers) clearTimeout(timer);
+    turnTimers = [];
+  };
+
+  const sendStatus = (stage: RuntimeStatusStage) => {
+    if (done || turnHasResult || !canSendRuntimeStatus(routing)) return;
+    writeMessageOut({
+      id: generateId(),
+      in_reply_to: activeInReplyTo,
+      kind: 'chat',
+      platform_id: routing.platformId,
+      channel_type: routing.channelType,
+      thread_id: routing.threadId,
+      content: JSON.stringify(runtimeStatusContent(stage)),
+    });
+  };
+
+  const armTurnTimers = (inReplyTo: string | null) => {
+    clearTurnTimers();
+    turnHasResult = false;
+    activeInReplyTo = inReplyTo;
+    if (FIRST_STATUS_MS > 0) {
+      turnTimers.push(
+        setTimeout(() => {
+          sendStatus('first');
+        }, FIRST_STATUS_MS),
+      );
+    }
+    if (PROGRESS_STATUS_MS > 0) {
+      turnTimers.push(
+        setTimeout(() => {
+          sendStatus('progress');
+        }, PROGRESS_STATUS_MS),
+      );
+    }
+    if (PARTIAL_STATUS_MS > 0) {
+      turnTimers.push(
+        setTimeout(() => {
+          sendStatus('partial');
+        }, PARTIAL_STATUS_MS),
+      );
+    }
+    if (HARD_STOP_MS > 0) {
+      turnTimers.push(
+        setTimeout(() => {
+          if (done || turnHasResult) return;
+          sendStatus('stopped');
+          log(`Hard-stopping active query after ${HARD_STOP_MS}ms without a result`);
+          query.abort();
+          query.end();
+        }, HARD_STOP_MS),
+      );
+    }
+  };
+
+  armTurnTimers(routing.inReplyTo);
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -348,6 +435,15 @@ async function processQuery(
         const newMessages = pending.filter((m) => m.kind !== 'system');
         if (newMessages.length === 0) return;
 
+        if (newMessages.some(isInterruptMessage)) {
+          log('Interrupt follow-up detected — aborting active query so outer loop can answer it fresh');
+          clearTurnTimers();
+          endedForCommand = true;
+          query.abort();
+          query.end();
+          return;
+        }
+
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
 
@@ -378,6 +474,7 @@ async function processQuery(
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
+        armTurnTimers(keptIds[keptIds.length - 1] ?? routing.inReplyTo);
         query.push(prompt);
         markCompleted(keptIds);
       } catch (err) {
@@ -433,6 +530,8 @@ async function processQuery(
         // Claude session with no prior context.
         setContinuation(providerName, event.continuation);
       } else if (event.type === 'result') {
+        turnHasResult = true;
+        clearTurnTimers();
         // A result — with or without text — means the turn is done. Mark
         // the initial batch completed now so the host sweep doesn't see
         // stale 'processing' claims while the query stays open for
@@ -458,10 +557,47 @@ async function processQuery(
     }
   } finally {
     done = true;
+    clearTurnTimers();
     clearInterval(pollHandle);
   }
 
   return { continuation: queryContinuation };
+}
+
+export function isInterruptMessage(message: MessageInRow): boolean {
+  if (message.kind !== 'chat' && message.kind !== 'chat-sdk') return false;
+  const text = extractMessageText(message).trim().toLowerCase();
+  if (!text) return false;
+
+  const interruptPatterns = [
+    /^(그만|중단|멈춰|취소|stop|cancel)\b/i,
+    /^(아니|응\?|왜\?|뭐야)\s*$/i,
+    /그럴\s*거면/,
+    /내가\s+(그냥\s*)?(보지|하지|할게|하면)/,
+    /네\s*일이야/,
+    /너(?:에게|한테)?\s*시킨\s*일/,
+    /내게\s*돌려\s*주/,
+    /순환시키/,
+    /효율적이지\s*않/,
+    /방법을\s*찾/,
+    /지금\s*(내\s*말에\s*)?답/,
+    /답이\s*없/,
+    /대답해/,
+  ];
+
+  return interruptPatterns.some((pattern) => pattern.test(text));
+}
+
+function extractMessageText(message: MessageInRow): string {
+  try {
+    const parsed = JSON.parse(message.content) as unknown;
+    if (parsed && typeof parsed === 'object' && 'text' in parsed && typeof parsed.text === 'string') {
+      return parsed.text;
+    }
+  } catch {
+    // Fall through.
+  }
+  return message.content;
 }
 
 function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
