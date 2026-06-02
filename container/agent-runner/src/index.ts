@@ -175,6 +175,13 @@ function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
 }
 
+// 上游用 thinking:'adaptive'|'disabled' 表达「思考意图」，但 4.8 只支持 adaptive thinking，
+// 无法真正关闭。控制思考深度的官方杠杆是 effortLevel —— 在 SDK 的 Settings 里生效。
+// 这里把意图翻译成 effortLevel：disabled→'low'（最少思考、最快），adaptive→'high'（默认）。
+function effortForThinking(thinking: 'adaptive' | 'disabled'): 'low' | 'high' {
+  return thinking === 'disabled' ? 'low' : 'high';
+}
+
 function getSessionSummary(
   sessionId: string,
   transcriptPath: string,
@@ -558,6 +565,68 @@ function waitForIpcMessage(): Promise<IpcMessage | null> {
 }
 
 /**
+ * 计算 additionalDirectories —— 让 nanoclaw 的 CLAUDE.md 跨 cwd 加载。
+ * cwd 切到 nine 等额外挂载目录后，nanoclaw 的群记忆/通用指令/根指令不在 cwd 父链上会丢，
+ * 这里把它们显式作为 additionalDirectories 注入（cwd 无关兜底）。
+ * sdk / print / interactive 三模式共用此逻辑。
+ *
+ * 注意：cwd 已落在额外挂载目录(如 nine)子树内时，其子目录走 cwd 子树懒加载(conditionalRule)，
+ * 不再塞进 additionalDirectories —— 否则会变成全量加载，破坏懒加载意图。
+ */
+function computeExtraDirs(paths: {
+  group: string;
+  queryCwd?: string;
+  extra?: string;
+}): string[] {
+  const extraDirs: string[] = [];
+  const pushDir = (d?: string) => {
+    if (d && fs.existsSync(d) && !extraDirs.includes(d)) extraDirs.push(d);
+  };
+
+  const effectiveCwd = paths.queryCwd || paths.group;
+  const extraBase = paths.extra;
+  const cwdInExtra = !!(
+    extraBase && effectiveCwd.startsWith(extraBase + path.sep)
+  );
+  if (extraBase && fs.existsSync(extraBase) && !cwdInExtra) {
+    for (const entry of fs.readdirSync(extraBase)) {
+      const fullPath = path.join(extraBase, entry);
+      if (fs.statSync(fullPath).isDirectory()) pushDir(fullPath);
+    }
+  }
+
+  // nanoclaw 相关 CLAUDE.md 目录：群目录(记忆) / groups(通用指令) / nanoclaw 根(GitNexus)。
+  // additional-dir 加载只读各目录自己的 CLAUDE.md + .claude/CLAUDE.md（不递归、不爬父链），
+  // SDK 内部按 processedPaths 去重，cwd=群目录时与父链加载重复也无害。
+  const groupsDir = paths.group ? path.dirname(paths.group) : undefined;
+  const nanoclawRoot = groupsDir ? path.dirname(groupsDir) : undefined;
+  pushDir(paths.group);
+  pushDir(groupsDir);
+  pushDir(nanoclawRoot);
+  return extraDirs;
+}
+
+/**
+ * 收集一组目录的 CLAUDE.md 内容（含 .claude/CLAUDE.md），用于 codex 首轮 prompt 前缀注入。
+ * codex 不读 CLAUDE.md、无懒加载、无 additionalDirectories，prompt 前缀是它唯一的注入通道，
+ * 故把 Claude 模式靠 cwd 父链 + additionalDirectories 加载的内容，在这里手动读出来拼进前缀。
+ */
+function collectClaudeMdContents(dirs: (string | undefined)[]): string[] {
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  for (const dir of dirs) {
+    if (!dir) continue;
+    for (const rel of ['CLAUDE.md', path.join('.claude', 'CLAUDE.md')]) {
+      const p = path.join(dir, rel);
+      if (seen.has(p)) continue;
+      seen.add(p);
+      if (fs.existsSync(p)) parts.push(fs.readFileSync(p, 'utf-8'));
+    }
+  }
+  return parts;
+}
+
+/**
  * Run a single query and stream results via writeOutput.
  * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
  * allowing agent teams subagents to run to completion.
@@ -611,12 +680,21 @@ async function runQuery(
         } catch (err: unknown) {
           log(`[model-override] piped setModel FAILED: ${err instanceof Error ? err.message : String(err)}`);
         }
-        const thinkingDisabled = msg.modelOverride?.thinking === 'disabled';
-        try {
-          await (queryRef as any).applyFlagSettings({ thinking: { type: thinkingDisabled ? 'disabled' : 'adaptive' } } as Record<string, unknown>);
-          log(`[model-override] piped thinking ${thinkingDisabled ? 'disabled' : 'adaptive'} (applyFlagSettings)`);
-        } catch (err: unknown) {
-          log(`[model-override] piped applyFlagSettings FAILED: ${err instanceof Error ? err.message : String(err)}`);
+        // 无 override 时回落到群默认 effort（defaultEffort），不能写死 high，
+        // 否则 settings.json 里配的 low 会被每次 pipe 续接覆盖回去。
+        // ⚠️ 4.8 只支持 adaptive thinking，无法真正关闭；控制思考深度的官方杠杆是
+        //   effortLevel（low=最少思考最快）。上游传来的 thinking:'disabled' 在这里翻译成
+        //   effortLevel:'low'。Settings schema 没有 thinking 字段，传了会被静默忽略。
+        const pipedEffort = msg.modelOverride?.thinking
+          ? effortForThinking(msg.modelOverride.thinking)
+          : defaultEffort;
+        if (pipedEffort) {
+          try {
+            await (queryRef as any).applyFlagSettings({ effortLevel: pipedEffort } as Record<string, unknown>);
+            log(`[model-override] piped effortLevel ${pipedEffort}${msg.modelOverride?.thinking ? ' (override)' : ' (default)'}`);
+          } catch (err: unknown) {
+            log(`[model-override] piped applyFlagSettings FAILED: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
       }
       const pushText = prependContext(msg.text, msg.context);
@@ -707,18 +785,8 @@ async function runQuery(
 
   const globalClaudeMd = contextParts.length > 0 ? contextParts.join('\n\n---\n\n') : undefined;
 
-  // Discover additional directories at extra workspace path
-  // These are passed to the SDK so their CLAUDE.md files are loaded automatically
-  const extraDirs: string[] = [];
-  const extraBase = PATHS.extra;
-  if (extraBase && fs.existsSync(extraBase)) {
-    for (const entry of fs.readdirSync(extraBase)) {
-      const fullPath = path.join(extraBase, entry);
-      if (fs.statSync(fullPath).isDirectory()) {
-        extraDirs.push(fullPath);
-      }
-    }
-  }
+  // Additional directories —— 让 nanoclaw 的 CLAUDE.md 跨 cwd 加载（详见 computeExtraDirs）。
+  const extraDirs = computeExtraDirs(PATHS);
   if (extraDirs.length > 0) {
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
@@ -802,39 +870,62 @@ async function runQuery(
   // 应用模型/思考覆盖：有 override → 切换；无 override → 用 settings.json 默认模型显式恢复
   // 读取 settings.json 中的默认模型（setModel(undefined) 可能不可靠）
   let defaultModel = 'claude-opus-4-6';
+  // settings.json 可显式配置 effortLevel（'low' | 'medium' | 'high'）。
+  // 某些群（如重度讨论复杂架构的）高 effort 下 adaptive thinking 容易陷入「只思考不输出」，
+  // 可在群 settings.json 里配 "effortLevel": "low" 从源头降低思考深度。
+  // 未配则保持 undefined —— 不主动 apply，让模型用自己的默认 effort（即升级前的行为）。
+  // 注意：4.8 只支持 adaptive thinking，无法真正关闭，effortLevel 才是官方控制杠杆。
+  let defaultEffort: 'low' | 'medium' | 'high' | undefined = undefined;
   try {
     const settingsPath = path.join(PATHS.group, '..', '..', 'data', 'sessions', containerInput.groupFolder, '.claude', 'settings.json');
     if (fs.existsSync(settingsPath)) {
       const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
       if (settings.model) defaultModel = settings.model;
+      if (settings.effortLevel === 'low' || settings.effortLevel === 'medium' || settings.effortLevel === 'high') {
+        defaultEffort = settings.effortLevel;
+      }
     }
   } catch { /* 使用硬编码默认值 */ }
 
   const targetModel = override?.model || defaultModel;
-  try {
-    log(`[model-override] calling setModel(${targetModel})...`);
-    await q.setModel(targetModel);
-    log(`[model-override] setModel(${targetModel}) done${override?.model ? ' (override)' : ' (default)'}`);
-  } catch (err) {
-    log(`[model-override] setModel FAILED: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  try {
-    if (override?.thinking === 'disabled') {
-      log('[model-override] applying thinking: disabled...');
-      await (q as any).applyFlagSettings({ thinking: { type: 'disabled' } } as Record<string, unknown>);
-      log('[model-override] thinking disabled');
-    } else {
-      log('[model-override] applying thinking: adaptive...');
-      await (q as any).applyFlagSettings({ thinking: { type: 'adaptive' } } as Record<string, unknown>);
-      log('[model-override] thinking adaptive');
+  const targetEffort = override?.thinking ? effortForThinking(override.thinking) : defaultEffort;
+  // setModel/applyFlagSettings 是 control request，要求 CLI 子进程已就绪。
+  // resume 大 session（数十 MB）时，CLI 仍在加载 transcript，若此刻 await setModel 会抢在
+  // control channel 就绪前发送 → "Query closed before response received" → 整个 query 崩溃 →
+  // SDK 兜底报 "No conversation found"，导致大会话永远 resume 失败（2026-06-02 事故根因）。
+  // 修复：推迟到收到第一条 stream 消息（CLI 已就绪、session 已 resume）后再应用。第一条通常是
+  // system/init，仍早于任何 assistant 推理，model/effort override 照常生效；小 session 无感知差异。
+  const applyModelSettings = async (): Promise<void> => {
+    try {
+      log(`[model-override] calling setModel(${targetModel})...`);
+      await q.setModel(targetModel);
+      log(`[model-override] setModel(${targetModel}) done${override?.model ? ' (override)' : ' (default)'}`);
+    } catch (err) {
+      log(`[model-override] setModel FAILED: ${err instanceof Error ? err.message : String(err)}`);
     }
-  } catch (err) {
-    log(`[model-override] applyFlagSettings FAILED: ${err instanceof Error ? err.message : String(err)}`);
-  }
+    if (targetEffort) {
+      try {
+        log(`[model-override] applying effortLevel: ${targetEffort}...`);
+        await (q as any).applyFlagSettings({ effortLevel: targetEffort } as Record<string, unknown>);
+        log(`[model-override] effortLevel ${targetEffort}${override?.thinking ? ' (override)' : ' (default)'}`);
+      } catch (err) {
+        log(`[model-override] applyFlagSettings FAILED: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else {
+      log(`[model-override] effortLevel 未配置，保持模型默认`);
+    }
+  };
+  let modelSettingsApplied = false;
 
   try {
   for await (const message of q) {
     messageCount++;
+    // CLI 就绪标志：收到第一条消息说明子进程已启动、session 已 resume 完成，
+    // 此刻再应用 model/effort override 才安全（避免 resume 大 session 时 setModel 抢跑崩溃）。
+    if (!modelSettingsApplied) {
+      modelSettingsApplied = true;
+      await applyModelSettings();
+    }
     const msgType =
       message.type === 'system'
         ? `system/${(message as { subtype?: string }).subtype}`
@@ -1231,6 +1322,10 @@ async function main(): Promise<void> {
   const sdkEnv: Record<string, string | undefined> = {
     ...process.env,
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: '700000',
+    // additionalDirectories 里目录的 CLAUDE.md 必须靠这个开关才会被加载。
+    // 我们用 additionalDirectories 注入 nanoclaw 群记忆/通用指令（cwd 切到 nine 后兜底），
+    // 所以强制打开，不依赖每群 settings.json 手动配。
+    CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
   };
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1303,17 +1398,8 @@ async function main(): Promise<void> {
     }
     const systemPromptAppend = contextParts.length > 0 ? contextParts.join('\n\n---\n\n') : undefined;
 
-    // 发现额外目录（与 SDK 模式一致）
-    const extraDirs: string[] = [];
-    const extraBase = PATHS.extra;
-    if (extraBase && fs.existsSync(extraBase)) {
-      for (const entry of fs.readdirSync(extraBase)) {
-        const fullPath = path.join(extraBase, entry);
-        if (fs.statSync(fullPath).isDirectory()) {
-          extraDirs.push(fullPath);
-        }
-      }
-    }
+    // 额外目录（与 SDK 模式一致：注入 nanoclaw 三目录 + cwd=nine 时跳过其子目录保懒加载）
+    const extraDirs = computeExtraDirs(PATHS);
 
     // 累积对话记录，退出时归档到 conversations/
     const cliTranscript: ParsedMessage[] = [];
@@ -1420,6 +1506,20 @@ async function main(): Promise<void> {
     if (cxClaudeMdPath && fs.existsSync(cxClaudeMdPath)) {
       cxContextParts.push(fs.readFileSync(cxClaudeMdPath, 'utf-8'));
     }
+    // codex 不读 CLAUDE.md、无懒加载、无 additionalDirectories，故把 Claude 模式靠 cwd 父链 +
+    // additionalDirectories 加载的 CLAUDE.md（cwd=nine 根 / 群记忆 / groups 通用指令 / nanoclaw 根）
+    // 手动读出来拼进首轮前缀，与其他模式行为对齐。nine 子目录的懒加载 codex 无法复刻（固有限制）。
+    const cxEffectiveCwd = PATHS.queryCwd || PATHS.group;
+    const cxGroupsDir = PATHS.group ? path.dirname(PATHS.group) : undefined;
+    const cxNanoclawRoot = cxGroupsDir ? path.dirname(cxGroupsDir) : undefined;
+    cxContextParts.push(
+      ...collectClaudeMdContents([
+        cxEffectiveCwd,
+        PATHS.group,
+        cxGroupsDir,
+        cxNanoclawRoot,
+      ]),
+    );
     const cxSystemPrefix = cxContextParts.length > 0
       ? `[系统人设与规范，必须遵守]\n\n${cxContextParts.join('\n\n---\n\n')}\n\n[以上为系统设定，以下是用户消息]\n\n`
       : '';
@@ -1443,7 +1543,7 @@ async function main(): Promise<void> {
           {
             prompt: turnPrompt,
             sessionId,
-            model: override?.model || undefined,
+            model: override?.model || 'gpt-5.5',
             mcpServerPath,
             chatJid: containerInput.chatJid,
             groupFolder: containerInput.groupFolder,
@@ -1521,17 +1621,8 @@ async function main(): Promise<void> {
     }
     const iSystemPromptAppend = iContextParts.length > 0 ? iContextParts.join('\n\n---\n\n') : undefined;
 
-    // 额外目录
-    const iExtraDirs: string[] = [];
-    const iExtraBase = PATHS.extra;
-    if (iExtraBase && fs.existsSync(iExtraBase)) {
-      for (const entry of fs.readdirSync(iExtraBase)) {
-        const fullPath = path.join(iExtraBase, entry);
-        if (fs.statSync(fullPath).isDirectory()) {
-          iExtraDirs.push(fullPath);
-        }
-      }
-    }
+    // 额外目录（与 SDK 模式一致：注入 nanoclaw 三目录 + cwd=nine 时跳过其子目录保懒加载）
+    const iExtraDirs = computeExtraDirs(PATHS);
 
     // 需要从环境变量中提取 OneCLI 上游代理信息
     const upstreamProxy = sdkEnv.HTTPS_PROXY || sdkEnv.https_proxy || '';

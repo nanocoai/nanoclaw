@@ -257,7 +257,9 @@ export function resolveWorkspacePaths(
   const projectRoot = process.cwd();
   return {
     group: resolveGroupFolderPath(group.folder),
-    queryCwd: group.customCwd || undefined,
+    // 默认 cwd：per-group customCwd 优先，否则用全局默认（NANOCLAW_DEFAULT_CWD，start.sh 指向 nine），
+    // 都没有才 fallback 到群目录。让 cwd 默认落在 nine 仓库内（分层文档懒加载），无需逐群 /cwd。
+    queryCwd: group.customCwd || process.env.NANOCLAW_DEFAULT_CWD || undefined,
     project: isMain ? projectRoot : undefined,
     global: path.join(GROUPS_DIR, 'global'),
     ipc: resolveGroupIpcPath(group.folder),
@@ -307,6 +309,37 @@ export function prepareGroupSession(groupFolder: string): string {
   }
 
   return groupSessionsDir;
+}
+
+/**
+ * 同步标记了 `codex-shared: true` 的 skill 到群的 codex skills 目录。
+ * codex 模式专用：单一源 container/skills/ → group/.codex-home/skills/，
+ * 一处维护、全群共享，与 Claude 的 prepareGroupSession 同步范式对齐。
+ * session 仍隔离在各群 .codex-home 下，不串味。
+ */
+export function prepareCodexSkills(groupFolder: string): void {
+  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
+  if (!fs.existsSync(skillsSrc)) return;
+
+  const codexSkillsDst = path.join(
+    resolveGroupFolderPath(groupFolder),
+    '.codex-home',
+    'skills',
+  );
+
+  for (const skillDir of fs.readdirSync(skillsSrc)) {
+    const srcDir = path.join(skillsSrc, skillDir);
+    if (!fs.statSync(srcDir).isDirectory()) continue;
+    const skillMd = path.join(srcDir, 'SKILL.md');
+    if (!fs.existsSync(skillMd)) continue;
+
+    // 只在 frontmatter 区域内匹配 codex-shared: true
+    const content = fs.readFileSync(skillMd, 'utf-8');
+    const fm = content.match(/^---\n([\s\S]*?)\n---/);
+    if (!fm || !/^codex-shared:\s*true\s*$/m.test(fm[1])) continue;
+
+    fs.cpSync(srcDir, path.join(codexSkillsDst, skillDir), { recursive: true });
+  }
 }
 
 /** 解析 onecli agents get-env 输出的 KEY=VALUE 格式 */
@@ -636,6 +669,11 @@ export async function runContainerAgent(
 
   // 准备 per-group .claude 目录
   const groupSessionsDir = prepareGroupSession(group.folder);
+
+  // codex 模式：同步标记了 codex-shared 的 skill 到群 .codex-home/skills
+  if (resolveCliMode(group.containerConfig) === 'codex') {
+    prepareCodexSkills(group.folder);
+  }
 
   // 准备 IPC 目录
   const groupIpcDir = resolveGroupIpcPath(group.folder);

@@ -20,4 +20,9 @@ fi
 # export CREDENTIAL_PROXY_URL="http://localhost:8317"
 # export CREDENTIAL_PROXY_API_KEY="oc-dog-666"
 
+# 默认 cwd：未配置 group.customCwd 时的兜底（container-runner.ts:262）
+# 主会话 session jsonl 历来存在 -Users-dajay-AI-Workspace-nine 项目 hash 下，缺这个
+# env 时 SDK 会按 groups/<folder> 算 hash 找不到 jsonl，触发 "No conversation found" 死循环
+export NANOCLAW_DEFAULT_CWD="/Users/dajay/AI_Workspace/nine"
+
 exec "$NODE" "$DIR/dist/index.js"

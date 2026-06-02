@@ -169,12 +169,13 @@ export function mapCodexProgress(event: CodexEvent): ContainerOutput[] {
   return [];
 }
 
-/** 映射 codex usage → ContainerOutput.usage */
+/** 映射 codex usage → ContainerOutput.usage（modelInfo 来自 rollout，--json 流不暴露 model） */
 export function mapCodexUsage(
   usage: CodexEvent['usage'],
+  modelInfo?: { model?: string; modelContextWindow?: number },
 ): ContainerOutput['usage'] | undefined {
   if (!usage) return undefined;
-  return {
+  const result: ContainerOutput['usage'] = {
     inputTokens: usage.input_tokens ?? 0,
     outputTokens: usage.output_tokens ?? 0,
     cacheReadInputTokens: usage.cached_input_tokens ?? 0,
@@ -183,6 +184,91 @@ export function mapCodexUsage(
     durationMs: 0,
     totalCostUsd: 0,
   };
+  if (modelInfo?.model) {
+    result.model = modelInfo.model;
+    if (modelInfo.modelContextWindow) {
+      result.modelContextWindows = {
+        [modelInfo.model]: modelInfo.modelContextWindow,
+      };
+    }
+  }
+  return result;
+}
+
+/**
+ * 从 rollout 文件读 codex 实际模型名 + context window。
+ * codex exec --json 的 stdout 流不暴露 model（实测只有 thread.started/turn.started/
+ * item.completed/turn.completed 四种事件，无 model 字段），模型信息只写在 rollout 的
+ * turn_context 记录里（payload.model / payload.model_context_window）。
+ * rollout 文件名以 threadId 结尾：sessions/YYYY/MM/DD/rollout-<ts>-<threadId>.jsonl
+ */
+export function readCodexModelInfo(
+  codexHome: string,
+  threadId: string,
+): { model?: string; modelContextWindow?: number } {
+  try {
+    const sessionsDir = path.join(codexHome, 'sessions');
+    if (!fs.existsSync(sessionsDir)) return {};
+    const rollout = findRolloutByThreadId(sessionsDir, threadId);
+    if (!rollout) return {};
+    const lines = fs.readFileSync(rollout, 'utf-8').split('\n');
+    // model 和 ctx 分散在不同记录：model 在 turn_context.payload.model，
+    // ctx 在 event_msg(task_started).payload.model_context_window。倒序各取最新一条。
+    let model: string | undefined;
+    let modelContextWindow: number | undefined;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      let obj: { payload?: { model?: unknown; model_context_window?: unknown } };
+      try {
+        obj = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const p = obj?.payload;
+      if (!p) continue;
+      if (model === undefined && typeof p.model === 'string') {
+        model = p.model;
+      }
+      if (
+        modelContextWindow === undefined &&
+        typeof p.model_context_window === 'number'
+      ) {
+        modelContextWindow = p.model_context_window;
+      }
+      if (model !== undefined && modelContextWindow !== undefined) break;
+    }
+    return { model, modelContextWindow };
+  } catch {
+    return {};
+  }
+}
+
+/** 在 sessions 目录递归找文件名以 -<threadId>.jsonl 结尾的 rollout 文件 */
+function findRolloutByThreadId(
+  sessionsDir: string,
+  threadId: string,
+): string | undefined {
+  const suffix = `-${threadId}.jsonl`;
+  const stack = [sessionsDir];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of entries) {
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        stack.push(full);
+      } else if (ent.name.startsWith('rollout-') && ent.name.endsWith(suffix)) {
+        return full;
+      }
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -297,7 +383,11 @@ export async function runCodexQuery(
 
       // turn 完成 → 发 success（result = 最后一条 agent_message）
       if (event.type === 'turn.completed') {
-        usage = mapCodexUsage(event.usage);
+        // model 不在 --json 流里，从 rollout 文件读（需要 thread_id）
+        const modelInfo = newSessionId
+          ? readCodexModelInfo(config.codexHome, newSessionId)
+          : undefined;
+        usage = mapCodexUsage(event.usage, modelInfo);
         writeOutput({
           status: 'success',
           result: lastAgentMessage || null,
