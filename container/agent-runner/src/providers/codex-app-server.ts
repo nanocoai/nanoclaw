@@ -15,6 +15,8 @@ import path from 'path';
 import { spawn, type ChildProcess } from 'child_process';
 import { createInterface, type Interface as ReadlineInterface } from 'readline';
 
+import type { McpServerConfig } from './types.js';
+
 function log(msg: string): void {
   console.error(`[codex-app-server] ${msg}`);
 }
@@ -355,19 +357,21 @@ export async function startCodexTurn(server: AppServer, params: TurnParams): Pro
 // We rewrite it on every spawn from whatever mcpServers the agent-runner
 // passes in, so the container's config reflects the current host wiring.
 
-export interface CodexMcpServer {
-  command: string;
-  args?: string[];
-  env?: Record<string, string>;
-}
-
-export function writeCodexMcpConfigToml(servers: Record<string, CodexMcpServer>): void {
+export function writeCodexMcpConfigToml(servers: Record<string, McpServerConfig>): void {
   const codexConfigDir = path.join(process.env.HOME || '/home/node', '.codex');
   fs.mkdirSync(codexConfigDir, { recursive: true });
   const configTomlPath = path.join(codexConfigDir, 'config.toml');
 
   const lines: string[] = [];
+  let written = 0;
   for (const [name, config] of Object.entries(servers)) {
+    // Codex's config.toml only models stdio MCP servers. The host's
+    // McpServerConfig union also carries http/sse variants (which have a `url`
+    // and no `command`); skip those rather than emit a broken stanza.
+    if (!('command' in config)) {
+      log(`Skipping non-stdio MCP server "${name}" — Codex config.toml supports stdio only`);
+      continue;
+    }
     lines.push(`[mcp_servers.${name}]`);
     lines.push('type = "stdio"');
     lines.push(`command = ${tomlBasicString(config.command)}`);
@@ -382,12 +386,74 @@ export function writeCodexMcpConfigToml(servers: Record<string, CodexMcpServer>)
       }
     }
     lines.push('');
+    written++;
   }
 
   fs.writeFileSync(configTomlPath, lines.join('\n'));
-  log(`Wrote MCP config.toml (${Object.keys(servers).length} server(s))`);
+  log(`Wrote MCP config.toml (${written} server(s))`);
 }
 
-export function createCodexConfigOverrides(): string[] {
-  return ['features.use_linux_sandbox_bwrap=false'];
+// ── HTTP-only transport (websocket workaround) ───────────────────────────────
+// Some deployments reach OpenAI/ChatGPT only through a forward proxy that
+// doesn't pass the WebSocket upgrade — so every Responses API call first fails
+// repeatedly with `405 Method Not Allowed` on wss://…/responses before Codex
+// falls back to HTTP. The clean fix is `supports_websockets=false`, but Codex
+// won't let it be set on the built-in `openai` provider (reserved id; see
+// openai/codex#13103). The documented workaround is to clone the backend as a
+// non-reserved provider with the flag off and point `model_provider` at it.
+
+export interface CodexHttpProvider {
+  id: string;
+  name: string;
+  baseUrl: string;
+  /** true → use the ChatGPT subscription OAuth (auth.json); false → API key. */
+  requiresOpenAiAuth: boolean;
+  /** env var holding the API key, for non-subscription auth. */
+  envKey?: string;
+}
+
+/**
+ * Pick an HTTP-only provider clone for the current auth mode, or null to leave
+ * Codex's defaults untouched (BYO endpoints manage their own transport).
+ */
+export function resolveHttpOnlyProvider(env: Record<string, string | undefined> = {}): CodexHttpProvider | null {
+  // A user-supplied OpenAI-compatible endpoint sets its own base URL and almost
+  // never attempts the Responses WS upgrade; don't second-guess it.
+  if (env.OPENAI_BASE_URL) return null;
+  // Raw API-key auth → the public API over HTTP.
+  if (env.OPENAI_API_KEY) {
+    return {
+      id: 'openai-http',
+      name: 'OpenAI (HTTP)',
+      baseUrl: 'https://api.openai.com/v1',
+      requiresOpenAiAuth: false,
+      envKey: 'OPENAI_API_KEY',
+    };
+  }
+  // Default: ChatGPT subscription (auth.json) → the Codex backend over HTTP.
+  return {
+    id: 'chatgpt-http',
+    name: 'ChatGPT (HTTP)',
+    baseUrl: 'https://chatgpt.com/backend-api/codex',
+    requiresOpenAiAuth: true,
+  };
+}
+
+export function createCodexConfigOverrides(httpProvider: CodexHttpProvider | null = null): string[] {
+  const overrides = ['features.use_linux_sandbox_bwrap=false'];
+  if (httpProvider) {
+    const { id } = httpProvider;
+    overrides.push(
+      `model_provider=${id}`,
+      `model_providers.${id}.name=${httpProvider.name}`,
+      `model_providers.${id}.base_url=${httpProvider.baseUrl}`,
+      `model_providers.${id}.wire_api=responses`,
+      `model_providers.${id}.requires_openai_auth=${httpProvider.requiresOpenAiAuth}`,
+      `model_providers.${id}.supports_websockets=false`,
+    );
+    if (httpProvider.envKey) {
+      overrides.push(`model_providers.${id}.env_key=${httpProvider.envKey}`);
+    }
+  }
+  return overrides;
 }
