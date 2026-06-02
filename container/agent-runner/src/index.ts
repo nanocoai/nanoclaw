@@ -1747,7 +1747,12 @@ async function main(): Promise<void> {
 
     archiveCliTranscript(iTranscript, containerInput.assistantName);
     await cleanupInteractiveResources(log);
-    return;
+    // 必须显式 exit：interactive 模式持有 TapProxy(net.Server)、tmux/MCP 子进程等
+    // 句柄，cleanup 停不干净 → 单纯 return 后 Node 事件循环不空、进程不退化为僵尸，
+    // 主进程 group-queue 的 state.active 永远为 true → 整个群队列死锁。
+    // 设计意图本就是 runner 退出后主进程拉起新 runner 重建一切（见 checkCliHealth 注释）。
+    log('[interactive] runner 正常退出，主进程将按需重建');
+    process.exit(0);
   }
 
   // ---- SDK 模式（默认路径） ----
