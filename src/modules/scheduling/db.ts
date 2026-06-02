@@ -119,9 +119,16 @@ export interface RecurringMessage {
   series_id: string;
 }
 
-export function getCompletedRecurring(db: Database.Database): RecurringMessage[] {
+/**
+ * Recurring rows whose run has finished — successfully ('completed') or after
+ * exhausting retries ('failed') — and that still carry a recurrence expression.
+ * Failed rows must be included: nothing else ever re-schedules a series, so
+ * skipping them would let a single bad run (container crash, max-retry
+ * exhaustion) silently kill the recurring task forever.
+ */
+export function getFinishedRecurring(db: Database.Database): RecurringMessage[] {
   return db
-    .prepare("SELECT * FROM messages_in WHERE status = 'completed' AND recurrence IS NOT NULL")
+    .prepare("SELECT * FROM messages_in WHERE status IN ('completed', 'failed') AND recurrence IS NOT NULL")
     .all() as RecurringMessage[];
 }
 

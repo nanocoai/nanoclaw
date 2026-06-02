@@ -16,7 +16,7 @@ import {
   pauseTask,
   resumeTask,
   updateTask,
-  getCompletedRecurring,
+  getFinishedRecurring,
   type RecurringMessage,
 } from './db.js';
 
@@ -99,12 +99,12 @@ describe('cancelTask / pauseTask / resumeTask series matching', () => {
     db.close();
   });
 
-  it('cancelled task is not picked up by getCompletedRecurring', () => {
+  it('cancelled task is not picked up by getFinishedRecurring', () => {
     const db = freshDb();
     insertBasicTask(db, 'task-1', '0 9 * * *');
     cancelTask(db, 'task-1');
 
-    const recurring = getCompletedRecurring(db);
+    const recurring = getFinishedRecurring(db);
     expect(recurring).toHaveLength(0);
     db.close();
   });
