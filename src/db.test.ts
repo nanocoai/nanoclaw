@@ -2,18 +2,22 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import {
   _initTestDatabase,
+  clampRangeParams,
   createTask,
   deleteTask,
   getAllChats,
   getAllRegisteredGroups,
   getLastBotMessageTimestamp,
   getMessageContext,
+  getMessageContextById,
+  getMessageRange,
   getMessagesSince,
   getNewMessages,
   getTaskById,
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
+  storeMessageDirect,
   updateTask,
 } from './db.js';
 import { formatMessages } from './router.js';
@@ -798,5 +802,170 @@ describe('getMessageContext', () => {
     for (let i = 1; i < result.before.length; i++) {
       expect(result.before[i].timestamp > result.before[i - 1].timestamp).toBe(true);
     }
+  });
+});
+
+// --- getMessageContextById ---
+
+describe('getMessageContextById', () => {
+  const JID = 'test-byid@g.us';
+
+  it('按 ID 命中，返回前后各 N 条', () => {
+    seedMessages(JID, 11); // ctx-{JID}-0 ~ ctx-{JID}-10
+
+    const result = getMessageContextById(`ctx-${JID}-5`, 3, 3);
+
+    expect(result.anchor).not.toBeNull();
+    expect(result.anchor!.content).toBe('消息 #5');
+    expect(result.before.map(m => m.content)).toEqual(['消息 #2', '消息 #3', '消息 #4']);
+    expect(result.after.map(m => m.content)).toEqual(['消息 #6', '消息 #7', '消息 #8']);
+  });
+
+  it('ID 不存在返回 null anchor，不抛异常', () => {
+    seedMessages(JID, 5);
+
+    const result = getMessageContextById('nonexistent-id', 3, 3);
+
+    expect(result.anchor).toBeNull();
+    expect(result.before).toHaveLength(0);
+    expect(result.after).toHaveLength(0);
+  });
+
+  it('不传 before/after 用默认值 5', () => {
+    seedMessages(JID, 20);
+
+    const result = getMessageContextById(`ctx-${JID}-10`);
+
+    expect(result.anchor!.content).toBe('消息 #10');
+    expect(result.before).toHaveLength(5);
+    expect(result.after).toHaveLength(5);
+  });
+
+  it('锚点是会话最早一条时 before 为空，不跨会话', () => {
+    seedMessages(JID, 5);
+    seedMessages('other@g.us', 5); // 另一个会话不应混入
+
+    const result = getMessageContextById(`ctx-${JID}-0`, 5, 2);
+
+    expect(result.anchor!.content).toBe('消息 #0');
+    expect(result.before).toHaveLength(0);
+    expect(result.after).toHaveLength(2);
+  });
+
+  it('上下文包含 bot 回复（不按 is_bot_message 过滤）', () => {
+    storeChatMetadata(JID, '2024-06-01T10:00:00.000Z');
+    const base = new Date('2024-06-01T10:00:00.000Z').getTime();
+    // 0: 用户  1: bot 回复  2: 用户(锚点)  3: bot 回复
+    storeMessageDirect({ id: 'm0', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '问题', timestamp: new Date(base).toISOString(), is_from_me: false, is_bot_message: false });
+    storeMessageDirect({ id: 'm1', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: 'bot 回复 A', timestamp: new Date(base + 60_000).toISOString(), is_from_me: true, is_bot_message: true });
+    storeMessageDirect({ id: 'm2', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '锚点', timestamp: new Date(base + 120_000).toISOString(), is_from_me: false, is_bot_message: false });
+    storeMessageDirect({ id: 'm3', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: 'bot 回复 B', timestamp: new Date(base + 180_000).toISOString(), is_from_me: true, is_bot_message: true });
+
+    const result = getMessageContextById('m2', 5, 5);
+
+    expect(result.anchor!.content).toBe('锚点');
+    expect(result.before.map(m => m.content)).toEqual(['问题', 'bot 回复 A']);
+    expect(result.after.map(m => m.content)).toEqual(['bot 回复 B']);
+  });
+});
+
+// --- getMessageRange ---
+
+describe('getMessageRange', () => {
+  const JID = 'test-range@g.us';
+
+  it('offset=0 取最近 N 条，正序返回', () => {
+    seedMessages(JID, 10); // #0(最早) ~ #9(最新)
+
+    const result = getMessageRange(JID, 0, 5);
+
+    expect(result.map(m => m.content)).toEqual(['消息 #5', '消息 #6', '消息 #7', '消息 #8', '消息 #9']);
+  });
+
+  it('翻页：offset=5 取更早的区间', () => {
+    seedMessages(JID, 10);
+
+    const result = getMessageRange(JID, 5, 5);
+
+    expect(result.map(m => m.content)).toEqual(['消息 #0', '消息 #1', '消息 #2', '消息 #3', '消息 #4']);
+  });
+
+  it('offset 超过总数返回空', () => {
+    seedMessages(JID, 5);
+
+    expect(getMessageRange(JID, 100, 10)).toHaveLength(0);
+  });
+
+  it('不存在的 chat_jid 返回空', () => {
+    seedMessages(JID, 5);
+
+    expect(getMessageRange('no-such@g.us', 0, 10)).toHaveLength(0);
+  });
+
+  it('空内容消息不计入区间序列', () => {
+    storeChatMetadata(JID, '2024-06-01T10:00:00.000Z');
+    const base = new Date('2024-06-01T10:00:00.000Z').getTime();
+    // 5 条，其中 #2 为空
+    for (let i = 0; i < 5; i++) {
+      storeMessage({
+        id: `r-${i}`,
+        chat_jid: JID,
+        sender: 'u@s',
+        sender_name: 'User',
+        content: i === 2 ? '' : `消息 #${i}`,
+        timestamp: new Date(base + i * 60_000).toISOString(),
+        is_from_me: false,
+      });
+    }
+
+    const result = getMessageRange(JID, 0, 10);
+
+    // 空的 #2 被排除，只剩 4 条非空
+    expect(result.map(m => m.content)).toEqual(['消息 #0', '消息 #1', '消息 #3', '消息 #4']);
+  });
+
+  it('包含 bot 回复', () => {
+    storeChatMetadata(JID, '2024-06-01T10:00:00.000Z');
+    const base = new Date('2024-06-01T10:00:00.000Z').getTime();
+    storeMessageDirect({ id: 'b0', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '用户消息', timestamp: new Date(base).toISOString(), is_from_me: false, is_bot_message: false });
+    storeMessageDirect({ id: 'b1', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: 'bot 消息', timestamp: new Date(base + 60_000).toISOString(), is_from_me: true, is_bot_message: true });
+
+    const result = getMessageRange(JID, 0, 10);
+
+    expect(result.map(m => m.content)).toEqual(['用户消息', 'bot 消息']);
+  });
+
+  it('结果按时间正序', () => {
+    seedMessages(JID, 8);
+
+    const result = getMessageRange(JID, 0, 8);
+
+    for (let i = 1; i < result.length; i++) {
+      expect(result[i].timestamp > result[i - 1].timestamp).toBe(true);
+    }
+  });
+});
+
+// --- clampRangeParams ---
+
+describe('clampRangeParams', () => {
+  it('offset 负值钳制为 0', () => {
+    expect(clampRangeParams(-5, 10)).toEqual({ offset: 0, limit: 10 });
+  });
+
+  it('limit 超上限钳制为 200', () => {
+    expect(clampRangeParams(0, 10000)).toEqual({ offset: 0, limit: 200 });
+  });
+
+  it('limit 下限为 1', () => {
+    expect(clampRangeParams(0, 0)).toEqual({ offset: 0, limit: 1 });
+  });
+
+  it('未传参数用默认 offset=0、limit=20', () => {
+    expect(clampRangeParams()).toEqual({ offset: 0, limit: 20 });
+  });
+
+  it('小数被取整', () => {
+    expect(clampRangeParams(2.7, 5.9)).toEqual({ offset: 2, limit: 5 });
   });
 });

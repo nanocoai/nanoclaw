@@ -14,7 +14,7 @@ import {
 } from './config.js';
 import { getChatIndex } from './chat-index.js';
 import { AvailableGroup, getFeishuToken } from './container-runner.js';
-import { createTask, deleteTask, getMessageContext, getTaskById, storeMessageDirect, updateTask } from './db.js';
+import { clampRangeParams, createTask, deleteTask, getMessageContext, getMessageContextById, getMessageRange, getTaskById, storeMessageDirect, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { withLogContext } from './log-context.js';
@@ -879,6 +879,68 @@ export async function processTaskIpc(
           after: [],
           error: String(err),
         });
+      }
+      break;
+    }
+
+    case 'get_message_by_id': {
+      const requestId = data.requestId as string;
+      if (!requestId) {
+        logger.warn({ sourceGroup }, 'get_message_by_id missing requestId');
+        break;
+      }
+
+      const raw = data as Record<string, unknown>;
+      const messageId = raw.message_id as string;
+      if (!messageId) {
+        writeIpcResponse(sourceGroup, requestId, { error: 'Missing message_id parameter' });
+        break;
+      }
+
+      try {
+        const before = typeof raw.before === 'number' ? raw.before : 5;
+        const after = typeof raw.after === 'number' ? raw.after : 5;
+        const result = getMessageContextById(messageId, before, after);
+        writeIpcResponse(sourceGroup, requestId, result);
+        logger.info(
+          { sourceGroup, messageId, beforeCount: result.before.length, afterCount: result.after.length },
+          'get_message_by_id via IPC',
+        );
+      } catch (err) {
+        logger.error({ err, sourceGroup }, 'get_message_by_id failed');
+        writeIpcResponse(sourceGroup, requestId, { before: [], anchor: null, after: [], error: String(err) });
+      }
+      break;
+    }
+
+    case 'get_message_range': {
+      const requestId = data.requestId as string;
+      if (!requestId) {
+        logger.warn({ sourceGroup }, 'get_message_range missing requestId');
+        break;
+      }
+
+      const raw = data as Record<string, unknown>;
+      const chatJid = raw.chat_jid as string;
+      if (!chatJid) {
+        writeIpcResponse(sourceGroup, requestId, { error: 'Missing chat_jid parameter' });
+        break;
+      }
+
+      try {
+        const { offset, limit } = clampRangeParams(
+          raw.offset as number | undefined,
+          raw.limit as number | undefined,
+        );
+        const messages = getMessageRange(chatJid, offset, limit);
+        writeIpcResponse(sourceGroup, requestId, { messages, offset, limit });
+        logger.info(
+          { sourceGroup, chatJid: chatJid.slice(0, 20), offset, limit, count: messages.length },
+          'get_message_range via IPC',
+        );
+      } catch (err) {
+        logger.error({ err, sourceGroup }, 'get_message_range failed');
+        writeIpcResponse(sourceGroup, requestId, { messages: [], error: String(err) });
       }
       break;
     }

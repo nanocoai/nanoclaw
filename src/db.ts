@@ -555,6 +555,102 @@ export function getMessageContext(
   };
 }
 
+/**
+ * 按消息 ID 定位并展开前后 N 条上下文。
+ * 消息 ID 是 messages 表主键（全局唯一），从锚点行自身解析所属会话，仅在该会话内展开。
+ * 含 bot 回复，只过滤空内容（与 getMessageContext 一致）。
+ * ID 不存在时返回 { before: [], anchor: null, after: [] }。
+ */
+export function getMessageContextById(
+  messageId: string,
+  beforeCount: number = 5,
+  afterCount: number = 5,
+): { before: ContextMessage[]; anchor: ContextMessage | null; after: ContextMessage[] } {
+  // 锚点：按主键直接命中（额外取 chat_jid 用于在同会话内展开）
+  const anchorRow = db.prepare(`
+    SELECT chat_jid, sender_name, content, timestamp, is_from_me
+    FROM messages
+    WHERE id = ?
+  `).get(messageId) as (ContextMessage & { chat_jid: string }) | undefined;
+
+  if (!anchorRow) {
+    logger.info({ messageId }, '[get_message_by_id] 未找到消息');
+    return { before: [], anchor: null, after: [] };
+  }
+
+  const chatJid = anchorRow.chat_jid;
+  const anchorTs = anchorRow.timestamp;
+
+  // 锚点前 N 条（倒序取、正序返回）
+  const beforeRows = db.prepare(`
+    SELECT * FROM (
+      SELECT sender_name, content, timestamp, is_from_me
+      FROM messages
+      WHERE chat_jid = ? AND timestamp < ? AND content != '' AND content IS NOT NULL
+      ORDER BY timestamp DESC
+      LIMIT ?
+    ) ORDER BY timestamp
+  `).all(chatJid, anchorTs, beforeCount) as ContextMessage[];
+
+  // 锚点后 N 条
+  const afterRows = db.prepare(`
+    SELECT sender_name, content, timestamp, is_from_me
+    FROM messages
+    WHERE chat_jid = ? AND timestamp > ? AND content != '' AND content IS NOT NULL
+    ORDER BY timestamp
+    LIMIT ?
+  `).all(chatJid, anchorTs, afterCount) as ContextMessage[];
+
+  const anchor: ContextMessage = {
+    sender_name: anchorRow.sender_name,
+    content: anchorRow.content,
+    timestamp: anchorRow.timestamp,
+    is_from_me: anchorRow.is_from_me,
+  };
+
+  logger.info(
+    { messageId, chatJid, before: beforeRows.length, after: afterRows.length },
+    '[get_message_by_id] 上下文查询完成',
+  );
+
+  return { before: beforeRows, anchor, after: afterRows };
+}
+
+/**
+ * 钳制 get_message_range 的入参：offset 非负，limit 落在 [1, 200]，默认 limit=20。
+ * 纯函数，便于单测。
+ */
+export function clampRangeParams(
+  offset?: number,
+  limit?: number,
+): { offset: number; limit: number } {
+  const safeOffset = Math.max(0, Math.floor(offset ?? 0));
+  const rawLimit = Math.floor(limit ?? 20);
+  const safeLimit = Math.min(200, Math.max(1, rawLimit));
+  return { offset: safeOffset, limit: safeLimit };
+}
+
+/**
+ * 按位置区间（OFFSET）查询会话消息。
+ * 倒序跳过最新 offset 条，取 limit 条，结果反转为正序返回（最早的在前）。
+ * 含 bot 回复，只过滤空内容。入参假设已由 clampRangeParams 钳制。
+ */
+export function getMessageRange(
+  chatJid: string,
+  offset: number = 0,
+  limit: number = 20,
+): ContextMessage[] {
+  return db.prepare(`
+    SELECT * FROM (
+      SELECT sender_name, content, timestamp, is_from_me
+      FROM messages
+      WHERE chat_jid = ? AND content != '' AND content IS NOT NULL
+      ORDER BY timestamp DESC
+      LIMIT ? OFFSET ?
+    ) ORDER BY timestamp
+  `).all(chatJid, limit, offset) as ContextMessage[];
+}
+
 export function createTask(
   task: Omit<ScheduledTask, 'last_run' | 'last_result'>,
 ): void {

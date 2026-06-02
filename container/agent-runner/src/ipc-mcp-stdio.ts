@@ -750,6 +750,80 @@ server.tool(
   },
 );
 
+// ─────────────────────────────────────────────────────────────
+// get_message_by_id — 按消息 ID 精确定位并展开前后上下文
+// ─────────────────────────────────────────────────────────────
+
+server.tool(
+  'get_message_by_id',
+  '按消息 ID 精确定位一条消息，并返回其前后 N 条上下文。消息 ID 是数据库主键（全局唯一，可从 search_chat 结果或飞书引用中获取），无需额外提供 chat_jid。返回结构与 get_chat_context 一致：{ before, anchor, after }。',
+  {
+    message_id: z.string().describe('消息 ID（messages 表主键，全局唯一）'),
+    before: z.number().optional().default(5).describe('锚点前 N 条消息，默认 5'),
+    after: z.number().optional().default(5).describe('锚点后 N 条消息，默认 5'),
+  },
+  async (args) => {
+    const requestId = crypto.randomUUID();
+    writeIpcFile(TASKS_DIR, {
+      type: 'get_message_by_id',
+      requestId,
+      message_id: args.message_id,
+      before: args.before,
+      after: args.after,
+      groupFolder,
+      senderId,
+      timestamp: new Date().toISOString(),
+    });
+
+    try {
+      const response = await waitForResponse(requestId);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(response, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `按 ID 查询失败: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ─────────────────────────────────────────────────────────────
+// get_message_range — 按位置区间（OFFSET）查询会话消息
+// ─────────────────────────────────────────────────────────────
+
+server.tool(
+  'get_message_range',
+  '按位置区间查询某个会话的历史消息。offset=0 表示从最新一条开始，倒数跳过 offset 条后取 limit 条，结果按时间正序返回（最早的在前）。用于"最近 N 条"回看和翻页式浏览历史，无需时间戳。',
+  {
+    chat_jid: z.string().describe('会话 JID（从 search_chat 结果的 chat_jid 字段获取）'),
+    offset: z.number().optional().default(0).describe('跳过最新的 N 条，offset=0 表示从最新开始，默认 0'),
+    limit: z.number().optional().default(20).describe('返回条数，默认 20，上限 200'),
+  },
+  async (args) => {
+    const requestId = crypto.randomUUID();
+    writeIpcFile(TASKS_DIR, {
+      type: 'get_message_range',
+      requestId,
+      chat_jid: args.chat_jid,
+      offset: args.offset,
+      limit: args.limit,
+      groupFolder,
+      senderId,
+      timestamp: new Date().toISOString(),
+    });
+
+    try {
+      const response = await waitForResponse(requestId);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(response, null, 2) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `区间查询失败: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);
