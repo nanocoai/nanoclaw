@@ -424,9 +424,27 @@ async function buildContainerArgs(
   // The caller (router or host-sweep) catches the throw, leaves the inbound
   // message pending, and the next sweep tick retries.
   if (agentIdentifier) {
-    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+    try {
+      await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('[StatusCode=403]')) {
+        log.warn('OneCLI ensureAgent forbidden; continuing with existing agent lookup', {
+          agentGroup: agentGroup.name,
+          identifier: agentIdentifier,
+        });
+      } else {
+        throw err;
+      }
+    }
   }
-  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+  let onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+  if (!onecliApplied && agentIdentifier) {
+    log.warn('OneCLI agent-specific gateway config unavailable; falling back to default agent config', {
+      agentGroup: agentGroup.name,
+      identifier: agentIdentifier,
+    });
+    onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false });
+  }
   if (!onecliApplied) {
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }

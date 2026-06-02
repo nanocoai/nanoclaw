@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nanoclaw.nanotalk-dashboard</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/opt/node@22/bin/node</string>
+    <string>/Users/songylee/nanoclaw/node_modules/.pnpm/tsx@4.21.0/node_modules/tsx/dist/cli.mjs</string>
+    <string>/Users/songylee/nanoclaw/scripts/roni-cody-dashboard.ts</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/songylee/nanoclaw</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>Crashed</key>
+    <true/>
+  </dict>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/songylee</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/opt/homebrew/opt/node@22/bin:/Users/songylee/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/songylee/nanoclaw/logs/nanotalk-dashboard.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/songylee/nanoclaw/logs/nanotalk-dashboard.error.log</string>
+</dict>
+</plist>

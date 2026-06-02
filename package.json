@@ -20,6 +20,9 @@
     "setup": "tsx setup/index.ts",
     "setup:auto": "tsx setup/auto.ts",
     "ncl": "tsx src/cli/client.ts",
+    "dashboard:nanotalk": "tsx scripts/roni-cody-dashboard.ts",
+    "dashboard:agents": "tsx scripts/roni-cody-dashboard.ts",
+    "dashboard:roni-cody": "tsx scripts/roni-cody-dashboard.ts",
     "chat": "tsx scripts/chat.ts",
     "auth": "tsx src/whatsapp-auth.ts",
     "lint": "eslint src/",
@@ -28,6 +31,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@chat-adapter/telegram": "4.26.0",
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
     "@onecli-sh/sdk": "^0.5.0",

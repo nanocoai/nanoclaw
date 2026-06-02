@@ -12,3 +12,4 @@ The files in this directory are original design documents and developer referenc
 | [skills-as-branches.md](skills-as-branches.md) | [Skills system](https://docs.nanoclaw.dev/integrations/skills-system) |
 | [docker-sandboxes.md](docker-sandboxes.md) | [Docker Sandboxes](https://docs.nanoclaw.dev/advanced/docker-sandboxes) |
 | [APPLE-CONTAINER-NETWORKING.md](APPLE-CONTAINER-NETWORKING.md) | [Container runtime](https://docs.nanoclaw.dev/advanced/container-runtime) |
+| [nanotalk-local-apps.md](nanotalk-local-apps.md) | Local Sawyer setup for Roni, Cody, and NanoTalk macOS launchers |
