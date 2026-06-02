@@ -45,6 +45,9 @@ const mockCreateTask = vi.fn();
 const mockDeleteTask = vi.fn();
 const mockGetTaskById = vi.fn();
 const mockUpdateTask = vi.fn();
+const mockGetMessageContextById = vi.fn();
+const mockGetMessageRange = vi.fn();
+const mockClampRangeParams = vi.fn();
 
 vi.mock('./db.js', () => ({
   createTask: (...args: unknown[]) => mockCreateTask(...args),
@@ -52,6 +55,10 @@ vi.mock('./db.js', () => ({
   getTaskById: (...args: unknown[]) => mockGetTaskById(...args),
   updateTask: (...args: unknown[]) => mockUpdateTask(...args),
   storeMessageDirect: vi.fn(),
+  getMessageContext: vi.fn(),
+  getMessageContextById: (...args: unknown[]) => mockGetMessageContextById(...args),
+  getMessageRange: (...args: unknown[]) => mockGetMessageRange(...args),
+  clampRangeParams: (...args: unknown[]) => mockClampRangeParams(...args),
 }));
 
 vi.mock('./group-folder.js', () => ({
@@ -126,6 +133,13 @@ beforeEach(() => {
     renameChat: vi.fn().mockResolvedValue(undefined),
     onFeishuAuthRequest: vi.fn().mockResolvedValue(undefined),
   };
+
+  mockGetMessageContextById.mockReturnValue({ before: [], anchor: null, after: [] });
+  mockGetMessageRange.mockReturnValue([]);
+  mockClampRangeParams.mockImplementation((offset?: number, limit?: number) => ({
+    offset: Math.max(0, Math.floor(offset ?? 0)),
+    limit: Math.min(200, Math.max(1, Math.floor(limit ?? 20))),
+  }));
 });
 
 // ---- writeIpcResponse ----
@@ -372,5 +386,83 @@ describe('isDuplicateMessage', () => {
     isDuplicateMessage('jid1', 'trigger-cleanup');
     // 清空后只有刚加的一条
     expect(recentMessages.size).toBe(1);
+  });
+});
+
+// ---- processTaskIpc: get_message_by_id ----
+
+describe('processTaskIpc - get_message_by_id', () => {
+  it('有 message_id → 调 getMessageContextById 并写 response', async () => {
+    mockGetMessageContextById.mockReturnValue({
+      before: [{ sender_name: 'Alice', content: '前', timestamp: '2024-01-01T00:00:00Z', is_from_me: false }],
+      anchor: { sender_name: 'Bob', content: '锚点', timestamp: '2024-01-01T00:01:00Z', is_from_me: true },
+      after: [],
+    });
+
+    await processTaskIpc(
+      { type: 'get_message_by_id', requestId: 'req-byid-1' } as Parameters<typeof processTaskIpc>[0],
+      'main_group', true, deps,
+    );
+
+    // 先补 message_id 字段（processTaskIpc 用 data as Record<string, unknown> 读）
+    const dataWithId = { type: 'get_message_by_id', requestId: 'req-byid-2', message_id: 'msg-abc', before: 3, after: 3 } as unknown as Parameters<typeof processTaskIpc>[0];
+    await processTaskIpc(dataWithId, 'main_group', true, deps);
+
+    const filePath = path.join(tmpDir, 'ipc', 'main_group', 'responses', 'req-byid-2.json');
+    expect(fs.existsSync(filePath)).toBe(true);
+    const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    expect(data.anchor.content).toBe('锚点');
+    expect(mockGetMessageContextById).toHaveBeenCalledWith('msg-abc', 3, 3);
+  });
+
+  it('缺 message_id → error response', async () => {
+    await processTaskIpc(
+      { type: 'get_message_by_id', requestId: 'req-byid-err' } as Parameters<typeof processTaskIpc>[0],
+      'main_group', true, deps,
+    );
+
+    const filePath = path.join(tmpDir, 'ipc', 'main_group', 'responses', 'req-byid-err.json');
+    const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    expect(data.error).toContain('message_id');
+  });
+
+  it('缺 requestId → 不写 response', async () => {
+    await processTaskIpc(
+      { type: 'get_message_by_id' } as Parameters<typeof processTaskIpc>[0],
+      'main_group', true, deps,
+    );
+    // 不崩溃即可
+  });
+});
+
+// ---- processTaskIpc: get_message_range ----
+
+describe('processTaskIpc - get_message_range', () => {
+  it('有 chat_jid → clamp + 调 getMessageRange + 写 response', async () => {
+    mockGetMessageRange.mockReturnValue([
+      { sender_name: 'Alice', content: '消息1', timestamp: '2024-01-01T00:00:00Z', is_from_me: false },
+    ]);
+
+    const dataWithJid = { type: 'get_message_range', requestId: 'req-range-1', chat_jid: 'group@g.us', offset: 0, limit: 10 } as unknown as Parameters<typeof processTaskIpc>[0];
+    await processTaskIpc(dataWithJid, 'main_group', true, deps);
+
+    const filePath = path.join(tmpDir, 'ipc', 'main_group', 'responses', 'req-range-1.json');
+    expect(fs.existsSync(filePath)).toBe(true);
+    const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    expect(data.messages).toHaveLength(1);
+    expect(data.messages[0].content).toBe('消息1');
+    expect(mockClampRangeParams).toHaveBeenCalledWith(0, 10);
+    expect(mockGetMessageRange).toHaveBeenCalledWith('group@g.us', 0, 10);
+  });
+
+  it('缺 chat_jid → error response', async () => {
+    await processTaskIpc(
+      { type: 'get_message_range', requestId: 'req-range-err' } as Parameters<typeof processTaskIpc>[0],
+      'main_group', true, deps,
+    );
+
+    const filePath = path.join(tmpDir, 'ipc', 'main_group', 'responses', 'req-range-err.json');
+    const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    expect(data.error).toContain('chat_jid');
   });
 });
