@@ -200,10 +200,13 @@ async function sweepSession(session: Session): Promise<void> {
       resetStuckProcessingRows(inDb, outDb, session, 'container not running');
     }
 
-    // 5. Recurrence fanout for completed recurring tasks.
+    // 5. Recurrence fanout for completed recurring tasks + notices for tasks
+    // that exhausted their retries (so permanent failures aren't silent).
     // MODULE-HOOK:scheduling-recurrence:start
     const { handleRecurrence } = await import('./modules/scheduling/recurrence.js');
     await handleRecurrence(inDb, session);
+    const { notifyFailedTasks } = await import('./modules/scheduling/failure-notice.js');
+    notifyFailedTasks(inDb, session);
     // MODULE-HOOK:scheduling-recurrence:end
   } finally {
     inDb.close();
