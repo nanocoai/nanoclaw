@@ -38,6 +38,7 @@ import {
   type ProviderContainerContribution,
   type VolumeMount,
 } from './providers/provider-container-registry.js';
+import { getNetworkPolicyProvider } from './modules/network/index.js';
 import {
   heartbeatPath,
   markContainerRunning,
@@ -431,6 +432,10 @@ async function buildContainerArgs(
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
   log.info('OneCLI gateway applied', { containerName });
+
+  // Network policy hook — here the provider can add flags like `--network`, etc.
+  // No-op is default (if no provider is registered).
+  await getNetworkPolicyProvider()?.applyContainerArgs?.(args, { agentGroup });
 
   // Host gateway
   args.push(...hostGatewayArgs());
