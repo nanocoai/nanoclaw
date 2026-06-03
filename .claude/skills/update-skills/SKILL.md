@@ -54,18 +54,22 @@ List all upstream skill branches:
 - `git branch -r --list 'upstream/skill/*'`
 
 For each `upstream/skill/<name>`:
-1. Check if the user has merged this skill branch before:
+1. **v2 compatibility check** — skip the branch entirely if it is v1-only:
+   - `git show upstream/skill/<name>:package.json 2>/dev/null | grep '"version"'`
+   - If the version starts with `1.`, the branch is stuck at v1 and cannot be merged into v2. Add it to a **v1-incompatible** list and skip all further checks for it.
+2. Check if the user has merged this skill branch before:
    - `git merge-base --is-ancestor upstream/skill/<name>~1 HEAD` — if this succeeds (exit 0) for any ancestor commit of the skill branch, the user has merged it at some point. A simpler check: `git log --oneline --merges --grep="skill/<name>" HEAD` to see if there's a merge commit referencing this branch.
    - Alternative: `MERGE_BASE=$(git merge-base HEAD upstream/skill/<name>)` — if the merge base is NOT the initial commit and the merge base includes commits unique to the skill branch, it has been merged.
    - Simplest reliable check: compare `git merge-base HEAD upstream/skill/<name>` with `git merge-base HEAD upstream/main`. If the skill merge-base is strictly ahead of (or different from) the main merge-base, the user has merged this skill.
-2. Check if there are new commits on the skill branch not yet in HEAD:
+3. Check if there are new commits on the skill branch not yet in HEAD:
    - `git log --oneline HEAD..upstream/skill/<name>`
    - If this produces output, there are updates available.
 
-Build three lists:
-- **Updates available**: skills that are merged AND have new commits
-- **Up to date**: skills that are merged and have no new commits
-- **Not installed**: skills that have never been merged
+Build four lists:
+- **Updates available**: skills that are merged AND have new commits (v2 only)
+- **Up to date**: skills that are merged and have no new commits (v2 only)
+- **Not installed**: skills that have never been merged (v2 only)
+- **v1-incompatible**: skill branches whose `package.json` version starts with `1.` — never offer these for merging; mention them briefly at the end as "skipped (v1-only)"
 
 # Step 2: Present results
 
