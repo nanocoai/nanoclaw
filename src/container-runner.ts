@@ -985,11 +985,22 @@ export async function runContainerAgent(
           { group: group.name, code, duration, stderr, stdout, logFile },
           'Agent exited with error',
         );
-        resolve({
-          status: 'error',
-          result: null,
-          error: `Agent exited with code ${code}: ${stderr.slice(-200)}`,
-        });
+        // 必须先 await outputChain 再 resolve：error 路径直接 resolve 会让 wrappedOnOutput
+        // 的 .then() 在 runAgent 的 stale-session 清理之后异步执行，把已清除的 session 指针
+        // 写回 sessions map，导致下一次 retry 仍用旧 sessionId，形成永久死循环。
+        outputChain
+          .catch(() => {/* onOutput 失败不影响 error 结果 */})
+          .then(() => {
+            logger.info(
+              { group: group.name, code, newSessionId },
+              'Agent error path drained outputChain, resolving error',
+            );
+            resolve({
+              status: 'error',
+              result: null,
+              error: `Agent exited with code ${code}: ${stderr.slice(-200)}`,
+            });
+          });
         return;
       }
 

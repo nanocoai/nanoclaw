@@ -538,3 +538,112 @@ describe('输出解析边界', () => {
     expect(onOutput).toHaveBeenCalledTimes(3);
   });
 });
+
+// ---- error 退出路径必须先 drain outputChain 再 resolve（oc_7a6c05 死循环根因回归） ----
+
+describe('error 退出 + outputChain 时序', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    fakeProc = createFakeProcess();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('进程异常退出时，pending 的 onOutput 必须在 resolve 之前跑完', async () => {
+    // 这是核心回归：error 路径若不 await outputChain，wrappedOnOutput 的 session
+    // 写回会发生在 stale 清理之后，把已清除的旧 sessionId 写回，造成永久死循环。
+    const order: string[] = [];
+    let releaseOnOutput!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseOnOutput = r;
+    });
+    const onOutput = vi.fn(async () => {
+      await gate; // 模拟 onOutput 尚未完成（如 setSession/sendMessage 在途）
+      order.push('onOutput');
+    });
+
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+    ).then((r) => {
+      order.push('resolved');
+      return r;
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    // 发一条携带 newSessionId 的输出，onOutput 会卡在 gate 上（outputChain 未完成）
+    emitOutputMarker(fakeProc, {
+      status: 'progress',
+      result: 'step',
+      newSessionId: 'sess-pending',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    // 进程异常退出，此刻 outputChain 仍 pending
+    fakeProc.stderr.push('crashed\n');
+    fakeProc.emit('close', 1);
+    await vi.advanceTimersByTimeAsync(10);
+
+    // outputChain 没完成，resolve 不应发生
+    expect(order).toEqual([]);
+
+    // 放行 onOutput → outputChain 完成 → 才允许 resolve
+    releaseOnOutput();
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('error');
+    // 严格顺序：onOutput 先跑完，resolve 在后
+    expect(order).toEqual(['onOutput', 'resolved']);
+  });
+
+  it('error 退出 + onOutput 抛异常时仍 resolve error，不挂死', async () => {
+    const onOutput = vi.fn(async () => {
+      throw new Error('sendMessage failed');
+    });
+
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+
+    emitOutputMarker(fakeProc, { status: 'progress', result: 'step' });
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.stderr.push('boom\n');
+    fakeProc.emit('close', 1);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('error');
+    expect(onOutput).toHaveBeenCalledTimes(1);
+  });
+
+  it('error 退出且无任何 output 回调时直接 resolve error', async () => {
+    const onOutput = vi.fn(async () => {});
+
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+
+    fakeProc.stderr.push('fatal\n');
+    fakeProc.emit('close', 1);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('error');
+    expect(result.error).toContain('code 1');
+    expect(onOutput).not.toHaveBeenCalled();
+  });
+});
