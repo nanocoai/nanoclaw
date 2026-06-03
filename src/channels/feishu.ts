@@ -537,26 +537,43 @@ export class FeishuChannel implements Channel {
         return;
       }
 
-      // 💬 / 💭 消息：assistant 中间叙述（agent 在工具调用之间说的话）
-      //   - 💬 progressType='text'  → 模型输出的可见文本块（"让我看下这块代码"）
-      //   - 💭 progressType='thinking' → 模型内部独白（当前 agent-runner 不主动发，但兼容历史）
-      // 都走"独立消息、不进进度卡片"路径，让用户实时看到 agent 的思考过程
-      if (title.startsWith('💬') || title.startsWith('💭')) {
-        const fullText = (detail ?? title).replace(/^(?:💬|💭)\s*/u, '').trim();
-        // emoji 是 surrogate pair，charAt(0) 只返回高位 surrogate（会在日志里乱码），
-        // 用 startsWith 判断后直接给字面 emoji 字符
-        const emoji = title.startsWith('💬') ? '💬' : '💭';
+      // 💭 消息：模型内部独白（历史兼容），直接丢弃不暴露给用户
+      if (title.startsWith('💭')) {
         logger.info(
-          { jid, emoji, len: fullText.length, preview: fullText.slice(0, 80) },
-          '[progress] 中间叙述消息，独立发送（不进进度卡片）',
+          { jid, len: title.length },
+          '[progress] 💭 thinking 消息，丢弃',
         );
-        if (fullText) {
+        return;
+      }
+
+      // 💬 消息：LLM 中间文字输出
+      //   quietProgress=true → 塞进进度卡片（折叠面板），减少刷屏
+      //   quietProgress=false/undefined → 保持独立发送（默认行为）
+      if (title.startsWith('💬')) {
+        const fullText = (detail ?? title).replace(/^💬\s*/u, '').trim();
+        if (!fullText) return;
+
+        const group = this.opts.registeredGroups()[jid];
+        const quiet = group?.containerConfig?.quietProgress === true;
+
+        if (quiet) {
+          // 安静模式：包装成卡片步骤，继续走 progressCards 路径
+          const firstLine = fullText.split('\n')[0];
+          title = `💬 ${firstLine.length > 80 ? firstLine.slice(0, 80) + '…' : firstLine}`;
+          detail = fullText.length > firstLine.length ? fullText : undefined;
+          // 不 return，下面走 progressCards 创建/更新
+        } else {
+          // 默认模式：独立发消息
+          logger.info(
+            { jid, len: fullText.length, preview: fullText.slice(0, 80) },
+            '[progress] 中间叙述消息，独立发送（不进进度卡片）',
+          );
           const chatId = chatIdFromJid(jid);
           this.sendPlainOrCard(chatId, fullText).catch((err) =>
             logger.debug({ err, jid }, '中间叙述消息发送失败'),
           );
+          return;
         }
-        return;
       }
 
       // 首次工具进度到达：移除 emoji + 创建卡片

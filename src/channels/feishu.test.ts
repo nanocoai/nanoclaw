@@ -385,25 +385,18 @@ describe('FeishuChannel', () => {
       expect(mockCreate).not.toHaveBeenCalled();
     });
 
-    it('💭 消息单独发送不加入卡片', async () => {
+    it('💭 消息直接丢弃不发送', async () => {
       const jid = 'fs:oc_thought';
-      // 确保没有 progressDone 标记
       (channel as any).progressDone.delete(jid);
 
       await channel.sendMessage(jid, '💭 这是内部思考', { isProgress: true });
 
-      // 应该调用 create 发送（而非 patch 卡片）
-      expect(mockCreate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({
-            receive_id: 'oc_thought',
-          }),
-        }),
-      );
+      // 💭 应该被丢弃，不调用任何发送
+      expect(mockCreate).not.toHaveBeenCalled();
     });
 
-    // 回归保护：assistant text block 走 💬 progress，必须像 💭 那样独立发送（不进卡片）
-    it('💬 消息（assistant 中间叙述）单独发送不加入卡片', async () => {
+    // 默认模式（quietProgress=false）：💬 独立发送
+    it('💬 消息（默认模式）单独发送不加入卡片', async () => {
       const jid = 'fs:oc_text_block';
       (channel as any).progressDone.delete(jid);
 
@@ -446,6 +439,59 @@ describe('FeishuChannel', () => {
       await channel.sendMessage(jid, '💬 迟到的中间消息', { isProgress: true });
 
       expect(mockCreate).not.toHaveBeenCalled();
+    });
+
+    // quietProgress=true 时，💬 进进度卡片而非独立发送
+    it('💬 安静模式下创建/更新进度卡片', async () => {
+      const jid = 'fs:oc_quiet_text';
+      (channel as any).progressDone.delete(jid);
+      // 注入 quietProgress 配置
+      (channel as any).opts.registeredGroups = () => ({
+        [jid]: {
+          name: 'test-quiet',
+          folder: 'fs_oc_quiet_text',
+          trigger: '@bot',
+          added_at: new Date().toISOString(),
+          containerConfig: { quietProgress: true },
+        },
+      });
+
+      await channel.sendMessage(jid, '💬 让我看下这块代码', { isProgress: true });
+
+      // 应该创建进度卡片（调用 create），而非独立文本消息
+      expect(mockCreate).toHaveBeenCalled();
+      const callArg = mockCreate.mock.calls[0]?.[0];
+      const content = JSON.parse(callArg?.data?.content ?? '{}');
+      const serialized = JSON.stringify(content);
+      // 卡片内应包含文字内容
+      expect(serialized).toContain('让我看下这块代码');
+      // 进度卡片使用 v2 schema（body.elements），而非 v1 header
+      expect(content.schema).toBe('2.0');
+      expect(content.body?.elements).toBeDefined();
+    });
+
+    it('💬 安静模式下长文本用折叠面板（detail）', async () => {
+      const jid = 'fs:oc_quiet_detail';
+      (channel as any).progressDone.delete(jid);
+      (channel as any).opts.registeredGroups = () => ({
+        [jid]: {
+          name: 'test-quiet-detail',
+          folder: 'fs_oc_quiet_detail',
+          trigger: '@bot',
+          added_at: new Date().toISOString(),
+          containerConfig: { quietProgress: true },
+        },
+      });
+
+      const longText = '第一行预览\n' + 'B'.repeat(200);
+      await channel.sendMessage(jid, `💬 ${longText}`, { isProgress: true });
+
+      expect(mockCreate).toHaveBeenCalled();
+      const callArg = mockCreate.mock.calls[0]?.[0];
+      const content = JSON.parse(callArg?.data?.content ?? '{}');
+      const serialized = JSON.stringify(content);
+      // 完整内容（含换行后的部分）应在卡片内
+      expect(serialized).toContain('B'.repeat(50));
     });
   });
 

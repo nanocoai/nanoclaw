@@ -37,6 +37,8 @@ export interface ContainerConfig {
   cliMode?: CliMode;
   /** @deprecated 使用 cliMode: 'print' 替代。向后兼容：useCliMode: true 等同于 cliMode: 'print' */
   useCliMode?: boolean;
+  /** 安静模式：LLM 中间文字（💬）进进度卡片而非独立发消息 */
+  quietProgress?: boolean;
 }
 
 export interface RegisteredGroup {
