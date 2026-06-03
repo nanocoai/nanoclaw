@@ -347,19 +347,19 @@ export type ThinkingOnlyAction = 'retry' | 'giveup' | 'none';
  *
  *  - 'retry'  → 还在重试上限内，pipe 一条重试消息（调用方负责关 thinking）
  *  - 'giveup' → 已达上限，放弃并提示用户，避免无限重试刷屏烧钱
- *  - 'none'   → 不是 thinking-only（正常有 text，或本轮已发过消息）
+ *  - 'none'   → 不是 thinking-only（正常有 text，或本轮已发过真实文本）
  *
  * 抽成纯函数便于单测 —— 防止重试上限/触发条件被悄悄改动而无 assertion 拦截。
  */
 export function decideThinkingOnlyAction(input: {
   hasText: boolean;
-  outputSentToUser: boolean;
+  textSentToUser: boolean;
   outputTokens: number;
   retryCount: number;
   maxRetries: number;
 }): ThinkingOnlyAction {
   const isThinkingOnly =
-    !input.hasText && !input.outputSentToUser && input.outputTokens > 0;
+    !input.hasText && !input.textSentToUser && input.outputTokens > 0;
   if (!isThinkingOnly) return 'none';
   return input.retryCount >= input.maxRetries ? 'giveup' : 'retry';
 }
@@ -449,6 +449,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const THINKING_ONLY_MAX_RETRIES = 1;
   let thinkingOnlyRetryCount = 0;
   let outputSentToUser = false; // 当前 query 是否发过消息（每轮重置）
+  let textSentToUser = false; // 当前 query 是否发过真实文本（工具进度卡不算）
   let everSentToUser = false; // 整个 agent 生命周期是否发过消息（不重置，error handler 用）
   let streamingRateLimitDetected = false;
   // SDK 把 fetch failed / API Error: 5xx 误包成 status:success + result 文本时
@@ -499,6 +500,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           : result.result;
         await channel.sendMessage(chatJid, payload, { isProgress: true });
         everSentToUser = true; // CLI interactive 模式下中间消息也算"发过消息"
+        if (result.progressType === 'text') {
+          textSentToUser = true;
+        }
         // tool_use 摘要存入 messages.db（供巡检和搜索使用）
         // result.result 格式如 "🔧 Bash: ls -la"，已含工具名和简短输入
         if (result.progressType === 'tool_use' && result.result) {
@@ -599,6 +603,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           logger.info({ group: group.name, feishuMsgId, textLen: text.length }, '[reply] sendMessage 返回');
           if (feishuMsgId) lastFeishuMsgId = feishuMsgId;
           outputSentToUser = true;
+          textSentToUser = true;
           everSentToUser = true;
           agentReplies.push(text);
 
@@ -629,9 +634,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // 表现为 result 为空但 outputTokens > 0。此时自动 pipe 一条重试消息让模型继续回答。
         const outputTokens = result.usage?.outputTokens ?? 0;
         const hasText = !!result.result && result.result.trim().length > 0;
+        logger.info(
+          {
+            group: group.name,
+            chatJid,
+            hasText,
+            outputSentToUser,
+            textSentToUser,
+            everSentToUser,
+            outputTokens,
+            retries: thinkingOnlyRetryCount,
+          },
+          '[thinking-only] success 空结果判定输入',
+        );
         const thinkingOnlyAction = decideThinkingOnlyAction({
           hasText,
-          outputSentToUser: outputSentToUser || everSentToUser,
+          textSentToUser,
           outputTokens,
           retryCount: thinkingOnlyRetryCount,
           maxRetries: THINKING_ONLY_MAX_RETRIES,
@@ -677,8 +695,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         }
         // CLI interactive 模式：文本已通过中间 progress/send_message 发出，
         // success 到达时 text 为空，但 pendingUsage 还在 → 单独发 usage-only 卡片。
+        // 只有真实文本发出过才补 footer；工具进度卡不能算，否则会产生空消息。
         // 必须在 cleanupProgressCard 之前调用（cleanup 会清理 pendingUsage）
-        if (everSentToUser && 'sendUsageOnly' in channel) {
+        if (textSentToUser && 'sendUsageOnly' in channel) {
           await (
             channel as { sendUsageOnly: (jid: string) => Promise<void> }
           ).sendUsageOnly(chatJid);
@@ -691,6 +710,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         }
         // 重置状态：IPC pipe 模式下下一轮 query 需要从干净状态开始
         outputSentToUser = false;
+        textSentToUser = false;
 
         // R8.1 实时记忆入队：agent 回复完成后立即入队，不等进程退出
         // agent-runner 完成回复后会进入 IPC 等待循环（可达 8 小时），
@@ -863,6 +883,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               : result.result;
             await channel.sendMessage(chatJid, payload, { isProgress: true });
             everSentToUser = true; // CLI interactive 模式下中间消息也算"发过消息"
+            if (result.progressType === 'text') {
+              textSentToUser = true;
+            }
             if (result.progressType === 'tool_use' && result.result) {
               try {
                 storeMessageDirect({
@@ -943,6 +966,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               const retryFmid = await channel.sendMessage(chatJid, text);
               if (retryFmid) lastFeishuMsgId = retryFmid;
               outputSentToUser = true;
+              textSentToUser = true;
               everSentToUser = true;
               agentReplies.push(text);
             }
@@ -953,7 +977,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               await channel.setTyping?.(chatJid, false);
             }
             // CLI interactive: usage-only 卡片（同主回调，在 cleanup 之前）
-            if (everSentToUser && 'sendUsageOnly' in channel) {
+            if (textSentToUser && 'sendUsageOnly' in channel) {
               await (
                 channel as { sendUsageOnly: (jid: string) => Promise<void> }
               ).sendUsageOnly(chatJid);
@@ -963,6 +987,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 channel as { cleanupProgressCard: (jid: string) => Promise<void> }
               ).cleanupProgressCard(chatJid);
             }
+            outputSentToUser = false;
+            textSentToUser = false;
             queue.notifyIdle(chatJid);
           }
           if (result.status === 'error') {

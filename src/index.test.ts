@@ -274,7 +274,7 @@ describe('buildTriggerPattern', () => {
 describe('decideThinkingOnlyAction', () => {
   const base = {
     hasText: false,
-    outputSentToUser: false,
+    textSentToUser: false,
     outputTokens: 100,
     retryCount: 0,
     maxRetries: 1,
@@ -296,10 +296,18 @@ describe('decideThinkingOnlyAction', () => {
     expect(decideThinkingOnlyAction({ ...base, hasText: true })).toBe('none');
   });
 
-  it('本轮已发过消息（CLI 流式）→ none，即使无 text', () => {
+  it('本轮已发过真实文本（CLI 流式）→ none，即使 final result 无 text', () => {
     expect(
-      decideThinkingOnlyAction({ ...base, outputSentToUser: true }),
+      decideThinkingOnlyAction({ ...base, textSentToUser: true }),
     ).toBe('none');
+  });
+
+  it('只发过工具进度卡、没发真实文本 → retry', () => {
+    // 回归保护：工具卡不能算用户已收到回复，否则会跳过 thinking-only 重试，
+    // 最后只发 usage-only 空卡。
+    expect(
+      decideThinkingOnlyAction({ ...base, textSentToUser: false }),
+    ).toBe('retry');
   });
 
   it('outputTokens 为 0 → none（空 turn，非 thinking-only）', () => {
@@ -324,12 +332,12 @@ describe('decideThinkingOnlyAction', () => {
     ).toBe('retry');
   });
 
-  it('混合态：hasText 且 outputSentToUser 都为 true → none', () => {
+  it('混合态：hasText 且 textSentToUser 都为 true → none', () => {
     expect(
       decideThinkingOnlyAction({
         ...base,
         hasText: true,
-        outputSentToUser: true,
+        textSentToUser: true,
       }),
     ).toBe('none');
   });
