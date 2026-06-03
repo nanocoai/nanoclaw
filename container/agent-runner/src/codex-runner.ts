@@ -45,6 +45,10 @@ export interface CodexEvent {
     output_tokens?: number;
     reasoning_output_tokens?: number;
   };
+  /** type:"error" 事件的错误正文（如鉴权失败、限额、重连） */
+  message?: string;
+  /** type:"turn.failed" 事件的错误对象 */
+  error?: { message?: string };
   [key: string]: unknown;
 }
 
@@ -167,6 +171,25 @@ export function mapCodexProgress(event: CodexEvent): ContainerOutput[] {
     ];
   }
   return [];
+}
+
+/**
+ * 从 codex 事件提取错误正文。
+ * - type:"turn.failed" → event.error.message（turn 最终失败的权威错误）
+ * - type:"error" → event.message（鉴权失败/限额/重连等中间错误）
+ * 非错误事件返回 undefined。
+ */
+export function extractCodexError(event: CodexEvent): string | undefined {
+  if (event.type === 'turn.failed') {
+    const msg = event.error?.message;
+    return typeof msg === 'string' && msg.trim() ? msg.trim() : undefined;
+  }
+  if (event.type === 'error') {
+    return typeof event.message === 'string' && event.message.trim()
+      ? event.message.trim()
+      : undefined;
+  }
+  return undefined;
 }
 
 /** 映射 codex usage → ContainerOutput.usage（modelInfo 来自 rollout，--json 流不暴露 model） */
@@ -358,6 +381,8 @@ export async function runCodexQuery(
     let sentSuccess = false;
     let lineBuffer = '';
     let stderrAccum = '';
+    // codex 通过 type:error/turn.failed 上报鉴权失败/限额等错误，捕获正文供 close 透传
+    let lastErrorMessage: string | undefined;
 
     // prompt 已通过 arg 传入，关闭 stdin 避免 codex 等待
     child.stdin!.end();
@@ -379,6 +404,12 @@ export async function runCodexQuery(
         if (typeof event.item.text === 'string') {
           lastAgentMessage = event.item.text;
         }
+      }
+
+      // 捕获错误正文（turn.failed 权威错误最后到达，覆盖中间 type:error 重连噪声）
+      const errMsg = extractCodexError(event);
+      if (errMsg) {
+        lastErrorMessage = errMsg;
       }
 
       // turn 完成 → 发 success（result = 最后一条 agent_message）
@@ -461,11 +492,16 @@ export async function runCodexQuery(
         return;
       }
 
-      if (code !== 0 && !sentSuccess) {
+      // 错误透传：codex 可能 turn.failed 但退出码仍为 0（实测鉴权失败场景），
+      // 所以判定条件是「非0退出 OR 捕获到错误正文」。优先用 codex 给的真实正文，
+      // 否则退回退出码。这样群里能看到「鉴权失败/限额」而非干等无响应。
+      if (!sentSuccess && (code !== 0 || lastErrorMessage)) {
         writeOutput({
           status: 'error',
           result: null,
-          error: `codex 进程退出码 ${code}`,
+          error: lastErrorMessage
+            ? `codex 失败: ${lastErrorMessage}`
+            : `codex 进程退出码 ${code}`,
           newSessionId,
         });
       }
