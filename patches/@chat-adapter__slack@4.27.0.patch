@@ -1,0 +1,76 @@
+diff --git a/dist/index.js b/dist/index.js
+index e1d9675be93dfbd8a1e128edb9c2db0448b18109..6f8802199ed80d0ca659c3d598f162dc68ab34fe 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -32,6 +32,62 @@ import {
+ } from "@chat-adapter/shared";
+ import { cardChildToFallbackText, tableElementToAscii } from "chat";
+ var convertEmoji = createEmojiConverter("slack");
++var SLACK_SECTION_TEXT_LIMIT = 3000;
++var SLACK_SECTION_SAFE_LIMIT = 2900;
++var SLACK_HEADER_TEXT_LIMIT = 150;
++var SLACK_MAX_BLOCKS = 50;
++function chunkMrkdwnText(text, max) {
++  const chunks = [];
++  let remaining = String(text);
++  while (remaining.length > max) {
++    let cut = remaining.lastIndexOf("\n", max);
++    if (cut < max * 0.5) {
++      const space = remaining.lastIndexOf(" ", max);
++      cut = space > max * 0.5 ? space : max;
++    }
++    chunks.push(remaining.slice(0, cut));
++    remaining = remaining.slice(cut).replace(/^[\n ]+/, "");
++  }
++  if (remaining.length > 0) chunks.push(remaining);
++  return chunks;
++}
++function splitOversizedSectionBlocks(blocks) {
++  const out = [];
++  for (const block of blocks) {
++    if (block && block.type === "section" && block.text && typeof block.text.text === "string" && block.text.text.length > SLACK_SECTION_TEXT_LIMIT) {
++      for (const part of chunkMrkdwnText(block.text.text, SLACK_SECTION_SAFE_LIMIT)) {
++        out.push({ ...block, text: { ...block.text, text: part } });
++      }
++      continue;
++    }
++    if (block && block.type === "context" && Array.isArray(block.elements) && block.elements.some((el) => el && typeof el.text === "string" && el.text.length > SLACK_SECTION_TEXT_LIMIT)) {
++      for (const el of block.elements) {
++        if (el && typeof el.text === "string" && el.text.length > SLACK_SECTION_TEXT_LIMIT) {
++          for (const part of chunkMrkdwnText(el.text, SLACK_SECTION_SAFE_LIMIT)) {
++            out.push({ type: "context", elements: [{ ...el, text: part }] });
++          }
++        } else {
++          out.push({ type: "context", elements: [el] });
++        }
++      }
++      continue;
++    }
++    if (block && block.type === "header" && block.text && typeof block.text.text === "string" && block.text.text.length > SLACK_HEADER_TEXT_LIMIT) {
++      out.push({ ...block, text: { ...block.text, text: block.text.text.slice(0, SLACK_HEADER_TEXT_LIMIT) } });
++      continue;
++    }
++    out.push(block);
++  }
++  // Slack rejects messages with more than 50 blocks; splitting could newly
++  // exceed this on very long messages. Truncate rather than have Slack reject
++  // the whole message (the original failure mode).
++  if (out.length > SLACK_MAX_BLOCKS) {
++    const kept = out.slice(0, SLACK_MAX_BLOCKS - 1);
++    kept.push({ type: "context", elements: [{ type: "mrkdwn", text: "_…message truncated (too long for a single Slack post)_" }] });
++    return kept;
++  }
++  return out;
++}
+ function cardToBlockKit(card) {
+   const blocks = [];
+   if (card.title) {
+@@ -67,7 +123,7 @@ function cardToBlockKit(card) {
+     const childBlocks = convertChildToBlocks(child, state);
+     blocks.push(...childBlocks);
+   }
+-  return blocks;
++  return splitOversizedSectionBlocks(blocks);
+ }
+ function convertChildToBlocks(child, state) {
+   switch (child.type) {
