@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  analyzeInteractivePaneCompletion,
   findLatestClaudeSessionId,
   isRealClaudeSessionId,
 } from '../container/agent-runner/src/interactive-cli-runner.js';
@@ -59,5 +60,41 @@ describe('findLatestClaudeSessionId', () => {
       cwd: '/Users/dajay/AI_Workspace/nine',
       sinceMs: Date.now(),
     })).toBeUndefined();
+  });
+});
+
+describe('analyzeInteractivePaneCompletion', () => {
+  it('识别工具调用解析失败后已回到 prompt 的终止态', () => {
+    const pane = [
+      "The model's tool call could not be parsed (retry also failed).",
+      '',
+      '❯',
+      '⏵⏵ bypass permissions on · /effort',
+    ].join('\n');
+
+    const result = analyzeInteractivePaneCompletion(pane);
+
+    expect(result.done).toBe(true);
+    expect(result.status).toBe('error');
+    expect(result.error).toContain('工具调用解析失败');
+  });
+
+  it('解析失败但还没回到 prompt 时不结束', () => {
+    const pane = [
+      "The model's tool call could not be parsed (retry also failed).",
+      '✻ Thinking...',
+    ].join('\n');
+
+    expect(analyzeInteractivePaneCompletion(pane).done).toBe(false);
+  });
+
+  it('正常 prompt 不误判为终止态', () => {
+    const pane = [
+      'Claude Code v2.1.162',
+      '❯',
+      '⏵⏵ bypass permissions on · /effort',
+    ].join('\n');
+
+    expect(analyzeInteractivePaneCompletion(pane).done).toBe(false);
   });
 });

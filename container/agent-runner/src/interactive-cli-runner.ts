@@ -59,7 +59,14 @@ export interface InteractiveCliConfig {
 }
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 分钟（Opus 4.8 extended thinking 可达 10+ 分钟）
+const PANE_WATCHDOG_INTERVAL_MS = 2_000;
+const PANE_WATCHDOG_GRACE_MS = 5_000;
 const UUID_SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CLI_TOOL_CALL_PARSE_FAILED_PATTERNS = [
+  "The model's tool call could not be parsed",
+  'tool call could not be parsed',
+  'retry also failed',
+];
 
 export function isRealClaudeSessionId(sessionId?: string): boolean {
   return !!sessionId && UUID_SESSION_ID_RE.test(sessionId);
@@ -98,6 +105,32 @@ export function findLatestClaudeSessionId(options: {
   }
 
   return latest?.sessionId;
+}
+
+export interface InteractivePaneCompletion {
+  done: boolean;
+  status?: 'error';
+  error?: string;
+}
+
+export function analyzeInteractivePaneCompletion(paneText: string): InteractivePaneCompletion {
+  const hasToolCallParseFailure = CLI_TOOL_CALL_PARSE_FAILED_PATTERNS.some((pattern) =>
+    paneText.includes(pattern),
+  );
+  if (!hasToolCallParseFailure) {
+    return { done: false };
+  }
+
+  const pane = analyzeTmuxPane(paneText);
+  if (pane.state !== 'ready') {
+    return { done: false };
+  }
+
+  return {
+    done: true,
+    status: 'error',
+    error: "Claude CLI 工具调用解析失败，已回到输入提示；本轮已终止，后续消息可继续处理",
+  };
 }
 
 // ---- 全局单例 ----
@@ -293,12 +326,22 @@ export async function runInteractiveQuery(
     let resolved = false;
     let numTurns = 0;
     const startTime = Date.now();
+    let paneWatchdogTimer: NodeJS.Timeout | null = null;
+    let paneWatchdogRunning = false;
     // CLI 会先用 haiku 做 context caching（预热缓存），再用目标模型做真正 prompt。
     // 过滤掉 haiku context caching 流的结果，只 emit 真正 prompt 的结果。
 
     const cleanup = () => {
       proxy.unsubscribe(sessionToken);
       clearTimeout(timer);
+      if (paneWatchdogTimer) {
+        clearInterval(paneWatchdogTimer);
+        paneWatchdogTimer = null;
+      }
+      if (pendingFinishTimer) {
+        clearTimeout(pendingFinishTimer);
+        pendingFinishTimer = null;
+      }
       // 清理 MCP 配置（临时文件，每轮请求生成）
       try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
       // 注意：combinedCaPath 不删除 — tmux session 持续运行，NODE_EXTRA_CA_CERTS 指向它
@@ -384,6 +427,48 @@ export async function runInteractiveQuery(
     const schedulePendingFlush = () => {
       if (pendingFinishTimer) clearTimeout(pendingFinishTimer);
       pendingFinishTimer = setTimeout(flushPending, FINISH_DEBOUNCE_MS);
+    };
+
+    const startPaneWatchdog = () => {
+      paneWatchdogTimer = setInterval(async () => {
+        if (resolved) return;
+        if (paneWatchdogRunning) return;
+        if (Date.now() - startTime < PANE_WATCHDOG_GRACE_MS) return;
+
+        const hasCurrentTurnActivity =
+          hasReceivedSseData ||
+          activeSseStreams > 0 ||
+          !!pendingOutput ||
+          pendingTextBlocks.length > 0 ||
+          numTurns > 0;
+        if (!hasCurrentTurnActivity) return;
+
+        paneWatchdogRunning = true;
+        let paneText: string;
+        try {
+          paneText = await tmux.capturePane(tmuxSession.name);
+        } catch (err) {
+          log(`[interactive] pane watchdog capture failed: ${err instanceof Error ? err.message : String(err)}`);
+          paneWatchdogRunning = false;
+          return;
+        }
+        paneWatchdogRunning = false;
+
+        const completion = analyzeInteractivePaneCompletion(paneText);
+        if (!completion.done) return;
+
+        log(`[interactive] pane watchdog detected terminal CLI error: ${completion.error}`);
+        if (pendingTextBlocks.length > 0) {
+          flushPendingTextBlocks('pane watchdog terminal error');
+        }
+        writeOutput({
+          status: completion.status || 'error',
+          result: null,
+          error: completion.error,
+          newSessionId: getDurableSessionId(),
+        });
+        finish();
+      }, PANE_WATCHDOG_INTERVAL_MS);
     };
 
     // ---- 中间叙述 text block 缓冲 ----
@@ -570,6 +655,7 @@ export async function runInteractiveQuery(
 
     log(`[interactive] subscribing to SSE (session: ${sessionToken.slice(0, 8)}...)`);
     proxy.subscribe(sessionToken, subscription);
+    startPaneWatchdog();
 
     // 注入消息
     tmux.sendMessage(tmuxSession.name, config.prompt).catch((err) => {
