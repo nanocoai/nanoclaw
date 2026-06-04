@@ -794,6 +794,7 @@ export async function runContainerAgent(
     // 流式解析 stdout 中的 OUTPUT_START/END 标记
     let parseBuffer = '';
     let newSessionId: string | undefined;
+    let lastStreamingOutput: ContainerOutput | undefined;
     let outputChain = Promise.resolve();
 
     child.stdout.on('data', (data) => {
@@ -827,6 +828,7 @@ export async function runContainerAgent(
 
           try {
             const parsed: ContainerOutput = JSON.parse(jsonStr);
+            lastStreamingOutput = parsed;
             if (parsed.newSessionId) {
               newSessionId = parsed.newSessionId;
             }
@@ -1068,9 +1070,21 @@ export async function runContainerAgent(
       if (onOutput) {
         outputChain.then(() => {
           logger.info(
-            { group: group.name, duration, newSessionId },
+            {
+              group: group.name,
+              duration,
+              newSessionId,
+              lastStatus: lastStreamingOutput?.status,
+            },
             'Agent completed (streaming mode)',
           );
+          if (lastStreamingOutput?.status === 'error') {
+            resolve({
+              ...lastStreamingOutput,
+              newSessionId: lastStreamingOutput.newSessionId ?? newSessionId,
+            });
+            return;
+          }
           resolve({ status: 'success', result: null, newSessionId });
         }).catch((err) => {
           logger.error({ group: group.name, error: err }, 'outputChain rejected on normal close');

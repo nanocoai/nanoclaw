@@ -378,6 +378,7 @@ describe('rotateAccount', () => {
 
     // A 群应该被防抖
     expect(rotateAccount('group-a', 'group_a')).toBeNull();
+    expect(mockExecSync).not.toHaveBeenCalled();
 
     // B 群应该正常轮换
     mockExecSync

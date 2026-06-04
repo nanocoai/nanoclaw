@@ -302,8 +302,9 @@ describe('agent spawn and timeout', () => {
 
     const result = await resultPromise;
     expect(result).toEqual({
-      status: 'success',
+      status: 'error',
       result: null,
+      error: 'gemini 失败: quota',
       newSessionId: 'session-gemini',
     });
     expect(onOutput).toHaveBeenCalledWith(
