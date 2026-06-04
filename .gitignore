@@ -8,6 +8,14 @@ dist/
 store/
 data/
 logs/
+backups/
+messages.db
+src/nanoclaw.db
+*.db-shm
+*.db-wal
+.code_index_cache.db
+.code_index_cache.db-shm
+.code_index_cache.db-wal
 
 # Groups - only track base structure and specific CLAUDE.md files
 groups/*
@@ -34,6 +42,9 @@ groups/global/*
 
 # Skills system (local per-installation state)
 .nanoclaw/
+container/skills/cold-water/
+container/skills/plain-language/
+container/skills/review-all/
 
 agents-sdk-docs
 .worktrees/
