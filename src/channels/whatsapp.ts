@@ -362,6 +362,16 @@ registerChannelAdapter('whatsapp', {
       return jid;
     }
 
+    // Group metadata for Baileys' OUTBOUND send path (cachedGroupMetadata).
+    //
+    // Return the RAW metadata with NATIVE participant addressing. Do NOT translate
+    // participant LIDs → phone JIDs here: Baileys uses this list to build the
+    // group sender-key envelope, and for a LID-addressed group it must address
+    // every participant by LID. Translating some participants to phone produced a
+    // mixed phone/LID envelope that WhatsApp rejects with ack error 421 (messages
+    // silently never delivered). Inbound LID→phone translation for the router is
+    // done per-message via translateJid (remoteJidAlt / participantAlt), so the
+    // agent still sees phone JIDs — that path is unaffected.
     async function getNormalizedGroupMetadata(jid: string): Promise<GroupMetadata | undefined> {
       if (!jid.endsWith('@g.us')) return undefined;
 
@@ -369,18 +379,11 @@ registerChannelAdapter('whatsapp', {
       if (cached && cached.expiresAt > Date.now()) return cached.metadata;
 
       const metadata = await sock.groupMetadata(jid);
-      const participants = await Promise.all(
-        metadata.participants.map(async (p) => ({
-          ...p,
-          id: await translateJid(p.id),
-        })),
-      );
-      const normalized = { ...metadata, participants };
       groupMetadataCache.set(jid, {
-        metadata: normalized,
+        metadata,
         expiresAt: Date.now() + GROUP_METADATA_CACHE_TTL_MS,
       });
-      return normalized;
+      return metadata;
     }
 
     async function syncGroupMetadata(force = false): Promise<void> {
