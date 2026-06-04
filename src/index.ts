@@ -1821,23 +1821,6 @@ async function main(): Promise<void> {
         trimmed = trimmed.replace(triggerPattern, '').trim();
       }
 
-      // sender allowlist 的 drop 模式必须早于命令分发和自动注册，避免未授权发送人改配置或污染上下文
-      if (!msg.is_from_me && !msg.is_bot_message) {
-        const cfg = loadSenderAllowlist();
-        if (
-          shouldDropMessage(chatJid, cfg) &&
-          !isSenderAllowed(chatJid, msg.sender, cfg)
-        ) {
-          if (cfg.logDenied) {
-            logger.debug(
-              { chatJid, sender: msg.sender },
-              'sender-allowlist: dropping message (drop mode)',
-            );
-          }
-          return;
-        }
-      }
-
       // Command Registry dispatch（已迁移的命令）
       if (group) {
         const handled = await dispatch(trimmed, {
@@ -1868,6 +1851,23 @@ async function main(): Promise<void> {
       // 自动注册未注册的群聊
       if (!registeredGroups[chatJid]) {
         autoRegisterGroup(chatJid);
+      }
+
+      // Sender allowlist drop mode: discard messages from denied senders before storing
+      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
+        const cfg = loadSenderAllowlist();
+        if (
+          shouldDropMessage(chatJid, cfg) &&
+          !isSenderAllowed(chatJid, msg.sender, cfg)
+        ) {
+          if (cfg.logDenied) {
+            logger.debug(
+              { chatJid, sender: msg.sender },
+              'sender-allowlist: dropping message (drop mode)',
+            );
+          }
+          return;
+        }
       }
       storeMessage(msg);
     },

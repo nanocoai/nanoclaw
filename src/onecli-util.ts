@@ -14,13 +14,3 @@ export function parseOneCLIList<T = unknown>(raw: string): T[] {
   }
   return [];
 }
-
-export function isAnthropicSecret(secret: { type?: string }): boolean {
-  return secret.type === 'anthropic' || secret.type == null;
-}
-
-export function filterAnthropicSecrets<T extends { type?: string }>(
-  secrets: T[],
-): T[] {
-  return secrets.filter(isAnthropicSecret);
-}

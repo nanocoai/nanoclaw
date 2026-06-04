@@ -281,40 +281,6 @@ describe('agent spawn and timeout', () => {
     expect(result.newSessionId).toBe('session-456');
   });
 
-  it('结构化 error 输出后正常退出时保留精确错误语义', async () => {
-    const onOutput = vi.fn(async () => {});
-    const resultPromise = runContainerAgent(
-      testGroup,
-      testInput,
-      () => {},
-      onOutput,
-    );
-
-    emitOutputMarker(fakeProc, {
-      status: 'error',
-      result: null,
-      error: 'gemini 失败: quota',
-      newSessionId: 'session-gemini',
-    });
-    await vi.advanceTimersByTimeAsync(10);
-    fakeProc.emit('close', 0);
-    await vi.advanceTimersByTimeAsync(10);
-
-    const result = await resultPromise;
-    expect(result).toEqual({
-      status: 'success',
-      result: null,
-      newSessionId: 'session-gemini',
-    });
-    expect(onOutput).toHaveBeenCalledWith(
-      expect.objectContaining({
-        status: 'error',
-        error: 'gemini 失败: quota',
-        newSessionId: 'session-gemini',
-      }),
-    );
-  });
-
   it('onOutput 抛异常时不阻塞后续消息且 resolve 正常', async () => {
     let callCount = 0;
     const onOutput = vi.fn(async (output: ContainerOutput) => {

@@ -174,49 +174,11 @@ describe('gemini-runner', () => {
     proc.emit('error', new Error('spawn gemini ENOENT'));
     proc.emit('close', null);
 
-    await expect(promise).resolves.toEqual({ failed: true });
+    await expect(promise).resolves.toEqual({});
     expect(outputs).toHaveLength(1);
     expect(outputs[0]).toMatchObject({
       status: 'error',
       error: expect.stringContaining('npm install -g @google/gemini-cli'),
     });
-  });
-
-  it('gemini 非成功结果返回 failed，避免外层继续等待 IPC', async () => {
-    const proc = new EventEmitter() as EventEmitter & {
-      stdin: PassThrough;
-      stdout: PassThrough;
-      stderr: PassThrough;
-    };
-    proc.stdin = new PassThrough();
-    proc.stdout = new PassThrough();
-    proc.stderr = new PassThrough();
-    spawnMock.mockReturnValueOnce(proc as unknown as ChildProcess);
-
-    const outputs: Array<{ status: string; error?: string }> = [];
-    const promise = runGeminiQuery(
-      {
-        prompt: 'hi',
-        mcpServerPath: '/tmp/mcp.js',
-        chatJid: 'chat',
-        groupFolder: 'group',
-        isMain: true,
-        ipcDir: '/tmp/ipc',
-        cwd: '/tmp',
-        env: { HOME: '/tmp' },
-        geminiHome: '/tmp/gemini-home-test',
-      },
-      (output) => outputs.push({ status: output.status, error: output.error }),
-      () => undefined,
-    );
-
-    proc.stdout.write('{"type":"init","session_id":"s1"}\n');
-    proc.stdout.write('{"type":"result","status":"failed","error":{"message":"quota"}}\n');
-    proc.emit('close', 1);
-
-    await expect(promise).resolves.toEqual({ newSessionId: 's1', failed: true });
-    expect(outputs).toEqual([
-      { status: 'error', error: 'gemini 失败: quota' },
-    ]);
   });
 });

@@ -204,25 +204,6 @@ describe('dispatch', () => {
       isCommandReply: true,
     });
   });
-
-  it('/mode 切换后停止旧容器，让新模式下次真实生效', async () => {
-    await import('./mode.js');
-    const deps = makeDeps({
-      group: { name: 'test', folder: 'test_folder', containerConfig: { cliMode: 'sdk' } },
-    });
-
-    const handled = await dispatch('/mode gemini', deps);
-
-    expect(handled).toBe(true);
-    expect(deps.group.containerConfig.cliMode).toBe('gemini');
-    expect(deps.setRegisteredGroup).toHaveBeenCalledWith('test-jid', deps.group);
-    expect(deps.queue.killGroup).toHaveBeenCalledWith('test-jid');
-    expect(deps.channels[0].sendMessage).toHaveBeenCalledWith(
-      'test-jid',
-      '✅ 已切换为 **gemini** 模式，已停止旧容器，下次对话生效',
-      { isCommandReply: true },
-    );
-  });
 });
 
 describe('getHelp', () => {

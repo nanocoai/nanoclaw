@@ -259,35 +259,6 @@ describe('rotateAccount', () => {
     expect(getRotateIndex('test_group')).toBe(0);
   });
 
-  it('轮换兼容旧版无 type 账号，并排除 openai 账号', () => {
-    setRotateEnabled(true);
-    setRotateIndex(0, 'test_group');
-
-    const secrets = [
-      { id: 'sec-openai', name: 'codex-tian', type: 'openai' },
-      { id: 'sec-1', name: 'legacy-a' },
-      { id: 'sec-2', name: 'legacy-b' },
-      { id: 'sec-3', name: 'anthropic-c', type: 'anthropic' },
-    ];
-    const agents = [
-      { id: 'agent-1', identifier: 'test-agent', isDefault: false },
-    ];
-
-    mockExecSync
-      .mockReturnValueOnce(JSON.stringify(secrets))
-      .mockReturnValueOnce(JSON.stringify(agents))
-      .mockReturnValueOnce('');
-
-    const result = rotateAccount('test-agent', 'test_group');
-    expect(result).toEqual({
-      success: true,
-      newSecretName: 'legacy-b',
-      oldSecretName: 'legacy-a',
-    });
-    expect(String(mockExecSync.mock.calls[2][0])).toContain('--secret-ids sec-2');
-    expect(getRotateIndex('test_group')).toBe(1);
-  });
-
   it('只有一个 secret 时返回 null', () => {
     setRotateEnabled(true);
 
@@ -488,17 +459,6 @@ describe('getSecretCount', () => {
         { id: 'sec-1', name: 'codex-tian', type: 'openai' },
         { id: 'sec-2', name: 'alex', type: 'anthropic' },
         { id: 'sec-3', name: 'tian', type: 'anthropic' },
-      ]),
-    );
-    expect(getSecretCount()).toBe(2);
-  });
-
-  it('兼容旧版 onecli 无 type 字段的 Anthropic 账号', () => {
-    mockExecSync.mockReturnValueOnce(
-      JSON.stringify([
-        { id: 'sec-1', name: 'legacy-a' },
-        { id: 'sec-2', name: 'legacy-b' },
-        { id: 'sec-3', name: 'codex-tian', type: 'openai' },
       ]),
     );
     expect(getSecretCount()).toBe(2);

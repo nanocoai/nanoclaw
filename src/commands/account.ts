@@ -2,7 +2,7 @@ import { execSync } from 'child_process';
 import { logger } from '../logger.js';
 import { getRotateEnabled, setRotateEnabled, setLastRotateAt, setRotateIndex } from '../db.js';
 import { registerCommand } from './registry.js';
-import { filterAnthropicSecrets, parseOneCLIList } from '../onecli-util.js';
+import { parseOneCLIList } from '../onecli-util.js';
 
 // /account — 列出/切换 Anthropic 账号
 registerCommand({
@@ -37,7 +37,7 @@ registerCommand({
 
     if (!args) {
       // 列出所有 secrets
-      let secrets: Array<{ id: string; name: string; type?: string }>;
+      let secrets: Array<{ id: string; name: string; type: string }>;
       let agents: Array<{
         id: string;
         name: string;
@@ -46,13 +46,11 @@ registerCommand({
         isDefault?: boolean;
       }>;
       try {
-        secrets = filterAnthropicSecrets(
-          parseOneCLIList<{ id: string; name: string; type?: string }>(
-            execSync('onecli secrets list', {
-              encoding: 'utf-8',
-              timeout: 5000,
-            }),
-          ),
+        secrets = parseOneCLIList<{ id: string; name: string; type: string }>(
+          execSync('onecli secrets list', {
+            encoding: 'utf-8',
+            timeout: 5000,
+          }),
         );
         agents = parseOneCLIList<{
           id: string;
@@ -98,7 +96,7 @@ registerCommand({
       const autoStatus = getRotateEnabled() ? '开启' : '关闭';
       const lines = secrets.map((s) => {
         const active = assignedSecretIds.includes(s.id) ? ' ← 当前' : '';
-        return `• ${s.name} (${s.type ?? 'legacy'})${active}`;
+        return `• ${s.name} (${s.type})${active}`;
       });
       const reply =
         lines.length > 0
@@ -107,15 +105,13 @@ registerCommand({
       await channel.sendMessage(chatJid, reply);
     } else {
       // 切换到指定账号
-      let secrets: Array<{ id: string; name: string; type?: string }>;
+      let secrets: Array<{ id: string; name: string }>;
       try {
-        secrets = filterAnthropicSecrets(
-          parseOneCLIList<{ id: string; name: string; type?: string }>(
-            execSync('onecli secrets list', {
-              encoding: 'utf-8',
-              timeout: 5000,
-            }),
-          ),
+        secrets = parseOneCLIList<{ id: string; name: string }>(
+          execSync('onecli secrets list', {
+            encoding: 'utf-8',
+            timeout: 5000,
+          }),
         );
       } catch (err) {
         logger.error({ err }, '/account: onecli 命令失败');
