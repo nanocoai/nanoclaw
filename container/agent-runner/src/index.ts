@@ -76,6 +76,8 @@ interface ContainerOutput {
     /** 各模型的实际 context window 大小（tokens），key 为模型名 */
     modelContextWindows?: Record<string, number>;
     model?: string;
+    /** 最后一轮 API 调用的实际 context 大小 */
+    lastTurnContext?: number;
   };
 }
 

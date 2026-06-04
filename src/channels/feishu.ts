@@ -310,7 +310,10 @@ function appendUsageFooter(
     usage.inputTokens +
       usage.cacheReadInputTokens +
       usage.cacheCreationInputTokens;
-  const ctxPct = Math.round((totalContextTokens / maxContextTokens) * 100);
+  const ctxPct = Math.min(
+    100,
+    Math.max(0, Math.round((totalContextTokens / maxContextTokens) * 100)),
+  );
   const ctxBar = ctxPct >= 80 ? '🔴' : ctxPct >= 50 ? '🟡' : '🟢';
   const maxK =
     maxContextTokens >= 1_000_000

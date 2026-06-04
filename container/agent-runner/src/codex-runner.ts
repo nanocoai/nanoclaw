@@ -202,7 +202,7 @@ export function extractCodexError(event: CodexEvent): string | undefined {
 /** 映射 codex usage → ContainerOutput.usage（modelInfo 来自 rollout，--json 流不暴露 model） */
 export function mapCodexUsage(
   usage: CodexEvent['usage'],
-  modelInfo?: { model?: string; modelContextWindow?: number },
+  modelInfo?: { model?: string; modelContextWindow?: number; lastTurnContext?: number },
 ): ContainerOutput['usage'] | undefined {
   if (!usage) return undefined;
   const result: ContainerOutput['usage'] = {
@@ -213,6 +213,9 @@ export function mapCodexUsage(
     numTurns: 1,
     durationMs: 0,
     totalCostUsd: 0,
+    lastTurnContext:
+      modelInfo?.lastTurnContext ??
+      (usage.input_tokens ?? 0) + (usage.cached_input_tokens ?? 0),
   };
   if (modelInfo?.model) {
     result.model = modelInfo.model;
@@ -235,7 +238,7 @@ export function mapCodexUsage(
 export function readCodexModelInfo(
   codexHome: string,
   threadId: string,
-): { model?: string; modelContextWindow?: number } {
+): { model?: string; modelContextWindow?: number; lastTurnContext?: number } {
   try {
     const sessionsDir = path.join(codexHome, 'sessions');
     if (!fs.existsSync(sessionsDir)) return {};
@@ -244,12 +247,20 @@ export function readCodexModelInfo(
     const lines = fs.readFileSync(rollout, 'utf-8').split('\n');
     // model 和 ctx 分散在不同记录：model 在 turn_context.payload.model，
     // ctx 在 event_msg(task_started).payload.model_context_window。倒序各取最新一条。
+    // usage 事件里的 total_token_usage 是整条线程累计值，footer 要用 last_token_usage。
     let model: string | undefined;
     let modelContextWindow: number | undefined;
+    let lastTurnContext: number | undefined;
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i].trim();
       if (!line) continue;
-      let obj: { payload?: { model?: unknown; model_context_window?: unknown } };
+      let obj: {
+        payload?: {
+          model?: unknown;
+          model_context_window?: unknown;
+          info?: { last_token_usage?: { input_tokens?: unknown } };
+        };
+      };
       try {
         obj = JSON.parse(line);
       } catch {
@@ -266,9 +277,17 @@ export function readCodexModelInfo(
       ) {
         modelContextWindow = p.model_context_window;
       }
-      if (model !== undefined && modelContextWindow !== undefined) break;
+      const maybeLastInput = p.info?.last_token_usage?.input_tokens;
+      if (lastTurnContext === undefined && typeof maybeLastInput === 'number') {
+        lastTurnContext = maybeLastInput;
+      }
+      if (
+        model !== undefined &&
+        modelContextWindow !== undefined &&
+        lastTurnContext !== undefined
+      ) break;
     }
-    return { model, modelContextWindow };
+    return { model, modelContextWindow, lastTurnContext };
   } catch {
     return {};
   }

@@ -54,6 +54,7 @@ export interface ContainerOutput {
     totalCostUsd: number;
     modelContextWindows?: Record<string, number>;
     model?: string;
+    lastTurnContext?: number;
   };
 }
 
