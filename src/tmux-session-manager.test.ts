@@ -7,6 +7,7 @@ import {
   escapeTmuxInput,
   buildInteractiveCliArgs,
   buildTmuxCommand,
+  analyzeTmuxPane,
   shellQuote,
   SEND_KEYS_MAX_BYTES,
 } from '../container/agent-runner/src/tmux-session-manager.js';
@@ -128,6 +129,31 @@ describe('buildInteractiveCliArgs', () => {
       dangerouslySkipPermissions: false,
     });
     expect(args).not.toContain('--dangerously-skip-permissions');
+  });
+});
+
+describe('analyzeTmuxPane', () => {
+  it('识别正常就绪提示', () => {
+    const pane = 'Claude Code v2.1.162\n❯\n⏵⏵ bypass permissions on · /effort';
+    expect(analyzeTmuxPane(pane).state).toBe('ready');
+  });
+
+  it('识别 Resume session 搜索页为阻塞坏态', () => {
+    const pane = [
+      'Resume session',
+      '⌕ new-fs:oc_df0d2dcb8747d8bcc2047c60ddcc7120-1779164795213',
+      'No sessions match "new-fs:oc_df0d2dcb8747d8bcc2047c60ddcc7120-1779164795213".',
+      'Type to Search · Enter to select · Esc to clear',
+    ].join('\n');
+    const result = analyzeTmuxPane(pane);
+    expect(result.state).toBe('blocked-resume-search');
+    expect(result.reason).toContain('Resume session');
+  });
+
+  it('识别可自动确认的欢迎页', () => {
+    const result = analyzeTmuxPane('Welcome\nPress Enter to continue');
+    expect(result.state).toBe('recoverable-dialog');
+    expect(result.action).toBe('enter');
   });
 });
 

@@ -128,6 +128,7 @@ export interface TmuxSessionConfig {
   cwd: string;
   env: Record<string, string | undefined>;
   cliArgs: string[];
+  routeToken: string;
   log: (message: string) => void;
 }
 
@@ -135,6 +136,111 @@ export interface TmuxSession {
   name: string;
   chatJid: string;
   createdAt: number;
+  routeToken: string;
+}
+
+export type TmuxPaneState =
+  | 'ready'
+  | 'recoverable-dialog'
+  | 'blocked-resume-search'
+  | 'auth-error'
+  | 'busy'
+  | 'unknown';
+
+export interface TmuxPaneAnalysis {
+  state: TmuxPaneState;
+  action?: 'enter' | 'select-and-enter';
+  keys?: string[];
+  reason?: string;
+}
+
+export class TmuxReadyError extends Error {
+  constructor(
+    message: string,
+    public readonly state: TmuxPaneState,
+    public readonly paneText: string,
+  ) {
+    super(message);
+    this.name = 'TmuxReadyError';
+  }
+}
+
+export function analyzeTmuxPane(paneText: string): TmuxPaneAnalysis {
+  const selectAndConfirmPatterns: { match: string; keys: string[] }[] = [
+    { match: 'Is this a project', keys: [] },
+    { match: 'No, exit', keys: ['Down'] },
+    { match: 'Do you want to use this API key', keys: ['Up'] },
+  ];
+
+  const autoConfirmPatterns = [
+    'Choose the text style',
+    'Let\'s get started',
+    'trust this folder',
+    'Press Enter to continue',
+    'Security notes',
+    'Enter to confirm',
+    'Syntax theme:',
+  ];
+
+  const readyPatterns = [
+    'Try "',
+    '/effort',
+  ];
+
+  const blockedResumePatterns = [
+    'Resume session',
+    'No sessions match',
+    'Type to Search',
+  ];
+
+  const authErrorPatterns = [
+    'Not logged in',
+    'Invalid API key',
+    'Authentication failed',
+    'OAuth token',
+  ];
+
+  if (readyPatterns.some((p) => paneText.includes(p))) {
+    return { state: 'ready' };
+  }
+
+  if (blockedResumePatterns.some((p) => paneText.includes(p))) {
+    return {
+      state: 'blocked-resume-search',
+      reason: 'Claude CLI 停在 Resume session 搜索页',
+    };
+  }
+
+  const selectMatch = selectAndConfirmPatterns.find((p) => paneText.includes(p.match));
+  if (selectMatch) {
+    return {
+      state: 'recoverable-dialog',
+      action: 'select-and-enter',
+      keys: selectMatch.keys,
+      reason: selectMatch.match,
+    };
+  }
+
+  if (autoConfirmPatterns.some((p) => paneText.includes(p))) {
+    return {
+      state: 'recoverable-dialog',
+      action: 'enter',
+      reason: 'auto-confirm dialog',
+    };
+  }
+
+  if (authErrorPatterns.some((p) => paneText.includes(p))) {
+    return {
+      state: 'auth-error',
+      reason: 'Claude CLI 鉴权失败',
+    };
+  }
+
+  if (paneText.includes('Thinking') || paneText.includes('⏺') || paneText.includes('✻')) {
+    return { state: 'busy' };
+  }
+
+  return { state: 'unknown' };
 }
 
 export class TmuxSessionManager {
@@ -155,7 +261,7 @@ export class TmuxSessionManager {
     if (existing) {
       const alive = await this.isAlive(existing.name);
       if (alive) {
-        this.log(`[tmux] reusing session ${existing.name}`);
+        this.log(`[tmux] reusing session ${existing.name} (routeToken: ${existing.routeToken.slice(0, 8)}...)`);
         return existing;
       }
       this.sessions.delete(config.chatJid);
@@ -204,6 +310,7 @@ export class TmuxSessionManager {
       name: sessionName,
       chatJid: config.chatJid,
       createdAt: Date.now(),
+      routeToken: config.routeToken,
     };
     this.sessions.set(config.chatJid, session);
 
@@ -339,34 +446,7 @@ export class TmuxSessionManager {
     const startTime = Date.now();
     const pollIntervalMs = 1000;
 
-    // 需要先用方向键选择再 Enter 确认的对话框
-    // keys: 在按 Enter 之前发送的 tmux 按键序列
-    const selectAndConfirmPatterns: { match: string; keys: string[] }[] = [
-      // 注意：顺序决定优先级（Array.find 取第一个命中）。
-      // Workspace trust 对话框里 "No, exit" 也可见（它是选项 2），如果 "No, exit" 排在前面
-      // 会被误判为 Bypass Permissions 对话框然后发 Down+Enter 选中 "No, exit" 退出 CLI。
-      // 必须把更具体的模式排在前面。
-      { match: 'Is this a project', keys: [] },            // Workspace trust：默认 "Yes"，直接 Enter
-      { match: 'No, exit', keys: ['Down'] },              // Bypass Permissions：默认 "No, exit"，Down 到 "Yes, I accept"
-      { match: 'Do you want to use this API key', keys: ['Up'] }, // Custom API key：默认 "No"，Up 到 "Yes"
-    ];
-
-    // 需要直接按 Enter 通过的对话框模式
-    const autoConfirmPatterns = [
-      'Choose the text style',       // 主题选择
-      'Let\'s get started',          // 欢迎页
-      'trust this folder',           // workspace trust
-      'Press Enter to continue',     // 安全提示
-      'Security notes',              // 安全说明
-      'Enter to confirm',            // 通用确认
-      'Syntax theme:',               // 代码主题预览
-    ];
-
-    // CLI 就绪标志
-    const readyPatterns = [
-      'Try "',                       // 提示文字 'Try "fix typecheck errors"'
-      '/effort',                     // effort 指示器
-    ];
+    let lastPaneText = '';
 
     while (Date.now() - startTime < timeoutMs) {
       await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
@@ -380,7 +460,7 @@ export class TmuxSessionManager {
         const alive = await this.isAlive(sessionName);
         if (!alive) {
           this.log(`[tmux] session ${sessionName} is dead, aborting waitForReady`);
-          return;
+          throw new TmuxReadyError('tmux session 已退出', 'unknown', '');
         }
         continue;
       }
@@ -388,35 +468,40 @@ export class TmuxSessionManager {
       const lines = pane.split('\n');
       const lastNonEmpty = lines.filter(l => l.trim().length > 0).slice(-8);
       const paneText = lastNonEmpty.join('\n');
+      lastPaneText = paneText;
       // 调试：打印 pane 内容
       const elapsed = Math.round((Date.now() - startTime) / 1000);
       this.log(`[tmux] pane@${elapsed}s: ${paneText.replace(/\n/g, ' | ')}`);
 
-      // 先检查是否已经就绪
-      if (readyPatterns.some(p => paneText.includes(p))) {
+      const analysis = analyzeTmuxPane(paneText);
+
+      if (analysis.state === 'ready') {
         this.log(`[tmux] CLI ready in session ${sessionName}`);
         return;
       }
 
-      // 检查是否有需要选择+确认的对话框
-      const selectMatch = selectAndConfirmPatterns.find(p => paneText.includes(p.match));
-      if (selectMatch) {
-        this.log(`[tmux] navigating for "${selectMatch.match}" in ${sessionName}: keys=[${selectMatch.keys.join(',')}]`);
-        // 发送方向键序列
-        for (const key of selectMatch.keys) {
+      if (analysis.state === 'blocked-resume-search' || analysis.state === 'auth-error') {
+        throw new TmuxReadyError(
+          `Claude CLI 未就绪：${analysis.reason || analysis.state}`,
+          analysis.state,
+          paneText,
+        );
+      }
+
+      if (analysis.state === 'recoverable-dialog' && analysis.action === 'select-and-enter') {
+        this.log(`[tmux] navigating for "${analysis.reason}" in ${sessionName}: keys=[${(analysis.keys || []).join(',')}]`);
+        for (const key of analysis.keys || []) {
           const keyArgs = buildTmuxCommand('send-keys', sessionName, [key]);
           await this.exec(keyArgs[0], keyArgs.slice(1));
           await new Promise(resolve => setTimeout(resolve, 200));
         }
-        // 按 Enter 确认
         const enterArgs = buildTmuxCommand('send-keys', sessionName, ['Enter']);
         await this.exec(enterArgs[0], enterArgs.slice(1));
         await new Promise(resolve => setTimeout(resolve, 2000));
         continue;
       }
 
-      // 检查是否有直接按 Enter 的对话框
-      if (autoConfirmPatterns.some(p => paneText.includes(p))) {
+      if (analysis.state === 'recoverable-dialog' && analysis.action === 'enter') {
         this.log(`[tmux] auto-confirming dialog in session ${sessionName}`);
         const enterArgs = buildTmuxCommand('send-keys', sessionName, ['Enter']);
         await this.exec(enterArgs[0], enterArgs.slice(1));
@@ -425,7 +510,11 @@ export class TmuxSessionManager {
       }
     }
 
-    this.log(`[tmux] WARNING: CLI readiness detection timed out after ${timeoutMs}ms, proceeding anyway`);
+    throw new TmuxReadyError(
+      `Claude CLI readiness timeout after ${timeoutMs}ms`,
+      'unknown',
+      lastPaneText,
+    );
   }
 
   private async exec(cmd: string, args: string[]): Promise<{ stdout: string; stderr: string }> {

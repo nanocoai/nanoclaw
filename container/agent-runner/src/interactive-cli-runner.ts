@@ -14,6 +14,8 @@ import {
 } from './tap-proxy.js';
 import {
   TmuxSessionManager,
+  TmuxReadyError,
+  analyzeTmuxPane,
   buildInteractiveCliArgs,
 } from './tmux-session-manager.js';
 import {
@@ -57,6 +59,46 @@ export interface InteractiveCliConfig {
 }
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 分钟（Opus 4.8 extended thinking 可达 10+ 分钟）
+const UUID_SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isRealClaudeSessionId(sessionId?: string): boolean {
+  return !!sessionId && UUID_SESSION_ID_RE.test(sessionId);
+}
+
+function encodeClaudeProjectDir(cwd: string): string {
+  return cwd.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+export function findLatestClaudeSessionId(options: {
+  claudeConfigDir?: string;
+  cwd: string;
+  sinceMs: number;
+}): string | undefined {
+  if (!options.claudeConfigDir) return undefined;
+
+  const projectDir = path.join(
+    options.claudeConfigDir,
+    'projects',
+    encodeClaudeProjectDir(options.cwd),
+  );
+  if (!fs.existsSync(projectDir)) return undefined;
+
+  let latest: { sessionId: string; mtimeMs: number } | undefined;
+  for (const entry of fs.readdirSync(projectDir)) {
+    if (!entry.endsWith('.jsonl')) continue;
+    const sessionId = entry.slice(0, -'.jsonl'.length);
+    if (!isRealClaudeSessionId(sessionId)) continue;
+
+    const fullPath = path.join(projectDir, entry);
+    const stat = fs.statSync(fullPath);
+    if (stat.mtimeMs + 1000 < options.sinceMs) continue;
+    if (!latest || stat.mtimeMs > latest.mtimeMs) {
+      latest = { sessionId, mtimeMs: stat.mtimeMs };
+    }
+  }
+
+  return latest?.sessionId;
+}
 
 // ---- 全局单例 ----
 
@@ -124,8 +166,10 @@ export async function runInteractiveQuery(
   // 初始化 tmux 管理器
   const tmux = getOrCreateTmuxManager(log);
 
-  // 生成 session token（用于 Tap Proxy 路由）
-  const sessionToken = config.sessionId || `new-${config.chatJid}-${Date.now()}`;
+  // Tap Proxy 路由 token 用来把 tmux 内 CLI 请求分发到本轮订阅。
+  // 它不是 Claude CLI 的真实 session id；首次启动时会是 new-* 临时值。
+  const desiredRouteToken = config.sessionId || `new-${config.chatJid}-${Date.now()}`;
+  const queryStartMs = Date.now();
 
   // 写入临时 MCP 配置文件
   const mcpConfig = buildMcpConfig(
@@ -141,9 +185,16 @@ export async function runInteractiveQuery(
   );
   fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig));
 
-  // 构建 CLI 参数（交互模式不传 --resume，tmux session 本身就是会话持久化）
+  // 构建 CLI 参数
+  // 传 --resume 使重启后新建的 tmux session 能恢复 Claude CLI 上下文
+  // （旧 tmux session 因 env 过期被 kill，但 CLI 对话历史通过 sessionId 持久化在磁盘）
+  // 注意：sessionToken 可能是 "new-<chatJid>-<ts>" 格式的临时 token（首次会话时生成），
+  // 这不是真正的 Claude session ID，传给 --resume 会让 CLI 进入搜索界面卡死。
+  // 只有 UUID 格式的才是真正的 Claude session ID，才能用于 --resume。
+  const isRealSessionId = isRealClaudeSessionId(config.sessionId);
   const cliArgs = buildInteractiveCliArgs({
     model: config.model,
+    sessionId: isRealSessionId ? config.sessionId : undefined,
     mcpConfigPath,
     dangerouslySkipPermissions: config.dangerouslySkipPermissions ?? true,
     additionalDirectories: config.additionalDirectories,
@@ -151,7 +202,7 @@ export async function runInteractiveQuery(
   });
 
   // 构建环境变量（指向 Tap Proxy 而非直接 OneCLI）
-  const tapProxyUrl = proxy.getProxyUrl(sessionToken);
+  const tapProxyUrl = proxy.getProxyUrl(desiredRouteToken);
   const tapCaCert = proxy.getCaCertificate();
 
   // 合并 CA 证书（Tap Proxy CA + OneCLI CA）
@@ -208,6 +259,7 @@ export async function runInteractiveQuery(
       cwd: config.cwd,
       env: cliEnv,
       cliArgs,
+      routeToken: desiredRouteToken,
       log,
     });
   } catch (err) {
@@ -220,8 +272,20 @@ export async function runInteractiveQuery(
   const isNewSession = (Date.now() - tmuxSession.createdAt) < 5000;
   if (isNewSession) {
     log('[interactive] waiting for CLI to become ready...');
-    await tmux.waitForReady(tmuxSession.name, 60_000);
+    try {
+      await tmux.waitForReady(tmuxSession.name, 60_000);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`[interactive] CLI readiness failed: ${message}`);
+      if (err instanceof TmuxReadyError) {
+        log(`[interactive] readiness pane snapshot: ${err.paneText.replace(/\n/g, ' | ').slice(0, 500)}`);
+      }
+      await tmux.destroy(tmuxSession.name, config.chatJid);
+      throw err;
+    }
   }
+
+  const sessionToken = tmuxSession.routeToken;
 
   // 注册 SSE 订阅
   return new Promise<{ newSessionId?: string; result?: string }>((resolve) => {
@@ -240,12 +304,19 @@ export async function runInteractiveQuery(
       // 注意：combinedCaPath 不删除 — tmux session 持续运行，NODE_EXTRA_CA_CERTS 指向它
     };
 
+    const getDurableSessionId = () =>
+      findLatestClaudeSessionId({
+        claudeConfigDir: config.env.CLAUDE_CONFIG_DIR,
+        cwd: config.cwd,
+        sinceMs: queryStartMs,
+      }) || (isRealClaudeSessionId(config.sessionId) ? config.sessionId : undefined);
+
     const finish = (result?: string) => {
       if (resolved) return;
       resolved = true;
       cleanup();
       resolve({
-        newSessionId: config.sessionId || sessionToken,
+        newSessionId: getDurableSessionId(),
         result,
       });
     };
@@ -267,7 +338,7 @@ export async function runInteractiveQuery(
           status: 'error',
           result: null,
           error: `Response timeout (${Math.round(timeoutMs / 1000)}s inactivity)`,
-          newSessionId: config.sessionId || sessionToken,
+          newSessionId: getDurableSessionId(),
         });
         finish();
       }, timeoutMs);
@@ -444,6 +515,12 @@ export async function runInteractiveQuery(
           numTurns++;
           const durationMs = Date.now() - startTime;
           const output = mapAccumulatorToResult(msgAcc, config.sessionId || sessionToken, numTurns, durationMs);
+          const durableSessionId = getDurableSessionId();
+          if (durableSessionId) {
+            output.newSessionId = durableSessionId;
+          } else {
+            delete output.newSessionId;
+          }
           log(`[interactive] mapAccumulatorToResult: status=${output.status}, resultLen=${output.result?.length ?? 0}, blocks=${msgAcc.blocks.size}, stopReason=${msgAcc.stopReason}, model=${msgAcc.model || 'unknown'}, outputTokens=${msgAcc.usage.outputTokens}`);
           if (!output.result && msgAcc.usage.outputTokens > 0) {
             log(`[interactive] ⚠️ result 为空但有 ${msgAcc.usage.outputTokens} output tokens — SSE 文本可能丢失`);
@@ -565,6 +642,15 @@ export async function checkCliHealth(
   // 2. 检查 window 0 有没有 CLI 进程
   try {
     const pane = await tmux.capturePane(session.name);
+    const paneAnalysis = analyzeTmuxPane(pane);
+    if (paneAnalysis.state === 'blocked-resume-search' || paneAnalysis.state === 'auth-error') {
+      const lastLines = pane.split('\n').filter(l => l.trim()).slice(-5).join(' | ');
+      log(`[health] CLI 异常界面: ${paneAnalysis.reason || paneAnalysis.state}: ${lastLines}`);
+      return {
+        healthy: false,
+        error: `CLI 异常界面: ${paneAnalysis.reason || paneAnalysis.state}`,
+      };
+    }
     // 检测 CLI 是否活着：空闲提示符 / 启动 banner / thinking 状态 / 工具执行
     const hasCliIndicator = pane.includes('❯') || pane.includes('Claude Code') || pane.includes('claude')
       || pane.includes('Thinking') || pane.includes('⏺') || pane.includes('✻');
