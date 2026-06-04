@@ -1688,6 +1688,11 @@ async function main(): Promise<void> {
         if (gmResult.result) {
           gmTranscript.push({ role: 'assistant', content: gmResult.result });
         }
+        if (gmResult.failed) {
+          log('[gemini-mode] Query failed, ending container after structured error output');
+          archiveCliTranscript(gmTranscript, containerInput.assistantName);
+          return;
+        }
 
         if (shouldClose()) {
           log('[gemini-mode] Close sentinel detected, exiting');

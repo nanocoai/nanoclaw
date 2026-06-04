@@ -37,6 +37,7 @@ registerCommand({
     config.cliMode = mode as CliMode;
     ctx.group.containerConfig = config;
     ctx.setRegisteredGroup(ctx.chatJid, ctx.group);
+    ctx.queue.killGroup(ctx.chatJid);
 
     logger.info(
       { group: ctx.group.folder, cliMode: mode },
@@ -44,7 +45,7 @@ registerCommand({
     );
     await ctx.channel.sendMessage(
       ctx.chatJid,
-      `✅ 已切换为 **${mode}** 模式，下次对话生效`,
+      `✅ 已切换为 **${mode}** 模式，已停止旧容器，下次对话生效`,
       { isCommandReply: true },
     );
   },

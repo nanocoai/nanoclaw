@@ -218,7 +218,7 @@ export async function runGeminiQuery(
   config: GeminiRunnerConfig,
   writeOutput: (output: ContainerOutput) => void,
   log: (message: string) => void,
-): Promise<{ newSessionId?: string; result?: string }> {
+): Promise<{ newSessionId?: string; result?: string; failed?: boolean }> {
   const settings = buildGeminiSettings({
     mcpServerPath: config.mcpServerPath,
     chatJid: config.chatJid,
@@ -315,7 +315,7 @@ export async function runGeminiQuery(
 
       log(`[gemini-runner] process exited code=${code}`);
       if (errorAlreadySent) {
-        resolve({ newSessionId, result: lastAssistantMessage || undefined });
+        resolve({ newSessionId, result: lastAssistantMessage || undefined, failed: true });
         return;
       }
       if (!sentSuccess && lastAssistantMessage && !lastErrorMessage) {
@@ -338,6 +338,8 @@ export async function runGeminiQuery(
           newSessionId,
         });
         sentSuccess = true;
+        resolve({ newSessionId, result: lastAssistantMessage || undefined, failed: true });
+        return;
       }
 
       resolve({ newSessionId, result: lastAssistantMessage || undefined });
@@ -352,7 +354,7 @@ export async function runGeminiQuery(
       });
       errorAlreadySent = true;
       sentSuccess = true;
-      resolve({ newSessionId, result: lastAssistantMessage || undefined });
+      resolve({ newSessionId, result: lastAssistantMessage || undefined, failed: true });
     });
   });
 }
