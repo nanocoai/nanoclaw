@@ -556,7 +556,7 @@ export function createSignalAdapter(config: {
       if (dest === config.account) {
         const text = (syncSent.message ?? '').trim();
         if (!text) return;
-        const platformId = config.account;
+        const platformId = `signal:${config.account}`;
         if (echoCache.isEcho(platformId, text)) return;
         const timestamp = syncSent.timestamp ? new Date(syncSent.timestamp).toISOString() : new Date().toISOString();
 
@@ -606,7 +606,7 @@ export function createSignalAdapter(config: {
     const groupId = dataMessage.groupV2?.id ?? groupInfo?.groupId;
     const isGroup = Boolean(groupId);
 
-    const platformId = isGroup ? `group:${groupId}` : sender;
+    const platformId = isGroup ? `group:${groupId}` : `signal:${sender}`;
 
     if (text && echoCache.isEcho(platformId, text)) {
       log.debug('Signal: skipping echo', { platformId });
@@ -671,6 +671,8 @@ export function createSignalAdapter(config: {
         ...(dataMessage.quote ? quoteToContent(dataMessage.quote) : {}),
       },
       timestamp,
+      isMention: !isGroup,
+      isGroup,
     };
     await setup.onInbound(platformId, null, msg);
 
@@ -721,7 +723,9 @@ export function createSignalAdapter(config: {
         if (platformId.startsWith('group:')) {
           params.groupId = platformId.slice('group:'.length);
         } else {
-          params.recipient = [platformId];
+          // DB stores DM platform IDs with 'signal:' prefix; signal-cli wants the raw UUID/number
+          const recipient = platformId.startsWith('signal:') ? platformId.slice('signal:'.length) : platformId;
+          params.recipient = [recipient];
         }
 
         try {
@@ -772,7 +776,8 @@ export function createSignalAdapter(config: {
       if (platformId.startsWith('group:')) {
         params.groupId = platformId.slice('group:'.length);
       } else {
-        params.recipient = [platformId];
+        const recipient = platformId.startsWith('signal:') ? platformId.slice('signal:'.length) : platformId;
+        params.recipient = [recipient];
       }
       await tcp.rpc('send', params);
       log.info('Signal attachments sent', { platformId, count: files.length, filenames: files.map((f) => f.filename) });
