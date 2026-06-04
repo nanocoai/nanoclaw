@@ -206,7 +206,7 @@ registerCommand({
     { usage: '/usage delete <name>', description: '删除 OAuth 凭证' },
   ],
   handler: async (ctx) => {
-    const { args, chatJid, channel, registeredGroups } = ctx;
+    const { args, chatJid, channel, registeredGroups, group } = ctx;
     // 动态 import 避免循环依赖
     const {
       formatUsage,
@@ -215,6 +215,19 @@ registerCommand({
       getUsageAll,
       getUsageForSecret,
     } = await import('../usage-api.js');
+
+    // codex 模式群:无参数 /usage 走 codex 配额(读最近 rollout 的 rate_limits)。
+    // 带参数(all / <name> / delete)仍走 Claude OAuth 路径,保持原行为。
+    if (!args && group) {
+      const { resolveCliMode } = await import('../container-runner.js');
+      if (resolveCliMode(group.containerConfig) === 'codex') {
+        const { getCodexUsage, formatCodexUsage } = await import(
+          '../codex-usage.js'
+        );
+        await channel.sendMessage(chatJid, formatCodexUsage(getCodexUsage(group)));
+        return;
+      }
+    }
 
     if (args?.startsWith('delete ')) {
       const name = args.slice('delete '.length).trim();

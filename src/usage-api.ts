@@ -344,12 +344,12 @@ export function getCurrentSecretName(
 
 // --- 格式化输出 ---
 
-function progressBar(percent: number): string {
+export function progressBar(percent: number): string {
   const filled = Math.round(percent / 10);
   return '█'.repeat(filled) + '░'.repeat(10 - filled);
 }
 
-function formatResetTime(isoStr: string | null | undefined): string {
+export function formatResetTime(isoStr: string | null | undefined): string {
   if (!isoStr) return '';
   try {
     const resetAt = new Date(isoStr);

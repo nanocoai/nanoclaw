@@ -56,10 +56,28 @@ export interface InteractiveCliConfig {
   credentialProxy?: { url: string; apiKey: string };
   /** 响应超时 ms（默认 10 分钟） */
   timeoutMs?: number;
+  /** 输入已被 Claude CLI 接收时回调，用于 ack IPC inflight 文件 */
+  onInputAccepted?: () => void;
+}
+
+export interface InteractiveQueryResult {
+  newSessionId?: string;
+  result?: string;
+  terminalOutputEmitted?: boolean;
+  inputAccepted?: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 分钟（Opus 4.8 extended thinking 可达 10+ 分钟）
+const PANE_WATCHDOG_INTERVAL_MS = 2_000;
+const PANE_WATCHDOG_GRACE_MS = 5_000;
+const PROMPT_READY_BLOCKED_TURN_MS = 5_000;
+const SSE_QUIET_BLOCKED_TURN_MS = 15_000;
 const UUID_SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const CLI_TOOL_CALL_PARSE_FAILED_PATTERNS = [
+  "The model's tool call could not be parsed",
+  'tool call could not be parsed',
+  'retry also failed',
+];
 
 export function isRealClaudeSessionId(sessionId?: string): boolean {
   return !!sessionId && UUID_SESSION_ID_RE.test(sessionId);
@@ -98,6 +116,77 @@ export function findLatestClaudeSessionId(options: {
   }
 
   return latest?.sessionId;
+}
+
+export interface InteractivePaneCompletion {
+  done: boolean;
+  status?: 'error';
+  error?: string;
+}
+
+export function analyzeInteractivePaneCompletion(paneText: string): InteractivePaneCompletion {
+  const hasToolCallParseFailure = CLI_TOOL_CALL_PARSE_FAILED_PATTERNS.some((pattern) =>
+    paneText.includes(pattern),
+  );
+  if (!hasToolCallParseFailure) {
+    return { done: false };
+  }
+
+  const pane = analyzeTmuxPane(paneText);
+  if (pane.state !== 'ready') {
+    return { done: false };
+  }
+
+  return {
+    done: true,
+    status: 'error',
+    error: "Claude CLI 工具调用解析失败，已回到输入提示；本轮已终止，后续消息可继续处理",
+  };
+}
+
+export interface BlockedTurnReleaseInput {
+  readyStableMs: number;
+  sseQuietMs: number;
+  activeSseStreams: number;
+  currentTurnState: 'idle' | 'busy' | 'degraded' | 'restarting';
+  backlogCount: number;
+  hasPendingOutput: boolean;
+  hasPendingText: boolean;
+}
+
+export function shouldReleaseBlockedTurn(input: BlockedTurnReleaseInput): boolean {
+  return (
+    input.readyStableMs >= PROMPT_READY_BLOCKED_TURN_MS &&
+    input.sseQuietMs >= SSE_QUIET_BLOCKED_TURN_MS &&
+    input.activeSseStreams === 0 &&
+    input.currentTurnState === 'busy' &&
+    input.backlogCount > 0 &&
+    !input.hasPendingOutput &&
+    !input.hasPendingText
+  );
+}
+
+export function countPendingIpcInputs(ipcDir: string): number {
+  const inputDir = path.join(ipcDir, 'input');
+  if (!fs.existsSync(inputDir)) return 0;
+
+  return fs.readdirSync(inputDir).filter((entry) => {
+    if (entry === '_close') return false;
+    if (entry.startsWith('.')) return false;
+    const fullPath = path.join(inputDir, entry);
+    try {
+      return fs.statSync(fullPath).isFile() && entry.endsWith('.json');
+    } catch {
+      return false;
+    }
+  }).length;
+}
+
+export function shouldEmitInteractiveSessionKeepalive(
+  sessionId: string | undefined,
+  result: Pick<InteractiveQueryResult, 'result' | 'terminalOutputEmitted'>,
+): boolean {
+  return !!sessionId && !result.result && !result.terminalOutputEmitted;
 }
 
 // ---- 全局单例 ----
@@ -149,10 +238,7 @@ export async function runInteractiveQuery(
   config: InteractiveCliConfig,
   writeOutput: (output: ContainerOutput) => void,
   log: (message: string) => void,
-): Promise<{
-  newSessionId?: string;
-  result?: string;
-}> {
+): Promise<InteractiveQueryResult> {
   const timeoutMs = config.timeoutMs || DEFAULT_TIMEOUT_MS;
 
   // 初始化 Tap Proxy
@@ -288,17 +374,31 @@ export async function runInteractiveQuery(
   const sessionToken = tmuxSession.routeToken;
 
   // 注册 SSE 订阅
-  return new Promise<{ newSessionId?: string; result?: string }>((resolve) => {
+  return new Promise<InteractiveQueryResult>((resolve) => {
     let acc = createMessageAccumulator();
     let resolved = false;
     let numTurns = 0;
     const startTime = Date.now();
+    let paneWatchdogTimer: NodeJS.Timeout | null = null;
+    let paneWatchdogRunning = false;
+    let lastSseAt = 0;
+    let lastPromptReadyAt = 0;
+    let inputAccepted = false;
+    let inputInjectedToTmux = false;
     // CLI 会先用 haiku 做 context caching（预热缓存），再用目标模型做真正 prompt。
     // 过滤掉 haiku context caching 流的结果，只 emit 真正 prompt 的结果。
 
     const cleanup = () => {
       proxy.unsubscribe(sessionToken);
       clearTimeout(timer);
+      if (paneWatchdogTimer) {
+        clearInterval(paneWatchdogTimer);
+        paneWatchdogTimer = null;
+      }
+      if (pendingFinishTimer) {
+        clearTimeout(pendingFinishTimer);
+        pendingFinishTimer = null;
+      }
       // 清理 MCP 配置（临时文件，每轮请求生成）
       try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
       // 注意：combinedCaPath 不删除 — tmux session 持续运行，NODE_EXTRA_CA_CERTS 指向它
@@ -311,13 +411,22 @@ export async function runInteractiveQuery(
         sinceMs: queryStartMs,
       }) || (isRealClaudeSessionId(config.sessionId) ? config.sessionId : undefined);
 
-    const finish = (result?: string) => {
+    const markInputAccepted = (reason: string) => {
+      if (inputAccepted) return;
+      inputAccepted = true;
+      log(`[interactive] input accepted by Claude CLI (${reason})`);
+      config.onInputAccepted?.();
+    };
+
+    const finish = (result?: string, terminalOutputEmitted = false) => {
       if (resolved) return;
       resolved = true;
       cleanup();
       resolve({
         newSessionId: getDurableSessionId(),
         result,
+        terminalOutputEmitted,
+        inputAccepted,
       });
     };
 
@@ -327,7 +436,7 @@ export async function runInteractiveQuery(
     let timer: NodeJS.Timeout;
     const resetTimeout = () => {
       clearTimeout(timer);
-      timer = setTimeout(() => {
+      timer = setTimeout(async () => {
         if (resolved) return;
         log(`[interactive] response timeout after ${timeoutMs}ms of inactivity (pendingTextBlocks: ${pendingTextBlocks.length})`);
         // 超时前把 buffered 的中间叙述先发出去，避免静默吞没
@@ -340,7 +449,13 @@ export async function runInteractiveQuery(
           error: `Response timeout (${Math.round(timeoutMs / 1000)}s inactivity)`,
           newSessionId: getDurableSessionId(),
         });
-        finish();
+        try {
+          log(`[interactive] destroying tmux session after timeout to prevent stale turn pollution: ${tmuxSession.name}`);
+          await tmux.destroy(tmuxSession.name, config.chatJid);
+        } catch (err) {
+          log(`[interactive] failed to destroy timeout tmux session: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        finish(undefined, true);
       }, timeoutMs);
     };
     resetTimeout();
@@ -369,14 +484,14 @@ export async function runInteractiveQuery(
           usage: pendingOutput.usage,
         };
         writeOutput(notice);
-        finish(notice.result || undefined);
+        finish(notice.result || undefined, true);
         pendingOutput = null;
         pendingResult = undefined;
         return;
       }
       log(`[interactive] flushPending: resultLen=${pendingResult?.length ?? 0}, status=${pendingOutput.status}`);
       writeOutput(pendingOutput);
-      finish(pendingResult);
+      finish(pendingResult, true);
       pendingOutput = null;
       pendingResult = undefined;
     };
@@ -384,6 +499,91 @@ export async function runInteractiveQuery(
     const schedulePendingFlush = () => {
       if (pendingFinishTimer) clearTimeout(pendingFinishTimer);
       pendingFinishTimer = setTimeout(flushPending, FINISH_DEBOUNCE_MS);
+    };
+
+    const startPaneWatchdog = () => {
+      paneWatchdogTimer = setInterval(async () => {
+        if (resolved) return;
+        if (paneWatchdogRunning) return;
+        if (Date.now() - startTime < PANE_WATCHDOG_GRACE_MS) return;
+
+        const hasCurrentTurnActivity =
+          inputInjectedToTmux ||
+          hasReceivedSseData ||
+          activeSseStreams > 0 ||
+          !!pendingOutput ||
+          pendingTextBlocks.length > 0 ||
+          numTurns > 0;
+        if (!hasCurrentTurnActivity) return;
+
+        paneWatchdogRunning = true;
+        let paneText: string;
+        try {
+          paneText = await tmux.capturePane(tmuxSession.name);
+        } catch (err) {
+          log(`[interactive] pane watchdog capture failed: ${err instanceof Error ? err.message : String(err)}`);
+          paneWatchdogRunning = false;
+          return;
+        }
+        paneWatchdogRunning = false;
+        if (resolved) return;
+
+        const completion = analyzeInteractivePaneCompletion(paneText);
+        const pane = analyzeTmuxPane(paneText);
+        const now = Date.now();
+        if (pane.state === 'ready') {
+          if (lastPromptReadyAt === 0) lastPromptReadyAt = now;
+        } else {
+          lastPromptReadyAt = 0;
+          if (pane.state === 'busy') {
+            markInputAccepted('pane busy');
+          }
+        }
+
+        if (!completion.done) {
+          const backlogCount = countPendingIpcInputs(config.ipcDir);
+          const shouldRelease = shouldReleaseBlockedTurn({
+            readyStableMs: lastPromptReadyAt ? now - lastPromptReadyAt : 0,
+            sseQuietMs: lastSseAt ? now - lastSseAt : Number.POSITIVE_INFINITY,
+            activeSseStreams,
+            currentTurnState: hasCurrentTurnActivity ? 'busy' : 'idle',
+            backlogCount,
+            hasPendingOutput: !!pendingOutput,
+            hasPendingText: pendingTextBlocks.length > 0,
+          });
+
+          if (!shouldRelease) return;
+
+          const degradedReason = 'prompt-ready-with-backlog';
+          log(`[interactive] pane watchdog releasing blocked turn: reason=${degradedReason}, backlog=${backlogCount}, readyStableMs=${now - lastPromptReadyAt}, sseQuietMs=${lastSseAt ? now - lastSseAt : -1}`);
+          writeOutput({
+            status: 'error',
+            result: null,
+            error: `Interactive CLI 本轮已降级收口：${degradedReason}`,
+            newSessionId: getDurableSessionId(),
+          });
+          try {
+            log(`[interactive] destroying tmux session after degraded release to prevent stale retry pollution: ${tmuxSession.name}`);
+            await tmux.destroy(tmuxSession.name, config.chatJid);
+          } catch (err) {
+            log(`[interactive] failed to destroy degraded tmux session: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          finish(undefined, true);
+          return;
+        }
+
+        log(`[interactive] pane watchdog detected terminal CLI error: ${completion.error}`);
+        if (pendingTextBlocks.length > 0) {
+          flushPendingTextBlocks('pane watchdog terminal error');
+        }
+        writeOutput({
+          status: completion.status || 'error',
+          result: null,
+          error: completion.error,
+          newSessionId: getDurableSessionId(),
+        });
+        finish(undefined, true);
+      }, PANE_WATCHDOG_INTERVAL_MS);
     };
 
     // ---- 中间叙述 text block 缓冲 ----
@@ -419,7 +619,10 @@ export async function runInteractiveQuery(
 
     const subscription: TapSubscription = {
       onEvent: (event: SseEvent) => {
+        if (resolved) return;
+        markInputAccepted(`sse:${event.type}`);
         hasReceivedSseData = true;
+        lastSseAt = Date.now();
         resetTimeout(); // SSE 数据到达 → 重置超时
 
         // message_start → 为新流创建独立 accumulator
@@ -532,10 +735,12 @@ export async function runInteractiveQuery(
         }
       },
       onError: (err: Error) => {
+        if (resolved) return;
         // SSE 流中断（EPIPE / ECONNRESET / aborted）是常见的瞬态错误。
         // CLI 自带重试机制（"Retrying in 1s · attempt 1/10"），
         // 不应在此时放弃 — 让 CLI 重试，用 timeout 兜底。
         log(`[interactive] SSE error: ${err.message} (hasData: ${hasReceivedSseData}, hasPending: ${!!pendingOutput}, pendingTextBlocks: ${pendingTextBlocks.length})`);
+        lastSseAt = Date.now();
         // 流中断 → 之前缓冲的 text 必然永远收不到后续 tool_use/message_stop 决断，
         // 主动 flush 给用户看（否则中间叙述永久丢失，无任何日志/告警）
         if (pendingTextBlocks.length > 0) {
@@ -545,9 +750,10 @@ export async function runInteractiveQuery(
         hasReceivedSseData = false;
       },
       onEnd: () => {
+        if (resolved) return;
         // 单个 SSE 流结束 — 不直接 finish
         // CLI 可能有多个并发 SSE 流，且可能自动重试
-        if (resolved) return;
+        lastSseAt = Date.now();
         log(`[interactive] SSE stream ended (active: ${activeSseStreams}, hasPending: ${!!pendingOutput}, pendingTextBlocks: ${pendingTextBlocks.length})`);
         // 流结束但还没 message_stop 决断 → 同 onError 处理，flush 防丢失
         // （正常 message_stop 已经清空 pendingTextBlocks，这里只是 belt-and-suspenders）
@@ -556,9 +762,13 @@ export async function runInteractiveQuery(
         }
       },
       onActiveStreamsChange: (count: number) => {
+        if (resolved) return;
         activeSseStreams = count;
         log(`[interactive] active SSE streams: ${count}`);
-        if (count > 0) resetTimeout(); // 新 SSE 流开始 → CLI 还在活跃
+        if (count > 0) {
+          markInputAccepted('active SSE stream');
+          if (!resolved) resetTimeout(); // 新 SSE 流开始 → CLI 还在活跃
+        }
         // 当最后一个流结束（count→0）且有待发结果 → 安排 flush
         // 不立刻 flush，给 CLI 1s 时间开新的重试流
         if (count <= 0 && pendingOutput && !resolved) {
@@ -570,17 +780,23 @@ export async function runInteractiveQuery(
 
     log(`[interactive] subscribing to SSE (session: ${sessionToken.slice(0, 8)}...)`);
     proxy.subscribe(sessionToken, subscription);
+    startPaneWatchdog();
 
     // 注入消息
-    tmux.sendMessage(tmuxSession.name, config.prompt).catch((err) => {
-      log(`[interactive] failed to send message: ${err.message}`);
-      writeOutput({
-        status: 'error',
-        result: null,
-        error: `Failed to send message to tmux: ${err.message}`,
-      });
-      finish();
-    });
+    tmux.sendMessage(tmuxSession.name, config.prompt).then(
+      () => {
+        inputInjectedToTmux = true;
+      },
+      (err) => {
+        log(`[interactive] failed to send message: ${err.message}`);
+        writeOutput({
+          status: 'error',
+          result: null,
+          error: `Failed to send message to tmux: ${err.message}`,
+        });
+        finish(undefined, true);
+      },
+    );
   });
 }
 
