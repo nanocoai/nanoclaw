@@ -1,7 +1,7 @@
 # chat-precise-query Specification
 
 ## Purpose
-TBD - created by archiving change chat-locate-by-id-range. Update Purpose after archive.
+为聊天历史提供精确回看能力：调用方可以按消息 ID 定位锚点并展开上下文，也可以按会话内位置区间分页读取最近或更早的消息，避免依赖不稳定的时间戳搜索。
 ## Requirements
 ### Requirement: 按消息 ID 定位并展开上下文
 
@@ -76,4 +76,3 @@ TBD - created by archiving change chat-locate-by-id-range. Update Purpose after 
 
 - **WHEN** 会话中夹杂若干空内容消息，调用方传 offset=0、limit=5
 - **THEN** 返回的 5 条均为非空消息，空内容消息既不占 offset 计数也不出现在结果中
-

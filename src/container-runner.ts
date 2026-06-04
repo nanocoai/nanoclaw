@@ -19,7 +19,7 @@ import { logger } from './logger.js';
 import { readEnvFile } from './env.js';
 import { OneCLI } from '@onecli-sh/sdk';
 import { CliMode, ContainerConfig, RegisteredGroup } from './types.js';
-import { parseOneCLIList } from './onecli-util.js';
+import { filterAnthropicSecrets, parseOneCLIList } from './onecli-util.js';
 
 /** 从 ContainerConfig 解析 cliMode，向后兼容 useCliMode */
 export function resolveCliMode(config?: ContainerConfig): CliMode {
@@ -36,6 +36,7 @@ export function resolveCliMode(config?: ContainerConfig): CliMode {
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 import {
+  getLastRotateAt,
   getRotateEnabled,
   getRotateIndex,
   setRotateIndex,
@@ -98,8 +99,8 @@ export function getSecretCount(): number {
   try {
     const secrets = parseOneCLIList<{ name: string; type?: string }>(
       execSync('onecli secrets list', { encoding: 'utf-8', timeout: 5000 }),
-    ).filter((s) => s.type === 'anthropic');
-    return secrets.length;
+    );
+    return filterAnthropicSecrets(secrets).length;
   } catch {
     return 1;
   }
@@ -108,8 +109,10 @@ export function getSecretCount(): number {
 /**
  * 切换到下一个 Anthropic 账号。
  * 返回 { success, newSecretName } 或 null（未开启/onecli 错误/单账号）。
- * 无防抖、无 cooldown — 调用方通过 retryCount 控制重试上限。
+ * 自动轮换本身不写防抖时间；只尊重手动 /account 写入的短保护窗，避免刚手动切完就被 429 覆盖。
  */
+const MANUAL_ACCOUNT_SWITCH_HOLD_MS = 60_000;
+
 export function rotateAccount(
   agentId: string,
   groupFolder: string,
@@ -120,13 +123,27 @@ export function rotateAccount(
 } | null {
   if (!getRotateEnabled()) return null;
 
+  const lastManualSwitchAt = getLastRotateAt(groupFolder);
+  if (
+    lastManualSwitchAt !== null &&
+    Date.now() - lastManualSwitchAt < MANUAL_ACCOUNT_SWITCH_HOLD_MS
+  ) {
+    logger.info(
+      { groupFolder, lastManualSwitchAt },
+      'rotateAccount: 手动切换保护窗内，跳过自动轮换',
+    );
+    return null;
+  }
+
   let secrets: Array<{ id: string; name: string; type?: string }>;
   try {
     // 只轮换 anthropic 账号：onecli 升级后 secrets 里混入了 codex 的 openai 账号
     // （如 codex-tian, type=openai），切给 anthropic 群用必然失败，必须过滤掉。
-    secrets = parseOneCLIList<{ id: string; name: string; type?: string }>(
-      execSync('onecli secrets list', { encoding: 'utf-8', timeout: 5000 }),
-    ).filter((s) => s.type === 'anthropic');
+    secrets = filterAnthropicSecrets(
+      parseOneCLIList<{ id: string; name: string; type?: string }>(
+        execSync('onecli secrets list', { encoding: 'utf-8', timeout: 5000 }),
+      ),
+    );
   } catch (err) {
     logger.error({ err }, 'rotateAccount: 无法获取 secrets 列表');
     return null;
