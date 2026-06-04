@@ -21,6 +21,7 @@ interface GroupState {
   idleWaiting: boolean;
   isTaskContainer: boolean;
   runningTaskId: string | null;
+  stopRequested: boolean;
   pendingMessages: boolean;
   pendingTasks: QueuedTask[];
   process: ChildProcess | null;
@@ -45,6 +46,7 @@ export class GroupQueue {
         idleWaiting: false,
         isTaskContainer: false,
         runningTaskId: null,
+        stopRequested: false,
         pendingMessages: false,
         pendingTasks: [],
         process: null,
@@ -201,6 +203,42 @@ export class GroupQueue {
   }
 
   /**
+   * 用户主动停止当前运行中的 Codex 任务。
+   * 与 killGroup 不同：这里会记录 stopRequested，让上层不要把主动停止当失败重试。
+   */
+  stopGroup(groupJid: string, forceKillAfterMs = 2000): boolean {
+    const state = this.groups.get(groupJid);
+    if (!state?.active || !state.process) return false;
+
+    const pid = state.process.pid;
+    if (!pid) return false;
+
+    const name = state.containerName || groupJid;
+    logger.info({ groupJid, pid, name }, 'stopGroup: 用户主动停止当前任务');
+
+    state.pendingMessages = false;
+    state.stopRequested = true;
+
+    this.signalProcess(pid, 'SIGTERM');
+
+    const timer = setTimeout(() => {
+      if (!this.isProcessAlive(pid)) return;
+      logger.warn({ groupJid, pid, name }, 'stopGroup: 进程未退出，发送 SIGKILL');
+      this.signalProcess(pid, 'SIGKILL');
+    }, forceKillAfterMs);
+    timer.unref?.();
+
+    return true;
+  }
+
+  consumeStopRequested(groupJid: string): boolean {
+    const state = this.groups.get(groupJid);
+    if (!state?.stopRequested) return false;
+    state.stopRequested = false;
+    return true;
+  }
+
+  /**
    * Mark the container as idle-waiting (finished work, waiting for IPC input).
    * If tasks are pending, preempt the idle container immediately.
    */
@@ -325,6 +363,7 @@ export class GroupQueue {
     } finally {
       if (state.groupFolder) clearContextHash(state.groupFolder);
       state.active = false;
+      state.stopRequested = false;
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
@@ -355,6 +394,7 @@ export class GroupQueue {
       state.active = false;
       state.isTaskContainer = false;
       state.runningTaskId = null;
+      state.stopRequested = false;
       state.process = null;
       state.containerName = null;
       state.groupFolder = null;
@@ -444,6 +484,27 @@ export class GroupQueue {
         );
       }
       // If neither pending, skip this group
+    }
+  }
+
+  private signalProcess(pid: number, signal: NodeJS.Signals): void {
+    try {
+      process.kill(-pid, signal);
+    } catch {
+      try {
+        process.kill(pid, signal);
+      } catch {
+        // 进程已退出
+      }
+    }
+  }
+
+  private isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
     }
   }
 

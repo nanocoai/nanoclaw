@@ -211,6 +211,49 @@ describe('GroupQueue', () => {
     expect(callCount).toBe(countAfterMaxRetries);
   });
 
+  it('stopGroup 主动停止当前进程并阻止 pending message 自动重跑', async () => {
+    let resolveWork!: () => void;
+    const processMessages = vi.fn(
+      async () =>
+        new Promise<boolean>((resolve) => {
+          resolveWork = () => resolve(true);
+        }),
+    );
+    const killSpy = vi
+      .spyOn(process, 'kill')
+      .mockImplementation((() => true) as typeof process.kill);
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+
+    queue.enqueueMessageCheck('group1@g.us');
+    queue.registerProcess(
+      'group1@g.us',
+      { pid: 12345 } as any,
+      'container-1',
+      'test-group',
+    );
+
+    expect(queue.stopGroup('group1@g.us', 100)).toBe(true);
+    expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGTERM');
+    expect(queue.consumeStopRequested('group1@g.us')).toBe(true);
+    expect(queue.consumeStopRequested('group1@g.us')).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(killSpy).toHaveBeenCalledWith(12345, 0);
+    expect(killSpy).toHaveBeenCalledWith(-12345, 'SIGKILL');
+
+    resolveWork();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(processMessages).toHaveBeenCalledTimes(1);
+    killSpy.mockRestore();
+  });
+
+  it('stopGroup 没有活跃进程时返回 false', () => {
+    expect(queue.stopGroup('group1@g.us')).toBe(false);
+  });
+
   // --- Waiting groups get drained when slots free up ---
 
   it('drains waiting groups when active slots free up', async () => {
