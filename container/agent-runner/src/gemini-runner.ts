@@ -150,6 +150,7 @@ export function prepareGeminiHome(
     try {
       fs.symlinkSync(src, dst);
     } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
       log(`[gemini-runner] symlink ${name} failed: ${(err as Error).message}`);
     }
   }
@@ -240,7 +241,7 @@ export async function runGeminiQuery(
   log(`[gemini-runner] spawning: gemini ${args.map((arg) => arg === config.prompt ? '<prompt>' : arg).join(' ')}`);
   log(`[gemini-runner] cwd=${config.cwd}, sessionId=${config.sessionId || 'new'}, HOME=${config.geminiHome}`);
 
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const child: ChildProcess = spawn('gemini', args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: geminiEnv as NodeJS.ProcessEnv,
@@ -255,6 +256,7 @@ export async function runGeminiQuery(
     let lineBuffer = '';
     let stderrAccum = '';
     let lastErrorMessage: string | undefined;
+    let errorAlreadySent = false;
 
     child.stdin!.end();
 
@@ -312,6 +314,10 @@ export async function runGeminiQuery(
       if (lineBuffer.trim()) handleLine(lineBuffer);
 
       log(`[gemini-runner] process exited code=${code}`);
+      if (errorAlreadySent) {
+        resolve({ newSessionId, result: lastAssistantMessage || undefined });
+        return;
+      }
       if (!sentSuccess && lastAssistantMessage && !lastErrorMessage) {
         writeOutput({
           status: 'success',
@@ -331,6 +337,7 @@ export async function runGeminiQuery(
             : `gemini 进程退出码 ${code}: ${stderrAccum.trim().slice(0, 500)}`,
           newSessionId,
         });
+        sentSuccess = true;
       }
 
       resolve({ newSessionId, result: lastAssistantMessage || undefined });
@@ -341,9 +348,11 @@ export async function runGeminiQuery(
       writeOutput({
         status: 'error',
         result: null,
-        error: `启动 gemini CLI 失败: ${err.message}`,
+        error: `启动 gemini CLI 失败: ${err.message}。请确认已安装：npm install -g @google/gemini-cli`,
       });
-      reject(err);
+      errorAlreadySent = true;
+      sentSuccess = true;
+      resolve({ newSessionId, result: lastAssistantMessage || undefined });
     });
   });
 }

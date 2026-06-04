@@ -374,7 +374,9 @@ function parseTranscript(content: string): ParsedMessage[] {
         const text = textParts.join('');
         if (text) messages.push({ role: 'assistant', content: text });
       }
-    } catch {}
+    } catch (err) {
+      log(`[cli-archive] Skip invalid transcript line: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   return messages;
@@ -451,6 +453,7 @@ interface MessageContext {
 
 interface IpcMessage {
   text: string;
+  senderId?: string;
   modelOverride?: { model?: string; thinking?: 'adaptive' | 'disabled' };
   context?: MessageContext | null;
 }
@@ -512,6 +515,7 @@ function drainIpcInput(): IpcMessage[] {
         if (data.type === 'message' && data.text) {
           messages.push({
             text: data.text,
+            senderId: typeof data.senderId === 'string' ? data.senderId : undefined,
             modelOverride: data.modelOverride,
             context: data.context || null,
           });
@@ -550,6 +554,7 @@ function waitForIpcMessage(): Promise<IpcMessage | null> {
         const last = messages[messages.length - 1];
         const combined: IpcMessage = {
           text: messages.map(m => m.text).join('\n'),
+          senderId: last.senderId,
           modelOverride: last.modelOverride,
           context: last.context || null,
         };
@@ -1467,6 +1472,9 @@ async function main(): Promise<void> {
         } else {
           containerInput.modelOverride = undefined;
         }
+        if (nextMessage.senderId !== undefined) {
+          containerInput.senderId = nextMessage.senderId;
+        }
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -1584,6 +1592,9 @@ async function main(): Promise<void> {
         } else {
           containerInput.modelOverride = undefined;
         }
+        if (nextMessage.senderId !== undefined) {
+          containerInput.senderId = nextMessage.senderId;
+        }
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -1695,6 +1706,9 @@ async function main(): Promise<void> {
           containerInput.modelOverride = nextMessage.modelOverride;
         } else {
           containerInput.modelOverride = undefined;
+        }
+        if (nextMessage.senderId !== undefined) {
+          containerInput.senderId = nextMessage.senderId;
         }
       }
     } catch (err) {
@@ -1843,6 +1857,9 @@ async function main(): Promise<void> {
         } else {
           containerInput.modelOverride = undefined;
         }
+        if (nextMessage.senderId !== undefined) {
+          containerInput.senderId = nextMessage.senderId;
+        }
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
@@ -1920,6 +1937,9 @@ async function main(): Promise<void> {
         log(`[ipc] modelOverride: ${JSON.stringify(nextMessage.modelOverride)}`);
       } else {
         containerInput.modelOverride = undefined;
+      }
+      if (nextMessage.senderId !== undefined) {
+        containerInput.senderId = nextMessage.senderId;
       }
     }
   } catch (err) {

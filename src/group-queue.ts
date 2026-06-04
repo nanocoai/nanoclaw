@@ -221,6 +221,7 @@ export class GroupQueue {
     text: string,
     modelOverride?: { model?: string; thinking?: 'adaptive' | 'disabled' },
     context?: MessageContext | null,
+    senderId?: string,
   ): boolean {
     const state = this.getGroup(groupJid);
     if (!state.active || !state.groupFolder || state.isTaskContainer) {
@@ -267,6 +268,7 @@ export class GroupQueue {
           text,
           modelOverride,
           context: context || undefined,
+          senderId,
         }),
       );
       fs.renameSync(tempPath, filepath);

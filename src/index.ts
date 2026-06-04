@@ -31,6 +31,7 @@ import {
 import { getChatIndex } from './chat-index.js';
 import { shouldFilterProgress, isModelRefusal } from './output-filters.js';
 import './channels/index.js';
+import type { FeishuChannel } from './channels/feishu.js';
 import {
   getChannelFactory,
   getRegisteredChannelNames,
@@ -676,7 +677,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           // pipe 重试消息到同一个 session，关闭 thinking 强制模型直接输出 text，
           // 否则 adaptive thinking 可能再次把整轮耗在 thinking 上、又是空结果。
           const retryMsg = '你刚才的回复只有 thinking 没有 text 输出，用户什么都没收到。请直接用文字重新回答上一个问题，不要只思考。';
-          if (!queue.sendMessage(chatJid, retryMsg, { thinking: 'disabled' })) {
+          if (!queue.sendMessage(chatJid, retryMsg, { thinking: 'disabled' }, null, memorySenderId)) {
             logger.warn({ chatJid }, '[thinking-only] pipe 重试失败（容器可能已退出），入队重新处理');
             queue.enqueueMessageCheck(chatJid);
           }
@@ -1675,6 +1676,7 @@ async function startMessageLoop(): Promise<void> {
               formatted,
               pipeModelOverride,
               dynamicContext,
+              pipeLastMsg?.sender,
             )
           ) {
             logger.debug(
@@ -1979,10 +1981,7 @@ async function main(): Promise<void> {
       }
     },
     onFeishuAuthRequest: async (chatJid, groupFolder) => {
-      const feishuMod = await import('./channels/feishu.js');
-      const feishuChannel = channels.find((c) => c.name === 'feishu') as
-        | InstanceType<typeof feishuMod.FeishuChannel>
-        | undefined;
+      const feishuChannel = channels.find((c) => c.name === 'feishu') as FeishuChannel | undefined;
       if (!feishuChannel?.sendAuthCard) return;
       const { buildAuthUrl } = await import('./channels/feishu-oauth.js');
       const state = `${chatJid}|${groupFolder}`;

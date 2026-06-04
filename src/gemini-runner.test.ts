@@ -1,4 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { EventEmitter } from 'events';
+import { PassThrough } from 'stream';
+import type { ChildProcess } from 'child_process';
+import { describe, expect, it, vi } from 'vitest';
+
+const spawnMock = vi.hoisted(() => vi.fn());
+
+vi.mock('child_process', () => ({
+  spawn: spawnMock,
+}));
+
 import {
   buildGeminiArgs,
   buildGeminiEnv,
@@ -6,6 +16,7 @@ import {
   extractGeminiError,
   mapGeminiUsage,
   parseGeminiEventLine,
+  runGeminiQuery,
 } from '../container/agent-runner/src/gemini-runner.js';
 
 describe('gemini-runner', () => {
@@ -130,5 +141,44 @@ describe('gemini-runner', () => {
     expect(extractGeminiError({ type: 'error', message: 'bad auth' })).toBe('bad auth');
     expect(extractGeminiError({ type: 'result', status: 'failed', error: { message: 'quota' } })).toBe('quota');
     expect(extractGeminiError({ type: 'result', status: 'success' })).toBeUndefined();
+  });
+
+  it('spawn error 后 close 不会二重 writeOutput', async () => {
+    const proc = new EventEmitter() as EventEmitter & {
+      stdin: PassThrough;
+      stdout: PassThrough;
+      stderr: PassThrough;
+    };
+    proc.stdin = new PassThrough();
+    proc.stdout = new PassThrough();
+    proc.stderr = new PassThrough();
+    spawnMock.mockReturnValueOnce(proc as unknown as ChildProcess);
+
+    const outputs: Array<{ status: string; error?: string }> = [];
+    const promise = runGeminiQuery(
+      {
+        prompt: 'hi',
+        mcpServerPath: '/tmp/mcp.js',
+        chatJid: 'chat',
+        groupFolder: 'group',
+        isMain: true,
+        ipcDir: '/tmp/ipc',
+        cwd: '/tmp',
+        env: { HOME: '/tmp' },
+        geminiHome: '/tmp/gemini-home-test',
+      },
+      (output) => outputs.push({ status: output.status, error: output.error }),
+      () => undefined,
+    );
+
+    proc.emit('error', new Error('spawn gemini ENOENT'));
+    proc.emit('close', null);
+
+    await expect(promise).resolves.toEqual({});
+    expect(outputs).toHaveLength(1);
+    expect(outputs[0]).toMatchObject({
+      status: 'error',
+      error: expect.stringContaining('npm install -g @google/gemini-cli'),
+    });
   });
 });
