@@ -113,7 +113,36 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
-  it('bare text produces no outbound messages (scratchpad only)', async () => {
+  it('bare text falls back to the sole destination (single-destination fallback)', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'hello' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    // Agent responds with bare text — no <message to="..."> wrapping. With
+    // exactly one destination, routing is unambiguous: deliver rather than
+    // silently drop (see nanocoai/nanoclaw#2405, the post-compaction
+    // unwrapped-output failure mode).
+    const provider = new MockProvider({}, () => 'I am thinking about this...');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('I am thinking about this...');
+    expect(out[0].platform_id).toBe('chan-1');
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('bare text with multiple destinations produces no outbound messages (scratchpad only)', async () => {
+    // Seed a second destination — routing is ambiguous, so no fallback fires.
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('slack-test', 'Slack Test', 'channel', 'slack', 'chan-2', NULL)`,
+      )
+      .run();
     insertMessage('m1', { sender: 'Alice', text: 'hello' }, { platformId: 'chan-1', channelType: 'discord' });
 
     // Agent responds with bare text — no <message to="..."> wrapping
