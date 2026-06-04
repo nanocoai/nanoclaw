@@ -28,12 +28,12 @@ export interface AllowedRoot {
 }
 
 /** CLI 执行模式 */
-export type CliMode = 'sdk' | 'print' | 'interactive' | 'codex';
+export type CliMode = 'sdk' | 'print' | 'interactive' | 'codex' | 'gemini';
 
 export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
-  /** CLI 执行模式：sdk（默认）| print（--print spawn）| interactive（tmux + tap proxy） */
+  /** CLI 执行模式：sdk（默认）| print（--print spawn）| interactive（tmux + tap proxy）| codex | gemini */
   cliMode?: CliMode;
   /** @deprecated 使用 cliMode: 'print' 替代。向后兼容：useCliMode: true 等同于 cliMode: 'print' */
   useCliMode?: boolean;

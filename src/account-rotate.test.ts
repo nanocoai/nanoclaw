@@ -218,9 +218,9 @@ describe('rotateAccount', () => {
     setRotateIndex(0, 'test_group');
 
     const secrets = [
-      { id: 'sec-1', name: 'account-a' },
-      { id: 'sec-2', name: 'account-b' },
-      { id: 'sec-3', name: 'account-c' },
+      { id: 'sec-1', name: 'account-a', type: 'anthropic' },
+      { id: 'sec-2', name: 'account-b', type: 'anthropic' },
+      { id: 'sec-3', name: 'account-c', type: 'anthropic' },
     ];
     const agents = [
       { id: 'agent-1', identifier: 'test-agent', isDefault: false },
@@ -241,9 +241,9 @@ describe('rotateAccount', () => {
     setRotateIndex(2, 'test_group');
 
     const secrets = [
-      { id: 'sec-1', name: 'account-a' },
-      { id: 'sec-2', name: 'account-b' },
-      { id: 'sec-3', name: 'account-c' },
+      { id: 'sec-1', name: 'account-a', type: 'anthropic' },
+      { id: 'sec-2', name: 'account-b', type: 'anthropic' },
+      { id: 'sec-3', name: 'account-c', type: 'anthropic' },
     ];
     const agents = [
       { id: 'agent-1', identifier: 'test-agent', isDefault: false },
@@ -263,31 +263,72 @@ describe('rotateAccount', () => {
     setRotateEnabled(true);
 
     mockExecSync.mockReturnValueOnce(
-      JSON.stringify([{ id: 'sec-1', name: 'account-a' }]),
+      JSON.stringify([{ id: 'sec-1', name: 'account-a', type: 'anthropic' }]),
     );
 
     expect(rotateAccount('test-agent', 'test_group')).toBeNull();
   });
 
-  it('identifier 不匹配 → 返回 null（不 fallback 到 Default）', () => {
+  it('agent 不存在 → 自动注册后切换成功（不 fallback 到 Default）', () => {
+    setRotateEnabled(true);
+    setRotateIndex(0, 'test_group');
+
+    const secrets = [
+      { id: 'sec-1', name: 'account-a', type: 'anthropic' },
+      { id: 'sec-2', name: 'account-b', type: 'anthropic' },
+    ];
+    // 第一次 list：没有 test-agent，只有 default 和 other
+    const agentsBefore = [
+      { id: 'agent-default', identifier: 'default-agent', isDefault: true },
+      { id: 'agent-other', identifier: 'other-agent', isDefault: false },
+    ];
+    // create 之后第二次 list：新建的 test-agent 出现了
+    const agentsAfter = [
+      ...agentsBefore,
+      { id: 'agent-new', identifier: 'test-agent', isDefault: false },
+    ];
+
+    mockExecSync
+      .mockReturnValueOnce(JSON.stringify(secrets)) // secrets list
+      .mockReturnValueOnce(JSON.stringify(agentsBefore)) // agents list（找不到）
+      .mockReturnValueOnce('') // agents create
+      .mockReturnValueOnce(JSON.stringify(agentsAfter)) // 重新 agents list（找到）
+      .mockReturnValueOnce(''); // set-secrets
+
+    const result = rotateAccount('test-agent', 'test_group');
+    expect(result).toEqual({
+      success: true,
+      newSecretName: 'account-b',
+      oldSecretName: 'account-a',
+    });
+    // 验证调用了 create，且用的是专属 identifier（不是 default）
+    const createCall = mockExecSync.mock.calls.find((c) =>
+      String(c[0]).includes('agents create'),
+    );
+    expect(createCall).toBeTruthy();
+    expect(String(createCall?.[0])).toContain('--identifier test-agent');
+  });
+
+  it('agent 不存在且自动注册失败 → 返回 null', () => {
     setRotateEnabled(true);
 
     const secrets = [
-      { id: 'sec-1', name: 'account-a' },
-      { id: 'sec-2', name: 'account-b' },
+      { id: 'sec-1', name: 'account-a', type: 'anthropic' },
+      { id: 'sec-2', name: 'account-b', type: 'anthropic' },
     ];
     const agents = [
-      { id: 'agent-default', identifier: 'default-agent', isDefault: true },
       { id: 'agent-other', identifier: 'other-agent', isDefault: false },
     ];
 
     mockExecSync
-      .mockReturnValueOnce(JSON.stringify(secrets))
-      .mockReturnValueOnce(JSON.stringify(agents));
+      .mockReturnValueOnce(JSON.stringify(secrets)) // secrets list
+      .mockReturnValueOnce(JSON.stringify(agents)) // agents list（找不到）
+      .mockImplementationOnce(() => {
+        throw new Error('create failed'); // agents create 失败
+      });
 
     const result = rotateAccount('test-agent', 'test_group');
     expect(result).toBeNull();
-    expect(mockExecSync).toHaveBeenCalledTimes(2);
   });
 
   it('per-group 防抖隔离：A 群防抖不影响 B 群', () => {
@@ -298,8 +339,8 @@ describe('rotateAccount', () => {
     setLastRotateAt(Date.now() - 120_000, 'group_b');
 
     const secrets = [
-      { id: 'sec-1', name: 'account-a' },
-      { id: 'sec-2', name: 'account-b' },
+      { id: 'sec-1', name: 'account-a', type: 'anthropic' },
+      { id: 'sec-2', name: 'account-b', type: 'anthropic' },
     ];
     const agents = [
       { id: 'agent-a', identifier: 'group-a', isDefault: false },
@@ -324,9 +365,9 @@ describe('rotateAccount', () => {
     setRotateIndex(1, 'group_b');
 
     const secrets = [
-      { id: 'sec-1', name: 'account-a' },
-      { id: 'sec-2', name: 'account-b' },
-      { id: 'sec-3', name: 'account-c' },
+      { id: 'sec-1', name: 'account-a', type: 'anthropic' },
+      { id: 'sec-2', name: 'account-b', type: 'anthropic' },
+      { id: 'sec-3', name: 'account-c', type: 'anthropic' },
     ];
     const agents = [
       { id: 'agent-a', identifier: 'group-a', isDefault: false },
@@ -360,9 +401,9 @@ describe('rotateAccount', () => {
     setRotateIndex(0, 'test_group');
 
     const secrets = [
-      { id: 'sec-1', name: 'account-a' },
-      { id: 'sec-2', name: 'account-b' },
-      { id: 'sec-3', name: 'account-c' },
+      { id: 'sec-1', name: 'account-a', type: 'anthropic' },
+      { id: 'sec-2', name: 'account-b', type: 'anthropic' },
+      { id: 'sec-3', name: 'account-c', type: 'anthropic' },
     ];
     const agents = [
       { id: 'agent-1', identifier: 'test-agent', isDefault: false },
@@ -398,8 +439,8 @@ describe('getSecretCount', () => {
   it('返回 secrets 数量', () => {
     mockExecSync.mockReturnValueOnce(
       JSON.stringify([
-        { id: 'sec-1', name: 'a' },
-        { id: 'sec-2', name: 'b' },
+        { id: 'sec-1', name: 'a', type: 'anthropic' },
+        { id: 'sec-2', name: 'b', type: 'anthropic' },
       ]),
     );
     expect(getSecretCount()).toBe(2);
@@ -410,5 +451,29 @@ describe('getSecretCount', () => {
       throw new Error('onecli not found');
     });
     expect(getSecretCount()).toBe(1);
+  });
+
+  it('只统计 anthropic 账号，排除 openai（codex）', () => {
+    mockExecSync.mockReturnValueOnce(
+      JSON.stringify([
+        { id: 'sec-1', name: 'codex-tian', type: 'openai' },
+        { id: 'sec-2', name: 'alex', type: 'anthropic' },
+        { id: 'sec-3', name: 'tian', type: 'anthropic' },
+      ]),
+    );
+    expect(getSecretCount()).toBe(2);
+  });
+
+  it('兼容 onecli 新版 {hint,data} 包装格式', () => {
+    mockExecSync.mockReturnValueOnce(
+      JSON.stringify({
+        hint: 'Manage your secrets',
+        data: [
+          { id: 'sec-1', name: 'alex', type: 'anthropic' },
+          { id: 'sec-2', name: 'tian', type: 'anthropic' },
+        ],
+      }),
+    );
+    expect(getSecretCount()).toBe(2);
   });
 });

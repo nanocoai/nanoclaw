@@ -15,6 +15,7 @@ import {
   updateOAuthUsageCache,
 } from './db.js';
 import { logger } from './logger.js';
+import { parseOneCLIList } from './onecli-util.js';
 import type { RateLimits, UsageResult } from './types.js';
 
 // --- 常量 ---
@@ -301,31 +302,35 @@ export function getCurrentSecretName(
     if (!group) return null;
 
     const agentId = group.folder.toLowerCase().replace(/_/g, '-');
-    const agents = JSON.parse(
-      execFileSync('onecli', ['agents', 'list'], {
+    const agents = parseOneCLIList<{
+      id: string;
+      identifier: string;
+      isDefault?: boolean;
+    }>(
+      execFileSync('onecli', ['agents', 'list', '--max', '1000'], {
         encoding: 'utf-8',
         timeout: 5000,
       }),
-    ) as Array<{ id: string; identifier: string; isDefault?: boolean }>;
+    );
 
     const agent =
       agents.find((a) => a.identifier === agentId) ||
       agents.find((a) => a.isDefault);
     if (!agent) return null;
 
-    const secrets = JSON.parse(
+    const secrets = parseOneCLIList<{ id: string; name: string }>(
       execFileSync('onecli', ['secrets', 'list'], {
         encoding: 'utf-8',
         timeout: 5000,
       }),
-    ) as Array<{ id: string; name: string }>;
+    );
 
-    const agentSecrets = JSON.parse(
+    const agentSecrets = parseOneCLIList<string | { id: string }>(
       execFileSync('onecli', ['agents', 'secrets', '--id', agent.id], {
         encoding: 'utf-8',
         timeout: 5000,
       }),
-    ) as Array<string | { id: string }>;
+    );
 
     const assignedIds = agentSecrets.map((s) =>
       typeof s === 'string' ? s : s.id,
