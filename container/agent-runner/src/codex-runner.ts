@@ -162,11 +162,18 @@ export function mapCodexProgress(event: CodexEvent): ContainerOutput[] {
     if (it.type === 'agent_message') return [];
     const label = it.command || it.type;
     const short = typeof label === 'string' ? label.slice(0, 60) : it.type;
+    // detail：完整命令（与 SDK 模式 buildToolUseProgress 对齐，进度页「详情」区展示）。
+    // 命令执行类用 ```bash 包裹完整命令（截断 500 字符防超长）；非命令类无 detail。
+    let detail: string | undefined;
+    if (typeof it.command === 'string' && it.command.trim()) {
+      detail = `\`\`\`bash\n${it.command.slice(0, 500)}\n\`\`\``;
+    }
     return [
       {
         status: 'progress',
         result: `🔧 ${short}`,
         progressType: 'tool_use',
+        detail,
       },
     ];
   }

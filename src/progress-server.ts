@@ -22,6 +22,8 @@ export const PROGRESS_SERVER_PORT = parseInt(
 interface ProgressStep {
   title: string;
   detail?: string;
+  /** 步骤进入主进程的时间戳（毫秒） */
+  ts?: number;
 }
 
 interface ProgressSession {
@@ -196,7 +198,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .steps{padding:12px 16px;display:flex;flex-direction:column;gap:8px}
 .step{background:#fff;border-radius:10px;padding:12px 14px;box-shadow:0 1px 3px rgba(0,0,0,.07);animation:fadeIn .3s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-.step-title{font-size:14px;line-height:1.4}
+.step-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+.step-title{font-size:14px;line-height:1.4;flex:1}
+.step-time{font-size:11px;color:#8e8e93;flex-shrink:0;font-variant-numeric:tabular-nums;padding-top:1px}
 .step-detail{font-size:12px;color:#6c6c70;margin-top:6px;white-space:pre-wrap;word-break:break-all;border-top:1px solid #f2f2f7;padding-top:6px}
 .empty{text-align:center;color:#8e8e93;padding:40px 0;font-size:14px}
 </style>
@@ -215,10 +219,19 @@ let completed = false;
 
 function escHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 
+function fmtTime(ts){
+  if(!ts) return '';
+  const d=new Date(ts);
+  const p=n=>String(n).padStart(2,'0');
+  return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());
+}
+
 function renderStep(s){
   const d=document.createElement('div');
   d.className='step';
-  d.innerHTML='<div class="step-title">'+escHtml(s.title)+'</div>'
+  const t=fmtTime(s.ts);
+  d.innerHTML='<div class="step-head"><div class="step-title">'+escHtml(s.title)+'</div>'
+    +(t?'<div class="step-time">'+t+'</div>':'')+'</div>'
     +(s.detail?'<div class="step-detail">'+escHtml(s.detail)+'</div>':'');
   return d;
 }

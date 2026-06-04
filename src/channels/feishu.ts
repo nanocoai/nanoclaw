@@ -113,6 +113,8 @@ function buildCard(
 interface ProgressStep {
   title: string;
   detail?: string;
+  /** 该步骤进入主进程的时间戳（毫秒，用于进度页每步时间显示） */
+  ts?: number;
 }
 
 /** 截断 step 标题：取第一行，最多 80 字符 */
@@ -594,15 +596,16 @@ export class FeishuChannel implements Channel {
         const chatId = chatIdFromJid(jid);
         await Promise.all([
           this.removeTypingReaction(jid),
-          this.createProgressCard(jid, chatId, { title, detail }),
+          this.createProgressCard(jid, chatId, { title, detail, ts: Date.now() }),
         ]);
         return;
       }
 
       const existing = this.progressCards.get(jid);
       if (existing) {
-        existing.steps.push({ title, detail });
-        existing.allSteps.push({ title, detail });
+        const stepTs = Date.now();
+        existing.steps.push({ title, detail, ts: stepTs });
+        existing.allSteps.push({ title, detail, ts: stepTs });
         if (existing.steps.length > 3) existing.steps.shift();
         if (existing.allSteps.length > 500) existing.allSteps.shift();
         // 卡片尚在创建中（messageId 为空），先缓冲步骤，createProgressCard 完成后会统一 patch
