@@ -19,11 +19,12 @@ import { logger } from './logger.js';
 import { readEnvFile } from './env.js';
 import { OneCLI } from '@onecli-sh/sdk';
 import { CliMode, ContainerConfig, RegisteredGroup } from './types.js';
+import { parseOneCLIList } from './onecli-util.js';
 
 /** 从 ContainerConfig 解析 cliMode，向后兼容 useCliMode */
 export function resolveCliMode(config?: ContainerConfig): CliMode {
   if (config?.cliMode) {
-    const validModes: CliMode[] = ['sdk', 'print', 'interactive', 'codex'];
+    const validModes: CliMode[] = ['sdk', 'print', 'interactive', 'codex', 'gemini'];
     if (!validModes.includes(config.cliMode)) {
       throw new Error(`Invalid cliMode: "${config.cliMode}". Valid values: ${validModes.join(', ')}`);
     }
@@ -95,9 +96,9 @@ export function detectRateLimit(text: string): boolean {
  */
 export function getSecretCount(): number {
   try {
-    const secrets = JSON.parse(
+    const secrets = parseOneCLIList<{ name: string; type?: string }>(
       execSync('onecli secrets list', { encoding: 'utf-8', timeout: 5000 }),
-    );
+    ).filter((s) => s.type === 'anthropic');
     return secrets.length;
   } catch {
     return 1;
@@ -119,18 +120,20 @@ export function rotateAccount(
 } | null {
   if (!getRotateEnabled()) return null;
 
-  let secrets: Array<{ id: string; name: string }>;
+  let secrets: Array<{ id: string; name: string; type?: string }>;
   try {
-    secrets = JSON.parse(
+    // 只轮换 anthropic 账号：onecli 升级后 secrets 里混入了 codex 的 openai 账号
+    // （如 codex-tian, type=openai），切给 anthropic 群用必然失败，必须过滤掉。
+    secrets = parseOneCLIList<{ id: string; name: string; type?: string }>(
       execSync('onecli secrets list', { encoding: 'utf-8', timeout: 5000 }),
-    );
+    ).filter((s) => s.type === 'anthropic');
   } catch (err) {
     logger.error({ err }, 'rotateAccount: 无法获取 secrets 列表');
     return null;
   }
 
   if (secrets.length < 2) {
-    logger.warn('只有一个 secret，无法轮换');
+    logger.warn('可轮换的 anthropic secret 不足 2 个，无法轮换');
     return null;
   }
 
@@ -139,22 +142,59 @@ export function rotateAccount(
 
   let agents: Array<{ id: string; identifier: string; isDefault?: boolean }>;
   try {
-    agents = JSON.parse(
-      execSync('onecli agents list', { encoding: 'utf-8', timeout: 5000 }),
+    // 必须带 --max：onecli agents list 默认只返回 20 条，群数超过 20 时
+    // 排在后面的群 find 不到 → 切换静默失败（"一会生效一会不生效"根因）
+    agents = parseOneCLIList<{ id: string; identifier: string; isDefault?: boolean }>(
+      execSync('onecli agents list --max 1000', {
+        encoding: 'utf-8',
+        timeout: 5000,
+      }),
     );
   } catch (err) {
     logger.error({ err }, 'rotateAccount: 无法获取 agents 列表');
     return null;
   }
 
-  const agent = agents.find((a) => a.identifier === agentId);
+  let agent = agents.find((a) => a.identifier === agentId);
 
   if (!agent) {
-    logger.error(
+    // onecli 里没有这个群（新群尚未 ensure，或异常丢失）→ 当场注册一个再切，
+    // 不放弃切换。注意：用专属 identifier 注册，绝不 fallback 到 Default Agent。
+    logger.warn(
       { agentId, groupFolder },
-      'rotateAccount: 找不到匹配的 agent',
+      'rotateAccount: agent 不在 onecli，自动注册后继续切换',
     );
-    return null;
+    try {
+      execSync(
+        `onecli agents create --name ${groupFolder} --identifier ${agentId}`,
+        { encoding: 'utf-8', timeout: 5000 },
+      );
+    } catch (err) {
+      logger.error(
+        { err, agentId, groupFolder },
+        'rotateAccount: 自动注册 agent 失败',
+      );
+      return null;
+    }
+    try {
+      agents = parseOneCLIList<{ id: string; identifier: string; isDefault?: boolean }>(
+        execSync('onecli agents list --max 1000', {
+          encoding: 'utf-8',
+          timeout: 5000,
+        }),
+      );
+    } catch (err) {
+      logger.error({ err }, 'rotateAccount: 注册后重新获取 agents 列表失败');
+      return null;
+    }
+    agent = agents.find((a) => a.identifier === agentId);
+    if (!agent) {
+      logger.error(
+        { agentId, groupFolder },
+        'rotateAccount: 注册后仍找不到 agent',
+      );
+      return null;
+    }
   }
 
   const oldSecret = secrets[currentIndex];
@@ -445,14 +485,17 @@ export async function getFeishuToken(
  */
 function getAgentAccessToken(groupFolder: string): string | undefined {
   try {
-    const agents: Array<{
+    const agents = parseOneCLIList<{
       id: string;
       name: string;
       identifier?: string;
       accessToken: string;
       isDefault?: boolean;
-    }> = JSON.parse(
-      execSync('onecli agents list', { encoding: 'utf-8', timeout: 5000 }),
+    }>(
+      execSync('onecli agents list --max 1000', {
+        encoding: 'utf-8',
+        timeout: 5000,
+      }),
     );
 
     // groupFolder 如 "feishu_main" → identifier "feishu-main"（与 ensureOneCLIAgent 一致）

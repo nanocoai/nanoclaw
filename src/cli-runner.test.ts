@@ -489,6 +489,8 @@ describe('resolveCliMode', () => {
   it('直接返回有效 cliMode', () => {
     expect(resolveCliMode({ cliMode: 'print' })).toBe('print');
     expect(resolveCliMode({ cliMode: 'interactive' })).toBe('interactive');
+    expect(resolveCliMode({ cliMode: 'codex' })).toBe('codex');
+    expect(resolveCliMode({ cliMode: 'gemini' })).toBe('gemini');
     expect(resolveCliMode({ cliMode: 'sdk' })).toBe('sdk');
   });
 
@@ -501,6 +503,6 @@ describe('resolveCliMode', () => {
   });
 
   it('非法 cliMode 抛错', () => {
-    expect(() => resolveCliMode({ cliMode: 'typo' as any })).toThrow('Invalid cliMode');
+    expect(() => resolveCliMode({ cliMode: 'typo' as never })).toThrow('Invalid cliMode');
   });
 });

@@ -2,6 +2,7 @@ import { execSync } from 'child_process';
 import { logger } from '../logger.js';
 import { getRotateEnabled, setRotateEnabled, setLastRotateAt, setRotateIndex } from '../db.js';
 import { registerCommand } from './registry.js';
+import { parseOneCLIList } from '../onecli-util.js';
 
 // /account — 列出/切换 Anthropic 账号
 registerCommand({
@@ -45,14 +46,20 @@ registerCommand({
         isDefault?: boolean;
       }>;
       try {
-        secrets = JSON.parse(
+        secrets = parseOneCLIList<{ id: string; name: string; type: string }>(
           execSync('onecli secrets list', {
             encoding: 'utf-8',
             timeout: 5000,
           }),
         );
-        agents = JSON.parse(
-          execSync('onecli agents list', {
+        agents = parseOneCLIList<{
+          id: string;
+          name: string;
+          identifier: string;
+          secretMode: string;
+          isDefault?: boolean;
+        }>(
+          execSync('onecli agents list --max 1000', {
             encoding: 'utf-8',
             timeout: 5000,
           }),
@@ -72,12 +79,12 @@ registerCommand({
       let assignedSecretIds: string[] = [];
       if (currentAgent) {
         try {
-          const agentSecrets = JSON.parse(
+          const agentSecrets = parseOneCLIList<string | { id: string }>(
             execSync(`onecli agents secrets --id ${currentAgent.id}`, {
               encoding: 'utf-8',
               timeout: 5000,
             }),
-          ) as Array<string | { id: string }>;
+          );
           assignedSecretIds = agentSecrets.map((s) =>
             typeof s === 'string' ? s : s.id,
           );
@@ -100,7 +107,7 @@ registerCommand({
       // 切换到指定账号
       let secrets: Array<{ id: string; name: string }>;
       try {
-        secrets = JSON.parse(
+        secrets = parseOneCLIList<{ id: string; name: string }>(
           execSync('onecli secrets list', {
             encoding: 'utf-8',
             timeout: 5000,
@@ -132,8 +139,12 @@ registerCommand({
         isDefault?: boolean;
       }>;
       try {
-        agents = JSON.parse(
-          execSync('onecli agents list', {
+        agents = parseOneCLIList<{
+          id: string;
+          identifier: string;
+          isDefault?: boolean;
+        }>(
+          execSync('onecli agents list --max 1000', {
             encoding: 'utf-8',
             timeout: 5000,
           }),

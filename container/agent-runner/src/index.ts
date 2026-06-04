@@ -25,6 +25,7 @@ import {
 import { fileURLToPath } from 'url';
 import { runCliQuery } from './cli-runner.js';
 import { runCodexQuery } from './codex-runner.js';
+import { runGeminiQuery } from './gemini-runner.js';
 import { runInteractiveQuery, cleanupInteractiveResources, checkCliHealth } from './interactive-cli-runner.js';
 
 interface ContainerInput {
@@ -38,8 +39,8 @@ interface ContainerInput {
   script?: string;
   /** 触发用户 ID（飞书 open_id），传给 MCP server 用于记忆读写 */
   senderId?: string;
-  /** CLI 执行模式：sdk（默认）| print | interactive | codex */
-  cliMode?: 'sdk' | 'print' | 'interactive' | 'codex';
+  /** CLI 执行模式：sdk（默认）| print | interactive | codex | gemini */
+  cliMode?: 'sdk' | 'print' | 'interactive' | 'codex' | 'gemini';
   modelOverride?: {
     model?: string;
     thinking?: 'adaptive' | 'disabled';
@@ -1598,6 +1599,118 @@ async function main(): Promise<void> {
     }
 
     archiveCliTranscript(cxTranscript, containerInput.assistantName);
+    return;
+  }
+
+  if (cliMode === 'gemini') {
+    log('[mode] gemini mode — spawning gemini stream-json per turn');
+
+    // Gemini CLI 没有 Claude 的 --append-system-prompt；与 codex mode 一样，
+    // 首轮把全局人设/工具说明/CLAUDE.md 作为前缀注入，后续靠 --resume 保持上下文。
+    const gmGlobalDir = PATHS.global;
+    const gmContextParts: string[] = [];
+    const gmSoulPath = gmGlobalDir ? path.join(gmGlobalDir, 'SOUL.md') : undefined;
+    if (gmSoulPath && fs.existsSync(gmSoulPath)) {
+      gmContextParts.push(fs.readFileSync(gmSoulPath, 'utf-8'));
+    }
+    const gmToolsPath = gmGlobalDir ? path.join(gmGlobalDir, 'TOOLS.md') : undefined;
+    if (gmToolsPath && fs.existsSync(gmToolsPath)) {
+      gmContextParts.push(fs.readFileSync(gmToolsPath, 'utf-8'));
+    }
+    const gmClaudeMdPath = PATHS.globalClaudeMd;
+    if (gmClaudeMdPath && fs.existsSync(gmClaudeMdPath)) {
+      gmContextParts.push(fs.readFileSync(gmClaudeMdPath, 'utf-8'));
+    }
+    const gmEffectiveCwd = PATHS.queryCwd || PATHS.group;
+    const gmGroupsDir = PATHS.group ? path.dirname(PATHS.group) : undefined;
+    const gmNanoclawRoot = gmGroupsDir ? path.dirname(gmGroupsDir) : undefined;
+    gmContextParts.push(
+      ...collectClaudeMdContents([
+        gmEffectiveCwd,
+        PATHS.group,
+        gmGroupsDir,
+        gmNanoclawRoot,
+      ]),
+    );
+    const gmSystemPrefix = gmContextParts.length > 0
+      ? `[系统人设与规范，必须遵守]\n\n${gmContextParts.join('\n\n---\n\n')}\n\n[以上为系统设定，以下是用户消息]\n\n`
+      : '';
+
+    // per-group HOME，隔离 Gemini session/MCP 配置；OAuth 凭证由 gemini-runner 软链宿主 ~/.gemini。
+    const geminiHome = path.join(PATHS.group, '.gemini-home');
+    const gmExtraDirs = computeExtraDirs(PATHS);
+    const gmTranscript: ParsedMessage[] = [];
+    let gmFirstTurn = true;
+
+    try {
+      while (true) {
+        log(`[gemini-mode] Starting gemini query (session: ${sessionId || 'new'})...`);
+
+        const turnPrompt = gmFirstTurn ? gmSystemPrefix + prompt : prompt;
+        gmFirstTurn = false;
+        gmTranscript.push({ role: 'user', content: prompt });
+
+        const override = containerInput.modelOverride;
+        const gmResult = await runGeminiQuery(
+          {
+            prompt: turnPrompt,
+            sessionId,
+            model: override?.model || 'gemini-3-pro-preview',
+            mcpServerPath,
+            chatJid: containerInput.chatJid,
+            groupFolder: containerInput.groupFolder,
+            isMain: containerInput.isMain,
+            senderId: containerInput.senderId,
+            ipcDir: PATHS.ipc,
+            cwd: gmEffectiveCwd,
+            env: sdkEnv,
+            geminiHome,
+            additionalDirectories: gmExtraDirs.length > 0 ? gmExtraDirs : undefined,
+          },
+          writeOutput,
+          log,
+        );
+
+        if (gmResult.newSessionId) {
+          sessionId = gmResult.newSessionId;
+        }
+        if (gmResult.result) {
+          gmTranscript.push({ role: 'assistant', content: gmResult.result });
+        }
+
+        if (shouldClose()) {
+          log('[gemini-mode] Close sentinel detected, exiting');
+          break;
+        }
+
+        log('[gemini-mode] Query ended, waiting for next IPC message...');
+        const nextMessage = await waitForIpcMessage();
+        if (nextMessage === null) {
+          log('[gemini-mode] Close sentinel received, exiting');
+          break;
+        }
+        log(`[gemini-mode] Got new message (${nextMessage.text.length} chars)`);
+        prompt = prependContext(nextMessage.text, nextMessage.context);
+        if (nextMessage.modelOverride) {
+          containerInput.modelOverride = nextMessage.modelOverride;
+        } else {
+          containerInput.modelOverride = undefined;
+        }
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log(`[gemini-mode] Agent error: ${errorMessage}`);
+      writeOutput({
+        status: 'error',
+        result: null,
+        newSessionId: sessionId,
+        error: errorMessage,
+      });
+      archiveCliTranscript(gmTranscript, containerInput.assistantName);
+      process.exit(1);
+    }
+
+    archiveCliTranscript(gmTranscript, containerInput.assistantName);
     return;
   }
 
