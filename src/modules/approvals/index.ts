@@ -16,6 +16,7 @@
  * `src/modules/self-mod/` in PR #7 — they now register delivery actions
  * + approval handlers via this module's public API.
  */
+import { CREDENTIAL_MODE } from '../../config.js';
 import { onDeliveryAdapterReady } from '../../delivery.js';
 import { registerResponseHandler, onShutdown } from '../../response-registry.js';
 import { handleApprovalsResponse } from './response-handler.js';
@@ -27,10 +28,16 @@ export type { ApprovalHandler, ApprovalHandlerContext, RequestApprovalOptions } 
 
 registerResponseHandler(handleApprovalsResponse);
 
-onDeliveryAdapterReady((adapter) => {
-  startOneCLIApprovalHandler(adapter);
-});
+// The OneCLI manual-approval handler long-polls the gateway. Only start it
+// when OneCLI is the active credential provider — in 'direct' mode there is no
+// gateway to poll. Self-mod approvals (install_packages/add_mcp_server) use
+// requestApproval() directly and are unaffected.
+if (CREDENTIAL_MODE === 'onecli') {
+  onDeliveryAdapterReady((adapter) => {
+    startOneCLIApprovalHandler(adapter);
+  });
 
-onShutdown(() => {
-  stopOneCLIApprovalHandler();
-});
+  onShutdown(() => {
+    stopOneCLIApprovalHandler();
+  });
+}

@@ -10,9 +10,14 @@ import path from 'path';
 import { OneCLI } from '@onecli-sh/sdk';
 
 import {
+  ANTHROPIC_API_KEY,
+  ANTHROPIC_AUTH_TOKEN,
+  ANTHROPIC_BASE_URL,
+  CLAUDE_CODE_OAUTH_TOKEN,
   CONTAINER_IMAGE,
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
+  CREDENTIAL_MODE,
   DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
@@ -418,19 +423,39 @@ async function buildContainerArgs(
     }
   }
 
-  // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
-  // are routed through the agent vault for credential injection. Treated as
-  // a transient hard failure: if we can't wire the gateway, we don't spawn.
-  // The caller (router or host-sweep) catches the throw, leaves the inbound
-  // message pending, and the next sweep tick retries.
-  if (agentIdentifier) {
-    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+  if (CREDENTIAL_MODE === 'direct') {
+    // Direct credential injection from .env — Claude subscription OAuth token
+    // or Anthropic API key passed straight into the container env. No OneCLI
+    // gateway. The Claude Agent SDK reads CLAUDE_CODE_OAUTH_TOKEN and runs the
+    // subscription OAuth flow (Bearer + anthropic-beta header) itself.
+    if (CLAUDE_CODE_OAUTH_TOKEN) {
+      args.push('-e', `CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}`);
+    }
+    if (ANTHROPIC_API_KEY) {
+      args.push('-e', `ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}`);
+    }
+    if (ANTHROPIC_AUTH_TOKEN) {
+      args.push('-e', `ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}`);
+    }
+    if (ANTHROPIC_BASE_URL) {
+      args.push('-e', `ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}`);
+    }
+    log.info('Direct credential injection (OneCLI gateway bypassed)', { containerName });
+  } else {
+    // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
+    // are routed through the agent vault for credential injection. Treated as
+    // a transient hard failure: if we can't wire the gateway, we don't spawn.
+    // The caller (router or host-sweep) catches the throw, leaves the inbound
+    // message pending, and the next sweep tick retries.
+    if (agentIdentifier) {
+      await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+    }
+    const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+    if (!onecliApplied) {
+      throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
+    }
+    log.info('OneCLI gateway applied', { containerName });
   }
-  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
-  if (!onecliApplied) {
-    throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
-  }
-  log.info('OneCLI gateway applied', { containerName });
 
   // Host gateway
   args.push(...hostGatewayArgs());
