@@ -94,7 +94,13 @@ export class MemoryStore {
       mmrLambda: 0.7,
     });
 
-    return merged.slice(0, topK);
+    // 4. 分数阈值过滤：无相关记忆时（话题无关）不再硬塞 topK 条噪声进 prompt。
+    // 实测分布：强命中 0.46~0.83 / 弱相关 0.2~0.35 / 纯噪声 0.07~0.11，
+    // 0.3 既滤掉噪声又保住命中。可用 MEMORY_RECALL_THRESHOLD 覆盖。
+    const threshold = Number(process.env.MEMORY_RECALL_THRESHOLD ?? 0.3);
+    const filtered = merged.filter((m) => (m.score ?? 0) >= threshold);
+
+    return filtered.slice(0, topK);
   }
 
   /**
