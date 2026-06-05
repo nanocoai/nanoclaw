@@ -68,6 +68,7 @@ vi.mock('../db.js', () => ({
 import { ASSISTANT_NAME } from '../config.js';
 import { FeishuChannel } from './feishu.js';
 import type { ChannelOpts } from './registry.js';
+import type { CliMode } from '../types.js';
 
 // ---- 测试辅助 ----
 
@@ -339,6 +340,45 @@ describe('FeishuChannel', () => {
   });
 
   describe('typing indicator', () => {
+    it.each([
+      ['sdk', 'OnIt'],
+      ['print', 'PROUD'],
+      ['interactive', 'HAUGHTY'],
+      ['codex', 'OneSecond'],
+      ['gemini', 'INNOCENTSMILE'],
+    ] satisfies Array<[CliMode, string]>)(
+      'setTyping(true) 在 %s 模式添加 %s reaction',
+      async (cliMode, emojiType) => {
+        const jid = `fs:oc_typing_${cliMode}`;
+        const msgId = `msg_user_${cliMode}`;
+        const channelWithMode = new FeishuChannel(
+          'app_id',
+          'app_secret',
+          makeOpts({
+            registeredGroups: () => ({
+              [jid]: {
+                name: `${cliMode} 群`,
+                folder: `feishu_${cliMode}`,
+                trigger: '@二狗',
+                added_at: '2026-06-05T00:00:00.000Z',
+                containerConfig: { cliMode },
+              },
+            }),
+          }),
+        );
+        (channelWithMode as any).lastMessageIds.set(jid, msgId);
+
+        await channelWithMode.setTyping!(jid, true);
+
+        expect(mockReactionCreate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: { reaction_type: { emoji_type: emojiType } },
+            path: { message_id: msgId },
+          }),
+        );
+      },
+    );
+
     it('setTyping(true) 添加 emoji reaction', async () => {
       // 设置最新 messageId（通过 private Map）
       (channel as any).lastMessageIds.set('fs:oc_typing', 'msg_user_1');

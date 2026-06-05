@@ -937,9 +937,35 @@ async function runQuery(
   const tokenMatch = proxyUrl.match(/x:([^@]{8})/);
   log(`[account] proxy_token_prefix=${tokenMatch?.[1] || '(none)'}, group=${containerInput.groupFolder}`);
 
+  // 在 query() 创建前先算好目标模型/思考深度，把 model 作为启动参数直接传入 options，
+  // 让 CLI 一启动就用正确模型。否则 CLI 先用 SDK 默认模型(sonnet)起，再靠延迟 setModel 切换，
+  // 导致第一轮卡片必显示 sonnet（setModel 是 control request，被推迟到首条消息后才执行）。
+  // model 是启动参数不是 control request，不受 2026-06-02 setModel 抢跑崩溃约束的影响。
+  let defaultModel = 'claude-opus-4-6';
+  // settings.json 可显式配置 effortLevel（'low' | 'medium' | 'high'）。
+  // 某些群（如重度讨论复杂架构的）高 effort 下 adaptive thinking 容易陷入「只思考不输出」，
+  // 可在群 settings.json 里配 "effortLevel": "low" 从源头降低思考深度。
+  // 未配则保持 undefined —— 不主动 apply，让模型用自己的默认 effort（即升级前的行为）。
+  // 注意：4.8 只支持 adaptive thinking，无法真正关闭，effortLevel 才是官方控制杠杆。
+  let defaultEffort: 'low' | 'medium' | 'high' | undefined = undefined;
+  try {
+    const settingsPath = path.join(PATHS.group, '..', '..', 'data', 'sessions', containerInput.groupFolder, '.claude', 'settings.json');
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      if (settings.model) defaultModel = settings.model;
+      if (settings.effortLevel === 'low' || settings.effortLevel === 'medium' || settings.effortLevel === 'high') {
+        defaultEffort = settings.effortLevel;
+      }
+    }
+  } catch { /* 使用硬编码默认值 */ }
+
+  const targetModel = override?.model || defaultModel;
+  const targetEffort = override?.thinking ? effortForThinking(override.thinking) : defaultEffort;
+
   const q = query({
     prompt: stream,
     options: {
+      model: targetModel,
       pathToClaudeCodeExecutable: resolvedCliPath,
       executable: 'node' as const,  // 显式指定用 node 运行 cli.js
       stderr: (data: string) => log(`[cli-stderr] ${data.trim()}`),
@@ -1000,28 +1026,9 @@ async function runQuery(
   });
   queryRef = q; // pollIpcDuringQuery 用于 setModel
 
-  // 应用模型/思考覆盖：有 override → 切换；无 override → 用 settings.json 默认模型显式恢复
-  // 读取 settings.json 中的默认模型（setModel(undefined) 可能不可靠）
-  let defaultModel = 'claude-opus-4-6';
-  // settings.json 可显式配置 effortLevel（'low' | 'medium' | 'high'）。
-  // 某些群（如重度讨论复杂架构的）高 effort 下 adaptive thinking 容易陷入「只思考不输出」，
-  // 可在群 settings.json 里配 "effortLevel": "low" 从源头降低思考深度。
-  // 未配则保持 undefined —— 不主动 apply，让模型用自己的默认 effort（即升级前的行为）。
-  // 注意：4.8 只支持 adaptive thinking，无法真正关闭，effortLevel 才是官方控制杠杆。
-  let defaultEffort: 'low' | 'medium' | 'high' | undefined = undefined;
-  try {
-    const settingsPath = path.join(PATHS.group, '..', '..', 'data', 'sessions', containerInput.groupFolder, '.claude', 'settings.json');
-    if (fs.existsSync(settingsPath)) {
-      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-      if (settings.model) defaultModel = settings.model;
-      if (settings.effortLevel === 'low' || settings.effortLevel === 'medium' || settings.effortLevel === 'high') {
-        defaultEffort = settings.effortLevel;
-      }
-    }
-  } catch { /* 使用硬编码默认值 */ }
-
-  const targetModel = override?.model || defaultModel;
-  const targetEffort = override?.thinking ? effortForThinking(override.thinking) : defaultEffort;
+  // model 已在 query() options 里作为启动参数传入（targetModel/targetEffort 在创建前算好）。
+  // 下面的 setModel/applyFlagSettings 作为兜底：万一 options.model 未生效，或需要在 resume
+  // 后再确认一次模型/思考深度。
   // setModel/applyFlagSettings 是 control request，要求 CLI 子进程已就绪。
   // resume 大 session（数十 MB）时，CLI 仍在加载 transcript，若此刻 await setModel 会抢在
   // control channel 就绪前发送 → "Query closed before response received" → 整个 query 崩溃 →

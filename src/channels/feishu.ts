@@ -20,6 +20,7 @@ import {
   deleteSession,
 } from '../progress-server.js';
 import { Channel, NewMessage, SendMessageOptions } from '../types.js';
+import type { CliMode } from '../types.js';
 import { notifyVoice } from '../voice-notify.js';
 
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -27,8 +28,13 @@ import { registerChannel, ChannelOpts } from './registry.js';
 // ---- 配置 ----
 
 const JID_PREFIX = 'fs:';
-const TYPING_EMOJI = 'OnIt'; // SDK 模式：在做了（后台异步执行）
-const CLI_TYPING_EMOJI = 'HAUGHTY'; // CLI 交互模式：白眼（区分两种模式）
+const TYPING_EMOJI_BY_MODE: Record<CliMode, string> = {
+  sdk: 'OnIt', // 在做了
+  print: 'PROUD', // 得意
+  interactive: 'HAUGHTY', // 白眼
+  codex: 'OneSecond', // 稍等
+  gemini: 'INNOCENTSMILE', // 无辜笑
+};
 const CARD_THRESHOLD = 500;
 const MD_PATTERN = /```|\*\*|^##?\s|^\|.*\||\*[^*\s]|^[-*+]\s|^>\s/m;
 const PROGRESS_JSON_PATTERN = /^\{"title":"[🔧📖✏️🔍🌐📋⚙️⏳💭💬✅]/u;
@@ -1046,12 +1052,15 @@ export class FeishuChannel implements Channel {
       if (isTyping) {
         // 新对话开始，清除上一轮的 progressDone 标记
         this.progressDone.delete(jid);
-        // 添加 emoji reaction 到用户消息（CLI 模式群用白眼，其他用在做了）
+        // 添加 emoji reaction 到用户消息，不同执行模式使用不同表情。
         const lastMsgId = this.getLastMessageId(jid);
         const group = this.opts.registeredGroups()[jid];
         const cliMode = resolveCliMode(group?.containerConfig);
-        const emoji = cliMode !== 'sdk' ? CLI_TYPING_EMOJI : TYPING_EMOJI;
-        logger.info({ jid, lastMsgId, emoji }, '[typing] 开始加 emoji reaction');
+        const emoji = TYPING_EMOJI_BY_MODE[cliMode] ?? TYPING_EMOJI_BY_MODE.sdk;
+        logger.info(
+          { jid, lastMsgId, cliMode, emoji },
+          '[typing] 开始加 emoji reaction',
+        );
         if (lastMsgId) {
           const resp = await this.client.im.messageReaction.create({
             data: { reaction_type: { emoji_type: emoji } },
