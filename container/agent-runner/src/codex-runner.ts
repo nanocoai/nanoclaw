@@ -101,7 +101,7 @@ function buildCodexTextProgress(text: string): ContainerOutput {
     status: 'progress',
     result: `💬 ${short}`,
     progressType: 'text',
-    detail: text.length > 80 ? text : undefined,
+    detail: text,
   };
 }
 
