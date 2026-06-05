@@ -114,8 +114,9 @@ function flushPendingCodexText(state: CodexTextProgressState): ContainerOutput[]
 }
 
 /**
- * Codex 的 agent_message 可能是最终回复，也可能是工具调用前的中间叙述。
- * 先缓存，后续出现工具/文件改动事件时再发成 💬；turn.completed 则丢弃缓存避免重复最终回复。
+ * Codex 的 agent_message 可能是最终回复，也可能是阶段性中间叙述。
+ * 先缓存，下一条 agent_message 到达时把前一条 flush 成 💬（确认前一条确是中间叙述）；
+ * 最后一条 agent_message 不发 💬，由 turn.completed 留作 success.result（避免结果文案重复/落空）。
  */
 export function mapCodexTextProgress(
   event: CodexEvent,
@@ -135,12 +136,11 @@ export function mapCodexTextProgress(
     return outputs;
   }
 
-  if (
-    (event.type === 'item.started' || event.type === 'item.completed') &&
-    event.item?.type !== 'agent_message'
-  ) {
-    return flushPendingCodexText(state);
-  }
+  // 工具/文件事件不再 flush pending agent_message。
+  // 原因：codex 常在最终回复后还跟 file_change/command 收尾动作，若按工具事件 flush，
+  // 最终回复会被误当中间叙述发成 💬、result 落空（卡片里有结果文案但无独立最终回复）。
+  // 改为：只有下一条 agent_message 到达时才 flush 前一条（说明前一条确是中间叙述）；
+  // 最后一条 agent_message 的 lastAgentMessage 保留到 turn.completed 作 result。
 
   if (event.type === 'turn.completed') {
     state.pendingAgentMessage = undefined;

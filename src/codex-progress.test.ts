@@ -73,7 +73,7 @@ describe('mapCodexProgress — 回归', () => {
 });
 
 describe('mapCodexTextProgress — Codex 中间文本', () => {
-  it('agent_message 后接工具事件时 flush 成 💬 progress', () => {
+  it('工具事件不 flush pending 文本(避免最终回复被收尾工具误发💬)', () => {
     const state = createCodexTextProgressState();
     expect(
       mapCodexTextProgress(
@@ -82,21 +82,15 @@ describe('mapCodexTextProgress — Codex 中间文本', () => {
       ),
     ).toEqual([]);
 
+    // 新行为：工具事件到达不再 flush，pending/last 保留（等下一条 agent_message 或 turn.completed 判定）
     const out = mapCodexTextProgress(
       started({ id: 'c1', type: 'command_execution', command: 'rg foo' }),
       state,
     );
 
-    expect(out).toEqual([
-      {
-        status: 'progress',
-        result: '💬 我先看一下代码。',
-        progressType: 'text',
-        detail: '我先看一下代码。',
-      },
-    ]);
-    expect(state.pendingAgentMessage).toBeUndefined();
-    expect(state.lastAgentMessage).toBeUndefined();
+    expect(out).toEqual([]);
+    expect(state.pendingAgentMessage).toBe('我先看一下代码。');
+    expect(state.lastAgentMessage).toBe('我先看一下代码。');
   });
 
   it('直接 turn.completed 时丢弃 pending 文本避免重复最终回复', () => {
@@ -145,7 +139,7 @@ describe('mapCodexTextProgress — Codex 中间文本', () => {
     expect(state.lastAgentMessage).toBeUndefined();
   });
 
-  it('completed 工具事件也会 flush pending 文本', () => {
+  it('completed 工具事件也不 flush pending 文本', () => {
     const state = createCodexTextProgressState();
     mapCodexTextProgress(
       completed({ id: 'm1', type: 'agent_message', text: '接下来读取文件。' }),
@@ -157,12 +151,12 @@ describe('mapCodexTextProgress — Codex 中间文本', () => {
       state,
     );
 
-    expect(out[0].result).toBe('💬 接下来读取文件。');
-    expect(state.pendingAgentMessage).toBeUndefined();
-    expect(state.lastAgentMessage).toBeUndefined();
+    expect(out).toEqual([]);
+    expect(state.pendingAgentMessage).toBe('接下来读取文件。');
+    expect(state.lastAgentMessage).toBe('接下来读取文件。');
   });
 
-  it('长中间文本 result 截断为预览,detail 保留全文', () => {
+  it('长中间文本被下条 agent_message flush 时 result 截断为预览,detail 保留全文', () => {
     const state = createCodexTextProgressState();
     const fullText = [
       '我先分析这段代码的结构。',
@@ -175,13 +169,71 @@ describe('mapCodexTextProgress — Codex 中间文本', () => {
       state,
     );
 
+    // 新行为：靠下一条 agent_message 触发 flush（而非工具事件）
     const out = mapCodexTextProgress(
-      started({ id: 'c1', type: 'command_execution', command: 'cat package.json' }),
+      completed({ id: 'm2', type: 'agent_message', text: '下一段叙述' }),
       state,
     );
 
     expect(out[0].result).toMatch(/^💬 /);
     expect(out[0].result.length).toBeLessThan(fullText.length + 2);
     expect(out[0].detail).toBe(fullText);
+  });
+});
+
+describe('mapCodexTextProgress — 中间叙述 vs 最终回复', () => {
+  const ev = (type: string, itemType?: string, text?: string) =>
+    ({ type, item: itemType ? { id: 'x', type: itemType, text } : undefined }) as any;
+  function run(seq: any[]) {
+    const s = createCodexTextProgressState();
+    const progress: string[] = [];
+    for (const e of seq)
+      for (const o of mapCodexTextProgress(e, s))
+        if (o.progressType === 'text') progress.push(o.detail!);
+    return { progress, result: s.lastAgentMessage };
+  }
+
+  it('最终回复后跟 file_change 收尾，最终回复不被 flush 成💬、留作 result', () => {
+    const { progress, result } = run([
+      ev('item.completed', 'agent_message', '中间叙述A'),
+      ev('item.started', 'command_execution'),
+      ev('item.completed', 'command_execution'),
+      ev('item.completed', 'agent_message', '最终回复B'),
+      ev('item.started', 'file_change'),
+      ev('item.completed', 'file_change'),
+      ev('turn.completed'),
+    ]);
+    expect(progress).toEqual(['中间叙述A']);
+    expect(result).toBe('最终回复B');
+  });
+
+  it('单条 agent_message(纯最终回复)不发💬，作 result', () => {
+    const { progress, result } = run([
+      ev('item.completed', 'agent_message', '直接答复'),
+      ev('turn.completed'),
+    ]);
+    expect(progress).toEqual([]);
+    expect(result).toBe('直接答复');
+  });
+
+  it('多条中间叙述各自发💬，最后一条作 result', () => {
+    const { progress, result } = run([
+      ev('item.completed', 'agent_message', '叙述1'),
+      ev('item.started', 'command_execution'),
+      ev('item.completed', 'agent_message', '叙述2'),
+      ev('item.started', 'file_change'),
+      ev('item.completed', 'agent_message', '最终3'),
+      ev('turn.completed'),
+    ]);
+    expect(progress).toEqual(['叙述1', '叙述2']);
+    expect(result).toBe('最终3');
+  });
+
+  it('<internal> 标签被剥离', () => {
+    const { result } = run([
+      ev('item.completed', 'agent_message', '正文<internal>思考</internal>'),
+      ev('turn.completed'),
+    ]);
+    expect(result).toBe('正文');
   });
 });
