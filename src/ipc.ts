@@ -14,10 +14,21 @@ import {
 } from './config.js';
 import { getChatIndex } from './chat-index.js';
 import { AvailableGroup, getFeishuToken } from './container-runner.js';
-import { clampRangeParams, createTask, deleteTask, getMessageContext, getMessageContextById, getMessageRange, getTaskById, storeMessageDirect, updateTask } from './db.js';
+import {
+  clampRangeParams,
+  createTask,
+  deleteTask,
+  getGroupAlias,
+  getMessageContext,
+  getMessageContextById,
+  getMessageRange,
+  getTaskById,
+  storeMessageDirect,
+  updateTask,
+} from './db.js';
+import { resolveTargetChatJid } from './group-alias.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import { withLogContext } from './log-context.js';
 import { MemoryStore } from './memory/memory-store.js';
 import { extractAndRefine } from './memory/extract-fact.js';
 import { loadFacts, storeFactRaw } from './memory/storage.js';
@@ -181,21 +192,34 @@ export function startIpcWatcher(deps: IpcDeps): void {
               }
 
               if (data.type === 'message' && data.chatJid && data.text) {
+                const originalTarget = data.chatJid;
+                const resolvedTarget = resolveTargetChatJid(
+                  String(data.chatJid),
+                  getGroupAlias,
+                );
+                data.chatJid = resolvedTarget.chatJid;
+                if (resolvedTarget.alias) {
+                  logger.info(
+                    {
+                      alias: resolvedTarget.alias,
+                      chatJid: data.chatJid,
+                      sourceGroup,
+                    },
+                    'IPC message target alias resolved',
+                  );
+                }
                 // 短窗口去重：session resume 可能重复执行 send_message
                 if (isDuplicateMessage(data.chatJid, data.text)) {
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
+                    { chatJid: data.chatJid, originalTarget, sourceGroup },
                     'IPC message deduplicated (same content within 30s window)',
                   );
                   continue;
                 }
-                // JID 前缀补全：agent 可能传 oc_xxx（无 fs: 前缀）
-                if (data.chatJid && !data.chatJid.includes(':') && data.chatJid.startsWith('oc_')) {
-                  data.chatJid = `fs:${data.chatJid}`;
-                }
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
-                const isSameGroup = targetGroup && targetGroup.folder === sourceGroup;
+                const isSameGroup =
+                  targetGroup && targetGroup.folder === sourceGroup;
                 const isCrossGroup = !isSameGroup;
                 if (
                   isMain ||
@@ -209,7 +233,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     // trigger 检查由 ipc_ ID 前缀绕过（见 index.ts），不再靠 is_from_me
                     const crossGroupSender = isCrossGroup
                       ? `${ASSISTANT_NAME}(${sourceGroup})`
-                      : (data.sender || ASSISTANT_NAME);
+                      : data.sender || ASSISTANT_NAME;
                     storeMessageDirect({
                       id: `ipc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
                       chat_jid: data.chatJid,
@@ -221,7 +245,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       is_bot_message: !isCrossGroup,
                     });
                   } catch (storeErr) {
-                    logger.warn({ storeErr }, 'IPC send_message 入库失败，不影响发送');
+                    logger.warn(
+                      { storeErr },
+                      'IPC send_message 入库失败，不影响发送',
+                    );
                   }
                   // 跨群消息：enqueue 目标群，让目标 agent 处理
                   if (isCrossGroup && deps.enqueueMessageCheck) {
@@ -232,12 +259,22 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     );
                   }
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
+                    {
+                      chatJid: data.chatJid,
+                      originalTarget,
+                      alias: resolvedTarget.alias,
+                      sourceGroup,
+                    },
                     'IPC message sent',
                   );
                 } else {
                   logger.warn(
-                    { chatJid: data.chatJid, sourceGroup },
+                    {
+                      chatJid: data.chatJid,
+                      originalTarget,
+                      alias: resolvedTarget.alias,
+                      sourceGroup,
+                    },
                     'Unauthorized IPC message attempt blocked',
                   );
                 }
@@ -666,8 +703,6 @@ export async function processTaskIpc(
         const query = (data.query as string) || '';
         const limit = (data.limit as number) || 10;
         const category = data.category as string | undefined;
-        const userId = (data.senderId as string) || '';
-
         let facts;
         if (query) {
           const store = MemoryStore.getInstance();

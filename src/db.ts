@@ -84,6 +84,14 @@ function createSchema(database: Database.Database): void {
       requires_trigger INTEGER DEFAULT 1
     );
 
+    CREATE TABLE IF NOT EXISTS group_aliases (
+      alias TEXT PRIMARY KEY,
+      chat_jid TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_group_aliases_chat_jid ON group_aliases(chat_jid);
+
     CREATE TABLE IF NOT EXISTS account_rotate_config (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -332,6 +340,63 @@ export function getAllChats(): ChatInfo[] {
   `,
     )
     .all() as ChatInfo[];
+}
+
+function normalizeGroupAlias(alias: string): string {
+  const trimmed = alias.trim();
+  if (!trimmed) throw new Error('别名不能为空');
+  return trimmed;
+}
+
+function normalizeGroupAliasTarget(chatJid: string): string {
+  const trimmed = chatJid.trim();
+  if (!trimmed) throw new Error('目标群不能为空');
+  if (trimmed.startsWith('oc_')) return `fs:${trimmed}`;
+  return trimmed;
+}
+
+export function setGroupAlias(alias: string, chatJid: string): void {
+  const normalizedAlias = normalizeGroupAlias(alias);
+  const normalizedChatJid = normalizeGroupAliasTarget(chatJid);
+  const now = new Date().toISOString();
+  db.prepare(
+    `
+    INSERT INTO group_aliases (alias, chat_jid, created_at, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(alias) DO UPDATE SET
+      chat_jid = excluded.chat_jid,
+      updated_at = excluded.updated_at
+  `,
+  ).run(normalizedAlias, normalizedChatJid, now, now);
+}
+
+export function getGroupAlias(alias: string): string | undefined {
+  const normalizedAlias = normalizeGroupAlias(alias);
+  const row = db
+    .prepare('SELECT chat_jid FROM group_aliases WHERE alias = ?')
+    .get(normalizedAlias) as { chat_jid: string } | undefined;
+  return row?.chat_jid;
+}
+
+export function getAllGroupAliases(): Record<string, string> {
+  const rows = db
+    .prepare(
+      'SELECT alias, chat_jid FROM group_aliases ORDER BY alias COLLATE NOCASE',
+    )
+    .all() as Array<{ alias: string; chat_jid: string }>;
+  const result: Record<string, string> = {};
+  for (const row of rows) {
+    result[row.alias] = row.chat_jid;
+  }
+  return result;
+}
+
+export function deleteGroupAlias(alias: string): boolean {
+  const normalizedAlias = normalizeGroupAlias(alias);
+  const result = db
+    .prepare('DELETE FROM group_aliases WHERE alias = ?')
+    .run(normalizedAlias);
+  return result.changes > 0;
 }
 
 /**
