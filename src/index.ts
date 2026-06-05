@@ -79,6 +79,7 @@ import {
 import { startSessionCleanup } from './session-cleanup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import type { CliMode } from './types.js';
 import { logger } from './logger.js';
 import { withLogContext } from './log-context.js';
 
@@ -340,6 +341,39 @@ export function parseModelPrefix(
 /** thinking-only 空结果的处置动作 */
 export type ThinkingOnlyAction = 'retry' | 'giveup' | 'none';
 
+const AUTO_FOLLOWUP_SUMMARY_MIN_CHARS = 200;
+const AUTO_FOLLOWUP_SUMMARY_MAX_REPLY_CHARS = 6000;
+
+export function shouldTriggerAutoFollowupSummary(input: {
+  enabled: boolean;
+  cliMode: CliMode;
+  text: string;
+  isAutoFollowupTurn: boolean;
+  hadError: boolean;
+}): boolean {
+  if (!input.enabled) return false;
+  if (input.isAutoFollowupTurn) return false;
+  if (input.hadError) return false;
+  if (!['sdk', 'interactive', 'codex'].includes(input.cliMode)) return false;
+  return input.text.trim().length >= AUTO_FOLLOWUP_SUMMARY_MIN_CHARS;
+}
+
+export function buildAutoFollowupSummaryPrompt(originalReply: string): string {
+  const clipped = originalReply.trim().slice(0, AUTO_FOLLOWUP_SUMMARY_MAX_REPLY_CHARS);
+  return [
+    '[AUTO_FOLLOWUP_SUMMARY]',
+    '你刚才已经把完整回复发给用户了。现在请基于下面这段已发送回复，补发一条给大杰看的极简总结。',
+    '要求：',
+    '1. 只输出总结，不要调用工具，不要新增事实，不要继续执行任务。',
+    '2. 第一句话必须是结论。',
+    '3. 最多 3 行，讲清楚：结果是什么、还要不要大杰处理。',
+    '4. 如果原回复已经足够短，只输出一句话。',
+    '',
+    '已发送回复：',
+    clipped,
+  ].join('\n');
+}
+
 /**
  * 判定一次 success 结果是否属于 thinking-only 空结果，以及该如何处置。
  *
@@ -452,6 +486,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let outputSentToUser = false; // 当前 query 是否发过消息（每轮重置）
   let textSentToUser = false; // 当前 query 是否发过真实文本（工具进度卡不算）
   let everSentToUser = false; // 整个 agent 生命周期是否发过消息（不重置，error handler 用）
+  let autoFollowupSummaryTurnsRemaining = 0; // 自动总结回合计数，用于防递归
+  let autoFollowupSummaryTextParts: string[] = []; // 当前 query 已发给用户的真实文本
   let streamingRateLimitDetected = false;
   // SDK 把 fetch failed / API Error: 5xx 误包成 status:success + result 文本时
   // 由主 onOutput 拦截并设置此 flag，runAgent 返回后触发 API error 重试 loop
@@ -483,6 +519,74 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   const latestUserMessage =
     recallParts.length > 0 ? recallParts.join('\n') : undefined;
 
+  const maybeEnqueueAutoFollowupSummary = () => {
+    const isAutoFollowupTurn = autoFollowupSummaryTurnsRemaining > 0;
+    const visibleTextForAutoFollowup = autoFollowupSummaryTextParts.join('\n').trim();
+    const cliMode = resolveCliMode(group.containerConfig);
+    const autoFollowupEnabled = group.containerConfig?.autoFollowupSummary === true;
+
+    if (isAutoFollowupTurn) {
+      logger.info(
+        { group: group.name, chatJid, cliMode, textLen: visibleTextForAutoFollowup.length },
+        '[auto-summary] 自动总结回合完成，跳过再次触发',
+      );
+      autoFollowupSummaryTurnsRemaining = 0;
+      return;
+    }
+
+    if (
+      shouldTriggerAutoFollowupSummary({
+        enabled: autoFollowupEnabled,
+        cliMode,
+        text: visibleTextForAutoFollowup,
+        isAutoFollowupTurn,
+        hadError: hadError || streamingApiErrorDetected || streamingRateLimitDetected,
+      })
+    ) {
+      const summaryPrompt = buildAutoFollowupSummaryPrompt(visibleTextForAutoFollowup);
+      const sent = queue.sendMessage(
+        chatJid,
+        summaryPrompt,
+        { thinking: 'disabled' },
+        null,
+        memorySenderId,
+      );
+      if (sent) {
+        autoFollowupSummaryTurnsRemaining = 1;
+        logger.info(
+          {
+            group: group.name,
+            chatJid,
+            cliMode,
+            textLen: visibleTextForAutoFollowup.length,
+            promptLen: summaryPrompt.length,
+          },
+          '[auto-summary] 自动后置总结已入队',
+        );
+      } else {
+        logger.warn(
+          { group: group.name, chatJid, cliMode },
+          '[auto-summary] 自动后置总结入队失败，容器可能已退出',
+        );
+      }
+      return;
+    }
+
+    if (autoFollowupEnabled) {
+      logger.info(
+        {
+          group: group.name,
+          chatJid,
+          cliMode,
+          textLen: visibleTextForAutoFollowup.length,
+          isAutoFollowupTurn,
+          hadError: hadError || streamingApiErrorDetected || streamingRateLimitDetected,
+        },
+        '[auto-summary] 跳过自动后置总结',
+      );
+    }
+  };
+
   // 主 onOutput 回调（提取为命名 const 以便 API error 重试 loop 复用）
   const mainOnOutput = async (result: ContainerOutput) => {
       // 进度消息 — 转发给 channel 显示进度卡片
@@ -503,6 +607,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         everSentToUser = true; // CLI interactive 模式下中间消息也算"发过消息"
         if (result.progressType === 'text') {
           textSentToUser = true;
+          autoFollowupSummaryTextParts.push(result.result);
         }
         // tool_use 摘要存入 messages.db（供巡检和搜索使用）
         // result.result 格式如 "🔧 Bash: ls -la"，已含工具名和简短输入
@@ -607,6 +712,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           textSentToUser = true;
           everSentToUser = true;
           agentReplies.push(text);
+          autoFollowupSummaryTextParts.push(text);
 
           // 实时索引聊天记录（不等 agent 退出，因为 agent 可能跑数小时）
           if (CHAT_INDEX_ENABLED) {
@@ -688,6 +794,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           thinkingOnlyRetryCount = 0;
         }
 
+        maybeEnqueueAutoFollowupSummary();
+
         // 每轮 query 结束时，确保 typing/spinner/进度卡片被清理
         // IPC pipe 模式下多轮 query 共享同一个闭包，必须每轮都清理
         // （之前只在 !outputSentToUser 时清理，导致第一轮设了 true 后后续轮次卡片永远不关）
@@ -712,6 +820,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // 重置状态：IPC pipe 模式下下一轮 query 需要从干净状态开始
         outputSentToUser = false;
         textSentToUser = false;
+        autoFollowupSummaryTextParts = [];
 
         // R8.1 实时记忆入队：agent 回复完成后立即入队，不等进程退出
         // agent-runner 完成回复后会进入 IPC 等待循环（可达 8 小时），
@@ -896,6 +1005,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             everSentToUser = true; // CLI interactive 模式下中间消息也算"发过消息"
             if (result.progressType === 'text') {
               textSentToUser = true;
+              autoFollowupSummaryTextParts.push(result.result);
             }
             if (result.progressType === 'tool_use' && result.result) {
               try {
@@ -980,9 +1090,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               textSentToUser = true;
               everSentToUser = true;
               agentReplies.push(text);
+              autoFollowupSummaryTextParts.push(text);
             }
           }
           if (result.status === 'success') {
+            maybeEnqueueAutoFollowupSummary();
             // 重试成功后也要清理进度卡片和 typing 状态
             if (!outputSentToUser) {
               await channel.setTyping?.(chatJid, false);
@@ -1000,6 +1112,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             }
             outputSentToUser = false;
             textSentToUser = false;
+            autoFollowupSummaryTextParts = [];
             queue.notifyIdle(chatJid);
           }
           if (result.status === 'error') {

@@ -4,6 +4,7 @@ import './account.js';
 import './misc.js';
 import './remote-control.js';
 import './quiet.js';
+import './brief.js';
 import './mode.js';
 
 export { dispatch, getHelp, getRegisteredCommands } from './registry.js';

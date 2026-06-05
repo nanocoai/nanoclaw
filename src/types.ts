@@ -39,6 +39,8 @@ export interface ContainerConfig {
   useCliMode?: boolean;
   /** 安静模式：LLM 中间文字（💬）进进度卡片而非独立发消息 */
   quietProgress?: boolean;
+  /** 最终回复发送后，自动补发一轮简短总结请求 */
+  autoFollowupSummary?: boolean;
 }
 
 export interface RegisteredGroup {

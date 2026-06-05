@@ -91,6 +91,8 @@ import {
   getAvailableGroups,
   _setRegisteredGroups,
   decideThinkingOnlyAction,
+  shouldTriggerAutoFollowupSummary,
+  buildAutoFollowupSummaryPrompt,
 } from './index.js';
 import { buildTriggerPattern } from './config.js';
 
@@ -245,6 +247,96 @@ describe('getAvailableGroups', () => {
     const unreg = groups.find((g) => g.jid === 'fs:oc_unreg');
     expect(reg?.isRegistered).toBe(true);
     expect(unreg?.isRegistered).toBe(false);
+  });
+});
+
+// ---- auto follow-up summary ----
+
+describe('shouldTriggerAutoFollowupSummary', () => {
+  const longText = '这是一段足够长的回复。'.repeat(20);
+
+  it('开启后支持 SDK、CLI interactive 和 Codex', () => {
+    for (const cliMode of ['sdk', 'interactive', 'codex'] as const) {
+      expect(
+        shouldTriggerAutoFollowupSummary({
+          enabled: true,
+          cliMode,
+          text: longText,
+          isAutoFollowupTurn: false,
+          hadError: false,
+        }),
+      ).toBe(true);
+    }
+  });
+
+  it('不支持 print 和 gemini', () => {
+    for (const cliMode of ['print', 'gemini'] as const) {
+      expect(
+        shouldTriggerAutoFollowupSummary({
+          enabled: true,
+          cliMode,
+          text: longText,
+          isAutoFollowupTurn: false,
+          hadError: false,
+        }),
+      ).toBe(false);
+    }
+  });
+
+  it('关闭配置、自动总结回合、错误回合、短回复都不触发', () => {
+    expect(
+      shouldTriggerAutoFollowupSummary({
+        enabled: false,
+        cliMode: 'sdk',
+        text: longText,
+        isAutoFollowupTurn: false,
+        hadError: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldTriggerAutoFollowupSummary({
+        enabled: true,
+        cliMode: 'sdk',
+        text: longText,
+        isAutoFollowupTurn: true,
+        hadError: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldTriggerAutoFollowupSummary({
+        enabled: true,
+        cliMode: 'sdk',
+        text: longText,
+        isAutoFollowupTurn: false,
+        hadError: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldTriggerAutoFollowupSummary({
+        enabled: true,
+        cliMode: 'sdk',
+        text: '太短了',
+        isAutoFollowupTurn: false,
+        hadError: false,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('buildAutoFollowupSummaryPrompt', () => {
+  it('生成带防递归标记和工具约束的总结 prompt', () => {
+    const prompt = buildAutoFollowupSummaryPrompt('这是已经发送给用户的完整回复');
+    expect(prompt).toContain('[AUTO_FOLLOWUP_SUMMARY]');
+    expect(prompt).toContain('不要调用工具');
+    expect(prompt).toContain('第一句话必须是结论');
+    expect(prompt).toContain('这是已经发送给用户的完整回复');
+  });
+
+  it('长回复会截断，避免把下一轮 prompt 撑爆', () => {
+    const prompt = buildAutoFollowupSummaryPrompt(`${'a'.repeat(7000)}尾巴`);
+    expect(prompt).toContain('a'.repeat(100));
+    expect(prompt).not.toContain('尾巴');
+    expect(prompt.length).toBeLessThan(6500);
   });
 });
 
