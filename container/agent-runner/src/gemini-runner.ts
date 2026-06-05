@@ -214,6 +214,10 @@ export function extractGeminiError(event: GeminiEvent): string | undefined {
   return undefined;
 }
 
+function isMissingGeminiSessionError(text?: string): boolean {
+  return !!text && text.includes('No previous sessions found for this project');
+}
+
 export async function runGeminiQuery(
   config: GeminiRunnerConfig,
   writeOutput: (output: ContainerOutput) => void,
@@ -326,6 +330,17 @@ export async function runGeminiQuery(
           usage,
         });
         sentSuccess = true;
+      }
+
+      const missingSessionError = isMissingGeminiSessionError(lastErrorMessage)
+        || isMissingGeminiSessionError(stderrAccum);
+      if (!sentSuccess && config.sessionId && missingSessionError) {
+        log(
+          `[gemini-runner] resume 失败（session 不存在: ${config.sessionId}），改用新 session 重跑`,
+        );
+        runGeminiQuery({ ...config, sessionId: undefined }, writeOutput, log)
+          .then(resolve);
+        return;
       }
 
       if (!sentSuccess && (code !== 0 || lastErrorMessage)) {
