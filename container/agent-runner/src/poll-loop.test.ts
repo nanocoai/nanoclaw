@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
-import { getPendingMessages, markCompleted } from './db/messages-in.js';
+import { getPendingMessages, markCompleted, markProcessing } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { isCorruptionError } from './poll-loop.js';
+import { isCorruptionError, classifyApiError, computeBackoffMs, apiErrorNotice, processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
+import type { AgentQuery, ProviderEvent } from './providers/types.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -393,5 +394,209 @@ describe('isCorruptionError', () => {
     expect(isCorruptionError('database is locked')).toBe(false);
     expect(isCorruptionError('no such table: messages_in')).toBe(false);
     expect(isCorruptionError('')).toBe(false);
+  });
+});
+
+describe('classifyApiError', () => {
+  it('treats 5xx server errors as retryable', () => {
+    for (const status of [500, 502, 503, 522, 529, 599]) {
+      expect(classifyApiError(status)).toBe('retryable');
+    }
+  });
+
+  it('treats 4xx and status-less errors as fatal', () => {
+    for (const status of [400, 401, 404, 429, 499, undefined]) {
+      expect(classifyApiError(status)).toBe('fatal');
+    }
+  });
+});
+
+describe('computeBackoffMs', () => {
+  it('doubles per attempt and caps', () => {
+    const cfg = { baseMs: 2000, capMs: 30000 };
+    expect(computeBackoffMs(0, cfg)).toBe(2000);
+    expect(computeBackoffMs(1, cfg)).toBe(4000);
+    expect(computeBackoffMs(2, cfg)).toBe(8000);
+    expect(computeBackoffMs(3, cfg)).toBe(16000);
+    expect(computeBackoffMs(4, cfg)).toBe(30000); // 32000 capped
+    expect(computeBackoffMs(5, cfg)).toBe(30000);
+  });
+});
+
+describe('apiErrorNotice', () => {
+  it('names the status and hints to resend when we retried', () => {
+    const msg = apiErrorNotice(529, true);
+    expect(msg).toContain('529');
+    expect(msg.toLowerCase()).toContain('resend');
+  });
+
+  it('omits the resend hint for a non-retried (fatal) error', () => {
+    const msg = apiErrorNotice(400, false);
+    expect(msg).toContain('400');
+    expect(msg.toLowerCase()).not.toContain('resend');
+  });
+
+  it('never prints the literal "undefined" when status is missing', () => {
+    expect(apiErrorNotice(undefined, true)).not.toContain('undefined');
+  });
+});
+
+describe('processQuery — transient API-error handling', () => {
+  const fastRetry = { maxAttempts: 2, baseMs: 1, capMs: 1 };
+
+  function seedDestination(name: string, channelType: string, platformId: string): void {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES (?, ?, 'channel', ?, ?, NULL)`,
+      )
+      .run(name, name, channelType, platformId);
+  }
+
+  function insertChat(id: string, platformId: string): void {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
+         VALUES (?, 'chat', datetime('now'), 'pending', ?, 'discord', ?)`,
+      )
+      .run(id, platformId, JSON.stringify({ sender: 'A', text: 'hi' }));
+  }
+
+  function ackStatus(id: string): string | undefined {
+    const row = getOutboundDb().prepare('SELECT status FROM processing_ack WHERE message_id = ?').get(id) as
+      | { status: string }
+      | undefined;
+    return row?.status;
+  }
+
+  type Turn = { kind: 'success'; text: string } | { kind: 'error'; status?: number };
+
+  // A provider query that emits one result per turn, parking between turns
+  // until a push() (a retry) arrives. Mirrors the real SDK: the first turn is
+  // delivered eagerly; each subsequent turn waits for the poll-loop to re-drive.
+  function scriptedQuery(turns: Turn[]): AgentQuery {
+    let pending = 0;
+    let resolveNext: (() => void) | null = null;
+    let aborted = false;
+    const wake = () => {
+      if (resolveNext) {
+        const r = resolveNext;
+        resolveNext = null;
+        r();
+      } else {
+        pending += 1;
+      }
+    };
+    const events = (async function* (): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 'sess-test' };
+      let i = 0;
+      while (i < turns.length && !aborted) {
+        const t = turns[i++];
+        if (t.kind === 'success') {
+          yield { type: 'result', text: t.text };
+        } else {
+          yield {
+            type: 'result',
+            text: `API Error: ${t.status ?? '???'} Overloaded`,
+            isError: true,
+            apiErrorStatus: t.status,
+          };
+        }
+        if (i >= turns.length) break;
+        if (pending > 0) pending -= 1;
+        else await new Promise<void>((r) => (resolveNext = r));
+      }
+    })();
+    return {
+      push: () => wake(),
+      end: () => {
+        if (resolveNext) {
+          const r = resolveNext;
+          resolveNext = null;
+          r();
+        }
+      },
+      events,
+      abort: () => {
+        aborted = true;
+        if (resolveNext) {
+          const r = resolveNext;
+          resolveNext = null;
+          r();
+        }
+      },
+    };
+  }
+
+  it('retries a 5xx result, then dispatches the eventual success', async () => {
+    seedDestination('discord-main', 'discord', 'chan-1');
+    insertChat('m1', 'chan-1');
+    const routing = extractRouting(getPendingMessages());
+    markProcessing(['m1']);
+
+    const query = scriptedQuery([
+      { kind: 'error', status: 529 },
+      { kind: 'success', text: '<message to="discord-main">hello there</message>' },
+    ]);
+    await processQuery(query, routing, ['m1'], 'claude', 'PROMPT', fastRetry);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toContain('hello there');
+    expect(ackStatus('m1')).toBe('completed');
+  });
+
+  it('notifies the user after exhausting retries on a persistent 5xx', async () => {
+    insertChat('m2', 'chan-1');
+    const routing = extractRouting(getPendingMessages());
+    markProcessing(['m2']);
+
+    // maxAttempts=2 → retry after turn 0 and turn 1; turn 2 exhausts the budget.
+    const query = scriptedQuery([
+      { kind: 'error', status: 503 },
+      { kind: 'error', status: 503 },
+      { kind: 'error', status: 503 },
+    ]);
+    await processQuery(query, routing, ['m2'], 'claude', 'PROMPT', fastRetry);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    const text = JSON.parse(out[0].content).text;
+    expect(text).toContain('503');
+    expect(text.toLowerCase()).toContain('resend');
+    expect(ackStatus('m2')).toBe('completed');
+  });
+
+  it('notifies immediately on a fatal 4xx without retrying', async () => {
+    insertChat('m3', 'chan-1');
+    const routing = extractRouting(getPendingMessages());
+    markProcessing(['m3']);
+
+    // Only one turn available: if it retried, the generator would end with no
+    // notice. A notice containing "400" proves it short-circuited to notify.
+    const query = scriptedQuery([{ kind: 'error', status: 400 }]);
+    await processQuery(query, routing, ['m3'], 'claude', 'PROMPT', fastRetry);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    const text = JSON.parse(out[0].content).text;
+    expect(text).toContain('400');
+    expect(text.toLowerCase()).not.toContain('resend');
+    expect(ackStatus('m3')).toBe('completed');
+  });
+
+  it('dispatches a normal successful result unchanged (regression)', async () => {
+    seedDestination('discord-main', 'discord', 'chan-1');
+    insertChat('m4', 'chan-1');
+    const routing = extractRouting(getPendingMessages());
+    markProcessing(['m4']);
+
+    const query = scriptedQuery([{ kind: 'success', text: '<message to="discord-main">ok</message>' }]);
+    await processQuery(query, routing, ['m4'], 'claude', 'PROMPT', fastRetry);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toContain('ok');
+    expect(ackStatus('m4')).toBe('completed');
   });
 });

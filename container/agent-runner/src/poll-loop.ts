@@ -51,6 +51,45 @@ function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+export interface ApiRetryConfig {
+  /** Maximum number of backoff retries before giving up and notifying the user. */
+  maxAttempts: number;
+  /** First backoff delay; doubles each attempt up to `capMs`. */
+  baseMs: number;
+  /** Upper bound on a single backoff delay. */
+  capMs: number;
+}
+
+/**
+ * Default API-error retry policy. Worst case ≈ 2+4+8+16+30 = 60s of sleep
+ * before notifying — comfortably under the host's 30-min absolute ceiling, and
+ * the kept-fresh heartbeat (see `sleepWithHeartbeat`) means the 60s
+ * "claimed then silent" sweep never fires while we wait.
+ */
+export const DEFAULT_API_RETRY: ApiRetryConfig = { maxAttempts: 5, baseMs: 2000, capMs: 30000 };
+
+/**
+ * A turn that ends in an `is_error` result is only worth retrying for transient
+ * server-side failures (HTTP 5xx). 4xx (bad request, auth) and status-less
+ * errors won't improve on retry, so they go straight to the user.
+ */
+export function classifyApiError(status: number | undefined): 'retryable' | 'fatal' {
+  return status !== undefined && status >= 500 && status <= 599 ? 'retryable' : 'fatal';
+}
+
+/** Exponential backoff with a hard cap: min(baseMs * 2^attempt, capMs). */
+export function computeBackoffMs(attempt: number, cfg: { baseMs: number; capMs: number }): number {
+  return Math.min(cfg.baseMs * 2 ** attempt, cfg.capMs);
+}
+
+/** User-facing notice when a turn could not complete because of an API error. */
+export function apiErrorNotice(status: number | undefined, retried: boolean): string {
+  const code = status ? ` (${status})` : '';
+  return retried
+    ? `I couldn't reach the model — the API kept returning a server error${code} and my retries didn't get through. Please resend in a few minutes.`
+    : `I couldn't reach the model — the API returned an error${code}. Please try again.`;
+}
+
 export interface PollLoopConfig {
   provider: AgentProvider;
   /**
@@ -63,6 +102,8 @@ export interface PollLoopConfig {
   systemContext?: {
     instructions?: string;
   };
+  /** API-error retry policy (exponential backoff). Defaults to DEFAULT_API_RETRY. */
+  apiRetry?: ApiRetryConfig;
 }
 
 /**
@@ -232,7 +273,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
+      const result = await processQuery(
+        query,
+        routing,
+        processingIds,
+        config.providerName,
+        prompt,
+        config.apiRetry ?? DEFAULT_API_RETRY,
+      );
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -308,15 +356,34 @@ interface QueryResult {
   continuation?: string;
 }
 
-async function processQuery(
+/** Sleep in chunks, touching the heartbeat each chunk so a long backoff never
+ * trips the host's "claimed then silent" sweep (which only fires when no
+ * heartbeat has been written since the claim — see src/host-sweep.ts). */
+async function sleepWithHeartbeat(ms: number): Promise<void> {
+  const CHUNK_MS = 5000;
+  let remaining = ms;
+  while (remaining > 0) {
+    const slice = Math.min(remaining, CHUNK_MS);
+    await sleep(slice);
+    touchHeartbeat();
+    remaining -= slice;
+  }
+}
+
+export async function processQuery(
   query: AgentQuery,
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
+  prompt: string,
+  retry: ApiRetryConfig = DEFAULT_API_RETRY,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  // How many transient-error backoff retries we've spent on the current turn.
+  // Reset on every successful result so each turn gets a fresh budget.
+  let transientAttempt = 0;
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -447,12 +514,47 @@ async function processQuery(
         // Claude session with no prior context.
         setContinuation(providerName, event.continuation);
       } else if (event.type === 'result') {
-        // A result — with or without text — means the turn is done. Mark
-        // the initial batch completed now so the host sweep doesn't see
-        // stale 'processing' claims while the query stays open for
-        // follow-up pushes. The agent may have responded via MCP
-        // (send_message) mid-turn, or the message may not need a response
-        // at all — either way the turn is finished.
+        // A failed turn (the SDK gave up and reported the error *as a result*,
+        // e.g. an exhausted-retry 529) must NOT be treated as a finished turn.
+        // Retry transient 5xx with backoff; on exhaustion or a fatal error,
+        // tell the user. Without this the batch would be marked completed and
+        // the error text discarded as scratchpad — a silent drop.
+        if (event.isError) {
+          const status = event.apiErrorStatus;
+          if (classifyApiError(status) === 'retryable' && transientAttempt < retry.maxAttempts) {
+            const delay = computeBackoffMs(transientAttempt, retry);
+            transientAttempt += 1;
+            log(
+              `API error${status ? ` ${status}` : ''} — backing off ${delay}ms, ` +
+                `retry ${transientAttempt}/${retry.maxAttempts}`,
+            );
+            await sleepWithHeartbeat(delay);
+            // The follow-up poll may have ended the stream for a slash command
+            // while we slept; don't push into a closed stream.
+            if (done || endedForCommand) continue;
+            query.push(prompt); // re-drive the same turn; claim stays 'processing'
+            continue;
+          }
+          // Out of retries, or a non-retryable error: notify, then finish.
+          markCompleted(initialBatchIds);
+          writeMessageOut({
+            id: generateId(),
+            kind: 'chat',
+            platform_id: routing.platformId,
+            channel_type: routing.channelType,
+            thread_id: routing.threadId,
+            content: JSON.stringify({ text: apiErrorNotice(status, transientAttempt > 0) }),
+          });
+          continue;
+        }
+
+        // A successful result — with or without text — means the turn is done.
+        // Mark the initial batch completed now so the host sweep doesn't see
+        // stale 'processing' claims while the query stays open for follow-up
+        // pushes. The agent may have responded via MCP (send_message) mid-turn,
+        // or the message may not need a response at all — either way the turn
+        // is finished.
+        transientAttempt = 0;
         markCompleted(initialBatchIds);
         if (event.text) {
           const { hasUnwrapped } = dispatchResultText(event.text, routing);

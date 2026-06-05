@@ -96,7 +96,15 @@ export interface AgentQuery {
 
 export type ProviderEvent =
   | { type: 'init'; continuation: string }
-  | { type: 'result'; text: string | null }
+  /**
+   * A finished turn. `isError` is true when the underlying SDK gave up on the
+   * turn (e.g. after exhausting its own API retries) and surfaced the failure
+   * *as a result* rather than a thrown error — `text` then holds the error
+   * string and `apiErrorStatus` the HTTP status (5xx = transient/retryable).
+   * Optional so out-of-tree providers that never set them keep success
+   * semantics unchanged.
+   */
+  | { type: 'result'; text: string | null; isError?: boolean; apiErrorStatus?: number }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
   /**

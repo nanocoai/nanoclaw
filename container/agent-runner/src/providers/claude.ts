@@ -440,8 +440,18 @@ export class ClaudeProvider implements AgentProvider {
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'result') {
-          const text = 'result' in message ? (message as { result?: string }).result ?? null : null;
-          yield { type: 'result', text };
+          // The SDK reports a turn it gave up on (e.g. exhausted API retries on
+          // a 529) as a result with `is_error: true` and the error string in
+          // `result`, plus `api_error_status` for HTTP-level failures. Carry
+          // both through so the poll-loop can retry transient 5xx and notify
+          // the user instead of silently completing the batch.
+          const m = message as { result?: string; is_error?: boolean; api_error_status?: number | null };
+          yield {
+            type: 'result',
+            text: m.result ?? null,
+            isError: m.is_error === true,
+            apiErrorStatus: m.api_error_status ?? undefined,
+          };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
