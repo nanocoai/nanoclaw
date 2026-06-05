@@ -1851,7 +1851,10 @@ async function main(): Promise<void> {
       if (trimmed.startsWith('/') && !trimmed.startsWith('/ ')) {
         const ch = findChannel(channels, chatJid);
         const unknownCmd = trimmed.split(/\s/)[0];
-        const help = getHelp(`❓ 未知命令 "${unknownCmd}"，`);
+        const help = getHelp(
+          `❓ 未知命令 "${unknownCmd}"，`,
+          resolveCliMode(group?.containerConfig),
+        );
         ch?.sendMessage(chatJid, help).catch((err) =>
           logger.error({ err }, 'unknown command reply failed'),
         );

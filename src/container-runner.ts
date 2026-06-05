@@ -21,18 +21,9 @@ import { OneCLI } from '@onecli-sh/sdk';
 import { CliMode, ContainerConfig, RegisteredGroup } from './types.js';
 import { parseOneCLIList } from './onecli-util.js';
 
-/** 从 ContainerConfig 解析 cliMode，向后兼容 useCliMode */
-export function resolveCliMode(config?: ContainerConfig): CliMode {
-  if (config?.cliMode) {
-    const validModes: CliMode[] = ['sdk', 'print', 'interactive', 'codex', 'gemini'];
-    if (!validModes.includes(config.cliMode)) {
-      throw new Error(`Invalid cliMode: "${config.cliMode}". Valid values: ${validModes.join(', ')}`);
-    }
-    return config.cliMode;
-  }
-  if (config?.useCliMode) return 'print';
-  return 'sdk';
-}
+// resolveCliMode 已抽到无副作用的 cli-mode.ts；import 供本模块使用 + re-export 保持既有 import 路径兼容。
+import { resolveCliMode } from './cli-mode.js';
+export { resolveCliMode };
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 import {

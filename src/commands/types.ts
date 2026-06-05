@@ -1,4 +1,4 @@
-import type { Channel, NewMessage, RegisteredGroup } from '../types.js';
+import type { Channel, CliMode, NewMessage, RegisteredGroup } from '../types.js';
 import type { GroupQueue } from '../group-queue.js';
 
 export interface Command {
@@ -7,7 +7,14 @@ export interface Command {
   hasArgs?: boolean; // true 时前缀匹配 '/account xxx'，false 时精确匹配
   requiresMain?: boolean; // 仅 main group 可用
   order?: number; // help 显示排序（默认注册顺序）
-  subcommands?: { usage: string; description: string }[];
+  // subcommand 也可带 modes：例 /usage 的 all/<name>/delete 仅 Claude 适用，codex 模式不显示
+  subcommands?: { usage: string; description: string; modes?: CliMode[] }[];
+  /**
+   * 适用的 CLI 模式白名单。不填 = 全模式适用。
+   * 例：Anthropic 专属命令标 ['sdk','print','interactive']，/stop 标 ['codex']。
+   * help 按当前群模式过滤显示，dispatch 拦截不适用模式的调用。
+   */
+  modes?: CliMode[];
   handler: (ctx: CommandContext) => Promise<void>;
 }
 

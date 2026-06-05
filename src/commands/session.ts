@@ -43,7 +43,9 @@ registerCommand({
   name: '/stop',
   description: '停止当前 Codex 任务（仅 codex mode，session 保留）',
   order: 12,
+  modes: ['codex'],
   handler: async (ctx) => {
+    // dispatch 已按 modes 拦截，此处判断作防御保险
     const cliMode = resolveCliMode(ctx.group.containerConfig);
     if (cliMode !== 'codex') {
       await ctx.channel.sendMessage(

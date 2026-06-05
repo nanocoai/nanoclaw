@@ -1,8 +1,14 @@
-import type { Channel, NewMessage, RegisteredGroup } from '../types.js';
+import type { Channel, CliMode, NewMessage, RegisteredGroup } from '../types.js';
 import type { GroupQueue } from '../group-queue.js';
 import { findChannel } from '../router.js';
 import { logger } from '../logger.js';
+import { CLAUDE_MODES, resolveCliMode } from '../cli-mode.js';
 import type { Command, CommandContext } from './types.js';
+
+/** 命令在给定模式下是否可用（无 modes 字段 = 全模式适用） */
+function isCommandAvailable(cmd: Command, mode: CliMode): boolean {
+  return !cmd.modes || cmd.modes.includes(mode);
+}
 
 const commands: Command[] = [];
 
@@ -58,6 +64,29 @@ export async function dispatch(
     return true; // 命令已匹配，不应穿透到"未知命令"
   }
 
+  // 包装 channel：命令回复自动带 isCommandReply，避免打断正在运行的 agent
+  const commandChannel: typeof channel = {
+    ...channel,
+    sendMessage: (jid: string, text: string) =>
+      channel.sendMessage(jid, text, { isCommandReply: true }),
+  };
+
+  // 模式检查：当前群 CLI 模式不在命令的 modes 白名单时，拦截并提示（用 commandChannel 避免打断 agent）
+  const currentMode = resolveCliMode(deps.group?.containerConfig);
+  if (!isCommandAvailable(matched, currentMode)) {
+    await commandChannel
+      .sendMessage(
+        deps.chatJid,
+        `⚠️ ${matched.name} 在当前 ${currentMode} 模式下不可用`,
+      )
+      .catch(() => {});
+    logger.info(
+      { chatJid: deps.chatJid, cmd: matched.name, mode: currentMode },
+      '命令因模式不匹配被拦截',
+    );
+    return true;
+  }
+
   // 权限检查
   if (matched.requiresMain && !deps.group?.isMain) {
     await channel
@@ -68,13 +97,6 @@ export async function dispatch(
 
   // 提取 args
   const args = trimmed.slice(matched.name.length).trim();
-
-  // 包装 channel：命令回复自动带 isCommandReply，避免打断正在运行的 agent
-  const commandChannel: typeof channel = {
-    ...channel,
-    sendMessage: (jid: string, text: string) =>
-      channel.sendMessage(jid, text, { isCommandReply: true }),
-  };
 
   try {
     await matched.handler({
@@ -99,17 +121,20 @@ export async function dispatch(
 }
 
 /**
- * 生成 help 文本。
+ * 生成 help 文本，按当前 CLI 模式过滤命令与修饰符。
  * @param prefix 前缀，如 '❓ 未知命令 "/foo"，'
+ * @param mode 当前群 CLI 模式，不传则默认 'sdk'（显示全部 Claude 命令）
  */
-export function getHelp(prefix?: string): string {
-  const sorted = [...commands].sort(
-    (a, b) => (a.order ?? 999) - (b.order ?? 999),
-  );
+export function getHelp(prefix?: string, mode: CliMode = 'sdk'): string {
+  const sorted = [...commands]
+    .filter((c) => isCommandAvailable(c, mode))
+    .sort((a, b) => (a.order ?? 999) - (b.order ?? 999));
   const lines = sorted.map((c) => {
     let line = `${c.name} — ${c.description}`;
     if (c.subcommands) {
       for (const sub of c.subcommands) {
+        // subcommand 无 modes = 跟随主命令；有 modes 则按当前模式过滤
+        if (sub.modes && !sub.modes.includes(mode)) continue;
         line += `\n  ${sub.usage} — ${sub.description}`;
       }
     }
@@ -117,7 +142,10 @@ export function getHelp(prefix?: string): string {
   });
 
   const header = prefix ? `${prefix}可用命令：\n` : '可用命令：\n';
-  const suffix = `\n\n消息前缀修饰符：\n! — Sonnet 快速（无思考）\n!! — Sonnet 深度思考\n~ — 关闭思考（默认模型）\n+ — Opus 4.6 深度思考`;
+  // 思考修饰符（! !! ~ +）是 Sonnet/Opus 专属，仅 Claude 系模式显示
+  const suffix = CLAUDE_MODES.includes(mode)
+    ? `\n\n消息前缀修饰符：\n! — Sonnet 快速（无思考）\n!! — Sonnet 深度思考\n~ — 关闭思考（默认模型）\n+ — Opus 4.6 深度思考`
+    : '';
   return header + lines.join('\n') + suffix;
 }
 

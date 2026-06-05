@@ -267,3 +267,121 @@ describe('getHelp', () => {
     expect(help).toContain('关闭思考（默认模型）');
   });
 });
+
+describe('模式过滤 (getHelp)', () => {
+  function reg() {
+    registerCommand({ name: '/common', description: '通用', order: 1 });
+    registerCommand({
+      name: '/claude-only',
+      description: 'Claude 专属',
+      order: 2,
+      modes: ['sdk', 'print', 'interactive'],
+    });
+    registerCommand({
+      name: '/codex-only',
+      description: 'codex 专属',
+      order: 3,
+      modes: ['codex'],
+    });
+    registerCommand({
+      name: '/usage-like',
+      description: '带子命令',
+      order: 4,
+      modes: ['sdk', 'print', 'interactive', 'codex'],
+      subcommands: [
+        { usage: '/usage-like', description: '主' },
+        { usage: '/usage-like all', description: '仅 Claude', modes: ['sdk', 'print', 'interactive'] },
+      ],
+    });
+  }
+
+  it('codex 模式：隐藏 Claude 专属、显示 codex 专属与通用', () => {
+    reg();
+    const help = getHelp(undefined, 'codex');
+    expect(help).toContain('/common');
+    expect(help).toContain('/codex-only');
+    expect(help).not.toContain('/claude-only');
+  });
+
+  it('sdk 模式：显示 Claude 专属、隐藏 codex 专属', () => {
+    reg();
+    const help = getHelp(undefined, 'sdk');
+    expect(help).toContain('/claude-only');
+    expect(help).not.toContain('/codex-only');
+  });
+
+  it('思考修饰符仅 Claude 系模式显示', () => {
+    reg();
+    expect(getHelp(undefined, 'sdk')).toContain('Sonnet 快速');
+    expect(getHelp(undefined, 'interactive')).toContain('Opus');
+    expect(getHelp(undefined, 'codex')).not.toContain('Sonnet');
+    expect(getHelp(undefined, 'gemini')).not.toContain('修饰符');
+  });
+
+  it('subcommand 按模式过滤：codex 不显示仅 Claude 子命令', () => {
+    reg();
+    const codexHelp = getHelp(undefined, 'codex');
+    expect(codexHelp).toContain('/usage-like — 带子命令');
+    expect(codexHelp).not.toContain('仅 Claude');
+    const sdkHelp = getHelp(undefined, 'sdk');
+    expect(sdkHelp).toContain('仅 Claude');
+  });
+
+  it('默认模式 sdk（不传 mode）', () => {
+    reg();
+    const help = getHelp();
+    expect(help).toContain('/claude-only');
+    expect(help).not.toContain('/codex-only');
+  });
+});
+
+describe('模式拦截 (dispatch)', () => {
+  it('codex 群打仅 Claude 命令被拦截，handler 不执行', async () => {
+    const handler = vi.fn().mockResolvedValue(undefined);
+    registerCommand({
+      name: '/claude-cmd',
+      description: 'Claude 专属',
+      modes: ['sdk', 'print', 'interactive'],
+      handler,
+    });
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({
+      group: { name: 't', folder: 'f', containerConfig: { cliMode: 'codex' } },
+      channels: [{ name: 'mock', ownsJid: () => true, sendMessage, connect: vi.fn() }],
+    });
+    const handled = await dispatch('/claude-cmd', deps as any);
+    expect(handled).toBe(true);
+    expect(handler).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith(
+      'test-jid',
+      expect.stringContaining('不可用'),
+      { isCommandReply: true },
+    );
+  });
+
+  it('适用模式下正常执行 handler', async () => {
+    const handler = vi.fn().mockResolvedValue(undefined);
+    registerCommand({
+      name: '/codex-cmd',
+      description: 'codex 专属',
+      modes: ['codex'],
+      handler,
+    });
+    const deps = makeDeps({
+      group: { name: 't', folder: 'f', containerConfig: { cliMode: 'codex' } },
+    });
+    const handled = await dispatch('/codex-cmd', deps as any);
+    expect(handled).toBe(true);
+    expect(handler).toHaveBeenCalledOnce();
+  });
+
+  it('无 modes 的命令在任何模式都执行', async () => {
+    const handler = vi.fn().mockResolvedValue(undefined);
+    registerCommand({ name: '/any', description: '通用', handler });
+    const deps = makeDeps({
+      group: { name: 't', folder: 'f', containerConfig: { cliMode: 'gemini' } },
+    });
+    await dispatch('/any', deps as any);
+    expect(handler).toHaveBeenCalledOnce();
+  });
+});

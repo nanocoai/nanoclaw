@@ -2,14 +2,16 @@ import { execSync } from 'child_process';
 import { logger } from '../logger.js';
 import { getRotateEnabled, setRotateEnabled, setLastRotateAt, setRotateIndex } from '../db.js';
 import { registerCommand } from './registry.js';
+import { CLAUDE_MODES } from '../cli-mode.js';
 import { parseOneCLIList } from '../onecli-util.js';
 
-// /account — 列出/切换 Anthropic 账号
+// /account — 列出/切换 Anthropic 账号（仅 Claude 系模式）
 registerCommand({
   name: '/account',
   description: '列出或切换 Anthropic 账号',
   hasArgs: true,
   order: 30,
+  modes: CLAUDE_MODES,
   subcommands: [
     { usage: '/account', description: '列出所有账号及当前绑定' },
     { usage: '/account <name>', description: '切换到指定账号' },
@@ -199,11 +201,14 @@ registerCommand({
   description: '查询账号配额使用率',
   hasArgs: true,
   order: 31,
+  // gemini 模式暂不支持配额查询，先隐藏；codex 走 codex 配额，Claude 走 Anthropic OAuth
+  modes: [...CLAUDE_MODES, 'codex'],
   subcommands: [
     { usage: '/usage', description: '查当前账号配额' },
-    { usage: '/usage all', description: '查所有账号配额' },
-    { usage: '/usage <name>', description: '查指定账号配额' },
-    { usage: '/usage delete <name>', description: '删除 OAuth 凭证' },
+    // all / <name> / delete 是 Anthropic OAuth 专属，codex 模式不显示
+    { usage: '/usage all', description: '查所有账号配额', modes: CLAUDE_MODES },
+    { usage: '/usage <name>', description: '查指定账号配额', modes: CLAUDE_MODES },
+    { usage: '/usage delete <name>', description: '删除 OAuth 凭证', modes: CLAUDE_MODES },
   ],
   handler: async (ctx) => {
     const { args, chatJid, channel, registeredGroups, group } = ctx;

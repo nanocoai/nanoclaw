@@ -3,14 +3,16 @@ import path from 'path';
 import { logger } from '../logger.js';
 import { DEFAULT_TRIGGER } from '../config.js';
 import { getHelp, registerCommand } from './registry.js';
+import { CLAUDE_MODES, resolveCliMode } from '../cli-mode.js';
 
-// /help — 显示所有可用命令
+// /help — 显示当前模式下可用命令
 registerCommand({
   name: '/help',
   description: '显示此帮助',
   order: 1,
   handler: async (ctx) => {
-    await ctx.channel.sendMessage(ctx.chatJid, getHelp());
+    const mode = resolveCliMode(ctx.group?.containerConfig);
+    await ctx.channel.sendMessage(ctx.chatJid, getHelp(undefined, mode));
   },
 });
 
@@ -74,12 +76,13 @@ registerCommand({
   },
 });
 
-// /cwd — 设置 Claude Code 工作目录
+// /cwd — 设置 Claude Code 工作目录（仅 Claude 系模式）
 registerCommand({
   name: '/cwd',
   description: '设置 Claude Code 工作目录',
   hasArgs: true,
   order: 42,
+  modes: CLAUDE_MODES,
   subcommands: [
     { usage: '/cwd', description: '查看当前工作目录' },
     { usage: '/cwd <path>', description: '设置新工作目录（下次对话生效）' },

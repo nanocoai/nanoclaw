@@ -67,9 +67,10 @@ describe('/stop', () => {
     expect(handled).toBe(true);
     expect(deps.queue.stopGroup).not.toHaveBeenCalled();
     expect(deps.queue.killGroup).not.toHaveBeenCalled();
+    // dispatch 现在按 modes 在进 handler 前拦截，提示「不可用」
     expect(deps.sendMessage).toHaveBeenCalledWith(
       'fs:oc_test',
-      expect.stringContaining('只对 codex mode 生效'),
+      expect.stringContaining('不可用'),
       { isCommandReply: true },
     );
   });
