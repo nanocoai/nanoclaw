@@ -559,16 +559,16 @@ export class FeishuChannel implements Channel {
       }
 
       // 💬 消息：LLM 中间文字输出
-      //   Codex/quietProgress=true → 塞进进度卡片（折叠面板），减少刷屏
-      //   其他模式 quietProgress=false/undefined → 保持独立发送（默认行为）
+      //   quietProgress 显式开关优先；未配置时 Codex 默认折叠，其他模式默认独立发送
       if (title.startsWith('💬')) {
         const fullText = (detail ?? title).replace(/^💬\s*/u, '').trim();
         if (!fullText) return;
 
         const group = this.opts.registeredGroups()[jid];
         const cliMode = resolveCliMode(group?.containerConfig);
+        const quietProgress = group?.containerConfig?.quietProgress;
         const quiet =
-          group?.containerConfig?.quietProgress === true || cliMode === 'codex';
+          typeof quietProgress === 'boolean' ? quietProgress : cliMode === 'codex';
 
         if (quiet) {
           // 安静模式：包装成卡片步骤，继续走 progressCards 路径

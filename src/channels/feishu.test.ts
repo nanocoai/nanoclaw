@@ -536,6 +536,25 @@ describe('FeishuChannel', () => {
       expect(content.body?.elements).toBeDefined();
     });
 
+    it('💬 Codex 模式下 quietProgress=false 时独立发送', async () => {
+      const jid = 'fs:oc_codex_quiet_off';
+      (channel as any).progressDone.delete(jid);
+      (channel as any).opts.registeredGroups = () => ({
+        [jid]: {
+          name: 'test-codex-quiet-off',
+          folder: 'fs_oc_codex_quiet_off',
+          trigger: '@bot',
+          added_at: new Date().toISOString(),
+          containerConfig: { cliMode: 'codex', quietProgress: false },
+        },
+      });
+
+      await channel.sendMessage(jid, '💬 我先查证据，不先猜', { isProgress: true });
+
+      expect(mockCreate).toHaveBeenCalled();
+      expect((channel as any).progressCards.has(jid)).toBe(false);
+    });
+
     it('💬 Codex 模式下单行长文本也保留全文明细', async () => {
       const jid = 'fs:oc_codex_long_text';
       (channel as any).progressDone.delete(jid);
