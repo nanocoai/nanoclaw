@@ -32,12 +32,14 @@ export interface CodexEvent {
   thread_id?: string;
   item?: {
     id: string;
-    type: 'agent_message' | 'command_execution' | string;
+    type: 'agent_message' | 'command_execution' | 'file_change' | string;
     text?: string;
     command?: string;
     aggregated_output?: string;
     exit_code?: number | null;
     status?: string;
+    /** file_change 事件：改动的文件列表（实测 codex-cli 0.136.0：path + kind:add|modify|delete） */
+    changes?: { path: string; kind: string }[];
   };
   usage?: {
     input_tokens?: number;
@@ -160,6 +162,40 @@ export function mapCodexProgress(event: CodexEvent): ContainerOutput[] {
   if (event.type === 'item.started' && event.item) {
     const it = event.item;
     if (it.type === 'agent_message') return [];
+
+    // file_change：codex 改文件事件无 command 字段，明细在 changes 数组（path + kind）。
+    // 不特殊处理会退化成只显示 "file_change" 类型名、无文件明细。
+    if (
+      it.type === 'file_change' &&
+      Array.isArray(it.changes) &&
+      it.changes.length > 0
+    ) {
+      const files = it.changes;
+      const kindLabel = (k: string): string =>
+        (
+          ({ add: '新增', modify: '修改', update: '修改', delete: '删除' }) as Record<
+            string,
+            string
+          >
+        )[k] ?? k;
+      const short =
+        files.length === 1
+          ? `${kindLabel(files[0].kind)} ${path.basename(files[0].path)}`
+          : `改动 ${files.length} 个文件`;
+      const detailBody = files
+        .map((c) => `${kindLabel(c.kind)}  ${c.path}`)
+        .join('\n')
+        .slice(0, 500);
+      return [
+        {
+          status: 'progress',
+          result: `📝 ${short}`,
+          progressType: 'tool_use',
+          detail: `\`\`\`\n${detailBody}\n\`\`\``,
+        },
+      ];
+    }
+
     const label = it.command || it.type;
     const short = typeof label === 'string' ? label.slice(0, 60) : it.type;
     // detail：完整命令（与 SDK 模式 buildToolUseProgress 对齐，进度页「详情」区展示）。
