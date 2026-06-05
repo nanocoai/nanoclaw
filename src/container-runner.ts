@@ -432,6 +432,22 @@ async function buildContainerArgs(
   }
   log.info('OneCLI gateway applied', { containerName });
 
+  // NO_PROXY — bypass gateway for local services.
+  // OneCLI container-config injects HTTPS_PROXY but NOT NO_PROXY, so all
+  // container HTTP routes through the gateway — including local MCP traffic
+  // to QMD (host.docker.internal:8181) which hangs.
+  // Merge with any provider-contributed NO_PROXY to avoid clobbering
+  // provider-specific bypass entries (e.g. OpenCode endpoints).
+  const LOCAL_NO_PROXY = 'host.docker.internal,localhost,127.0.0.1,::1';
+  const existingNoProxy = providerContribution.env?.NO_PROXY;
+  if (existingNoProxy) {
+    args.push('-e', `NO_PROXY=${LOCAL_NO_PROXY},${existingNoProxy}`);
+    args.push('-e', `no_proxy=${LOCAL_NO_PROXY},${existingNoProxy}`);
+  } else {
+    args.push('-e', `NO_PROXY=${LOCAL_NO_PROXY}`);
+    args.push('-e', `no_proxy=${LOCAL_NO_PROXY}`);
+  }
+
   // Host gateway
   args.push(...hostGatewayArgs());
 
