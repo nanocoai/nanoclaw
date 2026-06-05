@@ -352,7 +352,7 @@ export function prepareGroupSession(groupFolder: string): string {
 }
 
 /**
- * 同步标记了 `codex-shared: true` 的 skill 到群的 codex skills 目录。
+ * 同步 container/skills/ 下所有带 SKILL.md 的 skill 到群的 codex skills 目录。
  * codex 模式专用：单一源 container/skills/ → group/.codex-home/skills/，
  * 一处维护、全群共享，与 Claude 的 prepareGroupSession 同步范式对齐。
  * session 仍隔离在各群 .codex-home 下，不串味。
@@ -372,11 +372,6 @@ export function prepareCodexSkills(groupFolder: string): void {
     if (!fs.statSync(srcDir).isDirectory()) continue;
     const skillMd = path.join(srcDir, 'SKILL.md');
     if (!fs.existsSync(skillMd)) continue;
-
-    // 只在 frontmatter 区域内匹配 codex-shared: true
-    const content = fs.readFileSync(skillMd, 'utf-8');
-    const fm = content.match(/^---\n([\s\S]*?)\n---/);
-    if (!fm || !/^codex-shared:\s*true\s*$/m.test(fm[1])) continue;
 
     fs.cpSync(srcDir, path.join(codexSkillsDst, skillDir), { recursive: true });
   }

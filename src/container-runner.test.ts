@@ -129,6 +129,7 @@ import {
   checkAgentRunnerDist,
   resolveWorkspacePaths,
   prepareGroupSession,
+  prepareCodexSkills,
 } from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 import fs from 'fs';
@@ -427,6 +428,41 @@ describe('prepareGroupSession', () => {
   it('path ends with .claude', () => {
     const dir = prepareGroupSession('main');
     expect(dir).toMatch(/sessions\/main\/\.claude$/);
+  });
+});
+
+describe('prepareCodexSkills', () => {
+  it('同步所有带 SKILL.md 的 container skill，不再要求 codex-shared', () => {
+    vi.mocked(fs.readdirSync).mockReturnValue([
+      'html-report',
+      'kickoff',
+      'not-a-skill',
+    ] as unknown as ReturnType<typeof fs.readdirSync>);
+    vi.mocked(fs.statSync).mockReturnValue({
+      isDirectory: () => true,
+    } as unknown as ReturnType<typeof fs.statSync>);
+    vi.mocked(fs.existsSync).mockImplementation((target) => {
+      const p = String(target);
+      return !p.includes('not-a-skill/SKILL.md');
+    });
+
+    prepareCodexSkills('group-a');
+
+    expect(fs.cpSync).toHaveBeenCalledWith(
+      expect.stringContaining('container/skills/html-report'),
+      '/tmp/nanoclaw-test-groups/group-a/.codex-home/skills/html-report',
+      { recursive: true },
+    );
+    expect(fs.cpSync).toHaveBeenCalledWith(
+      expect.stringContaining('container/skills/kickoff'),
+      '/tmp/nanoclaw-test-groups/group-a/.codex-home/skills/kickoff',
+      { recursive: true },
+    );
+    expect(fs.cpSync).not.toHaveBeenCalledWith(
+      expect.stringContaining('not-a-skill'),
+      expect.any(String),
+      expect.any(Object),
+    );
   });
 });
 
