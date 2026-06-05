@@ -5,6 +5,7 @@ import './misc.js';
 import './remote-control.js';
 import './quiet.js';
 import './mode.js';
+import './topic-brief.js';
 
 export { dispatch, getHelp, getRegisteredCommands } from './registry.js';
 export type { Command, CommandContext } from './types.js';
