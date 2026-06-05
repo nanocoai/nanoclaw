@@ -92,7 +92,7 @@ describe('mapCodexTextProgress — Codex 中间文本', () => {
         status: 'progress',
         result: '💬 我先看一下代码。',
         progressType: 'text',
-        detail: undefined,
+        detail: '我先看一下代码。',
       },
     ]);
     expect(state.pendingAgentMessage).toBeUndefined();
@@ -160,5 +160,28 @@ describe('mapCodexTextProgress — Codex 中间文本', () => {
     expect(out[0].result).toBe('💬 接下来读取文件。');
     expect(state.pendingAgentMessage).toBeUndefined();
     expect(state.lastAgentMessage).toBeUndefined();
+  });
+
+  it('长中间文本 result 截断为预览,detail 保留全文', () => {
+    const state = createCodexTextProgressState();
+    const fullText = [
+      '我先分析这段代码的结构。',
+      '接下来会读取 package.json，确认项目名称和脚本配置。',
+      '最后只返回需要的字段，避免把过程重复到最终回复里。',
+      '这段文本故意超过预览长度，用来验证卡片明细里保留完整内容。',
+    ].join('\n');
+    mapCodexTextProgress(
+      completed({ id: 'm1', type: 'agent_message', text: fullText }),
+      state,
+    );
+
+    const out = mapCodexTextProgress(
+      started({ id: 'c1', type: 'command_execution', command: 'cat package.json' }),
+      state,
+    );
+
+    expect(out[0].result).toMatch(/^💬 /);
+    expect(out[0].result.length).toBeLessThan(fullText.length + 2);
+    expect(out[0].detail).toBe(fullText);
   });
 });
