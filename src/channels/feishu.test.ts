@@ -510,6 +510,56 @@ describe('FeishuChannel', () => {
       expect(content.body?.elements).toBeDefined();
     });
 
+    it('💬 Codex 模式默认进入进度卡片', async () => {
+      const jid = 'fs:oc_codex_text';
+      (channel as any).progressDone.delete(jid);
+      (channel as any).opts.registeredGroups = () => ({
+        [jid]: {
+          name: 'test-codex',
+          folder: 'fs_oc_codex_text',
+          trigger: '@bot',
+          added_at: new Date().toISOString(),
+          containerConfig: { cliMode: 'codex' },
+        },
+      });
+
+      await channel.sendMessage(jid, '💬 我先查证据，不先猜', { isProgress: true });
+
+      expect(mockCreate).toHaveBeenCalled();
+      const callArg = mockCreate.mock.calls[0]?.[0];
+      expect(callArg?.data?.receive_id).toBe('oc_codex_text');
+      expect(callArg?.data?.msg_type).toBe('interactive');
+      const content = JSON.parse(callArg?.data?.content ?? '{}');
+      const serialized = JSON.stringify(content);
+      expect(serialized).toContain('我先查证据，不先猜');
+      expect(content.schema).toBe('2.0');
+      expect(content.body?.elements).toBeDefined();
+    });
+
+    it('💬 Codex 模式下单行长文本也保留全文明细', async () => {
+      const jid = 'fs:oc_codex_long_text';
+      (channel as any).progressDone.delete(jid);
+      (channel as any).opts.registeredGroups = () => ({
+        [jid]: {
+          name: 'test-codex-long',
+          folder: 'fs_oc_codex_long_text',
+          trigger: '@bot',
+          added_at: new Date().toISOString(),
+          containerConfig: { cliMode: 'codex' },
+        },
+      });
+
+      const longText = '我先查证据，不先猜。'.repeat(20);
+      await channel.sendMessage(jid, `💬 ${longText}`, { isProgress: true });
+
+      expect(mockCreate).toHaveBeenCalled();
+      const callArg = mockCreate.mock.calls[0]?.[0];
+      const content = JSON.parse(callArg?.data?.content ?? '{}');
+      const serialized = JSON.stringify(content);
+      expect(serialized).toContain(longText);
+      expect(serialized).toContain('collapsible_panel');
+    });
+
     it('💬 安静模式下长文本用折叠面板（detail）', async () => {
       const jid = 'fs:oc_quiet_detail';
       (channel as any).progressDone.delete(jid);

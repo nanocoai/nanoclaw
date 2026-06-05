@@ -559,20 +559,25 @@ export class FeishuChannel implements Channel {
       }
 
       // 💬 消息：LLM 中间文字输出
-      //   quietProgress=true → 塞进进度卡片（折叠面板），减少刷屏
-      //   quietProgress=false/undefined → 保持独立发送（默认行为）
+      //   Codex/quietProgress=true → 塞进进度卡片（折叠面板），减少刷屏
+      //   其他模式 quietProgress=false/undefined → 保持独立发送（默认行为）
       if (title.startsWith('💬')) {
         const fullText = (detail ?? title).replace(/^💬\s*/u, '').trim();
         if (!fullText) return;
 
         const group = this.opts.registeredGroups()[jid];
-        const quiet = group?.containerConfig?.quietProgress === true;
+        const cliMode = resolveCliMode(group?.containerConfig);
+        const quiet =
+          group?.containerConfig?.quietProgress === true || cliMode === 'codex';
 
         if (quiet) {
           // 安静模式：包装成卡片步骤，继续走 progressCards 路径
           const firstLine = fullText.split('\n')[0];
           title = `💬 ${firstLine.length > 80 ? firstLine.slice(0, 80) + '…' : firstLine}`;
-          detail = fullText.length > firstLine.length ? fullText : undefined;
+          detail =
+            fullText.length > firstLine.length || firstLine.length > 80
+              ? fullText
+              : undefined;
           // 不 return，下面走 progressCards 创建/更新
         } else {
           // 默认模式：独立发消息
