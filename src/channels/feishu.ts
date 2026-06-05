@@ -6,7 +6,8 @@ import path from 'path';
 import * as lark from '@larksuiteoapi/node-sdk';
 
 import { ASSISTANT_NAME } from '../config.js';
-import { resolveCliMode, type ContainerOutput } from '../container-runner.js';
+import { resolveCliMode } from '../cli-mode.js';
+import type { ContainerOutput } from '../container-runner.js';
 import { getMessageById } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';

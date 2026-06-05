@@ -224,7 +224,7 @@ registerCommand({
     // codex 模式群:无参数 /usage 走 codex 配额(读最近 rollout 的 rate_limits)。
     // 带参数(all / <name> / delete)仍走 Claude OAuth 路径,保持原行为。
     if (!args && group) {
-      const { resolveCliMode } = await import('../container-runner.js');
+      const { resolveCliMode } = await import('../cli-mode.js');
       if (resolveCliMode(group.containerConfig) === 'codex') {
         const { getCodexUsage, formatCodexUsage } = await import(
           '../codex-usage.js'

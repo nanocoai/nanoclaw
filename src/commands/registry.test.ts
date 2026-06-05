@@ -183,7 +183,10 @@ describe('dispatch', () => {
 
     expect(handled).toBe(true);
     const sendMsg = deps.channels[0].sendMessage;
-    expect(sendMsg).toHaveBeenCalledWith('test-jid', '此命令仅限主群使用');
+    // 权限拒绝现在走 commandChannel，带 isCommandReply 避免打断 agent
+    expect(sendMsg).toHaveBeenCalledWith('test-jid', '此命令仅限主群使用', {
+      isCommandReply: true,
+    });
   });
 
   it('handler 抛异常时捕获并回复错误', async () => {

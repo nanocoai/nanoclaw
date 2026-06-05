@@ -1,5 +1,5 @@
 import { logger } from '../logger.js';
-import { resolveCliMode } from '../container-runner.js';
+import { resolveCliMode } from '../cli-mode.js';
 import { registerCommand } from './registry.js';
 
 // /clear — 清除 session，开始新对话（对齐 Claude Code /clear）

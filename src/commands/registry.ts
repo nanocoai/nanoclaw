@@ -64,11 +64,12 @@ export async function dispatch(
     return true; // 命令已匹配，不应穿透到"未知命令"
   }
 
-  // 包装 channel：命令回复自动带 isCommandReply，避免打断正在运行的 agent
+  // 包装 channel：命令回复自动带 isCommandReply，避免打断正在运行的 agent。
+  // 保留 handler 可能传入的 options（如进度标记），仅追加 isCommandReply。
   const commandChannel: typeof channel = {
     ...channel,
-    sendMessage: (jid: string, text: string) =>
-      channel.sendMessage(jid, text, { isCommandReply: true }),
+    sendMessage: (jid, text, opts) =>
+      channel.sendMessage(jid, text, { ...opts, isCommandReply: true }),
   };
 
   // 模式检查：当前群 CLI 模式不在命令的 modes 白名单时，拦截并提示（用 commandChannel 避免打断 agent）
@@ -87,9 +88,9 @@ export async function dispatch(
     return true;
   }
 
-  // 权限检查
+  // 权限检查（用 commandChannel 回复，避免拒绝消息打断正在运行的 agent）
   if (matched.requiresMain && !deps.group?.isMain) {
-    await channel
+    await commandChannel
       .sendMessage(deps.chatJid, '此命令仅限主群使用')
       .catch(() => {});
     return true;
