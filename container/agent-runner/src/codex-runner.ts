@@ -71,6 +71,11 @@ export interface CodexRunnerConfig {
   codexHome: string;
 }
 
+export interface CodexTextProgressState {
+  pendingAgentMessage?: string;
+  lastAgentMessage?: string;
+}
+
 // ---- 纯函数（可单元测试） ----
 
 /** 解析 codex JSONL 单行 → CodexEvent，畸形输入返回 null */
@@ -84,6 +89,64 @@ export function parseCodexEventLine(line: string): CodexEvent | null {
   } catch {
     return null;
   }
+}
+
+export function createCodexTextProgressState(): CodexTextProgressState {
+  return {};
+}
+
+function buildCodexTextProgress(text: string): ContainerOutput {
+  const short = text.slice(0, 80) + (text.length > 80 ? '...' : '');
+  return {
+    status: 'progress',
+    result: `💬 ${short}`,
+    progressType: 'text',
+    detail: text.length > 80 ? text : undefined,
+  };
+}
+
+function flushPendingCodexText(state: CodexTextProgressState): ContainerOutput[] {
+  const text = state.pendingAgentMessage;
+  state.pendingAgentMessage = undefined;
+  // 一旦文本被发成 💬 中间进度，就不能再作为最终 success.result 复用。
+  if (text) state.lastAgentMessage = undefined;
+  return text ? [buildCodexTextProgress(text)] : [];
+}
+
+/**
+ * Codex 的 agent_message 可能是最终回复，也可能是工具调用前的中间叙述。
+ * 先缓存，后续出现工具/文件改动事件时再发成 💬；turn.completed 则丢弃缓存避免重复最终回复。
+ */
+export function mapCodexTextProgress(
+  event: CodexEvent,
+  state: CodexTextProgressState,
+): ContainerOutput[] {
+  if (event.type === 'item.completed' && event.item?.type === 'agent_message') {
+    const outputs = flushPendingCodexText(state);
+    const text =
+      typeof event.item.text === 'string'
+        ? event.item.text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim()
+        : '';
+    state.lastAgentMessage = undefined;
+    if (text) {
+      state.pendingAgentMessage = text;
+      state.lastAgentMessage = text;
+    }
+    return outputs;
+  }
+
+  if (
+    (event.type === 'item.started' || event.type === 'item.completed') &&
+    event.item?.type !== 'agent_message'
+  ) {
+    return flushPendingCodexText(state);
+  }
+
+  if (event.type === 'turn.completed') {
+    state.pendingAgentMessage = undefined;
+  }
+
+  return [];
 }
 
 /** 构建 codex CLI 参数数组（prompt 由调用方追加到末尾） */
@@ -438,7 +501,7 @@ export async function runCodexQuery(
     });
 
     let newSessionId: string | undefined = config.sessionId;
-    let lastAgentMessage: string | undefined;
+    const textProgressState = createCodexTextProgressState();
     let usage: ContainerOutput['usage'] | undefined;
     let sentSuccess = false;
     let lineBuffer = '';
@@ -461,11 +524,9 @@ export async function runCodexQuery(
         log(`[codex-runner] thread: ${newSessionId}`);
       }
 
-      // 累积最后一条 agent_message 作为最终结果
-      if (event.type === 'item.completed' && event.item?.type === 'agent_message') {
-        if (typeof event.item.text === 'string') {
-          lastAgentMessage = event.item.text;
-        }
+      // Codex agent_message 先缓存；后续工具事件到达时才作为中间叙述输出。
+      for (const output of mapCodexTextProgress(event, textProgressState)) {
+        writeOutput(output);
       }
 
       // 捕获错误正文（turn.failed 权威错误最后到达，覆盖中间 type:error 重连噪声）
@@ -483,7 +544,7 @@ export async function runCodexQuery(
         usage = mapCodexUsage(event.usage, modelInfo);
         writeOutput({
           status: 'success',
-          result: lastAgentMessage || null,
+          result: textProgressState.lastAgentMessage || null,
           newSessionId,
           usage,
         });
@@ -526,10 +587,10 @@ export async function runCodexQuery(
       }
 
       // 没有正常 turn.completed 但有 agent_message → 兜底发 success
-      if (!sentSuccess && lastAgentMessage) {
+      if (!sentSuccess && textProgressState.lastAgentMessage) {
         writeOutput({
           status: 'success',
-          result: lastAgentMessage,
+          result: textProgressState.lastAgentMessage,
           newSessionId,
           usage,
         });
@@ -568,7 +629,7 @@ export async function runCodexQuery(
         });
       }
 
-      resolve({ newSessionId, result: lastAgentMessage });
+      resolve({ newSessionId, result: textProgressState.lastAgentMessage });
     });
 
     child.on('error', (err) => {

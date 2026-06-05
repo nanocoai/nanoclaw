@@ -3,10 +3,18 @@
  * mapCodexProgress 在 container/agent-runner,纯函数,跨目录 import 验证
  */
 import { describe, it, expect } from 'vitest';
-import { mapCodexProgress } from '../container/agent-runner/src/codex-runner.js';
+import {
+  createCodexTextProgressState,
+  mapCodexProgress,
+  mapCodexTextProgress,
+} from '../container/agent-runner/src/codex-runner.js';
 
 function started(item: Record<string, unknown>) {
   return { type: 'item.started', item } as any;
+}
+
+function completed(item: Record<string, unknown>) {
+  return { type: 'item.completed', item } as any;
 }
 
 describe('mapCodexProgress — file_change', () => {
@@ -61,5 +69,96 @@ describe('mapCodexProgress — 回归', () => {
 
   it('agent_message 返回空', () => {
     expect(mapCodexProgress(started({ id: 'm1', type: 'agent_message', text: 'hi' }))).toEqual([]);
+  });
+});
+
+describe('mapCodexTextProgress — Codex 中间文本', () => {
+  it('agent_message 后接工具事件时 flush 成 💬 progress', () => {
+    const state = createCodexTextProgressState();
+    expect(
+      mapCodexTextProgress(
+        completed({ id: 'm1', type: 'agent_message', text: '我先看一下代码。' }),
+        state,
+      ),
+    ).toEqual([]);
+
+    const out = mapCodexTextProgress(
+      started({ id: 'c1', type: 'command_execution', command: 'rg foo' }),
+      state,
+    );
+
+    expect(out).toEqual([
+      {
+        status: 'progress',
+        result: '💬 我先看一下代码。',
+        progressType: 'text',
+        detail: undefined,
+      },
+    ]);
+    expect(state.pendingAgentMessage).toBeUndefined();
+    expect(state.lastAgentMessage).toBeUndefined();
+  });
+
+  it('直接 turn.completed 时丢弃 pending 文本避免重复最终回复', () => {
+    const state = createCodexTextProgressState();
+    mapCodexTextProgress(
+      completed({ id: 'm1', type: 'agent_message', text: '最终答案。' }),
+      state,
+    );
+
+    expect(mapCodexTextProgress({ type: 'turn.completed' } as any, state)).toEqual([]);
+    expect(state.pendingAgentMessage).toBeUndefined();
+    expect(state.lastAgentMessage).toBe('最终答案。');
+  });
+
+  it('连续 agent_message 时 flush 前一段,保留后一段等待判定', () => {
+    const state = createCodexTextProgressState();
+    mapCodexTextProgress(
+      completed({ id: 'm1', type: 'agent_message', text: '第一段中间说明。' }),
+      state,
+    );
+
+    const out = mapCodexTextProgress(
+      completed({ id: 'm2', type: 'agent_message', text: '第二段可能是最终回复。' }),
+      state,
+    );
+
+    expect(out[0].result).toBe('💬 第一段中间说明。');
+    expect(state.pendingAgentMessage).toBe('第二段可能是最终回复。');
+    expect(state.lastAgentMessage).toBe('第二段可能是最终回复。');
+  });
+
+  it('internal-only 后续消息不复用旧文本当最终回复', () => {
+    const state = createCodexTextProgressState();
+    mapCodexTextProgress(
+      completed({ id: 'm1', type: 'agent_message', text: '这段后面还有处理。' }),
+      state,
+    );
+
+    const out = mapCodexTextProgress(
+      completed({ id: 'm2', type: 'agent_message', text: '<internal>已写完总结</internal>' }),
+      state,
+    );
+
+    expect(out[0].result).toBe('💬 这段后面还有处理。');
+    expect(state.pendingAgentMessage).toBeUndefined();
+    expect(state.lastAgentMessage).toBeUndefined();
+  });
+
+  it('completed 工具事件也会 flush pending 文本', () => {
+    const state = createCodexTextProgressState();
+    mapCodexTextProgress(
+      completed({ id: 'm1', type: 'agent_message', text: '接下来读取文件。' }),
+      state,
+    );
+
+    const out = mapCodexTextProgress(
+      completed({ id: 'c1', type: 'command_execution', command: 'sed -n 1,80p a.ts' }),
+      state,
+    );
+
+    expect(out[0].result).toBe('💬 接下来读取文件。');
+    expect(state.pendingAgentMessage).toBeUndefined();
+    expect(state.lastAgentMessage).toBeUndefined();
   });
 });
