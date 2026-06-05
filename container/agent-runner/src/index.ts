@@ -26,7 +26,12 @@ import { fileURLToPath } from 'url';
 import { runCliQuery } from './cli-runner.js';
 import { runCodexQuery } from './codex-runner.js';
 import { runGeminiQuery } from './gemini-runner.js';
-import { runInteractiveQuery, cleanupInteractiveResources, checkCliHealth } from './interactive-cli-runner.js';
+import {
+  runInteractiveQuery,
+  cleanupInteractiveResources,
+  checkCliHealth,
+  shouldEmitInteractiveSessionKeepalive,
+} from './interactive-cli-runner.js';
 
 interface ContainerInput {
   prompt: string;
@@ -458,6 +463,7 @@ interface IpcMessage {
   senderId?: string;
   modelOverride?: { model?: string; thinking?: 'adaptive' | 'disabled' };
   context?: MessageContext | null;
+  claimPath?: string;
 }
 
 /**
@@ -566,6 +572,125 @@ function waitForIpcMessage(): Promise<IpcMessage | null> {
         resolve(combined);
         return;
       }
+      setTimeout(poll, IPC_POLL_MS);
+    };
+    poll();
+  });
+}
+
+function claimNextIpcMessage(): IpcMessage | null {
+  try {
+    fs.mkdirSync(PATHS.ipcInput, { recursive: true });
+    const inflightDir = path.join(PATHS.ipcInput, '.inflight');
+    fs.mkdirSync(inflightDir, { recursive: true });
+
+    const files = fs
+      .readdirSync(PATHS.ipcInput)
+      .filter((f) => f.endsWith('.json') && !f.startsWith('.'))
+      .sort();
+
+    for (const file of files) {
+      const filePath = path.join(PATHS.ipcInput, file);
+      const claimPath = path.join(inflightDir, file);
+      try {
+        fs.renameSync(filePath, claimPath);
+      } catch {
+        continue;
+      }
+
+      try {
+        const data = JSON.parse(fs.readFileSync(claimPath, 'utf-8'));
+        if (data.type === 'message' && data.text) {
+          return {
+            text: data.text,
+            senderId: typeof data.senderId === 'string' ? data.senderId : undefined,
+            modelOverride: data.modelOverride,
+            context: data.context || null,
+            claimPath,
+          };
+        }
+        fs.unlinkSync(claimPath);
+      } catch (err) {
+        log(
+          `Failed to process claimed IPC file ${file}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        try {
+          fs.unlinkSync(claimPath);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  } catch (err) {
+    log(`Interactive IPC claim error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return null;
+}
+
+function ackClaimedIpcMessages(claimPaths: string[]): void {
+  for (const claimPath of claimPaths) {
+    try {
+      fs.unlinkSync(claimPath);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function requeueClaimedIpcMessages(claimPaths: string[]): void {
+  for (const claimPath of claimPaths) {
+    if (!fs.existsSync(claimPath)) continue;
+    const targetPath = path.join(PATHS.ipcInput, path.basename(claimPath));
+    try {
+      fs.renameSync(claimPath, targetPath);
+    } catch {
+      /* keep inflight for restart recovery */
+    }
+  }
+}
+
+function recoverInflightIpcMessages(): number {
+  const inflightDir = path.join(PATHS.ipcInput, '.inflight');
+  if (!fs.existsSync(inflightDir)) return 0;
+
+  let recovered = 0;
+  for (const file of fs.readdirSync(inflightDir).filter((f) => f.endsWith('.json')).sort()) {
+    const claimPath = path.join(inflightDir, file);
+    const targetPath = path.join(PATHS.ipcInput, file);
+    try {
+      if (fs.existsSync(targetPath)) {
+        const recoveredName = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}-${file}`;
+        fs.renameSync(claimPath, path.join(PATHS.ipcInput, recoveredName));
+      } else {
+        fs.renameSync(claimPath, targetPath);
+      }
+      recovered++;
+    } catch {
+      /* keep inflight for next recovery attempt */
+    }
+  }
+  return recovered;
+}
+
+function waitForInteractiveIpcMessage(): Promise<IpcMessage | null> {
+  return new Promise((resolve) => {
+    const poll = () => {
+      if (shouldClose()) {
+        resolve(null);
+        return;
+      }
+
+      const recovered = recoverInflightIpcMessages();
+      if (recovered > 0) {
+        log(`[interactive] recovered ${recovered} inflight IPC message(s)`);
+      }
+
+      const message = claimNextIpcMessage();
+      if (message) {
+        resolve(message);
+        return;
+      }
+
       setTimeout(poll, IPC_POLL_MS);
     };
     poll();
@@ -1341,6 +1466,7 @@ async function main(): Promise<void> {
 
   let sessionId = containerInput.sessionId;
   fs.mkdirSync(PATHS.ipcInput, { recursive: true });
+  const cliMode = containerInput.cliMode || 'sdk';
 
   // Clean up stale _close sentinel from previous container runs
   try {
@@ -1351,13 +1477,33 @@ async function main(): Promise<void> {
 
   // Build initial prompt (drain any pending IPC messages too)
   let prompt = containerInput.prompt;
+  const initialInteractiveClaims: string[] = [];
   if (containerInput.isScheduledTask) {
     prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
   }
-  const pending = drainIpcInput();
-  if (pending.length > 0) {
-    log(`Draining ${pending.length} pending IPC messages into initial prompt`);
-    prompt += '\n' + pending.map(m => prependContext(m.text, m.context)).join('\n');
+  if (cliMode === 'interactive') {
+    const recovered = recoverInflightIpcMessages();
+    if (recovered > 0) {
+      log(`[interactive] recovered ${recovered} inflight IPC message(s) before initial prompt`);
+    }
+    const pending: IpcMessage[] = [];
+    while (true) {
+      const claimed = claimNextIpcMessage();
+      if (!claimed) break;
+      pending.push(claimed);
+      if (claimed.claimPath) initialInteractiveClaims.push(claimed.claimPath);
+    }
+    if (pending.length > 0) {
+      log(`[interactive] Claiming ${pending.length} pending IPC message(s) into initial prompt`);
+      // interactive 模式按真实时间顺序处理 pending：旧消息在 initial prompt 前面。
+      prompt = pending.map(m => prependContext(m.text, m.context)).join('\n') + '\n' + prompt;
+    }
+  } else {
+    const pending = drainIpcInput();
+    if (pending.length > 0) {
+      log(`Draining ${pending.length} pending IPC messages into initial prompt`);
+      prompt += '\n' + pending.map(m => prependContext(m.text, m.context)).join('\n');
+    }
   }
 
   // Script phase: run script before waking agent
@@ -1383,7 +1529,6 @@ async function main(): Promise<void> {
   }
 
   // ---- 模式分叉：sdk / print / interactive ----
-  const cliMode = containerInput.cliMode || 'sdk';
   log(`[mode] cliMode=${cliMode}`);
 
   if (cliMode === 'print') {
@@ -1775,6 +1920,7 @@ async function main(): Promise<void> {
 
     // 对话记录
     const iTranscript: ParsedMessage[] = [];
+    let activeClaimPaths = initialInteractiveClaims;
 
     try {
       while (true) {
@@ -1805,6 +1951,11 @@ async function main(): Promise<void> {
             upstreamProxy,
             upstreamCaCert,
             credentialProxy,
+            onInputAccepted: () => {
+              // 快路径：一旦确认 Claude 接收输入，立即 ack，避免 final 前崩溃导致重放。
+              ackClaimedIpcMessages(activeClaimPaths);
+              activeClaimPaths = [];
+            },
           },
           writeOutput,
           log,
@@ -1820,6 +1971,13 @@ async function main(): Promise<void> {
 
         // 增量归档：每轮查询结束立即写入磁盘，不依赖进程退出
         appendInteractiveTranscript(prompt, result.result || null, containerInput.assistantName);
+        if (result.inputAccepted) {
+          // 保险路径：如果快路径已 ack，这里 activeClaimPaths 已为空；否则补 ack。
+          ackClaimedIpcMessages(activeClaimPaths);
+        } else if (activeClaimPaths.length > 0) {
+          requeueClaimedIpcMessages(activeClaimPaths);
+        }
+        activeClaimPaths = [];
 
         // 检查 _close 信号
         if (shouldClose()) {
@@ -1827,24 +1985,27 @@ async function main(): Promise<void> {
           break;
         }
 
-        if (sessionId && !result.result) {
+        if (shouldEmitInteractiveSessionKeepalive(sessionId, result)) {
           writeOutput({ status: 'success', result: null, newSessionId: sessionId });
         }
 
         log('[interactive] Query ended, waiting for next IPC message...');
 
-        const nextMessage = await waitForIpcMessage();
+        const nextMessage = await waitForInteractiveIpcMessage();
         if (nextMessage === null) {
           log('[interactive] Close sentinel received, exiting');
           break;
         }
 
         log(`[interactive] Got new message (${nextMessage.text.length} chars)`);
+        activeClaimPaths = nextMessage.claimPath ? [nextMessage.claimPath] : [];
 
         // 消息驱动健康检查：发消息时才检查环境，不用定时器
         const health = await checkCliHealth(containerInput.chatJid, log);
         if (!health.healthy) {
           log(`[interactive] 环境异常，退出 runner: ${health.error}`);
+          requeueClaimedIpcMessages(activeClaimPaths);
+          activeClaimPaths = [];
           writeOutput({
             status: 'error',
             result: null,

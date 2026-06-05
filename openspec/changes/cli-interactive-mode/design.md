@@ -19,12 +19,14 @@ NanoClaw 当前 CLI 模式使用 `claude --print --output-format stream-json` pe
 - 保持现有 ContainerOutput 接口不变（对上层透明）
 - 保持 per-group 账号隔离、MCP 注入、session 恢复等现有能力
 - 实时获取工具调用进度（不是等最终结果）
+- 将 interactive mode 从 per-turn query 改为 per-group terminal bridge，避免 CLI 已回 prompt 但 runner 仍等待 SSE final 导致后续 IPC 消息无人读取
 
 **Non-Goals:**
 - 不改 OneCLI 代码（当前 SDK 无 tap API，我们自己解决）
 - 不支持 `--print` fallback（一旦切换，彻底弃用旧模式）
 - 不做多账号热切换（启动时确定账号，运行期间不换）
 - 不实现文件/图片多媒体输入（后续迭代）
+- 不改变上层飞书发送协议、GroupQueue IPC 文件格式和 ContainerOutput 字段语义
 
 ## Decisions
 
@@ -181,6 +183,10 @@ tmux session 丢失（崩溃/重启）但 sessionId 还在时，需要恢复：
 | Anthropic 未来可能通过其他方式识别非人类使用 | P2 | 架构最大程度模拟真人使用模式 |
 | 多 tmux session 并发资源占用 | P1 | 设上限（如 10 个并发），超限排队 |
 | Tap Proxy 自签 CA 安全性 | P2 | 仅 localhost 通信，CA 私钥权限 600 |
+| pane ready 被误判导致提前注入下一条消息 | P0 | 必须同时满足 ready 连续稳定、SSE 静默、无 pendingOutput；并用单测覆盖瞬态 ready |
+| IPC 文件删除过早导致用户消息丢失 | P0 | 只在 tmux send/paste/Enter 全部成功后删除；失败保留文件 |
+| 降级收口丢 final 文本 | P1 | 已发送 progress 不撤回；日志记录 degraded reason；后续可从 Claude JSONL 补偿 |
+| 常驻 daemon 引入循环泄漏 | P1 | 所有 interval/subscription 统一挂到 session lifecycle，destroy 时强制清理 |
 
 ## Migration Plan
 
@@ -207,6 +213,16 @@ tmux session 丢失（崩溃/重启）但 sessionId 还在时，需要恢复：
 
 **回滚**：关闭 `USE_INTERACTIVE_CLI` 即回退到 `--print` 模式，零代码改动。
 
+### Phase 5: 三层终端桥硬化
+1. 提取 `InteractiveTerminalBridge`，保留现有 `runInteractiveQuery()` 外观作为兼容薄层。
+2. 实现 InputBridge，复用现有 IPC input 文件格式，不改 GroupQueue。
+3. 实现 OutputBridge，把现有 SSE accumulator 迁移为常驻订阅。
+4. 实现 HealthSupervisor，覆盖 parse failed、prompt-ready-with-backlog、tmux dead、proxy dead。
+5. 增加 `interactive-state.json`，重启后校验并恢复。
+6. 单群灰度：仅 `oc_df0d2dcb8747d8bcc2047c60ddcc7120` 开启三层桥，其他 interactive 群保持旧行为。
+
+**回滚**：保留 `cliMode: interactive` 下的 feature flag `interactiveBridgeV2`，关闭后退回当前 `runInteractiveQuery()` 路径。
+
 ### D8: 账号轮换与 Tap Proxy 协同
 
 现有 per-turn spawn 模式下，账号轮换通过下一次 spawn 时注入新 HTTPS_PROXY URL 实现。交互模式下 Claude CLI 常驻，HTTPS_PROXY 启动时固化。
@@ -217,6 +233,126 @@ tmux session 丢失（崩溃/重启）但 sessionId 还在时，需要恢复：
 // Tap Proxy 内部
 tapProxy.updateUpstreamToken(sessionId: string, newToken: string): void
 ```
+
+### D9: 三层终端桥替代 per-turn query
+
+**问题**：现有 interactive runner 把生命周期绑定到 `runInteractiveQuery()`：
+
+```
+send tmux input → 等 SSE message_stop/end_turn → resolve → waitForIpcMessage()
+```
+
+现场故障已经证明这个模型不成立。Claude CLI 可能已经回到 `❯` prompt，但 Tap Proxy 没有收到可映射成 final result 的 SSE 结束事件。此时 runner 不 resolve，也不进入 `waitForIpcMessage()`，新消息只会堆在 `data/ipc/<group>/input/`。
+
+**选择**：改为 per-group 常驻 daemon，拆成三层：
+
+```
+InteractiveTerminalBridge
+  ├─ InputBridge       持续读 IPC input，按 pane 状态注入 tmux
+  ├─ OutputBridge      持续订阅 SSE/pane 输出，写 ContainerOutput
+  └─ HealthSupervisor  按 tmux/pane/proxy/backlog 判死和恢复
+```
+
+三层共享一个 `InteractiveSessionState`，但职责不能互相穿透：InputBridge 不解析 SSE，OutputBridge 不删除 IPC 文件，HealthSupervisor 不直接发送用户消息。
+
+### D10: Input Bridge 消费语义
+
+Input Bridge 使用现有 IPC input 目录，保持 `src/group-queue.ts` 写文件的行为不变。
+
+处理规则：
+1. 按文件 mtime/name 排序读取最早消息。
+2. capture pane，调用 `analyzeTmuxPane()`。
+3. `ready` → 生成 turnId，把 `input/<file>.json` 原子 rename 到 `input/.inflight/<turnId>.json`，再注入 tmux。
+4. 注入成功后先不删除 inflight；等 Tap Proxy 看到该 turn 的首个 `/v1/messages`，或 pane 明确离开 ready 进入 busy，才删除 inflight。
+5. `busy` → 不 claim、不删除、不重复注入，等待下一轮。
+6. `blocked-resume-search/auth-error/unknown` → 交给 HealthSupervisor 标记 degraded 或 restarting。
+
+**关键约束**：tmux send/paste/Enter 成功只代表终端收到按键，不代表 Claude CLI 收到用户消息。必须用 request/busy 作为 ack，否则会丢消息。重启时 `.inflight` 要参与恢复判定。
+
+### D11: Output Bridge 结束信号
+
+Output Bridge 仍然优先相信 SSE，因为 SSE 有结构化工具调用、usage 和文本块。但结束信号不能只靠 `message_stop/end_turn`。
+
+每个 turn 必须有 fencing：
+
+- InputBridge 注入前生成 `turnId`。
+- Tap Proxy 对每个 `/v1/messages` 生成 `requestId/streamId`。
+- OutputBridge 只把“turn 注入后出现的下一批 request”绑定到该 `turnId`。
+- 降级收口后迟到的 SSE 只能写 orphan/degraded 日志，不能发 success，也不能修改当前 active turn。
+
+结束信号分三级：
+1. **正常结束**：收到 `message_stop` 且 stop_reason=end_turn，flush success。
+2. **降级结束**：pane ready、activeSseStreams=0、距离 lastSseAt 超过阈值、没有 pendingOutput 可 flush。此时写带 `degradedReason` 的 ContainerOutput 和 warning 日志，释放当前 turn。
+3. **错误结束**：pane 出现已知 terminal error（如 `tool call could not be parsed`）且 ready，写 error output，释放当前 turn。
+
+阈值建议：`promptReadyQuietMs=5s`，`sseQuietMs=15s`，`turnHardTimeoutMs=30min`。
+
+### D12: Health Supervisor 状态机
+
+每个 group 维护状态：
+
+```typescript
+type InteractiveRunnerState =
+  | 'idle'
+  | 'busy'
+  | 'degraded'
+  | 'restarting';
+```
+
+HealthSupervisor 每 2 秒检查 tmux session、pane 状态、TapProxy 订阅、IPC backlog、lastSseAt、lastOutputAt、lastPromptReadyAt。核心判定必须做成可单测纯函数：
+
+```typescript
+shouldReleaseBlockedTurn({
+  readyStableMs,
+  sseQuietMs,
+  activeSseStreams,
+  currentTurnState,
+  backlogCount,
+  pendingOutput,
+}): boolean
+```
+
+P0 条件：
+
+```typescript
+readyStableMs >= 5000 &&
+sseQuietMs >= 15000 &&
+activeSseStreams === 0 &&
+currentTurnState === 'busy' &&
+backlogCount > 0 &&
+pendingOutput == null
+```
+
+采样失败规则也必须确定：pane capture 连续 3 次失败算 tmux unhealthy；Tap Proxy 订阅连续 3 次失败算 proxy unhealthy；pane `unknown` 连续 5 次且有 backlog 算 degraded。命中这些条件后释放或重启 currentTurn，这是本次卡死的核心修复。
+
+### D13: 状态持久化
+
+新增 `data/ipc/<groupFolder>/interactive-state.json`，只存最小状态：
+
+```json
+{
+  "tmuxSessionName": "nanoclaw-fsoc...",
+  "claudeSessionId": "30270a9e-...",
+  "state": "busy",
+  "currentTurnId": "turn-...",
+  "currentInputFile": "input/.inflight/turn-....json",
+  "currentInputDigest": "sha256:...",
+  "currentRequestIds": ["req-..."],
+  "finalEmitted": false,
+  "degradedReason": null,
+  "lastInputAt": "2026-06-05T00:14:01.918+08:00",
+  "lastSseAt": "2026-06-05T00:14:49.423+08:00",
+  "lastPromptReadyAt": "2026-06-05T00:15:03.000+08:00"
+}
+```
+
+这个文件不是业务真相源，只是重启恢复线索。恢复时必须重新验证 tmux 和 proxy；验证失败就重建，不能盲信 JSON。
+
+恢复规则：
+
+- `currentInputFile` 仍在 `.inflight` 且没有 requestId → 可以重放。
+- 有 requestId 但没有 final → 先检查 pane/SSE 状态，必要时 degraded 收口。
+- `finalEmitted=true` → 归档 inflight，不重放。
 
 ## Open Questions
 
@@ -237,22 +373,37 @@ tapProxy.updateUpstreamToken(sessionId: string, newToken: string): void
 - `mapSseToContainerOutput(events)`: SSE 事件序列 → ContainerOutput 映射
 - `buildTmuxSessionName(chatJid)`: session 命名规则
 - `buildInteractiveCliArgs(config)`: CLI 参数构建（不含 `--print`）
-- 预估：**25-30 个用例**
+- `analyzeTerminalBridgeState(input)`: pane/SSE/backlog → idle/busy/degraded/restarting 判定
+- `shouldReleaseBlockedTurn(input)`: prompt ready + SSE quiet + IPC backlog 的释放条件
+- `shouldClaimIpcInput(input)`: ready/busy/restarting 状态下是否允许 claim 下一条 IPC
+- `shouldAckInflightInput(input)`: tmux send 成功后，是否已观察到 `/v1/messages` 或 pane busy，可安全删除 inflight
+- `bindStreamToTurn(input)`: turnId 与 requestId/streamId 绑定规则
+- `classifyLateSse(input)`: 已收口 turn 的迟到 SSE 归类为 orphan/degraded，不产生 success
+- `pickNextIpcMessage(files)`: IPC 文件排序和去重
+- 预估：**45-55 个用例**
 
 **P1 — mock 外部依赖（重要路径）**：
 - TapProxy CONNECT 处理：mock net.Socket，验证 TLS 握手 + 上游转发
 - TapProxy SSE 拦截：mock HTTP response stream，验证事件路由
 - TmuxSessionManager 生命周期：mock child_process.exec（tmux 命令），验证创建/销毁/健康检查
 - InteractiveCliRunner 端到端流：mock tmux + tap proxy，验证消息发送 → SSE 接收 → ContainerOutput 回调
-- 预估：**15-20 个用例**
+- InputBridge：mock tmux manager + fs，验证 ready claim、busy 保留、ack 后删除 inflight、tmux send 成功但无 API request 时保留 inflight
+- OutputBridge：mock SSE stream，验证 turn fencing、late SSE orphan、degraded ContainerOutput、已发送 progress 不重复 flush
+- HealthSupervisor：mock pane/proxy/backlog，验证 prompt-ready-with-backlog 自动收口、active stream 抖动不误收口、pane/proxy 连续采样失败触发 restarting
+- 状态恢复：mock state + inflight 文件，验证无 requestId 重放、有 requestId 无 final degraded、finalEmitted=true 归档
+- 预估：**35-45 个用例**
 
 **P2 — 集成测试（锦上添花）**：
 - 真实 tmux session 创建/销毁（CI 环境需 tmux）
 - 真实 Tap Proxy 启动 + CONNECT 隧道建立
-- 预估：**5-8 个用例**
+- 真实 CLI mode 单群：发送两条消息，第一条出现无 final 回 prompt 时第二条仍能进入 tmux
+- 迟到 final：第一轮 degraded 后旧 stream 才到 message_stop，验证不污染第二轮
+- 注入后崩溃：IPC claim 后、ack 前重启，验证 inflight 不丢且可恢复
+- active stream 抖动：短暂 quiet/ready 交替时不误收口
+- 预估：**10-14 个用例**
 
 ### 优先级总结
-- P0: 25-30 用例（纯函数，跑得快，零 flaky）
-- P1: 15-20 用例（mock 外部调用）
-- P2: 5-8 用例（需 tmux 环境）
-- **总计约 50 个测试用例**
+- P0: 45-55 用例（纯函数，跑得快，零 flaky）
+- P1: 35-45 用例（mock 外部调用）
+- P2: 10-14 用例（需 tmux 环境）
+- **总计约 90-110 个测试用例**

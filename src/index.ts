@@ -760,6 +760,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
+  if (queue.consumeStopRequested(chatJid)) {
+    lastAgentTimestamp[chatJid] = newCursor;
+    saveState();
+    logger.info(
+      { group: group.name, chatJid },
+      '/stop: 用户主动停止，cursor 已推进且不触发重试',
+    );
+    return true;
+  }
+
   // SDK 假成功 API 瞬时错误（fetch failed / API Error: 5xx）重试 loop
   // onOutput 主回调拦截到这类文本后，已 kill 子进程并 set streamingApiErrorDetected
   // 此处带延迟重试（3s/6s），不轮换账号（API 瞬时错误不是账号问题）

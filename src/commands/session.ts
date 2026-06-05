@@ -1,4 +1,5 @@
 import { logger } from '../logger.js';
+import { resolveCliMode } from '../container-runner.js';
 import { registerCommand } from './registry.js';
 
 // /clear — 清除 session，开始新对话（对齐 Claude Code /clear）
@@ -37,11 +38,40 @@ registerCommand({
   },
 });
 
+// /stop — Codex 专用急停：杀当前任务但保留 session
+registerCommand({
+  name: '/stop',
+  description: '停止当前 Codex 任务（仅 codex mode，session 保留）',
+  order: 12,
+  handler: async (ctx) => {
+    const cliMode = resolveCliMode(ctx.group.containerConfig);
+    if (cliMode !== 'codex') {
+      await ctx.channel.sendMessage(
+        ctx.chatJid,
+        `/stop 只对 codex mode 生效。当前模式: ${cliMode}。其他模式请用 /reset。`,
+      );
+      return;
+    }
+
+    const stopped = ctx.queue.stopGroup(ctx.chatJid);
+    logger.info(
+      { group: ctx.group.folder, stopped },
+      '/stop: Codex 当前任务停止请求',
+    );
+    await ctx.channel.sendMessage(
+      ctx.chatJid,
+      stopped
+        ? '已停止当前 Codex 任务，session 保留。下一条消息会继续沿用当前上下文。'
+        : '当前没有运行中的 Codex 任务。',
+    );
+  },
+});
+
 // /new — 杀进程 + 删 session，开启全新会话
 registerCommand({
   name: '/new',
   description: '杀进程 + 清 session，开启全新会话',
-  order: 12,
+  order: 13,
   handler: async (ctx) => {
     const killed = ctx.queue.killGroup(ctx.chatJid);
     delete ctx.sessions[ctx.group.folder];

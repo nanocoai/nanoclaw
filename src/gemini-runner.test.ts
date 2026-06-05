@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 import type { ChildProcess } from 'child_process';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const spawnMock = vi.hoisted(() => vi.fn());
 
@@ -20,6 +20,10 @@ import {
 } from '../container/agent-runner/src/gemini-runner.js';
 
 describe('gemini-runner', () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+  });
+
   interface GeminiSettingsForTest {
     security: { auth: { selectedType: string } };
     mcpServers: {
@@ -180,5 +184,77 @@ describe('gemini-runner', () => {
       status: 'error',
       error: expect.stringContaining('npm install -g @google/gemini-cli'),
     });
+  });
+
+  it('resume session 不存在时改用新会话重跑', async () => {
+    const first = new EventEmitter() as EventEmitter & {
+      stdin: PassThrough;
+      stdout: PassThrough;
+      stderr: PassThrough;
+    };
+    first.stdin = new PassThrough();
+    first.stdout = new PassThrough();
+    first.stderr = new PassThrough();
+
+    const second = new EventEmitter() as EventEmitter & {
+      stdin: PassThrough;
+      stdout: PassThrough;
+      stderr: PassThrough;
+    };
+    second.stdin = new PassThrough();
+    second.stdout = new PassThrough();
+    second.stderr = new PassThrough();
+
+    spawnMock
+      .mockReturnValueOnce(first as unknown as ChildProcess)
+      .mockReturnValueOnce(second as unknown as ChildProcess);
+
+    const outputs: Array<{ status: string; result?: string | null; newSessionId?: string }> = [];
+    const logs: string[] = [];
+    const promise = runGeminiQuery(
+      {
+        prompt: 'hi',
+        sessionId: 'missing-session',
+        mcpServerPath: '/tmp/mcp.js',
+        chatJid: 'chat',
+        groupFolder: 'group',
+        isMain: true,
+        ipcDir: '/tmp/ipc',
+        cwd: '/tmp',
+        env: { HOME: '/tmp' },
+        geminiHome: '/tmp/gemini-home-test',
+      },
+      (output) => outputs.push({
+        status: output.status,
+        result: output.result,
+        newSessionId: output.newSessionId,
+      }),
+      (message) => logs.push(message),
+    );
+
+    first.stderr.write('Error resuming session: No previous sessions found for this project.\n');
+    first.emit('close', 42);
+
+    second.stdout.write('{"type":"init","session_id":"fresh-session","model":"gemini-3-pro-preview"}\n');
+    second.stdout.write('{"type":"message","role":"assistant","content":"好了"}\n');
+    second.stdout.write('{"type":"result","status":"success","stats":{"input_tokens":1,"output_tokens":1}}\n');
+    second.emit('close', 0);
+
+    await expect(promise).resolves.toMatchObject({
+      newSessionId: 'fresh-session',
+      result: '好了',
+    });
+
+    expect(outputs).toEqual([
+      {
+        status: 'success',
+        result: '好了',
+        newSessionId: 'fresh-session',
+      },
+    ]);
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+    expect(spawnMock.mock.calls[0][1]).toContain('--resume');
+    expect(spawnMock.mock.calls[1][1]).not.toContain('--resume');
+    expect(logs.some((line) => line.includes('改用新 session 重跑'))).toBe(true);
   });
 });
