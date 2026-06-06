@@ -6,7 +6,9 @@ import {
   createTask,
   deleteTask,
   getAllChats,
+  getAllGroupAliases,
   getAllRegisteredGroups,
+  getGroupAlias,
   getLastBotMessageTimestamp,
   getMessageContext,
   getMessageContextById,
@@ -14,6 +16,7 @@ import {
   getMessagesSince,
   getNewMessages,
   getTaskById,
+  setGroupAlias,
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
@@ -653,6 +656,28 @@ describe('registered group isMain', () => {
     const group = groups['group@g.us'];
     expect(group).toBeDefined();
     expect(group.isMain).toBeUndefined();
+  });
+});
+
+// --- group aliases ---
+
+describe('group aliases', () => {
+  it('保存并读取群别名', () => {
+    setGroupAlias('2号', 'fs:oc_two');
+
+    expect(getGroupAlias('2号')).toBe('fs:oc_two');
+    expect(getAllGroupAliases()).toEqual({ '2号': 'fs:oc_two' });
+  });
+
+  it('重复设置同一别名会覆盖目标群', () => {
+    setGroupAlias('2号', 'fs:oc_old');
+    setGroupAlias('2号', 'fs:oc_new');
+
+    expect(getGroupAlias('2号')).toBe('fs:oc_new');
+  });
+
+  it('空别名会被拒绝', () => {
+    expect(() => setGroupAlias('   ', 'fs:oc_two')).toThrow('别名不能为空');
   });
 });
 
