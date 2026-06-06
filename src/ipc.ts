@@ -239,7 +239,16 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       sender: crossGroupSender,
                       sender_name: crossGroupSender,
                       content: data.text,
-                      timestamp: data.timestamp || new Date().toISOString(),
+                      // 跨群消息用 host 入库时刻，而非源 agent 写 IPC 文件时的旧时间。
+                      // 否则在「源 agent 发消息」到「host 入库」的窗口里，别的群消息
+                      // 可能把全局 lastTimestamp 推过这条旧 timestamp，导致 message loop
+                      // 的 timestamp > lastTimestamp 永远扫不到它（删掉主动 enqueue 后
+                      // message loop 是唯一投喂路径，扫不到 = 消息发出去但目标 agent 不接活）。
+                      // 同群消息是 bot message（is_bot_message=1），本就被 getNewMessages
+                      // 过滤掉，不走这条路径，故只对跨群覆盖时间。
+                      timestamp: isCrossGroup
+                        ? new Date().toISOString()
+                        : data.timestamp || new Date().toISOString(),
                       is_from_me: !isCrossGroup,
                       is_bot_message: !isCrossGroup,
                     });
