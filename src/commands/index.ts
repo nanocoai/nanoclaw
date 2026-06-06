@@ -2,6 +2,7 @@
 import './session.js';
 import './account.js';
 import './misc.js';
+import './tmux.js';
 import './remote-control.js';
 import './quiet.js';
 import './brief.js';
