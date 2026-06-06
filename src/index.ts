@@ -1331,10 +1331,8 @@ async function runAgent(
               outputSessionId: output.newSessionId || undefined,
               error: output.error,
             },
-            'Terminal session corruption detected from agent output — clearing session pointer',
+            'Terminal session corruption detected from agent output — preserving session pointer for user decision',
           );
-          delete sessions[group.folder];
-          deleteSession(group.folder);
           await onOutput(output);
           return;
         }
@@ -1379,10 +1377,8 @@ async function runAgent(
             sessionId,
             error: output.error,
           },
-          'Terminal session corruption detected from final output — clearing session pointer',
+          'Terminal session corruption detected from final output — preserving session pointer for user decision',
         );
-        delete sessions[group.folder];
-        deleteSession(group.folder);
       }
 
       // Detect stale/corrupt session — clear it so the next retry starts fresh.

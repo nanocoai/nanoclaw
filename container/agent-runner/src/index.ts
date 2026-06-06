@@ -69,7 +69,7 @@ interface ContainerOutput {
   progressType?: 'tool_use' | 'tool_result' | 'thinking' | 'text';
   /** 可折叠面板的展开内容（markdown 格式） */
   detail?: string;
-  /** CLI interactive 模式：终端态错误已污染当前 Claude session，宿主必须清 session 指针。 */
+  /** CLI interactive 模式：终端态错误已污染当前 Claude session，需要提示用户决定是否清理。 */
   terminalSessionCorruption?: boolean;
   /** token 用量（仅 result 消息） */
   usage?: {
