@@ -969,14 +969,24 @@ async function runQuery(
     configDir: process.env.CLAUDE_CONFIG_DIR,
     sessionId,
     defaultCwd: defaultQueryCwd,
+    candidateCwds: [
+      PATHS.group,
+      PATHS.project,
+      PATHS.global,
+      PATHS.extra,
+    ],
   });
-  if (resolvedQueryCwd.usedTranscriptCwd) {
+  if (resolvedQueryCwd.usedProjectCwd) {
+    log(
+      `[query-start] 已从 session 项目目录恢复 cwd: ${resolvedQueryCwd.projectCwd} (default=${defaultQueryCwd}, project=${resolvedQueryCwd.projectEntry}, transcriptCwd=${resolvedQueryCwd.transcriptCwd || 'none'}, transcript=${resolvedQueryCwd.transcriptPath})`,
+    );
+  } else if (resolvedQueryCwd.usedTranscriptCwd) {
     log(
       `[query-start] 已从 transcript 恢复 session cwd: ${resolvedQueryCwd.transcriptCwd} (default=${defaultQueryCwd}, transcript=${resolvedQueryCwd.transcriptPath})`,
     );
   } else {
     log(
-      `[query-start] session cwd=${resolvedQueryCwd.cwd} (default=${defaultQueryCwd}, transcriptCwd=${resolvedQueryCwd.transcriptCwd || 'none'})`,
+      `[query-start] session cwd=${resolvedQueryCwd.cwd} (default=${defaultQueryCwd}, project=${resolvedQueryCwd.projectEntry || 'none'}, transcriptCwd=${resolvedQueryCwd.transcriptCwd || 'none'})`,
     );
   }
 
