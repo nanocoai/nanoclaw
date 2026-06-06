@@ -79,6 +79,16 @@ const CLI_TOOL_CALL_PARSE_FAILED_PATTERNS = [
   'retry also failed',
 ];
 
+function summarizePaneTail(paneText: string, maxLines = 8): string {
+  return paneText
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0)
+    .slice(-maxLines)
+    .join(' | ')
+    .slice(0, 1200);
+}
+
 export function isRealClaudeSessionId(sessionId?: string): boolean {
   return !!sessionId && UUID_SESSION_ID_RE.test(sessionId);
 }
@@ -122,6 +132,7 @@ export interface InteractivePaneCompletion {
   done: boolean;
   status?: 'error';
   error?: string;
+  terminalSessionCorruption?: boolean;
 }
 
 export function analyzeInteractivePaneCompletion(paneText: string): InteractivePaneCompletion {
@@ -141,6 +152,7 @@ export function analyzeInteractivePaneCompletion(paneText: string): InteractiveP
     done: true,
     status: 'error',
     error: "Claude CLI 工具调用解析失败，已回到输入提示；本轮已终止，后续消息可继续处理",
+    terminalSessionCorruption: true,
   };
 }
 
@@ -572,7 +584,16 @@ export async function runInteractiveQuery(
           return;
         }
 
-        log(`[interactive] pane watchdog detected terminal CLI error: ${completion.error}`);
+        const sseQuietMs = lastSseAt ? now - lastSseAt : -1;
+        const paneTail = summarizePaneTail(paneText);
+        log(
+          `[interactive] pane watchdog detected terminal CLI error: ${completion.error}; ` +
+          `sessionId=${config.sessionId || 'new'}, durableSessionId=${getDurableSessionId() || 'none'}, ` +
+          `routeToken=${sessionToken}, activeSseStreams=${activeSseStreams}, ` +
+          `hasReceivedSseData=${hasReceivedSseData}, sseQuietMs=${sseQuietMs}, ` +
+          `pendingTextBlocks=${pendingTextBlocks.length}, pendingOutput=${!!pendingOutput}, ` +
+          `paneTail=${JSON.stringify(paneTail)}`,
+        );
         if (pendingTextBlocks.length > 0) {
           flushPendingTextBlocks('pane watchdog terminal error');
         }
@@ -580,6 +601,7 @@ export async function runInteractiveQuery(
           status: completion.status || 'error',
           result: null,
           error: completion.error,
+          terminalSessionCorruption: completion.terminalSessionCorruption,
           newSessionId: getDurableSessionId(),
         });
         finish(undefined, true);

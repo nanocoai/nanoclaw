@@ -80,6 +80,7 @@ describe('analyzeInteractivePaneCompletion', () => {
     expect(result.done).toBe(true);
     expect(result.status).toBe('error');
     expect(result.error).toContain('工具调用解析失败');
+    expect(result.terminalSessionCorruption).toBe(true);
   });
 
   it('解析失败但还没回到 prompt 时不结束', () => {
