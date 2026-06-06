@@ -1,11 +1,11 @@
 ---
 name: add-slack
-description: Add Slack channel integration via Chat SDK.
+description: Add Slack channel integration via Chat SDK. Uses Socket Mode — no public URL or webhook endpoint required.
 ---
 
 # Add Slack Channel
 
-Adds Slack support via the Chat SDK bridge.
+Adds Slack support via the Chat SDK bridge in Socket Mode. The bot connects outbound to Slack over WebSocket, so no public URL or reverse proxy is needed — works on a laptop, behind a firewall, etc.
 
 ## Install
 
@@ -59,30 +59,35 @@ pnpm run build
 
 1. Go to [api.slack.com/apps](https://api.slack.com/apps) and click **Create New App** > **From scratch**
 2. Name it (e.g., "NanoClaw") and select your workspace
-3. Go to **OAuth & Permissions** and add Bot Token Scopes:
+
+### Enable Socket Mode
+
+3. Go to **Socket Mode** in the left sidebar and toggle **Enable Socket Mode** ON
+4. Slack will prompt you to create an **App-Level Token**. Name it anything (e.g. `socket`), grant the **`connections:write`** scope, and click **Generate**
+5. Copy the token — it starts with `xapp-...`. Save it now; you can't view it again later.
+
+### OAuth scopes
+
+6. Go to **OAuth & Permissions** and under **Scopes** > **Bot Token Scopes**, add:
    - `chat:write`, `im:write`, `channels:history`, `groups:history`, `im:history`, `channels:read`, `groups:read`, `users:read`, `reactions:write`, `files:read`, `files:write`
-4. Click **Install to Workspace** and copy the **Bot User OAuth Token** (`xoxb-...`)
-5. Go to **Basic Information** and copy the **Signing Secret**
+
+### Subscribe to bot events
+
+7. Go to **Event Subscriptions** and toggle **Enable Events** ON
+   - No Request URL is needed — Socket Mode delivers events over the WebSocket connection
+8. Under **Subscribe to bot events**, add:
+   - `message.channels`, `message.groups`, `message.im`, `app_mention`
+9. Click **Save Changes**
 
 ### Enable DMs
 
-6. Go to **App Home** and enable the **Messages Tab**
-7. Check **"Allow users to send Slash commands and messages from the messages tab"**
+10. Go to **App Home** and enable the **Messages Tab**
+11. Check **"Allow users to send Slash commands and messages from the messages tab"**
 
-### Event Subscriptions
+### Install to workspace
 
-8. Go to **Event Subscriptions** and toggle **Enable Events**
-9. Set the **Request URL** to `https://your-domain/webhook/slack` — Slack will send a verification challenge; it must pass before you can save
-10. Under **Subscribe to bot events**, add:
-    - `message.channels`, `message.groups`, `message.im`, `app_mention`
-11. Click **Save Changes**
-
-### Interactivity
-
-12. Go to **Interactivity & Shortcuts** and toggle **Interactivity** on
-13. Set the **Request URL** to the same `https://your-domain/webhook/slack`
-14. Click **Save Changes**
-15. Slack will show a banner asking you to **reinstall the app** — click it to apply the new settings
+12. Go to **Install App** and click **Install to Workspace** > **Allow**
+13. Copy the **Bot User OAuth Token** — it starts with `xoxb-...`
 
 ### Configure environment
 
@@ -90,16 +95,10 @@ Add to `.env`:
 
 ```bash
 SLACK_BOT_TOKEN=xoxb-your-bot-token
-SLACK_SIGNING_SECRET=your-signing-secret
+SLACK_APP_TOKEN=xapp-your-app-level-token
 ```
 
 Sync to container: `mkdir -p data/env && cp .env data/env/env`
-
-### Webhook server
-
-The Chat SDK bridge automatically starts a shared webhook server on port 3000 (configurable via `WEBHOOK_PORT` env var). The server handles `/webhook/slack` for Slack and other webhook-based adapters. This port must be publicly reachable from the internet for Slack to deliver events.
-
-If running locally, discuss options for exposing the server — e.g. ngrok (`ngrok http 3000`), Cloudflare Tunnel, or a reverse proxy on a VPS. The resulting public URL becomes the base for `https://your-domain/webhook/slack`.
 
 ## Next Steps
 
