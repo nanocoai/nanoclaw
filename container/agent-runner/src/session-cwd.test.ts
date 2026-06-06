@@ -5,6 +5,7 @@ import path from 'path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  encodeClaudeProjectPath,
   findSessionTranscript,
   readTranscriptCwd,
   resolveQueryCwdForSession,
@@ -30,13 +31,13 @@ describe('session cwd resolver', () => {
     expect(readTranscriptCwd(transcript)).toBe(cwd);
   });
 
-  it('resume 历史 session 时优先使用 transcript cwd', () => {
+  it('resume 历史 session 时优先使用 Claude 项目根 cwd', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'session-cwd-'));
     const legacyCwd = path.join(tmp, 'groups', 'old-group');
     const defaultCwd = path.join(tmp, 'nine');
     fs.mkdirSync(legacyCwd, { recursive: true });
     fs.mkdirSync(defaultCwd, { recursive: true });
-    const projectDir = path.join(tmp, '.claude', 'projects', '-legacy');
+    const projectDir = path.join(tmp, '.claude', 'projects', encodeClaudeProjectPath(legacyCwd));
     fs.mkdirSync(projectDir, { recursive: true });
     fs.writeFileSync(
       path.join(projectDir, 'sess-old.jsonl'),
@@ -47,10 +48,41 @@ describe('session cwd resolver', () => {
       configDir: path.join(tmp, '.claude'),
       sessionId: 'sess-old',
       defaultCwd,
+      candidateCwds: [legacyCwd],
     });
 
     expect(resolved.cwd).toBe(legacyCwd);
-    expect(resolved.usedTranscriptCwd).toBe(true);
+    expect(resolved.usedProjectCwd).toBe(true);
+    expect(resolved.usedTranscriptCwd).toBe(false);
+  });
+
+  it('transcript cwd 漂移时仍按项目目录恢复原 session cwd', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'session-cwd-'));
+    const projectRoot = path.join(tmp, 'nine');
+    const driftedCwd = path.join(tmp, 'nanoclaw');
+    fs.mkdirSync(projectRoot, { recursive: true });
+    fs.mkdirSync(driftedCwd, { recursive: true });
+    const projectDir = path.join(tmp, '.claude', 'projects', encodeClaudeProjectPath(projectRoot));
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, 'sess-drift.jsonl'),
+      [
+        JSON.stringify({ type: 'user', sessionId: 'sess-drift', cwd: projectRoot }),
+        JSON.stringify({ type: 'assistant', sessionId: 'sess-drift', cwd: driftedCwd }),
+      ].join('\n') + '\n',
+    );
+
+    const resolved = resolveQueryCwdForSession({
+      configDir: path.join(tmp, '.claude'),
+      sessionId: 'sess-drift',
+      defaultCwd: projectRoot,
+      candidateCwds: [driftedCwd],
+    });
+
+    expect(resolved.cwd).toBe(projectRoot);
+    expect(resolved.transcriptCwd).toBe(driftedCwd);
+    expect(resolved.usedProjectCwd).toBe(true);
+    expect(resolved.usedTranscriptCwd).toBe(false);
   });
 
   it('没有可用 transcript cwd 时保持默认 cwd', () => {
@@ -65,6 +97,7 @@ describe('session cwd resolver', () => {
     });
 
     expect(resolved.cwd).toBe(defaultCwd);
+    expect(resolved.usedProjectCwd).toBe(false);
     expect(resolved.usedTranscriptCwd).toBe(false);
   });
 });
