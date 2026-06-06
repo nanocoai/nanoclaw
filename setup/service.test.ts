@@ -1,7 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import path from 'path';
 
+import { log } from '../src/log.js';
 import { getLaunchdLabel } from '../src/install-slug.js';
+import { manageUserLinger } from './linger.js';
+import type { EncryptedHomeDetection } from './linger.js';
 
 /**
  * Tests for service configuration generation.
@@ -164,6 +167,108 @@ describe('systemd unit generation', () => {
     expect(unit).toContain(
       'ExecStart=/usr/bin/node /srv/nanoclaw/dist/index.js',
     );
+  });
+});
+
+describe('manageUserLinger (encrypted-home guard, issue #2680)', () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  let infoSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    infoSpy = vi.spyOn(log, 'info').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+    infoSpy.mockRestore();
+  });
+
+  // Realistic per-install unit name (matches getSystemdUnit(projectRoot)
+  // format `nanoclaw-v2-<8-hex-slug>`). The warning must interpolate this
+  // rather than the static word "nanoclaw" — copy-pasting the recovery
+  // command with the wrong unit name leaves users stuck on
+  // `Unit nanoclaw.service not found.` See issue #2680.
+  const testUnitName = 'nanoclaw-v2-abc123';
+
+  it('skips loginctl enable-linger when an encrypted home is detected', () => {
+    const detected: EncryptedHomeDetection = {
+      detected: true,
+      type: 'ecryptfs',
+      signal: 'findmnt reports FSTYPE=ecryptfs for /home/user',
+    };
+    const exec = vi.fn();
+
+    const result = manageUserLinger(testUnitName, () => detected, exec);
+
+    expect(exec).not.toHaveBeenCalled();
+    expect(result.lingerEnabled).toBe(false);
+    expect(result.encryptedHome).toEqual(detected);
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const [warnMessage, warnData] = warnSpy.mock.calls[0];
+    expect(warnMessage).toContain('Per-home encryption detected (ecryptfs)');
+    expect(warnMessage).toContain('skipping');
+    expect(warnMessage).toContain('loginctl enable-linger');
+    expect(warnMessage).toContain('systemctl --user daemon-reload');
+    expect(warnMessage).toContain(
+      `systemctl --user start ${testUnitName}`,
+    );
+    // Regression guard: must NOT recommend the static `nanoclaw` unit name.
+    expect(warnMessage).not.toContain('systemctl --user start nanoclaw ');
+    expect(warnMessage).not.toMatch(/systemctl --user start nanoclaw\.$/);
+    expect(warnMessage).toContain('issues/2680');
+    expect(warnData).toMatchObject({
+      type: 'ecryptfs',
+      unitName: testUnitName,
+    });
+  });
+
+  it('also skips for fscrypt and gocryptfs detections', () => {
+    for (const type of ['fscrypt', 'gocryptfs'] as const) {
+      const exec = vi.fn();
+      const result = manageUserLinger(
+        testUnitName,
+        () => ({ detected: true, type, signal: `probe:${type}` }),
+        exec,
+      );
+      expect(exec).not.toHaveBeenCalled();
+      expect(result.lingerEnabled).toBe(false);
+      expect(result.encryptedHome?.type).toBe(type);
+    }
+  });
+
+  it('runs loginctl enable-linger when no encrypted home is detected', () => {
+    const exec = vi.fn();
+
+    const result = manageUserLinger(
+      testUnitName,
+      () => ({ detected: false }),
+      exec,
+    );
+
+    expect(exec).toHaveBeenCalledTimes(1);
+    expect(exec).toHaveBeenCalledWith('loginctl enable-linger');
+    expect(result.lingerEnabled).toBe(true);
+    expect(result.encryptedHome).toBeUndefined();
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('reports lingerEnabled=false and warns when loginctl fails', () => {
+    const exec = vi.fn(() => {
+      throw new Error('loginctl not available');
+    });
+
+    const result = manageUserLinger(
+      testUnitName,
+      () => ({ detected: false }),
+      exec,
+    );
+
+    expect(result.lingerEnabled).toBe(false);
+    expect(result.encryptedHome).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toContain('loginctl enable-linger failed');
   });
 });
 
