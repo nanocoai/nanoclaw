@@ -17,6 +17,7 @@ import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, st
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
 import { log } from './log.js';
+import { acquireSingleInstanceLock } from './single-instance.js';
 
 // Response + shutdown registries live in response-registry.ts to break the
 // circular import cycle: src/index.ts imports src/modules/index.js for side
@@ -66,7 +67,13 @@ import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from 
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
 
-  // 0. Circuit breaker — backoff on rapid restarts
+  // 0a. Single-instance guard — refuse to start if another host is already running.
+  //     Two concurrent hosts each run the sweep and double-spawn containers for the same
+  //     due message → duplicate messages. Nothing else stops a second host (sockets are
+  //     unlink-and-rebind; the webhook port is dormant on a polling install).
+  acquireSingleInstanceLock(DATA_DIR);
+
+  // 0b. Circuit breaker — backoff on rapid restarts
   await enforceStartupBackoff();
 
   // 1. Init central DB
