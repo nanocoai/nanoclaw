@@ -48,7 +48,6 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   onTasksChanged: () => void;
-  enqueueMessageCheck?: (chatJid: string) => void;
   onFeishuAuthRequest?: (chatJid: string, groupFolder: string) => Promise<void>;
   renameChat?: (jid: string, name: string) => Promise<void>;
 }
@@ -250,14 +249,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       'IPC send_message 入库失败，不影响发送',
                     );
                   }
-                  // 跨群消息：enqueue 目标群，让目标 agent 处理
-                  if (isCrossGroup && deps.enqueueMessageCheck) {
-                    deps.enqueueMessageCheck(data.chatJid);
-                    logger.info(
-                      { chatJid: data.chatJid, sourceGroup },
-                      'Cross-group message enqueued for target agent',
-                    );
-                  }
+                  // 跨群消息不在此处主动 enqueue：统一交给 message loop 发现并处理。
+                  // message loop 已对 ipc_ 消息放行 trigger（index.ts），冷启动则
+                  // enqueueMessageCheck 起容器、热容器则 pipe，并在成功后推进
+                  // lastAgentTimestamp。若此处再 enqueue 会形成与 message loop 并行的
+                  // 第二条投喂路径，导致同一条消息进同一 agent stream 两次、重复回复。
                   logger.info(
                     {
                       chatJid: data.chatJid,
