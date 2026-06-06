@@ -32,6 +32,7 @@ import {
   checkCliHealth,
   shouldEmitInteractiveSessionKeepalive,
 } from './interactive-cli-runner.js';
+import { resolveQueryCwdForSession } from './session-cwd.js';
 
 interface ContainerInput {
   prompt: string;
@@ -963,6 +964,21 @@ async function runQuery(
 
   const targetModel = override?.model || defaultModel;
   const targetEffort = override?.thinking ? effortForThinking(override.thinking) : defaultEffort;
+  const defaultQueryCwd = PATHS.queryCwd || PATHS.group;
+  const resolvedQueryCwd = resolveQueryCwdForSession({
+    configDir: process.env.CLAUDE_CONFIG_DIR,
+    sessionId,
+    defaultCwd: defaultQueryCwd,
+  });
+  if (resolvedQueryCwd.usedTranscriptCwd) {
+    log(
+      `[query-start] 已从 transcript 恢复 session cwd: ${resolvedQueryCwd.transcriptCwd} (default=${defaultQueryCwd}, transcript=${resolvedQueryCwd.transcriptPath})`,
+    );
+  } else {
+    log(
+      `[query-start] session cwd=${resolvedQueryCwd.cwd} (default=${defaultQueryCwd}, transcriptCwd=${resolvedQueryCwd.transcriptCwd || 'none'})`,
+    );
+  }
 
   const q = query({
     prompt: stream,
@@ -971,7 +987,7 @@ async function runQuery(
       pathToClaudeCodeExecutable: resolvedCliPath,
       executable: 'node' as const,  // 显式指定用 node 运行 cli.js
       stderr: (data: string) => log(`[cli-stderr] ${data.trim()}`),
-      cwd: PATHS.queryCwd || PATHS.group,
+      cwd: resolvedQueryCwd.cwd,
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,

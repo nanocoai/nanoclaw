@@ -30,6 +30,10 @@ import {
 } from './config.js';
 import { getChatIndex } from './chat-index.js';
 import { shouldFilterProgress, isModelRefusal } from './output-filters.js';
+import {
+  buildSessionRecoveryMessage,
+  isSessionRecoveryError,
+} from './session-recovery.js';
 import './channels/index.js';
 import type { FeishuChannel } from './channels/feishu.js';
 import {
@@ -1164,6 +1168,23 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         logger.error({ err, group: group.name }, '[rate-limit] 耗尽通知发送失败');
       });
   }
+  if (output.sessionRecoveryRequired) {
+    const text = buildSessionRecoveryMessage({
+      sessionId: output.sessionRecoveryRequired.sessionId,
+      error: output.sessionRecoveryRequired.error,
+    });
+    logger.warn(
+      {
+        group: group.name,
+        chatJid,
+        sessionId: output.sessionRecoveryRequired.sessionId,
+        sessionFileExists: output.sessionRecoveryRequired.sessionFileExists,
+      },
+      '[session-recovery] 已通知用户并保留 cursor，等待用户决定是否 /new',
+    );
+    await channel.sendMessage(chatJid, text, { isCommandReply: true });
+    everSentToUser = true;
+  }
 
   if (output.status === 'error' || hadError) {
     // If we already sent output to the user, don't roll back the cursor —
@@ -1262,6 +1283,11 @@ interface RunAgentResult {
   rotatedTo?: string; // 轮换到的新 secret 名称（用于通知用户）
   rotatedFrom?: string; // 轮换前的旧 secret 名称
   allExhausted?: boolean; // 所有账号配额耗尽
+  sessionRecoveryRequired?: {
+    sessionId?: string;
+    error?: string;
+    sessionFileExists: boolean;
+  };
 }
 
 async function runAgent(
@@ -1381,16 +1407,12 @@ async function runAgent(
         );
       }
 
-      // Detect stale/corrupt session — clear it so the next retry starts fresh.
-      // The session .jsonl can go missing after a crash mid-write, manual
-      // deletion, or disk-full. The existing backoff in group-queue.ts
-      // handles the retry; we just need to remove the broken session ID.
+      // 识别 session 恢复失败。这里不自动清指针：长会话上下文丢失的代价更高，
+      // 必须先把错误告诉用户，让用户决定是否执行 /new。
       const errorLooksStale =
         sessionId &&
         output.error &&
-        /no conversation found|ENOENT.*\.jsonl|session.*not found/i.test(
-          output.error,
-        );
+        isSessionRecoveryError(output.error);
 
       // 加固：错误信息匹配 stale 模式 ≠ session 真失效。query 崩溃（如 resume 大会话时
       // setModel 抢跑）也会吐出假的 "no conversation found"，此时 .jsonl 其实健在。
@@ -1413,22 +1435,19 @@ async function runAgent(
           );
       })();
 
-      const isStaleSession = errorLooksStale && !sessionFileExists;
-
-      if (errorLooksStale && sessionFileExists) {
+      if (errorLooksStale) {
         logger.warn(
-          { group: group.name, sessionId, error: output.error },
-          'Session error 匹配 stale 模式但 .jsonl 文件健在 — 保留指针（疑似 query 崩溃而非真失效）',
+          { group: group.name, sessionId, sessionFileExists, error: output.error },
+          'Session 恢复失败 — 保留指针并等待用户决定',
         );
-      }
-
-      if (isStaleSession) {
-        logger.warn(
-          { group: group.name, staleSessionId: sessionId, error: output.error },
-          'Stale session detected — clearing for next retry',
-        );
-        delete sessions[group.folder];
-        deleteSession(group.folder);
+        return {
+          status: 'error',
+          sessionRecoveryRequired: {
+            sessionId,
+            error: output.error,
+            sessionFileExists,
+          },
+        };
       }
 
       // API 瞬时错误自动重试（500/502/503/fetch failed）
