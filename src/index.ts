@@ -1322,6 +1322,22 @@ async function runAgent(
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
+        if (output.terminalSessionCorruption) {
+          logger.warn(
+            {
+              group: group.name,
+              folder: group.folder,
+              sessionId: sessions[group.folder],
+              outputSessionId: output.newSessionId || undefined,
+              error: output.error,
+            },
+            'Terminal session corruption detected from agent output — clearing session pointer',
+          );
+          delete sessions[group.folder];
+          deleteSession(group.folder);
+          await onOutput(output);
+          return;
+        }
         if (output.newSessionId) {
           sessions[group.folder] = output.newSessionId;
           setSession(group.folder, output.newSessionId);
@@ -1355,6 +1371,20 @@ async function runAgent(
     }
 
     if (output.status === 'error') {
+      if (output.terminalSessionCorruption) {
+        logger.warn(
+          {
+            group: group.name,
+            folder: group.folder,
+            sessionId,
+            error: output.error,
+          },
+          'Terminal session corruption detected from final output — clearing session pointer',
+        );
+        delete sessions[group.folder];
+        deleteSession(group.folder);
+      }
+
       // Detect stale/corrupt session — clear it so the next retry starts fresh.
       // The session .jsonl can go missing after a crash mid-write, manual
       // deletion, or disk-full. The existing backoff in group-queue.ts

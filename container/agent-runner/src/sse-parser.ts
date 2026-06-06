@@ -305,6 +305,8 @@ export interface ContainerOutput {
   error?: string;
   progressType?: 'tool_use' | 'tool_result' | 'thinking' | 'text';
   detail?: string;
+  /** CLI interactive 模式：终端态错误已污染当前 Claude session，宿主必须清 session 指针。 */
+  terminalSessionCorruption?: boolean;
   /**
    * CLI interactive 模式专用：标识本次响应是 Claude Code auto-compact 产生的
    * 会话总结（被 `<analysis>` 包裹 + 后续 summary 文本），而不是给用户的真正回复。

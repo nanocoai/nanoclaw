@@ -44,6 +44,8 @@ export interface ContainerOutput {
   error?: string;
   progressType?: 'tool_use' | 'tool_result' | 'thinking' | 'text';
   detail?: string;
+  /** CLI interactive 模式：终端态错误已污染当前 Claude session，宿主必须清 session 指针。 */
+  terminalSessionCorruption?: boolean;
   usage?: {
     inputTokens: number;
     outputTokens: number;
