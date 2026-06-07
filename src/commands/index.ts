@@ -9,6 +9,7 @@ import './brief.js';
 import './mode.js';
 import './topic-brief.js';
 import './alias.js';
+import './delegate.js';
 
 export { dispatch, getHelp, getRegisteredCommands } from './registry.js';
 export type { Command, CommandContext } from './types.js';

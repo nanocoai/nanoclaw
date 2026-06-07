@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { randomBytes } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -6,6 +7,8 @@ import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
+  DelegationStatus,
+  DelegationTask,
   NewMessage,
   OAuthCredential,
   RegisteredGroup,
@@ -144,6 +147,28 @@ function createSchema(database: Database.Database): void {
     CREATE TRIGGER IF NOT EXISTS chat_chunks_ai AFTER INSERT ON chat_chunks BEGIN
       INSERT INTO chat_chunks_fts(rowid, chunk_text) VALUES (new.rowid, new.chunk_text);
     END;
+
+    CREATE TABLE IF NOT EXISTS delegation_tasks (
+      task_id         TEXT PRIMARY KEY,
+      target_group    TEXT NOT NULL,
+      target_jid      TEXT NOT NULL,
+      title           TEXT,
+      status          TEXT NOT NULL,
+      summary         TEXT,
+      details         TEXT,
+      artifacts       TEXT,
+      dispatch_msg_id TEXT,
+      dispatched_at   TEXT NOT NULL,
+      last_report_at  TEXT,
+      updated_at      TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_delegation_target ON delegation_tasks(target_group);
+    CREATE INDEX IF NOT EXISTS idx_delegation_status ON delegation_tasks(status);
+    -- DB 级兜底"一群一在办任务"：占槽态（dispatched/progress/blocked/question）下
+    -- 每个 target_group 最多一条，防多进程/未来入口绕过应用层先查再插的竞态。
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_delegation_active_unique
+      ON delegation_tasks(target_group)
+      WHERE status IN ('dispatched', 'progress', 'blocked', 'question');
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -1245,4 +1270,185 @@ function migrateJsonState(): void {
       }
     }
   }
+}
+
+// --- Commander 派工账本 (delegation_tasks) ---
+
+/** 占在办槽位的状态（一群同时只能有一个）：进行态 + 等待态 */
+export const DELEGATION_OCCUPYING_STATUSES: DelegationStatus[] = [
+  'dispatched',
+  'progress',
+  'blocked',
+  'question',
+];
+
+interface DelegationRow {
+  task_id: string;
+  target_group: string;
+  target_jid: string;
+  title: string | null;
+  status: string;
+  summary: string | null;
+  details: string | null;
+  artifacts: string | null;
+  dispatch_msg_id: string | null;
+  dispatched_at: string;
+  last_report_at: string | null;
+  updated_at: string;
+}
+
+function rowToDelegation(row: DelegationRow): DelegationTask {
+  return {
+    taskId: row.task_id,
+    targetGroup: row.target_group,
+    targetJid: row.target_jid,
+    title: row.title || undefined,
+    status: row.status as DelegationStatus,
+    summary: row.summary || undefined,
+    details: row.details || undefined,
+    artifacts: row.artifacts ? JSON.parse(row.artifacts) : undefined,
+    dispatchMsgId: row.dispatch_msg_id || undefined,
+    dispatchedAt: row.dispatched_at,
+    lastReportAt: row.last_report_at || undefined,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** 派发落账：生成 task_id、status=dispatched，返回新建的任务行 */
+export function createDelegation(params: {
+  targetGroup: string;
+  targetJid: string;
+  title?: string;
+}): DelegationTask {
+  const now = new Date().toISOString();
+  const taskId = `dlg_${Date.now()}_${randomBytes(4).toString('hex')}`;
+  db.prepare(
+    `INSERT INTO delegation_tasks (task_id, target_group, target_jid, title, status, dispatched_at, updated_at)
+     VALUES (?, ?, ?, ?, 'dispatched', ?, ?)`,
+  ).run(taskId, params.targetGroup, params.targetJid, params.title || null, now, now);
+  return getDelegation(taskId)!;
+}
+
+/** 回写派发消息 id */
+export function setDelegationDispatchMsgId(taskId: string, msgId: string): void {
+  db.prepare(
+    `UPDATE delegation_tasks SET dispatch_msg_id = ?, updated_at = ? WHERE task_id = ?`,
+  ).run(msgId, new Date().toISOString(), taskId);
+}
+
+/** 汇报更新：刷新 status/summary/details/artifacts/last_report_at */
+export function updateDelegationOnReport(params: {
+  taskId: string;
+  status: DelegationStatus;
+  summary?: string;
+  details?: string;
+  artifacts?: string[];
+}): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE delegation_tasks
+     SET status = ?, summary = ?, details = ?, artifacts = ?, last_report_at = ?, updated_at = ?
+     WHERE task_id = ?`,
+  ).run(
+    params.status,
+    params.summary ?? null,
+    params.details ?? null,
+    params.artifacts ? JSON.stringify(params.artifacts) : null,
+    now,
+    now,
+    params.taskId,
+  );
+}
+
+/**
+ * 续投（/delegate reply）：占槽态任务状态回置 progress。
+ * 同时把 last_report_at 刷到 now——续投本身是一次新交互，
+ * 否则会按旧的 last_report_at 立刻被判失联。
+ */
+export function replyDelegation(taskId: string): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE delegation_tasks SET status = 'progress', last_report_at = ?, updated_at = ? WHERE task_id = ?`,
+  ).run(now, now, taskId);
+}
+
+/**
+ * 重派（/delegate retry）：状态回置 dispatched。
+ * 刷新 dispatched_at 并清空 last_report_at——重派等于重新计时，
+ * 否则会按旧时间立刻被判失联。
+ */
+export function resetDelegationToDispatched(taskId: string): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE delegation_tasks SET status = 'dispatched', dispatched_at = ?, last_report_at = NULL, updated_at = ? WHERE task_id = ?`,
+  ).run(now, now, taskId);
+}
+
+/** 关闭（/delegate close）：状态置 closed，释放在办槽位 */
+export function closeDelegation(taskId: string): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE delegation_tasks SET status = 'closed', updated_at = ? WHERE task_id = ?`,
+  ).run(now, taskId);
+}
+
+export function getDelegation(taskId: string): DelegationTask | undefined {
+  const row = db
+    .prepare('SELECT * FROM delegation_tasks WHERE task_id = ?')
+    .get(taskId) as DelegationRow | undefined;
+  return row ? rowToDelegation(row) : undefined;
+}
+
+/** 列账本，可选按 target_group 过滤，按派发时间倒序 */
+export function listDelegations(targetGroup?: string): DelegationTask[] {
+  const rows = (
+    targetGroup
+      ? db
+          .prepare(
+            'SELECT * FROM delegation_tasks WHERE target_group = ? ORDER BY dispatched_at DESC',
+          )
+          .all(targetGroup)
+      : db
+          .prepare('SELECT * FROM delegation_tasks ORDER BY dispatched_at DESC')
+          .all()
+  ) as DelegationRow[];
+  return rows.map(rowToDelegation);
+}
+
+/**
+ * 反查某群唯一占槽态任务（dispatched/progress/blocked/question）。
+ * 依赖"一群一在办任务"约束保证唯一；取最近派发的一条兜底。
+ */
+export function getActiveDelegationByGroup(
+  targetGroup: string,
+): DelegationTask | undefined {
+  const placeholders = DELEGATION_OCCUPYING_STATUSES.map(() => '?').join(', ');
+  const row = db
+    .prepare(
+      `SELECT * FROM delegation_tasks
+       WHERE target_group = ? AND status IN (${placeholders})
+       ORDER BY dispatched_at DESC LIMIT 1`,
+    )
+    .get(targetGroup, ...DELEGATION_OCCUPYING_STATUSES) as
+    | DelegationRow
+    | undefined;
+  return row ? rowToDelegation(row) : undefined;
+}
+
+/**
+ * 获取唯一 isMain 群。0 个或 >1 个均抛错（不静默降级，避免汇报投错群）。
+ */
+export function getMainGroup(): RegisteredGroup & { jid: string } {
+  const groups = getAllRegisteredGroups();
+  const mains = Object.entries(groups).filter(([, g]) => g.isMain);
+  if (mains.length === 0) {
+    throw new Error('No main group registered (isMain=true)');
+  }
+  if (mains.length > 1) {
+    throw new Error(
+      `Multiple main groups registered (${mains.length}), expected exactly 1`,
+    );
+  }
+  const [jid, group] = mains[0];
+  return { jid, ...group };
 }

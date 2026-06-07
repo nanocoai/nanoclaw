@@ -54,6 +54,40 @@ export interface RegisteredGroup {
   customCwd?: string; // Custom cwd for Claude Code query(), set via /cwd command
 }
 
+/** Commander 派工任务状态 */
+export type DelegationStatus =
+  | 'dispatched'
+  | 'progress'
+  | 'blocked'
+  | 'question'
+  | 'done'
+  | 'failed'
+  | 'closed';
+
+/** 子群 report_to_main 允许的状态（dispatched 由派发设、closed 由命令设，不在此列） */
+export type ReportStatus =
+  | 'progress'
+  | 'done'
+  | 'blocked'
+  | 'failed'
+  | 'question';
+
+/** Commander 派工账本一行 */
+export interface DelegationTask {
+  taskId: string;
+  targetGroup: string;
+  targetJid: string;
+  title?: string;
+  status: DelegationStatus;
+  summary?: string;
+  details?: string;
+  artifacts?: string[];
+  dispatchMsgId?: string;
+  dispatchedAt: string;
+  lastReportAt?: string;
+  updatedAt: string;
+}
+
 export interface NewMessage {
   id: string;
   chat_jid: string;
