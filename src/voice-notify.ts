@@ -7,7 +7,7 @@
  *
  * 设计原则：
  * - 纯 fire-and-forget，失败不影响飞书主流程
- * - 超时短（5s 摘要 + 3s 推送），挂了就放过
+ * - 超时有界（15s 摘要 + 3s 推送），挂了就放过
  * - 空 token / 非主会话 → 跳过，无副作用
  */
 import OpenAI from 'openai';
@@ -107,7 +107,12 @@ async function pushToPushover(summary: string): Promise<void> {
   const userKey = envFile.PUSHOVER_USER_KEY || process.env.PUSHOVER_USER_KEY;
   const appToken = envFile.PUSHOVER_APP_TOKEN || process.env.PUSHOVER_APP_TOKEN;
   if (!userKey || !appToken) {
-    logger.debug('[voice-notify] 缺 PUSHOVER_USER_KEY/APP_TOKEN，跳过推送');
+    // 用 warn 而非 debug：这次事故就是被 debug 静默跳过坑了（debug<info 不写日志，
+    // 推送悄无声息没了还查不到）。只打布尔，绝不打密钥本身。
+    logger.warn(
+      { hasUserKey: !!userKey, hasAppToken: !!appToken },
+      '[voice-notify] 缺 PUSHOVER token，跳过推送（检查 .env 的 PUSHOVER_USER_KEY/APP_TOKEN）',
+    );
     return;
   }
 
