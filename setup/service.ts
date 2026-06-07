@@ -10,7 +10,7 @@ import os from 'os';
 import path from 'path';
 
 import { log } from '../src/log.js';
-import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
+import { getInstallSlug, getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { cleanupUnhealthyPeers } from './peer-cleanup.js';
 import {
   commandExists,
@@ -280,6 +280,7 @@ function setupSystemd(
 ): void {
   const runningAsRoot = isRoot();
   const unitName = getSystemdUnit(projectRoot);
+  const installSlug = getInstallSlug(projectRoot);
   const unitFileName = `${unitName}.service`;
 
   // Root uses system-level service, non-root uses user-level
@@ -318,6 +319,10 @@ WorkingDirectory=${projectRoot}
 Restart=always
 RestartSec=5
 KillMode=process
+# Reap this install's agent containers when the host stops, so KillMode=process
+# (which spares them from systemd) doesn't leave orphans across restarts. Scoped
+# by label so peer installs are untouched; matches the host's docker stop -t 1.
+ExecStopPost=/bin/sh -c 'docker ps -q --filter label=nanoclaw-install=${installSlug} | xargs -r docker stop -t 1'
 Environment=HOME=${homeDir}
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin
 StandardOutput=append:${projectRoot}/logs/nanoclaw.log
