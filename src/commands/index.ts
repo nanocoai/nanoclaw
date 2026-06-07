@@ -10,6 +10,7 @@ import './mode.js';
 import './topic-brief.js';
 import './alias.js';
 import './delegate.js';
+import './reboot.js';
 
 export { dispatch, getHelp, getRegisteredCommands } from './registry.js';
 export type { Command, CommandContext } from './types.js';
