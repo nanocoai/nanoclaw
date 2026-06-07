@@ -2,14 +2,16 @@
  * Host-side container config for the `codex` provider.
  *
  * Codex reads auth and MCP config from ~/.codex. We give each session its
- * own private copy of that directory so:
+ * own private codex dir for config.toml (which the in-container provider
+ * rewrites on every wake), but the host's auth.json is bind-mounted directly
+ * on top of it.
  *
- * - The user's host ~/.codex/auth.json reaches the container without us
- *   touching their host config.toml (which the host's own `codex` CLI
- *   might be using).
- * - The in-container provider can rewrite config.toml freely on every
- *   wake with container-appropriate MCP server paths, without racing
- *   other sessions or leaking per-session paths back to the host.
+ * Why bind-mount auth.json instead of copying it: ChatGPT OAuth uses
+ * single-use rotating refresh tokens. When a container refreshes its access
+ * token, the new refresh token has to reach the host file so the NEXT codex
+ * spawn picks it up — otherwise every subsequent spawn copies a stale auth
+ * and fails with `refresh_token_reused`. The mount lets the container's
+ * in-place writes propagate back to the host.
  *
  * Env passthrough covers the two knobs that are read at runtime:
  *   OPENAI_API_KEY  — fallback auth when auth.json isn't a subscription token
@@ -19,20 +21,27 @@
 import fs from 'fs';
 import path from 'path';
 
-import { registerProviderContainerConfig } from './provider-container-registry.js';
+import { registerProviderContainerConfig, type VolumeMount } from './provider-container-registry.js';
 
 registerProviderContainerConfig('codex', (ctx) => {
   const codexDir = path.join(ctx.sessionDir, 'codex');
   fs.mkdirSync(codexDir, { recursive: true });
 
-  // Copy the host's auth.json into the per-session dir if it exists.
-  // We only copy auth.json, not the full ~/.codex — config.toml would
-  // get clobbered by the container on every wake anyway.
+  const mounts: VolumeMount[] = [{ hostPath: codexDir, containerPath: '/home/node/.codex', readonly: false }];
+
+  // Bind-mount host's auth.json directly on top of the per-session codex dir.
+  // Docker requires the source file to exist; if the user hasn't run
+  // `codex login` yet there's nothing to mount and the container will fall
+  // back to OPENAI_API_KEY (or fail loudly if neither is configured).
   const hostHome = ctx.hostEnv.HOME;
   if (hostHome) {
     const hostAuth = path.join(hostHome, '.codex', 'auth.json');
     if (fs.existsSync(hostAuth)) {
-      fs.copyFileSync(hostAuth, path.join(codexDir, 'auth.json'));
+      mounts.push({
+        hostPath: hostAuth,
+        containerPath: '/home/node/.codex/auth.json',
+        readonly: false,
+      });
     }
   }
 
@@ -42,8 +51,5 @@ registerProviderContainerConfig('codex', (ctx) => {
     if (value) env[key] = value;
   }
 
-  return {
-    mounts: [{ hostPath: codexDir, containerPath: '/home/node/.codex', readonly: false }],
-    env,
-  };
+  return { mounts, env };
 });
