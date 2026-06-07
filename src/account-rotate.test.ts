@@ -236,6 +236,41 @@ describe('rotateAccount', () => {
     expect(getRotateIndex('test_group')).toBe(1);
   });
 
+  it('优先按 OneCLI 当前绑定校准轮换位置，而不是盲信 DB 游标', () => {
+    setRotateEnabled(true);
+    // DB 里还停在 account-a，但 OneCLI 实际已经绑定 account-b。
+    // 正确行为：从真实绑定 account-b 往后切到 account-c，并同步 DB 到 index 2。
+    setRotateIndex(0, 'test_group');
+
+    const secrets = [
+      { id: 'sec-1', name: 'account-a', type: 'anthropic' },
+      { id: 'sec-2', name: 'account-b', type: 'anthropic' },
+      { id: 'sec-3', name: 'account-c', type: 'anthropic' },
+    ];
+    const agents = [
+      { id: 'agent-1', identifier: 'test-agent', isDefault: false },
+    ];
+
+    mockExecSync
+      .mockReturnValueOnce(JSON.stringify(secrets))
+      .mockReturnValueOnce(JSON.stringify(agents))
+      .mockReturnValueOnce(JSON.stringify(['sec-2']))
+      .mockReturnValueOnce('');
+
+    const result = rotateAccount('test-agent', 'test_group');
+
+    expect(result).toEqual({
+      success: true,
+      newSecretName: 'account-c',
+      oldSecretName: 'account-b',
+    });
+    expect(getRotateIndex('test_group')).toBe(2);
+    expect(mockExecSync).toHaveBeenLastCalledWith(
+      'onecli agents set-secrets --id agent-1 --secret-ids sec-3',
+      expect.objectContaining({ encoding: 'utf-8' }),
+    );
+  });
+
   it('连续轮换走完一圈回到 index 0', () => {
     setRotateEnabled(true);
     setRotateIndex(2, 'test_group');

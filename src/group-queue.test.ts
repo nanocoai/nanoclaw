@@ -250,6 +250,37 @@ describe('GroupQueue', () => {
     killSpy.mockRestore();
   });
 
+  it('killGroup 会在 SIGTERM 后进程仍存活时升级 SIGKILL', async () => {
+    const processMessages = vi.fn(
+      async () =>
+        new Promise<boolean>(() => {
+          // 保持运行中
+        }),
+    );
+    const killSpy = vi
+      .spyOn(process, 'kill')
+      .mockImplementation((() => true) as typeof process.kill);
+
+    queue.setProcessMessagesFn(processMessages);
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(10);
+    queue.registerProcess(
+      'group1@g.us',
+      { pid: 23456 } as any,
+      'container-1',
+      'test-group',
+    );
+
+    expect(queue.killGroup('group1@g.us', 100)).toBe(true);
+    expect(killSpy).toHaveBeenCalledWith(-23456, 'SIGTERM');
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(killSpy).toHaveBeenCalledWith(23456, 0);
+    expect(killSpy).toHaveBeenCalledWith(-23456, 'SIGKILL');
+
+    killSpy.mockRestore();
+  });
+
   it('stopGroup 没有活跃进程时返回 false', () => {
     expect(queue.stopGroup('group1@g.us')).toBe(false);
   });
