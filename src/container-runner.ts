@@ -432,6 +432,19 @@ async function buildContainerArgs(
   }
   log.info('OneCLI gateway applied', { containerName });
 
+  // Config-supplied env vars. Applied after the OneCLI gateway so they win over
+  // its injected vars (e.g. redirecting ANTHROPIC_BASE_URL to a local model).
+  for (const [key, value] of Object.entries(containerConfig.env)) {
+    args.push('-e', `${key}=${value}`);
+  }
+
+  // Blocked hosts → mapped to 0.0.0.0 so they're unreachable from the container
+  // (e.g. block api.anthropic.com so a local-model agent fails fast instead of
+  // silently reaching the cloud API if the redirect is misconfigured).
+  for (const host of containerConfig.blockedHosts) {
+    args.push('--add-host', `${host}:0.0.0.0`);
+  }
+
   // Host gateway
   args.push(...hostGatewayArgs());
 

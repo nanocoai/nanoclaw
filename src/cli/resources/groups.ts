@@ -27,6 +27,8 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     packages_apt: JSON.parse(row.packages_apt),
     packages_npm: JSON.parse(row.packages_npm),
     additional_mounts: JSON.parse(row.additional_mounts),
+    env: JSON.parse(row.env),
+    blocked_hosts: JSON.parse(row.blocked_hosts),
     cli_scope: row.cli_scope,
     updated_at: row.updated_at,
   };
@@ -251,6 +253,72 @@ registerResource({
 
         const updated = getContainerConfig(id)!;
         return presentConfig(updated);
+      },
+    },
+    'config set-env': {
+      access: 'approval',
+      description:
+        'Set the container env vars for a group (replaces the whole map). Requires `ncl groups restart` to take effect. ' +
+        'Use --id <group-id> --env <json-object>, e.g. --env \'{"ANTHROPIC_BASE_URL":"http://host.docker.internal:11434"}\'. Pass --env \'{}\' to clear.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+        if (args.env === undefined) throw new Error('--env <json-object> is required');
+
+        const row = getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
+
+        let env: Record<string, string>;
+        try {
+          env = JSON.parse(args.env as string) as Record<string, string>;
+        } catch {
+          throw new Error('--env must be a valid JSON object');
+        }
+        if (typeof env !== 'object' || env === null || Array.isArray(env)) {
+          throw new Error('--env must be a JSON object of string values');
+        }
+        updateContainerConfigJson(id, 'env', env);
+
+        return presentConfig(getContainerConfig(id)!);
+      },
+    },
+    'config block-host': {
+      access: 'approval',
+      description:
+        'Block a host inside the container (mapped to 0.0.0.0). Requires `ncl groups restart` to take effect. Use --id <group-id> --host <hostname>.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+        const host = args.host as string;
+        if (!host) throw new Error('--host is required');
+
+        const row = getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
+
+        const hosts = JSON.parse(row.blocked_hosts) as string[];
+        if (!hosts.includes(host)) hosts.push(host);
+        updateContainerConfigJson(id, 'blocked_hosts', hosts);
+
+        return { blocked: host, blocked_hosts: hosts };
+      },
+    },
+    'config unblock-host': {
+      access: 'approval',
+      description:
+        'Remove a blocked host from a group. Requires `ncl groups restart` to take effect. Use --id <group-id> --host <hostname>.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+        const host = args.host as string;
+        if (!host) throw new Error('--host is required');
+
+        const row = getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
+
+        const hosts = (JSON.parse(row.blocked_hosts) as string[]).filter((h) => h !== host);
+        updateContainerConfigJson(id, 'blocked_hosts', hosts);
+
+        return { unblocked: host, blocked_hosts: hosts };
       },
     },
     'config add-mcp-server': {

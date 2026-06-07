@@ -24,6 +24,8 @@ interface LegacyContainerJson {
   provider?: string;
   assistantName?: string;
   maxMessagesPerPrompt?: number;
+  env?: Record<string, string>;
+  blockedHosts?: string[];
 }
 
 export function backfillContainerConfigs(): void {
@@ -64,6 +66,8 @@ export function backfillContainerConfigs(): void {
       packages_apt: JSON.stringify(legacy.packages?.apt ?? []),
       packages_npm: JSON.stringify(legacy.packages?.npm ?? []),
       additional_mounts: JSON.stringify(legacy.additionalMounts ?? []),
+      env: JSON.stringify(legacy.env ?? {}),
+      blocked_hosts: JSON.stringify(legacy.blockedHosts ?? []),
       cli_scope: 'group',
       updated_at: new Date().toISOString(),
     };
