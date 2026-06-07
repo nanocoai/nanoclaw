@@ -10,18 +10,48 @@ rm -f src/native-credential-proxy.ts \
       src/native-credential-proxy-wiring.test.ts
 ```
 
-## 2. Revert the reach-in in `src/container-runner.ts`
+## 2. Revert the edits in `src/container-runner.ts`
 
 - Remove the import line:
 
   ```ts
-  import { nativeCredentialEnvArgs } from './native-credential-proxy.js';
+  import { nativeCredentialEnvArgs, nativeCredentialsEnabled } from './native-credential-proxy.js';
   ```
 
 - Remove the call that follows the `TZ` env line, leaving the `TZ` line intact:
 
   ```ts
   args.push(...nativeCredentialEnvArgs());
+  ```
+
+- Unwrap the OneCLI gateway guard so the gateway always applies again. Replace:
+
+  ```ts
+  if (!nativeCredentialsEnabled()) {
+    if (agentIdentifier) {
+      await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+    }
+    const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+    if (!onecliApplied) {
+      throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
+    }
+    log.info('OneCLI gateway applied', { containerName });
+  } else {
+    log.info('OneCLI gateway skipped — native credentials enabled', { containerName });
+  }
+  ```
+
+  with the original unguarded block:
+
+  ```ts
+  if (agentIdentifier) {
+    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+  }
+  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+  if (!onecliApplied) {
+    throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
+  }
+  log.info('OneCLI gateway applied', { containerName });
   ```
 
 ## 3. Remove the env keys
@@ -61,6 +91,7 @@ Confirm the reach-in is gone and the proxy file is removed:
 ```bash
 test -f src/native-credential-proxy.ts && echo "still present" || echo removed
 grep -c 'nativeCredentialEnvArgs' src/container-runner.ts
+grep -c 'nativeCredentialsEnabled' src/container-runner.ts
 ```
 
-Expected: `removed`, and a count of `0`.
+Expected: `removed`, and a count of `0` for both greps.
