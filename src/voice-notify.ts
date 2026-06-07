@@ -17,7 +17,12 @@ import { getMemoryConfig } from './memory/config.js';
 
 const PUSHOVER_API = 'https://api.pushover.net/1/messages.json';
 const PUSHOVER_MAX_CHARS = 1024; // Pushover 单条限制
-const SUMMARIZE_TIMEOUT_MS = 5000;
+// qwen3.7-max 摘要长回复实测要 13.9s，原 5s 必超时降级发原文；turbo 实测 0.9s 质量够用。
+// 摘要是简单口语化任务，不需要 max 模型。超时给足 15s 兜底偶发慢。
+const SUMMARIZE_TIMEOUT_MS = 15000;
+// 摘要专用模型（可 env 覆盖）。默认 qwen-turbo：快（~1s）且口语化质量足够，
+// 不复用记忆系统的 llmModel（qwen3.7-max 太慢，长输入必超时）。
+const VOICE_SUMMARY_MODEL = process.env.VOICE_SUMMARY_MODEL || 'qwen-turbo';
 const PUSH_TIMEOUT_MS = 3000;
 
 const SYSTEM_PROMPT = `你把一段给用户的 AI 回复改写成口语化的语音播报版本，供 TTS 朗读。语音是线性的，用户只能听、不能跳读，所以要让他第一耳朵就抓住重点。
@@ -69,7 +74,7 @@ async function summarizeForSpeech(text: string): Promise<string> {
   try {
     const response = await client.chat.completions.create(
       {
-        model: config.llmModel,
+        model: VOICE_SUMMARY_MODEL,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: text },
