@@ -43,6 +43,19 @@ export interface ContainerConfig {
   maxMessagesPerPrompt?: number;
   model?: string;
   effort?: string;
+  /**
+   * Extra env vars injected into the container at spawn as `-e KEY=VALUE`.
+   * Used e.g. to redirect the agent to a local OpenAI/Anthropic-compatible
+   * endpoint (ANTHROPIC_BASE_URL, NO_PROXY). DB-backed (`container_configs.env`).
+   */
+  env: Record<string, string>;
+  /**
+   * Hosts made unreachable inside the container (mapped to 0.0.0.0 via
+   * `--add-host`). Pairs with `env` to harden a local-model redirect: block
+   * `api.anthropic.com` so the agent fails fast instead of silently falling
+   * back to the cloud API. DB-backed (`container_configs.blocked_hosts`).
+   */
+  blockedHosts: string[];
 }
 
 /** Build a `ContainerConfig` from a DB row + agent group identity. */
@@ -63,6 +76,8 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     maxMessagesPerPrompt: row.max_messages_per_prompt ?? undefined,
     model: row.model ?? undefined,
     effort: row.effort ?? undefined,
+    env: JSON.parse(row.env) as Record<string, string>,
+    blockedHosts: JSON.parse(row.blocked_hosts) as string[],
   };
 }
 
