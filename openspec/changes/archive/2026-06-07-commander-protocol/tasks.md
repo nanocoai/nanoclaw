@@ -43,10 +43,10 @@
 - [x] 5.1 tsc 通过
 - [x] 5.2 相关单测全过（db / ipc / commands / 现有回归）
 - [x] 5.3 build（tsc + agent-runner）
-- [ ] 5.4 合 main + 重启
-- [ ] 5.5 E2E：主群 `delegate` 一个真实小任务给某子群 → 子群干 → `report_to_main` 汇报 → 主群 message loop 单次收到 → `/delegate status` 看到状态 → 确认不刷屏、不双投喂
+- [x] 5.4 合 main + 重启
+- [x] 5.5 E2E：主群 `delegate` 一个真实小任务给某子群 → 子群干 → `report_to_main` 汇报 → 主群 message loop 单次收到 → `/delegate status` 看到状态 → 确认不刷屏、不双投喂
 
 ## 6. 收尾
 
-- [ ] 6.1 wrapup 复盘文档 + wiki ingest
-- [ ] 6.2 archive OpenSpec change
+- [x] 6.1 wrapup 复盘文档 + wiki ingest
+- [x] 6.2 archive OpenSpec change
