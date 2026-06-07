@@ -47,6 +47,7 @@ import {
   resolveCliMode,
   rotateAccount,
   runContainerAgent,
+  shouldAutoRotateAnthropicAccount,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
@@ -493,6 +494,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let autoFollowupSummaryTurnsRemaining = 0; // 自动总结回合计数，用于防递归
   let autoFollowupSummaryTextParts: string[] = []; // 当前 query 已发给用户的真实文本
   let streamingRateLimitDetected = false;
+  let rotatedNotificationSent = false;
   // SDK 把 fetch failed / API Error: 5xx 误包成 status:success + result 文本时
   // 由主 onOutput 拦截并设置此 flag，runAgent 返回后触发 API error 重试 loop
   let streamingApiErrorDetected = false;
@@ -875,6 +877,23 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       }
   };
 
+  const notifyRotation = (rotation: {
+    newSecretName: string;
+    oldSecretName?: string;
+  }) => {
+    if (rotatedNotificationSent) return;
+    rotatedNotificationSent = true;
+    channel
+      .sendMessage(
+        chatJid,
+        `🔄 ${rotation.oldSecretName || '当前账号'}额度已满，已自动切换到 ${rotation.newSecretName}`,
+        { isCommandReply: true },
+      )
+      .catch((err) => {
+        logger.error({ err, group: group.name }, '[rate-limit] 轮换通知发送失败');
+      });
+  };
+
   const output = await runAgent(
     group,
     prompt,
@@ -884,6 +903,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     memorySenderId,
     0, // retryCount
     modelOverride,
+    notifyRotation,
   );
 
   await channel.setTyping?.(chatJid, false);
@@ -931,6 +951,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         memorySenderId,
         0, // retryCount 从 0 起，让 runAgent 内 1ef031b 重试链路也可独立工作
         modelOverride,
+        notifyRotation,
       );
       logger.info(
         {
@@ -987,7 +1008,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Streaming 模式下限流检测：onOutput 回调中发现 "hit your limit" 等文本
   // 轮换账号并重试，runAgent 内部会继续轮换直到试完所有账号
-  if (streamingRateLimitDetected && !output.rotatedTo) {
+  const cliMode = resolveCliMode(group.containerConfig);
+  const canAutoRotateAnthropic = shouldAutoRotateAnthropicAccount(cliMode);
+
+  if (streamingRateLimitDetected && !canAutoRotateAnthropic) {
+    logger.warn(
+      { group: group.name, cliMode },
+      '[rate-limit] 当前模式不是 Claude 系，跳过 Anthropic 自动轮换',
+    );
+    hadError = true;
+  }
+
+  if (streamingRateLimitDetected && !output.rotatedTo && canAutoRotateAnthropic) {
     const agentId = group.folder.toLowerCase().replace(/_/g, '-');
     logger.warn(
       { group: group.name, agentId },
@@ -1001,6 +1033,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         { group: group.name, oldAgentId: agentId, newSecret: rotateResult.newSecretName },
         '[rate-limit] 已轮换账号，开始重试',
       );
+      notifyRotation(rotateResult);
       // 重试：复用原始 onOutput 回调，确保 progress/usage/reply 全链路完整
       const retryOutput = await runAgent(
         group,
@@ -1143,6 +1176,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         memorySenderId,
         1, // retryCount=1，runAgent 内部会继续轮换
         modelOverride,
+        notifyRotation,
       );
       // 合并重试结果
       if (retryOutput.status === 'error') hadError = true;
@@ -1162,7 +1196,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   // 轮换通知
-  if (output.rotatedTo) {
+  if (output.rotatedTo && !rotatedNotificationSent) {
     logger.info(
       { group: group.name, rotatedTo: output.rotatedTo },
       '[rate-limit] 发送轮换通知给用户',
@@ -1328,8 +1362,14 @@ async function runAgent(
   memorySenderId?: string,
   retryCount = 0,
   modelOverride?: { model?: string; thinking?: 'adaptive' | 'disabled' },
+  onRotation?: (rotation: {
+    newSecretName: string;
+    oldSecretName?: string;
+  }) => void | Promise<void>,
 ): Promise<RunAgentResult> {
-  const maxRetries = getSecretCount() - 1; // 最多试完所有账号
+  const cliMode = resolveCliMode(group.containerConfig);
+  const canAutoRotateAnthropic = shouldAutoRotateAnthropicAccount(cliMode);
+  const maxRetries = canAutoRotateAnthropic ? getSecretCount() - 1 : 0; // 最多试完所有账号
   const isMain = group.isMain === true;
   const sessionId = sessions[group.folder];
 
@@ -1411,7 +1451,7 @@ async function runAgent(
         assistantName: ASSISTANT_NAME,
         modelOverride,
         senderId: memorySenderId,
-        cliMode: resolveCliMode(group.containerConfig),
+        cliMode,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -1526,6 +1566,13 @@ async function runAgent(
       }
 
       // 429 检测 + 自动轮换（试完所有账号才放弃）
+      if (!canAutoRotateAnthropic && output.error && detectRateLimit(output.error)) {
+        logger.warn(
+          { group: group.name, cliMode, error: output.error?.slice(0, 200) },
+          '[rate-limit] 当前模式不是 Claude 系，跳过 Anthropic 自动轮换',
+        );
+      }
+
       if (retryCount < maxRetries && output.error && detectRateLimit(output.error)) {
         const agentId = group.folder.toLowerCase().replace(/_/g, '-');
         logger.warn(
@@ -1539,6 +1586,7 @@ async function runAgent(
             { group: group.name, newSecret: rotateResult.newSecretName, retryCount: retryCount + 1 },
             '[rate-limit] 已轮换账号，重试中',
           );
+          void onRotation?.(rotateResult);
           return runAgent(
             group,
             prompt,
@@ -1548,6 +1596,7 @@ async function runAgent(
             memorySenderId,
             retryCount + 1,
             modelOverride,
+            onRotation,
           ).then((retryResult) => ({
             ...retryResult,
             rotatedTo: rotateResult.newSecretName,
@@ -1580,6 +1629,14 @@ async function runAgent(
 
     // Claude Code 有时以 status=success 返回限流消息（"You've hit your limit"）
     // 检查 result 文本以捕获这种假成功
+    if (!canAutoRotateAnthropic && output.result && detectRateLimit(output.result)) {
+      logger.warn(
+        { group: group.name, cliMode, result: output.result?.slice(0, 200) },
+        '[rate-limit] 当前模式不是 Claude 系，跳过 Anthropic 自动轮换',
+      );
+      return { status: 'error' };
+    }
+
     if (retryCount < maxRetries && output.result && detectRateLimit(output.result)) {
       const agentId = group.folder.toLowerCase().replace(/_/g, '-');
       logger.warn(
@@ -1593,6 +1650,7 @@ async function runAgent(
           { group: group.name, newSecret: rotateResult.newSecretName, retryCount: retryCount + 1 },
           '[rate-limit] 假成功已轮换账号，重试中',
         );
+        void onRotation?.(rotateResult);
         return runAgent(
           group,
           prompt,
@@ -1602,6 +1660,7 @@ async function runAgent(
           memorySenderId,
           retryCount + 1,
           modelOverride,
+          onRotation,
         ).then((retryResult) => ({
           ...retryResult,
           rotatedTo: rotateResult.newSecretName,

@@ -22,8 +22,8 @@ import { CliMode, ContainerConfig, RegisteredGroup } from './types.js';
 import { parseOneCLIList } from './onecli-util.js';
 
 // resolveCliMode 已抽到无副作用的 cli-mode.ts；import 供本模块使用 + re-export 保持既有 import 路径兼容。
-import { resolveCliMode } from './cli-mode.js';
-export { resolveCliMode };
+import { resolveCliMode, shouldAutoRotateAnthropicAccount } from './cli-mode.js';
+export { resolveCliMode, shouldAutoRotateAnthropicAccount };
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 import {
@@ -128,9 +128,6 @@ export function rotateAccount(
     return null;
   }
 
-  const currentIndex = getRotateIndex(groupFolder);
-  const nextIndex = (currentIndex + 1) % secrets.length;
-
   let agents: Array<{ id: string; identifier: string; isDefault?: boolean }>;
   try {
     // 必须带 --max：onecli agents list 默认只返回 20 条，群数超过 20 时
@@ -188,6 +185,36 @@ export function rotateAccount(
     }
   }
 
+  const dbIndex = getRotateIndex(groupFolder);
+  let currentIndex = dbIndex;
+  try {
+    const assignedSecrets = parseOneCLIList<string | { id: string }>(
+      execSync(`onecli agents secrets --id ${agent.id}`, {
+        encoding: 'utf-8',
+        timeout: 5000,
+      }),
+    );
+    const assignedIds = assignedSecrets.map((s) =>
+      typeof s === 'string' ? s : s.id,
+    );
+    const actualIndex = secrets.findIndex((s) => assignedIds.includes(s.id));
+    if (actualIndex >= 0) {
+      currentIndex = actualIndex;
+      if (actualIndex !== dbIndex) {
+        logger.warn(
+          { agent: agent.id, groupFolder, dbIndex, actualIndex, actualSecret: secrets[actualIndex]?.name },
+          'rotateAccount: DB 游标与 OneCLI 实际绑定不一致，按实际绑定校准',
+        );
+      }
+    }
+  } catch (err) {
+    logger.warn(
+      { err, agent: agent.id, groupFolder, dbIndex },
+      'rotateAccount: 读取当前绑定 secret 失败，回退使用 DB 游标',
+    );
+  }
+
+  const nextIndex = (currentIndex + 1) % secrets.length;
   const oldSecret = secrets[currentIndex];
   const nextSecret = secrets[nextIndex];
   try {

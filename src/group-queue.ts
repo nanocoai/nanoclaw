@@ -178,27 +178,27 @@ export class GroupQueue {
    * 用于 /account 切换账号时立即终止旧容器，让新消息用新 key 起新容器。
    * 进程退出后 runForGroup 的 finally 块会自动 drain 后续消息。
    */
-  killGroup(groupJid: string): boolean {
+  killGroup(groupJid: string, forceKillAfterMs = 2000): boolean {
     const state = this.groups.get(groupJid);
     if (!state?.active || !state.process) return false;
 
     const pid = state.process.pid;
+    if (!pid) return false;
     const name = state.containerName || groupJid;
     logger.info({ groupJid, pid, name }, 'killGroup: 终止容器进程');
 
     // 清除 pending 状态，防止 drainGroup 在进程退出后自动拉起新容器
     state.pendingMessages = false;
 
-    try {
-      // 先尝试杀进程组
-      process.kill(-pid!, 'SIGTERM');
-    } catch {
-      try {
-        process.kill(pid!, 'SIGTERM');
-      } catch {
-        // 进程已退出
-      }
-    }
+    this.signalProcess(pid, 'SIGTERM');
+
+    const timer = setTimeout(() => {
+      if (!this.isProcessAlive(pid)) return;
+      logger.warn({ groupJid, pid, name }, 'killGroup: 进程未退出，发送 SIGKILL');
+      this.signalProcess(pid, 'SIGKILL');
+    }, forceKillAfterMs);
+    timer.unref?.();
+
     return true;
   }
 

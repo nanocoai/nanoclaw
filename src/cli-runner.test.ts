@@ -478,7 +478,7 @@ describe('CLI 模式集成场景', () => {
 
 // ---- resolveCliMode ----
 
-import { resolveCliMode } from './container-runner.js';
+import { resolveCliMode, shouldAutoRotateAnthropicAccount } from './container-runner.js';
 
 describe('resolveCliMode', () => {
   it('默认返回 sdk', () => {
@@ -504,5 +504,15 @@ describe('resolveCliMode', () => {
 
   it('非法 cliMode 抛错', () => {
     expect(() => resolveCliMode({ cliMode: 'typo' as never })).toThrow('Invalid cliMode');
+  });
+});
+
+describe('shouldAutoRotateAnthropicAccount', () => {
+  it('只允许 Claude 系模式自动轮换 Anthropic 账号', () => {
+    expect(shouldAutoRotateAnthropicAccount('sdk')).toBe(true);
+    expect(shouldAutoRotateAnthropicAccount('print')).toBe(true);
+    expect(shouldAutoRotateAnthropicAccount('interactive')).toBe(true);
+    expect(shouldAutoRotateAnthropicAccount('codex')).toBe(false);
+    expect(shouldAutoRotateAnthropicAccount('gemini')).toBe(false);
   });
 });
