@@ -14,6 +14,7 @@ import OpenAI from 'openai';
 
 import { logger } from './logger.js';
 import { getMemoryConfig } from './memory/config.js';
+import { readEnvFile } from './env.js';
 
 const PUSHOVER_API = 'https://api.pushover.net/1/messages.json';
 const PUSHOVER_MAX_CHARS = 1024; // Pushover 单条限制
@@ -98,8 +99,13 @@ async function summarizeForSpeech(text: string): Promise<string> {
  * 推送到 Pushover
  */
 async function pushToPushover(summary: string): Promise<void> {
-  const userKey = process.env.PUSHOVER_USER_KEY;
-  const appToken = process.env.PUSHOVER_APP_TOKEN;
+  // token 优先从 .env 文件读(readEnvFile），fallback process.env。
+  // 根因：主进程不把 .env 注入 process.env（见 env.ts 注释「Does NOT load into process.env」），
+  // launchd plist 也没配 PUSHOVER，之前直接读 process.env 拿到 undefined → 推送被 debug 静默跳过，
+  // 这才是「自动播报收不到」的真根因（摘要侧走 config 读 .env 文件所以能跑，推送侧读 process.env 拿空）。
+  const envFile = readEnvFile(['PUSHOVER_USER_KEY', 'PUSHOVER_APP_TOKEN']);
+  const userKey = envFile.PUSHOVER_USER_KEY || process.env.PUSHOVER_USER_KEY;
+  const appToken = envFile.PUSHOVER_APP_TOKEN || process.env.PUSHOVER_APP_TOKEN;
   if (!userKey || !appToken) {
     logger.debug('[voice-notify] 缺 PUSHOVER_USER_KEY/APP_TOKEN，跳过推送');
     return;
