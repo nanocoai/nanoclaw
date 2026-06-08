@@ -105,6 +105,41 @@ export const CONFIG: Entry[] = [
     secret: true,
     validate: (v) => (v.trim() ? undefined : 'Required'),
   },
+  {
+    key: 'geminiAuthMethod',
+    label: 'Gemini auth method',
+    help: 'Choose between API key or Gemini subscription.',
+    surface: 'flag+ui',
+    group: 'Gemini',
+    type: 'enum',
+    options: [
+      { value: 'api', label: 'API Key', hint: 'from Google AI Studio' },
+      { value: 'subscription', label: 'Gemini Subscription', hint: 'via OAuth login' },
+    ],
+    default: 'api',
+  },
+  {
+    key: 'geminiApiKey',
+    label: 'Gemini API key',
+    help: 'API key from Google AI Studio.',
+    surface: 'flag+ui',
+    group: 'Gemini',
+    type: 'string',
+    secret: true,
+  },
+  {
+    key: 'agentProvider',
+    label: 'Agent provider',
+    help: 'Default provider for new sessions (claude, gemini).',
+    surface: 'flag+ui',
+    group: 'Agent',
+    type: 'enum',
+    options: [
+      { value: 'claude', label: 'Claude (Anthropic)' },
+      { value: 'gemini', label: 'Gemini (Google)' },
+    ],
+    default: 'claude',
+  },
 
   // Existing env-var knobs — flag-only so they don't clutter the UI screen.
   {

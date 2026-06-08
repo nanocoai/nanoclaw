@@ -6,4 +6,5 @@
 // Skills add a new provider by appending one import line below.
 
 import './codex.js';
+import './gemini.js';
 import './opencode.js';

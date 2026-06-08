@@ -10,7 +10,7 @@
 # bind mount at runtime (see src/container-runner.ts). Source-only changes
 # never require an image rebuild.
 
-FROM node:22-slim
+FROM node:20-slim
 
 # ---- Build-time arguments ----------------------------------------------------
 # CJK fonts add ~200MB. Opt in only if you render Chinese/Japanese/Korean text.
@@ -20,10 +20,11 @@ ARG INSTALL_CJK_FONTS=false
 # mean every rebuild silently picks up the latest and can break in lockstep
 # across all users.
 ARG CLAUDE_CODE_VERSION=2.1.116
-ARG CODEX_VERSION=0.124.0
 ARG AGENT_BROWSER_VERSION=latest
+ARG GEMINI_CLI_VERSION=0.40.0
 ARG VERCEL_VERSION=latest
 ARG BUN_VERSION=1.3.12
+ARG GEMINI_CLI_VERSION=0.40.1
 
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
@@ -103,10 +104,13 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "agent-browser@${AGENT_BROWSER_VERSION}"
 
 RUN --mount=type=cache,target=/root/.cache/pnpm \
-    pnpm install -g "@openai/codex@${CODEX_VERSION}"
+    pnpm install -g "@google/gemini-cli@${GEMINI_CLI_VERSION}"
 
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+
+RUN --mount=type=cache,target=/root/.cache/pnpm \
+    pnpm install -g "@google/gemini-cli@${GEMINI_CLI_VERSION}"
 
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh

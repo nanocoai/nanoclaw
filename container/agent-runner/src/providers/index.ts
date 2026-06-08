@@ -4,5 +4,6 @@
 
 import './claude.js';
 import './codex.js';
+import './gemini.js';
 import './mock.js';
 import './opencode.js';
