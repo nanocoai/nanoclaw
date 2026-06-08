@@ -45,6 +45,7 @@ const mockCreateTask = vi.fn();
 const mockDeleteTask = vi.fn();
 const mockGetTaskById = vi.fn();
 const mockUpdateTask = vi.fn();
+const mockGetMessageContext = vi.fn();
 const mockGetMessageContextById = vi.fn();
 const mockGetMessageRange = vi.fn();
 const mockClampRangeParams = vi.fn();
@@ -55,7 +56,7 @@ vi.mock('./db.js', () => ({
   getTaskById: (...args: unknown[]) => mockGetTaskById(...args),
   updateTask: (...args: unknown[]) => mockUpdateTask(...args),
   storeMessageDirect: vi.fn(),
-  getMessageContext: vi.fn(),
+  getMessageContext: (...args: unknown[]) => mockGetMessageContext(...args),
   getMessageContextById: (...args: unknown[]) => mockGetMessageContextById(...args),
   getMessageRange: (...args: unknown[]) => mockGetMessageRange(...args),
   clampRangeParams: (...args: unknown[]) => mockClampRangeParams(...args),
@@ -134,6 +135,7 @@ beforeEach(() => {
     onFeishuAuthRequest: vi.fn().mockResolvedValue(undefined),
   };
 
+  mockGetMessageContext.mockReturnValue({ before: [], anchor: null, after: [] });
   mockGetMessageContextById.mockReturnValue({ before: [], anchor: null, after: [] });
   mockGetMessageRange.mockReturnValue([]);
   mockClampRangeParams.mockImplementation((offset?: number, limit?: number) => ({
@@ -389,6 +391,47 @@ describe('isDuplicateMessage', () => {
   });
 });
 
+// ---- processTaskIpc: get_chat_context ----
+
+describe('processTaskIpc - get_chat_context', () => {
+  it('默认过滤工具调用记录', async () => {
+    mockGetMessageContext.mockReturnValue({
+      before: [],
+      anchor: { sender_name: 'Bob', content: '锚点', timestamp: '2024-01-01T00:01:00Z', is_from_me: true },
+      after: [],
+    });
+
+    await processTaskIpc(
+      {
+        type: 'get_chat_context',
+        requestId: 'req-context-filtered',
+        chat_jid: 'group@g.us',
+        timestamp: '2024-01-01T00:01:00Z',
+        before: 2,
+        after: 4,
+      } as unknown as Parameters<typeof processTaskIpc>[0],
+      'main_group', true, deps,
+    );
+
+    expect(mockGetMessageContext).toHaveBeenCalledWith('group@g.us', '2024-01-01T00:01:00Z', 2, 4, false);
+  });
+
+  it('include_tool_calls=true → 查询全量上下文', async () => {
+    await processTaskIpc(
+      {
+        type: 'get_chat_context',
+        requestId: 'req-context-all',
+        chat_jid: 'group@g.us',
+        timestamp: '2024-01-01T00:01:00Z',
+        include_tool_calls: true,
+      } as unknown as Parameters<typeof processTaskIpc>[0],
+      'main_group', true, deps,
+    );
+
+    expect(mockGetMessageContext).toHaveBeenCalledWith('group@g.us', '2024-01-01T00:01:00Z', 5, 5, true);
+  });
+});
+
 // ---- processTaskIpc: get_message_by_id ----
 
 describe('processTaskIpc - get_message_by_id', () => {
@@ -412,7 +455,20 @@ describe('processTaskIpc - get_message_by_id', () => {
     expect(fs.existsSync(filePath)).toBe(true);
     const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
     expect(data.anchor.content).toBe('锚点');
-    expect(mockGetMessageContextById).toHaveBeenCalledWith('msg-abc', 3, 3);
+    expect(mockGetMessageContextById).toHaveBeenCalledWith('msg-abc', 3, 3, false);
+  });
+
+  it('include_tool_calls=true → 按 ID 查询全量上下文', async () => {
+    const dataWithId = {
+      type: 'get_message_by_id',
+      requestId: 'req-byid-all',
+      message_id: 'msg-abc',
+      include_tool_calls: true,
+    } as unknown as Parameters<typeof processTaskIpc>[0];
+
+    await processTaskIpc(dataWithId, 'main_group', true, deps);
+
+    expect(mockGetMessageContextById).toHaveBeenCalledWith('msg-abc', 5, 5, true);
   });
 
   it('缺 message_id → error response', async () => {
@@ -452,7 +508,20 @@ describe('processTaskIpc - get_message_range', () => {
     expect(data.messages).toHaveLength(1);
     expect(data.messages[0].content).toBe('消息1');
     expect(mockClampRangeParams).toHaveBeenCalledWith(0, 10);
-    expect(mockGetMessageRange).toHaveBeenCalledWith('group@g.us', 0, 10);
+    expect(mockGetMessageRange).toHaveBeenCalledWith('group@g.us', 0, 10, false);
+  });
+
+  it('include_tool_calls=true → 区间查询全量消息', async () => {
+    const dataWithJid = {
+      type: 'get_message_range',
+      requestId: 'req-range-all',
+      chat_jid: 'group@g.us',
+      include_tool_calls: true,
+    } as unknown as Parameters<typeof processTaskIpc>[0];
+
+    await processTaskIpc(dataWithJid, 'main_group', true, deps);
+
+    expect(mockGetMessageRange).toHaveBeenCalledWith('group@g.us', 0, 20, true);
   });
 
   it('缺 chat_jid → error response', async () => {

@@ -47,6 +47,7 @@ export interface SearchOptions {
   startTime?: string; // ISO 8601 起始时间
   endTime?: string; // ISO 8601 截止时间
   limit?: number; // 返回条数，默认 10
+  includeToolCalls?: boolean; // 是否返回纯工具调用 chunk，默认 false
 }
 
 export interface SearchResult {
@@ -93,6 +94,39 @@ export function cleanContent(text: string): string {
     '[使用工具: $1]',
   );
   return cleaned.trim();
+}
+
+const TOOL_PROGRESS_PREFIXES = [
+  '🔧',
+  '📖',
+  '✏️',
+  '📝',
+  '🔍',
+  '🌐',
+  '💻',
+  '⚙️',
+  '🧰',
+  '📁',
+  '📄',
+  '🗂️',
+  '🛠️',
+];
+
+export function isToolCallNoiseContent(text: string): boolean {
+  if (!text) return false;
+  const assistantLines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('助手:'))
+    .map((line) => line.replace(/^助手:\s*/, '').trim())
+    .filter(Boolean);
+
+  if (assistantLines.length === 0) return false;
+
+  return assistantLines.every((line) =>
+    /^\[(?:使用工具|工具|工具调用结果)(?::[^\]]*)?\]$/.test(line) ||
+    TOOL_PROGRESS_PREFIXES.some((prefix) => line.startsWith(prefix)),
+  );
 }
 
 // --- 分块逻辑 ---
@@ -602,9 +636,12 @@ export class ChatIndex {
 
     // sender 过滤（应用层）
     let filtered = merged;
+    if (!options.includeToolCalls) {
+      filtered = filtered.filter((r) => !isToolCallNoiseContent(r.content));
+    }
     if (options.sender) {
       const senderLower = options.sender.toLowerCase();
-      filtered = merged.filter((r) => {
+      filtered = filtered.filter((r) => {
         const names = String(
           (r.metadata as Record<string, unknown>)?.sender_names || '',
         ).toLowerCase();

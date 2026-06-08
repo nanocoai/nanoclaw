@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import {
   cleanContent,
+  isToolCallNoiseContent,
   estimateTokens,
   generateChunkId,
   chunkConversation,
@@ -64,6 +65,17 @@ describe('cleanContent', () => {
   it('保留普通文本不变', () => {
     const input = '这是一段普通文本，包含 code 和 123';
     expect(cleanContent(input)).toBe(input);
+  });
+});
+
+describe('isToolCallNoiseContent', () => {
+  it('识别助手纯工具调用 chunk', () => {
+    expect(isToolCallNoiseContent('用户: 查一下\n助手: 🔧 Bash: ls -la')).toBe(true);
+    expect(isToolCallNoiseContent('用户: 查一下\n助手: [使用工具: Bash]')).toBe(true);
+  });
+
+  it('普通结果不是工具噪音', () => {
+    expect(isToolCallNoiseContent('用户: 查一下\n助手: 已查完，结果是 3 个文件')).toBe(false);
   });
 });
 
@@ -332,6 +344,27 @@ describe('ChatIndex SQLite 操作', () => {
     const results = await idx.search('"OR" AND * NOT');
     // 不崩溃就算通过
     expect(Array.isArray(results)).toBe(true);
+  });
+
+  it('search 默认过滤纯工具调用 chunk，includeToolCalls=true 返回全量', async () => {
+    const idx = new ChatIndex();
+    idx.enqueue({
+      userContent: '统计文件数量',
+      botContent: '🔧 Bash: find . -type f | wc -l',
+      userMsgId: 'tool_u1',
+      botMsgId: 'tool_b1',
+      chat_jid: 'test@jid',
+      group_folder: 'tool_noise_grp',
+      sender_name: '用户',
+      timestamp: '2024-06-01T10:00:00Z',
+    });
+    await idx.batchIndex();
+
+    const filtered = await idx.search('统计文件数量');
+    const all = await idx.search('统计文件数量', { includeToolCalls: true });
+
+    expect(filtered).toHaveLength(0);
+    expect(all.length).toBeGreaterThanOrEqual(1);
   });
 
   it('bot 回复失败不阻塞（空内容不入库）', () => {

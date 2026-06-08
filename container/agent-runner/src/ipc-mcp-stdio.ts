@@ -735,7 +735,7 @@ server.tool(
 
 server.tool(
   'search_chat',
-  '搜索聊天历史记录。支持自然语言语义搜索和关键词搜索，双路融合排序。用于查找之前的对话内容。可按时间区间精确过滤。',
+  '搜索聊天历史记录。支持自然语言语义搜索和关键词搜索，双路融合排序。默认过滤工具调用等过程噪音，主要返回过程文本和结果；调试时可用 include_tool_calls=true 查看全量。',
   {
     query: z.string().describe('搜索关键词或自然语言描述'),
     group: z
@@ -747,6 +747,7 @@ server.tool(
     startTime: z.string().optional().describe('起始时间（ISO 8601），如 "2026-05-15T00:00:00"'),
     endTime: z.string().optional().describe('截止时间（ISO 8601），如 "2026-05-20T23:59:59"'),
     limit: z.number().optional().default(10).describe('返回条数，默认 10'),
+    include_tool_calls: z.boolean().optional().default(false).describe('是否包含工具调用/工具进度等调试信息，默认 false'),
   },
   async (args) => {
     const requestId = crypto.randomUUID();
@@ -761,6 +762,7 @@ server.tool(
         startTime: args.startTime,
         endTime: args.endTime,
         limit: args.limit,
+        includeToolCalls: args.include_tool_calls,
       },
       groupFolder,
       senderId,
@@ -794,12 +796,13 @@ server.tool(
 
 server.tool(
   'get_chat_context',
-  '获取指定消息前后的聊天记录。先用 search_chat 找到目标消息，再用此工具展开上下文，查看完整对话。',
+  '获取指定消息前后的聊天记录。先用 search_chat 找到目标消息，再用此工具展开上下文。默认过滤工具调用等过程噪音，调试时可用 include_tool_calls=true 查看全量。',
   {
     chat_jid: z.string().describe('消息所在的会话 JID（从 search_chat 结果的 chat_jid 字段获取）'),
     timestamp: z.string().describe('锚点消息的时间戳（ISO 8601），从 search_chat 结果的 time_range 获取'),
     before: z.number().optional().default(5).describe('锚点前 N 条消息，默认 5'),
     after: z.number().optional().default(5).describe('锚点后 N 条消息，默认 5'),
+    include_tool_calls: z.boolean().optional().default(false).describe('是否包含工具调用/工具进度等调试信息，默认 false'),
   },
   async (args) => {
     const requestId = crypto.randomUUID();
@@ -810,6 +813,7 @@ server.tool(
       timestamp: args.timestamp,
       before: args.before,
       after: args.after,
+      include_tool_calls: args.include_tool_calls,
       groupFolder,
       senderId,
       timestamp_now: new Date().toISOString(),
@@ -842,11 +846,12 @@ server.tool(
 
 server.tool(
   'get_message_by_id',
-  '按消息 ID 精确定位一条消息，并返回其前后 N 条上下文。消息 ID 是数据库主键（全局唯一，可从 search_chat 结果或飞书引用中获取），无需额外提供 chat_jid。返回结构与 get_chat_context 一致：{ before, anchor, after }。',
+  '按消息 ID 精确定位一条消息，并返回其前后 N 条上下文。消息 ID 是数据库主键（全局唯一，可从 search_chat 结果或飞书引用中获取），无需额外提供 chat_jid。默认过滤工具调用等过程噪音，调试时可用 include_tool_calls=true 查看全量。',
   {
     message_id: z.string().describe('消息 ID（messages 表主键，全局唯一）'),
     before: z.number().optional().default(5).describe('锚点前 N 条消息，默认 5'),
     after: z.number().optional().default(5).describe('锚点后 N 条消息，默认 5'),
+    include_tool_calls: z.boolean().optional().default(false).describe('是否包含工具调用/工具进度等调试信息，默认 false'),
   },
   async (args) => {
     const requestId = crypto.randomUUID();
@@ -856,6 +861,7 @@ server.tool(
       message_id: args.message_id,
       before: args.before,
       after: args.after,
+      include_tool_calls: args.include_tool_calls,
       groupFolder,
       senderId,
       timestamp: new Date().toISOString(),
@@ -879,11 +885,12 @@ server.tool(
 
 server.tool(
   'get_message_range',
-  '按位置区间查询某个会话的历史消息。offset=0 表示从最新一条开始，倒数跳过 offset 条后取 limit 条，结果按时间正序返回（最早的在前）。用于"最近 N 条"回看和翻页式浏览历史，无需时间戳。',
+  '按位置区间查询某个会话的历史消息。offset=0 表示从最新一条开始，倒数跳过 offset 条后取 limit 条，结果按时间正序返回（最早的在前）。默认过滤工具调用等过程噪音，调试时可用 include_tool_calls=true 查看全量。',
   {
     chat_jid: z.string().describe('会话 JID（从 search_chat 结果的 chat_jid 字段获取）'),
     offset: z.number().optional().default(0).describe('跳过最新的 N 条，offset=0 表示从最新开始，默认 0'),
     limit: z.number().optional().default(20).describe('返回条数，默认 20，上限 200'),
+    include_tool_calls: z.boolean().optional().default(false).describe('是否包含工具调用/工具进度等调试信息，默认 false'),
   },
   async (args) => {
     const requestId = crypto.randomUUID();
@@ -893,6 +900,7 @@ server.tool(
       chat_jid: args.chat_jid,
       offset: args.offset,
       limit: args.limit,
+      include_tool_calls: args.include_tool_calls,
       groupFolder,
       senderId,
       timestamp: new Date().toISOString(),
