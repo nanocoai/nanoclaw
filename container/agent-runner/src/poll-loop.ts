@@ -2,7 +2,7 @@ import { findByName, getAllDestinations, type DestinationEntry } from './destina
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
-import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
+import { clearContinuation, clearFailedTurn, getContinuation, getFailedTurn, migrateLegacyContinuation, setContinuation, setFailedTurn } from './db/session-state.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
 import {
   formatMessages,
@@ -138,6 +138,19 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const ids = messages.map((m) => m.id);
     markProcessing(ids);
 
+    // Resync continuation from session_state at the top of each batch.
+    // The local variable only gets updated on processQuery's success
+    // return path; on the error path (and inside long-lived queries that
+    // outlive a single batch via follow-up pushes) the canonical value
+    // lives in session_state — written by the init handler and rolled
+    // back by the failure-recovery path. Without this resync, after a
+    // failed follow-up turn the next batch would start a brand-new
+    // Claude session, dropping all prior context.
+    const persisted = getContinuation(config.providerName);
+    if (persisted !== continuation) {
+      continuation = persisted;
+    }
+
     const routing = extractRouting(messages);
 
     // Command handling: the host router gates filtered and unauthorized
@@ -214,7 +227,22 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
-    const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+    let prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+
+    // Replay any prior failed turn. The continuation rollback in
+    // processQuery restores the agent to a session that completed before
+    // the failure, so the resumed transcript has no record of the lost
+    // user message or the error. Prepend a context block so the agent
+    // knows what happened and can acknowledge it rather than acting as
+    // if the user never spoke. Cleared regardless of whether the prompt
+    // ends up being sent successfully — if the new turn also fails, its
+    // own record will overwrite this one.
+    const failed = getFailedTurn();
+    if (failed) {
+      clearFailedTurn();
+      prompt = renderFailedTurnReplay(failed) + '\n\n' + prompt;
+      log(`Replaying failed turn from ${new Date(failed.recorded_at).toISOString()}`);
+    }
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
@@ -231,8 +259,22 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
+    // Mutable holder so processQuery can report the most recent prompt
+    // it actually pushed to the SDK. The initial batch's prompt is
+    // seeded here; follow-up pushes overwrite it. On failure we record
+    // *that* prompt as the failed turn — not the initial one, which
+    // may have completed cleanly turns earlier in the same query.
+    const promptTracker = { latest: prompt };
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
+      const result = await processQuery(
+        query,
+        routing,
+        processingIds,
+        config.providerName,
+        continuation,
+        true,
+        promptTracker,
+      );
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -250,15 +292,26 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuation(config.providerName);
       }
 
-      // Write error response so the user knows something went wrong
-      writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
-      });
+      try {
+        setFailedTurn({ prompt: promptTracker.latest, error: errMsg, recorded_at: Date.now() });
+      } catch (e) {
+        log(`Failed to persist failed-turn record: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      const ack = await tryAcknowledgeFailure(config, routing, errMsg, undefined);
+      // Intentionally do NOT persist ack.continuation — the ack runs
+      // in a fresh one-shot session with no real conversation state;
+      // the user's next turn should resume the rolled-back
+      // `continuation` we already have.
+      if (!ack.delivered) {
+        writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: friendlyProviderErrorFallback(errMsg) }),
+        });
+      }
     } finally {
       clearCurrentInReplyTo();
     }
@@ -304,6 +357,103 @@ function formatMessagesWithCommands(messages: MessageInRow[], nativeSlashCommand
   return parts.join('\n\n');
 }
 
+/**
+ * Render the prior failed-turn record as an XML block to prepend to the
+ * next prompt. Tells the agent verbatim what the user said last time and
+ * what error the provider returned, so it can acknowledge the failure
+ * instead of acting as if the message never happened. Paired with the
+ * continuation rollback in processQuery — the resumed transcript has no
+ * memory of the failed turn, so this block is the only signal.
+ */
+function renderFailedTurnReplay(failed: { prompt: string; error: string; recorded_at: number }): string {
+  const when = new Date(failed.recorded_at).toISOString();
+  return [
+    `<previous_turn_failed at="${when}">`,
+    `<user_message_that_was_not_processed>`,
+    failed.prompt,
+    `</user_message_that_was_not_processed>`,
+    `<provider_error>${failed.error}</provider_error>`,
+    `<note>The provider rejected ONLY the single user turn shown above. Your earlier conversation history (everything before that turn) is intact and resumed normally — do not claim you have forgotten it. The user was already told that one turn was not processed. Acknowledge the failure briefly only if directly relevant; do not silently retry the failed action.</note>`,
+    `</previous_turn_failed>`,
+  ].join('\n');
+}
+
+interface AcknowledgeResult {
+  /** True when the agent emitted at least one user-visible message
+   *  during the ack turn — caller skips the static error fallback. */
+  delivered: boolean;
+}
+
+/**
+ * Static fallback message used only when both the agent's normal turn
+ * AND the in-turn ack failed. Pulls the human-readable message out of
+ * Claude Code-style API errors so the user gets one short line instead
+ * of a wall of JSON. Best-effort — if extraction misses, returns a
+ * generic message and drops the raw error entirely (the user can't act
+ * on it anyway).
+ */
+function friendlyProviderErrorFallback(errMsg: string): string {
+  // Match either `"message":"..."` (JSON-escaped) or a bare error line
+  // anywhere in the string. The first capture wins.
+  const jsonMatch = errMsg.match(/"message"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"/);
+  if (jsonMatch) {
+    const quoted = jsonMatch[1].replace(/\\"/g, '"').replace(/\\n/g, ' ').trim();
+    if (quoted) return `Your message couldn't be processed: "${quoted}". You may want to rephrase and try again.`;
+  }
+  return "Your message couldn't be processed due to a provider error. You may want to rephrase and try again.";
+}
+
+/**
+ * Best-effort in-turn acknowledgment of a provider failure.
+ *
+ * Runs in a FRESH session (no continuation) so whatever context tripped
+ * the failure (e.g. a content-filter trigger in the rolled-back
+ * transcript) can't immediately re-trip it. The user-supplied prompt is
+ * also intentionally NOT included for the same reason.
+ *
+ * Single query call, no recursion. If it also fails (throws or returns
+ * its own unsurfacedError) the caller falls back to a short static
+ * message; nothing here calls setFailedTurn so a busted ack never
+ * poisons the next turn's replay.
+ */
+async function tryAcknowledgeFailure(
+  config: PollLoopConfig,
+  routing: RoutingContext,
+  errorMessage: string,
+  errorClassification: string | undefined,
+): Promise<AcknowledgeResult> {
+  const tag = errorClassification ? ` (${errorClassification})` : '';
+  const ackPrompt = [
+    `<system>`,
+    `The user's most recent message could not be processed because the model provider returned an error${tag}:`,
+    ``,
+    errorMessage,
+    ``,
+    `Briefly (one or two short sentences) tell the user that their message failed and, if useful, quote the most relevant phrase from the error verbatim so they can act on it. Do not retry the failed action. Do not speculate about causes beyond what the error literally says. Do not apologize at length.`,
+    `</system>`,
+  ].join('\n');
+
+  // Always use a fresh session (no continuation). The rolled-back
+  // transcript still carries whatever content tripped the filter, so
+  // re-asking the model there often trips it again. The ack only needs
+  // the error string itself — no conversation context required.
+  log('Generating in-turn acknowledgment of provider error');
+  try {
+    const query = config.provider.query({
+      prompt: ackPrompt,
+      continuation: undefined,
+      cwd: config.cwd,
+      systemContext: config.systemContext,
+    });
+    await processQuery(query, routing, [], config.providerName, undefined, false);
+    return { delivered: true };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    log(`Acknowledgment turn threw: ${errMsg}`);
+    return { delivered: false };
+  }
+}
+
 interface QueryResult {
   continuation?: string;
 }
@@ -313,8 +463,12 @@ async function processQuery(
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
+  priorContinuation: string | undefined,
+  persistContinuation = true,
+  promptTracker?: { latest: string },
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
+  let resultSeen = false;
   let done = false;
   let unwrappedNudged = false;
 
@@ -392,6 +546,7 @@ async function processQuery(
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
+        if (promptTracker) promptTracker.latest = prompt;
         query.push(prompt);
         markCompleted(keptIds);
       } catch (err) {
@@ -445,8 +600,14 @@ async function processQuery(
         // container died between `init` and `result`, the SDK session was
         // effectively orphaned and the next message started a blank
         // Claude session with no prior context.
-        setContinuation(providerName, event.continuation);
+        // Skip for one-shot calls (e.g. the in-turn ack), which run in a
+        // throwaway session and would otherwise clobber the rolled-back
+        // continuation set by the failing turn's processQuery.
+        if (persistContinuation) {
+          setContinuation(providerName, event.continuation);
+        }
       } else if (event.type === 'result') {
+        resultSeen = true;
         // A result — with or without text — means the turn is done. Mark
         // the initial batch completed now so the host sweep doesn't see
         // stale 'processing' claims while the query stays open for
@@ -468,11 +629,35 @@ async function processQuery(
             );
           }
         }
+        // One-shot calls (in-turn ack): end the stream immediately after
+        // the first result. Without this, the query stays open waiting
+        // for stream-close, and the follow-up poller pushes the next
+        // user message into this throwaway session — defeating the
+        // continuation rollback. The user's next turn must start a
+        // fresh query against the rolled-back continuation.
+        if (!persistContinuation) {
+          endedForCommand = true;
+          query.end();
+        }
       }
     }
   } finally {
     done = true;
     clearInterval(pollHandle);
+    // Atomic continuation rollback. The `init` handler persisted the new
+    // SDK session id immediately (for mid-turn crash recovery), but if the
+    // turn never reached a `result` event — the stream errored out or the
+    // SDK threw — that new id points at a half-baked transcript with no
+    // completed assistant turn. Resuming from it on the next message tends
+    // to drop prior context, which cascades: every subsequent turn forks
+    // into a fresh session and the agent eventually has nothing to anchor
+    // on. Restore the prior good id so the next turn resumes from a
+    // session that actually completed at least one turn cleanly.
+    if (!resultSeen && priorContinuation && queryContinuation && queryContinuation !== priorContinuation) {
+      log(`Turn ended without result; restoring prior continuation ${priorContinuation} (discarding ${queryContinuation})`);
+      try { setContinuation(providerName, priorContinuation); } catch { /* best-effort */ }
+      queryContinuation = priorContinuation;
+    }
   }
 
   return { continuation: queryContinuation };

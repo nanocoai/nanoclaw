@@ -77,3 +77,46 @@ export function setContinuation(providerName: string, id: string): void {
 export function clearContinuation(providerName: string): void {
   deleteValue(continuationKey(providerName));
 }
+
+const FAILED_TURN_KEY = 'failed_turn';
+
+export interface FailedTurnRecord {
+  /** The prompt that was sent to the provider on the failed turn. Used to
+   *  reconstruct what the user asked when we replay context on the next
+   *  turn — the inbound row has been markCompleted'd by then. */
+  prompt: string;
+  /** The error message we surfaced to the user. The next turn tells the
+   *  agent about it so it can acknowledge the failure rather than acting
+   *  as if the previous message never happened. */
+  error: string;
+  /** Wall-clock when we recorded the failure. Lets the next turn render a
+   *  rough "a few seconds ago" hint if desired. */
+  recorded_at: number;
+}
+
+/** Persist a failed-turn record. Called when a turn surfaces an error to
+ *  the user (either via the unsurfacedError path or by throwing after
+ *  stale-session retry is exhausted). Read once on the next turn so the
+ *  agent has visibility into what was lost.
+ *
+ *  Pairs with the continuation rollback in processQuery: when we revert
+ *  to the prior good session id, the resumed transcript has no record of
+ *  the failed message or its error. This row carries that context across
+ *  turns instead. */
+export function setFailedTurn(record: FailedTurnRecord): void {
+  setValue(FAILED_TURN_KEY, JSON.stringify(record));
+}
+
+export function getFailedTurn(): FailedTurnRecord | undefined {
+  const raw = getValue(FAILED_TURN_KEY);
+  if (!raw) return undefined;
+  try {
+    return JSON.parse(raw) as FailedTurnRecord;
+  } catch {
+    return undefined;
+  }
+}
+
+export function clearFailedTurn(): void {
+  deleteValue(FAILED_TURN_KEY);
+}
