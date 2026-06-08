@@ -17,6 +17,8 @@
  * Startup sweep edits any leftover cards from a previous process to
  * "Expired (host restarted)" and drops the rows.
  */
+import { randomBytes } from 'node:crypto';
+
 import { OneCLI, type ApprovalRequest, type ManualApprovalHandle } from '@onecli-sh/sdk';
 
 import { pickApprovalDelivery, pickApprover } from './primitive.js';
@@ -50,18 +52,25 @@ let adapterRef: ChannelDeliveryAdapter | null = null;
 /**
  * Generate a short approval id for card buttons.
  *
- * OneCLI's native request.id is a UUID (36 bytes). When we put it into a card
- * button's action id as `ncq:<uuid>:Approve`, Chat SDK's Telegram adapter then
- * serializes both `id` and `value` into the Telegram `callback_data` field,
- * which has a hard 64-byte limit. UUIDs push past that limit.
+ * Constraints:
+ *   - This id IS the secret. The Chat SDK callback's `actionId` is what
+ *     the click resolves against (`resolveOneCLIApproval`). Anyone who can
+ *     guess a pending id can approve a credentialed action they shouldn't
+ *     be able to. Use a CSPRNG, not Math.random.
+ *   - Telegram's callback_data is hard-capped at 64 bytes. The Chat SDK
+ *     wraps the id as `chat:{"a":"<id>","v":"<value>"}`, so the budget is
+ *     ~64 - 25 (wrapper) - 7 (max value `approve`) = 32 bytes for the id.
+ *     A full UUID-with-dashes (36 chars + `oa-` prefix = 39) would not fit.
  *
- * Instead we generate a 10-byte id (`oa-` + 8 base36 chars) for the card, and
- * keep the OneCLI request.id in the persisted payload for audit. The pending
- * map, DB row, and button callback all use this short id; click handling
- * looks up the short id and resolves the Promise that was waiting on it.
+ * Resolution: 16 random bytes encoded as base64url = 22 chars + `oa-` prefix
+ * = 25-char id. 128 bits of entropy, well inside the callback_data budget.
+ *
+ * The OneCLI native request.id (a UUID) is still kept in the persisted
+ * payload for audit; the short id is only the lookup key for the in-memory
+ * pending map and the Telegram button.
  */
-function shortApprovalId(): string {
-  return `oa-${Math.random().toString(36).slice(2, 10)}`;
+export function shortApprovalId(): string {
+  return `oa-${randomBytes(16).toString('base64url')}`;
 }
 
 /** Called from the approvals response handler when a card button is clicked. */

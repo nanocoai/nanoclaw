@@ -17,9 +17,9 @@ import { deletePendingApproval, getPendingApproval, getSession } from '../../db/
 import type { ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
-import type { PendingApproval } from '../../types.js';
+import type { PendingApproval, Session } from '../../types.js';
 import { ONECLI_ACTION, resolveOneCLIApproval } from './onecli-approvals.js';
-import { getApprovalHandler } from './primitive.js';
+import { getApprovalHandler, pickApprover } from './primitive.js';
 
 export async function handleApprovalsResponse(payload: ResponsePayload): Promise<boolean> {
   // OneCLI credential approvals — resolved via in-memory Promise first.
@@ -38,14 +38,31 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
     return true;
   }
 
-  await handleRegisteredApproval(approval, payload.value, payload.userId ?? '');
+  // payload.userId is the raw platform user id (e.g. "8550182903"); namespace
+  // it with the channel type so it matches users(id) format and can be checked
+  // against pickApprover. Mirror handleSenderApprovalResponse in permissions/.
+  const clickerId = payload.userId ? `${payload.channelType}:${payload.userId}` : null;
+  await handleRegisteredApproval(approval, payload.value, clickerId);
   return true;
+}
+
+/**
+ * Verify the clicker is in the eligible-approvers list for this approval's
+ * agent group. Without this check, any forged click — including one that
+ * spoofs another user's id via `payload.userId` — would dispatch the
+ * approval handler. The webhook receiver itself does not authenticate
+ * clicks beyond platform-signature checks, so we re-verify here so an
+ * approved cards can't be redeemed by a non-admin.
+ */
+function isAuthorizedClicker(clickerId: string | null, session: Session): boolean {
+  if (!clickerId) return false;
+  return pickApprover(session.agent_group_id).includes(clickerId);
 }
 
 async function handleRegisteredApproval(
   approval: PendingApproval,
   selectedOption: string,
-  userId: string,
+  clickerId: string | null,
 ): Promise<void> {
   if (!approval.session_id) {
     deletePendingApproval(approval.approval_id);
@@ -56,6 +73,20 @@ async function handleRegisteredApproval(
     deletePendingApproval(approval.approval_id);
     return;
   }
+
+  if (!isAuthorizedClicker(clickerId, session)) {
+    // Claim the response so the dispatcher doesn't keep retrying, but do
+    // nothing else. Leave the pending_approvals row in place — a real
+    // approver can still click and resolve it.
+    log.warn('Approval click rejected — clicker is not an eligible approver', {
+      approvalId: approval.approval_id,
+      action: approval.action,
+      clickerId,
+      eligible: pickApprover(session.agent_group_id),
+    });
+    return;
+  }
+  const userId = clickerId as string; // narrowed by isAuthorizedClicker
 
   const notify = (text: string): void => {
     writeSessionMessage(session.agent_group_id, session.id, {
