@@ -43,7 +43,7 @@ const server = new McpServer({
 
 server.tool(
   'send_message',
-  'Send a message to the user or group immediately while you\'re still running. Use this for progress updates or to send multiple messages. You can call this multiple times.\n\nMain group only: set target or target_chat_jid to send a message to a different group (cross-group messaging). target can be a configured alias such as "1号", "2号", or a full chat JID.',
+  'Send a message to the current user or group immediately while you are still running. Use this for progress updates or to send multiple messages in the same conversation. Cross-group task dispatch is disabled here; main group must use delegate for work assignment.',
   {
     text: z.string().describe('The message text to send'),
     sender: z
@@ -52,30 +52,11 @@ server.tool(
       .describe(
         'Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.',
       ),
-    target_chat_jid: z
-      .string()
-      .optional()
-      .describe(
-        '(Main group only) JID or alias of the target group to send the message to. If omitted, sends to the current group.',
-      ),
-    target: z
-      .string()
-      .optional()
-      .describe(
-        '(Main group only) Alias or JID of the target group, e.g. "1号", "2号", or "fs:oc_xxx".',
-      ),
   },
   async (args) => {
-    // 跨群发消息仅 main group 可用
-    // 自动补全 JID 前缀：agent 传 oc_xxx 时自动加 fs: 前缀
-    const rawTarget = args.target ?? args.target_chat_jid;
-    const normalizedTarget =
-      rawTarget && rawTarget.startsWith('oc_') ? `fs:${rawTarget}` : rawTarget;
-    const targetJid = isMain && normalizedTarget ? normalizedTarget : chatJid;
-
     const data: Record<string, string | undefined> = {
       type: 'message',
-      chatJid: targetJid,
+      chatJid,
       text: args.text,
       sender: args.sender || undefined,
       groupFolder,
@@ -84,9 +65,8 @@ server.tool(
 
     writeIpcFile(MESSAGES_DIR, data);
 
-    const targetNote = targetJid !== chatJid ? ` (to ${targetJid})` : '';
     return {
-      content: [{ type: 'text' as const, text: `Message sent${targetNote}.` }],
+      content: [{ type: 'text' as const, text: 'Message sent.' }],
     };
   },
 );

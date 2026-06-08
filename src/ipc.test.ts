@@ -94,7 +94,14 @@ vi.mock('./memory/extract-fact.js', () => ({
   extractAndRefine: (...args: unknown[]) => mockExtractAndRefine(...args),
 }));
 
-import { writeIpcResponse, processTaskIpc, isDuplicateMessage, recentMessages, IpcDeps } from './ipc.js';
+import {
+  writeIpcResponse,
+  processTaskIpc,
+  isDuplicateMessage,
+  recentMessages,
+  canSendMessageViaIpc,
+  IpcDeps,
+} from './ipc.js';
 import type { RegisteredGroup } from './types.js';
 
 // ---- helpers ----
@@ -388,6 +395,22 @@ describe('isDuplicateMessage', () => {
     isDuplicateMessage('jid1', 'trigger-cleanup');
     // 清空后只有刚加的一条
     expect(recentMessages.size).toBe(1);
+  });
+});
+
+// ---- send_message authorization ----
+
+describe('canSendMessageViaIpc', () => {
+  it('允许同群 send_message', () => {
+    expect(canSendMessageViaIpc('main_group', 'fs:oc_main', groups)).toBe(true);
+  });
+
+  it('即使源群是主群，也不允许跨群 send_message', () => {
+    expect(canSendMessageViaIpc('main_group', 'fs:oc_other', groups)).toBe(false);
+  });
+
+  it('目标群未注册时拒绝 send_message', () => {
+    expect(canSendMessageViaIpc('main_group', 'fs:oc_missing', groups)).toBe(false);
   });
 });
 
