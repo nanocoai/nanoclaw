@@ -123,6 +123,15 @@ export function isDuplicateMessage(chatJid: string, text: string): boolean {
   return false;
 }
 
+export function canSendMessageViaIpc(
+  sourceGroup: string,
+  targetChatJid: string,
+  registeredGroups: Record<string, RegisteredGroup>,
+): boolean {
+  const targetGroup = registeredGroups[targetChatJid];
+  return !!targetGroup && targetGroup.folder === sourceGroup;
+}
+
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
     logger.debug('IPC watcher already running, skipping duplicate start');
@@ -248,15 +257,15 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   );
                   continue;
                 }
-                // Authorization: verify this group can send to this chatJid
-                const targetGroup = registeredGroups[data.chatJid];
-                const isSameGroup =
-                  targetGroup && targetGroup.folder === sourceGroup;
+                // Authorization: send_message 仅允许同群即时通知。
+                // 跨群派工必须走 delegate，避免绕过 delegation 账本导致汇报闭环断裂。
+                const isSameGroup = canSendMessageViaIpc(
+                  sourceGroup,
+                  data.chatJid,
+                  registeredGroups,
+                );
                 const isCrossGroup = !isSameGroup;
-                if (
-                  isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
-                ) {
+                if (isSameGroup) {
                   await deps.sendMessage(data.chatJid, data.text);
                   // 存入 messages.db，供巡检和搜索使用
                   try {
@@ -313,7 +322,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                       alias: resolvedTarget.alias,
                       sourceGroup,
                     },
-                    'Unauthorized IPC message attempt blocked',
+                    'Cross-group send_message blocked; use delegate for cross-group work',
                   );
                 }
               }
