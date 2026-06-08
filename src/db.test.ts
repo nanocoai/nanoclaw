@@ -817,6 +817,31 @@ describe('getMessageContext', () => {
     expect(result.after).toHaveLength(1); // 只有 msg-4
   });
 
+  it('默认过滤 tool_call 进度，锚点会命中最近的有效消息', () => {
+    storeChatMetadata(JID, '2024-06-01T10:00:00.000Z');
+    const base = new Date('2024-06-01T10:00:00.000Z').getTime();
+    storeMessageDirect({ id: 'ctx-user', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '用户消息', timestamp: new Date(base).toISOString(), is_from_me: false, is_bot_message: false });
+    storeMessageDirect({ id: 'tool_ctx', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: '🔧 Bash: ls', timestamp: new Date(base + 60_000).toISOString(), is_from_me: true, is_bot_message: true });
+    storeMessageDirect({ id: 'ctx-result', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: '最终结果', timestamp: new Date(base + 180_000).toISOString(), is_from_me: true, is_bot_message: true });
+
+    const result = getMessageContext(JID, new Date(base + 60_000).toISOString(), 5, 5);
+
+    expect(result.anchor!.content).toBe('用户消息');
+    expect(result.after.map(m => m.content)).toEqual(['最终结果']);
+  });
+
+  it('includeToolCalls=true 时按时间戳上下文保留 tool_call 进度', () => {
+    storeChatMetadata(JID, '2024-06-01T10:00:00.000Z');
+    const base = new Date('2024-06-01T10:00:00.000Z').getTime();
+    storeMessageDirect({ id: 'ctx-user-all', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '用户消息', timestamp: new Date(base).toISOString(), is_from_me: false, is_bot_message: false });
+    storeMessageDirect({ id: 'tool_ctx_all', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: '🔧 Bash: ls', timestamp: new Date(base + 60_000).toISOString(), is_from_me: true, is_bot_message: true });
+
+    const result = getMessageContext(JID, new Date(base + 60_000).toISOString(), 5, 5, true);
+
+    expect(result.anchor!.content).toBe('🔧 Bash: ls');
+    expect(result.before.map(m => m.content)).toEqual(['用户消息']);
+  });
+
   it('before 按时间正序排列', () => {
     seedMessages(JID, 10);
     const base = new Date('2024-06-01T10:00:00.000Z').getTime();
@@ -877,20 +902,33 @@ describe('getMessageContextById', () => {
     expect(result.after).toHaveLength(2);
   });
 
-  it('上下文包含 bot 回复（不按 is_bot_message 过滤）', () => {
+  it('上下文包含普通 bot 回复，但默认过滤 tool_call 进度', () => {
     storeChatMetadata(JID, '2024-06-01T10:00:00.000Z');
     const base = new Date('2024-06-01T10:00:00.000Z').getTime();
-    // 0: 用户  1: bot 回复  2: 用户(锚点)  3: bot 回复
+    // 0: 用户  1: tool_call 进度  2: bot 回复  3: 用户(锚点)  4: bot 回复
     storeMessageDirect({ id: 'm0', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '问题', timestamp: new Date(base).toISOString(), is_from_me: false, is_bot_message: false });
-    storeMessageDirect({ id: 'm1', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: 'bot 回复 A', timestamp: new Date(base + 60_000).toISOString(), is_from_me: true, is_bot_message: true });
-    storeMessageDirect({ id: 'm2', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '锚点', timestamp: new Date(base + 120_000).toISOString(), is_from_me: false, is_bot_message: false });
-    storeMessageDirect({ id: 'm3', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: 'bot 回复 B', timestamp: new Date(base + 180_000).toISOString(), is_from_me: true, is_bot_message: true });
+    storeMessageDirect({ id: 'tool_1', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: '🔧 Bash: ls', timestamp: new Date(base + 60_000).toISOString(), is_from_me: true, is_bot_message: true });
+    storeMessageDirect({ id: 'm1', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: 'bot 回复 A', timestamp: new Date(base + 120_000).toISOString(), is_from_me: true, is_bot_message: true });
+    storeMessageDirect({ id: 'm2', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '锚点', timestamp: new Date(base + 180_000).toISOString(), is_from_me: false, is_bot_message: false });
+    storeMessageDirect({ id: 'm3', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: 'bot 回复 B', timestamp: new Date(base + 240_000).toISOString(), is_from_me: true, is_bot_message: true });
 
     const result = getMessageContextById('m2', 5, 5);
 
     expect(result.anchor!.content).toBe('锚点');
     expect(result.before.map(m => m.content)).toEqual(['问题', 'bot 回复 A']);
     expect(result.after.map(m => m.content)).toEqual(['bot 回复 B']);
+  });
+
+  it('includeToolCalls=true 时上下文保留 tool_call 进度', () => {
+    storeChatMetadata(JID, '2024-06-01T10:00:00.000Z');
+    const base = new Date('2024-06-01T10:00:00.000Z').getTime();
+    storeMessageDirect({ id: 'm0-all', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '问题', timestamp: new Date(base).toISOString(), is_from_me: false, is_bot_message: false });
+    storeMessageDirect({ id: 'tool_all', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: '🔧 Bash: ls', timestamp: new Date(base + 60_000).toISOString(), is_from_me: true, is_bot_message: true });
+    storeMessageDirect({ id: 'm1-all', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '锚点', timestamp: new Date(base + 120_000).toISOString(), is_from_me: false, is_bot_message: false });
+
+    const result = getMessageContextById('m1-all', 5, 5, true);
+
+    expect(result.before.map(m => m.content)).toEqual(['问题', '🔧 Bash: ls']);
   });
 });
 
@@ -949,15 +987,27 @@ describe('getMessageRange', () => {
     expect(result.map(m => m.content)).toEqual(['消息 #0', '消息 #1', '消息 #3', '消息 #4']);
   });
 
-  it('包含 bot 回复', () => {
+  it('包含普通 bot 回复，默认过滤 tool_call 进度', () => {
     storeChatMetadata(JID, '2024-06-01T10:00:00.000Z');
     const base = new Date('2024-06-01T10:00:00.000Z').getTime();
     storeMessageDirect({ id: 'b0', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '用户消息', timestamp: new Date(base).toISOString(), is_from_me: false, is_bot_message: false });
-    storeMessageDirect({ id: 'b1', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: 'bot 消息', timestamp: new Date(base + 60_000).toISOString(), is_from_me: true, is_bot_message: true });
+    storeMessageDirect({ id: 'tool_b1', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: '🔧 Bash: pwd', timestamp: new Date(base + 60_000).toISOString(), is_from_me: true, is_bot_message: true });
+    storeMessageDirect({ id: 'b1', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: 'bot 消息', timestamp: new Date(base + 120_000).toISOString(), is_from_me: true, is_bot_message: true });
 
     const result = getMessageRange(JID, 0, 10);
 
     expect(result.map(m => m.content)).toEqual(['用户消息', 'bot 消息']);
+  });
+
+  it('includeToolCalls=true 时区间查询保留 tool_call 进度', () => {
+    storeChatMetadata(JID, '2024-06-01T10:00:00.000Z');
+    const base = new Date('2024-06-01T10:00:00.000Z').getTime();
+    storeMessageDirect({ id: 'range-u', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '用户消息', timestamp: new Date(base).toISOString(), is_from_me: false, is_bot_message: false });
+    storeMessageDirect({ id: 'tool_range', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: '🔧 Bash: pwd', timestamp: new Date(base + 60_000).toISOString(), is_from_me: true, is_bot_message: true });
+
+    const result = getMessageRange(JID, 0, 10, true);
+
+    expect(result.map(m => m.content)).toEqual(['用户消息', '🔧 Bash: pwd']);
   });
 
   it('结果按时间正序', () => {

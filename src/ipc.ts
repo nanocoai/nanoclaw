@@ -1219,6 +1219,7 @@ export async function processTaskIpc(
             startTime: options?.startTime as string | undefined,
             endTime: options?.endTime as string | undefined,
             limit: options?.limit as number | undefined,
+            includeToolCalls: options?.includeToolCalls as boolean | undefined,
           }),
           new Promise<never>((_, reject) =>
             setTimeout(
@@ -1262,7 +1263,8 @@ export async function processTaskIpc(
       try {
         const before = (raw.before as number) || 5;
         const after = (raw.after as number) || 5;
-        const result = getMessageContext(chatJid, timestamp, before, after);
+        const includeToolCalls = raw.include_tool_calls === true;
+        const result = getMessageContext(chatJid, timestamp, before, after, includeToolCalls);
         writeIpcResponse(sourceGroup, requestId, result);
         logger.info(
           {
@@ -1271,6 +1273,7 @@ export async function processTaskIpc(
             timestamp,
             beforeCount: result.before.length,
             afterCount: result.after.length,
+            includeToolCalls,
           },
           'Chat context via IPC',
         );
@@ -1303,10 +1306,11 @@ export async function processTaskIpc(
       try {
         const before = typeof raw.before === 'number' ? raw.before : 5;
         const after = typeof raw.after === 'number' ? raw.after : 5;
-        const result = getMessageContextById(messageId, before, after);
+        const includeToolCalls = raw.include_tool_calls === true;
+        const result = getMessageContextById(messageId, before, after, includeToolCalls);
         writeIpcResponse(sourceGroup, requestId, result);
         logger.info(
-          { sourceGroup, messageId, beforeCount: result.before.length, afterCount: result.after.length },
+          { sourceGroup, messageId, beforeCount: result.before.length, afterCount: result.after.length, includeToolCalls },
           'get_message_by_id via IPC',
         );
       } catch (err) {
@@ -1335,10 +1339,11 @@ export async function processTaskIpc(
           raw.offset as number | undefined,
           raw.limit as number | undefined,
         );
-        const messages = getMessageRange(chatJid, offset, limit);
+        const includeToolCalls = raw.include_tool_calls === true;
+        const messages = getMessageRange(chatJid, offset, limit, includeToolCalls);
         writeIpcResponse(sourceGroup, requestId, { messages, offset, limit });
         logger.info(
-          { sourceGroup, chatJid: chatJid.slice(0, 20), offset, limit, count: messages.length },
+          { sourceGroup, chatJid: chatJid.slice(0, 20), offset, limit, count: messages.length, includeToolCalls },
           'get_message_range via IPC',
         );
       } catch (err) {

@@ -587,6 +587,10 @@ export interface ContextMessage {
   is_from_me: boolean;
 }
 
+function toolCallHistoryFilter(includeToolCalls: boolean): string {
+  return includeToolCalls ? '' : `AND id NOT LIKE 'tool\\_%' ESCAPE '\\'`;
+}
+
 /**
  * 获取锚点时间戳前后 N 条消息。
  * 返回 { before, anchor, after }，anchor 是最接近锚点的那条消息。
@@ -596,12 +600,14 @@ export function getMessageContext(
   anchorTimestamp: string,
   beforeCount: number = 5,
   afterCount: number = 5,
+  includeToolCalls: boolean = false,
 ): { before: ContextMessage[]; anchor: ContextMessage | null; after: ContextMessage[] } {
   // 锚点：最接近指定时间戳的消息
   const anchorRow = db.prepare(`
     SELECT sender_name, content, timestamp, is_from_me
     FROM messages
     WHERE chat_jid = ? AND content != '' AND content IS NOT NULL
+      ${toolCallHistoryFilter(includeToolCalls)}
     ORDER BY ABS(julianday(timestamp) - julianday(?))
     LIMIT 1
   `).get(chatJid, anchorTimestamp) as ContextMessage | undefined;
@@ -619,6 +625,7 @@ export function getMessageContext(
       SELECT sender_name, content, timestamp, is_from_me
       FROM messages
       WHERE chat_jid = ? AND timestamp < ? AND content != '' AND content IS NOT NULL
+        ${toolCallHistoryFilter(includeToolCalls)}
       ORDER BY timestamp DESC
       LIMIT ?
     ) ORDER BY timestamp
@@ -629,6 +636,7 @@ export function getMessageContext(
     SELECT sender_name, content, timestamp, is_from_me
     FROM messages
     WHERE chat_jid = ? AND timestamp > ? AND content != '' AND content IS NOT NULL
+      ${toolCallHistoryFilter(includeToolCalls)}
     ORDER BY timestamp
     LIMIT ?
   `).all(chatJid, actualAnchorTs, afterCount) as ContextMessage[];
@@ -655,12 +663,14 @@ export function getMessageContextById(
   messageId: string,
   beforeCount: number = 5,
   afterCount: number = 5,
+  includeToolCalls: boolean = false,
 ): { before: ContextMessage[]; anchor: ContextMessage | null; after: ContextMessage[] } {
   // 锚点：按主键直接命中（额外取 chat_jid 用于在同会话内展开）
   const anchorRow = db.prepare(`
     SELECT chat_jid, sender_name, content, timestamp, is_from_me
     FROM messages
     WHERE id = ?
+      ${toolCallHistoryFilter(includeToolCalls)}
   `).get(messageId) as (ContextMessage & { chat_jid: string }) | undefined;
 
   if (!anchorRow) {
@@ -677,6 +687,7 @@ export function getMessageContextById(
       SELECT sender_name, content, timestamp, is_from_me
       FROM messages
       WHERE chat_jid = ? AND timestamp < ? AND content != '' AND content IS NOT NULL
+        ${toolCallHistoryFilter(includeToolCalls)}
       ORDER BY timestamp DESC
       LIMIT ?
     ) ORDER BY timestamp
@@ -687,6 +698,7 @@ export function getMessageContextById(
     SELECT sender_name, content, timestamp, is_from_me
     FROM messages
     WHERE chat_jid = ? AND timestamp > ? AND content != '' AND content IS NOT NULL
+      ${toolCallHistoryFilter(includeToolCalls)}
     ORDER BY timestamp
     LIMIT ?
   `).all(chatJid, anchorTs, afterCount) as ContextMessage[];
@@ -729,12 +741,14 @@ export function getMessageRange(
   chatJid: string,
   offset: number = 0,
   limit: number = 20,
+  includeToolCalls: boolean = false,
 ): ContextMessage[] {
   return db.prepare(`
     SELECT * FROM (
       SELECT sender_name, content, timestamp, is_from_me
       FROM messages
       WHERE chat_jid = ? AND content != '' AND content IS NOT NULL
+        ${toolCallHistoryFilter(includeToolCalls)}
       ORDER BY timestamp DESC
       LIMIT ? OFFSET ?
     ) ORDER BY timestamp
