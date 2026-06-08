@@ -103,7 +103,7 @@ ncl help
 | roles | list, grant, revoke | Owner / admin privileges (global or scoped to an agent group) |
 | members | list, add, remove | Unprivileged access gate for an agent group |
 | destinations | list, add, remove | Where an agent group can send messages |
-| sessions | list, get | Active sessions (read-only) |
+| sessions | list, get, wake | Active sessions. `wake --id <session-id> [--message <text>]` spawns a stopped session's container now (revives a session reaped by the absolute-ceiling watchdog, which `groups restart` can't — it only bounces *running* containers). |
 | user-dms | list | Cold-DM cache (read-only) |
 | dropped-messages | list | Messages from unregistered senders (read-only) |
 | approvals | list, get | Pending approval requests (read-only) |
@@ -144,6 +144,8 @@ Key files: `src/db/container-configs.ts`, `src/container-config.ts`, `src/cli/di
 ## Container Restart
 
 `ncl groups restart --id <group-id> [--rebuild] [--message <text>]`. Kills running containers; if `--message` is provided, writes an `on_wake` message and respawns via `onExit` callback. Without `--message`, containers come back on the next user message. From inside a container, `--id` is auto-filled and only the calling session is restarted.
+
+`restart` only acts on *running* containers. To bring up a **stopped** session immediately (e.g. one reaped by the absolute-ceiling watchdog) without waiting for the next inbound message or the 60s sweep, use `ncl sessions wake --id <session-id> [--message <text>]`. It runs host-side in `dispatch()`, so `wakeContainer` mutates the host's own `activeContainers` map (no split-brain), enforces group scope in-handler (the dispatcher doesn't cross-group-check `--id` for session custom ops), and no-ops if the container is already running. Key file: `src/cli/resources/sessions.ts`.
 
 The `on_wake` column on `messages_in` ensures wake messages are only picked up by a fresh container's first poll iteration. This prevents the race where a dying container (still in its SIGTERM grace period) could steal the message. `killContainer` accepts an optional `onExit` callback that fires after the process exits, guaranteeing the old container is gone before the new one spawns.
 

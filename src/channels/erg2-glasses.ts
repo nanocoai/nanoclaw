@@ -64,7 +64,14 @@ function stripMarkdown(text: string): string {
 }
 
 function createAdapter(): ChannelAdapter | null {
-  const env = readEnvFile(['ERG2_GLASSES_TOKEN', 'ERG2_GLASSES_PORT', 'ERG2_GLASSES_HOST']);
+  const env = readEnvFile([
+    'ERG2_GLASSES_TOKEN',
+    'ERG2_GLASSES_PORT',
+    'ERG2_GLASSES_HOST',
+    'TELEGRAM_BOT_TOKEN',
+    'ERG2_MIRROR_TELEGRAM_CHAT_ID',
+    'ASSISTANT_NAME',
+  ]);
   if (!env.ERG2_GLASSES_TOKEN) return null;
 
   const port = parseInt(env.ERG2_GLASSES_PORT || '7420', 10);
@@ -74,6 +81,30 @@ function createAdapter(): ChannelAdapter | null {
       .map((t) => t.trim())
       .filter(Boolean),
   );
+
+  // Optional mirror: tee each glasses inquiry + the agent's answer to a Telegram
+  // chat so the conversation is visible there too. No-op unless both the bot
+  // token and a target chat id are present. Sends are fire-and-forget — a
+  // Telegram outage must never delay or fail the synchronous glasses response.
+  const mirrorBotToken = env.TELEGRAM_BOT_TOKEN?.trim() || null;
+  const mirrorChatId = env.ERG2_MIRROR_TELEGRAM_CHAT_ID?.trim() || null;
+  const mirrorEnabled = Boolean(mirrorBotToken && mirrorChatId);
+  const assistantName = env.ASSISTANT_NAME?.trim() || 'Assistant';
+
+  function mirrorToTelegram(inquiry: string, answer: string): void {
+    if (!mirrorEnabled || !inquiry) return;
+    const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
+    const text = `🕶️ Inquiry:\n${clip(inquiry, 1500)}\n\n🤖 ${assistantName}:\n${clip(answer, 2000)}`;
+    fetch(`https://api.telegram.org/bot${mirrorBotToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chat_id: mirrorChatId, text }),
+    })
+      .then((res) => {
+        if (!res.ok) log.warn('ERG2 glasses: Telegram mirror non-OK', { status: res.status });
+      })
+      .catch((err) => log.warn('ERG2 glasses: Telegram mirror failed', { err }));
+  }
 
   let server: http.Server | null = null;
   let setupConfig: ChannelSetup | null = null;
@@ -304,6 +335,9 @@ function createAdapter(): ChannelAdapter | null {
     }
 
     const result = await waitForDelivery(platformId);
+
+    // Mirror the full exchange (inquiry + final answer) as one Telegram message.
+    mirrorToTelegram(text, result.text);
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(formatResponse(result.text, result.xNanoclaw));
