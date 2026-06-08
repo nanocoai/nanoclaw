@@ -413,8 +413,11 @@ export class ClaudeProvider implements AgentProvider {
         model: this.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.effort as any,
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
+        // In rootless-podman-on-LXC we run as --user=0:0 so host bind mounts
+        // are accessible. Claude Code refuses bypassPermissions as root, so
+        // fall back to 'auto' which still honours allowedTools/disallowedTools.
+        permissionMode: process.getuid?.() === 0 ? 'auto' : 'bypassPermissions',
+        allowDangerouslySkipPermissions: process.getuid?.() !== 0,
         settingSources: ['project', 'user', 'local'],
         mcpServers: this.mcpServers,
         hooks: {

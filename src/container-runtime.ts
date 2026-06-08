@@ -2,20 +2,68 @@
  * Container runtime abstraction for NanoClaw.
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import os from 'os';
 
-import { CONTAINER_INSTALL_LABEL } from './config.js';
+import { CONTAINER_INSTALL_LABEL, ONECLI_URL } from './config.js';
 import { log } from './log.js';
 
 /** The container runtime binary name. */
 export const CONTAINER_RUNTIME_BIN = 'docker';
 
+/** Cached result of rootless-podman detection. */
+let _isRootlessPodman: boolean | null = null;
+
+/** Detect whether the runtime is rootless Podman (needs --userns=keep-id). */
+export function isRootlessPodman(): boolean {
+  if (_isRootlessPodman !== null) return _isRootlessPodman;
+  try {
+    const out = execSync(`${CONTAINER_RUNTIME_BIN} info --format '{{.Host.Security.Rootless}}'`, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+      timeout: 5000,
+    }).trim();
+    _isRootlessPodman = out === 'true';
+  } catch {
+    _isRootlessPodman = false;
+  }
+  return _isRootlessPodman;
+}
+
+const LOCALHOST_NAMES = new Set(['localhost', '127.0.0.1', '::1']);
+
+/**
+ * Resolve the IP address that `host.docker.internal` should map to inside
+ * containers. When OneCLI runs on a remote host, `host-gateway` (which
+ * resolves to the container host) is wrong — the container must reach the
+ * OneCLI gateway on the remote host directly.
+ */
+function resolveHostDockerTarget(): string {
+  if (!ONECLI_URL) return 'host-gateway';
+  try {
+    const hostname = new URL(ONECLI_URL).hostname;
+    if (LOCALHOST_NAMES.has(hostname)) return 'host-gateway';
+    // Resolve the hostname to an IP for --add-host (hostnames aren't allowed).
+    // Use execFileSync to avoid shell injection.
+    const resolved = execFileSync('getent', ['hosts', hostname], {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 5000,
+    }).trim().split(/\s+/)[0];
+    return resolved || 'host-gateway';
+  } catch {
+    return 'host-gateway';
+  }
+}
+
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
-  // On Linux, host.docker.internal isn't built-in — add it explicitly
+  // On Linux, host.docker.internal isn't built-in — add it explicitly.
+  // When OneCLI runs on a remote host, map to that host's IP instead of
+  // host-gateway (which points to the local container host).
   if (os.platform() === 'linux') {
-    return ['--add-host=host.docker.internal:host-gateway'];
+    const target = resolveHostDockerTarget();
+    return [`--add-host=host.docker.internal:${target}`];
   }
   return [];
 }

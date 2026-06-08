@@ -22,7 +22,13 @@ import {
 import { materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars, updateContainerConfigJson } from './db/container-configs.js';
-import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import {
+  CONTAINER_RUNTIME_BIN,
+  hostGatewayArgs,
+  isRootlessPodman,
+  readonlyMountArgs,
+  stopContainer,
+} from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
@@ -406,6 +412,19 @@ async function buildContainerArgs(
   agentIdentifier?: string,
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
+
+  // Rootless Podman: UID 0 inside the container maps to the host user
+  // (e.g. denis/1000). The Dockerfile sets USER node (UID 1000) which would
+  // map to an unmapped high UID and can't write to bind mounts. Override to
+  // root so the in-container process effectively runs as the host user.
+  // NOTE: --userns=keep-id is NOT used — it triggers storage-chown-by-maps
+  // which hangs or takes minutes on large images in nested container envs.
+  if (isRootlessPodman()) {
+    args.push('--user=0:0');
+    // Forcing UID 0 bypasses the Dockerfile's USER node, so HOME defaults to
+    // /root instead of /home/node where .claude is mounted. Pin it explicitly.
+    args.push('-e', 'HOME=/home/node');
+  }
 
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
