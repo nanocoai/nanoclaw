@@ -26,6 +26,8 @@
  * sender_identity). A retry / rapid second message from the same unknown
  * sender is silently dropped (no duplicate card sent).
  */
+import { randomUUID } from 'crypto';
+
 import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { getDeliveryAdapter } from '../../delivery.js';
@@ -40,7 +42,7 @@ const APPROVAL_OPTIONS: RawOption[] = [
 ];
 
 function generateId(): string {
-  return `nsa-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return `nsa-${randomUUID()}`;
 }
 
 export interface RequestSenderApprovalInput {

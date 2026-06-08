@@ -378,6 +378,14 @@ export function openOutboundDbRw(agentGroupId: string, sessionId: string): Datab
  * Write a message directly to a session's outbound DB so the host delivery
  * loop picks it up. Used by the command gate to send denial responses
  * without waking a container.
+ *
+ * Uses even seq numbers (host convention; container uses odd). The
+ * formula `(COALESCE(MAX(seq),0)/2)*2 + 2` rounds up to the next even
+ * regardless of whether the current max is odd or even (integer division).
+ *
+ * This is a documented exception to the one-writer-per-file rule:
+ * INSERT OR IGNORE prevents collision with container rows, and the
+ * even/odd seq split prevents ordering conflicts.
  */
 export function writeOutboundDirect(
   agentGroupId: string,
@@ -391,11 +399,11 @@ export function writeOutboundDirect(
     content: string;
   },
 ): void {
-  const db = openOutboundDb(agentGroupId, sessionId);
+  const db = openOutboundDbRw(agentGroupId, sessionId);
   try {
     db.prepare(
       `INSERT OR IGNORE INTO messages_out (id, seq, timestamp, kind, platform_id, channel_type, thread_id, content)
-       VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 2 FROM messages_out), datetime('now'), ?, ?, ?, ?, ?)`,
+       VALUES (?, (SELECT (COALESCE(MAX(seq), 0) / 2) * 2 + 2 FROM messages_out), datetime('now'), ?, ?, ?, ?, ?)`,
     ).run(message.id, message.kind, message.platformId, message.channelType, message.threadId, message.content);
   } finally {
     db.close();

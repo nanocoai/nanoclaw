@@ -118,8 +118,15 @@ function ensureServer(): void {
     }
   });
 
-  server.listen(port, '0.0.0.0', () => {
-    log.info('Webhook server started', { port, adapters: [...routes.keys()] });
+  // Bind to loopback by default. Set WEBHOOK_BIND_HOST=0.0.0.0 only when
+  // the server must be reachable from external network interfaces
+  // (e.g. behind a reverse proxy or in a container). Adapters are
+  // responsible for validating request signatures; this default limits
+  // exposure when they don't.
+  const bindHost = process.env.WEBHOOK_BIND_HOST || '127.0.0.1';
+
+  server.listen(port, bindHost, () => {
+    log.info('Webhook server started', { port, host: bindHost, adapters: [...routes.keys()] });
   });
 }
 

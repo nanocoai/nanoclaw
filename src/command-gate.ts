@@ -8,6 +8,7 @@
  * - Normal messages: pass through unchanged
  */
 import { getDb, hasTable } from './db/connection.js';
+import { log } from './log.js';
 
 export type GateResult = { action: 'pass' } | { action: 'filter' } | { action: 'deny'; command: string };
 
@@ -48,7 +49,13 @@ export function gateCommand(content: string, userId: string | null, agentGroupId
 
 function isAdmin(userId: string | null, agentGroupId: string): boolean {
   if (!userId) return false;
-  if (!hasTable(getDb(), 'user_roles')) return true; // no permissions module = allow all
+  if (!hasTable(getDb(), 'user_roles')) {
+    log.warn('user_roles table missing — admin command allowed without role check (permissions module not installed)', {
+      userId,
+      agentGroupId,
+    });
+    return true;
+  }
   const db = getDb();
   const row = db
     .prepare(
