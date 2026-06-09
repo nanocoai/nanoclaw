@@ -73,7 +73,15 @@ export function cleanupOrphans(): void {
         encoding: 'utf-8',
       },
     );
-    const orphans = output.trim().split('\n').filter(Boolean);
+    const orphans = output
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      // Sandbox/proxy: Docker Sandbox runs the host process inside a container
+      // whose name equals os.hostname(). Filter it out so cleanupOrphans never
+      // tries to stop the sandbox container itself (self-kill). Gated on
+      // HTTPS_PROXY so non-sandbox users see no change.
+      .filter((name) => !(process.env.HTTPS_PROXY || process.env.https_proxy) || name !== os.hostname());
     for (const name of orphans) {
       try {
         stopContainer(name);

@@ -16,6 +16,16 @@ FROM node:22-slim
 # CJK fonts add ~200MB. Opt in only if you render Chinese/Japanese/Korean text.
 ARG INSTALL_CJK_FONTS=false
 
+# Sandbox/proxy support: accept proxy build args so pnpm install succeeds
+# when the Docker Sandbox MITM proxy is active (HTTPS_PROXY env on the host).
+# Non-sandbox users: these default to empty and have no effect.
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+ARG NODE_EXTRA_CA_CERTS
+ARG npm_config_strict_ssl=true
+RUN npm config set strict-ssl ${npm_config_strict_ssl}
+
 # Pin CLI versions for reproducibility. Bump deliberately — unpinned installs
 # mean every rebuild silently picks up the latest and can break in lockstep
 # across all users.
@@ -79,6 +89,10 @@ COPY agent-runner/package.json agent-runner/bun.lock ./
 
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --frozen-lockfile
+
+# Restore strict-ssl after bun install (proxy build args set it to false).
+# Non-sandbox users: this is a no-op (strict-ssl was already true).
+RUN npm config set strict-ssl true
 
 # ---- pnpm + global Node CLIs -------------------------------------------------
 # Most stable first, most frequently bumped last. Bumping claude-code

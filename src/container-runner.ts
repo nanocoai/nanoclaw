@@ -240,6 +240,21 @@ function resolveProviderContribution(
   return { provider, contribution };
 }
 
+/**
+ * Ensure an empty file exists at `data/empty.env` for use as a shadow mount.
+ * Docker Sandbox rejects `/dev/null` bind mounts; an empty regular file is
+ * the portable alternative. Non-sandbox users benefit too — the file is
+ * harmless and avoids the need for `/dev/null` workarounds in any caller.
+ */
+function ensureEmptyEnvFile(): string {
+  const emptyEnvPath = path.join(DATA_DIR, 'empty.env');
+  if (!fs.existsSync(emptyEnvPath)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(emptyEnvPath, '');
+  }
+  return emptyEnvPath;
+}
+
 function buildMounts(
   agentGroup: AgentGroup,
   session: Session,
@@ -332,6 +347,25 @@ function buildMounts(
     mounts.push(...providerContribution.mounts);
   }
 
+  // Sandbox/proxy: mount the MITM CA certificate so container processes
+  // can verify TLS through the proxy. Only when HTTPS_PROXY is set.
+  if (process.env.HTTPS_PROXY || process.env.https_proxy) {
+    const caCertPath =
+      process.env.NODE_EXTRA_CA_CERTS ||
+      process.env.SSL_CERT_FILE ||
+      '';
+    if (caCertPath && fs.existsSync(caCertPath)) {
+      // Copy to a stable path inside DATA_DIR so container can read it RO.
+      const destCaPath = path.join(DATA_DIR, 'sandbox-ca.crt');
+      fs.copyFileSync(caCertPath, destCaPath);
+      mounts.push({ hostPath: destCaPath, containerPath: '/etc/ssl/certs/sandbox-ca.crt', readonly: true });
+    }
+    // Ensure the empty.env sentinel exists (used to shadow .env if the project
+    // root is ever mounted). Docker Sandbox rejects /dev/null bind mounts;
+    // emptyEnvPath is the portable replacement.
+    ensureEmptyEnvFile();
+  }
+
   return mounts;
 }
 
@@ -416,6 +450,23 @@ async function buildContainerArgs(
   if (providerContribution.env) {
     for (const [key, value] of Object.entries(providerContribution.env)) {
       args.push('-e', `${key}=${value}`);
+    }
+  }
+
+  // Sandbox/proxy: forward proxy env vars so container outbound requests
+  // route through the Docker Sandbox MITM proxy. Gate on HTTPS_PROXY so
+  // non-sandbox users see no change.
+  const httpsProxy = process.env.HTTPS_PROXY || process.env.https_proxy;
+  if (httpsProxy) {
+    args.push('-e', `HTTPS_PROXY=${httpsProxy}`);
+    const httpProxy = process.env.HTTP_PROXY || process.env.http_proxy;
+    if (httpProxy) args.push('-e', `HTTP_PROXY=${httpProxy}`);
+    const noProxy = process.env.NO_PROXY || process.env.no_proxy;
+    if (noProxy) args.push('-e', `NO_PROXY=${noProxy}`);
+    const caCertPath = process.env.NODE_EXTRA_CA_CERTS || process.env.SSL_CERT_FILE;
+    if (caCertPath) {
+      args.push('-e', 'NODE_EXTRA_CA_CERTS=/etc/ssl/certs/sandbox-ca.crt');
+      args.push('-e', 'SSL_CERT_FILE=/etc/ssl/certs/sandbox-ca.crt');
     }
   }
 

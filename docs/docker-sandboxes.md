@@ -1,5 +1,7 @@
 # Running NanoClaw in Docker Sandboxes (Manual Setup)
 
+> **Fast path:** All six sandbox-readiness patches from this guide have already been applied on the [`sandbox-ready` branch of `ealeyner/nanoclaw`](https://github.com/ealeyner/nanoclaw/tree/sandbox-ready). Clone that branch and skip Steps 4a–4f — `pnpm install`, `pnpm run build`, and `bash container/build.sh` are all you need.
+
 This guide walks through setting up NanoClaw inside a [Docker Sandbox](https://docs.docker.com/ai/sandboxes/) from scratch — no install script, no pre-built fork. You'll clone the upstream repo, apply the necessary patches, and have agents running in full hypervisor-level isolation.
 
 ## Architecture

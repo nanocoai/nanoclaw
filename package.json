@@ -34,6 +34,7 @@
     "better-sqlite3": "11.10.0",
     "chat": "^4.24.0",
     "cron-parser": "5.5.0",
+    "https-proxy-agent": "^9.0.0",
     "kleur": "^4.1.5"
   },
   "devDependencies": {

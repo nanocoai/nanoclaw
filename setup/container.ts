@@ -186,6 +186,22 @@ export async function run(args: string[]): Promise<void> {
     // .env is optional; absence is normal on a fresh checkout
   }
 
+  // Sandbox/proxy: forward proxy env vars as build args so pnpm/npm inside
+  // the image can reach the internet through the Docker Sandbox MITM proxy.
+  // Mirrors container/build.sh (step 4b). Gate on HTTPS_PROXY so
+  // non-sandbox users see no change.
+  if (process.env.HTTPS_PROXY || process.env.https_proxy) {
+    const httpsProxy = process.env.HTTPS_PROXY || process.env.https_proxy || '';
+    const httpProxy = process.env.HTTP_PROXY || process.env.http_proxy || '';
+    const noProxy = process.env.NO_PROXY || process.env.no_proxy || '';
+    buildArgs.push(
+      `--build-arg http_proxy=${httpProxy}`,
+      `--build-arg https_proxy=${httpsProxy}`,
+      `--build-arg no_proxy=${noProxy}`,
+      '--build-arg npm_config_strict_ssl=false',
+    );
+  }
+
   // Build — stdio inherit so the parent setup runner can tail docker's
   // per-step output and render it in a rolling window. Previously we used
   // execSync which buffered everything; users couldn't tell whether a

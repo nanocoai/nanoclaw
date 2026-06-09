@@ -32,6 +32,18 @@ if [ "${INSTALL_CJK_FONTS:-false}" = "true" ]; then
     BUILD_ARGS+=(--build-arg INSTALL_CJK_FONTS=true)
 fi
 
+# Sandbox/proxy support: forward proxy env vars as build args so pnpm/npm
+# inside the image can reach the internet through the Docker Sandbox MITM proxy.
+# Gate on HTTPS_PROXY being set so non-sandbox users see no change.
+if [ -n "${HTTPS_PROXY:-$https_proxy}" ]; then
+    BUILD_ARGS+=(
+        --build-arg http_proxy="${http_proxy:-$HTTP_PROXY}"
+        --build-arg https_proxy="${https_proxy:-$HTTPS_PROXY}"
+        --build-arg no_proxy="${no_proxy:-$NO_PROXY}"
+        --build-arg npm_config_strict_ssl=false
+    )
+fi
+
 echo "Building NanoClaw agent container image..."
 echo "Image: ${IMAGE_NAME}:${TAG}"
 
