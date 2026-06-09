@@ -419,6 +419,14 @@ async function buildContainerArgs(
     }
   }
 
+  // Operator-tunable auto-compact threshold for the Claude Agent SDK.
+  // Pass through when set so the container's provider can override the SDK
+  // default. Absent = SDK default (currently 9_000_000 tokens).
+  const autoCompactWindow = process.env.AGENT_AUTO_COMPACT_WINDOW?.trim();
+  if (autoCompactWindow) {
+    args.push('-e', `AGENT_AUTO_COMPACT_WINDOW=${autoCompactWindow}`);
+  }
+
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
   // are routed through the agent vault for credential injection. Treated as
   // a transient hard failure: if we can't wire the gateway, we don't spawn.
