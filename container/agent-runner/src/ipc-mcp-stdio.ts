@@ -11,6 +11,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
+import { shouldRegisterSendMessage } from './mcp-tool-policy.js';
 
 const IPC_DIR = process.env.NANOCLAW_IPC_DIR!;
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
@@ -41,35 +42,37 @@ const server = new McpServer({
   version: '1.0.0',
 });
 
-server.tool(
-  'send_message',
-  'Send a message to the current user or group immediately while you are still running. Use this for progress updates or to send multiple messages in the same conversation. Cross-group task dispatch is disabled here; main group must use delegate for work assignment.',
-  {
-    text: z.string().describe('The message text to send'),
-    sender: z
-      .string()
-      .optional()
-      .describe(
-        'Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.',
-      ),
-  },
-  async (args) => {
-    const data: Record<string, string | undefined> = {
-      type: 'message',
-      chatJid,
-      text: args.text,
-      sender: args.sender || undefined,
-      groupFolder,
-      timestamp: new Date().toISOString(),
-    };
+if (shouldRegisterSendMessage()) {
+  server.tool(
+    'send_message',
+    'Send a message to the current user or group immediately while you are still running. Use this for progress updates or to send multiple messages in the same conversation. Cross-group task dispatch is disabled here; main group must use delegate for work assignment.',
+    {
+      text: z.string().describe('The message text to send'),
+      sender: z
+        .string()
+        .optional()
+        .describe(
+          'Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.',
+        ),
+    },
+    async (args) => {
+      const data: Record<string, string | undefined> = {
+        type: 'message',
+        chatJid,
+        text: args.text,
+        sender: args.sender || undefined,
+        groupFolder,
+        timestamp: new Date().toISOString(),
+      };
 
-    writeIpcFile(MESSAGES_DIR, data);
+      writeIpcFile(MESSAGES_DIR, data);
 
-    return {
-      content: [{ type: 'text' as const, text: 'Message sent.' }],
-    };
-  },
-);
+      return {
+        content: [{ type: 'text' as const, text: 'Message sent.' }],
+      };
+    },
+  );
+}
 
 server.tool(
   'rename_chat',
