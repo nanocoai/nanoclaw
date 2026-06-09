@@ -125,13 +125,18 @@ export async function run(_args: string[]): Promise<void> {
 
   log.info('Service status', { service, runningFromPath });
 
-  // 2. Check container runtime
+  // 2. Check container runtime — prefer Apple Container on macOS, fall back to Docker
   let containerRuntime = 'none';
   try {
-    execSync('docker info', { stdio: 'ignore' });
-    containerRuntime = 'docker';
+    execSync('container system status', { stdio: 'ignore' });
+    containerRuntime = 'container';
   } catch {
-    // Docker not running
+    try {
+      execSync('docker info', { stdio: 'ignore' });
+      containerRuntime = 'docker';
+    } catch {
+      // No runtime available
+    }
   }
 
   // 3. Check credentials

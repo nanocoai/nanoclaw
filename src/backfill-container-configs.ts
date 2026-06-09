@@ -24,6 +24,7 @@ interface LegacyContainerJson {
   provider?: string;
   assistantName?: string;
   maxMessagesPerPrompt?: number;
+  memoryMb?: number;
 }
 
 export function backfillContainerConfigs(): void {
@@ -59,6 +60,7 @@ export function backfillContainerConfigs(): void {
       image_tag: legacy.imageTag ?? null,
       assistant_name: legacy.assistantName ?? null,
       max_messages_per_prompt: legacy.maxMessagesPerPrompt ?? null,
+      memory_mb: legacy.memoryMb ?? null,
       skills: JSON.stringify(legacy.skills ?? 'all'),
       mcp_servers: JSON.stringify(legacy.mcpServers ?? {}),
       packages_apt: JSON.stringify(legacy.packages?.apt ?? []),

@@ -19,7 +19,7 @@ cd "$SCRIPT_DIR"
 source "$PROJECT_ROOT/setup/lib/install-slug.sh"
 IMAGE_NAME="$(container_image_base)"
 TAG="${1:-latest}"
-CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-container}"
 
 # Caller's env takes precedence; fall back to .env.
 if [ -z "${INSTALL_CJK_FONTS:-}" ] && [ -f "../.env" ]; then

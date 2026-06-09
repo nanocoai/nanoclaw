@@ -7,7 +7,8 @@
 import path from 'path';
 
 import { backfillContainerConfigs } from './backfill-container-configs.js';
-import { DATA_DIR } from './config.js';
+import { CREDENTIAL_PROXY_HOST, CREDENTIAL_PROXY_PORT, DATA_DIR, USE_NATIVE_CREDENTIAL_PROXY } from './config.js';
+import { startCredentialProxy } from './credential-proxy.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
 import { initDb } from './db/connection.js';
@@ -90,6 +91,11 @@ async function main(): Promise<void> {
   // 2. Container runtime
   ensureContainerRuntimeRunning();
   cleanupOrphans();
+
+  // 2b. Native credential proxy (only when OneCLI is not configured).
+  if (USE_NATIVE_CREDENTIAL_PROXY) {
+    await startCredentialProxy(CREDENTIAL_PROXY_PORT, CREDENTIAL_PROXY_HOST);
+  }
 
   // 3. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {

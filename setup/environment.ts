@@ -87,11 +87,20 @@ export async function run(_args: string[]): Promise<void> {
   const wsl = isWSL();
   const headless = isHeadless();
 
-  // Check Docker
+  // Check container runtime — prefer Apple Container, fall back to Docker.
+  // Reported under the `docker` key for backwards-compatible status emission.
   let docker: 'running' | 'installed_not_running' | 'not_found' = 'not_found';
-  if (commandExists('docker')) {
+  const { execSync } = await import('child_process');
+  if (commandExists('container')) {
     try {
-      const { execSync } = await import('child_process');
+      execSync('container system status', { stdio: 'ignore' });
+      docker = 'running';
+    } catch {
+      docker = 'installed_not_running';
+    }
+  }
+  if (docker === 'not_found' && commandExists('docker')) {
+    try {
       execSync('docker info', { stdio: 'ignore' });
       docker = 'running';
     } catch {

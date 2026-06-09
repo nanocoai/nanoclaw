@@ -104,6 +104,11 @@ export const sendMessage: McpToolDefinition = {
           description: 'Destination name (e.g., "family", "worker-1"). Optional if you have only one destination.',
         },
         text: { type: 'string', description: 'Message content' },
+        sender: {
+          type: 'string',
+          description:
+            'Optional persona/character name shown as the sender on the channel. On Telegram, when TELEGRAM_BOT_POOL is configured, each unique sender gets a dedicated bot identity (and that bot is renamed to match). Use for multi-persona agent teams; omit otherwise.',
+        },
       },
       required: ['text'],
     },
@@ -115,6 +120,9 @@ export const sendMessage: McpToolDefinition = {
     const routing = resolveRouting(args.to as string | undefined);
     if ('error' in routing) return err(routing.error);
 
+    const sender = (args.sender as string | undefined)?.trim();
+    const content = sender ? { text, sender } : { text };
+
     const id = generateId();
     const seq = writeMessageOut({
       id,
@@ -123,10 +131,10 @@ export const sendMessage: McpToolDefinition = {
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
       thread_id: routing.thread_id,
-      content: JSON.stringify({ text }),
+      content: JSON.stringify(content),
     });
 
-    log(`send_message: #${seq} → ${routing.resolvedName}`);
+    log(`send_message: #${seq} → ${routing.resolvedName}${sender ? ` (as "${sender}")` : ''}`);
     return ok(`Message sent to ${routing.resolvedName} (id: ${seq})`);
   },
 };
