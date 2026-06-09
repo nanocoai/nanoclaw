@@ -10,11 +10,13 @@
  * - 超时有界（15s 摘要 + 3s 推送），挂了就放过
  * - 空 token / 非主会话 → 跳过，无副作用
  */
+import { spawn } from 'child_process';
 import OpenAI from 'openai';
 
 import { logger } from './logger.js';
 import { getMemoryConfig } from './memory/config.js';
 import { readEnvFile } from './env.js';
+import type { RegisteredGroup } from './types.js';
 
 const PUSHOVER_API = 'https://api.pushover.net/1/messages.json';
 const PUSHOVER_MAX_CHARS = 1024; // Pushover 单条限制
@@ -25,6 +27,7 @@ const SUMMARIZE_TIMEOUT_MS = 15000;
 // 不复用记忆系统的 llmModel（qwen3.7-max 太慢，长输入必超时）。
 const VOICE_SUMMARY_MODEL = process.env.VOICE_SUMMARY_MODEL || 'qwen-turbo';
 const PUSH_TIMEOUT_MS = 3000;
+const DEFAULT_MAC_VOICE = process.env.MAC_VOICE_VOICE || 'Ting-Ting';
 
 const SYSTEM_PROMPT = `你把一段给用户的 AI 回复改写成口语化的语音播报版本，供 TTS 朗读。语音是线性的，用户只能听、不能跳读，所以要让他第一耳朵就抓住重点。
 
@@ -41,17 +44,72 @@ const SYSTEM_PROMPT = `你把一段给用户的 AI 回复改写成口语化的�
 
 只输出改写后的文本，不要任何前缀后缀。`;
 
+export interface VoiceNotifyContext {
+  groupFolder: string | null;
+  text: string;
+  chatJid?: string;
+  groupName?: string;
+  containerConfig?: RegisteredGroup['containerConfig'];
+  aliases?: Record<string, string>;
+}
+
+type MacVoiceRunner = (text: string, voice: string) => Promise<void>;
+
+let macVoiceRunner: MacVoiceRunner = runMacSay;
+const macVoiceQueue: Array<{ text: string; voice: string }> = [];
+let macVoiceRunning = false;
+
 /**
- * 判断是否应该推送语音通知
+ * 判断文本是否值得播报
  */
-function shouldNotify(groupFolder: string | null, text: string): boolean {
-  if (groupFolder !== 'feishu_main') return false;
+export function isVoiceTextEligible(text: string): boolean {
   if (!text || !text.trim()) return false;
   // 纯 emoji / 纯符号 / 极短系统消息不播
   if (text.trim().length < 4) return false;
   // 媒体标记占位文本不播
   if (/^\s*\[(图片|文件|语音):/.test(text)) return false;
   return true;
+}
+
+/**
+ * 判断是否应该推送 Pushover 语音通知
+ */
+function shouldNotifyPushover(
+  groupFolder: string | null,
+  text: string,
+): boolean {
+  return groupFolder === 'feishu_main' && isVoiceTextEligible(text);
+}
+
+/**
+ * 判断当前群是否开启 Mac 本地语音播报
+ */
+export function shouldNotifyMacVoice(context: VoiceNotifyContext): boolean {
+  return (
+    context.containerConfig?.voiceNotify?.mac === true &&
+    isVoiceTextEligible(context.text)
+  );
+}
+
+/**
+ * 解析播报里的群名：alias 优先，其次群名，最后短 JID。
+ */
+export function resolveVoiceGroupLabel(
+  context: Pick<VoiceNotifyContext, 'aliases' | 'chatJid' | 'groupName'>,
+): string {
+  if (context.chatJid && context.aliases) {
+    const alias = Object.entries(context.aliases).find(
+      ([, jid]) => jid === context.chatJid,
+    )?.[0];
+    if (alias) return alias;
+  }
+  if (context.groupName?.trim()) return context.groupName.trim();
+  if (context.chatJid) return context.chatJid.replace(/^fs:/, '').slice(0, 12);
+  return '当前群';
+}
+
+export function buildSpokenText(label: string, summary: string): string {
+  return `${label}：${summary}`.slice(0, PUSHOVER_MAX_CHARS);
 }
 
 /**
@@ -153,16 +211,95 @@ async function pushToPushover(summary: string): Promise<void> {
   }
 }
 
+function runMacSay(text: string, voice: string): Promise<void> {
+  if (process.platform !== 'darwin') {
+    logger.warn(
+      { platform: process.platform },
+      '[voice-notify] 非 macOS 环境，跳过 Mac 播报',
+    );
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve) => {
+    const child = spawn('/usr/bin/say', ['-v', voice, text], {
+      stdio: 'ignore',
+    });
+    child.on('error', (err) => {
+      logger.warn({ err }, '[voice-notify] Mac say 启动失败');
+      resolve();
+    });
+    child.on('close', (code) => {
+      if (code && code !== 0) {
+        logger.warn({ code }, '[voice-notify] Mac say 非 0 退出');
+      }
+      resolve();
+    });
+  });
+}
+
+function enqueueMacSpeech(text: string, voice = DEFAULT_MAC_VOICE): void {
+  macVoiceQueue.push({ text, voice });
+  void drainMacVoiceQueue();
+}
+
+async function drainMacVoiceQueue(): Promise<void> {
+  if (macVoiceRunning) return;
+  macVoiceRunning = true;
+  try {
+    while (macVoiceQueue.length > 0) {
+      const item = macVoiceQueue.shift()!;
+      await macVoiceRunner(item.text, item.voice);
+      logger.info(
+        { chars: item.text.length, voice: item.voice },
+        '[voice-notify] Mac 播报完成',
+      );
+    }
+  } catch (err) {
+    logger.warn({ err }, '[voice-notify] Mac 播报队列异常');
+  } finally {
+    macVoiceRunning = false;
+    if (macVoiceQueue.length > 0) void drainMacVoiceQueue();
+  }
+}
+
+export function setMacVoiceRunnerForTest(runner: MacVoiceRunner | null): void {
+  macVoiceRunner = runner ?? runMacSay;
+  macVoiceQueue.length = 0;
+  macVoiceRunning = false;
+}
+
 /**
  * 入口：fire-and-forget，外层 await 也只等 setImmediate 这一下。
  */
-export function notifyVoice(groupFolder: string | null, text: string): void {
-  if (!shouldNotify(groupFolder, text)) return;
+export function notifyVoice(groupFolder: string | null, text: string): void;
+export function notifyVoice(context: VoiceNotifyContext): void;
+export function notifyVoice(
+  groupFolderOrContext: string | null | VoiceNotifyContext,
+  maybeText?: string,
+): void {
+  const context: VoiceNotifyContext =
+    typeof groupFolderOrContext === 'object' && groupFolderOrContext !== null
+      ? groupFolderOrContext
+      : { groupFolder: groupFolderOrContext, text: maybeText ?? '' };
+
+  const notifyPushover = shouldNotifyPushover(
+    context.groupFolder,
+    context.text,
+  );
+  const notifyMac = shouldNotifyMacVoice(context);
+  if (!notifyPushover && !notifyMac) return;
+
   // 异步 IIFE，异常全吃掉，不影响主链路
   void (async () => {
     try {
-      const summary = await summarizeForSpeech(text);
-      await pushToPushover(summary);
+      const summary = await summarizeForSpeech(context.text);
+      if (notifyPushover) {
+        await pushToPushover(summary);
+      }
+      if (notifyMac) {
+        const label = resolveVoiceGroupLabel(context);
+        enqueueMacSpeech(buildSpokenText(label, summary));
+      }
     } catch (err) {
       logger.warn({ err }, '[voice-notify] 未捕获异常');
     }

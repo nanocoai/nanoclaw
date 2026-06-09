@@ -8,7 +8,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import { ASSISTANT_NAME } from '../config.js';
 import { resolveCliMode } from '../cli-mode.js';
 import type { ContainerOutput } from '../container-runner.js';
-import { getMessageById } from '../db.js';
+import { getAllGroupAliases, getMessageById } from '../db.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
@@ -568,7 +568,9 @@ export class FeishuChannel implements Channel {
         const cliMode = resolveCliMode(group?.containerConfig);
         const quietProgress = group?.containerConfig?.quietProgress;
         const quiet =
-          typeof quietProgress === 'boolean' ? quietProgress : cliMode === 'codex';
+          typeof quietProgress === 'boolean'
+            ? quietProgress
+            : cliMode === 'codex';
 
         if (quiet) {
           // 安静模式：包装成卡片步骤，继续走 progressCards 路径
@@ -611,7 +613,11 @@ export class FeishuChannel implements Channel {
         const chatId = chatIdFromJid(jid);
         await Promise.all([
           this.removeTypingReaction(jid),
-          this.createProgressCard(jid, chatId, { title, detail, ts: Date.now() }),
+          this.createProgressCard(jid, chatId, {
+            title,
+            detail,
+            ts: Date.now(),
+          }),
         ]);
         return;
       }
@@ -681,7 +687,21 @@ export class FeishuChannel implements Channel {
       .replace(new RegExp(FILE_SEND_PATTERN.source, 'gi'), '')
       .replace(/\s{2,}/g, ' ')
       .trim();
-    notifyVoice(groupFolder, textForSpeech);
+    const group = this.opts.registeredGroups()[jid];
+    let aliases: Record<string, string> | undefined;
+    try {
+      aliases = getAllGroupAliases();
+    } catch (err) {
+      logger.warn({ err, jid }, '读取群别名失败，语音播报将使用群名或 JID');
+    }
+    notifyVoice({
+      groupFolder,
+      text: textForSpeech,
+      chatJid: jid,
+      groupName: group?.name,
+      containerConfig: group?.containerConfig,
+      aliases,
+    });
 
     return this.extractAndSendMedia(chatId, text, groupFolder, usage, thinking);
   }
@@ -713,7 +733,16 @@ export class FeishuChannel implements Channel {
     ].map((m) => m[1]);
 
     const hasMedia = imageMatches.length > 0 || fileMatches.length > 0;
-    logger.info({ chatId, textLen: text.length, hasMedia, images: imageMatches.length, files: fileMatches.length }, '[reply] extractAndSendMedia 入口');
+    logger.info(
+      {
+        chatId,
+        textLen: text.length,
+        hasMedia,
+        images: imageMatches.length,
+        files: fileMatches.length,
+      },
+      '[reply] extractAndSendMedia 入口',
+    );
 
     // 无标记 → 直接发文本
     if (!hasMedia) {
@@ -737,7 +766,12 @@ export class FeishuChannel implements Channel {
     let textMsgId: string | undefined;
     if (remainingText) {
       try {
-        textMsgId = await this.sendPlainOrCard(chatId, remainingText, usage, thinking);
+        textMsgId = await this.sendPlainOrCard(
+          chatId,
+          remainingText,
+          usage,
+          thinking,
+        );
         textSent = true;
       } catch (err) {
         logger.warn({ err }, '飞书文本卡片发送失败，媒体发送继续');
@@ -830,7 +864,10 @@ export class FeishuChannel implements Channel {
     const usage = this.pendingUsage.get(jid);
     const thinking = this.thinkingMode.get(jid);
     if (usage) {
-      logger.info({ jid, hasUsage: true, thinking }, '[sendDirect] 读取 pendingUsage');
+      logger.info(
+        { jid, hasUsage: true, thinking },
+        '[sendDirect] 读取 pendingUsage',
+      );
     }
     await this.extractAndSendMedia(chatId, text, groupFolder, usage, thinking);
     // 消费后清理，避免下条消息重复附加
@@ -850,10 +887,7 @@ export class FeishuChannel implements Channel {
         path: { chat_id: chatId },
         data: { name },
       });
-      logger.info(
-        { jid, name, code: resp?.code },
-        '[rename] 群名已更新',
-      );
+      logger.info({ jid, name, code: resp?.code }, '[rename] 群名已更新');
     } catch (err: any) {
       logger.warn({ err, jid, name }, '[rename] 修改群名失败');
     }
@@ -937,7 +971,10 @@ export class FeishuChannel implements Channel {
     usage?: ContainerOutput['usage'],
     thinking?: 'adaptive' | 'disabled',
   ): Promise<string | undefined> {
-    logger.info({ chatId, textLen: text.length, hasUsage: !!usage, thinking }, '[sendPlainOrCard] 准备发送');
+    logger.info(
+      { chatId, textLen: text.length, hasUsage: !!usage, thinking },
+      '[sendPlainOrCard] 准备发送',
+    );
     if (usage || shouldUseCard(text)) {
       const elements: unknown[] = [
         { tag: 'markdown', content: text, text_size: 'normal' },
@@ -955,11 +992,17 @@ export class FeishuChannel implements Channel {
           },
           params: { receive_id_type: 'chat_id' },
         });
-        logger.info({ chatId, msgId: resp?.data?.message_id }, '[sendPlainOrCard] 卡片发送成功');
+        logger.info(
+          { chatId, msgId: resp?.data?.message_id },
+          '[sendPlainOrCard] 卡片发送成功',
+        );
         return resp?.data?.message_id;
       } catch (cardErr) {
         // 卡片发送失败 → 拆分 markdown 元素重试（长内容/复杂表格常触发飞书 400）
-        logger.warn({ err: cardErr }, '飞书卡片发送失败，尝试拆分 markdown 重试');
+        logger.warn(
+          { err: cardErr },
+          '飞书卡片发送失败，尝试拆分 markdown 重试',
+        );
         const chunks = splitMarkdownByHeadings(text);
         if (chunks.length > 1) {
           try {
@@ -983,7 +1026,10 @@ export class FeishuChannel implements Channel {
             logger.info('飞书卡片拆分 markdown 重试成功');
             return resp?.data?.message_id;
           } catch (splitErr) {
-            logger.warn({ err: splitErr }, '飞书卡片拆分重试也失败，降级为纯文本');
+            logger.warn(
+              { err: splitErr },
+              '飞书卡片拆分重试也失败，降级为纯文本',
+            );
           }
         }
         // 最终降级：纯文本
@@ -1006,7 +1052,10 @@ export class FeishuChannel implements Channel {
         },
         params: { receive_id_type: 'chat_id' },
       });
-      logger.info({ chatId, msgId: resp?.data?.message_id }, '[sendPlainOrCard] 纯文本发送成功');
+      logger.info(
+        { chatId, msgId: resp?.data?.message_id },
+        '[sendPlainOrCard] 纯文本发送成功',
+      );
       return resp?.data?.message_id;
     }
   }
@@ -1391,9 +1440,7 @@ export class FeishuChannel implements Channel {
    * 从群名提取缩略字（1-2 个字符），生成彩色头像 PNG，上传到飞书获取 image_key。
    * 使用 SVG + macOS qlmanage 渲染，无需额外依赖。
    */
-  private async generateAndUploadAvatar(
-    name: string,
-  ): Promise<string | null> {
+  private async generateAndUploadAvatar(name: string): Promise<string | null> {
     try {
       // 提取缩略字：优先取开头英文大写/数字（最多 2 个），否则取前 2 个中文字
       const abbr = this.extractAbbreviation(name);
@@ -1401,8 +1448,16 @@ export class FeishuChannel implements Channel {
 
       // 基于名称 hash 选颜色和风格，保证同名群一致
       const colors = [
-        '#4F46E5', '#7C3AED', '#2563EB', '#0891B2', '#059669',
-        '#D97706', '#DC2626', '#DB2777', '#4338CA', '#0D9488',
+        '#4F46E5',
+        '#7C3AED',
+        '#2563EB',
+        '#0891B2',
+        '#059669',
+        '#D97706',
+        '#DC2626',
+        '#DB2777',
+        '#4338CA',
+        '#0D9488',
       ];
       const hash = [...name].reduce((h, c) => h * 31 + c.charCodeAt(0), 0);
       const absHash = Math.abs(hash);
@@ -1926,7 +1981,10 @@ export class FeishuChannel implements Channel {
         };
       }
     } catch (err) {
-      logger.debug({ err, parentId }, '[reply-ctx] DB 查询引用消息失败，fallback API');
+      logger.debug(
+        { err, parentId },
+        '[reply-ctx] DB 查询引用消息失败，fallback API',
+      );
     }
 
     // 2. DB miss → 调飞书 API
@@ -2198,9 +2256,7 @@ export class FeishuChannel implements Channel {
     if (message.mentions) {
       for (const m of message.mentions) {
         const isBotMention = this.botOpenId && m.id.open_id === this.botOpenId;
-        const replacement = isBotMention
-          ? `@${ASSISTANT_NAME}`
-          : `@${m.name}`;
+        const replacement = isBotMention ? `@${ASSISTANT_NAME}` : `@${m.name}`;
         text = text.replace(m.key, replacement);
         // post 消息中 at 元素生成的占位符（extractPostContent 输出）
         if (m.id.open_id) {

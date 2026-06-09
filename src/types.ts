@@ -41,6 +41,11 @@ export interface ContainerConfig {
   quietProgress?: boolean;
   /** 最终回复发送后，自动补发一轮简短总结请求 */
   autoFollowupSummary?: boolean;
+  /** 语音播报配置：按群独立控制本机 Mac 播报等出口 */
+  voiceNotify?: {
+    /** 最终回复摘要在当前 Mac 上用系统 TTS 播报 */
+    mac?: boolean;
+  };
 }
 
 export interface RegisteredGroup {
