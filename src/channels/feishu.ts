@@ -680,7 +680,7 @@ export class FeishuChannel implements Channel {
     // 统一媒体提取与发送（图片/文件标记提取、文本发送、媒体上传，互不阻塞）
     const groupFolder = this.getGroupFolder(jid);
 
-    // 语音通知（只对主会话）：剥离媒体标记后送 LLM 摘要 → Pushover → iOS 朗读
+    // 语音通知（按群 /voice 开关）：剥离媒体标记后送 LLM 摘要 → Pushover → iOS 朗读
     // fire-and-forget，不 await，不影响飞书主流程
     const textForSpeech = text
       .replace(new RegExp(IMAGE_SEND_PATTERN.source, 'gi'), '')
