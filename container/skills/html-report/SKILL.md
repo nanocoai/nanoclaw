@@ -102,28 +102,6 @@ description: 将内容生成精美 HTML 页面并上传到报告服务器，返�
 
 ---
 
-## 设计 Token
-
-所有样式统一使用以下变量，保持视觉一致性：
-
-| Token | 值 | 用途 |
-|-------|-----|------|
-| 主色 | `#667eea` | 标题背景、链接、强调 |
-| 辅色 | `#764ba2` | 渐变终点 |
-| 正文色 | `#1a1a2e` | 正文文字 |
-| 次要文字 | `#4a5568` | 次级标题、说明 |
-| 背景色 | `#f0f2f5` | 页面背景 |
-| 卡片背景 | `#ffffff` | 内容区背景 |
-| 边框色 | `#e2e8f0` | 表格、分隔线 |
-| 成功 | `#c6f6d5 / #276749` | badge-green |
-| 警告 | `#fefcbf / #975a16` | badge-yellow |
-| 错误 | `#fed7d7 / #9b2c2c` | badge-red |
-| 信息 | `#bee3f8 / #2a4365` | badge-blue |
-| 圆角 | `12px`（大）/ `8px`（中）/ `4px`（小） | 卡片、代码块、badge |
-| 字号 | `1.8rem`（h1）/ `1.4rem`（h2）/ `1.15rem`（h3）/ `1rem`（正文） | |
-
----
-
 ## 禁止项
 
 - ⛔ 外部 CSS / JS CDN（CDN 挂了页面就废了）
@@ -173,115 +151,89 @@ description: 将内容生成精美 HTML 页面并上传到报告服务器，返�
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{{TITLE}}</title>
 <style>
+  /* Claude 风格：暖白底、暖灰文字、大留白、无装饰 */
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    line-height: 1.8; color: #1a1a2e; background: #f0f2f5;
-    padding: 2rem 1rem;
-  }
-  .container { max-width: 900px; margin: 0 auto; }
-
-  /* Hero Header */
-  .header {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    color: white; padding: 2rem; border-radius: 12px 12px 0 0;
-  }
-  .header h1 { font-size: 1.8rem; font-weight: 700; }
-  .header .meta { font-size: 0.85rem; opacity: 0.85; margin-top: 0.5rem; }
-
-  /* Content Area */
-  .content {
-    background: white; padding: 2rem; border-radius: 0 0 12px 12px;
-    box-shadow: 0 4px 6px rgba(0,0,0,0.07);
+    font-family: ui-sans-serif, -apple-system, system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height: 1.6; color: #2d2d2d; background: #faf9f7;
+    max-width: 820px; margin: 0 auto; padding: 3rem 1.5rem;
+    font-size: 15px;
   }
 
-  /* Summary Cards */
-  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
-  .card { background: #f7fafc; border-radius: 8px; padding: 1.2rem; text-align: center; border: 1px solid #e2e8f0; }
-  .card-value { font-size: 2rem; font-weight: 700; color: #667eea; }
-  .card-label { font-size: 0.85rem; color: #4a5568; margin-top: 0.3rem; }
+  /* Header */
+  .header { margin-bottom: 2rem; padding-bottom: 1.5rem; border-bottom: 1px solid #e8e6e1; }
+  .header h1 { font-size: 1.6rem; font-weight: 600; color: #1a1a1a; letter-spacing: -0.01em; }
+  .header .meta { font-size: 0.8rem; color: #8b8b7a; margin-top: 0.4rem; }
 
   /* Typography */
-  h2 { font-size: 1.4rem; color: #2d3748; margin: 1.5rem 0 0.8rem; padding-bottom: 0.4rem; border-bottom: 2px solid #e2e8f0; }
-  h3 { font-size: 1.15rem; color: #4a5568; margin: 1.2rem 0 0.6rem; }
-  p { margin: 0.6rem 0; }
-  ul, ol { padding-left: 1.5rem; margin: 0.6rem 0; }
+  h2 { font-size: 1.2rem; font-weight: 600; color: #1a1a1a; margin: 2rem 0 0.8rem; }
+  h3 { font-size: 1.05rem; font-weight: 600; color: #3d3929; margin: 1.5rem 0 0.5rem; }
+  p { margin: 0.8rem 0; color: #2d2d2d; }
+  ul, ol { padding-left: 1.5rem; margin: 0.8rem 0; }
   li { margin: 0.3rem 0; }
-  strong { color: #2d3748; }
-  a { color: #667eea; text-decoration: none; }
+  a { color: #b5651d; text-decoration: none; }
   a:hover { text-decoration: underline; }
+  strong { font-weight: 600; }
+
+  /* Summary Cards */
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.8rem; margin: 1.5rem 0; }
+  .card { background: #fff; border: 1px solid #e8e6e1; padding: 1.2rem; text-align: center; }
+  .card-value { font-size: 1.8rem; font-weight: 600; color: #1a1a1a; }
+  .card-label { font-size: 0.8rem; color: #8b8b7a; margin-top: 0.25rem; }
 
   /* Table */
-  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
-  th { background: #f7fafc; font-weight: 600; text-align: left; padding: 0.6rem 0.8rem; border: 1px solid #e2e8f0; }
-  td { padding: 0.6rem 0.8rem; border: 1px solid #e2e8f0; }
-  tr:hover td { background: #f7fafc; }
+  table { width: 100%; border-collapse: collapse; margin: 1.2rem 0; font-size: 0.9rem; }
+  th { font-weight: 600; text-align: left; padding: 0.6rem 0.8rem; border-bottom: 2px solid #e8e6e1; color: #3d3929; }
+  td { padding: 0.6rem 0.8rem; border-bottom: 1px solid #eeece7; }
 
   /* Badge */
-  .badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
-  .badge-green { background: #c6f6d5; color: #276749; }
-  .badge-red { background: #fed7d7; color: #9b2c2c; }
-  .badge-yellow { background: #fefcbf; color: #975a16; }
-  .badge-blue { background: #bee3f8; color: #2a4365; }
+  .badge { font-size: 0.75rem; font-weight: 500; padding: 0.15rem 0.5rem; border-radius: 2px; }
+  .badge-green { background: #e6f4ea; color: #1e7e34; }
+  .badge-red { background: #fce8e8; color: #c62828; }
+  .badge-yellow { background: #fef7e0; color: #8a6d00; }
+  .badge-blue { background: #e8f0fe; color: #1a5fb4; }
 
   /* Callout */
-  blockquote { border-left: 4px solid #667eea; padding: 0.8rem 1rem; background: #f8f9ff; margin: 1rem 0; border-radius: 0 8px 8px 0; }
-  .callout-warn { border-left-color: #ecc94b; background: #fffff0; }
-  .callout-info { border-left-color: #4299e1; background: #ebf8ff; }
-  .callout-success { border-left-color: #48bb78; background: #f0fff4; }
+  blockquote { border-left: 2px solid #d4d1ca; padding: 0.6rem 1rem; margin: 1.2rem 0; color: #4a4a3a; background: #f5f4f0; }
+  .callout-warn { border-left-color: #d4a017; background: #fdf8ec; }
+  .callout-info { border-left-color: #5b8dc9; background: #f0f5fb; }
+  .callout-success { border-left-color: #4a9960; background: #f0f8f2; }
 
   /* Timeline */
-  .timeline { position: relative; padding-left: 2rem; margin: 1rem 0; }
-  .timeline::before { content: ''; position: absolute; left: 0.5rem; top: 0; bottom: 0; width: 2px; background: #e2e8f0; }
-  .timeline-item { position: relative; margin-bottom: 1.2rem; }
-  .timeline-dot { position: absolute; left: -1.75rem; top: 0.4rem; width: 10px; height: 10px; border-radius: 50%; background: #667eea; border: 2px solid white; box-shadow: 0 0 0 2px #667eea; }
-  .timeline-time { font-size: 0.8rem; color: #a0aec0; font-weight: 600; }
-  .timeline-text { margin-top: 0.2rem; }
+  .timeline { padding-left: 1.5rem; border-left: 2px solid #e8e6e1; margin: 1.2rem 0; }
+  .timeline-item { margin-bottom: 1.2rem; }
+  .timeline-dot { display: none; }
+  .timeline-time { font-size: 0.8rem; color: #8b8b7a; font-weight: 500; }
+  .timeline-text { margin-top: 0.15rem; }
 
   /* Checklist */
   .checklist { list-style: none; padding-left: 0; }
-  .checklist li { padding: 0.4rem 0; }
-  .check-pass { color: #276749; }
-  .check-fail { color: #9b2c2c; }
-  .check-warn { color: #975a16; }
+  .checklist li { padding: 0.3rem 0; }
 
   /* Code */
-  code { background: #f1f5f9; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.88em; color: #e53e3e; }
-  pre { background: #1e293b; color: #e2e8f0; padding: 1rem; border-radius: 8px; overflow-x: auto; margin: 1rem 0; }
-  pre code { background: none; color: inherit; padding: 0; }
+  code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; font-size: 0.85em; background: #f0eeea; padding: 0.1rem 0.35rem; border-radius: 2px; }
+  pre { background: #2d2d2d; color: #e8e6e1; padding: 1rem 1.2rem; overflow-x: auto; margin: 1.2rem 0; font-size: 0.85rem; line-height: 1.5; }
+  pre code { background: none; color: inherit; padding: 0; border-radius: 0; }
 
   /* Divider */
-  hr { border: none; border-top: 1px solid #e2e8f0; margin: 1.5rem 0; }
+  hr { border: none; border-top: 1px solid #e8e6e1; margin: 2rem 0; }
 
   /* Footer */
-  .footer { text-align: center; margin-top: 2rem; font-size: 0.8rem; color: #a0aec0; }
+  .footer { text-align: center; margin-top: 3rem; font-size: 0.75rem; color: #b0ae9f; }
 
   /* Print */
-  @media print {
-    body { background: white; padding: 0; }
-    .header { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-    .container { max-width: 100%; }
-  }
-  /* Mobile */
-  @media (max-width: 640px) {
-    .card-grid { grid-template-columns: 1fr 1fr; }
-    .header h1 { font-size: 1.4rem; }
-    body { padding: 1rem 0.5rem; }
-  }
+  @media print { body { background: white; } }
 </style>
 </head>
 <body>
-<div class="container">
   <div class="header">
     <h1>{{TITLE}}</h1>
     <div class="meta">{{META}}</div>
   </div>
-  <div class="content">
-    {{SUMMARY_CARDS}}
-    {{BODY_SECTIONS}}
-  </div>
+  {{SUMMARY_CARDS}}
+  {{BODY_SECTIONS}}
+  <hr>
   <div class="footer">Generated by NanoClaw · {{DATE}}</div>
-</div>
 </body>
 </html>
 ```
