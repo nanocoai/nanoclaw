@@ -17,7 +17,14 @@ const SYSTEM_PROMPT = `你是记忆提取助手。给定用户要求记住的一
 规则：
 - content: 精炼后的事实陈述，去除口语化表达
 - category: 从 preference / knowledge / context / behavior / goal 中选一个
+  * preference：用户明确偏好的架构、流程、风格、禁忌、取舍
+  * knowledge：长期有效、可复用的技术结论、架构事实、踩坑经验、故障根因和解决原则
+  * context：阶段性背景和当前状态，只有对接下来几轮有用才记录
+  * behavior：稳定反复出现的工作模式或沟通习惯
+  * goal：明确尚未完成的目标或计划
 - confidence: 0.0-1.0，表示这条信息的确定程度
+- 不要把 PR 号、commit hash、测试通过、build 结果、当前 PID、当前分支脏项、一次性部署状态、临时路径写成长期 knowledge
+- 如果输入只是短期流水账，优先输出 context 且 confidence 不超过 0.8；如果完全无长期价值，原样精简为 context
 
 只输出 JSON，不要其他内容：
 {"content": "...", "category": "...", "confidence": 0.0}`;

@@ -317,6 +317,29 @@ describe('prompt', () => {
     expect(MEMORY_UPDATE_PROMPT).toContain('{conversation}');
   });
 
+  it('MEMORY_UPDATE_PROMPT 明确长期知识与短期流水账边界', () => {
+    expect(MEMORY_UPDATE_PROMPT).toContain(
+      'knowledge：长期有效、可复用的技术结论',
+    );
+    expect(MEMORY_UPDATE_PROMPT).toContain('PR 号');
+    expect(MEMORY_UPDATE_PROMPT).toContain('commit hash');
+    expect(MEMORY_UPDATE_PROMPT).toContain('当前 PID');
+    expect(MEMORY_UPDATE_PROMPT).toContain('当前分支脏项');
+    expect(MEMORY_UPDATE_PROMPT).toContain(
+      '不要记录 AI 自己刚完成了什么',
+    );
+  });
+
+  it('MEMORY_UPDATE_PROMPT 要求已完成事项不继续写 goal', () => {
+    expect(MEMORY_UPDATE_PROMPT).toContain(
+      '已完成、已合并、已验证通过、已放弃的事项不能继续写 goal',
+    );
+  });
+
+  it('MEMORY_UPDATE_PROMPT 对 context 置信度有降权约束', () => {
+    expect(MEMORY_UPDATE_PROMPT).toContain('context 通常不超过 0.8');
+  });
+
   describe('formatMemoryForInjection', () => {
     it('格式化完整记忆数据', () => {
       const text = formatMemoryForInjection({
