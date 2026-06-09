@@ -1,10 +1,18 @@
 import { spawn, type ChildProcess } from 'child_process';
+import fs from 'fs';
 
 import { createOpencodeClient, type OpencodeClient } from '@opencode-ai/sdk';
 
 import { registerProvider } from './provider-registry.js';
+import { composeAvailableSkills } from './skill-catalog.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import { mcpServersToOpenCodeConfig } from './mcp-to-opencode.js';
+
+// Stable path for the skills-catalog markdown OpenCode reads via `instructions`.
+// Written synchronously at config-build time and re-written on every config
+// rebuild so the catalog tracks any group-level skill add/remove between
+// session restarts. /tmp is per-container, so no cross-session leakage.
+const SKILLS_CATALOG_PATH = '/tmp/nanoclaw-skills-catalog.md';
 
 function log(msg: string): void {
   console.error(`[opencode-provider] ${msg}`);
@@ -122,6 +130,21 @@ function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> 
     '/workspace/agent/.claude-fragments/*.md',
     '/workspace/agent/CLAUDE.local.md',
   ];
+
+  // Skills catalog: OpenCode doesn't have Claude Code's `Skill` tool, so per-
+  // group prompts referencing "use the X skill" would dangle. Materialize the
+  // discovery list to a tmp file and add it to instructions. The agent reads
+  // /app/skills/<name>/SKILL.md on demand for the full body — same lazy-load
+  // model Claude Code uses internally.
+  const skillsCatalog = composeAvailableSkills();
+  if (skillsCatalog) {
+    try {
+      fs.writeFileSync(SKILLS_CATALOG_PATH, skillsCatalog, 'utf-8');
+      instructions.push(SKILLS_CATALOG_PATH);
+    } catch (err) {
+      log(`Failed to write skills catalog (${err instanceof Error ? err.message : err}); proceeding without it.`);
+    }
+  }
 
   return {
     ...(model ? { model } : {}),

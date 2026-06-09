@@ -17,6 +17,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { registerProvider } from './provider-registry.js';
+import { composeAvailableSkills } from './skill-catalog.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import {
   type AppServer,
@@ -92,7 +93,8 @@ function readAgentAndGlobalClaudeMd(): string | undefined {
 
 function composeBaseInstructions(promptAddendum: string | undefined): string | undefined {
   const claudeMd = readAgentAndGlobalClaudeMd();
-  const pieces = [claudeMd, promptAddendum].filter((s): s is string => Boolean(s));
+  const skills = composeAvailableSkills();
+  const pieces = [claudeMd, skills, promptAddendum].filter((s): s is string => Boolean(s));
   return pieces.length > 0 ? pieces.join('\n\n---\n\n') : undefined;
 }
 
