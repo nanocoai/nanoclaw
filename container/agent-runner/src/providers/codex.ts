@@ -17,15 +17,24 @@ import fs from 'fs';
 import path from 'path';
 
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type {
+  AgentProvider,
+  AgentQuery,
+  McpServerConfig,
+  ProviderEvent,
+  ProviderOptions,
+  QueryInput,
+} from './types.js';
 import {
   type AppServer,
+  type CodexHttpProvider,
   type JsonRpcNotification,
   STALE_THREAD_RE,
   attachCodexAutoApproval,
   createCodexConfigOverrides,
   initializeCodexAppServer,
   killCodexAppServer,
+  resolveHttpOnlyProvider,
   spawnCodexAppServer,
   startCodexTurn,
   startOrResumeCodexThread,
@@ -101,12 +110,14 @@ function composeBaseInstructions(promptAddendum: string | undefined): string | u
 export class CodexProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
 
-  private readonly mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
+  private readonly mcpServers: Record<string, McpServerConfig>;
   private readonly model: string;
+  private readonly httpProvider: CodexHttpProvider | null;
 
   constructor(options: ProviderOptions = {}) {
     this.mcpServers = options.mcpServers ?? {};
     this.model = (options.env?.CODEX_MODEL as string | undefined) ?? 'gpt-5.4-mini';
+    this.httpProvider = resolveHttpOnlyProvider(options.env ?? {});
   }
 
   isSessionInvalid(err: unknown): boolean {
@@ -132,7 +143,7 @@ export class CodexProvider implements AgentProvider {
       // query active per batch of pending messages and ends it on idle, so
       // spawn-per-query matches that cadence naturally.
       writeCodexMcpConfigToml(self.mcpServers);
-      const server = spawnCodexAppServer(createCodexConfigOverrides());
+      const server = spawnCodexAppServer(createCodexConfigOverrides(self.httpProvider));
       attachCodexAutoApproval(server);
 
       let threadId: string | undefined = input.continuation;
