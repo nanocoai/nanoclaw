@@ -201,6 +201,26 @@ onecli secrets create --name "OpenRouter" --type generic \
   --header-name "Authorization" --value-format "Bearer {value}"
 ```
 
+#### Example: Atlas Cloud (OpenAI-compatible, 59 frontier LLMs)
+
+[Atlas Cloud](https://www.atlascloud.ai/) is a full-modal, OpenAI-compatible inference platform — one endpoint for DeepSeek-V4, Kimi K2, Qwen3, GPT-5, Gemini 2.5 Pro, Claude, and 50+ more models. Use it as a drop-in backend without managing multiple vendor integrations.
+
+```env
+OPENCODE_PROVIDER=openai
+OPENCODE_MODEL=openai/deepseek-ai/deepseek-v4-pro
+OPENCODE_SMALL_MODEL=openai/deepseek-ai/deepseek-v4-flash
+ANTHROPIC_BASE_URL=https://api.atlascloud.ai/v1
+```
+
+Register the key:
+```bash
+onecli secrets create --name "Atlas Cloud" --type generic \
+  --value YOUR_ATLASCLOUD_API_KEY --host-pattern "api.atlascloud.ai" \
+  --header-name "Authorization" --value-format "Bearer {value}"
+```
+
+Get an API key: [atlascloud.ai/console/coding-plan](https://www.atlascloud.ai/console/coding-plan)
+
 #### Example: Anthropic (no ANTHROPIC_BASE_URL needed)
 
 When `OPENCODE_PROVIDER` is `anthropic`, OpenCode uses normal Anthropic env inside the container — the proxy + placeholder key pattern is unchanged and `ANTHROPIC_BASE_URL` is not required.
