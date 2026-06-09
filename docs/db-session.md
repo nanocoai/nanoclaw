@@ -2,6 +2,8 @@
 
 Reference for the two SQLite files each session owns: `inbound.db` (host writes, container reads) and `outbound.db` (container writes, host reads). Start with [db.md](db.md) for the three-DB overview, the single-writer rule, and the cross-mount visibility constraints.
 
+The session DB pair is NanoClaw's host/container protocol, not a Claude-specific protocol. The default Claude provider, plus skill-installed providers such as Codex or OpenCode, all sit behind the agent-runner's provider interface after the runner has read messages from `inbound.db`. Provider-specific continuation state is stored in `outbound.db.session_state` under provider-scoped keys such as `continuation:claude`, so switching providers does not reuse another provider's opaque session id.
+
 Schemas live in `src/db/schema.ts` as the `INBOUND_SCHEMA` and `OUTBOUND_SCHEMA` constants. Both files are created by `ensureSchema()` in `src/session-manager.ts` when a new session folder is provisioned.
 
 ---
@@ -17,7 +19,7 @@ data/v2-sessions/<agent_group_id>/<session_id>/
   outbox/<message_id>/    ← attachments the agent produced
 ```
 
-One session = one folder = one pair of DBs. The `agent_group_id` parent directory also holds per-group state (`.claude-shared/`, `agent-runner-src/`) that is shared across every session of that agent group.
+One session = one folder = one pair of DBs. The `agent_group_id` parent directory also holds per-group Claude state in `.claude-shared/`, which is shared across every session of that agent group. Agent-runner source is mounted read-only from the shared project source, not copied per group.
 
 Path helpers in `src/session-manager.ts`: `sessionDir()`, `inboundDbPath()`, `outboundDbPath()`, `heartbeatPath()`.
 

@@ -2,7 +2,9 @@
 
 The official documentation is at **[docs.nanoclaw.dev](https://docs.nanoclaw.dev)**.
 
-The files in this directory are original design documents and developer references. For the most current and accurate information, use the documentation site.
+The files in this directory are source-adjacent developer references, design notes, and maintainer documentation. For install instructions, user-facing setup, and task-oriented guides, use the documentation site.
+
+Some files here are current implementation references. Others are historical design notes that explain why the v2 architecture looks the way it does. When a file is marked historical, treat it as background context rather than an operating checklist.
 
 | This directory | Documentation site |
 |---|---|

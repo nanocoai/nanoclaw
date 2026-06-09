@@ -1,4 +1,6 @@
-# Setup Wiring — Status & Remaining Work
+# Setup wiring notes
+
+> Historical note: this file captures the v2 setup-wiring status as of the date below. Use it as implementation history and architecture context, not as the current setup checklist. The current installer path is `bash nanoclaw.sh`, which bootstraps the host and hands off to `pnpm run setup:auto`. For current setup behavior, start with `nanoclaw.sh`, `setup/auto.ts`, `setup/index.ts`, `setup/register.ts`, `setup/verify.ts`, and the relevant `.claude/skills/*/SKILL.md` files.
 
 Last updated: 2026-04-09
 

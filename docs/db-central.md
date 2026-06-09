@@ -81,7 +81,7 @@ CREATE TABLE users (
 );
 ```
 
-- **Writers/readers:** `src/db/users.ts`; channel auth flows
+- **Writers/readers:** `src/modules/permissions/db/users.ts`; channel auth flows
 
 ### 1.5 `user_roles`
 
@@ -104,7 +104,7 @@ Invariants:
 - `role = 'admin'` → global (NULL) or scoped to one agent group.
 - Admin @ A implies membership in A — no `agent_group_members` row required.
 
-Access layer: `src/db/user-roles.ts`, `src/access.ts`.
+Access layer: `src/modules/permissions/db/user-roles.ts`, `src/modules/permissions/access.ts`.
 
 ### 1.6 `agent_group_members`
 
@@ -134,7 +134,7 @@ CREATE TABLE user_dms (
 );
 ```
 
-Populated lazily by `ensureUserDm()` in `src/user-dm.ts`.
+Populated lazily by `ensureUserDm()` in `src/modules/permissions/user-dm.ts`.
 
 ### 1.8 `sessions`
 
@@ -193,9 +193,9 @@ CREATE TABLE agent_destinations (
 CREATE INDEX idx_agent_dest_target ON agent_destinations(target_type, target_id);
 ```
 
-**Projection invariant (load-bearing).** The central table is the source of truth, but each running container reads from a projection in its own `inbound.db` (see [db-session.md §2.3](db-session.md#23-destinations)). Any code that mutates `agent_destinations` while a container is running must also call `writeDestinations()` (`src/session-manager.ts`) or the container will reject sends with stale data. Known call sites: `createMessagingGroupAgent()` in `src/db/messaging-groups.ts`, the `create_agent` system action in `src/delivery.ts`.
+**Projection invariant (load-bearing).** The central table is the source of truth, but each running container reads from a projection in its own `inbound.db` (see [db-session.md §2.3](db-session.md#23-destinations)). Any code that mutates `agent_destinations` while a container is running must also call `writeDestinations()` (`src/modules/agent-to-agent/write-destinations.ts`) or the container will reject sends with stale data. Known call sites: `createMessagingGroupAgent()` in `src/db/messaging-groups.ts`, the `create_agent` system action in `src/modules/agent-to-agent/create-agent.ts`.
 
-Access layer: `src/db/agent-destinations.ts`.
+Access layer: `src/modules/agent-to-agent/db/agent-destinations.ts`.
 
 ### 1.11 `pending_approvals`
 
@@ -226,7 +226,7 @@ CREATE INDEX idx_pending_approvals_action_status ON pending_approvals(action, st
 
 - `status`: `pending` | `approved` | `rejected` | `expired`.
 - `platform_message_id` lets the host edit the admin card in place after a decision.
-- Access layer: `src/db/sessions.ts`; sweep + delivery: `src/onecli-approvals.ts`.
+- Access layer: `src/db/sessions.ts`; OneCLI approval handling: `src/modules/approvals/onecli-approvals.ts`.
 
 ### 1.12 `unregistered_senders`
 

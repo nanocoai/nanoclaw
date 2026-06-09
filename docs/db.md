@@ -35,7 +35,6 @@ data/
   v2-sessions/
     <agent_group_id>/
       .claude-shared/                     ← shared Claude state for the agent group
-      agent-runner-src/                   ← per-group agent-runner overlay
       <session_id>/
         inbound.db                        ← host writes, container reads
         outbound.db                       ← container writes, host reads
@@ -99,14 +98,14 @@ These rules are enforced by convention in `src/session-manager.ts` and `containe
 | `agent_groups` | central | `src/db/agent-groups.ts` | session resolver, delivery, router |
 | `messaging_groups` | central | `src/db/messaging-groups.ts`, channel setup | router, delivery, session resolver |
 | `messaging_group_agents` | central | `src/db/messaging-groups.ts` | router |
-| `users` | central | `src/db/users.ts`, auth flows | permission checks |
-| `user_roles` | central | `src/db/user-roles.ts` | `src/access.ts`, all permission gates |
-| `agent_group_members` | central | `src/db/agent-group-members.ts` | membership checks |
-| `user_dms` | central | `src/user-dm.ts` (`ensureUserDm`) | approval + pairing delivery |
+| `users` | central | `src/modules/permissions/db/users.ts`, auth flows | permission checks |
+| `user_roles` | central | `src/modules/permissions/db/user-roles.ts` | `src/modules/permissions/access.ts`, approval routing |
+| `agent_group_members` | central | `src/modules/permissions/db/agent-group-members.ts` | membership checks |
+| `user_dms` | central | `src/modules/permissions/user-dm.ts` (`ensureUserDm`) | approval + pairing delivery |
 | `sessions` | central | `src/db/sessions.ts`, `src/session-manager.ts` | delivery, sweep, container runner |
 | `pending_questions` | central | `src/db/sessions.ts` (via `ask_user_question`) | container response matcher |
-| `agent_destinations` | central | `src/db/agent-destinations.ts`, migration 004 backfill | `writeDestinations()`, delivery ACL |
-| `pending_approvals` | central | `src/db/sessions.ts`, `src/onecli-approvals.ts` | admin-card delivery, sweep |
+| `agent_destinations` | central | `src/modules/agent-to-agent/db/agent-destinations.ts`, `src/db/migrations/module-agent-to-agent-destinations.ts` | `src/modules/agent-to-agent/write-destinations.ts`, delivery ACL |
+| `pending_approvals` | central | approval modules, `src/db/sessions.ts` | `src/modules/approvals/onecli-approvals.ts`, admin-card delivery, sweep |
 | `unregistered_senders` | central | `src/db/dropped-messages.ts` | ops tooling |
 | `chat_sdk_*` | central | `src/state-sqlite.ts` | Chat SDK bridge |
 | `schema_version` | central | `src/db/migrations/index.ts` | migration runner |
