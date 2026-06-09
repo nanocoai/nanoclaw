@@ -63,6 +63,14 @@ export interface PollLoopConfig {
   systemContext?: {
     instructions?: string;
   };
+  /**
+   * Optional abort signal. When aborted, the loop exits cleanly between
+   * iterations. Production runs the loop until the process is killed and
+   * doesn't pass this; tests pass it so the loop stops alongside the test
+   * (otherwise it keeps polling after `closeSessionDb()` in afterEach and
+   * crashes trying to reopen `/workspace/inbound.db`).
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -107,6 +115,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   let pollCount = 0;
   let isFirstPoll = true;
   while (true) {
+    if (config.signal?.aborted) return;
+
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
     const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
     isFirstPoll = false;
@@ -232,7 +242,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
+      const result = await processQuery(query, routing, processingIds, config.providerName, config.signal);
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -313,10 +323,23 @@ async function processQuery(
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
+  signal?: AbortSignal,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+
+  // If the loop is being torn down (test abort, future SIGTERM handling),
+  // proactively call query.abort() so the provider's events generator
+  // unblocks instead of awaiting forever (the mock provider in particular
+  // sleeps until push/end/abort).
+  const onAbort = (): void => {
+    query.abort();
+  };
+  if (signal) {
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -473,6 +496,7 @@ async function processQuery(
   } finally {
     done = true;
     clearInterval(pollHandle);
+    signal?.removeEventListener('abort', onAbort);
   }
 
   return { continuation: queryContinuation };
