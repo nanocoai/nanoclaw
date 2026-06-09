@@ -16,7 +16,11 @@ vi.mock('./env.js', () => ({
 }));
 
 // --- mock logger，捕获 warn 调用做断言 ---
-const loggerCalls = { warn: [] as any[], info: [] as any[], debug: [] as any[] };
+const loggerCalls = {
+  warn: [] as any[],
+  info: [] as any[],
+  debug: [] as any[],
+};
 vi.mock('./logger.js', () => ({
   logger: {
     warn: (...a: any[]) => loggerCalls.warn.push(a),
@@ -35,7 +39,13 @@ vi.mock('./memory/config.js', () => ({
   }),
 }));
 
-import { notifyVoice } from './voice-notify.js';
+import {
+  buildSpokenText,
+  notifyVoice,
+  resolveVoiceGroupLabel,
+  setMacVoiceRunnerForTest,
+  shouldNotifyMacVoice,
+} from './voice-notify.js';
 
 /** 等 fire-and-forget 的异步 IIFE 跑完 */
 async function flushAsync() {
@@ -72,8 +82,11 @@ describe('voice-notify 推送 token 来源', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    if (savedUserKey !== undefined) process.env.PUSHOVER_USER_KEY = savedUserKey;
-    if (savedAppToken !== undefined) process.env.PUSHOVER_APP_TOKEN = savedAppToken;
+    setMacVoiceRunnerForTest(null);
+    if (savedUserKey !== undefined)
+      process.env.PUSHOVER_USER_KEY = savedUserKey;
+    if (savedAppToken !== undefined)
+      process.env.PUSHOVER_APP_TOKEN = savedAppToken;
     delete mockEnvFile.PUSHOVER_USER_KEY;
     delete mockEnvFile.PUSHOVER_APP_TOKEN;
   });
@@ -89,7 +102,9 @@ describe('voice-notify 推送 token 来源', () => {
     expect(body).toContain('token=' + 'a'.repeat(30));
     expect(body).toContain('user=' + 'u'.repeat(30));
     // 没有走「缺 token 跳过」分支
-    expect(loggerCalls.warn.some((c) => /缺 PUSHOVER token/.test(c[1] ?? ''))).toBe(false);
+    expect(
+      loggerCalls.warn.some((c) => /缺 PUSHOVER token/.test(c[1] ?? '')),
+    ).toBe(false);
   });
 
   it('process.env 和 .env 都没有 token 时，warn 跳过且只打布尔不打密钥', async () => {
@@ -100,7 +115,9 @@ describe('voice-notify 推送 token 来源', () => {
     await flushAsync();
 
     expect(fetchSpy).not.toHaveBeenCalled();
-    const warnCall = loggerCalls.warn.find((c) => /缺 PUSHOVER token/.test(c[1] ?? ''));
+    const warnCall = loggerCalls.warn.find((c) =>
+      /缺 PUSHOVER token/.test(c[1] ?? ''),
+    );
     expect(warnCall).toBeTruthy();
     // 第一个参数是结构化对象，只含布尔，不含密钥字符串
     expect(warnCall[0]).toEqual({ hasUserKey: false, hasAppToken: false });
@@ -111,5 +128,147 @@ describe('voice-notify 推送 token 来源', () => {
     notifyVoice('some_other_group', '这是一条足够长的测试回复内容');
     await flushAsync();
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('Mac 播报开关开启时，播报内容带群别名', async () => {
+    const macRunner = vi.fn().mockResolvedValue(undefined);
+    setMacVoiceRunnerForTest(macRunner);
+
+    notifyVoice({
+      groupFolder: 'feishu_some_group',
+      text: '这是一条足够长的测试回复内容',
+      chatJid: 'fs:oc_group',
+      groupName: '真实群名',
+      containerConfig: { voiceNotify: { mac: true } },
+      aliases: { '3号群': 'fs:oc_group' },
+    });
+    await flushAsync();
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(macRunner).toHaveBeenCalledWith(
+      expect.stringContaining('3号群：这是一条足够长的测试回复内容'),
+      expect.any(String),
+    );
+  });
+
+  it('Mac 播报开关关闭时不播报', async () => {
+    const macRunner = vi.fn().mockResolvedValue(undefined);
+    setMacVoiceRunnerForTest(macRunner);
+
+    notifyVoice({
+      groupFolder: 'feishu_some_group',
+      text: '这是一条足够长的测试回复内容',
+      chatJid: 'fs:oc_group',
+      containerConfig: { voiceNotify: { mac: false } },
+      aliases: { '3号群': 'fs:oc_group' },
+    });
+    await flushAsync();
+
+    expect(macRunner).not.toHaveBeenCalled();
+  });
+
+  it('群标识解析顺序：别名优先，其次群名，最后短 JID', () => {
+    expect(
+      resolveVoiceGroupLabel({
+        chatJid: 'fs:oc_group',
+        groupName: '真实群名',
+        aliases: { '3号群': 'fs:oc_group' },
+      }),
+    ).toBe('3号群');
+    expect(
+      resolveVoiceGroupLabel({
+        chatJid: 'fs:oc_group',
+        groupName: '真实群名',
+        aliases: {},
+      }),
+    ).toBe('真实群名');
+    expect(resolveVoiceGroupLabel({ chatJid: 'fs:oc_abcdef1234567890' })).toBe(
+      'oc_abcdef123',
+    );
+  });
+
+  it('Mac 播报队列串行执行，前一条未结束时后一条不启动', async () => {
+    let releaseFirst!: () => void;
+    const macRunner = vi.fn((text: string) => {
+      if (text.includes('第一条')) {
+        return new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+      }
+      return Promise.resolve();
+    });
+    setMacVoiceRunnerForTest(macRunner);
+
+    notifyVoice({
+      groupFolder: 'feishu_a',
+      text: '第一条足够长的测试回复',
+      chatJid: 'fs:oc_a',
+      containerConfig: { voiceNotify: { mac: true } },
+    });
+    notifyVoice({
+      groupFolder: 'feishu_b',
+      text: '第二条足够长的测试回复',
+      chatJid: 'fs:oc_b',
+      containerConfig: { voiceNotify: { mac: true } },
+    });
+    await flushAsync();
+
+    expect(macRunner).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    await flushAsync();
+    expect(macRunner).toHaveBeenCalledTimes(2);
+  });
+
+  it('Mac 播报 runner 失败后不影响下一条', async () => {
+    const macRunner = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('say failed'))
+      .mockResolvedValueOnce(undefined);
+    setMacVoiceRunnerForTest(macRunner);
+
+    notifyVoice({
+      groupFolder: 'feishu_a',
+      text: '第一条足够长的测试回复',
+      chatJid: 'fs:oc_a',
+      containerConfig: { voiceNotify: { mac: true } },
+    });
+    notifyVoice({
+      groupFolder: 'feishu_b',
+      text: '第二条足够长的测试回复',
+      chatJid: 'fs:oc_b',
+      containerConfig: { voiceNotify: { mac: true } },
+    });
+    await flushAsync();
+
+    expect(macRunner).toHaveBeenCalledTimes(2);
+  });
+
+  it('Mac 播报判断必须同时满足开关和有效文本', () => {
+    expect(
+      shouldNotifyMacVoice({
+        groupFolder: 'feishu_a',
+        text: '足够长的',
+        containerConfig: { voiceNotify: { mac: true } },
+      }),
+    ).toBe(true);
+    expect(
+      shouldNotifyMacVoice({
+        groupFolder: 'feishu_a',
+        text: '[图片: /tmp/a.png]',
+        containerConfig: { voiceNotify: { mac: true } },
+      }),
+    ).toBe(false);
+    expect(
+      shouldNotifyMacVoice({
+        groupFolder: 'feishu_a',
+        text: '足够长的',
+        containerConfig: { voiceNotify: { mac: false } },
+      }),
+    ).toBe(false);
+  });
+
+  it('播报文本带群标识且按长度截断', () => {
+    expect(buildSpokenText('3号群', '搞定了')).toBe('3号群：搞定了');
+    expect(buildSpokenText('3号群', 'a'.repeat(2000)).length).toBe(1024);
   });
 });

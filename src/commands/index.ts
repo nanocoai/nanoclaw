@@ -6,6 +6,7 @@ import './tmux.js';
 import './remote-control.js';
 import './quiet.js';
 import './brief.js';
+import './voice.js';
 import './mode.js';
 import './topic-brief.js';
 import './alias.js';

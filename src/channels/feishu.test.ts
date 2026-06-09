@@ -25,7 +25,11 @@ const mockChatList = vi.fn().mockResolvedValue({
 vi.mock('@larksuiteoapi/node-sdk', () => {
   class MockClient {
     im = {
-      message: { create: mockCreate, patch: mockPatch, delete: mockMessageDelete },
+      message: {
+        create: mockCreate,
+        patch: mockPatch,
+        delete: mockMessageDelete,
+      },
       messageReaction: {
         create: mockReactionCreate,
         delete: mockReactionDelete,
@@ -61,8 +65,15 @@ vi.mock('../group-folder.js', () => ({
 }));
 
 const mockGetMessageById = vi.fn().mockReturnValue(undefined);
+const mockGetAllGroupAliases = vi.fn().mockReturnValue({});
 vi.mock('../db.js', () => ({
   getMessageById: (...args: unknown[]) => mockGetMessageById(...args),
+  getAllGroupAliases: () => mockGetAllGroupAliases(),
+}));
+
+const mockNotifyVoice = vi.fn();
+vi.mock('../voice-notify.js', () => ({
+  notifyVoice: (...args: unknown[]) => mockNotifyVoice(...args),
 }));
 
 import { ASSISTANT_NAME } from '../config.js';
@@ -89,6 +100,7 @@ describe('FeishuChannel', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetAllGroupAliases.mockReturnValue({});
     opts = makeOpts();
     channel = new FeishuChannel('app_id', 'app_secret', opts);
   });
@@ -169,6 +181,41 @@ describe('FeishuChannel', () => {
       expect(mockCreate).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({ msg_type: 'interactive' }),
+        }),
+      );
+    });
+
+    it('正式回复触发语音通知时传入群配置和别名', async () => {
+      mockGetAllGroupAliases.mockReturnValue({ '3号群': 'fs:oc_voice' });
+      const voiceChannel = new FeishuChannel(
+        'app_id',
+        'app_secret',
+        makeOpts({
+          registeredGroups: () => ({
+            'fs:oc_voice': {
+              name: '语音测试群',
+              folder: 'fs_oc_voice',
+              trigger: '@bot',
+              added_at: new Date().toISOString(),
+              containerConfig: { voiceNotify: { mac: true } },
+            },
+          }),
+        }),
+      );
+
+      await voiceChannel.sendMessage(
+        'fs:oc_voice',
+        '这是最终结果 [图片: /tmp/result.png]',
+      );
+
+      expect(mockNotifyVoice).toHaveBeenCalledWith(
+        expect.objectContaining({
+          groupFolder: 'fs_oc_voice',
+          text: '这是最终结果',
+          chatJid: 'fs:oc_voice',
+          groupName: '语音测试群',
+          containerConfig: { voiceNotify: { mac: true } },
+          aliases: { '3号群': 'fs:oc_voice' },
         }),
       );
     });
@@ -333,9 +380,9 @@ describe('FeishuChannel', () => {
         .mockRejectedValueOnce(new Error('text also failed'));
 
       const longText = 'b'.repeat(501);
-      await expect(
-        channel.sendMessage('fs:oc_123', longText),
-      ).rejects.toThrow('text also failed');
+      await expect(channel.sendMessage('fs:oc_123', longText)).rejects.toThrow(
+        'text also failed',
+      );
     });
   });
 
@@ -440,7 +487,9 @@ describe('FeishuChannel', () => {
       const jid = 'fs:oc_text_block';
       (channel as any).progressDone.delete(jid);
 
-      await channel.sendMessage(jid, '💬 让我先看下这块代码', { isProgress: true });
+      await channel.sendMessage(jid, '💬 让我先看下这块代码', {
+        isProgress: true,
+      });
 
       expect(mockCreate).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -496,7 +545,9 @@ describe('FeishuChannel', () => {
         },
       });
 
-      await channel.sendMessage(jid, '💬 让我看下这块代码', { isProgress: true });
+      await channel.sendMessage(jid, '💬 让我看下这块代码', {
+        isProgress: true,
+      });
 
       // 应该创建进度卡片（调用 create），而非独立文本消息
       expect(mockCreate).toHaveBeenCalled();
@@ -523,7 +574,9 @@ describe('FeishuChannel', () => {
         },
       });
 
-      await channel.sendMessage(jid, '💬 我先查证据，不先猜', { isProgress: true });
+      await channel.sendMessage(jid, '💬 我先查证据，不先猜', {
+        isProgress: true,
+      });
 
       expect(mockCreate).toHaveBeenCalled();
       const callArg = mockCreate.mock.calls[0]?.[0];
@@ -549,7 +602,9 @@ describe('FeishuChannel', () => {
         },
       });
 
-      await channel.sendMessage(jid, '💬 我先查证据，不先猜', { isProgress: true });
+      await channel.sendMessage(jid, '💬 我先查证据，不先猜', {
+        isProgress: true,
+      });
 
       expect(mockCreate).toHaveBeenCalled();
       expect((channel as any).progressCards.has(jid)).toBe(false);
@@ -732,26 +787,39 @@ describe('FeishuChannel', () => {
 
   describe('sendMessage 返回飞书 message_id', () => {
     it('正式回复返回飞书 message_id', async () => {
-      mockCreate.mockResolvedValueOnce({ data: { message_id: 'om_reply_001' } });
+      mockCreate.mockResolvedValueOnce({
+        data: { message_id: 'om_reply_001' },
+      });
       const msgId = await channel.sendMessage('fs:oc_123', '正式回复');
       expect(msgId).toBe('om_reply_001');
     });
 
     it('✅ 开头的正式回复不被误判为进度消息', async () => {
-      mockCreate.mockResolvedValueOnce({ data: { message_id: 'om_emoji_reply' } });
-      const msgId = await channel.sendMessage('fs:oc_123', '✅ 任务已完成，结果如下...');
+      mockCreate.mockResolvedValueOnce({
+        data: { message_id: 'om_emoji_reply' },
+      });
+      const msgId = await channel.sendMessage(
+        'fs:oc_123',
+        '✅ 任务已完成，结果如下...',
+      );
       // 不传 isProgress → 走正式回复路径，正常发送
       expect(msgId).toBe('om_emoji_reply');
       expect(mockCreate).toHaveBeenCalled();
     });
 
     it('进度消息返回 undefined', async () => {
-      const msgId = await channel.sendMessage('fs:oc_123', '🔧 Bash: ls -la', { isProgress: true });
+      const msgId = await channel.sendMessage('fs:oc_123', '🔧 Bash: ls -la', {
+        isProgress: true,
+      });
       expect(msgId).toBeUndefined();
     });
 
     it('💭 思考消息返回 undefined', async () => {
-      const msgId = await channel.sendMessage('fs:oc_123', '💭 正在分析代码结构...', { isProgress: true });
+      const msgId = await channel.sendMessage(
+        'fs:oc_123',
+        '💭 正在分析代码结构...',
+        { isProgress: true },
+      );
       expect(msgId).toBeUndefined();
     });
 
@@ -800,7 +868,9 @@ describe('FeishuChannel', () => {
     beforeEach(() => {
       mockGetMessageById.mockReset();
       originalFetch = globalThis.fetch;
-      (channel as any).getTenantAccessToken = vi.fn().mockResolvedValue('mock_token');
+      (channel as any).getTenantAccessToken = vi
+        .fn()
+        .mockResolvedValue('mock_token');
     });
 
     afterEach(() => {
@@ -933,17 +1003,21 @@ describe('FeishuChannel', () => {
     it('有 pendingUsage 时，sendDirectMessage 附加 usage footer', async () => {
       const jid = 'fs:oc_test_direct';
       // 先 setUsage
-      channel.setUsage(jid, {
-        inputTokens: 1000,
-        outputTokens: 200,
-        cacheReadInputTokens: 500,
-        cacheCreationInputTokens: 0,
-        numTurns: 3,
-        durationMs: 5000,
-        totalCostUsd: 0.05,
-        model: 'claude-opus-4-6',
-        lastTurnContext: 1500,
-      }, 'adaptive');
+      channel.setUsage(
+        jid,
+        {
+          inputTokens: 1000,
+          outputTokens: 200,
+          cacheReadInputTokens: 500,
+          cacheCreationInputTokens: 0,
+          numTurns: 3,
+          durationMs: 5000,
+          totalCostUsd: 0.05,
+          model: 'claude-opus-4-6',
+          lastTurnContext: 1500,
+        },
+        'adaptive',
+      );
 
       // 用 sendDirectMessage 发消息（长文本触发卡片）
       const longText = '结果已发送。' + 'x'.repeat(500);
@@ -988,17 +1062,21 @@ describe('FeishuChannel', () => {
 
     it('sendDirectMessage 消费 usage 后，cleanupProgressCard 不重复使用', async () => {
       const jid = 'fs:oc_test_cleanup';
-      channel.setUsage(jid, {
-        inputTokens: 100,
-        outputTokens: 50,
-        cacheReadInputTokens: 0,
-        cacheCreationInputTokens: 0,
-        numTurns: 1,
-        durationMs: 1000,
-        totalCostUsd: 0.01,
-        model: 'claude-opus-4-6',
-        lastTurnContext: 100,
-      }, 'adaptive');
+      channel.setUsage(
+        jid,
+        {
+          inputTokens: 100,
+          outputTokens: 50,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          numTurns: 1,
+          durationMs: 1000,
+          totalCostUsd: 0.01,
+          model: 'claude-opus-4-6',
+          lastTurnContext: 100,
+        },
+        'adaptive',
+      );
 
       // sendDirectMessage 消费 usage
       await (channel as any).sendDirectMessage(jid, 'x'.repeat(500));
