@@ -56,6 +56,7 @@ describe('voice-notify 推送 token 来源', () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
   let savedUserKey: string | undefined;
   let savedAppToken: string | undefined;
+  let savedLegacyAppToken: string | undefined;
 
   beforeEach(() => {
     loggerCalls.warn = [];
@@ -65,8 +66,10 @@ describe('voice-notify 推送 token 来源', () => {
     // 备份并清空 process.env 里的 PUSHOVER token，模拟 launchd 环境
     savedUserKey = process.env.PUSHOVER_USER_KEY;
     savedAppToken = process.env.PUSHOVER_APP_TOKEN;
+    savedLegacyAppToken = process.env.APP_TOKEN;
     delete process.env.PUSHOVER_USER_KEY;
     delete process.env.PUSHOVER_APP_TOKEN;
+    delete process.env.APP_TOKEN;
     // .env 里有 token
     mockEnvFile.PUSHOVER_USER_KEY = 'u'.repeat(30);
     mockEnvFile.PUSHOVER_APP_TOKEN = 'a'.repeat(30);
@@ -85,8 +88,11 @@ describe('voice-notify 推送 token 来源', () => {
       process.env.PUSHOVER_USER_KEY = savedUserKey;
     if (savedAppToken !== undefined)
       process.env.PUSHOVER_APP_TOKEN = savedAppToken;
+    if (savedLegacyAppToken !== undefined)
+      process.env.APP_TOKEN = savedLegacyAppToken;
     delete mockEnvFile.PUSHOVER_USER_KEY;
     delete mockEnvFile.PUSHOVER_APP_TOKEN;
+    delete mockEnvFile.APP_TOKEN;
   });
 
   it('群开关开启且 .env 可读时，用 .env 的 token 推送', async () => {
@@ -134,6 +140,23 @@ describe('voice-notify 推送 token 来源', () => {
     // 第一个参数是结构化对象，只含布尔，不含密钥字符串
     expect(warnCall[0]).toEqual({ hasUserKey: false, hasAppToken: false });
     expect(JSON.stringify(warnCall[0])).not.toContain('u'.repeat(30));
+  });
+
+  it('.env 只有兼容名 APP_TOKEN 时也能推送', async () => {
+    delete mockEnvFile.PUSHOVER_APP_TOKEN;
+    mockEnvFile.APP_TOKEN = 'b'.repeat(30);
+
+    notifyVoice({
+      groupFolder: 'feishu_some_group',
+      text: '这是一条足够长的测试回复内容',
+      chatJid: 'fs:oc_group',
+      containerConfig: { voiceNotify: { push: true } },
+    });
+    await flushAsync();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const body = fetchSpy.mock.calls[0][1].body as URLSearchParams;
+    expect(body.get('token')).toBe('b'.repeat(30));
   });
 
   it('主群未开启开关也不再默认推送', async () => {

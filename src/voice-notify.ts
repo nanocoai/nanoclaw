@@ -144,15 +144,23 @@ async function pushToPushover(message: string): Promise<void> {
   // 根因：主进程不把 .env 注入 process.env（见 env.ts 注释「Does NOT load into process.env」），
   // launchd plist 也没配 PUSHOVER，之前直接读 process.env 拿到 undefined → 推送被 debug 静默跳过，
   // 这才是「自动播报收不到」的真根因（摘要侧走 config 读 .env 文件所以能跑，推送侧读 process.env 拿空）。
-  const envFile = readEnvFile(['PUSHOVER_USER_KEY', 'PUSHOVER_APP_TOKEN']);
+  const envFile = readEnvFile([
+    'PUSHOVER_USER_KEY',
+    'PUSHOVER_APP_TOKEN',
+    'APP_TOKEN',
+  ]);
   const userKey = envFile.PUSHOVER_USER_KEY || process.env.PUSHOVER_USER_KEY;
-  const appToken = envFile.PUSHOVER_APP_TOKEN || process.env.PUSHOVER_APP_TOKEN;
+  const appToken =
+    envFile.PUSHOVER_APP_TOKEN ||
+    envFile.APP_TOKEN ||
+    process.env.PUSHOVER_APP_TOKEN ||
+    process.env.APP_TOKEN;
   if (!userKey || !appToken) {
     // 用 warn 而非 debug：这次事故就是被 debug 静默跳过坑了（debug<info 不写日志，
     // 推送悄无声息没了还查不到）。只打布尔，绝不打密钥本身。
     logger.warn(
       { hasUserKey: !!userKey, hasAppToken: !!appToken },
-      '[voice-notify] 缺 PUSHOVER token，跳过推送（检查 .env 的 PUSHOVER_USER_KEY/APP_TOKEN）',
+      '[voice-notify] 缺 PUSHOVER token，跳过推送（检查 .env 的 PUSHOVER_USER_KEY/PUSHOVER_APP_TOKEN，或兼容名 APP_TOKEN）',
     );
     return;
   }
