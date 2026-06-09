@@ -1,4 +1,5 @@
-import type { McpServerConfig } from '../../container-config.js';
+import type { McpServerConfig, AdditionalMountConfig } from '../../container-config.js';
+import { validateMount } from '../../modules/mount-security/index.js';
 import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { getDb, hasTable } from '../../db/connection.js';
@@ -366,6 +367,89 @@ registerResource({
         return {
           removed: { apt: apt || null, npm: npm || null },
           note: 'Image rebuild required for package changes to take effect.',
+        };
+      },
+    },
+    'config add-mount': {
+      access: 'approval',
+      description:
+        'Add an additional bind mount to a group. Requires `ncl groups restart` to take effect (no --rebuild needed). ' +
+        'Use --id <group-id> --host-path <path> --container-path <relative-path> [--writable]. ' +
+        'containerPath must be relative — it is mounted under /workspace/extra/<containerPath> in the container. ' +
+        'Mounts are read-only by default; --writable requests RW but is only granted if the host-allowlist root permits it.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+
+        const hostPath = (args['host-path'] ?? args.host_path) as string | undefined;
+        if (!hostPath) throw new Error('--host-path is required');
+
+        const containerPath = (args['container-path'] ?? args.container_path) as string | undefined;
+        if (!containerPath) throw new Error('--container-path is required');
+
+        const row = getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
+
+        const mounts = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
+
+        if (mounts.some((m) => m.containerPath === containerPath)) {
+          throw new Error(
+            `A mount at container path "${containerPath}" already exists. Remove it first with 'config remove-mount'.`,
+          );
+        }
+
+        const mount: AdditionalMountConfig = {
+          hostPath,
+          containerPath,
+          ...(args.writable ? { readonly: false } : {}),
+        };
+
+        const result = validateMount(mount);
+        if (!result.allowed) {
+          throw new Error(`Mount rejected: ${result.reason}`);
+        }
+
+        mounts.push(mount);
+        updateContainerConfigJson(id, 'additional_mounts', mounts);
+
+        return {
+          added: mount,
+          effective_readonly: result.effectiveReadonly,
+          resolved_host_path: result.realHostPath,
+          mounts,
+          note: 'Restart required for mount to take effect. Run `ncl groups restart --id <group-id>`.',
+        };
+      },
+    },
+    'config remove-mount': {
+      access: 'approval',
+      description:
+        'Remove a bind mount from a group by container path. Requires `ncl groups restart` to take effect. ' +
+        'Use --id <group-id> --container-path <relative-path>.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+
+        const containerPath = (args['container-path'] ?? args.container_path) as string | undefined;
+        if (!containerPath) throw new Error('--container-path is required');
+
+        const row = getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
+
+        const mounts = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
+        const index = mounts.findIndex((m) => m.containerPath === containerPath);
+
+        if (index === -1) {
+          throw new Error(`No mount found at container path "${containerPath}"`);
+        }
+
+        const removed = mounts.splice(index, 1)[0];
+        updateContainerConfigJson(id, 'additional_mounts', mounts);
+
+        return {
+          removed,
+          mounts,
+          note: 'Restart required for mount removal to take effect. Run `ncl groups restart --id <group-id>`.',
         };
       },
     },
