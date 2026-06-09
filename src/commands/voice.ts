@@ -2,7 +2,7 @@ import { logger } from '../logger.js';
 import { registerCommand } from './registry.js';
 
 function ensureVoiceConfig(group: {
-  containerConfig?: { voiceNotify?: { mac?: boolean } };
+  containerConfig?: { voiceNotify?: { push?: boolean; mac?: boolean } };
 }) {
   const config = group.containerConfig ?? {};
   config.voiceNotify = config.voiceNotify ?? {};
@@ -12,13 +12,13 @@ function ensureVoiceConfig(group: {
 
 registerCommand({
   name: '/voice',
-  description: '切换当前群的 Mac 语音播报（on / off / status）',
+  description: '切换当前群的语音播报推送（on / off / status）',
   hasArgs: true,
   order: 23,
   subcommands: [
-    { usage: '/voice on', description: '开启当前群最终结果 Mac 播报' },
-    { usage: '/voice off', description: '关闭当前群最终结果 Mac 播报' },
-    { usage: '/voice status', description: '查看当前群 Mac 播报状态' },
+    { usage: '/voice on', description: '开启当前群最终结果语音推送' },
+    { usage: '/voice off', description: '关闭当前群最终结果语音推送' },
+    { usage: '/voice status', description: '查看当前群语音推送状态' },
   ],
   handler: async (ctx) => {
     const action = ctx.args.trim().toLowerCase() || 'status';
@@ -35,25 +35,26 @@ registerCommand({
     if (action === 'status') {
       await ctx.channel.sendMessage(
         ctx.chatJid,
-        voice.mac
-          ? '🔊 当前群 Mac 语音播报：已开启'
-          : '🔇 当前群 Mac 语音播报：已关闭',
+        voice.push || voice.mac
+          ? '🔊 当前群语音播报推送：已开启'
+          : '🔇 当前群语音播报推送：已关闭',
         { isCommandReply: true },
       );
       return;
     }
 
-    voice.mac = action === 'on';
+    voice.push = action === 'on';
+    delete voice.mac;
     ctx.setRegisteredGroup(ctx.chatJid, ctx.group);
     logger.info(
-      { group: ctx.group.folder, chatJid: ctx.chatJid, macVoice: voice.mac },
-      '/voice: Mac 语音播报切换',
+      { group: ctx.group.folder, chatJid: ctx.chatJid, voicePush: voice.push },
+      '/voice: 语音播报推送切换',
     );
     await ctx.channel.sendMessage(
       ctx.chatJid,
-      voice.mac
-        ? '🔊 已开启当前群 Mac 语音播报 — 最终结果会播报摘要'
-        : '🔇 已关闭当前群 Mac 语音播报',
+      voice.push
+        ? '🔊 已开启当前群语音播报推送 — 最终结果会推送摘要'
+        : '🔇 已关闭当前群语音播报推送',
       { isCommandReply: true },
     );
   },
