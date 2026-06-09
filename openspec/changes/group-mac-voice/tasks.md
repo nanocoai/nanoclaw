@@ -23,4 +23,4 @@
 - [x] 4.1 Add pure function tests for eligibility, alias fallback, and spoken text.
 - [x] 4.2 Add queue tests with mocked TTS process success and failure.
 - [x] 4.3 Add Feishu integration tests for enabled and disabled groups.
-- [ ] 4.4 Run targeted tests and `npm run build`.
+- [x] 4.4 Run targeted tests and `npm run build`.
