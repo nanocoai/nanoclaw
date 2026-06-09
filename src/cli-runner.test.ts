@@ -120,6 +120,7 @@ describe('buildMcpConfig', () => {
             NANOCLAW_GROUP_FOLDER: 'test-group',
             NANOCLAW_IS_MAIN: '1',
             NANOCLAW_IPC_DIR: '/path/to/ipc',
+            NANOCLAW_DISABLE_SEND_MESSAGE: '1',
           },
         },
       },
@@ -130,6 +131,12 @@ describe('buildMcpConfig', () => {
     const config = buildMcpConfig('/mcp.js', 'jid', 'grp', false, '/ipc');
     const env = (config.mcpServers as Record<string, Record<string, Record<string, string>>>).nanoclaw.env;
     expect(env.NANOCLAW_IS_MAIN).toBe('0');
+  });
+
+  it('定时任务保留 send_message 工具用于主动通知', () => {
+    const config = buildMcpConfig('/mcp.js', 'jid', 'grp', false, '/ipc', true);
+    const env = (config.mcpServers as Record<string, Record<string, Record<string, string>>>).nanoclaw.env;
+    expect(env.NANOCLAW_DISABLE_SEND_MESSAGE).toBeUndefined();
   });
 });
 

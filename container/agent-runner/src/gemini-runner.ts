@@ -10,6 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import type { ContainerOutput } from './cli-runner.js';
+import { buildSendMessageToolEnv } from './mcp-tool-policy.js';
 
 const DEFAULT_GEMINI_MODEL = 'gemini-3-pro-preview';
 
@@ -56,6 +57,7 @@ export interface GeminiRunnerConfig {
   env: Record<string, string | undefined>;
   geminiHome: string;
   additionalDirectories?: string[];
+  isScheduledTask?: boolean;
 }
 
 export function parseGeminiEventLine(line: string): GeminiEvent | null {
@@ -106,6 +108,7 @@ export function buildGeminiSettings(config: {
   isMain: boolean;
   ipcDir: string;
   senderId?: string;
+  isScheduledTask?: boolean;
 }): Record<string, unknown> {
   return {
     security: {
@@ -123,6 +126,7 @@ export function buildGeminiSettings(config: {
           NANOCLAW_IS_MAIN: config.isMain ? '1' : '0',
           NANOCLAW_IPC_DIR: config.ipcDir,
           NANOCLAW_SENDER_ID: config.senderId || '',
+          ...buildSendMessageToolEnv(config.isScheduledTask),
         },
         trust: true,
       },
@@ -230,6 +234,7 @@ export async function runGeminiQuery(
     isMain: config.isMain,
     ipcDir: config.ipcDir,
     senderId: config.senderId,
+    isScheduledTask: config.isScheduledTask,
   });
   const sourceHome = config.env.HOME || os.homedir();
   prepareGeminiHome(config.geminiHome, sourceHome, settings, log);

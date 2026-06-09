@@ -6,9 +6,39 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import {
+  buildCodexConfigToml,
   mapCodexUsage,
   readCodexModelInfo,
 } from '../container/agent-runner/src/codex-runner.js';
+
+describe('buildCodexConfigToml', () => {
+  it('普通会话隐藏 send_message 工具', () => {
+    const config = buildCodexConfigToml({
+      mcpServerPath: '/runner/ipc-mcp-stdio.js',
+      chatJid: 'oc_test',
+      groupFolder: 'Codex',
+      isMain: false,
+      ipcDir: '/ipc',
+      senderId: 'ou_user',
+    });
+
+    expect(config).toContain('NANOCLAW_DISABLE_SEND_MESSAGE = "1"');
+  });
+
+  it('定时任务保留 send_message 工具用于主动通知', () => {
+    const config = buildCodexConfigToml({
+      mcpServerPath: '/runner/ipc-mcp-stdio.js',
+      chatJid: 'oc_test',
+      groupFolder: 'Codex',
+      isMain: false,
+      ipcDir: '/ipc',
+      senderId: 'ou_user',
+      isScheduledTask: true,
+    });
+
+    expect(config).not.toContain('NANOCLAW_DISABLE_SEND_MESSAGE');
+  });
+});
 
 describe('mapCodexUsage', () => {
   it('用本轮 input + cached input 计算 lastTurnContext', () => {
