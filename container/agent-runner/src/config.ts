@@ -27,15 +27,39 @@ let _config: RunnerConfig | null = null;
 /**
  * Load config from container.json. Called once at startup.
  * Falls back to sensible defaults for any missing field.
+ *
+ * Retry loop: on Apple Container, /workspace/agent is a nested virtio-fs
+ * mount that takes a moment to become readable after the container starts.
+ * The first read commonly fails with EACCES or ENOENT and the file becomes
+ * available within ~500ms. We retry briefly before giving up. This is a
+ * no-op on Docker/Linux runtimes where the mount is ready before init runs.
  */
 export function loadConfig(): RunnerConfig {
   if (_config) return _config;
 
   let raw: Record<string, unknown> = {};
-  try {
-    raw = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-  } catch {
-    console.error(`[config] Failed to read ${CONFIG_PATH}, using defaults`);
+  let lastErr: unknown = null;
+  const RETRY_MS = [50, 100, 200, 400, 800, 1500];
+  for (let attempt = 0; attempt <= RETRY_MS.length; attempt++) {
+    try {
+      raw = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+      if (attempt > 0) {
+        console.error(`[config] Read ${CONFIG_PATH} on retry ${attempt}`);
+      }
+      lastErr = null;
+      break;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < RETRY_MS.length) {
+        // Synchronous sleep — we're in startup, no event loop yet.
+        const until = Date.now() + RETRY_MS[attempt];
+        while (Date.now() < until) {} // busy-wait, ~hundreds of ms total in worst case
+      }
+    }
+  }
+  if (lastErr) {
+    const reason = lastErr instanceof Error ? lastErr.message : String(lastErr);
+    console.error(`[config] Failed to read ${CONFIG_PATH} after retries, using defaults: ${reason}`);
   }
 
   _config = {

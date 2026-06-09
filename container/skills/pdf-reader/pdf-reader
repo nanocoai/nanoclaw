@@ -1,0 +1,203 @@
+#!/bin/bash
+set -euo pipefail
+
+# pdf-reader — CLI wrapper around poppler-utils (pdftotext, pdfinfo)
+# Provides extract, fetch, info, list commands for PDF processing.
+
+VERSION="1.0.0"
+
+usage() {
+  cat <<'USAGE'
+pdf-reader — Extract text and metadata from PDF files
+
+Usage:
+  pdf-reader extract <file> [--layout] [--pages N-M]
+  pdf-reader fetch <url> [filename]
+  pdf-reader info <file>
+  pdf-reader list
+  pdf-reader help
+
+Commands:
+  extract   Extract text from a PDF file to stdout
+  fetch     Download a PDF from a URL and extract text
+  info      Show PDF metadata and file size
+  list      List all PDFs in current directory tree
+  help      Show this help message
+
+Extract options:
+  --layout  Preserve original layout (tables, columns)
+  --pages   Page range to extract (e.g. 1-5, 3-3 for single page)
+USAGE
+}
+
+cmd_extract() {
+  local file=""
+  local layout=false
+  local first_page=""
+  local last_page=""
+
+  # Parse arguments
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --layout)
+        layout=true
+        shift
+        ;;
+      --pages)
+        if [[ -z "${2:-}" ]]; then
+          echo "Error: --pages requires a range argument (e.g. 1-5)" >&2
+          exit 1
+        fi
+        local range="$2"
+        first_page="${range%-*}"
+        last_page="${range#*-}"
+        shift 2
+        ;;
+      -*)
+        echo "Error: Unknown option: $1" >&2
+        exit 1
+        ;;
+      *)
+        if [[ -z "$file" ]]; then
+          file="$1"
+        else
+          echo "Error: Unexpected argument: $1" >&2
+          exit 1
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$file" ]]; then
+    echo "Error: No file specified" >&2
+    echo "Usage: pdf-reader extract <file> [--layout] [--pages N-M]" >&2
+    exit 1
+  fi
+
+  if [[ ! -f "$file" ]]; then
+    echo "Error: File not found: $file" >&2
+    exit 1
+  fi
+
+  # Build pdftotext arguments
+  local args=()
+  if [[ "$layout" == true ]]; then
+    args+=(-layout)
+  fi
+  if [[ -n "$first_page" ]]; then
+    args+=(-f "$first_page")
+  fi
+  if [[ -n "$last_page" ]]; then
+    args+=(-l "$last_page")
+  fi
+
+  pdftotext ${args[@]+"${args[@]}"} "$file" -
+}
+
+cmd_fetch() {
+  local url="${1:-}"
+  local filename="${2:-}"
+
+  if [[ -z "$url" ]]; then
+    echo "Error: No URL specified" >&2
+    echo "Usage: pdf-reader fetch <url> [filename]" >&2
+    exit 1
+  fi
+
+  # Create temporary file
+  local tmpfile
+  tmpfile="$(mktemp /tmp/pdf-reader-XXXXXX.pdf)"
+  trap 'rm -f "$tmpfile"' EXIT
+
+  # Download
+  echo "Downloading: $url" >&2
+  if ! curl -sL -o "$tmpfile" "$url"; then
+    echo "Error: Failed to download: $url" >&2
+    exit 1
+  fi
+
+  # Verify PDF header
+  local header
+  header="$(head -c 4 "$tmpfile")"
+  if [[ "$header" != "%PDF" ]]; then
+    echo "Error: Downloaded file is not a valid PDF (header: $header)" >&2
+    exit 1
+  fi
+
+  # Save with name if requested
+  if [[ -n "$filename" ]]; then
+    cp "$tmpfile" "$filename"
+    echo "Saved to: $filename" >&2
+  fi
+
+  # Extract with layout
+  pdftotext -layout "$tmpfile" -
+}
+
+cmd_info() {
+  local file="${1:-}"
+
+  if [[ -z "$file" ]]; then
+    echo "Error: No file specified" >&2
+    echo "Usage: pdf-reader info <file>" >&2
+    exit 1
+  fi
+
+  if [[ ! -f "$file" ]]; then
+    echo "Error: File not found: $file" >&2
+    exit 1
+  fi
+
+  pdfinfo "$file"
+  echo ""
+  echo "File size:    $(du -h "$file" | cut -f1)"
+}
+
+cmd_list() {
+  local found=false
+
+  # Use globbing to find PDFs (globstar makes **/ match recursively)
+  shopt -s nullglob globstar
+
+  # Use associative array to deduplicate (*.pdf overlaps with **/*.pdf)
+  declare -A seen
+  for pdf in *.pdf **/*.pdf; do
+    [[ -v seen["$pdf"] ]] && continue
+    seen["$pdf"]=1
+    found=true
+
+    local pages="?"
+    local size
+    size="$(du -h "$pdf" | cut -f1)"
+
+    # Try to get page count from pdfinfo
+    if page_line="$(pdfinfo "$pdf" 2>/dev/null | grep '^Pages:')"; then
+      pages="$(echo "$page_line" | awk '{print $2}')"
+    fi
+
+    printf "%-60s %5s pages  %8s\n" "$pdf" "$pages" "$size"
+  done
+
+  if [[ "$found" == false ]]; then
+    echo "No PDF files found in current directory tree." >&2
+  fi
+}
+
+# Main dispatch
+command="${1:-help}"
+shift || true
+
+case "$command" in
+  extract) cmd_extract "$@" ;;
+  fetch)   cmd_fetch "$@" ;;
+  info)    cmd_info "$@" ;;
+  list)    cmd_list ;;
+  help|--help|-h) usage ;;
+  version|--version|-v) echo "pdf-reader $VERSION" ;;
+  *)
+    echo "Error: Unknown command: $command" >&2
+    echo "Run 'pdf-reader help' for usage." >&2
+    exit 1
+    ;;
+esac

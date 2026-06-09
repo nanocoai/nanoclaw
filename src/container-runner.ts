@@ -10,15 +10,19 @@ import path from 'path';
 import { OneCLI } from '@onecli-sh/sdk';
 
 import {
+  CONTAINER_HOST_GATEWAY,
   CONTAINER_IMAGE,
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
+  CREDENTIAL_PROXY_PORT,
   DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
   ONECLI_URL,
   TIMEZONE,
+  USE_NATIVE_CREDENTIAL_PROXY,
 } from './config.js';
+import { detectAuthMode } from './credential-proxy.js';
 import { materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars, updateContainerConfigJson } from './db/container-configs.js';
@@ -419,19 +423,43 @@ async function buildContainerArgs(
     }
   }
 
-  // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
-  // are routed through the agent vault for credential injection. Treated as
-  // a transient hard failure: if we can't wire the gateway, we don't spawn.
-  // The caller (router or host-sweep) catches the throw, leaves the inbound
-  // message pending, and the next sweep tick retries.
-  if (agentIdentifier) {
-    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+  if (USE_NATIVE_CREDENTIAL_PROXY) {
+    // Native credential proxy — containers point their Anthropic SDK at the
+    // host-side proxy, which injects the real API key / OAuth token from
+    // .env. Containers see only a placeholder.
+    //
+    // The host portion of the URL must be reachable from the container's
+    // network. Docker on macOS auto-resolves host.docker.internal; Apple
+    // Container requires either the bridge100 gateway IP or that the proxy
+    // binds to 0.0.0.0 with an external interface IP the container can reach.
+    args.push('-e', `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`);
+    const authMode = detectAuthMode();
+    if (authMode === 'api-key') {
+      args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+    } else {
+      // ANTHROPIC_AUTH_TOKEN (not CLAUDE_CODE_OAUTH_TOKEN): the Claude CLI
+      // sends it as a plain Bearer header on /v1/messages without first
+      // exchanging it for a temp API key via /api/oauth/claude_cli/create_api_key.
+      // Many Pro-tier OAuth tokens lack the `org:create_api_key` scope, so
+      // the exchange returns 403; direct Bearer auth works regardless.
+      args.push('-e', 'ANTHROPIC_AUTH_TOKEN=placeholder');
+    }
+    log.info('Native credential proxy wired into container', { containerName, authMode });
+  } else {
+    // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
+    // are routed through the agent vault for credential injection. Treated as
+    // a transient hard failure: if we can't wire the gateway, we don't spawn.
+    // The caller (router or host-sweep) catches the throw, leaves the inbound
+    // message pending, and the next sweep tick retries.
+    if (agentIdentifier) {
+      await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+    }
+    const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+    if (!onecliApplied) {
+      throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
+    }
+    log.info('OneCLI gateway applied', { containerName });
   }
-  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
-  if (!onecliApplied) {
-    throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
-  }
-  log.info('OneCLI gateway applied', { containerName });
 
   // Egress lockdown when enabled — throws if it can't be established, aborting
   // the spawn rather than running with open egress. Otherwise the host gateway.
@@ -457,6 +485,11 @@ async function buildContainerArgs(
     } else {
       args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
     }
+  }
+
+  // Memory cap. Both Docker and Apple Container accept `-m <N>MiB`.
+  if (containerConfig.memoryMb && containerConfig.memoryMb > 0) {
+    args.push('-m', `${containerConfig.memoryMb}MiB`);
   }
 
   // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).

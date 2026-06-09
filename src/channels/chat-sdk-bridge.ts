@@ -153,7 +153,23 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             const buffer = await att.fetchData();
             entry.data = buffer.toString('base64');
           } catch (err) {
-            log.warn('Failed to download attachment', { type: att.type, err });
+            const msg = err instanceof Error ? err.message : String(err);
+            // Telegram caps bot getFile at 20 MiB. Other platforms have their
+            // own caps. Surface the cause to the agent (via `entry.error`) so
+            // it can give the user a clear "too big to download" explanation
+            // instead of pretending the attachment doesn't exist.
+            const tooBig = /too big|too large|file is too big|too_big|413|payload too large/i.test(msg);
+            entry.error = tooBig ? 'too_big' : 'download_failed';
+            entry.errorMessage = msg;
+            if (tooBig) {
+              log.info('Attachment too big to download — surfacing to agent', {
+                type: att.type,
+                name: att.name,
+                size: att.size,
+              });
+            } else {
+              log.warn('Failed to download attachment', { type: att.type, err });
+            }
           }
         }
         enriched.push(entry);

@@ -19,6 +19,7 @@ export interface ContainerConfigRow {
   image_tag: string | null;
   assistant_name: string | null;
   max_messages_per_prompt: number | null;
+  memory_mb: number | null;
   skills: string; // JSON: '"all"' | '["skill1","skill2"]'
   mcp_servers: string; // JSON: Record<string, McpServerConfig>
   packages_apt: string; // JSON: string[]
