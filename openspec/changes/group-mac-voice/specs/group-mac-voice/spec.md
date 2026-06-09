@@ -1,46 +1,51 @@
 ## ADDED Requirements
 
-### Requirement: Per-group Mac voice toggle
+### Requirement: Per-group Pushover voice toggle
 
-The system SHALL allow each registered group to independently enable or disable Mac local voice announcements. The default SHALL be disabled for groups unless explicitly enabled.
+The system SHALL allow each registered group to independently enable or disable Pushover voice notifications. The default SHALL be disabled for groups unless explicitly enabled, including the main group.
 
-#### Scenario: Group enables Mac voice
+#### Scenario: Group enables voice push
 
-- **WHEN** a user enables Mac voice for the current group
-- **THEN** the group's persisted container configuration records Mac voice as enabled
+- **WHEN** a user enables voice notification for the current group
+- **THEN** the group's persisted container configuration records Pushover voice as enabled
 
-#### Scenario: Group disables Mac voice
+#### Scenario: Group disables voice push
 
-- **WHEN** a user disables Mac voice for the current group
-- **THEN** future final replies in that group do not trigger Mac local voice announcements
+- **WHEN** a user disables voice notification for the current group
+- **THEN** future final replies in that group do not trigger Pushover voice notifications
 
 #### Scenario: Unconfigured group
 
-- **WHEN** a group has no Mac voice configuration
-- **THEN** final replies in that group do not trigger Mac local voice announcements
+- **WHEN** a group has no voice notification configuration
+- **THEN** final replies in that group do not trigger Pushover voice notifications
+
+#### Scenario: Main group is unconfigured
+
+- **WHEN** the main group has no voice notification configuration
+- **THEN** final replies in the main group do not trigger Pushover voice notifications
 
 ### Requirement: Final-result-only announcements
 
-The system SHALL trigger Mac local voice announcements only for final user-visible replies, not for tool calls, tool results, progress text, media placeholders, or very short system messages.
+The system SHALL trigger Pushover voice notifications only for final user-visible replies, not for tool calls, tool results, progress text, media placeholders, or very short system messages.
 
 #### Scenario: Final reply arrives
 
-- **WHEN** a final text reply is sent to a group with Mac voice enabled
-- **THEN** the system schedules one Mac voice announcement for the summarized result
+- **WHEN** a final text reply is sent to a group with voice notification enabled
+- **THEN** the system sends one Pushover voice notification for the summarized result
 
 #### Scenario: Tool progress arrives
 
 - **WHEN** a tool call or tool result progress event is shown
-- **THEN** the system does not schedule a Mac voice announcement
+- **THEN** the system does not send a Pushover voice notification
 
 #### Scenario: Media-only reply arrives
 
 - **WHEN** the remaining text after stripping media markers is empty or too short
-- **THEN** the system does not schedule a Mac voice announcement
+- **THEN** the system does not send a Pushover voice notification
 
 ### Requirement: Alias-prefixed speech
 
-The system SHALL prefix Mac voice announcements with a stable group label. The label priority SHALL be configured alias, then registered group name, then shortened chat JID.
+The system SHALL prefix Pushover voice notification text with a stable group label. The label priority SHALL be configured alias, then registered group name, then shortened chat JID.
 
 #### Scenario: Alias exists
 
@@ -57,30 +62,30 @@ The system SHALL prefix Mac voice announcements with a stable group label. The l
 - **WHEN** neither alias nor group name is available
 - **THEN** the spoken text starts with a shortened chat JID followed by the summarized result
 
-### Requirement: Serial Mac playback
+### Requirement: Pushover delivery safety
 
-The system SHALL play Mac local voice announcements serially so multiple group results do not overlap.
+The system SHALL keep Pushover delivery fire-and-forget, bounded, and non-blocking for the Feishu reply path.
 
-#### Scenario: Multiple announcements queued
+#### Scenario: Pushover credentials are missing
 
-- **WHEN** two or more announcements are scheduled close together
-- **THEN** the system plays them one after another
+- **WHEN** voice notification is enabled but Pushover credentials are missing
+- **THEN** the system logs a warning and still sends the Feishu reply
 
-#### Scenario: Mac TTS command fails
+#### Scenario: Pushover delivery fails
 
-- **WHEN** the local TTS process exits with an error
-- **THEN** the system logs a warning and continues processing later queued announcements
+- **WHEN** Pushover returns an error or times out
+- **THEN** the system logs a warning and does not fail the Feishu reply
 
-### Requirement: Existing Pushover compatibility
+### Requirement: Legacy config compatibility
 
-The system SHALL preserve the existing main-group Pushover notification behavior unless separately configured otherwise.
+The system SHALL treat the early `voiceNotify.mac` flag as enabled voice push during runtime, and SHALL write `voiceNotify.push` for new command changes.
 
-#### Scenario: Main group final reply
+#### Scenario: Existing mac flag is true
 
-- **WHEN** the main group receives a final reply
-- **THEN** the existing Pushover notification path remains available
+- **WHEN** a group has `voiceNotify.mac` set to true from the earlier implementation
+- **THEN** final replies in that group still trigger Pushover voice notifications
 
-#### Scenario: Non-main group enables Mac voice
+#### Scenario: User changes voice setting
 
-- **WHEN** a non-main group enables Mac voice
-- **THEN** the system uses Mac local speech without requiring Pushover credentials
+- **WHEN** a user runs `/voice on` or `/voice off`
+- **THEN** the system writes `voiceNotify.push` and removes the legacy `voiceNotify.mac` flag

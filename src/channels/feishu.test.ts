@@ -197,7 +197,7 @@ describe('FeishuChannel', () => {
               folder: 'fs_oc_voice',
               trigger: '@bot',
               added_at: new Date().toISOString(),
-              containerConfig: { voiceNotify: { mac: true } },
+              containerConfig: { voiceNotify: { push: true } },
             },
           }),
         }),
@@ -214,7 +214,7 @@ describe('FeishuChannel', () => {
           text: '这是最终结果',
           chatJid: 'fs:oc_voice',
           groupName: '语音测试群',
-          containerConfig: { voiceNotify: { mac: true } },
+          containerConfig: { voiceNotify: { push: true } },
           aliases: { '3号群': 'fs:oc_voice' },
         }),
       );

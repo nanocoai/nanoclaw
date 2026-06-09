@@ -43,7 +43,9 @@ export interface ContainerConfig {
   autoFollowupSummary?: boolean;
   /** 语音播报配置：按群独立控制本机 Mac 播报等出口 */
   voiceNotify?: {
-    /** 最终回复摘要在当前 Mac 上用系统 TTS 播报 */
+    /** 最终回复摘要通过 Pushover 推送到手机/耳机播报 */
+    push?: boolean;
+    /** @deprecated 早期 Mac 本地播报开关，保留兼容旧配置 */
     mac?: boolean;
   };
 }

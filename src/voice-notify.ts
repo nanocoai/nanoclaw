@@ -2,15 +2,14 @@
  * 语音通知：飞书消息发给大杰时，并行推送一份 LLM 摘要到 Pushover，
  * iOS 端借 "朗读通知" 功能自动经 AirPods 念出来。
  *
- * 触发条件：group folder === 'feishu_main'（主会话）
+ * 触发条件：当前群显式开启 voiceNotify.push（兼容旧 voiceNotify.mac）
  * 链路：飞书文字 → 本模块 → LLM 压口语版 → Pushover API → APNs → iOS TTS
  *
  * 设计原则：
  * - 纯 fire-and-forget，失败不影响飞书主流程
  * - 超时有界（15s 摘要 + 3s 推送），挂了就放过
- * - 空 token / 非主会话 → 跳过，无副作用
+ * - 空 token / 未开启群 → 跳过，无副作用
  */
-import { spawn } from 'child_process';
 import OpenAI from 'openai';
 
 import { logger } from './logger.js';
@@ -27,7 +26,6 @@ const SUMMARIZE_TIMEOUT_MS = 15000;
 // 不复用记忆系统的 llmModel（qwen3.7-max 太慢，长输入必超时）。
 const VOICE_SUMMARY_MODEL = process.env.VOICE_SUMMARY_MODEL || 'qwen-turbo';
 const PUSH_TIMEOUT_MS = 3000;
-const DEFAULT_MAC_VOICE = process.env.MAC_VOICE_VOICE;
 
 const SYSTEM_PROMPT = `你把一段给用户的 AI 回复改写成口语化的语音播报版本，供 TTS 朗读。语音是线性的，用户只能听、不能跳读，所以要让他第一耳朵就抓住重点。
 
@@ -53,12 +51,6 @@ export interface VoiceNotifyContext {
   aliases?: Record<string, string>;
 }
 
-type MacVoiceRunner = (text: string, voice?: string) => Promise<void>;
-
-let macVoiceRunner: MacVoiceRunner = runMacSay;
-const macVoiceQueue: Array<{ text: string; voice?: string }> = [];
-let macVoiceRunning = false;
-
 /**
  * 判断文本是否值得播报
  */
@@ -74,19 +66,10 @@ export function isVoiceTextEligible(text: string): boolean {
 /**
  * 判断是否应该推送 Pushover 语音通知
  */
-function shouldNotifyPushover(
-  groupFolder: string | null,
-  text: string,
-): boolean {
-  return groupFolder === 'feishu_main' && isVoiceTextEligible(text);
-}
-
-/**
- * 判断当前群是否开启 Mac 本地语音播报
- */
-export function shouldNotifyMacVoice(context: VoiceNotifyContext): boolean {
+export function shouldNotifyPushover(context: VoiceNotifyContext): boolean {
   return (
-    context.containerConfig?.voiceNotify?.mac === true &&
+    (context.containerConfig?.voiceNotify?.push === true ||
+      context.containerConfig?.voiceNotify?.mac === true) &&
     isVoiceTextEligible(context.text)
   );
 }
@@ -156,7 +139,7 @@ async function summarizeForSpeech(text: string): Promise<string> {
 /**
  * 推送到 Pushover
  */
-async function pushToPushover(summary: string): Promise<void> {
+async function pushToPushover(message: string): Promise<void> {
   // token 优先从 .env 文件读(readEnvFile），fallback process.env。
   // 根因：主进程不把 .env 注入 process.env（见 env.ts 注释「Does NOT load into process.env」），
   // launchd plist 也没配 PUSHOVER，之前直接读 process.env 拿到 undefined → 推送被 debug 静默跳过，
@@ -177,7 +160,7 @@ async function pushToPushover(summary: string): Promise<void> {
   const body = new URLSearchParams({
     token: appToken,
     user: userKey,
-    message: summary,
+    message,
     priority: '1', // Time Sensitive，锁屏/勿扰也能响
     title: '大狗', // iOS 朗读会带上，改空能省一句
   });
@@ -200,7 +183,7 @@ async function pushToPushover(summary: string): Promise<void> {
       );
     } else {
       logger.info(
-        { chars: summary.length },
+        { chars: message.length },
         '[voice-notify] Pushover 推送成功',
       );
     }
@@ -209,64 +192,6 @@ async function pushToPushover(summary: string): Promise<void> {
   } finally {
     clearTimeout(timer);
   }
-}
-
-function runMacSay(text: string, voice?: string): Promise<void> {
-  if (process.platform !== 'darwin') {
-    logger.warn(
-      { platform: process.platform },
-      '[voice-notify] 非 macOS 环境，跳过 Mac 播报',
-    );
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve) => {
-    const args = voice ? ['-v', voice, text] : [text];
-    const child = spawn('/usr/bin/say', args, {
-      stdio: 'ignore',
-    });
-    child.on('error', (err) => {
-      logger.warn({ err }, '[voice-notify] Mac say 启动失败');
-      resolve();
-    });
-    child.on('close', (code) => {
-      if (code && code !== 0) {
-        logger.warn({ code }, '[voice-notify] Mac say 非 0 退出');
-      }
-      resolve();
-    });
-  });
-}
-
-function enqueueMacSpeech(text: string, voice = DEFAULT_MAC_VOICE): void {
-  macVoiceQueue.push({ text, voice });
-  void drainMacVoiceQueue();
-}
-
-async function drainMacVoiceQueue(): Promise<void> {
-  if (macVoiceRunning) return;
-  macVoiceRunning = true;
-  try {
-    while (macVoiceQueue.length > 0) {
-      const item = macVoiceQueue.shift()!;
-      await macVoiceRunner(item.text, item.voice);
-      logger.info(
-        { chars: item.text.length, voice: item.voice },
-        '[voice-notify] Mac 播报完成',
-      );
-    }
-  } catch (err) {
-    logger.warn({ err }, '[voice-notify] Mac 播报队列异常');
-  } finally {
-    macVoiceRunning = false;
-    if (macVoiceQueue.length > 0) void drainMacVoiceQueue();
-  }
-}
-
-export function setMacVoiceRunnerForTest(runner: MacVoiceRunner | null): void {
-  macVoiceRunner = runner ?? runMacSay;
-  macVoiceQueue.length = 0;
-  macVoiceRunning = false;
 }
 
 /**
@@ -283,24 +208,14 @@ export function notifyVoice(
       ? groupFolderOrContext
       : { groupFolder: groupFolderOrContext, text: maybeText ?? '' };
 
-  const notifyPushover = shouldNotifyPushover(
-    context.groupFolder,
-    context.text,
-  );
-  const notifyMac = shouldNotifyMacVoice(context);
-  if (!notifyPushover && !notifyMac) return;
+  if (!shouldNotifyPushover(context)) return;
 
   // 异步 IIFE，异常全吃掉，不影响主链路
   void (async () => {
     try {
       const summary = await summarizeForSpeech(context.text);
-      if (notifyPushover) {
-        await pushToPushover(summary);
-      }
-      if (notifyMac) {
-        const label = resolveVoiceGroupLabel(context);
-        enqueueMacSpeech(buildSpokenText(label, summary));
-      }
+      const label = resolveVoiceGroupLabel(context);
+      await pushToPushover(buildSpokenText(label, summary));
     } catch (err) {
       logger.warn({ err }, '[voice-notify] 未捕获异常');
     }
