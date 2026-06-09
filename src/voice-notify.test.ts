@@ -147,7 +147,7 @@ describe('voice-notify 推送 token 来源', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(macRunner).toHaveBeenCalledWith(
       expect.stringContaining('3号群：这是一条足够长的测试回复内容'),
-      expect.any(String),
+      undefined,
     );
   });
 

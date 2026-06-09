@@ -27,7 +27,7 @@ const SUMMARIZE_TIMEOUT_MS = 15000;
 // 不复用记忆系统的 llmModel（qwen3.7-max 太慢，长输入必超时）。
 const VOICE_SUMMARY_MODEL = process.env.VOICE_SUMMARY_MODEL || 'qwen-turbo';
 const PUSH_TIMEOUT_MS = 3000;
-const DEFAULT_MAC_VOICE = process.env.MAC_VOICE_VOICE || 'Ting-Ting';
+const DEFAULT_MAC_VOICE = process.env.MAC_VOICE_VOICE;
 
 const SYSTEM_PROMPT = `你把一段给用户的 AI 回复改写成口语化的语音播报版本，供 TTS 朗读。语音是线性的，用户只能听、不能跳读，所以要让他第一耳朵就抓住重点。
 
@@ -53,10 +53,10 @@ export interface VoiceNotifyContext {
   aliases?: Record<string, string>;
 }
 
-type MacVoiceRunner = (text: string, voice: string) => Promise<void>;
+type MacVoiceRunner = (text: string, voice?: string) => Promise<void>;
 
 let macVoiceRunner: MacVoiceRunner = runMacSay;
-const macVoiceQueue: Array<{ text: string; voice: string }> = [];
+const macVoiceQueue: Array<{ text: string; voice?: string }> = [];
 let macVoiceRunning = false;
 
 /**
@@ -211,7 +211,7 @@ async function pushToPushover(summary: string): Promise<void> {
   }
 }
 
-function runMacSay(text: string, voice: string): Promise<void> {
+function runMacSay(text: string, voice?: string): Promise<void> {
   if (process.platform !== 'darwin') {
     logger.warn(
       { platform: process.platform },
@@ -221,7 +221,8 @@ function runMacSay(text: string, voice: string): Promise<void> {
   }
 
   return new Promise((resolve) => {
-    const child = spawn('/usr/bin/say', ['-v', voice, text], {
+    const args = voice ? ['-v', voice, text] : [text];
+    const child = spawn('/usr/bin/say', args, {
       stdio: 'ignore',
     });
     child.on('error', (err) => {
