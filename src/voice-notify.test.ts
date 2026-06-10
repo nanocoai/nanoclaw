@@ -214,6 +214,21 @@ describe('voice-notify 网关推送', () => {
     );
   });
 
+  it('多别名时选最长的（TTS 念"7号群"比单字"7"听得清）', () => {
+    expect(
+      resolveVoiceGroupLabel({
+        chatJid: 'fs:oc_group7',
+        groupName: '真实群名',
+        aliases: {
+          '7': 'fs:oc_group7',
+          '7号': 'fs:oc_group7',
+          '7号群': 'fs:oc_group7',
+          '3号群': 'fs:oc_group3',
+        },
+      }),
+    ).toBe('7号群');
+  });
+
   it('推送判断必须同时满足开关和有效文本', () => {
     expect(
       shouldNotifyPushover({

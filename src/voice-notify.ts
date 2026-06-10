@@ -85,9 +85,12 @@ export function resolveVoiceGroupLabel(
   context: Pick<VoiceNotifyContext, 'aliases' | 'chatJid' | 'groupName'>,
 ): string {
   if (context.chatJid && context.aliases) {
-    const alias = Object.entries(context.aliases).find(
-      ([, jid]) => jid === context.chatJid,
-    )?.[0];
+    // 同一个群常有多个别名（"7"/"7号"/"7号群"），选最长的：
+    // TTS 念"7号群"能听清，念单字"7"一闪而过等于没报
+    const alias = Object.entries(context.aliases)
+      .filter(([, jid]) => jid === context.chatJid)
+      .map(([name]) => name)
+      .sort((a, b) => b.length - a.length)[0];
     if (alias) return alias;
   }
   if (context.groupName?.trim()) return context.groupName.trim();
