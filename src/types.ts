@@ -142,6 +142,8 @@ export interface SendMessageOptions {
   isCommandReply?: boolean;
   // 调用方显式标记为进度消息，不再依赖 emoji 猜测
   isProgress?: boolean;
+  // 跳过语音播报推送（如语音回显：用户刚说过的话不要再总结播回去）
+  skipVoiceNotify?: boolean;
 }
 
 export interface Channel {

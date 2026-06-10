@@ -1803,7 +1803,8 @@ async function startMessageLoop(): Promise<void> {
       },
       echoToFeishu: async (jid, text) => {
         const channel = findChannel(channels, jid);
-        if (channel) await channel.sendMessage(jid, text);
+        // skipVoiceNotify：回显的是用户刚说的话，不要再总结播回手机
+        if (channel) await channel.sendMessage(jid, text, { skipVoiceNotify: true });
       },
     });
   } catch (err) {
