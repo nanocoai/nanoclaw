@@ -15,6 +15,7 @@ import OpenAI from 'openai';
 import { logger } from './logger.js';
 import { getMemoryConfig } from './memory/config.js';
 import { readEnvFile } from './env.js';
+import { broadcastVoiceSpeech } from './voice-ws.js';
 import type { RegisteredGroup } from './types.js';
 
 const PUSHOVER_API = 'https://api.pushover.net/1/messages.json';
@@ -223,6 +224,8 @@ export function notifyVoice(
     try {
       const summary = await summarizeForSpeech(context.text);
       const label = resolveVoiceGroupLabel(context);
+      // WS 广播给自研 app（本地 TTS 队列），与 Pushover 并行双出口
+      broadcastVoiceSpeech(label, summary);
       await pushToPushover(buildSpokenText(label, summary));
     } catch (err) {
       logger.warn({ err }, '[voice-notify] 未捕获异常');
