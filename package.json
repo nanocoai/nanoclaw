@@ -29,8 +29,7 @@
     "@qdrant/js-client-rest": "^1.17.0",
     "better-sqlite3": "11.10.0",
     "cron-parser": "5.5.0",
-    "openai": "^6.33.0",
-    "ws": "^8.20.0"
+    "openai": "^6.33.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",

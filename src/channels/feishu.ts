@@ -680,28 +680,31 @@ export class FeishuChannel implements Channel {
     // 统一媒体提取与发送（图片/文件标记提取、文本发送、媒体上传，互不阻塞）
     const groupFolder = this.getGroupFolder(jid);
 
-    // 语音通知（按群 /voice 开关）：剥离媒体标记后送 LLM 摘要 → Pushover → iOS 朗读
+    // 语音通知（按群 /voice 开关）：剥离媒体标记后送 LLM 摘要 → 语音网关 → iOS 朗读
     // fire-and-forget，不 await，不影响飞书主流程
-    const textForSpeech = text
-      .replace(new RegExp(IMAGE_SEND_PATTERN.source, 'gi'), '')
-      .replace(new RegExp(FILE_SEND_PATTERN.source, 'gi'), '')
-      .replace(/\s{2,}/g, ' ')
-      .trim();
-    const group = this.opts.registeredGroups()[jid];
-    let aliases: Record<string, string> | undefined;
-    try {
-      aliases = getAllGroupAliases();
-    } catch (err) {
-      logger.warn({ err, jid }, '读取群别名失败，语音播报将使用群名或 JID');
+    // skipVoiceNotify：语音回显等消息不推（用户刚说的话不要总结播回去）
+    if (!options?.skipVoiceNotify) {
+      const textForSpeech = text
+        .replace(new RegExp(IMAGE_SEND_PATTERN.source, 'gi'), '')
+        .replace(new RegExp(FILE_SEND_PATTERN.source, 'gi'), '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+      const group = this.opts.registeredGroups()[jid];
+      let aliases: Record<string, string> | undefined;
+      try {
+        aliases = getAllGroupAliases();
+      } catch (err) {
+        logger.warn({ err, jid }, '读取群别名失败，语音播报将使用群名或 JID');
+      }
+      notifyVoice({
+        groupFolder,
+        text: textForSpeech,
+        chatJid: jid,
+        groupName: group?.name,
+        containerConfig: group?.containerConfig,
+        aliases,
+      });
     }
-    notifyVoice({
-      groupFolder,
-      text: textForSpeech,
-      chatJid: jid,
-      groupName: group?.name,
-      containerConfig: group?.containerConfig,
-      aliases,
-    });
 
     return this.extractAndSendMedia(chatId, text, groupFolder, usage, thinking);
   }

@@ -58,6 +58,7 @@ export interface InteractiveCliConfig {
   timeoutMs?: number;
   /** 输入已被 Claude CLI 接收时回调，用于 ack IPC inflight 文件 */
   onInputAccepted?: () => void;
+  isScheduledTask?: boolean;
 }
 
 export interface InteractiveQueryResult {
@@ -276,6 +277,7 @@ export async function runInteractiveQuery(
     config.groupFolder,
     config.isMain,
     config.ipcDir,
+    config.isScheduledTask,
   );
   const mcpConfigPath = path.join(
     os.tmpdir(),

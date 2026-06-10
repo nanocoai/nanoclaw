@@ -93,7 +93,24 @@ describe('gemini-runner', () => {
       NANOCLAW_IS_MAIN: '0',
       NANOCLAW_IPC_DIR: '/ipc',
       NANOCLAW_SENDER_ID: 'ou_user',
+      NANOCLAW_DISABLE_SEND_MESSAGE: '1',
     });
+  });
+
+  it('定时任务保留 send_message 工具用于主动通知', () => {
+    const settings = buildGeminiSettings({
+      mcpServerPath: '/runner/ipc-mcp-stdio.js',
+      chatJid: 'oc_test',
+      groupFolder: 'Gemini3_1',
+      isMain: false,
+      ipcDir: '/ipc',
+      senderId: 'ou_user',
+      isScheduledTask: true,
+    }) as unknown as GeminiSettingsForTest;
+
+    expect(
+      settings.mcpServers.nanoclaw.env.NANOCLAW_DISABLE_SEND_MESSAGE,
+    ).toBeUndefined();
   });
 
   it('构建 per-group HOME 环境', () => {

@@ -83,7 +83,6 @@ import {
 } from './sender-allowlist.js';
 import { startSessionCleanup } from './session-cleanup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { startVoiceWsServer, stopVoiceWsServer } from './voice-ws.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import type { CliMode } from './types.js';
 import { logger } from './logger.js';
@@ -1784,6 +1783,34 @@ async function startMessageLoop(): Promise<void> {
     /* debug api 启动失败不影响主流程 */
   }
 
+  // 语音回传订阅 — iOS app 语音回复经网关回流，注入对应群会话
+  try {
+    const { startVoiceReplySubscriber } = await import('./voice-reply.js');
+    startVoiceReplySubscriber({
+      isRegisteredGroup: (jid) => Boolean(registeredGroups[jid]),
+      injectMessage: (jid, text) => {
+        storeMessage({
+          id: `voice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          chat_jid: jid,
+          sender: 'voice',
+          sender_name: '大杰（语音）',
+          content: text,
+          timestamp: new Date().toISOString(),
+          is_from_me: true,
+          is_bot_message: false,
+        });
+        queue.enqueueMessageCheck(jid);
+      },
+      echoToFeishu: async (jid, text) => {
+        const channel = findChannel(channels, jid);
+        // skipVoiceNotify：回显的是用户刚说的话，不要再总结播回手机
+        if (channel) await channel.sendMessage(jid, text, { skipVoiceNotify: true });
+      },
+    });
+  } catch (err) {
+    logger.warn({ err }, '[voice-reply] 订阅启动失败，不影响主流程');
+  }
+
   logger.info(`NanoClaw running (default trigger: ${DEFAULT_TRIGGER})`);
 
   while (true) {
@@ -2033,9 +2060,6 @@ async function main(): Promise<void> {
 
   restoreRemoteControl();
 
-  // 语音播报 WS 出口（自研 iOS app）：缺 VOICE_WS_TOKEN 时自动跳过
-  startVoiceWsServer();
-
   // Initialize memory system (if enabled)
   if (isMemoryEnabled()) {
     getMemoryQueue();
@@ -2055,7 +2079,6 @@ async function main(): Promise<void> {
     logger.info({ signal }, 'Shutdown signal received');
     // 先杀所有 agent 子进程（5 秒宽限期）
     await queue.shutdown(5000);
-    stopVoiceWsServer();
     // flush 聊天索引
     if (CHAT_INDEX_ENABLED) {
       await getChatIndex().dispose();

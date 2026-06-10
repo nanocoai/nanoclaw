@@ -1616,6 +1616,7 @@ async function main(): Promise<void> {
             env: sdkEnv,
             additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
             systemPromptAppend,
+            isScheduledTask: containerInput.isScheduledTask,
           },
           writeOutput,
           log,
@@ -1746,6 +1747,7 @@ async function main(): Promise<void> {
             cwd: PATHS.queryCwd || PATHS.group,
             env: sdkEnv,
             codexHome,
+            isScheduledTask: containerInput.isScheduledTask,
           },
           writeOutput,
           log,
@@ -1861,6 +1863,7 @@ async function main(): Promise<void> {
             env: sdkEnv,
             geminiHome,
             additionalDirectories: gmExtraDirs.length > 0 ? gmExtraDirs : undefined,
+            isScheduledTask: containerInput.isScheduledTask,
           },
           writeOutput,
           log,
@@ -1988,6 +1991,7 @@ async function main(): Promise<void> {
             upstreamProxy,
             upstreamCaCert,
             credentialProxy,
+            isScheduledTask: containerInput.isScheduledTask,
             onInputAccepted: () => {
               // 快路径：一旦确认 Claude 接收输入，立即 ack，避免 final 前崩溃导致重放。
               ackClaimedIpcMessages(activeClaimPaths);

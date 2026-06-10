@@ -17,6 +17,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import type { ContainerOutput } from './cli-runner.js';
+import { buildSendMessageToolEnv } from './mcp-tool-policy.js';
 
 // ---- 类型定义 ----
 
@@ -69,6 +70,7 @@ export interface CodexRunnerConfig {
   env: Record<string, string | undefined>;
   /** per-group CODEX_HOME 目录（持久化，跨轮保留 session 文件供 resume） */
   codexHome: string;
+  isScheduledTask?: boolean;
 }
 
 export interface CodexTextProgressState {
@@ -202,6 +204,7 @@ export function buildCodexConfigToml(config: {
   isMain: boolean;
   ipcDir: string;
   senderId?: string;
+  isScheduledTask?: boolean;
 }): string {
   // 路径用 JSON.stringify 做 TOML 字符串转义（双引号 + 反斜杠）
   const q = (s: string) => JSON.stringify(s);
@@ -216,6 +219,9 @@ export function buildCodexConfigToml(config: {
     `NANOCLAW_IS_MAIN = ${q(config.isMain ? '1' : '0')}`,
     `NANOCLAW_IPC_DIR = ${q(config.ipcDir)}`,
     `NANOCLAW_SENDER_ID = ${q(config.senderId || '')}`,
+    ...Object.entries(buildSendMessageToolEnv(config.isScheduledTask)).map(
+      ([key, value]) => `${key} = ${q(value)}`,
+    ),
     '',
   ].join('\n');
 }
@@ -469,6 +475,7 @@ export async function runCodexQuery(
     isMain: config.isMain,
     ipcDir: config.ipcDir,
     senderId: config.senderId,
+    isScheduledTask: config.isScheduledTask,
   });
   const homeDir = config.env.HOME || os.homedir();
   prepareCodexHome(config.codexHome, homeDir, configToml, log);

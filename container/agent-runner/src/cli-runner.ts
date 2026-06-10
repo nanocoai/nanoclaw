@@ -13,6 +13,7 @@ import { spawn, type ChildProcess } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { buildSendMessageToolEnv } from './mcp-tool-policy.js';
 
 // ---- 类型定义 ----
 
@@ -74,6 +75,7 @@ export interface CliRunnerConfig {
   env: Record<string, string | undefined>;
   additionalDirectories?: string[];
   systemPromptAppend?: string;
+  isScheduledTask?: boolean;
 }
 
 // ---- 纯函数（可单元测试） ----
@@ -103,6 +105,7 @@ export function buildMcpConfig(
   groupFolder: string,
   isMain: boolean,
   ipcDir: string,
+  isScheduledTask?: boolean,
 ): Record<string, unknown> {
   return {
     mcpServers: {
@@ -114,6 +117,7 @@ export function buildMcpConfig(
           NANOCLAW_GROUP_FOLDER: groupFolder,
           NANOCLAW_IS_MAIN: isMain ? '1' : '0',
           NANOCLAW_IPC_DIR: ipcDir,
+          ...buildSendMessageToolEnv(isScheduledTask),
         },
       },
     },
@@ -289,6 +293,7 @@ export async function runCliQuery(
     config.groupFolder,
     config.isMain,
     config.ipcDir,
+    config.isScheduledTask,
   );
   const mcpConfigPath = path.join(os.tmpdir(), `nanoclaw-mcp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`);
   fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig));
