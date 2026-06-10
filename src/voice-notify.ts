@@ -1,9 +1,10 @@
 /**
- * 语音通知：飞书消息发给大杰时，并行推送一份 LLM 摘要到 Pushover，
- * iOS 端借 "朗读通知" 功能自动经 AirPods 念出来。
+ * 语音通知：飞书消息发给大杰时，并行推送一份 LLM 摘要到公网语音网关，
+ * 网关排队下发给 iOS app（大狗播报），app 本地 TTS 一条条念。
  *
  * 触发条件：当前群显式开启 voiceNotify.push（兼容旧 voiceNotify.mac）
- * 链路：飞书文字 → 本模块 → LLM 压口语版 → Pushover API → APNs → iOS TTS
+ * 链路：飞书文字 → 本模块 → LLM 压口语版 → 网关 /voice/api/push → WS → iOS app TTS
+ * （2026-06-10 从 Pushover 切到自建网关：排队顺序播放、不被通知中心折叠）
  *
  * 设计原则：
  * - 纯 fire-and-forget，失败不影响飞书主流程
@@ -17,8 +18,11 @@ import { getMemoryConfig } from './memory/config.js';
 import { readEnvFile } from './env.js';
 import type { RegisteredGroup } from './types.js';
 
-const PUSHOVER_API = 'https://api.pushover.net/1/messages.json';
-const PUSHOVER_MAX_CHARS = 1024; // Pushover 单条限制
+const VOICE_GATEWAY_API =
+  process.env.VOICE_GATEWAY_URL || 'https://api.saltapp.cn/voice/api/push';
+const VOICE_GATEWAY_CLIENT_ID =
+  process.env.VOICE_GATEWAY_CLIENT_ID || 'ios-main';
+const MAX_SPEAK_CHARS = 1024; // 单条播报上限，太长 TTS 念不动也没人听
 // qwen3.7-max 摘要长回复实测要 13.9s，原 5s 必超时降级发原文；turbo 实测 0.9s 质量够用。
 // 摘要是简单口语化任务，不需要 max 模型。超时给足 15s 兜底偶发慢。
 const SUMMARIZE_TIMEOUT_MS = 15000;
@@ -92,7 +96,7 @@ export function resolveVoiceGroupLabel(
 }
 
 export function buildSpokenText(label: string, summary: string): string {
-  return `${label}：${summary}`.slice(0, PUSHOVER_MAX_CHARS);
+  return `${label}：${summary}`.slice(0, MAX_SPEAK_CHARS);
 }
 
 /**
@@ -102,7 +106,7 @@ async function summarizeForSpeech(text: string): Promise<string> {
   const config = getMemoryConfig();
   if (!config.dashscopeApiKey) {
     logger.debug('[voice-notify] 无 dashscope key，跳过摘要，发原文');
-    return text.slice(0, PUSHOVER_MAX_CHARS);
+    return text.slice(0, MAX_SPEAK_CHARS);
   }
 
   const client = new OpenAI({
@@ -126,77 +130,64 @@ async function summarizeForSpeech(text: string): Promise<string> {
       { signal: controller.signal },
     );
     const summary = response.choices[0]?.message?.content?.trim() || '';
-    if (!summary) return text.slice(0, PUSHOVER_MAX_CHARS);
-    return summary.slice(0, PUSHOVER_MAX_CHARS);
+    if (!summary) return text.slice(0, MAX_SPEAK_CHARS);
+    return summary.slice(0, MAX_SPEAK_CHARS);
   } catch (err) {
     logger.warn({ err }, '[voice-notify] 摘要失败，fallback 原文');
-    return text.slice(0, PUSHOVER_MAX_CHARS);
+    return text.slice(0, MAX_SPEAK_CHARS);
   } finally {
     clearTimeout(timer);
   }
 }
 
 /**
- * 推送到 Pushover
+ * 推送到公网语音网关（网关排队下发 iOS app，app 播完回执才发下一条）
  */
-async function pushToPushover(message: string): Promise<void> {
+async function pushToVoiceGateway(message: string): Promise<void> {
   // token 优先从 .env 文件读(readEnvFile），fallback process.env。
-  // 根因：主进程不把 .env 注入 process.env（见 env.ts 注释「Does NOT load into process.env」），
-  // launchd plist 也没配 PUSHOVER，之前直接读 process.env 拿到 undefined → 推送被 debug 静默跳过，
-  // 这才是「自动播报收不到」的真根因（摘要侧走 config 读 .env 文件所以能跑，推送侧读 process.env 拿空）。
-  const envFile = readEnvFile([
-    'PUSHOVER_USER_KEY',
-    'PUSHOVER_APP_TOKEN',
-    'APP_TOKEN',
-  ]);
-  const userKey = envFile.PUSHOVER_USER_KEY || process.env.PUSHOVER_USER_KEY;
-  const appToken =
-    envFile.PUSHOVER_APP_TOKEN ||
-    envFile.APP_TOKEN ||
-    process.env.PUSHOVER_APP_TOKEN ||
-    process.env.APP_TOKEN;
-  if (!userKey || !appToken) {
-    // 用 warn 而非 debug：这次事故就是被 debug 静默跳过坑了（debug<info 不写日志，
-    // 推送悄无声息没了还查不到）。只打布尔，绝不打密钥本身。
+  // 原因：主进程不把 .env 注入 process.env（见 env.ts 注释「Does NOT load into process.env」），
+  // launchd plist 也没配这些变量，直接读 process.env 会拿到 undefined（Pushover 时代踩过的坑）。
+  const envFile = readEnvFile(['VOICE_GATEWAY_TOKEN']);
+  const token = envFile.VOICE_GATEWAY_TOKEN || process.env.VOICE_GATEWAY_TOKEN;
+  if (!token) {
+    // 用 warn 而非 debug：静默跳过查不到日志的事故踩过一次，不再犯。只打布尔不打密钥。
     logger.warn(
-      { hasUserKey: !!userKey, hasAppToken: !!appToken },
-      '[voice-notify] 缺 PUSHOVER token，跳过推送（检查 .env 的 PUSHOVER_USER_KEY/PUSHOVER_APP_TOKEN，或兼容名 APP_TOKEN）',
+      { hasToken: false },
+      '[voice-notify] 缺 VOICE_GATEWAY_TOKEN，跳过推送（检查 .env）',
     );
     return;
   }
-
-  const body = new URLSearchParams({
-    token: appToken,
-    user: userKey,
-    message,
-    priority: '1', // Time Sensitive，锁屏/勿扰也能响
-    title: '大狗', // iOS 朗读会带上，改空能省一句
-  });
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PUSH_TIMEOUT_MS);
 
   try {
-    const resp = await fetch(PUSHOVER_API, {
+    const resp = await fetch(VOICE_GATEWAY_API, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Voice-Token': token,
+      },
+      body: JSON.stringify({
+        client_id: VOICE_GATEWAY_CLIENT_ID,
+        text: message,
+      }),
       signal: controller.signal,
     });
     if (!resp.ok) {
       const respText = await resp.text().catch(() => '');
       logger.warn(
         { status: resp.status, body: respText.slice(0, 200) },
-        '[voice-notify] Pushover 返回非 2xx',
+        '[voice-notify] 语音网关返回非 2xx',
       );
     } else {
       logger.info(
-        { chars: message.length },
-        '[voice-notify] Pushover 推送成功',
+        { chars: message.length, clientId: VOICE_GATEWAY_CLIENT_ID },
+        '[voice-notify] 语音网关推送成功',
       );
     }
   } catch (err) {
-    logger.warn({ err }, '[voice-notify] Pushover 推送异常');
+    logger.warn({ err }, '[voice-notify] 语音网关推送异常');
   } finally {
     clearTimeout(timer);
   }
@@ -223,7 +214,7 @@ export function notifyVoice(
     try {
       const summary = await summarizeForSpeech(context.text);
       const label = resolveVoiceGroupLabel(context);
-      await pushToPushover(buildSpokenText(label, summary));
+      await pushToVoiceGateway(buildSpokenText(label, summary));
     } catch (err) {
       logger.warn({ err }, '[voice-notify] 未捕获异常');
     }
