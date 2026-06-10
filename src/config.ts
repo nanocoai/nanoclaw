@@ -6,7 +6,7 @@ import { getContainerImageBase, getDefaultContainerImage, getInstallSlug } from 
 import { isValidTimezone } from './timezone.js';
 
 // Read config values from .env (falls back to process.env).
-const envConfig = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER', 'ONECLI_URL', 'ONECLI_API_KEY', 'TZ']);
+const envConfig = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER', 'ONECLI_URL', 'ONECLI_API_KEY', 'TZ', 'NANOCLAW_CONTAINER_LOGS']);
 
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
 export const ASSISTANT_HAS_OWN_NUMBER =
@@ -33,6 +33,7 @@ export const INSTALL_SLUG = getInstallSlug(PROJECT_ROOT);
 export const CONTAINER_INSTALL_LABEL = `nanoclaw-install=${INSTALL_SLUG}`;
 export const CONTAINER_TIMEOUT = parseInt(process.env.CONTAINER_TIMEOUT || '1800000', 10);
 export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760', 10); // 10MB default
+export const CONTAINER_LOGS_ENABLED = (process.env.NANOCLAW_CONTAINER_LOGS || envConfig.NANOCLAW_CONTAINER_LOGS) === 'enabled';
 export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
 export const ONECLI_API_KEY = process.env.ONECLI_API_KEY || envConfig.ONECLI_API_KEY;
 export const MAX_MESSAGES_PER_PROMPT = Math.max(1, parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10);

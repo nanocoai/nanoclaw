@@ -13,6 +13,7 @@ import {
   CONTAINER_IMAGE,
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
+  CONTAINER_LOGS_ENABLED,
   DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
@@ -155,20 +156,33 @@ async function spawnContainer(session: Session): Promise<void> {
   // immediate kill before the new container touches the file itself.
   fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
 
-  const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  // Persist container stdout+stderr to a per-instance file via inherited fd.
+  // Kernel-level write — the host process is uninvolved once spawn() returns,
+  // so a slow disk or full filesystem hits the container's writes, not us.
+  // Files accumulate in logs/containers/<group>/<containerName>.log; prune
+  // manually (rm) or via cron. Off by default — opt in with
+  // NANOCLAW_CONTAINER_LOGS=enabled in .env or the environment.
+  let logFd: number | undefined;
+  if (CONTAINER_LOGS_ENABLED) {
+    try {
+      const logDir = path.join(process.cwd(), 'logs', 'containers', agentGroup.folder);
+      fs.mkdirSync(logDir, { recursive: true });
+      logFd = fs.openSync(path.join(logDir, `${containerName}.log`), 'a');
+    } catch (err) {
+      log.warn('Container log file open failed — proceeding without persistence', {
+        containerName,
+        err,
+      });
+    }
+  }
+
+  const stdio: Array<'ignore' | number> =
+    logFd !== undefined ? ['ignore', logFd, logFd] : ['ignore', 'ignore', 'ignore'];
+  const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio });
+  if (logFd !== undefined) fs.closeSync(logFd);
 
   activeContainers.set(session.id, { process: container, containerName });
   markContainerRunning(session.id);
-
-  // Log stderr
-  container.stderr?.on('data', (data) => {
-    for (const line of data.toString().trim().split('\n')) {
-      if (line) log.debug(line, { container: agentGroup.folder });
-    }
-  });
-
-  // stdout is unused in v2 (all IO is via session DB)
-  container.stdout?.on('data', () => {});
 
   // No host-side idle timeout. Stale/stuck detection is driven by the host
   // sweep reading heartbeat mtime + processing_ack claim age + container_state
