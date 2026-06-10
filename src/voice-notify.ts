@@ -107,6 +107,38 @@ export function buildSpokenText(summary: string): string {
 }
 
 /**
+ * TTS 前的确定性清洗：剥 Markdown 符号和 URL。
+ * 为什么不靠 LLM prompt：摘要超时/失败会 fallback 发原文（带 Markdown），
+ * 且 LLM 偶尔不听话保留 # 和链接 —— TTS 念"井号"念 URL 全是噪音（大杰 2026-06-10 实听反馈）。
+ */
+export function sanitizeForSpeech(text: string): string {
+  let t = text;
+  // 代码块整块去掉（prompt 已要求 LLM 概括，这里兜 fallback 原文）
+  t = t.replace(/```[\s\S]*?```/g, ' ');
+  // 行内代码保留内容
+  t = t.replace(/`([^`]*)`/g, '$1');
+  // 图片 ![alt](url) / 链接 [text](url) → 只留文字
+  t = t.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1');
+  t = t.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+  // 裸 URL 整个删掉，念出来全是字母噪音
+  t = t.replace(/https?:\/\/[^\s）)\]」】，。；,;]+/g, '');
+  // 粗体/斜体星号
+  t = t.replace(/(\*\*|\*)([^*]*)\1/g, '$2');
+  // 行首列表符号 / 引用符号
+  t = t.replace(/^\s*[-*+>]\s+/gm, '');
+  // 表格竖线换空格（表格内容顺序念出来勉强能听）
+  t = t.replace(/\|/g, ' ');
+  // 所有井号删掉：标题 #、PR#123、#话题 —— TTS 念"井号"纯噪音
+  t = t.replace(/#/g, ' ');
+  // 折叠空白：换行当句号断句，连续句号合一
+  t = t
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\s*\n\s*/g, '。')
+    .replace(/。{2,}/g, '。');
+  return t.trim();
+}
+
+/**
  * 调 LLM 做语音摘要。失败时 fallback 原文截断到 1024 字符。
  */
 async function summarizeForSpeech(text: string): Promise<string> {
@@ -229,7 +261,7 @@ export function notifyVoice(
       const summary = await summarizeForSpeech(context.text);
       const label = resolveVoiceGroupLabel(context);
       await pushToVoiceGateway(
-        buildSpokenText(summary),
+        buildSpokenText(sanitizeForSpeech(summary)),
         context.chatJid ?? null,
         label,
       );

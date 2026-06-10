@@ -43,6 +43,7 @@ vi.mock('./memory/config.js', () => ({
 import {
   buildSpokenText,
   notifyVoice,
+  sanitizeForSpeech,
   resolveVoiceGroupLabel,
   shouldNotifyPushover,
 } from './voice-notify.js';
@@ -256,5 +257,32 @@ describe('voice-notify 网关推送', () => {
   it('播报文本带群标识且按长度截断', () => {
     expect(buildSpokenText('搞定了')).toBe('搞定了');
     expect(buildSpokenText('a'.repeat(2000)).length).toBe(1024);
+  });
+});
+
+describe('sanitizeForSpeech TTS 清洗', () => {
+  it('剥掉标题井号和 PR 编号里的井号', () => {
+    expect(sanitizeForSpeech('## 修复完成')).toBe('修复完成');
+    expect(sanitizeForSpeech('已合并 PR#3149')).toBe('已合并 PR 3149');
+  });
+
+  it('Markdown 链接只留文字，裸 URL 整个删掉', () => {
+    expect(sanitizeForSpeech('详见[复盘文档](https://example.com/a/b)')).toBe('详见复盘文档');
+    expect(sanitizeForSpeech('地址 https://api.saltapp.cn/voice/api/push 已部署')).toBe('地址 已部署');
+  });
+
+  it('代码块整块去掉，行内代码留内容', () => {
+    expect(sanitizeForSpeech('运行 `npm test` 即可')).toBe('运行 npm test 即可');
+    expect(sanitizeForSpeech('改动如下\n```js\nconst a = 1;\n```\n测试通过')).toBe('改动如下。测试通过');
+  });
+
+  it('粗体星号、列表符号、表格竖线清掉', () => {
+    expect(sanitizeForSpeech('**重要**：先备份')).toBe('重要：先备份');
+    expect(sanitizeForSpeech('- 第一项\n- 第二项')).toBe('第一项。第二项');
+    expect(sanitizeForSpeech('| 名称 | 状态 |')).toBe('名称 状态');
+  });
+
+  it('正常中文不受影响', () => {
+    expect(sanitizeForSpeech('搞定了，测试全过。')).toBe('搞定了，测试全过。');
   });
 });
