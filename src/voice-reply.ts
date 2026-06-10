@@ -98,6 +98,16 @@ export function startVoiceReplySubscriber(deps: VoiceReplyDeps): void {
   let attempt = 0;
 
   const connect = (): void => {
+    // error/close 可能都触发、也可能只触发其一，用本连接局部标记保证只重连一次。
+    // 踩坑实录：undici WebSocket 握手失败（网关重启间隙拒连/502）只发 error 不发 close，
+    // 之前只在 close 里重连 → 订阅永久死掉，语音回传全丢（2026-06-10 21:01 实锤）。
+    let reconnectScheduled = false;
+    const reconnectOnce = (): void => {
+      if (reconnectScheduled) return;
+      reconnectScheduled = true;
+      scheduleReconnect();
+    };
+
     let ws: WebSocket;
     try {
       // Node 22 内置 WebSocket（undici）支持第二参数 headers（已对线上网关实测通过）
@@ -129,7 +139,9 @@ export function startVoiceReplySubscriber(deps: VoiceReplyDeps): void {
     });
 
     ws.addEventListener('error', () => {
-      // close 事件随后必触发，统一在 close 里重连；这里吃掉避免 unhandled
+      // 握手失败时 undici 只发 error 不发 close，必须在这里也兜重连
+      logger.warn({}, '[voice-reply] 语音网关连接出错，准备重连');
+      reconnectOnce();
     });
 
     ws.addEventListener('close', (event) => {
@@ -137,7 +149,7 @@ export function startVoiceReplySubscriber(deps: VoiceReplyDeps): void {
         { code: event.code, reason: event.reason },
         '[voice-reply] 语音网关连接断开，准备重连',
       );
-      scheduleReconnect();
+      reconnectOnce();
     });
   };
 
