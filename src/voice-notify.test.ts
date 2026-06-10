@@ -103,7 +103,11 @@ describe('voice-notify 网关推送', () => {
     expect(opts.headers['X-Voice-Token']).toBe(FAKE_TOKEN);
     const body = JSON.parse(opts.body as string);
     expect(body.client_id).toBe('ios-main');
-    expect(body.text).toContain('3号群：这是一条足够长的测试回复内容');
+    // 结构化推送：text 纯内容不带群名前缀，群上下文走独立字段
+    expect(body.text).toContain('这是一条足够长的测试回复内容');
+    expect(body.text).not.toContain('3号群：');
+    expect(body.group_id).toBe('fs:oc_group');
+    expect(body.group_name).toBe('3号群');
     // 没有走「缺 token 跳过」分支
     expect(
       loggerCalls.warn.some((c) => /缺 VOICE_GATEWAY_TOKEN/.test(c[1] ?? '')),
@@ -172,7 +176,9 @@ describe('voice-notify 网关推送', () => {
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const body = JSON.parse(fetchSpy.mock.calls[0][1].body as string);
-    expect(body.text).toContain('3号群：这是一条足够长的测试回复内容');
+    expect(body.text).toContain('这是一条足够长的测试回复内容');
+    expect(body.group_id).toBe('fs:oc_group');
+    expect(body.group_name).toBe('3号群');
   });
 
   it('群开关关闭时不推送', async () => {
@@ -233,7 +239,7 @@ describe('voice-notify 网关推送', () => {
   });
 
   it('播报文本带群标识且按长度截断', () => {
-    expect(buildSpokenText('3号群', '搞定了')).toBe('3号群：搞定了');
-    expect(buildSpokenText('3号群', 'a'.repeat(2000)).length).toBe(1024);
+    expect(buildSpokenText('搞定了')).toBe('搞定了');
+    expect(buildSpokenText('a'.repeat(2000)).length).toBe(1024);
   });
 });

@@ -95,8 +95,12 @@ export function resolveVoiceGroupLabel(
   return '当前群';
 }
 
-export function buildSpokenText(label: string, summary: string): string {
-  return `${label}：${summary}`.slice(0, MAX_SPEAK_CHARS);
+/**
+ * 结构化推送后 text 为纯播报内容，群名由 app 端用 group_name 渲染/念出。
+ * （voice-dialog-loop spec：播报文本不再拼接群名前缀）
+ */
+export function buildSpokenText(summary: string): string {
+  return summary.slice(0, MAX_SPEAK_CHARS);
 }
 
 /**
@@ -143,7 +147,11 @@ async function summarizeForSpeech(text: string): Promise<string> {
 /**
  * 推送到公网语音网关（网关排队下发 iOS app，app 播完回执才发下一条）
  */
-async function pushToVoiceGateway(message: string): Promise<void> {
+async function pushToVoiceGateway(
+  message: string,
+  groupId: string | null,
+  groupName: string | null,
+): Promise<void> {
   // token 优先从 .env 文件读(readEnvFile），fallback process.env。
   // 原因：主进程不把 .env 注入 process.env（见 env.ts 注释「Does NOT load into process.env」），
   // launchd plist 也没配这些变量，直接读 process.env 会拿到 undefined（Pushover 时代踩过的坑）。
@@ -171,6 +179,9 @@ async function pushToVoiceGateway(message: string): Promise<void> {
       body: JSON.stringify({
         client_id: VOICE_GATEWAY_CLIENT_ID,
         text: message,
+        // 群上下文：app 按 group_id 聚合会话、回复时带回；无群上下文时网关收 null 走"未分组"
+        group_id: groupId,
+        group_name: groupName,
       }),
       signal: controller.signal,
     });
@@ -214,7 +225,11 @@ export function notifyVoice(
     try {
       const summary = await summarizeForSpeech(context.text);
       const label = resolveVoiceGroupLabel(context);
-      await pushToVoiceGateway(buildSpokenText(label, summary));
+      await pushToVoiceGateway(
+        buildSpokenText(summary),
+        context.chatJid ?? null,
+        label,
+      );
     } catch (err) {
       logger.warn({ err }, '[voice-notify] 未捕获异常');
     }
