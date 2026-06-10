@@ -14,6 +14,7 @@ import type { Chat } from 'chat';
 import { log } from './log.js';
 
 const DEFAULT_PORT = 3000;
+const DEFAULT_BIND = '127.0.0.1';
 
 interface WebhookEntry {
   chat: Chat;
@@ -22,6 +23,20 @@ interface WebhookEntry {
 
 const routes = new Map<string, WebhookEntry>();
 let server: http.Server | null = null;
+
+/**
+ * Resolve the listen address from the environment.
+ *
+ * Defaults to loopback so the webhook port is not exposed to the LAN. Set
+ * `WEBHOOK_BIND=0.0.0.0` (or a specific interface IP) to opt into external
+ * exposure — typically you want a reverse proxy in front instead.
+ */
+export function resolveListenConfig(env: NodeJS.ProcessEnv): { port: number; bind: string } {
+  const portRaw = env.WEBHOOK_PORT;
+  const port = portRaw ? parseInt(portRaw, 10) : DEFAULT_PORT;
+  const bind = env.WEBHOOK_BIND || DEFAULT_BIND;
+  return { port, bind };
+}
 
 /** Convert Node.js IncomingMessage to a Web API Request. */
 async function toWebRequest(req: http.IncomingMessage): Promise<Request> {
@@ -79,7 +94,7 @@ export function registerWebhookAdapter(chat: Chat, adapterName: string): void {
 function ensureServer(): void {
   if (server) return;
 
-  const port = parseInt(process.env.WEBHOOK_PORT || String(DEFAULT_PORT), 10);
+  const { port, bind } = resolveListenConfig(process.env);
 
   server = http.createServer(async (req, res) => {
     const url = req.url || '/';
@@ -118,8 +133,8 @@ function ensureServer(): void {
     }
   });
 
-  server.listen(port, '0.0.0.0', () => {
-    log.info('Webhook server started', { port, adapters: [...routes.keys()] });
+  server.listen(port, bind, () => {
+    log.info('Webhook server started', { port, bind, adapters: [...routes.keys()] });
   });
 }
 
