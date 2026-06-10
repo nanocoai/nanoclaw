@@ -187,6 +187,18 @@ export function analyzeTmuxPane(paneText: string): TmuxPaneAnalysis {
     '/effort',
   ];
 
+  // 新版 CLI（v2.1.170+）resume 老会话时不显示 "Try" 欢迎页，状态栏文案也没有 /effort。
+  // idle 状态栏特征 + 无 busy 标志（esc to interrupt）→ ready。
+  // busy 时状态栏同样存在但带 "esc to interrupt"，不会误判。
+  const idleStatusBarPatterns = [
+    'shift+tab to cycle',
+    'bypass permissions on',
+  ];
+  const busyIndicatorPatterns = [
+    'esc to interrupt',
+    'ctrl+c to interrupt',
+  ];
+
   const blockedResumePatterns = [
     'Resume session',
     'No sessions match',
@@ -201,6 +213,13 @@ export function analyzeTmuxPane(paneText: string): TmuxPaneAnalysis {
   ];
 
   if (readyPatterns.some((p) => paneText.includes(p))) {
+    return { state: 'ready' };
+  }
+
+  if (
+    idleStatusBarPatterns.some((p) => paneText.includes(p)) &&
+    !busyIndicatorPatterns.some((p) => paneText.includes(p))
+  ) {
     return { state: 'ready' };
   }
 
