@@ -3,7 +3,7 @@ import { randomBytes } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
-import { ASSISTANT_NAME, DATA_DIR, STORE_DIR } from './config.js';
+import { ASSISTANT_NAME, DATA_DIR, GROUPS_DIR, STORE_DIR } from './config.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -13,6 +13,15 @@ import {
   OAuthCredential,
   RegisteredGroup,
   ScheduledTask,
+  TaskLedgerChecklistItem,
+  TaskLedgerChecklistStatus,
+  TaskLedgerDetail,
+  TaskLedgerEvent,
+  TaskLedgerStatus,
+  TaskLedgerTask,
+  TaskLedgerTestCase,
+  TaskLedgerTestCaseStatus,
+  TaskLedgerType,
   TaskRunLog,
 } from './types.js';
 
@@ -169,6 +178,70 @@ function createSchema(database: Database.Database): void {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_delegation_active_unique
       ON delegation_tasks(target_group)
       WHERE status IN ('dispatched', 'progress', 'blocked', 'question');
+
+    CREATE TABLE IF NOT EXISTS task_ledger_tasks (
+      id                  TEXT PRIMARY KEY,
+      title               TEXT NOT NULL,
+      project             TEXT NOT NULL,
+      task_type           TEXT NOT NULL,
+      status              TEXT NOT NULL,
+      priority            TEXT NOT NULL DEFAULT 'normal',
+      description         TEXT,
+      desired_outcome     TEXT,
+      acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+      owner_group         TEXT NOT NULL,
+      chat_jid            TEXT,
+      created_by          TEXT,
+      artifact_root       TEXT,
+      prd_path            TEXT,
+      spec_path           TEXT,
+      created_at          TEXT NOT NULL,
+      updated_at          TEXT NOT NULL,
+      completed_at        TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_ledger_status ON task_ledger_tasks(status);
+    CREATE INDEX IF NOT EXISTS idx_task_ledger_project ON task_ledger_tasks(project);
+    CREATE INDEX IF NOT EXISTS idx_task_ledger_owner ON task_ledger_tasks(owner_group);
+
+    CREATE TABLE IF NOT EXISTS task_ledger_checklist (
+      id         TEXT PRIMARY KEY,
+      task_id    TEXT NOT NULL,
+      title      TEXT NOT NULL,
+      status     TEXT NOT NULL,
+      position   INTEGER NOT NULL DEFAULT 0,
+      notes      TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (task_id) REFERENCES task_ledger_tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_ledger_checklist_task ON task_ledger_checklist(task_id, position);
+
+    CREATE TABLE IF NOT EXISTS task_ledger_test_cases (
+      id          TEXT PRIMARY KEY,
+      task_id     TEXT NOT NULL,
+      title       TEXT NOT NULL,
+      description TEXT,
+      status      TEXT NOT NULL,
+      evidence    TEXT,
+      position    INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT NOT NULL,
+      updated_at  TEXT NOT NULL,
+      FOREIGN KEY (task_id) REFERENCES task_ledger_tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_ledger_test_cases_task ON task_ledger_test_cases(task_id, position);
+
+    CREATE TABLE IF NOT EXISTS task_ledger_events (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id      TEXT NOT NULL,
+      event_type   TEXT NOT NULL,
+      summary      TEXT NOT NULL,
+      details      TEXT,
+      actor_group  TEXT,
+      actor_sender TEXT,
+      created_at   TEXT NOT NULL,
+      FOREIGN KEY (task_id) REFERENCES task_ledger_tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_task_ledger_events_task ON task_ledger_events(task_id, created_at);
   `);
 
   // Add context_mode column if it doesn't exist (migration for existing DBs)
@@ -239,6 +312,22 @@ function createSchema(database: Database.Database): void {
     database.exec(`ALTER TABLE registered_groups ADD COLUMN custom_cwd TEXT`);
   } catch {
     /* column already exists */
+  }
+
+  try {
+    const taskLedgerColumns = database
+      .prepare('PRAGMA table_info(task_ledger_tasks)')
+      .all() as Array<{ name: string }>;
+    if (!taskLedgerColumns.some((column) => column.name === 'artifact_root')) {
+      database.exec(
+        `ALTER TABLE task_ledger_tasks ADD COLUMN artifact_root TEXT`,
+      );
+    }
+  } catch (err) {
+    logger.warn(
+      { err },
+      'Failed to ensure task_ledger_tasks artifact_root column',
+    );
   }
 
   // Add reply context columns if they don't exist (migration for existing DBs)
@@ -601,26 +690,39 @@ export function getMessageContext(
   beforeCount: number = 5,
   afterCount: number = 5,
   includeToolCalls: boolean = false,
-): { before: ContextMessage[]; anchor: ContextMessage | null; after: ContextMessage[] } {
+): {
+  before: ContextMessage[];
+  anchor: ContextMessage | null;
+  after: ContextMessage[];
+} {
   // 锚点：最接近指定时间戳的消息
-  const anchorRow = db.prepare(`
+  const anchorRow = db
+    .prepare(
+      `
     SELECT sender_name, content, timestamp, is_from_me
     FROM messages
     WHERE chat_jid = ? AND content != '' AND content IS NOT NULL
       ${toolCallHistoryFilter(includeToolCalls)}
     ORDER BY ABS(julianday(timestamp) - julianday(?))
     LIMIT 1
-  `).get(chatJid, anchorTimestamp) as ContextMessage | undefined;
+  `,
+    )
+    .get(chatJid, anchorTimestamp) as ContextMessage | undefined;
 
   if (!anchorRow) {
-    logger.info({ chatJid, anchorTimestamp }, '[get_chat_context] 未找到锚点消息');
+    logger.info(
+      { chatJid, anchorTimestamp },
+      '[get_chat_context] 未找到锚点消息',
+    );
     return { before: [], anchor: null, after: [] };
   }
 
   const actualAnchorTs = anchorRow.timestamp;
 
   // 锚点前 N 条
-  const beforeRows = db.prepare(`
+  const beforeRows = db
+    .prepare(
+      `
     SELECT * FROM (
       SELECT sender_name, content, timestamp, is_from_me
       FROM messages
@@ -629,20 +731,31 @@ export function getMessageContext(
       ORDER BY timestamp DESC
       LIMIT ?
     ) ORDER BY timestamp
-  `).all(chatJid, actualAnchorTs, beforeCount) as ContextMessage[];
+  `,
+    )
+    .all(chatJid, actualAnchorTs, beforeCount) as ContextMessage[];
 
   // 锚点后 N 条
-  const afterRows = db.prepare(`
+  const afterRows = db
+    .prepare(
+      `
     SELECT sender_name, content, timestamp, is_from_me
     FROM messages
     WHERE chat_jid = ? AND timestamp > ? AND content != '' AND content IS NOT NULL
       ${toolCallHistoryFilter(includeToolCalls)}
     ORDER BY timestamp
     LIMIT ?
-  `).all(chatJid, actualAnchorTs, afterCount) as ContextMessage[];
+  `,
+    )
+    .all(chatJid, actualAnchorTs, afterCount) as ContextMessage[];
 
   logger.info(
-    { chatJid, anchorTimestamp: actualAnchorTs, before: beforeRows.length, after: afterRows.length },
+    {
+      chatJid,
+      anchorTimestamp: actualAnchorTs,
+      before: beforeRows.length,
+      after: afterRows.length,
+    },
     '[get_chat_context] 上下文查询完成',
   );
 
@@ -664,14 +777,22 @@ export function getMessageContextById(
   beforeCount: number = 5,
   afterCount: number = 5,
   includeToolCalls: boolean = false,
-): { before: ContextMessage[]; anchor: ContextMessage | null; after: ContextMessage[] } {
+): {
+  before: ContextMessage[];
+  anchor: ContextMessage | null;
+  after: ContextMessage[];
+} {
   // 锚点：按主键直接命中（额外取 chat_jid 用于在同会话内展开）
-  const anchorRow = db.prepare(`
+  const anchorRow = db
+    .prepare(
+      `
     SELECT chat_jid, sender_name, content, timestamp, is_from_me
     FROM messages
     WHERE id = ?
       ${toolCallHistoryFilter(includeToolCalls)}
-  `).get(messageId) as (ContextMessage & { chat_jid: string }) | undefined;
+  `,
+    )
+    .get(messageId) as (ContextMessage & { chat_jid: string }) | undefined;
 
   if (!anchorRow) {
     logger.info({ messageId }, '[get_message_by_id] 未找到消息');
@@ -682,7 +803,9 @@ export function getMessageContextById(
   const anchorTs = anchorRow.timestamp;
 
   // 锚点前 N 条（倒序取、正序返回）
-  const beforeRows = db.prepare(`
+  const beforeRows = db
+    .prepare(
+      `
     SELECT * FROM (
       SELECT sender_name, content, timestamp, is_from_me
       FROM messages
@@ -691,17 +814,23 @@ export function getMessageContextById(
       ORDER BY timestamp DESC
       LIMIT ?
     ) ORDER BY timestamp
-  `).all(chatJid, anchorTs, beforeCount) as ContextMessage[];
+  `,
+    )
+    .all(chatJid, anchorTs, beforeCount) as ContextMessage[];
 
   // 锚点后 N 条
-  const afterRows = db.prepare(`
+  const afterRows = db
+    .prepare(
+      `
     SELECT sender_name, content, timestamp, is_from_me
     FROM messages
     WHERE chat_jid = ? AND timestamp > ? AND content != '' AND content IS NOT NULL
       ${toolCallHistoryFilter(includeToolCalls)}
     ORDER BY timestamp
     LIMIT ?
-  `).all(chatJid, anchorTs, afterCount) as ContextMessage[];
+  `,
+    )
+    .all(chatJid, anchorTs, afterCount) as ContextMessage[];
 
   const anchor: ContextMessage = {
     sender_name: anchorRow.sender_name,
@@ -743,7 +872,9 @@ export function getMessageRange(
   limit: number = 20,
   includeToolCalls: boolean = false,
 ): ContextMessage[] {
-  return db.prepare(`
+  return db
+    .prepare(
+      `
     SELECT * FROM (
       SELECT sender_name, content, timestamp, is_from_me
       FROM messages
@@ -752,7 +883,9 @@ export function getMessageRange(
       ORDER BY timestamp DESC
       LIMIT ? OFFSET ?
     ) ORDER BY timestamp
-  `).all(chatJid, limit, offset) as ContextMessage[];
+  `,
+    )
+    .all(chatJid, limit, offset) as ContextMessage[];
 }
 
 export function createTask(
@@ -880,6 +1013,597 @@ export function updateTaskAfterRun(
     WHERE id = ?
   `,
   ).run(nextRun, now, lastResult, nextRun, id);
+}
+
+function newLedgerId(prefix: string): string {
+  return `${prefix}_${Date.now().toString(36)}_${randomBytes(4).toString('hex')}`;
+}
+
+function parseJsonArray(value: string | null | undefined): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map((item) => String(item)) : [];
+  } catch {
+    return [];
+  }
+}
+
+type TaskLedgerTaskRow = Omit<TaskLedgerTask, 'acceptance_criteria'> & {
+  acceptance_criteria: string;
+};
+
+const TASK_LEDGER_TASK_COLUMNS =
+  'id, title, project, task_type, status, priority, description, desired_outcome, acceptance_criteria, owner_group, chat_jid, created_by, artifact_root, prd_path, spec_path, created_at, updated_at, completed_at';
+const TASK_LEDGER_CHECKLIST_COLUMNS =
+  'id, task_id, title, status, position, notes, created_at, updated_at';
+const TASK_LEDGER_TEST_CASE_COLUMNS =
+  'id, task_id, title, description, status, evidence, position, created_at, updated_at';
+const TASK_LEDGER_EVENT_COLUMNS =
+  'id, task_id, event_type, summary, details, actor_group, actor_sender, created_at';
+
+const TASK_LEDGER_GLOBAL_DIR =
+  process.env.NANOCLAW_TASK_LEDGER_DIR ||
+  (process.env.VITEST
+    ? path.join(
+        process.env.TMPDIR || '/tmp',
+        `nanoclaw-task-ledger-test-${process.pid}`,
+        'task-ledger',
+      )
+    : path.join(GROUPS_DIR, 'global', 'task-ledger'));
+
+function safeLedgerPathSegment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'task';
+}
+
+function defaultTaskArtifactRoot(taskId: string): string {
+  return path.join(TASK_LEDGER_GLOBAL_DIR, safeLedgerPathSegment(taskId));
+}
+
+function writeFileIfMissing(filePath: string, content: string): void {
+  if (fs.existsSync(filePath)) return;
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, content, 'utf8');
+}
+
+function ensureTaskLedgerArtifactFiles(detail: TaskLedgerDetail): void {
+  const root = detail.task.artifact_root;
+  if (!root) return;
+  fs.mkdirSync(path.join(root, 'evidence'), { recursive: true });
+  writeFileIfMissing(
+    path.join(root, 'prd.md'),
+    `# ${detail.task.title}\n\n状态：草稿\n\n## 问题 / 需求\n\n${detail.task.description || ''}\n\n## 目标效果\n\n${detail.task.desired_outcome || ''}\n`,
+  );
+  writeFileIfMissing(
+    path.join(root, 'acceptance.md'),
+    `# 验收标准\n\n${detail.task.acceptance_criteria.map((item) => `- ${item}`).join('\n')}\n`,
+  );
+  writeFileIfMissing(
+    path.join(root, 'e2e-cases.md'),
+    `# E2E 用例\n\n${detail.test_cases.map((item) => `- [ ] ${item.id} ${item.title} (${item.status})`).join('\n')}\n`,
+  );
+  writeFileIfMissing(path.join(root, 'bugs.md'), '# Bug 历史\n\n');
+  writeFileIfMissing(path.join(root, 'decisions.md'), '# 决策记录\n\n');
+}
+
+function syncTaskLedgerArtifactIndex(taskId: string): void {
+  const detail = getTaskLedgerTask(taskId);
+  if (!detail?.task.artifact_root) return;
+  ensureTaskLedgerArtifactFiles(detail);
+  const root = detail.task.artifact_root;
+  const index = {
+    task_id: detail.task.id,
+    title: detail.task.title,
+    project: detail.task.project,
+    task_type: detail.task.task_type,
+    status: detail.task.status,
+    owner_group: detail.task.owner_group,
+    chat_jid: detail.task.chat_jid,
+    artifact_root: root,
+    artifacts: {
+      prd: detail.task.prd_path || path.join(root, 'prd.md'),
+      acceptance: path.join(root, 'acceptance.md'),
+      e2e_cases: path.join(root, 'e2e-cases.md'),
+      bugs: path.join(root, 'bugs.md'),
+      decisions: path.join(root, 'decisions.md'),
+      evidence_dir: path.join(root, 'evidence'),
+      task_index: path.join(root, 'task.yaml'),
+      spec: detail.task.spec_path,
+    },
+    desired_outcome: detail.task.desired_outcome,
+    acceptance_criteria: detail.task.acceptance_criteria,
+    checklist: detail.checklist.map((item) => ({
+      id: item.id,
+      title: item.title,
+      status: item.status,
+      notes: item.notes,
+      position: item.position,
+    })),
+    test_cases: detail.test_cases.map((item) => ({
+      id: item.id,
+      title: item.title,
+      description: item.description,
+      status: item.status,
+      evidence: item.evidence,
+      position: item.position,
+    })),
+    events: detail.events.map((event) => ({
+      id: event.id,
+      type: event.event_type,
+      summary: event.summary,
+      details: event.details,
+      actor_group: event.actor_group,
+      actor_sender: event.actor_sender,
+      created_at: event.created_at,
+    })),
+    updated_at: detail.task.updated_at,
+  };
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(
+    path.join(root, 'task.yaml'),
+    JSON.stringify(index, null, 2),
+    'utf8',
+  );
+}
+
+function rowToTaskLedgerTask(row: TaskLedgerTaskRow): TaskLedgerTask {
+  return {
+    ...row,
+    acceptance_criteria: parseJsonArray(row.acceptance_criteria),
+  };
+}
+
+export function createTaskLedgerTask(input: {
+  id?: string;
+  title: string;
+  project: string;
+  task_type: TaskLedgerType;
+  status?: TaskLedgerStatus;
+  priority?: string;
+  description?: string | null;
+  desired_outcome?: string | null;
+  acceptance_criteria?: string[];
+  owner_group: string;
+  chat_jid?: string | null;
+  created_by?: string | null;
+  artifact_root?: string | null;
+  prd_path?: string | null;
+  spec_path?: string | null;
+  checklist?: Array<{
+    title: string;
+    status?: TaskLedgerChecklistStatus;
+    notes?: string | null;
+  }>;
+  test_cases?: Array<{
+    title: string;
+    description?: string | null;
+    status?: TaskLedgerTestCaseStatus;
+    evidence?: string | null;
+  }>;
+}): TaskLedgerDetail {
+  const now = new Date().toISOString();
+  const id = input.id || newLedgerId('tl');
+  const status = input.status || 'draft';
+  const completedAt = status === 'done' || status === 'cancelled' ? now : null;
+  const artifactRoot = input.artifact_root || defaultTaskArtifactRoot(id);
+  const prdPath = input.prd_path || path.join(artifactRoot, 'prd.md');
+
+  const tx = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO task_ledger_tasks (
+        id, title, project, task_type, status, priority, description, desired_outcome,
+        acceptance_criteria, owner_group, chat_jid, created_by, artifact_root, prd_path, spec_path,
+        created_at, updated_at, completed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      input.title,
+      input.project,
+      input.task_type,
+      status,
+      input.priority || 'normal',
+      input.description || null,
+      input.desired_outcome || null,
+      JSON.stringify(input.acceptance_criteria || []),
+      input.owner_group,
+      input.chat_jid || null,
+      input.created_by || null,
+      artifactRoot,
+      prdPath,
+      input.spec_path || null,
+      now,
+      now,
+      completedAt,
+    );
+
+    for (const [index, item] of (input.checklist || []).entries()) {
+      db.prepare(
+        `INSERT INTO task_ledger_checklist (
+          id, task_id, title, status, position, notes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        newLedgerId('cli'),
+        id,
+        item.title,
+        item.status || 'todo',
+        index,
+        item.notes || null,
+        now,
+        now,
+      );
+    }
+
+    for (const [index, item] of (input.test_cases || []).entries()) {
+      db.prepare(
+        `INSERT INTO task_ledger_test_cases (
+          id, task_id, title, description, status, evidence, position, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        newLedgerId('tc'),
+        id,
+        item.title,
+        item.description || null,
+        item.status || 'pending',
+        item.evidence || null,
+        index,
+        now,
+        now,
+      );
+    }
+
+    db.prepare(
+      `INSERT INTO task_ledger_events (
+        task_id, event_type, summary, details, actor_group, actor_sender, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      'created',
+      '任务已创建',
+      input.desired_outcome || null,
+      input.owner_group,
+      input.created_by || null,
+      now,
+    );
+  });
+  tx();
+
+  const detail = getTaskLedgerTask(id);
+  if (!detail) throw new Error(`Task ledger row missing after create: ${id}`);
+  syncTaskLedgerArtifactIndex(id);
+  return getTaskLedgerTask(id) || detail;
+}
+
+export function getTaskLedgerTask(id: string): TaskLedgerDetail | undefined {
+  const taskRow = db
+    .prepare(
+      `SELECT ${TASK_LEDGER_TASK_COLUMNS} FROM task_ledger_tasks WHERE id = ?`,
+    )
+    .get(id) as TaskLedgerTaskRow | undefined;
+  if (!taskRow) return undefined;
+  const checklist = db
+    .prepare(
+      `SELECT ${TASK_LEDGER_CHECKLIST_COLUMNS} FROM task_ledger_checklist WHERE task_id = ? ORDER BY position, created_at`,
+    )
+    .all(id) as TaskLedgerChecklistItem[];
+  const testCases = db
+    .prepare(
+      `SELECT ${TASK_LEDGER_TEST_CASE_COLUMNS} FROM task_ledger_test_cases WHERE task_id = ? ORDER BY position, created_at`,
+    )
+    .all(id) as TaskLedgerTestCase[];
+  const events = db
+    .prepare(
+      `SELECT ${TASK_LEDGER_EVENT_COLUMNS} FROM task_ledger_events WHERE task_id = ? ORDER BY created_at, id`,
+    )
+    .all(id) as TaskLedgerEvent[];
+  return {
+    task: rowToTaskLedgerTask(taskRow),
+    checklist,
+    test_cases: testCases,
+    events,
+  };
+}
+
+export function listTaskLedgerTasks(
+  filters: {
+    owner_group?: string;
+    project?: string;
+    status?: TaskLedgerStatus;
+    task_type?: TaskLedgerType;
+    include_done?: boolean;
+    limit?: number;
+  } = {},
+): TaskLedgerTask[] {
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+  if (filters.owner_group) {
+    clauses.push('owner_group = ?');
+    values.push(filters.owner_group);
+  }
+  if (filters.project) {
+    clauses.push('project = ?');
+    values.push(filters.project);
+  }
+  if (filters.status) {
+    clauses.push('status = ?');
+    values.push(filters.status);
+  } else if (!filters.include_done) {
+    clauses.push("status NOT IN ('done', 'cancelled')");
+  }
+  if (filters.task_type) {
+    clauses.push('task_type = ?');
+    values.push(filters.task_type);
+  }
+
+  const limit = Math.min(100, Math.max(1, Math.floor(filters.limit || 20)));
+  values.push(limit);
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const rows = db
+    .prepare(
+      `SELECT ${TASK_LEDGER_TASK_COLUMNS} FROM task_ledger_tasks ${where} ORDER BY updated_at DESC LIMIT ?`,
+    )
+    .all(...values) as TaskLedgerTaskRow[];
+  return rows.map(rowToTaskLedgerTask);
+}
+
+export function updateTaskLedgerTask(
+  id: string,
+  updates: Partial<
+    Pick<
+      TaskLedgerTask,
+      | 'title'
+      | 'project'
+      | 'task_type'
+      | 'status'
+      | 'priority'
+      | 'description'
+      | 'desired_outcome'
+      | 'acceptance_criteria'
+      | 'artifact_root'
+      | 'prd_path'
+      | 'spec_path'
+    >
+  >,
+): TaskLedgerDetail | undefined {
+  const fields: string[] = [];
+  const values: unknown[] = [];
+  const now = new Date().toISOString();
+
+  for (const key of [
+    'title',
+    'project',
+    'task_type',
+    'status',
+    'priority',
+    'description',
+    'desired_outcome',
+    'artifact_root',
+    'prd_path',
+    'spec_path',
+  ] as const) {
+    if (updates[key] !== undefined) {
+      fields.push(`${key} = ?`);
+      values.push(updates[key]);
+    }
+  }
+  if (updates.acceptance_criteria !== undefined) {
+    fields.push('acceptance_criteria = ?');
+    values.push(JSON.stringify(updates.acceptance_criteria));
+  }
+  if (updates.status !== undefined) {
+    fields.push('completed_at = ?');
+    values.push(
+      updates.status === 'done' || updates.status === 'cancelled' ? now : null,
+    );
+  }
+  fields.push('updated_at = ?');
+  values.push(now);
+
+  values.push(id);
+  const result = db
+    .prepare(`UPDATE task_ledger_tasks SET ${fields.join(', ')} WHERE id = ?`)
+    .run(...values);
+  if (result.changes === 0) return undefined;
+  syncTaskLedgerArtifactIndex(id);
+  return getTaskLedgerTask(id);
+}
+
+export function addTaskLedgerEvent(input: {
+  task_id: string;
+  event_type: string;
+  summary: string;
+  details?: string | null;
+  actor_group?: string | null;
+  actor_sender?: string | null;
+}): TaskLedgerEvent | undefined {
+  const now = new Date().toISOString();
+  const result = db
+    .prepare(
+      `INSERT INTO task_ledger_events (
+      task_id, event_type, summary, details, actor_group, actor_sender, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      input.task_id,
+      input.event_type,
+      input.summary,
+      input.details || null,
+      input.actor_group || null,
+      input.actor_sender || null,
+      now,
+    );
+  db.prepare('UPDATE task_ledger_tasks SET updated_at = ? WHERE id = ?').run(
+    now,
+    input.task_id,
+  );
+  syncTaskLedgerArtifactIndex(input.task_id);
+  return db
+    .prepare(
+      `SELECT ${TASK_LEDGER_EVENT_COLUMNS} FROM task_ledger_events WHERE id = ?`,
+    )
+    .get(result.lastInsertRowid) as TaskLedgerEvent | undefined;
+}
+
+export function upsertTaskLedgerChecklistItem(input: {
+  task_id: string;
+  id?: string;
+  title: string;
+  status?: TaskLedgerChecklistStatus;
+  notes?: string | null;
+  position?: number;
+}): TaskLedgerChecklistItem | undefined {
+  const now = new Date().toISOString();
+  const existing = input.id
+    ? (db
+        .prepare(
+          `SELECT ${TASK_LEDGER_CHECKLIST_COLUMNS} FROM task_ledger_checklist WHERE id = ? AND task_id = ?`,
+        )
+        .get(input.id, input.task_id) as TaskLedgerChecklistItem | undefined)
+    : (db
+        .prepare(
+          `SELECT ${TASK_LEDGER_CHECKLIST_COLUMNS} FROM task_ledger_checklist WHERE task_id = ? AND title = ?`,
+        )
+        .get(input.task_id, input.title) as
+        | TaskLedgerChecklistItem
+        | undefined);
+
+  if (existing) {
+    db.prepare(
+      `UPDATE task_ledger_checklist
+       SET title = ?, status = ?, notes = ?, position = ?, updated_at = ?
+       WHERE id = ?`,
+    ).run(
+      input.title,
+      input.status || existing.status,
+      input.notes !== undefined ? input.notes : existing.notes,
+      input.position !== undefined ? input.position : existing.position,
+      now,
+      existing.id,
+    );
+    db.prepare('UPDATE task_ledger_tasks SET updated_at = ? WHERE id = ?').run(
+      now,
+      input.task_id,
+    );
+    syncTaskLedgerArtifactIndex(input.task_id);
+    return db
+      .prepare(
+        `SELECT ${TASK_LEDGER_CHECKLIST_COLUMNS} FROM task_ledger_checklist WHERE id = ?`,
+      )
+      .get(existing.id) as TaskLedgerChecklistItem | undefined;
+  }
+
+  const maxRow = db
+    .prepare(
+      'SELECT COALESCE(MAX(position), -1) AS max_position FROM task_ledger_checklist WHERE task_id = ?',
+    )
+    .get(input.task_id) as { max_position: number };
+  const id = newLedgerId('cli');
+  db.prepare(
+    `INSERT INTO task_ledger_checklist (
+      id, task_id, title, status, position, notes, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    input.task_id,
+    input.title,
+    input.status || 'todo',
+    input.position !== undefined ? input.position : maxRow.max_position + 1,
+    input.notes || null,
+    now,
+    now,
+  );
+  db.prepare('UPDATE task_ledger_tasks SET updated_at = ? WHERE id = ?').run(
+    now,
+    input.task_id,
+  );
+  syncTaskLedgerArtifactIndex(input.task_id);
+  return db
+    .prepare(
+      `SELECT ${TASK_LEDGER_CHECKLIST_COLUMNS} FROM task_ledger_checklist WHERE id = ?`,
+    )
+    .get(id) as TaskLedgerChecklistItem | undefined;
+}
+
+export function upsertTaskLedgerTestCase(input: {
+  task_id: string;
+  id?: string;
+  title: string;
+  description?: string | null;
+  status?: TaskLedgerTestCaseStatus;
+  evidence?: string | null;
+  position?: number;
+}): TaskLedgerTestCase | undefined {
+  const now = new Date().toISOString();
+  const existing = input.id
+    ? (db
+        .prepare(
+          `SELECT ${TASK_LEDGER_TEST_CASE_COLUMNS} FROM task_ledger_test_cases WHERE id = ? AND task_id = ?`,
+        )
+        .get(input.id, input.task_id) as TaskLedgerTestCase | undefined)
+    : (db
+        .prepare(
+          `SELECT ${TASK_LEDGER_TEST_CASE_COLUMNS} FROM task_ledger_test_cases WHERE task_id = ? AND title = ?`,
+        )
+        .get(input.task_id, input.title) as TaskLedgerTestCase | undefined);
+
+  if (existing) {
+    db.prepare(
+      `UPDATE task_ledger_test_cases
+       SET title = ?, description = ?, status = ?, evidence = ?, position = ?, updated_at = ?
+       WHERE id = ?`,
+    ).run(
+      input.title,
+      input.description !== undefined
+        ? input.description
+        : existing.description,
+      input.status || existing.status,
+      input.evidence !== undefined ? input.evidence : existing.evidence,
+      input.position !== undefined ? input.position : existing.position,
+      now,
+      existing.id,
+    );
+    db.prepare('UPDATE task_ledger_tasks SET updated_at = ? WHERE id = ?').run(
+      now,
+      input.task_id,
+    );
+    syncTaskLedgerArtifactIndex(input.task_id);
+    return db
+      .prepare(
+        `SELECT ${TASK_LEDGER_TEST_CASE_COLUMNS} FROM task_ledger_test_cases WHERE id = ?`,
+      )
+      .get(existing.id) as TaskLedgerTestCase | undefined;
+  }
+
+  const maxRow = db
+    .prepare(
+      'SELECT COALESCE(MAX(position), -1) AS max_position FROM task_ledger_test_cases WHERE task_id = ?',
+    )
+    .get(input.task_id) as { max_position: number };
+  const id = newLedgerId('tc');
+  db.prepare(
+    `INSERT INTO task_ledger_test_cases (
+      id, task_id, title, description, status, evidence, position, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    input.task_id,
+    input.title,
+    input.description || null,
+    input.status || 'pending',
+    input.evidence || null,
+    input.position !== undefined ? input.position : maxRow.max_position + 1,
+    now,
+    now,
+  );
+  db.prepare('UPDATE task_ledger_tasks SET updated_at = ? WHERE id = ?').run(
+    now,
+    input.task_id,
+  );
+  syncTaskLedgerArtifactIndex(input.task_id);
+  return db
+    .prepare(
+      `SELECT ${TASK_LEDGER_TEST_CASE_COLUMNS} FROM task_ledger_test_cases WHERE id = ?`,
+    )
+    .get(id) as TaskLedgerTestCase | undefined;
 }
 
 export function logTaskRun(log: TaskRunLog): void {
@@ -1123,9 +1847,7 @@ export function getFeishuTokenByUserId(
 
 export function getAllFeishuTokenUsers(): { user_id: string }[] {
   return db
-    .prepare(
-      "SELECT DISTINCT user_id FROM feishu_tokens WHERE user_id != ''",
-    )
+    .prepare("SELECT DISTINCT user_id FROM feishu_tokens WHERE user_id != ''")
     .all() as { user_id: string }[];
 }
 
@@ -1339,12 +2061,22 @@ export function createDelegation(params: {
   db.prepare(
     `INSERT INTO delegation_tasks (task_id, target_group, target_jid, title, status, dispatched_at, updated_at)
      VALUES (?, ?, ?, ?, 'dispatched', ?, ?)`,
-  ).run(taskId, params.targetGroup, params.targetJid, params.title || null, now, now);
+  ).run(
+    taskId,
+    params.targetGroup,
+    params.targetJid,
+    params.title || null,
+    now,
+    now,
+  );
   return getDelegation(taskId)!;
 }
 
 /** 回写派发消息 id */
-export function setDelegationDispatchMsgId(taskId: string, msgId: string): void {
+export function setDelegationDispatchMsgId(
+  taskId: string,
+  msgId: string,
+): void {
   db.prepare(
     `UPDATE delegation_tasks SET dispatch_msg_id = ?, updated_at = ? WHERE task_id = ?`,
   ).run(msgId, new Date().toISOString(), taskId);

@@ -16,9 +16,11 @@ import { getChatIndex } from './chat-index.js';
 import { AvailableGroup, getFeishuToken } from './container-runner.js';
 import {
   clampRangeParams,
+  addTaskLedgerEvent,
   closeDelegation,
   createDelegation,
   createTask,
+  createTaskLedgerTask,
   deleteTask,
   getActiveDelegationByGroup,
   getGroupAlias,
@@ -27,10 +29,15 @@ import {
   getMessageContextById,
   getMessageRange,
   getTaskById,
+  getTaskLedgerTask,
+  listTaskLedgerTasks,
   setDelegationDispatchMsgId,
   storeMessageDirect,
   updateDelegationOnReport,
   updateTask,
+  updateTaskLedgerTask,
+  upsertTaskLedgerChecklistItem,
+  upsertTaskLedgerTestCase,
 } from './db.js';
 import { partitionArtifacts } from './commander.js';
 import { resolveTargetChatJid } from './group-alias.js';
@@ -53,6 +60,26 @@ const REPORT_ALLOWED_STATUSES = new Set<string>([
 
 /** 自动终态兜底汇报里携带的子群最终回复摘要上限（防超长撑爆主群 context） */
 const FINALIZE_DETAILS_MAX = 2000;
+
+const TASK_LEDGER_STAGE_ORDER = [
+  'draft',
+  'draft_prd',
+  'effect_locked',
+  'e2e_defined',
+  'tests_planned',
+  'implementing',
+  'verifying',
+  'done',
+] as const;
+
+function taskLedgerStageIndex(status: string): number {
+  const index = TASK_LEDGER_STAGE_ORDER.indexOf(status as never);
+  return index === -1 ? -1 : index;
+}
+
+function taskLedgerAtLeast(status: string, required: string): boolean {
+  return taskLedgerStageIndex(status) >= taskLedgerStageIndex(required);
+}
 
 /**
  * 同一目标群 messages.db 内 ipc_ 消息的单调递增时间戳。
@@ -770,6 +797,7 @@ export async function processTaskIpc(
     category?: string;
     content?: string;
     senderId?: string;
+    options?: Record<string, unknown>;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -1273,7 +1301,13 @@ export async function processTaskIpc(
         const before = (raw.before as number) || 5;
         const after = (raw.after as number) || 5;
         const includeToolCalls = raw.include_tool_calls === true;
-        const result = getMessageContext(chatJid, timestamp, before, after, includeToolCalls);
+        const result = getMessageContext(
+          chatJid,
+          timestamp,
+          before,
+          after,
+          includeToolCalls,
+        );
         writeIpcResponse(sourceGroup, requestId, result);
         logger.info(
           {
@@ -1308,7 +1342,9 @@ export async function processTaskIpc(
       const raw = data as Record<string, unknown>;
       const messageId = raw.message_id as string;
       if (!messageId) {
-        writeIpcResponse(sourceGroup, requestId, { error: 'Missing message_id parameter' });
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Missing message_id parameter',
+        });
         break;
       }
 
@@ -1316,15 +1352,31 @@ export async function processTaskIpc(
         const before = typeof raw.before === 'number' ? raw.before : 5;
         const after = typeof raw.after === 'number' ? raw.after : 5;
         const includeToolCalls = raw.include_tool_calls === true;
-        const result = getMessageContextById(messageId, before, after, includeToolCalls);
+        const result = getMessageContextById(
+          messageId,
+          before,
+          after,
+          includeToolCalls,
+        );
         writeIpcResponse(sourceGroup, requestId, result);
         logger.info(
-          { sourceGroup, messageId, beforeCount: result.before.length, afterCount: result.after.length, includeToolCalls },
+          {
+            sourceGroup,
+            messageId,
+            beforeCount: result.before.length,
+            afterCount: result.after.length,
+            includeToolCalls,
+          },
           'get_message_by_id via IPC',
         );
       } catch (err) {
         logger.error({ err, sourceGroup }, 'get_message_by_id failed');
-        writeIpcResponse(sourceGroup, requestId, { before: [], anchor: null, after: [], error: String(err) });
+        writeIpcResponse(sourceGroup, requestId, {
+          before: [],
+          anchor: null,
+          after: [],
+          error: String(err),
+        });
       }
       break;
     }
@@ -1339,7 +1391,9 @@ export async function processTaskIpc(
       const raw = data as Record<string, unknown>;
       const chatJid = raw.chat_jid as string;
       if (!chatJid) {
-        writeIpcResponse(sourceGroup, requestId, { error: 'Missing chat_jid parameter' });
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Missing chat_jid parameter',
+        });
         break;
       }
 
@@ -1349,16 +1403,579 @@ export async function processTaskIpc(
           raw.limit as number | undefined,
         );
         const includeToolCalls = raw.include_tool_calls === true;
-        const messages = getMessageRange(chatJid, offset, limit, includeToolCalls);
+        const messages = getMessageRange(
+          chatJid,
+          offset,
+          limit,
+          includeToolCalls,
+        );
         writeIpcResponse(sourceGroup, requestId, { messages, offset, limit });
         logger.info(
-          { sourceGroup, chatJid: chatJid.slice(0, 20), offset, limit, count: messages.length, includeToolCalls },
+          {
+            sourceGroup,
+            chatJid: chatJid.slice(0, 20),
+            offset,
+            limit,
+            count: messages.length,
+            includeToolCalls,
+          },
           'get_message_range via IPC',
         );
       } catch (err) {
         logger.error({ err, sourceGroup }, 'get_message_range failed');
-        writeIpcResponse(sourceGroup, requestId, { messages: [], error: String(err) });
+        writeIpcResponse(sourceGroup, requestId, {
+          messages: [],
+          error: String(err),
+        });
       }
+      break;
+    }
+
+    case 'task_create': {
+      const requestId = data.requestId as string;
+      if (!requestId) {
+        logger.warn({ sourceGroup }, 'task_create missing requestId');
+        break;
+      }
+      const raw = data as Record<string, unknown>;
+      const title = raw.title as string;
+      const project = raw.project as string;
+      const taskType = raw.task_type as string;
+      if (!title || !project || !taskType) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Missing title, project or task_type parameter',
+        });
+        break;
+      }
+      try {
+        const detail = createTaskLedgerTask({
+          title,
+          project,
+          task_type: taskType as never,
+          status: (raw.status as never) || 'draft',
+          priority: (raw.priority as string) || 'normal',
+          description: (raw.description as string | undefined) || null,
+          desired_outcome: (raw.desired_outcome as string | undefined) || null,
+          acceptance_criteria: Array.isArray(raw.acceptance_criteria)
+            ? (raw.acceptance_criteria as unknown[]).map(String)
+            : [],
+          owner_group: sourceGroup,
+          chat_jid: (raw.chat_jid as string | undefined) || null,
+          created_by: (data.senderId as string | undefined) || null,
+          artifact_root: (raw.artifact_root as string | undefined) || null,
+          prd_path: (raw.prd_path as string | undefined) || null,
+          spec_path: (raw.spec_path as string | undefined) || null,
+          checklist: Array.isArray(raw.checklist)
+            ? (raw.checklist as Array<Record<string, unknown>>)
+                .map((item) => ({
+                  title: String(item.title || ''),
+                  status: item.status as never,
+                  notes: (item.notes as string | undefined) || null,
+                }))
+                .filter((item) => item.title)
+            : [],
+          test_cases: Array.isArray(raw.test_cases)
+            ? (raw.test_cases as Array<Record<string, unknown>>)
+                .map((item) => ({
+                  title: String(item.title || ''),
+                  description: (item.description as string | undefined) || null,
+                  status: item.status as never,
+                  evidence: (item.evidence as string | undefined) || null,
+                }))
+                .filter((item) => item.title)
+            : [],
+        });
+        writeIpcResponse(sourceGroup, requestId, detail);
+        logger.info(
+          { sourceGroup, taskId: detail.task.id },
+          'Task ledger created via IPC',
+        );
+      } catch (err) {
+        logger.error({ err, sourceGroup }, 'task_create failed');
+        writeIpcResponse(sourceGroup, requestId, { error: String(err) });
+      }
+      break;
+    }
+
+    case 'task_get': {
+      const requestId = data.requestId as string;
+      if (!requestId) {
+        logger.warn({ sourceGroup }, 'task_get missing requestId');
+        break;
+      }
+      const taskId = data.taskId as string;
+      if (!taskId) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Missing taskId parameter',
+        });
+        break;
+      }
+      const detail = getTaskLedgerTask(taskId);
+      if (!detail || (!isMain && detail.task.owner_group !== sourceGroup)) {
+        writeIpcResponse(sourceGroup, requestId, { error: 'Task not found' });
+        break;
+      }
+      writeIpcResponse(sourceGroup, requestId, detail);
+      break;
+    }
+
+    case 'task_list': {
+      const requestId = data.requestId as string;
+      if (!requestId) {
+        logger.warn({ sourceGroup }, 'task_list missing requestId');
+        break;
+      }
+      const raw = data as Record<string, unknown>;
+      const tasks = listTaskLedgerTasks({
+        owner_group: isMain
+          ? (raw.owner_group as string | undefined)
+          : sourceGroup,
+        project: raw.project as never,
+        status: raw.status as never,
+        task_type: raw.task_type as never,
+        include_done: raw.include_done === true,
+        limit: raw.limit as number | undefined,
+      });
+      writeIpcResponse(sourceGroup, requestId, { tasks });
+      break;
+    }
+
+    case 'task_update': {
+      const requestId = data.requestId as string;
+      if (!requestId) {
+        logger.warn({ sourceGroup }, 'task_update missing requestId');
+        break;
+      }
+      const raw = data as Record<string, unknown>;
+      const taskId = data.taskId as string;
+      const current = taskId ? getTaskLedgerTask(taskId) : undefined;
+      if (!current || (!isMain && current.task.owner_group !== sourceGroup)) {
+        writeIpcResponse(sourceGroup, requestId, { error: 'Task not found' });
+        break;
+      }
+      if (raw.status !== undefined) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Status must be changed via workflow tools, not task_update',
+        });
+        break;
+      }
+      const detail = updateTaskLedgerTask(taskId, {
+        title: raw.title as string | undefined,
+        project: raw.project as string | undefined,
+        task_type: raw.task_type as never,
+        priority: raw.priority as string | undefined,
+        description: raw.description as string | null | undefined,
+        desired_outcome: raw.desired_outcome as string | null | undefined,
+        acceptance_criteria: Array.isArray(raw.acceptance_criteria)
+          ? (raw.acceptance_criteria as unknown[]).map(String)
+          : undefined,
+        artifact_root: raw.artifact_root as string | null | undefined,
+        prd_path: raw.prd_path as string | null | undefined,
+        spec_path: raw.spec_path as string | null | undefined,
+      });
+      writeIpcResponse(
+        sourceGroup,
+        requestId,
+        detail || { error: 'Task not found' },
+      );
+      break;
+    }
+
+    case 'task_add_log': {
+      const requestId = data.requestId as string;
+      if (!requestId) {
+        logger.warn({ sourceGroup }, 'task_add_log missing requestId');
+        break;
+      }
+      const raw = data as Record<string, unknown>;
+      const taskId = data.taskId as string;
+      const current = taskId ? getTaskLedgerTask(taskId) : undefined;
+      if (!current || (!isMain && current.task.owner_group !== sourceGroup)) {
+        writeIpcResponse(sourceGroup, requestId, { error: 'Task not found' });
+        break;
+      }
+      const summary = raw.summary as string;
+      if (!summary) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Missing summary parameter',
+        });
+        break;
+      }
+      const event = addTaskLedgerEvent({
+        task_id: taskId,
+        event_type: (raw.event_type as string) || 'progress',
+        summary,
+        details: (raw.details as string | undefined) || null,
+        actor_group: sourceGroup,
+        actor_sender: (data.senderId as string | undefined) || null,
+      });
+      writeIpcResponse(sourceGroup, requestId, { event });
+      break;
+    }
+
+    case 'task_update_checklist': {
+      const requestId = data.requestId as string;
+      if (!requestId) {
+        logger.warn({ sourceGroup }, 'task_update_checklist missing requestId');
+        break;
+      }
+      const raw = data as Record<string, unknown>;
+      const taskId = data.taskId as string;
+      const current = taskId ? getTaskLedgerTask(taskId) : undefined;
+      if (!current || (!isMain && current.task.owner_group !== sourceGroup)) {
+        writeIpcResponse(sourceGroup, requestId, { error: 'Task not found' });
+        break;
+      }
+      const title = raw.title as string;
+      if (!title) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Missing title parameter',
+        });
+        break;
+      }
+      const item = upsertTaskLedgerChecklistItem({
+        task_id: taskId,
+        id: raw.item_id as string | undefined,
+        title,
+        status: raw.status as never,
+        notes: raw.notes as string | null | undefined,
+        position: raw.position as number | undefined,
+      });
+      writeIpcResponse(sourceGroup, requestId, { item });
+      break;
+    }
+
+    case 'task_update_test_case': {
+      const requestId = data.requestId as string;
+      if (!requestId) {
+        logger.warn({ sourceGroup }, 'task_update_test_case missing requestId');
+        break;
+      }
+      const raw = data as Record<string, unknown>;
+      const taskId = data.taskId as string;
+      const current = taskId ? getTaskLedgerTask(taskId) : undefined;
+      if (!current || (!isMain && current.task.owner_group !== sourceGroup)) {
+        writeIpcResponse(sourceGroup, requestId, { error: 'Task not found' });
+        break;
+      }
+      const title = raw.title as string;
+      if (!title) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Missing title parameter',
+        });
+        break;
+      }
+      const test_case = upsertTaskLedgerTestCase({
+        task_id: taskId,
+        id: raw.test_case_id as string | undefined,
+        title,
+        description: raw.description as string | null | undefined,
+        status: raw.status as never,
+        evidence: raw.evidence as string | null | undefined,
+        position: raw.position as number | undefined,
+      });
+      writeIpcResponse(sourceGroup, requestId, { test_case });
+      break;
+    }
+
+    case 'task_lock_effect': {
+      const requestId = data.requestId as string;
+      if (!requestId) {
+        logger.warn({ sourceGroup }, 'task_lock_effect missing requestId');
+        break;
+      }
+      const raw = data as Record<string, unknown>;
+      const taskId = data.taskId as string;
+      const current = taskId ? getTaskLedgerTask(taskId) : undefined;
+      if (!current || (!isMain && current.task.owner_group !== sourceGroup)) {
+        writeIpcResponse(sourceGroup, requestId, { error: 'Task not found' });
+        break;
+      }
+      const desiredOutcome = raw.desired_outcome as string;
+      const acceptanceCriteria = Array.isArray(raw.acceptance_criteria)
+        ? (raw.acceptance_criteria as unknown[]).map(String)
+        : [];
+      if (!desiredOutcome || acceptanceCriteria.length === 0) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Missing desired_outcome or acceptance_criteria',
+        });
+        break;
+      }
+      const detail = updateTaskLedgerTask(taskId, {
+        status: 'effect_locked',
+        desired_outcome: desiredOutcome,
+        acceptance_criteria: acceptanceCriteria,
+      });
+      addTaskLedgerEvent({
+        task_id: taskId,
+        event_type: 'effect_locked',
+        summary: '最终效果已锁定',
+        details: desiredOutcome,
+        actor_group: sourceGroup,
+        actor_sender: (data.senderId as string | undefined) || null,
+      });
+      writeIpcResponse(
+        sourceGroup,
+        requestId,
+        detail || { error: 'Task not found' },
+      );
+      break;
+    }
+
+    case 'task_define_e2e': {
+      const requestId = data.requestId as string;
+      if (!requestId) {
+        logger.warn({ sourceGroup }, 'task_define_e2e missing requestId');
+        break;
+      }
+      const raw = data as Record<string, unknown>;
+      const taskId = data.taskId as string;
+      const current = taskId ? getTaskLedgerTask(taskId) : undefined;
+      if (!current || (!isMain && current.task.owner_group !== sourceGroup)) {
+        writeIpcResponse(sourceGroup, requestId, { error: 'Task not found' });
+        break;
+      }
+      if (!taskLedgerAtLeast(current.task.status, 'effect_locked')) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Lock desired outcome before defining E2E cases',
+        });
+        break;
+      }
+      const cases = Array.isArray(raw.test_cases)
+        ? (raw.test_cases as Array<Record<string, unknown>>)
+        : [];
+      if (cases.length === 0) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Missing test_cases',
+        });
+        break;
+      }
+      for (const [index, item] of cases.entries()) {
+        const title = String(item.title || '');
+        if (!title) continue;
+        upsertTaskLedgerTestCase({
+          task_id: taskId,
+          title,
+          description: (item.description as string | undefined) || null,
+          status: 'pending',
+          position: index,
+        });
+      }
+      updateTaskLedgerTask(taskId, { status: 'e2e_defined' });
+      addTaskLedgerEvent({
+        task_id: taskId,
+        event_type: 'e2e_defined',
+        summary: `已定义 ${cases.length} 个端到端验收用例`,
+        details: JSON.stringify(cases),
+        actor_group: sourceGroup,
+        actor_sender: (data.senderId as string | undefined) || null,
+      });
+      writeIpcResponse(
+        sourceGroup,
+        requestId,
+        getTaskLedgerTask(taskId) || { error: 'Task not found' },
+      );
+      break;
+    }
+
+    case 'task_plan_tests': {
+      const requestId = data.requestId as string;
+      if (!requestId) {
+        logger.warn({ sourceGroup }, 'task_plan_tests missing requestId');
+        break;
+      }
+      const raw = data as Record<string, unknown>;
+      const taskId = data.taskId as string;
+      const current = taskId ? getTaskLedgerTask(taskId) : undefined;
+      if (!current || (!isMain && current.task.owner_group !== sourceGroup)) {
+        writeIpcResponse(sourceGroup, requestId, { error: 'Task not found' });
+        break;
+      }
+      if (!taskLedgerAtLeast(current.task.status, 'e2e_defined')) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Define E2E cases before planning tests',
+        });
+        break;
+      }
+      const checklist = Array.isArray(raw.checklist)
+        ? (raw.checklist as Array<Record<string, unknown>>)
+        : [];
+      if (checklist.length === 0) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Missing checklist',
+        });
+        break;
+      }
+      for (const [index, item] of checklist.entries()) {
+        const title = String(item.title || '');
+        if (!title) continue;
+        upsertTaskLedgerChecklistItem({
+          task_id: taskId,
+          title,
+          status: 'todo',
+          notes: (item.notes as string | undefined) || null,
+          position: index,
+        });
+      }
+      updateTaskLedgerTask(taskId, { status: 'tests_planned' });
+      addTaskLedgerEvent({
+        task_id: taskId,
+        event_type: 'tests_planned',
+        summary: `已拆解 ${checklist.length} 个测试/执行清单项`,
+        details: JSON.stringify(checklist),
+        actor_group: sourceGroup,
+        actor_sender: (data.senderId as string | undefined) || null,
+      });
+      writeIpcResponse(
+        sourceGroup,
+        requestId,
+        getTaskLedgerTask(taskId) || { error: 'Task not found' },
+      );
+      break;
+    }
+
+    case 'task_start_implementation': {
+      const requestId = data.requestId as string;
+      if (!requestId) {
+        logger.warn(
+          { sourceGroup },
+          'task_start_implementation missing requestId',
+        );
+        break;
+      }
+      const taskId = data.taskId as string;
+      const current = taskId ? getTaskLedgerTask(taskId) : undefined;
+      if (!current || (!isMain && current.task.owner_group !== sourceGroup)) {
+        writeIpcResponse(sourceGroup, requestId, { error: 'Task not found' });
+        break;
+      }
+      if (!taskLedgerAtLeast(current.task.status, 'tests_planned')) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Plan tests before starting implementation',
+        });
+        break;
+      }
+      const detail = updateTaskLedgerTask(taskId, { status: 'implementing' });
+      addTaskLedgerEvent({
+        task_id: taskId,
+        event_type: 'implementation_started',
+        summary: '进入实现阶段',
+        details: (data as Record<string, unknown>).summary as
+          | string
+          | undefined,
+        actor_group: sourceGroup,
+        actor_sender: (data.senderId as string | undefined) || null,
+      });
+      writeIpcResponse(
+        sourceGroup,
+        requestId,
+        detail || { error: 'Task not found' },
+      );
+      break;
+    }
+
+    case 'task_record_verification': {
+      const requestId = data.requestId as string;
+      if (!requestId) {
+        logger.warn(
+          { sourceGroup },
+          'task_record_verification missing requestId',
+        );
+        break;
+      }
+      const raw = data as Record<string, unknown>;
+      const taskId = data.taskId as string;
+      const current = taskId ? getTaskLedgerTask(taskId) : undefined;
+      if (!current || (!isMain && current.task.owner_group !== sourceGroup)) {
+        writeIpcResponse(sourceGroup, requestId, { error: 'Task not found' });
+        break;
+      }
+      if (!taskLedgerAtLeast(current.task.status, 'implementing')) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Start implementation before recording verification',
+        });
+        break;
+      }
+      const title = raw.title as string;
+      if (!title) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Missing title parameter',
+        });
+        break;
+      }
+      upsertTaskLedgerTestCase({
+        task_id: taskId,
+        id: raw.test_case_id as string | undefined,
+        title,
+        description: raw.description as string | null | undefined,
+        status: raw.status as never,
+        evidence: raw.evidence as string | null | undefined,
+      });
+      updateTaskLedgerTask(taskId, { status: 'verifying' });
+      addTaskLedgerEvent({
+        task_id: taskId,
+        event_type: 'verification',
+        summary: title,
+        details: raw.evidence as string | undefined,
+        actor_group: sourceGroup,
+        actor_sender: (data.senderId as string | undefined) || null,
+      });
+      writeIpcResponse(
+        sourceGroup,
+        requestId,
+        getTaskLedgerTask(taskId) || { error: 'Task not found' },
+      );
+      break;
+    }
+
+    case 'task_mark_done': {
+      const requestId = data.requestId as string;
+      if (!requestId) {
+        logger.warn({ sourceGroup }, 'task_mark_done missing requestId');
+        break;
+      }
+      const taskId = data.taskId as string;
+      const current = taskId ? getTaskLedgerTask(taskId) : undefined;
+      if (!current || (!isMain && current.task.owner_group !== sourceGroup)) {
+        writeIpcResponse(sourceGroup, requestId, { error: 'Task not found' });
+        break;
+      }
+      if (!taskLedgerAtLeast(current.task.status, 'verifying')) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Record verification before marking done',
+        });
+        break;
+      }
+      const failedCases = current.test_cases.filter((item) =>
+        ['pending', 'failed', 'blocked'].includes(item.status),
+      );
+      const openChecklist = current.checklist.filter((item) =>
+        ['todo', 'doing', 'blocked'].includes(item.status),
+      );
+      if (failedCases.length > 0 || openChecklist.length > 0) {
+        writeIpcResponse(sourceGroup, requestId, {
+          error: 'Cannot mark done with open checklist or unpassed test cases',
+          open_checklist: openChecklist,
+          open_test_cases: failedCases,
+        });
+        break;
+      }
+      const detail = updateTaskLedgerTask(taskId, { status: 'done' });
+      addTaskLedgerEvent({
+        task_id: taskId,
+        event_type: 'done',
+        summary: '任务验收完成',
+        details: (data as Record<string, unknown>).summary as
+          | string
+          | undefined,
+        actor_group: sourceGroup,
+        actor_sender: (data.senderId as string | undefined) || null,
+      });
+      writeIpcResponse(
+        sourceGroup,
+        requestId,
+        detail || { error: 'Task not found' },
+      );
       break;
     }
 
