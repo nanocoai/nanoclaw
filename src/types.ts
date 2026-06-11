@@ -135,6 +135,113 @@ export interface TaskRunLog {
   error: string | null;
 }
 
+/** 任务账本：任务状态 */
+export type TaskLedgerStatus =
+  | 'draft'
+  | 'draft_prd'
+  | 'ready'
+  | 'effect_locked'
+  | 'e2e_defined'
+  | 'tests_planned'
+  | 'in_progress'
+  | 'implementing'
+  | 'blocked'
+  | 'review'
+  | 'testing'
+  | 'verifying'
+  | 'done'
+  | 'cancelled';
+
+/** 任务账本：任务类型 */
+export type TaskLedgerType =
+  | 'bug'
+  | 'feature'
+  | 'refactor'
+  | 'review'
+  | 'e2e'
+  | 'research'
+  | 'ops'
+  | 'other';
+
+/** 任务账本：执行清单状态 */
+export type TaskLedgerChecklistStatus =
+  | 'todo'
+  | 'doing'
+  | 'done'
+  | 'blocked'
+  | 'skipped';
+
+/** 任务账本：测试/验收用例状态 */
+export type TaskLedgerTestCaseStatus =
+  | 'pending'
+  | 'passed'
+  | 'failed'
+  | 'blocked'
+  | 'skipped';
+
+/** 任务账本主任务。用于把“最终效果、验收标准、执行过程”固定成 LLM 可查的结构化事实。 */
+export interface TaskLedgerTask {
+  id: string;
+  title: string;
+  project: string;
+  task_type: TaskLedgerType;
+  status: TaskLedgerStatus;
+  priority: string;
+  description: string | null;
+  desired_outcome: string | null;
+  acceptance_criteria: string[];
+  owner_group: string;
+  chat_jid: string | null;
+  created_by: string | null;
+  artifact_root: string | null;
+  prd_path: string | null;
+  spec_path: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface TaskLedgerChecklistItem {
+  id: string;
+  task_id: string;
+  title: string;
+  status: TaskLedgerChecklistStatus;
+  position: number;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskLedgerTestCase {
+  id: string;
+  task_id: string;
+  title: string;
+  description: string | null;
+  status: TaskLedgerTestCaseStatus;
+  evidence: string | null;
+  position: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskLedgerEvent {
+  id: number;
+  task_id: string;
+  event_type: string;
+  summary: string;
+  details: string | null;
+  actor_group: string | null;
+  actor_sender: string | null;
+  created_at: string;
+}
+
+export interface TaskLedgerDetail {
+  task: TaskLedgerTask;
+  checklist: TaskLedgerChecklistItem[];
+  test_cases: TaskLedgerTestCase[];
+  events: TaskLedgerEvent[];
+}
+
 // --- Channel abstraction ---
 
 export interface SendMessageOptions {

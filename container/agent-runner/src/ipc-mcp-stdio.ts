@@ -88,7 +88,9 @@ server.tool(
       groupFolder,
       timestamp: new Date().toISOString(),
     });
-    return { content: [{ type: 'text' as const, text: `群名已改为「${args.name}」` }] };
+    return {
+      content: [{ type: 'text' as const, text: `群名已改为「${args.name}」` }],
+    };
   },
 );
 
@@ -629,7 +631,7 @@ async function waitForResponse(
     }
     await new Promise((r) => setTimeout(r, 100));
   }
-  throw new Error(`Memory request ${requestId} timed out after ${timeoutMs}ms`);
+  throw new Error(`IPC request ${requestId} timed out after ${timeoutMs}ms`);
 }
 
 server.tool(
@@ -641,11 +643,7 @@ server.tool(
       .optional()
       .default('')
       .describe('搜索查询（自然语言），为空返回全部'),
-    limit: z
-      .number()
-      .optional()
-      .default(10)
-      .describe('最多返回条数'),
+    limit: z.number().optional().default(10).describe('最多返回条数'),
     category: z
       .string()
       .optional()
@@ -695,9 +693,7 @@ server.tool(
     category: z
       .string()
       .optional()
-      .describe(
-        '建议类别: preference | knowledge | context | behavior | goal',
-      ),
+      .describe('建议类别: preference | knowledge | context | behavior | goal'),
   },
   async (args) => {
     writeIpcFile(TASKS_DIR, {
@@ -709,6 +705,609 @@ server.tool(
       timestamp: new Date().toISOString(),
     });
     return { content: [{ type: 'text' as const, text: '已记住。' }] };
+  },
+);
+
+// ─────────────────────────────────────────────────────────────
+// Task ledger — 结构化任务账本
+// ─────────────────────────────────────────────────────────────
+
+const taskStatusSchema = z.enum([
+  'draft',
+  'draft_prd',
+  'ready',
+  'effect_locked',
+  'e2e_defined',
+  'tests_planned',
+  'in_progress',
+  'implementing',
+  'blocked',
+  'review',
+  'testing',
+  'verifying',
+  'done',
+  'cancelled',
+]);
+const taskTypeSchema = z.enum([
+  'bug',
+  'feature',
+  'refactor',
+  'review',
+  'e2e',
+  'research',
+  'ops',
+  'other',
+]);
+const checklistStatusSchema = z.enum([
+  'todo',
+  'doing',
+  'done',
+  'blocked',
+  'skipped',
+]);
+const testCaseStatusSchema = z.enum([
+  'pending',
+  'passed',
+  'failed',
+  'blocked',
+  'skipped',
+]);
+
+async function callTaskLedger(type: string, payload: Record<string, unknown>) {
+  const requestId = crypto.randomUUID();
+  writeIpcFile(TASKS_DIR, {
+    type,
+    requestId,
+    ...payload,
+    groupFolder,
+    chatJid,
+    senderId,
+    timestamp: new Date().toISOString(),
+  });
+  return waitForResponse(requestId);
+}
+
+server.tool(
+  'task_create',
+  '创建一条结构化任务账本。用于把需求、Bug 或排查任务的最终效果、验收标准、执行清单、测试用例先固定下来，方便后续 LLM 查询和推进。',
+  {
+    title: z.string().describe('任务标题，短句即可'),
+    project: z
+      .string()
+      .describe('项目名，如 nine / nanoclaw / nine-recruit-api / other'),
+    task_type: taskTypeSchema.describe('任务类型'),
+    status: taskStatusSchema
+      .optional()
+      .default('draft')
+      .describe('初始状态，默认 draft'),
+    priority: z
+      .string()
+      .optional()
+      .default('normal')
+      .describe('优先级，如 low / normal / high / urgent'),
+    description: z.string().optional().describe('任务背景和问题描述'),
+    desired_outcome: z
+      .string()
+      .optional()
+      .describe('最终效果：做到什么才算这事真的完成'),
+    acceptance_criteria: z
+      .array(z.string())
+      .optional()
+      .default([])
+      .describe('验收标准列表'),
+    checklist: z
+      .array(
+        z.object({
+          title: z.string(),
+          status: checklistStatusSchema.optional(),
+          notes: z.string().optional(),
+        }),
+      )
+      .optional()
+      .default([])
+      .describe('执行清单，可从最终效果倒推'),
+    test_cases: z
+      .array(
+        z.object({
+          title: z.string(),
+          description: z.string().optional(),
+          status: testCaseStatusSchema.optional(),
+          evidence: z.string().optional(),
+        }),
+      )
+      .optional()
+      .default([])
+      .describe('测试或 E2E 用例：跑完哪些能证明效果成立'),
+    artifact_root: z
+      .string()
+      .optional()
+      .describe(
+        '任务产物根目录；默认写入全局 groups/global/task-ledger/{task_id}',
+      ),
+    prd_path: z.string().optional().describe('关联 PRD 文件路径'),
+    spec_path: z.string().optional().describe('关联 OpenSpec 或设计文档路径'),
+  },
+  async (args) => {
+    try {
+      const response = await callTaskLedger('task_create', args);
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(response, null, 2) },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `创建任务失败: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'task_get',
+  '查看一条任务账本详情，包含主任务、执行清单、测试用例和过程日志。',
+  {
+    task_id: z.string().describe('任务 ID'),
+  },
+  async (args) => {
+    try {
+      const response = await callTaskLedger('task_get', {
+        taskId: args.task_id,
+      });
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(response, null, 2) },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `查询任务失败: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'task_list',
+  '列出任务账本。默认只看当前群未完成任务；主群可传 owner_group 看指定群。',
+  {
+    owner_group: z.string().optional().describe('主群可用：按群 folder 过滤'),
+    project: z.string().optional().describe('按项目过滤'),
+    status: taskStatusSchema.optional().describe('按状态过滤'),
+    task_type: taskTypeSchema.optional().describe('按任务类型过滤'),
+    include_done: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe('是否包含 done/cancelled'),
+    limit: z.number().optional().default(20).describe('最多返回条数，最大 100'),
+  },
+  async (args) => {
+    try {
+      const response = await callTaskLedger('task_list', args);
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(response, null, 2) },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `列任务失败: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'task_update',
+  '更新任务账本主任务的非状态字段，如标题、描述、最终效果、验收标准、PRD/Spec 路径。状态推进必须使用 task_lock_effect 等 workflow 工具。',
+  {
+    task_id: z.string().describe('任务 ID'),
+    title: z.string().optional(),
+    project: z.string().optional(),
+    task_type: taskTypeSchema.optional(),
+    priority: z.string().optional(),
+    description: z.string().optional(),
+    desired_outcome: z.string().optional(),
+    acceptance_criteria: z.array(z.string()).optional(),
+    artifact_root: z.string().optional(),
+    prd_path: z.string().optional(),
+    spec_path: z.string().optional(),
+  },
+  async (args) => {
+    try {
+      const { task_id, ...updates } = args;
+      const response = await callTaskLedger('task_update', {
+        taskId: task_id,
+        ...updates,
+      });
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(response, null, 2) },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `更新任务失败: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'task_lock_effect',
+  '锁定任务最终效果。必须先明确 desired_outcome 和 acceptance_criteria，后续才能定义 E2E 用例。用于防止 LLM 未对齐目标就开始实现。',
+  {
+    task_id: z.string().describe('任务 ID'),
+    desired_outcome: z
+      .string()
+      .describe('最终效果：完成后用户/系统应该看到什么变化'),
+    acceptance_criteria: z
+      .array(z.string())
+      .min(1)
+      .describe('验收标准：满足哪些条件才算效果成立'),
+  },
+  async (args) => {
+    try {
+      const response = await callTaskLedger('task_lock_effect', {
+        taskId: args.task_id,
+        desired_outcome: args.desired_outcome,
+        acceptance_criteria: args.acceptance_criteria,
+      });
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(response, null, 2) },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `锁定效果失败: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'task_define_e2e',
+  '定义端到端验收用例。必须在 task_lock_effect 之后调用，用例要能证明最终效果真的达成。',
+  {
+    task_id: z.string().describe('任务 ID'),
+    test_cases: z
+      .array(
+        z.object({
+          title: z.string(),
+          description: z.string().optional(),
+        }),
+      )
+      .min(1)
+      .describe('端到端验收用例列表'),
+  },
+  async (args) => {
+    try {
+      const response = await callTaskLedger('task_define_e2e', {
+        taskId: args.task_id,
+        test_cases: args.test_cases,
+      });
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(response, null, 2) },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `定义 E2E 失败: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'task_plan_tests',
+  '拆解测试与执行清单。必须在 task_define_e2e 之后调用，用于从 E2E 倒推集成测试、单元测试和实现步骤。',
+  {
+    task_id: z.string().describe('任务 ID'),
+    checklist: z
+      .array(
+        z.object({
+          title: z.string(),
+          notes: z.string().optional(),
+        }),
+      )
+      .min(1)
+      .describe('测试/执行清单'),
+  },
+  async (args) => {
+    try {
+      const response = await callTaskLedger('task_plan_tests', {
+        taskId: args.task_id,
+        checklist: args.checklist,
+      });
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(response, null, 2) },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `规划测试失败: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'task_start_implementation',
+  '进入实现阶段。只有最终效果、E2E 用例、测试/执行清单都完成后才能调用。',
+  {
+    task_id: z.string().describe('任务 ID'),
+    summary: z.string().optional().describe('进入实现阶段的说明'),
+  },
+  async (args) => {
+    try {
+      const response = await callTaskLedger('task_start_implementation', {
+        taskId: args.task_id,
+        summary: args.summary,
+      });
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(response, null, 2) },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `进入实现阶段失败: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'task_record_verification',
+  '记录验证结果。用于把测试/E2E 结果和证据写回账本；调用后任务进入 verifying。',
+  {
+    task_id: z.string().describe('任务 ID'),
+    test_case_id: z.string().optional().describe('测试用例 ID，可选'),
+    title: z.string().describe('验证项标题'),
+    description: z.string().optional(),
+    status: testCaseStatusSchema.describe('验证状态'),
+    evidence: z
+      .string()
+      .optional()
+      .describe('验证证据，如命令输出、截图路径、trace 链接'),
+  },
+  async (args) => {
+    try {
+      const response = await callTaskLedger('task_record_verification', {
+        taskId: args.task_id,
+        test_case_id: args.test_case_id,
+        title: args.title,
+        description: args.description,
+        status: args.status,
+        evidence: args.evidence,
+      });
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(response, null, 2) },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `记录验证失败: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'task_mark_done',
+  '将任务标记完成。只有任务进入 verifying，且清单没有未完成项、测试用例没有 pending/failed/blocked 时才能成功。',
+  {
+    task_id: z.string().describe('任务 ID'),
+    summary: z.string().optional().describe('完成说明'),
+  },
+  async (args) => {
+    try {
+      const response = await callTaskLedger('task_mark_done', {
+        taskId: args.task_id,
+        summary: args.summary,
+      });
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(response, null, 2) },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `标记完成失败: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'task_add_log',
+  '给任务账本追加过程记录。用于记录根因、决策、风险、验证证据、卡点和人工确认。',
+  {
+    task_id: z.string().describe('任务 ID'),
+    event_type: z
+      .string()
+      .optional()
+      .default('progress')
+      .describe(
+        '事件类型，如 progress / decision / evidence / risk / blocked / done',
+      ),
+    summary: z.string().describe('一句话摘要'),
+    details: z.string().optional().describe('详细说明或证据'),
+  },
+  async (args) => {
+    try {
+      const response = await callTaskLedger('task_add_log', {
+        taskId: args.task_id,
+        event_type: args.event_type,
+        summary: args.summary,
+        details: args.details,
+      });
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(response, null, 2) },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `追加日志失败: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'task_update_checklist',
+  '新增或更新任务执行清单项。传 item_id 精确更新；不传时按同名 title 更新或创建。',
+  {
+    task_id: z.string().describe('任务 ID'),
+    item_id: z.string().optional().describe('清单项 ID，可选'),
+    title: z.string().describe('清单项标题'),
+    status: checklistStatusSchema.optional().default('todo'),
+    notes: z.string().optional(),
+    position: z.number().optional(),
+  },
+  async (args) => {
+    try {
+      const response = await callTaskLedger('task_update_checklist', {
+        taskId: args.task_id,
+        item_id: args.item_id,
+        title: args.title,
+        status: args.status,
+        notes: args.notes,
+        position: args.position,
+      });
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(response, null, 2) },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `更新清单失败: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.tool(
+  'task_update_test_case',
+  '新增或更新任务测试/验收用例。传 test_case_id 精确更新；不传时按同名 title 更新或创建。',
+  {
+    task_id: z.string().describe('任务 ID'),
+    test_case_id: z.string().optional().describe('测试用例 ID，可选'),
+    title: z.string().describe('测试用例标题'),
+    description: z.string().optional(),
+    status: testCaseStatusSchema.optional().default('pending'),
+    evidence: z
+      .string()
+      .optional()
+      .describe('验证证据，如命令输出、截图路径、E2E trace'),
+    position: z.number().optional(),
+  },
+  async (args) => {
+    try {
+      const response = await callTaskLedger('task_update_test_case', {
+        taskId: args.task_id,
+        test_case_id: args.test_case_id,
+        title: args.title,
+        description: args.description,
+        status: args.status,
+        evidence: args.evidence,
+        position: args.position,
+      });
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(response, null, 2) },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `更新测试用例失败: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      };
+    }
   },
 );
 
@@ -726,11 +1325,24 @@ server.tool(
       .optional()
       .describe('限定搜索的群组 folder，默认搜索所有群'),
     sender: z.string().optional().describe('按发送人名称过滤'),
-    days: z.number().optional().describe('限定最近 N 天（与 startTime/endTime 互斥，优先使用后者）'),
-    startTime: z.string().optional().describe('起始时间（ISO 8601），如 "2026-05-15T00:00:00"'),
-    endTime: z.string().optional().describe('截止时间（ISO 8601），如 "2026-05-20T23:59:59"'),
+    days: z
+      .number()
+      .optional()
+      .describe('限定最近 N 天（与 startTime/endTime 互斥，优先使用后者）'),
+    startTime: z
+      .string()
+      .optional()
+      .describe('起始时间（ISO 8601），如 "2026-05-15T00:00:00"'),
+    endTime: z
+      .string()
+      .optional()
+      .describe('截止时间（ISO 8601），如 "2026-05-20T23:59:59"'),
     limit: z.number().optional().default(10).describe('返回条数，默认 10'),
-    include_tool_calls: z.boolean().optional().default(false).describe('是否包含工具调用/工具进度等调试信息，默认 false'),
+    include_tool_calls: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe('是否包含工具调用/工具进度等调试信息，默认 false'),
   },
   async (args) => {
     const requestId = crypto.randomUUID();
@@ -781,11 +1393,27 @@ server.tool(
   'get_chat_context',
   '获取指定消息前后的聊天记录。先用 search_chat 找到目标消息，再用此工具展开上下文。默认过滤工具调用等过程噪音，调试时可用 include_tool_calls=true 查看全量。',
   {
-    chat_jid: z.string().describe('消息所在的会话 JID（从 search_chat 结果的 chat_jid 字段获取）'),
-    timestamp: z.string().describe('锚点消息的时间戳（ISO 8601），从 search_chat 结果的 time_range 获取'),
-    before: z.number().optional().default(5).describe('锚点前 N 条消息，默认 5'),
+    chat_jid: z
+      .string()
+      .describe(
+        '消息所在的会话 JID（从 search_chat 结果的 chat_jid 字段获取）',
+      ),
+    timestamp: z
+      .string()
+      .describe(
+        '锚点消息的时间戳（ISO 8601），从 search_chat 结果的 time_range 获取',
+      ),
+    before: z
+      .number()
+      .optional()
+      .default(5)
+      .describe('锚点前 N 条消息，默认 5'),
     after: z.number().optional().default(5).describe('锚点后 N 条消息，默认 5'),
-    include_tool_calls: z.boolean().optional().default(false).describe('是否包含工具调用/工具进度等调试信息，默认 false'),
+    include_tool_calls: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe('是否包含工具调用/工具进度等调试信息，默认 false'),
   },
   async (args) => {
     const requestId = crypto.randomUUID();
@@ -832,9 +1460,17 @@ server.tool(
   '按消息 ID 精确定位一条消息，并返回其前后 N 条上下文。消息 ID 是数据库主键（全局唯一，可从 search_chat 结果或飞书引用中获取），无需额外提供 chat_jid。默认过滤工具调用等过程噪音，调试时可用 include_tool_calls=true 查看全量。',
   {
     message_id: z.string().describe('消息 ID（messages 表主键，全局唯一）'),
-    before: z.number().optional().default(5).describe('锚点前 N 条消息，默认 5'),
+    before: z
+      .number()
+      .optional()
+      .default(5)
+      .describe('锚点前 N 条消息，默认 5'),
     after: z.number().optional().default(5).describe('锚点后 N 条消息，默认 5'),
-    include_tool_calls: z.boolean().optional().default(false).describe('是否包含工具调用/工具进度等调试信息，默认 false'),
+    include_tool_calls: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe('是否包含工具调用/工具进度等调试信息，默认 false'),
   },
   async (args) => {
     const requestId = crypto.randomUUID();
@@ -852,10 +1488,19 @@ server.tool(
 
     try {
       const response = await waitForResponse(requestId);
-      return { content: [{ type: 'text' as const, text: JSON.stringify(response, null, 2) }] };
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(response, null, 2) },
+        ],
+      };
     } catch (err) {
       return {
-        content: [{ type: 'text' as const, text: `按 ID 查询失败: ${err instanceof Error ? err.message : String(err)}` }],
+        content: [
+          {
+            type: 'text' as const,
+            text: `按 ID 查询失败: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
         isError: true,
       };
     }
@@ -870,10 +1515,24 @@ server.tool(
   'get_message_range',
   '按位置区间查询某个会话的历史消息。offset=0 表示从最新一条开始，倒数跳过 offset 条后取 limit 条，结果按时间正序返回（最早的在前）。默认过滤工具调用等过程噪音，调试时可用 include_tool_calls=true 查看全量。',
   {
-    chat_jid: z.string().describe('会话 JID（从 search_chat 结果的 chat_jid 字段获取）'),
-    offset: z.number().optional().default(0).describe('跳过最新的 N 条，offset=0 表示从最新开始，默认 0'),
-    limit: z.number().optional().default(20).describe('返回条数，默认 20，上限 200'),
-    include_tool_calls: z.boolean().optional().default(false).describe('是否包含工具调用/工具进度等调试信息，默认 false'),
+    chat_jid: z
+      .string()
+      .describe('会话 JID（从 search_chat 结果的 chat_jid 字段获取）'),
+    offset: z
+      .number()
+      .optional()
+      .default(0)
+      .describe('跳过最新的 N 条，offset=0 表示从最新开始，默认 0'),
+    limit: z
+      .number()
+      .optional()
+      .default(20)
+      .describe('返回条数，默认 20，上限 200'),
+    include_tool_calls: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe('是否包含工具调用/工具进度等调试信息，默认 false'),
   },
   async (args) => {
     const requestId = crypto.randomUUID();
@@ -891,10 +1550,19 @@ server.tool(
 
     try {
       const response = await waitForResponse(requestId);
-      return { content: [{ type: 'text' as const, text: JSON.stringify(response, null, 2) }] };
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify(response, null, 2) },
+        ],
+      };
     } catch (err) {
       return {
-        content: [{ type: 'text' as const, text: `区间查询失败: ${err instanceof Error ? err.message : String(err)}` }],
+        content: [
+          {
+            type: 'text' as const,
+            text: `区间查询失败: ${err instanceof Error ? err.message : String(err)}`,
+          },
+        ],
         isError: true,
       };
     }

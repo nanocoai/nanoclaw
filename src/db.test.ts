@@ -1,9 +1,13 @@
+import fs from 'fs';
+
 import { describe, it, expect, beforeEach } from 'vitest';
 
 import {
   _initTestDatabase,
   clampRangeParams,
+  addTaskLedgerEvent,
   createTask,
+  createTaskLedgerTask,
   deleteTask,
   getAllChats,
   getAllGroupAliases,
@@ -16,17 +20,134 @@ import {
   getMessagesSince,
   getNewMessages,
   getTaskById,
+  getTaskLedgerTask,
+  listTaskLedgerTasks,
   setGroupAlias,
   setRegisteredGroup,
   storeChatMetadata,
   storeMessage,
   storeMessageDirect,
+  updateTaskLedgerTask,
+  upsertTaskLedgerChecklistItem,
+  upsertTaskLedgerTestCase,
   updateTask,
 } from './db.js';
 import { formatMessages } from './router.js';
 
 beforeEach(() => {
   _initTestDatabase();
+});
+
+describe('task ledger db', () => {
+  it('创建任务时保存最终效果、验收标准、清单和测试用例', () => {
+    const detail = createTaskLedgerTask({
+      title: '实现任务账本 MCP',
+      project: 'nanoclaw',
+      task_type: 'feature',
+      status: 'ready',
+      owner_group: 'main_group',
+      created_by: 'user-1',
+      desired_outcome: 'LLM 能查看任务进度并记录验收证据',
+      acceptance_criteria: ['能创建任务', '能记录 E2E 证据'],
+      checklist: [{ title: '设计 schema' }, { title: '接 MCP 工具' }],
+      test_cases: [{ title: '创建任务后能查询详情' }],
+    });
+
+    expect(detail.task.id).toMatch(/^tl_/);
+    expect(detail.task.acceptance_criteria).toEqual([
+      '能创建任务',
+      '能记录 E2E 证据',
+    ]);
+    expect(detail.checklist.map((item) => item.title)).toEqual([
+      '设计 schema',
+      '接 MCP 工具',
+    ]);
+    expect(detail.test_cases[0].status).toBe('pending');
+    expect(detail.events[0].event_type).toBe('created');
+    expect(detail.task.artifact_root).toContain('task-ledger');
+    expect(detail.task.prd_path).toBe(`${detail.task.artifact_root}/prd.md`);
+    expect(fs.existsSync(`${detail.task.artifact_root}/task.yaml`)).toBe(true);
+    expect(fs.existsSync(`${detail.task.artifact_root}/prd.md`)).toBe(true);
+    expect(fs.existsSync(`${detail.task.artifact_root}/e2e-cases.md`)).toBe(
+      true,
+    );
+  });
+
+  it('支持按项目和未完成状态列任务', () => {
+    createTaskLedgerTask({
+      title: '未完成任务',
+      project: 'nine',
+      task_type: 'bug',
+      owner_group: 'main_group',
+    });
+    createTaskLedgerTask({
+      title: '已完成任务',
+      project: 'nine',
+      task_type: 'bug',
+      status: 'done',
+      owner_group: 'main_group',
+    });
+
+    const active = listTaskLedgerTasks({ project: 'nine' });
+    expect(active).toHaveLength(1);
+    expect(active[0].title).toBe('未完成任务');
+
+    const all = listTaskLedgerTasks({ project: 'nine', include_done: true });
+    expect(all).toHaveLength(2);
+  });
+
+  it('更新任务、清单、测试用例和过程日志', () => {
+    const created = createTaskLedgerTask({
+      title: '修 bug',
+      project: 'nine',
+      task_type: 'bug',
+      owner_group: 'main_group',
+    });
+    const taskId = created.task.id;
+
+    const updated = updateTaskLedgerTask(taskId, {
+      status: 'in_progress',
+      desired_outcome: '异常有清晰错误，不静默失败',
+      acceptance_criteria: ['RED 用例先失败', '修复后通过'],
+    });
+    expect(updated?.task.status).toBe('in_progress');
+    expect(updated?.task.acceptance_criteria).toHaveLength(2);
+
+    const checklist = upsertTaskLedgerChecklistItem({
+      task_id: taskId,
+      title: '补 RED 测试',
+      status: 'done',
+      notes: '已覆盖',
+    });
+    expect(checklist?.status).toBe('done');
+
+    const testCase = upsertTaskLedgerTestCase({
+      task_id: taskId,
+      title: '异常路径 E2E',
+      status: 'passed',
+      evidence: 'npm test -- task-ledger',
+    });
+    expect(testCase?.evidence).toContain('npm test');
+
+    const event = addTaskLedgerEvent({
+      task_id: taskId,
+      event_type: 'evidence',
+      summary: '目标测试通过',
+      details: '1 passed',
+      actor_group: 'main_group',
+    });
+    expect(event?.summary).toBe('目标测试通过');
+
+    const detail = getTaskLedgerTask(taskId);
+    expect(detail?.checklist[0].title).toBe('补 RED 测试');
+    expect(detail?.test_cases[0].status).toBe('passed');
+    expect(detail?.events.some((item) => item.event_type === 'evidence')).toBe(
+      true,
+    );
+    expect(
+      fs.readFileSync(`${detail?.task.artifact_root}/task.yaml`, 'utf8'),
+    ).toContain('异常路径 E2E');
+  });
 });
 
 // Helper to store a message using the normalized NewMessage interface
@@ -684,7 +805,11 @@ describe('group aliases', () => {
 // --- getMessageContext ---
 
 // 批量写入消息的辅助函数
-function seedMessages(chatJid: string, count: number, baseTime = '2024-06-01T10:00:00.000Z') {
+function seedMessages(
+  chatJid: string,
+  count: number,
+  baseTime = '2024-06-01T10:00:00.000Z',
+) {
   storeChatMetadata(chatJid, baseTime);
   const base = new Date(baseTime).getTime();
   for (let i = 0; i < count; i++) {
@@ -714,9 +839,17 @@ describe('getMessageContext', () => {
     expect(result.anchor).not.toBeNull();
     expect(result.anchor!.content).toBe('消息 #5');
     expect(result.before).toHaveLength(3);
-    expect(result.before.map(m => m.content)).toEqual(['消息 #2', '消息 #3', '消息 #4']);
+    expect(result.before.map((m) => m.content)).toEqual([
+      '消息 #2',
+      '消息 #3',
+      '消息 #4',
+    ]);
     expect(result.after).toHaveLength(3);
-    expect(result.after.map(m => m.content)).toEqual(['消息 #6', '消息 #7', '消息 #8']);
+    expect(result.after.map((m) => m.content)).toEqual([
+      '消息 #6',
+      '消息 #7',
+      '消息 #8',
+    ]);
   });
 
   it('锚点在两条消息之间时，命中最近的一条', () => {
@@ -813,33 +946,89 @@ describe('getMessageContext', () => {
     const result = getMessageContext(JID, ts, 3, 3);
 
     expect(result.anchor!.content).toBe('消息 #3');
-    expect(result.before.map(m => m.content)).toEqual(['消息 #0', '消息 #1']);
+    expect(result.before.map((m) => m.content)).toEqual(['消息 #0', '消息 #1']);
     expect(result.after).toHaveLength(1); // 只有 msg-4
   });
 
   it('默认过滤 tool_call 进度，锚点会命中最近的有效消息', () => {
     storeChatMetadata(JID, '2024-06-01T10:00:00.000Z');
     const base = new Date('2024-06-01T10:00:00.000Z').getTime();
-    storeMessageDirect({ id: 'ctx-user', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '用户消息', timestamp: new Date(base).toISOString(), is_from_me: false, is_bot_message: false });
-    storeMessageDirect({ id: 'tool_ctx', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: '🔧 Bash: ls', timestamp: new Date(base + 60_000).toISOString(), is_from_me: true, is_bot_message: true });
-    storeMessageDirect({ id: 'ctx-result', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: '最终结果', timestamp: new Date(base + 180_000).toISOString(), is_from_me: true, is_bot_message: true });
+    storeMessageDirect({
+      id: 'ctx-user',
+      chat_jid: JID,
+      sender: 'u@s',
+      sender_name: 'User',
+      content: '用户消息',
+      timestamp: new Date(base).toISOString(),
+      is_from_me: false,
+      is_bot_message: false,
+    });
+    storeMessageDirect({
+      id: 'tool_ctx',
+      chat_jid: JID,
+      sender: 'bot@s',
+      sender_name: 'Bot',
+      content: '🔧 Bash: ls',
+      timestamp: new Date(base + 60_000).toISOString(),
+      is_from_me: true,
+      is_bot_message: true,
+    });
+    storeMessageDirect({
+      id: 'ctx-result',
+      chat_jid: JID,
+      sender: 'bot@s',
+      sender_name: 'Bot',
+      content: '最终结果',
+      timestamp: new Date(base + 180_000).toISOString(),
+      is_from_me: true,
+      is_bot_message: true,
+    });
 
-    const result = getMessageContext(JID, new Date(base + 60_000).toISOString(), 5, 5);
+    const result = getMessageContext(
+      JID,
+      new Date(base + 60_000).toISOString(),
+      5,
+      5,
+    );
 
     expect(result.anchor!.content).toBe('用户消息');
-    expect(result.after.map(m => m.content)).toEqual(['最终结果']);
+    expect(result.after.map((m) => m.content)).toEqual(['最终结果']);
   });
 
   it('includeToolCalls=true 时按时间戳上下文保留 tool_call 进度', () => {
     storeChatMetadata(JID, '2024-06-01T10:00:00.000Z');
     const base = new Date('2024-06-01T10:00:00.000Z').getTime();
-    storeMessageDirect({ id: 'ctx-user-all', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '用户消息', timestamp: new Date(base).toISOString(), is_from_me: false, is_bot_message: false });
-    storeMessageDirect({ id: 'tool_ctx_all', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: '🔧 Bash: ls', timestamp: new Date(base + 60_000).toISOString(), is_from_me: true, is_bot_message: true });
+    storeMessageDirect({
+      id: 'ctx-user-all',
+      chat_jid: JID,
+      sender: 'u@s',
+      sender_name: 'User',
+      content: '用户消息',
+      timestamp: new Date(base).toISOString(),
+      is_from_me: false,
+      is_bot_message: false,
+    });
+    storeMessageDirect({
+      id: 'tool_ctx_all',
+      chat_jid: JID,
+      sender: 'bot@s',
+      sender_name: 'Bot',
+      content: '🔧 Bash: ls',
+      timestamp: new Date(base + 60_000).toISOString(),
+      is_from_me: true,
+      is_bot_message: true,
+    });
 
-    const result = getMessageContext(JID, new Date(base + 60_000).toISOString(), 5, 5, true);
+    const result = getMessageContext(
+      JID,
+      new Date(base + 60_000).toISOString(),
+      5,
+      5,
+      true,
+    );
 
     expect(result.anchor!.content).toBe('🔧 Bash: ls');
-    expect(result.before.map(m => m.content)).toEqual(['用户消息']);
+    expect(result.before.map((m) => m.content)).toEqual(['用户消息']);
   });
 
   it('before 按时间正序排列', () => {
@@ -850,7 +1039,9 @@ describe('getMessageContext', () => {
     const result = getMessageContext(JID, ts, 5, 0);
 
     for (let i = 1; i < result.before.length; i++) {
-      expect(result.before[i].timestamp > result.before[i - 1].timestamp).toBe(true);
+      expect(result.before[i].timestamp > result.before[i - 1].timestamp).toBe(
+        true,
+      );
     }
   });
 });
@@ -867,8 +1058,16 @@ describe('getMessageContextById', () => {
 
     expect(result.anchor).not.toBeNull();
     expect(result.anchor!.content).toBe('消息 #5');
-    expect(result.before.map(m => m.content)).toEqual(['消息 #2', '消息 #3', '消息 #4']);
-    expect(result.after.map(m => m.content)).toEqual(['消息 #6', '消息 #7', '消息 #8']);
+    expect(result.before.map((m) => m.content)).toEqual([
+      '消息 #2',
+      '消息 #3',
+      '消息 #4',
+    ]);
+    expect(result.after.map((m) => m.content)).toEqual([
+      '消息 #6',
+      '消息 #7',
+      '消息 #8',
+    ]);
   });
 
   it('ID 不存在返回 null anchor，不抛异常', () => {
@@ -906,29 +1105,104 @@ describe('getMessageContextById', () => {
     storeChatMetadata(JID, '2024-06-01T10:00:00.000Z');
     const base = new Date('2024-06-01T10:00:00.000Z').getTime();
     // 0: 用户  1: tool_call 进度  2: bot 回复  3: 用户(锚点)  4: bot 回复
-    storeMessageDirect({ id: 'm0', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '问题', timestamp: new Date(base).toISOString(), is_from_me: false, is_bot_message: false });
-    storeMessageDirect({ id: 'tool_1', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: '🔧 Bash: ls', timestamp: new Date(base + 60_000).toISOString(), is_from_me: true, is_bot_message: true });
-    storeMessageDirect({ id: 'm1', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: 'bot 回复 A', timestamp: new Date(base + 120_000).toISOString(), is_from_me: true, is_bot_message: true });
-    storeMessageDirect({ id: 'm2', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '锚点', timestamp: new Date(base + 180_000).toISOString(), is_from_me: false, is_bot_message: false });
-    storeMessageDirect({ id: 'm3', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: 'bot 回复 B', timestamp: new Date(base + 240_000).toISOString(), is_from_me: true, is_bot_message: true });
+    storeMessageDirect({
+      id: 'm0',
+      chat_jid: JID,
+      sender: 'u@s',
+      sender_name: 'User',
+      content: '问题',
+      timestamp: new Date(base).toISOString(),
+      is_from_me: false,
+      is_bot_message: false,
+    });
+    storeMessageDirect({
+      id: 'tool_1',
+      chat_jid: JID,
+      sender: 'bot@s',
+      sender_name: 'Bot',
+      content: '🔧 Bash: ls',
+      timestamp: new Date(base + 60_000).toISOString(),
+      is_from_me: true,
+      is_bot_message: true,
+    });
+    storeMessageDirect({
+      id: 'm1',
+      chat_jid: JID,
+      sender: 'bot@s',
+      sender_name: 'Bot',
+      content: 'bot 回复 A',
+      timestamp: new Date(base + 120_000).toISOString(),
+      is_from_me: true,
+      is_bot_message: true,
+    });
+    storeMessageDirect({
+      id: 'm2',
+      chat_jid: JID,
+      sender: 'u@s',
+      sender_name: 'User',
+      content: '锚点',
+      timestamp: new Date(base + 180_000).toISOString(),
+      is_from_me: false,
+      is_bot_message: false,
+    });
+    storeMessageDirect({
+      id: 'm3',
+      chat_jid: JID,
+      sender: 'bot@s',
+      sender_name: 'Bot',
+      content: 'bot 回复 B',
+      timestamp: new Date(base + 240_000).toISOString(),
+      is_from_me: true,
+      is_bot_message: true,
+    });
 
     const result = getMessageContextById('m2', 5, 5);
 
     expect(result.anchor!.content).toBe('锚点');
-    expect(result.before.map(m => m.content)).toEqual(['问题', 'bot 回复 A']);
-    expect(result.after.map(m => m.content)).toEqual(['bot 回复 B']);
+    expect(result.before.map((m) => m.content)).toEqual(['问题', 'bot 回复 A']);
+    expect(result.after.map((m) => m.content)).toEqual(['bot 回复 B']);
   });
 
   it('includeToolCalls=true 时上下文保留 tool_call 进度', () => {
     storeChatMetadata(JID, '2024-06-01T10:00:00.000Z');
     const base = new Date('2024-06-01T10:00:00.000Z').getTime();
-    storeMessageDirect({ id: 'm0-all', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '问题', timestamp: new Date(base).toISOString(), is_from_me: false, is_bot_message: false });
-    storeMessageDirect({ id: 'tool_all', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: '🔧 Bash: ls', timestamp: new Date(base + 60_000).toISOString(), is_from_me: true, is_bot_message: true });
-    storeMessageDirect({ id: 'm1-all', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '锚点', timestamp: new Date(base + 120_000).toISOString(), is_from_me: false, is_bot_message: false });
+    storeMessageDirect({
+      id: 'm0-all',
+      chat_jid: JID,
+      sender: 'u@s',
+      sender_name: 'User',
+      content: '问题',
+      timestamp: new Date(base).toISOString(),
+      is_from_me: false,
+      is_bot_message: false,
+    });
+    storeMessageDirect({
+      id: 'tool_all',
+      chat_jid: JID,
+      sender: 'bot@s',
+      sender_name: 'Bot',
+      content: '🔧 Bash: ls',
+      timestamp: new Date(base + 60_000).toISOString(),
+      is_from_me: true,
+      is_bot_message: true,
+    });
+    storeMessageDirect({
+      id: 'm1-all',
+      chat_jid: JID,
+      sender: 'u@s',
+      sender_name: 'User',
+      content: '锚点',
+      timestamp: new Date(base + 120_000).toISOString(),
+      is_from_me: false,
+      is_bot_message: false,
+    });
 
     const result = getMessageContextById('m1-all', 5, 5, true);
 
-    expect(result.before.map(m => m.content)).toEqual(['问题', '🔧 Bash: ls']);
+    expect(result.before.map((m) => m.content)).toEqual([
+      '问题',
+      '🔧 Bash: ls',
+    ]);
   });
 });
 
@@ -942,7 +1216,13 @@ describe('getMessageRange', () => {
 
     const result = getMessageRange(JID, 0, 5);
 
-    expect(result.map(m => m.content)).toEqual(['消息 #5', '消息 #6', '消息 #7', '消息 #8', '消息 #9']);
+    expect(result.map((m) => m.content)).toEqual([
+      '消息 #5',
+      '消息 #6',
+      '消息 #7',
+      '消息 #8',
+      '消息 #9',
+    ]);
   });
 
   it('翻页：offset=5 取更早的区间', () => {
@@ -950,7 +1230,13 @@ describe('getMessageRange', () => {
 
     const result = getMessageRange(JID, 5, 5);
 
-    expect(result.map(m => m.content)).toEqual(['消息 #0', '消息 #1', '消息 #2', '消息 #3', '消息 #4']);
+    expect(result.map((m) => m.content)).toEqual([
+      '消息 #0',
+      '消息 #1',
+      '消息 #2',
+      '消息 #3',
+      '消息 #4',
+    ]);
   });
 
   it('offset 超过总数返回空', () => {
@@ -984,30 +1270,80 @@ describe('getMessageRange', () => {
     const result = getMessageRange(JID, 0, 10);
 
     // 空的 #2 被排除，只剩 4 条非空
-    expect(result.map(m => m.content)).toEqual(['消息 #0', '消息 #1', '消息 #3', '消息 #4']);
+    expect(result.map((m) => m.content)).toEqual([
+      '消息 #0',
+      '消息 #1',
+      '消息 #3',
+      '消息 #4',
+    ]);
   });
 
   it('包含普通 bot 回复，默认过滤 tool_call 进度', () => {
     storeChatMetadata(JID, '2024-06-01T10:00:00.000Z');
     const base = new Date('2024-06-01T10:00:00.000Z').getTime();
-    storeMessageDirect({ id: 'b0', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '用户消息', timestamp: new Date(base).toISOString(), is_from_me: false, is_bot_message: false });
-    storeMessageDirect({ id: 'tool_b1', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: '🔧 Bash: pwd', timestamp: new Date(base + 60_000).toISOString(), is_from_me: true, is_bot_message: true });
-    storeMessageDirect({ id: 'b1', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: 'bot 消息', timestamp: new Date(base + 120_000).toISOString(), is_from_me: true, is_bot_message: true });
+    storeMessageDirect({
+      id: 'b0',
+      chat_jid: JID,
+      sender: 'u@s',
+      sender_name: 'User',
+      content: '用户消息',
+      timestamp: new Date(base).toISOString(),
+      is_from_me: false,
+      is_bot_message: false,
+    });
+    storeMessageDirect({
+      id: 'tool_b1',
+      chat_jid: JID,
+      sender: 'bot@s',
+      sender_name: 'Bot',
+      content: '🔧 Bash: pwd',
+      timestamp: new Date(base + 60_000).toISOString(),
+      is_from_me: true,
+      is_bot_message: true,
+    });
+    storeMessageDirect({
+      id: 'b1',
+      chat_jid: JID,
+      sender: 'bot@s',
+      sender_name: 'Bot',
+      content: 'bot 消息',
+      timestamp: new Date(base + 120_000).toISOString(),
+      is_from_me: true,
+      is_bot_message: true,
+    });
 
     const result = getMessageRange(JID, 0, 10);
 
-    expect(result.map(m => m.content)).toEqual(['用户消息', 'bot 消息']);
+    expect(result.map((m) => m.content)).toEqual(['用户消息', 'bot 消息']);
   });
 
   it('includeToolCalls=true 时区间查询保留 tool_call 进度', () => {
     storeChatMetadata(JID, '2024-06-01T10:00:00.000Z');
     const base = new Date('2024-06-01T10:00:00.000Z').getTime();
-    storeMessageDirect({ id: 'range-u', chat_jid: JID, sender: 'u@s', sender_name: 'User', content: '用户消息', timestamp: new Date(base).toISOString(), is_from_me: false, is_bot_message: false });
-    storeMessageDirect({ id: 'tool_range', chat_jid: JID, sender: 'bot@s', sender_name: 'Bot', content: '🔧 Bash: pwd', timestamp: new Date(base + 60_000).toISOString(), is_from_me: true, is_bot_message: true });
+    storeMessageDirect({
+      id: 'range-u',
+      chat_jid: JID,
+      sender: 'u@s',
+      sender_name: 'User',
+      content: '用户消息',
+      timestamp: new Date(base).toISOString(),
+      is_from_me: false,
+      is_bot_message: false,
+    });
+    storeMessageDirect({
+      id: 'tool_range',
+      chat_jid: JID,
+      sender: 'bot@s',
+      sender_name: 'Bot',
+      content: '🔧 Bash: pwd',
+      timestamp: new Date(base + 60_000).toISOString(),
+      is_from_me: true,
+      is_bot_message: true,
+    });
 
     const result = getMessageRange(JID, 0, 10, true);
 
-    expect(result.map(m => m.content)).toEqual(['用户消息', '🔧 Bash: pwd']);
+    expect(result.map((m) => m.content)).toEqual(['用户消息', '🔧 Bash: pwd']);
   });
 
   it('结果按时间正序', () => {
