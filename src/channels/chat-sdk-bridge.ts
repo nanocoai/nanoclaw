@@ -74,6 +74,16 @@ export interface ChatSdkBridgeConfig {
    * and reactions still target the head of the reply.
    */
   maxTextLength?: number;
+  /**
+   * Override the channelType (and webhook path) for this bridge. Defaults to
+   * `adapter.name`. Used by channels that register multiple instances in one
+   * process — e.g. multi-workspace Slack, multi-bot Teams — so each instance
+   * gets a distinct channelType and a distinct `/webhook/<channelType>`
+   * routing path. The Chat SDK adapter's internal `.name` is unchanged, so
+   * `chat.webhooks[adapter.name]` lookup inside the webhook server still
+   * resolves correctly.
+   */
+  channelType?: string;
 }
 
 /**
@@ -192,9 +202,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     };
   }
 
+  const channelType = config.channelType ?? adapter.name;
+
   const bridge: ChannelAdapter = {
-    name: adapter.name,
-    channelType: adapter.name,
+    name: channelType,
+    channelType,
     supportsThreads: config.supportsThreads,
 
     async setup(hostConfig: ChannelSetup) {
@@ -358,8 +370,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         startGateway();
         log.info('Gateway listener started', { adapter: adapter.name });
       } else {
-        // Non-gateway adapters (Slack, Teams, GitHub, etc.) — register on the shared webhook server
-        registerWebhookAdapter(chat, adapter.name);
+        // Non-gateway adapters (Slack, Teams, GitHub, etc.) — register on the
+        // shared webhook server. Pass `channelType` as the routing path so
+        // multi-instance channels (e.g. multi-workspace Slack, multi-bot
+        // Teams) get distinct `/webhook/<channelType>` paths while sharing
+        // the same `adapter.name` key in `chat.webhooks`.
+        registerWebhookAdapter(chat, adapter.name, channelType);
       }
 
       log.info('Chat SDK bridge initialized', { adapter: adapter.name });
