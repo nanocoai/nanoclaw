@@ -43,6 +43,7 @@ import {
 import {
   ContainerOutput,
   detectRateLimit,
+  detectRateLimitResult,
   getSecretCount,
   resolveCliMode,
   rotateAccount,
@@ -669,7 +670,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // Streaming 模式下检测限流文本（"You've hit your limit" 等）
         // 检测到后抑制发送 + 立即 kill 子进程，让 runContainerAgent resolve
         // 之后由 runAgent 返回后的 streamingRateLimitDetected 轮换逻辑执行切账号+重试
-        if (detectRateLimit(raw)) {
+        //
+        // 两个守门（2026-06-11 oc_f0c8 群误杀死循环复盘）：
+        // 1. 长度 <500：真限流的假成功 result 就是孤零零一句话；正常回答里
+        //    "引用/转述"限流报错（如诊断别的群限流问题）必然长得多。
+        //    误杀后 cursor 不推进 → 重试 → 回答还带同样引用 → 再杀 → 死循环。
+        // 2. 仅 Claude 系 cliMode：非 Claude 系（codex/gemini）检测到也不会轮换
+        //    Anthropic 账号（见 runAgent 返回后的轮换逻辑），kill 纯属白杀。
+        if (
+          detectRateLimitResult(raw) &&
+          shouldAutoRotateAnthropicAccount(resolveCliMode(group.containerConfig))
+        ) {
           streamingRateLimitDetected = true;
           logger.warn(
             { group: group.name, text: raw.slice(0, 200) },
@@ -1101,7 +1112,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 ? result.result
                 : JSON.stringify(result.result);
             // 重试也可能再次限流，必须检查并抑制 + kill 子进程避免死锁
-            if (detectRateLimit(raw)) {
+            if (
+              detectRateLimitResult(raw) &&
+              shouldAutoRotateAnthropicAccount(resolveCliMode(group.containerConfig))
+            ) {
               logger.warn(
                 { group: group.name, text: raw.slice(0, 200) },
                 'Retry 输出仍包含限流文本，抑制发送并 kill 子进程',
@@ -1629,7 +1643,7 @@ async function runAgent(
 
     // Claude Code 有时以 status=success 返回限流消息（"You've hit your limit"）
     // 检查 result 文本以捕获这种假成功
-    if (!canAutoRotateAnthropic && output.result && detectRateLimit(output.result)) {
+    if (!canAutoRotateAnthropic && output.result && detectRateLimitResult(output.result)) {
       logger.warn(
         { group: group.name, cliMode, result: output.result?.slice(0, 200) },
         '[rate-limit] 当前模式不是 Claude 系，跳过 Anthropic 自动轮换',
@@ -1637,7 +1651,7 @@ async function runAgent(
       return { status: 'error' };
     }
 
-    if (retryCount < maxRetries && output.result && detectRateLimit(output.result)) {
+    if (retryCount < maxRetries && output.result && detectRateLimitResult(output.result)) {
       const agentId = group.folder.toLowerCase().replace(/_/g, '-');
       logger.warn(
         { group: group.name, agentId, retryCount, maxRetries, result: output.result?.slice(0, 200) },
@@ -1677,7 +1691,7 @@ async function runAgent(
     }
 
     // 试完所有账号仍然假成功限流
-    if (retryCount >= maxRetries && maxRetries > 0 && output.result && detectRateLimit(output.result)) {
+    if (retryCount >= maxRetries && maxRetries > 0 && output.result && detectRateLimitResult(output.result)) {
       logger.warn(
         { group: group.name, retryCount },
         '[rate-limit] 假成功：所有账号均被限流',

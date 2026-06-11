@@ -83,6 +83,18 @@ export function detectRateLimit(text: string): boolean {
 }
 
 /**
+ * result 文本的限流判定（带长度守门）。
+ * 真限流的"假成功" result 是孤零零一句话（"You've hit your limit · resets 5:30pm"，
+ * 远短于 500 字符）；而正常回答里"引用/转述"限流报错（如诊断别的群限流问题）必然长得多。
+ * 不加长度门会误杀引用场景：抑制发送 + cursor 不推进 → 重试 → 回答还带同样引用 →
+ * 再杀 → 死循环（2026-06-11 oc_f0c8 群事故）。
+ * 仅用于 result 文本判定；error/stderr 路径请直接用 detectRateLimit。
+ */
+export function detectRateLimitResult(text: string): boolean {
+  return text.length < 500 && detectRateLimit(text);
+}
+
+/**
  * 获取可用账号数量（用于确定最大重试次数）。
  */
 export function getSecretCount(): number {

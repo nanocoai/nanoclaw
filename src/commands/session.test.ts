@@ -52,13 +52,13 @@ describe('/stop', () => {
     expect(deps.queue.killGroup).not.toHaveBeenCalled();
     expect(deps.sendMessage).toHaveBeenCalledWith(
       'fs:oc_test',
-      expect.stringContaining('已停止当前 Codex 任务'),
+      expect.stringContaining('已停止当前任务'),
       { isCommandReply: true },
     );
   });
 
-  it('非 codex mode 下不杀进程', async () => {
-    mockCliMode = 'interactive';
+  it('sdk mode 下也停止当前任务', async () => {
+    mockCliMode = 'sdk';
     await import('./session.js');
     const { dispatch } = await import('./registry.js');
     const deps = makeDeps();
@@ -66,12 +66,11 @@ describe('/stop', () => {
     const handled = await dispatch('/stop', deps);
 
     expect(handled).toBe(true);
-    expect(deps.queue.stopGroup).not.toHaveBeenCalled();
+    expect(deps.queue.stopGroup).toHaveBeenCalledWith('fs:oc_test');
     expect(deps.queue.killGroup).not.toHaveBeenCalled();
-    // dispatch 现在按 modes 在进 handler 前拦截，提示「不可用」
     expect(deps.sendMessage).toHaveBeenCalledWith(
       'fs:oc_test',
-      expect.stringContaining('不可用'),
+      expect.stringContaining('已停止当前任务'),
       { isCommandReply: true },
     );
   });
