@@ -15,6 +15,7 @@ import {
   CONTAINER_INSTALL_LABEL,
   DATA_DIR,
   GROUPS_DIR,
+  MAX_CONCURRENT_CONTAINERS,
   ONECLI_API_KEY,
   ONECLI_URL,
   TIMEZONE,
@@ -22,7 +23,13 @@ import {
 import { materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars, updateContainerConfigJson } from './db/container-configs.js';
-import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import {
+  CONTAINER_RUNTIME_BIN,
+  forceKillContainer,
+  hostGatewayArgs,
+  readonlyMountArgs,
+  stopContainer,
+} from './container-runtime.js';
 import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from './egress-lockdown.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
@@ -53,6 +60,60 @@ const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 
 /** Active containers tracked by session ID. */
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
+
+// Crash-on-spawn circuit breaker.
+//
+// A container that exits fast with a nonzero code never claimed a message
+// (no processing_ack rows are written before the agent-runner is up), so the
+// message-level retry/backoff in host-sweep — which keys entirely off
+// processing claims — never fires. countDueMessages stays > 0 and the sweep
+// (and the router) keep re-waking the same broken container every tick. This
+// is exactly how a broken per-group image / OneCLI race / OOM-at-startup turns
+// into a silent infinite respawn loop (observed: a stale Docker bind-mount
+// staging path crash-looping a session for hours with exit 127).
+//
+// We track consecutive fast-fail exits per session, back off exponentially,
+// and after MAX_CRASH_RESPAWNS open the breaker for a cooldown — respawns are
+// skipped during the window and a single ERROR is logged so the failure is
+// visible in nanoclaw.error.log instead of thrashing forever. Messages are
+// left pending (not failed) so they are processed once the breaker closes or
+// the host is restarted. A healthy or long-running exit resets the counter.
+export const CRASH_FAST_FAIL_MS = 15_000; // exited this fast => never did real work
+export const CRASH_BACKOFF_BASE_MS = 5_000;
+export const CRASH_BACKOFF_MAX_MS = 60_000;
+export const MAX_CRASH_RESPAWNS = 5;
+export const CRASH_GIVEUP_COOLDOWN_MS = 30 * 60_000;
+
+export type CrashBreakerState = { fails: number; notBefore: number };
+export type CrashExitDecision =
+  | { kind: 'reset' }
+  | { kind: 'backoff'; state: CrashBreakerState; backoffMs: number }
+  | { kind: 'open'; state: CrashBreakerState; consecutiveFails: number };
+
+/**
+ * Pure decision for the crash-on-spawn breaker (side effects — the crashState
+ * map + logging — live in recordContainerExit, mirroring decideStuckAction in
+ * host-sweep). A "fast fail" is a nonzero exit within CRASH_FAST_FAIL_MS of
+ * spawn; signalled exits (code === null) and healthy/long-running exits reset.
+ */
+export function decideCrashExit(
+  prev: CrashBreakerState | undefined,
+  code: number | null,
+  aliveMs: number,
+  now: number,
+): CrashExitDecision {
+  const fastFail = code !== null && code !== 0 && aliveMs < CRASH_FAST_FAIL_MS;
+  if (!fastFail) return { kind: 'reset' };
+
+  const fails = (prev?.fails ?? 0) + 1;
+  if (fails >= MAX_CRASH_RESPAWNS) {
+    return { kind: 'open', state: { fails: 0, notBefore: now + CRASH_GIVEUP_COOLDOWN_MS }, consecutiveFails: fails };
+  }
+  const backoffMs = Math.min(CRASH_BACKOFF_BASE_MS * 2 ** (fails - 1), CRASH_BACKOFF_MAX_MS);
+  return { kind: 'backoff', state: { fails, notBefore: now + backoffMs }, backoffMs };
+}
+
+const crashState = new Map<string, CrashBreakerState>();
 
 /**
  * In-flight wake promises, keyed by session id. Deduplicates concurrent
@@ -93,6 +154,33 @@ export function wakeContainer(session: Session): Promise<boolean> {
   if (existing) {
     log.debug('Container wake already in-flight — joining existing promise', { sessionId: session.id });
     return existing;
+  }
+  // Crash-loop circuit breaker: if recent spawns fast-failed, skip the wake
+  // until the backoff/cooldown window elapses. Leaves the inbound row pending
+  // so the next eligible tick retries.
+  const breaker = crashState.get(session.id);
+  if (breaker && breaker.notBefore > Date.now()) {
+    log.debug('Container in crash-loop backoff — skipping wake', {
+      sessionId: session.id,
+      retryInMs: breaker.notBefore - Date.now(),
+      fails: breaker.fails,
+    });
+    return Promise.resolve(false);
+  }
+  // Concurrency cap: never run more than MAX_CONCURRENT_CONTAINERS at once.
+  // host-sweep wakes one container per due session per tick, so without this a
+  // recurrence fanout or restart-all could spawn many containers simultaneously
+  // and exhaust the Docker host. Leave the inbound row pending — the next sweep
+  // tick retries once a slot frees up. (in-flight wakes are counted via
+  // wakePromises so a burst within one tick can't overshoot the cap.)
+  if (getActiveContainerCount() + wakePromises.size >= MAX_CONCURRENT_CONTAINERS) {
+    log.debug('At max concurrent containers — deferring wake', {
+      sessionId: session.id,
+      active: getActiveContainerCount(),
+      pending: wakePromises.size,
+      max: MAX_CONCURRENT_CONTAINERS,
+    });
+    return Promise.resolve(false);
   }
   const promise = spawnContainer(session)
     .then(() => true)
@@ -163,6 +251,7 @@ async function spawnContainer(session: Session): Promise<void> {
   // immediate kill before the new container touches the file itself.
   fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
 
+  const spawnedAt = Date.now();
   const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
   activeContainers.set(session.id, { process: container, containerName });
@@ -187,7 +276,9 @@ async function spawnContainer(session: Session): Promise<void> {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
-    log.info('Container exited', { sessionId: session.id, code, containerName });
+    const aliveMs = Date.now() - spawnedAt;
+    log.info('Container exited', { sessionId: session.id, code, containerName, aliveMs });
+    recordContainerExit(session, agentGroup, code, aliveMs);
   });
 
   container.on('error', (err) => {
@@ -195,6 +286,46 @@ async function spawnContainer(session: Session): Promise<void> {
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
     log.error('Container spawn error', { sessionId: session.id, err });
+  });
+}
+
+/**
+ * Update the crash-on-spawn circuit breaker on container exit. See the
+ * crashState declaration for the rationale. A "fast fail" is a nonzero exit
+ * within CRASH_FAST_FAIL_MS of spawn — the container never did real work.
+ * Signalled exits (code === null, e.g. host-initiated SIGKILL) and healthy /
+ * long-running exits reset the breaker.
+ */
+function recordContainerExit(session: Session, agentGroup: AgentGroup, code: number | null, aliveMs: number): void {
+  const decision = decideCrashExit(crashState.get(session.id), code, aliveMs, Date.now());
+
+  if (decision.kind === 'reset') {
+    crashState.delete(session.id);
+    return;
+  }
+
+  crashState.set(session.id, decision.state);
+
+  if (decision.kind === 'open') {
+    // Pause respawns for the cooldown and surface a single ERROR. The counter
+    // is reset (in decision.state) so a fresh round is attempted after cooldown.
+    log.error('Container crash-looping on spawn — pausing respawns (circuit breaker open)', {
+      sessionId: session.id,
+      agentGroup: agentGroup.name,
+      code,
+      consecutiveFails: decision.consecutiveFails,
+      cooldownMs: CRASH_GIVEUP_COOLDOWN_MS,
+    });
+    return;
+  }
+
+  log.warn('Container fast-fail on spawn — backing off before respawn', {
+    sessionId: session.id,
+    agentGroup: agentGroup.name,
+    code,
+    aliveMs,
+    consecutiveFails: decision.state.fails,
+    backoffMs: decision.backoffMs,
   });
 }
 
@@ -210,8 +341,27 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
   log.info('Killing container', { sessionId, reason, containerName: entry.containerName });
   try {
     stopContainer(entry.containerName);
-  } catch {
-    entry.process.kill('SIGKILL');
+  } catch (stopErr) {
+    // `docker stop` failed (daemon transiently unreachable / timed out).
+    // Killing the local CLI client (entry.process) does NOT stop the
+    // container — the daemon owns its lifecycle — so try a daemon-level kill
+    // first to avoid leaving an orphan that still holds the session dir
+    // (double-writer hazard). Fall back to the CLI client only if that fails.
+    log.warn('docker stop failed — trying daemon-level kill', {
+      sessionId,
+      containerName: entry.containerName,
+      err: stopErr,
+    });
+    try {
+      forceKillContainer(entry.containerName);
+    } catch (killErr) {
+      log.warn('docker kill also failed — killing CLI client as last resort (container may orphan)', {
+        sessionId,
+        containerName: entry.containerName,
+        err: killErr,
+      });
+      entry.process.kill('SIGKILL');
+    }
   }
 }
 
@@ -281,6 +431,14 @@ export function buildMounts(
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
 
+  // Inbound attachments — read-only mount so the agent can Read images/PDFs
+  // that channel adapters downloaded. Path matches what `formatAttachments`
+  // emits to the prompt (`/workspace/attachments/<name>`).
+  const attachmentsDir = path.resolve(DATA_DIR, 'attachments');
+  if (fs.existsSync(attachmentsDir)) {
+    mounts.push({ hostPath: attachmentsDir, containerPath: '/workspace/attachments', readonly: true });
+  }
+
   // Agent group folder at /workspace/agent (RW for working files + CLAUDE.local.md)
   mounts.push({ hostPath: groupDir, containerPath: '/workspace/agent', readonly: false });
 
@@ -348,6 +506,20 @@ export function buildMounts(
   }
 
   return mounts;
+}
+
+/**
+ * Resolve a mount's host path through realpath so symlinked roots (groups/,
+ * data/) point at their real ext4 location before being handed to Docker.
+ * Falls back to the original path if it can't be resolved (e.g. not yet
+ * created) so behaviour is unchanged for non-symlinked paths.
+ */
+function resolveMountHostPath(hostPath: string): string {
+  try {
+    return fs.realpathSync(hostPath);
+  } catch {
+    return hostPath;
+  }
 }
 
 /**
@@ -451,12 +623,19 @@ async function buildContainerArgs(
     args.push('-e', 'HOME=/home/node');
   }
 
-  // Volume mounts
+  // Volume mounts. Resolve each host path through realpath so symlinks
+  // (groups/ and data/ are symlinked onto ext4 to avoid drvfs issues) are
+  // followed on the host side. Passing the unresolved /mnt/c (drvfs) path to
+  // Docker Desktop makes it cache a path-keyed bind-mount staging entry that
+  // goes dangling when the source file is rewritten (e.g. composed CLAUDE.md),
+  // causing every spawn to fail with exit 127. Resolving keeps drvfs out of
+  // the mount path entirely.
   for (const mount of mounts) {
+    const hostPath = resolveMountHostPath(mount.hostPath);
     if (mount.readonly) {
-      args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
+      args.push(...readonlyMountArgs(hostPath, mount.containerPath));
     } else {
-      args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
+      args.push('-v', `${hostPath}:${mount.containerPath}`);
     }
   }
 

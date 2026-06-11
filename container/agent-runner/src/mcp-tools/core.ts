@@ -11,7 +11,7 @@ import path from 'path';
 
 import { getCurrentInReplyTo } from '../current-batch.js';
 import { findByName, getAllDestinations } from '../destinations.js';
-import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
+import { getMessageIdBySeq, getRoutingBySeq, isOwnMessageBySeq, writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -211,7 +211,7 @@ export const editMessage: McpToolDefinition = {
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
       thread_id: routing.thread_id,
-      content: JSON.stringify({ operation: 'edit', messageId: platformId, text }),
+      content: JSON.stringify({ operation: 'edit', messageId: platformId, text, fromMe: isOwnMessageBySeq(seq) }),
     });
 
     log(`edit_message: #${seq} → ${platformId}`);
@@ -252,7 +252,7 @@ export const addReaction: McpToolDefinition = {
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
       thread_id: routing.thread_id,
-      content: JSON.stringify({ operation: 'reaction', messageId: platformId, emoji }),
+      content: JSON.stringify({ operation: 'reaction', messageId: platformId, emoji, fromMe: isOwnMessageBySeq(seq) }),
     });
 
     log(`add_reaction: #${seq} → ${emoji} on ${platformId}`);

@@ -31,7 +31,14 @@ const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
 const MAX_DELIVERY_ATTEMPTS = 3;
 
-/** Track delivery attempt counts. Resets on process restart (gives failed messages a fresh chance). */
+/**
+ * Track in-flight delivery attempt counts (resets on process restart). NOTE:
+ * this does NOT give permanently-failed messages a fresh chance — after
+ * MAX_DELIVERY_ATTEMPTS a message is recorded in the host-owned `delivered`
+ * table with status='failed', and getDeliveredIds() returns all delivered rows
+ * regardless of status, so a failed message is filtered out of `undelivered`
+ * forever (restart or not). This map only bounds retries within a single run.
+ */
 const deliveryAttempts = new Map<string, number>();
 
 /**

@@ -33,6 +33,19 @@ export function stopContainer(name: string): void {
   execSync(`${CONTAINER_RUNTIME_BIN} stop -t 1 ${name}`, { stdio: 'pipe' });
 }
 
+/**
+ * Force-kill a container at the daemon level (`docker kill`). Unlike killing
+ * the local `docker run` CLI client process, this reliably stops the container
+ * the daemon owns — use it when `stopContainer` fails so a container can't be
+ * left orphaned (still holding its mounts + OneCLI gateway).
+ */
+export function forceKillContainer(name: string): void {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
+    throw new Error(`Invalid container name: ${name}`);
+  }
+  execSync(`${CONTAINER_RUNTIME_BIN} kill ${name}`, { stdio: 'pipe' });
+}
+
 /** Ensure the container runtime is running, starting it if needed. */
 export function ensureContainerRuntimeRunning(): void {
   try {

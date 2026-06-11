@@ -2,7 +2,16 @@ import fs from 'fs';
 import path from 'path';
 import { describe, expect, it } from 'vitest';
 
-import { resolveProviderName } from './container-runner.js';
+import {
+  CRASH_BACKOFF_BASE_MS,
+  CRASH_BACKOFF_MAX_MS,
+  CRASH_FAST_FAIL_MS,
+  CRASH_GIVEUP_COOLDOWN_MS,
+  MAX_CRASH_RESPAWNS,
+  decideCrashExit,
+  resolveProviderName,
+  type CrashBreakerState,
+} from './container-runner.js';
 
 describe('resolveProviderName', () => {
   it('prefers session over container config', () => {
@@ -44,5 +53,55 @@ describe('buildContainerArgs ordering invariant (structural)', () => {
     expect(mountsLoop).toBeGreaterThan(-1);
     expect(gatewayApply).toBeGreaterThan(-1);
     expect(gatewayApply).toBeGreaterThan(mountsLoop);
+  });
+});
+
+describe('decideCrashExit', () => {
+  const NOW = 1_000_000;
+
+  it('resets on a healthy exit (code 0)', () => {
+    expect(decideCrashExit({ fails: 3, notBefore: 0 }, 0, 100, NOW)).toEqual({ kind: 'reset' });
+  });
+
+  it('resets on a signalled exit (code null, e.g. host SIGKILL)', () => {
+    expect(decideCrashExit({ fails: 2, notBefore: 0 }, null, 100, NOW)).toEqual({ kind: 'reset' });
+  });
+
+  it('resets on a long-running crash (alive past fast-fail window)', () => {
+    // crashed nonzero but ran long enough to do real work — not a spawn loop
+    expect(decideCrashExit({ fails: 1, notBefore: 0 }, 1, CRASH_FAST_FAIL_MS + 1, NOW)).toEqual({
+      kind: 'reset',
+    });
+  });
+
+  it('backs off with exponential delay on the first fast-fails', () => {
+    const d1 = decideCrashExit(undefined, 127, 500, NOW);
+    expect(d1).toMatchObject({ kind: 'backoff', backoffMs: CRASH_BACKOFF_BASE_MS });
+    expect((d1 as { state: CrashBreakerState }).state).toEqual({
+      fails: 1,
+      notBefore: NOW + CRASH_BACKOFF_BASE_MS,
+    });
+
+    const d2 = decideCrashExit({ fails: 1, notBefore: 0 }, 127, 500, NOW);
+    expect(d2).toMatchObject({ kind: 'backoff', backoffMs: CRASH_BACKOFF_BASE_MS * 2 });
+  });
+
+  it('caps the backoff at CRASH_BACKOFF_MAX_MS', () => {
+    // fails high enough that 2^(fails-1)*base would exceed the cap, but still
+    // below the give-up threshold
+    const prev = { fails: MAX_CRASH_RESPAWNS - 2, notBefore: 0 };
+    const d = decideCrashExit(prev, 1, 500, NOW);
+    expect(d.kind).toBe('backoff');
+    expect((d as { backoffMs: number }).backoffMs).toBeLessThanOrEqual(CRASH_BACKOFF_MAX_MS);
+  });
+
+  it('opens the breaker after MAX_CRASH_RESPAWNS consecutive fast-fails', () => {
+    const prev = { fails: MAX_CRASH_RESPAWNS - 1, notBefore: 0 };
+    const d = decideCrashExit(prev, 127, 500, NOW);
+    expect(d).toMatchObject({ kind: 'open', consecutiveFails: MAX_CRASH_RESPAWNS });
+    expect((d as { state: CrashBreakerState }).state).toEqual({
+      fails: 0,
+      notBefore: NOW + CRASH_GIVEUP_COOLDOWN_MS,
+    });
   });
 });

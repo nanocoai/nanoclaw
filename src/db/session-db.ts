@@ -258,9 +258,12 @@ export interface OutboundMessage {
 export function getDueOutboundMessages(db: Database.Database): OutboundMessage[] {
   return db
     .prepare(
+      // seq is strictly monotonic (and disjoint per writer) — use it as the
+      // tiebreaker so a multi-part reply emitted within the same one-second
+      // timestamp is delivered in order rather than arbitrary rowid order.
       `SELECT * FROM messages_out
        WHERE (deliver_after IS NULL OR deliver_after <= datetime('now'))
-       ORDER BY timestamp ASC`,
+       ORDER BY timestamp ASC, seq ASC`,
     )
     .all() as OutboundMessage[];
 }
@@ -329,6 +332,11 @@ export function migrateMessagesInTable(db: Database.Database): void {
     // All existing rows are normal messages, so default 0.
     db.prepare('ALTER TABLE messages_in ADD COLUMN on_wake INTEGER NOT NULL DEFAULT 0').run();
   }
+  // Supports the host's hot countDueMessages poll (status/trigger/process_after);
+  // without it that query is a full table scan every tick. Created last so the
+  // `trigger` column (added above on legacy DBs) exists. IF NOT EXISTS makes it
+  // safe to run unconditionally on every existing session DB.
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_messages_in_due ON messages_in(status, trigger, process_after)').run();
 }
 
 /**

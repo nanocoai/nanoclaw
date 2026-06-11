@@ -388,13 +388,19 @@ async function processQuery(
         const newMessages = pending.filter((m) => m.kind !== 'system');
         if (newMessages.length === 0) return;
 
-        const newIds = newMessages.map((m) => m.id);
-        markProcessing(newIds);
+        // Accumulate gate (mirrors the outer loop at the top of runPollLoop):
+        // if the follow-ups are all trigger=0 context-only rows, don't engage
+        // the agent. Leave them pending and unclaimed so they ride along the
+        // next real trigger=1 message. Without this, accumulate-only messages
+        // were pushed straight into the active query, defeating the
+        // "store as context, don't engage" contract the outer loop enforces.
+        if (!newMessages.some((m) => m.trigger === 1)) return;
 
         // Run pre-task scripts on follow-ups too — without this, a task that
         // arrives during an active query (e.g. a */10 monitoring cron) bypasses
         // its script gate and always wakes the agent, defeating the gate.
-        // Mirrors the initial-batch hook above.
+        // Mirrors the initial-batch hook above. Run BEFORE claiming so skipped
+        // rows don't need a separate release.
         let keep = newMessages;
         let skipped: string[] = [];
         // MODULE-HOOK:scheduling-pre-task-followup:start
@@ -410,11 +416,16 @@ async function processQuery(
 
         if (keep.length === 0) return;
         // Re-check done — the outer query may have finished while the script
-        // was awaited. Pushing into a closed stream is wasted work; the
-        // claimed messages get released by the host's processing-claim sweep.
+        // was awaited. Claim ONLY the messages we are about to push, and only
+        // after this check, so a query that ends mid-poll never leaves rows
+        // orphaned in 'processing'. getPendingMessages filters out any id in
+        // processing_ack, so an abandoned claim would be invisible to the outer
+        // loop until the container is killed. The re-entrancy guard
+        // (pollInFlight) means no other poll can grab these before we claim.
         if (done) return;
 
         const keptIds = keep.map((m) => m.id);
+        markProcessing(keptIds);
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;

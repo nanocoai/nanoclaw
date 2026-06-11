@@ -1,5 +1,21 @@
 import type { AgentGroup } from '../types.js';
-import { getDb } from './connection.js';
+import { getDb, hasTable } from './connection.js';
+
+// Child tables referencing agent_groups(id) WITHOUT ON DELETE CASCADE. With
+// foreign_keys=ON a bare DELETE of an agent group that has any dependent row
+// fails ("FOREIGN KEY constraint failed"), so we clear dependents first inside
+// a transaction. (container_configs cascades on its own.) Guarded by hasTable
+// because some are optional-module tables.
+const AGENT_GROUP_CHILD_TABLES = [
+  'messaging_group_agents',
+  'user_roles',
+  'agent_group_members',
+  'sessions',
+  'pending_approvals',
+  'agent_destinations',
+  'pending_sender_approvals',
+  'pending_channel_approvals',
+];
 
 export function createAgentGroup(group: AgentGroup): void {
   getDb()
@@ -40,5 +56,13 @@ export function updateAgentGroup(id: string, updates: Partial<Pick<AgentGroup, '
 }
 
 export function deleteAgentGroup(id: string): void {
-  getDb().prepare('DELETE FROM agent_groups WHERE id = ?').run(id);
+  const db = getDb();
+  db.transaction(() => {
+    for (const table of AGENT_GROUP_CHILD_TABLES) {
+      if (hasTable(db, table)) {
+        db.prepare(`DELETE FROM ${table} WHERE agent_group_id = ?`).run(id);
+      }
+    }
+    db.prepare('DELETE FROM agent_groups WHERE id = ?').run(id);
+  })();
 }

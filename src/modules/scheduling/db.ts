@@ -117,11 +117,20 @@ export interface RecurringMessage {
   channel_type: string | null;
   thread_id: string | null;
   series_id: string;
+  // Populated by getCompletedRecurring (SELECT *); optional because callers that
+  // only build a row to pass to insertRecurrence don't need it.
+  status?: string;
 }
 
+// Include 'failed' as well as 'completed': the host-sweep MAX_TRIES path marks
+// a crashed-container occurrence status='failed' WITHOUT clearing recurrence.
+// If we only fanned out 'completed' rows, a single transient failure (wedged
+// pre-task script, provider outage) would silently and permanently kill the
+// whole recurring series. Fanning out from 'failed' too keeps the chain alive;
+// clearRecurrence() on the original prevents re-cloning, so there's no loop.
 export function getCompletedRecurring(db: Database.Database): RecurringMessage[] {
   return db
-    .prepare("SELECT * FROM messages_in WHERE status = 'completed' AND recurrence IS NOT NULL")
+    .prepare("SELECT * FROM messages_in WHERE status IN ('completed', 'failed') AND recurrence IS NOT NULL")
     .all() as RecurringMessage[];
 }
 

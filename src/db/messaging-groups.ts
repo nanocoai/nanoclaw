@@ -134,8 +134,26 @@ export function updateMessagingGroup(
     .run(values);
 }
 
+// Child tables referencing messaging_groups(id) WITHOUT ON DELETE CASCADE —
+// cleared first so a bare DELETE doesn't fail under foreign_keys=ON.
+const MESSAGING_GROUP_CHILD_TABLES = [
+  'messaging_group_agents',
+  'user_dms',
+  'sessions',
+  'pending_sender_approvals',
+  'pending_channel_approvals',
+];
+
 export function deleteMessagingGroup(id: string): void {
-  getDb().prepare('DELETE FROM messaging_groups WHERE id = ?').run(id);
+  const db = getDb();
+  db.transaction(() => {
+    for (const table of MESSAGING_GROUP_CHILD_TABLES) {
+      if (hasTable(db, table)) {
+        db.prepare(`DELETE FROM ${table} WHERE messaging_group_id = ?`).run(id);
+      }
+    }
+    db.prepare('DELETE FROM messaging_groups WHERE id = ?').run(id);
+  })();
 }
 
 /**
