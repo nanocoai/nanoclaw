@@ -63,6 +63,8 @@ In `setup/index.ts`, add this entry to the `STEPS` map (right after the `registe
 pnpm install @chat-adapter/telegram@4.29.0
 ```
 
+The pin must stay in step with the version the `channels` branch declares (`git show origin/channels:package.json`). The adapter and the `chat` core resolve shared types like `ChatInstance` structurally per-version — installing an adapter minor ahead of the resolved core version produces type-mismatch build errors in `createChatSdkBridge`.
+
 ### 6. Build and validate
 
 ```bash
@@ -109,7 +111,7 @@ Otherwise, run `/manage-channels` to wire this channel to an agent group.
 
 - **type**: `telegram`
 - **terminology**: Telegram calls them "groups" and "chats." A "group" has multiple members; a "chat" is a 1:1 conversation with the bot.
-- **how-to-find-id**: Do NOT ask the user for a chat ID. Telegram registration uses pairing — run `pnpm exec tsx setup/index.ts --step pair-telegram -- --intent <main|wire-to:folder|new-agent:folder>`, show the user the 4-digit `CODE` from the `PAIR_TELEGRAM_ISSUED` block (follow the `REMINDER_TO_ASSISTANT` line in that block), and tell them to send just the 4 digits as a message from the chat they want to register (DM the bot for `main`, post in the group otherwise). In groups with Group Privacy ON, prefix with the bot handle: `@<botname> CODE`. Wrong guesses invalidate the code — if a `PAIR_TELEGRAM_ATTEMPT` block arrives with a mismatched `RECEIVED_CODE`, a `PAIR_TELEGRAM_NEW_CODE` block will follow automatically (up to 5 regenerations); show the new code. On `PAIR_TELEGRAM STATUS=failed ERROR=max-regenerations-exceeded`, ask the user if they want to try again and re-invoke the step — each invocation starts a fresh 5-attempt batch. Success emits `PAIR_TELEGRAM STATUS=success` with `PLATFORM_ID`, `IS_GROUP`, and `ADMIN_USER_ID`. The service must be running for this to work (the polling adapter is what observes the code).
+- **how-to-find-id**: Do NOT ask the user for a chat ID. Telegram registration uses pairing — run `pnpm exec tsx setup/index.ts --step pair-telegram -- --intent <main|wire-to:folder|new-agent:folder>`, show the user the 4-digit `CODE` from the `PAIR_TELEGRAM_CODE` block (`REASON=initial`), and tell them to send just the 4 digits as a message from the chat they want to register (DM the bot for `main`, post in the group otherwise). In groups with Group Privacy ON, prefix with the bot handle: `@<botname> CODE`. Wrong guesses invalidate the code — if a `PAIR_TELEGRAM_ATTEMPT` block arrives with a mismatched `CANDIDATE`, a new `PAIR_TELEGRAM_CODE` block (`REASON=regenerated`) will follow automatically (up to 5 regenerations); show the new code. On `PAIR_TELEGRAM STATUS=failed ERROR=max-regenerations-exceeded`, ask the user if they want to try again and re-invoke the step — each invocation starts a fresh 5-attempt batch. Success emits `PAIR_TELEGRAM STATUS=success` with `PLATFORM_ID`, `IS_GROUP`, and `PAIRED_USER_ID`. The service must be running for this to work (the polling adapter is what observes the code).
 - **supports-threads**: no
 - **typical-use**: Interactive chat — direct messages or small groups
 - **default-isolation**: Same agent group if you're the only participant across multiple chats. Separate agent group if different people are in different groups.
