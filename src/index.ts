@@ -2117,6 +2117,10 @@ async function main(): Promise<void> {
           registeredGroups,
           deleteSession,
           setRegisteredGroup,
+          advanceCursor: (jid, ts) => {
+            lastAgentTimestamp[jid] = ts;
+            saveState();
+          },
         });
         if (handled) return;
       }

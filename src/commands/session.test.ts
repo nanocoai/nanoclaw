@@ -29,6 +29,7 @@ function makeDeps() {
     registeredGroups: {} as any,
     deleteSession: vi.fn(),
     setRegisteredGroup: vi.fn(),
+    advanceCursor: vi.fn(),
     sendMessage,
   };
 }
@@ -72,6 +73,62 @@ describe('/stop', () => {
       'fs:oc_test',
       expect.stringContaining('不可用'),
       { isCommandReply: true },
+    );
+  });
+});
+
+describe('/new', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mockCliMode = 'sdk';
+  });
+
+  it('杀进程、清 session，并把消息游标推进到命令时间戳（丢弃 /new 之前的待处理消息）', async () => {
+    await import('./session.js');
+    const { dispatch } = await import('./registry.js');
+    const deps = makeDeps();
+    deps.msg = {
+      content: '/new',
+      sender: 'user1',
+      timestamp: '2026-06-11T10:00:00.000Z',
+    } as any;
+
+    const handled = await dispatch('/new', deps);
+
+    expect(handled).toBe(true);
+    expect(deps.queue.killGroup).toHaveBeenCalledWith('fs:oc_test');
+    expect(deps.deleteSession).toHaveBeenCalledWith('test_folder');
+    expect(deps.advanceCursor).toHaveBeenCalledWith(
+      'fs:oc_test',
+      '2026-06-11T10:00:00.000Z',
+    );
+  });
+});
+
+describe('/clear', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    mockCliMode = 'sdk';
+  });
+
+  it('清 session 并把消息游标推进到命令时间戳（不杀进程）', async () => {
+    await import('./session.js');
+    const { dispatch } = await import('./registry.js');
+    const deps = makeDeps();
+    deps.msg = {
+      content: '/clear',
+      sender: 'user1',
+      timestamp: '2026-06-11T10:00:00.000Z',
+    } as any;
+
+    const handled = await dispatch('/clear', deps);
+
+    expect(handled).toBe(true);
+    expect(deps.queue.killGroup).not.toHaveBeenCalled();
+    expect(deps.deleteSession).toHaveBeenCalledWith('test_folder');
+    expect(deps.advanceCursor).toHaveBeenCalledWith(
+      'fs:oc_test',
+      '2026-06-11T10:00:00.000Z',
     );
   });
 });
