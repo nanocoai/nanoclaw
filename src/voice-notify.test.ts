@@ -42,10 +42,12 @@ vi.mock('./memory/config.js', () => ({
 
 import {
   buildSpokenText,
+  needsSummarization,
   notifyVoice,
   sanitizeForSpeech,
   resolveVoiceGroupLabel,
   shouldNotifyPushover,
+  SUMMARY_MIN_CHARS,
 } from './voice-notify.js';
 
 /** 等 fire-and-forget 的异步 IIFE 跑完 */
@@ -284,5 +286,25 @@ describe('sanitizeForSpeech TTS 清洗', () => {
 
   it('正常中文不受影响', () => {
     expect(sanitizeForSpeech('搞定了，测试全过。')).toBe('搞定了，测试全过。');
+  });
+});
+
+describe('needsSummarization 短文本跳过 LLM', () => {
+  it('短回复不走摘要（防 prompt 示例泄漏：2026-06-11"在，听到了。"被播成 3812号PR）', () => {
+    expect(needsSummarization('在，听到了。')).toBe(false);
+    expect(needsSummarization('搞定了。')).toBe(false);
+  });
+
+  it('长文本走摘要', () => {
+    expect(needsSummarization('我'.repeat(SUMMARY_MIN_CHARS))).toBe(true);
+    expect(
+      needsSummarization(
+        '修复完成了，根因是网关重启后 undici 只触发 error 不触发 close，重连逻辑挂在 close 上永远不会执行，现在两个事件都挂了。',
+      ),
+    ).toBe(true);
+  });
+
+  it('阈值边界：恰好少一字不摘要', () => {
+    expect(needsSummarization('字'.repeat(SUMMARY_MIN_CHARS - 1))).toBe(false);
   });
 });
