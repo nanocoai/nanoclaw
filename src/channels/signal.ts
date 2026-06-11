@@ -296,6 +296,120 @@ interface SignalMention {
   name?: string;
 }
 
+/**
+ * Shortcode names the agent's add_reaction tool emits (e.g. "thumbs_up") →
+ * the unicode emoji Signal's sendReaction expects. Raw unicode passes
+ * through untouched; unknown shortcodes are dropped with a warning.
+ */
+const EMOJI_SHORTCODES: Record<string, string> = {
+  thumbs_up: '👍',
+  '+1': '👍',
+  thumbs_down: '👎',
+  '-1': '👎',
+  heart: '❤️',
+  eyes: '👀',
+  white_check_mark: '✅',
+  heavy_check_mark: '✔️',
+  tada: '🎉',
+  fire: '🔥',
+  joy: '😂',
+  laughing: '😆',
+  smile: '😄',
+  pray: '🙏',
+  clap: '👏',
+  thinking_face: '🤔',
+  wave: '👋',
+  rocket: '🚀',
+  sparkles: '✨',
+  ok_hand: '👌',
+  sob: '😭',
+  cry: '😢',
+  star: '⭐',
+  '100': '💯',
+  warning: '⚠️',
+  question: '❓',
+  exclamation: '❗',
+  worm: '🪱',
+  bug: '🐛',
+  snake: '🐍',
+  raised_hands: '🙌',
+  muscle: '💪',
+  salute: '🫡',
+  handshake: '🤝',
+  point_up: '☝️',
+  raised_hand: '✋',
+  v: '✌️',
+  crossed_fingers: '🤞',
+  heart_eyes: '😍',
+  smiling_face_with_hearts: '🥰',
+  grin: '😁',
+  grinning: '😀',
+  sweat_smile: '😅',
+  rofl: '🤣',
+  wink: '😉',
+  slightly_smiling_face: '🙂',
+  upside_down_face: '🙃',
+  neutral_face: '😐',
+  grimacing: '😬',
+  scream: '😱',
+  astonished: '😲',
+  exploding_head: '🤯',
+  mind_blown: '🤯',
+  zany_face: '🤪',
+  sunglasses: '😎',
+  nerd_face: '🤓',
+  robot: '🤖',
+  alien: '👽',
+  ghost: '👻',
+  skull: '💀',
+  poop: '💩',
+  egg: '🥚',
+  hatching_chick: '🐣',
+  chicken: '🐔',
+  party: '🥳',
+  partying_face: '🥳',
+  confetti_ball: '🎊',
+  balloon: '🎈',
+  gift: '🎁',
+  trophy: '🏆',
+  medal: '🏅',
+  crown: '👑',
+  gem: '💎',
+  zap: '⚡',
+  boom: '💥',
+  bulb: '💡',
+  hourglass: '⏳',
+  alarm_clock: '⏰',
+  checkered_flag: '🏁',
+  dart: '🎯',
+  eyes_rolling: '🙄',
+  roll_eyes: '🙄',
+  shrug: '🤷',
+  facepalm: '🤦',
+  pleading_face: '🥺',
+  hot_face: '🥵',
+  cold_face: '🥶',
+  green_heart: '💚',
+  blue_heart: '💙',
+  purple_heart: '💜',
+  yellow_heart: '💛',
+  orange_heart: '🧡',
+  black_heart: '🖤',
+  broken_heart: '💔',
+  sparkling_heart: '💖',
+  red_circle: '🔴',
+  green_circle: '🟢',
+  x: '❌',
+  no_entry: '⛔',
+  white_circle: '⚪',
+};
+
+function resolveEmoji(raw: string): string | null {
+  if (!raw) return null;
+  if (/[^\x00-\x7f]/.test(raw)) return raw; // already unicode — pass through
+  return EMOJI_SHORTCODES[raw.toLowerCase().replace(/^:|:$/g, '')] ?? null;
+}
+
 interface SignalDataMessage {
   timestamp?: number;
   message?: string;
@@ -303,6 +417,12 @@ interface SignalDataMessage {
   groupInfo?: { groupId?: string; groupName?: string; type?: string };
   groupV2?: { id?: string };
   quote?: SignalQuote;
+  reaction?: {
+    emoji?: string;
+    targetAuthor?: string;
+    targetSentTimestamp?: number;
+    isRemove?: boolean;
+  };
   attachments?: Array<{
     id?: string;
     contentType?: string;
@@ -532,6 +652,19 @@ export function createSignalAdapter(config: {
   const echoCache = new EchoCache();
   let setup: ChannelSetup | null = null;
 
+  // Inbound message id -> author, so outbound reactions in GROUPS can supply
+  // signal-cli's required targetAuthor (in DMs the peer is always the author).
+  // Bounded FIFO — reactions target recent messages in practice.
+  const reactionTargets = new Map<string, string>();
+  function rememberReactionTarget(id: string, author: string): void {
+    if (!id || !author) return;
+    reactionTargets.set(id, author);
+    if (reactionTargets.size > 500) {
+      const oldest = reactionTargets.keys().next().value;
+      if (oldest !== undefined) reactionTargets.delete(oldest);
+    }
+  }
+
   // -- inbound handling --
 
   function handleNotification(method: string, params: unknown): void {
@@ -584,6 +717,36 @@ export function createSignalAdapter(config: {
 
     const dataMessage = envelope.dataMessage;
     if (!dataMessage) return;
+
+    // Reactions arrive as dataMessage.reaction with no message text — handle
+    // them before the empty-content gate below would silently drop them.
+    // The host has no dedicated reaction kind, so forward as a formatted
+    // chat event the agent can interpret (mirrors how voice notes become
+    // "[Voice: …]" lines).
+    if (dataMessage.reaction?.emoji) {
+      if (dataMessage.reaction.isRemove) return; // un-reacting is noise
+      const rSender = (envelope.sourceNumber ?? envelope.sourceUuid ?? envelope.source ?? '').trim();
+      if (!rSender) return;
+      const rSenderName = (envelope.sourceName?.trim() || rSender).trim();
+      const rGroupId = dataMessage.groupV2?.id ?? dataMessage.groupInfo?.groupId;
+      const rPlatformId = rGroupId ? `group:${rGroupId}` : rSender;
+      const rMsg: InboundMessage = {
+        id: String(dataMessage.timestamp ?? Date.now()),
+        kind: 'chat',
+        content: {
+          text: `[${rSenderName} reacted ${dataMessage.reaction.emoji} to your message]`,
+          sender: rSender,
+          senderId: `signal:${rSender}`,
+          senderName: rSenderName,
+        },
+        timestamp: dataMessage.timestamp
+          ? new Date(dataMessage.timestamp).toISOString()
+          : new Date().toISOString(),
+      };
+      await setup.onInbound(rPlatformId, null, rMsg);
+      log.info('Signal reaction received', { platformId: rPlatformId, emoji: dataMessage.reaction.emoji });
+      return;
+    }
 
     const rawText = (dataMessage.message ?? '').trim();
     const text = rawText ? resolveMentions(rawText, dataMessage.mentions) : '';
@@ -673,6 +836,7 @@ export function createSignalAdapter(config: {
       timestamp,
     };
     await setup.onInbound(platformId, null, msg);
+    rememberReactionTarget(msg.id, sender);
 
     log.info('Signal message received', { platformId, sender: senderName });
   }
@@ -700,6 +864,45 @@ export function createSignalAdapter(config: {
   }
 
   // -- send helpers --
+
+  async function sendReaction(platformId: string, targetMsgId: string, rawEmoji: string): Promise<void> {
+    if (!connected || !tcp) return;
+    const emoji = resolveEmoji(rawEmoji);
+    // The host namespaces message ids as "<signal-timestamp>:<agent-group-id>"
+    // by the time they reach the outbound queue — strip back to the timestamp
+    // signal-cli targets by.
+    const bareId = targetMsgId.split(':')[0];
+    const targetTimestamp = Number(bareId);
+    if (!emoji || !Number.isFinite(targetTimestamp) || targetTimestamp <= 0) {
+      log.warn('Signal: dropping malformed reaction', { platformId, targetMsgId, rawEmoji });
+      return;
+    }
+
+    // signal-cli targets reactions by (author, timestamp). In a DM the peer
+    // authored everything we react to; in groups, use the author remembered
+    // at inbound time (bounded cache — very old messages can miss).
+    const isGroup = platformId.startsWith('group:');
+    const targetAuthor = isGroup ? reactionTargets.get(bareId) : platformId;
+    if (!targetAuthor) {
+      log.warn('Signal: no author known for reaction target', { platformId, targetMsgId });
+      return;
+    }
+
+    const params: Record<string, unknown> = { emoji, targetAuthor, targetTimestamp };
+    if (config.account) params.account = config.account;
+    if (isGroup) {
+      params.groupId = platformId.slice('group:'.length);
+    } else {
+      params.recipient = [platformId];
+    }
+
+    try {
+      await tcp.rpc('sendReaction', params);
+      log.info('Signal reaction sent', { platformId, emoji, targetTimestamp });
+    } catch (err) {
+      log.error('Signal: sendReaction failed', { platformId, emoji, err });
+    }
+  }
 
   async function sendText(platformId: string, text: string): Promise<void> {
     if (!connected || !tcp) return;
@@ -893,6 +1096,15 @@ export function createSignalAdapter(config: {
 
     async deliver(platformId: string, _threadId: string | null, message: OutboundMessage): Promise<string | undefined> {
       const content = message.content as Record<string, unknown> | string | undefined;
+
+      // Reaction operation from the agent's add_reaction tool — an emoji on
+      // an existing message, not a text send. content:
+      //   { operation: 'reaction', messageId: <inbound msg id>, emoji: <shortcode> }
+      if (content && typeof content === 'object' && content.operation === 'reaction') {
+        await sendReaction(platformId, String(content.messageId ?? ''), String(content.emoji ?? ''));
+        return undefined;
+      }
+
       let text: string | null = null;
       if (typeof content === 'string') {
         text = content;
