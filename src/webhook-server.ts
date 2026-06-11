@@ -23,11 +23,36 @@ interface WebhookEntry {
 const routes = new Map<string, WebhookEntry>();
 let server: http.Server | null = null;
 
+const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
+
+class PayloadTooLargeError extends Error {
+  constructor() {
+    super('Payload Too Large');
+  }
+}
+
+function maxWebhookBodyBytes(): number {
+  const parsed = Number.parseInt(process.env.WEBHOOK_MAX_BODY_BYTES || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_BODY_BYTES;
+}
+
 /** Convert Node.js IncomingMessage to a Web API Request. */
 async function toWebRequest(req: http.IncomingMessage): Promise<Request> {
+  const maxBytes = maxWebhookBodyBytes();
+  const contentLength = req.headers['content-length'];
+  if (typeof contentLength === 'string' && Number.parseInt(contentLength, 10) > maxBytes) {
+    throw new PayloadTooLargeError();
+  }
+
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
   for await (const chunk of req) {
-    chunks.push(chunk as Buffer);
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as ArrayBuffer);
+    totalBytes += buf.length;
+    if (totalBytes > maxBytes) {
+      throw new PayloadTooLargeError();
+    }
+    chunks.push(buf);
   }
   const body = Buffer.concat(chunks);
 
@@ -112,6 +137,11 @@ function ensureServer(): void {
       });
       await fromWebResponse(webRes, res);
     } catch (err) {
+      if (err instanceof PayloadTooLargeError) {
+        res.writeHead(413, { 'Content-Type': 'text/plain' });
+        res.end('Payload Too Large');
+        return;
+      }
       log.error('Webhook handler error', { adapter: adapterName, url: req.url, err });
       res.writeHead(500, { 'Content-Type': 'text/plain' });
       res.end('Internal Server Error');
