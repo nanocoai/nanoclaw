@@ -1017,7 +1017,7 @@ describe('delivery', () => {
     const db = new Database(dbPath);
     db.prepare(
       `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
-       VALUES ('out-1', datetime('now'), 'chat', 'chan-123', 'discord', ?)`,
+       VALUES ('out-1', strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'chat', 'chan-123', 'discord', ?)`,
     ).run(JSON.stringify({ text: 'Agent response' }));
 
     const undelivered = db.prepare('SELECT * FROM messages_out').all() as Array<{

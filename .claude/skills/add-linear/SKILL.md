@@ -120,11 +120,11 @@ Run `/manage-channels` to wire the Linear channel to an agent group, or insert m
 ```sql
 -- Create messaging group (one per team)
 INSERT INTO messaging_groups (id, channel_type, platform_id, name, is_group, unknown_sender_policy, created_at)
-VALUES ('mg-linear-eng', 'linear', 'linear:ENG', 'Engineering', 1, 'public', datetime('now'));
+VALUES ('mg-linear-eng', 'linear', 'linear:ENG', 'Engineering', 1, 'public', strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 
 -- Wire to agent group
 INSERT INTO messaging_group_agents (id, messaging_group_id, agent_group_id, trigger_rules, response_scope, session_mode, priority, created_at)
-VALUES ('mga-linear-eng', 'mg-linear-eng', '<your-agent-group-id>', '', 'all', 'per-thread', 10, datetime('now'));
+VALUES ('mga-linear-eng', 'mg-linear-eng', '<your-agent-group-id>', '', 'all', 'per-thread', 10, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 ```
 
 The `platform_id` must be `linear:<TEAM_KEY>` matching the `LINEAR_TEAM_KEY` env var. Use `per-thread` session mode so each issue comment thread gets its own agent session.

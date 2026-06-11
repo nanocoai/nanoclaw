@@ -156,7 +156,7 @@ async function main(): Promise<void> {
     db.prepare(`
       INSERT INTO messaging_group_agents
         (id, messaging_group_id, agent_group_id, trigger_rules, response_scope, session_mode, priority, created_at)
-      VALUES (?, ?, ?, '', 'all', ?, 10, datetime('now'))
+      VALUES (?, ?, ?, '', 'all', ?, 10, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     `).run(generateId('mga'), mg.id, ag.id, args.sessionMode);
   });
   tx();

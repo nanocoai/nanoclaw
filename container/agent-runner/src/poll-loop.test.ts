@@ -24,7 +24,7 @@ function insertMessage(
   getInboundDb()
     .prepare(
       `INSERT INTO messages_in (id, kind, timestamp, status, process_after, trigger, on_wake, content)
-     VALUES (?, ?, datetime('now'), 'pending', ?, ?, ?, ?)`,
+     VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'pending', ?, ?, ?, ?)`,
     )
     .run(id, kind, opts?.processAfter ?? null, opts?.trigger ?? 1, opts?.onWake ?? 0, JSON.stringify(content));
 }
@@ -131,7 +131,7 @@ describe('accumulate gate (trigger column)', () => {
     getInboundDb()
       .prepare(
         `INSERT INTO messages_in (id, kind, timestamp, status, content)
-         VALUES ('m1', 'chat', datetime('now'), 'pending', '{"text":"hi"}')`,
+         VALUES ('m1', 'chat', strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'pending', '{"text":"hi"}')`,
       )
       .run();
     const [msg] = getPendingMessages();
@@ -196,7 +196,7 @@ describe('routing', () => {
     getInboundDb()
       .prepare(
         `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, thread_id, content)
-       VALUES ('m1', 'chat', datetime('now'), 'pending', 'chan-123', 'discord', 'thread-456', '{"text":"hi"}')`,
+       VALUES ('m1', 'chat', strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'pending', 'chan-123', 'discord', 'thread-456', '{"text":"hi"}')`,
       )
       .run();
 

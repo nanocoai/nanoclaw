@@ -65,7 +65,7 @@ function insertOutbound(agentGroupId: string, sessionId: string, msgId: string):
   const db = new Database(outboundDbPath(agentGroupId, sessionId));
   db.prepare(
     `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
-     VALUES (?, datetime('now'), 'chat', 'telegram:123', 'telegram', ?)`,
+     VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'chat', 'telegram:123', 'telegram', ?)`,
   ).run(msgId, JSON.stringify({ text: 'hello' }));
   db.close();
 }

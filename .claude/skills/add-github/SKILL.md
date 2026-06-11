@@ -112,11 +112,11 @@ Run `/manage-channels` to wire the GitHub channel to an agent group, or insert m
 ```sql
 -- Create messaging group (one per repo)
 INSERT INTO messaging_groups (id, channel_type, platform_id, name, is_group, unknown_sender_policy, created_at)
-VALUES ('mg-github-myrepo', 'github', 'github:owner/repo', 'owner/repo', 1, '<policy>', datetime('now'));
+VALUES ('mg-github-myrepo', 'github', 'github:owner/repo', 'owner/repo', 1, '<policy>', strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 
 -- Wire to agent group
 INSERT INTO messaging_group_agents (id, messaging_group_id, agent_group_id, trigger_rules, response_scope, session_mode, priority, created_at)
-VALUES ('mga-github-myrepo', 'mg-github-myrepo', '<your-agent-group-id>', '', 'all', 'per-thread', 10, datetime('now'));
+VALUES ('mga-github-myrepo', 'mg-github-myrepo', '<your-agent-group-id>', '', 'all', 'per-thread', 10, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 ```
 
 Replace `<policy>` with `public` or `strict` based on the user's choice above.
@@ -128,7 +128,7 @@ When using `strict`, add each GitHub user who should be able to trigger the agen
 ```sql
 -- Add user (kind = 'github', id = 'github:<numeric-user-id>')
 INSERT OR IGNORE INTO users (id, kind, display_name, created_at)
-VALUES ('github:<user-id>', 'github', '<username>', datetime('now'));
+VALUES ('github:<user-id>', 'github', '<username>', strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 
 -- Grant membership to the agent group
 INSERT OR IGNORE INTO agent_group_members (user_id, agent_group_id)

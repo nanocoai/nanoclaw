@@ -33,7 +33,7 @@ db.exec(`
 `);
 
 // Insert test message
-db.prepare(`INSERT INTO messages_in (id, kind, timestamp, status, content) VALUES (?, 'chat', datetime('now'), 'pending', ?)`).run(
+db.prepare(`INSERT INTO messages_in (id, kind, timestamp, status, content) VALUES (?, 'chat', strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'pending', ?)`).run(
   'test-1',
   JSON.stringify({ sender: 'Gavriel', text: 'Say "Hello from v2!" and nothing else. Do not use any tools.' }),
 );

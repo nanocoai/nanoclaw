@@ -152,7 +152,7 @@ export function markMessageFailed(db: Database.Database, messageId: string): voi
 
 export function retryWithBackoff(db: Database.Database, messageId: string, backoffSec: number): void {
   db.prepare(
-    `UPDATE messages_in SET tries = tries + 1, process_after = datetime('now', '+${backoffSec} seconds') WHERE id = ?`,
+    `UPDATE messages_in SET tries = tries + 1, process_after = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+${backoffSec} seconds') WHERE id = ?`,
   ).run(messageId);
 }
 
@@ -259,7 +259,7 @@ export function getDueOutboundMessages(db: Database.Database): OutboundMessage[]
   return db
     .prepare(
       `SELECT * FROM messages_out
-       WHERE (deliver_after IS NULL OR deliver_after <= datetime('now'))
+       WHERE (deliver_after IS NULL OR datetime(deliver_after) <= datetime('now'))
        ORDER BY timestamp ASC`,
     )
     .all() as OutboundMessage[];
@@ -279,13 +279,13 @@ export function getDeliveredIds(db: Database.Database): Set<string> {
 
 export function markDelivered(db: Database.Database, messageOutId: string, platformMessageId: string | null): void {
   db.prepare(
-    "INSERT OR IGNORE INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES (?, ?, 'delivered', datetime('now'))",
+    "INSERT OR IGNORE INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES (?, ?, 'delivered', strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
   ).run(messageOutId, platformMessageId ?? null);
 }
 
 export function markDeliveryFailed(db: Database.Database, messageOutId: string): void {
   db.prepare(
-    "INSERT OR IGNORE INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES (?, NULL, 'failed', datetime('now'))",
+    "INSERT OR IGNORE INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES (?, NULL, 'failed', strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
   ).run(messageOutId);
 }
 

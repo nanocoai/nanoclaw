@@ -264,7 +264,7 @@ CREATE TABLE chat_sdk_kv (
 
 CREATE TABLE chat_sdk_subscriptions (
   thread_id     TEXT PRIMARY KEY,
-  subscribed_at TEXT NOT NULL DEFAULT (datetime('now'))
+  subscribed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
 CREATE TABLE chat_sdk_locks (

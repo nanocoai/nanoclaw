@@ -58,7 +58,7 @@ export function writeMessageOut(msg: WriteMessageOut): number {
   outbound
     .prepare(
       `INSERT INTO messages_out (id, seq, in_reply_to, timestamp, deliver_after, recurrence, kind, platform_id, channel_type, thread_id, content)
-     VALUES ($id, $seq, $in_reply_to, datetime('now'), $deliver_after, $recurrence, $kind, $platform_id, $channel_type, $thread_id, $content)`,
+     VALUES ($id, $seq, $in_reply_to, strftime('%Y-%m-%dT%H:%M:%fZ','now'), $deliver_after, $recurrence, $kind, $platform_id, $channel_type, $thread_id, $content)`,
     )
     .run({
       $id: msg.id,
@@ -136,7 +136,7 @@ export function getUndeliveredMessages(): MessageOutRow[] {
   return getOutboundDb()
     .prepare(
       `SELECT * FROM messages_out
-       WHERE (deliver_after IS NULL OR deliver_after <= datetime('now'))
+       WHERE (deliver_after IS NULL OR datetime(deliver_after) <= datetime('now'))
        ORDER BY timestamp ASC`,
     )
     .all() as MessageOutRow[];

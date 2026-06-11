@@ -43,7 +43,7 @@ describe('migrateMessagesInTable', () => {
       );
     `);
     db.prepare(
-      "INSERT INTO messages_in (id, seq, kind, timestamp, status, content) VALUES (?, ?, 'task', datetime('now'), 'pending', '{}')",
+      "INSERT INTO messages_in (id, seq, kind, timestamp, status, content) VALUES (?, ?, 'task', strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'pending', '{}')",
     ).run('legacy-1', 2);
 
     migrateMessagesInTable(db);

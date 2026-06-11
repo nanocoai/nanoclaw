@@ -26,7 +26,7 @@ function insertMessage(id: string, content: object, opts?: { platformId?: string
   getInboundDb()
     .prepare(
       `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, thread_id, content)
-       VALUES (?, 'chat', datetime('now'), 'pending', ?, ?, ?, ?)`,
+       VALUES (?, 'chat', strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'pending', ?, ?, ?, ?)`,
     )
     .run(id, opts?.platformId ?? null, opts?.channelType ?? null, opts?.threadId ?? null, JSON.stringify(content));
 }
