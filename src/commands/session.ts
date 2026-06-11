@@ -10,6 +10,9 @@ registerCommand({
   handler: async (ctx) => {
     delete ctx.sessions[ctx.group.folder];
     ctx.deleteSession(ctx.group.folder);
+    // 推进消息游标到 /clear 命令时间戳，丢弃此前累积的待处理消息
+    // （否则新对话会被 getMessagesSince 把 /clear 之前的旧消息一起拉回）
+    ctx.advanceCursor(ctx.chatJid, ctx.msg.timestamp);
     logger.info({ group: ctx.group.folder }, '/clear: session 已清除');
     await ctx.channel.sendMessage(
       ctx.chatJid,
@@ -78,6 +81,9 @@ registerCommand({
     const killed = ctx.queue.killGroup(ctx.chatJid);
     delete ctx.sessions[ctx.group.folder];
     ctx.deleteSession(ctx.group.folder);
+    // 推进消息游标到 /new 命令时间戳，丢弃此前累积的待处理消息
+    // （否则全新会话会被 getMessagesSince 把 /new 之前的旧消息一起拉回）
+    ctx.advanceCursor(ctx.chatJid, ctx.msg.timestamp);
     logger.info(
       { group: ctx.group.folder, killed },
       '/new: 进程已终止，session 已清除',
