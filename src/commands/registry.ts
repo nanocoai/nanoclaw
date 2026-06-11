@@ -29,6 +29,7 @@ export interface DispatchDeps {
   registeredGroups: Record<string, RegisteredGroup>;
   deleteSession: (folder: string) => void;
   setRegisteredGroup: (jid: string, group: RegisteredGroup) => void;
+  advanceCursor: (chatJid: string, timestamp: string) => void;
 }
 
 /**
@@ -111,6 +112,7 @@ export async function dispatch(
       registeredGroups: deps.registeredGroups,
       deleteSession: deps.deleteSession,
       setRegisteredGroup: deps.setRegisteredGroup,
+      advanceCursor: deps.advanceCursor,
     });
   } catch (err) {
     logger.error({ err, cmd: matched.name }, '命令执行失败');

@@ -31,4 +31,6 @@ export interface CommandContext {
   // 辅助函数
   deleteSession: (folder: string) => void;
   setRegisteredGroup: (jid: string, group: RegisteredGroup) => void;
+  // 推进群消息处理游标到指定时间戳，丢弃该时间戳之前未处理的消息（/new、/clear 用于开启全新对话）
+  advanceCursor: (chatJid: string, timestamp: string) => void;
 }
