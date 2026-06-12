@@ -104,4 +104,19 @@ export type ProviderEvent =
    * event (tool call, thinking, partial message, anything) so the
    * poll-loop's idle timer stays honest during long tool runs.
    */
-  | { type: 'activity' };
+  | { type: 'activity' }
+  /**
+   * Per-turn token accounting from the underlying SDK. Optional — providers
+   * that don't surface usage simply never emit this. Consumed by the
+   * early-compaction nudge in poll-loop to compare against the auto-compact
+   * ceiling. All fields are absolute (not deltas) and represent the input
+   * cost of the assistant turn that produced them.
+   */
+  | { type: 'usage'; inputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number }
+  /**
+   * The underlying SDK auto-compacted history. Re-arms anything latched on a
+   * usage threshold (the nudge tracker, primarily). Distinct from the
+   * Claude-provider's existing remap of compact_boundary into a synthetic
+   * `result` text event — that path is preserved for backwards compatibility.
+   */
+  | { type: 'compact_boundary' };

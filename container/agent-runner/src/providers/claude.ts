@@ -439,6 +439,19 @@ export class ClaudeProvider implements AgentProvider {
 
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };
+        } else if (message.type === 'assistant') {
+          // Surface per-turn token usage so poll-loop can drive the early
+          // compaction nudge. SDK assistant messages carry a `usage` object;
+          // absent on partial/streaming chunks — skip those silently.
+          const usage = (message as { message?: { usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } }).message?.usage;
+          if (usage) {
+            yield {
+              type: 'usage',
+              inputTokens: usage.input_tokens ?? 0,
+              cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
+              cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
+            };
+          }
         } else if (message.type === 'result') {
           const text = 'result' in message ? (message as { result?: string }).result ?? null : null;
           yield { type: 'result', text };
@@ -447,6 +460,7 @@ export class ClaudeProvider implements AgentProvider {
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
           yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
+          yield { type: 'compact_boundary' };
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
           const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';
           yield { type: 'result', text: `Context compacted${detail}.` };

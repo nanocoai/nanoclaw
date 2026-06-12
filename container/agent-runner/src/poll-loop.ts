@@ -15,6 +15,7 @@ import {
 } from './formatter.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
+import { createNudgeTracker, type NudgeTracker } from './compact-nudge.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -63,6 +64,12 @@ export interface PollLoopConfig {
   systemContext?: {
     instructions?: string;
   };
+  /**
+   * Optional abort signal for clean shutdown. Production never sets this
+   * (the loop runs until the process is killed). Tests use it so leaked
+   * loops don't compete with the next test's messages.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -104,9 +111,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // This lets the new container re-process those messages.
   clearStaleProcessingAcks();
 
+  const nudgeTracker = createNudgeTracker();
+
   let pollCount = 0;
   let isFirstPoll = true;
   while (true) {
+    if (config.signal?.aborted) return;
+
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
     const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
     isFirstPoll = false;
@@ -231,8 +242,12 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
+    // Forward an external abort (test-only signal) into the active query so a
+    // long-lived MockProvider stream actually ends when the test tears down.
+    const abortListener = () => query.abort();
+    config.signal?.addEventListener('abort', abortListener, { once: true });
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
+      const result = await processQuery(query, routing, processingIds, config.providerName, nudgeTracker);
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -261,6 +276,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       });
     } finally {
       clearCurrentInReplyTo();
+      config.signal?.removeEventListener('abort', abortListener);
     }
 
     // Ensure completed even if processQuery ended without a result event
@@ -313,6 +329,7 @@ async function processQuery(
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
+  nudgeTracker: NudgeTracker,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -437,7 +454,19 @@ async function processQuery(
       handleEvent(event, routing);
       touchHeartbeat();
 
-      if (event.type === 'init') {
+      if (event.type === 'usage') {
+        const nudge = nudgeTracker.onUsage({
+          inputTokens: event.inputTokens,
+          cacheReadInputTokens: event.cacheReadInputTokens,
+          cacheCreationInputTokens: event.cacheCreationInputTokens,
+        });
+        if (nudge) {
+          log('Pushing early-compaction nudge into active query');
+          query.push(nudge);
+        }
+      } else if (event.type === 'compact_boundary') {
+        nudgeTracker.onCompactBoundary();
+      } else if (event.type === 'init') {
         queryContinuation = event.continuation;
         // Persist immediately so a mid-turn container crash still lets the
         // next wake resume the conversation. Without this, the session id
