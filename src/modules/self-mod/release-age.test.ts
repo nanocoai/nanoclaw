@@ -73,4 +73,15 @@ describe('checkNpmReleaseAge', () => {
     });
     expect(r.unverifiable).toEqual(['ghost']);
   });
+
+  it('resolves a scoped package end-to-end', async () => {
+    const r = await checkNpmReleaseAge(['@scope/pkg'], {
+      thresholdMs: DEFAULT_RELEASE_AGE_MS,
+      overrides: [],
+      now: NOW,
+      fetchImpl: fakeFetch({ '@scope/pkg': oldPkg }),
+    });
+    expect(r.unverifiable).toHaveLength(0);
+    expect(r.resolved[0].name).toBe('@scope/pkg');
+  });
 });

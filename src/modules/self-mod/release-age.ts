@@ -11,6 +11,8 @@ const NPM_REGISTRY = 'https://registry.npmjs.org';
 /** 3 days in ms — matches `minimumReleaseAge: 4320` (minutes) in pnpm-workspace.yaml. */
 export const DEFAULT_RELEASE_AGE_MS = 4320 * 60 * 1000;
 
+type NpmMeta = { 'dist-tags'?: { latest?: string }; time?: Record<string, string> };
+
 export interface ResolvedPkg {
   name: string;
   version: string;
@@ -44,13 +46,18 @@ export async function checkNpmReleaseAge(
 
   for (const spec of specs) {
     const { name, version } = parseSpec(spec);
-    type NpmMeta = { 'dist-tags'?: { latest?: string }; time?: Record<string, string> };
     let meta: NpmMeta | null = null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
     try {
-      const res = await doFetch(`${NPM_REGISTRY}/${encodeURIComponent(name).replace('%40', '@')}`);
+      const res = await doFetch(`${NPM_REGISTRY}/${encodeURIComponent(name).replace('%40', '@')}`, {
+        signal: controller.signal,
+      });
       if (res.ok) meta = (await res.json()) as NpmMeta;
     } catch {
       meta = null;
+    } finally {
+      clearTimeout(timer);
     }
 
     if (!meta) {
@@ -69,7 +76,7 @@ export async function checkNpmReleaseAge(
     resolved.push(pkg);
 
     const pinned = `${name}@${v}`;
-    if (overrides.has(pinned) || overrides.has(spec)) continue; // explicit human-pinned exemption
+    if (overrides.has(pinned)) continue; // exact-pinned (name@version) human-signed exemption only
 
     if (now - new Date(publishedAt).getTime() < opts.thresholdMs) {
       violations.push(pkg);
