@@ -18,6 +18,7 @@ import type { McpServerConfig } from '../../container-config.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { ApprovalHandler } from '../approvals/index.js';
+import { checkNpmReleaseAge, DEFAULT_RELEASE_AGE_MS } from './release-age.js';
 
 export const applyInstallPackages: ApprovalHandler = async ({ session, payload, userId, notify }) => {
   const agentGroup = getAgentGroup(session.agent_group_id);
@@ -30,6 +31,30 @@ export const applyInstallPackages: ApprovalHandler = async ({ session, payload, 
   if (!configRow) {
     notify('install_packages approved but container config missing.');
     return;
+  }
+
+  // Supply-chain gate: agent-requested npm packages must satisfy the same
+  // 3-day release-age policy the host tree enforces. Fail closed.
+  const npmSpecs = (payload.npm as string[] | undefined) ?? [];
+  if (npmSpecs.length > 0) {
+    const overrides = (payload.allowReleaseAge as string[] | undefined) ?? [];
+    const check = await checkNpmReleaseAge(npmSpecs, { thresholdMs: DEFAULT_RELEASE_AGE_MS, overrides });
+    if (check.violations.length > 0 || check.unverifiable.length > 0) {
+      const tooNew = check.violations.map((p) => `${p.name}@${p.version} (published ${p.publishedAt})`).join(', ');
+      const unv = check.unverifiable.join(', ');
+      notify(
+        `install_packages blocked by supply-chain policy (min age ${DEFAULT_RELEASE_AGE_MS / 60000} min). ` +
+          (tooNew ? `Too new: ${tooNew}. ` : '') +
+          (unv ? `Could not verify: ${unv}. ` : '') +
+          `To override, re-request with an exact-pinned allowlist (allowReleaseAge: ["name@version"]) — human sign-off required.`,
+      );
+      log.warn('install_packages blocked by release-age gate', {
+        agentGroupId: session.agent_group_id,
+        violations: check.violations,
+        unverifiable: check.unverifiable,
+      });
+      return;
+    }
   }
 
   // Append new packages to existing lists in the DB (deduplicated)
