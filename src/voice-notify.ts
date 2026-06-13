@@ -23,12 +23,13 @@ const VOICE_GATEWAY_API =
 const VOICE_GATEWAY_CLIENT_ID =
   process.env.VOICE_GATEWAY_CLIENT_ID || 'ios-main';
 const MAX_SPEAK_CHARS = 1024; // 单条播报上限，太长 TTS 念不动也没人听
-// qwen3.7-max 摘要长回复实测要 13.9s，原 5s 必超时降级发原文；turbo 实测 0.9s 质量够用。
-// 摘要是简单口语化任务，不需要 max 模型。超时给足 15s 兜底偶发慢。
+// qwen3.7-max 默认开思考时摘要要 23-32s（必超时降级），关思考后 1.5s 出结果、质量更好。
+// 超时给足 15s 兜底偶发慢。
 const SUMMARIZE_TIMEOUT_MS = 15000;
-// 摘要专用模型（可 env 覆盖）。默认 qwen-turbo：快（~1s）且口语化质量足够，
-// 不复用记忆系统的 llmModel（qwen3.7-max 太慢，长输入必超时）。
-const VOICE_SUMMARY_MODEL = process.env.VOICE_SUMMARY_MODEL || 'qwen-turbo';
+// 摘要专用模型（可 env 覆盖）。默认 qwen3.7-max 并关闭思考（enable_thinking=false）：
+// 实测非流式 1.7s、流式首字 0.5s，文案比 qwen-turbo 更准更干净、无残留符号。
+// 关思考是关键——开思考会慢到 20s+ 必超时降级发原文。
+const VOICE_SUMMARY_MODEL = process.env.VOICE_SUMMARY_MODEL || 'qwen3.7-max';
 const PUSH_TIMEOUT_MS = 3000;
 
 const SYSTEM_PROMPT = `你把一段给用户的 AI 回复改写成口语化的语音播报版本，供 TTS 朗读。语音是线性的，用户只能听、不能跳读，所以要让他第一耳朵就抓住重点。
@@ -183,7 +184,10 @@ async function summarizeForSpeech(text: string): Promise<string> {
           { role: 'user', content: text },
         ],
         temperature: 0.3,
-      },
+        // 关闭思考链：qwen3.7-max 默认开思考会慢到 20s+ 必超时，关掉后 1.5s 出结果。
+        // enable_thinking 是 DashScope 扩展参数，不在 OpenAI 类型里，故整体断言一次。
+        enable_thinking: false,
+      } as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
       { signal: controller.signal },
     );
     const summary = response.choices[0]?.message?.content?.trim() || '';
