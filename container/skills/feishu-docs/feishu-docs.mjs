@@ -223,7 +223,7 @@ async function readDoc(urlOrId) {
   const result = runLarkCli([
     'docs', '+fetch',
     '--api-version', 'v2',
-    '--as', 'bot',
+    '--as', 'user',
     '--doc', urlOrId,
     '--format', 'json',
   ]);
@@ -305,7 +305,7 @@ async function createDoc(title, content) {
   const args = [
     'docs', '+create',
     '--api-version', 'v2',
-    '--as', 'bot',
+    '--as', 'user',
     '--title', title,
     '--format', 'json',
   ];
@@ -523,7 +523,7 @@ async function uploadFile(filePath, folderName) {
   const fileName = _path.basename(filePath);
   const args = [
     'drive', '+upload',
-    '--as', 'bot',
+    '--as', 'user',
     '--file', fileName,
     '--name', fileName,
     '--format', 'json',
@@ -724,7 +724,7 @@ async function appendDoc(urlOrId, content) {
   const result = withTempMarkdown(content, (cwd, rel) => runLarkCli([
     'docs', '+update',
     '--api-version', 'v2',
-    '--as', 'bot',
+    '--as', 'user',
     '--doc', urlOrId,
     '--command', 'append',
     '--content', `@${rel}`,
@@ -748,7 +748,7 @@ async function insertImage(urlOrId, filePath, args = []) {
   const captionIdx = args.indexOf('--caption');
   const cliArgs = [
     'docs', '+media-insert',
-    '--as', 'bot',
+    '--as', 'user',
     '--doc', urlOrId,
     '--file', _path.basename(filePath),
     '--type', 'image',
