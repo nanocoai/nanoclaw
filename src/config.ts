@@ -82,6 +82,17 @@ export const MAX_MESSAGES_PER_PROMPT = Math.max(
   1,
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,
 );
+// Rotate a group's SDK session once its transcript file grows past this size.
+// Resuming a session replays the entire transcript as model input, so an
+// unbounded session eventually overflows the context window and every message
+// fails with "prompt is too long" (observed twice on the main group — the
+// failing transcript was ~12 MB). Rotating starts a fresh session; continuity
+// is preserved via MemU memories and per-group CLAUDE.md. A value of 0 disables
+// the guard. Override with SESSION_MAX_TRANSCRIPT_MB.
+export const SESSION_MAX_TRANSCRIPT_BYTES =
+  Math.max(0, parseFloat(process.env.SESSION_MAX_TRANSCRIPT_MB || '4')) *
+  1024 *
+  1024;
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(

@@ -5,6 +5,7 @@ import {
   ASSISTANT_NAME,
   CLARIFY_PROXY_PORT,
   CREDENTIAL_PROXY_PORT,
+  DATA_DIR,
   DEFAULT_TRIGGER,
   getTriggerPattern,
   GOG_PROXY_PORT,
@@ -14,6 +15,7 @@ import {
   MEMU_PROXY_PORT,
   POLL_INTERVAL,
   REMINDERS_PROXY_PORT,
+  SESSION_MAX_TRANSCRIPT_BYTES,
   SIGNAL_DETECTOR_PROXY_PORT,
   TIMEZONE,
 } from './config.js';
@@ -381,6 +383,31 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   return true;
 }
 
+// The SDK stores each group's session transcript at
+//   <DATA_DIR>/sessions/<folder>/.claude/projects/-workspace-group/<sessionId>.jsonl
+// (the project dir derives from the container cwd /workspace/group). Resuming a
+// session replays this whole file as model input, so its size is our proxy for
+// how big the next prompt will be. Returns 0 if the file is missing.
+function getSessionTranscriptBytes(
+  groupFolder: string,
+  sessionId: string,
+): number {
+  const file = path.join(
+    DATA_DIR,
+    'sessions',
+    groupFolder,
+    '.claude',
+    'projects',
+    '-workspace-group',
+    `${sessionId}.jsonl`,
+  );
+  try {
+    return fs.statSync(file).size;
+  } catch {
+    return 0;
+  }
+}
+
 async function runAgent(
   group: RegisteredGroup,
   prompt: string,
@@ -388,7 +415,30 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
+  let sessionId: string | undefined = sessions[group.folder];
+
+  // Proactive session rotation. Resuming replays the entire transcript, so an
+  // unbounded session eventually overflows the model context window and every
+  // message fails with "prompt is too long" (happened twice on main — see the
+  // session_rotation notes). Rotate before that point; MemU memories and the
+  // per-group CLAUDE.md carry continuity into the fresh session.
+  if (sessionId && SESSION_MAX_TRANSCRIPT_BYTES > 0) {
+    const transcriptBytes = getSessionTranscriptBytes(group.folder, sessionId);
+    if (transcriptBytes > SESSION_MAX_TRANSCRIPT_BYTES) {
+      logger.warn(
+        {
+          group: group.name,
+          sessionId,
+          transcriptMB: +(transcriptBytes / 1024 / 1024).toFixed(1),
+          limitMB: +(SESSION_MAX_TRANSCRIPT_BYTES / 1024 / 1024).toFixed(1),
+        },
+        'Session transcript exceeded rotation threshold — starting fresh session',
+      );
+      delete sessions[group.folder];
+      deleteSession(group.folder);
+      sessionId = undefined;
+    }
+  }
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
