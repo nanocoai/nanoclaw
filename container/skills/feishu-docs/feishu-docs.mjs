@@ -246,8 +246,11 @@ function blocksToMarkdown(blocks) {
 
 function extractText(block) {
   // 尝试不同的文本字段位置
-  const textBlock = block.text || block.heading || block.code || block.quote ||
-                    block.bullet || block.ordered || block.todo || block.callout;
+  const textBlock = block.text || block.heading || block.heading1 || block.heading2 ||
+                    block.heading3 || block.heading4 || block.heading5 || block.heading6 ||
+                    block.heading7 || block.heading8 || block.heading9 ||
+                    block.code || block.quote || block.bullet || block.ordered ||
+                    block.todo || block.callout;
   if (!textBlock?.elements) return '';
 
   return textBlock.elements.map(el => {
@@ -336,7 +339,7 @@ function markdownToBlocks(md) {
       const level = headingMatch[1].length;
       blocks.push({
         block_type: 2 + level, // heading1=3, heading2=4, ...
-        heading: {
+        [`heading${level}`]: {
           elements: [{ text_run: { content: headingMatch[2] } }],
         },
       });
