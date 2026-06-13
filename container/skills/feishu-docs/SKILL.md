@@ -6,7 +6,9 @@ codex-shared: true
 
 # 飞书文档工具
 
-通过 `feishu-docs` CLI 操作飞书文档和云盘。环境变量 `FEISHU_TENANT_TOKEN` 由系统自动注入。
+通过 `feishu-docs` CLI 操作飞书文档和云盘。这个 skill 对外保留统一入口，底层优先调用飞书官方 `lark-cli`；不要在业务 skill 里直接散写 `lark-cli` 命令。
+
+所有官方 CLI 调用默认带 `LARK_CLI_NO_PROXY=1`，避免代理污染内网/飞书请求。
 
 ## 可用命令
 
@@ -20,7 +22,7 @@ node /home/node/.claude/skills/feishu-docs/feishu-docs.mjs read <URL或文档ID>
 - `https://xxx.feishu.cn/wiki/TOKEN`
 - 直接传文档 ID
 
-输出为 Markdown 格式的文档内容。
+底层使用 `lark-cli docs +fetch --api-version v2 --as bot`。输出为飞书官方返回的文档内容结构，适合保真读取；不要假装复杂表格/图片一定能还原成 Markdown。
 
 ### 创建文档
 ```bash
@@ -32,6 +34,26 @@ cat content.md | node /home/node/.claude/skills/feishu-docs/feishu-docs.mjs crea
 ```
 
 输出 JSON: `{ document_id, url, message }`。将 url 分享给用户即可。
+
+底层使用 `lark-cli docs +create --api-version v2 --as bot --content @file`，支持长文和表格，优先用于 PRD/方案文档。
+
+### 追加内容
+```bash
+# 方式1: 内联内容
+node /home/node/.claude/skills/feishu-docs/feishu-docs.mjs append <URL或文档ID> "## 新章节\n正文..."
+
+# 方式2: 从 stdin 读取（适合长内容）
+cat append.md | node /home/node/.claude/skills/feishu-docs/feishu-docs.mjs append <URL或文档ID>
+```
+
+底层使用 `lark-cli docs +update --api-version v2 --as bot --command append --content @file`。
+
+### 插入图片
+```bash
+node /home/node/.claude/skills/feishu-docs/feishu-docs.mjs insert-image <URL或文档ID> ./diagram.png --width 900 --caption "流程图"
+```
+
+底层优先使用 `lark-cli docs +media-insert --as bot`。如果官方 CLI 当前应用身份缺 `docs:document.media:upload`，工具会自动 fallback 到老飞书 Doc 三阶段链路：创建空 image block → `drive/v1/medias/upload_all` 以 `docx_image` 上传 → `replace_image` 绑定 token。只有两条链路都失败时，才退化为上传 HTML/SVG/PNG 文件并在文档中放链接。
 
 ### 上传文件
 ```bash
@@ -45,17 +67,22 @@ node /home/node/.claude/skills/feishu-docs/feishu-docs.mjs upload /path/to/file
 文件上传到用户个人云盘。`--folder` 指定目标文件夹（不存在会自动创建）。
 输出 JSON: `{ file_token, file_name, size, url, folder, message }`。url 是可直接点击的云盘链接。
 
+底层使用 `lark-cli drive +upload --as bot`。当前 `--folder nanoclaw` 映射到固定 folder token；其他文件夹名需要先补 folder token 映射。
+
 ### 搜索文档
 ```bash
 node /home/node/.claude/skills/feishu-docs/feishu-docs.mjs search "关键词"
 ```
 
 返回匹配的文档列表（JSON 数组）。
+底层使用 `lark-cli drive +search --as user`。
 
 ## 使用场景
 
 - 用户发了飞书文档链接 → 用 `read` 命令获取内容
 - 用户要求写报告/文档 → 先在本地编写内容，再用 `create` 命令创建飞书文档，把链接发给用户
+- 用户要求在已有文档后追加内容 → 用 `append`
+- 用户要求把图放进文档 → 优先把 SVG/HTML 渲染成 PNG 后用 `insert-image`；如权限不足，上传图件并把链接追加回文档
 - 用户要求发文件/保存文件 → 用 `upload --folder nanoclaw` 上传到云盘，把 url 链接发给用户
 - 用户要求查找文档 → 用 `search` 命令搜索
 
@@ -72,7 +99,7 @@ node /home/node/.claude/skills/feishu-docs/feishu-docs.mjs search "关键词"
 
 ## 注意事项
 
-- 用户授权后可读取该用户有权限的所有文档
-- 创建的文档在应用空间中，需要分享链接给用户
-- 上传的文件在用户个人云盘中（默认 `nanoclaw` 文件夹）
-- User Token 有效期约 2 小时，系统会自动刷新
+- `create/read/append/insert-image/upload` 优先走官方 `lark-cli`
+- `insert-image` 官方链路依赖飞书应用权限 `docs:document.media:upload`；权限不足时自动走旧 user-token 三阶段插图回退
+- `search` 需要 `lark-cli` user 身份可用
+- 创建的文档会由官方 CLI 给当前 CLI 用户授予管理权限
