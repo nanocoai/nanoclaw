@@ -281,12 +281,31 @@ async function main() {
   // （初始授权返回的 token 可能缺少 user:profile scope，refresh 时可以 expand）
   console.log('正在刷新 token 以获取完整 scope...');
   const refreshed = await refreshForScope(tokens.refresh_token);
-  const finalTokens = refreshed ?? tokens;
   if (refreshed) {
     console.log('Token 刷新成功，scope:', refreshed.scope);
   } else {
-    console.log('Token 刷新跳过，使用原始 token');
+    console.log('补 scope 刷新未确认（网络抖动或已被轮换），进入验证刷新…');
   }
+
+  // ⚠️ 存库前必须验证刷新一次（2026-06-12 复盘）：
+  // Anthropic 的 refresh token 是 rotation 制——刷新请求一旦到达服务端，旧 token 立即作废。
+  // 若上一步刷新的【响应】在网络抖动中丢失，本地手里的 token 其实已经死了；
+  // 旧逻辑静默回退存入这个死 token，表面绑定成功，等 access_token 过期后必现
+  // "凭证已失效"。这就是 tian/Elizabeth 反复"刚绑就失效"的根因。
+  // 验证刷新拿到 200 响应才存库；拿不到就报错退出，绝不存可疑 token。
+  const candidate = refreshed ?? tokens;
+  console.log('正在验证 refresh token（存库前最后一道闸）...');
+  const verified = await refreshForScope(candidate.refresh_token);
+  if (!verified) {
+    console.error('');
+    console.error('❌ 验证刷新失败，token 状态不可信，已放弃存库。');
+    console.error('   可能原因：1) 网络抖动导致轮换响应丢失（token 已被服务端作废）');
+    console.error('            2) 到 platform.claude.com 的链路不通');
+    console.error('   请确认网络稳定后重新跑一遍本脚本。数据库中的旧凭证未被覆盖。');
+    process.exit(1);
+  }
+  const finalTokens = verified;
+  console.log('验证通过，scope:', verified.scope);
 
   // 存入数据库
   const db = new Database(dbPath);

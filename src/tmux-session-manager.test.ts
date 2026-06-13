@@ -91,6 +91,15 @@ describe('buildInteractiveCliArgs', () => {
     expect(args).toContain('claude-3-5-sonnet');
   });
 
+  it('interactive 调用侧传入默认 model 时会生成 --model', () => {
+    const args = buildInteractiveCliArgs({
+      model: 'claude-opus-4-8',
+      mcpConfigPath: '/tmp/mcp.json',
+      sessionId: '30270a9e-916e-47bb-b50a-72c98f89d08b',
+    });
+    expect(args[args.indexOf('--model') + 1]).toBe('claude-opus-4-8');
+  });
+
   it('resume session', () => {
     const args = buildInteractiveCliArgs({
       mcpConfigPath: '/tmp/mcp.json',

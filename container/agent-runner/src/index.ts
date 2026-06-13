@@ -33,6 +33,7 @@ import {
   shouldEmitInteractiveSessionKeepalive,
 } from './interactive-cli-runner.js';
 import { buildSendMessageToolEnv } from './mcp-tool-policy.js';
+import { readGroupModelSettings } from './model-settings.js';
 import { resolveQueryCwdForSession } from './session-cwd.js';
 
 interface ContainerInput {
@@ -952,16 +953,12 @@ async function runQuery(
   // 未配则保持 undefined —— 不主动 apply，让模型用自己的默认 effort（即升级前的行为）。
   // 注意：4.8 只支持 adaptive thinking，无法真正关闭，effortLevel 才是官方控制杠杆。
   let defaultEffort: 'low' | 'medium' | 'high' | undefined = undefined;
-  try {
-    const settingsPath = path.join(PATHS.group, '..', '..', 'data', 'sessions', containerInput.groupFolder, '.claude', 'settings.json');
-    if (fs.existsSync(settingsPath)) {
-      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-      if (settings.model) defaultModel = settings.model;
-      if (settings.effortLevel === 'low' || settings.effortLevel === 'medium' || settings.effortLevel === 'high') {
-        defaultEffort = settings.effortLevel;
-      }
-    }
-  } catch { /* 使用硬编码默认值 */ }
+  const modelSettings = readGroupModelSettings({
+    groupPath: PATHS.group,
+    groupFolder: containerInput.groupFolder,
+  });
+  if (modelSettings.model) defaultModel = modelSettings.model;
+  if (modelSettings.effortLevel) defaultEffort = modelSettings.effortLevel;
 
   const targetModel = override?.model || defaultModel;
   const targetEffort = override?.thinking ? effortForThinking(override.thinking) : defaultEffort;
@@ -1601,12 +1598,17 @@ async function main(): Promise<void> {
         // 记录用户消息
         cliTranscript.push({ role: 'user', content: prompt });
 
+        const defaultModel =
+          readGroupModelSettings({
+            groupPath: PATHS.group,
+            groupFolder: containerInput.groupFolder,
+          }).model || 'claude-opus-4-6';
         const override = containerInput.modelOverride;
         const cliResult = await runCliQuery(
           {
             prompt,
             sessionId,
-            model: override?.model || undefined,
+            model: override?.model || defaultModel,
             mcpServerPath,
             chatJid: containerInput.chatJid,
             groupFolder: containerInput.groupFolder,
@@ -1967,6 +1969,11 @@ async function main(): Promise<void> {
         log(`[interactive] Starting query (session: ${sessionId || 'new'})...`);
         iTranscript.push({ role: 'user', content: prompt });
 
+        const defaultModel =
+          readGroupModelSettings({
+            groupPath: PATHS.group,
+            groupFolder: containerInput.groupFolder,
+          }).model || 'claude-opus-4-6';
         const override = containerInput.modelOverride;
         // credential proxy 变量已在循环外声明
         const credentialProxy = hasCredentialProxy
@@ -1978,7 +1985,7 @@ async function main(): Promise<void> {
           {
             prompt,
             sessionId,
-            model: override?.model || undefined,
+            model: override?.model || defaultModel,
             mcpServerPath,
             chatJid: containerInput.chatJid,
             groupFolder: containerInput.groupFolder,

@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Should you write this as a skill?</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --color-paper:#f5f5f5; --color-paper-2:#ececec; --color-ink:#2d3142; --color-muted:#4f5d75; --color-soft:#7a8399; --color-rule:rgba(45,49,66,0.12); --color-accent:#eb6c36; --color-link:#2e5aa8; --font-sans:'Geist',system-ui,sans-serif; --font-serif:'Instrument Serif',serif; --font-mono:'Geist Mono',ui-monospace,monospace; }
+    body { font-family: var(--font-sans); background: var(--color-paper); min-height: 100vh; padding: 3rem 2rem; color: var(--color-ink); }
+    .container { max-width: 1200px; margin: 0 auto; }
+    .header { margin-bottom: 2.5rem; }
+    .header-eyebrow { font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500; letter-spacing: 0.18em; text-transform: uppercase; color: var(--color-muted); margin-bottom: 0.75rem; }
+    h1 { font-family: var(--font-serif); font-size: clamp(1.75rem, 3vw + 1rem, 2.5rem); font-weight: 400; letter-spacing: -0.02em; line-height: 1.1; margin-bottom: 0.5rem; }
+    .subtitle { font-size: 1rem; line-height: 1.55; color: var(--color-muted); max-width: 58ch; }
+    .diagram-container { background: var(--color-paper-2); border-radius: 8px; border: 1px solid var(--color-rule); padding: 1.5rem; overflow-x: auto; }
+    svg { width: 100%; min-width: 900px; display: block; }
+    .cards { display: grid; grid-template-columns: 1.1fr 1fr 0.9fr; gap: 1rem; margin-top: 1.5rem; }
+    @media (max-width: 820px) { .cards { grid-template-columns: 1fr; } }
+    .card { background: #fff; border-radius: 6px; border: 1px solid var(--color-rule); padding: 1.25rem; }
+    .card .eyebrow { font-family: var(--font-mono); font-size: 0.5rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--color-muted); margin-bottom: 0.5rem; }
+    .card-header { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.875rem; padding-bottom: 0.875rem; border-bottom: 1px solid rgba(45,49,66,0.08); }
+    .card-dot { width: 7px; height: 7px; border-radius: 50%; }
+    .card-dot.ink { background: var(--color-ink); } .card-dot.muted { background: var(--color-muted); } .card-dot.coral { background: var(--color-accent); }
+    .card h3 { font-size: 0.875rem; font-weight: 600; }
+    .card p, .card ul { color: var(--color-muted); font-size: 0.8125rem; line-height: 1.55; list-style: none; }
+    .card li { margin-bottom: 0.3rem; padding-left: 0.875rem; position: relative; }
+    .card li::before { content: '—'; position: absolute; left: 0; color: rgba(45,49,66,0.25); font-size: 0.75rem; }
+    .footer { margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid rgba(45,49,66,0.10); font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.06em; color: var(--color-soft); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <p class="header-eyebrow">Flowchart · Diagram Design</p>
+      <h1>Should you write this as a skill?</h1>
+      <p class="subtitle">A three-decision triage for turning a one-off workflow into something reusable. Shape carries type — ovals bracket the flow, rectangles are steps, diamonds are decisions.</p>
+    </div>
+
+    <div class="diagram-container">
+      <svg viewBox="0 0 1000 600" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <pattern id="dots" width="22" height="22" patternUnits="userSpaceOnUse">
+            <circle cx="1" cy="1" r="0.9" fill="rgba(45,49,66,0.10)"/>
+          </pattern>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/></marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#eb6c36"/></marker>
+        </defs>
+
+        <rect width="100%" height="100%" fill="#f5f5f5"/>
+        <rect width="100%" height="100%" fill="url(#dots)" opacity="0.55"/>
+
+        <!-- Arrows (drawn first, behind nodes) -->
+        <!-- Start → Step -->
+        <line x1="500" y1="88" x2="500" y2="120" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- Step → Diamond 1 -->
+        <line x1="500" y1="168" x2="500" y2="192" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- Diamond 1 "NO" right -->
+        <line x1="600" y1="240" x2="720" y2="240" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- Diamond 1 "YES" down -->
+        <line x1="500" y1="288" x2="500" y2="328" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- Diamond 2 "NO" right -->
+        <line x1="600" y1="376" x2="720" y2="376" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <!-- Diamond 2 "YES" down (coral — happy path) -->
+        <line x1="500" y1="424" x2="500" y2="464" stroke="#eb6c36" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+
+        <!-- Arrow labels -->
+        <rect x="644" y="230" width="24" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="656" y="239" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">NO</text>
+
+        <rect x="484" y="298" width="32" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="500" y="307" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">YES</text>
+
+        <rect x="644" y="366" width="24" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="656" y="375" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">NO</text>
+
+        <rect x="484" y="434" width="32" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="500" y="443" fill="#eb6c36" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.12em">YES</text>
+
+        <!-- Start oval -->
+        <rect x="420" y="40" width="160" height="48" rx="24" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <text x="500" y="68" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">New workflow</text>
+
+        <!-- Rectangle: Step -->
+        <rect x="420" y="120" width="160" height="48" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="500" y="148" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Do it manually once</text>
+
+        <!-- Diamond 1: Repeated >3 times? -->
+        <polygon points="500,192 600,240 500,288 400,240" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="500" y="238" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Will you repeat</text>
+        <text x="500" y="252" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">it >3 times?</text>
+
+        <!-- End oval: One-off -->
+        <rect x="720" y="216" width="160" height="48" rx="24" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <text x="800" y="240" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">One-off</text>
+        <text x="800" y="254" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">keep manual</text>
+
+        <!-- Diamond 2: Reusable across projects? -->
+        <polygon points="500,328 600,376 500,424 400,376" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="500" y="374" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Reusable across</text>
+        <text x="500" y="388" fill="#2d3142" font-size="11" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">projects?</text>
+
+        <!-- End oval: CLAUDE.md note -->
+        <rect x="720" y="352" width="160" height="48" rx="24" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <text x="800" y="376" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">CLAUDE.md note</text>
+        <text x="800" y="390" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">project-scoped</text>
+
+        <!-- End oval: Write a skill (coral focal) -->
+        <rect x="420" y="464" width="160" height="56" rx="28" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
+        <text x="500" y="492" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Write a skill</text>
+        <text x="500" y="508" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">reusable + assets</text>
+
+        <!-- Legend -->
+        <line x1="40" y1="540" x2="960" y2="540" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+        <text x="40" y="556" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.18em">LEGEND · SHAPE CARRIES TYPE</text>
+
+        <rect x="40" y="572" width="24" height="12" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <text x="72" y="582" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Start / end (oval)</text>
+
+        <rect x="220" y="572" width="24" height="12" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="252" y="582" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Step (rectangle)</text>
+
+        <polygon points="412,578 424,572 436,578 424,584" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <text x="448" y="582" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Decision (diamond)</text>
+
+        <line x1="604" y1="580" x2="632" y2="580" stroke="#eb6c36" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+        <text x="640" y="582" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Happy path</text>
+
+        <line x1="768" y1="580" x2="796" y2="580" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <text x="804" y="582" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Branch</text>
+      </svg>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <p class="eyebrow">WHY THIS FLOWCHART</p>
+        <div class="card-header"><span class="card-dot coral"></span><h3>Most things aren't skills</h3></div>
+        <p>The happy path is narrow on purpose. Only workflows that clear all three gates earn the overhead of a reusable skill — everything else is better as a project note.</p>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-dot ink"></span><h3>Shape, not color</h3></div>
+        <ul><li>Oval bookends the flow</li><li>Rectangle is a step</li><li>Diamond is a decision</li><li>Color reserved for the happy path</li></ul>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-dot muted"></span><h3>Every branch gets a label</h3></div>
+        <p>Unlabeled branches turn a flowchart into a maze. Yes/No is fine; conditions in mono when the logic is richer.</p>
+      </div>
+    </div>
+
+    <div class="footer">
+      <span>flowchart · should I write this as a skill?</span>
+      <span>example · schematic skill</span>
+    </div>
+  </div>
+</body>
+</html>

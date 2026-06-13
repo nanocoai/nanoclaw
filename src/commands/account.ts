@@ -5,6 +5,23 @@ import { registerCommand } from './registry.js';
 import { CLAUDE_MODES } from '../cli-mode.js';
 import { parseOneCLIList } from '../onecli-util.js';
 
+type OneCliSecret = { id: string; name: string; type?: string };
+
+function isAnthropicSecret(secret: OneCliSecret): boolean {
+  return secret.type === 'anthropic';
+}
+
+function findSecretByNameOrId(
+  secrets: OneCliSecret[],
+  query: string,
+): OneCliSecret | undefined {
+  const normalized = query.toLowerCase();
+  return (
+    secrets.find((s) => s.name === query || s.id === query) ||
+    secrets.find((s) => s.name.toLowerCase().includes(normalized))
+  );
+}
+
 // /account — 列出/切换 Anthropic 账号（仅 Claude 系模式）
 registerCommand({
   name: '/account',
@@ -39,7 +56,7 @@ registerCommand({
 
     if (!args) {
       // 列出所有 secrets
-      let secrets: Array<{ id: string; name: string; type: string }>;
+      let secrets: OneCliSecret[];
       let agents: Array<{
         id: string;
         name: string;
@@ -48,12 +65,12 @@ registerCommand({
         isDefault?: boolean;
       }>;
       try {
-        secrets = parseOneCLIList<{ id: string; name: string; type: string }>(
+        secrets = parseOneCLIList<OneCliSecret>(
           execSync('onecli secrets list', {
             encoding: 'utf-8',
             timeout: 5000,
           }),
-        );
+        ).filter(isAnthropicSecret);
         agents = parseOneCLIList<{
           id: string;
           name: string;
@@ -107,25 +124,20 @@ registerCommand({
       await channel.sendMessage(chatJid, reply);
     } else {
       // 切换到指定账号
-      let secrets: Array<{ id: string; name: string }>;
+      let secrets: OneCliSecret[];
       try {
-        secrets = parseOneCLIList<{ id: string; name: string }>(
+        secrets = parseOneCLIList<OneCliSecret>(
           execSync('onecli secrets list', {
             encoding: 'utf-8',
             timeout: 5000,
           }),
-        );
+        ).filter(isAnthropicSecret);
       } catch (err) {
         logger.error({ err }, '/account: onecli 命令失败');
         await channel.sendMessage(chatJid, '❌ 账号操作失败，onecli 不可用');
         return;
       }
-      const target = secrets.find(
-        (s) =>
-          s.name === args ||
-          s.id === args ||
-          s.name.toLowerCase().includes(args.toLowerCase()),
-      );
+      const target = findSecretByNameOrId(secrets, args);
       if (!target) {
         await channel.sendMessage(
           chatJid,

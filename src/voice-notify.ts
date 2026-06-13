@@ -37,12 +37,14 @@ const SYSTEM_PROMPT = `你把一段给用户的 AI 回复改写成口语化的�
 - 第一句话必须是结论或最重要的信息，不要先讲背景再下结论
 - 简短优先，控制在 120 字以内（极简单的一句话就够，别硬凑）
 - 口语化，流畅连贯，像当面对用户说话；用"我"指代你自己、"你"指代用户
-- 代码块、表格、命令行、长路径、长 URL 全部略去，换成"我写了代码"、"我查了日志"这种概括
+- 代码块、表格、命令行、长路径全部略去，换成"我写了代码"、"我查了日志"这种概括
 - 大段技术细节只保留结论
-- 英文缩写、编号、版本号（如 PR#2779、v1.3）用中文自然说法或直接略去，别让 TTS 念一串符号
-- 不要念 Markdown 格式（不念 * _ # 等符号）
+- 所有符号编号按语义转成自然语言：「PR#数字」说成"几号PR"，「issue#数字」说成"几号issue"，commit 哈希绝不念出来、直接略去或说"那个提交"，「v数字」说成"几点几版本"，「#话题」直接说话题名——绝不能留下井号、星号等任何让 TTS 干念的符号
+- 链接绝不念 URL 本身，按语义转成一句话：GitHub PR 链接说成"某某仓库的几号PR"，文档链接说成"某某文档"，普通网页说成"一个关于某某的链接"；上下文里看不出指向的就说"详情有链接，看文字版"
+- 不要保留任何 Markdown 格式符号（* _ # \` [ ] 等）
 - 不要说"以下是摘要"、"总结一下"这种元语言，直接说内容
 - 待用户决策的选项要明确编号说清楚，比如"有两个选择：第一……第二……"
+- 严禁编造：输出里的每个事实、编号、数字都必须来自原文；原文里没有的信息一个字都不能加。原文本身已经很短很口语时，原样输出即可
 
 只输出改写后的文本，不要任何前缀后缀。`;
 
@@ -107,9 +109,57 @@ export function buildSpokenText(summary: string): string {
 }
 
 /**
+ * TTS 前的确定性清洗：剥 Markdown 符号和 URL。
+ * 为什么不靠 LLM prompt：摘要超时/失败会 fallback 发原文（带 Markdown），
+ * 且 LLM 偶尔不听话保留 # 和链接 —— TTS 念"井号"念 URL 全是噪音（大杰 2026-06-10 实听反馈）。
+ */
+export function sanitizeForSpeech(text: string): string {
+  let t = text;
+  // 代码块整块去掉（prompt 已要求 LLM 概括，这里兜 fallback 原文）
+  t = t.replace(/```[\s\S]*?```/g, ' ');
+  // 行内代码保留内容
+  t = t.replace(/`([^`]*)`/g, '$1');
+  // 图片 ![alt](url) / 链接 [text](url) → 只留文字
+  t = t.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1');
+  t = t.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+  // 裸 URL 整个删掉，念出来全是字母噪音
+  t = t.replace(/https?:\/\/[^\s）)\]」】，。；,;]+/g, '');
+  // 粗体/斜体星号
+  t = t.replace(/(\*\*|\*)([^*]*)\1/g, '$2');
+  // 行首列表符号 / 引用符号
+  t = t.replace(/^\s*[-*+>]\s+/gm, '');
+  // 表格竖线换空格（表格内容顺序念出来勉强能听）
+  t = t.replace(/\|/g, ' ');
+  // 所有井号删掉：标题 #、PR#123、#话题 —— TTS 念"井号"纯噪音
+  t = t.replace(/#/g, ' ');
+  // 折叠空白：换行当句号断句，连续句号合一
+  t = t
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\s*\n\s*/g, '。')
+    .replace(/。{2,}/g, '。');
+  return t.trim();
+}
+
+// 短于此长度的文本不走 LLM 摘要：没东西可总结时模型会拿 prompt 里的
+// 示例现编内容（2026-06-11 实锤："在，听到了。"被播成"3812号PR的问题我解决了"）
+export const SUMMARY_MIN_CHARS = 40;
+
+/** 是否需要 LLM 摘要：短文本直接念，又快又杜绝示例泄漏 */
+export function needsSummarization(text: string): boolean {
+  return text.length >= SUMMARY_MIN_CHARS;
+}
+
+/**
  * 调 LLM 做语音摘要。失败时 fallback 原文截断到 1024 字符。
  */
 async function summarizeForSpeech(text: string): Promise<string> {
+  if (!needsSummarization(text)) {
+    logger.debug(
+      { chars: text.length },
+      '[voice-notify] 文本过短跳过摘要，直接播原文',
+    );
+    return text;
+  }
   const config = getMemoryConfig();
   if (!config.dashscopeApiKey) {
     logger.debug('[voice-notify] 无 dashscope key，跳过摘要，发原文');
@@ -229,7 +279,7 @@ export function notifyVoice(
       const summary = await summarizeForSpeech(context.text);
       const label = resolveVoiceGroupLabel(context);
       await pushToVoiceGateway(
-        buildSpokenText(summary),
+        buildSpokenText(sanitizeForSpeech(summary)),
         context.chatJid ?? null,
         label,
       );

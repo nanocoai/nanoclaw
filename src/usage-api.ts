@@ -69,14 +69,19 @@ interface TokenResponse {
   expires_in: number;
 }
 
+type RefreshResult =
+  | { ok: true; accessToken: string; refreshToken: string; expiresAt: number }
+  // auth: 服务端明确拒绝（400/401/403，token 真死了）；
+  // network: 链路问题（超时/TLS 断连/5xx），token 状态未知，不能判死刑。
+  // 2026-06-12 复盘：旧逻辑两种情况都返回 null，调用方一律标 'auth' →
+  // 网络抖动也提示"凭证已失效，请重新绑定"，骗用户去重绑（重绑还可能踩
+  // 绑定脚本的轮换响应丢失雷），形成"总是失效"的恶性循环。
+  | { ok: false; reason: 'auth' | 'network' };
+
 async function refreshAccessToken(
   secretName: string,
   refreshToken: string,
-): Promise<{
-  accessToken: string;
-  refreshToken: string;
-  expiresAt: number;
-} | null> {
+): Promise<RefreshResult> {
   // 用 JSON 格式，不带 scope（与 CLIProxyAPI 一致）
   // 端点用 api.anthropic.com（不用 platform.claude.com 避免 TLS 问题）
   const body = JSON.stringify({
@@ -99,13 +104,18 @@ async function refreshAccessToken(
 
     if (res.status !== 200) {
       logger.warn({ secretName, status: res.status }, 'Token 刷新失败');
-      return null;
+      // 4xx = 服务端明确拒绝（invalid_grant 等），token 真死；5xx 当网络问题
+      return {
+        ok: false,
+        reason: res.status >= 400 && res.status < 500 ? 'auth' : 'network',
+      };
     }
 
     const parsed = JSON.parse(res.body) as TokenResponse;
-    if (!parsed.access_token) return null;
+    if (!parsed.access_token) return { ok: false, reason: 'network' };
 
     const result = {
+      ok: true as const,
       accessToken: parsed.access_token,
       refreshToken: parsed.refresh_token || refreshToken,
       expiresAt: Date.now() + parsed.expires_in * 1000,
@@ -122,7 +132,7 @@ async function refreshAccessToken(
     return result;
   } catch (err) {
     logger.error({ err, secretName }, 'Token 刷新异常');
-    return null;
+    return { ok: false, reason: 'network' };
   }
 }
 
@@ -222,9 +232,10 @@ export async function getUsageForSecret(
   let currentRefreshToken = cred.refresh_token;
   if (!accessToken || (cred.expires_at && cred.expires_at <= Date.now())) {
     const refreshed = await refreshAccessToken(secretName, currentRefreshToken);
-    if (!refreshed) {
-      updateOAuthUsageCache(secretName, null, 'auth');
-      return { secretName, rateLimits: null, error: 'auth' };
+    if (!refreshed.ok) {
+      // 只有服务端明确拒绝才标 auth（提示重新绑定）；网络抖动标 network，下次重试
+      updateOAuthUsageCache(secretName, null, refreshed.reason);
+      return { secretName, rateLimits: null, error: refreshed.reason };
     }
     accessToken = refreshed.accessToken;
     currentRefreshToken = refreshed.refreshToken;
@@ -236,15 +247,18 @@ export async function getUsageForSecret(
   if (result.status === 401 || result.status === 403) {
     // access token 可能刚过期，尝试刷新一次（用最新的 refresh token）
     const refreshed = await refreshAccessToken(secretName, currentRefreshToken);
-    if (refreshed) {
+    if (refreshed.ok) {
       const retry = await fetchUsage(refreshed.accessToken);
       if (retry.data) {
         updateOAuthUsageCache(secretName, JSON.stringify(retry.data));
         return { secretName, rateLimits: retry.data };
       }
+      // 刷新成功但 usage 仍取不到 → 链路问题，不是凭证问题
+      updateOAuthUsageCache(secretName, null, 'network');
+      return { secretName, rateLimits: null, error: 'network' };
     }
-    updateOAuthUsageCache(secretName, null, 'auth');
-    return { secretName, rateLimits: null, error: 'auth' };
+    updateOAuthUsageCache(secretName, null, refreshed.reason);
+    return { secretName, rateLimits: null, error: refreshed.reason };
   }
 
   if (result.status === 429) {
