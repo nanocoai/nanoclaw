@@ -28,7 +28,7 @@ import { logger } from './logger.js';
 
 const HAIKU_MODEL =
   process.env.SIGNAL_DETECTOR_HAIKU_MODEL || 'claude-haiku-4-5-20251001';
-const OPUS_MODEL = process.env.SIGNAL_DETECTOR_OPUS_MODEL || 'claude-opus-4-7';
+const OPUS_MODEL = process.env.SIGNAL_DETECTOR_OPUS_MODEL || 'claude-opus-4-8';
 
 const CANDIDATES_PATH =
   process.env.SIGNAL_DETECTOR_CANDIDATES_PATH ||
@@ -36,25 +36,43 @@ const CANDIDATES_PATH =
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
+// Beta header required when authenticating /v1/messages with a Claude Code
+// OAuth token (Authorization: Bearer) instead of an API key.
+const OAUTH_BETA = 'oauth-2025-04-20';
 
-// Lazy-load the API key. Cache ONLY on success — caching the missing state
-// would prevent picking up the key when the user adds it mid-process (the
-// failure mode observed 2026-05-12 14:46). The miss-warning is rate-limited
-// separately via `warnedMissing` so we don't spam the log every message.
-let apiKeyCache: string | null = null;
+// Anthropic credential: either a Claude Code OAuth token (subscription) or a
+// raw API key. We prefer OAuth — on 2026-06-13 the ANTHROPIC_API_KEY hit a
+// spend cap and silently killed ambient capture (and the main agent), so this
+// detector deliberately decouples from the api-key path the way the credential
+// proxy fell back to OAuth. See project_andy_auth_oauth_switch.
+interface AnthropicCreds {
+  mode: 'oauth' | 'api-key';
+  token: string;
+}
+
+// Lazy-load creds. Cache ONLY on success — caching the missing state would
+// prevent picking up a credential added mid-process (the failure mode observed
+// 2026-05-12 14:46). The miss-warning is rate-limited via `warnedMissing` so we
+// don't spam the log every message.
+let credsCache: AnthropicCreds | null = null;
 let warnedMissing = false;
-function getApiKey(): string | null {
-  if (apiKeyCache) return apiKeyCache;
-  const env = readEnvFile(['ANTHROPIC_API_KEY']);
-  const key = env.ANTHROPIC_API_KEY;
-  if (key) {
-    apiKeyCache = key;
+function getAnthropicCreds(): AnthropicCreds | null {
+  if (credsCache) return credsCache;
+  const env = readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  // Prefer OAuth (subscription) over the API key — see note above.
+  if (env.CLAUDE_CODE_OAUTH_TOKEN) {
+    credsCache = { mode: 'oauth', token: env.CLAUDE_CODE_OAUTH_TOKEN };
     warnedMissing = false; // reset so a future remove + re-add re-warns
-    return key;
+    return credsCache;
+  }
+  if (env.ANTHROPIC_API_KEY) {
+    credsCache = { mode: 'api-key', token: env.ANTHROPIC_API_KEY };
+    warnedMissing = false;
+    return credsCache;
   }
   if (!warnedMissing) {
     logger.warn(
-      'ANTHROPIC_API_KEY not set in .env — signal-detector will skip until added (no restart needed; .env is re-checked on every call until found)',
+      'Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY set in .env — signal-detector will skip until one is added (no restart needed; .env is re-checked on every call until found)',
     );
     warnedMissing = true;
   }
@@ -72,20 +90,26 @@ interface AnthropicResponse {
 }
 
 async function callAnthropic(
-  apiKey: string,
+  creds: AnthropicCreds,
   model: string,
   system: string,
   messages: AnthropicMessage[],
   maxTokens: number,
 ): Promise<AnthropicResponse | null> {
+  const headers: Record<string, string> = {
+    'anthropic-version': ANTHROPIC_VERSION,
+    'content-type': 'application/json',
+  };
+  if (creds.mode === 'oauth') {
+    headers['authorization'] = `Bearer ${creds.token}`;
+    headers['anthropic-beta'] = OAUTH_BETA;
+  } else {
+    headers['x-api-key'] = creds.token;
+  }
   try {
     const resp = await fetch(ANTHROPIC_API_URL, {
       method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': ANTHROPIC_VERSION,
-        'content-type': 'application/json',
-      },
+      headers,
       body: JSON.stringify({
         model,
         max_tokens: maxTokens,
@@ -160,7 +184,7 @@ Bogdan is a BD consultant at AppThrive.Ai. His clients are CleanerDNS / Quad9
 people, companies, projects, deals, topics.`;
 
 async function runHaikuExtract(
-  apiKey: string,
+  creds: AnthropicCreds,
   envelope: { text: string; source: string; noteToSelf: boolean },
 ): Promise<HaikuResult | null> {
   const userPrompt = `Extract from this Signal message:
@@ -177,7 +201,7 @@ Return JSON with these fields:
 Return ONLY the JSON object.`;
 
   const resp = await callAnthropic(
-    apiKey,
+    creds,
     HAIKU_MODEL,
     HAIKU_SYSTEM,
     [{ role: 'user', content: userPrompt }],
@@ -232,7 +256,7 @@ NOT ORIGINAL THINKING:
 Return ONLY valid JSON, no commentary, no markdown fences.`;
 
 async function runOpusJudge(
-  apiKey: string,
+  creds: AnthropicCreds,
   envelope: { text: string },
   haiku: HaikuResult,
 ): Promise<OpusResult | null> {
@@ -261,7 +285,7 @@ Filing rules:
 Quality grade: "high" only for ideas that genuinely add to his knowledge base. "medium" for solid observations. "low" for borderline. "none" if not original thinking.`;
 
   const resp = await callAnthropic(
-    apiKey,
+    creds,
     OPUS_MODEL,
     OPUS_SYSTEM,
     [{ role: 'user', content: userPrompt }],
@@ -334,14 +358,14 @@ function appendCandidate(record: CandidateRecord): void {
  * Fully async; returns void. Errors are isolated — never throws.
  */
 export async function runSignalDetector(input: DetectorInput): Promise<void> {
-  const apiKey = getApiKey();
-  if (!apiKey) return; // already logged once on first miss
+  const creds = getAnthropicCreds();
+  if (!creds) return; // already logged once on first miss
 
   const text = input.text.trim();
   if (!text) return;
 
   // Pass 1: Haiku always.
-  const haiku = await runHaikuExtract(apiKey, {
+  const haiku = await runHaikuExtract(creds, {
     text,
     source: input.source,
     noteToSelf: input.noteToSelf,
@@ -389,7 +413,7 @@ export async function runSignalDetector(input: DetectorInput): Promise<void> {
         ? `user_voice_channel:${input.channel}`
         : 'bogdan_speaker_in_haiku';
     if (haiku) {
-      opus = await runOpusJudge(apiKey, { text }, haiku);
+      opus = await runOpusJudge(creds, { text }, haiku);
     }
   }
 
