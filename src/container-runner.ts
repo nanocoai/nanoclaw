@@ -122,6 +122,15 @@ async function spawnContainer(session: Session): Promise<void> {
   }
   writeSessionRouting(agentGroup.id, session.id);
 
+  let parentIdentifier: string | undefined;
+  if (hasTable(getDb(), 'agent_destinations')) {
+    const { getDestinationByName } = await import('./modules/agent-to-agent/db/agent-destinations.js');
+    const parentDest = getDestinationByName(agentGroup.id, 'parent');
+    if (parentDest?.target_type === 'agent') {
+      parentIdentifier = parentDest.target_id;
+    }
+  }
+
   // Materialize container.json from DB — writes fresh file and returns
   // the config object, threaded through provider resolution, buildMounts,
   // and buildContainerArgs so we don't re-read.
@@ -145,6 +154,7 @@ async function spawnContainer(session: Session): Promise<void> {
     provider,
     contribution,
     agentIdentifier,
+    parentIdentifier,
   );
 
   log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
@@ -405,6 +415,7 @@ async function buildContainerArgs(
   provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
+  parentIdentifier?: string,
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
@@ -425,7 +436,11 @@ async function buildContainerArgs(
   // The caller (router or host-sweep) catches the throw, leaves the inbound
   // message pending, and the next sweep tick retries.
   if (agentIdentifier) {
-    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+    await onecli.ensureAgent({
+      name: agentGroup.name,
+      identifier: agentIdentifier,
+      ...(parentIdentifier && { parentIdentifier }),
+    });
   }
   const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
   if (!onecliApplied) {
