@@ -53,7 +53,7 @@ cat append.md | node /home/node/.claude/skills/feishu-docs/feishu-docs.mjs appen
 node /home/node/.claude/skills/feishu-docs/feishu-docs.mjs insert-image <URL或文档ID> ./diagram.png --width 900 --caption "流程图"
 ```
 
-底层使用 `lark-cli docs +media-insert --as bot`。如果返回 `docs:document.media:upload` 权限缺失，必须如实告诉用户“飞书应用权限未开”，不要说图片已嵌入。短期可退化为上传 HTML/SVG/PNG 文件并在文档中放链接。
+底层优先使用 `lark-cli docs +media-insert --as bot`。如果官方 CLI 当前应用身份缺 `docs:document.media:upload`，工具会自动 fallback 到老飞书 Doc 三阶段链路：创建空 image block → `drive/v1/medias/upload_all` 以 `docx_image` 上传 → `replace_image` 绑定 token。只有两条链路都失败时，才退化为上传 HTML/SVG/PNG 文件并在文档中放链接。
 
 ### 上传文件
 ```bash
@@ -100,6 +100,6 @@ node /home/node/.claude/skills/feishu-docs/feishu-docs.mjs search "关键词"
 ## 注意事项
 
 - `create/read/append/insert-image/upload` 优先走官方 `lark-cli`
-- `insert-image` 依赖飞书应用权限 `docs:document.media:upload`
+- `insert-image` 官方链路依赖飞书应用权限 `docs:document.media:upload`；权限不足时自动走旧 user-token 三阶段插图回退
 - `search` 需要 `lark-cli` user 身份可用
 - 创建的文档会由官方 CLI 给当前 CLI 用户授予管理权限

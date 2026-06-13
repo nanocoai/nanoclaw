@@ -622,6 +622,44 @@ async function uploadFileLegacy(filePath, folderName, fallbackReason = '') {
   }));
 }
 
+async function uploadDocxImageLegacy(filePath, parentNode) {
+  const fileName = _path.basename(filePath);
+  const fileData = _fs.readFileSync(filePath);
+  const token = await getToken();
+  if (!token) authRequiredExit('插入图片需要飞书授权');
+
+  const boundary = '----FormBoundary' + Date.now().toString(36);
+  const parts = [];
+  parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="file_name"\r\n\r\n${fileName}`);
+  parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="parent_type"\r\n\r\ndocx_image`);
+  parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="parent_node"\r\n\r\n${parentNode}`);
+  parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="size"\r\n\r\n${fileData.length}`);
+
+  const prefixStr = parts.join('\r\n') + '\r\n';
+  const fileHeader = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: application/octet-stream\r\n\r\n`;
+  const suffix = `\r\n--${boundary}--\r\n`;
+  const body = Buffer.concat([
+    Buffer.from(prefixStr),
+    Buffer.from(fileHeader),
+    fileData,
+    Buffer.from(suffix),
+  ]);
+
+  const resp = await fetch(`${API_BASE}/drive/v1/medias/upload_all`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+    },
+    body,
+  });
+  const data = await resp.json();
+  if (data.code !== 0) {
+    throw new Error(`上传图片失败: code=${data.code}, msg=${data.msg || JSON.stringify(data)}`);
+  }
+  return data.data?.file_token || '';
+}
+
 // ---- 搜索文档 ----
 
 async function searchDocs(query) {
@@ -718,8 +756,75 @@ async function insertImage(urlOrId, filePath, args = []) {
   ];
   if (widthIdx >= 0 && args[widthIdx + 1]) cliArgs.push('--width', args[widthIdx + 1]);
   if (captionIdx >= 0 && args[captionIdx + 1]) cliArgs.push('--caption', args[captionIdx + 1]);
-  const result = withTempFile(filePath, (cwd) => runLarkCli(cliArgs, { cwd }));
-  console.log(JSON.stringify(result, null, 2));
+  const result = withTempFile(filePath, (cwd) => runLarkCli(cliArgs, { cwd, allowFailure: true }));
+  if (result?.ok !== false) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  const msg = `${result?.error?.message || ''}\n${result?.stderr || ''}\n${result?.raw || ''}`;
+  if (!msg.includes('docs:document.media:upload')) {
+    if (result.raw) process.stderr.write(result.raw);
+    if (result.stderr) process.stderr.write(result.stderr);
+    console.error(JSON.stringify(result, null, 2));
+    process.exit(result.status || 1);
+  }
+
+  await insertImageLegacy(urlOrId, filePath, 'lark-cli 缺少 docs:document.media:upload 权限，已自动 fallback 到老三阶段 docx_image 插图链路');
+}
+
+async function insertImageLegacy(urlOrId, filePath, fallbackReason = '') {
+  const parsed = parseFeishuUrl(urlOrId);
+  const documentId = parsed?.token || urlOrId;
+  if (!documentId) {
+    console.error('无法解析文档 ID:', urlOrId);
+    process.exit(1);
+  }
+
+  const createResp = await api('POST', `/docx/v1/documents/${documentId}/blocks/${documentId}/children`, {
+    children: [{ block_type: 27, image: {} }],
+  });
+  if (createResp.code !== 0) {
+    console.error('创建图片 Block 失败:', createResp.msg || JSON.stringify(createResp));
+    process.exit(1);
+  }
+
+  const imageBlock = createResp.data?.children?.[0] || {};
+  const blockId = imageBlock.block_id || '';
+  if (!blockId) {
+    console.error('创建图片 Block 后未返回 block_id:', JSON.stringify(createResp));
+    process.exit(1);
+  }
+
+  let fileToken = '';
+  try {
+    fileToken = await uploadDocxImageLegacy(filePath, blockId);
+  } catch (err) {
+    console.error(err?.message || String(err));
+    process.exit(1);
+  }
+  if (!fileToken) {
+    console.error('上传图片后未返回 file_token');
+    process.exit(1);
+  }
+
+  const patchResp = await api('PATCH', `/docx/v1/documents/${documentId}/blocks/${blockId}?document_revision_id=-1`, {
+    replace_image: { token: fileToken },
+  });
+  if (patchResp.code !== 0) {
+    console.error('绑定图片 token 失败:', patchResp.msg || JSON.stringify(patchResp));
+    process.exit(1);
+  }
+
+  console.log(JSON.stringify({
+    document_id: documentId,
+    block_id: blockId,
+    file_token: fileToken,
+    url: `https://poizon.feishu.cn/docx/${documentId}`,
+    message: '图片已插入飞书文档',
+    backend: 'legacy-user-token-docx-image',
+    fallback_reason: fallbackReason,
+  }, null, 2));
 }
 
 // ---- 主入口 ----
