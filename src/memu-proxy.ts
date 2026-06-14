@@ -257,6 +257,37 @@ function dedupeMemoriesByPrefix<T extends { content: string }>(
   return memories.filter((_, i) => keep.has(i));
 }
 
+// Guard the curated "Learned Behaviors" section at the write boundary. MemU's
+// pattern extractor occasionally mis-captures an assistant reply (e.g.
+// "Andy**: Good — the three new emails are ...") or a session-narration summary
+// ("This session continues processing ...") as a 'behavior'. Those are not
+// durable rules; promoting them is what bloated groups/main/CLAUDE.md (cleaned
+// by hand 2026-06-13). Reject them before they reach the file — the strict-
+// prefix dedup above can't fold them because they diverge at the end.
+function isPromotableBehavior(content: string): boolean {
+  const c = content.trim();
+  if (c.length < 8) return false;
+  // Mis-captured speaker label / assistant reply ("Name**:", "Andy: ...").
+  if (/^[A-Z][\w .'-]{0,30}\*\*\s*:/.test(c)) return false;
+  // Session-narration summaries, not rules.
+  if (
+    /\b(this session (continues|began)|at session start|the session began|automated data[- ]sync notifications)\b/i.test(
+      c,
+    )
+  ) {
+    return false;
+  }
+  // Conversational openers / acknowledgements, not rules.
+  if (
+    /^(good[\s—,:-]|sure[,!\s]|here('s| is)\b|okay[,!\s]|got it\b|done[.!\s])/i.test(
+      c,
+    )
+  ) {
+    return false;
+  }
+  return true;
+}
+
 async function storeMemory(
   groupFolder: string,
   content: string,
@@ -338,6 +369,17 @@ function promoteMemory(groupFolder: string, memoryId: string): void {
     const cleanContent = stripLineMarkers(memory.content);
     if (!cleanContent) {
       db.prepare('UPDATE memories SET promoted = 1 WHERE id = ?').run(memoryId);
+      return;
+    }
+
+    // Reject non-rule captures (mis-captured replies, session narration) before
+    // they reach CLAUDE.md. Mark promoted so the failed candidate isn't retried.
+    if (!isPromotableBehavior(cleanContent)) {
+      db.prepare('UPDATE memories SET promoted = 1 WHERE id = ?').run(memoryId);
+      logger.info(
+        { groupFolder, memoryId, content: cleanContent.slice(0, 80) },
+        'Skipped non-rule memory (not promoted to CLAUDE.md)',
+      );
       return;
     }
 

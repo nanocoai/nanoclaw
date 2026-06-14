@@ -693,10 +693,23 @@ async function main(): Promise<void> {
     prompt += '\n' + pending.join('\n');
   }
 
-  // MemU: inject remembered context at session start
+  // MemU: inject remembered context at session start.
+  //
+  // DISABLED by default (2026-06-13). This push-injection of a
+  // <remembered-context> block was the recurring-bug source: injected memories
+  // get re-scanned and re-memorized each session, nesting list markers
+  // ("- foo" -> "- - foo") until the prompt explodes — the bullet-recursion
+  // class we fixed repeatedly through May–June 2026. Recall is now PULL-only:
+  // the agent calls mcp__memu__* (memory_retrieve / search) and the vault
+  // search tools on demand, which is what heavy transcript/email/Slack lookups
+  // actually use. Set MEMU_CONTEXT_INJECTION=1 to re-enable the legacy push.
   const memuPort = process.env.MEMU_PROXY_PORT;
   const memuHost = process.env.MEMU_PROXY_HOST || 'host.docker.internal';
-  if (memuPort && containerInput.groupFolder) {
+  if (
+    process.env.MEMU_CONTEXT_INJECTION === '1' &&
+    memuPort &&
+    containerInput.groupFolder
+  ) {
     try {
       const ctxResp = await fetch(`http://${memuHost}:${memuPort}/context`, {
         method: 'POST',
