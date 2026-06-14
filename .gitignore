@@ -26,6 +26,7 @@ groups/main/CLAUDE.md.verbose-baseline
 # Secrets
 *.keys.json
 .env
+.env.*
 
 # Temp files
 .tmp-*
@@ -42,3 +43,6 @@ groups/main/CLAUDE.md.verbose-baseline
 
 agents-sdk-docs
 .claude/settings.local.json
+
+# Graphify code-graph output (derived, rebuild with: graphify update .)
+graphify-out/
