@@ -693,68 +693,9 @@ async function main(): Promise<void> {
     prompt += '\n' + pending.join('\n');
   }
 
-  // MemU: inject remembered context at session start.
-  //
-  // DISABLED by default (2026-06-13). This push-injection of a
-  // <remembered-context> block was the recurring-bug source: injected memories
-  // get re-scanned and re-memorized each session, nesting list markers
-  // ("- foo" -> "- - foo") until the prompt explodes — the bullet-recursion
-  // class we fixed repeatedly through May–June 2026. Recall is now PULL-only:
-  // the agent calls mcp__memu__* (memory_retrieve / search) and the vault
-  // search tools on demand, which is what heavy transcript/email/Slack lookups
-  // actually use. Set MEMU_CONTEXT_INJECTION=1 to re-enable the legacy push.
-  const memuPort = process.env.MEMU_PROXY_PORT;
-  const memuHost = process.env.MEMU_PROXY_HOST || 'host.docker.internal';
-  if (
-    process.env.MEMU_CONTEXT_INJECTION === '1' &&
-    memuPort &&
-    containerInput.groupFolder
-  ) {
-    try {
-      const ctxResp = await fetch(`http://${memuHost}:${memuPort}/context`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          groupFolder: containerInput.groupFolder,
-          prompt: containerInput.prompt,
-        }),
-      });
-      if (ctxResp.ok) {
-        const ctx = await ctxResp.json() as {
-          behaviors: { content: string; category: string }[];
-          relevant: { content: string; category: string; score: number }[];
-        };
-        // Strip leading list/quote markers from MemU content — without this,
-        // a memory stored as "- foo" gets re-injected as "- - foo", which the
-        // next session's transcript scanner re-memorizes verbatim, deepening
-        // the bullet on every cycle until the prompt explodes.
-        const stripMarkers = (s: string) =>
-          s.replace(/^(?:\s*(?:[-*+•]|>)+)+\s*/, '').trim();
-        const parts: string[] = [];
-        if (ctx.behaviors.length > 0) {
-          parts.push('## Remembered behaviors (from past sessions)');
-          for (const m of ctx.behaviors) {
-            const clean = stripMarkers(m.content);
-            if (clean) parts.push(`- ${clean}`);
-          }
-        }
-        if (ctx.relevant.length > 0) {
-          parts.push('## Relevant memories');
-          for (const m of ctx.relevant) {
-            const clean = stripMarkers(m.content);
-            if (clean) parts.push(`- [${m.category}] ${clean}`);
-          }
-        }
-        if (parts.length > 0) {
-          const memoryBlock = parts.join('\n');
-          prompt = `<remembered-context>\n${memoryBlock}\n</remembered-context>\n\n${prompt}`;
-          log(`Injected ${ctx.behaviors.length} behavior + ${ctx.relevant.length} relevant memories into prompt`);
-        }
-      }
-    } catch (err) {
-      log(`MemU context injection failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
+  // MemU context push-injection REMOVED (2026-06-13 decommission). Recall is
+  // pull-only: the agent calls mcp__memu__* (memory_retrieve / search) and the
+  // vault search tools on demand. See src/memu-proxy.ts.
 
   // --- Slash command handling ---
   // Only known session slash commands are handled here. This prevents

@@ -137,9 +137,18 @@ Choose the right type:
 
 server.tool(
   'memory_search',
-  `Search across all memories and past conversation chunks.
-More thorough than memory_retrieve — also searches archived transcript chunks.
-Use when you need to find something specific from the past.`,
+  `Full-text + semantic search across all memories AND past conversation
+transcript chunks — the complete record of prior sessions. This is your
+PRIMARY recall tool.
+
+ALWAYS search here BEFORE answering any question that asks you to recall
+something specific: "what did we say about X", "find the message / email /
+thread about Y", "which transcript mentioned Z", "remind me what happened
+with W". Do NOT answer recall questions from your current context alone —
+the answer is very often in a past transcript you have not loaded. Search
+first, then answer with what you actually found. If the first query misses,
+retry with different terms (synonyms, names, dates) before concluding you
+don't have it. Combine with the vault search tools for emails/Slack/notes.`,
   {
     query: z.string().describe('Search query'),
     limit: z

@@ -58,6 +58,10 @@ When the user's request touches one of these areas, Read the linked skill file f
 
 - **Data sync**: trigger a manual sync, check sync status, read sync logs → Read `skills/data-sync.md` (dispatcher for: trigger JSON files in `sync-triggers/`, `last_sync.json` check, per-script log paths)
 
+## Recall — search before answering
+
+For any question that asks you to find or remember something specific — a past message, email, Slack thread, meeting/transcript, or "what did we say about X / remind me about Y" — **search before answering**. Use `memory_search` for prior-session transcripts and the vault search tools for emails / Slack / notes. Do NOT answer recall questions from current context alone; the answer is usually in something you haven't loaded yet. If the first search misses, retry with different terms (names, dates, synonyms) before saying you don't have it.
+
 ## Admin
 
 This is the **main channel** with elevated privileges. For group management, container mounts, authentication, and sender allowlists, see `docs/admin-reference.md`.

@@ -154,8 +154,6 @@ interface MemoryRow extends Omit<Memory, 'tags'> {
   embedding: string | null;
 }
 
-const PROMOTION_THRESHOLD = 3;
-
 function generateId(): string {
   return `mem-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -165,127 +163,6 @@ function generateId(): string {
 // this, "- foo" → "- - foo" → "- - - foo" each round.
 function stripLineMarkers(s: string): string {
   return s.replace(/^(?:\s*(?:[-*+•]|>)+)+\s*/, '').trim();
-}
-
-// The bullet-recursion bug (fixed 2026-05-05) left truncated copies of
-// memory bodies in the Learned Behaviors section. The exact-match guard in
-// promoteMemory only blocks *new* duplicates; it doesn't fold legacy
-// truncations into their fully-written successors. Run this on every write
-// so the section self-cleans over time:
-//   - drop any bullet whose normalized form is a strict prefix of another
-//     bullet (the truncations)
-//   - strip the leaked `Why:** ` prefix that escapes from feedback-format
-//     memory bodies
-function dedupeLearnedBehaviorsSection(content: string): string {
-  const HEADER = '## Learned Behaviors (auto-promoted from memory)';
-  const start = content.indexOf(HEADER);
-  if (start === -1) return content;
-
-  const afterHeader = start + HEADER.length;
-  const tail = content.slice(afterHeader);
-  const nextHeading = tail.search(/\n##\s/);
-  const sectionEnd =
-    nextHeading === -1 ? content.length : afterHeader + nextHeading;
-
-  const before = content.slice(0, afterHeader);
-  const body = content.slice(afterHeader, sectionEnd);
-  const after = content.slice(sectionEnd);
-
-  const bullets = body.split('\n').filter((l) => l.startsWith('- '));
-  if (bullets.length < 2) return content;
-
-  const normalize = (line: string) =>
-    line
-      .replace(/^- /, '')
-      .replace(/^Why:\*\*\s+/, '')
-      .replace(/\s*\.{3,}\s*$/, '')
-      .trim();
-
-  const sortedDesc = [...new Set(bullets)].sort(
-    (a, b) => normalize(b).length - normalize(a).length,
-  );
-  const kept: string[] = [];
-  for (const line of sortedDesc) {
-    const n = normalize(line);
-    if (!n) continue;
-    if (kept.some((k) => normalize(k).startsWith(n))) continue;
-    kept.push(line);
-  }
-
-  const keptSet = new Set(kept);
-  const seen = new Set<string>();
-  const ordered: string[] = [];
-  for (const line of bullets) {
-    if (keptSet.has(line) && !seen.has(line)) {
-      ordered.push(line.replace(/^- Why:\*\*\s+/, '- '));
-      seen.add(line);
-    }
-  }
-
-  return before + '\n\n' + ordered.join('\n') + '\n' + after;
-}
-
-// DB-row equivalent of dedupeLearnedBehaviorsSection's prefix-collision logic.
-// The May 6 file-level fix doesn't help the inject path, which reads from the
-// memories table directly and was caught shipping 9 truncated copies of the
-// same behavior to the agent on 2026-05-20. Used by getContextForInjection.
-function dedupeMemoriesByPrefix<T extends { content: string }>(
-  memories: T[],
-): T[] {
-  if (memories.length < 2) return memories;
-  const normalize = (s: string) =>
-    s
-      .replace(/^Why:\*\*\s+/, '')
-      .replace(/\s*\.{3,}\s*$/, '')
-      .trim();
-  const norm = memories.map((m) => normalize(m.content));
-  const keep = new Set<number>();
-  for (let i = 0; i < memories.length; i++) {
-    const n = norm[i];
-    if (!n) continue;
-    let isPrefixOfLonger = false;
-    for (let j = 0; j < memories.length; j++) {
-      if (i === j) continue;
-      const m = norm[j];
-      if (m.length > n.length && m.startsWith(n)) {
-        isPrefixOfLonger = true;
-        break;
-      }
-    }
-    if (!isPrefixOfLonger) keep.add(i);
-  }
-  return memories.filter((_, i) => keep.has(i));
-}
-
-// Guard the curated "Learned Behaviors" section at the write boundary. MemU's
-// pattern extractor occasionally mis-captures an assistant reply (e.g.
-// "Andy**: Good — the three new emails are ...") or a session-narration summary
-// ("This session continues processing ...") as a 'behavior'. Those are not
-// durable rules; promoting them is what bloated groups/main/CLAUDE.md (cleaned
-// by hand 2026-06-13). Reject them before they reach the file — the strict-
-// prefix dedup above can't fold them because they diverge at the end.
-function isPromotableBehavior(content: string): boolean {
-  const c = content.trim();
-  if (c.length < 8) return false;
-  // Mis-captured speaker label / assistant reply ("Name**:", "Andy: ...").
-  if (/^[A-Z][\w .'-]{0,30}\*\*\s*:/.test(c)) return false;
-  // Session-narration summaries, not rules.
-  if (
-    /\b(this session (continues|began)|at session start|the session began|automated data[- ]sync notifications)\b/i.test(
-      c,
-    )
-  ) {
-    return false;
-  }
-  // Conversational openers / acknowledgements, not rules.
-  if (
-    /^(good[\s—,:-]|sure[,!\s]|here('s| is)\b|okay[,!\s]|got it\b|done[.!\s])/i.test(
-      c,
-    )
-  ) {
-    return false;
-  }
-  return true;
 }
 
 async function storeMemory(
@@ -321,10 +198,6 @@ async function storeMemory(
        last_reinforced_at = ?, updated_at = ? WHERE id = ?`,
     ).run(newCount, now, now, existing.id);
 
-    if (newCount >= PROMOTION_THRESHOLD) {
-      promoteMemory(groupFolder, existing.id);
-    }
-
     return existing.id;
   }
 
@@ -347,71 +220,6 @@ async function storeMemory(
   });
 
   return id;
-}
-
-function promoteMemory(groupFolder: string, memoryId: string): void {
-  const memory = db
-    .prepare('SELECT * FROM memories WHERE id = ? AND group_folder = ?')
-    .get(memoryId, groupFolder) as MemoryRow | undefined;
-
-  if (!memory || memory.promoted) return;
-
-  try {
-    const claudeMdPath = path.join(
-      resolveGroupFolderPath(groupFolder),
-      'CLAUDE.md',
-    );
-
-    if (!fs.existsSync(claudeMdPath)) return;
-
-    const existing = fs.readFileSync(claudeMdPath, 'utf-8');
-
-    const cleanContent = stripLineMarkers(memory.content);
-    if (!cleanContent) {
-      db.prepare('UPDATE memories SET promoted = 1 WHERE id = ?').run(memoryId);
-      return;
-    }
-
-    // Reject non-rule captures (mis-captured replies, session narration) before
-    // they reach CLAUDE.md. Mark promoted so the failed candidate isn't retried.
-    if (!isPromotableBehavior(cleanContent)) {
-      db.prepare('UPDATE memories SET promoted = 1 WHERE id = ?').run(memoryId);
-      logger.info(
-        { groupFolder, memoryId, content: cleanContent.slice(0, 80) },
-        'Skipped non-rule memory (not promoted to CLAUDE.md)',
-      );
-      return;
-    }
-
-    if (existing.includes(cleanContent)) {
-      db.prepare('UPDATE memories SET promoted = 1 WHERE id = ?').run(memoryId);
-      return;
-    }
-
-    const section = '\n\n## Learned Behaviors (auto-promoted from memory)\n\n';
-    const entry = `- ${cleanContent}\n`;
-
-    const nextContent = existing.includes(
-      '## Learned Behaviors (auto-promoted from memory)',
-    )
-      ? existing.replace(
-          '## Learned Behaviors (auto-promoted from memory)\n\n',
-          `## Learned Behaviors (auto-promoted from memory)\n\n${entry}`,
-        )
-      : existing + section + entry;
-    fs.writeFileSync(claudeMdPath, dedupeLearnedBehaviorsSection(nextContent));
-
-    db.prepare('UPDATE memories SET promoted = 1 WHERE id = ?').run(memoryId);
-    logger.info(
-      { groupFolder, memoryId, content: memory.content.slice(0, 100) },
-      'Memory promoted to CLAUDE.md',
-    );
-  } catch (err) {
-    logger.warn(
-      { groupFolder, memoryId, err },
-      'Failed to promote memory to CLAUDE.md',
-    );
-  }
 }
 
 async function retrieveMemories(
@@ -595,19 +403,11 @@ async function memorizeTranscript(
     });
   }
 
-  // Extract explicit patterns (corrections, preferences) as structured memories.
-  // Run against the stripped transcript so injected context doesn't get
-  // re-extracted as new patterns.
-  const extracted = extractPatterns(stripped);
-  for (const pattern of extracted) {
-    await storeMemory(
-      groupFolder,
-      pattern.content,
-      pattern.type,
-      pattern.tags,
-      'auto-extract',
-    );
-  }
+  // Auto-extraction of "behaviors" from transcripts was REMOVED (2026-06-13
+  // decommission) — it was the regex mis-capture + CLAUDE.md-bloat source.
+  // Durable preferences now live in curated CLAUDE.md + Claude Code native
+  // memory. memorizeTranscript's only job is to index transcript chunks so
+  // mcp__memu__search / retrieve can pull them back on demand.
 
   return written;
 }
@@ -617,36 +417,6 @@ async function memorizeTranscript(
  * Returns behavior memories (corrections, preferences) that should always
  * be loaded, plus any memories relevant to the incoming prompt.
  */
-async function getContextForInjection(
-  groupFolder: string,
-  prompt?: string,
-): Promise<{ behaviors: Memory[]; relevant: Memory[] }> {
-  // Oversample (50) so dedupeMemoriesByPrefix has room to drop legacy
-  // truncated copies and still return a useful set. After dedup, cap at 20.
-  const behaviorRows = db
-    .prepare(
-      `SELECT * FROM memories
-       WHERE group_folder = ? AND type = 'behavior'
-       ORDER BY reinforcement_count DESC, updated_at DESC
-       LIMIT 50`,
-    )
-    .all(groupFolder) as MemoryRow[];
-  const behaviors = dedupeMemoriesByPrefix(
-    behaviorRows.map(parseMemoryRow),
-  ).slice(0, 20);
-
-  let relevant: Memory[] = [];
-  if (prompt) {
-    relevant = await retrieveMemories(groupFolder, prompt, 5, [
-      'knowledge',
-      'profile',
-      'skill',
-      'tool',
-    ]);
-  }
-
-  return { behaviors, relevant };
-}
 
 function chunkText(text: string, targetSize: number): string[] {
   const chunks: string[] = [];
@@ -665,61 +435,6 @@ function chunkText(text: string, targetSize: number): string[] {
   }
 
   return chunks;
-}
-
-interface ExtractedPattern {
-  content: string;
-  type: MemoryType;
-  tags: string[];
-}
-
-function extractPatterns(transcript: string): ExtractedPattern[] {
-  const patterns: ExtractedPattern[] = [];
-  const lines = transcript.split('\n');
-
-  for (const line of lines) {
-    const cleaned = stripLineMarkers(line);
-    // Skip lines that were just markers, or that came back to us as our own
-    // injected memory block — re-memorizing those is what caused the
-    // exponential bullet bloat that OOM'd the host.
-    if (!cleaned || cleaned.length < 8) continue;
-    if (/^remembered\s+(behaviors|context)|^relevant\s+memories/i.test(cleaned))
-      continue;
-
-    if (
-      /\b(no,?\s+(actually|that's|it's|i meant)|that's not right|wrong|incorrect|don't do that|stop doing|never do|always do)\b/i.test(
-        cleaned,
-      )
-    ) {
-      patterns.push({
-        content: cleaned,
-        type: 'behavior',
-        tags: ['correction', 'auto-detected'],
-      });
-    }
-
-    if (
-      /\b(i prefer|i like when|always use|never use|please always|please never|from now on)\b/i.test(
-        cleaned,
-      )
-    ) {
-      patterns.push({
-        content: cleaned,
-        type: 'behavior',
-        tags: ['preference', 'auto-detected'],
-      });
-    }
-
-    if (/\b(my (email|phone|name|title|company) is)\b/i.test(cleaned)) {
-      patterns.push({
-        content: cleaned,
-        type: 'profile',
-        tags: ['profile-info', 'auto-detected'],
-      });
-    }
-  }
-
-  return patterns;
 }
 
 // --- HTTP Server ---
@@ -887,13 +602,6 @@ export function startMemuProxy(
               { groupFolder, chunkCount, sessionId },
               'Transcript memorized',
             );
-            break;
-          }
-
-          case '/context': {
-            const prompt = body.prompt as string | undefined;
-            const context = await getContextForInjection(groupFolder, prompt);
-            jsonResponse(res, 200, { status: 'ok', ...context });
             break;
           }
 
