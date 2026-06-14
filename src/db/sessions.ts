@@ -67,6 +67,11 @@ export function getActiveSessions(): Session[] {
   return getDb().prepare("SELECT * FROM sessions WHERE status = 'active'").all() as Session[];
 }
 
+/** All known session ids (any status) — for on-disk folder reconciliation. */
+export function getAllSessionIds(): Set<string> {
+  return new Set((getDb().prepare('SELECT id FROM sessions').all() as Array<{ id: string }>).map((r) => r.id));
+}
+
 export function getRunningSessions(): Session[] {
   return getDb().prepare("SELECT * FROM sessions WHERE container_status IN ('running', 'idle')").all() as Session[];
 }

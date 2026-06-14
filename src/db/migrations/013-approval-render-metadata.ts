@@ -15,13 +15,27 @@
 import type Database from 'better-sqlite3';
 import type { Migration } from './index.js';
 
+/** Add a column only if it doesn't already exist (idempotent re-run safety). */
+function addColumnIfMissing(db: Database.Database, table: string, column: string, ddl: string): void {
+  const cols = new Set(
+    (db.prepare(`PRAGMA table_info('${table}')`).all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  if (!cols.has(column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+}
+
 export const migration013: Migration = {
   version: 13,
   name: 'approval-render-metadata',
   up(db: Database.Database) {
-    db.exec(`ALTER TABLE pending_channel_approvals ADD COLUMN title TEXT NOT NULL DEFAULT ''`);
-    db.exec(`ALTER TABLE pending_channel_approvals ADD COLUMN options_json TEXT NOT NULL DEFAULT '[]'`);
-    db.exec(`ALTER TABLE pending_sender_approvals ADD COLUMN title TEXT NOT NULL DEFAULT ''`);
-    db.exec(`ALTER TABLE pending_sender_approvals ADD COLUMN options_json TEXT NOT NULL DEFAULT '[]'`);
+    // Guarded ALTERs: bare ADD COLUMN throws "duplicate column" if a target
+    // column ever pre-exists (restored/merged DB, module touching these tables),
+    // which would abort startup since migrations run in a transaction. Mirror
+    // the moduleApprovalsTitleOptions guard pattern.
+    addColumnIfMissing(db, 'pending_channel_approvals', 'title', `title TEXT NOT NULL DEFAULT ''`);
+    addColumnIfMissing(db, 'pending_channel_approvals', 'options_json', `options_json TEXT NOT NULL DEFAULT '[]'`);
+    addColumnIfMissing(db, 'pending_sender_approvals', 'title', `title TEXT NOT NULL DEFAULT ''`);
+    addColumnIfMissing(db, 'pending_sender_approvals', 'options_json', `options_json TEXT NOT NULL DEFAULT '[]'`);
   },
 };

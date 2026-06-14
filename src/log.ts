@@ -1,17 +1,24 @@
 const LEVELS = { debug: 20, info: 30, warn: 40, error: 50, fatal: 60 } as const;
 type Level = keyof typeof LEVELS;
 
+// Only emit ANSI color when writing to an interactive terminal. Under the
+// systemd service stdout/stderr are redirected to the log file, and embedded
+// color codes there break ops greps (e.g. `code=127` becomes `code\x1b[39m=127`)
+// and any exit-code alerting. A non-TTY sink gets plain, greppable text.
+const COLOR = process.stdout.isTTY === true;
+const paint = (code: string): string => (COLOR ? code : '');
+
 const COLORS: Record<Level, string> = {
-  debug: '\x1b[34m',
-  info: '\x1b[32m',
-  warn: '\x1b[33m',
-  error: '\x1b[31m',
-  fatal: '\x1b[41m\x1b[37m',
+  debug: paint('\x1b[34m'),
+  info: paint('\x1b[32m'),
+  warn: paint('\x1b[33m'),
+  error: paint('\x1b[31m'),
+  fatal: paint('\x1b[41m\x1b[37m'),
 };
-const KEY_COLOR = '\x1b[35m';
-const MSG_COLOR = '\x1b[36m';
-const RESET = '\x1b[39m';
-const FULL_RESET = '\x1b[0m';
+const KEY_COLOR = paint('\x1b[35m');
+const MSG_COLOR = paint('\x1b[36m');
+const RESET = paint('\x1b[39m');
+const FULL_RESET = paint('\x1b[0m');
 
 const threshold = LEVELS[(process.env.LOG_LEVEL as Level) || 'info'] ?? LEVELS.info;
 

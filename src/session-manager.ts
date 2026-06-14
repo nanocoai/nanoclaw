@@ -23,6 +23,7 @@ import {
   createSession,
   findSessionByAgentGroup,
   findSessionForAgent,
+  getAllSessionIds,
   getSession,
   updateSession,
 } from './db/sessions.js';
@@ -51,6 +52,37 @@ export function sessionsBaseDir(): string {
 /** Directory for a specific session: sessions/{agent_group_id}/{session_id}/ */
 export function sessionDir(agentGroupId: string, sessionId: string): string {
   return path.join(sessionsBaseDir(), agentGroupId, sessionId);
+}
+
+/**
+ * Non-destructive startup reconciliation: log on-disk session folders that have
+ * no corresponding central `sessions` row. Surfaces the lifecycle-drift /
+ * unbounded-growth problem (sessions are never closed or pruned) WITHOUT
+ * deleting anything — automated retention is intentionally a separate, opt-in
+ * decision so we never silently destroy conversation history.
+ */
+export function reconcileSessionFolders(): void {
+  const base = sessionsBaseDir();
+  if (!fs.existsSync(base)) return;
+  const known = getAllSessionIds();
+  const orphans: string[] = [];
+  for (const agentDir of fs.readdirSync(base)) {
+    const agentPath = path.join(base, agentDir);
+    try {
+      if (!fs.statSync(agentPath).isDirectory()) continue;
+      for (const sid of fs.readdirSync(agentPath)) {
+        if (sid.startsWith('sess-') && !known.has(sid)) orphans.push(sid);
+      }
+    } catch {
+      continue;
+    }
+  }
+  if (orphans.length > 0) {
+    log.warn('Orphan session folders on disk (no central sessions row) — not deleted', {
+      count: orphans.length,
+      sample: orphans.slice(0, 10),
+    });
+  }
 }
 
 /** Path to the host-owned inbound DB (messages_in + delivered). */

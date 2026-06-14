@@ -1,7 +1,12 @@
 /**
- * Reference copy of the current v2 schema.
- * Read this to understand the DB structure.
- * Actual creation is done by migrations — do not use this at runtime.
+ * Reference sketch of the v2 schema for orientation only.
+ *
+ * NOT authoritative and NOT used at runtime — the migrations in ./migrations
+ * are the source of truth and add columns/tables this file omits (e.g.
+ * container_configs + cli_scope, pending_channel_approvals + title/options_json,
+ * messaging_groups.denied_at, agent_destinations, unregistered_senders, …).
+ * Verify against the migrations (or a live `sqlite_master` dump) before relying
+ * on any detail here.
  */
 
 export const SCHEMA = `
@@ -187,6 +192,8 @@ CREATE TABLE IF NOT EXISTS messages_in (
                -- Dying containers (past first poll) skip these rows.
 );
 CREATE INDEX IF NOT EXISTS idx_messages_in_series ON messages_in(series_id);
+-- Supports the host's hot countDueMessages poll (status/trigger/process_after).
+CREATE INDEX IF NOT EXISTS idx_messages_in_due ON messages_in(status, trigger, process_after);
 
 -- Host tracks delivery outcomes for messages_out IDs.
 -- Avoids writing to outbound.db (container-owned).

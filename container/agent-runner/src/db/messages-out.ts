@@ -87,6 +87,20 @@ export function writeMessageOut(msg: WriteMessageOut): number {
  * Instead, look up the platform_message_id from the delivered table (host writes this
  * after successful delivery).
  */
+/**
+ * True if `seq` refers to one of the agent's own outbound messages (fromMe),
+ * false if it's an inbound message from someone else. Mirrors the inbound-first
+ * precedence of getMessageIdBySeq. Used so edit/reaction targeting can set the
+ * correct WhatsApp message key `fromMe` flag.
+ */
+export function isOwnMessageBySeq(seq: number): boolean {
+  const inbound = getInboundDb();
+  const inRow = inbound.prepare('SELECT 1 FROM messages_in WHERE seq = ?').get(seq);
+  if (inRow) return false;
+  const outRow = getOutboundDb().prepare('SELECT 1 FROM messages_out WHERE seq = ?').get(seq);
+  return !!outRow;
+}
+
 export function getMessageIdBySeq(seq: number): string | null {
   const inbound = getInboundDb();
 
@@ -135,9 +149,11 @@ export function getRoutingBySeq(
 export function getUndeliveredMessages(): MessageOutRow[] {
   return getOutboundDb()
     .prepare(
+      // seq is strictly monotonic — tiebreak on it so same-second multi-part
+      // replies stay in order rather than arbitrary rowid order.
       `SELECT * FROM messages_out
        WHERE (deliver_after IS NULL OR deliver_after <= datetime('now'))
-       ORDER BY timestamp ASC`,
+       ORDER BY timestamp ASC, seq ASC`,
     )
     .all() as MessageOutRow[];
 }

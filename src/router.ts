@@ -372,6 +372,35 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  *                      a thread has engaged us once, follow-ups arrive
  *                      with no mention and should still fire.
  */
+// engage_pattern is admin-authored but run against fully attacker-controlled
+// message text on every inbound. Cap the input length and cache the compiled
+// RegExp to bound worst-case backtracking on the single-threaded event loop
+// and avoid recompiling per message. A bad pattern fails CLOSED (don't engage)
+// — an admin typo shouldn't turn a wiring into respond-to-everything.
+const MAX_PATTERN_TEXT_LEN = 4096;
+const compiledPatternCache = new Map<string, RegExp | null>(); // null = known-invalid
+const warnedBadPatterns = new Set<string>();
+
+function matchEngagePattern(pattern: string, text: string): boolean {
+  let re = compiledPatternCache.get(pattern);
+  if (re === undefined) {
+    try {
+      re = new RegExp(pattern);
+    } catch {
+      re = null;
+    }
+    compiledPatternCache.set(pattern, re);
+  }
+  if (re === null) {
+    if (!warnedBadPatterns.has(pattern)) {
+      warnedBadPatterns.add(pattern);
+      log.warn('Invalid engage_pattern — failing closed (agent will not engage until fixed)', { pattern });
+    }
+    return false;
+  }
+  return re.test(text.length > MAX_PATTERN_TEXT_LEN ? text.slice(0, MAX_PATTERN_TEXT_LEN) : text);
+}
+
 function evaluateEngage(
   agent: MessagingGroupAgent,
   text: string,
@@ -383,12 +412,7 @@ function evaluateEngage(
     case 'pattern': {
       const pat = agent.engage_pattern ?? '.';
       if (pat === '.') return true;
-      try {
-        return new RegExp(pat).test(text);
-      } catch {
-        // Bad regex: fail open so admin sees the agent responding + can fix.
-        return true;
-      }
+      return matchEngagePattern(pat, text);
     }
     case 'mention':
       return isMention;
@@ -438,7 +462,13 @@ async function deliverToAgent(
   // Command gate: classify slash commands before they reach the container.
   // Filtered commands are dropped silently. Denied admin commands get a
   // permission-denied response written directly to messages_out.
-  if (event.message.kind === 'chat' || event.message.kind === 'chat-sdk') {
+  //
+  // Only gate when actually engaging (wake). For an accumulate delivery
+  // (wake=false) the message is merely being stored as silent context, so a
+  // denied admin command must NOT produce a "Permission denied" reply, and a
+  // filtered command should still be stored — running the gate here would
+  // break the "silent context stays silent" contract.
+  if (wake && (event.message.kind === 'chat' || event.message.kind === 'chat-sdk')) {
     const gate = gateCommand(event.message.content, userId, agent.agent_group_id);
     if (gate.action === 'filter') {
       log.debug('Filtered command dropped by gate', { agentGroupId: agent.agent_group_id });
