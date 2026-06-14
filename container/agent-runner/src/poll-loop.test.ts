@@ -4,7 +4,7 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { isCorruptionError } from './poll-loop.js';
+import { findClosingMessageTag, isCorruptionError } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 
 beforeEach(() => {
@@ -376,6 +376,61 @@ describe('end-to-end with mock provider', () => {
     expect(outMessages).toHaveLength(1);
     expect(JSON.parse(outMessages[0].content).text).toBe('The answer is 4');
     expect(outMessages[0].in_reply_to).toBe('m1');
+  });
+});
+
+describe('findClosingMessageTag', () => {
+  // Helper: simulate the dispatch parser by finding <message to="..."> open,
+  // then looking up the matching close starting from the body.
+  function bodyOf(text: string): string {
+    const openRe = /<message\s+to="([^"]+)"\s*>/;
+    const m = openRe.exec(text);
+    if (!m) throw new Error('no open tag');
+    const bodyStart = m.index + m[0].length;
+    const close = findClosingMessageTag(text, bodyStart);
+    if (close === -1) return '<UNCLOSED>';
+    return text.slice(bodyStart, close);
+  }
+
+  it('matches the close of a plain message', () => {
+    expect(bodyOf('<message to="mark">hello</message>')).toBe('hello');
+  });
+
+  it('ignores </message> inside inline backticks', () => {
+    // Agent writing about NanoClaw destinations in prose
+    const text = '<message to="mark">routing example: `<message to="x">…</message>` covered</message>';
+    expect(bodyOf(text)).toBe('routing example: `<message to="x">…</message>` covered');
+  });
+
+  it('ignores </message> inside fenced code blocks', () => {
+    const text = [
+      '<message to="mark">here is the format:',
+      '```',
+      '<message to="name">body</message>',
+      '```',
+      'end</message>',
+    ].join('\n');
+    expect(bodyOf(text)).toBe(['here is the format:', '```', '<message to="name">body</message>', '```', 'end'].join('\n'));
+  });
+
+  it('returns -1 when the close tag is missing', () => {
+    expect(findClosingMessageTag('<message to="mark">no close here', 19)).toBe(-1);
+  });
+
+  it('treats inline-backtick close as unclosed when no other close follows', () => {
+    // Single `</message>` inside inline backticks with nothing after — outer is unclosed
+    const text = '<message to="mark">talking about `</message>` only';
+    expect(findClosingMessageTag(text, 19)).toBe(-1);
+  });
+
+  it('finds the outer close even when an inner close is inside a fenced block', () => {
+    // The inner </message> in the fence must NOT short-circuit the outer match.
+    const text = '<message to="mark">prefix\n```\n</message>\n```\nsuffix</message>';
+    const start = '<message to="mark">'.length;
+    const close = findClosingMessageTag(text, start);
+    // It should land on the outer </message>, not the fenced one
+    expect(close).toBeGreaterThan(text.indexOf('```\nsuffix'));
+    expect(text.slice(close)).toBe('</message>');
   });
 });
 
