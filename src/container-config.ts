@@ -67,11 +67,32 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
 }
 
 /**
+ * Resolve dynamic token placeholders in remote MCP server headers.
+ * Currently supports `Bearer {{strava}}` — replaced with a fresh Strava
+ * access token at spawn time.
+ */
+async function resolveRemoteMcpTokens(config: ContainerConfig): Promise<void> {
+  for (const mcp of Object.values(config.mcpServers)) {
+    if (!('url' in mcp) || !(mcp as Record<string, unknown>).headers) continue;
+    const headers = (mcp as Record<string, unknown>).headers as Record<string, string>;
+    for (const [key, value] of Object.entries(headers)) {
+      if (value === 'Bearer {{strava}}') {
+        const { getStravaAccessToken } = await import('./strava-token.js');
+        const token = await getStravaAccessToken();
+        if (token) {
+          headers[key] = `Bearer ${token}`;
+        }
+      }
+    }
+  }
+}
+
+/**
  * Materialize `container.json` from the DB. Called at spawn time so the
  * container always sees fresh config. Returns the `ContainerConfig` for
  * use by the caller (buildMounts, buildContainerArgs, etc.).
  */
-export function materializeContainerJson(agentGroupId: string): ContainerConfig {
+export async function materializeContainerJson(agentGroupId: string): Promise<ContainerConfig> {
   const group = getAgentGroup(agentGroupId);
   if (!group) throw new Error(`Agent group not found: ${agentGroupId}`);
 
@@ -79,6 +100,8 @@ export function materializeContainerJson(agentGroupId: string): ContainerConfig 
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
   const config = configFromDb(row, group);
+
+  await resolveRemoteMcpTokens(config);
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');
   const dir = path.dirname(p);
