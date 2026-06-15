@@ -16,12 +16,21 @@ import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
 
-export interface McpServerConfig {
+export interface McpServerStdioConfig {
   command: string;
   args?: string[];
   env?: Record<string, string>;
   instructions?: string;
 }
+
+export interface McpServerRemoteConfig {
+  type: 'http' | 'sse';
+  url: string;
+  headers?: Record<string, string>;
+  instructions?: string;
+}
+
+export type McpServerConfig = McpServerStdioConfig | McpServerRemoteConfig;
 
 export interface AdditionalMountConfig {
   hostPath: string;

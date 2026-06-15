@@ -15,7 +15,7 @@ export interface RunnerConfig {
   groupName: string;
   agentGroupId: string;
   maxMessagesPerPrompt: number;
-  mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
+  mcpServers: Record<string, import('./providers/types.js').McpServerConfig>;
   model?: string;
   effort?: string;
 }

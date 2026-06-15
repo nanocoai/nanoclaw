@@ -103,11 +103,19 @@ export interface QueryInput {
   };
 }
 
-export interface McpServerConfig {
+export interface McpServerStdioConfig {
   command: string;
   args: string[];
   env: Record<string, string>;
 }
+
+export interface McpServerRemoteConfig {
+  type: 'http' | 'sse';
+  url: string;
+  headers?: Record<string, string>;
+}
+
+export type McpServerConfig = McpServerStdioConfig | McpServerRemoteConfig;
 
 export interface AgentQuery {
   /** Push a follow-up message into the active query. */
