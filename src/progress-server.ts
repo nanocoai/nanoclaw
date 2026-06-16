@@ -13,6 +13,7 @@ import Database from 'better-sqlite3';
 
 import { logger } from './logger.js';
 import { STORE_DIR } from './config.js';
+import { handleTaskBoardRequest } from './task-board.js';
 
 export const PROGRESS_SERVER_PORT = parseInt(
   process.env.PROGRESS_SERVER_PORT || '3457',
@@ -287,6 +288,9 @@ export function startProgressServer(): void {
   _lanIp = getLanIp();
 
   server = http.createServer((req, res) => {
+    // 任务账本路由（/board、/api/board）优先拦截，未命中再走进度查看逻辑
+    if (handleTaskBoardRequest(req, res)) return;
+
     const url = req.url ?? '';
     const isJson = url.includes('?json=1');
     const pathPart = url.split('?')[0];
