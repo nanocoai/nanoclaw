@@ -323,7 +323,7 @@ interface QueryResult {
   continuation?: string;
 }
 
-async function processQuery(
+export async function processQuery(
   query: AgentQuery,
   routing: RoutingContext,
   initialBatchIds: string[],
@@ -482,28 +482,43 @@ async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          const { hasUnwrapped } = dispatchResultText(event.text, routing);
-          const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
-          notifyExchangeComplete(onExchangeComplete, {
-            prompt: archivePrompts[0] ?? initialPrompt,
-            result: event.text,
-            continuation: queryContinuation ?? initialContinuation,
-            status: hasUnwrapped ? 'undelivered' : 'completed',
-          });
-          if (willRetryWrapping) {
-            unwrappedNudged = true;
-            const destinations = getAllDestinations();
-            const names = destinations.map((d) => d.name).join(', ');
-            query.push(
-              `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
-                `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
-                `Your destinations: ${names}. ` +
-                `Please re-send your response with the correct wrapping.</system>`,
-            );
+          const { sent, hasUnwrapped } = dispatchResultText(event.text, routing);
+          if (sent === 0 && event.isError === true) {
+            // Non-retryable error turn (e.g. a 403 billing_error) with no
+            // <message> envelope: deliver the notice instead of dropping it as
+            // scratchpad, and skip the re-wrap nudge — it would just re-hammer
+            // the failing gateway turn after turn.
+            deliverErrorResult(event.text, routing);
+            notifyExchangeComplete(onExchangeComplete, {
+              prompt: archivePrompts[0] ?? initialPrompt,
+              result: event.text,
+              continuation: queryContinuation ?? initialContinuation,
+              status: 'error',
+            });
+            archivePrompts.shift();
+          } else {
+            const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+            notifyExchangeComplete(onExchangeComplete, {
+              prompt: archivePrompts[0] ?? initialPrompt,
+              result: event.text,
+              continuation: queryContinuation ?? initialContinuation,
+              status: hasUnwrapped ? 'undelivered' : 'completed',
+            });
+            if (willRetryWrapping) {
+              unwrappedNudged = true;
+              const destinations = getAllDestinations();
+              const names = destinations.map((d) => d.name).join(', ');
+              query.push(
+                `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
+                  `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
+                  `Your destinations: ${names}. ` +
+                  `Please re-send your response with the correct wrapping.</system>`,
+              );
+            }
+            // The wrapping-retry result answers the SAME user prompt — keep it
+            // queued so the retry archives against it, not the nudge text.
+            if (!willRetryWrapping) archivePrompts.shift();
           }
-          // The wrapping-retry result answers the SAME user prompt — keep it
-          // queued so the retry archives against it, not the nudge text.
-          if (!willRetryWrapping) archivePrompts.shift();
         } else {
           archivePrompts.shift();
         }
@@ -555,6 +570,26 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       log(`Progress: ${event.message}`);
       break;
   }
+}
+
+/**
+ * Deliver a turn's text straight to the channel the batch arrived on. Used when
+ * a turn ends in a provider error (e.g. a non-retryable 403 billing_error) with
+ * no <message> envelope: the notice would otherwise be dropped as scratchpad.
+ * This is the same user-facing write the outer catch block does, minus the
+ * `Error:` prefix — the provider's text is already a user-facing message.
+ */
+function deliverErrorResult(text: string, routing: RoutingContext): void {
+  log('Error result with no <message> envelope — delivering to channel');
+  writeMessageOut({
+    id: generateId(),
+    in_reply_to: routing.inReplyTo,
+    kind: 'chat',
+    platform_id: routing.platformId,
+    channel_type: routing.channelType,
+    thread_id: routing.threadId,
+    content: JSON.stringify({ text }),
+  });
 }
 
 /**

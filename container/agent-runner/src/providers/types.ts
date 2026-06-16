@@ -125,7 +125,13 @@ export interface AgentQuery {
 
 export type ProviderEvent =
   | { type: 'init'; continuation: string }
-  | { type: 'result'; text: string | null }
+  /**
+   * A completed turn. `isError` is set when the underlying SDK flagged the
+   * turn as an error (e.g. a non-retryable Anthropic 403 billing_error). The
+   * poll-loop uses it to surface the result text to the user instead of
+   * dropping it as un-wrapped scratchpad, and to skip the re-wrap nudge.
+   */
+  | { type: 'result'; text: string | null; isError?: boolean }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
   /**
