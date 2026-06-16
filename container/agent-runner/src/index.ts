@@ -231,14 +231,14 @@ async function main(): Promise<void> {
     prompt = `[SCHEDULED TASK - You are running automatically, not in response to a user message. Use mcp__nanoclaw__send_message if needed to communicate with the user.]\n\n${input.prompt}`;
   }
 
-  try {
-    log('Starting agent...');
-
+  // Stream a single query run. Extracted so we can retry with a fresh session
+  // if resuming a stored session fails (e.g. its transcript was lost).
+  const runQuery = async (resumeId: string | undefined) => {
     for await (const message of query({
       prompt,
       options: {
         cwd: '/workspace/group',
-        resume: input.sessionId,
+        resume: resumeId,
         allowedTools: [
           'Bash',
           'Read', 'Write', 'Edit', 'Glob', 'Grep',
@@ -263,6 +263,27 @@ async function main(): Promise<void> {
 
       if ('result' in message && message.result) {
         result = message.result as string;
+      }
+    }
+  };
+
+  try {
+    log('Starting agent...');
+
+    try {
+      await runQuery(input.sessionId);
+    } catch (err) {
+      // A resume can fail if the stored session's transcript no longer exists
+      // (e.g. it was lost during a migration). Rather than bricking the group
+      // forever, fall back to starting a fresh session.
+      if (input.sessionId) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log(`Resume of session ${input.sessionId} failed (${msg}); retrying with a fresh session`);
+        result = null;
+        newSessionId = undefined;
+        await runQuery(undefined);
+      } else {
+        throw err;
       }
     }
 
