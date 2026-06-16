@@ -91,10 +91,10 @@ export function enforceUpgradeTripwire(): void {
   // immutable image install through their own flow and skip the sanctioned
   // `service` setup step (the one that stamps the marker), so the marker is
   // never written and every boot would trip. Such fleets own their upgrade
-  // path, so they set NANOCLAW_SKIP_UPGRADE_TRIPWIRE=1 to bypass the gate. Loud
+  // path, so they set NANOCLAW_DISABLE_UPGRADE_TRIPWIRE=1 to bypass the gate. Loud
   // and explicit (a logged env flag), never a silent default.
-  if (process.env.NANOCLAW_SKIP_UPGRADE_TRIPWIRE === '1') {
-    log.warn('Upgrade tripwire bypassed via NANOCLAW_SKIP_UPGRADE_TRIPWIRE=1 (self-managed install)');
+  if (process.env.NANOCLAW_DISABLE_UPGRADE_TRIPWIRE === '1') {
+    log.warn('Upgrade tripwire bypassed via NANOCLAW_DISABLE_UPGRADE_TRIPWIRE=1 (self-managed install)');
     return;
   }
 

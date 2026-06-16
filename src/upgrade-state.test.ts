@@ -89,20 +89,20 @@ describe('upgrade-state', () => {
     errSpy.mockRestore();
   });
 
-  it('NANOCLAW_SKIP_UPGRADE_TRIPWIRE=1 bypasses the gate (managed fleet) even with no marker', () => {
+  it('NANOCLAW_DISABLE_UPGRADE_TRIPWIRE=1 bypasses the gate (managed fleet) even with no marker', () => {
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`exit:${code}`);
     }) as never);
     const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {});
-    const prev = process.env.NANOCLAW_SKIP_UPGRADE_TRIPWIRE;
-    process.env.NANOCLAW_SKIP_UPGRADE_TRIPWIRE = '1';
+    const prev = process.env.NANOCLAW_DISABLE_UPGRADE_TRIPWIRE;
+    process.env.NANOCLAW_DISABLE_UPGRADE_TRIPWIRE = '1';
     try {
       // No marker would normally trip; the opt-out makes it pass, loudly.
       expect(() => enforceUpgradeTripwire()).not.toThrow();
       expect(warnSpy).toHaveBeenCalled();
     } finally {
-      if (prev === undefined) delete process.env.NANOCLAW_SKIP_UPGRADE_TRIPWIRE;
-      else process.env.NANOCLAW_SKIP_UPGRADE_TRIPWIRE = prev;
+      if (prev === undefined) delete process.env.NANOCLAW_DISABLE_UPGRADE_TRIPWIRE;
+      else process.env.NANOCLAW_DISABLE_UPGRADE_TRIPWIRE = prev;
       warnSpy.mockRestore();
       exitSpy.mockRestore();
     }
