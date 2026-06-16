@@ -55,6 +55,34 @@ node /home/node/.claude/skills/feishu-docs/feishu-docs.mjs insert-image <URL或�
 
 底层优先使用 `lark-cli docs +media-insert --as bot`。如果官方 CLI 当前应用身份缺 `docs:document.media:upload`，工具会自动 fallback 到老飞书 Doc 三阶段链路：创建空 image block → `drive/v1/medias/upload_all` 以 `docx_image` 上传 → `replace_image` 绑定 token。只有两条链路都失败时，才退化为上传 HTML/SVG/PNG 文件并在文档中放链接。
 
+### 插图表：优先 mermaid 白板（可编辑、不截图）
+
+**画流程/时序/状态/类图，首选在正文里直接写 ` ```mermaid ` 代码块**，不要先渲染成 PNG 再 `insert-image`。`create` 和 `append` 都走 `lark-cli docs +create/+update --content` 的导入链路，飞书会把 ` ```mermaid ` 和 ` ```plantuml ` 代码块**自动转成可编辑的白板块**（block_type 为 whiteboard），源码无损保留——用户在飞书里能直接拖拽改图，再 `read` 回来 mermaid 源码原样还在。这比 PNG 截图强：可编辑、可二次维护、文字不会糊。
+
+```bash
+# mermaid 直接写进正文，create/append 自动转白板
+cat <<'EOF' | node /home/node/.claude/skills/feishu-docs/feishu-docs.mjs create "架构文档"
+# 整体架构
+
+下面是请求链路：
+
+```mermaid
+sequenceDiagram
+    客户端->>Go网关: HTTP
+    Go网关->>Python: 内部API
+    Python-->>Go网关: SSE via Redis
+```
+EOF
+```
+
+**精确更新单张图**用 `lark-cli docs +whiteboard-update`（拿到 whiteboard-token 后覆盖单个白板，不动正文）：
+```bash
+LARK_CLI_NO_PROXY=1 lark-cli docs +whiteboard-update --as bot \
+  --input_format mermaid --source @diagram.mmd --whiteboard-token <TOKEN> --overwrite
+```
+
+**什么时候还用 `insert-image` PNG**：mermaid 表达不了的图（如需要像素级精确摆位的手画 SVG、PlantUML 高级皮肤/分层）才退回截图路线。常规架构图/流程图一律 mermaid 白板。
+
 ### 上传文件
 ```bash
 # 上传到用户云盘指定目录（推荐）

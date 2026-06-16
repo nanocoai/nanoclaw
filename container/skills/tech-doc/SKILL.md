@@ -59,7 +59,11 @@ description: 把现有代码/系统的运作机制沉淀成图文一体的技术
 
 ### Step 4:画图 + 渲染
 
-写 `.puml` 源码,渲染 PNG。
+**先选图引擎(默认 mermaid 白板)**:
+- **默认 mermaid → 飞书白板**:能用 mermaid 表达的(sequence/state/class/flowchart/component),**首选直接在正文写 ` ```mermaid ` 代码块**,`feishu-docs create/append` 会自动转成**可编辑白板块**(源码无损,用户能在飞书里直接改图)。省掉渲染 PNG、字体、graphviz 这一整套,且交付的是活图不是死截图。配色/高亮用 mermaid 自己的 `style`/`classDef` 语法。
+- **退回 PlantUML PNG 的场景**:mermaid 画不出或画不好的——需要复杂泳道、精细 `skinparam` 皮肤、像素级焦点高亮、或一张图分多层级精排版时,才走下面的 PlantUML 渲染路线。
+
+PlantUML 路线:写 `.puml` 源码,渲染 PNG。
 
 **渲染命令**(中文正常):
 ```
@@ -98,23 +102,26 @@ skinparam componentStyle rectangle
 
 ### Step 5:出图文一体飞书文档
 
-用 `feishu-docs` 把正文和图**按章节顺序交替写入同一个飞书 docx**:
+用 `feishu-docs` 把正文和图**按章节顺序交替写入同一个飞书 docx**。两条路按 Step 4 选定的引擎走:
 
+**mermaid 白板路线(默认)**:把 ` ```mermaid ` 代码块直接写进正文,`create`/`append` 时随正文一起导入,飞书自动转白板,图天然落在它解释的文字旁,**不需要 insert-image**。要事后精改单张图用 `lark-cli docs +whiteboard-update --input_format mermaid`。
+
+**PlantUML PNG 路线(退回时)**:
 1. 各图 `.puml` 渲染成 PNG(dpi 高清)。
 2. `feishu-docs create "标题"`(stdin 传第 1 段正文,到第一张图之前)→ 拿 document_id。
 3. `feishu-docs insert-image <doc> 图.png --width 720 --caption "图N · ..."` 插图。
 4. `feishu-docs append <doc>`(stdin 传下一段正文)→ `insert-image` 插下一张图 → 交替到写完。
 5. append/insert-image 都追加到文档末尾,**按章节顺序调用,图自然落对位置**。
 
-图宽建议:时序/事件谱系等横向图 760-820,流程/状态/组件 600-720。
+图宽建议(PNG 路线):时序/事件谱系等横向图 760-820,流程/状态/组件 600-720。
 
 ### Step 6:read 验证
 
 ```
-feishu-docs read <doc> | grep -oc image   # 图数 == 计划张数
-feishu-docs read <doc> | grep -oiE "<h2>|图[0-9]"   # 章节 + 图注顺序对位
+feishu-docs read <doc> | grep -ociE "image|whiteboard|mermaid"   # 图数 == 计划张数(白板/图片都数上)
+feishu-docs read <doc> | grep -oiE "<h2>|图[0-9]"                 # 章节 + 图注顺序对位
 ```
-图数不对或图注错位 → 修。验证通过才交付链接。
+mermaid 白板路线还要确认 `read` 回来的 mermaid 源码完整(没被截断)。图数不对或图注错位 → 修。验证通过才交付链接。
 
 ## 推荐文档骨架(按需裁剪)
 
