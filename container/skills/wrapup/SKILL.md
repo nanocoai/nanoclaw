@@ -71,6 +71,24 @@ description: 任务收尾工作流。回顾任务全过程，总结踩坑记录�
 1. `openspec status --change <name>` 确认任务完成度
 2. `openspec archive <change-name>` 归档
 
+### Step 5.5: 收尾任务账本（如适用）
+
+如果本次任务在 kickoff 时建了任务账本（task-ledger），收尾时要把它标记完成，让 3457 看板上的进度走到终态。
+
+1. 找到本任务的 `task_id`（kickoff 过程中记下的；忘了就用 `task_list` 按项目+标题找）
+2. `task_get` 确认当前状态：
+   - 还没到 `verifying` → 说明验证没走完，**先补 `task_record_verification` 记录验证证据**（进 `verifying`），再往下
+   - checklist 有未完成项 / 测试用例有 pending/failed/blocked → 用 `task_update_checklist` 补齐，否则 `task_mark_done` 会被闸门拒
+3. 调用 `task_mark_done`（带 `task_id` + 完成说明）→ 账本进 `done`
+
+> ⚠️ 纯调查/答疑类任务（账本停在 `draft`，没进实现）不用强行 mark_done，保持原状即可。
+
+**📋 日志**：
+```
+📋 [账本收尾] task_id=tl_xxx → done
+  - 验证证据已补 / checklist 已齐
+```
+
 ### Step 6: 汇报
 
 向用户简要汇报：
