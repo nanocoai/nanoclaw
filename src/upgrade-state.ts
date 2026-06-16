@@ -87,6 +87,17 @@ export function markerPath(): string {
  * just ran the upgrade to act on automatically.
  */
 export function enforceUpgradeTripwire(): void {
+  // Managed-fleet opt-out. Self-managed deployments that bake NanoClaw into an
+  // immutable image install through their own flow and skip the sanctioned
+  // `service` setup step (the one that stamps the marker), so the marker is
+  // never written and every boot would trip. Such fleets own their upgrade
+  // path, so they set NANOCLAW_SKIP_UPGRADE_TRIPWIRE=1 to bypass the gate. Loud
+  // and explicit (a logged env flag), never a silent default.
+  if (process.env.NANOCLAW_SKIP_UPGRADE_TRIPWIRE === '1') {
+    log.warn('Upgrade tripwire bypassed via NANOCLAW_SKIP_UPGRADE_TRIPWIRE=1 (self-managed install)');
+    return;
+  }
+
   if (isUpgradeCurrent()) return;
 
   const code = getCodeVersion();
