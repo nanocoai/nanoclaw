@@ -71,6 +71,22 @@ systemctl is-active docker-tailscale-routing-patch.service 2>/dev/null
 
 If both are present, skip to Phase 3 (Verify).
 
+**Edge case — service active but rule missing:** Older installs of this fix used a `Type=oneshot` unit that only ran at boot, so it couldn't react when Tailscale flushed the rule mid-session (e.g. on exit-node reconnect). Check which version is installed:
+
+```bash
+systemctl cat docker-tailscale-routing-patch.service 2>/dev/null | grep "^Type="
+```
+
+If it shows `Type=oneshot`, this is the old non-self-healing version — proceed to Phase 2 and reinstall it as the watch-based version (the same install command upgrades it in place). If it already shows `Type=simple`, the watch loop should keep the rule in place automatically; if the rule is still missing, restart it and check logs:
+
+```bash
+sudo systemctl restart docker-tailscale-routing-patch.service
+journalctl -u docker-tailscale-routing-patch.service --no-pager -n 30
+ip rule show | grep 5269
+```
+
+Then skip to Phase 3 (Verify).
+
 ## Phase 2: Apply Fix
 
 ### Add the ip rule immediately
@@ -89,9 +105,9 @@ ip rule show | grep 5269
 
 Expected: `5269: from all to 172.16.0.0/12 lookup main`
 
-### Install the systemd service for persistence
+### Install the systemd service for persistence and self-healing
 
-The rule is lost on reboot without a service to restore it. Create the service file:
+A oneshot service that only runs at boot isn't enough: Tailscale can flush and rebuild its own ip rules at any time (exit-node switches, reconnects, sleep/wake), silently dropping rule 5269 while `systemctl is-active` keeps reporting `active`. Instead, install a long-running service that watches for ip rule changes via `ip monitor rule` and re-applies the fix the moment it's needed:
 
 ```bash
 sudo tee /etc/systemd/system/docker-tailscale-routing-patch.service > /dev/null << 'EOF'
@@ -101,17 +117,19 @@ After=network.target tailscaled.service docker.service
 Wants=tailscaled.service docker.service
 
 [Service]
-Type=oneshot
-ExecStart=/bin/sh -c '/sbin/ip rule show | grep -q "5269.*172.16.0.0/12" || /sbin/ip rule add to 172.16.0.0/12 lookup main priority 5269'
+Type=simple
+ExecStartPre=/bin/sh -c '/sbin/ip rule show | grep -q "5269.*172.16.0.0/12" || /sbin/ip rule add to 172.16.0.0/12 lookup main priority 5269'
+ExecStart=/bin/sh -c '/sbin/ip monitor rule | while read -r _line; do /sbin/ip rule show | grep -q "5269.*172.16.0.0/12" || /sbin/ip rule add to 172.16.0.0/12 lookup main priority 5269; done'
 ExecStop=/sbin/ip rule del to 172.16.0.0/12 lookup main priority 5269
-RemainAfterExit=yes
+Restart=always
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
 EOF
 ```
 
-Enable and start it:
+Enable and start it (idempotent — this also upgrades an existing oneshot install in place):
 
 ```bash
 sudo systemctl daemon-reload
@@ -124,7 +142,7 @@ Verify:
 systemctl is-active docker-tailscale-routing-patch.service
 ```
 
-Expected: `active`
+Expected: `active`. Unlike the old oneshot unit, this process stays running — `ip monitor rule` blocks waiting for the next rule-table change — so `is-active` now reflects live protection rather than "ran once at boot".
 
 ## Phase 3: Verify
 
@@ -156,6 +174,8 @@ The fix adds `5269: from all to 172.16.0.0/12 lookup main` — checked one step 
 
 Internet-bound traffic from containers (source-NATed to the host's Tailscale IP by Docker's MASQUERADE rule) is unaffected — its destination is never in `172.16.0.0/12`, so it continues to flow through Tailscale and out via Mullvad as intended.
 
+Because Tailscale can flush and rebuild its own ip rules at any time, a boot-time-only fix isn't sufficient. The installed service runs `ip monitor rule` as a long-lived process, which emits a line on stdout the instant any ip rule is added or removed system-wide. On each line it re-checks for rule 5269 and re-adds it if missing — reacting within the same second the conflict reappears, instead of requiring a manual restart or reboot.
+
 ## Troubleshooting
 
 ### Service fails to start
@@ -168,7 +188,14 @@ journalctl -u docker-tailscale-routing-patch.service --no-pager
 
 ### Rule disappears after Tailscale restarts
 
-Tailscale may flush and re-add its routing rules on reconnect. If this happens, the service ordering (`After=tailscaled.service`) should handle it — but if Tailscale restarts mid-session you may need to manually re-run:
+The service watches `ip monitor rule` and re-applies the fix automatically whenever any ip rule changes — including Tailscale flushing its own rules on reconnect or exit-node switch. If the rule still goes missing and stays missing:
+
+```bash
+systemctl is-active docker-tailscale-routing-patch.service
+journalctl -u docker-tailscale-routing-patch.service --no-pager -n 50
+```
+
+Confirm the unit is actually the watch-based version and not the old oneshot one (`systemctl cat docker-tailscale-routing-patch.service | grep Type=`) — reinstall via Phase 2 if it's stale. As a last resort, reapply manually:
 
 ```bash
 sudo ip rule add to 172.16.0.0/12 lookup main priority 5269
