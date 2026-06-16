@@ -14,6 +14,7 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
+import { enqueueFileOut } from './outbox.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -507,6 +508,8 @@ async function processQuery(
         } else {
           archivePrompts.shift();
         }
+      } else if (event.type === 'file') {
+        deliverHarnessFile(event.path, routing);
       }
     }
   } catch (err) {
@@ -554,6 +557,34 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
     case 'progress':
       log(`Progress: ${event.message}`);
       break;
+  }
+}
+
+/**
+ * Deliver a harness-generated file (e.g. a Codex-rendered image) to the
+ * batch's reply destination. The model never sends these itself — its native
+ * client already rendered them — so the loop delivers them via the same outbox
+ * path send_file uses. Best-effort: a missing reply destination or an
+ * unreadable file logs and is skipped rather than failing the whole turn.
+ */
+function deliverHarnessFile(filePath: string, routing: RoutingContext): void {
+  if (!routing.platformId || !routing.channelType) {
+    log(`Dropping harness file ${filePath}: batch has no reply destination`);
+    return;
+  }
+  try {
+    const { filename, seq } = enqueueFileOut({
+      srcPath: filePath,
+      routing: {
+        platform_id: routing.platformId,
+        channel_type: routing.channelType,
+        thread_id: routing.threadId,
+        in_reply_to: routing.inReplyTo,
+      },
+    });
+    log(`Delivered harness file #${seq} → ${routing.channelType}:${routing.platformId} (${filename})`);
+  } catch (err) {
+    log(`Failed to deliver harness file ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 

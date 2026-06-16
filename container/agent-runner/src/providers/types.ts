@@ -129,6 +129,13 @@ export type ProviderEvent =
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
   /**
+   * A file the harness produced that the model won't deliver itself (e.g.
+   * Codex's built-in image generation renders to its native client, so the
+   * model believes delivery already happened). The poll-loop delivers it to
+   * the batch's reply destination. `path` is absolute inside the container.
+   */
+  | { type: 'file'; path: string }
+  /**
    * Liveness signal. Providers MUST yield this on every underlying SDK
    * event (tool call, thinking, partial message, anything) so the
    * poll-loop's idle timer stays honest during long tool runs.
