@@ -296,10 +296,14 @@ async function syncWikiVectors(
  */
 export async function matchWikiEntries(
   text: string,
-  wikiIndexPath: string,
+  wikiIndexPath: string | string[],
   maxEntries: number = 3,
 ): Promise<WikiMatch[]> {
-  const entries = parseWikiIndex(wikiIndexPath);
+  // 支持多个 index 合并召回（team_wiki/index.md + team_wiki/private/index.md）
+  const indexPaths = Array.isArray(wikiIndexPath)
+    ? wikiIndexPath
+    : [wikiIndexPath];
+  const entries = indexPaths.flatMap((p) => parseWikiIndex(p));
   if (entries.length === 0) return [];
 
   const queryTokens = extractKeywords(text);
@@ -432,13 +436,17 @@ export async function buildMessageContext(
   const config = getMemoryConfig();
   if (!config.injectionEnabled) return null;
 
-  // Wiki 索引路径
-  const wikiDir = groupDir
-    ? path.join(groupDir, '..', 'global', 'wiki', 'index.md')
-    : path.join(GROUPS_DIR, 'global', 'wiki', 'index.md');
+  // Wiki 索引路径：团队库为主，叠加本地私有索引(private 被 .gitignore 隔离，不上传)
+  const teamWikiBase = groupDir
+    ? path.join(groupDir, '..', 'global', 'team_wiki')
+    : path.join(GROUPS_DIR, 'global', 'team_wiki');
+  const wikiIndexes = [
+    path.join(teamWikiBase, 'index.md'),
+    path.join(teamWikiBase, 'private', 'index.md'),
+  ];
 
   const [wikiMatches, facts] = await Promise.all([
-    matchWikiEntries(latestUserMessage, wikiDir, 3),
+    matchWikiEntries(latestUserMessage, wikiIndexes, 3),
     recallRelevantFacts(latestUserMessage, 5),
   ]);
 
@@ -540,18 +548,20 @@ export async function injectMemory(
   // Wiki index 关键词匹配（复用 matchWikiEntries）
   let wikiHints = '';
   if (latestUserMessage) {
-    const wikiIndexPath = path.join(
-      groupDir,
-      '..',
-      'global',
-      'wiki',
-      'index.md',
+    const teamWikiBase = path.join(groupDir, '..', 'global', 'team_wiki');
+    const wikiIndexPaths = [
+      path.join(teamWikiBase, 'index.md'),
+      path.join(teamWikiBase, 'private', 'index.md'),
+    ];
+    const matched = await matchWikiEntries(
+      latestUserMessage,
+      wikiIndexPaths,
+      5,
     );
-    const matched = await matchWikiEntries(latestUserMessage, wikiIndexPath, 5);
     if (matched.length > 0) {
       const lines = matched.map(
         (e) =>
-          `- [${e.title}](../../global/wiki/${e.path})${e.snippet ? ' — ' + e.snippet : ''}`,
+          `- [${e.title}](../../global/team_wiki/${e.path})${e.snippet ? ' — ' + e.snippet : ''}`,
       );
       wikiHints =
         '\nWiki 相关条目（需要时可用 Read 工具查看详情）：\n' +
