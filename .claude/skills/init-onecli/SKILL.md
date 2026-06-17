@@ -9,6 +9,10 @@ This skill installs OneCLI, configures the Agent Vault gateway, and migrates any
 
 **Principle:** When something is broken or missing, fix it. Don't tell the user to go fix it themselves unless it genuinely requires their manual action (e.g. pasting a token).
 
+## Service details
+
+OneCLI runs as a local HTTP service listening on **port `10254`** by default. Other steps in this skill assume that port is free — see the Troubleshooting note at the bottom of this file for what to do if the port is already in use.
+
 ## Phase 1: Pre-flight
 
 ### Check if OneCLI is already working
