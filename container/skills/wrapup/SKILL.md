@@ -59,11 +59,18 @@ description: 任务收尾工作流。回顾任务全过程，总结踩坑记录�
 从本次经验中可以提炼的通用知识或规则，值得写入 Wiki 供后续任务参考。
 ```
 
-### Step 4: 存入 Wiki
+### Step 4: 存入团队知识库（team_wiki）
 
-1. 使用 `/wiki` skill 的 ingest 流程将文档存入 Wiki
-2. 分类标签：`复盘`、`[项目名]`、`[技术领域]`
-3. 确保与已有 Wiki 条目建立交叉引用（比如引用了某个已有的技术方案页面）
+**写入目标是团队库 `../../global/team_wiki/`，不是个人库 `wiki/`。** 这一点关键：线上飞书对话的向量化召回（`src/memory/inject.ts`）只读 `team_wiki/index.md` + `team_wiki/private/index.md`，写进个人 `wiki/` 的内容召回不到。
+
+1. 使用 `/wiki` skill 的 ingest 流程将文档存入 **team_wiki**
+2. **判断进共享层还是 private**（规则见 `team_wiki/README.md`）：
+   - **Nine 相关、可团队公开** → `team_wiki/`（共享层，会推 GitHub `TierIITech/knowloage`）
+   - **非 Nine（NanoClaw 自身 / Wall-E / Claude Code 研究等）、草稿、涉敏（IP/账号/证书/内部群 ID）** → `team_wiki/private/`（被 `.gitignore` 隔离，不上传）
+   - ⚠️ 拿不准是否涉敏时，先进 private，宁可保守
+3. 分类标签：`复盘`、`[项目名]`、`[技术领域]`
+4. 遵循"**综合进已有页**"原则：新知识优先融进相关已有页并更新交叉引用（`[[page-name]]`），不要无脑新建孤立碎片文件
+5. 更新对应的 `index.md`（共享进 `team_wiki/index.md`，私有进 `team_wiki/private/index.md`，两本索引互不引用）
 
 ### Step 5: 归档 OpenSpec（如适用）
 

@@ -51,3 +51,6 @@ agents-sdk-docs
 .worktrees/
 .claude/worktrees/
 groups/global/team_wiki/
+
+# wiki 私有页（敏感信息/个人私货，不进团队共享）
+groups/global/wiki/private/
