@@ -31,12 +31,16 @@ kickoff 管"想清楚"，implement 管"动手做"，wrapup 管"收尾沉淀"。�
 1. **检查 OpenSpec**：当前项目是否有相关 OpenSpec change？
    - 有 → 读取 design.md 作为实现蓝图
    - 没有 → 从对话上下文提取实现需求，列出要做的事项清单
-2. **检查 worktree**：是否已在 worktree 中？
+2. **查团队知识库（按当前要改的模块）**：用"本次要改的模块 / 文件 / 技术点"当 query，召回 `../../global/team_wiki/index.md`（+ `private/index.md`），把命中的领域页读进来。
+   - **为什么单列**：kickoff 用「任务全貌」查的是背景页；implement 要的是「正在动的这块」的具体页——离线实测这种「按模块」query 召回命中率 **93%**，是三个阶段里最高的，跳了就是把最准的一次召回浪费掉。
+   - 没走 kickoff、直接 implement 触发的，这步**尤其不能跳**（否则全程没查过库）。
+   - 命中页里的踩坑/约定直接复用；标 **INVARIANT** 的不变量记下来，Step 3 审代码时要逐条对照。
+3. **检查 worktree**：是否已在 worktree 中？
    - 是 → 继续
    - 不是 → 用 `EnterWorktree` 开一个（分支名 `feat/<name>` 或 `fix/<name>`）
-3. **列出实现清单**：把要做的事拆成具体的文件级改动列表
-4. **确认验收标准**：什么状态算"做完了"
-5. **对齐任务账本**：用 `task_list`（按项目 + 标题）找 kickoff 阶段建的账本，记下 `task_id`，后续每步都带它。然后按当前状态处理：
+4. **列出实现清单**：把要做的事拆成具体的文件级改动列表
+5. **确认验收标准**：什么状态算"做完了"
+6. **对齐任务账本**：用 `task_list`（按项目 + 标题）找 kickoff 阶段建的账本，记下 `task_id`，后续每步都带它。然后按当前状态处理：
    - 已是 `implementing` → 直接继续
    - 还在 `tests_planned`（kickoff 走完但没进实现）→ 调 `task_start_implementation` 推进到 `implementing`
    - **没有账本**（implement 单独触发、没走 kickoff）→ 闸门要求必须先把效果/E2E/测试都锁了才能进实现，依次补：`task_create` → `task_lock_effect` → `task_define_e2e` → `task_plan_tests` → `task_start_implementation`。别跳，跳了 `start_implementation` 会被拒。
@@ -123,6 +127,20 @@ kickoff 管"想清楚"，implement 管"动手做"，wrapup 管"收尾沉淀"。�
 ## Step 3: 审代码（双轨）
 
 代码审查分两轮，先 Codex 机审，再人工子 agent 审。两轮都做，互补盲区。
+
+### 3.0 审前准备：按 diff 召回领域 KB（别裸审）
+
+机审/人审之前，先用**本次 diff 涉及的文件/模块**当 query 查一次团队知识库——这是**分阶段召回的第三阶段（review 阶段）**。
+
+为什么这步不能省：implement 期读进上下文的全文，到 review 时多半已被**上下文压缩**吃掉，必须重新召回。离线实测：用 diff 的改动范围当 query，命中率 **80%**（query 跟 kickoff/implement 阶段都不同，召回的页基本不重叠，重读不是浪费）。
+
+怎么做：
+1. 用「本次改了哪些文件 / 哪个模块 / 涉及什么契约」当 query 召回团队知识库
+2. 重点捞标 **INVARIANT** 的不变量页、契约页（和 Step 0 记下的那批对照，看 review 阶段有没有新召回的）
+3. 把召回到的不变量/契约**逐条对着 diff 过一遍**：这次改动有没有破约？
+4. 召回到的关键约束，**塞进下面 3a Codex / 3b 子 agent 的 prompt**，让机审和人审都带着领域知识审，而不是裸审 diff
+
+方法论参考团队知识库的 `review-time-kb-autoload-pattern`（按改动范围自动挂 KB + 改动类型↔KB 文件的双向触发表 + INVARIANT 对照）。
 
 ### 3a. Codex Review（自动化机审）
 
