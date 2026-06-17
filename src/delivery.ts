@@ -159,6 +159,27 @@ export async function deliverSessionMessages(session: Session): Promise<void> {
 
   try {
     await drainSession(session);
+  } catch (err) {
+    // Isolate per-session delivery failures. The active/sweep poll loops call
+    // this for every session in a plain for-loop; an unhandled throw here
+    // aborts the entire tick, so a single unhealthy session silently stalls
+    // delivery for every other agent until the daemon restarts.
+    //
+    // The known trigger: a crashed container can leave an orphaned hot journal
+    // (outbound.db-journal) next to its outbound.db. drainSession opens that DB
+    // read-only (single-writer invariant), but even a read SELECT must roll the
+    // journal back — a write — which fails with "attempt to write a readonly
+    // database". That throw then poisons delivery for all sessions ordered
+    // after the broken one in the loop.
+    //
+    // Containment: log and move on. The broken session self-heals on its next
+    // container start (the writer opens the DB read-write and rolls the journal
+    // back), instead of taking the whole install down with it.
+    log.error('Session delivery failed, skipping until next tick', {
+      sessionId: session.id,
+      agentGroupId: session.agent_group_id,
+      err,
+    });
   } finally {
     inflightDeliveries.delete(session.id);
   }
