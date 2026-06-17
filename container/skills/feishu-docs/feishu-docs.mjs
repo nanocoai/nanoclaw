@@ -315,8 +315,25 @@ async function createDoc(title, content) {
     : runLarkCli(args);
 
   const doc = result?.data?.document || {};
+  const documentId = doc.document_id || '';
+
+  // lark-cli v2 用 markdown --content 创建时会忽略 --title（文档标题取正文首个 H1，
+  // 正文无 H1 时标题就变成 Untitled）。这里显式 PATCH 根 page block 把标题强制写回。
+  // 写失败直接报错退出，不静默吞——标题是创建的一部分，设不上就是失败。
+  if (documentId && title) {
+    const titleResp = await api(
+      'PATCH',
+      `/docx/v1/documents/${documentId}/blocks/${documentId}?document_revision_id=-1`,
+      { update_text_elements: { elements: [{ text_run: { content: title } }] } },
+    );
+    if (titleResp.code !== 0) {
+      console.error('文档已创建但标题写入失败:', titleResp.msg || JSON.stringify(titleResp));
+      process.exit(1);
+    }
+  }
+
   console.log(JSON.stringify({
-    document_id: doc.document_id || '',
+    document_id: documentId,
     url: larkDocUrl(doc),
     message: content ? '文档已通过官方 lark-cli 创建并写入内容' : '文档已通过官方 lark-cli 创建（空文档）',
     backend: 'lark-cli',
