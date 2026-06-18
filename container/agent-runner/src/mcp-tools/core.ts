@@ -38,6 +38,12 @@ function destinationList(): string {
   return all.map((d) => d.name).join(', ');
 }
 
+const SEND_FILE_ROOT = '/workspace/agent';
+
+function isWithinSendFileRoot(sourcePath: string): boolean {
+  return sourcePath === SEND_FILE_ROOT || sourcePath.startsWith(`${SEND_FILE_ROOT}/`);
+}
+
 /**
  * Resolve a destination name to routing fields.
  *
@@ -139,7 +145,7 @@ export const sendFile: McpToolDefinition = {
       type: 'object' as const,
       properties: {
         to: { type: 'string', description: 'Destination name. Optional if you have only one destination.' },
-        path: { type: 'string', description: 'File path (relative to /workspace/agent/ or absolute)' },
+        path: { type: 'string', description: 'File path (relative to /workspace/agent/ or absolute within /workspace/agent/)' },
         text: { type: 'string', description: 'Optional accompanying message' },
         filename: { type: 'string', description: 'Display name (default: basename of path)' },
       },
@@ -153,7 +159,7 @@ export const sendFile: McpToolDefinition = {
     const routing = resolveRouting(args.to as string | undefined);
     if ('error' in routing) return err(routing.error);
 
-    const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve('/workspace/agent', filePath);
+    const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(SEND_FILE_ROOT, filePath);
     if (!fs.existsSync(resolvedPath)) return err(`File not found: ${filePath}`);
 
     let sourcePath: string;
@@ -162,8 +168,8 @@ export const sendFile: McpToolDefinition = {
     } catch {
       return err(`File not found: ${filePath}`);
     }
-    if (sourcePath !== '/workspace' && !sourcePath.startsWith('/workspace/')) {
-      return err('path must be within /workspace');
+    if (!isWithinSendFileRoot(sourcePath)) {
+      return err('path must be within /workspace/agent');
     }
 
     const id = generateId();
