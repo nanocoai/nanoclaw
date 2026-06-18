@@ -69,6 +69,14 @@ export interface PollLoopConfig {
    * polling forever and stealing messages from the next test's DB.
    */
   signal?: AbortSignal;
+  /**
+   * Optional bot name / agent-group id, forwarded from index.ts. Upstream's loop
+   * ignores them; an install-overlay poll-loop uses them to tag outbound rows
+   * (e.g. sender_name / source-id prefix on cross-group sends). Optional so the
+   * pristine call site type-checks and stays inert.
+   */
+  assistantName?: string;
+  agentGroupId?: string;
 }
 
 /**

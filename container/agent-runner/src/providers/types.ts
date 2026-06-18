@@ -157,4 +157,11 @@ export type ProviderEvent =
    * event (tool call, thinking, partial message, anything) so the
    * poll-loop's idle timer stays honest during long tool runs.
    */
-  | { type: 'activity' };
+  | { type: 'activity' }
+  /**
+   * The provider's underlying SDK auto-compacted the conversation context. A
+   * consumer (e.g. an install-overlay's memory capture) may react by persisting
+   * a session summary and/or re-injecting context. Providers without on-disk
+   * compaction never emit it. Optional capability, additive to the union.
+   */
+  | { type: 'compacted'; text: string };

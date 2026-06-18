@@ -164,3 +164,21 @@ export function findQuestionResponse(questionId: string): MessageInRow | undefin
   }
 }
 
+/**
+ * Un-mark messages so a later poll iteration re-fetches them (e.g. an overlay
+ * deferring a system row to a later turn boundary). Deletes their processing_ack
+ * rows entirely: markProcessing ran for the whole batch at wake, and
+ * getPendingMessages filters out ANY acked id (processing OR completed), so
+ * leaving them 'processing' would orphan them until the next container restart.
+ * markCompleted would instead consume them — wrong, the deferred task still needs
+ * to run. A plain DELETE puts them back to genuinely-pending for the next poll.
+ */
+export function deferProcessing(ids: string[]): void {
+  if (ids.length === 0) return;
+  const db = getOutboundDb();
+  const stmt = db.prepare('DELETE FROM processing_ack WHERE message_id = ?');
+  db.transaction(() => {
+    for (const id of ids) stmt.run(id);
+  })();
+}
+

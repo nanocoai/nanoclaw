@@ -111,6 +111,10 @@ async function main(): Promise<void> {
     providerName,
     cwd: CWD,
     systemContext: { instructions },
+    // Forwarded for install-overlays whose poll-loop tags outbound rows with the
+    // bot name / agent-group prefix. Upstream's poll-loop ignores them (optional).
+    assistantName: config.assistantName,
+    agentGroupId: config.agentGroupId,
   });
 }
 
