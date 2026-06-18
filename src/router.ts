@@ -145,7 +145,9 @@ export function setChannelRequestGate(fn: ChannelRequestGateFn): void {
 
 function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string } {
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    return { text: raw };
   } catch {
     return { text: raw };
   }
