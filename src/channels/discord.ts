@@ -33,6 +33,11 @@ registerChannelAdapter('discord', {
       botToken: env.DISCORD_BOT_TOKEN,
       extractReplyContext,
       supportsThreads: true,
+      // Discord hard-caps a message at 2000 chars. Without a limit set here,
+      // @chat-adapter/discord silently truncates longer replies with an
+      // ellipsis. Setting maxTextLength engages the bridge's splitForLimit,
+      // which chunks long replies across multiple messages instead.
+      maxTextLength: 2000,
     });
   },
 });
