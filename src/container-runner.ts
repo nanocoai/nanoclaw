@@ -16,13 +16,22 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
+  ONECLI_GATEWAY_REWRITE,
+  ONECLI_REMOTE_HOST,
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
 import { materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
-import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import {
+  CONTAINER_RUNTIME_BIN,
+  getHostGateway,
+  IS_APPLE_CONTAINER,
+  hostGatewayArgs,
+  readonlyMountArgs,
+  stopContainer,
+} from './container-runtime.js';
 import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from './egress-lockdown.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
@@ -488,6 +497,54 @@ async function buildContainerArgs(
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
   log.info('OneCLI gateway applied', { containerName });
+
+  // OneCLI bakes a proxy host into the injected env (HTTPS_PROXY etc.) — by
+  // default the literal "host.docker.internal", which assumes the agent runs in
+  // Docker Desktop alongside the gateway. That assumption breaks for a remote
+  // gateway (wrong host) and for Apple Container (no host.docker.internal in the
+  // VM at all). Retarget it, value-driven, on -e arg VALUES only (-v mount paths
+  // are /tmp/onecli-*.pem, never touched). Runs AFTER applyContainerConfig.
+  //
+  // Precedence for the rewrite target:
+  //   1. ONECLI_GATEWAY_REWRITE  — explicit "from=to" override (e.g. Tailscale IP)
+  //   2. ONECLI_REMOTE_HOST      — remote gateway: host.docker.internal -> its host
+  //   3. Apple Container + local — host.docker.internal -> bridge gateway (forwarder)
+  let rwFrom = '';
+  let rwTo = '';
+  if (ONECLI_GATEWAY_REWRITE) {
+    const eq = ONECLI_GATEWAY_REWRITE.indexOf('='); // format validated in config.ts
+    rwFrom = ONECLI_GATEWAY_REWRITE.slice(0, eq);
+    rwTo = ONECLI_GATEWAY_REWRITE.slice(eq + 1);
+  } else if (ONECLI_REMOTE_HOST) {
+    rwFrom = 'host.docker.internal';
+    rwTo = ONECLI_REMOTE_HOST;
+  } else if (IS_APPLE_CONTAINER) {
+    rwFrom = 'host.docker.internal';
+    rwTo = getHostGateway(); // lazy — bridge is up by spawn time
+  }
+  if (rwFrom && rwTo) {
+    let n = 0;
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '-e' && args[i + 1].includes(rwFrom)) {
+        args[i + 1] = args[i + 1].split(rwFrom).join(rwTo);
+        n++;
+      }
+    }
+    log.info('Rewrote OneCLI gateway host in injected env', { from: rwFrom, to: rwTo, count: n, containerName });
+  }
+  // Apple Container cannot resolve host.docker.internal at all — fail loud and
+  // refuse to spawn if any survived (e.g. a future OneCLI changed its injected env
+  // schema), rather than launch a container that hangs on an unreachable proxy
+  // host. Matches the fail-fast posture of the OneCLI-not-applied guard above.
+  if (IS_APPLE_CONTAINER) {
+    const stillLiteral = args.some((a, i) => i > 0 && args[i - 1] === '-e' && a.includes('host.docker.internal'));
+    if (stillLiteral) {
+      throw new Error(
+        `Apple Container: host.docker.internal still present in injected -e args after rewrite ` +
+          `(containerName=${containerName}) — refusing to spawn a container that cannot reach the OneCLI gateway`,
+      );
+    }
+  }
 
   // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
   args.push('--entrypoint', 'bash');
