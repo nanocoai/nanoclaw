@@ -7,6 +7,15 @@ export interface AgentProvider {
   readonly supportsNativeSlashCommands: boolean;
 
   /**
+   * Optional capability flag. True if the provider HONORS `query({ confinedExternal:
+   * true })` by dropping every built-in fs/bash tool and exposing only the nanoclaw
+   * MCP server. Absent ⇒ treated as false: a caller requesting a confined turn from a
+   * provider without this support must fail closed (skip), never run it unconfined.
+   * Providers OPT IN.
+   */
+  readonly supportsConfinedExternal?: boolean;
+
+  /**
    * Optional. When true, the runner scaffolds a persistent `memory/` tree in the
    * agent's workspace at boot. Providers with their own native memory (e.g.
    * Claude's `CLAUDE.local.md`) omit this and get nothing — memory is opt-in per
@@ -101,6 +110,15 @@ export interface QueryInput {
   systemContext?: {
     instructions?: string;
   };
+
+  /**
+   * Optional. Run this query in CONFINED mode: the provider must drop ALL built-in
+   * fs/bash tools, exposing only the nanoclaw MCP server. Pair with a neutral `cwd`
+   * and a minimal `systemContext`. A provider that does not implement a confined mode
+   * (see `AgentProvider.supportsConfinedExternal`) MUST treat the turn as unsupported
+   * rather than run it unconfined.
+   */
+  confinedExternal?: boolean;
 }
 
 export interface McpServerConfig {
