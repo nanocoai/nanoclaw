@@ -27,6 +27,7 @@ export class SocketTransport implements Transport {
     return new Promise((resolve, reject) => {
       const client = net.createConnection(this.socketPath);
       let buffer = '';
+      let responseBytes = 0;
       let settled = false;
 
       const timer = setTimeout(() => {
@@ -51,11 +52,12 @@ export class SocketTransport implements Transport {
       });
 
       client.on('data', (chunk) => {
-        buffer += chunk.toString('utf8');
-        if (buffer.length > MAX_RESPONSE_BYTES) {
+        responseBytes += chunk.byteLength;
+        if (responseBytes > MAX_RESPONSE_BYTES) {
           settle('reject', new Error('host response exceeded maximum size'));
           return;
         }
+        buffer += chunk.toString('utf8');
         const idx = buffer.indexOf('\n');
         if (idx < 0) return;
         const line = buffer.slice(0, idx);
