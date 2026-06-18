@@ -35,6 +35,7 @@ import {
 import { buildSendMessageToolEnv } from './mcp-tool-policy.js';
 import { readGroupModelSettings } from './model-settings.js';
 import { resolveQueryCwdForSession } from './session-cwd.js';
+import { isFinalizingOnly } from './finalizing-tools.js';
 
 interface ContainerInput {
   prompt: string;
@@ -876,7 +877,13 @@ async function runQuery(
   //
   // ⚠️ 不要回退成 500ms 时间窗口去重（旧实现）：SDK 事件循环偶尔延迟 > 500ms 时会让中间 text
   //   先 emit progress 再 emit 最终 result，导致重复（Codex review 提出的 race condition）。
-  let pendingThought: { text: string; short: string; detail: string | undefined; timer: ReturnType<typeof setTimeout> } | null = null;
+  // isFinalCandidate：该段缓存文本后面只跟随了收尾型工具（如 TodoWrite），
+  //   被判定为「候选最终回复」——保留缓存、不降级 💬，等 result（为空时发）或
+  //   finally（中断兜底）把它作为正式回复发出。
+  let pendingThought: { text: string; short: string; detail: string | undefined; timer: ReturnType<typeof setTimeout>; isFinalCandidate?: boolean } | null = null;
+  // 跟随在「当前缓存的 pendingThought 文本」之后出现的 tool_use 工具名，按出现顺序累积。
+  // 每次缓存一段新文本时清空；tool_result 到达时喂给 isFinalizingOnly 判定是否升格。
+  let followupToolsSinceText: string[] = [];
   const flushPendingThought = () => {
     if (pendingThought) {
       log(`[text-block] flush → emit 💬 progress (len=${pendingThought.text.length}, short="${pendingThought.short}")`);
@@ -1164,6 +1171,9 @@ async function runQuery(
         for (const block of content) {
           // 工具调用 — 提取工具名、输入摘要、详情
           if (block.type === 'tool_use' && block.name) {
+            // 累积「当前缓存文本之后出现的工具名」，供 tool_result 到达时判定是否
+            // 只跟随收尾型工具（见下方 user/tool_result 分流）。
+            followupToolsSinceText.push(block.name);
             const input = block.input as Record<string, unknown> | null;
             const emoji = block.name === 'Bash' ? '🔧' :
                           block.name === 'Read' ? '📖' :
@@ -1212,6 +1222,8 @@ async function runQuery(
             if (stripped.length > 5) {
               // 先 flush 之前缓存的（如果有的话）— 同一个 message 可能有多段 text
               flushPendingThought();
+              // 新缓存一段文本 → 重置「跟随工具」累积，重新开始判定
+              followupToolsSinceText = [];
               // 用剥掉 internal 标签后的可见文本做缓存
               const short = stripped.slice(0, 80) + (stripped.length > 80 ? '...' : '');
               log(`[text-block] cached pending (will flush on tool_result, drop on result, or 30s fallback): "${short}"`);
@@ -1233,13 +1245,20 @@ async function runQuery(
 
     // 工具执行结果 — 从 user 消息的 content 中提取 tool_result
     if (message.type === 'user') {
-      // 关键去重：tool_result message 到达 → 前面 pending 的 text 必然是中间叙述（不是最终回复），
-      // 主动 flush 比等 500ms timer 更稳健。否则 result message 若延迟到达 > 500ms 会和 text
-      // 双发（Codex review 指出的 race）。timer 仍保留作为 fallback（中断/error 不会泄漏）。
+      // tool_result message 到达 → 判定前面 pending 的 text 是中间叙述还是候选最终回复：
+      //   · 跟随的工具全是收尾型（白名单，如 TodoWrite）→ 标记为候选最终回复，保留缓存、
+      //     不降级 💬、清掉 timer，等 result/finally 作为正式回复发出。
+      //   · 含任何实质工具（Read/Bash/Edit/Grep…）→ 维持现状，主动 flush 成 💬 中间叙述
+      //     （比等 30s timer 更稳健，避免 result 延迟 > 时间窗与 text 双发的 race）。
       if (pendingThought) {
-        log('[text-block] tool_result arrived → flush pending text (it is interim narration, not final)');
         clearTimeout(pendingThought.timer);
-        flushPendingThought();
+        if (isFinalizingOnly(followupToolsSinceText)) {
+          pendingThought.isFinalCandidate = true;
+          log(`[text-block] tool_result arrived, only finalizing tools followed (${followupToolsSinceText.join(',')}) → mark as final candidate (hold, no 💬)`);
+        } else {
+          log(`[text-block] tool_result arrived (followed by real tools: ${followupToolsSinceText.join(',') || 'none'}) → flush pending text as interim narration`);
+          flushPendingThought();
+        }
       }
       const userMsg = message as { message?: { content?: unknown[] } };
       const content = userMsg.message?.content;
@@ -1309,19 +1328,25 @@ async function runQuery(
       const textResult =
         'result' in message ? (message as { result?: string }).result : null;
 
-      // 💬 去重：result message 必然包含 SDK 这一轮的最终 assistant 文本（textResult 即正式回复）
-      // pendingThought 缓存的"最后一段 text block"会通过正式回复路径发送，drop 避免重复
-      // 与 interactive 模式 stop_reason='end_turn' 的 drop 语义对齐
-      // 例外：textResult 为空（错误/截断），flush pendingThought 让用户至少看到中间叙述
+      // result 到达时对 pendingThought 的处理（「发候选」与「发 result」同轮互斥）：
+      //   · textResult 非空 → result 本身就是更完整的最终回复，总是发 result、丢弃 pending
+      //     （含候选），与 interactive 模式 stop_reason='end_turn' 的 drop 语义对齐。
+      //   · textResult 为空 + 候选最终回复 → 用候选文本作为正式回复（下方 writeOutput 取
+      //     promotedFinalText），修复「结论被收尾工具吞掉、result 为空」的核心 bug。
+      //   · textResult 为空 + 普通中间叙述 → flush 成 💬 让用户至少看到。
+      let promotedFinalText: string | null = null;
       if (pendingThought) {
         const hasFinalText = !!textResult && textResult.trim().length > 0;
+        clearTimeout(pendingThought.timer);
         if (hasFinalText) {
-          log('[text-block] result arrived → drop pending (included in final result)');
-          clearTimeout(pendingThought.timer);
+          log('[text-block] result arrived with text → drop pending (result is the final reply)');
+          pendingThought = null;
+        } else if (pendingThought.isFinalCandidate) {
+          log('[text-block] result empty + final candidate → promote candidate text to formal reply');
+          promotedFinalText = pendingThought.text;
           pendingThought = null;
         } else {
           log('[text-block] result is empty/null → flush pending so user sees interim narration');
-          clearTimeout(pendingThought.timer);
           flushPendingThought();
         }
       }
@@ -1371,7 +1396,7 @@ async function runQuery(
       );
       writeOutput({
         status: 'success',
-        result: textResult || null,
+        result: textResult || promotedFinalText || null,
         newSessionId,
         usage,
       });
@@ -1382,10 +1407,24 @@ async function runQuery(
     // 都要清掉 pendingThought 的 timer，否则 30s 后 fallback timer 可能在
     // runQuery 已退出（下一轮 query 可能已开始）的情况下触发 writeOutput，
     // 把上一轮的 💬 串到下一个会话。
+    //
+    // 中断兜底（决策4）：若此时缓存的是「候选最终回复」（后面只跟收尾工具，
+    // 且 result 未到达就被 abort/异常打断），补发为正式回复而非丢弃——否则
+    // agent 的结论彻底沉默。finally 同步执行、在 runQuery return 前跑完，不跨轮，
+    // 先 clearTimeout 即可，无需会话标识。普通中间叙述仍按旧行为丢弃。
     ipcPolling = false;
     if (pendingThought) {
-      log('[text-block] runQuery exiting → clear pending timer (avoid cross-session leak)');
       clearTimeout(pendingThought.timer);
+      if (pendingThought.isFinalCandidate) {
+        log('[text-block] runQuery exiting with final candidate → emit as formal reply (interruption fallback)');
+        writeOutput({
+          status: 'success',
+          result: pendingThought.text,
+          newSessionId: undefined,
+        });
+      } else {
+        log('[text-block] runQuery exiting → clear pending timer (avoid cross-session leak)');
+      }
       pendingThought = null;
     }
   }
