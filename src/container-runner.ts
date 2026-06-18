@@ -140,7 +140,16 @@ async function spawnContainer(session: Session): Promise<void> {
   // buildMounts and buildContainerArgs so side effects (mkdir, etc.) fire once.
   const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
-  const mounts = buildMounts(agentGroup, session, containerConfig, provider, contribution);
+  // Install-overlay container contributions (extra mounts + env). Empty on pristine core.
+  // Reserved-path / reserved-env guards are enforced inside collectContainerContributions.
+  const contributorContribution = collectContainerContributions({
+    sessionDir: sessionDir(agentGroup.id, session.id),
+    dataDir: DATA_DIR,
+    agentGroupFolder: agentGroup.folder,
+    agentGroupId: agentGroup.id,
+    hostEnv: process.env,
+  });
+  const mounts = buildMounts(agentGroup, session, containerConfig, provider, contribution, contributorContribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
@@ -152,6 +161,7 @@ async function spawnContainer(session: Session): Promise<void> {
     containerConfig,
     provider,
     contribution,
+    contributorContribution,
     agentIdentifier,
   );
 
@@ -267,6 +277,7 @@ export function buildMounts(
   containerConfig: import('./container-config.js').ContainerConfig,
   provider: string,
   providerContribution: ProviderContainerContribution,
+  contributorContribution: ContainerContribution,
 ): VolumeMount[] {
   const projectRoot = process.cwd();
 
@@ -358,6 +369,11 @@ export function buildMounts(
     mounts.push(...providerContribution.mounts);
   }
 
+  // Install-overlay contributed mounts (reserved-path guards enforced in the registry).
+  if (contributorContribution.mounts) {
+    mounts.push(...contributorContribution.mounts);
+  }
+
   return mounts;
 }
 
@@ -423,6 +439,8 @@ function selectedSkillNames(containerConfig: import('./container-config.js').Con
     : [];
 }
 
+import { collectContainerContributions, type ContainerContribution } from './container-contributor-registry.js';
+
 async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
@@ -430,6 +448,7 @@ async function buildContainerArgs(
   containerConfig: import('./container-config.js').ContainerConfig,
   _provider: string,
   providerContribution: ProviderContainerContribution,
+  contributorContribution: ContainerContribution,
   agentIdentifier?: string,
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
@@ -437,6 +456,12 @@ async function buildContainerArgs(
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Install-overlay contributed env, applied FIRST so provider + host-critical env below
+  // always override (reserved keys already dropped in collectContainerContributions).
+  for (const [key, value] of Object.entries(contributorContribution.env ?? {})) {
+    args.push('-e', `${key}=${value}`);
+  }
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {

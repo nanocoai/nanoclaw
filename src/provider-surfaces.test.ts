@@ -153,7 +153,7 @@ describe('buildMounts agent surfaces', () => {
     ensureContainerConfig(ag.id);
     initGroupFilesystem(ag, {});
 
-    const mounts = buildMounts(ag, session('s1', ag.id), containerConfig(), 'claude', {});
+    const mounts = buildMounts(ag, session('s1', ag.id), containerConfig(), 'claude', {}, {});
 
     const byContainerPath = new Map(mounts.map((m) => [m.containerPath, m]));
     expect(byContainerPath.has('/home/node/.claude')).toBe(true);
@@ -178,7 +178,7 @@ describe('buildMounts agent surfaces', () => {
         },
       ],
     };
-    const mounts = buildMounts(ag, session('s2', ag.id), containerConfig(), 'surfaces-test-provider', contributed);
+    const mounts = buildMounts(ag, session('s2', ag.id), containerConfig(), 'surfaces-test-provider', contributed, {});
 
     const containerPaths = mounts.map((m) => m.containerPath);
     expect(containerPaths).not.toContain('/home/node/.claude');
