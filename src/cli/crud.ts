@@ -69,6 +69,8 @@ export interface ResourceDef {
   };
   /** Non-standard verbs (grant, revoke, add, remove, restart, etc.). */
   customOperations?: Record<string, CustomOperation>;
+  /** Optional pre-insert validation for generic create. Throw to reject. */
+  validateCreate?: (values: Record<string, unknown>) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +154,8 @@ function genericCreate(def: ResourceDef) {
         values[col.name] = col.default;
       }
     }
+
+    def.validateCreate?.(values);
 
     const colNames = Object.keys(values);
     const placeholders = colNames.map((c) => `@${c}`);
