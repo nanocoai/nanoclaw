@@ -95,9 +95,12 @@ export class MemoryStore {
     });
 
     // 4. 分数阈值过滤：无相关记忆时（话题无关）不再硬塞 topK 条噪声进 prompt。
-    // 实测分布：强命中 0.46~0.83 / 弱相关 0.2~0.35 / 纯噪声 0.07~0.11，
-    // 0.3 既滤掉噪声又保住命中。可用 MEMORY_RECALL_THRESHOLD 覆盖。
-    const threshold = Number(process.env.MEMORY_RECALL_THRESHOLD ?? 0.3);
+    // 实测分布（5899 facts × 20 条真实消息）：
+    //   0.30: 日常消息平均召回 1.7 条噪音，精确率 64%
+    //   0.42: 技术消息保持 4.6/5，日常噪音降至 0.3 条，精确率 73%
+    //   0.45: 技术消息降至 4.1/5，开始丢有效结果
+    // 甜区 0.42：过滤"收到/好的/看下这个"等日常噪音，保住技术召回。
+    const threshold = Number(process.env.MEMORY_RECALL_THRESHOLD ?? 0.42);
     const filtered = merged.filter((m) => (m.score ?? 0) >= threshold);
 
     return filtered.slice(0, topK);
