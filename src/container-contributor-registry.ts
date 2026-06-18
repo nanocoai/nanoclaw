@@ -36,6 +36,8 @@
  * (non-reserved) containerPath or env key, the LATER one wins and a warning is
  * logged — overlays should not collide, so a collision is a packaging bug.
  */
+import path from 'path';
+
 import { log } from './log.js';
 import type { VolumeMount } from './providers/provider-container-registry.js';
 
@@ -93,23 +95,28 @@ export function collectContainerContributions(ctx: ContainerContributorContext):
 
   for (const { name, fn } of contributors) {
     const contribution = fn(ctx);
-    for (const mount of contribution.mounts ?? []) {
-      if (RESERVED_CONTAINER_PATHS.has(mount.containerPath)) {
+    for (const rawMount of contribution.mounts ?? []) {
+      // Normalize before the reserved / dedup checks so variants like "/workspace/",
+      // "/workspace/.", or doubled separators can't slip past the reserved guard or
+      // double-mount over an earlier contributor. Mount the canonical path.
+      const containerPath = path.posix.normalize(rawMount.containerPath);
+      const mount: VolumeMount = { ...rawMount, containerPath };
+      if (RESERVED_CONTAINER_PATHS.has(containerPath)) {
         log.warn('Container contributor mount dropped: reserved containerPath', {
           contributor: name,
-          containerPath: mount.containerPath,
+          containerPath,
         });
         continue;
       }
-      if (seenPaths.has(mount.containerPath)) {
+      if (seenPaths.has(containerPath)) {
         log.warn('Container contributor mount overrides an earlier contributor', {
           contributor: name,
-          containerPath: mount.containerPath,
+          containerPath,
         });
-        const idx = mounts.findIndex((m) => m.containerPath === mount.containerPath);
+        const idx = mounts.findIndex((m) => m.containerPath === containerPath);
         if (idx >= 0) mounts.splice(idx, 1);
       }
-      seenPaths.add(mount.containerPath);
+      seenPaths.add(containerPath);
       mounts.push(mount);
     }
     for (const [key, value] of Object.entries(contribution.env ?? {})) {

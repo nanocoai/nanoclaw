@@ -134,7 +134,14 @@ export function runEmitFilename(tool: string, requested: string | undefined, sou
 
 /** Post-write side effect (e.g. same-conv dedup mark). */
 export function runEmitPostHook(tool: string, routing: EmitRouting): void {
-  emitHooks.get(tool)?.postEmit?.(routing);
+  // BEST-EFFORT: the post-hook runs AFTER the outbound row is written. A throw here must NOT
+  // propagate — it would fail the already-completed tool call and invite a retry that
+  // double-sends. (The PRE / source / external-target / filename hooks stay fail-closed.)
+  try {
+    emitHooks.get(tool)?.postEmit?.(routing);
+  } catch (err) {
+    console.error(`emit post-hook threw for ${tool} (ignored, best-effort):`, err);
+  }
 }
 
 /** edit_message/add_reaction external-conversation guard (SEC#11). null ⇒ proceed. */

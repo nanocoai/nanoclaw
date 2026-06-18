@@ -77,9 +77,8 @@ async function main(): Promise<void> {
   v1Db.close();
 
   if (v1Groups.length === 0) {
-    // Non-zero so run_step routes to the skipped branch, not silent "success".
     console.log('SKIPPED:no registered groups in v1');
-    process.exit(1);
+    process.exit(0);
   }
 
   // Init v2 DB

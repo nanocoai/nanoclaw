@@ -243,10 +243,12 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   //     escalate to owner for channel-registration approval.
   if (agentCount === 0) {
     // Unrouted-DM resolver hook: a DM on a no-wirings messaging group gets first refusal BEFORE
-    // the `!isMention` drop (WhatsApp DMs don't reliably set isMention). DMs only (is_group === 0):
-    // a group with no wirings is never an external-DM reply. A resolver throw must not crash the
-    // inbound pipeline — log and fall through to the existing drop (itself the fail-closed outcome).
-    if (mg.is_group === 0 && unroutedDmResolver) {
+    // the `!isMention` drop (WhatsApp DMs don't reliably set isMention). DMs only (is_group === 0)
+    // and NOT a group the owner already denied (`!mg.denied_at`) — a denied DM must stay dropped,
+    // never routed by a registrant. A resolver throw must not crash the inbound pipeline — log and
+    // fall through to the existing drop (itself the fail-closed outcome). The `denied_at` / `!isMention`
+    // drops below keep upstream order, so pristine core (no resolver) is unchanged.
+    if (mg.is_group === 0 && !mg.denied_at && unroutedDmResolver) {
       let consumed = false;
       try {
         consumed = await unroutedDmResolver(mg, event);
