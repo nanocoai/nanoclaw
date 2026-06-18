@@ -143,6 +143,29 @@ export function setChannelRequestGate(fn: ChannelRequestGateFn): void {
   channelRequestGate = fn;
 }
 
+/**
+ * Unrouted-DM resolver hook. Runs for a DM (`is_group === 0`) on a messaging
+ * group that has NO wirings, BEFORE the `!isMention` drop — some platforms
+ * (WhatsApp) don't reliably set `isMention` on DMs, and a never-contacted
+ * external's reply is addressed at the bot without a platform mention. A
+ * registered resolver authenticates the sender and, if matched, routes the reply
+ * into an existing session (returning true = consumed). Returning false falls
+ * through to the existing drop/escalation path. Orthogonal to `channelRequestGate`
+ * (escalate-unknown-channel) and `messageInterceptor` (permissions single slot):
+ * separate concern, separate owner. No resolver registered on pristine core ⇒
+ * the DM no-wirings path is unchanged.
+ */
+export type UnroutedDmResolverFn = (mg: MessagingGroup, event: InboundEvent) => Promise<boolean>;
+
+let unroutedDmResolver: UnroutedDmResolverFn | null = null;
+
+export function setUnroutedDmResolver(fn: UnroutedDmResolverFn): void {
+  if (unroutedDmResolver) {
+    log.warn('Unrouted-DM resolver overwritten');
+  }
+  unroutedDmResolver = fn;
+}
+
 function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string } {
   try {
     return JSON.parse(raw);
@@ -219,6 +242,19 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // 1b. No wirings — either silent drop (plain chatter / denied channel) or
   //     escalate to owner for channel-registration approval.
   if (agentCount === 0) {
+    // Unrouted-DM resolver hook: a DM on a no-wirings messaging group gets first refusal BEFORE
+    // the `!isMention` drop (WhatsApp DMs don't reliably set isMention). DMs only (is_group === 0):
+    // a group with no wirings is never an external-DM reply. A resolver throw must not crash the
+    // inbound pipeline — log and fall through to the existing drop (itself the fail-closed outcome).
+    if (mg.is_group === 0 && unroutedDmResolver) {
+      let consumed = false;
+      try {
+        consumed = await unroutedDmResolver(mg, event);
+      } catch (err) {
+        log.error('Unrouted-DM resolver threw — falling through to drop', { messagingGroupId: mg.id, err });
+      }
+      if (consumed) return;
+    }
     if (!isMention) return;
     if (mg.denied_at) {
       log.debug('Message dropped — channel was denied by owner', {
@@ -372,7 +408,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  *                      a thread has engaged us once, follow-ups arrive
  *                      with no mention and should still fire.
  */
-function evaluateEngage(
+export function evaluateEngage(
   agent: MessagingGroupAgent,
   text: string,
   isMention: boolean,
