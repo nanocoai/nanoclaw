@@ -156,12 +156,24 @@ export const sendFile: McpToolDefinition = {
     const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve('/workspace/agent', filePath);
     if (!fs.existsSync(resolvedPath)) return err(`File not found: ${filePath}`);
 
+    let sourcePath: string;
+    try {
+      sourcePath = fs.realpathSync(resolvedPath);
+    } catch {
+      return err(`File not found: ${filePath}`);
+    }
+    if (sourcePath !== '/workspace' && !sourcePath.startsWith('/workspace/')) {
+      return err('path must be within /workspace');
+    }
+
     const id = generateId();
-    const filename = (args.filename as string) || path.basename(resolvedPath);
+    const requestedFilename = (args.filename as string | undefined) || path.basename(sourcePath);
+    const filename = path.basename(requestedFilename);
+    if (!filename || filename === '.' || filename === '..') return err('filename must be a file name');
 
     const outboxDir = path.join('/workspace/outbox', id);
     fs.mkdirSync(outboxDir, { recursive: true });
-    fs.copyFileSync(resolvedPath, path.join(outboxDir, filename));
+    fs.copyFileSync(sourcePath, path.join(outboxDir, filename));
 
     writeMessageOut({
       id,
