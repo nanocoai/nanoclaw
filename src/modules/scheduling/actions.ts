@@ -13,17 +13,18 @@ import { wakeContainer } from '../../container-runner.js';
 import { getSession } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
+import { sanitizeTaskScript } from '../../task-script-sanitizer.js';
 import type { Session } from '../../types.js';
 import { cancelTask, insertTask, pauseTask, resumeTask, updateTask, type TaskUpdate } from './db.js';
 
 export async function handleScheduleTask(
   content: Record<string, unknown>,
-  _session: Session,
+  session: Session,
   inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
   const prompt = content.prompt as string;
-  const script = content.script as string | null;
+  const script = sanitizeTaskScript(session, content.script as string | null);
   const processAfter = content.processAfter as string;
   const recurrence = (content.recurrence as string) || null;
 
@@ -82,7 +83,7 @@ export async function handleUpdateTask(
     update.recurrence = content.recurrence as string | null;
   }
   if (content.script === null || typeof content.script === 'string') {
-    update.script = content.script as string | null;
+    update.script = sanitizeTaskScript(session, content.script as string | null);
   }
   const touched = updateTask(inDb, taskId, update);
   log.info('Task updated', { taskId, touched, fields: Object.keys(update) });
