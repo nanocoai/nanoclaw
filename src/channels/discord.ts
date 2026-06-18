@@ -33,6 +33,7 @@ registerChannelAdapter('discord', {
       botToken: env.DISCORD_BOT_TOKEN,
       extractReplyContext,
       supportsThreads: true,
+      maxTextLength: 2000,
     });
   },
 });
