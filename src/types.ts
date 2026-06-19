@@ -47,6 +47,9 @@ export interface ContainerConfig {
     push?: boolean;
     /** @deprecated 早期 Mac 本地播报开关，保留兼容旧配置 */
     mac?: boolean;
+    /** 启用 v2 智能摘要：按内容类型（代码/表格/方案/列表/对话）分流不同 prompt，
+     *  替代一刀切 120 字压缩。灰度期间按群开关，验证通过后全量 */
+    summaryV2?: boolean;
   };
 }
 

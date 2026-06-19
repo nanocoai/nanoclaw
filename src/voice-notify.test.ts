@@ -42,6 +42,7 @@ vi.mock('./memory/config.js', () => ({
 
 import {
   buildSpokenText,
+  classifyContent,
   needsSummarization,
   notifyVoice,
   sanitizeForSpeech,
@@ -306,5 +307,65 @@ describe('needsSummarization 短文本跳过 LLM', () => {
 
   it('阈值边界：恰好少一字不摘要', () => {
     expect(needsSummarization('字'.repeat(SUMMARY_MIN_CHARS - 1))).toBe(false);
+  });
+});
+
+describe('classifyContent 内容分类器', () => {
+  it('短纯文本 → concise', () => {
+    expect(classifyContent('搞定了，已经合并并部署到 dev 环境。')).toBe('concise');
+    expect(classifyContent('我'.repeat(100))).toBe('concise');
+  });
+
+  it('有代码块 → skip_code（不管长度）', () => {
+    expect(classifyContent('改好了\n```js\nconst a = 1;\n```\n测试通过')).toBe('skip_code');
+    // 哪怕很短也走 skip_code
+    expect(classifyContent('```x\na\n```')).toBe('skip_code');
+  });
+
+  it('有表格 → skip_table', () => {
+    expect(classifyContent('对比如下：\n| 方案 | 优势 |\n|---|---|\n| A | 快 |')).toBe('skip_table');
+  });
+
+  it('代码块优先于表格', () => {
+    const text = '```js\ncode\n```\n\n| a | b |\n|---|---|';
+    expect(classifyContent(text)).toBe('skip_code');
+  });
+
+  it('有 ## 标题且 >=300 字 → navigate', () => {
+    const text = '## 总结\n' + '内容'.repeat(200) + '\n## 下一步\n继续';
+    expect(classifyContent(text)).toBe('navigate');
+  });
+
+  it('有 ## 标题但 <300 字 → concise（短文档不需要导航）', () => {
+    expect(classifyContent('## 结论\n搞定了。')).toBe('concise');
+  });
+
+  it('>=300 字纯文本无结构 → digest', () => {
+    const text = '分析'.repeat(200);
+    expect(classifyContent(text)).toBe('digest');
+  });
+
+  it('>=300 字有列表但无标题 → digest', () => {
+    const text = '操作步骤：\n' + Array.from({length: 50}, (_, i) => `- 第${i+1}步`).join('\n');
+    expect(classifyContent(text)).toBe('digest');
+  });
+
+  it('v2 灰度：summaryV2=true 时 notifyVoice 走分流日志', async () => {
+    // 需要给 dashscope key 才能走到分流逻辑（否则提前 fallback 跳过摘要）
+    mockDashscopeKey = 'test-key';
+    const longText = '## 方案\n' + '详细内容'.repeat(200) + '\n## 结论\n完成';
+    notifyVoice({
+      groupFolder: 'feishu_some_group',
+      text: longText,
+      chatJid: 'fs:oc_group',
+      containerConfig: { voiceNotify: { push: true, summaryV2: true } },
+    });
+    await flushAsync();
+    // v2 分流日志应该被记录（LLM 调用会失败，但分流日志在 LLM 调用前）
+    const v2Log = loggerCalls.info.find((c) =>
+      /v2 摘要分流/.test(c[1] ?? ''),
+    );
+    expect(v2Log).toBeTruthy();
+    expect(v2Log[0].category).toBe('navigate');
   });
 });
