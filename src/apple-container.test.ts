@@ -30,6 +30,25 @@ describe('detectHostGateway', () => {
     });
     expect(detectHostGateway()).toBe('192.168.64.1');
   });
+
+  it('lets an explicit NANOCLAW_HOST_GATEWAY_IP override win over a detected bridge address', async () => {
+    // The override must take precedence even when a real bridge address exists —
+    // otherwise the documented override is a no-op on any host with bridge100 up.
+    // NANOCLAW_HOST_GATEWAY_IP is frozen at config-import time, so mock config and
+    // re-import the runtime module to exercise the override path.
+    vi.resetModules();
+    vi.doMock('./config.js', async () => ({
+      ...(await vi.importActual<typeof import('./config.js')>('./config.js')),
+      NANOCLAW_HOST_GATEWAY_IP: '192.168.64.250',
+    }));
+    const { detectHostGateway: detect } = await import('./container-runtime.js');
+    vi.spyOn(os, 'networkInterfaces').mockReturnValue({
+      bridge100: [{ family: 'IPv4', address: '192.168.64.1', internal: false } as os.NetworkInterfaceInfo],
+    });
+    expect(detect()).toBe('192.168.64.250');
+    vi.doUnmock('./config.js');
+    vi.resetModules();
+  });
 });
 
 describe('inBridgeSubnet', () => {

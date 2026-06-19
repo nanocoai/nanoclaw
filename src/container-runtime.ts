@@ -19,16 +19,17 @@ export const IS_APPLE_CONTAINER = CONTAINER_RUNTIME_BIN === 'container';
 /**
  * Bridge gateway IP that Apple Container VMs use to reach the host.
  * bridge100 is vmnet-managed (192.168.64.x); the host is at the gateway (.1).
- * We extract the bridge100 (or bridge0) IPv4 in the host-only 192.168.64.0/24
- * subnet; if none is found the env override then the conventional .1 win.
+ * Precedence: an explicit NANOCLAW_HOST_GATEWAY_IP override wins (that is what
+ * "override" means); otherwise we extract the bridge100 (or bridge0) IPv4 in the
+ * host-only 192.168.64.0/24 subnet; if neither is present, the conventional .1.
  * Uses `||` (not `??`) so an unset override — which config.ts normalises to the
- * empty string, NOT null — still falls through to the .1 literal default.
+ * empty string, NOT null — is skipped rather than winning as a falsy value.
  */
 export function detectHostGateway(): string {
   const ni = os.networkInterfaces();
   const ifaces = ni['bridge100'] ?? ni['bridge0'] ?? [];
   const addr = ifaces.find((a) => a.family === 'IPv4' && a.address.startsWith('192.168.64.'))?.address;
-  return addr || NANOCLAW_HOST_GATEWAY_IP || '192.168.64.1';
+  return NANOCLAW_HOST_GATEWAY_IP || addr || '192.168.64.1';
 }
 
 /**
