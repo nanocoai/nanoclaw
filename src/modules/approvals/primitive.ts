@@ -23,7 +23,7 @@
  */
 import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
-import { createPendingApproval, getSession } from '../../db/sessions.js';
+import { createPendingApproval, getSession, updatePendingApprovalDelivery } from '../../db/sessions.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { wakeContainer } from '../../container-runner.js';
 import { log } from '../../log.js';
@@ -243,7 +243,7 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
   const adapter = getDeliveryAdapter();
   if (adapter) {
     try {
-      await adapter.deliver(
+      const platformMessageId = await adapter.deliver(
         target.messagingGroup.channel_type,
         target.messagingGroup.platform_id,
         null,
@@ -255,6 +255,14 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
           question,
           options: APPROVAL_OPTIONS,
         }),
+      );
+      // Record where the card landed so the row reflects its real destination
+      // (channel_type / platform_id / platform_message_id) instead of NULL.
+      updatePendingApprovalDelivery(
+        approvalId,
+        target.messagingGroup.channel_type,
+        target.messagingGroup.platform_id,
+        platformMessageId ?? null,
       );
     } catch (err) {
       log.error('Failed to deliver approval card', { action, approvalId, err });
