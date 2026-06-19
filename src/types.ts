@@ -254,6 +254,8 @@ export interface SendMessageOptions {
   isProgress?: boolean;
   // 跳过语音播报推送（如语音回显：用户刚说过的话不要再总结播回去）
   skipVoiceNotify?: boolean;
+  // 语音播报上下文：群名 + 最近几轮用户消息，供 LLM 摘要时添加"关于 xxx"前缀
+  voiceContext?: string;
 }
 
 export interface Channel {

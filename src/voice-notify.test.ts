@@ -261,6 +261,62 @@ describe('voice-notify 网关推送', () => {
     expect(buildSpokenText('搞定了')).toBe('搞定了');
     expect(buildSpokenText('a'.repeat(2000)).length).toBe(1024);
   });
+
+  it('conversationContext 传到 LLM：user message 包含对话上下文', async () => {
+    mockDashscopeKey = 'test-key';
+    // OpenAI client 内部用 fetch，fetchSpy 会截获 LLM 调用
+    // mock 一个有效的 LLM 响应，这样能走完整条链路到网关推送
+    fetchSpy.mockImplementation(async (url: string) => {
+      if (String(url).includes('example.com')) {
+        // LLM 调用：返回有效的 OpenAI chat completion 格式
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          text: async () =>
+            JSON.stringify({
+              choices: [
+                { message: { content: '关于修复登录超时，已完成三处修改。' } },
+              ],
+            }),
+          json: async () => ({
+            choices: [
+              { message: { content: '关于修复登录超时，已完成三处修改。' } },
+            ],
+          }),
+        };
+      }
+      // 网关推送
+      return { ok: true, status: 202, text: async () => '{"ok":true}' };
+    });
+
+    const longText = '修复完成，' + '详细步骤说明'.repeat(30);
+    notifyVoice({
+      groupFolder: 'feishu_some_group',
+      text: longText,
+      chatJid: 'fs:oc_group',
+      containerConfig: { voiceNotify: { push: true } },
+      conversationContext:
+        '[对话上下文]\n[当前任务] 修复登录超时\n[用户消息]\nPR#3257 的 review 意见你看下',
+    });
+    await flushAsync();
+
+    // 找到发往 LLM 的 fetch 调用（URL 含 example.com）
+    const llmCall = fetchSpy.mock.calls.find((c: any[]) =>
+      String(c[0]).includes('example.com'),
+    );
+    expect(llmCall).toBeTruthy();
+    const body = JSON.parse(llmCall[1].body as string);
+    const userMsg = body.messages?.find(
+      (m: { role: string }) => m.role === 'user',
+    );
+    expect(userMsg).toBeTruthy();
+    expect(userMsg.content).toContain('[对话上下文]');
+    expect(userMsg.content).toContain('修复登录超时');
+    expect(userMsg.content).toContain('PR#3257');
+    // 正文也在
+    expect(userMsg.content).toContain('修复完成');
+  });
 });
 
 describe('sanitizeForSpeech TTS 清洗', () => {
@@ -368,4 +424,5 @@ describe('classifyContent 内容分类器', () => {
     expect(v2Log).toBeTruthy();
     expect(v2Log[0].category).toBe('navigate');
   });
+
 });

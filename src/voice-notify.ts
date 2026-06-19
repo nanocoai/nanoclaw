@@ -47,6 +47,7 @@ const SYSTEM_PROMPT = `你把一段给用户的 AI 回复改写成口语化的�
 - 不要说"以下是摘要"、"总结一下"这种元语言，直接说内容
 - 待用户决策的选项要明确编号说清楚，比如"有两个选择：第一……第二……"
 - 严禁编造：输出里的每个事实、编号、数字都必须来自原文；原文里没有的信息一个字都不能加。原文本身已经很短很口语时，原样输出即可
+- 如果输入包含 [对话上下文]，用它判断当前话题，在摘要开头用"关于xxx，"一句话点明（让听者想起在聊什么）。上下文模糊（如"继续"、"好"）时不硬加前缀。没有 [对话上下文] 段落时也不加
 
 只输出改写后的文本，不要任何前缀后缀。`;
 
@@ -69,6 +70,7 @@ const V2_COMMON_RULES = `
 - 不保留任何 Markdown 格式符号（* _ # \` [ ] | 等）
 - 不说"以下是摘要"这种元语言，直接说内容
 - 严禁编造：每个事实、编号、数字都必须来自原文
+- 如果输入包含 [对话上下文]，用它判断当前话题，在摘要开头用"关于xxx，"一句话点明（让听者想起在聊什么）。上下文模糊（如"继续"、"好"）时不硬加前缀。没有 [对话上下文] 段落时也不加
 只输出改写后的文本，不要任何前缀后缀。`;
 
 const V2_PROMPTS: Record<ContentCategory, string> = {
@@ -146,6 +148,8 @@ export interface VoiceNotifyContext {
   groupName?: string;
   containerConfig?: RegisteredGroup['containerConfig'];
   aliases?: Record<string, string>;
+  /** 对话上下文：群名 + 最近几轮用户消息，供摘要 LLM 生成"关于 xxx"前缀 */
+  conversationContext?: string;
 }
 
 /**
@@ -243,10 +247,12 @@ export function needsSummarization(text: string): boolean {
 /**
  * 调 LLM 做语音摘要。失败时 fallback 原文截断到 1024 字符。
  * summaryV2=true 时按内容类型分流不同 prompt（灰度开关）。
+ * conversationContext 有值时，LLM 会在摘要开头加"关于 xxx"一句话点明话题。
  */
 async function summarizeForSpeech(
   text: string,
   summaryV2 = false,
+  conversationContext?: string,
 ): Promise<string> {
   if (!needsSummarization(text)) {
     logger.debug(
@@ -283,12 +289,16 @@ async function summarizeForSpeech(
   const timer = setTimeout(() => controller.abort(), SUMMARIZE_TIMEOUT_MS);
 
   try {
+    // 有对话上下文时，拼在正文前面，让 LLM 能在摘要开头加"关于 xxx"定位话题
+    const userContent = conversationContext
+      ? `${conversationContext}\n\n---\n[回复正文]\n${text}`
+      : text;
     const response = await client.chat.completions.create(
       {
         model: VOICE_SUMMARY_MODEL,
         messages: [
           { role: 'system', content: prompt },
-          { role: 'user', content: text },
+          { role: 'user', content: userContent },
         ],
         temperature: 0.3,
         // 关闭思考链：qwen3.7-max 默认开思考会慢到 20s+ 必超时，关掉后 1.5s 出结果。
@@ -389,7 +399,11 @@ export function notifyVoice(
   // 异步 IIFE，异常全吃掉，不影响主链路
   void (async () => {
     try {
-      const summary = await summarizeForSpeech(context.text, useV2);
+      const summary = await summarizeForSpeech(
+        context.text,
+        useV2,
+        context.conversationContext,
+      );
       const label = resolveVoiceGroupLabel(context);
       await pushToVoiceGateway(
         buildSpokenText(sanitizeForSpeech(summary)),

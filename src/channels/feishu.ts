@@ -703,6 +703,7 @@ export class FeishuChannel implements Channel {
         groupName: group?.name,
         containerConfig: group?.containerConfig,
         aliases,
+        conversationContext: options?.voiceContext,
       });
     }
 

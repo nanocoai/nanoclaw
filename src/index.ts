@@ -431,6 +431,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
+  // 语音播报上下文：群名（当前任务主题）+ 最近 5 条用户消息（对话线索）
+  // 提前构造，agent 回复和 retry 回调都能用（闭包捕获）
+  const voiceCtxParts: string[] = [];
+  if (group.name) voiceCtxParts.push(`[当前任务] ${group.name}`);
+  const recentUserMsgs = missedMessages
+    .filter((m) => !m.is_from_me)
+    .slice(-5)
+    .map((m) => m.content.slice(0, 200));
+  if (recentUserMsgs.length > 0)
+    voiceCtxParts.push(`[用户消息]\n${recentUserMsgs.join('\n')}`);
+  const voiceContext =
+    voiceCtxParts.length > 0
+      ? `[对话上下文]\n${voiceCtxParts.join('\n')}`
+      : undefined;
+
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
     const triggerPattern = getTriggerPattern(group.trigger);
@@ -722,7 +737,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
         if (text) {
           await channel.setTyping?.(chatJid, false);
-          const feishuMsgId = await channel.sendMessage(chatJid, text);
+          const feishuMsgId = await channel.sendMessage(chatJid, text, {
+            voiceContext,
+          });
           logger.info({ group: group.name, feishuMsgId, textLen: text.length }, '[reply] sendMessage 返回');
           if (feishuMsgId) lastFeishuMsgId = feishuMsgId;
           outputSentToUser = true;
@@ -1151,7 +1168,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               return;
             }
             if (text) {
-              const retryFmid = await channel.sendMessage(chatJid, text);
+              const retryFmid = await channel.sendMessage(chatJid, text, {
+                voiceContext,
+              });
               if (retryFmid) lastFeishuMsgId = retryFmid;
               outputSentToUser = true;
               textSentToUser = true;
