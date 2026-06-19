@@ -1020,12 +1020,15 @@ async function runQuery(
         'TaskStop',
         'TeamCreate',
         'TeamDelete',
-        // SendMessage 是 SDK 内部 inbox，不经过飞书通道，用 mcp__nanoclaw__send_message 替代
+        // SendMessage 是 SDK 内置 agent 间通讯，不经过飞书通道 → 用 disallowedTools 显式禁
         'TodoWrite',
         'ToolSearch',
         'Skill',
         'NotebookEdit',
         'mcp__nanoclaw__*',
+      ],
+      disallowedTools: [
+        'SendMessage', // SDK 内置 agent 间通讯，绕过 allowedTools 白名单；飞书通道走 mcp__nanoclaw__send_message
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
