@@ -1,37 +1,73 @@
 /**
- * Provider tool-policy seam — INERT on pristine core.
+ * Provider tool-policy seam — INERT on pristine core, MONOTONICALLY restrictive.
  *
  * An install-overlay can TIGHTEN the agent's tool surface without overwriting the
- * provider file. The seam is deliberately one-directional so a registrant can only
- * make the surface MORE restrictive, never less:
- *   - `extraDenied`   — tools ADDED to the provider's base denylist (never removes a base denial).
- *   - `allowTool`     — return false to DROP a tool from the base allowlist (never adds one).
- *   - `hideMcpServer` — return true to HIDE an MCP server from the SDK (never reveals one).
- *   - `settingSources`— REPLACE which CLAUDE.md setting layers the SDK reads (not a security knob).
+ * provider file. Registrations ACCUMULATE and compose so that — no matter how many
+ * policies register, or in what order — the effective surface can only get MORE
+ * restrictive, never less. A registrant can therefore never weaken another's denial:
+ *   - `extraDenied`   — tools ADDED to the base denylist. Composed by UNION.
+ *   - `allowTool`     — drop a tool from the base allowlist. Composed by AND (a tool
+ *                       survives only if EVERY policy allows it).
+ *   - `hideMcpServer` — hide an MCP server from the SDK. Composed by OR (hidden if ANY).
+ *   - `settingSources`— restrict which CLAUDE.md setting layers the SDK reads. Composed
+ *                       by INTERSECTION over the provider default (a registrant can only
+ *                       REMOVE a source). This IS a security knob — a settings layer can
+ *                       grant tools / register MCP servers — hence intersection, not replace.
  *
- * With no policy registered the provider uses its built-in defaults unchanged, so
- * pristine-core behaviour is identical to upstream. The denylist is the enforced
- * security boundary (a provider's `disallowedTools` wins over `allowedTools`); the
- * additive-only contract above is what keeps a registrant from weakening it.
+ * With no policy registered every accessor returns the provider's built-in default, so
+ * pristine-core behaviour is identical to upstream.
+ *
+ * NOTE on `hideMcpServer`: hiding only drops a server from `this.mcpServers` + the
+ * allowlist patterns. The SDK can still LOAD an MCP server from a settings source, so a
+ * security-critical hide must ALSO be denied via `extraDenied` (e.g. `mcp__sqlite__*`
+ * tool names) — the hide is presentation, the denylist is the boundary.
  */
+export type SettingSource = 'project' | 'user' | 'local';
+
 export interface ProviderToolPolicy {
-  /** Tools ADDED to the provider's base denylist. Additive only — cannot remove a base denial. */
+  /** Tools ADDED to the base denylist. Additive (union) — cannot remove a base/other denial. */
   readonly extraDenied?: readonly string[];
-  /** Return false to drop a tool from the base allowlist. Restrictive only — cannot add a tool. */
+  /** Return false to drop a tool from the base allowlist. Restrictive (AND) — cannot add a tool. */
   readonly allowTool?: (tool: string) => boolean;
-  /** Return true to hide an MCP server from the SDK. Additive hide — cannot reveal a hidden one. */
+  /** Return true to hide an MCP server. Additive hide (OR) — cannot reveal a hidden one. */
   readonly hideMcpServer?: (serverName: string) => boolean;
-  /** Replace the SDK `settingSources` (which CLAUDE.md setting layers the SDK reads). */
-  readonly settingSources?: readonly ('project' | 'user' | 'local')[];
+  /** Setting layers this registrant permits. Composed by intersection — cannot add a layer. */
+  readonly settingSources?: readonly SettingSource[];
 }
 
-let registered: ProviderToolPolicy | null = null;
+const policies: ProviderToolPolicy[] = [];
 
 export function registerProviderToolPolicy(policy: ProviderToolPolicy): void {
-  if (registered) console.error('[tool-policy] provider tool-policy overwritten');
-  registered = policy;
+  // Accumulate. Composition (below) is monotonically restrictive, so an extra
+  // registrant can only tighten — there is no overwrite/replace path to weaken.
+  policies.push(policy);
 }
 
-export function getProviderToolPolicy(): ProviderToolPolicy | null {
-  return registered;
+/** Effective additions to the provider's base denylist — the UNION across all registrants. */
+export function policyExtraDenied(): string[] {
+  return policies.flatMap((p) => p.extraDenied ?? []);
+}
+
+/** A base-allowlist tool survives iff EVERY registrant allows it (AND). */
+export function policyAllowsTool(tool: string): boolean {
+  return policies.every((p) => p.allowTool?.(tool) ?? true);
+}
+
+/** An MCP server is hidden iff ANY registrant hides it (OR). */
+export function policyHidesMcpServer(serverName: string): boolean {
+  return policies.some((p) => p.hideMcpServer?.(serverName) ?? false);
+}
+
+/** Effective SDK settingSources = base ∩ every registrant's permitted set (a registrant can
+ *  only REMOVE a source). */
+export function policySettingSources(base: readonly SettingSource[]): SettingSource[] {
+  return policies.reduce<SettingSource[]>(
+    (acc, p) => (p.settingSources ? acc.filter((s) => p.settingSources!.includes(s)) : acc),
+    [...base],
+  );
+}
+
+/** Test-only: reset the accumulated policies. */
+export function __resetProviderToolPolicyForTest(): void {
+  policies.length = 0;
 }

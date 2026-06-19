@@ -6,7 +6,7 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { registerProvider } from './provider-registry.js';
-import { getProviderToolPolicy } from './tool-policy.js';
+import { policyAllowsTool, policyExtraDenied, policyHidesMcpServer, policySettingSources } from './tool-policy.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
 function log(msg: string): void {
@@ -43,8 +43,7 @@ const BASE_DISALLOWED_TOOLS = [
  * identical to upstream.
  */
 function disallowedTools(): string[] {
-  const extra = getProviderToolPolicy()?.extraDenied;
-  return extra && extra.length > 0 ? [...BASE_DISALLOWED_TOOLS, ...extra] : BASE_DISALLOWED_TOOLS;
+  return [...BASE_DISALLOWED_TOOLS, ...policyExtraDenied()];
 }
 
 // Tool allowlist for NanoClaw agent containers. MCP-tool entries are derived
@@ -408,14 +407,12 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
 
-    // Provider tool-policy seam (INERT on pristine core): a registered policy may TIGHTEN
-    // the tool surface — drop allowlisted tools, hide MCP servers from the SDK. With no
-    // policy the allowlist/MCP set are upstream-unchanged.
-    const policy = getProviderToolPolicy();
-    const hideMcp = policy?.hideMcpServer;
-    const visibleMcpServers = hideMcp
-      ? Object.fromEntries(Object.entries(this.mcpServers).filter(([name]) => !hideMcp(name)))
-      : this.mcpServers;
+    // Provider tool-policy seam (INERT on pristine core): registered policies may only TIGHTEN
+    // the tool surface — drop allowlisted tools, hide MCP servers, restrict settingSources. With
+    // no policy registered every accessor returns the upstream default.
+    const visibleMcpServers = Object.fromEntries(
+      Object.entries(this.mcpServers).filter(([name]) => !policyHidesMcpServer(name)),
+    );
 
     const sdkResult = sdkQuery({
       prompt: stream,
@@ -426,7 +423,7 @@ export class ClaudeProvider implements AgentProvider {
         pathToClaudeCodeExecutable: '/pnpm/claude',
         systemPrompt: instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions } : undefined,
         allowedTools: [
-          ...TOOL_ALLOWLIST.filter((t) => policy?.allowTool?.(t) ?? true),
+          ...TOOL_ALLOWLIST.filter((t) => policyAllowsTool(t)),
           ...Object.keys(visibleMcpServers).map(mcpAllowPattern),
         ],
         disallowedTools: disallowedTools(),
@@ -436,7 +433,7 @@ export class ClaudeProvider implements AgentProvider {
         effort: this.effort as any,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
-        settingSources: [...(policy?.settingSources ?? ['project', 'user', 'local'])],
+        settingSources: policySettingSources(['project', 'user', 'local']),
         mcpServers: visibleMcpServers,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],

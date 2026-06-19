@@ -1,21 +1,73 @@
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it } from 'bun:test';
 
-import { getProviderToolPolicy, registerProviderToolPolicy } from './tool-policy.js';
+import {
+  __resetProviderToolPolicyForTest,
+  policyAllowsTool,
+  policyExtraDenied,
+  policyHidesMcpServer,
+  policySettingSources,
+  registerProviderToolPolicy,
+} from './tool-policy.js';
 
-// Module-level singleton: the inert-on-pristine assertion must run FIRST.
-describe('provider tool-policy registry', () => {
-  it('is null on pristine core — no registrant ⇒ the provider uses its built-in defaults', () => {
-    expect(getProviderToolPolicy()).toBeNull();
+afterEach(() => __resetProviderToolPolicyForTest());
+
+describe('provider tool-policy (monotonic composition)', () => {
+  it('is inert with no policy — every accessor returns the provider default', () => {
+    expect(policyExtraDenied()).toEqual([]);
+    expect(policyAllowsTool('Bash')).toBe(true);
+    expect(policyHidesMcpServer('sqlite')).toBe(false);
+    expect(policySettingSources(['project', 'user', 'local'])).toEqual(['project', 'user', 'local']);
   });
 
-  it('returns the registered policy; a later registration overwrites', () => {
-    registerProviderToolPolicy({ extraDenied: ['Bash', 'Read'] });
-    expect(getProviderToolPolicy()?.extraDenied).toEqual(['Bash', 'Read']);
+  it('a single policy tightens each surface', () => {
+    registerProviderToolPolicy({
+      extraDenied: ['Bash', 'Read'],
+      allowTool: (t) => t !== 'WebSearch',
+      hideMcpServer: (n) => n === 'sqlite',
+      settingSources: [],
+    });
+    expect(policyExtraDenied()).toEqual(['Bash', 'Read']);
+    expect(policyAllowsTool('WebSearch')).toBe(false);
+    expect(policyAllowsTool('Read')).toBe(true); // allowlist filter independent of denylist
+    expect(policyHidesMcpServer('sqlite')).toBe(true);
+    expect(policySettingSources(['project', 'user', 'local'])).toEqual([]);
+  });
 
-    registerProviderToolPolicy({ settingSources: [], allowTool: (t) => t !== 'WebSearch' });
-    const p = getProviderToolPolicy();
-    expect(p?.settingSources).toEqual([]);
-    expect(p?.allowTool?.('WebSearch')).toBe(false);
-    expect(p?.allowTool?.('Read')).toBe(true);
+  it('a SECOND policy can only tighten — it can NEVER weaken the first (the Codex BLOCKER)', () => {
+    registerProviderToolPolicy({
+      extraDenied: ['Bash'],
+      allowTool: (t) => t !== 'WebSearch',
+      hideMcpServer: (n) => n === 'sqlite',
+      settingSources: ['project'],
+    });
+    // An empty/loose later registrant must NOT undo any of the strict one.
+    registerProviderToolPolicy({});
+    expect(policyExtraDenied()).toContain('Bash'); // union — still denied
+    expect(policyAllowsTool('WebSearch')).toBe(false); // AND — still dropped
+    expect(policyHidesMcpServer('sqlite')).toBe(true); // OR — still hidden
+    expect(policySettingSources(['project', 'user', 'local'])).toEqual(['project']); // ∩ — not widened
+  });
+
+  it('two tightening policies compose: union / AND / OR / intersection', () => {
+    registerProviderToolPolicy({
+      extraDenied: ['Bash'],
+      allowTool: (t) => t !== 'WebSearch',
+      hideMcpServer: (n) => n === 'sqlite',
+      settingSources: ['project', 'user'],
+    });
+    registerProviderToolPolicy({
+      extraDenied: ['Edit'],
+      allowTool: (t) => t !== 'WebFetch',
+      hideMcpServer: (n) => n === 'other',
+      settingSources: ['project', 'local'],
+    });
+    expect(policyExtraDenied().sort()).toEqual(['Bash', 'Edit']);
+    expect(policyAllowsTool('WebSearch')).toBe(false);
+    expect(policyAllowsTool('WebFetch')).toBe(false);
+    expect(policyAllowsTool('Read')).toBe(true);
+    expect(policyHidesMcpServer('sqlite')).toBe(true);
+    expect(policyHidesMcpServer('other')).toBe(true);
+    expect(policyHidesMcpServer('keep')).toBe(false);
+    expect(policySettingSources(['project', 'user', 'local'])).toEqual(['project']); // ∩
   });
 });
