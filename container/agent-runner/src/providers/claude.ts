@@ -6,6 +6,7 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { registerProvider } from './provider-registry.js';
+import { getProviderToolPolicy } from './tool-policy.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
 function log(msg: string): void {
@@ -23,7 +24,7 @@ function log(msg: string): void {
 //   the question and blocks on the real reply.
 // - EnterPlanMode / ExitPlanMode / EnterWorktree / ExitWorktree: Claude
 //   Code UI affordances; in a headless container they'd appear stuck.
-const SDK_DISALLOWED_TOOLS = [
+const BASE_DISALLOWED_TOOLS = [
   'CronCreate',
   'CronDelete',
   'CronList',
@@ -34,6 +35,17 @@ const SDK_DISALLOWED_TOOLS = [
   'EnterWorktree',
   'ExitWorktree',
 ];
+
+/**
+ * The effective denylist = the provider's base + any tools a registered
+ * ProviderToolPolicy adds (ADDITIVE only — a registrant can tighten the
+ * security boundary, never loosen it). No policy registered ⇒ the base set,
+ * identical to upstream.
+ */
+function disallowedTools(): string[] {
+  const extra = getProviderToolPolicy()?.extraDenied;
+  return extra && extra.length > 0 ? [...BASE_DISALLOWED_TOOLS, ...extra] : BASE_DISALLOWED_TOOLS;
+}
 
 // Tool allowlist for NanoClaw agent containers. MCP-tool entries are derived
 // at the call site from the registered `mcpServers` map so that any server
@@ -155,13 +167,13 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
 /**
  * PreToolUse hook: record the current tool + its declared timeout so the host
  * sweep can widen its stuck tolerance while Bash is running a long-declared
- * script. Defense-in-depth: if SDK_DISALLOWED_TOOLS slips through somehow,
+ * script. Defense-in-depth: if a disallowed tool slips through somehow,
  * block the call here instead of letting the agent hang.
  */
 const preToolUseHook: HookCallback = async (input) => {
   const i = input as { tool_name?: string; tool_input?: Record<string, unknown> };
   const toolName = i.tool_name ?? '';
-  if (SDK_DISALLOWED_TOOLS.includes(toolName)) {
+  if (disallowedTools().includes(toolName)) {
     return {
       decision: 'block',
       stopReason: `Tool '${toolName}' is not available in this environment — use the nanoclaw equivalent.`,
@@ -396,6 +408,15 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
 
+    // Provider tool-policy seam (INERT on pristine core): a registered policy may TIGHTEN
+    // the tool surface — drop allowlisted tools, hide MCP servers from the SDK. With no
+    // policy the allowlist/MCP set are upstream-unchanged.
+    const policy = getProviderToolPolicy();
+    const hideMcp = policy?.hideMcpServer;
+    const visibleMcpServers = hideMcp
+      ? Object.fromEntries(Object.entries(this.mcpServers).filter(([name]) => !hideMcp(name)))
+      : this.mcpServers;
+
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {
@@ -405,18 +426,18 @@ export class ClaudeProvider implements AgentProvider {
         pathToClaudeCodeExecutable: '/pnpm/claude',
         systemPrompt: instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions } : undefined,
         allowedTools: [
-          ...TOOL_ALLOWLIST,
-          ...Object.keys(this.mcpServers).map(mcpAllowPattern),
+          ...TOOL_ALLOWLIST.filter((t) => policy?.allowTool?.(t) ?? true),
+          ...Object.keys(visibleMcpServers).map(mcpAllowPattern),
         ],
-        disallowedTools: SDK_DISALLOWED_TOOLS,
+        disallowedTools: disallowedTools(),
         env: this.env,
         model: this.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.effort as any,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
-        settingSources: ['project', 'user', 'local'],
-        mcpServers: this.mcpServers,
+        settingSources: [...(policy?.settingSources ?? ['project', 'user', 'local'])],
+        mcpServers: visibleMcpServers,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],
           PostToolUse: [{ hooks: [postToolUseHook] }],
