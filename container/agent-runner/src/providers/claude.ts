@@ -8,6 +8,7 @@ import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/conn
 import { applyInputTransform } from './input-transform.js';
 import { registerProvider } from './provider-registry.js';
 import { policyAllowsTool, policyExtraDenied, policyHidesMcpServer, policySettingSources } from './tool-policy.js';
+import { applyToolResultMiddleware } from './tool-result-middleware.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
 function log(msg: string): void {
@@ -191,12 +192,28 @@ const preToolUseHook: HookCallback = async (input) => {
   return { continue: true };
 };
 
-/** Clear in-flight tool on PostToolUse / PostToolUseFailure. */
-const postToolUseHook: HookCallback = async () => {
+/**
+ * Clear in-flight tool on PostToolUse / PostToolUseFailure, then run any
+ * registered tool-result middleware over the tool_response. INERT on pristine
+ * core: with no registrant the middleware is identity (changed:false), so this
+ * returns { continue: true } unchanged. An overlay registrant can rewrite the
+ * tool output (emitted as `updatedToolOutput`) before the SDK records it.
+ */
+const postToolUseHook: HookCallback = async (input) => {
   try {
     clearContainerToolInFlight();
   } catch (err) {
     log(`PostToolUse: failed to clear container_state: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const resp = (input as { tool_response?: unknown }).tool_response;
+  if (resp !== undefined) {
+    const { value, changed } = applyToolResultMiddleware(resp);
+    if (changed) {
+      return {
+        continue: true,
+        hookSpecificOutput: { hookEventName: 'PostToolUse', updatedToolOutput: value },
+      } as unknown as ReturnType<HookCallback>;
+    }
   }
   return { continue: true };
 };
