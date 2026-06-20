@@ -49,3 +49,23 @@ export async function applyPromptTransform(prompt: string, messages: MessageInRo
 export function __resetPromptTransformForTest(): void {
   promptTransforms.length = 0;
 }
+
+// Third registry (cluster 7, #407): a prefilter side-effect run over the freshly
+// read pending batch BEFORE the kind!=='system' filter — e.g. replay approved
+// actions. Hooks run in order; no registrant ⇒ no-op. Side-effect only (void).
+export type PrefilterStep = (messages: MessageInRow[]) => Promise<void> | void;
+
+const prefilterSteps: PrefilterStep[] = [];
+
+export function registerPrefilterStep(fn: PrefilterStep): void {
+  prefilterSteps.push(fn);
+}
+
+/** Run each registrant over the batch in order. No registrant ⇒ no-op. */
+export async function applyPrefilterSteps(messages: MessageInRow[]): Promise<void> {
+  for (const fn of prefilterSteps) await fn(messages);
+}
+
+export function __resetPrefilterStepsForTest(): void {
+  prefilterSteps.length = 0;
+}

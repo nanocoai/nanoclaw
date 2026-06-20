@@ -1,6 +1,6 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
-import { applyMessageFilter, applyPromptTransform } from './poll-loop-extensions.js';
+import { applyMessageFilter, applyPromptTransform, applyPrefilterSteps } from './poll-loop-extensions.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
@@ -123,9 +123,12 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   let isFirstPoll = true;
   while (true) {
     if (config.signal?.aborted) return;
+    // Inert on pristine: no registrant ⇒ applyPrefilterSteps is a no-op and
+    // applyMessageFilter returns the batch unchanged.
+    const allPending = getPendingMessages(isFirstPoll);
+    await applyPrefilterSteps(allPending);
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
-    // Inert on pristine: no registrant ⇒ applyMessageFilter returns the batch unchanged.
-    const messages = applyMessageFilter(getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system'));
+    const messages = applyMessageFilter(allPending.filter((m) => m.kind !== 'system'));
     isFirstPoll = false;
     pollCount++;
 
