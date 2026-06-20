@@ -5,6 +5,7 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
+import { applyInputTransform } from './input-transform.js';
 import { registerProvider } from './provider-registry.js';
 import { policyAllowsTool, policyExtraDenied, policyHidesMcpServer, policySettingSources } from './tool-policy.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
@@ -97,7 +98,7 @@ class MessageStream {
   push(text: string): void {
     this.queue.push({
       type: 'user',
-      message: { role: 'user', content: text },
+      message: { role: 'user', content: applyInputTransform(text, 'prompt') },
       parent_tool_use_id: null,
       session_id: '',
     });
@@ -405,7 +406,8 @@ export class ClaudeProvider implements AgentProvider {
     const stream = new MessageStream();
     stream.push(input.prompt);
 
-    const instructions = input.systemContext?.instructions;
+    const rawInstructions = input.systemContext?.instructions;
+    const instructions = rawInstructions ? applyInputTransform(rawInstructions, 'instructions') : undefined;
 
     // Provider tool-policy seam (INERT on pristine core): registered policies may only TIGHTEN
     // the tool surface — drop allowlisted tools, hide MCP servers, restrict settingSources. With
