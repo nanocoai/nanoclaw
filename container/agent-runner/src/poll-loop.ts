@@ -248,68 +248,73 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
-    // Inert on pristine: no registrant ⇒ applyTurnStart is a no-op.
+    // Inert on pristine: no registrant ⇒ applyTurnStart/applyTurnEnd are no-ops.
+    // After a successful turn-start, turn-end MUST run (finally) so a registered
+    // per-turn actor pin can never leak across turns — even on a synchronous
+    // provider.query() failure, a catch-path write failure, or a markCompleted throw.
     applyTurnStart(keep);
-    const query = config.provider.query({
-      prompt,
-      continuation,
-      cwd: config.cwd,
-      systemContext: config.systemContext,
-    });
-
-    // Process the query while concurrently polling for new messages
-    const skippedSet = new Set(skipped);
-    const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
-    // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
-    // can stamp it on outbound rows — needed for a2a return-path routing.
-    setCurrentInReplyTo(routing.inReplyTo);
     try {
-      const result = await processQuery(
-        query,
-        routing,
-        processingIds,
-        config.providerName,
-        config.provider.onExchangeComplete?.bind(config.provider),
+      const query = config.provider.query({
         prompt,
         continuation,
-      );
-      if (result.continuation && result.continuation !== continuation) {
-        continuation = result.continuation;
-        setContinuation(config.providerName, continuation);
-      }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      log(`Query error: ${errMsg}`);
-
-      // Stale/corrupt continuation recovery: ask the provider whether
-      // this error means the stored continuation is unusable, and clear
-      // it so the next attempt starts fresh.
-      if (continuation && config.provider.isSessionInvalid(err)) {
-        log(`Stale session detected (${continuation}) — clearing for next retry`);
-        continuation = undefined;
-        clearContinuation(config.providerName);
-      }
-
-      // Write error response so the user knows something went wrong
-      writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        cwd: config.cwd,
+        systemContext: config.systemContext,
       });
-    } finally {
-      clearCurrentInReplyTo();
-    }
 
-    // Ensure completed even if processQuery ended without a result event
-    // (e.g. stream closed unexpectedly).
-    markCompleted(processingIds);
-    // Inert on pristine: no registrant ⇒ applyTurnEnd is a no-op. Runs in both
-    // the success and caught-error paths (the try/catch above swallows errors).
-    await applyTurnEnd();
-    log(`Completed ${ids.length} message(s)`);
+      // Process the query while concurrently polling for new messages
+      const skippedSet = new Set(skipped);
+      const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
+      // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
+      // can stamp it on outbound rows — needed for a2a return-path routing.
+      setCurrentInReplyTo(routing.inReplyTo);
+      try {
+        const result = await processQuery(
+          query,
+          routing,
+          processingIds,
+          config.providerName,
+          config.provider.onExchangeComplete?.bind(config.provider),
+          prompt,
+          continuation,
+        );
+        if (result.continuation && result.continuation !== continuation) {
+          continuation = result.continuation;
+          setContinuation(config.providerName, continuation);
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        log(`Query error: ${errMsg}`);
+
+        // Stale/corrupt continuation recovery: ask the provider whether
+        // this error means the stored continuation is unusable, and clear
+        // it so the next attempt starts fresh.
+        if (continuation && config.provider.isSessionInvalid(err)) {
+          log(`Stale session detected (${continuation}) — clearing for next retry`);
+          continuation = undefined;
+          clearContinuation(config.providerName);
+        }
+
+        // Write error response so the user knows something went wrong
+        writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        });
+      } finally {
+        clearCurrentInReplyTo();
+      }
+
+      // Ensure completed even if processQuery ended without a result event
+      // (e.g. stream closed unexpectedly).
+      markCompleted(processingIds);
+      log(`Completed ${ids.length} message(s)`);
+    } finally {
+      // Inert on pristine: no registrant ⇒ applyTurnEnd is a no-op.
+      await applyTurnEnd();
+    }
   }
 }
 
