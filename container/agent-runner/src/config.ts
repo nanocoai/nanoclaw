@@ -40,7 +40,7 @@ export function loadConfig(): RunnerConfig {
 
   _config = {
     provider: (raw.provider as string) || 'claude',
-    assistantName: (raw.assistantName as string) || '',
+    assistantName: typeof raw.assistantName === 'string' ? raw.assistantName : '',
     groupName: (raw.groupName as string) || '',
     agentGroupId: (raw.agentGroupId as string) || '',
     maxMessagesPerPrompt: (raw.maxMessagesPerPrompt as number) || DEFAULT_MAX_MESSAGES,
