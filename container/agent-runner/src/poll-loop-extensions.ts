@@ -69,3 +69,36 @@ export async function applyPrefilterSteps(messages: MessageInRow[]): Promise<voi
 export function __resetPrefilterStepsForTest(): void {
   prefilterSteps.length = 0;
 }
+
+// Fourth registry (clusters 2/3 + 6): turn lifecycle hooks. registerTurnStart runs
+// just before provider.query with the batch (e.g. pin the per-turn actor channel
+// for anti-spoof binding); registerTurnEnd runs after the turn completes (e.g.
+// clear the actor channel + drain deferred notifications). No registrant ⇒ no-op.
+export type TurnStartHook = (messages: MessageInRow[]) => void;
+export type TurnEndHook = () => void | Promise<void>;
+
+const turnStartHooks: TurnStartHook[] = [];
+const turnEndHooks: TurnEndHook[] = [];
+
+export function registerTurnStart(fn: TurnStartHook): void {
+  turnStartHooks.push(fn);
+}
+
+export function registerTurnEnd(fn: TurnEndHook): void {
+  turnEndHooks.push(fn);
+}
+
+/** Run turn-start hooks in order. No registrant ⇒ no-op. */
+export function applyTurnStart(messages: MessageInRow[]): void {
+  for (const fn of turnStartHooks) fn(messages);
+}
+
+/** Run turn-end hooks in order. No registrant ⇒ no-op. */
+export async function applyTurnEnd(): Promise<void> {
+  for (const fn of turnEndHooks) await fn();
+}
+
+export function __resetTurnHooksForTest(): void {
+  turnStartHooks.length = 0;
+  turnEndHooks.length = 0;
+}

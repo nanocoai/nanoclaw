@@ -1,6 +1,12 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
-import { applyMessageFilter, applyPromptTransform, applyPrefilterSteps } from './poll-loop-extensions.js';
+import {
+  applyMessageFilter,
+  applyPromptTransform,
+  applyPrefilterSteps,
+  applyTurnStart,
+  applyTurnEnd,
+} from './poll-loop-extensions.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
@@ -242,6 +248,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
+    // Inert on pristine: no registrant ⇒ applyTurnStart is a no-op.
+    applyTurnStart(keep);
     const query = config.provider.query({
       prompt,
       continuation,
@@ -298,6 +306,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Ensure completed even if processQuery ended without a result event
     // (e.g. stream closed unexpectedly).
     markCompleted(processingIds);
+    // Inert on pristine: no registrant ⇒ applyTurnEnd is a no-op. Runs in both
+    // the success and caught-error paths (the try/catch above swallows errors).
+    await applyTurnEnd();
     log(`Completed ${ids.length} message(s)`);
   }
 }
