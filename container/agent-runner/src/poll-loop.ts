@@ -1,5 +1,6 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
+import { applyMessageFilter } from './poll-loop-extensions.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
@@ -123,7 +124,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   while (true) {
     if (config.signal?.aborted) return;
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
-    const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
+    // Inert on pristine: no registrant ⇒ applyMessageFilter returns the batch unchanged.
+    const messages = applyMessageFilter(getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system'));
     isFirstPoll = false;
     pollCount++;
 
@@ -393,7 +395,7 @@ export async function processQuery(
         // everything. Filtering on thread_id here caused deadlocks when the
         // initial batch and follow-ups had mismatched thread_ids (e.g. a
         // host-generated welcome trigger with null thread vs a Discord DM reply).
-        const newMessages = pending.filter((m) => m.kind !== 'system');
+        const newMessages = applyMessageFilter(pending.filter((m) => m.kind !== 'system'));
         if (newMessages.length === 0) return;
 
         const newIds = newMessages.map((m) => m.id);
