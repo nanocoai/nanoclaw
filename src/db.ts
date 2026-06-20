@@ -655,6 +655,30 @@ export function getMessagesSince(
     .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
 }
 
+/**
+ * 取某群最近 N 条用户消息（跨轮次），用于语音播报上下文。
+ * 不受 cursor/sinceTimestamp 限制，返回最新的在最后。
+ */
+export function getRecentUserMessages(
+  chatJid: string,
+  limit: number = 5,
+): Array<{ content: string; timestamp: string }> {
+  const sql = `
+    SELECT content, timestamp FROM (
+      SELECT content, timestamp
+      FROM messages
+      WHERE chat_jid = ? AND is_from_me = 0 AND is_bot_message = 0
+        AND content != '' AND content IS NOT NULL
+      ORDER BY timestamp DESC
+      LIMIT ?
+    ) ORDER BY timestamp
+  `;
+  return db.prepare(sql).all(chatJid, limit) as Array<{
+    content: string;
+    timestamp: string;
+  }>;
+}
+
 export function getLastBotMessageTimestamp(
   chatJid: string,
   botPrefix: string,

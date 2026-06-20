@@ -62,6 +62,7 @@ import {
   getLastBotMessageTimestamp,
   getMessagesSince,
   getNewMessages,
+  getRecentUserMessages,
   getRouterState,
   initDatabase,
   setRegisteredGroup,
@@ -310,9 +311,7 @@ export function _setRegisteredGroups(
  * + + 空格 → Opus 深度思考
  * ~ + 空格 → 关闭思考
  */
-export function parseModelPrefix(
-  text: string,
-): {
+export function parseModelPrefix(text: string): {
   override: { model?: string; thinking?: 'adaptive' | 'disabled' };
   cleanedText: string;
 } | null {
@@ -365,7 +364,9 @@ export function shouldTriggerAutoFollowupSummary(input: {
 }
 
 export function buildAutoFollowupSummaryPrompt(originalReply: string): string {
-  const clipped = originalReply.trim().slice(0, AUTO_FOLLOWUP_SUMMARY_MAX_REPLY_CHARS);
+  const clipped = originalReply
+    .trim()
+    .slice(0, AUTO_FOLLOWUP_SUMMARY_MAX_REPLY_CHARS);
   return [
     '[AUTO_FOLLOWUP_SUMMARY]',
     '你刚才已经把完整回复发给用户了。现在请基于下面这段已发送回复，补发一条给大杰看的极简总结。',
@@ -419,7 +420,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return true;
   }
 
-
   const isMainGroup = group.isMain === true;
 
   const missedMessages = getMessagesSince(
@@ -431,14 +431,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
-  // 语音播报上下文：群名（当前任务主题）+ 最近 5 条用户消息（对话线索）
+  // 语音播报上下文：群名 + 跨轮次最近 5 条用户消息（从 DB 取，不限本轮 cursor）
   // 提前构造，agent 回复和 retry 回调都能用（闭包捕获）
   const voiceCtxParts: string[] = [];
   if (group.name) voiceCtxParts.push(`[当前任务] ${group.name}`);
-  const recentUserMsgs = missedMessages
-    .filter((m) => !m.is_from_me)
-    .slice(-5)
-    .map((m) => m.content.slice(0, 200));
+  const recentUserMsgs = getRecentUserMessages(chatJid, 5).map((m) =>
+    m.content.slice(0, 200),
+  );
   if (recentUserMsgs.length > 0)
     voiceCtxParts.push(`[用户消息]\n${recentUserMsgs.join('\n')}`);
   const voiceContext =
@@ -543,13 +542,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const maybeEnqueueAutoFollowupSummary = () => {
     const isAutoFollowupTurn = autoFollowupSummaryTurnsRemaining > 0;
-    const visibleTextForAutoFollowup = autoFollowupSummaryTextParts.join('\n').trim();
+    const visibleTextForAutoFollowup = autoFollowupSummaryTextParts
+      .join('\n')
+      .trim();
     const cliMode = resolveCliMode(group.containerConfig);
-    const autoFollowupEnabled = group.containerConfig?.autoFollowupSummary === true;
+    const autoFollowupEnabled =
+      group.containerConfig?.autoFollowupSummary === true;
 
     if (isAutoFollowupTurn) {
       logger.info(
-        { group: group.name, chatJid, cliMode, textLen: visibleTextForAutoFollowup.length },
+        {
+          group: group.name,
+          chatJid,
+          cliMode,
+          textLen: visibleTextForAutoFollowup.length,
+        },
         '[auto-summary] 自动总结回合完成，跳过再次触发',
       );
       autoFollowupSummaryTurnsRemaining = 0;
@@ -562,10 +569,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         cliMode,
         text: visibleTextForAutoFollowup,
         isAutoFollowupTurn,
-        hadError: hadError || streamingApiErrorDetected || streamingRateLimitDetected,
+        hadError:
+          hadError || streamingApiErrorDetected || streamingRateLimitDetected,
       })
     ) {
-      const summaryPrompt = buildAutoFollowupSummaryPrompt(visibleTextForAutoFollowup);
+      const summaryPrompt = buildAutoFollowupSummaryPrompt(
+        visibleTextForAutoFollowup,
+      );
       const sent = queue.sendMessage(
         chatJid,
         summaryPrompt,
@@ -602,7 +612,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           cliMode,
           textLen: visibleTextForAutoFollowup.length,
           isAutoFollowupTurn,
-          hadError: hadError || streamingApiErrorDetected || streamingRateLimitDetected,
+          hadError:
+            hadError || streamingApiErrorDetected || streamingRateLimitDetected,
         },
         '[auto-summary] 跳过自动后置总结',
       );
@@ -611,298 +622,351 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // 主 onOutput 回调（提取为命名 const 以便 API error 重试 loop 复用）
   const mainOnOutput = async (result: ContainerOutput) => {
-      // 进度消息 — 转发给 channel 显示进度卡片
-      if (result.status === 'progress' && result.result) {
-        // thinking 类型的 progress 不发给用户（模型内部思考过程，发出去会触发死循环）
-        if (shouldFilterProgress(result.progressType)) {
-          logger.info({ chatJid, text: result.result.slice(0, 100) }, '[progress] thinking 类型，跳过发送');
-          return;
-        }
+    // 进度消息 — 转发给 channel 显示进度卡片
+    if (result.status === 'progress' && result.result) {
+      // thinking 类型的 progress 不发给用户（模型内部思考过程，发出去会触发死循环）
+      if (shouldFilterProgress(result.progressType)) {
         logger.info(
-          { chatJid, progressType: result.progressType, preview: result.result.slice(0, 80) },
-          '[progress] 转发到 channel',
+          { chatJid, text: result.result.slice(0, 100) },
+          '[progress] thinking 类型，跳过发送',
         );
-        const payload = result.detail
-          ? JSON.stringify({ title: result.result, detail: result.detail })
-          : result.result;
-        await channel.sendMessage(chatJid, payload, { isProgress: true });
-        everSentToUser = true; // CLI interactive 模式下中间消息也算"发过消息"
-        if (result.progressType === 'text') {
-          textSentToUser = true;
-          autoFollowupSummaryTextParts.push(result.result);
+        return;
+      }
+      logger.info(
+        {
+          chatJid,
+          progressType: result.progressType,
+          preview: result.result.slice(0, 80),
+        },
+        '[progress] 转发到 channel',
+      );
+      const payload = result.detail
+        ? JSON.stringify({ title: result.result, detail: result.detail })
+        : result.result;
+      await channel.sendMessage(chatJid, payload, { isProgress: true });
+      everSentToUser = true; // CLI interactive 模式下中间消息也算"发过消息"
+      if (result.progressType === 'text') {
+        textSentToUser = true;
+        autoFollowupSummaryTextParts.push(result.result);
+      }
+      // tool_use 摘要存入 messages.db（供巡检和搜索使用）
+      // result.result 格式如 "🔧 Bash: ls -la"，已含工具名和简短输入
+      if (result.progressType === 'tool_use' && result.result) {
+        try {
+          storeMessageDirect({
+            id: `tool_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            chat_jid: chatJid,
+            sender: ASSISTANT_NAME,
+            sender_name: ASSISTANT_NAME,
+            content: result.result,
+            timestamp: new Date().toISOString(),
+            is_from_me: true,
+            is_bot_message: true,
+          });
+        } catch {
+          /* 入库失败不影响主流程 */
         }
-        // tool_use 摘要存入 messages.db（供巡检和搜索使用）
-        // result.result 格式如 "🔧 Bash: ls -la"，已含工具名和简短输入
-        if (result.progressType === 'tool_use' && result.result) {
-          try {
-            storeMessageDirect({
-              id: `tool_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-              chat_jid: chatJid,
-              sender: ASSISTANT_NAME,
-              sender_name: ASSISTANT_NAME,
-              content: result.result,
-              timestamp: new Date().toISOString(),
-              is_from_me: true,
-              is_bot_message: true,
-            });
-          } catch { /* 入库失败不影响主流程 */ }
+      }
+      return;
+    }
+
+    // 传递 usage 数据到飞书 channel（在发送文本回复之前）
+    if (result.usage && 'setUsage' in channel) {
+      (
+        channel as {
+          setUsage: (
+            jid: string,
+            usage: typeof result.usage,
+            thinking?: 'adaptive' | 'disabled',
+          ) => void;
         }
+      )
+        // agent-runner 默认 thinking adaptive（除非显式 disabled），所以 undefined → 'adaptive'
+        .setUsage(
+          chatJid,
+          result.usage,
+          modelOverride?.thinking === 'disabled' ? 'disabled' : 'adaptive',
+        );
+    }
+
+    // kill 后可能还有残余 chunk 在 outputChain 里排队，直接丢弃
+    if (streamingRateLimitDetected) return;
+
+    // Streaming output callback — called for each agent result
+    if (result.result) {
+      const raw =
+        typeof result.result === 'string'
+          ? result.result
+          : JSON.stringify(result.result);
+      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+      logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
+
+      // Streaming 模式下检测限流文本（"You've hit your limit" 等）
+      // 检测到后抑制发送 + 立即 kill 子进程，让 runContainerAgent resolve
+      // 之后由 runAgent 返回后的 streamingRateLimitDetected 轮换逻辑执行切账号+重试
+      //
+      // 两个守门（2026-06-11 oc_f0c8 群误杀死循环复盘）：
+      // 1. 长度 <500：真限流的假成功 result 就是孤零零一句话；正常回答里
+      //    "引用/转述"限流报错（如诊断别的群限流问题）必然长得多。
+      //    误杀后 cursor 不推进 → 重试 → 回答还带同样引用 → 再杀 → 死循环。
+      // 2. 仅 Claude 系 cliMode：非 Claude 系（codex/gemini）检测到也不会轮换
+      //    Anthropic 账号（见 runAgent 返回后的轮换逻辑），kill 纯属白杀。
+      if (
+        detectRateLimitResult(raw) &&
+        shouldAutoRotateAnthropicAccount(resolveCliMode(group.containerConfig))
+      ) {
+        streamingRateLimitDetected = true;
+        logger.warn(
+          { group: group.name, text: raw.slice(0, 200) },
+          'Streaming 输出检测到限流文本，抑制发送并 kill 子进程触发轮换',
+        );
+        // kill 子进程，让 runContainerAgent 的 Promise resolve
+        // 这样 runAgent 返回后的轮换逻辑能立即执行
+        queue.killGroup(chatJid);
         return;
       }
 
-      // 传递 usage 数据到飞书 channel（在发送文本回复之前）
-      if (result.usage && 'setUsage' in channel) {
-        (
-          channel as {
-            setUsage: (
-              jid: string,
-              usage: typeof result.usage,
-              thinking?: 'adaptive' | 'disabled',
-            ) => void;
-          }
-        )
-          // agent-runner 默认 thinking adaptive（除非显式 disabled），所以 undefined → 'adaptive'
-          .setUsage(
-            chatJid,
-            result.usage,
-            modelOverride?.thinking === 'disabled' ? 'disabled' : 'adaptive',
-          );
+      // SDK 系统消息过滤：拦截不应发给用户的内部信息
+      // - "New session: UUID" — session 被强制重置时 SDK 输出
+      // - "fetch failed" / "API Error: 5xx" — API 调用失败被包装成 success
+      // - 纯 UUID 行 — session ID 泄露
+      if (text && /^(?:🔄\s*)?New session:\s*[0-9a-f-]+$/i.test(text)) {
+        logger.warn(
+          { group: group.name, text },
+          'SDK 系统消息被拦截（New session），不发给用户',
+        );
+        return;
+      }
+      if (text && /^(?:fetch failed|API Error:\s*\d{3}\b)/i.test(text)) {
+        // SDK 把上游 API 瞬时错误（fetch failed / 5xx）包成 status:success + result 文本
+        // 这条文本不能发给用户，且必须触发外层重试（不是简单 silent return）
+        streamingApiErrorDetected = true;
+        streamingApiErrorText = text.slice(0, 200);
+        logger.warn(
+          { group: group.name, text: text.slice(0, 200), chatJid },
+          '[api-error] SDK 把 API 瞬时错误包成 success result，标记重试并 kill 子进程',
+        );
+        // kill 子进程，让 runContainerAgent resolve，由 runAgent 返回后的 API error 重试 loop 接管
+        queue.killGroup(chatJid);
+        return;
       }
 
-      // kill 后可能还有残余 chunk 在 outputChain 里排队，直接丢弃
-      if (streamingRateLimitDetected) return;
-
-      // Streaming output callback — called for each agent result
-      if (result.result) {
-        const raw =
-          typeof result.result === 'string'
-            ? result.result
-            : JSON.stringify(result.result);
-        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-        logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-
-        // Streaming 模式下检测限流文本（"You've hit your limit" 等）
-        // 检测到后抑制发送 + 立即 kill 子进程，让 runContainerAgent resolve
-        // 之后由 runAgent 返回后的 streamingRateLimitDetected 轮换逻辑执行切账号+重试
-        //
-        // 两个守门（2026-06-11 oc_f0c8 群误杀死循环复盘）：
-        // 1. 长度 <500：真限流的假成功 result 就是孤零零一句话；正常回答里
-        //    "引用/转述"限流报错（如诊断别的群限流问题）必然长得多。
-        //    误杀后 cursor 不推进 → 重试 → 回答还带同样引用 → 再杀 → 死循环。
-        // 2. 仅 Claude 系 cliMode：非 Claude 系（codex/gemini）检测到也不会轮换
-        //    Anthropic 账号（见 runAgent 返回后的轮换逻辑），kill 纯属白杀。
-        if (
-          detectRateLimitResult(raw) &&
-          shouldAutoRotateAnthropicAccount(resolveCliMode(group.containerConfig))
-        ) {
-          streamingRateLimitDetected = true;
-          logger.warn(
-            { group: group.name, text: raw.slice(0, 200) },
-            'Streaming 输出检测到限流文本，抑制发送并 kill 子进程触发轮换',
-          );
-          // kill 子进程，让 runContainerAgent 的 Promise resolve
-          // 这样 runAgent 返回后的轮换逻辑能立即执行
-          queue.killGroup(chatJid);
-          return;
-        }
-
-        // SDK 系统消息过滤：拦截不应发给用户的内部信息
-        // - "New session: UUID" — session 被强制重置时 SDK 输出
-        // - "fetch failed" / "API Error: 5xx" — API 调用失败被包装成 success
-        // - 纯 UUID 行 — session ID 泄露
-        if (text && /^(?:🔄\s*)?New session:\s*[0-9a-f-]+$/i.test(text)) {
-          logger.warn({ group: group.name, text }, 'SDK 系统消息被拦截（New session），不发给用户');
-          return;
-        }
-        if (text && /^(?:fetch failed|API Error:\s*\d{3}\b)/i.test(text)) {
-          // SDK 把上游 API 瞬时错误（fetch failed / 5xx）包成 status:success + result 文本
-          // 这条文本不能发给用户，且必须触发外层重试（不是简单 silent return）
-          streamingApiErrorDetected = true;
-          streamingApiErrorText = text.slice(0, 200);
-          logger.warn(
-            { group: group.name, text: text.slice(0, 200), chatJid },
-            '[api-error] SDK 把 API 瞬时错误包成 success result，标记重试并 kill 子进程',
-          );
-          // kill 子进程，让 runContainerAgent resolve，由 runAgent 返回后的 API error 重试 loop 接管
-          queue.killGroup(chatJid);
-          return;
-        }
-
-        // 模型拒绝回复文本过滤 — "No response requested." 等不应发给用户（会触发死循环）
-        if (text && isModelRefusal(text)) {
-          logger.warn({ chatJid, text: text.slice(0, 100) }, '[reply] 模型拒绝文本被拦截，不发给用户');
-          return;
-        }
-
-        if (text) {
-          await channel.setTyping?.(chatJid, false);
-          const feishuMsgId = await channel.sendMessage(chatJid, text, {
-            voiceContext,
-          });
-          logger.info({ group: group.name, feishuMsgId, textLen: text.length }, '[reply] sendMessage 返回');
-          if (feishuMsgId) lastFeishuMsgId = feishuMsgId;
-          outputSentToUser = true;
-          textSentToUser = true;
-          everSentToUser = true;
-          agentReplies.push(text);
-          autoFollowupSummaryTextParts.push(text);
-
-          // 实时索引聊天记录（不等 agent 退出，因为 agent 可能跑数小时）
-          if (CHAT_INDEX_ENABLED) {
-            const latestUserMsg = missedMessages[missedMessages.length - 1];
-            if (latestUserMsg) {
-              getChatIndex().enqueue({
-                userContent: latestUserMsg.content,
-                botContent: text,
-                userMsgId: latestUserMsg.id,
-                botMsgId: `bot_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-                chat_jid: chatJid,
-                group_folder: group.folder,
-                sender_name: latestUserMsg.sender_name || '用户',
-                timestamp: latestUserMsg.timestamp || new Date().toISOString(),
-              });
-            }
-          }
-        }
-        // Only reset idle timer on actual results, not session-update markers (result: null)
-        resetIdleTimer();
+      // 模型拒绝回复文本过滤 — "No response requested." 等不应发给用户（会触发死循环）
+      if (text && isModelRefusal(text)) {
+        logger.warn(
+          { chatJid, text: text.slice(0, 100) },
+          '[reply] 模型拒绝文本被拦截，不发给用户',
+        );
+        return;
       }
 
-      if (result.status === 'success') {
-        // thinking-only 空结果检测与自动重试：
-        // 模型偶尔会只产出 thinking tokens（extended thinking）但没有 text 输出就 end_turn，
-        // 表现为 result 为空但 outputTokens > 0。此时自动 pipe 一条重试消息让模型继续回答。
-        const outputTokens = result.usage?.outputTokens ?? 0;
-        const hasText = !!result.result && result.result.trim().length > 0;
+      if (text) {
+        await channel.setTyping?.(chatJid, false);
+        const feishuMsgId = await channel.sendMessage(chatJid, text, {
+          voiceContext,
+        });
         logger.info(
+          { group: group.name, feishuMsgId, textLen: text.length },
+          '[reply] sendMessage 返回',
+        );
+        if (feishuMsgId) lastFeishuMsgId = feishuMsgId;
+        outputSentToUser = true;
+        textSentToUser = true;
+        everSentToUser = true;
+        agentReplies.push(text);
+        autoFollowupSummaryTextParts.push(text);
+
+        // 实时索引聊天记录（不等 agent 退出，因为 agent 可能跑数小时）
+        if (CHAT_INDEX_ENABLED) {
+          const latestUserMsg = missedMessages[missedMessages.length - 1];
+          if (latestUserMsg) {
+            getChatIndex().enqueue({
+              userContent: latestUserMsg.content,
+              botContent: text,
+              userMsgId: latestUserMsg.id,
+              botMsgId: `bot_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+              chat_jid: chatJid,
+              group_folder: group.folder,
+              sender_name: latestUserMsg.sender_name || '用户',
+              timestamp: latestUserMsg.timestamp || new Date().toISOString(),
+            });
+          }
+        }
+      }
+      // Only reset idle timer on actual results, not session-update markers (result: null)
+      resetIdleTimer();
+    }
+
+    if (result.status === 'success') {
+      // thinking-only 空结果检测与自动重试：
+      // 模型偶尔会只产出 thinking tokens（extended thinking）但没有 text 输出就 end_turn，
+      // 表现为 result 为空但 outputTokens > 0。此时自动 pipe 一条重试消息让模型继续回答。
+      const outputTokens = result.usage?.outputTokens ?? 0;
+      const hasText = !!result.result && result.result.trim().length > 0;
+      logger.info(
+        {
+          group: group.name,
+          chatJid,
+          hasText,
+          outputSentToUser,
+          textSentToUser,
+          everSentToUser,
+          outputTokens,
+          retries: thinkingOnlyRetryCount,
+        },
+        '[thinking-only] success 空结果判定输入',
+      );
+      const thinkingOnlyAction = decideThinkingOnlyAction({
+        hasText,
+        textSentToUser,
+        outputTokens,
+        retryCount: thinkingOnlyRetryCount,
+        maxRetries: THINKING_ONLY_MAX_RETRIES,
+      });
+      if (thinkingOnlyAction === 'giveup') {
+        // 已达重试上限：放弃并提示用户，避免无限循环刷屏烧钱。
+        // 不 return —— 继续往下走正常清理（关 typing / 清进度卡片）。
+        logger.warn(
           {
             group: group.name,
             chatJid,
-            hasText,
-            outputSentToUser,
-            textSentToUser,
-            everSentToUser,
             outputTokens,
             retries: thinkingOnlyRetryCount,
           },
-          '[thinking-only] success 空结果判定输入',
+          '[thinking-only] 重试已达上限，放弃并提示用户',
         );
-        const thinkingOnlyAction = decideThinkingOnlyAction({
-          hasText,
-          textSentToUser,
-          outputTokens,
-          retryCount: thinkingOnlyRetryCount,
-          maxRetries: THINKING_ONLY_MAX_RETRIES,
-        });
-        if (thinkingOnlyAction === 'giveup') {
-          // 已达重试上限：放弃并提示用户，避免无限循环刷屏烧钱。
-          // 不 return —— 继续往下走正常清理（关 typing / 清进度卡片）。
-          logger.warn(
-            { group: group.name, chatJid, outputTokens, retries: thinkingOnlyRetryCount },
-            '[thinking-only] 重试已达上限，放弃并提示用户',
+        channel
+          .sendMessage(
+            chatJid,
+            '⚠️ 模型连续多次只思考、不输出内容，已停止自动重试。请重新发条消息或换个问法。',
+            { isCommandReply: true },
+          )
+          .catch((err) =>
+            logger.warn({ err }, '[thinking-only] 放弃通知发送失败'),
           );
-          channel.sendMessage(chatJid, '⚠️ 模型连续多次只思考、不输出内容，已停止自动重试。请重新发条消息或换个问法。', { isCommandReply: true })
-            .catch((err) => logger.warn({ err }, '[thinking-only] 放弃通知发送失败'));
-          thinkingOnlyRetryCount = 0;
-        } else if (thinkingOnlyAction === 'retry') {
-          thinkingOnlyRetryCount++;
-          logger.warn(
-            { group: group.name, chatJid, outputTokens, cost: result.usage?.totalCostUsd, retry: thinkingOnlyRetryCount },
-            '[thinking-only] 模型仅产出 thinking 无 text，自动重试（关闭 thinking 强制输出）',
-          );
-          // 通知用户
-          channel.sendMessage(chatJid, '⚠️ 模型开了个小差（只有 thinking 没有输出），自动重试中...', { isCommandReply: true })
-            .catch((err) => logger.warn({ err }, '[thinking-only] 通知发送失败'));
-          // pipe 重试消息到同一个 session，关闭 thinking 强制模型直接输出 text，
-          // 否则 adaptive thinking 可能再次把整轮耗在 thinking 上、又是空结果。
-          const retryMsg = '你刚才的回复只有 thinking 没有 text 输出，用户什么都没收到。请直接用文字重新回答上一个问题，不要只思考。';
-          if (!queue.sendMessage(chatJid, retryMsg, { thinking: 'disabled' }, null, memorySenderId)) {
-            logger.warn({ chatJid }, '[thinking-only] pipe 重试失败（容器可能已退出），入队重新处理');
-            queue.enqueueMessageCheck(chatJid);
-          }
-          // 不清理进度卡片、不重置状态，等重试结果回来再清理
-          return;
-        } else if (hasText) {
-          // 成功产出 text → 清零重试计数，下次 thinking-only 重新计
-          thinkingOnlyRetryCount = 0;
-        }
-
-        maybeEnqueueAutoFollowupSummary();
-
-        // 每轮 query 结束时，确保 typing/spinner/进度卡片被清理
-        // IPC pipe 模式下多轮 query 共享同一个闭包，必须每轮都清理
-        // （之前只在 !outputSentToUser 时清理，导致第一轮设了 true 后后续轮次卡片永远不关）
-        if (!outputSentToUser) {
-          await channel.setTyping?.(chatJid, false);
-        }
-        // CLI interactive 模式：文本已通过中间 progress/send_message 发出，
-        // success 到达时 text 为空，但 pendingUsage 还在 → 单独发 usage-only 卡片。
-        // 只有真实文本发出过才补 footer；工具进度卡不能算，否则会产生空消息。
-        // 必须在 cleanupProgressCard 之前调用（cleanup 会清理 pendingUsage）
-        if (textSentToUser && 'sendUsageOnly' in channel) {
-          await (
-            channel as { sendUsageOnly: (jid: string) => Promise<void> }
-          ).sendUsageOnly(chatJid);
-        }
-        // 无条件清理进度卡片（cleanupProgressCard 内部会检查卡片是否存在，不存在则 no-op）
-        if ('cleanupProgressCard' in channel) {
-          await (
-            channel as { cleanupProgressCard: (jid: string) => Promise<void> }
-          ).cleanupProgressCard(chatJid);
-        }
-        // 重置状态：IPC pipe 模式下下一轮 query 需要从干净状态开始
-        outputSentToUser = false;
-        textSentToUser = false;
-        autoFollowupSummaryTextParts = [];
-
-        // Commander 自动终态兜底：子群一轮 query 正常结束时，若本群仍有进行态
-        // delegation 任务（agent 干完但忘了调 report_to_main），host 自动补 done，
-        // 避免账本卡 dispatched/progress 直到 15 分钟失联。仅子群、进行态生效；
-        // agent 已自主汇报或留 blocked/question 时本函数不触发（见函数内说明）。
-        if (!isMainGroup) {
-          try {
-            finalizeDelegationOnTurnEnd(
-              group.folder,
-              true,
-              agentReplies.join('\n'),
-            );
-          } catch (err) {
-            logger.warn({ err, group: group.folder }, '自动终态汇报(done)异常');
-          }
-        }
-
-        // R8.1 实时记忆入队：agent 回复完成后立即入队，不等进程退出
-        // agent-runner 完成回复后会进入 IPC 等待循环（可达 8 小时），
-        // 如果等进程退出才入队，记忆会延迟数小时甚至因 SIGTERM 丢失
-        if (!memoryEnqueued && isMemoryEnabled() && agentReplies.length > 0) {
-          const memoryMessages = [
-            ...missedMessages.map((m) => ({
-              content: m.content,
-              sender_name: m.sender_name,
-              is_bot_message: m.is_bot_message,
-              is_from_me: m.is_from_me,
-            })),
-            ...agentReplies.map((text) => ({
-              content: text,
-              is_bot_message: true,
-            })),
-          ];
-          getMemoryQueue().add(
-            group.folder,
-            memoryMessages,
-            sessions[group.folder],
+        thinkingOnlyRetryCount = 0;
+      } else if (thinkingOnlyAction === 'retry') {
+        thinkingOnlyRetryCount++;
+        logger.warn(
+          {
+            group: group.name,
+            chatJid,
+            outputTokens,
+            cost: result.usage?.totalCostUsd,
+            retry: thinkingOnlyRetryCount,
+          },
+          '[thinking-only] 模型仅产出 thinking 无 text，自动重试（关闭 thinking 强制输出）',
+        );
+        // 通知用户
+        channel
+          .sendMessage(
+            chatJid,
+            '⚠️ 模型开了个小差（只有 thinking 没有输出），自动重试中...',
+            { isCommandReply: true },
+          )
+          .catch((err) => logger.warn({ err }, '[thinking-only] 通知发送失败'));
+        // pipe 重试消息到同一个 session，关闭 thinking 强制模型直接输出 text，
+        // 否则 adaptive thinking 可能再次把整轮耗在 thinking 上、又是空结果。
+        const retryMsg =
+          '你刚才的回复只有 thinking 没有 text 输出，用户什么都没收到。请直接用文字重新回答上一个问题，不要只思考。';
+        if (
+          !queue.sendMessage(
+            chatJid,
+            retryMsg,
+            { thinking: 'disabled' },
+            null,
             memorySenderId,
+          )
+        ) {
+          logger.warn(
+            { chatJid },
+            '[thinking-only] pipe 重试失败（容器可能已退出），入队重新处理',
           );
-          memoryEnqueued = true;
+          queue.enqueueMessageCheck(chatJid);
         }
-
-        queue.notifyIdle(chatJid);
+        // 不清理进度卡片、不重置状态，等重试结果回来再清理
+        return;
+      } else if (hasText) {
+        // 成功产出 text → 清零重试计数，下次 thinking-only 重新计
+        thinkingOnlyRetryCount = 0;
       }
 
-      if (result.status === 'error') {
-        hadError = true;
+      maybeEnqueueAutoFollowupSummary();
+
+      // 每轮 query 结束时，确保 typing/spinner/进度卡片被清理
+      // IPC pipe 模式下多轮 query 共享同一个闭包，必须每轮都清理
+      // （之前只在 !outputSentToUser 时清理，导致第一轮设了 true 后后续轮次卡片永远不关）
+      if (!outputSentToUser) {
+        await channel.setTyping?.(chatJid, false);
       }
+      // CLI interactive 模式：文本已通过中间 progress/send_message 发出，
+      // success 到达时 text 为空，但 pendingUsage 还在 → 单独发 usage-only 卡片。
+      // 只有真实文本发出过才补 footer；工具进度卡不能算，否则会产生空消息。
+      // 必须在 cleanupProgressCard 之前调用（cleanup 会清理 pendingUsage）
+      if (textSentToUser && 'sendUsageOnly' in channel) {
+        await (
+          channel as { sendUsageOnly: (jid: string) => Promise<void> }
+        ).sendUsageOnly(chatJid);
+      }
+      // 无条件清理进度卡片（cleanupProgressCard 内部会检查卡片是否存在，不存在则 no-op）
+      if ('cleanupProgressCard' in channel) {
+        await (
+          channel as { cleanupProgressCard: (jid: string) => Promise<void> }
+        ).cleanupProgressCard(chatJid);
+      }
+      // 重置状态：IPC pipe 模式下下一轮 query 需要从干净状态开始
+      outputSentToUser = false;
+      textSentToUser = false;
+      autoFollowupSummaryTextParts = [];
+
+      // Commander 自动终态兜底：子群一轮 query 正常结束时，若本群仍有进行态
+      // delegation 任务（agent 干完但忘了调 report_to_main），host 自动补 done，
+      // 避免账本卡 dispatched/progress 直到 15 分钟失联。仅子群、进行态生效；
+      // agent 已自主汇报或留 blocked/question 时本函数不触发（见函数内说明）。
+      if (!isMainGroup) {
+        try {
+          finalizeDelegationOnTurnEnd(
+            group.folder,
+            true,
+            agentReplies.join('\n'),
+          );
+        } catch (err) {
+          logger.warn({ err, group: group.folder }, '自动终态汇报(done)异常');
+        }
+      }
+
+      // R8.1 实时记忆入队：agent 回复完成后立即入队，不等进程退出
+      // agent-runner 完成回复后会进入 IPC 等待循环（可达 8 小时），
+      // 如果等进程退出才入队，记忆会延迟数小时甚至因 SIGTERM 丢失
+      if (!memoryEnqueued && isMemoryEnabled() && agentReplies.length > 0) {
+        const memoryMessages = [
+          ...missedMessages.map((m) => ({
+            content: m.content,
+            sender_name: m.sender_name,
+            is_bot_message: m.is_bot_message,
+            is_from_me: m.is_from_me,
+          })),
+          ...agentReplies.map((text) => ({
+            content: text,
+            is_bot_message: true,
+          })),
+        ];
+        getMemoryQueue().add(
+          group.folder,
+          memoryMessages,
+          sessions[group.folder],
+          memorySenderId,
+        );
+        memoryEnqueued = true;
+      }
+
+      queue.notifyIdle(chatJid);
+    }
+
+    if (result.status === 'error') {
+      hadError = true;
+    }
   };
 
   const notifyRotation = (rotation: {
@@ -918,7 +982,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         { isCommandReply: true },
       )
       .catch((err) => {
-        logger.error({ err, group: group.name }, '[rate-limit] 轮换通知发送失败');
+        logger.error(
+          { err, group: group.name },
+          '[rate-limit] 轮换通知发送失败',
+        );
       });
   };
 
@@ -1047,7 +1114,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     hadError = true;
   }
 
-  if (streamingRateLimitDetected && !output.rotatedTo && canAutoRotateAnthropic) {
+  if (
+    streamingRateLimitDetected &&
+    !output.rotatedTo &&
+    canAutoRotateAnthropic
+  ) {
     const agentId = group.folder.toLowerCase().replace(/_/g, '-');
     logger.warn(
       { group: group.name, agentId },
@@ -1058,7 +1129,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       output.rotatedTo = rotateResult.newSecretName;
       output.rotatedFrom = rotateResult.oldSecretName;
       logger.info(
-        { group: group.name, oldAgentId: agentId, newSecret: rotateResult.newSecretName },
+        {
+          group: group.name,
+          oldAgentId: agentId,
+          newSecret: rotateResult.newSecretName,
+        },
         '[rate-limit] 已轮换账号，开始重试',
       );
       notifyRotation(rotateResult);
@@ -1072,11 +1147,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           if (result.status === 'progress' && result.result) {
             // thinking 类型的 progress 不发给用户（同主回调逻辑）
             if (shouldFilterProgress(result.progressType)) {
-              logger.info({ chatJid, text: result.result.slice(0, 100) }, '[retry-progress] thinking 类型，跳过发送');
+              logger.info(
+                { chatJid, text: result.result.slice(0, 100) },
+                '[retry-progress] thinking 类型，跳过发送',
+              );
               return;
             }
             logger.info(
-              { chatJid, progressType: result.progressType, preview: result.result.slice(0, 80) },
+              {
+                chatJid,
+                progressType: result.progressType,
+                preview: result.result.slice(0, 80),
+              },
               '[retry-progress] 转发到 channel',
             );
             const payload = result.detail
@@ -1100,7 +1182,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                   is_from_me: true,
                   is_bot_message: true,
                 });
-              } catch { /* 入库失败不影响主流程 */ }
+              } catch {
+                /* 入库失败不影响主流程 */
+              }
             }
             return;
           }
@@ -1131,7 +1215,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             // 重试也可能再次限流，必须检查并抑制 + kill 子进程避免死锁
             if (
               detectRateLimitResult(raw) &&
-              shouldAutoRotateAnthropicAccount(resolveCliMode(group.containerConfig))
+              shouldAutoRotateAnthropicAccount(
+                resolveCliMode(group.containerConfig),
+              )
             ) {
               logger.warn(
                 { group: group.name, text: raw.slice(0, 200) },
@@ -1164,7 +1250,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             }
             // 模型拒绝回复文本过滤（同主回调逻辑）
             if (text && isModelRefusal(text)) {
-              logger.warn({ chatJid, text: text.slice(0, 100) }, '[retry-reply] 模型拒绝文本被拦截，不发给用户');
+              logger.warn(
+                { chatJid, text: text.slice(0, 100) },
+                '[retry-reply] 模型拒绝文本被拦截，不发给用户',
+              );
               return;
             }
             if (text) {
@@ -1193,7 +1282,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             }
             if ('cleanupProgressCard' in channel) {
               await (
-                channel as { cleanupProgressCard: (jid: string) => Promise<void> }
+                channel as {
+                  cleanupProgressCard: (jid: string) => Promise<void>;
+                }
               ).cleanupProgressCard(chatJid);
             }
             outputSentToUser = false;
@@ -1235,20 +1326,27 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       '[rate-limit] 发送轮换通知给用户',
     );
     channel
-      .sendMessage(chatJid, `🔄 ${output.rotatedFrom || '当前账号'}额度已满，已自动切换到 ${output.rotatedTo}`, { isCommandReply: true })
+      .sendMessage(
+        chatJid,
+        `🔄 ${output.rotatedFrom || '当前账号'}额度已满，已自动切换到 ${output.rotatedTo}`,
+        { isCommandReply: true },
+      )
       .catch((err) => {
-        logger.error({ err, group: group.name }, '[rate-limit] 轮换通知发送失败');
+        logger.error(
+          { err, group: group.name },
+          '[rate-limit] 轮换通知发送失败',
+        );
       });
   }
   if (output.allExhausted) {
-    logger.warn(
-      { group: group.name },
-      '[rate-limit] 发送配额耗尽通知给用户',
-    );
+    logger.warn({ group: group.name }, '[rate-limit] 发送配额耗尽通知给用户');
     channel
       .sendMessage(chatJid, '⚠️ 所有账号配额已耗尽，请等待恢复或添加新账号')
       .catch((err) => {
-        logger.error({ err, group: group.name }, '[rate-limit] 耗尽通知发送失败');
+        logger.error(
+          { err, group: group.name },
+          '[rate-limit] 耗尽通知发送失败',
+        );
       });
   }
   if (output.sessionRecoveryRequired) {
@@ -1325,7 +1423,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   // Bot 回复入库（优先用飞书 message_id，引用时可直接命中 DB）
   const botReplyText = agentReplies.join('\n');
-  const botMsgId = lastFeishuMsgId ?? `bot_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const botMsgId =
+    lastFeishuMsgId ??
+    `bot_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   if (agentReplies.length > 0) {
     try {
       storeMessage({
@@ -1512,9 +1612,7 @@ async function runAgent(
       // 识别 session 恢复失败。这里不自动清指针：长会话上下文丢失的代价更高，
       // 必须先把错误告诉用户，让用户决定是否执行 /new。
       const errorLooksStale =
-        sessionId &&
-        output.error &&
-        isSessionRecoveryError(output.error);
+        sessionId && output.error && isSessionRecoveryError(output.error);
 
       // 加固：错误信息匹配 stale 模式 ≠ session 真失效。query 崩溃（如 resume 大会话时
       // setModel 抢跑）也会吐出假的 "no conversation found"，此时 .jsonl 其实健在。
@@ -1539,7 +1637,12 @@ async function runAgent(
 
       if (errorLooksStale) {
         logger.warn(
-          { group: group.name, sessionId, sessionFileExists, error: output.error },
+          {
+            group: group.name,
+            sessionId,
+            sessionFileExists,
+            error: output.error,
+          },
           'Session 恢复失败 — 保留指针并等待用户决定',
         );
         return {
@@ -1599,24 +1702,42 @@ async function runAgent(
       }
 
       // 429 检测 + 自动轮换（试完所有账号才放弃）
-      if (!canAutoRotateAnthropic && output.error && detectRateLimit(output.error)) {
+      if (
+        !canAutoRotateAnthropic &&
+        output.error &&
+        detectRateLimit(output.error)
+      ) {
         logger.warn(
           { group: group.name, cliMode, error: output.error?.slice(0, 200) },
           '[rate-limit] 当前模式不是 Claude 系，跳过 Anthropic 自动轮换',
         );
       }
 
-      if (retryCount < maxRetries && output.error && detectRateLimit(output.error)) {
+      if (
+        retryCount < maxRetries &&
+        output.error &&
+        detectRateLimit(output.error)
+      ) {
         const agentId = group.folder.toLowerCase().replace(/_/g, '-');
         logger.warn(
-          { group: group.name, agentId, retryCount, maxRetries, error: output.error?.slice(0, 200) },
+          {
+            group: group.name,
+            agentId,
+            retryCount,
+            maxRetries,
+            error: output.error?.slice(0, 200),
+          },
           '[rate-limit] Agent 退出错误包含限流关键词，尝试轮换',
         );
         const rotateResult = rotateAccount(agentId, group.folder);
 
         if (rotateResult?.success) {
           logger.info(
-            { group: group.name, newSecret: rotateResult.newSecretName, retryCount: retryCount + 1 },
+            {
+              group: group.name,
+              newSecret: rotateResult.newSecretName,
+              retryCount: retryCount + 1,
+            },
             '[rate-limit] 已轮换账号，重试中',
           );
           void onRotation?.(rotateResult);
@@ -1645,7 +1766,12 @@ async function runAgent(
       }
 
       // 已试完所有账号仍然限流（maxRetries > 0 才算"全部耗尽"，否则只是普通错误）
-      if (retryCount >= maxRetries && maxRetries > 0 && output.error && detectRateLimit(output.error)) {
+      if (
+        retryCount >= maxRetries &&
+        maxRetries > 0 &&
+        output.error &&
+        detectRateLimit(output.error)
+      ) {
         logger.warn(
           { group: group.name, retryCount, maxRetries },
           '[rate-limit] 所有账号均被限流',
@@ -1662,7 +1788,11 @@ async function runAgent(
 
     // Claude Code 有时以 status=success 返回限流消息（"You've hit your limit"）
     // 检查 result 文本以捕获这种假成功
-    if (!canAutoRotateAnthropic && output.result && detectRateLimitResult(output.result)) {
+    if (
+      !canAutoRotateAnthropic &&
+      output.result &&
+      detectRateLimitResult(output.result)
+    ) {
       logger.warn(
         { group: group.name, cliMode, result: output.result?.slice(0, 200) },
         '[rate-limit] 当前模式不是 Claude 系，跳过 Anthropic 自动轮换',
@@ -1670,17 +1800,31 @@ async function runAgent(
       return { status: 'error' };
     }
 
-    if (retryCount < maxRetries && output.result && detectRateLimitResult(output.result)) {
+    if (
+      retryCount < maxRetries &&
+      output.result &&
+      detectRateLimitResult(output.result)
+    ) {
       const agentId = group.folder.toLowerCase().replace(/_/g, '-');
       logger.warn(
-        { group: group.name, agentId, retryCount, maxRetries, result: output.result?.slice(0, 200) },
+        {
+          group: group.name,
+          agentId,
+          retryCount,
+          maxRetries,
+          result: output.result?.slice(0, 200),
+        },
         '[rate-limit] 假成功（result 包含限流关键词），尝试轮换',
       );
       const rotateResult = rotateAccount(agentId, group.folder);
 
       if (rotateResult?.success) {
         logger.info(
-          { group: group.name, newSecret: rotateResult.newSecretName, retryCount: retryCount + 1 },
+          {
+            group: group.name,
+            newSecret: rotateResult.newSecretName,
+            retryCount: retryCount + 1,
+          },
           '[rate-limit] 假成功已轮换账号，重试中',
         );
         void onRotation?.(rotateResult);
@@ -1710,7 +1854,12 @@ async function runAgent(
     }
 
     // 试完所有账号仍然假成功限流
-    if (retryCount >= maxRetries && maxRetries > 0 && output.result && detectRateLimitResult(output.result)) {
+    if (
+      retryCount >= maxRetries &&
+      maxRetries > 0 &&
+      output.result &&
+      detectRateLimitResult(output.result)
+    ) {
       logger.warn(
         { group: group.name, retryCount },
         '[rate-limit] 假成功：所有账号均被限流',
@@ -1837,7 +1986,8 @@ async function startMessageLoop(): Promise<void> {
       echoToFeishu: async (jid, text) => {
         const channel = findChannel(channels, jid);
         // skipVoiceNotify：回显的是用户刚说的话，不要再总结播回手机
-        if (channel) await channel.sendMessage(jid, text, { skipVoiceNotify: true });
+        if (channel)
+          await channel.sendMessage(jid, text, { skipVoiceNotify: true });
       },
     });
   } catch (err) {
@@ -2313,7 +2463,9 @@ async function main(): Promise<void> {
       }
     },
     onFeishuAuthRequest: async (chatJid, groupFolder) => {
-      const feishuChannel = channels.find((c) => c.name === 'feishu') as FeishuChannel | undefined;
+      const feishuChannel = channels.find((c) => c.name === 'feishu') as
+        | FeishuChannel
+        | undefined;
       if (!feishuChannel?.sendAuthCard) return;
       const { buildAuthUrl } = await import('./channels/feishu-oauth.js');
       const state = `${chatJid}|${groupFolder}`;
@@ -2327,9 +2479,8 @@ async function main(): Promise<void> {
   startSessionCleanup();
   queue.setProcessMessagesFn((chatJid) => {
     const group = registeredGroups[chatJid];
-    return withLogContext(
-      { chatJid, groupFolder: group?.folder },
-      () => processGroupMessages(chatJid),
+    return withLogContext({ chatJid, groupFolder: group?.folder }, () =>
+      processGroupMessages(chatJid),
     );
   });
   recoverPendingMessages();
