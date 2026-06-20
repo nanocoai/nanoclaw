@@ -1,6 +1,6 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
-import { applyMessageFilter } from './poll-loop-extensions.js';
+import { applyMessageFilter, applyPromptTransform } from './poll-loop-extensions.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
@@ -231,7 +231,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
-    const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+    // Inert on pristine: no registrant ⇒ applyPromptTransform resolves to the prompt unchanged.
+    const prompt = await applyPromptTransform(
+      formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands),
+      keep,
+    );
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 

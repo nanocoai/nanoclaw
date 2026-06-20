@@ -26,3 +26,26 @@ export function applyMessageFilter(messages: MessageInRow[]): MessageInRow[] {
 export function __resetMessageFilterForTest(): void {
   messageFilters.length = 0;
 }
+
+// Second registry (cluster 4): a prompt transform applied to the formatted turn
+// prompt right before provider.query — e.g. prepend an embedding-ranked board
+// context preamble. Async + composed left-to-right; no registrant ⇒ the prompt
+// is returned unchanged.
+export type PromptTransform = (prompt: string, messages: MessageInRow[]) => Promise<string> | string;
+
+const promptTransforms: PromptTransform[] = [];
+
+export function registerPromptTransform(fn: PromptTransform): void {
+  promptTransforms.push(fn);
+}
+
+/** Left-fold over registrants. No registrant ⇒ resolves to `prompt` unchanged. */
+export async function applyPromptTransform(prompt: string, messages: MessageInRow[]): Promise<string> {
+  let current = prompt;
+  for (const fn of promptTransforms) current = await fn(current, messages);
+  return current;
+}
+
+export function __resetPromptTransformForTest(): void {
+  promptTransforms.length = 0;
+}
