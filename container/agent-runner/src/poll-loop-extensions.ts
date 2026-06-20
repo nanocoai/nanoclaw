@@ -9,6 +9,7 @@
 // state-gated suppression of scheduled-runner (standup/digest/review) messages
 // when the board is idle/stale. Composed left-to-right in registration order.
 import type { MessageInRow } from './db/messages-in.js';
+import type { RoutingContext } from './formatter.js';
 
 export type MessageFilter = (messages: MessageInRow[]) => MessageInRow[];
 
@@ -101,4 +102,86 @@ export async function applyTurnEnd(): Promise<void> {
 export function __resetTurnHooksForTest(): void {
   turnStartHooks.length = 0;
   turnEndHooks.length = 0;
+}
+
+// Fifth registry (M4 turn-interceptor — the WOVEN trio: web-origin fail-closed,
+// confined-external, actor-domain split). Unlike the transform/side-effect seams
+// above, an interceptor has CONTROL-FLOW AUTHORITY over the turn, expressed as a
+// returned decision the poll loop interprets. Registration order is load-bearing
+// (web → external → split); a terminal `handled` short-circuits later interceptors.
+// No registrant ⇒ applyTurnInterceptor returns {handled:undefined, keep, routing,
+// deferIds:[]} — byte-identical upstream control flow.
+export interface TurnInterceptorCtx {
+  /** Post-filter wake batch (kind!=='system' removed, message-filter applied,
+   *  markProcessing already called on all ids). */
+  readonly keep: MessageInRow[];
+  /** RAW pre-filter batch incl kind==='system' rows — needed for a fail-closed
+   *  check on a co-batched system row (confined-external). */
+  readonly allPending: MessageInRow[];
+  /** Loop-local routing as derived from `keep`. */
+  readonly routing: RoutingContext;
+  readonly isFirstPoll: boolean;
+  readonly assistantName?: string;
+  readonly agentGroupId?: string;
+}
+
+export type TurnDecision =
+  | { kind: 'proceed' }
+  // Rewrite loop-local state; omitted field ⇒ unchanged. The registrant re-derives
+  // routing off its new keep.
+  | { kind: 'rewrite'; keep?: MessageInRow[]; routing?: RoutingContext }
+  // Exclude rows from THIS turn, leave them PENDING (caller un-marks). deferIds ⊆ ids.
+  | { kind: 'defer'; deferIds: string[]; routing?: RoutingContext }
+  // MODEL-BYPASS: registrant fully handled/drained the batch; caller markCompleted
+  // + continue (no normal query). Terminal — SEC-critical.
+  | { kind: 'handled'; completedIds: string[] };
+
+export type TurnInterceptor = (ctx: TurnInterceptorCtx) => Promise<TurnDecision> | TurnDecision;
+
+export interface TurnInterceptorResult {
+  /** handled ⇒ caller markCompleted(completedIds) + continue; else proceed with
+   *  the (possibly rewritten/narrowed) keep + routing, un-marking deferIds. */
+  handled?: { completedIds: string[] };
+  keep: MessageInRow[];
+  routing: RoutingContext;
+  deferIds: string[];
+}
+
+const turnInterceptors: TurnInterceptor[] = [];
+
+export function registerTurnInterceptor(fn: TurnInterceptor): void {
+  turnInterceptors.push(fn);
+}
+
+/**
+ * Fold the interceptors in registration order, threading keep/routing/deferIds.
+ * `rewrite` updates threaded state; `defer` accumulates ids + narrows keep;
+ * `handled` is TERMINAL (returns immediately, later interceptors do not run).
+ * No registrant ⇒ {handled:undefined, keep:input, routing, deferIds:[]} (inert).
+ */
+export async function applyTurnInterceptor(ctx: TurnInterceptorCtx): Promise<TurnInterceptorResult> {
+  let keep = ctx.keep;
+  let routing = ctx.routing;
+  const deferIds: string[] = [];
+  for (const fn of turnInterceptors) {
+    const decision = await fn({ ...ctx, keep, routing });
+    if (decision.kind === 'handled') {
+      return { handled: { completedIds: decision.completedIds }, keep, routing, deferIds };
+    }
+    if (decision.kind === 'rewrite') {
+      if (decision.keep !== undefined) keep = decision.keep;
+      if (decision.routing !== undefined) routing = decision.routing;
+    } else if (decision.kind === 'defer') {
+      const deferSet = new Set(decision.deferIds);
+      for (const id of decision.deferIds) if (!deferIds.includes(id)) deferIds.push(id);
+      keep = keep.filter((m) => !deferSet.has(m.id));
+      if (decision.routing !== undefined) routing = decision.routing;
+    }
+    // 'proceed' ⇒ no change.
+  }
+  return { keep, routing, deferIds };
+}
+
+export function __resetTurnInterceptorForTest(): void {
+  turnInterceptors.length = 0;
 }
