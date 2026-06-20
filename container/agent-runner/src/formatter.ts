@@ -205,9 +205,13 @@ function formatTaskMessage(msg: MessageInRow): string {
   const time = formatLocalTime(msg.timestamp, TIMEZONE);
   const parts: string[] = [];
   if (content.scriptOutput) {
-    parts.push('Script output:', JSON.stringify(content.scriptOutput, null, 2), '');
+    // escapeXml: JSON.stringify does NOT escape </>, so an embedded `</task>` (or a spoofed
+    // <system_response>) would otherwise break out of the XML envelope and inject structure.
+    parts.push('Script output:', escapeXml(JSON.stringify(content.scriptOutput, null, 2)), '');
   }
-  parts.push('Instructions:', content.prompt || '');
+  // Escape the task prompt too — chat text is escaped (formatSingleChat) but this path was not,
+  // so a crafted scheduled-task prompt could inject tags into the agent's next-turn context.
+  parts.push('Instructions:', content.prompt ? escapeXml(content.prompt) : '');
   return `<task${from} time="${escapeXml(time)}">${parts.join('\n')}</task>`;
 }
 
