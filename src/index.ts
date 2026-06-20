@@ -2296,6 +2296,15 @@ async function main(): Promise<void> {
       const channel = findChannel(channels, jid);
       if (channel?.renameChat) {
         await channel.renameChat(jid, name);
+        // 同步更新内存 + DB 中的群名（语音播报上下文、日志等都依赖 group.name）
+        if (registeredGroups[jid]) {
+          registeredGroups[jid].name = name;
+          try {
+            setRegisteredGroup(jid, registeredGroups[jid]);
+          } catch (err) {
+            logger.warn({ err, jid, name }, '[rename] 更新 DB 群名失败');
+          }
+        }
       } else {
         logger.warn(
           { jid, hasChannel: !!channel },

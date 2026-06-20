@@ -309,6 +309,15 @@ async function summarizeForSpeech(
     );
     const summary = response.choices[0]?.message?.content?.trim() || '';
     if (!summary) return text.slice(0, MAX_SPEAK_CHARS);
+    logger.info(
+      {
+        origChars: text.length,
+        summaryChars: summary.length,
+        hasContext: !!conversationContext,
+        summary: summary.slice(0, 300),
+      },
+      '[voice-notify] 摘要结果',
+    );
     return summary.slice(0, MAX_SPEAK_CHARS);
   } catch (err) {
     logger.warn({ err }, '[voice-notify] 摘要失败，fallback 原文');
