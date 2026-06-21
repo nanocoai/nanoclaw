@@ -39,7 +39,7 @@ import { runSlackChannel } from './channels/slack.js';
 import { runTeamsChannel } from './channels/teams.js';
 import { runTelegramChannel } from './channels/telegram.js';
 import { runWhatsAppChannel } from './channels/whatsapp.js';
-import { pingCliAgent, type PingResult } from './lib/agent-ping.js';
+import { pingCliAgent, waitForPing, type PingResult } from './lib/agent-ping.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
 // Provider payloads self-register their picker entry + auth on import.
 import './providers/index.js';
@@ -710,7 +710,11 @@ async function confirmAssistantResponds(): Promise<PingResult> {
     s.message(`${fitToWidth(label, suffix)}${k.dim(suffix)}`);
   }, 1000);
 
-  const result = await pingCliAgent();
+  // The service step returns before the host binds its CLI socket, so the
+  // first ping can land early and come back socket_error. Retry on that one
+  // result for a bounded window before giving up; the spinner's elapsed
+  // counter keeps the wait legible.
+  const result = await waitForPing(() => pingCliAgent());
 
   clearInterval(tick);
   const suffix = ` (${fmtDuration(Date.now() - start)})`;

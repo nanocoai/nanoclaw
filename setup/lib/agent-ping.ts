@@ -32,6 +32,42 @@ export function classifyPingResult(exitCode: number | null, stdout: string, stde
   return 'no_reply';
 }
 
+/**
+ * Retry a ping while the host is still booting.
+ *
+ * The `service` step reports success the moment `launchctl load` / `systemctl
+ * start` returns — before the host process has bound its CLI socket. A ping
+ * fired immediately after therefore often hits a missing socket and comes back
+ * `socket_error`, even though the host is up a moment later. Retry on that one
+ * result for a bounded window before giving up; any other result (ok, auth,
+ * no_reply) is conclusive and returns immediately.
+ *
+ * `now` and `sleep` are injectable so the retry loop can be unit-tested
+ * without real timers.
+ */
+export async function waitForPing(
+  ping: () => Promise<PingResult>,
+  {
+    windowMs = 10_000,
+    intervalMs = 1_000,
+    now = Date.now,
+    sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
+  }: {
+    windowMs?: number;
+    intervalMs?: number;
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<PingResult> {
+  const deadline = now() + windowMs;
+  let result = await ping();
+  while (result === 'socket_error' && now() < deadline) {
+    await sleep(intervalMs);
+    result = await ping();
+  }
+  return result;
+}
+
 export function pingCliAgent(timeoutMs = 30_000): Promise<PingResult> {
   return new Promise((resolve) => {
     const child = spawn('pnpm', ['run', 'chat', 'ping'], {
