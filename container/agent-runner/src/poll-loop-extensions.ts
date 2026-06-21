@@ -142,6 +142,42 @@ export function __resetRunStartForTest(): void {
   runStartHooks.length = 0;
 }
 
+// Result-dispatch REPLACEMENT seam. Unlike the transform/fold seams, the agent's final-text
+// dispatch (parse `<message to="...">` blocks → deliver each) is a whole-function concern an
+// overlay may need to REPLACE wholesale — e.g. to add model-final send-gating (deny a board agent
+// exfiltrating via `<message to="other-board">`), same-turn mutation-card dedup, or to confine an
+// external turn's reply to its cold-DM. So this seam is a REPLACE, not a fold: if an overlay
+// registers a dispatcher, the loop calls it INSTEAD of the base dispatch; the last registrant wins
+// (a config-free overlay registers exactly one at module load). The dispatcher must honor the base
+// contract — return {sent, hasUnwrapped} — so the unwrapped-nudge retry + ack status are unchanged.
+// No registrant ⇒ applyResultDispatch returns null ⇒ the caller falls back to the base dispatch ⇒
+// byte-identical upstream.
+export interface ResultDispatchOutcome {
+  /** Number of `<message>` blocks actually delivered. */
+  sent: number;
+  /** True when the agent produced no deliverable block (sent===0) but non-empty scratchpad —
+   *  drives the base's one-shot re-wrap nudge + the 'undelivered' ack status. */
+  hasUnwrapped: boolean;
+}
+
+export type ResultDispatcher = (text: string, routing: RoutingContext) => ResultDispatchOutcome;
+
+const resultDispatchers: ResultDispatcher[] = [];
+
+export function registerResultDispatch(fn: ResultDispatcher): void {
+  resultDispatchers.push(fn);
+}
+
+/** Last registrant wins (replace, not fold). No registrant ⇒ null ⇒ caller uses the base dispatch. */
+export function applyResultDispatch(text: string, routing: RoutingContext): ResultDispatchOutcome | null {
+  if (resultDispatchers.length === 0) return null;
+  return resultDispatchers[resultDispatchers.length - 1](text, routing);
+}
+
+export function __resetResultDispatchForTest(): void {
+  resultDispatchers.length = 0;
+}
+
 // Fifth registry (M4 turn-interceptor — the WOVEN trio: web-origin fail-closed,
 // confined-external, actor-domain split). Unlike the transform/side-effect seams
 // above, an interceptor has CONTROL-FLOW AUTHORITY over the turn, expressed as a

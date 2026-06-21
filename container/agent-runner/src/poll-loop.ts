@@ -17,6 +17,7 @@ import {
   reconcileTurn,
   applyPostReconcile,
   applyRunStart,
+  applyResultDispatch,
   applyFollowupDrop,
   applyFollowupEndStream,
 } from './poll-loop-extensions.js';
@@ -661,7 +662,11 @@ export async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          const { sent, hasUnwrapped } = dispatchResultText(event.text, routing);
+          // Result-dispatch replacement seam: an overlay may register a gated dispatcher
+          // (model-final send-gating, mutation-card dedup, confined-external reply). Inert on
+          // pristine ⇒ applyResultDispatch returns null ⇒ the base dispatch runs (byte-identical).
+          const { sent, hasUnwrapped } =
+            applyResultDispatch(event.text, routing) ?? dispatchResultText(event.text, routing);
           if (sent === 0 && event.isError === true) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as

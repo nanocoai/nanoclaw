@@ -9,10 +9,12 @@ import {
   registerPostTaskInterceptor,
   registerPostReconcile,
   registerRunStart,
+  registerResultDispatch,
   __resetTurnInterceptorForTest,
   __resetPostTaskInterceptorForTest,
   __resetPostReconcileForTest,
   __resetRunStartForTest,
+  __resetResultDispatchForTest,
   type RunStartConfig,
 } from './poll-loop-extensions.js';
 import type { MessageInRow } from './db/messages-in.js';
@@ -35,6 +37,7 @@ beforeEach(() => {
   __resetPostTaskInterceptorForTest();
   __resetPostReconcileForTest();
   __resetRunStartForTest();
+  __resetResultDispatchForTest();
 });
 
 afterEach(() => {
@@ -42,6 +45,7 @@ afterEach(() => {
   __resetPostTaskInterceptorForTest();
   __resetPostReconcileForTest();
   __resetRunStartForTest();
+  __resetResultDispatchForTest();
   closeSessionDb();
 });
 
@@ -356,5 +360,52 @@ describe('poll-loop run-start hook call site', () => {
     expect(ackStatus('m1')).toBe('completed'); // iteration 1 did process m1 (≥2 iterations ran)
     expect(count).toBe(1); // once per RUN despite ≥2 poll iterations
     expect(seen[0].providerName).toBe('mock'); // received THIS run's config
+  });
+});
+
+// Records whether the loop pushed a re-wrap nudge into the active query — the observable that
+// distinguishes "overlay dispatcher ran (hasUnwrapped:false → no nudge)" from "base dispatch ran
+// (bare text, no destination → hasUnwrapped:true → pushes the nudge)".
+class PushSpyProvider extends MockProvider {
+  pushCount = 0;
+  query(opts: Parameters<MockProvider['query']>[0]) {
+    const q = super.query(opts);
+    const origPush = q.push.bind(q);
+    q.push = (m: string) => {
+      this.pushCount++;
+      return origPush(m);
+    };
+    return q;
+  }
+}
+
+describe('poll-loop result-dispatch seam call site', () => {
+  it('a registered dispatcher REPLACES the base dispatch (the ?? short-circuits it)', async () => {
+    // Base call site: `applyResultDispatch(text, routing) ?? dispatchResultText(...)`. The overlay
+    // dispatcher must run AND its {sent, hasUnwrapped} must be the one used. It returns
+    // {sent:0, hasUnwrapped:false} (a handled/suppressed turn) on BARE text. If the base dispatch
+    // had ALSO run on that bare text (no <message>, no destinations), it would return
+    // hasUnwrapped:true → the loop pushes the re-wrap nudge. Asserting pushCount===0 proves the
+    // base dispatch was bypassed, not merely that the overlay also ran.
+    insertChat('m1');
+    const provider = new PushSpyProvider({}, () => 'AGENT REPLY TEXT'); // bare, unwrapped result
+    const controller = new AbortController();
+    let captured: string | undefined;
+    registerResultDispatch((text) => {
+      captured = text;
+      return { sent: 0, hasUnwrapped: false };
+    });
+
+    const loop = runOnce(provider, controller.signal);
+    const start = Date.now();
+    while (ackStatus('m1') !== 'completed' && Date.now() - start < 1500) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    controller.abort();
+    await loop;
+
+    expect(captured).toBe('AGENT REPLY TEXT'); // overlay dispatcher ran on the agent's final text
+    expect(provider.pushCount).toBe(0); // NO re-wrap nudge → base dispatch did NOT run (would be hasUnwrapped:true)
+    expect(ackStatus('m1')).toBe('completed');
   });
 });
