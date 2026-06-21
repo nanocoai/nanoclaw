@@ -72,6 +72,29 @@ export function __resetPrefilterStepsForTest(): void {
   prefilterSteps.length = 0;
 }
 
+// Idle-iteration side-effect hook (#396): runs at an early `continue` where the loop takes NO agent
+// turn this iteration — an empty wake batch, or an accumulate-only (trigger=0) batch. Those branches
+// sleep+continue without reaching the turn body or turn-end, so a per-turn drain never fires for a
+// board that stays idle / keeps receiving context-only messages. An overlay registers a deferred
+// cross-board notification drain here. Side-effect only (void); hooks run in order. No registrant ⇒
+// no-op ⇒ byte-identical upstream (an awaited empty loop).
+export type IdleStep = () => void | Promise<void>;
+
+const idleSteps: IdleStep[] = [];
+
+export function registerIdleStep(fn: IdleStep): void {
+  idleSteps.push(fn);
+}
+
+/** Run each idle hook in order at a no-turn early-continue. No registrant ⇒ no-op. */
+export async function applyIdleSteps(): Promise<void> {
+  for (const fn of idleSteps) await fn();
+}
+
+export function __resetIdleStepsForTest(): void {
+  idleSteps.length = 0;
+}
+
 // Fourth registry (clusters 2/3 + 6): turn lifecycle hooks. registerTurnStart runs
 // just before provider.query with the batch (e.g. pin the per-turn actor channel
 // for anti-spoof binding); registerTurnEnd runs after the turn completes (e.g.

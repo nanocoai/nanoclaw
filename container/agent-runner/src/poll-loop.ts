@@ -10,6 +10,7 @@ import {
   applyMessageFilter,
   applyPromptTransform,
   applyPrefilterSteps,
+  applyIdleSteps,
   applyTurnStart,
   applyTurnEnd,
   applyTurnInterceptor,
@@ -165,6 +166,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     }
 
     if (messages.length === 0) {
+      // Idle iteration — no agent turn. Overlay hook (#396): drain deferred cross-board
+      // notifications even while idle. Inert on pristine ⇒ no-op.
+      await applyIdleSteps();
       await sleep(POLL_INTERVAL_MS);
       continue;
     }
@@ -178,6 +182,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // the "store as context, don't engage" contract. Host-side countDueMessages
     // gates the same way for wake-from-cold (see src/db/session-db.ts).
     if (!messages.some((m) => m.trigger === 1)) {
+      // Accumulate-only batch — also a no-turn iteration; same idle drain hook (#396) so a board
+      // that keeps receiving context-only messages still flushes pending notifications. Inert ⇒ no-op.
+      await applyIdleSteps();
       await sleep(POLL_INTERVAL_MS);
       continue;
     }
