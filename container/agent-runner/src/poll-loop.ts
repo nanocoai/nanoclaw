@@ -14,6 +14,8 @@ import {
   applyTurnEnd,
   applyTurnInterceptor,
   reconcileTurn,
+  applyFollowupDrop,
+  applyFollowupEndStream,
 } from './poll-loop-extensions.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
@@ -445,6 +447,25 @@ export async function processQuery(
       try {
         const pending = getPendingMessages();
 
+        // Follow-up DROP seam (BEFORE the slash-command check): an overlay may claim
+        // follow-up rows that belong to a DIFFERENT (e.g. confined-external) turn —
+        // markComplete them and withhold them from this board stream's push. Clamp to
+        // the current batch so a hook can never complete a row outside it. Inert on
+        // pristine ⇒ no drops, `active` === `pending`.
+        let active = pending;
+        const followupDrops = applyFollowupDrop({ pending, routing });
+        if (followupDrops.length > 0) {
+          const batchIds = new Set(pending.map((m) => m.id));
+          const dropIds = followupDrops.filter((id) => batchIds.has(id));
+          if (dropIds.length > 0) {
+            markCompleted(dropIds);
+            const dropSet = new Set(dropIds);
+            active = pending.filter((m) => !dropSet.has(m.id));
+            log(`Follow-up interceptor dropped ${dropIds.length} message(s)`);
+          }
+        }
+        if (active.length === 0) return;
+
         // Slash commands need a fresh query: /clear resets the SDK's
         // resume id (fixed at sdkQuery() time); admin/passthrough commands
         // (/compact, /cost, …) only dispatch when they're the first input
@@ -455,10 +476,24 @@ export async function processQuery(
         // not end: end() lets an in-flight turn run to completion, which
         // can block the command (e.g. /clear during a long task) for as
         // long as the turn takes.
-        if (pending.some((m) => isRunnerCommand(m))) {
+        if (active.some((m) => isRunnerCommand(m))) {
           log('Pending slash command — aborting active stream so outer loop can process');
           endedForCommand = true;
           query.abort();
+          return;
+        }
+
+        // Follow-up END-STREAM seam (AFTER the slash-command check): an overlay may
+        // decide the batch crosses a turn boundary (actor-domain / web-origin) and the
+        // active stream should END — let the in-flight turn finish + deliver, then leave
+        // the rows PENDING (we return before markProcessing) so the outer loop re-routes
+        // them with correct actor/routing. query.end(), NOT abort: abort would discard
+        // the in-flight reply. `endedForCommand` is reused as the "this poll handed the
+        // stream back to the outer loop — stop re-entering" guard. Inert ⇒ never ends.
+        if (applyFollowupEndStream({ pending: active, routing })) {
+          log('Follow-up interceptor — batch crosses a turn boundary; ending stream for the outer loop');
+          endedForCommand = true;
+          query.end();
           return;
         }
 
@@ -469,7 +504,7 @@ export async function processQuery(
         // everything. Filtering on thread_id here caused deadlocks when the
         // initial batch and follow-ups had mismatched thread_ids (e.g. a
         // host-generated welcome trigger with null thread vs a Discord DM reply).
-        const newMessages = applyMessageFilter(pending.filter((m) => m.kind !== 'system'));
+        const newMessages = applyMessageFilter(active.filter((m) => m.kind !== 'system'));
         if (newMessages.length === 0) return;
 
         const newIds = newMessages.map((m) => m.id);

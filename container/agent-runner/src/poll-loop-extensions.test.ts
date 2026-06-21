@@ -6,9 +6,15 @@ import {
   applyTurnInterceptor,
   registerTurnInterceptor,
   reconcileTurn,
+  registerFollowupDrop,
+  registerFollowupEndStream,
+  applyFollowupDrop,
+  applyFollowupEndStream,
+  __resetFollowupHooksForTest,
   __resetTurnInterceptorForTest,
   type TurnInterceptorCtx,
   type TurnInterceptorResult,
+  type FollowupCtx,
 } from './poll-loop-extensions.js';
 
 // WHY: the M4 turn-interceptor seam carries CONTROL-FLOW AUTHORITY (it can defer
@@ -149,5 +155,41 @@ describe('reconcileTurn — owned-set accounting (no row leaks)', () => {
     const out = reconcileTurn(['a'], res({ handled: { completedIds: ['a', 'ZZZ'] } }));
     expect(out.completedIds).toEqual(['a']);
     expect(out.unaccounted).toEqual([]);
+  });
+});
+
+// WHY: the follow-up seam is the cross-turn partner of the main interceptor. DROP and
+// END-STREAM are independent inert hooks the poll consults at two ORDERED points; both
+// must be no-ops with zero registrants (byte-identical follow-up poll) and compose
+// correctly (drop = union, end-stream = OR) when an overlay registers.
+describe('follow-up poll seam (applyFollowupDrop / applyFollowupEndStream)', () => {
+  const fctx = (ids: string[]): FollowupCtx => ({
+    pending: ids.map((id) => row(id)),
+    routing: routing('r'),
+  });
+
+  afterEach(() => __resetFollowupHooksForTest());
+
+  it('inert: drop returns [] and end-stream returns false with no registrant', () => {
+    expect(applyFollowupDrop(fctx(['a', 'b']))).toEqual([]);
+    expect(applyFollowupEndStream(fctx(['a', 'b']))).toBe(false);
+  });
+
+  it('drop is the deduped UNION of all registrants', () => {
+    registerFollowupDrop(() => ['a', 'b']);
+    registerFollowupDrop(() => ['b', 'c']);
+    expect(applyFollowupDrop(fctx(['a', 'b', 'c'])).sort()).toEqual(['a', 'b', 'c']);
+  });
+
+  it('end-stream is an OR-fold — any true ⇒ true', () => {
+    registerFollowupEndStream(() => false);
+    registerFollowupEndStream(() => true);
+    expect(applyFollowupEndStream(fctx(['a']))).toBe(true);
+  });
+
+  it('end-stream stays false when every registrant declines', () => {
+    registerFollowupEndStream(() => false);
+    registerFollowupEndStream(() => false);
+    expect(applyFollowupEndStream(fctx(['a']))).toBe(false);
   });
 });

@@ -239,3 +239,57 @@ export function reconcileTurn(ownedIds: string[], result: TurnInterceptorResult)
   for (const id of unaccounted) deferSet.add(id);
   return { handled: false, keep, completedIds: [], deferIds: [...deferSet], unaccounted };
 }
+
+// Follow-up poll seam (the M4 turn-interceptor's cross-turn partner). processQuery's
+// inner poll pushes newly-arrived rows INTO the active stream. Two inert hooks let an
+// overlay intervene at the two ORDERED points the woven follow-up logic needs — the
+// order mirrors the fork: external-DROP → slash-command(abort, base) → boundary END-STREAM.
+//   - DROP runs BEFORE the slash-command abort check: ids to markComplete + withhold from
+//     the push (e.g. external-actor rows that belong to a CONFINED turn, not this board's
+//     stream). Union of registrants; the caller clamps to the current batch.
+//   - END-STREAM runs AFTER the slash-command abort check: true ⇒ end() the active query
+//     (let the in-flight turn FINISH + deliver) and leave the batch PENDING for the outer
+//     loop to re-route (e.g. the batch crosses the actor-domain / web-origin boundary).
+//     NOT abort — abort would discard the in-flight reply (the Q-B regression). OR-fold.
+// No registrant ⇒ DROP returns [] and END-STREAM returns false ⇒ the follow-up poll
+// behaves byte-identically to upstream.
+export interface FollowupCtx {
+  /** The freshly-read follow-up batch (pre system-filter) seen by the inner poll. */
+  readonly pending: MessageInRow[];
+  /** The ACTIVE turn's routing (captured when processQuery started). */
+  readonly routing: RoutingContext;
+}
+
+export type FollowupDropHook = (ctx: FollowupCtx) => string[];
+export type FollowupEndStreamHook = (ctx: FollowupCtx) => boolean;
+
+const followupDropHooks: FollowupDropHook[] = [];
+const followupEndStreamHooks: FollowupEndStreamHook[] = [];
+
+export function registerFollowupDrop(fn: FollowupDropHook): void {
+  followupDropHooks.push(fn);
+}
+
+export function registerFollowupEndStream(fn: FollowupEndStreamHook): void {
+  followupEndStreamHooks.push(fn);
+}
+
+/** Union of every registrant's drop ids (deduped). No registrant ⇒ []. The CALLER must
+ *  clamp to the current batch — a drop hook must never markComplete a row outside it. */
+export function applyFollowupDrop(ctx: FollowupCtx): string[] {
+  if (followupDropHooks.length === 0) return [];
+  const ids = new Set<string>();
+  for (const fn of followupDropHooks) for (const id of fn(ctx)) ids.add(id);
+  return [...ids];
+}
+
+/** OR-fold — any registrant ⇒ end the stream. No registrant ⇒ false (never ends). */
+export function applyFollowupEndStream(ctx: FollowupCtx): boolean {
+  for (const fn of followupEndStreamHooks) if (fn(ctx)) return true;
+  return false;
+}
+
+export function __resetFollowupHooksForTest(): void {
+  followupDropHooks.length = 0;
+  followupEndStreamHooks.length = 0;
+}
