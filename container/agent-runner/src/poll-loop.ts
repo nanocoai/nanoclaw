@@ -13,6 +13,7 @@ import {
   applyTurnStart,
   applyTurnEnd,
   applyTurnInterceptor,
+  applyPostTaskInterceptor,
   reconcileTurn,
   applyFollowupDrop,
   applyFollowupEndStream,
@@ -291,6 +292,49 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
+    // SITE 2 — post-pre-task turn interceptor (actor-domain split; later M3 fast-path).
+    // Runs on the FINAL `keep` (post command-handling + post pre-task gating) so a
+    // registrant sees exactly the batch the fork's split saw. Reconciled against keep's
+    // owned ids by the same reconcileTurn chokepoint: handled ⇒ markCompleted + skip query
+    // (model-bypass); defer ⇒ deferProcessing (un-mark → re-read) + drop from keep; rewrite
+    // ⇒ thread the narrowed keep/routing. Inert on pristine ⇒ keep/routing unchanged, no
+    // defer/handled ⇒ control flow byte-identical to upstream.
+    const postTaskDeferred = new Set<string>();
+    const ptInterception = await applyPostTaskInterceptor({
+      keep,
+      allPending,
+      routing,
+      isFirstPoll: firstPoll,
+      assistantName: config.assistantName,
+      agentGroupId: config.agentGroupId,
+    });
+    const postTask = reconcileTurn(
+      keep.map((m) => m.id),
+      ptInterception,
+    );
+    if (postTask.unaccounted.length > 0) {
+      log(
+        `WARNING: post-task interceptor left ${postTask.unaccounted.length} owned row(s) unaccounted ` +
+          `— auto-deferring to avoid orphaning: ${postTask.unaccounted.join(', ')}`,
+      );
+    }
+    if (postTask.deferIds.length > 0) {
+      deferProcessing(postTask.deferIds);
+      for (const id of postTask.deferIds) postTaskDeferred.add(id);
+      log(`Post-task interceptor deferred ${postTask.deferIds.length} message(s)`);
+    }
+    if (postTask.handled) {
+      markCompleted(postTask.completedIds);
+      log(`Post-task interceptor handled ${postTask.completedIds.length} message(s), skipping query`);
+      continue;
+    }
+    keep = postTask.keep;
+    routing = ptInterception.routing;
+    if (keep.length === 0) {
+      log('Post-task interceptor deferred all surviving message(s), skipping query');
+      continue;
+    }
+
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
     // Inert on pristine: no registrant ⇒ applyPromptTransform resolves to the prompt unchanged.
@@ -316,7 +360,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
       // Process the query while concurrently polling for new messages
       const skippedSet = new Set(skipped);
-      const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
+      const processingIds = ids.filter(
+        (id) => !commandIds.includes(id) && !skippedSet.has(id) && !postTaskDeferred.has(id),
+      );
       // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
       // can stamp it on outbound rows — needed for a2a return-path routing.
       setCurrentInReplyTo(routing.inReplyTo);

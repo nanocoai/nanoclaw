@@ -147,10 +147,24 @@ export interface TurnInterceptorResult {
   deferIds: string[];
 }
 
+// TWO interceptor SITES, each its own registry but sharing the fold + reconcileTurn.
+// SITE 1 (turnInterceptors) runs BEFORE the command loop + pre-task scripts — for the
+//   EARLY drains: web-origin fail-closed + confined-external (both terminate the turn
+//   early, so they belong before anything reads/gates the batch).
+// SITE 2 (postTaskInterceptors) runs AFTER pre-task gating, on the narrowed `keep` — for
+//   decisions that must see the post-pre-task batch the fork's split saw: the actor-domain
+//   split (defer co-batched system rows + rewrite routing) and, later, the M3 fast-path.
+// Registering the split at SITE 1 would fire it on batches a pre-task script would have
+// gated and re-derive routing off the wrong (wider) keep — hence the second site.
 const turnInterceptors: TurnInterceptor[] = [];
+const postTaskInterceptors: TurnInterceptor[] = [];
 
 export function registerTurnInterceptor(fn: TurnInterceptor): void {
   turnInterceptors.push(fn);
+}
+
+export function registerPostTaskInterceptor(fn: TurnInterceptor): void {
+  postTaskInterceptors.push(fn);
 }
 
 /**
@@ -159,11 +173,14 @@ export function registerTurnInterceptor(fn: TurnInterceptor): void {
  * `handled` is TERMINAL (returns immediately, later interceptors do not run).
  * No registrant ⇒ {handled:undefined, keep:input, routing, deferIds:[]} (inert).
  */
-export async function applyTurnInterceptor(ctx: TurnInterceptorCtx): Promise<TurnInterceptorResult> {
+async function foldInterceptors(
+  list: TurnInterceptor[],
+  ctx: TurnInterceptorCtx,
+): Promise<TurnInterceptorResult> {
   let keep = ctx.keep;
   let routing = ctx.routing;
   const deferIds: string[] = [];
-  for (const fn of turnInterceptors) {
+  for (const fn of list) {
     const decision = await fn({ ...ctx, keep, routing });
     if (decision.kind === 'handled') {
       return { handled: { completedIds: decision.completedIds }, keep, routing, deferIds };
@@ -182,8 +199,24 @@ export async function applyTurnInterceptor(ctx: TurnInterceptorCtx): Promise<Tur
   return { keep, routing, deferIds };
 }
 
+/** SITE 1 — pre-command interceptors (web-origin / confined-external). Reconcile the
+ *  result against the full owned batch via reconcileTurn at the call site. Inert ⇒ identity. */
+export async function applyTurnInterceptor(ctx: TurnInterceptorCtx): Promise<TurnInterceptorResult> {
+  return foldInterceptors(turnInterceptors, ctx);
+}
+
+/** SITE 2 — post-pre-task interceptors (actor-domain split; later M3 fast-path). Same fold;
+ *  the call site reconciles against the post-pre-task `keep` owned set. Inert ⇒ identity. */
+export async function applyPostTaskInterceptor(ctx: TurnInterceptorCtx): Promise<TurnInterceptorResult> {
+  return foldInterceptors(postTaskInterceptors, ctx);
+}
+
 export function __resetTurnInterceptorForTest(): void {
   turnInterceptors.length = 0;
+}
+
+export function __resetPostTaskInterceptorForTest(): void {
+  postTaskInterceptors.length = 0;
 }
 
 export interface ReconciledTurn {
