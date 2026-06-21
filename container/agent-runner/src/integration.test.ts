@@ -681,4 +681,32 @@ describe('poll loop — follow-up interceptor seam', () => {
     controller.abort();
     await loopPromise.catch(() => {});
   });
+
+  it('accumulate gate: a trigger=0 context-only follow-up is left PENDING, never pushed/processed', async () => {
+    // Mirrors the main read's accumulate gate: a follow-up batch with only trigger=0 rows must not
+    // wake/push the active turn ("store as context, don't engage"). Without the follow-up gate it
+    // would be markProcessing'd here and dropped from the next real accumulate batch.
+    insertMessage('m-active', { sender: 'Alice', text: 'long request' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new BlockingProvider();
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2500);
+
+    await waitFor(() => provider.queries === 1, 2000);
+    // a trigger=0 (accumulate) context row arrives mid-stream
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, trigger, content)
+         VALUES ('m-ctx', 'chat', datetime('now'), 'pending', 'chan-1', 'discord', 0, ?)`,
+      )
+      .run(JSON.stringify({ sender: 'C', text: 'background chatter' }));
+
+    await new Promise((r) => setTimeout(r, 700)); // let the follow-up poll tick a couple of times
+    // NOT processed: still pending (never markProcessing'd), so it can ride the next trigger=1 batch.
+    expect(getPendingMessages().map((m) => m.id)).toContain('m-ctx');
+    expect(ackStatus('m-ctx')).toBeUndefined();
+
+    controller.abort();
+    await loopPromise.catch(() => {});
+  });
 });

@@ -568,6 +568,14 @@ export async function processQuery(
         const newMessages = applyMessageFilter(active.filter((m) => m.kind !== 'system'));
         if (newMessages.length === 0) return;
 
+        // Accumulate gate — mirror the main read at the top of the loop: a follow-up batch with only
+        // trigger=0 context rows (router-stored under ignored_message_policy='accumulate') must NOT
+        // wake/push the active turn. Leave them pending to ride the next trigger=1 message ("store as
+        // context, don't engage"). Without this, the follow-up path engages on background chatter the
+        // main read would have accumulated — and markProcessing'ing them here drops them from that
+        // later accumulate batch.
+        if (!newMessages.some((m) => m.trigger === 1)) return;
+
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
 
