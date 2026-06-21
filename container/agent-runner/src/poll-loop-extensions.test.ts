@@ -5,8 +5,10 @@ import type { RoutingContext } from './formatter.js';
 import {
   applyTurnInterceptor,
   registerTurnInterceptor,
+  reconcileTurn,
   __resetTurnInterceptorForTest,
   type TurnInterceptorCtx,
+  type TurnInterceptorResult,
 } from './poll-loop-extensions.js';
 
 // WHY: the M4 turn-interceptor seam carries CONTROL-FLOW AUTHORITY (it can defer
@@ -86,5 +88,66 @@ describe('applyTurnInterceptor fold semantics', () => {
     const out = await applyTurnInterceptor(ctx([row('x'), row('y')], routing('r')));
     expect(out.handled).toEqual({ completedIds: ['y'] });
     expect(out.deferIds).toEqual(['x']);
+  });
+});
+
+// WHY: the fold accepts whatever a registrant returns; reconcileTurn is the SEC
+// chokepoint that bounds it to the OWNED (marked-processing) id set so a registrant
+// — buggy or hostile — cannot orphan a row in 'processing', resurrect a completed
+// row by deferring an out-of-set id, or complete-while-deferring the same row.
+describe('reconcileTurn — owned-set accounting (no row leaks)', () => {
+  const res = (over: Partial<TurnInterceptorResult>): TurnInterceptorResult => ({
+    handled: undefined,
+    keep: [],
+    routing: routing('r'),
+    deferIds: [],
+    ...over,
+  });
+
+  it('inert: keeps all owned rows, nothing deferred/completed/unaccounted', () => {
+    const out = reconcileTurn(['a', 'b'], res({ keep: [row('a'), row('b')] }));
+    expect(out.handled).toBe(false);
+    expect(out.keep.map((m) => m.id)).toEqual(['a', 'b']);
+    expect(out.deferIds).toEqual([]);
+    expect(out.completedIds).toEqual([]);
+    expect(out.unaccounted).toEqual([]);
+  });
+
+  it('rewrite that DROPS a row without deferring it auto-defers it (never orphaned)', () => {
+    const out = reconcileTurn(['a', 'b'], res({ keep: [row('a')] })); // b silently dropped
+    expect(out.keep.map((m) => m.id)).toEqual(['a']);
+    expect(out.deferIds).toEqual(['b']); // auto-deferred → re-read next poll
+    expect(out.unaccounted).toEqual(['b']); // flagged so the caller can fail-loud
+  });
+
+  it('an out-of-set defer id is dropped (cannot DELETE a foreign / already-completed ack)', () => {
+    const out = reconcileTurn(['a'], res({ keep: [row('a')], deferIds: ['ZZZ'] }));
+    expect(out.deferIds).toEqual([]);
+    expect(out.keep.map((m) => m.id)).toEqual(['a']);
+    expect(out.unaccounted).toEqual([]);
+  });
+
+  it('defer loses to keep: a row in BOTH keep and deferIds stays kept (not un-marked mid-batch)', () => {
+    const out = reconcileTurn(['a', 'b'], res({ keep: [row('a'), row('b')], deferIds: ['b'] }));
+    expect(out.keep.map((m) => m.id)).toEqual(['a', 'b']);
+    expect(out.deferIds).toEqual([]);
+  });
+
+  it('handled: completed wins over a conflicting defer; leftover keep + unaccounted rows auto-defer', () => {
+    const out = reconcileTurn(
+      ['a', 'b', 'c'],
+      res({ handled: { completedIds: ['a'] }, keep: [row('a'), row('b')], deferIds: ['a'] }),
+    );
+    expect(out.handled).toBe(true);
+    expect(out.keep).toEqual([]); // handled ⇒ no working batch
+    expect(out.completedIds).toEqual(['a']); // a completed (defer for a dropped)
+    expect([...out.deferIds].sort()).toEqual(['b', 'c']); // leftover keep b + unaccounted c
+    expect([...out.unaccounted].sort()).toEqual(['b', 'c']);
+  });
+
+  it('handled: an out-of-set completed id is dropped', () => {
+    const out = reconcileTurn(['a'], res({ handled: { completedIds: ['a', 'ZZZ'] } }));
+    expect(out.completedIds).toEqual(['a']);
+    expect(out.unaccounted).toEqual([]);
   });
 });

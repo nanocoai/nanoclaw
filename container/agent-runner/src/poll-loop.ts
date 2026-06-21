@@ -1,11 +1,19 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
-import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
+import {
+  getPendingMessages,
+  markProcessing,
+  markCompleted,
+  deferProcessing,
+  type MessageInRow,
+} from './db/messages-in.js';
 import {
   applyMessageFilter,
   applyPromptTransform,
   applyPrefilterSteps,
   applyTurnStart,
   applyTurnEnd,
+  applyTurnInterceptor,
+  reconcileTurn,
 } from './poll-loop-extensions.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
@@ -129,12 +137,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   let isFirstPoll = true;
   while (true) {
     if (config.signal?.aborted) return;
+    // Capture before the reset below — the turn-interceptor ctx reports it.
+    const firstPoll = isFirstPoll;
     // Inert on pristine: no registrant ⇒ applyPrefilterSteps is a no-op and
     // applyMessageFilter returns the batch unchanged.
     const allPending = getPendingMessages(isFirstPoll);
     await applyPrefilterSteps(allPending);
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
-    const messages = applyMessageFilter(allPending.filter((m) => m.kind !== 'system'));
+    let messages = applyMessageFilter(allPending.filter((m) => m.kind !== 'system'));
     isFirstPoll = false;
     pollCount++;
 
@@ -161,10 +171,51 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
-    const ids = messages.map((m) => m.id);
+    let ids = messages.map((m) => m.id);
     markProcessing(ids);
 
-    const routing = extractRouting(messages);
+    let routing = extractRouting(messages);
+
+    // Turn-interceptor seam (M4 woven trio: web-origin fail-closed / confined-external /
+    // actor-domain split). Unlike the transform/side-effect seams, an interceptor has
+    // CONTROL-FLOW AUTHORITY over the turn: a registrant may rewrite the surviving batch +
+    // routing, defer rows (leave them PENDING for a later poll), or fully handle & drain the
+    // batch (model-bypass). Runs AFTER markProcessing (we already own every id) + extractRouting,
+    // BEFORE the command loop, so a deferred/rewritten batch is reflected everywhere downstream.
+    // Inert on pristine: no registrant ⇒ {handled:undefined, keep:messages, routing, deferIds:[]}
+    // ⇒ control flow byte-identical to upstream.
+    const interception = await applyTurnInterceptor({
+      keep: messages,
+      allPending,
+      routing,
+      isFirstPoll: firstPoll,
+      assistantName: config.assistantName,
+      agentGroupId: config.agentGroupId,
+    });
+    // Reconcile the registrant's decision against the OWNED (marked) id set so no row can
+    // leak past the model-bypass surface: every owned id ends kept | completed | deferred,
+    // out-of-set defer/complete ids are dropped, and any row silently dropped from keep is
+    // auto-deferred (re-read next poll) rather than orphaned in 'processing'.
+    const recon = reconcileTurn(ids, interception);
+    if (recon.unaccounted.length > 0) {
+      log(
+        `WARNING: turn interceptor left ${recon.unaccounted.length} owned row(s) unaccounted ` +
+          `(dropped without defer/complete) — auto-deferring to avoid orphaning: ${recon.unaccounted.join(', ')}`,
+      );
+    }
+    if (recon.deferIds.length > 0) {
+      deferProcessing(recon.deferIds);
+      log(`Turn interceptor deferred ${recon.deferIds.length} message(s)`);
+    }
+    if (recon.handled) {
+      // Model-bypass: mark exactly the registrant-owned rows completed, skip the normal query.
+      markCompleted(recon.completedIds);
+      log(`Turn interceptor handled ${recon.completedIds.length} message(s), skipping query`);
+      continue;
+    }
+    messages = recon.keep;
+    routing = interception.routing;
+    ids = messages.map((m) => m.id);
 
     // Command handling: the host router gates filtered and unauthorized
     // admin commands before they reach the container. The only command

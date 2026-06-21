@@ -185,3 +185,57 @@ export async function applyTurnInterceptor(ctx: TurnInterceptorCtx): Promise<Tur
 export function __resetTurnInterceptorForTest(): void {
   turnInterceptors.length = 0;
 }
+
+export interface ReconciledTurn {
+  /** True when a registrant returned a terminal `handled` (model-bypass). */
+  handled: boolean;
+  /** The working batch for this turn — the interceptor `keep`, clamped to OWNED
+   *  rows. Empty when handled (the turn is over). */
+  keep: MessageInRow[];
+  /** Rows the registrant drained, to markCompleted (handled path only). */
+  completedIds: string[];
+  /** Rows to un-mark back to pending (explicit defers + auto-deferred unaccounted). */
+  deferIds: string[];
+  /** Owned ids the registrant dropped WITHOUT defer/complete — auto-deferred here so
+   *  they are re-read next poll rather than orphaned in 'processing'. Non-empty ⇒ a
+   *  registrant bug; the caller should fail-loud log it. */
+  unaccounted: string[];
+}
+
+/**
+ * Reconcile an interceptor result against the OWNED (already markProcessing'd) id set
+ * so no row can leak past the model-bypass surface. This is the SEC chokepoint: the
+ * fold itself accepts whatever a registrant returns, so the partition is enforced HERE,
+ * not trusted. Guarantees, for the original owned set:
+ *   - every owned id ends as exactly ONE of: kept (processed this turn) | completed
+ *     (handled-drained) | deferred (un-marked → re-read next poll);
+ *   - defer/complete ids OUTSIDE the owned set are dropped — a registrant must never
+ *     touch a row it doesn't own (deferProcessing blindly DELETEs an ack and could
+ *     resurrect an already-completed row; markCompleted could consume a foreign row);
+ *   - defer loses to keep AND to completed (a row about to be processed or already
+ *     drained is never also un-marked — prevents completed-while-deferred / a deferred
+ *     row leaking back into the live batch via a later rewrite);
+ *   - any owned id the registrant silently dropped is AUTO-DEFERRED (fail-safe:
+ *     at-least-once + visible, never silently lost).
+ */
+export function reconcileTurn(ownedIds: string[], result: TurnInterceptorResult): ReconciledTurn {
+  const owned = new Set(ownedIds);
+
+  if (result.handled) {
+    const completedIds = result.handled.completedIds.filter((id) => owned.has(id));
+    const completedSet = new Set(completedIds);
+    const deferSet = new Set(result.deferIds.filter((id) => owned.has(id) && !completedSet.has(id)));
+    const accounted = new Set([...completedSet, ...deferSet]);
+    const unaccounted = ownedIds.filter((id) => !accounted.has(id));
+    for (const id of unaccounted) deferSet.add(id);
+    return { handled: true, keep: [], completedIds, deferIds: [...deferSet], unaccounted };
+  }
+
+  const keep = result.keep.filter((m) => owned.has(m.id));
+  const keepSet = new Set(keep.map((m) => m.id));
+  const deferSet = new Set(result.deferIds.filter((id) => owned.has(id) && !keepSet.has(id)));
+  const accounted = new Set([...keepSet, ...deferSet]);
+  const unaccounted = ownedIds.filter((id) => !accounted.has(id));
+  for (const id of unaccounted) deferSet.add(id);
+  return { handled: false, keep, completedIds: [], deferIds: [...deferSet], unaccounted };
+}
