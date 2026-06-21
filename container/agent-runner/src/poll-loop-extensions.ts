@@ -10,6 +10,7 @@
 // when the board is idle/stale. Composed left-to-right in registration order.
 import type { MessageInRow } from './db/messages-in.js';
 import type { RoutingContext } from './formatter.js';
+import type { AgentProvider } from './providers/types.js';
 
 export type MessageFilter = (messages: MessageInRow[]) => MessageInRow[];
 
@@ -102,6 +103,43 @@ export async function applyTurnEnd(): Promise<void> {
 export function __resetTurnHooksForTest(): void {
   turnStartHooks.length = 0;
   turnEndHooks.length = 0;
+}
+
+// Run-start hook (the M4 woven trio's REGISTRATION keystone). The interceptor /
+// follow-up / post-reconcile registrants below are PER-RUN, config-bound: the
+// confined-external interceptor closes over `config.provider` (the confined provider
+// is overlay-owned — ADR-0002 — and the seam ctx deliberately never exposes it), and
+// the web-origin re-derivation needs `config.assistantName`/`agentGroupId`. The other
+// seams self-register at module load (config-free); these cannot. So an overlay
+// registers ONE run-start hook at module load, and the base calls applyRunStart(config)
+// ONCE at the top of each runPollLoop — the hook then production-resets its own
+// registrants and re-registers them bound to THIS run's config. Running it per-run (not
+// per-poll) means a 2nd runPollLoop in the same process rebinds cleanly instead of
+// appending a 2nd stale-config interceptor whose terminal `handled` would win first.
+// No registrant ⇒ no-op ⇒ byte-identical upstream.
+export interface RunStartConfig {
+  provider: AgentProvider;
+  providerName: string;
+  cwd: string;
+  assistantName?: string;
+  agentGroupId?: string;
+}
+
+export type RunStartHook = (config: RunStartConfig) => void;
+
+const runStartHooks: RunStartHook[] = [];
+
+export function registerRunStart(fn: RunStartHook): void {
+  runStartHooks.push(fn);
+}
+
+/** Run each registrant once with this run's config, in order. No registrant ⇒ no-op. */
+export function applyRunStart(config: RunStartConfig): void {
+  for (const fn of runStartHooks) fn(config);
+}
+
+export function __resetRunStartForTest(): void {
+  runStartHooks.length = 0;
 }
 
 // Fifth registry (M4 turn-interceptor — the WOVEN trio: web-origin fail-closed,

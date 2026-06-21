@@ -16,6 +16,7 @@ import {
   applyPostTaskInterceptor,
   reconcileTurn,
   applyPostReconcile,
+  applyRunStart,
   applyFollowupDrop,
   applyFollowupEndStream,
 } from './poll-loop-extensions.js';
@@ -136,6 +137,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // Clear leftover 'processing' acks from a previous crashed container.
   // This lets the new container re-process those messages.
   clearStaleProcessingAcks();
+
+  // Run-start seam: per-run, config-bound registration of the woven-trio overlay
+  // registrants (confined-provider closure + web-origin config). Called ONCE per
+  // runPollLoop, before the poll loop. Inert on pristine ⇒ no registrant ⇒ no-op.
+  applyRunStart(config);
 
   let pollCount = 0;
   let isFirstPoll = true;

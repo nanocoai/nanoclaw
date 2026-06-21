@@ -8,9 +8,12 @@ import {
   registerTurnInterceptor,
   registerPostTaskInterceptor,
   registerPostReconcile,
+  registerRunStart,
   __resetTurnInterceptorForTest,
   __resetPostTaskInterceptorForTest,
   __resetPostReconcileForTest,
+  __resetRunStartForTest,
+  type RunStartConfig,
 } from './poll-loop-extensions.js';
 import type { MessageInRow } from './db/messages-in.js';
 import { MockProvider } from './providers/mock.js';
@@ -31,12 +34,14 @@ beforeEach(() => {
   __resetTurnInterceptorForTest();
   __resetPostTaskInterceptorForTest();
   __resetPostReconcileForTest();
+  __resetRunStartForTest();
 });
 
 afterEach(() => {
   __resetTurnInterceptorForTest();
   __resetPostTaskInterceptorForTest();
   __resetPostReconcileForTest();
+  __resetRunStartForTest();
   closeSessionDb();
 });
 
@@ -315,5 +320,41 @@ describe('poll-loop post-reconcile hook call site (FINDINGS #7)', () => {
 
     expect(captured).toEqual(['m1']); // reconcileTurn clamped the un-owned foreign row out
     expect(provider.queryCalled).toBe(true);
+  });
+});
+
+describe('poll-loop run-start hook call site', () => {
+  it('fires exactly once per runPollLoop (before the poll loop), across multiple iterations', async () => {
+    // The run-start hook is the per-run registration keystone: it must run ONCE per
+    // runPollLoop invocation, before the while loop — not per poll iteration — so an
+    // overlay rebinds its config-bound registrants cleanly. We force a SECOND iteration
+    // by processing m1 to completion (iteration 1 does real work, then the loop re-enters
+    // the while body for iteration 2). If applyRunStart were misplaced INSIDE the loop,
+    // count would be 2 here; before the loop it stays 1. (A wait-then-abort with no rows
+    // never reaches a 2nd iteration — the empty-poll sleep is 1000ms — so it can't pin this.)
+    insertChat('m1');
+    const provider = new QuerySpyProvider({}, () => 'unused'); // bare text → m1 completes on its result
+    const controller = new AbortController();
+    let count = 0;
+    const seen: RunStartConfig[] = [];
+    registerRunStart((cfg) => {
+      count++;
+      seen.push(cfg);
+    });
+
+    const loop = runOnce(provider, controller.signal);
+    // Wait for m1 to complete (iteration 1 fully ran) so the loop has re-entered the
+    // while body for iteration 2, then give that 2nd top a beat to execute before abort.
+    const start = Date.now();
+    while (ackStatus('m1') !== 'completed' && Date.now() - start < 1500) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    await new Promise((r) => setTimeout(r, 100)); // let iteration 2's top run
+    controller.abort();
+    await loop;
+
+    expect(ackStatus('m1')).toBe('completed'); // iteration 1 did process m1 (≥2 iterations ran)
+    expect(count).toBe(1); // once per RUN despite ≥2 poll iterations
+    expect(seen[0].providerName).toBe('mock'); // received THIS run's config
   });
 });
