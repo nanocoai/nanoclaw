@@ -273,6 +273,31 @@ export function reconcileTurn(ownedIds: string[], result: TurnInterceptorResult)
   return { handled: false, keep, completedIds: [], deferIds: [...deferSet], unaccounted };
 }
 
+// Post-reconcile hook (M4 woven trio, FINDINGS #7). A side-effect run AFTER reconcileTurn
+// has finalized the turn's surviving batch — narrowed by Site-1 + Site-2 reconcile, command
+// handling, and pre-task gating — and BEFORE the provider query, keyed off the FINAL `keep`.
+// An overlay uses it to re-derive per-turn loop-local state that must track the queried batch
+// EXACTLY, e.g. currentWebOrigin: setting that inside an interceptor body would read the
+// interceptor's (wider) keep, which a later reconcile/site can narrow, desyncing a web reply's
+// board_chat route. Re-deriving here keys it off the rows that actually reach the query.
+// No registrant ⇒ no-op ⇒ byte-identical upstream.
+export type PostReconcileHook = (keep: MessageInRow[]) => void;
+
+const postReconcileHooks: PostReconcileHook[] = [];
+
+export function registerPostReconcile(fn: PostReconcileHook): void {
+  postReconcileHooks.push(fn);
+}
+
+/** Run each registrant with the finalized surviving batch, in order. No registrant ⇒ no-op. */
+export function applyPostReconcile(keep: MessageInRow[]): void {
+  for (const fn of postReconcileHooks) fn(keep);
+}
+
+export function __resetPostReconcileForTest(): void {
+  postReconcileHooks.length = 0;
+}
+
 // Follow-up poll seam (the M4 turn-interceptor's cross-turn partner). processQuery's
 // inner poll pushes newly-arrived rows INTO the active stream. Two inert hooks let an
 // overlay intervene at the two ORDERED points the woven follow-up logic needs — the

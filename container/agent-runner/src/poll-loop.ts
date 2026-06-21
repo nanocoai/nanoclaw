@@ -15,6 +15,7 @@ import {
   applyTurnInterceptor,
   applyPostTaskInterceptor,
   reconcileTurn,
+  applyPostReconcile,
   applyFollowupDrop,
   applyFollowupEndStream,
 } from './poll-loop-extensions.js';
@@ -334,6 +335,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       log('Post-task interceptor deferred all surviving message(s), skipping query');
       continue;
     }
+
+    // Post-reconcile hook (FINDINGS #7): `keep` is now FINAL for this turn — narrowed by
+    // Site-1 + Site-2 reconcile, command handling, and pre-task gating. Re-derive any per-turn
+    // loop-local state that must track the queried batch (e.g. web-origin) HERE, off the rows
+    // that actually reach the query, not inside an interceptor body where a later narrowing
+    // would desync it. Inert on pristine ⇒ no-op.
+    applyPostReconcile(keep);
 
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.

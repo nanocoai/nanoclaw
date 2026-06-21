@@ -7,9 +7,12 @@ import { runPollLoop } from './poll-loop.js';
 import {
   registerTurnInterceptor,
   registerPostTaskInterceptor,
+  registerPostReconcile,
   __resetTurnInterceptorForTest,
   __resetPostTaskInterceptorForTest,
+  __resetPostReconcileForTest,
 } from './poll-loop-extensions.js';
+import type { MessageInRow } from './db/messages-in.js';
 import { MockProvider } from './providers/mock.js';
 
 // WHY: poll-loop-extensions.test.ts pins the applyTurnInterceptor FOLD in isolation.
@@ -27,11 +30,13 @@ beforeEach(() => {
   initTestSessionDb();
   __resetTurnInterceptorForTest();
   __resetPostTaskInterceptorForTest();
+  __resetPostReconcileForTest();
 });
 
 afterEach(() => {
   __resetTurnInterceptorForTest();
   __resetPostTaskInterceptorForTest();
+  __resetPostReconcileForTest();
   closeSessionDb();
 });
 
@@ -244,5 +249,71 @@ describe('poll-loop SITE 2 — post-pre-task interceptor call site', () => {
     expect(ackStatus('m1')).toBe('completed'); // m1 completed by the turn
     expect(ackStatus('m2')).toBeUndefined(); // m2 deferred → un-marked, excluded from processingIds
     expect(getPendingMessages().map((m) => m.id)).toEqual(['m2']); // m2 re-readable next poll
+  });
+});
+
+describe('poll-loop post-reconcile hook call site (FINDINGS #7)', () => {
+  it('runs with the FINAL keep — narrowed by a Site-2 defer — before the query', async () => {
+    // The hook must see the batch that actually reaches the provider, NOT a wider
+    // pre-reconcile keep. A Site-2 interceptor defers m2; the post-reconcile hook must
+    // then be handed [m1] only. This pins the ordering #7 needs: an overlay re-derives
+    // web-origin off recon.keep HERE, so a later narrowing can't desync it. If the call
+    // moved before the Site-2 reconcile, captured would still contain m2 → red.
+    insertChat('m1');
+    insertChat('m2');
+    const provider = new QuerySpyProvider({}, () => 'unused'); // bare text → m1 completes on its result
+    const controller = new AbortController();
+    let captured: string[] | undefined;
+    registerPostTaskInterceptor((ctx) =>
+      ctx.keep.some((m) => m.id === 'm2') ? { kind: 'defer', deferIds: ['m2'] } : { kind: 'proceed' },
+    );
+    registerPostReconcile((keep: MessageInRow[]) => {
+      captured = keep.map((m) => m.id);
+    });
+
+    const loop = runOnce(provider, controller.signal);
+    const start = Date.now();
+    while (ackStatus('m1') !== 'completed' && Date.now() - start < 1500) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    controller.abort();
+    await loop;
+
+    expect(captured).toEqual(['m1']); // FINAL keep — m2 was deferred at Site 2, never reaches the hook
+    expect(provider.queryCalled).toBe(true); // m1 still queried
+  });
+
+  it('receives the reconcileTurn-CLAMPED keep, not the raw fold keep (a rewrite adding a foreign row)', async () => {
+    // Pins the boundary specifically AFTER reconcileTurn, not merely after the fold:
+    // a Site-2 rewrite injects a row that was never markProcessing'd (un-owned). The fold
+    // returns it in keep, but reconcileTurn clamps `result.keep.filter(owned.has)` → drops it.
+    // The hook must see the CLAMPED [m1], never the foreign row. If the call moved before
+    // reconcileTurn and were fed ptInterception.keep, captured would include the foreign id → red.
+    insertChat('m1');
+    const provider = new QuerySpyProvider({}, () => 'unused');
+    const controller = new AbortController();
+    let captured: string[] | undefined;
+    registerPostTaskInterceptor((ctx) =>
+      ctx.keep.some((m) => m.id === 'm1')
+        ? {
+            kind: 'rewrite',
+            keep: [...ctx.keep, { ...ctx.keep[0], id: 'foreign-not-owned' } as MessageInRow],
+          }
+        : { kind: 'proceed' },
+    );
+    registerPostReconcile((keep: MessageInRow[]) => {
+      captured = keep.map((m) => m.id);
+    });
+
+    const loop = runOnce(provider, controller.signal);
+    const start = Date.now();
+    while (ackStatus('m1') !== 'completed' && Date.now() - start < 1500) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    controller.abort();
+    await loop;
+
+    expect(captured).toEqual(['m1']); // reconcileTurn clamped the un-owned foreign row out
+    expect(provider.queryCalled).toBe(true);
   });
 });
