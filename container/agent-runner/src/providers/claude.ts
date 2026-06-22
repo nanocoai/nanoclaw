@@ -225,8 +225,10 @@ const postToolUseHook: HookCallback = async (input) => {
  * Read a Claude transcript .jsonl, render a markdown summary, and drop it into
  * the agent's `conversations/` folder so context survives a compaction or a
  * session rotation. Returns the PARSED messages (so a caller can reuse them
- * without re-reading the file), or null (and logs) on any failure / empty
- * transcript. Best-effort.
+ * without re-reading the file), or null on a read/parse failure or empty
+ * transcript. The markdown write is independently best-effort: if ONLY the write
+ * fails the parsed messages are still returned (logs), so a post-archive consumer
+ * still runs.
  */
 function archiveTranscriptFile(transcriptPath: string | undefined, sessionId: string | undefined, assistantName?: string): ParsedMessage[] | null {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) {
@@ -234,11 +236,22 @@ function archiveTranscriptFile(transcriptPath: string | undefined, sessionId: st
     return null;
   }
 
+  // Read + parse first. A read/parse failure (or an empty transcript) yields null — nothing to
+  // archive OR hand to a post-archive consumer.
+  let messages: ParsedMessage[];
   try {
     const content = fs.readFileSync(transcriptPath, 'utf-8');
-    const messages = parseTranscript(content);
-    if (messages.length === 0) return null;
+    messages = parseTranscript(content);
+  } catch (err) {
+    log(`Failed to read transcript: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+  if (messages.length === 0) return null;
 
+  // The markdown WRITE is independently best-effort: a failure here (EACCES/ENOSPC on the
+  // conversations dir) must NOT prevent a post-archive consumer (the PreCompact capture seam)
+  // from running — the transcript is already parsed. Swallow + still return the parsed messages.
+  try {
     // Try to get summary from sessions index
     let summary: string | undefined;
     const indexPath = path.join(path.dirname(transcriptPath), 'sessions-index.json');
@@ -260,11 +273,11 @@ function archiveTranscriptFile(transcriptPath: string | undefined, sessionId: st
     const filename = `${new Date().toISOString().split('T')[0]}-${name}.md`;
     fs.writeFileSync(path.join(conversationsDir, filename), formatTranscriptMarkdown(messages, summary, assistantName));
     log(`Archived conversation to ${filename}`);
-    return messages;
   } catch (err) {
     log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
   }
+  // Parse succeeded → return the messages regardless of write outcome (best-effort archive).
+  return messages;
 }
 
 function createPreCompactHook(assistantName?: string): HookCallback {
