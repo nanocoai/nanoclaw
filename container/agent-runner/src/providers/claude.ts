@@ -7,6 +7,7 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { applyInputTransform } from './input-transform.js';
 import { registerProvider } from './provider-registry.js';
+import { applyQueryConfinement, isQueryConfinementRegistered } from './query-confinement.js';
 import { policyAllowsTool, policyExtraDenied, policyHidesMcpServer, policySettingSources } from './tool-policy.js';
 import { applyToolResultMiddleware } from './tool-result-middleware.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
@@ -360,6 +361,16 @@ const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not fou
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
 
+  /**
+   * Honest capability (per-turn query-confinement seam, INERT on pristine core).
+   * The provider can run a `query({ confinedExternal: true })` turn iff an overlay
+   * registered HOW to confine it. Pristine core has no registrant ⇒ false ⇒ a caller
+   * requesting a confined turn fails closed (skips it) before query() ever runs.
+   */
+  get supportsConfinedExternal(): boolean {
+    return isQueryConfinementRegistered();
+  }
+
   private assistantName?: string;
   private mcpServers: Record<string, McpServerConfig>;
   private env: Record<string, string | undefined>;
@@ -433,18 +444,41 @@ export class ClaudeProvider implements AgentProvider {
       Object.entries(this.mcpServers).filter(([name]) => !policyHidesMcpServer(name)),
     );
 
+    // Normal-mode turn surface: the full (policy-filtered) allowlist, every visible MCP
+    // server, and any board dirs.
+    let allowedTools = [
+      ...TOOL_ALLOWLIST.filter((t) => policyAllowsTool(t)),
+      ...Object.keys(visibleMcpServers).map(mcpAllowPattern),
+    ];
+    let mcpServers = visibleMcpServers;
+    let additionalDirectories = this.additionalDirectories;
+
+    // Per-turn query-confinement seam (INERT on pristine core). A confined-external turn
+    // routes the normal surface through applyQueryConfinement, which a registered overlay
+    // tightens (MCP-only / no built-ins / no board dirs). FAIL-CLOSED: a flagged turn with
+    // no registrant throws rather than run unconfined (see query-confinement.ts).
+    if (input.confinedExternal === true) {
+      const confined = applyQueryConfinement({
+        allowedTools,
+        visibleMcpServerNames: Object.keys(visibleMcpServers),
+        additionalDirectories: this.additionalDirectories ?? [],
+      });
+      allowedTools = [...confined.allowedTools];
+      mcpServers = Object.fromEntries(
+        Object.entries(visibleMcpServers).filter(([name]) => confined.visibleMcpServerNames.includes(name)),
+      );
+      additionalDirectories = [...confined.additionalDirectories];
+    }
+
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {
         cwd: input.cwd,
-        additionalDirectories: this.additionalDirectories,
+        additionalDirectories,
         resume: input.continuation,
         pathToClaudeCodeExecutable: '/pnpm/claude',
         systemPrompt: instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions } : undefined,
-        allowedTools: [
-          ...TOOL_ALLOWLIST.filter((t) => policyAllowsTool(t)),
-          ...Object.keys(visibleMcpServers).map(mcpAllowPattern),
-        ],
+        allowedTools,
         disallowedTools: disallowedTools(),
         env: this.env,
         model: this.model,
@@ -453,7 +487,7 @@ export class ClaudeProvider implements AgentProvider {
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         settingSources: policySettingSources(['project', 'user', 'local']),
-        mcpServers: visibleMcpServers,
+        mcpServers,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],
           PostToolUse: [{ hooks: [postToolUseHook] }],
