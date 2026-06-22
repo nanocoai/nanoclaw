@@ -98,7 +98,7 @@ server.tool(
 
 server.tool(
   'delegate',
-  '(主群专用) 派活给指定子群，区别于 send_message：delegate 是带账本的"派工"语义，host 会落账本生成 task_id 并注入消息投递给子群，之后可用 /delegate status 跟踪进度。task_id 完全由 host 生成管理，你不需要也不能自带。仅主群可用，子群调用会被拒绝。',
+  '派活给指定群，区别于 send_message：delegate 是带账本的"派工"语义，host 会落账本生成 task_id 并注入消息投递给目标群，之后可用 /delegate status 跟踪进度。task_id 完全由 host 生成管理，你不需要也不能自带。任意已注册群都可派给其他已注册群，但不能派给自己。',
   {
     target: z
       .string()
@@ -116,7 +116,7 @@ server.tool(
       : rawTarget;
     writeIpcFile(MESSAGES_DIR, {
       type: 'delegate',
-      // 源群（主群）folder，host 据此校验 isMain
+      // 源群 folder，host 据此写入 task.source_group。
       sourceGroup: groupFolder,
       target: normalizedTarget,
       text: args.text,
@@ -134,41 +134,59 @@ server.tool(
   },
 );
 
-server.tool(
+function registerReportTool(
+  name: 'report_to_source' | 'report_to_main',
+  description: string,
+) {
+  server.tool(
+    name,
+    description,
+    {
+      status: z
+        .enum(['progress', 'done', 'blocked', 'failed', 'question'])
+        .describe(
+          '汇报状态：progress=进行中 / done=完成 / blocked=卡住等人工 / failed=失败 / question=有问题需发起群答复',
+        ),
+      summary: z.string().describe('一句话摘要，发起群一眼能看懂当前状态'),
+      details: z.string().optional().describe('详细说明（可选）'),
+      artifacts: z
+        .array(z.string())
+        .optional()
+        .describe(
+          '产出文件的宿主机绝对路径数组（可选）。仅限本群 workspace / 项目根 / /tmp/nanoclaw-artifacts/ 下的路径，非法路径会被 host 降级为纯文本备注。',
+        ),
+    },
+    async (args) => {
+      writeIpcFile(MESSAGES_DIR, {
+        type: 'report',
+        // 当前执行任务的 reporting group，host 用 target_group=该值反查 task_id。
+        sourceGroup: groupFolder,
+        status: args.status,
+        summary: args.summary,
+        details: args.details || undefined,
+        artifacts: args.artifacts || undefined,
+        timestamp: new Date().toISOString(),
+      });
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `已向任务发起群汇报（${args.status}）。`,
+          },
+        ],
+      };
+    },
+  );
+}
+
+registerReportTool(
+  'report_to_source',
+  '向当前派工任务的发起群汇报进展。目标群由 host 根据当前群正在执行的 delegation 反查，不能指定任意群；task_id 也由 host 用当前群锁定，你不需要传。status 必须是 progress/done/blocked/failed/question 之一。',
+);
+
+registerReportTool(
   'report_to_main',
-  '(子群专用) 向唯一主群汇报当前派工任务的进展。目标恒为主群，不能指定任意群；task_id 由 host 用你的群反查锁定，你不需要传。status 必须是 progress/done/blocked/failed/question 之一。主群调用会被拒绝。',
-  {
-    status: z
-      .enum(['progress', 'done', 'blocked', 'failed', 'question'])
-      .describe(
-        '汇报状态：progress=进行中 / done=完成 / blocked=卡住等人工 / failed=失败 / question=有问题需主群答复',
-      ),
-    summary: z.string().describe('一句话摘要，主群一眼能看懂当前状态'),
-    details: z.string().optional().describe('详细说明（可选）'),
-    artifacts: z
-      .array(z.string())
-      .optional()
-      .describe(
-        '产出文件的宿主机绝对路径数组（可选）。仅限本群 workspace / 项目根 / /tmp/nanoclaw-artifacts/ 下的路径，非法路径会被 host 降级为纯文本备注。',
-      ),
-  },
-  async (args) => {
-    writeIpcFile(MESSAGES_DIR, {
-      type: 'report',
-      // 源群（子群）folder，host 据此反查 task_id 并校验非 main
-      sourceGroup: groupFolder,
-      status: args.status,
-      summary: args.summary,
-      details: args.details || undefined,
-      artifacts: args.artifacts || undefined,
-      timestamp: new Date().toISOString(),
-    });
-    return {
-      content: [
-        { type: 'text' as const, text: `已向主群汇报（${args.status}）。` },
-      ],
-    };
-  },
+  '兼容旧名：实际语义已经是 report_to_source，不再固定发唯一主群。用于向当前派工任务的发起群汇报进展；不能指定任意群，task_id 由 host 用当前群锁定，你不需要传。',
 );
 
 server.tool(
