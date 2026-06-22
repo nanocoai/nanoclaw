@@ -115,7 +115,10 @@ async function deliverToSubgroup(
       is_bot_message: false,
     });
   } catch (err) {
-    logger.error({ err, taskId }, '/delegate 发送成功但入库失败，agent 收不到，不推进状态');
+    logger.error(
+      { err, taskId },
+      '/delegate 发送成功但入库失败，agent 收不到，不推进状态',
+    );
     return 'store-failed';
   }
   return 'ok';
@@ -134,8 +137,14 @@ registerCommand({
       usage: '/delegate reply <task_id> <text>',
       description: '对进行/等待态任务续投（状态回 progress）',
     },
-    { usage: '/delegate retry <task_id>', description: '重派任务（状态回 dispatched）' },
-    { usage: '/delegate close <task_id>', description: '关闭任务，释放在办槽位' },
+    {
+      usage: '/delegate retry <task_id>',
+      description: '重派任务（状态回 dispatched）',
+    },
+    {
+      usage: '/delegate close <task_id>',
+      description: '关闭任务，释放在办槽位',
+    },
   ],
   handler: async (ctx) => {
     const reply = (text: string) =>
@@ -178,7 +187,9 @@ registerCommand({
         ctx.channel,
       );
       if (sent === 'send-failed') {
-        await reply(`续投失败：发送给 ${task.targetGroup} 出错，状态未变更，请重试。`);
+        await reply(
+          `续投失败：发送给 ${task.targetGroup} 出错，状态未变更，请重试。`,
+        );
         return;
       }
       if (sent === 'store-failed') {
@@ -190,7 +201,9 @@ registerCommand({
       }
       replyDelegation(task.taskId);
       logger.info({ taskId: task.taskId }, '/delegate reply 续投');
-      await reply(`✅ 已续投给 ${task.targetGroup}（${taskId}），状态回 progress。`);
+      await reply(
+        `✅ 已续投给 ${task.targetGroup}（${taskId}），状态回 progress。`,
+      );
       return;
     }
 
@@ -223,7 +236,9 @@ registerCommand({
         ctx.channel,
       );
       if (sent === 'send-failed') {
-        await reply(`重派失败：发送给 ${task.targetGroup} 出错，状态未变更，请重试。`);
+        await reply(
+          `重派失败：发送给 ${task.targetGroup} 出错，状态未变更，请重试。`,
+        );
         return;
       }
       if (sent === 'store-failed') {
@@ -235,7 +250,9 @@ registerCommand({
       }
       resetDelegationToDispatched(task.taskId);
       logger.info({ taskId: task.taskId }, '/delegate retry 重派');
-      await reply(`✅ 已重派给 ${task.targetGroup}（${taskId}），状态回 dispatched。`);
+      await reply(
+        `✅ 已重派给 ${task.targetGroup}（${taskId}），状态回 dispatched。`,
+      );
       return;
     }
 
@@ -252,12 +269,12 @@ registerCommand({
       }
       closeDelegation(task.taskId);
       logger.info({ taskId: task.taskId }, '/delegate close 关闭');
-      await reply(`✅ 已关闭任务 ${taskId}，释放 ${task.targetGroup} 在办槽位。`);
+      await reply(
+        `✅ 已关闭任务 ${taskId}，释放 ${task.targetGroup} 在办槽位。`,
+      );
       return;
     }
 
-    await reply(
-      '未知子命令。可用：/delegate status | reply | retry | close',
-    );
+    await reply('未知子命令。可用：/delegate status | reply | retry | close');
   },
 });

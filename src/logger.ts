@@ -54,7 +54,9 @@ function tsPretty(): string {
 
 // ── Error 序列化 ─────────────────────────────────────────
 
-function serializeErr(err: unknown): { type: string; message: string; stack?: string } | unknown {
+function serializeErr(
+  err: unknown,
+): { type: string; message: string; stack?: string } | unknown {
   if (err instanceof Error) {
     return {
       type: err.constructor.name,
@@ -129,17 +131,29 @@ class RotatingFileStream {
 
     // 删除最旧的归档
     const oldest = `${this.filePath}.${this.maxFiles}`;
-    try { fs.unlinkSync(oldest); } catch { /* 不存在则忽略 */ }
+    try {
+      fs.unlinkSync(oldest);
+    } catch {
+      /* 不存在则忽略 */
+    }
 
     // shift: .6 → .7, .5 → .6, ... .1 → .2
     for (let i = this.maxFiles - 1; i >= 1; i--) {
       const from = `${this.filePath}.${i}`;
       const to = `${this.filePath}.${i + 1}`;
-      try { fs.renameSync(from, to); } catch { /* 不存在则忽略 */ }
+      try {
+        fs.renameSync(from, to);
+      } catch {
+        /* 不存在则忽略 */
+      }
     }
 
     // 当前文件 → .1
-    try { fs.renameSync(this.filePath, `${this.filePath}.1`); } catch { /* 忽略 */ }
+    try {
+      fs.renameSync(this.filePath, `${this.filePath}.1`);
+    } catch {
+      /* 忽略 */
+    }
 
     // 打开新文件
     this.fd = fs.openSync(this.filePath, 'a');
@@ -148,7 +162,11 @@ class RotatingFileStream {
 
   /** 用于测试 */
   close(): void {
-    try { fs.closeSync(this.fd); } catch { /* 忽略 */ }
+    try {
+      fs.closeSync(this.fd);
+    } catch {
+      /* 忽略 */
+    }
   }
 }
 
@@ -215,7 +233,8 @@ function log(
   } else {
     // ── Pretty 输出 ──
     const tag = `${COLORS[level]}${level.toUpperCase()}${level === 'fatal' ? FULL_RESET : RESET}`;
-    const stream = LEVELS[level] >= LEVELS.warn ? process.stderr : process.stdout;
+    const stream =
+      LEVELS[level] >= LEVELS.warn ? process.stderr : process.stdout;
     const traceTag = ctx?.traceId ? ` [${ctx.traceId}]` : '';
 
     if (!data) {

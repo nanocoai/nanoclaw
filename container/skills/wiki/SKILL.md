@@ -5,7 +5,7 @@ description: 全局共享 Wiki 知识库维护。Ingest 资料、Query 查询、
 
 # Wiki 知识库
 
-团队共享知识库，所有群的 agent 共享。**权威库是 `../../global/team_wiki/`**（推 GitHub `TierIITech/knowloage`，线上向量召回也只读这里）。
+团队共享知识库，所有群的 agent 共享。**权威库是 `../../global/team_wiki/`**（推 GitHub `TierIITech/team-knowledge`，线上向量召回也只读这里）。
 
 > ⚠️ 历史遗留的个人库 `../../global/wiki/` 已退役为草稿池，**不要再往那写**。写入端（本 skill）和召回端（`src/memory/inject.ts`）现已统一指向 `team_wiki`。
 

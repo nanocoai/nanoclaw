@@ -43,8 +43,20 @@ describe('/delegate 命令', () => {
     _initTestDatabase();
     // 跨群投递会往子群 messages.db 写消息，messages 表对 chats 有外键约束。
     // 生产里子群 chat 早已存在，测试需先 seed，否则 storeMessageDirect 外键违约。
-    storeChatMetadata('fs:oc_3', new Date().toISOString(), 'sub3', 'mock', true);
-    storeChatMetadata('fs:oc_main', new Date().toISOString(), 'main', 'mock', true);
+    storeChatMetadata(
+      'fs:oc_3',
+      new Date().toISOString(),
+      'sub3',
+      'mock',
+      true,
+    );
+    storeChatMetadata(
+      'fs:oc_main',
+      new Date().toISOString(),
+      'main',
+      'mock',
+      true,
+    );
   });
 
   async function run(args: string, isMain = true) {
@@ -76,7 +88,9 @@ describe('/delegate 命令', () => {
     const t = createDelegation({ targetGroup: 'sub3', targetJid: 'fs:oc_3' });
     // 手动把 dispatched_at 改到 20 分钟前，触发失联
     getDb()
-      .prepare('UPDATE delegation_tasks SET dispatched_at = ? WHERE task_id = ?')
+      .prepare(
+        'UPDATE delegation_tasks SET dispatched_at = ? WHERE task_id = ?',
+      )
       .run(new Date(Date.now() - 20 * 60 * 1000).toISOString(), t.taskId);
     const { sendMessage } = await run('status');
     const text = sendMessage.mock.calls[0][1] as string;
@@ -155,11 +169,9 @@ describe('/delegate 命令', () => {
   it('reply 入库失败 → 状态不推进 + 提示主群手动确认', async () => {
     const t = createDelegation({ targetGroup: 'sub3', targetJid: 'fs:oc_3' });
     updateDelegationOnReport({ taskId: t.taskId, status: 'question' });
-    const spy = vi
-      .spyOn(dbMod, 'storeMessageDirect')
-      .mockImplementation(() => {
-        throw new Error('disk full');
-      });
+    const spy = vi.spyOn(dbMod, 'storeMessageDirect').mockImplementation(() => {
+      throw new Error('disk full');
+    });
     try {
       const { sendMessage } = await run(`reply ${t.taskId} 用方案A`);
       // 飞书发出去了（发送成功）

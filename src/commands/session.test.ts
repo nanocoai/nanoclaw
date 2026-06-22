@@ -25,7 +25,10 @@ function makeDeps() {
       },
     ] as any,
     sessions: {} as Record<string, string>,
-    queue: { stopGroup: vi.fn().mockReturnValue(true), killGroup: vi.fn() } as any,
+    queue: {
+      stopGroup: vi.fn().mockReturnValue(true),
+      killGroup: vi.fn(),
+    } as any,
     registeredGroups: {} as any,
     deleteSession: vi.fn(),
     setRegisteredGroup: vi.fn(),

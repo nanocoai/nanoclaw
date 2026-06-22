@@ -9,9 +9,9 @@ describe('validateArtifactPath', () => {
     expect(validateArtifactPath('/repo/nine/diff.patch', roots)).toBe(
       '/repo/nine/diff.patch',
     );
-    expect(
-      validateArtifactPath('/tmp/nanoclaw-artifacts/x.txt', roots),
-    ).toBe('/tmp/nanoclaw-artifacts/x.txt');
+    expect(validateArtifactPath('/tmp/nanoclaw-artifacts/x.txt', roots)).toBe(
+      '/tmp/nanoclaw-artifacts/x.txt',
+    );
     expect(validateArtifactPath('/repo/groups/sub3/out.md', roots)).toBe(
       '/repo/groups/sub3/out.md',
     );
@@ -30,19 +30,13 @@ describe('validateArtifactPath', () => {
   });
 
   it('敏感子路径黑名单兜底（即使在白名单根内）', () => {
-    expect(
-      validateArtifactPath('/repo/nine/.ssh/id_rsa', roots),
-    ).toBeNull();
+    expect(validateArtifactPath('/repo/nine/.ssh/id_rsa', roots)).toBeNull();
     expect(
       validateArtifactPath('/repo/nine/.aws/credentials', roots),
     ).toBeNull();
     expect(validateArtifactPath('/repo/nine/.env', roots)).toBeNull();
-    expect(
-      validateArtifactPath('/repo/nine/sub/.env.local', roots),
-    ).toBeNull();
-    expect(
-      validateArtifactPath('/repo/nine/.config/secret', roots),
-    ).toBeNull();
+    expect(validateArtifactPath('/repo/nine/sub/.env.local', roots)).toBeNull();
+    expect(validateArtifactPath('/repo/nine/.config/secret', roots)).toBeNull();
   });
 
   it('敏感段大小写不敏感（macOS 防 .SSH/.Aws 绕过）', () => {

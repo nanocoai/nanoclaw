@@ -145,7 +145,12 @@ function statusLabel(s: string): string {
 function statusTone(s: string): string {
   if (s === 'done') return 'done';
   if (s === 'blocked' || s === 'cancelled') return 'warn';
-  if (STAGE_ORDER.includes(s as never) || s === 'in_progress' || s === 'review' || s === 'testing')
+  if (
+    STAGE_ORDER.includes(s as never) ||
+    s === 'in_progress' ||
+    s === 'review' ||
+    s === 'testing'
+  )
     return 'active';
   return 'idle';
 }
@@ -293,7 +298,15 @@ a{color:inherit;text-decoration:none}
 function renderListPage(project: string, status: string): string {
   const tasks = queryTasks(project, status);
   const projects = queryProjects();
-  const allStatuses = ['all', ...STAGE_ORDER, 'in_progress', 'blocked', 'review', 'testing', 'cancelled'];
+  const allStatuses = [
+    'all',
+    ...STAGE_ORDER,
+    'in_progress',
+    'blocked',
+    'review',
+    'testing',
+    'cancelled',
+  ];
 
   const projOpts = ['all', ...projects]
     .map(
@@ -316,7 +329,9 @@ function renderListPage(project: string, status: string): string {
           const cl = t.checklist_total
             ? `清单 ${t.checklist_done}/${t.checklist_total}`
             : '';
-          const tc = t.test_total ? `用例 ${t.test_passed}/${t.test_total}` : '';
+          const tc = t.test_total
+            ? `用例 ${t.test_passed}/${t.test_total}`
+            : '';
           const stats = [cl, tc].filter(Boolean).join(' · ');
           return `<a class="card" href="/board/task/${encodeURIComponent(t.id)}">
   <div class="card-top">
@@ -446,7 +461,9 @@ function renderDetailPage(detail: TaskDetail): string {
     ? `<section class="block"><h2>执行清单 <span class="cnt">${checklist.filter((c) => c.status === 'done').length}/${checklist.length}</span></h2>
 <ul class="cklist">${checklist
         .map(
-          (c) => `<li class="ck ck-${escHtml(c.status)}"><span class="ck-mark">${c.status === 'done' ? '✓' : c.status === 'blocked' ? '!' : c.status === 'skipped' ? '–' : '○'}</span>
+          (
+            c,
+          ) => `<li class="ck ck-${escHtml(c.status)}"><span class="ck-mark">${c.status === 'done' ? '✓' : c.status === 'blocked' ? '!' : c.status === 'skipped' ? '–' : '○'}</span>
   <span class="ck-title">${escHtml(c.title)}</span>
   <span class="tag">${escHtml(CHECKLIST_LABEL[c.status] ?? c.status)}</span>
   ${c.notes ? `<span class="ck-notes">${escHtml(c.notes)}</span>` : ''}</li>`,
@@ -455,9 +472,18 @@ function renderDetailPage(detail: TaskDetail): string {
     : '';
 
   const artifacts: string[] = [];
-  if (task.prd_path) artifacts.push(`<div class="kv"><span class="k">PRD</span><span class="v mono">${escHtml(task.prd_path)}</span></div>`);
-  if (task.spec_path) artifacts.push(`<div class="kv"><span class="k">Spec</span><span class="v mono">${escHtml(task.spec_path)}</span></div>`);
-  if (task.artifact_root) artifacts.push(`<div class="kv"><span class="k">产物目录</span><span class="v mono">${escHtml(task.artifact_root)}</span></div>`);
+  if (task.prd_path)
+    artifacts.push(
+      `<div class="kv"><span class="k">PRD</span><span class="v mono">${escHtml(task.prd_path)}</span></div>`,
+    );
+  if (task.spec_path)
+    artifacts.push(
+      `<div class="kv"><span class="k">Spec</span><span class="v mono">${escHtml(task.spec_path)}</span></div>`,
+    );
+  if (task.artifact_root)
+    artifacts.push(
+      `<div class="kv"><span class="k">产物目录</span><span class="v mono">${escHtml(task.artifact_root)}</span></div>`,
+    );
   const artifactBlock = artifacts.length
     ? `<section class="block"><h2>产物 / 证据</h2>${artifacts.join('')}</section>`
     : '';
@@ -576,7 +602,9 @@ export function handleTaskBoardRequest(
       const detail = queryTaskDetail(detailMatch[1]);
       if (!detail) {
         res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end('<div style="font-family:sans-serif;text-align:center;padding:60px;color:#8a857c">任务不存在</div>');
+        res.end(
+          '<div style="font-family:sans-serif;text-align:center;padding:60px;color:#8a857c">任务不存在</div>',
+        );
         return true;
       }
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });

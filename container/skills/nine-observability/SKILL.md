@@ -7,7 +7,7 @@ description: Nine 平台线上问题排查 & 查日志（GlitchTip→Jaeger→Lo
 
 Nine 平台（Python backend + Go api）的标准排查路径。所有凭据已持久化在两台机器的 `/etc/profile.d/glitchtip.sh`，**不要**在本地 export token。
 
-详细资料见 Wiki：`../../global/wiki/nine-observability-debug.md`（精选页）和 `../../global/wiki/sources/nine-observability-debug-guide.md`（完整原始指南）。
+详细资料见 Wiki：`../../global/team_wiki/nine-observability-debug.md`（精选页）和 `../../global/sources/nine-observability-debug-guide.md`（完整原始指南）。
 
 ## 触发词
 

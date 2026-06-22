@@ -1,12 +1,16 @@
 export function isSessionRecoveryError(error: string | undefined): boolean {
-  return /no conversation found|ENOENT.*\.jsonl|session.*not found/i.test(error ?? '');
+  return /no conversation found|ENOENT.*\.jsonl|session.*not found/i.test(
+    error ?? '',
+  );
 }
 
 export function buildSessionRecoveryMessage(input: {
   sessionId?: string;
   error?: string;
 }): string {
-  const sessionLine = input.sessionId ? `当前 session：${input.sessionId}` : '当前 session：未知';
+  const sessionLine = input.sessionId
+    ? `当前 session：${input.sessionId}`
+    : '当前 session：未知';
   const errorLine = input.error ? `错误：${input.error}` : '错误：未知';
   return [
     '⚠️ 当前会话恢复失败，我没有自动切换到新 session。',

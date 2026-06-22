@@ -20,7 +20,11 @@ function completed(item: Record<string, unknown>) {
 describe('mapCodexProgress — file_change', () => {
   it('单文件:显示 kind + basename,detail 列出路径', () => {
     const out = mapCodexProgress(
-      started({ id: 'i1', type: 'file_change', changes: [{ path: '/tmp/a.txt', kind: 'add' }] }),
+      started({
+        id: 'i1',
+        type: 'file_change',
+        changes: [{ path: '/tmp/a.txt', kind: 'add' }],
+      }),
     );
     expect(out).toHaveLength(1);
     expect(out[0].result).toBe('📝 新增 a.txt');
@@ -48,27 +52,39 @@ describe('mapCodexProgress — file_change', () => {
 
   it('未知 kind 原样保留', () => {
     const out = mapCodexProgress(
-      started({ id: 'i3', type: 'file_change', changes: [{ path: '/x', kind: 'rename' }] }),
+      started({
+        id: 'i3',
+        type: 'file_change',
+        changes: [{ path: '/x', kind: 'rename' }],
+      }),
     );
     expect(out[0].result).toBe('📝 rename x');
   });
 
   it('changes 为空时退化为通用分支(不崩)', () => {
-    const out = mapCodexProgress(started({ id: 'i4', type: 'file_change', changes: [] }));
+    const out = mapCodexProgress(
+      started({ id: 'i4', type: 'file_change', changes: [] }),
+    );
     expect(out[0].result).toBe('🔧 file_change');
   });
 });
 
 describe('mapCodexProgress — 回归', () => {
   it('command_execution 仍显示命令 + bash detail', () => {
-    const out = mapCodexProgress(started({ id: 'c1', type: 'command_execution', command: 'npm test' }));
+    const out = mapCodexProgress(
+      started({ id: 'c1', type: 'command_execution', command: 'npm test' }),
+    );
     expect(out[0].result).toBe('🔧 npm test');
     expect(out[0].detail).toContain('```bash');
     expect(out[0].detail).toContain('npm test');
   });
 
   it('agent_message 返回空', () => {
-    expect(mapCodexProgress(started({ id: 'm1', type: 'agent_message', text: 'hi' }))).toEqual([]);
+    expect(
+      mapCodexProgress(
+        started({ id: 'm1', type: 'agent_message', text: 'hi' }),
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -77,7 +93,11 @@ describe('mapCodexTextProgress — Codex 中间文本', () => {
     const state = createCodexTextProgressState();
     expect(
       mapCodexTextProgress(
-        completed({ id: 'm1', type: 'agent_message', text: '我先看一下代码。' }),
+        completed({
+          id: 'm1',
+          type: 'agent_message',
+          text: '我先看一下代码。',
+        }),
         state,
       ),
     ).toEqual([]);
@@ -100,7 +120,9 @@ describe('mapCodexTextProgress — Codex 中间文本', () => {
       state,
     );
 
-    expect(mapCodexTextProgress({ type: 'turn.completed' } as any, state)).toEqual([]);
+    expect(
+      mapCodexTextProgress({ type: 'turn.completed' } as any, state),
+    ).toEqual([]);
     expect(state.pendingAgentMessage).toBeUndefined();
     expect(state.lastAgentMessage).toBe('最终答案。');
   });
@@ -113,7 +135,11 @@ describe('mapCodexTextProgress — Codex 中间文本', () => {
     );
 
     const out = mapCodexTextProgress(
-      completed({ id: 'm2', type: 'agent_message', text: '第二段可能是最终回复。' }),
+      completed({
+        id: 'm2',
+        type: 'agent_message',
+        text: '第二段可能是最终回复。',
+      }),
       state,
     );
 
@@ -125,12 +151,20 @@ describe('mapCodexTextProgress — Codex 中间文本', () => {
   it('internal-only 后续消息不复用旧文本当最终回复', () => {
     const state = createCodexTextProgressState();
     mapCodexTextProgress(
-      completed({ id: 'm1', type: 'agent_message', text: '这段后面还有处理。' }),
+      completed({
+        id: 'm1',
+        type: 'agent_message',
+        text: '这段后面还有处理。',
+      }),
       state,
     );
 
     const out = mapCodexTextProgress(
-      completed({ id: 'm2', type: 'agent_message', text: '<internal>已写完总结</internal>' }),
+      completed({
+        id: 'm2',
+        type: 'agent_message',
+        text: '<internal>已写完总结</internal>',
+      }),
       state,
     );
 
@@ -147,7 +181,11 @@ describe('mapCodexTextProgress — Codex 中间文本', () => {
     );
 
     const out = mapCodexTextProgress(
-      completed({ id: 'c1', type: 'command_execution', command: 'sed -n 1,80p a.ts' }),
+      completed({
+        id: 'c1',
+        type: 'command_execution',
+        command: 'sed -n 1,80p a.ts',
+      }),
       state,
     );
 
@@ -183,7 +221,10 @@ describe('mapCodexTextProgress — Codex 中间文本', () => {
 
 describe('mapCodexTextProgress — 中间叙述 vs 最终回复', () => {
   const ev = (type: string, itemType?: string, text?: string) =>
-    ({ type, item: itemType ? { id: 'x', type: itemType, text } : undefined }) as any;
+    ({
+      type,
+      item: itemType ? { id: 'x', type: itemType, text } : undefined,
+    }) as any;
   function run(seq: any[]) {
     const s = createCodexTextProgressState();
     const progress: string[] = [];

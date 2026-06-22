@@ -24,7 +24,11 @@ describe('logger — JSON 模式', () => {
 
   afterEach(() => {
     process.stdout.write = originalWrite;
-    try { fs.rmSync(tmpDir, { recursive: true }); } catch { /* ignore */ }
+    try {
+      fs.rmSync(tmpDir, { recursive: true });
+    } catch {
+      /* ignore */
+    }
   });
 
   it('JSON 输出可被 JSON.parse 解析', async () => {
@@ -112,7 +116,11 @@ describe('RotatingFileStream', () => {
   });
 
   afterEach(() => {
-    try { fs.rmSync(tmpDir, { recursive: true }); } catch { /* ignore */ }
+    try {
+      fs.rmSync(tmpDir, { recursive: true });
+    } catch {
+      /* ignore */
+    }
   });
 
   it('写入小于 maxSize 不触发轮转', () => {
@@ -188,7 +196,9 @@ describe('RotatingFileStream', () => {
     stream.write('new content\n'); // 12 bytes → total 29 < 30, 不轮转
     stream.close();
 
-    expect(fs.readFileSync(logPath, 'utf-8')).toBe('existing content\nnew content\n');
+    expect(fs.readFileSync(logPath, 'utf-8')).toBe(
+      'existing content\nnew content\n',
+    );
     expect(fs.existsSync(`${logPath}.1`)).toBe(false);
   });
 
@@ -301,19 +311,35 @@ class TestRotatingFileStream {
   private rotate(): void {
     fs.closeSync(this.fd);
     const oldest = `${this.filePath}.${this.maxFiles}`;
-    try { fs.unlinkSync(oldest); } catch { /* ignore */ }
+    try {
+      fs.unlinkSync(oldest);
+    } catch {
+      /* ignore */
+    }
     for (let i = this.maxFiles - 1; i >= 1; i--) {
       const from = `${this.filePath}.${i}`;
       const to = `${this.filePath}.${i + 1}`;
-      try { fs.renameSync(from, to); } catch { /* ignore */ }
+      try {
+        fs.renameSync(from, to);
+      } catch {
+        /* ignore */
+      }
     }
-    try { fs.renameSync(this.filePath, `${this.filePath}.1`); } catch { /* ignore */ }
+    try {
+      fs.renameSync(this.filePath, `${this.filePath}.1`);
+    } catch {
+      /* ignore */
+    }
     this.fd = fs.openSync(this.filePath, 'a');
     this.currentSize = 0;
   }
 
   close(): void {
-    try { fs.closeSync(this.fd); } catch { /* ignore */ }
+    try {
+      fs.closeSync(this.fd);
+    } catch {
+      /* ignore */
+    }
   }
 }
 

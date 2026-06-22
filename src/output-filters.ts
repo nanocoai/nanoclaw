@@ -15,7 +15,9 @@ export const MODEL_REFUSAL_PATTERN =
  * 判断 progress 类型是否应被过滤（不发给用户）
  * 目前只过滤 thinking 类型
  */
-export function shouldFilterProgress(progressType: string | undefined): boolean {
+export function shouldFilterProgress(
+  progressType: string | undefined,
+): boolean {
   return progressType === 'thinking';
 }
 

@@ -30,7 +30,11 @@ const {
 } = await import('./codex-usage.js');
 
 // 真实 rollout 里 token_count 事件的一行(实测 codex-cli 0.136.0 结构)
-function tokenCountLine(primaryPct: number, secondaryPct: number, plan = 'plus') {
+function tokenCountLine(
+  primaryPct: number,
+  secondaryPct: number,
+  plan = 'plus',
+) {
   return JSON.stringify({
     timestamp: '2026-06-04T22:40:51.000Z',
     type: 'event_msg',
@@ -39,8 +43,16 @@ function tokenCountLine(primaryPct: number, secondaryPct: number, plan = 'plus')
       info: { total_token_usage: { total_tokens: 1000 } },
       rate_limits: {
         limit_id: 'codex',
-        primary: { used_percent: primaryPct, window_minutes: 300, resets_at: 1780588999 },
-        secondary: { used_percent: secondaryPct, window_minutes: 10080, resets_at: 1781175799 },
+        primary: {
+          used_percent: primaryPct,
+          window_minutes: 300,
+          resets_at: 1780588999,
+        },
+        secondary: {
+          used_percent: secondaryPct,
+          window_minutes: 10080,
+          resets_at: 1781175799,
+        },
         plan_type: plan,
       },
     },
@@ -56,7 +68,12 @@ afterEach(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
-function writeRollout(home: string, dateDir: string, name: string, lines: string[]) {
+function writeRollout(
+  home: string,
+  dateDir: string,
+  name: string,
+  lines: string[],
+) {
   const dir = path.join(home, 'sessions', dateDir);
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, name);
@@ -71,9 +88,19 @@ describe('findLatestCodexRollout', () => {
 
   it('递归找到最新 mtime 的 rollout-*.jsonl', () => {
     const home = path.join(tmpRoot, '.codex-home');
-    const old = writeRollout(home, '2026/06/01', 'rollout-2026-06-01T01-00-00-aaa.jsonl', [tokenCountLine(10, 5)]);
+    const old = writeRollout(
+      home,
+      '2026/06/01',
+      'rollout-2026-06-01T01-00-00-aaa.jsonl',
+      [tokenCountLine(10, 5)],
+    );
     fs.utimesSync(old, new Date('2026-06-01'), new Date('2026-06-01'));
-    const recent = writeRollout(home, '2026/06/04', 'rollout-2026-06-04T22-40-51-bbb.jsonl', [tokenCountLine(40, 16)]);
+    const recent = writeRollout(
+      home,
+      '2026/06/04',
+      'rollout-2026-06-04T22-40-51-bbb.jsonl',
+      [tokenCountLine(40, 16)],
+    );
     fs.utimesSync(recent, new Date('2026-06-04'), new Date('2026-06-04'));
     expect(findLatestCodexRollout(home)).toBe(recent);
   });
@@ -88,8 +115,18 @@ describe('findLatestCodexRollout', () => {
 
   it('mtime 相同时按文件名降序兜底,结果确定', () => {
     const home = path.join(tmpRoot, '.codex-home');
-    const a = writeRollout(home, '2026/06/04', 'rollout-2026-06-04T10-00-00-aaa.jsonl', [tokenCountLine(1, 1)]);
-    const b = writeRollout(home, '2026/06/04', 'rollout-2026-06-04T22-00-00-zzz.jsonl', [tokenCountLine(2, 2)]);
+    const a = writeRollout(
+      home,
+      '2026/06/04',
+      'rollout-2026-06-04T10-00-00-aaa.jsonl',
+      [tokenCountLine(1, 1)],
+    );
+    const b = writeRollout(
+      home,
+      '2026/06/04',
+      'rollout-2026-06-04T22-00-00-zzz.jsonl',
+      [tokenCountLine(2, 2)],
+    );
     const t = new Date('2026-06-04T12:00:00Z');
     fs.utimesSync(a, t, t);
     fs.utimesSync(b, t, t);
@@ -113,7 +150,9 @@ describe('extractCodexRateLimits', () => {
 
   it('没有 rate_limits 时返回 null', () => {
     const home = path.join(tmpRoot, '.codex-home');
-    const file = writeRollout(home, '2026/06/04', 'rollout-y.jsonl', ['{"type":"turn.started"}']);
+    const file = writeRollout(home, '2026/06/04', 'rollout-y.jsonl', [
+      '{"type":"turn.started"}',
+    ]);
     expect(extractCodexRateLimits(file)).toBeNull();
   });
 
@@ -123,7 +162,9 @@ describe('extractCodexRateLimits', () => {
       'not json but has rate_limits text',
       tokenCountLine(50, 8),
     ]);
-    expect(extractCodexRateLimits(file)!.rateLimits.primary!.used_percent).toBe(50);
+    expect(extractCodexRateLimits(file)!.rateLimits.primary!.used_percent).toBe(
+      50,
+    );
   });
 });
 
@@ -146,7 +187,12 @@ describe('codexToRateLimits', () => {
 describe('formatCodexUsage', () => {
   it('正常输出含进度条与 plan', () => {
     const out = formatCodexUsage({
-      rateLimits: { fiveHourPercent: 100, weeklyPercent: 16, fiveHourResetsAt: null, weeklyResetsAt: null },
+      rateLimits: {
+        fiveHourPercent: 100,
+        weeklyPercent: 16,
+        fiveHourResetsAt: null,
+        weeklyResetsAt: null,
+      },
       planType: 'prolite',
     });
     expect(out).toContain('📊 codex (prolite)');
@@ -156,8 +202,12 @@ describe('formatCodexUsage', () => {
   });
 
   it('各 error 状态有对应提示', () => {
-    expect(formatCodexUsage({ rateLimits: null, error: 'no_session' })).toContain('还没有会话');
-    expect(formatCodexUsage({ rateLimits: null, error: 'no_data' })).toContain('未记录配额');
+    expect(
+      formatCodexUsage({ rateLimits: null, error: 'no_session' }),
+    ).toContain('还没有会话');
+    expect(formatCodexUsage({ rateLimits: null, error: 'no_data' })).toContain(
+      '未记录配额',
+    );
   });
 
   it('planType 为空时不显示括号', () => {
@@ -172,14 +222,22 @@ describe('formatCodexUsage', () => {
 
 describe('getCodexUsage (集成)', () => {
   it('无 session 返回 no_session', () => {
-    const res = getCodexUsage({ folder: 'g', containerConfig: { cliMode: 'codex' } } as any);
+    const res = getCodexUsage({
+      folder: 'g',
+      containerConfig: { cliMode: 'codex' },
+    } as any);
     expect(res.error).toBe('no_session');
   });
 
   it('有 rollout 时解析出配额', () => {
     const home = path.join(tmpRoot, '.codex-home');
-    writeRollout(home, '2026/06/04', 'rollout-2026-06-04T10-00-00-ok.jsonl', [tokenCountLine(42, 7, 'plus')]);
-    const res = getCodexUsage({ folder: 'g', containerConfig: { cliMode: 'codex' } } as any);
+    writeRollout(home, '2026/06/04', 'rollout-2026-06-04T10-00-00-ok.jsonl', [
+      tokenCountLine(42, 7, 'plus'),
+    ]);
+    const res = getCodexUsage({
+      folder: 'g',
+      containerConfig: { cliMode: 'codex' },
+    } as any);
     expect(res.error).toBeUndefined();
     expect(res.planType).toBe('plus');
     expect(res.rateLimits!.fiveHourPercent).toBe(42);
@@ -198,8 +256,13 @@ describe('getCodexUsage (集成)', () => {
         },
       },
     });
-    writeRollout(home, '2026/06/04', 'rollout-2026-06-04T11-00-00-x.jsonl', [line]);
-    const res = getCodexUsage({ folder: 'g', containerConfig: { cliMode: 'codex' } } as any);
+    writeRollout(home, '2026/06/04', 'rollout-2026-06-04T11-00-00-x.jsonl', [
+      line,
+    ]);
+    const res = getCodexUsage({
+      folder: 'g',
+      containerConfig: { cliMode: 'codex' },
+    } as any);
     expect(res.planType).toBe('proscript');
   });
 });

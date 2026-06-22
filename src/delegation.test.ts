@@ -54,7 +54,11 @@ describe('delegation_tasks 账本', () => {
     expect(got.artifacts).toEqual(['/tmp/nanoclaw-artifacts/x.patch']);
     expect(got.lastReportAt).toBeTruthy();
 
-    updateDelegationOnReport({ taskId: t.taskId, status: 'done', summary: '完成' });
+    updateDelegationOnReport({
+      taskId: t.taskId,
+      status: 'done',
+      summary: '完成',
+    });
     got = getDelegation(t.taskId)!;
     expect(got.status).toBe('done');
     expect(got.summary).toBe('完成');
@@ -106,9 +110,9 @@ describe('delegation_tasks 账本', () => {
     expect(after.status).toBe('dispatched');
     // 重派清空 last_report_at（重新计时，避免立刻被判失联）
     expect(after.lastReportAt).toBeUndefined();
-    expect(
-      new Date(after.dispatchedAt).getTime(),
-    ).toBeGreaterThanOrEqual(new Date(before.dispatchedAt).getTime());
+    expect(new Date(after.dispatchedAt).getTime()).toBeGreaterThanOrEqual(
+      new Date(before.dispatchedAt).getTime(),
+    );
   });
 
   it('replyDelegation 刷新 last_report_at（续投算新交互）', () => {

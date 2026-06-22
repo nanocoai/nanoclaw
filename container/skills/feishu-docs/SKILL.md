@@ -81,6 +81,12 @@ LARK_CLI_NO_PROXY=1 lark-cli docs +whiteboard-update --as bot \
   --input_format mermaid --source @diagram.mmd --whiteboard-token <TOKEN> --overwrite
 ```
 
+**⚠️ mermaid 与其他代码块不能混用**：lark-cli 的 markdown 导入器在同一篇文档中遇到多个 ``` 围栏代码块时，会把反引号边界搞混，导致 mermaid 块被当成普通代码块插入（不渲染成图）。规则：
+
+1. **隔离围栏**：文档含 ` ```mermaid ` 块时，其他代码示例必须用行内代码（单反引号）或 4 空格缩进代码块，**禁止用 ``` 围栏**
+2. **创建后验证**：创建含 mermaid 的文档后，必须 `read` 回来检查输出里有 `<whiteboard type="mermaid">`；如果出现 `<code>` 或纯文本，说明转换失败
+3. **分段写入**：如果确实需要 mermaid 图和围栏代码块共存，先 `create` 只含 mermaid 的部分（确保转白板），再 `append` 含围栏代码块的章节
+
 **什么时候还用 `insert-image` PNG**：mermaid 表达不了的图（如需要像素级精确摆位的手画 SVG、PlantUML 高级皮肤/分层）才退回截图路线。常规架构图/流程图一律 mermaid 白板。
 
 ### 上传文件

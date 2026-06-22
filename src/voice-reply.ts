@@ -154,10 +154,7 @@ export function startVoiceReplySubscriber(deps: VoiceReplyDeps): void {
   };
 
   const scheduleReconnect = (): void => {
-    const delay = Math.min(
-      RECONNECT_BASE_MS * 2 ** attempt,
-      RECONNECT_MAX_MS,
-    );
+    const delay = Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_MAX_MS);
     attempt += 1;
     setTimeout(connect, delay).unref();
   };

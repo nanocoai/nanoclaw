@@ -64,13 +64,18 @@ description: 任务收尾工作流。回顾任务全过程，总结踩坑记录�
 **写入目标是团队库 `../../global/team_wiki/`，不是个人库 `wiki/`。** 这一点关键：线上飞书对话的向量化召回（`src/memory/inject.ts`）只读 `team_wiki/index.md` + `team_wiki/private/index.md`，写进个人 `wiki/` 的内容召回不到。
 
 1. 使用 `/wiki` skill 的 ingest 流程将文档存入 **team_wiki**
-2. **判断进共享层还是 private**（规则见 `team_wiki/README.md`）：
-   - **Nine 相关、可团队公开** → `team_wiki/`（共享层，会推 GitHub `TierIITech/knowloage`）
-   - **非 Nine（NanoClaw 自身 / Wall-E / Claude Code 研究等）、草稿、涉敏（IP/账号/证书/内部群 ID）** → `team_wiki/private/`（被 `.gitignore` 隔离，不上传）
-   - ⚠️ 拿不准是否涉敏时，先进 private，宁可保守
+2. **判断进共享层还是 private**（两步判断，按优先级执行）：
+   - **Step A: 先判项目归属**——Nine 生态项目（Nine 平台前后端、sandbox-api、NineConnect、agent-runner、recruit-api）→ **一律进共享层 `team_wiki/`**，不管内容是否含 open_id/chat_id/IP/端口/容器名等技术细节（这些不算涉敏）
+   - **Step B: 非 Nine 项目** → `team_wiki/private/`（NanoClaw 自身 / Wall-E / Claude Code 研究等）
+   - **唯一例外：含真实凭据（密码、API Key/Secret、证书私钥、OAuth token）的内容必须进 private**，不管项目归属
 3. 分类标签：`复盘`、`[项目名]`、`[技术领域]`
 4. 遵循"**综合进已有页**"原则：新知识优先融进相关已有页并更新交叉引用（`[[page-name]]`），不要无脑新建孤立碎片文件
 5. 更新对应的 `index.md`（共享进 `team_wiki/index.md`，私有进 `team_wiki/private/index.md`，两本索引互不引用）
+6. **三处验证落盘后 commit + push**（页 + index + log 用 `grep`/`wc` 确认真在，再推）：
+   ```bash
+   cd ../../global/team_wiki && git add <页+index> && git commit -m "docs(wiki): <一句话>" && env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy git push origin main
+   ```
+   `private/` 被 gitignore 隔离不进 push；push 报远端有新提交先 `git pull --ff-only` 再推。详见 `/wiki` skill INSTRUCTIONS「Git 同步」。
 
 ### Step 5: 归档 OpenSpec（如适用）
 

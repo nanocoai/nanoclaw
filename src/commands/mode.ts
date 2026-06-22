@@ -3,12 +3,19 @@ import { resolveCliMode } from '../cli-mode.js';
 import type { CliMode } from '../types.js';
 import { registerCommand } from './registry.js';
 
-const VALID_MODES: CliMode[] = ['sdk', 'print', 'interactive', 'codex', 'gemini'];
+const VALID_MODES: CliMode[] = [
+  'sdk',
+  'print',
+  'interactive',
+  'codex',
+  'gemini',
+];
 
 // /mode <sdk|print|interactive|codex|gemini> — 切换群的 CLI 运行模式，并清掉旧模式 session
 registerCommand({
   name: '/mode',
-  description: '切换 CLI 运行模式（sdk / print / interactive / codex / gemini）',
+  description:
+    '切换 CLI 运行模式（sdk / print / interactive / codex / gemini）',
   hasArgs: true,
   order: 21,
   handler: async (ctx) => {

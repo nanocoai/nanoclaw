@@ -14,7 +14,9 @@ import {
 const tempDirs: string[] = [];
 
 function makeTempDir(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-interactive-test-'));
+  const dir = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'nanoclaw-interactive-test-'),
+  );
   tempDirs.push(dir);
   return dir;
 }
@@ -27,8 +29,14 @@ afterEach(() => {
 
 describe('isRealClaudeSessionId', () => {
   it('只接受 Claude CLI 的 UUID session id', () => {
-    expect(isRealClaudeSessionId('478eb1ce-d5f4-4da2-a3bd-3f44d5b82e37')).toBe(true);
-    expect(isRealClaudeSessionId('new-fs:oc_df0d2dcb8747d8bcc2047c60ddcc7120-1779164795213')).toBe(false);
+    expect(isRealClaudeSessionId('478eb1ce-d5f4-4da2-a3bd-3f44d5b82e37')).toBe(
+      true,
+    );
+    expect(
+      isRealClaudeSessionId(
+        'new-fs:oc_df0d2dcb8747d8bcc2047c60ddcc7120-1779164795213',
+      ),
+    ).toBe(false);
     expect(isRealClaudeSessionId('session_abc123')).toBe(false);
     expect(isRealClaudeSessionId(undefined)).toBe(false);
   });
@@ -38,7 +46,11 @@ describe('findLatestClaudeSessionId', () => {
   it('从 cwd 对应 project 目录找到本轮最新 UUID jsonl', () => {
     const claudeConfigDir = makeTempDir();
     const cwd = '/Users/dajay/AI_Workspace/nine';
-    const projectDir = path.join(claudeConfigDir, 'projects', '-Users-dajay-AI-Workspace-nine');
+    const projectDir = path.join(
+      claudeConfigDir,
+      'projects',
+      '-Users-dajay-AI-Workspace-nine',
+    );
     fs.mkdirSync(projectDir, { recursive: true });
 
     const oldSession = '11111111-1111-4111-8111-111111111111';
@@ -49,20 +61,28 @@ describe('findLatestClaudeSessionId', () => {
     fs.writeFileSync(newPath, '{}\n');
 
     const sinceMs = Date.now() - 1000;
-    fs.utimesSync(oldPath, new Date(sinceMs - 10_000), new Date(sinceMs - 10_000));
+    fs.utimesSync(
+      oldPath,
+      new Date(sinceMs - 10_000),
+      new Date(sinceMs - 10_000),
+    );
     fs.utimesSync(newPath, new Date(sinceMs + 1000), new Date(sinceMs + 1000));
     fs.writeFileSync(path.join(projectDir, 'new-fs:fake.jsonl'), '{}\n');
 
-    expect(findLatestClaudeSessionId({ claudeConfigDir, cwd, sinceMs })).toBe(newSession);
+    expect(findLatestClaudeSessionId({ claudeConfigDir, cwd, sinceMs })).toBe(
+      newSession,
+    );
   });
 
   it('没有本轮 UUID jsonl 时返回 undefined', () => {
     const claudeConfigDir = makeTempDir();
-    expect(findLatestClaudeSessionId({
-      claudeConfigDir,
-      cwd: '/Users/dajay/AI_Workspace/nine',
-      sinceMs: Date.now(),
-    })).toBeUndefined();
+    expect(
+      findLatestClaudeSessionId({
+        claudeConfigDir,
+        cwd: '/Users/dajay/AI_Workspace/nine',
+        sinceMs: Date.now(),
+      }),
+    ).toBeUndefined();
   });
 });
 
@@ -105,83 +125,97 @@ describe('analyzeInteractivePaneCompletion', () => {
 
 describe('shouldReleaseBlockedTurn', () => {
   it('ready 稳定、SSE 静默、无 active stream 且有 backlog 时释放阻塞 turn', () => {
-    expect(shouldReleaseBlockedTurn({
-      readyStableMs: 5000,
-      sseQuietMs: 15000,
-      activeSseStreams: 0,
-      currentTurnState: 'busy',
-      backlogCount: 1,
-      hasPendingOutput: false,
-      hasPendingText: false,
-    })).toBe(true);
+    expect(
+      shouldReleaseBlockedTurn({
+        readyStableMs: 5000,
+        sseQuietMs: 15000,
+        activeSseStreams: 0,
+        currentTurnState: 'busy',
+        backlogCount: 1,
+        hasPendingOutput: false,
+        hasPendingText: false,
+      }),
+    ).toBe(true);
   });
 
   it('没有 backlog 时不释放，避免截断正常长任务', () => {
-    expect(shouldReleaseBlockedTurn({
-      readyStableMs: 10_000,
-      sseQuietMs: 20_000,
-      activeSseStreams: 0,
-      currentTurnState: 'busy',
-      backlogCount: 0,
-      hasPendingOutput: false,
-      hasPendingText: false,
-    })).toBe(false);
+    expect(
+      shouldReleaseBlockedTurn({
+        readyStableMs: 10_000,
+        sseQuietMs: 20_000,
+        activeSseStreams: 0,
+        currentTurnState: 'busy',
+        backlogCount: 0,
+        hasPendingOutput: false,
+        hasPendingText: false,
+      }),
+    ).toBe(false);
   });
 
   it('仍有 active SSE stream 时不释放', () => {
-    expect(shouldReleaseBlockedTurn({
-      readyStableMs: 10_000,
-      sseQuietMs: 20_000,
-      activeSseStreams: 1,
-      currentTurnState: 'busy',
-      backlogCount: 2,
-      hasPendingOutput: false,
-      hasPendingText: false,
-    })).toBe(false);
+    expect(
+      shouldReleaseBlockedTurn({
+        readyStableMs: 10_000,
+        sseQuietMs: 20_000,
+        activeSseStreams: 1,
+        currentTurnState: 'busy',
+        backlogCount: 2,
+        hasPendingOutput: false,
+        hasPendingText: false,
+      }),
+    ).toBe(false);
   });
 
   it('存在 pending output 或 pending text 时不释放，避免丢 final', () => {
-    expect(shouldReleaseBlockedTurn({
-      readyStableMs: 10_000,
-      sseQuietMs: 20_000,
-      activeSseStreams: 0,
-      currentTurnState: 'busy',
-      backlogCount: 2,
-      hasPendingOutput: true,
-      hasPendingText: false,
-    })).toBe(false);
+    expect(
+      shouldReleaseBlockedTurn({
+        readyStableMs: 10_000,
+        sseQuietMs: 20_000,
+        activeSseStreams: 0,
+        currentTurnState: 'busy',
+        backlogCount: 2,
+        hasPendingOutput: true,
+        hasPendingText: false,
+      }),
+    ).toBe(false);
 
-    expect(shouldReleaseBlockedTurn({
-      readyStableMs: 10_000,
-      sseQuietMs: 20_000,
-      activeSseStreams: 0,
-      currentTurnState: 'busy',
-      backlogCount: 2,
-      hasPendingOutput: false,
-      hasPendingText: true,
-    })).toBe(false);
+    expect(
+      shouldReleaseBlockedTurn({
+        readyStableMs: 10_000,
+        sseQuietMs: 20_000,
+        activeSseStreams: 0,
+        currentTurnState: 'busy',
+        backlogCount: 2,
+        hasPendingOutput: false,
+        hasPendingText: true,
+      }),
+    ).toBe(false);
   });
 
   it('ready 或 SSE 静默时间未达阈值时不释放', () => {
-    expect(shouldReleaseBlockedTurn({
-      readyStableMs: 4999,
-      sseQuietMs: 20_000,
-      activeSseStreams: 0,
-      currentTurnState: 'busy',
-      backlogCount: 2,
-      hasPendingOutput: false,
-      hasPendingText: false,
-    })).toBe(false);
+    expect(
+      shouldReleaseBlockedTurn({
+        readyStableMs: 4999,
+        sseQuietMs: 20_000,
+        activeSseStreams: 0,
+        currentTurnState: 'busy',
+        backlogCount: 2,
+        hasPendingOutput: false,
+        hasPendingText: false,
+      }),
+    ).toBe(false);
 
-    expect(shouldReleaseBlockedTurn({
-      readyStableMs: 10_000,
-      sseQuietMs: 14_999,
-      activeSseStreams: 0,
-      currentTurnState: 'busy',
-      backlogCount: 2,
-      hasPendingOutput: false,
-      hasPendingText: false,
-    })).toBe(false);
+    expect(
+      shouldReleaseBlockedTurn({
+        readyStableMs: 10_000,
+        sseQuietMs: 14_999,
+        activeSseStreams: 0,
+        currentTurnState: 'busy',
+        backlogCount: 2,
+        hasPendingOutput: false,
+        hasPendingText: false,
+      }),
+    ).toBe(false);
   });
 });
 
@@ -207,28 +241,36 @@ describe('countPendingIpcInputs', () => {
 
 describe('shouldEmitInteractiveSessionKeepalive', () => {
   it('已有 session、本轮没有结果且没有发过终态 output 时补 keepalive', () => {
-    expect(shouldEmitInteractiveSessionKeepalive('session-id', {
-      result: undefined,
-      terminalOutputEmitted: false,
-    })).toBe(true);
+    expect(
+      shouldEmitInteractiveSessionKeepalive('session-id', {
+        result: undefined,
+        terminalOutputEmitted: false,
+      }),
+    ).toBe(true);
   });
 
   it('degraded/error 已经发过终态 output 时不补空 success', () => {
-    expect(shouldEmitInteractiveSessionKeepalive('session-id', {
-      result: undefined,
-      terminalOutputEmitted: true,
-    })).toBe(false);
+    expect(
+      shouldEmitInteractiveSessionKeepalive('session-id', {
+        result: undefined,
+        terminalOutputEmitted: true,
+      }),
+    ).toBe(false);
   });
 
   it('已有文本结果或没有 session 时不补 keepalive', () => {
-    expect(shouldEmitInteractiveSessionKeepalive('session-id', {
-      result: 'ok',
-      terminalOutputEmitted: true,
-    })).toBe(false);
+    expect(
+      shouldEmitInteractiveSessionKeepalive('session-id', {
+        result: 'ok',
+        terminalOutputEmitted: true,
+      }),
+    ).toBe(false);
 
-    expect(shouldEmitInteractiveSessionKeepalive(undefined, {
-      result: undefined,
-      terminalOutputEmitted: false,
-    })).toBe(false);
+    expect(
+      shouldEmitInteractiveSessionKeepalive(undefined, {
+        result: undefined,
+        terminalOutputEmitted: false,
+      }),
+    ).toBe(false);
   });
 });

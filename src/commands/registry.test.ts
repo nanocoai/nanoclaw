@@ -293,7 +293,11 @@ describe('模式过滤 (getHelp)', () => {
       modes: ['sdk', 'print', 'interactive', 'codex'],
       subcommands: [
         { usage: '/usage-like', description: '主' },
-        { usage: '/usage-like all', description: '仅 Claude', modes: ['sdk', 'print', 'interactive'] },
+        {
+          usage: '/usage-like all',
+          description: '仅 Claude',
+          modes: ['sdk', 'print', 'interactive'],
+        },
       ],
     });
   }
@@ -350,7 +354,9 @@ describe('模式拦截 (dispatch)', () => {
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     const deps = makeDeps({
       group: { name: 't', folder: 'f', containerConfig: { cliMode: 'codex' } },
-      channels: [{ name: 'mock', ownsJid: () => true, sendMessage, connect: vi.fn() }],
+      channels: [
+        { name: 'mock', ownsJid: () => true, sendMessage, connect: vi.fn() },
+      ],
     });
     const handled = await dispatch('/claude-cmd', deps as any);
     expect(handled).toBe(true);

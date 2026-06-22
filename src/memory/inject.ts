@@ -256,10 +256,7 @@ async function syncWikiVectors(
           _wikiHashCache.set(item.path, item.hash);
         }
       } catch (upsertErr) {
-        logger.error(
-          { err: upsertErr },
-          '[wiki-vector] Qdrant upsert 失败',
-        );
+        logger.error({ err: upsertErr }, '[wiki-vector] Qdrant upsert 失败');
       }
     }
   }

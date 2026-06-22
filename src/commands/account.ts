@@ -1,6 +1,11 @@
 import { execSync } from 'child_process';
 import { logger } from '../logger.js';
-import { getRotateEnabled, setRotateEnabled, setLastRotateAt, setRotateIndex } from '../db.js';
+import {
+  getRotateEnabled,
+  setRotateEnabled,
+  setLastRotateAt,
+  setRotateIndex,
+} from '../db.js';
 import { registerCommand } from './registry.js';
 import { CLAUDE_MODES } from '../cli-mode.js';
 import { parseOneCLIList } from '../onecli-util.js';
@@ -219,8 +224,16 @@ registerCommand({
     { usage: '/usage', description: '查当前账号配额' },
     // all / <name> / delete 是 Anthropic OAuth 专属，codex 模式不显示
     { usage: '/usage all', description: '查所有账号配额', modes: CLAUDE_MODES },
-    { usage: '/usage <name>', description: '查指定账号配额', modes: CLAUDE_MODES },
-    { usage: '/usage delete <name>', description: '删除 OAuth 凭证', modes: CLAUDE_MODES },
+    {
+      usage: '/usage <name>',
+      description: '查指定账号配额',
+      modes: CLAUDE_MODES,
+    },
+    {
+      usage: '/usage delete <name>',
+      description: '删除 OAuth 凭证',
+      modes: CLAUDE_MODES,
+    },
   ],
   handler: async (ctx) => {
     const { args, chatJid, channel, registeredGroups, group } = ctx;
@@ -238,10 +251,12 @@ registerCommand({
     if (!args && group) {
       const { resolveCliMode } = await import('../cli-mode.js');
       if (resolveCliMode(group.containerConfig) === 'codex') {
-        const { getCodexUsage, formatCodexUsage } = await import(
-          '../codex-usage.js'
+        const { getCodexUsage, formatCodexUsage } =
+          await import('../codex-usage.js');
+        await channel.sendMessage(
+          chatJid,
+          formatCodexUsage(getCodexUsage(group)),
         );
-        await channel.sendMessage(chatJid, formatCodexUsage(getCodexUsage(group)));
         return;
       }
     }
@@ -252,7 +267,8 @@ registerCommand({
         await channel.sendMessage(chatJid, '⚠️ 用法: /usage delete <name>');
         return;
       }
-      const { deleteOAuthCredential, getOAuthCredential } = await import('../db.js');
+      const { deleteOAuthCredential, getOAuthCredential } =
+        await import('../db.js');
       if (!getOAuthCredential(name)) {
         await channel.sendMessage(chatJid, `⚠️ ${name}: 未找到该 OAuth 凭证`);
         return;

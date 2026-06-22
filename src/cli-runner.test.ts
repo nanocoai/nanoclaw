@@ -16,7 +16,8 @@ import {
 
 describe('parseStreamJsonLine', () => {
   it('解析有效的 system init 消息', () => {
-    const line = '{"type":"system","subtype":"init","session_id":"abc-123","tools":[],"model":"claude-opus-4-7"}';
+    const line =
+      '{"type":"system","subtype":"init","session_id":"abc-123","tools":[],"model":"claude-opus-4-7"}';
     const result = parseStreamJsonLine(line);
     expect(result).not.toBeNull();
     expect(result!.type).toBe('system');
@@ -44,7 +45,9 @@ describe('parseStreamJsonLine', () => {
       type: 'assistant',
       message: {
         role: 'assistant',
-        content: [{ type: 'tool_use', name: 'Bash', input: { command: 'ls -la' } }],
+        content: [
+          { type: 'tool_use', name: 'Bash', input: { command: 'ls -la' } },
+        ],
       },
     });
     const result = parseStreamJsonLine(line);
@@ -58,7 +61,12 @@ describe('parseStreamJsonLine', () => {
       subtype: 'success',
       result: '任务完成',
       session_id: 'sess-456',
-      usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 20, cache_creation_input_tokens: 10 },
+      usage: {
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_read_input_tokens: 20,
+        cache_creation_input_tokens: 10,
+      },
       total_cost_usd: 0.05,
       num_turns: 3,
       duration_ms: 5000,
@@ -71,7 +79,10 @@ describe('parseStreamJsonLine', () => {
   });
 
   it('解析 rate_limit_event', () => {
-    const line = JSON.stringify({ type: 'rate_limit_event', resetsAt: '2026-05-14T12:00:00Z' });
+    const line = JSON.stringify({
+      type: 'rate_limit_event',
+      resetsAt: '2026-05-14T12:00:00Z',
+    });
     const result = parseStreamJsonLine(line);
     expect(result).not.toBeNull();
     expect(result!.type).toBe('rate_limit_event');
@@ -129,13 +140,23 @@ describe('buildMcpConfig', () => {
 
   it('isMain=false 时传 0', () => {
     const config = buildMcpConfig('/mcp.js', 'jid', 'grp', false, '/ipc');
-    const env = (config.mcpServers as Record<string, Record<string, Record<string, string>>>).nanoclaw.env;
+    const env = (
+      config.mcpServers as Record<
+        string,
+        Record<string, Record<string, string>>
+      >
+    ).nanoclaw.env;
     expect(env.NANOCLAW_IS_MAIN).toBe('0');
   });
 
   it('定时任务保留 send_message 工具用于主动通知', () => {
     const config = buildMcpConfig('/mcp.js', 'jid', 'grp', false, '/ipc', true);
-    const env = (config.mcpServers as Record<string, Record<string, Record<string, string>>>).nanoclaw.env;
+    const env = (
+      config.mcpServers as Record<
+        string,
+        Record<string, Record<string, string>>
+      >
+    ).nanoclaw.env;
     expect(env.NANOCLAW_DISABLE_SEND_MESSAGE).toBeUndefined();
   });
 });
@@ -154,7 +175,10 @@ describe('buildCliArgs', () => {
   });
 
   it('指定 model', () => {
-    const args = buildCliArgs({ model: 'claude-haiku-4-5-20251001', mcpConfigPath: '/tmp/mcp.json' });
+    const args = buildCliArgs({
+      model: 'claude-haiku-4-5-20251001',
+      mcpConfigPath: '/tmp/mcp.json',
+    });
     expect(args).toContain('--model');
     expect(args[args.indexOf('--model') + 1]).toBe('claude-haiku-4-5-20251001');
   });
@@ -165,7 +189,10 @@ describe('buildCliArgs', () => {
   });
 
   it('指定 sessionId 时包含 --resume', () => {
-    const args = buildCliArgs({ sessionId: 'sess-abc', mcpConfigPath: '/tmp/mcp.json' });
+    const args = buildCliArgs({
+      sessionId: 'sess-abc',
+      mcpConfigPath: '/tmp/mcp.json',
+    });
     expect(args).toContain('--resume');
     expect(args[args.indexOf('--resume') + 1]).toBe('sess-abc');
   });
@@ -181,7 +208,10 @@ describe('buildCliArgs', () => {
   });
 
   it('dangerouslySkipPermissions=false 时不包含', () => {
-    const args = buildCliArgs({ mcpConfigPath: '/tmp/mcp.json', dangerouslySkipPermissions: false });
+    const args = buildCliArgs({
+      mcpConfigPath: '/tmp/mcp.json',
+      dangerouslySkipPermissions: false,
+    });
     expect(args).not.toContain('--dangerously-skip-permissions');
   });
 
@@ -211,7 +241,9 @@ describe('buildCliArgs', () => {
       systemPromptAppend: 'You are a helpful dog.',
     });
     expect(args).toContain('--append-system-prompt');
-    expect(args[args.indexOf('--append-system-prompt') + 1]).toBe('You are a helpful dog.');
+    expect(args[args.indexOf('--append-system-prompt') + 1]).toBe(
+      'You are a helpful dog.',
+    );
   });
 });
 
@@ -219,7 +251,11 @@ describe('buildCliArgs', () => {
 
 describe('mapToContainerOutput', () => {
   it('system init 返回空数组（session_id 由调用方提取）', () => {
-    const msg = { type: 'system' as const, subtype: 'init', session_id: 'sess-1' };
+    const msg = {
+      type: 'system' as const,
+      subtype: 'init',
+      session_id: 'sess-1',
+    };
     expect(mapToContainerOutput(msg)).toEqual([]);
   });
 
@@ -227,7 +263,9 @@ describe('mapToContainerOutput', () => {
     const msg = {
       type: 'assistant' as const,
       message: {
-        content: [{ type: 'tool_use', name: 'Bash', input: { command: 'echo hello' } }],
+        content: [
+          { type: 'tool_use', name: 'Bash', input: { command: 'echo hello' } },
+        ],
       },
     };
     const outputs = mapToContainerOutput(msg);
@@ -242,7 +280,9 @@ describe('mapToContainerOutput', () => {
     const msg = {
       type: 'assistant' as const,
       message: {
-        content: [{ type: 'text', text: '我来分析一下这个问题，需要先检查日志' }],
+        content: [
+          { type: 'text', text: '我来分析一下这个问题，需要先检查日志' },
+        ],
       },
     };
     const outputs = mapToContainerOutput(msg);
@@ -304,7 +344,11 @@ describe('mapToContainerOutput', () => {
   });
 
   it('system error 映射为 error', () => {
-    const msg = { type: 'system' as const, subtype: 'error', message: 'Something went wrong' };
+    const msg = {
+      type: 'system' as const,
+      subtype: 'error',
+      message: 'Something went wrong',
+    };
     const outputs = mapToContainerOutput(msg);
     expect(outputs).toHaveLength(1);
     expect(outputs[0].status).toBe('error');
@@ -312,13 +356,19 @@ describe('mapToContainerOutput', () => {
   });
 
   it('system error 非字符串 message 回退为默认', () => {
-    const msg = { type: 'system' as const, subtype: 'error', message: { role: 'error', content: [] } };
+    const msg = {
+      type: 'system' as const,
+      subtype: 'error',
+      message: { role: 'error', content: [] },
+    };
     const outputs = mapToContainerOutput(msg as any);
     expect(outputs[0].error).toBe('CLI error');
   });
 
   it('未知类型返回空数组', () => {
-    expect(mapToContainerOutput({ type: 'rate_limit_event' as any })).toEqual([]);
+    expect(mapToContainerOutput({ type: 'rate_limit_event' as any })).toEqual(
+      [],
+    );
     expect(mapToContainerOutput({ type: 'stream_event' as any })).toEqual([]);
   });
 
@@ -361,7 +411,11 @@ describe('mapToContainerOutput', () => {
       message: {
         content: [
           { type: 'text', text: '让我来检查一下这个文件的内容' },
-          { type: 'tool_use', name: 'Read', input: { file_path: '/tmp/test.ts' } },
+          {
+            type: 'tool_use',
+            name: 'Read',
+            input: { file_path: '/tmp/test.ts' },
+          },
         ],
       },
     };
@@ -467,7 +521,13 @@ describe('CLI 模式集成场景', () => {
   });
 
   it('buildCliArgs + buildMcpConfig 组合使用', () => {
-    const mcpConfig = buildMcpConfig('/mcp.js', 'jid-1', 'grp-1', false, '/ipc');
+    const mcpConfig = buildMcpConfig(
+      '/mcp.js',
+      'jid-1',
+      'grp-1',
+      false,
+      '/ipc',
+    );
     // 验证 mcpConfig 是可序列化的
     const json = JSON.stringify(mcpConfig);
     expect(JSON.parse(json)).toEqual(mcpConfig);
@@ -485,7 +545,10 @@ describe('CLI 模式集成场景', () => {
 
 // ---- resolveCliMode ----
 
-import { resolveCliMode, shouldAutoRotateAnthropicAccount } from './container-runner.js';
+import {
+  resolveCliMode,
+  shouldAutoRotateAnthropicAccount,
+} from './container-runner.js';
 
 describe('resolveCliMode', () => {
   it('默认返回 sdk', () => {
@@ -506,11 +569,15 @@ describe('resolveCliMode', () => {
   });
 
   it('cliMode 优先于 useCliMode', () => {
-    expect(resolveCliMode({ cliMode: 'interactive', useCliMode: true })).toBe('interactive');
+    expect(resolveCliMode({ cliMode: 'interactive', useCliMode: true })).toBe(
+      'interactive',
+    );
   });
 
   it('非法 cliMode 抛错', () => {
-    expect(() => resolveCliMode({ cliMode: 'typo' as never })).toThrow('Invalid cliMode');
+    expect(() => resolveCliMode({ cliMode: 'typo' as never })).toThrow(
+      'Invalid cliMode',
+    );
   });
 });
 

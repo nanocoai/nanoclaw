@@ -55,7 +55,7 @@ describe('escapeTmuxInput', () => {
   });
 
   it('保留引号', () => {
-    expect(escapeTmuxInput("it's a \"test\"")).toBe("it's a \"test\"");
+    expect(escapeTmuxInput('it\'s a "test"')).toBe('it\'s a "test"');
   });
 
   it('保留反斜杠', () => {
@@ -168,16 +168,33 @@ describe('analyzeTmuxPane', () => {
 
 describe('buildTmuxCommand', () => {
   it('new-session', () => {
-    const args = buildTmuxCommand('new-session', 'my-session', ['claude --model haiku']);
+    const args = buildTmuxCommand('new-session', 'my-session', [
+      'claude --model haiku',
+    ]);
     expect(args).toEqual([
-      'tmux', 'new-session', '-d', '-s', 'my-session', '-x', '200', '-y', '50',
+      'tmux',
+      'new-session',
+      '-d',
+      '-s',
+      'my-session',
+      '-x',
+      '200',
+      '-y',
+      '50',
       'claude --model haiku',
     ]);
   });
 
   it('send-keys 显式指定 window 0', () => {
     const args = buildTmuxCommand('send-keys', 'my-session', ['-l', 'hello']);
-    expect(args).toEqual(['tmux', 'send-keys', '-t', 'my-session:0', '-l', 'hello']);
+    expect(args).toEqual([
+      'tmux',
+      'send-keys',
+      '-t',
+      'my-session:0',
+      '-l',
+      'hello',
+    ]);
   });
 
   it('send-keys Enter 也指定 window 0', () => {
@@ -212,7 +229,15 @@ describe('buildTmuxCommand', () => {
 
   it('capture-pane 显式指定 window 0', () => {
     const args = buildTmuxCommand('capture-pane', 'my-session', ['-S', '-50']);
-    expect(args).toEqual(['tmux', 'capture-pane', '-t', 'my-session:0', '-p', '-S', '-50']);
+    expect(args).toEqual([
+      'tmux',
+      'capture-pane',
+      '-t',
+      'my-session:0',
+      '-p',
+      '-S',
+      '-50',
+    ]);
   });
 });
 

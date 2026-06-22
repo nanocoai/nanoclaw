@@ -325,9 +325,7 @@ describe('prompt', () => {
     expect(MEMORY_UPDATE_PROMPT).toContain('commit hash');
     expect(MEMORY_UPDATE_PROMPT).toContain('当前 PID');
     expect(MEMORY_UPDATE_PROMPT).toContain('当前分支脏项');
-    expect(MEMORY_UPDATE_PROMPT).toContain(
-      '不要记录 AI 自己刚完成了什么',
-    );
+    expect(MEMORY_UPDATE_PROMPT).toContain('不要记录 AI 自己刚完成了什么');
   });
 
   it('MEMORY_UPDATE_PROMPT 要求已完成事项不继续写 goal', () => {

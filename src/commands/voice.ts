@@ -20,8 +20,14 @@ registerCommand({
   subcommands: [
     { usage: '/voice on', description: '开启当前群最终结果语音推送' },
     { usage: '/voice off', description: '关闭当前群最终结果语音推送' },
-    { usage: '/voice v2 on', description: '开启 v2 智能摘要（按内容类型分流 prompt）' },
-    { usage: '/voice v2 off', description: '关闭 v2 智能摘要，恢复 120 字一刀切' },
+    {
+      usage: '/voice v2 on',
+      description: '开启 v2 智能摘要（按内容类型分流 prompt）',
+    },
+    {
+      usage: '/voice v2 off',
+      description: '关闭 v2 智能摘要，恢复 120 字一刀切',
+    },
     { usage: '/voice status', description: '查看当前群语音推送状态' },
   ],
   handler: async (ctx) => {
@@ -66,9 +72,7 @@ registerCommand({
       const v2On = voice.summaryV2 === true;
       const lines = [
         pushOn ? '🔊 语音播报推送：已开启' : '🔇 语音播报推送：已关闭',
-        v2On
-          ? '🧠 摘要模式：v2 智能分流'
-          : '📝 摘要模式：v1（120 字一刀切）',
+        v2On ? '🧠 摘要模式：v2 智能分流' : '📝 摘要模式：v1（120 字一刀切）',
       ];
       await ctx.channel.sendMessage(ctx.chatJid, lines.join('\n'), {
         isCommandReply: true,

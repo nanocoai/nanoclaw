@@ -194,7 +194,10 @@ export class GroupQueue {
 
     const timer = setTimeout(() => {
       if (!this.isProcessAlive(pid)) return;
-      logger.warn({ groupJid, pid, name }, 'killGroup: 进程未退出，发送 SIGKILL');
+      logger.warn(
+        { groupJid, pid, name },
+        'killGroup: 进程未退出，发送 SIGKILL',
+      );
       this.signalProcess(pid, 'SIGKILL');
     }, forceKillAfterMs);
     timer.unref?.();
@@ -223,7 +226,10 @@ export class GroupQueue {
 
     const timer = setTimeout(() => {
       if (!this.isProcessAlive(pid)) return;
-      logger.warn({ groupJid, pid, name }, 'stopGroup: 进程未退出，发送 SIGKILL');
+      logger.warn(
+        { groupJid, pid, name },
+        'stopGroup: 进程未退出，发送 SIGKILL',
+      );
       this.signalProcess(pid, 'SIGKILL');
     }, forceKillAfterMs);
     timer.unref?.();

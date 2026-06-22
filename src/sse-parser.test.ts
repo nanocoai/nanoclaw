@@ -63,7 +63,8 @@ describe('parseSseLines', () => {
 
 describe('parseSseEvent', () => {
   it('解析 message_start 事件', () => {
-    const data = '{"type":"message_start","message":{"id":"msg_01","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":0}}}';
+    const data =
+      '{"type":"message_start","message":{"id":"msg_01","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":0}}}';
     const result = parseSseEvent('message_start', data);
     expect(result).toEqual({
       type: 'message_start',
@@ -77,7 +78,10 @@ describe('parseSseEvent', () => {
   });
 
   it('解析 error 事件', () => {
-    const result = parseSseEvent('error', '{"error":{"message":"rate limited"}}');
+    const result = parseSseEvent(
+      'error',
+      '{"error":{"message":"rate limited"}}',
+    );
     expect(result).toEqual({
       type: 'error',
       data: { error: { message: 'rate limited' } },
@@ -159,28 +163,50 @@ describe('accumulateSseEvent', () => {
       data: {
         type: 'content_block_start',
         index: 1,
-        content_block: { type: 'tool_use', id: 'toolu_01', name: 'Bash', input: {} },
+        content_block: {
+          type: 'tool_use',
+          id: 'toolu_01',
+          name: 'Bash',
+          input: {},
+        },
       } as ContentBlockStartData,
     };
 
     const next = accumulateSseEvent(acc, event);
     const block = next.blocks.get(1);
-    expect(block).toEqual({ type: 'tool_use', id: 'toolu_01', name: 'Bash', inputJson: '' });
+    expect(block).toEqual({
+      type: 'tool_use',
+      id: 'toolu_01',
+      name: 'Bash',
+      inputJson: '',
+    });
   });
 
   it('content_block_delta 累积文本', () => {
     let acc = createMessageAccumulator();
     acc = accumulateSseEvent(acc, {
       type: 'content_block_start',
-      data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      data: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' },
+      },
     });
     acc = accumulateSseEvent(acc, {
       type: 'content_block_delta',
-      data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } } as ContentBlockDeltaData,
+      data: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'Hello' },
+      } as ContentBlockDeltaData,
     });
     acc = accumulateSseEvent(acc, {
       type: 'content_block_delta',
-      data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: ' World' } } as ContentBlockDeltaData,
+      data: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: ' World' },
+      } as ContentBlockDeltaData,
     });
 
     const block = acc.blocks.get(0);
@@ -195,17 +221,26 @@ describe('accumulateSseEvent', () => {
     acc = accumulateSseEvent(acc, {
       type: 'content_block_start',
       data: {
-        type: 'content_block_start', index: 0,
+        type: 'content_block_start',
+        index: 0,
         content_block: { type: 'tool_use', id: 'toolu_01', name: 'Bash' },
       },
     });
     acc = accumulateSseEvent(acc, {
       type: 'content_block_delta',
-      data: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"com' } },
+      data: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'input_json_delta', partial_json: '{"com' },
+      },
     });
     acc = accumulateSseEvent(acc, {
       type: 'content_block_delta',
-      data: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'mand":"ls"}' } },
+      data: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'input_json_delta', partial_json: 'mand":"ls"}' },
+      },
     });
 
     const block = acc.blocks.get(0);
@@ -262,7 +297,11 @@ describe('accumulateSseEvent', () => {
       type: 'message_start',
       data: {
         type: 'message_start',
-        message: { id: 'msg_01', model: 'sonnet', usage: { input_tokens: 100, output_tokens: 0 } },
+        message: {
+          id: 'msg_01',
+          model: 'sonnet',
+          usage: { input_tokens: 100, output_tokens: 0 },
+        },
       },
     });
     expect(acc.model).toBe('');
@@ -273,7 +312,11 @@ describe('accumulateSseEvent', () => {
     const acc = createMessageAccumulator();
     const next = accumulateSseEvent(acc, {
       type: 'content_block_delta',
-      data: { type: 'content_block_delta', index: 99, delta: { type: 'text_delta', text: 'orphan' } },
+      data: {
+        type: 'content_block_delta',
+        index: 99,
+        delta: { type: 'text_delta', text: 'orphan' },
+      },
     });
     expect(next.blocks.size).toBe(0); // 不创建新 block
   });
@@ -283,26 +326,48 @@ describe('accumulateSseEvent', () => {
     // 第一轮 message_start
     acc = accumulateSseEvent(acc, {
       type: 'message_start',
-      data: { type: 'message_start', message: { id: 'msg_01', model: 'sonnet', usage: { input_tokens: 100, output_tokens: 0 } } },
+      data: {
+        type: 'message_start',
+        message: {
+          id: 'msg_01',
+          model: 'sonnet',
+          usage: { input_tokens: 100, output_tokens: 0 },
+        },
+      },
     });
     // 第一轮 message_delta
     acc = accumulateSseEvent(acc, {
       type: 'message_delta',
-      data: { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 50 } },
+      data: {
+        type: 'message_delta',
+        delta: { stop_reason: 'tool_use' },
+        usage: { output_tokens: 50 },
+      },
     });
     // 第二轮 message_start（tool_use 后的新请求）
     acc = accumulateSseEvent(acc, {
       type: 'message_start',
-      data: { type: 'message_start', message: { id: 'msg_02', model: 'sonnet', usage: { input_tokens: 200, output_tokens: 0 } } },
+      data: {
+        type: 'message_start',
+        message: {
+          id: 'msg_02',
+          model: 'sonnet',
+          usage: { input_tokens: 200, output_tokens: 0 },
+        },
+      },
     });
     // 第二轮 message_delta
     acc = accumulateSseEvent(acc, {
       type: 'message_delta',
-      data: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 30 } },
+      data: {
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn' },
+        usage: { output_tokens: 30 },
+      },
     });
 
-    expect(acc.usage.inputTokens).toBe(300);   // 100 + 200
-    expect(acc.usage.outputTokens).toBe(80);    // 50 + 30
+    expect(acc.usage.inputTokens).toBe(300); // 100 + 200
+    expect(acc.usage.outputTokens).toBe(80); // 50 + 30
   });
 });
 
@@ -350,9 +415,15 @@ describe('mapSseEventToProgress', () => {
   });
 
   it('非 content_block_start 事件返回 null', () => {
-    expect(mapSseEventToProgress({ type: 'message_start', data: {} })).toBeNull();
-    expect(mapSseEventToProgress({ type: 'content_block_delta', data: {} })).toBeNull();
-    expect(mapSseEventToProgress({ type: 'message_stop', data: {} })).toBeNull();
+    expect(
+      mapSseEventToProgress({ type: 'message_start', data: {} }),
+    ).toBeNull();
+    expect(
+      mapSseEventToProgress({ type: 'content_block_delta', data: {} }),
+    ).toBeNull();
+    expect(
+      mapSseEventToProgress({ type: 'message_stop', data: {} }),
+    ).toBeNull();
   });
 
   it('未知工具用 ⚙️ emoji', () => {
@@ -385,13 +456,23 @@ describe('buildTextProgress', () => {
   });
 
   it('剥掉 <internal> 标签后长度 ≤ 5 返回 null（视为无可见内容）', () => {
-    expect(buildTextProgress({ type: 'text', text: '<internal>大段内部独白文本</internal>' })).toBeNull();
-    expect(buildTextProgress({ type: 'text', text: '<internal>x</internal>hi' })).toBeNull();
+    expect(
+      buildTextProgress({
+        type: 'text',
+        text: '<internal>大段内部独白文本</internal>',
+      }),
+    ).toBeNull();
+    expect(
+      buildTextProgress({ type: 'text', text: '<internal>x</internal>hi' }),
+    ).toBeNull();
     expect(buildTextProgress({ type: 'text', text: '12345' })).toBeNull();
   });
 
   it('剥掉 <internal> 标签后还有可见文本 → emit', () => {
-    const block: TextBlock = { type: 'text', text: '<internal>thinking</internal>这是用户可见的回复内容' };
+    const block: TextBlock = {
+      type: 'text',
+      text: '<internal>thinking</internal>这是用户可见的回复内容',
+    };
     const result = buildTextProgress(block);
     expect(result).not.toBeNull();
     expect(result!.result).toBe('💬 这是用户可见的回复内容');
@@ -413,7 +494,10 @@ describe('buildTextProgress', () => {
 
   it('progressType MUST 为 text（不是 thinking）— 防止被 shouldFilterProgress 误杀', () => {
     // 回归测试：曾经的 bug 是用 'thinking'，被主进程 shouldFilterProgress 过滤
-    const result = buildTextProgress({ type: 'text', text: '正常的中间叙述文本' });
+    const result = buildTextProgress({
+      type: 'text',
+      text: '正常的中间叙述文本',
+    });
     expect(result!.progressType).toBe('text');
     expect(result!.progressType).not.toBe('thinking');
   });
@@ -480,37 +564,58 @@ describe('buildToolUseProgress', () => {
 
 describe('decideTextBlockAction', () => {
   it('stop_reason=tool_use, 非 haiku → flush（中间叙述应发给用户）', () => {
-    const action = decideTextBlockAction({ stopReason: 'tool_use', isHaikuPreheat: false });
+    const action = decideTextBlockAction({
+      stopReason: 'tool_use',
+      isHaikuPreheat: false,
+    });
     expect(action).toBe('flush');
   });
 
   it('stop_reason=end_turn, 非 haiku → drop（已含在最终 result，不重复发）', () => {
-    const action = decideTextBlockAction({ stopReason: 'end_turn', isHaikuPreheat: false });
+    const action = decideTextBlockAction({
+      stopReason: 'end_turn',
+      isHaikuPreheat: false,
+    });
     expect(action).toBe('drop');
   });
 
   it('stop_reason=max_tokens → drop（被截断的最终回复也会走 result 路径）', () => {
-    const action = decideTextBlockAction({ stopReason: 'max_tokens', isHaikuPreheat: false });
+    const action = decideTextBlockAction({
+      stopReason: 'max_tokens',
+      isHaikuPreheat: false,
+    });
     expect(action).toBe('drop');
   });
 
   it('stop_reason=stop_sequence → drop', () => {
-    const action = decideTextBlockAction({ stopReason: 'stop_sequence', isHaikuPreheat: false });
+    const action = decideTextBlockAction({
+      stopReason: 'stop_sequence',
+      isHaikuPreheat: false,
+    });
     expect(action).toBe('drop');
   });
 
   it('haiku 预热流 + stop_reason=tool_use → drop（haiku 优先级高，预热噪音不展示）', () => {
-    const action = decideTextBlockAction({ stopReason: 'tool_use', isHaikuPreheat: true });
+    const action = decideTextBlockAction({
+      stopReason: 'tool_use',
+      isHaikuPreheat: true,
+    });
     expect(action).toBe('drop');
   });
 
   it('haiku 预热流 + stop_reason=end_turn → drop', () => {
-    const action = decideTextBlockAction({ stopReason: 'end_turn', isHaikuPreheat: true });
+    const action = decideTextBlockAction({
+      stopReason: 'end_turn',
+      isHaikuPreheat: true,
+    });
     expect(action).toBe('drop');
   });
 
   it('空 stop_reason → drop（防御默认值，不应该误 flush）', () => {
-    const action = decideTextBlockAction({ stopReason: '', isHaikuPreheat: false });
+    const action = decideTextBlockAction({
+      stopReason: '',
+      isHaikuPreheat: false,
+    });
     expect(action).toBe('drop');
   });
 });
@@ -532,13 +637,62 @@ describe('interactive SSE 事件流集成', () => {
 
   it('text → tool_use → message_stop(stop_reason=tool_use) → flush 决策', () => {
     const acc = feedEvents([
-      { type: 'message_start', data: { type: 'message_start', message: { id: 'msg_1', model: 'claude-sonnet-4-6', usage: { input_tokens: 100, output_tokens: 0 } } } },
-      { type: 'content_block_start', data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } },
-      { type: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '让我看下这块代码' } } },
-      { type: 'content_block_stop', data: { type: 'content_block_stop', index: 0 } },
-      { type: 'content_block_start', data: { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'toolu_01', name: 'Read', input: {} } } },
-      { type: 'content_block_stop', data: { type: 'content_block_stop', index: 1 } },
-      { type: 'message_delta', data: { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 20 } } },
+      {
+        type: 'message_start',
+        data: {
+          type: 'message_start',
+          message: {
+            id: 'msg_1',
+            model: 'claude-sonnet-4-6',
+            usage: { input_tokens: 100, output_tokens: 0 },
+          },
+        },
+      },
+      {
+        type: 'content_block_start',
+        data: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'text', text: '' },
+        },
+      },
+      {
+        type: 'content_block_delta',
+        data: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: '让我看下这块代码' },
+        },
+      },
+      {
+        type: 'content_block_stop',
+        data: { type: 'content_block_stop', index: 0 },
+      },
+      {
+        type: 'content_block_start',
+        data: {
+          type: 'content_block_start',
+          index: 1,
+          content_block: {
+            type: 'tool_use',
+            id: 'toolu_01',
+            name: 'Read',
+            input: {},
+          },
+        },
+      },
+      {
+        type: 'content_block_stop',
+        data: { type: 'content_block_stop', index: 1 },
+      },
+      {
+        type: 'message_delta',
+        data: {
+          type: 'message_delta',
+          delta: { stop_reason: 'tool_use' },
+          usage: { output_tokens: 20 },
+        },
+      },
       { type: 'message_stop', data: { type: 'message_stop' } },
     ]);
 
@@ -558,11 +712,45 @@ describe('interactive SSE 事件流集成', () => {
 
   it('text → message_stop(stop_reason=end_turn) → drop 决策', () => {
     const acc = feedEvents([
-      { type: 'message_start', data: { type: 'message_start', message: { id: 'msg_2', model: 'claude-sonnet-4-6', usage: { input_tokens: 100, output_tokens: 0 } } } },
-      { type: 'content_block_start', data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } },
-      { type: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '搞定了' } } },
-      { type: 'content_block_stop', data: { type: 'content_block_stop', index: 0 } },
-      { type: 'message_delta', data: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5 } } },
+      {
+        type: 'message_start',
+        data: {
+          type: 'message_start',
+          message: {
+            id: 'msg_2',
+            model: 'claude-sonnet-4-6',
+            usage: { input_tokens: 100, output_tokens: 0 },
+          },
+        },
+      },
+      {
+        type: 'content_block_start',
+        data: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'text', text: '' },
+        },
+      },
+      {
+        type: 'content_block_delta',
+        data: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: '搞定了' },
+        },
+      },
+      {
+        type: 'content_block_stop',
+        data: { type: 'content_block_stop', index: 0 },
+      },
+      {
+        type: 'message_delta',
+        data: {
+          type: 'message_delta',
+          delta: { stop_reason: 'end_turn' },
+          usage: { output_tokens: 5 },
+        },
+      },
       { type: 'message_stop', data: { type: 'message_stop' } },
     ]);
 
@@ -578,11 +766,45 @@ describe('interactive SSE 事件流集成', () => {
 
   it('haiku 预热流 + text + stop_reason=end_turn → drop 决策（haiku 优先级覆盖）', () => {
     const acc = feedEvents([
-      { type: 'message_start', data: { type: 'message_start', message: { id: 'msg_3', model: 'claude-haiku-4-5-20251001', usage: { input_tokens: 50, output_tokens: 0 } } } },
-      { type: 'content_block_start', data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } },
-      { type: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '预热缓存的副产物文本' } } },
-      { type: 'content_block_stop', data: { type: 'content_block_stop', index: 0 } },
-      { type: 'message_delta', data: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 10 } } },
+      {
+        type: 'message_start',
+        data: {
+          type: 'message_start',
+          message: {
+            id: 'msg_3',
+            model: 'claude-haiku-4-5-20251001',
+            usage: { input_tokens: 50, output_tokens: 0 },
+          },
+        },
+      },
+      {
+        type: 'content_block_start',
+        data: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'text', text: '' },
+        },
+      },
+      {
+        type: 'content_block_delta',
+        data: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: '预热缓存的副产物文本' },
+        },
+      },
+      {
+        type: 'content_block_stop',
+        data: { type: 'content_block_stop', index: 0 },
+      },
+      {
+        type: 'message_delta',
+        data: {
+          type: 'message_delta',
+          delta: { stop_reason: 'end_turn' },
+          usage: { output_tokens: 10 },
+        },
+      },
       { type: 'message_stop', data: { type: 'message_stop' } },
     ]);
 
@@ -603,19 +825,38 @@ describe('mapAccumulatorToResult', () => {
     let acc = createMessageAccumulator();
     acc = accumulateSseEvent(acc, {
       type: 'message_start',
-      data: { type: 'message_start', message: { id: 'msg_01', model: 'sonnet', usage: { input_tokens: 100, output_tokens: 0 } } },
+      data: {
+        type: 'message_start',
+        message: {
+          id: 'msg_01',
+          model: 'sonnet',
+          usage: { input_tokens: 100, output_tokens: 0 },
+        },
+      },
     });
     acc = accumulateSseEvent(acc, {
       type: 'content_block_start',
-      data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      data: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' },
+      },
     });
     acc = accumulateSseEvent(acc, {
       type: 'content_block_delta',
-      data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '好' } },
+      data: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: '好' },
+      },
     });
     acc = accumulateSseEvent(acc, {
       type: 'message_delta',
-      data: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 1 } },
+      data: {
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn' },
+        usage: { output_tokens: 1 },
+      },
     });
     acc = accumulateSseEvent(acc, { type: 'message_stop', data: {} });
 
@@ -654,19 +895,35 @@ describe('mapAccumulatorToResult', () => {
     let acc = createMessageAccumulator();
     acc = accumulateSseEvent(acc, {
       type: 'content_block_start',
-      data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      data: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' },
+      },
     });
     acc = accumulateSseEvent(acc, {
       type: 'content_block_delta',
-      data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } },
+      data: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: 'Hello' },
+      },
     });
     acc = accumulateSseEvent(acc, {
       type: 'content_block_start',
-      data: { type: 'content_block_start', index: 2, content_block: { type: 'text', text: '' } },
+      data: {
+        type: 'content_block_start',
+        index: 2,
+        content_block: { type: 'text', text: '' },
+      },
     });
     acc = accumulateSseEvent(acc, {
       type: 'content_block_delta',
-      data: { type: 'content_block_delta', index: 2, delta: { type: 'text_delta', text: ' World' } },
+      data: {
+        type: 'content_block_delta',
+        index: 2,
+        delta: { type: 'text_delta', text: ' World' },
+      },
     });
 
     const result = mapAccumulatorToResult(acc);
@@ -677,14 +934,21 @@ describe('mapAccumulatorToResult', () => {
     let acc = createMessageAccumulator();
     acc = accumulateSseEvent(acc, {
       type: 'content_block_start',
-      data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      data: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' },
+      },
     });
     acc = accumulateSseEvent(acc, {
       type: 'content_block_delta',
       data: {
         type: 'content_block_delta',
         index: 0,
-        delta: { type: 'text_delta', text: '<analysis>\nThe user wants me to...\n</analysis>\n\n摘要内容' },
+        delta: {
+          type: 'text_delta',
+          text: '<analysis>\nThe user wants me to...\n</analysis>\n\n摘要内容',
+        },
       },
     });
     const result = mapAccumulatorToResult(acc, 'session_x');
@@ -698,14 +962,21 @@ describe('mapAccumulatorToResult', () => {
     let acc = createMessageAccumulator();
     acc = accumulateSseEvent(acc, {
       type: 'content_block_start',
-      data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      data: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' },
+      },
     });
     acc = accumulateSseEvent(acc, {
       type: 'content_block_delta',
       data: {
         type: 'content_block_delta',
         index: 0,
-        delta: { type: 'text_delta', text: 'Let me chronologically analyze each message in detail...' },
+        delta: {
+          type: 'text_delta',
+          text: 'Let me chronologically analyze each message in detail...',
+        },
       },
     });
     const result = mapAccumulatorToResult(acc);
@@ -718,7 +989,9 @@ describe('mapAccumulatorToResult', () => {
 
 describe('isCompactSummary', () => {
   it('<analysis> 开头 → true', () => {
-    expect(isCompactSummary('<analysis>\n...\n</analysis>\n\nsummary')).toBe(true);
+    expect(isCompactSummary('<analysis>\n...\n</analysis>\n\nsummary')).toBe(
+      true,
+    );
   });
 
   it('前置空白后仍以 <analysis> 开头 → true', () => {
@@ -726,7 +999,9 @@ describe('isCompactSummary', () => {
   });
 
   it('包含 chronologically analyze each message → true', () => {
-    expect(isCompactSummary('I will chronologically analyze each message below.')).toBe(true);
+    expect(
+      isCompactSummary('I will chronologically analyze each message below.'),
+    ).toBe(true);
   });
 
   it('null / undefined / 空字符串 → false', () => {
@@ -741,7 +1016,9 @@ describe('isCompactSummary', () => {
   });
 
   it('文本中间出现 <analysis>（不在开头）→ false（避免误杀）', () => {
-    expect(isCompactSummary('我们讨论的 <analysis> 标签其实是 Claude 内部用的')).toBe(false);
+    expect(
+      isCompactSummary('我们讨论的 <analysis> 标签其实是 Claude 内部用的'),
+    ).toBe(false);
   });
 });
 
@@ -765,7 +1042,10 @@ describe('buildTextProgress compact-summary 过滤', () => {
   });
 
   it('普通文本不受影响 → 正常 emit', () => {
-    const block: TextBlock = { type: 'text', text: '这是一段正常的助手回复内容' };
+    const block: TextBlock = {
+      type: 'text',
+      text: '这是一段正常的助手回复内容',
+    };
     const result = buildTextProgress(block);
     expect(result).not.toBeNull();
     expect(result!.result?.startsWith('💬 ')).toBe(true);
@@ -807,7 +1087,10 @@ describe('并发 SSE 流共享 accumulator 竞态', () => {
       { type: 'content_block_stop', data: { index: 0 } },
       {
         type: 'message_delta',
-        data: { delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 50 } },
+        data: {
+          delta: { stop_reason: 'end_turn' },
+          usage: { output_tokens: 50 },
+        },
       },
       { type: 'message_stop', data: {} },
     ];
@@ -907,7 +1190,13 @@ describe('并发 SSE 流共享 accumulator 竞态', () => {
     // 流 B 的 message_start 清空 blocks
     acc = accumulateSseEvent(acc, {
       type: 'message_start',
-      data: { message: { id: 'msg_b', model: 'opus', usage: { input_tokens: 5, output_tokens: 0 } } },
+      data: {
+        message: {
+          id: 'msg_b',
+          model: 'opus',
+          usage: { input_tokens: 5, output_tokens: 0 },
+        },
+      },
     });
     expect(acc.blocks.size).toBe(0);
 
@@ -929,9 +1218,9 @@ describe('并发 SSE 流共享 accumulator 竞态', () => {
 
     // 按实际交错顺序处理
     acc = accumulateSseEvent(acc, haikuEvents[0]); // haiku message_start
-    acc = accumulateSseEvent(acc, opusEvents[0]);  // opus message_start（清空 blocks）
-    acc = accumulateSseEvent(acc, haikuEvents[1]);  // haiku block_start
-    acc = accumulateSseEvent(acc, haikuEvents[2]);  // haiku delta
+    acc = accumulateSseEvent(acc, opusEvents[0]); // opus message_start（清空 blocks）
+    acc = accumulateSseEvent(acc, haikuEvents[1]); // haiku block_start
+    acc = accumulateSseEvent(acc, haikuEvents[2]); // haiku delta
 
     // haiku block_stop → 调用侧取 acc.blocks.get(0)
     acc = accumulateSseEvent(acc, haikuEvents[3]);

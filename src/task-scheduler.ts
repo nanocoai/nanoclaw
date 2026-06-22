@@ -207,7 +207,9 @@ async function runTask(
               ? streamedOutput.result
               : JSON.stringify(streamedOutput.result);
           // 剥掉 <internal> 标签
-          const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+          const text = raw
+            .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+            .trim();
           if (text) {
             result = text;
             // Forward result to user (sendMessage handles formatting)

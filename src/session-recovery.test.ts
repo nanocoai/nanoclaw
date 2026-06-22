@@ -12,7 +12,11 @@ describe('session recovery helpers', () => {
         'Claude Code returned an error result: No conversation found with session ID: abc',
       ),
     ).toBe(true);
-    expect(isSessionRecoveryError('ENOENT: no such file or directory, open abc.jsonl')).toBe(true);
+    expect(
+      isSessionRecoveryError(
+        'ENOENT: no such file or directory, open abc.jsonl',
+      ),
+    ).toBe(true);
     expect(isSessionRecoveryError('session abc not found')).toBe(true);
     expect(isSessionRecoveryError('API Error: 500 overloaded')).toBe(false);
   });

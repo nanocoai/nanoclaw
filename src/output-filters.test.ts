@@ -93,11 +93,15 @@ describe('MODEL_REFUSAL_PATTERN 正则边界', () => {
   it('必须是完整短句才匹配（有尾部锚定）', () => {
     expect(MODEL_REFUSAL_PATTERN.test('No response requested.')).toBe(true);
     // 后面跟了更多文本 — 不匹配
-    expect(MODEL_REFUSAL_PATTERN.test('No response requested. But here is more')).toBe(false);
+    expect(
+      MODEL_REFUSAL_PATTERN.test('No response requested. But here is more'),
+    ).toBe(false);
   });
 
   it('必须是文本开头才匹配', () => {
-    expect(MODEL_REFUSAL_PATTERN.test('Prefix: No response requested.')).toBe(false);
+    expect(MODEL_REFUSAL_PATTERN.test('Prefix: No response requested.')).toBe(
+      false,
+    );
   });
 
   it('大小写不敏感', () => {
@@ -107,8 +111,14 @@ describe('MODEL_REFUSAL_PATTERN 正则边界', () => {
 
   it('多行文本中只匹配独立一行', () => {
     // multiline flag (m) 使 ^ $ 匹配行首行尾
-    expect(MODEL_REFUSAL_PATTERN.test('Some intro\nNo response requested.\nMore text')).toBe(false);
+    expect(
+      MODEL_REFUSAL_PATTERN.test(
+        'Some intro\nNo response requested.\nMore text',
+      ),
+    ).toBe(false);
     // 但如果第一行就是拒绝文本
-    expect(MODEL_REFUSAL_PATTERN.test('No response requested.\nMore text')).toBe(false);
+    expect(
+      MODEL_REFUSAL_PATTERN.test('No response requested.\nMore text'),
+    ).toBe(false);
   });
 });

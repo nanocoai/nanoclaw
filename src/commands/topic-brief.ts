@@ -27,10 +27,7 @@ registerCommand({
       ctx.msg.sender,
     );
 
-    logger.info(
-      { group: ctx.group.folder, queued },
-      '/j: 手动话题回顾请求',
-    );
+    logger.info({ group: ctx.group.folder, queued }, '/j: 手动话题回顾请求');
 
     if (!queued) {
       await ctx.channel.sendMessage(

@@ -20,6 +20,24 @@ groups/global/team_wiki/private/index.md  ← 私有独立索引
 
 > ⚠️ 线上向量召回（`src/memory/inject.ts`）只读 `team_wiki/index.md` + `team_wiki/private/index.md`。写进别处召回不到。
 
+## Git 同步（team_wiki 是独立仓库，origin = TierIITech/team-knowledge）
+
+`team_wiki/` 是独立 git 仓库。本地写完不 push，团队看不到、换机器就丢；别人推了你不 pull，读到的就是旧的。两条铁律：
+
+**读前先 pull**（Query / Ingest 开始时各一次即可，不是每次读文件都 pull）：
+```bash
+cd ../../global/team_wiki && env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy git pull --ff-only
+```
+- `--ff-only`：只接受快进。本地有未提交改动或与远端分叉时会直接报错——**报错就停下来人工处理，绝不自动 merge 或覆盖。**
+- `env -u ...proxy`：绕开内部代理的 SSL 拦截，不绕会报 self signed cert / x509。
+
+**写完必 push**（Ingest 第 6 步、wrapup Step 4 落盘并三处验证后）：
+```bash
+cd ../../global/team_wiki && git add <改动的页 + index.md> && git commit -m "docs(wiki): <一句话>" && env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy git push origin main
+```
+- `private/` 被 `.gitignore` 隔离，push 不会带上，无需特殊处理。
+- push 报"远端有新提交"→ 先按上面 `pull --ff-only` 同步再 push。
+
 ## Ingest（导入资料）
 
 用户提供文档、URL、或让你写技术方案时：
@@ -31,12 +49,14 @@ groups/global/team_wiki/private/index.md  ← 私有独立索引
    - 相关实体页（项目、人员、技术）/ 概念页
 4. 更新所有受影响页面的交叉引用（用 `[[page-name]]` wiki link 格式）
 5. 更新对应索引：共享进 `team_wiki/index.md`，私有进 `team_wiki/private/index.md`（两本索引互不引用）
+6. **commit + push**（见上「Git 同步」）让团队和其他机器拿到更新；private 页不进 push 无妨（gitignore）
 
 **重要**：多个资料必须逐一处理，不要批量。"综合进已有页"优先于新建孤立碎片。
+开工前先 pull 一次（见上「Git 同步」），避免在旧版本上改。
 
 ## Query（查询）
 
-1. 先读 `team_wiki/index.md` 找相关页面（涉敏/个人经验再查 `team_wiki/private/index.md`）
+1. **先 pull 同步**（见上「Git 同步」），再读 `team_wiki/index.md` 找相关页面（涉敏/个人经验再查 `team_wiki/private/index.md`）
 2. 读取相关页面
 3. 基于已综合的知识回答（附引用）
 4. 如果回答本身有价值，考虑存回 team_wiki 作为新页面

@@ -123,9 +123,10 @@ export function isToolCallNoiseContent(text: string): boolean {
 
   if (assistantLines.length === 0) return false;
 
-  return assistantLines.every((line) =>
-    /^\[(?:使用工具|工具|工具调用结果)(?::[^\]]*)?\]$/.test(line) ||
-    TOOL_PROGRESS_PREFIXES.some((prefix) => line.startsWith(prefix)),
+  return assistantLines.every(
+    (line) =>
+      /^\[(?:使用工具|工具|工具调用结果)(?::[^\]]*)?\]$/.test(line) ||
+      TOOL_PROGRESS_PREFIXES.some((prefix) => line.startsWith(prefix)),
   );
 }
 

@@ -57,16 +57,28 @@ fi
  */
 function parseAgentOutput(
   child: ChildProcess,
-  onOutput: (output: { status: string; result: string | null; newSessionId?: string }) => Promise<void>,
+  onOutput: (output: {
+    status: string;
+    result: string | null;
+    newSessionId?: string;
+  }) => Promise<void>,
   timeoutMs = 8000,
 ): Promise<{ status: string; result: string | null; newSessionId?: string }> {
   return new Promise((resolve) => {
     let parseBuffer = '';
     let outputChain = Promise.resolve();
-    let lastOutput: { status: string; result: string | null; newSessionId?: string } | null = null;
+    let lastOutput: {
+      status: string;
+      result: string | null;
+      newSessionId?: string;
+    } | null = null;
     let resolved = false;
 
-    const finish = (result: { status: string; result: string | null; newSessionId?: string }) => {
+    const finish = (result: {
+      status: string;
+      result: string | null;
+      newSessionId?: string;
+    }) => {
       if (resolved) return;
       resolved = true;
       resolve(result);
@@ -74,7 +86,9 @@ function parseAgentOutput(
 
     // 安全超时：防止子进程没退出导致测试挂死
     const timer = setTimeout(() => {
-      try { child.kill('SIGKILL'); } catch {}
+      try {
+        child.kill('SIGKILL');
+      } catch {}
       finish(lastOutput || { status: 'error', result: null });
     }, timeoutMs);
 
@@ -84,12 +98,16 @@ function parseAgentOutput(
       while ((startIdx = parseBuffer.indexOf(OUTPUT_START)) !== -1) {
         const endIdx = parseBuffer.indexOf(OUTPUT_END, startIdx);
         if (endIdx === -1) break;
-        const jsonStr = parseBuffer.slice(startIdx + OUTPUT_START.length, endIdx).trim();
+        const jsonStr = parseBuffer
+          .slice(startIdx + OUTPUT_START.length, endIdx)
+          .trim();
         parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END.length);
         try {
           const parsed = JSON.parse(jsonStr);
           lastOutput = parsed;
-          outputChain = outputChain.then(() => onOutput(parsed)).catch(() => {});
+          outputChain = outputChain
+            .then(() => onOutput(parsed))
+            .catch(() => {});
         } catch {
           // ignore parse errors
         }
@@ -141,7 +159,11 @@ describe('限流 → kill → 轮换集成测试', () => {
         rateLimitDetected.push(isRateLimit);
         if (isRateLimit) {
           // 模拟 kill — 在真实代码中是 queue.killGroup（杀进程组）
-          try { process.kill(-child.pid!, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
+          try {
+            process.kill(-child.pid!, 'SIGTERM');
+          } catch {
+            child.kill('SIGTERM');
+          }
         }
       }
     });
@@ -168,7 +190,11 @@ describe('限流 → kill → 轮换集成测试', () => {
 
     const resultPromise = parseAgentOutput(child, async (output) => {
       if (output.result && /hit your limit/i.test(output.result)) {
-        try { process.kill(-child.pid!, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
+        try {
+          process.kill(-child.pid!, 'SIGTERM');
+        } catch {
+          child.kill('SIGTERM');
+        }
         killTime = Date.now();
       }
     });
@@ -203,53 +229,61 @@ describe('限流 → kill → 轮换集成测试', () => {
     expect(result.newSessionId).toBe('test-session-001');
   });
 
-  it('完整轮换流程：限流 → kill → 切账号 → 重试成功', { timeout: 15000 }, async () => {
-    // 模拟两次调用：第一次限流，第二次正常
-    let attempt = 0;
-    let rotatedAccount = false;
+  it(
+    '完整轮换流程：限流 → kill → 切账号 → 重试成功',
+    { timeout: 15000 },
+    async () => {
+      // 模拟两次调用：第一次限流，第二次正常
+      let attempt = 0;
+      let rotatedAccount = false;
 
-    async function simulateRunAgent(): Promise<{
-      status: string;
-      result: string | null;
-      rateLimited: boolean;
-    }> {
-      attempt++;
-      const isFirstAttempt = attempt === 1;
-      const child = spawn('bash', [mockScript], {
-        env: {
-          ...process.env,
-          MOCK_RATE_LIMIT: isFirstAttempt ? 'true' : 'false',
-        },
-        stdio: ['pipe', 'pipe', 'pipe'],
-        detached: true,
-      });
-      child.stdin!.write('{"prompt":"test"}\n');
+      async function simulateRunAgent(): Promise<{
+        status: string;
+        result: string | null;
+        rateLimited: boolean;
+      }> {
+        attempt++;
+        const isFirstAttempt = attempt === 1;
+        const child = spawn('bash', [mockScript], {
+          env: {
+            ...process.env,
+            MOCK_RATE_LIMIT: isFirstAttempt ? 'true' : 'false',
+          },
+          stdio: ['pipe', 'pipe', 'pipe'],
+          detached: true,
+        });
+        child.stdin!.write('{"prompt":"test"}\n');
 
-      let rateLimited = false;
+        let rateLimited = false;
 
-      const result = await parseAgentOutput(child, async (output) => {
-        if (output.result && /hit your limit/i.test(output.result)) {
-          rateLimited = true;
-          try { process.kill(-child.pid!, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
-        }
-      });
+        const result = await parseAgentOutput(child, async (output) => {
+          if (output.result && /hit your limit/i.test(output.result)) {
+            rateLimited = true;
+            try {
+              process.kill(-child.pid!, 'SIGTERM');
+            } catch {
+              child.kill('SIGTERM');
+            }
+          }
+        });
 
-      return { status: result.status, result: result.result, rateLimited };
-    }
+        return { status: result.status, result: result.result, rateLimited };
+      }
 
-    // 第一次：限流
-    const first = await simulateRunAgent();
-    expect(first.rateLimited).toBe(true);
+      // 第一次：限流
+      const first = await simulateRunAgent();
+      expect(first.rateLimited).toBe(true);
 
-    // 模拟轮换账号
-    rotatedAccount = true;
+      // 模拟轮换账号
+      rotatedAccount = true;
 
-    // 第二次：正常
-    const second = await simulateRunAgent();
-    expect(second.rateLimited).toBe(false);
-    expect(second.result).toBe('正常回复内容');
-    expect(rotatedAccount).toBe(true);
-  });
+      // 第二次：正常
+      const second = await simulateRunAgent();
+      expect(second.rateLimited).toBe(false);
+      expect(second.result).toBe('正常回复内容');
+      expect(rotatedAccount).toBe(true);
+    },
+  );
 
   it('多次限流输出只 kill 一次（幂等性）', { timeout: 15000 }, async () => {
     // 创建一个输出多条限流消息的脚本

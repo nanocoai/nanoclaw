@@ -84,8 +84,7 @@ describe('voice-notify 网关推送', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    if (savedToken !== undefined)
-      process.env.VOICE_GATEWAY_TOKEN = savedToken;
+    if (savedToken !== undefined) process.env.VOICE_GATEWAY_TOKEN = savedToken;
     delete mockEnvFile.VOICE_GATEWAY_TOKEN;
   });
 
@@ -326,13 +325,21 @@ describe('sanitizeForSpeech TTS 清洗', () => {
   });
 
   it('Markdown 链接只留文字，裸 URL 整个删掉', () => {
-    expect(sanitizeForSpeech('详见[复盘文档](https://example.com/a/b)')).toBe('详见复盘文档');
-    expect(sanitizeForSpeech('地址 https://api.saltapp.cn/voice/api/push 已部署')).toBe('地址 已部署');
+    expect(sanitizeForSpeech('详见[复盘文档](https://example.com/a/b)')).toBe(
+      '详见复盘文档',
+    );
+    expect(
+      sanitizeForSpeech('地址 https://api.saltapp.cn/voice/api/push 已部署'),
+    ).toBe('地址 已部署');
   });
 
   it('代码块整块去掉，行内代码留内容', () => {
-    expect(sanitizeForSpeech('运行 `npm test` 即可')).toBe('运行 npm test 即可');
-    expect(sanitizeForSpeech('改动如下\n```js\nconst a = 1;\n```\n测试通过')).toBe('改动如下。测试通过');
+    expect(sanitizeForSpeech('运行 `npm test` 即可')).toBe(
+      '运行 npm test 即可',
+    );
+    expect(
+      sanitizeForSpeech('改动如下\n```js\nconst a = 1;\n```\n测试通过'),
+    ).toBe('改动如下。测试通过');
   });
 
   it('粗体星号、列表符号、表格竖线清掉', () => {
@@ -368,18 +375,24 @@ describe('needsSummarization 短文本跳过 LLM', () => {
 
 describe('classifyContent 内容分类器', () => {
   it('短纯文本 → concise', () => {
-    expect(classifyContent('搞定了，已经合并并部署到 dev 环境。')).toBe('concise');
+    expect(classifyContent('搞定了，已经合并并部署到 dev 环境。')).toBe(
+      'concise',
+    );
     expect(classifyContent('我'.repeat(100))).toBe('concise');
   });
 
   it('有代码块 → skip_code（不管长度）', () => {
-    expect(classifyContent('改好了\n```js\nconst a = 1;\n```\n测试通过')).toBe('skip_code');
+    expect(classifyContent('改好了\n```js\nconst a = 1;\n```\n测试通过')).toBe(
+      'skip_code',
+    );
     // 哪怕很短也走 skip_code
     expect(classifyContent('```x\na\n```')).toBe('skip_code');
   });
 
   it('有表格 → skip_table', () => {
-    expect(classifyContent('对比如下：\n| 方案 | 优势 |\n|---|---|\n| A | 快 |')).toBe('skip_table');
+    expect(
+      classifyContent('对比如下：\n| 方案 | 优势 |\n|---|---|\n| A | 快 |'),
+    ).toBe('skip_table');
   });
 
   it('代码块优先于表格', () => {
@@ -402,7 +415,9 @@ describe('classifyContent 内容分类器', () => {
   });
 
   it('>=300 字有列表但无标题 → digest', () => {
-    const text = '操作步骤：\n' + Array.from({length: 50}, (_, i) => `- 第${i+1}步`).join('\n');
+    const text =
+      '操作步骤：\n' +
+      Array.from({ length: 50 }, (_, i) => `- 第${i + 1}步`).join('\n');
     expect(classifyContent(text)).toBe('digest');
   });
 
@@ -418,11 +433,8 @@ describe('classifyContent 内容分类器', () => {
     });
     await flushAsync();
     // v2 分流日志应该被记录（LLM 调用会失败，但分流日志在 LLM 调用前）
-    const v2Log = loggerCalls.info.find((c) =>
-      /v2 摘要分流/.test(c[1] ?? ''),
-    );
+    const v2Log = loggerCalls.info.find((c) => /v2 摘要分流/.test(c[1] ?? ''));
     expect(v2Log).toBeTruthy();
     expect(v2Log[0].category).toBe('navigate');
   });
-
 });

@@ -21,7 +21,10 @@ function makeDeps() {
       },
     ] as any,
     sessions,
-    queue: { killGroup: vi.fn().mockReturnValue(true), stopGroup: vi.fn() } as any,
+    queue: {
+      killGroup: vi.fn().mockReturnValue(true),
+      stopGroup: vi.fn(),
+    } as any,
     registeredGroups: { 'fs:oc_test': group },
     deleteSession: vi.fn(),
     setRegisteredGroup: vi.fn(),

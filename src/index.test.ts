@@ -64,7 +64,9 @@ vi.mock('./env.js', () => ({
 
 vi.mock('@onecli-sh/sdk', () => ({
   OneCLI: class {
-    getContainerConfig = vi.fn().mockResolvedValue({ env: {}, caCertificate: '' });
+    getContainerConfig = vi
+      .fn()
+      .mockResolvedValue({ env: {}, caCertificate: '' });
     applyContainerConfig = vi.fn().mockResolvedValue(true);
     ensureAgent = vi.fn().mockResolvedValue({ id: 'test', created: false });
   },
@@ -211,8 +213,18 @@ describe('getAvailableGroups', () => {
 
   it('过滤 __group_sync__ 键', () => {
     mockGetAllChats.mockReturnValue([
-      { jid: '__group_sync__', name: 'sync', last_message_time: '2026-01-01', is_group: true },
-      { jid: 'fs:oc_real', name: 'real', last_message_time: '2026-01-01', is_group: true },
+      {
+        jid: '__group_sync__',
+        name: 'sync',
+        last_message_time: '2026-01-01',
+        is_group: true,
+      },
+      {
+        jid: 'fs:oc_real',
+        name: 'real',
+        last_message_time: '2026-01-01',
+        is_group: true,
+      },
     ]);
     const groups = getAvailableGroups();
     expect(groups).toHaveLength(1);
@@ -221,8 +233,18 @@ describe('getAvailableGroups', () => {
 
   it('只返回 is_group 为 true 的', () => {
     mockGetAllChats.mockReturnValue([
-      { jid: 'fs:oc_g1', name: 'group', last_message_time: '2026-01-01', is_group: true },
-      { jid: 'fs:ou_priv', name: 'private', last_message_time: '2026-01-01', is_group: false },
+      {
+        jid: 'fs:oc_g1',
+        name: 'group',
+        last_message_time: '2026-01-01',
+        is_group: true,
+      },
+      {
+        jid: 'fs:ou_priv',
+        name: 'private',
+        last_message_time: '2026-01-01',
+        is_group: false,
+      },
     ]);
     const groups = getAvailableGroups();
     expect(groups).toHaveLength(1);
@@ -236,8 +258,18 @@ describe('getAvailableGroups', () => {
 
   it('isRegistered 正确标注', () => {
     mockGetAllChats.mockReturnValue([
-      { jid: 'fs:oc_reg', name: '注册群', last_message_time: '2026-01-01', is_group: true },
-      { jid: 'fs:oc_unreg', name: '未注册', last_message_time: '2026-01-01', is_group: true },
+      {
+        jid: 'fs:oc_reg',
+        name: '注册群',
+        last_message_time: '2026-01-01',
+        is_group: true,
+      },
+      {
+        jid: 'fs:oc_unreg',
+        name: '未注册',
+        last_message_time: '2026-01-01',
+        is_group: true,
+      },
     ]);
     _setRegisteredGroups({
       'fs:oc_reg': { name: '注册群', folder: 'reg', jid: 'fs:oc_reg' } as any,
@@ -325,7 +357,8 @@ describe('shouldTriggerAutoFollowupSummary', () => {
 
 describe('buildAutoFollowupSummaryPrompt', () => {
   it('生成带防递归标记和工具约束的总结 prompt', () => {
-    const prompt = buildAutoFollowupSummaryPrompt('这是已经发送给用户的完整回复');
+    const prompt =
+      buildAutoFollowupSummaryPrompt('这是已经发送给用户的完整回复');
     expect(prompt).toContain('[AUTO_FOLLOWUP_SUMMARY]');
     expect(prompt).toContain('不要调用工具');
     expect(prompt).toContain('第一句话必须是结论');
@@ -389,17 +422,17 @@ describe('decideThinkingOnlyAction', () => {
   });
 
   it('本轮已发过真实文本（CLI 流式）→ none，即使 final result 无 text', () => {
-    expect(
-      decideThinkingOnlyAction({ ...base, textSentToUser: true }),
-    ).toBe('none');
+    expect(decideThinkingOnlyAction({ ...base, textSentToUser: true })).toBe(
+      'none',
+    );
   });
 
   it('只发过工具进度卡、没发真实文本 → retry', () => {
     // 回归保护：工具卡不能算用户已收到回复，否则会跳过 thinking-only 重试，
     // 最后只发 usage-only 空卡。
-    expect(
-      decideThinkingOnlyAction({ ...base, textSentToUser: false }),
-    ).toBe('retry');
+    expect(decideThinkingOnlyAction({ ...base, textSentToUser: false })).toBe(
+      'retry',
+    );
   });
 
   it('outputTokens 为 0 → none（空 turn，非 thinking-only）', () => {

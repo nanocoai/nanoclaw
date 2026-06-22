@@ -70,12 +70,18 @@ describe('cleanContent', () => {
 
 describe('isToolCallNoiseContent', () => {
   it('识别助手纯工具调用 chunk', () => {
-    expect(isToolCallNoiseContent('用户: 查一下\n助手: 🔧 Bash: ls -la')).toBe(true);
-    expect(isToolCallNoiseContent('用户: 查一下\n助手: [使用工具: Bash]')).toBe(true);
+    expect(isToolCallNoiseContent('用户: 查一下\n助手: 🔧 Bash: ls -la')).toBe(
+      true,
+    );
+    expect(isToolCallNoiseContent('用户: 查一下\n助手: [使用工具: Bash]')).toBe(
+      true,
+    );
   });
 
   it('普通结果不是工具噪音', () => {
-    expect(isToolCallNoiseContent('用户: 查一下\n助手: 已查完，结果是 3 个文件')).toBe(false);
+    expect(
+      isToolCallNoiseContent('用户: 查一下\n助手: 已查完，结果是 3 个文件'),
+    ).toBe(false);
   });
 });
 

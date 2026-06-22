@@ -168,13 +168,23 @@ beforeEach(() => {
     onFeishuAuthRequest: vi.fn().mockResolvedValue(undefined),
   };
 
-  mockGetMessageContext.mockReturnValue({ before: [], anchor: null, after: [] });
-  mockGetMessageContextById.mockReturnValue({ before: [], anchor: null, after: [] });
+  mockGetMessageContext.mockReturnValue({
+    before: [],
+    anchor: null,
+    after: [],
+  });
+  mockGetMessageContextById.mockReturnValue({
+    before: [],
+    anchor: null,
+    after: [],
+  });
   mockGetMessageRange.mockReturnValue([]);
-  mockClampRangeParams.mockImplementation((offset?: number, limit?: number) => ({
-    offset: Math.max(0, Math.floor(offset ?? 0)),
-    limit: Math.min(200, Math.max(1, Math.floor(limit ?? 20))),
-  }));
+  mockClampRangeParams.mockImplementation(
+    (offset?: number, limit?: number) => ({
+      offset: Math.max(0, Math.floor(offset ?? 0)),
+      limit: Math.min(200, Math.max(1, Math.floor(limit ?? 20))),
+    }),
+  );
 });
 
 // ---- writeIpcResponse ----
@@ -659,7 +669,9 @@ describe('processTaskIpc - task ledger', () => {
       deps,
     );
 
-    expect(readResponse('req-e2e-before-effect').error).toContain('Lock desired outcome');
+    expect(readResponse('req-e2e-before-effect').error).toContain(
+      'Lock desired outcome',
+    );
   });
 
   it('完整 workflow 能从锁效果推进到验证阶段', async () => {
@@ -758,11 +770,22 @@ describe('processTaskIpc - task ledger', () => {
       deps,
     );
 
-    expect(mockUpdateTaskLedgerTask).toHaveBeenCalledWith('tl-1', expect.objectContaining({ status: 'effect_locked' }));
-    expect(mockUpdateTaskLedgerTask).toHaveBeenCalledWith('tl-1', { status: 'e2e_defined' });
-    expect(mockUpdateTaskLedgerTask).toHaveBeenCalledWith('tl-1', { status: 'tests_planned' });
-    expect(mockUpdateTaskLedgerTask).toHaveBeenCalledWith('tl-1', { status: 'implementing' });
-    expect(mockUpdateTaskLedgerTask).toHaveBeenCalledWith('tl-1', { status: 'verifying' });
+    expect(mockUpdateTaskLedgerTask).toHaveBeenCalledWith(
+      'tl-1',
+      expect.objectContaining({ status: 'effect_locked' }),
+    );
+    expect(mockUpdateTaskLedgerTask).toHaveBeenCalledWith('tl-1', {
+      status: 'e2e_defined',
+    });
+    expect(mockUpdateTaskLedgerTask).toHaveBeenCalledWith('tl-1', {
+      status: 'tests_planned',
+    });
+    expect(mockUpdateTaskLedgerTask).toHaveBeenCalledWith('tl-1', {
+      status: 'implementing',
+    });
+    expect(mockUpdateTaskLedgerTask).toHaveBeenCalledWith('tl-1', {
+      status: 'verifying',
+    });
     expect(readResponse('req-lock').task.id).toBe('tl-1');
     expect(readResponse('req-verify').task.id).toBe('tl-1');
   });

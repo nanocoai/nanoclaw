@@ -522,4 +522,3 @@ export function backfillFtsIndex(groupFolder?: string): number {
   logger.info({ count }, 'FTS 索引补录完成');
   return count;
 }
-

@@ -42,7 +42,10 @@ describe('/brief', () => {
 
     expect(handled).toBe(true);
     expect(deps.group.containerConfig.autoFollowupSummary).toBe(true);
-    expect(deps.setRegisteredGroup).toHaveBeenCalledWith('fs:oc_test', deps.group);
+    expect(deps.setRegisteredGroup).toHaveBeenCalledWith(
+      'fs:oc_test',
+      deps.group,
+    );
     expect(deps.sendMessage).toHaveBeenCalledWith(
       'fs:oc_test',
       expect.stringContaining('brief 已开启'),
@@ -59,7 +62,10 @@ describe('/brief', () => {
 
     expect(handled).toBe(true);
     expect(deps.group.containerConfig.autoFollowupSummary).toBe(false);
-    expect(deps.setRegisteredGroup).toHaveBeenCalledWith('fs:oc_test', deps.group);
+    expect(deps.setRegisteredGroup).toHaveBeenCalledWith(
+      'fs:oc_test',
+      deps.group,
+    );
     expect(deps.sendMessage).toHaveBeenCalledWith(
       'fs:oc_test',
       expect.stringContaining('brief 已关闭'),

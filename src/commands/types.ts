@@ -1,4 +1,9 @@
-import type { Channel, CliMode, NewMessage, RegisteredGroup } from '../types.js';
+import type {
+  Channel,
+  CliMode,
+  NewMessage,
+  RegisteredGroup,
+} from '../types.js';
 import type { GroupQueue } from '../group-queue.js';
 
 export interface Command {

@@ -8,7 +8,11 @@ import {
   setRotateIndex,
   setLastRotateAt,
 } from './db.js';
-import { detectRateLimit, getSecretCount, rotateAccount } from './container-runner.js';
+import {
+  detectRateLimit,
+  getSecretCount,
+  rotateAccount,
+} from './container-runner.js';
 
 // Mock config
 vi.mock('./config.js', () => ({
@@ -138,16 +142,12 @@ describe('detectRateLimit', () => {
 
   it('不误匹配单独讨论 rate limit 话题', () => {
     expect(detectRateLimit('我们来讨论一下 rate limit 的设计')).toBe(false);
-    expect(
-      detectRateLimit('rate-limit 检测的正则需要更严格'),
-    ).toBe(false);
+    expect(detectRateLimit('rate-limit 检测的正则需要更严格')).toBe(false);
   });
 
   it('不误匹配讨论 hit your limit 话题', () => {
     // 正则要求 "hit your (usage )?limit"，"the" 不匹配
-    expect(
-      detectRateLimit('如果用户触发 hit the limit 场景'),
-    ).toBe(false);
+    expect(detectRateLimit('如果用户触发 hit the limit 场景')).toBe(false);
   });
 
   it('不误匹配讨论 overloaded / quota 普通语义', () => {
@@ -232,7 +232,11 @@ describe('rotateAccount', () => {
       .mockReturnValueOnce('');
 
     const result = rotateAccount('test-agent', 'test_group');
-    expect(result).toEqual({ success: true, newSecretName: 'account-b', oldSecretName: 'account-a' });
+    expect(result).toEqual({
+      success: true,
+      newSecretName: 'account-b',
+      oldSecretName: 'account-a',
+    });
     expect(getRotateIndex('test_group')).toBe(1);
   });
 
@@ -290,7 +294,11 @@ describe('rotateAccount', () => {
       .mockReturnValueOnce('');
 
     const result = rotateAccount('test-agent', 'test_group');
-    expect(result).toEqual({ success: true, newSecretName: 'account-a', oldSecretName: 'account-c' });
+    expect(result).toEqual({
+      success: true,
+      newSecretName: 'account-a',
+      oldSecretName: 'account-c',
+    });
     expect(getRotateIndex('test_group')).toBe(0);
   });
 
@@ -392,7 +400,11 @@ describe('rotateAccount', () => {
       .mockReturnValueOnce('');
 
     const result = rotateAccount('group-b', 'group_b');
-    expect(result).toEqual({ success: true, newSecretName: 'account-b', oldSecretName: 'account-a' });
+    expect(result).toEqual({
+      success: true,
+      newSecretName: 'account-b',
+      oldSecretName: 'account-a',
+    });
   });
   it('per-group index 隔离：各群独立维护轮换位置', () => {
     setRotateEnabled(true);

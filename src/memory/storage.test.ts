@@ -44,10 +44,16 @@ vi.mock('./config.js', () => ({
 const mockGetEmbedding = vi.fn().mockResolvedValue(null);
 vi.mock('./embeddings.js', () => ({
   getEmbedding: (...args: unknown[]) => mockGetEmbedding(...args),
-  embeddingToBuffer: (emb: number[]) => Buffer.from(new Float32Array(emb).buffer),
-  bufferToEmbedding: (buf: Buffer) => Array.from(new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4)),
+  embeddingToBuffer: (emb: number[]) =>
+    Buffer.from(new Float32Array(emb).buffer),
+  bufferToEmbedding: (buf: Buffer) =>
+    Array.from(
+      new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4),
+    ),
   cosineSimilarity: (a: number[], b: number[]) => {
-    let dot = 0, normA = 0, normB = 0;
+    let dot = 0,
+      normA = 0,
+      normB = 0;
     for (let i = 0; i < a.length; i++) {
       dot += a[i] * b[i];
       normA += a[i] * a[i];
@@ -79,9 +85,21 @@ beforeEach(() => {
   closeMemoryDb();
   // 删除旧 DB 文件
   const dbPath = path.join(tmpDir, 'memory.db');
-  try { fs.unlinkSync(dbPath); } catch { /* 不存在 */ }
-  try { fs.unlinkSync(dbPath + '-wal'); } catch { /* */ }
-  try { fs.unlinkSync(dbPath + '-shm'); } catch { /* */ }
+  try {
+    fs.unlinkSync(dbPath);
+  } catch {
+    /* 不存在 */
+  }
+  try {
+    fs.unlinkSync(dbPath + '-wal');
+  } catch {
+    /* */
+  }
+  try {
+    fs.unlinkSync(dbPath + '-shm');
+  } catch {
+    /* */
+  }
   vi.clearAllMocks();
   invalidateFactsCache();
 });
@@ -134,7 +152,13 @@ describe('Facts CRUD', () => {
   });
 
   it('storeFactRaw 同 id 重复 → INSERT OR IGNORE', () => {
-    const fact = { id: 'dup', content: '原始', category: 'c', confidence: 0.5, source: 's' };
+    const fact = {
+      id: 'dup',
+      content: '原始',
+      category: 'c',
+      confidence: 0.5,
+      source: 's',
+    };
     storeFactRaw('g1', fact);
     storeFactRaw('g1', { ...fact, content: '覆盖' });
     const facts = loadFacts();
@@ -154,8 +178,20 @@ describe('Facts CRUD', () => {
   });
 
   it('removeFacts → loadFacts 不含已删 fact', () => {
-    storeFactRaw('g1', { id: 'del-1', content: '删除我', category: 'c', confidence: 0.5, source: 's' });
-    storeFactRaw('g1', { id: 'keep-1', content: '保留我', category: 'c', confidence: 0.5, source: 's' });
+    storeFactRaw('g1', {
+      id: 'del-1',
+      content: '删除我',
+      category: 'c',
+      confidence: 0.5,
+      source: 's',
+    });
+    storeFactRaw('g1', {
+      id: 'keep-1',
+      content: '保留我',
+      category: 'c',
+      confidence: 0.5,
+      source: 's',
+    });
     const removed = removeFacts(['del-1']);
     expect(removed).toBe(1);
     const facts = loadFacts();
@@ -176,7 +212,13 @@ describe('Facts CRUD', () => {
 
 describe('updateFact', () => {
   it('更新 content', () => {
-    storeFactRaw('g1', { id: 'u1', content: '旧内容', category: 'c', confidence: 0.5, source: 's' });
+    storeFactRaw('g1', {
+      id: 'u1',
+      content: '旧内容',
+      category: 'c',
+      confidence: 0.5,
+      source: 's',
+    });
     const result = updateFact('u1', { content: '新内容' });
     expect(result).toBe(true);
     invalidateFactsCache();
@@ -184,7 +226,13 @@ describe('updateFact', () => {
   });
 
   it('更新 confidence', () => {
-    storeFactRaw('g1', { id: 'u2', content: '内容', category: 'c', confidence: 0.5, source: 's' });
+    storeFactRaw('g1', {
+      id: 'u2',
+      content: '内容',
+      category: 'c',
+      confidence: 0.5,
+      source: 's',
+    });
     updateFact('u2', { confidence: 0.9 });
     invalidateFactsCache();
     expect(loadFacts()[0].confidence).toBe(0.9);
@@ -195,7 +243,13 @@ describe('updateFact', () => {
   });
 
   it('空 updates → 返回 false', () => {
-    storeFactRaw('g1', { id: 'u3', content: '内容', category: 'c', confidence: 0.5, source: 's' });
+    storeFactRaw('g1', {
+      id: 'u3',
+      content: '内容',
+      category: 'c',
+      confidence: 0.5,
+      source: 's',
+    });
     expect(updateFact('u3', {})).toBe(false);
   });
 });
@@ -204,7 +258,13 @@ describe('updateFact', () => {
 
 describe('Facts 缓存', () => {
   it('loadFacts 连续调用 → 第二次走缓存', () => {
-    storeFactRaw('g1', { id: 'cache-1', content: '缓存测试', category: 'c', confidence: 0.5, source: 's' });
+    storeFactRaw('g1', {
+      id: 'cache-1',
+      content: '缓存测试',
+      category: 'c',
+      confidence: 0.5,
+      source: 's',
+    });
     const first = loadFacts();
     const second = loadFacts();
     // 返回相同引用（缓存）
@@ -212,7 +272,13 @@ describe('Facts 缓存', () => {
   });
 
   it('invalidateFactsCache 后 → 重新查 DB', () => {
-    storeFactRaw('g1', { id: 'inv-1', content: '初始', category: 'c', confidence: 0.5, source: 's' });
+    storeFactRaw('g1', {
+      id: 'inv-1',
+      content: '初始',
+      category: 'c',
+      confidence: 0.5,
+      source: 's',
+    });
     const first = loadFacts();
     invalidateFactsCache();
     const second = loadFacts();
@@ -225,12 +291,30 @@ describe('Facts 缓存', () => {
 
 describe('storeFacts 去重', () => {
   it('字符串精确重复 → 跳过', async () => {
-    storeFactRaw('g1', { id: 'existing', content: '已存在', category: 'c', confidence: 0.5, source: 's' });
+    storeFactRaw('g1', {
+      id: 'existing',
+      content: '已存在',
+      category: 'c',
+      confidence: 0.5,
+      source: 's',
+    });
     invalidateFactsCache();
 
     const count = await storeFacts('g1', [
-      { id: 'new-1', content: '已存在', category: 'c', confidence: 0.5, source: 's' },
-      { id: 'new-2', content: '全新内容', category: 'c', confidence: 0.5, source: 's' },
+      {
+        id: 'new-1',
+        content: '已存在',
+        category: 'c',
+        confidence: 0.5,
+        source: 's',
+      },
+      {
+        id: 'new-2',
+        content: '全新内容',
+        category: 'c',
+        confidence: 0.5,
+        source: 's',
+      },
     ]);
 
     expect(count).toBe(1); // 只存了 new-2
@@ -238,7 +322,13 @@ describe('storeFacts 去重', () => {
 
   it('空 content → 跳过', async () => {
     const count = await storeFacts('g1', [
-      { id: 'empty', content: '  ', category: 'c', confidence: 0.5, source: 's' },
+      {
+        id: 'empty',
+        content: '  ',
+        category: 'c',
+        confidence: 0.5,
+        source: 's',
+      },
     ]);
     expect(count).toBe(0);
   });
@@ -246,16 +336,28 @@ describe('storeFacts 去重', () => {
   it('向量语义重复 → 跳过', async () => {
     // 存一个有 embedding 的 fact
     const emb = new Array(4).fill(0).map((_, i) => i * 0.1);
-    storeFactRaw('g1', { id: 'with-emb', content: '有向量', category: 'c', confidence: 0.5, source: 's' });
+    storeFactRaw('g1', {
+      id: 'with-emb',
+      content: '有向量',
+      category: 'c',
+      confidence: 0.5,
+      source: 's',
+    });
     // 手动更新 embedding
     updateFact('with-emb', { embedding: emb });
     invalidateFactsCache();
 
     // mock getEmbedding 返回几乎相同的向量（cosine > 0.95）
-    mockGetEmbedding.mockResolvedValueOnce(emb.map(x => x * 1.001));
+    mockGetEmbedding.mockResolvedValueOnce(emb.map((x) => x * 1.001));
 
     const count = await storeFacts('g1', [
-      { id: 'dup-vec', content: '语义重复', category: 'c', confidence: 0.5, source: 's' },
+      {
+        id: 'dup-vec',
+        content: '语义重复',
+        category: 'c',
+        confidence: 0.5,
+        source: 's',
+      },
     ]);
     expect(count).toBe(0);
   });
@@ -265,7 +367,13 @@ describe('storeFacts 去重', () => {
 
 describe('enforceMaxFacts', () => {
   it('facts ≤ limit → 不删除', () => {
-    storeFactRaw('g1', { id: 'e1', content: 'a', category: 'c', confidence: 0.5, source: 's' });
+    storeFactRaw('g1', {
+      id: 'e1',
+      content: 'a',
+      category: 'c',
+      confidence: 0.5,
+      source: 's',
+    });
     invalidateFactsCache();
     expect(enforceMaxFacts('g1', 10)).toBe(0);
   });
@@ -287,11 +395,17 @@ describe('enforceMaxFacts', () => {
     const remaining = loadFacts();
     expect(remaining).toHaveLength(3);
     // 保留高 confidence 的
-    expect(remaining.every(f => f.confidence >= 0.4)).toBe(true);
+    expect(remaining.every((f) => f.confidence >= 0.4)).toBe(true);
   });
 
   it('limit=0 的 config → 不删除（0 = 不限制）', () => {
-    storeFactRaw('g1', { id: 'x', content: 'a', category: 'c', confidence: 0.5, source: 's' });
+    storeFactRaw('g1', {
+      id: 'x',
+      content: 'a',
+      category: 'c',
+      confidence: 0.5,
+      source: 's',
+    });
     invalidateFactsCache();
     // maxFacts=0 from config means no limit
     expect(enforceMaxFacts('g1')).toBe(0);
@@ -308,14 +422,22 @@ describe('FTS', () => {
   });
 
   it('storeFactRaw 后 FTS 索引同步', () => {
-    storeFactRaw('g1', { id: 'fts-1', content: '搜索测试内容abc', category: 'c', confidence: 0.5, source: 's' });
+    storeFactRaw('g1', {
+      id: 'fts-1',
+      content: '搜索测试内容abc',
+      category: 'c',
+      confidence: 0.5,
+      source: 's',
+    });
 
     if (isFtsAvailable()) {
       const db = getMemoryDb();
       // trigram tokenizer 需要至少 3 字符匹配
-      const row = db.prepare(
-        `SELECT fact_id FROM memory_facts_fts WHERE content MATCH '"搜索测"'`,
-      ).get() as { fact_id: string } | undefined;
+      const row = db
+        .prepare(
+          `SELECT fact_id FROM memory_facts_fts WHERE content MATCH '"搜索测"'`,
+        )
+        .get() as { fact_id: string } | undefined;
       expect(row?.fact_id).toBe('fts-1');
     }
   });
@@ -334,9 +456,11 @@ describe('FTS', () => {
     expect(count).toBe(1);
 
     // trigram tokenizer 需要至少 3 字符
-    const row = db.prepare(
-      `SELECT fact_id FROM memory_facts_fts WHERE content MATCH '"补录内"'`,
-    ).get() as { fact_id: string } | undefined;
+    const row = db
+      .prepare(
+        `SELECT fact_id FROM memory_facts_fts WHERE content MATCH '"补录内"'`,
+      )
+      .get() as { fact_id: string } | undefined;
     expect(row?.fact_id).toBe('backfill-1');
   });
 });

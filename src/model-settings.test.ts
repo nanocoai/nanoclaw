@@ -10,7 +10,9 @@ import {
 const tempDirs: string[] = [];
 
 function makeTempRoot(): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-model-settings-'));
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'nanoclaw-model-settings-'),
+  );
   tempDirs.push(root);
   fs.mkdirSync(path.join(root, 'groups', 'g'), { recursive: true });
   return root;
@@ -24,7 +26,9 @@ afterEach(() => {
 
 describe('normalizeClaudeModelName', () => {
   it('剥离历史 1m 后缀', () => {
-    expect(normalizeClaudeModelName('claude-opus-4-8[1m]')).toBe('claude-opus-4-8');
+    expect(normalizeClaudeModelName('claude-opus-4-8[1m]')).toBe(
+      'claude-opus-4-8',
+    );
   });
 
   it('保留正常模型名', () => {
@@ -42,10 +46,12 @@ describe('readGroupModelSettings', () => {
       JSON.stringify({ model: 'claude-fable-5[1m]', effortLevel: 'medium' }),
     );
 
-    expect(readGroupModelSettings({
-      groupPath: path.join(root, 'groups', 'g'),
-      groupFolder: 'g',
-    })).toEqual({
+    expect(
+      readGroupModelSettings({
+        groupPath: path.join(root, 'groups', 'g'),
+        groupFolder: 'g',
+      }),
+    ).toEqual({
       model: 'claude-fable-5',
       effortLevel: 'medium',
     });
@@ -53,9 +59,11 @@ describe('readGroupModelSettings', () => {
 
   it('缺失或非法配置时返回空对象', () => {
     const root = makeTempRoot();
-    expect(readGroupModelSettings({
-      groupPath: path.join(root, 'groups', 'g'),
-      groupFolder: 'g',
-    })).toEqual({});
+    expect(
+      readGroupModelSettings({
+        groupPath: path.join(root, 'groups', 'g'),
+        groupFolder: 'g',
+      }),
+    ).toEqual({});
   });
 });

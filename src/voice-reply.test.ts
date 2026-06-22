@@ -82,9 +82,9 @@ describe('voice-reply 网关消息处理', () => {
     expect(result).toBe('dropped');
     expect(injected).toEqual([]);
     expect(echoed).toEqual([]);
-    expect(
-      loggerCalls.warn.some((c) => /不是已注册群/.test(c[1] ?? '')),
-    ).toBe(true);
+    expect(loggerCalls.warn.some((c) => /不是已注册群/.test(c[1] ?? ''))).toBe(
+      true,
+    );
   });
 
   it('group_id 缺失（null）→ 丢弃', () => {
@@ -100,9 +100,9 @@ describe('voice-reply 网关消息处理', () => {
   it('非 reply 类型（hello/dispatched/done）→ 忽略', () => {
     const { deps, injected } = makeDeps();
     for (const type of ['hello', 'dispatched', 'done', 'device_online']) {
-      expect(
-        handleGatewayMessage(JSON.stringify({ type }), deps),
-      ).toBe('ignored');
+      expect(handleGatewayMessage(JSON.stringify({ type }), deps)).toBe(
+        'ignored',
+      );
     }
     expect(injected).toEqual([]);
     expect(loggerCalls.warn).toEqual([]);
@@ -140,9 +140,9 @@ describe('voice-reply 网关消息处理', () => {
     expect(result).toBe('injected');
     expect(injected.length).toBe(1);
     await new Promise((r) => setImmediate(r));
-    expect(
-      loggerCalls.warn.some((c) => /飞书回显失败/.test(c[1] ?? '')),
-    ).toBe(true);
+    expect(loggerCalls.warn.some((c) => /飞书回显失败/.test(c[1] ?? ''))).toBe(
+      true,
+    );
   });
 
   it('buildEchoText 格式符合 spec', () => {

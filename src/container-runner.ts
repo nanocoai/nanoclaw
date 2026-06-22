@@ -22,15 +22,14 @@ import { CliMode, ContainerConfig, RegisteredGroup } from './types.js';
 import { parseOneCLIList } from './onecli-util.js';
 
 // resolveCliMode 已抽到无副作用的 cli-mode.ts；import 供本模块使用 + re-export 保持既有 import 路径兼容。
-import { resolveCliMode, shouldAutoRotateAnthropicAccount } from './cli-mode.js';
+import {
+  resolveCliMode,
+  shouldAutoRotateAnthropicAccount,
+} from './cli-mode.js';
 export { resolveCliMode, shouldAutoRotateAnthropicAccount };
 
 const onecli = new OneCLI({ url: ONECLI_URL });
-import {
-  getRotateEnabled,
-  getRotateIndex,
-  setRotateIndex,
-} from './db.js';
+import { getRotateEnabled, getRotateIndex, setRotateIndex } from './db.js';
 
 // agent-runner 编译产物路径
 const AGENT_RUNNER_DIST = path.join(
@@ -144,7 +143,11 @@ export function rotateAccount(
   try {
     // 必须带 --max：onecli agents list 默认只返回 20 条，群数超过 20 时
     // 排在后面的群 find 不到 → 切换静默失败（"一会生效一会不生效"根因）
-    agents = parseOneCLIList<{ id: string; identifier: string; isDefault?: boolean }>(
+    agents = parseOneCLIList<{
+      id: string;
+      identifier: string;
+      isDefault?: boolean;
+    }>(
       execSync('onecli agents list --max 1000', {
         encoding: 'utf-8',
         timeout: 5000,
@@ -177,7 +180,11 @@ export function rotateAccount(
       return null;
     }
     try {
-      agents = parseOneCLIList<{ id: string; identifier: string; isDefault?: boolean }>(
+      agents = parseOneCLIList<{
+        id: string;
+        identifier: string;
+        isDefault?: boolean;
+      }>(
         execSync('onecli agents list --max 1000', {
           encoding: 'utf-8',
           timeout: 5000,
@@ -214,7 +221,13 @@ export function rotateAccount(
       currentIndex = actualIndex;
       if (actualIndex !== dbIndex) {
         logger.warn(
-          { agent: agent.id, groupFolder, dbIndex, actualIndex, actualSecret: secrets[actualIndex]?.name },
+          {
+            agent: agent.id,
+            groupFolder,
+            dbIndex,
+            actualIndex,
+            actualSecret: secrets[actualIndex]?.name,
+          },
           'rotateAccount: DB 游标与 OneCLI 实际绑定不一致，按实际绑定校准',
         );
       }
@@ -242,11 +255,21 @@ export function rotateAccount(
   setRotateIndex(nextIndex, groupFolder);
 
   logger.info(
-    { agent: agent.id, secret: nextSecret.name, oldSecret: oldSecret?.name, index: nextIndex, groupFolder },
+    {
+      agent: agent.id,
+      secret: nextSecret.name,
+      oldSecret: oldSecret?.name,
+      index: nextIndex,
+      groupFolder,
+    },
     '账号已自动轮换',
   );
 
-  return { success: true, newSecretName: nextSecret.name, oldSecretName: oldSecret?.name };
+  return {
+    success: true,
+    newSecretName: nextSecret.name,
+    oldSecretName: oldSecret?.name,
+  };
 }
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -539,7 +562,10 @@ function getAgentAccessToken(groupFolder: string): string | undefined {
       return agent.accessToken;
     }
   } catch (err) {
-    logger.warn({ err, groupFolder }, '获取群 OneCLI agent token 失败，将用默认');
+    logger.warn(
+      { err, groupFolder },
+      '获取群 OneCLI agent token 失败，将用默认',
+    );
   }
   return undefined;
 }
@@ -858,12 +884,14 @@ export async function runContainerAgent(
               'Agent output received',
             );
             resetTimeout();
-            outputChain = outputChain.then(() => onOutput(parsed)).catch((err) => {
-              logger.error(
-                { group: group.name, error: err, status: parsed.status },
-                'onOutput callback failed, message may be lost',
-              );
-            });
+            outputChain = outputChain
+              .then(() => onOutput(parsed))
+              .catch((err) => {
+                logger.error(
+                  { group: group.name, error: err, status: parsed.status },
+                  'onOutput callback failed, message may be lost',
+                );
+              });
           } catch (err) {
             logger.warn(
               { group: group.name, error: err },
@@ -982,12 +1010,17 @@ export async function runContainerAgent(
             { group: group.name, agentName, duration, code },
             'Agent timed out after output (idle cleanup)',
           );
-          outputChain.then(() => {
-            resolve({ status: 'success', result: null, newSessionId });
-          }).catch((err) => {
-            logger.error({ group: group.name, error: err }, 'outputChain rejected on timeout close');
-            resolve({ status: 'success', result: null, newSessionId });
-          });
+          outputChain
+            .then(() => {
+              resolve({ status: 'success', result: null, newSessionId });
+            })
+            .catch((err) => {
+              logger.error(
+                { group: group.name, error: err },
+                'outputChain rejected on timeout close',
+              );
+              resolve({ status: 'success', result: null, newSessionId });
+            });
           return;
         }
 
@@ -1061,7 +1094,9 @@ export async function runContainerAgent(
         // 的 .then() 在 runAgent 的 stale-session 清理之后异步执行，把已清除的 session 指针
         // 写回 sessions map，导致下一次 retry 仍用旧 sessionId，形成永久死循环。
         outputChain
-          .catch(() => {/* onOutput 失败不影响 error 结果 */})
+          .catch(() => {
+            /* onOutput 失败不影响 error 结果 */
+          })
           .then(() => {
             logger.info(
               { group: group.name, code, newSessionId },
@@ -1078,28 +1113,33 @@ export async function runContainerAgent(
 
       // 流式模式：等待 output chain 完成
       if (onOutput) {
-        outputChain.then(() => {
-          logger.info(
-            {
-              group: group.name,
-              duration,
-              newSessionId,
-              lastStatus: lastStreamingOutput?.status,
-            },
-            'Agent completed (streaming mode)',
-          );
-          if (lastStreamingOutput?.status === 'error') {
-            resolve({
-              ...lastStreamingOutput,
-              newSessionId: lastStreamingOutput.newSessionId ?? newSessionId,
-            });
-            return;
-          }
-          resolve({ status: 'success', result: null, newSessionId });
-        }).catch((err) => {
-          logger.error({ group: group.name, error: err }, 'outputChain rejected on normal close');
-          resolve({ status: 'success', result: null, newSessionId });
-        });
+        outputChain
+          .then(() => {
+            logger.info(
+              {
+                group: group.name,
+                duration,
+                newSessionId,
+                lastStatus: lastStreamingOutput?.status,
+              },
+              'Agent completed (streaming mode)',
+            );
+            if (lastStreamingOutput?.status === 'error') {
+              resolve({
+                ...lastStreamingOutput,
+                newSessionId: lastStreamingOutput.newSessionId ?? newSessionId,
+              });
+              return;
+            }
+            resolve({ status: 'success', result: null, newSessionId });
+          })
+          .catch((err) => {
+            logger.error(
+              { group: group.name, error: err },
+              'outputChain rejected on normal close',
+            );
+            resolve({ status: 'success', result: null, newSessionId });
+          });
         return;
       }
 

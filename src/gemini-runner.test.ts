@@ -39,7 +39,11 @@ describe('gemini-runner', () => {
   it('解析 stream-json 事件行', () => {
     expect(parseGeminiEventLine('')).toBeNull();
     expect(parseGeminiEventLine('Warning: terminal')).toBeNull();
-    expect(parseGeminiEventLine('{"type":"init","session_id":"s1","model":"gemini-3-pro-preview"}')).toEqual({
+    expect(
+      parseGeminiEventLine(
+        '{"type":"init","session_id":"s1","model":"gemini-3-pro-preview"}',
+      ),
+    ).toEqual({
       type: 'init',
       session_id: 's1',
       model: 'gemini-3-pro-preview',
@@ -85,7 +89,9 @@ describe('gemini-runner', () => {
 
     expect(settings.security.auth.selectedType).toBe('oauth-personal');
     expect(settings.mcpServers.nanoclaw.command).toBe('node');
-    expect(settings.mcpServers.nanoclaw.args).toEqual(['/runner/ipc-mcp-stdio.js']);
+    expect(settings.mcpServers.nanoclaw.args).toEqual([
+      '/runner/ipc-mcp-stdio.js',
+    ]);
     expect(settings.mcpServers.nanoclaw.trust).toBe(true);
     expect(settings.mcpServers.nanoclaw.env).toEqual({
       NANOCLAW_CHAT_JID: 'oc_test',
@@ -114,25 +120,31 @@ describe('gemini-runner', () => {
   });
 
   it('构建 per-group HOME 环境', () => {
-    const env = buildGeminiEnv({ HOME: '/real-home', HTTPS_PROXY: 'http://proxy' }, '/group-home');
+    const env = buildGeminiEnv(
+      { HOME: '/real-home', HTTPS_PROXY: 'http://proxy' },
+      '/group-home',
+    );
     expect(env.HOME).toBe('/group-home');
     expect(env.HTTPS_PROXY).toBe('http://proxy');
   });
 
   it('映射 usage，auto 模型取 token 最高的实际模型', () => {
-    const usage = mapGeminiUsage({
-      type: 'result',
-      stats: {
-        input_tokens: 10,
-        output_tokens: 2,
-        cached: 3,
-        duration_ms: 100,
-        models: {
-          'gemini-3.1-flash-lite': { total_tokens: 5 },
-          'gemini-3-flash': { total_tokens: 12 },
+    const usage = mapGeminiUsage(
+      {
+        type: 'result',
+        stats: {
+          input_tokens: 10,
+          output_tokens: 2,
+          cached: 3,
+          duration_ms: 100,
+          models: {
+            'gemini-3.1-flash-lite': { total_tokens: 5 },
+            'gemini-3-flash': { total_tokens: 12 },
+          },
         },
       },
-    }, 'auto');
+      'auto',
+    );
 
     expect(usage).toMatchObject({
       inputTokens: 10,
@@ -144,24 +156,37 @@ describe('gemini-runner', () => {
   });
 
   it('显式模型优先于 stats 里的实际模型名', () => {
-    const usage = mapGeminiUsage({
-      type: 'result',
-      stats: {
-        input_tokens: 10,
-        output_tokens: 2,
-        models: {
-          'gemini-3-flash': { total_tokens: 12 },
+    const usage = mapGeminiUsage(
+      {
+        type: 'result',
+        stats: {
+          input_tokens: 10,
+          output_tokens: 2,
+          models: {
+            'gemini-3-flash': { total_tokens: 12 },
+          },
         },
       },
-    }, 'gemini-3-pro-preview');
+      'gemini-3-pro-preview',
+    );
 
     expect(usage?.model).toBe('gemini-3-pro-preview');
   });
 
   it('提取错误正文', () => {
-    expect(extractGeminiError({ type: 'error', message: 'bad auth' })).toBe('bad auth');
-    expect(extractGeminiError({ type: 'result', status: 'failed', error: { message: 'quota' } })).toBe('quota');
-    expect(extractGeminiError({ type: 'result', status: 'success' })).toBeUndefined();
+    expect(extractGeminiError({ type: 'error', message: 'bad auth' })).toBe(
+      'bad auth',
+    );
+    expect(
+      extractGeminiError({
+        type: 'result',
+        status: 'failed',
+        error: { message: 'quota' },
+      }),
+    ).toBe('quota');
+    expect(
+      extractGeminiError({ type: 'result', status: 'success' }),
+    ).toBeUndefined();
   });
 
   it('spawn error 后 close 不会二重 writeOutput', async () => {
@@ -226,7 +251,11 @@ describe('gemini-runner', () => {
       .mockReturnValueOnce(first as unknown as ChildProcess)
       .mockReturnValueOnce(second as unknown as ChildProcess);
 
-    const outputs: Array<{ status: string; result?: string | null; newSessionId?: string }> = [];
+    const outputs: Array<{
+      status: string;
+      result?: string | null;
+      newSessionId?: string;
+    }> = [];
     const logs: string[] = [];
     const promise = runGeminiQuery(
       {
@@ -241,20 +270,29 @@ describe('gemini-runner', () => {
         env: { HOME: '/tmp' },
         geminiHome: '/tmp/gemini-home-test',
       },
-      (output) => outputs.push({
-        status: output.status,
-        result: output.result,
-        newSessionId: output.newSessionId,
-      }),
+      (output) =>
+        outputs.push({
+          status: output.status,
+          result: output.result,
+          newSessionId: output.newSessionId,
+        }),
       (message) => logs.push(message),
     );
 
-    first.stderr.write('Error resuming session: No previous sessions found for this project.\n');
+    first.stderr.write(
+      'Error resuming session: No previous sessions found for this project.\n',
+    );
     first.emit('close', 42);
 
-    second.stdout.write('{"type":"init","session_id":"fresh-session","model":"gemini-3-pro-preview"}\n');
-    second.stdout.write('{"type":"message","role":"assistant","content":"好了"}\n');
-    second.stdout.write('{"type":"result","status":"success","stats":{"input_tokens":1,"output_tokens":1}}\n');
+    second.stdout.write(
+      '{"type":"init","session_id":"fresh-session","model":"gemini-3-pro-preview"}\n',
+    );
+    second.stdout.write(
+      '{"type":"message","role":"assistant","content":"好了"}\n',
+    );
+    second.stdout.write(
+      '{"type":"result","status":"success","stats":{"input_tokens":1,"output_tokens":1}}\n',
+    );
     second.emit('close', 0);
 
     await expect(promise).resolves.toMatchObject({
@@ -272,6 +310,8 @@ describe('gemini-runner', () => {
     expect(spawnMock).toHaveBeenCalledTimes(2);
     expect(spawnMock.mock.calls[0][1]).toContain('--resume');
     expect(spawnMock.mock.calls[1][1]).not.toContain('--resume');
-    expect(logs.some((line) => line.includes('改用新 session 重跑'))).toBe(true);
+    expect(logs.some((line) => line.includes('改用新 session 重跑'))).toBe(
+      true,
+    );
   });
 });

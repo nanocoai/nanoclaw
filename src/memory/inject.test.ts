@@ -82,7 +82,10 @@ vi.mock('./prompt.js', () => ({
       parts.push(
         '事实:\n' +
           data.facts
-            .map((f: any) => `- [${f.category} | ${f.confidence?.toFixed?.(2) ?? f.confidence}] ${f.content}`)
+            .map(
+              (f: any) =>
+                `- [${f.category} | ${f.confidence?.toFixed?.(2) ?? f.confidence}] ${f.content}`,
+            )
             .join('\n'),
       );
     }
@@ -162,13 +165,22 @@ describe('extractKeywords', () => {
 
 describe('hashContext', () => {
   it('相同 context → 相同 hash', () => {
-    const ctx = { wiki: [], facts: [{ content: 'a', category: 'b', confidence: 0.5 }] };
+    const ctx = {
+      wiki: [],
+      facts: [{ content: 'a', category: 'b', confidence: 0.5 }],
+    };
     expect(hashContext(ctx)).toBe(hashContext(ctx));
   });
 
   it('不同 context → 不同 hash', () => {
-    const c1 = { wiki: [], facts: [{ content: 'a', category: 'b', confidence: 0.5 }] };
-    const c2 = { wiki: [], facts: [{ content: 'x', category: 'y', confidence: 0.9 }] };
+    const c1 = {
+      wiki: [],
+      facts: [{ content: 'a', category: 'b', confidence: 0.5 }],
+    };
+    const c2 = {
+      wiki: [],
+      facts: [{ content: 'x', category: 'y', confidence: 0.9 }],
+    };
     expect(hashContext(c1)).not.toBe(hashContext(c2));
   });
 });
@@ -252,7 +264,12 @@ describe('recallRelevantFacts', () => {
   it('MemoryStore 召回成功 → 返回格式化结果', async () => {
     mockLoadFacts.mockReturnValue([{ id: 'f1', content: '存在' }]);
     mockRecall.mockResolvedValue([
-      { id: 'f1', content: '用户喜欢 TypeScript', score: 0.85, metadata: { category: 'preference' } },
+      {
+        id: 'f1',
+        content: '用户喜欢 TypeScript',
+        score: 0.85,
+        metadata: { category: 'preference' },
+      },
     ]);
     const result = await recallRelevantFacts('TypeScript');
     expect(result).toHaveLength(1);
@@ -281,7 +298,11 @@ describe('injectMemory', () => {
     fs.mkdirSync(groupDir, { recursive: true });
     // 清理 CLAUDE.md
     const claudeMd = path.join(groupDir, 'CLAUDE.md');
-    try { fs.unlinkSync(claudeMd); } catch { /* */ }
+    try {
+      fs.unlinkSync(claudeMd);
+    } catch {
+      /* */
+    }
   });
 
   it('无记忆数据 → 不写文件', async () => {
