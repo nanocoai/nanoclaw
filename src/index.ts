@@ -920,20 +920,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       textSentToUser = false;
       autoFollowupSummaryTextParts = [];
 
-      // Commander 自动终态兜底：子群一轮 query 正常结束时，若本群仍有进行态
+      // Commander 自动终态兜底：目标群一轮 query 正常结束时，若本群仍有进行态
       // delegation 任务（agent 干完但忘了调 report_to_main），host 自动补 done，
-      // 避免账本卡 dispatched/progress 直到 15 分钟失联。仅子群、进行态生效；
+      // 避免账本卡 dispatched/progress 直到 15 分钟失联。仅进行态生效；
       // agent 已自主汇报或留 blocked/question 时本函数不触发（见函数内说明）。
-      if (!isMainGroup) {
-        try {
-          finalizeDelegationOnTurnEnd(
-            group.folder,
-            true,
-            agentReplies.join('\n'),
-          );
-        } catch (err) {
-          logger.warn({ err, group: group.folder }, '自动终态汇报(done)异常');
-        }
+      try {
+        finalizeDelegationOnTurnEnd(
+          group.folder,
+          true,
+          agentReplies.join('\n'),
+        );
+      } catch (err) {
+        logger.warn({ err, group: group.folder }, '自动终态汇报(done)异常');
       }
 
       // R8.1 实时记忆入队：agent 回复完成后立即入队，不等进程退出
@@ -1368,18 +1366,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   if (output.status === 'error' || hadError) {
-    // Commander 自动终态兜底：子群容器异常结束时，若仍有进行态 delegation 任务，
+    // Commander 自动终态兜底：目标群容器异常结束时，若仍有进行态 delegation 任务，
     // host 自动补 failed，避免账本卡 dispatched/progress 直到 15 分钟失联。
-    if (!isMainGroup) {
-      try {
-        finalizeDelegationOnTurnEnd(
-          group.folder,
-          false,
-          agentReplies.join('\n'),
-        );
-      } catch (err) {
-        logger.warn({ err, group: group.folder }, '自动终态汇报(failed)异常');
-      }
+    try {
+      finalizeDelegationOnTurnEnd(
+        group.folder,
+        false,
+        agentReplies.join('\n'),
+      );
+    } catch (err) {
+      logger.warn({ err, group: group.folder }, '自动终态汇报(failed)异常');
     }
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.

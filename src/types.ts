@@ -85,6 +85,8 @@ export type ReportStatus =
 /** Commander 派工账本一行 */
 export interface DelegationTask {
   taskId: string;
+  sourceGroup: string;
+  sourceJid: string;
   targetGroup: string;
   targetJid: string;
   title?: string;

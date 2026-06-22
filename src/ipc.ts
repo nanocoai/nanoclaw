@@ -17,14 +17,13 @@ import { AvailableGroup, getFeishuToken } from './container-runner.js';
 import {
   clampRangeParams,
   addTaskLedgerEvent,
-  closeDelegation,
   createDelegation,
   createTask,
   createTaskLedgerTask,
   deleteTask,
+  failDelegation,
   getActiveDelegationByGroup,
   getGroupAlias,
-  getMainGroup,
   getMessageContext,
   getMessageContextById,
   getMessageRange,
@@ -354,20 +353,14 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 }
               }
 
-              // --- Commander：派工 delegate（仅主群）---
+              // --- Commander：派工 delegate（已注册群可发起，host 侧校验 source/target）---
               if (data.type === 'delegate' && data.target && data.text) {
-                await handleDelegate(
-                  data,
-                  sourceGroup,
-                  isMain,
-                  registeredGroups,
-                  deps,
-                );
+                await handleDelegate(data, sourceGroup, registeredGroups, deps);
               }
 
-              // --- Commander：汇报 report（仅子群，恒发唯一主群）---
+              // --- Commander：汇报 report（目标群回任务发起群）---
               if (data.type === 'report' && data.status && data.summary) {
-                handleReport(data, sourceGroup, isMain, registeredGroups);
+                handleReport(data, sourceGroup, registeredGroups);
               }
             } catch (err) {
               logger.error(
@@ -469,8 +462,8 @@ function findJidByFolder(
 }
 
 /**
- * 处理 delegate IPC：主群派活给子群。
- * 先校验 isMain + 一群一在办任务约束 → 落账本拿 task_id → host 注入
+ * 处理 delegate IPC：任意已注册 source 群派活给另一个已注册 target 群。
+ * 先校验 source/target + 一目标群一在办任务约束 → 落账本拿 task_id → host 注入
  * [task_id:xxx] 前缀 → 复用跨群投递 → 回写 dispatch_msg_id。
  */
 async function handleDelegate(
@@ -480,18 +473,16 @@ async function handleDelegate(
     title?: string;
   },
   sourceGroup: string,
-  isMain: boolean,
   registeredGroups: Record<string, RegisteredGroup>,
   deps: IpcDeps,
 ): Promise<void> {
-  if (!isMain) {
-    logger.warn({ sourceGroup }, 'Unauthorized delegate (非主群) blocked');
+  const sourceJid = findJidByFolder(registeredGroups, sourceGroup);
+  if (!sourceJid) {
+    logger.warn({ sourceGroup }, 'delegate source group not registered');
     return;
   }
-
-  const mainJid = findJidByFolder(registeredGroups, sourceGroup);
-  const notifyMain = async (text: string) => {
-    if (mainJid) await deps.sendMessage(mainJid, text);
+  const notifySource = async (text: string) => {
+    await deps.sendMessage(sourceJid, text);
   };
 
   // 解析目标群别名 → jid
@@ -504,16 +495,18 @@ async function handleDelegate(
       { rawTarget, targetJid, sourceGroup },
       'delegate target group not registered',
     );
-    await notifyMain(`派工失败：目标群 ${rawTarget} 未注册。`);
-    return;
-  }
-  // 不允许派工给主群自己：主群是编排者，给自己派会收到自注入的 ipc_ 任务消息。
-  if (targetGroup.isMain) {
-    logger.warn({ rawTarget, sourceGroup }, 'delegate to main group rejected');
-    await notifyMain(`派工失败：${rawTarget} 是主群，不能给自己派工。`);
+    await notifySource(`派工失败：目标群 ${rawTarget} 未注册。`);
     return;
   }
   const targetFolder = targetGroup.folder;
+  if (targetFolder === sourceGroup) {
+    logger.warn(
+      { rawTarget, sourceGroup },
+      'delegate self-delegation rejected',
+    );
+    await notifySource(`派工失败：不能给自己派工。`);
+    return;
+  }
 
   // 一群一在办任务约束
   const active = getActiveDelegationByGroup(targetFolder);
@@ -522,7 +515,7 @@ async function handleDelegate(
       { targetFolder, activeTaskId: active.taskId },
       'delegate rejected: target group has an in-flight task',
     );
-    await notifyMain(
+    await notifySource(
       `派工被拒：${rawTarget} 已有在办任务 ${active.taskId}（${active.status}）。` +
         `用 /delegate reply ${active.taskId} <内容> 续投，或 /delegate close ${active.taskId} 关闭后再派。`,
     );
@@ -531,6 +524,8 @@ async function handleDelegate(
 
   // 先落账本拿 task_id
   const task = createDelegation({
+    sourceGroup,
+    sourceJid,
     targetGroup: targetFolder,
     targetJid,
     title: data.title,
@@ -544,13 +539,13 @@ async function handleDelegate(
   try {
     msgId = await deps.sendMessage(targetJid, prefixedText);
   } catch (sendErr) {
-    // 发送失败：回滚账本，避免留下 dispatched 占槽的幽灵任务（否则该群再也派不进去）
-    closeDelegation(task.taskId);
+    // 发送失败：失败终态回滚槽位，保留审计，避免 dispatched 幽灵占槽。
+    failDelegation(task.taskId, `派工失败：发送给 ${rawTarget} 出错。`);
     logger.error(
       { sendErr, taskId: task.taskId, targetFolder },
-      'delegate 发送失败，已关闭任务回滚槽位',
+      'delegate 发送失败，已标记 failed 回滚槽位',
     );
-    await notifyMain(`派工失败：发送给 ${rawTarget} 出错，已回滚。`);
+    await notifySource(`派工失败：发送给 ${rawTarget} 出错，已回滚。`);
     return;
   }
   try {
@@ -568,13 +563,16 @@ async function handleDelegate(
   } catch (storeErr) {
     // 飞书发出去了但入目标群库失败：agent 靠 message loop 扫 DB 才收得到，
     // 入库失败 = agent 收不到这条任务，但账本却占着 dispatched 槽。
-    // 必须回滚（close 释放槽位）并通知主群重派，否则该群被幽灵任务永久占住。
-    closeDelegation(task.taskId);
+    // 必须回滚为 failed 释放槽位并通知发起群重派，否则目标群被幽灵任务永久占住。
+    failDelegation(
+      task.taskId,
+      `派工异常：${rawTarget} 消息已发但入库失败，目标群 agent 可能收不到。`,
+    );
     logger.error(
       { storeErr, taskId: task.taskId, targetFolder },
-      'delegate 入目标群库失败，已关闭任务回滚槽位（飞书消息已发但 agent 收不到）',
+      'delegate 入目标群库失败，已标记 failed 回滚槽位（飞书消息已发但 agent 收不到）',
     );
-    await notifyMain(
+    await notifySource(
       `派工异常：${rawTarget} 消息已发但入库失败，子群 agent 可能收不到，已回滚槽位，请重新派工。`,
     );
     return;
@@ -589,9 +587,9 @@ async function handleDelegate(
 }
 
 /**
- * 处理 report IPC：子群向唯一主群汇报。
- * 校验源非 main → getMainGroup → source_group 锁 task_id → artifacts 白名单
- * → 更新账本 → 组装可读消息入主群 messages.db（host 时刻 + ipc_ 前缀，
+ * 处理 report IPC：目标群向任务发起群汇报。
+ * 用 reporting_group 锁 target_group 的在办 task → 读取 task.source_jid
+ * → 更新账本 → 组装可读消息入发起群 messages.db（host 时刻 + ipc_ 前缀，
  * 不调 enqueueMessageCheck，交给 message loop 统一限流投喂）。
  */
 function handleReport(
@@ -602,22 +600,9 @@ function handleReport(
     artifacts?: string[];
   },
   sourceGroup: string,
-  isMain: boolean,
   registeredGroups: Record<string, RegisteredGroup>,
 ): void {
-  if (isMain) {
-    logger.warn({ sourceGroup }, 'main group misused report_to_main, blocked');
-    return;
-  }
-
-  // 唯一主群解析（0 或 >1 抛错，不静默降级）
-  let mainJid: string;
-  try {
-    mainJid = getMainGroup().jid;
-  } catch (err) {
-    logger.error({ err, sourceGroup }, 'report 无法解析唯一主群，丢弃汇报');
-    return;
-  }
+  const reportingGroup = sourceGroup;
 
   // host 边界白名单校验 status：report_to_main 只允许这 5 个值。
   // 不信任 agent 端 MCP schema —— 绕过 schema 直接写 IPC 文件就能注入
@@ -631,12 +616,12 @@ function handleReport(
   }
   const status = data.status as ReportStatus;
 
-  // source_group 反查唯一在办任务。无在办任务 = 子群越界汇报（没人派工却 report），
-  // 直接拒绝，不投主群——否则破坏"source_group 锁定 task"语义，也成了任意发消息通道。
-  const task = getActiveDelegationByGroup(sourceGroup);
+  // reporting_group 反查唯一在办任务。无在办任务 = 当前群越界汇报（没人派工却 report），
+  // 直接拒绝，不投任何群——否则会变成任意发消息通道。
+  const task = getActiveDelegationByGroup(reportingGroup);
   if (!task) {
     logger.warn(
-      { sourceGroup, status },
+      { reportingGroup, status },
       'report 该群无在办任务，拒绝汇报（疑似越界）',
     );
     return;
@@ -644,10 +629,10 @@ function handleReport(
 
   // artifacts 白名单校验
   const sourceReg = registeredGroups[
-    findJidByFolder(registeredGroups, sourceGroup) || ''
+    findJidByFolder(registeredGroups, reportingGroup) || ''
   ] as RegisteredGroup | undefined;
   const allowedRoots = [
-    resolveGroupFolderPath(sourceGroup),
+    resolveGroupFolderPath(reportingGroup),
     sourceReg?.customCwd || process.env.NANOCLAW_DEFAULT_CWD || '',
     '/tmp/nanoclaw-artifacts',
   ].filter(Boolean);
@@ -669,7 +654,7 @@ function handleReport(
   });
 
   // 组装可读汇报消息
-  const lines = [`【汇报｜${sourceGroup}｜${status}】${data.summary}`];
+  const lines = [`【汇报｜${reportingGroup}｜${status}】${data.summary}`];
   if (data.details) lines.push(data.details);
   if (valid.length > 0) lines.push(`产物: ${valid.join(', ')}`);
   if (rejected.length > 0)
@@ -677,33 +662,33 @@ function handleReport(
   lines.push(`(task ${task.taskId})`);
   const reportText = lines.join('\n');
 
-  storeReportToMain(mainJid, sourceGroup, reportText);
+  storeReportToSource(task.sourceJid, reportingGroup, reportText);
   logger.info(
-    { sourceGroup, status, taskId: task.taskId, mainJid },
-    'report stored to main group DB',
+    { reportingGroup, status, taskId: task.taskId, sourceJid: task.sourceJid },
+    'report stored to source group DB',
   );
 }
 
 /**
- * 把一条汇报文本入主群 messages.db。
+ * 把一条汇报文本入任务发起群 messages.db。
  * host 时刻（nextIpcTimestamp 保证同群严格递增）+ ipc_ 前缀（绕 trigger）+
  * is_from_me=false。绝不 enqueueMessageCheck —— 交给 message loop 统一发现，
  * 把同一周期内的多条汇报合并成一次 context 喂给主群 agent（复用 2026-06-07
  * 删双投喂修复后的统一路径，避免 N 个子群同时 done 触发主群 N 次 + 双投喂）。
  */
-function storeReportToMain(
-  mainJid: string,
-  sourceGroup: string,
+function storeReportToSource(
+  sourceJid: string,
+  reportingGroup: string,
   reportText: string,
 ): void {
-  const reportSender = `${ASSISTANT_NAME}(${sourceGroup})`;
+  const reportSender = `${ASSISTANT_NAME}(${reportingGroup})`;
   storeMessageDirect({
     id: `ipc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    chat_jid: mainJid,
+    chat_jid: sourceJid,
     sender: reportSender,
     sender_name: reportSender,
     content: reportText,
-    timestamp: nextIpcTimestamp(mainJid),
+    timestamp: nextIpcTimestamp(sourceJid),
     is_from_me: false,
     is_bot_message: false,
   });
@@ -724,21 +709,13 @@ function storeReportToMain(
  * @returns 是否实际触发了一次自动汇报（用于日志）
  */
 export function finalizeDelegationOnTurnEnd(
-  sourceGroup: string,
+  reportingGroup: string,
   ok: boolean,
   finalReply?: string,
 ): boolean {
-  const task = getActiveDelegationByGroup(sourceGroup);
+  const task = getActiveDelegationByGroup(reportingGroup);
   if (!task) return false;
   if (task.status !== 'dispatched' && task.status !== 'progress') return false;
-
-  let mainJid: string;
-  try {
-    mainJid = getMainGroup().jid;
-  } catch (err) {
-    logger.error({ err, sourceGroup }, '自动终态汇报无法解析主群，跳过');
-    return false;
-  }
 
   const status: ReportStatus = ok ? 'done' : 'failed';
   const baseSummary = ok
@@ -756,20 +733,34 @@ export function finalizeDelegationOnTurnEnd(
     details,
   });
 
-  let reportText = `【汇报｜${sourceGroup}｜${status}】${baseSummary}`;
+  let reportText = `【汇报｜${reportingGroup}｜${status}】${baseSummary}`;
   if (details) reportText += `\n结果：${details}`;
   reportText += `\n(task ${task.taskId}，自动终态)`;
   try {
-    storeReportToMain(mainJid, sourceGroup, reportText);
+    storeReportToSource(task.sourceJid, reportingGroup, reportText);
   } catch (storeErr) {
-    logger.error({ storeErr, sourceGroup }, '自动终态汇报入主群库失败');
+    logger.error(
+      {
+        storeErr,
+        reportingGroup,
+        taskId: task.taskId,
+        sourceJid: task.sourceJid,
+        status,
+      },
+      '自动终态汇报入发起群库失败',
+    );
   }
   logger.info(
-    { sourceGroup, taskId: task.taskId, status },
-    '自动终态汇报已写入主群',
+    { reportingGroup, taskId: task.taskId, status, sourceJid: task.sourceJid },
+    '自动终态汇报已写入发起群',
   );
   return true;
 }
+
+export const __testing = {
+  handleDelegate,
+  handleReport,
+};
 
 export async function processTaskIpc(
   data: {

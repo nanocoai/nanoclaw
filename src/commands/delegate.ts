@@ -57,12 +57,19 @@ function renderStatus(tasks: DelegationTask[]): string {
     const stale = isStale(t) ? ' ⚠️失联' : '';
     const last = fmtTime(t.lastReportAt || t.dispatchedAt);
     lines.push(
-      `• [${shortId(t.taskId)}] ${t.targetGroup} | ${t.status}${stale} | ${last}`,
+      `• [${shortId(t.taskId)}] ${t.sourceGroup} → ${t.targetGroup} | ${t.status}${stale} | ${last}`,
     );
     const detail = truncate(t.summary || t.title, 40);
     if (detail) lines.push(`    ${detail}`);
   }
   return lines.join('\n');
+}
+
+function canManageDelegation(
+  group: { folder: string; isMain?: boolean },
+  task: DelegationTask,
+): boolean {
+  return Boolean(group.isMain) || task.sourceGroup === group.folder;
 }
 
 /**
@@ -129,7 +136,6 @@ registerCommand({
   description:
     '派工账本管理：status 查看 / reply 续投 / retry 重派 / close 关闭',
   hasArgs: true,
-  requiresMain: true,
   order: 30,
   subcommands: [
     { usage: '/delegate status [group]', description: '查看派工状态表' },
@@ -156,7 +162,9 @@ registerCommand({
     // 无参数或 status：展示状态表
     if (!sub || sub === 'status') {
       const groupFilter = rest[0];
-      const tasks = listDelegations(groupFilter);
+      const tasks = ctx.group.isMain
+        ? listDelegations(groupFilter ? { group: groupFilter } : undefined)
+        : listDelegations({ sourceGroup: ctx.group.folder });
       await reply(renderStatus(tasks));
       return;
     }
@@ -171,6 +179,10 @@ registerCommand({
       const task = getDelegation(taskId);
       if (!task) {
         await reply(`未找到任务 ${taskId}`);
+        return;
+      }
+      if (!canManageDelegation(ctx.group, task)) {
+        await reply(`无权管理任务 ${taskId}`);
         return;
       }
       if (!REPLYABLE.has(task.status)) {
@@ -216,6 +228,10 @@ registerCommand({
       const task = getDelegation(taskId);
       if (!task) {
         await reply(`未找到任务 ${taskId}`);
+        return;
+      }
+      if (!canManageDelegation(ctx.group, task)) {
+        await reply(`无权管理任务 ${taskId}`);
         return;
       }
       // 防破坏"一群一在办"：若目标群当前已有"另一个"占槽任务，retry 会让该群
@@ -265,6 +281,10 @@ registerCommand({
       const task = getDelegation(taskId);
       if (!task) {
         await reply(`未找到任务 ${taskId}`);
+        return;
+      }
+      if (!canManageDelegation(ctx.group, task)) {
+        await reply(`无权管理任务 ${taskId}`);
         return;
       }
       closeDelegation(task.taskId);
