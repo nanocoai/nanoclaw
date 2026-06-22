@@ -6,8 +6,10 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { applyInputTransform } from './input-transform.js';
+import { applyPreCompactCapture, preCompactCaptureTimeoutSec } from './precompact-capture.js';
 import { registerProvider } from './provider-registry.js';
 import { applyQueryConfinement, isQueryConfinementRegistered } from './query-confinement.js';
+import { mapCompactBoundaryMessage, mapResultMessage } from './result-events.js';
 import { policyAllowsTool, policyExtraDenied, policyHidesMcpServer, policySettingSources } from './tool-policy.js';
 import { applyToolResultMiddleware } from './tool-result-middleware.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
@@ -222,18 +224,20 @@ const postToolUseHook: HookCallback = async (input) => {
 /**
  * Read a Claude transcript .jsonl, render a markdown summary, and drop it into
  * the agent's `conversations/` folder so context survives a compaction or a
- * session rotation. Best-effort: returns false (and logs) on any failure.
+ * session rotation. Returns the PARSED messages (so a caller can reuse them
+ * without re-reading the file), or null (and logs) on any failure / empty
+ * transcript. Best-effort.
  */
-function archiveTranscriptFile(transcriptPath: string | undefined, sessionId: string | undefined, assistantName?: string): boolean {
+function archiveTranscriptFile(transcriptPath: string | undefined, sessionId: string | undefined, assistantName?: string): ParsedMessage[] | null {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) {
     log('No transcript found for archiving');
-    return false;
+    return null;
   }
 
   try {
     const content = fs.readFileSync(transcriptPath, 'utf-8');
     const messages = parseTranscript(content);
-    if (messages.length === 0) return false;
+    if (messages.length === 0) return null;
 
     // Try to get summary from sessions index
     let summary: string | undefined;
@@ -256,17 +260,23 @@ function archiveTranscriptFile(transcriptPath: string | undefined, sessionId: st
     const filename = `${new Date().toISOString().split('T')[0]}-${name}.md`;
     fs.writeFileSync(path.join(conversationsDir, filename), formatTranscriptMarkdown(messages, summary, assistantName));
     log(`Archived conversation to ${filename}`);
-    return true;
+    return messages;
   } catch (err) {
     log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
+    return null;
   }
 }
 
 function createPreCompactHook(assistantName?: string): HookCallback {
   return async (input) => {
     const preCompact = input as PreCompactHookInput;
-    archiveTranscriptFile(preCompact.transcript_path, preCompact.session_id, assistantName);
+    const messages = archiveTranscriptFile(preCompact.transcript_path, preCompact.session_id, assistantName);
+    // Post-archive capture seam (INERT on pristine core): an overlay may distil durable facts
+    // from the SAME parsed transcript into board memory. Runs only when a registrant exists and
+    // is best-effort (applyPreCompactCapture swallows failures) so it can never break compaction.
+    if (messages) {
+      await applyPreCompactCapture({ messages, sessionId: preCompact.session_id ?? 'unknown' });
+    }
     return {};
   };
 }
@@ -498,7 +508,10 @@ export class ClaudeProvider implements AgentProvider {
           PreToolUse: [{ hooks: [preToolUseHook] }],
           PostToolUse: [{ hooks: [postToolUseHook] }],
           PostToolUseFailure: [{ hooks: [postToolUseHook] }],
-          PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],
+          // timeout widens to what a registered PreCompact capture needs (undefined ⇒ SDK
+          // default, matching upstream) so an overlay's extraction writes cleanly before the
+          // SDK could kill the hook.
+          PreCompact: [{ timeout: preCompactCaptureTimeoutSec(), hooks: [createPreCompactHook(this.assistantName)] }],
         },
       },
     });
@@ -517,21 +530,23 @@ export class ClaudeProvider implements AgentProvider {
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'result') {
-          // `result` text exists only on subtype:"success"; error subtypes
-          // (e.g. a non-retryable 403 billing_error) carry their message in
-          // `errors[]` instead. Surface either so the poll-loop can deliver a
-          // billing/quota notice to the user rather than dropping the turn.
-          const m = message as { result?: string; is_error?: boolean; errors?: string[] };
-          const text = m.result ?? (m.errors && m.errors.length > 0 ? m.errors.join('\n') : null);
-          yield { type: 'result', text, isError: m.is_error === true };
+          // `result` text exists only on subtype:"success"; error subtypes (e.g. a non-retryable
+          // 403 billing_error) carry their message in `errors[]`. The mapping is routed through
+          // the result-event seam (INERT on core — base default surfaces either so the poll-loop
+          // can deliver a billing/quota notice rather than dropping the turn). An overlay may
+          // replace it (e.g. to guarantee non-null error text).
+          for (const ev of mapResultMessage(message as { result?: string; is_error?: boolean; errors?: string[] })) {
+            yield ev;
+          }
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
           yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
-          const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
-          const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';
-          yield { type: 'result', text: `Context compacted${detail}.` };
+          // Routed through the result-event seam (INERT on core — base default delivers the
+          // notice as a `result`). An overlay may emit a `compacted` event the poll-loop
+          // suppresses instead.
+          yield mapCompactBoundaryMessage(message as { compact_metadata?: { pre_tokens?: number } });
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
           const tn = message as { summary?: string };
           yield { type: 'progress', message: tn.summary || 'Task notification' };
