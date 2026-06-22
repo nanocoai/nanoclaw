@@ -57,12 +57,19 @@ function renderStatus(tasks: DelegationTask[]): string {
     const stale = isStale(t) ? ' ⚠️失联' : '';
     const last = fmtTime(t.lastReportAt || t.dispatchedAt);
     lines.push(
-      `• [${shortId(t.taskId)}] ${t.targetGroup} | ${t.status}${stale} | ${last}`,
+      `• [${shortId(t.taskId)}] ${t.sourceGroup} → ${t.targetGroup} | ${t.status}${stale} | ${last}`,
     );
     const detail = truncate(t.summary || t.title, 40);
     if (detail) lines.push(`    ${detail}`);
   }
   return lines.join('\n');
+}
+
+function canManageDelegation(
+  group: { folder: string; isMain?: boolean },
+  task: DelegationTask,
+): boolean {
+  return Boolean(group.isMain) || task.sourceGroup === group.folder;
 }
 
 /**
@@ -115,7 +122,10 @@ async function deliverToSubgroup(
       is_bot_message: false,
     });
   } catch (err) {
-    logger.error({ err, taskId }, '/delegate 发送成功但入库失败，agent 收不到，不推进状态');
+    logger.error(
+      { err, taskId },
+      '/delegate 发送成功但入库失败，agent 收不到，不推进状态',
+    );
     return 'store-failed';
   }
   return 'ok';
@@ -126,7 +136,6 @@ registerCommand({
   description:
     '派工账本管理：status 查看 / reply 续投 / retry 重派 / close 关闭',
   hasArgs: true,
-  requiresMain: true,
   order: 30,
   subcommands: [
     { usage: '/delegate status [group]', description: '查看派工状态表' },
@@ -134,8 +143,14 @@ registerCommand({
       usage: '/delegate reply <task_id> <text>',
       description: '对进行/等待态任务续投（状态回 progress）',
     },
-    { usage: '/delegate retry <task_id>', description: '重派任务（状态回 dispatched）' },
-    { usage: '/delegate close <task_id>', description: '关闭任务，释放在办槽位' },
+    {
+      usage: '/delegate retry <task_id>',
+      description: '重派任务（状态回 dispatched）',
+    },
+    {
+      usage: '/delegate close <task_id>',
+      description: '关闭任务，释放在办槽位',
+    },
   ],
   handler: async (ctx) => {
     const reply = (text: string) =>
@@ -147,7 +162,9 @@ registerCommand({
     // 无参数或 status：展示状态表
     if (!sub || sub === 'status') {
       const groupFilter = rest[0];
-      const tasks = listDelegations(groupFilter);
+      const tasks = ctx.group.isMain
+        ? listDelegations(groupFilter ? { group: groupFilter } : undefined)
+        : listDelegations({ sourceGroup: ctx.group.folder });
       await reply(renderStatus(tasks));
       return;
     }
@@ -164,6 +181,10 @@ registerCommand({
         await reply(`未找到任务 ${taskId}`);
         return;
       }
+      if (!canManageDelegation(ctx.group, task)) {
+        await reply(`无权管理任务 ${taskId}`);
+        return;
+      }
       if (!REPLYABLE.has(task.status)) {
         await reply(
           `任务 ${taskId} 当前状态 ${task.status}，已关闭，不能续投。`,
@@ -178,7 +199,9 @@ registerCommand({
         ctx.channel,
       );
       if (sent === 'send-failed') {
-        await reply(`续投失败：发送给 ${task.targetGroup} 出错，状态未变更，请重试。`);
+        await reply(
+          `续投失败：发送给 ${task.targetGroup} 出错，状态未变更，请重试。`,
+        );
         return;
       }
       if (sent === 'store-failed') {
@@ -190,7 +213,9 @@ registerCommand({
       }
       replyDelegation(task.taskId);
       logger.info({ taskId: task.taskId }, '/delegate reply 续投');
-      await reply(`✅ 已续投给 ${task.targetGroup}（${taskId}），状态回 progress。`);
+      await reply(
+        `✅ 已续投给 ${task.targetGroup}（${taskId}），状态回 progress。`,
+      );
       return;
     }
 
@@ -203,6 +228,10 @@ registerCommand({
       const task = getDelegation(taskId);
       if (!task) {
         await reply(`未找到任务 ${taskId}`);
+        return;
+      }
+      if (!canManageDelegation(ctx.group, task)) {
+        await reply(`无权管理任务 ${taskId}`);
         return;
       }
       // 防破坏"一群一在办"：若目标群当前已有"另一个"占槽任务，retry 会让该群
@@ -223,7 +252,9 @@ registerCommand({
         ctx.channel,
       );
       if (sent === 'send-failed') {
-        await reply(`重派失败：发送给 ${task.targetGroup} 出错，状态未变更，请重试。`);
+        await reply(
+          `重派失败：发送给 ${task.targetGroup} 出错，状态未变更，请重试。`,
+        );
         return;
       }
       if (sent === 'store-failed') {
@@ -235,7 +266,9 @@ registerCommand({
       }
       resetDelegationToDispatched(task.taskId);
       logger.info({ taskId: task.taskId }, '/delegate retry 重派');
-      await reply(`✅ 已重派给 ${task.targetGroup}（${taskId}），状态回 dispatched。`);
+      await reply(
+        `✅ 已重派给 ${task.targetGroup}（${taskId}），状态回 dispatched。`,
+      );
       return;
     }
 
@@ -250,14 +283,18 @@ registerCommand({
         await reply(`未找到任务 ${taskId}`);
         return;
       }
+      if (!canManageDelegation(ctx.group, task)) {
+        await reply(`无权管理任务 ${taskId}`);
+        return;
+      }
       closeDelegation(task.taskId);
       logger.info({ taskId: task.taskId }, '/delegate close 关闭');
-      await reply(`✅ 已关闭任务 ${taskId}，释放 ${task.targetGroup} 在办槽位。`);
+      await reply(
+        `✅ 已关闭任务 ${taskId}，释放 ${task.targetGroup} 在办槽位。`,
+      );
       return;
     }
 
-    await reply(
-      '未知子命令。可用：/delegate status | reply | retry | close',
-    );
+    await reply('未知子命令。可用：/delegate status | reply | retry | close');
   },
 });

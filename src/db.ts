@@ -159,6 +159,8 @@ function createSchema(database: Database.Database): void {
 
     CREATE TABLE IF NOT EXISTS delegation_tasks (
       task_id         TEXT PRIMARY KEY,
+      source_group    TEXT NOT NULL,
+      source_jid      TEXT NOT NULL,
       target_group    TEXT NOT NULL,
       target_jid      TEXT NOT NULL,
       title           TEXT,
@@ -286,6 +288,8 @@ function createSchema(database: Database.Database): void {
     /* column already exists */
   }
 
+  migrateDelegationSourceFields(database);
+
   // Add channel and is_group columns if they don't exist (migration for existing DBs)
   try {
     database.exec(`ALTER TABLE chats ADD COLUMN channel TEXT`);
@@ -341,6 +345,64 @@ function createSchema(database: Database.Database): void {
     /* columns already exist */
   }
 }
+
+function migrateDelegationSourceFields(database: Database.Database): void {
+  try {
+    const delegationColumns = database
+      .prepare('PRAGMA table_info(delegation_tasks)')
+      .all() as Array<{ name: string }>;
+    const hasSourceGroup = delegationColumns.some(
+      (column) => column.name === 'source_group',
+    );
+    const hasSourceJid = delegationColumns.some(
+      (column) => column.name === 'source_jid',
+    );
+    if (!hasSourceGroup) {
+      database.exec(
+        `ALTER TABLE delegation_tasks ADD COLUMN source_group TEXT`,
+      );
+    }
+    if (!hasSourceJid) {
+      database.exec(`ALTER TABLE delegation_tasks ADD COLUMN source_jid TEXT`);
+    }
+
+    // 每次启动都检查空 source，而不是只在刚加列时回填。
+    // 如果第一次启动 ALTER 成功后在查主群/回填前失败，重启时列已存在；
+    // 这里继续回填，避免旧任务留下空 source 导致权限和汇报路由读脏数据。
+    const pending = database
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM delegation_tasks
+         WHERE source_group IS NULL OR source_group = '' OR source_jid IS NULL OR source_jid = ''`,
+      )
+      .get() as { count: number };
+    if (pending.count === 0) return;
+
+    const mains = database
+      .prepare(`SELECT jid, folder FROM registered_groups WHERE is_main = 1`)
+      .all() as Array<{ jid: string; folder: string }>;
+    if (mains.length !== 1) {
+      throw new Error(
+        `Cannot backfill delegation source fields: expected exactly 1 main group, got ${mains.length}`,
+      );
+    }
+    database
+      .prepare(
+        `UPDATE delegation_tasks
+         SET source_group = COALESCE(NULLIF(source_group, ''), ?),
+             source_jid = COALESCE(NULLIF(source_jid, ''), ?)
+         WHERE source_group IS NULL OR source_group = '' OR source_jid IS NULL OR source_jid = ''`,
+      )
+      .run(mains[0].folder, mains[0].jid);
+  } catch (err) {
+    logger.error({ err }, 'Failed to migrate delegation_tasks source fields');
+    throw err;
+  }
+}
+
+export const __testing = {
+  migrateDelegationSourceFields,
+};
 
 export function initDatabase(): void {
   const dbPath = path.join(STORE_DIR, 'messages.db');
@@ -2020,6 +2082,8 @@ export const DELEGATION_OCCUPYING_STATUSES: DelegationStatus[] = [
 
 interface DelegationRow {
   task_id: string;
+  source_group: string;
+  source_jid: string;
   target_group: string;
   target_jid: string;
   title: string | null;
@@ -2036,6 +2100,8 @@ interface DelegationRow {
 function rowToDelegation(row: DelegationRow): DelegationTask {
   return {
     taskId: row.task_id,
+    sourceGroup: row.source_group,
+    sourceJid: row.source_jid,
     targetGroup: row.target_group,
     targetJid: row.target_jid,
     title: row.title || undefined,
@@ -2052,17 +2118,24 @@ function rowToDelegation(row: DelegationRow): DelegationTask {
 
 /** 派发落账：生成 task_id、status=dispatched，返回新建的任务行 */
 export function createDelegation(params: {
+  sourceGroup: string;
+  sourceJid: string;
   targetGroup: string;
   targetJid: string;
   title?: string;
 }): DelegationTask {
+  if (!params.sourceGroup || !params.sourceJid) {
+    throw new Error('createDelegation requires sourceGroup and sourceJid');
+  }
   const now = new Date().toISOString();
   const taskId = `dlg_${Date.now()}_${randomBytes(4).toString('hex')}`;
   db.prepare(
-    `INSERT INTO delegation_tasks (task_id, target_group, target_jid, title, status, dispatched_at, updated_at)
-     VALUES (?, ?, ?, ?, 'dispatched', ?, ?)`,
+    `INSERT INTO delegation_tasks (task_id, source_group, source_jid, target_group, target_jid, title, status, dispatched_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'dispatched', ?, ?)`,
   ).run(
     taskId,
+    params.sourceGroup,
+    params.sourceJid,
     params.targetGroup,
     params.targetJid,
     params.title || null,
@@ -2138,6 +2211,16 @@ export function closeDelegation(taskId: string): void {
   ).run(now, taskId);
 }
 
+/** 派发失败：状态置 failed，释放在办槽位，同时保留审计摘要 */
+export function failDelegation(taskId: string, summary?: string): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE delegation_tasks
+     SET status = 'failed', summary = COALESCE(?, summary), last_report_at = ?, updated_at = ?
+     WHERE task_id = ?`,
+  ).run(summary ?? null, now, now, taskId);
+}
+
 export function getDelegation(taskId: string): DelegationTask | undefined {
   const row = db
     .prepare('SELECT * FROM delegation_tasks WHERE task_id = ?')
@@ -2145,19 +2228,30 @@ export function getDelegation(taskId: string): DelegationTask | undefined {
   return row ? rowToDelegation(row) : undefined;
 }
 
-/** 列账本，可选按 target_group 过滤，按派发时间倒序 */
-export function listDelegations(targetGroup?: string): DelegationTask[] {
-  const rows = (
-    targetGroup
-      ? db
-          .prepare(
-            'SELECT * FROM delegation_tasks WHERE target_group = ? ORDER BY dispatched_at DESC',
-          )
-          .all(targetGroup)
-      : db
-          .prepare('SELECT * FROM delegation_tasks ORDER BY dispatched_at DESC')
-          .all()
-  ) as DelegationRow[];
+/** 列账本，可选按 source_group / target_group 过滤，按派发时间倒序 */
+export function listDelegations(filters?: {
+  sourceGroup?: string;
+  targetGroup?: string;
+  group?: string;
+}): DelegationTask[] {
+  const where: string[] = [];
+  const args: string[] = [];
+  if (filters?.sourceGroup) {
+    where.push('source_group = ?');
+    args.push(filters.sourceGroup);
+  }
+  if (filters?.targetGroup) {
+    where.push('target_group = ?');
+    args.push(filters.targetGroup);
+  }
+  if (filters?.group) {
+    where.push('(source_group = ? OR target_group = ?)');
+    args.push(filters.group, filters.group);
+  }
+  const sql = `SELECT * FROM delegation_tasks${
+    where.length > 0 ? ` WHERE ${where.join(' AND ')}` : ''
+  } ORDER BY dispatched_at DESC`;
+  const rows = db.prepare(sql).all(...args) as DelegationRow[];
   return rows.map(rowToDelegation);
 }
 
