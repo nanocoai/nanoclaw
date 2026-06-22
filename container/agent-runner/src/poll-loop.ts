@@ -397,6 +397,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
           config.provider.onExchangeComplete?.bind(config.provider),
           prompt,
           continuation,
+          config.signal,
         );
         if (result.continuation && result.continuation !== continuation) {
           continuation = result.continuation;
@@ -485,6 +486,7 @@ export async function processQuery(
   onExchangeComplete: ((exchange: ProviderExchange) => void) | undefined,
   initialPrompt: string,
   initialContinuation: string | undefined,
+  signal?: AbortSignal,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -508,6 +510,14 @@ export async function processQuery(
   let endedForCommand = false;
   let corruptionStreak = 0;
   const pollHandle = setInterval(() => {
+    // Loop owner aborted (tests pass config.signal; production leaves it undefined → this never
+    // fires → byte-identical upstream). The for-await on query.events would otherwise block until
+    // the stream ends on its own, so an abandoned test loop with a long-lived query would leak.
+    // Abort (not end) the stream so the for-await unwinds and runPollLoop returns at its top check.
+    if (signal?.aborted) {
+      query.abort();
+      return;
+    }
     if (done || pollInFlight || endedForCommand) return;
     pollInFlight = true;
 
