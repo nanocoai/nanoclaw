@@ -457,6 +457,12 @@ export class ClaudeProvider implements AgentProvider {
     // routes the normal surface through applyQueryConfinement, which a registered overlay
     // tightens (MCP-only / no built-ins / no board dirs). FAIL-CLOSED: a flagged turn with
     // no registrant throws rather than run unconfined (see query-confinement.ts).
+    //
+    // Note: confinement narrows the MCP servers + dirs (and prunes allowedTools as
+    // defense-in-depth). The actual fs/bash lockdown is NOT owned here — built-in tools are
+    // denied every turn by `disallowedTools()` (a registered ProviderToolPolicy adds
+    // Bash/Read/Write/Edit/Glob/Grep/… to the base denylist), and under bypassPermissions
+    // `allowedTools` only auto-approves. Do not assume this block alone blocks built-ins.
     if (input.confinedExternal === true) {
       const confined = applyQueryConfinement({
         allowedTools,
