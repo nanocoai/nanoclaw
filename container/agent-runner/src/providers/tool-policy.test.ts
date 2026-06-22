@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
 import {
   __resetProviderToolPolicyForTest,
@@ -9,6 +9,13 @@ import {
   registerProviderToolPolicy,
 } from './tool-policy.js';
 
+// Reset BOTH before and after each case: an install-overlay's tool-policy registrant
+// self-registers at module load (via the providers barrel), so when this base suite runs in the
+// same bun process as the installed barrel, the shared registry would be pre-populated and the
+// "inert" assertions would see a stale policy. beforeEach guarantees the un-registered baseline
+// regardless of order — caught by the install-then-test gate (passes on pristine core, where no
+// registrant loads; failed once the overlay barrel wired the registrant).
+beforeEach(() => __resetProviderToolPolicyForTest());
 afterEach(() => __resetProviderToolPolicyForTest());
 
 describe('provider tool-policy (monotonic composition)', () => {
