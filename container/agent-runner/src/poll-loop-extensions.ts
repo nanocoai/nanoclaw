@@ -448,3 +448,30 @@ export function __resetFollowupHooksForTest(): void {
   followupDropHooks.length = 0;
   followupEndStreamHooks.length = 0;
 }
+
+// Pre-task-script guard (Route-C hook). `applyPreTaskScripts` (scheduling/task-script.ts) consults
+// each guard for a task message that carries a pre-agent `script` BEFORE writing+executing it; a
+// guard returning a reason string SKIPS that task (it lands in `skipped`, so neither the script nor
+// the prompt runs). An overlay registers the TaskFlow board veto here (a pre-agent script is a
+// delayed bash shell-exec primitive that bypasses the Bash/Write/Read denylist; board scheduled
+// tasks are prompt-only). No registrant ⇒ null ⇒ every scripted task runs exactly as upstream.
+export type PreTaskScriptGuard = (msg: MessageInRow) => string | null;
+
+const preTaskScriptGuards: PreTaskScriptGuard[] = [];
+
+export function registerPreTaskScriptGuard(fn: PreTaskScriptGuard): void {
+  preTaskScriptGuards.push(fn);
+}
+
+/** First guard returning a reason wins (skip that task). No registrant ⇒ null ⇒ run the script. */
+export function applyPreTaskScriptGuards(msg: MessageInRow): string | null {
+  for (const fn of preTaskScriptGuards) {
+    const reason = fn(msg);
+    if (reason) return reason;
+  }
+  return null;
+}
+
+export function __resetPreTaskScriptGuardsForTest(): void {
+  preTaskScriptGuards.length = 0;
+}

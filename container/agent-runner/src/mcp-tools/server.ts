@@ -187,6 +187,23 @@ export function getRegisteredToolForTesting(name: string): McpToolDefinition | u
 }
 
 /**
+ * ADR 0006 contract 8 (tools/list extension point). A filter applied to the
+ * EXPOSED tool set right before `tools/list` is answered, so an overlay can hide
+ * a registered tool from certain sessions WITHOUT core importing any fork module
+ * (the in-handler dispatch guards still gate `tools/call`; this is the matching
+ * advertisement-side control). TaskFlow registers a board filter that drops
+ * `create_agent` on a board session (defense-in-depth atop its dispatch-guard
+ * denial). Composed in registration order; empty on pristine core ⇒ the exposed
+ * set is announced unchanged (upstream behavior). Evaluated per `tools/list` call
+ * so an env-gated filter sees the live session state. */
+type ToolListFilter = (tools: McpToolDefinition[]) => McpToolDefinition[];
+const toolListFilters: ToolListFilter[] = [];
+
+export function registerToolListFilter(fn: ToolListFilter): void {
+  toolListFilters.push(fn);
+}
+
+/**
  * Per-tool argument guard for the restricted (FastAPI) surface: keyed by
  * tool name, returns a rejection reason string to deny the call, or null
  * to allow it. Used to gate sub-modes of an otherwise-allowlisted tool
@@ -214,9 +231,12 @@ export async function startMcpServer(
   const server = new Server(SERVER_INFO, { capabilities: { tools: {} } });
   const exposed = allow ? allTools.filter((t) => allow.has(t.tool.name)) : allTools;
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: exposed.map((t) => t.tool),
-  }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    // Apply any overlay list-filters (e.g. hide create_agent on a board session) over the
+    // allow-restricted exposed set. No registrant ⇒ `exposed` is announced unchanged (upstream).
+    const listed = toolListFilters.reduce((acc, fn) => fn(acc), exposed);
+    return { tools: listed.map((t) => t.tool) };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
