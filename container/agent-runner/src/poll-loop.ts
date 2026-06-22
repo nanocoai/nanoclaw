@@ -687,7 +687,16 @@ export async function processQuery(
             // <message> envelope: deliver the notice instead of dropping it as
             // scratchpad, and skip the re-wrap nudge — it would just re-hammer
             // the failing gateway turn after turn.
-            deliverErrorResult(event.text, routing);
+            //
+            // Only deliver here when the dispatcher did NOT already deliver it. The
+            // pristine dispatchResultText never bare-delivers (hasUnwrapped === true for
+            // an undelivered error → this fires, byte-identical to upstream). A registered
+            // overlay dispatcher MAY bare-deliver the error text (e.g. a confined/gated
+            // reply); it then reports hasUnwrapped === false (delivered), so gating on
+            // hasUnwrapped avoids a double-send while keeping the error status + no-nudge.
+            if (hasUnwrapped) {
+              deliverErrorResult(event.text, routing);
+            }
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
