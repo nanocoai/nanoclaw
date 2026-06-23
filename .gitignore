@@ -46,3 +46,5 @@ AGENTS.md
 docs/maintainer-guide.md
 docs/drafts/
 forks.md
+/node_modules
+/container/agent-runner/node_modules
