@@ -185,6 +185,26 @@ export function updatePendingApprovalStatus(approvalId: string, status: PendingA
   getDb().prepare('UPDATE pending_approvals SET status = ? WHERE approval_id = ?').run(status, approvalId);
 }
 
+/**
+ * Record where an approval card was actually delivered. requestApproval()
+ * creates the row before it knows the approver, then calls this once the
+ * channel adapter has sent the card. Without it channel_type / platform_id /
+ * platform_message_id stay NULL, so `approvals list` can't show the real
+ * destination and there's no record of which chat the card went to.
+ */
+export function updatePendingApprovalDelivery(
+  approvalId: string,
+  channelType: string,
+  platformId: string,
+  platformMessageId: string | null,
+): void {
+  getDb()
+    .prepare(
+      'UPDATE pending_approvals SET channel_type = ?, platform_id = ?, platform_message_id = ? WHERE approval_id = ?',
+    )
+    .run(channelType, platformId, platformMessageId, approvalId);
+}
+
 export function deletePendingApproval(approvalId: string): void {
   getDb().prepare('DELETE FROM pending_approvals WHERE approval_id = ?').run(approvalId);
 }
