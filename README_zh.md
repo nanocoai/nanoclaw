@@ -18,6 +18,16 @@
 
 ---
 
+<p align="center">
+  <a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=nanoclaw">
+    <img src="assets/atlas-cloud-logo.png" alt="Atlas Cloud" width="200">
+  </a>
+</p>
+
+> 🎁 **[Atlas Cloud](https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=nanoclaw)** 是全模态 OpenAI 兼容 AI 推理平台 —— 通过 `/add-opencode` 设置 `ANTHROPIC_BASE_URL=https://api.atlascloud.ai/v1`，即可在 NanoClaw 智能体中使用 DeepSeek-V4、Kimi K2、Qwen3、GPT-5、Gemini 2.5 Pro、Claude 等 50+ 前沿模型，无需管理多个供应商。立即使用：[coding plan](https://www.atlascloud.ai/console/coding-plan)。
+
+---
+
 ## 我为什么创建 NanoClaw
 
 [OpenClaw](https://github.com/openclaw/openclaw) 是一个令人印象深刻的项目，但我无法安心使用一个我不了解、却能访问我个人隐私的复杂软件。OpenClaw 有近 50 万行代码、53 个配置文件和 70+ 个依赖项。其安全性是应用级别的（白名单、配对码），而非真正的操作系统级隔离。所有东西都在一个共享内存的 Node 进程中运行。
