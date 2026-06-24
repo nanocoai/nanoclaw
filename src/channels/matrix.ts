@@ -39,6 +39,13 @@
  *                                 token + the persisted access token.
  *   MATRIX_RECOVERY_KEY         — see the cross-signing note below.
  *   MATRIX_INVITE_AUTOJOIN      — "true" (default) auto-accepts room invites.
+ *   WHISPER_BIN                 — path to a whisper.cpp binary. When set,
+ *                                 voice messages (m.audio) are transcribed
+ *                                 locally via ffmpeg + whisper.cpp and routed
+ *                                 as text. Audio never leaves the machine.
+ *                                 If unset, voice messages arrive as "[Voice message]".
+ *   WHISPER_MODEL               — path to the ggml model file (default:
+ *                                 ~/.local/share/whisper/models/ggml-base.en.bin).
  *
  * Cross-signing + 4S (MATRIX_RECOVERY_KEY): a patch
  * (patches/matrix-bot-sdk@0.8.0.patch) fixes two SDK gaps and adds three new
@@ -67,7 +74,10 @@
  * if a future SDK bump renames that field it WARNs loudly instead of going
  * silent. See docs/matrix-cross-signing.md and docs/matrix-e2ee-native.md.
  */
-import { existsSync, mkdirSync } from 'node:fs';
+import { createDecipheriv } from 'node:crypto';
+import { execSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, rmdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
@@ -215,6 +225,13 @@ export function dmPlatformId(userId: string): string {
 // Matrix event shapes (only the fields we read)
 // ---------------------------------------------------------------------------
 
+interface MatrixEncryptedFile {
+  url: string;
+  key: { k: string };
+  iv: string;
+  hashes: Record<string, string>;
+}
+
 interface MatrixMessageEvent {
   sender?: string;
   event_id?: string;
@@ -222,6 +239,9 @@ interface MatrixMessageEvent {
   content?: {
     msgtype?: string;
     body?: string;
+    url?: string;
+    file?: MatrixEncryptedFile;
+    info?: { mimetype?: string; duration?: number };
     'm.relates_to'?: { 'm.in_reply_to'?: { event_id?: string } };
   };
 }
@@ -306,6 +326,7 @@ export interface MatrixLikeClient {
   joinRoom(roomIdOrAlias: string): Promise<string>;
   sendText(roomId: string, text: string): Promise<string>;
   sendMessage(roomId: string, content: Record<string, unknown>): Promise<string>;
+  downloadContent(mxcUrl: string): Promise<{ data: Buffer; contentType: string }>;
   start(filter?: unknown): Promise<unknown>;
   stop(): void;
 }
@@ -717,6 +738,83 @@ export function createMatrixAdapter(config: MatrixConfig, deps: MatrixClientDeps
     return other;
   }
 
+  /**
+   * Download a Matrix media attachment and decrypt it if the room is E2EE.
+   * `fileInfo` is present when the content has a `file` field (encrypted room).
+   */
+  async function downloadMatrixMedia(mxcUrl: string, fileInfo?: MatrixEncryptedFile): Promise<Buffer> {
+    if (!client) throw new Error('Matrix client not connected');
+    const { data } = await client.downloadContent(mxcUrl);
+    if (!fileInfo) return data;
+
+    // AES-256-CTR decryption per the Matrix attachment encryption spec.
+    // key.k is base64url; iv is base64 (16 bytes, last 8 are zero counter).
+    const key = Buffer.from(fileInfo.key.k.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+    const iv = Buffer.from(fileInfo.iv, 'base64');
+    const decipher = createDecipheriv('aes-256-ctr', key, iv);
+    return Buffer.concat([decipher.update(data), decipher.final()]);
+  }
+
+  /**
+   * Transcribe a Matrix audio event using a local whisper.cpp binary.
+   * Requires WHISPER_BIN to be set; WHISPER_MODEL defaults to
+   * ~/.local/share/whisper/models/ggml-base.en.bin.
+   * Returns null if WHISPER_BIN is not set or transcription fails — caller
+   * falls back to a "[Voice message]" placeholder.
+   * Audio never leaves the machine.
+   */
+  async function transcribeMatrixAudio(event: MatrixMessageEvent): Promise<string | null> {
+    const whisperBin = process.env.WHISPER_BIN;
+    if (!whisperBin) return null;
+
+    const content = event.content;
+    if (!content) return null;
+
+    const mxcUrl = content.file?.url ?? content.url;
+    if (!mxcUrl) return null;
+
+    let audioData: Buffer;
+    try {
+      audioData = await downloadMatrixMedia(mxcUrl, content.file);
+    } catch (err) {
+      log.warn('Matrix: failed to download audio attachment', { err });
+      return null;
+    }
+
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'nanoclaw-matrix-audio-'));
+    const audioPath = path.join(tmpDir, 'audio');
+    const wavPath = path.join(tmpDir, 'audio.wav');
+    const txtPath = `${wavPath}.txt`;
+
+    const cleanup = () => {
+      for (const f of [audioPath, wavPath, txtPath]) {
+        try { unlinkSync(f); } catch {}
+      }
+      try { rmdirSync(tmpDir); } catch {}
+    };
+
+    try {
+      writeFileSync(audioPath, audioData);
+
+      execSync(`ffmpeg -y -loglevel error -i "${audioPath}" -ar 16000 -ac 1 "${wavPath}"`, {
+        stdio: 'ignore',
+      });
+      const model =
+        process.env.WHISPER_MODEL ?? path.join(homedir(), '.local/share/whisper/models/ggml-base.en.bin');
+      const out = execSync(`"${whisperBin}" -m "${model}" -f "${wavPath}" -nt -otxt -of "${wavPath}"`, {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const text = out.replace(/\[[^\]]*\]/g, '').trim();
+      return text || null;
+    } catch (err) {
+      log.debug('Matrix: local whisper transcription failed', { err });
+      return null;
+    } finally {
+      cleanup();
+    }
+  }
+
   async function handleMessage(roomId: string, event: MatrixMessageEvent): Promise<void> {
     if (!setup || !client) return;
 
@@ -726,10 +824,24 @@ export function createMatrixAdapter(config: MatrixConfig, deps: MatrixClientDeps
     if (sender === botUserId) return;
 
     const msgtype = event.content?.msgtype;
-    const body = (event.content?.body ?? '').trim();
-    // Only handle text-ish messages; notices/emotes carry body too.
-    if (!body) return;
-    if (msgtype && msgtype !== 'm.text' && msgtype !== 'm.notice' && msgtype !== 'm.emote') return;
+    const isAudio = msgtype === 'm.audio';
+
+    // Only handle text-ish and audio messages; drop everything else silently.
+    if (!isAudio && msgtype && msgtype !== 'm.text' && msgtype !== 'm.notice' && msgtype !== 'm.emote') return;
+
+    let text: string;
+    if (isAudio) {
+      const transcript = await transcribeMatrixAudio(event);
+      if (transcript) {
+        text = `[Voice: ${transcript}]`;
+        log.info('Matrix: voice message transcribed locally', { sender });
+      } else {
+        text = '[Voice message]';
+      }
+    } else {
+      text = (event.content?.body ?? '').trim();
+      if (!text) return;
+    }
 
     const other = await resolveOtherUser(roomId);
     const isGroup = other === null;
@@ -742,7 +854,7 @@ export function createMatrixAdapter(config: MatrixConfig, deps: MatrixClientDeps
       id: event.event_id ?? String(event.origin_server_ts ?? Date.now()),
       kind: 'chat',
       content: {
-        text: body,
+        text,
         sender,
         // Matrix user ids contain ":" which the permissions module would treat
         // as already-prefixed. Always carry the explicit "matrix:" prefix so
@@ -758,7 +870,7 @@ export function createMatrixAdapter(config: MatrixConfig, deps: MatrixClientDeps
     };
 
     await setup.onInbound(platformId, null, message);
-    log.info('Matrix message received', { platformId, sender, isGroup });
+    log.info('Matrix message received', { platformId, sender, isGroup, msgtype: msgtype ?? 'm.text' });
   }
 
   /** Resolve an outbound platform id to a concrete room id (creating the DM if needed). */

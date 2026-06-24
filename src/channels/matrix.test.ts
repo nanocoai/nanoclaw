@@ -134,6 +134,9 @@ class FakeMatrixClient {
     this.sent.push({ roomId, text: String(content.body ?? '') });
     return `$evt_${this.sent.length}`;
   }
+  async downloadContent(_mxcUrl: string): Promise<{ data: Buffer; contentType: string }> {
+    return { data: Buffer.alloc(0), contentType: 'audio/ogg' };
+  }
   async start(): Promise<unknown> {
     this.started = true;
     return {};
@@ -886,6 +889,29 @@ describe('inbound message mapping', () => {
     });
     await new Promise((r) => setTimeout(r, 0));
     expect(cfg.onInbound).not.toHaveBeenCalled();
+  });
+
+  it('routes m.audio as [Voice message] when WHISPER_BIN is not set', async () => {
+    const { deps, getClient } = depsCapturing();
+    const adapter = createMatrixAdapter(baseConfig(), deps);
+    const cfg = makeSetup();
+    await adapter.setup(cfg);
+
+    delete process.env.WHISPER_BIN;
+    const client = getClient();
+    client.emit('room.message', '!r:server', {
+      sender: '@alice:server',
+      content: {
+        msgtype: 'm.audio',
+        body: 'voice-note.ogg',
+        url: 'mxc://server/abc123',
+        info: { mimetype: 'audio/ogg', duration: 3000 },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(cfg.onInbound).toHaveBeenCalledOnce();
+    const msg = cfg.onInbound.mock.calls[0][2] as { content: { text: string } };
+    expect(msg.content.text).toBe('[Voice message]');
   });
 });
 
