@@ -416,7 +416,9 @@ export class ClaudeProvider implements AgentProvider {
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         settingSources: ['project', 'user', 'local'],
-        mcpServers: this.mcpServers,
+        mcpServers: Object.fromEntries(
+          Object.entries(this.mcpServers).filter(([, cfg]) => cfg.command !== undefined)
+        ) as any,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],
           PostToolUse: [{ hooks: [postToolUseHook] }],

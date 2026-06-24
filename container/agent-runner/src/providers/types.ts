@@ -104,9 +104,10 @@ export interface QueryInput {
 }
 
 export interface McpServerConfig {
-  command: string;
-  args: string[];
-  env: Record<string, string>;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
 }
 
 export interface AgentQuery {
