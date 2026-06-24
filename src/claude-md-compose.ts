@@ -126,6 +126,13 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
   for (const name of [...desired.keys()].sort()) {
     imports.push(`@./.claude-fragments/${name}`);
   }
+  // Per-group role spec — auto-imported when the operator (or a port skill
+  // like `/migrate-team-from-v1`) has written one. Loads after framework
+  // base + fragments so the role can override defaults. Absent file → no
+  // import; never write a dangling reference.
+  if (fs.existsSync(path.join(groupDir, 'CLAUDE.role.md'))) {
+    imports.push('@./CLAUDE.role.md');
+  }
   const body = [COMPOSED_HEADER, ...imports, ''].join('\n');
   writeAtomic(path.join(groupDir, 'CLAUDE.md'), body);
 
