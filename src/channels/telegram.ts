@@ -213,6 +213,7 @@ function buildTelegramAdapter(token: string, instance?: string): ChannelAdapter 
     concurrency: 'concurrent',
     extractReplyContext,
     supportsThreads: false,
+    transformOutboundText: sanitizeTelegramLegacyMarkdown,
     maxTextLength: 4000,
   });
 
