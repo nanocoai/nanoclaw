@@ -347,10 +347,23 @@ export function buildMounts(
     mounts.push({ hostPath: skillsSrc, containerPath: '/app/skills', readonly: true });
   }
 
-  // Additional mounts from container config
+  // Additional mounts from container config.
+  // Docker socket is a special case: it must mount at an exact absolute path
+  // (/var/run/docker.sock) and bypasses the allowlist validator (which only
+  // handles user-data mounts under /workspace/extra/). All other mounts go
+  // through the normal security validation.
   if (containerConfig.additionalMounts && containerConfig.additionalMounts.length > 0) {
-    const validated = validateAdditionalMounts(containerConfig.additionalMounts, agentGroup.name);
-    mounts.push(...validated);
+    const dockerSocketMounts = containerConfig.additionalMounts.filter((m) => m.hostPath === '/var/run/docker.sock');
+    const otherMounts = containerConfig.additionalMounts.filter((m) => m.hostPath !== '/var/run/docker.sock');
+
+    for (const m of dockerSocketMounts) {
+      mounts.push({ hostPath: '/var/run/docker.sock', containerPath: '/var/run/docker.sock', readonly: false });
+    }
+
+    if (otherMounts.length > 0) {
+      const validated = validateAdditionalMounts(otherMounts, agentGroup.name);
+      mounts.push(...validated);
+    }
   }
 
   // Provider-contributed mounts (e.g. opencode-xdg)
@@ -468,6 +481,16 @@ async function buildContainerArgs(
       args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
     } else {
       args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
+    }
+  }
+
+  const hasDockerSocket = mounts.some((m) => m.hostPath === '/var/run/docker.sock');
+  if (hasDockerSocket) {
+    try {
+      const dockerGid = fs.statSync('/var/run/docker.sock').gid;
+      args.push('--group-add', String(dockerGid));
+    } catch {
+      /* best-effort fallback if file does not exist or stat fails */
     }
   }
 
