@@ -659,9 +659,15 @@ export function createSignalAdapter(config: {
       attachmentRefs.push({ path: imagePath, contentType: img.contentType || 'image/jpeg' });
     }
 
+    const botMentionedInGroup =
+      isGroup &&
+      !!dataMessage.mentions?.some((m) => m.number === config.account);
+
     const msg: InboundMessage = {
       id: String(dataMessage.timestamp ?? Date.now()),
       kind: 'chat',
+      isMention: !isGroup || botMentionedInGroup ? true : undefined,
+      isGroup,
       content: {
         text: content,
         sender,
