@@ -65,11 +65,11 @@ description: 任务收尾工作流。回顾任务全过程，总结踩坑记录�
 
 1. 使用 `/wiki` skill 的 ingest 流程将文档存入 **team_wiki**
 2. **判断进共享层还是 private**（两步判断，按优先级执行）：
-   - **Step A: 先判项目归属**——Nine 生态项目（Nine 平台前后端、sandbox-api、NineConnect、agent-runner、recruit-api）→ **一律进共享层 `team_wiki/`**，不管内容是否含 open_id/chat_id/IP/端口/容器名等技术细节（这些不算涉敏）
-   - **Step B: 非 Nine 项目** → `team_wiki/private/`（NanoClaw 自身 / Wall-E / Claude Code 研究等）
+   - **Step A: 先判是否影响 Nine 用户体验**——直接或间接影响 Nine 平台功能的知识（包括底层组件如 GitNexus/eval-server/sandbox-api/agent-runner 等）→ **进共享层 `team_wiki/`**，不管内容是否含 open_id/chat_id/IP/端口/容器名/测试账号等开发常规信息（这些不算涉敏）
+   - **Step B: 与 Nine 无关的纯个人知识** → `team_wiki/private/`（NanoClaw 自身机制研究 / Wall-E / Claude Code 研究等）
    - **唯一例外：含真实凭据（密码、API Key/Secret、证书私钥、OAuth token）的内容必须进 private**，不管项目归属
 3. 分类标签：`复盘`、`[项目名]`、`[技术领域]`
-4. 遵循"**综合进已有页**"原则：新知识优先融进相关已有页并更新交叉引用（`[[page-name]]`），不要无脑新建孤立碎片文件
+4. 遵循"**综合进已有页的对应小节并回收旧态**"原则（详见 `team_wiki/CONTRIBUTING.md`）：新知识融进对应小节、更新顶部状态、回收被取代的旧描述、禁页内行号引用；不要无脑追加带日期的新章节或新建孤立碎片
 5. 更新对应的 `index.md`（共享进 `team_wiki/index.md`，私有进 `team_wiki/private/index.md`，两本索引互不引用）
 6. **三处验证落盘后 commit + push**（页 + index + log 用 `grep`/`wc` 确认真在，再推）：
    ```bash
