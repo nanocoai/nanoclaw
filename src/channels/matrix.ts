@@ -282,6 +282,7 @@ export interface SecretStorageEngine {
     passphrase: string,
     opts?: { withKeyBackup?: boolean; reset?: boolean },
   ): Promise<void>;
+  restoreSecretsFromSecretStorage(passphrase: string): Promise<void>;
 }
 
 export interface MatrixLikeClient {
@@ -542,6 +543,56 @@ export async function bootstrapCrossSigning(
       'Matrix: cross-signing bootstrap failed (non-fatal — E2EE messaging continues, device stays unverified). ' +
         'Common causes: crypto binding < 0.5.0 (cannot return the upload requests), or UIA rejected. ' +
         'See docs/matrix-cross-signing.md.',
+      { err },
+    );
+    return false;
+  }
+}
+
+/**
+ * Restore cross-signing private keys (and megolm backup decryption key) from
+ * 4S/SSSS account data into the local crypto store, using `recoveryPassphrase`
+ * to decrypt. This is the recovery path when the crypto store has been lost:
+ * the keys were previously uploaded by `bootstrapSecretStorage` and can be
+ * re-imported from the homeserver using the same passphrase.
+ *
+ * Returns true if all three cross-signing keys were successfully imported.
+ * NON-FATAL: any failure logs a WARN and returns false.
+ * Exported for unit testing.
+ */
+export async function restoreFromSecretStorage(
+  machine: OlmMachineReadonly | null | undefined,
+  engine: Partial<SecretStorageEngine> | undefined,
+  recoveryPassphrase: string,
+): Promise<boolean> {
+  if (!machine || !engine || !recoveryPassphrase) return false;
+
+  if (typeof engine.restoreSecretsFromSecretStorage !== 'function') {
+    log.warn(
+      'Matrix: Secret Storage restore is unavailable — the matrix-bot-sdk patch does not include ' +
+        'restoreSecretsFromSecretStorage. Falling back to fresh cross-signing bootstrap.',
+    );
+    return false;
+  }
+
+  try {
+    await engine.restoreSecretsFromSecretStorage(recoveryPassphrase);
+    const cs = await machine.crossSigningStatus();
+    const ok = cs.hasMaster && cs.hasSelfSigning;
+    if (ok) {
+      log.info('Matrix: cross-signing keys restored from 4S/SSSS account data');
+    } else {
+      log.warn('Matrix: restoreSecretsFromSecretStorage completed but device is still not cross-signed', {
+        hasMaster: cs.hasMaster,
+        hasSelfSigning: cs.hasSelfSigning,
+      });
+    }
+    return ok;
+  } catch (err) {
+    log.warn(
+      'Matrix: failed to restore cross-signing keys from 4S/SSSS account data (non-fatal). ' +
+        'Cause: wrong passphrase, missing account data, or binding < 0.6.0. ' +
+        'Falling back to fresh cross-signing bootstrap.',
       { err },
     );
     return false;
@@ -837,7 +888,26 @@ export function createMatrixAdapter(config: MatrixConfig, deps: MatrixClientDeps
         // signing UIA is completed with the bot's own password.
         if (config.recoveryKey) {
           const uiaCallback = makeUIACallback(botUserId!, config.password);
-          const crossSigningOk = await bootstrapCrossSigning(machine, client.crypto.engine, uiaCallback);
+
+          // Check if we already have cross-signing keys in this crypto store.
+          let crossSigningOk = false;
+          try {
+            const cs = await machine?.crossSigningStatus();
+            crossSigningOk = (cs?.hasMaster && cs?.hasSelfSigning) ?? false;
+          } catch (_) { /* non-fatal */ }
+
+          if (!crossSigningOk) {
+            // Try to restore from 4S first (crypto store was lost but keys are
+            // in account data). Fall back to fresh bootstrap if restore fails
+            // (first run, or account data missing/wrong passphrase).
+            crossSigningOk = await restoreFromSecretStorage(machine, client.crypto.engine, config.recoveryKey);
+            if (!crossSigningOk) {
+              crossSigningOk = await bootstrapCrossSigning(machine, client.crypto.engine, uiaCallback);
+            }
+          } else {
+            log.info('Matrix: cross-signing already in local crypto store — skipping bootstrap/restore');
+          }
+
           // 4S: only attempt after cross-signing is confirmed — cross-signing
           // keys must exist in the local store before they can be exported.
           if (crossSigningOk) {
