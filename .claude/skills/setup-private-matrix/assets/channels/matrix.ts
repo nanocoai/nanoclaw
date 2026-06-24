@@ -40,32 +40,33 @@
  *   MATRIX_RECOVERY_KEY         — see the cross-signing note below.
  *   MATRIX_INVITE_AUTOJOIN      — "true" (default) auto-accepts room invites.
  *
- * Cross-signing + 4S (MATRIX_RECOVERY_KEY): a patch
- * (patches/matrix-bot-sdk@0.8.0.patch) fixes two SDK gaps and adds three new
- * methods to RustEngine. When MATRIX_RECOVERY_KEY is set this adapter calls all
- * three — idempotently and STRICTLY non-fatally:
+ * Cross-signing (MATRIX_RECOVERY_KEY): stock matrix-bot-sdk 0.8.0 cannot drive
+ * cross-signing — its RustEngine request loop THROWS on the SignatureUpload
+ * (type 4) and KeysBackup (type 6) request types, and it never sends the
+ * cross-signing public-key upload at all. A patch
+ * (patches/matrix-bot-sdk@0.8.0.patch) fixes this: it turns those throwing
+ * cases into real handlers and adds RustEngine.bootstrapCrossSigning(), which
+ * publishes the cross-signing identity (master/self/user-signing keys via
+ * /keys/device_signing/upload, completing the User-Interactive Auth challenge
+ * with the bot's password) and self-signs this device. When MATRIX_RECOVERY_KEY
+ * is set and crypto is ready, this adapter calls that method — idempotently and
+ * STRICTLY non-fatally (a failure WARNs and the message flow continues). After
+ * it succeeds the bot device shows verified/green in clients.
  *
- *   1. bootstrapCrossSigning() — publishes the cross-signing identity
- *      (master/self/user-signing public keys via /keys/device_signing/upload,
- *      completing UIA with the bot's password) and self-signs this device. After
- *      it succeeds the bot device shows verified/green in clients.
- *      Requires crypto binding >= 0.5.0.
+ * Two requirements for the bootstrap to actually publish keys: (1) the patch
+ * above is applied, and (2) the native crypto binding is >= 0.5.0, the first
+ * version whose OlmMachine.bootstrapCrossSigning() RETURNS the upload requests
+ * (0.4.0 discards them and returns void, so cross-signing cannot be published —
+ * the adapter detects this and WARNs). See docs/matrix-cross-signing.md.
  *
- *   2. bootstrapSecretStorage() — derives an SSSS key from MATRIX_RECOVERY_KEY
- *      (via PBKDF2), uploads encrypted cross-signing private keys and a megolm
- *      key-backup decryption key to account data. Recovery from a new machine:
- *      provide the same MATRIX_RECOVERY_KEY value to re-import all keys.
- *      Requires crypto binding >= 0.6.0.
- *
- *   3. Megolm key backup (part of bootstrapSecretStorage) — creates a server-side
- *      key-backup version and enables it in the OlmMachine. Room-key history
- *      becomes recoverable from the homeserver using the backup decryption key
- *      stored in SSSS.
- *
- * The startup diagnostic reads (read-only, safe) the cross-signing + backup
- * state via the SDK's @internal crypto.engine.machine field and logs it honestly;
- * if a future SDK bump renames that field it WARNs loudly instead of going
- * silent. See docs/matrix-cross-signing.md and docs/matrix-e2ee-native.md.
+ * Key backup (server-side room-key backup) is SECONDARY and currently DEFERRED:
+ * the patch adds the request plumbing, but 0.4.0 exposes no room-key import to
+ * restore a backup, so the adapter does not enable it. Device keys still persist
+ * soundly on disk across restarts. The startup diagnostic reads (read-only,
+ * safe) the cross-signing + backup state via the SDK's @internal
+ * crypto.engine.machine field and logs it honestly; if a future SDK bump renames
+ * that field the diagnostic WARNs loudly instead of going silent. See
+ * docs/matrix-cross-signing.md and docs/matrix-e2ee-native.md.
  */
 import { existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
@@ -270,27 +271,12 @@ export interface CrossSigningEngine {
   bootstrapCrossSigning(uiaCallback: UIACallbackFn, reset?: boolean): Promise<void>;
 }
 
-/**
- * The patched RustEngine surface for Secret Storage (4S/SSSS). The patch adds
- * `bootstrapSecretStorageFromPassphrase`, which derives an SSSS key from the
- * given passphrase, then encrypts the cross-signing private keys and a megolm
- * key-backup decryption key and stores them in Matrix account data.
- * Requires @matrix-org/matrix-sdk-crypto-nodejs >= 0.6.0.
- */
-export interface SecretStorageEngine {
-  bootstrapSecretStorageFromPassphrase(
-    passphrase: string,
-    opts?: { withKeyBackup?: boolean; reset?: boolean },
-  ): Promise<void>;
-}
-
 export interface MatrixLikeClient {
   readonly crypto?: {
     prepare(roomIds: string[]): Promise<void>;
     readonly clientDeviceId?: string;
     /** Internal: the RustEngine wrapping the native OlmMachine. */
-    readonly engine?: { readonly machine?: OlmMachineReadonly } & Partial<CrossSigningEngine> &
-      Partial<SecretStorageEngine>;
+    readonly engine?: { readonly machine?: OlmMachineReadonly } & Partial<CrossSigningEngine>;
   };
   readonly dms: {
     getOrCreateDm(userId: string): Promise<string>;
@@ -413,16 +399,19 @@ export async function reportCryptoStatus(
         );
       } else {
         log.info(
-          'Matrix: this device is not cross-signed (it starts unverified). Set MATRIX_RECOVERY_KEY to a ' +
-            'passphrase to publish a cross-signing identity + 4S key backup automatically, or verify the device ' +
+          'Matrix: this device is not cross-signed (it starts unverified). Set MATRIX_RECOVERY_KEY (and ensure ' +
+            'a crypto binding >= 0.5.0) to publish a cross-signing identity automatically, or verify the device ' +
             'interactively from another logged-in session. See docs/matrix-cross-signing.md.',
         );
       }
     }
     if (hasRecoveryKey && !backupActive) {
+      // Key backup (secondary) is not currently active. This is expected: the
+      // adapter publishes cross-signing but defers server-side key backup — see
+      // docs/matrix-cross-signing.md ("What is deferred").
       log.info(
-        'Matrix: server-side key backup is not yet active (will be created on first startup with MATRIX_RECOVERY_KEY). ' +
-          'Device keys persist soundly on disk across restarts regardless.',
+        'Matrix: server-side key backup is not active (deferred — cross-signing is the supported path). ' +
+          'Device keys persist soundly on disk across restarts regardless. See docs/matrix-cross-signing.md.',
       );
     }
   } catch (err) {
@@ -542,67 +531,6 @@ export async function bootstrapCrossSigning(
       'Matrix: cross-signing bootstrap failed (non-fatal — E2EE messaging continues, device stays unverified). ' +
         'Common causes: crypto binding < 0.5.0 (cannot return the upload requests), or UIA rejected. ' +
         'See docs/matrix-cross-signing.md.',
-      { err },
-    );
-    return false;
-  }
-}
-
-/**
- * Idempotently set up Secure Secret Storage (4S/SSSS) using `recoveryPassphrase`
- * as the SSSS key derivation passphrase, then store the cross-signing private keys
- * and a megolm key-backup decryption key in Matrix account data.
- *
- * Idempotency: skipped when the OlmMachine already has a persisted backup version
- * (set by the previous `bootstrapSecretStorage` call via `saveBackupDecryptionKey`).
- * This avoids replacing SSSS metadata with new PBKDF2 params on every restart.
- *
- * NON-FATAL by contract: any failure logs a WARN and returns false. The value of
- * MATRIX_RECOVERY_KEY is used as the passphrase; it never leaves the local machine
- * — the server only ever sees the encrypted blobs.
- *
- * Exported for unit testing.
- */
-export async function bootstrapSecretStorage(
-  machine: OlmMachineReadonly | null | undefined,
-  engine: Partial<SecretStorageEngine> | undefined,
-  recoveryPassphrase: string,
-): Promise<boolean> {
-  if (!machine || !engine || !recoveryPassphrase) return false;
-
-  // Idempotency: if a backup version is already saved in the crypto store, 4S was
-  // previously bootstrapped. Re-running createFromPassphrase would generate a new
-  // PBKDF2 salt and effectively rotate the key, so we skip.
-  try {
-    const backupKeys = await machine.getBackupKeys();
-    if (backupKeys.backupVersion) {
-      log.info('Matrix: 4S already set up (backup key in crypto store) — skipping re-bootstrap');
-      return true;
-    }
-  } catch (err) {
-    log.warn('Matrix: could not check backup keys for 4S idempotency (continuing)', { err });
-  }
-
-  if (typeof engine.bootstrapSecretStorageFromPassphrase !== 'function') {
-    log.warn(
-      'Matrix: Secret Storage (4S) bootstrap is unavailable — the SDK patch does not include ' +
-        'bootstrapSecretStorageFromPassphrase. Cross-signing is still active; back up ' +
-        'data/v2-matrix-crypto for recovery.',
-    );
-    return false;
-  }
-
-  try {
-    await engine.bootstrapSecretStorageFromPassphrase(recoveryPassphrase);
-    log.info(
-      'Matrix: 4S bootstrap complete — cross-signing keys + key backup decryption key stored ' +
-        'encrypted in account data. Recovery: provide MATRIX_RECOVERY_KEY value as passphrase.',
-    );
-    return true;
-  } catch (err) {
-    log.warn(
-      'Matrix: Secret Storage (4S) bootstrap failed (non-fatal — cross-signing + E2EE messaging ' +
-        'continue unaffected). Back up data/v2-matrix-crypto for recovery in the interim.',
       { err },
     );
     return false;
@@ -837,12 +765,7 @@ export function createMatrixAdapter(config: MatrixConfig, deps: MatrixClientDeps
         // signing UIA is completed with the bot's own password.
         if (config.recoveryKey) {
           const uiaCallback = makeUIACallback(botUserId!, config.password);
-          const crossSigningOk = await bootstrapCrossSigning(machine, client.crypto.engine, uiaCallback);
-          // 4S: only attempt after cross-signing is confirmed — cross-signing
-          // keys must exist in the local store before they can be exported.
-          if (crossSigningOk) {
-            await bootstrapSecretStorage(machine, client.crypto.engine, config.recoveryKey);
-          }
+          await bootstrapCrossSigning(machine, client.crypto.engine, uiaCallback);
         }
 
         // Honest, read-only report of cross-signing / key-backup trust state.
