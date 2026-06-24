@@ -4,6 +4,7 @@
  * Thin orchestrator: init DB, run migrations, start channel adapters,
  * start delivery polls, start sweep, handle shutdown.
  */
+import fs from 'fs';
 import path from 'path';
 
 import { backfillContainerConfigs } from './backfill-container-configs.js';
@@ -70,6 +71,27 @@ import {
 
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
+
+  // 0a. Redirect TMPDIR to a runtime-shareable directory on macOS.
+  //
+  // The OneCLI SDK writes its gateway CA bundles (onecli-proxy-ca.pem,
+  // onecli-combined-ca.pem) under os.tmpdir() and then bind-mounts those exact
+  // files into each agent container so the in-container API client trusts the
+  // credential-injection proxy. On macOS, os.tmpdir() resolves to $TMPDIR
+  // (/var/folders/...), which Rancher Desktop and Apple `container` do NOT
+  // share into their VMs. A single-file bind-mount whose host source the VM
+  // can't see silently materializes as an empty directory inside the
+  // container — so NODE_EXTRA_CA_CERTS points at a directory, the CA never
+  // loads, and every API call fails with "self-signed certificate detected".
+  // The user-mounted home tree (/Users) is shared, so redirecting TMPDIR under
+  // DATA_DIR puts the CA files somewhere the bind-mount can actually resolve.
+  // No-op on Linux, where the host /tmp is shared with containers natively.
+  if (process.platform === 'darwin') {
+    const sharedTmp = path.join(DATA_DIR, 'tmp');
+    fs.mkdirSync(sharedTmp, { recursive: true });
+    process.env.TMPDIR = sharedTmp;
+    log.info('Redirected TMPDIR to a container-shareable path', { tmpdir: sharedTmp });
+  }
 
   // 0. Circuit breaker — backoff on rapid restarts
   await enforceStartupBackoff();
