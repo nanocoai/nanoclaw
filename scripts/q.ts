@@ -20,10 +20,10 @@
  */
 import Database from 'better-sqlite3';
 
-const [, , dbPath, sql] = process.argv;
+const [, , dbPath, sql, ...params] = process.argv;
 
 if (!dbPath || sql === undefined) {
-  console.error('Usage: pnpm exec tsx scripts/q.ts <db-path> "<sql>"');
+  console.error('Usage: pnpm exec tsx scripts/q.ts <db-path> "<sql>" [param1] [param2] ...');
   process.exit(2);
 }
 
@@ -32,7 +32,7 @@ try {
   try {
     const stmt = db.prepare(sql);
     if (stmt.reader) {
-      const rows = stmt.all() as Record<string, unknown>[];
+      const rows = stmt.all(...params) as Record<string, unknown>[];
       for (const row of rows) {
         console.log(
           Object.values(row)
@@ -41,7 +41,7 @@ try {
         );
       }
     } else {
-      stmt.run();
+      stmt.run(...params);
     }
   } catch (e: unknown) {
     // better-sqlite3 throws on compound statements ("contains more than
