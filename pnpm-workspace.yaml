@@ -6,3 +6,9 @@ onlyBuiltDependencies:
 
 pnpm:
   minimumReleaseAge: 4320
+
+patchedDependencies:
+  matrix-bot-sdk@0.8.0: patches/matrix-bot-sdk@0.8.0.patch
+
+overrides:
+  '@matrix-org/matrix-sdk-crypto-nodejs': 0.6.1

@@ -24,7 +24,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@beeper/chat-adapter-matrix": "^0.2.0",
+    "matrix-bot-sdk": "0.8.0",
     "@bitbasti/chat-adapter-webex": "^0.1.0",
     "@chat-adapter/discord": "4.29.0",
     "@chat-adapter/gchat": "4.29.0",

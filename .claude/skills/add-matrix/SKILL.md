@@ -1,23 +1,37 @@
 ---
 name: add-matrix
-description: Add Matrix channel integration via Chat SDK. Works with any Matrix homeserver.
+description: Add Matrix channel with persistent native E2EE (cross-signing + 4S). Works with any Matrix homeserver, including self-hosted Synapse.
 ---
 
 # Add Matrix Channel
 
-Adds Matrix support via the Chat SDK bridge.
+Adds Matrix support via a native adapter built on `matrix-bot-sdk` and the
+`@matrix-org/matrix-sdk-crypto-nodejs` Rust binding. Unlike the previous Chat
+SDK bridge (which relied on WASM crypto and lost E2E keys on every restart),
+this adapter persists its crypto identity and room keys to the filesystem — so
+the bot device is stable across restarts and the green shield is achievable.
+
+Features: E2EE with persistent key storage, cross-signing, 4S/SSSS secret
+backup, auto-join invites, quoted replies, typing indicators (DMs), read
+receipts.
+
+For a self-hosted private homeserver (Synapse on Tailscale + encrypted
+backups), run `/setup-private-matrix` after this skill.
+
+## Prerequisites
+
+- Node 24+ (required for the native crypto binding). Check: `node --version`
 
 ## Install
-
-NanoClaw doesn't ship channels in trunk. This skill copies the Matrix adapter in from the `channels` branch.
 
 ### Pre-flight (idempotent)
 
 Skip to **Credentials** if all of these are already in place:
 
-- `src/channels/matrix.ts` exists
+- `src/channels/matrix.ts` exists and its first comment mentions `SOUND persistent E2EE`
 - `src/channels/index.ts` contains `import './matrix.js';`
-- `@beeper/chat-adapter-matrix` is listed in `package.json` dependencies
+- `matrix-bot-sdk` is listed in `package.json` dependencies
+- `patches/matrix-bot-sdk@0.8.0.patch` exists
 
 Otherwise continue. Every step below is safe to re-run.
 
@@ -27,10 +41,14 @@ Otherwise continue. Every step below is safe to re-run.
 git fetch origin channels
 ```
 
-### 2. Copy the adapter
+### 2. Copy the adapter, tests, and patch
 
 ```bash
 git show origin/channels:src/channels/matrix.ts > src/channels/matrix.ts
+git show origin/channels:src/channels/matrix.test.ts > src/channels/matrix.test.ts
+git show origin/channels:src/channels/matrix-registration.test.ts > src/channels/matrix-registration.test.ts
+git show origin/channels:src/channels/matrix-rustengine-patch.test.ts > src/channels/matrix-rustengine-patch.test.ts
+git show origin/channels:patches/matrix-bot-sdk@0.8.0.patch > patches/matrix-bot-sdk@0.8.0.patch
 ```
 
 ### 3. Append the self-registration import
@@ -41,108 +59,180 @@ Append to `src/channels/index.ts` (skip if the line is already present):
 import './matrix.js';
 ```
 
-### 4. Install the adapter package (pinned)
+### 4. Add dep + patch config
 
-```bash
-pnpm install @beeper/chat-adapter-matrix@0.2.0
+In `package.json` dependencies, add:
+
+```json
+"matrix-bot-sdk": "0.8.0"
 ```
 
-### 5. Patch matrix-js-sdk ESM imports
+Remove `@beeper/chat-adapter-matrix` from dependencies if present.
 
-The adapter's published dist references `matrix-js-sdk/lib/...` without `.js`
-extensions, which fails under Node 22 strict ESM resolution. Add the missing
-extensions (idempotent — safe to re-run):
+Append to `pnpm-workspace.yaml`:
 
-```bash
-node -e '
-  const fs = require("fs"), path = require("path");
-  const root = "node_modules/.pnpm";
-  const dir = fs.readdirSync(root).find(d => d.startsWith("@beeper+chat-adapter-matrix@"));
-  if (!dir) { console.log("Matrix adapter not installed"); process.exit(0); }
-  const f = path.join(root, dir, "node_modules/@beeper/chat-adapter-matrix/dist/index.js");
-  fs.writeFileSync(f, fs.readFileSync(f, "utf8").replace(
-    /from "(matrix-js-sdk\/lib\/[^"]+?)(?<!\.js)"/g, "from \"$1.js\""
-  ));
-  console.log("Patched", f);
-'
+```yaml
+patchedDependencies:
+  matrix-bot-sdk@0.8.0: patches/matrix-bot-sdk@0.8.0.patch
+
+overrides:
+  '@matrix-org/matrix-sdk-crypto-nodejs': 0.6.1
 ```
 
-Re-run this after every `pnpm install` that touches the adapter.
-
-### 6. Build
+### 5. Install and build
 
 ```bash
+pnpm install
 pnpm run build
 ```
 
+`pnpm install` applies the patch automatically. The patch adds
+`bootstrapCrossSigning` and `bootstrapSecretStorageFromPassphrase` to
+`RustEngine`, and fixes the `SignatureUpload` envelope unwrapping bug.
+
 ## Credentials
 
-The bot needs its own Matrix account — separate from the user's account. This is required because Matrix cannot send DMs to yourself.
-
-### Create a bot account
-
-1. Open [app.element.io](https://app.element.io) in a private/incognito window (or sign out first)
-2. Register a new account for the bot (e.g. `andybot` on matrix.org)
-3. Note the bot's user ID (e.g. `@andybot:matrix.org`)
-
-### Choose an auth method
-
-**Option A: Username + Password (simpler)**
-
-No extra steps — just use the bot account's credentials directly. The adapter logs in automatically.
+Add to `.env`:
 
 ```bash
-MATRIX_BASE_URL=https://matrix.org
-MATRIX_USERNAME=andybot
-MATRIX_PASSWORD=your-bot-password
-MATRIX_USER_ID=@andybot:matrix.org
-MATRIX_BOT_USERNAME=Andy
+MATRIX_BASE_URL=https://your-homeserver.example.com
+MATRIX_USERNAME=yourbot          # localpart only, no @ or :server
+MATRIX_PASSWORD=yourpassword
+
+# Stable device id — generate once, never change:
+MATRIX_DEVICE_ID=NANOCLAWBOT
+
+# Recovery passphrase — enables cross-signing + 4S/SSSS key backup:
+MATRIX_RECOVERY_KEY=a-long-random-passphrase
 ```
 
-**Option B: Access Token (recommended for production)**
+`MATRIX_DEVICE_ID` and `MATRIX_RECOVERY_KEY` are both strongly recommended:
 
-Get an access token from Element: sign into the bot account → **Settings** > **Help & About** > **Access Token** (under Advanced). Or via API:
+- `MATRIX_DEVICE_ID` — ensures the bot always appears as the same device (no
+  new-device notifications on restarts)
+- `MATRIX_RECOVERY_KEY` — bootstraps cross-signing (green shield) and uploads
+  encrypted key backups to account data so room keys survive if the crypto
+  store is lost
+
+Generate a strong recovery key:
 
 ```bash
-curl -XPOST 'https://matrix.org/_matrix/client/r0/login' \
-  -d '{"type":"m.login.password","user":"andybot","password":"..."}'
+openssl rand -base64 32
 ```
+
+Store it somewhere safe (password manager). It cannot be recovered if lost.
+
+### Optional env vars
 
 ```bash
-MATRIX_BASE_URL=https://matrix.org
-MATRIX_ACCESS_TOKEN=your-access-token
-MATRIX_USER_ID=@andybot:matrix.org
-MATRIX_BOT_USERNAME=Andy
+MATRIX_INVITE_AUTOJOIN=true                         # auto-accept room invites
+MATRIX_INVITE_AUTOJOIN_ALLOWLIST=@you:example.com   # only from these users
+MATRIX_BOT_USERNAME="NanoClaw"                      # display name
+MATRIX_CRYPTO_STORE_PATH=data/v2-matrix-crypto      # default
 ```
 
-### Optional settings
+Sync to container: `mkdir -p data/env && cp .env data/env/env`
+
+### Restart
 
 ```bash
-MATRIX_INVITE_AUTOJOIN=true                    # Auto-accept room invites (default: true)
-MATRIX_INVITE_AUTOJOIN_ALLOWLIST=@you:matrix.org  # Only accept invites from these users
-MATRIX_RECOVERY_KEY=your-recovery-key          # Enable E2EE cross-signing
-MATRIX_DEVICE_ID=NANOCLAW01                    # Stable device ID across restarts
+# macOS
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw
+
+# Linux
+systemctl --user restart nanoclaw
 ```
 
-### Configure environment
+On first start with `MATRIX_RECOVERY_KEY` set, the adapter bootstraps
+cross-signing and 4S. Subsequent restarts detect the existing setup and skip
+(idempotent). Check logs for:
 
-Add the chosen env vars to `.env`, then sync:
+```
+Matrix channel connected
+Cross-signing bootstrapped (new setup)   — or "already set up — skipping"
+4S bootstrap done — keyBackupVersion="1" — or "already set up — skipping"
+```
+
+## Wiring
+
+After the service starts, send a message from your Matrix client to the bot.
+The router creates a `messaging_groups` row. Then:
 
 ```bash
-mkdir -p data/env && cp .env data/env/env
+sqlite3 data/v2.db \
+  "SELECT id, platform_id FROM messaging_groups WHERE channel_type='matrix' ORDER BY created_at DESC LIMIT 5"
 ```
 
-## Next Steps
+Pass the `id` to `/init-first-agent` or `/manage-channels`.
 
-If you're in the middle of `/setup`, return to the setup flow now.
+### Grant user access
 
-Otherwise, run `/manage-channels` to wire this channel to an agent group.
+New Matrix users are silently dropped with `not_member` until granted:
+
+```bash
+NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+sqlite3 data/v2.db "
+INSERT OR REPLACE INTO user_roles (user_id, role, agent_group_id, granted_by, granted_at)
+  VALUES ('matrix:@you:yourserver', 'owner', NULL, 'system', '$NOW');
+INSERT OR IGNORE INTO agent_group_members (user_id, agent_group_id, added_by, added_at)
+  VALUES ('matrix:@you:yourserver', 'ag-AGENTID', 'system', '$NOW');
+"
+```
+
+Find your Matrix ID from `messaging_groups.platform_id` or the `users` table.
 
 ## Channel Info
 
 - **type**: `matrix`
-- **terminology**: Matrix has "rooms." A room can be a group chat or a direct message. Rooms have internal IDs (like `!abc123:matrix.org`) and optional aliases (like `#general:matrix.org`).
-- **how-to-find-id**: For DMs, use the bot's `openDM` to resolve the room automatically. For group rooms, in Element click the room name > Settings > Advanced — the "Internal room ID" is the platform ID (starts with `!`). Or use a room alias like `#general:matrix.org`.
-- **supports-threads**: partial (some clients support threads, but not all — treat as no for reliability)
-- **typical-use**: Interactive chat — rooms or direct messages. Requires a separate bot account (the agent cannot DM users from their own account).
-- **default-isolation**: Same agent group for rooms where you're the primary user. Separate agent group for rooms with different communities or sensitive contexts.
+- **terminology**: Matrix has "rooms" (both DMs and group chats)
+- **supports-threads**: no
+- **platform-id-format**: `matrix:@user:server`
+- **how-to-find-id**: send a message to the bot, then query `messaging_groups`
+- **typical-use**: private DMs (especially with a self-hosted homeserver) or
+  group rooms as a privacy-respecting alternative to Slack/Discord
+
+### Features
+
+- Persistent native E2EE — crypto store survives restarts (no lost keys)
+- Cross-signing — green shield achievable after device verification
+- 4S/SSSS key backup — cross-signing private keys + megolm backup key encrypted
+  in account data, recoverable with `MATRIX_RECOVERY_KEY`
+- Auto-join room invites
+- Quoted replies (reply context passed to agent)
+- Typing indicators (DMs only)
+- Read receipts
+
+Not yet supported: outbound file attachments, edit/delete, reactions, threads.
+
+## Troubleshooting
+
+### Bot not responding
+
+1. `grep "Matrix channel" logs/nanoclaw.log | tail -3`
+2. `sqlite3 data/v2.db "SELECT mg.platform_id FROM messaging_groups mg JOIN messaging_group_agents mga ON mg.id = mga.messaging_group_id WHERE mg.channel_type='matrix'"`
+3. Service status: `launchctl print gui/$(id -u)/com.nanoclaw` (macOS) / `systemctl --user status nanoclaw` (Linux)
+
+### `ERR_DLOPEN_FAILED` on start
+
+Requires Node 24+. Check `node --version`. After upgrading Node, run
+`pnpm rebuild` to recompile native modules.
+
+### Cross-signing not completing / no green shield
+
+Ensure both `MATRIX_DEVICE_ID` and `MATRIX_RECOVERY_KEY` are set. The crypto
+store at `data/v2-matrix-crypto/` must be writable. Check logs for errors after
+`Cross-signing bootstrap`.
+
+### `401 Unauthorized` on start
+
+Password login failed. Verify `MATRIX_USERNAME` is the localpart only (no `@`
+or `:server`) and `MATRIX_PASSWORD` matches.
+
+### Messages dropped with `not_member`
+
+The Matrix user hasn't been granted membership. See "Grant user access" above.
+
+### Self-hosted homeserver
+
+For a private self-hosted setup (Synapse on Tailscale + age-encrypted Google
+Drive backups), run `/setup-private-matrix` after this skill completes.
