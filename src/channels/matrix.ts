@@ -894,7 +894,9 @@ export function createMatrixAdapter(config: MatrixConfig, deps: MatrixClientDeps
           try {
             const cs = await machine?.crossSigningStatus();
             crossSigningOk = (cs?.hasMaster && cs?.hasSelfSigning) ?? false;
-          } catch (_) { /* non-fatal */ }
+          } catch (_) {
+            /* non-fatal */
+          }
 
           if (!crossSigningOk) {
             // Try to restore from 4S first (crypto store was lost but keys are

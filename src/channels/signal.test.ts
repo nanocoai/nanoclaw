@@ -599,9 +599,7 @@ describe('SignalAdapter', () => {
       );
       expect((sendCalls[0].params as Record<string, unknown>).attachments).toBeUndefined();
       // Second call: attachment, no message
-      expect(sendCalls[1].params).toEqual(
-        expect.objectContaining({ recipient: ['+15555550123'] }),
-      );
+      expect(sendCalls[1].params).toEqual(expect.objectContaining({ recipient: ['+15555550123'] }));
       const attachments = (sendCalls[1].params as Record<string, unknown>).attachments as string[];
       expect(attachments).toHaveLength(1);
 

@@ -1,3 +1,5 @@
+diff --git a/lib/e2ee/RustEngine.d.ts b/lib/e2ee/RustEngine.d.ts
+index 8f29aebe0036372d5e036eb392e19cb39b997439..e271b819c1c1e36cb6b3ee5cb5678972e5d02e21 100644
 --- a/lib/e2ee/RustEngine.d.ts
 +++ b/lib/e2ee/RustEngine.d.ts
 @@ -1,4 +1,4 @@
@@ -6,10 +8,11 @@
  import * as AsyncLock from "async-lock";
  import { MatrixClient } from "../MatrixClient";
  import { ICryptoRoomInformation } from "./ICryptoRoomInformation";
-@@ -7,6 +7,19 @@
+@@ -6,6 +6,19 @@ import { ICryptoRoomInformation } from "./ICryptoRoomInformation";
+  * @internal
   */
  export declare const SYNC_LOCK_NAME = "sync";
- /**
++/**
 + * Callback invoked to satisfy a User-Interactive Authentication (UIA) challenge
 + * when uploading cross-signing keys.
 + *
@@ -22,11 +25,10 @@
 +    params?: Record<string, unknown>;
 +    session?: string;
 +}) => Promise<Record<string, unknown> | null>;
-+/**
+ /**
   * @internal
   */
- export declare class RustEngine {
-@@ -23,4 +36,47 @@
+@@ -23,4 +36,47 @@ export declare class RustEngine {
      private processKeysQueryRequest;
      private processToDeviceRequest;
      private actuallyProcessToDeviceRequest;
@@ -74,6 +76,8 @@
 +} | null;
 +/** @internal */
 +export declare function hasFailedUIA(err: unknown): boolean;
+diff --git a/lib/e2ee/RustEngine.js b/lib/e2ee/RustEngine.js
+index 09df965fcb3f017840f9e7dcc2d4c751b089c9f8..af1b7193891ec67781677a1ce0f77a505f1c5d6b 100644
 --- a/lib/e2ee/RustEngine.js
 +++ b/lib/e2ee/RustEngine.js
 @@ -1,6 +1,6 @@
@@ -84,7 +88,7 @@
  const matrix_sdk_crypto_nodejs_1 = require("@matrix-org/matrix-sdk-crypto-nodejs");
  const AsyncLock = require("async-lock");
  const Crypto_1 = require("../models/Crypto");
-@@ -43,9 +43,11 @@
+@@ -43,9 +43,11 @@ class RustEngine {
                  case 5 /* RequestType.RoomMessage */:
                      throw new Error("Bindings error: Sending room messages is not supported");
                  case 4 /* RequestType.SignatureUpload */:
@@ -98,7 +102,7 @@
                  default:
                      throw new Error("Bindings error: Unrecognized request type: " + request.type);
              }
-@@ -127,6 +129,210 @@
+@@ -127,6 +129,233 @@ class RustEngine {
          const resp = await this.client.sendToDevices(type, messages);
          await this.machine.markRequestAsSent(id, 3 /* RequestType.ToDevice */, JSON.stringify(resp));
      }
@@ -215,9 +219,9 @@
 +                "4S may not have been bootstrapped yet — run bootstrapSecretStorage first.");
 +        }
 +        const items = new matrix_sdk_crypto_nodejs_1.SecretStorageItems({
-+            "m.cross_signing.master": JSON.stringify(masterRaw),
-+            "m.cross_signing.self_signing": JSON.stringify(selfSigningRaw),
-+            "m.cross_signing.user_signing": JSON.stringify(userSigningRaw),
++            masterKey: JSON.stringify(masterRaw),
++            selfSigningKey: JSON.stringify(selfSigningRaw),
++            userSigningKey: JSON.stringify(userSigningRaw),
 +        });
 +        const sigReq = await machine4s.importSecretsFromSecretStorage(ssssKey, items);
 +        await this.processSignatureUploadRequest(sigReq);
@@ -262,7 +266,30 @@
 +    async bootstrapKeyBackupIntoSecretStorage(ssssKey, userId, reset) {
 +        const existingVersion = await this.activeKeyBackupVersion();
 +        if (existingVersion && !reset) {
-+            return;
++            // Server has a backup. Check whether the local OlmMachine already knows about it.
++            const localKeys = await this.machine.getBackupKeys();
++            if (localKeys.backupVersion === existingVersion) {
++                return; // Local store is in sync — nothing to do.
++            }
++            // Local store is out of sync (e.g. crypto-store wiped and bootstrap retried with a new
++            // SSSS key, or interrupted before saveBackupDecryptionKey). Try to reconnect by
++            // decrypting the existing backup key from account data using the current SSSS key.
++            try {
++                const backupKeyRaw = await this.client.getAccountData("m.megolm_backup.v1");
++                if (backupKeyRaw) {
++                    const decryptedBase64 = ssssKey.decrypt(JSON.stringify(backupKeyRaw), "m.megolm_backup.v1");
++                    const decryptionKey = matrix_sdk_crypto_nodejs_1.BackupDecryptionKey.fromBase64(decryptedBase64);
++                    await this.machine.enableBackupV1(decryptionKey.megolmV1PublicKey.publicKeyBase64, existingVersion);
++                    await this.machine.saveBackupDecryptionKey(decryptionKey, existingVersion);
++                    return;
++                }
++            }
++            catch {
++                // Account data is missing, encrypted with a different SSSS key, or corrupted.
++                // Fall through to create a new backup version under the current SSSS key.
++            }
++            // Could not reuse the existing backup — delete it and create a fresh one.
++            await this.client.doRequest("DELETE", `/_matrix/client/v3/room_keys/version/${existingVersion}`);
 +        }
 +        if (existingVersion && reset) {
 +            await this.client.doRequest("DELETE", `/_matrix/client/v3/room_keys/version/${existingVersion}`);
@@ -310,9 +337,11 @@
 +exports.hasFailedUIA = hasFailedUIA;
  //# sourceMappingURL=RustEngine.js.map
 \ No newline at end of file
+diff --git a/src/e2ee/RustEngine.ts b/src/e2ee/RustEngine.ts
+index 20be638b619aca65f1932551e8f9fd977cfb7a89..870f2b7cc19488fdd501d2165f091eb7737fc749 100644
 --- a/src/e2ee/RustEngine.ts
 +++ b/src/e2ee/RustEngine.ts
-@@ -10,7 +10,23 @@
+@@ -10,7 +10,23 @@ import {
      KeysUploadRequest,
      KeysQueryRequest,
      ToDeviceRequest,
@@ -336,10 +365,11 @@
  import * as AsyncLock from "async-lock";
  
  import { MatrixClient } from "../MatrixClient";
-@@ -24,8 +40,44 @@
+@@ -23,6 +39,42 @@ import { EncryptionEvent } from "../models/events/EncryptionEvent";
+  */
  export const SYNC_LOCK_NAME = "sync";
  
- /**
++/**
 + * Callback invoked to satisfy a User-Interactive Authentication (UIA) challenge
 + * when uploading cross-signing keys. Given the `flows`/`params`/`session` from a
 + * 401 response, it must return the `auth` dict to retry with (e.g. an
@@ -361,8 +391,8 @@
 + * published with them — `bootstrapCrossSigning()` below detects that and reports
 + * it rather than silently doing nothing.
 + *
-  * @internal
-  */
++ * @internal
++ */
 +interface CrossSigningBootstrapRequestsLike {
 +    /** Device-keys upload; may be absent if device keys were already uploaded. */
 +    uploadKeysReq?: KeysUploadRequest;
@@ -375,13 +405,10 @@
 +    uploadSignaturesReq: SignatureUploadRequest;
 +}
 +
-+/**
-+ * @internal
-+ */
- export class RustEngine {
-     public readonly lock = new AsyncLock();
- 
-@@ -57,9 +109,11 @@
+ /**
+  * @internal
+  */
+@@ -57,9 +109,11 @@ export class RustEngine {
                  case RequestType.RoomMessage:
                      throw new Error("Bindings error: Sending room messages is not supported");
                  case RequestType.SignatureUpload:
@@ -395,11 +422,10 @@
                  default:
                      throw new Error("Bindings error: Unrecognized request type: " + request.type);
              }
-@@ -153,5 +207,351 @@
-     private async actuallyProcessToDeviceRequest(id: string, type: string, messages: Record<string, Record<string, unknown>>) {
+@@ -154,4 +208,373 @@ export class RustEngine {
          const resp = await this.client.sendToDevices(type, messages);
          await this.machine.markRequestAsSent(id, RequestType.ToDevice, JSON.stringify(resp));
-+    }
+     }
 +
 +    private async processSignatureUploadRequest(request: SignatureUploadRequest) {
 +        // The binding serializes the body as { "signed_keys": {<user_id>: {...}} },
@@ -561,7 +587,7 @@
 +            "POST", "/_matrix/client/v3/room_keys/version", null, { algorithm, auth_data: authData },
 +        );
 +        return resp.version;
-     }
++    }
 +
 +    /**
 +     * Restore cross-signing private keys (and optionally the megolm backup decryption
@@ -624,9 +650,9 @@
 +        //    private keys into the local OlmMachine, and returns a SignatureUpload
 +        //    request to re-sign the current device with the self-signing key.
 +        const items = new SecretStorageItems({
-+            "m.cross_signing.master":    JSON.stringify(masterRaw),
-+            "m.cross_signing.self_signing": JSON.stringify(selfSigningRaw),
-+            "m.cross_signing.user_signing": JSON.stringify(userSigningRaw),
++            masterKey:      JSON.stringify(masterRaw),
++            selfSigningKey: JSON.stringify(selfSigningRaw),
++            userSigningKey: JSON.stringify(userSigningRaw),
 +        });
 +        const sigReq = await machine4s.importSecretsFromSecretStorage(ssssKey, items);
 +        await this.processSignatureUploadRequest(sigReq);
@@ -686,7 +712,30 @@
 +        reset: boolean,
 +    ): Promise<void> {
 +        const existingVersion = await this.activeKeyBackupVersion();
-+        if (existingVersion && !reset) return;
++        if (existingVersion && !reset) {
++            // Server has a backup. Check whether the local OlmMachine already knows about it.
++            const localKeys = await this.machine.getBackupKeys();
++            if (localKeys.backupVersion === existingVersion) return; // In sync — nothing to do.
++
++            // Local store is out of sync (e.g. crypto-store wiped and bootstrap retried with
++            // a new SSSS key, or interrupted before saveBackupDecryptionKey). Try to reconnect
++            // by decrypting the existing backup key from account data using the current SSSS key.
++            try {
++                const backupKeyRaw = await this.client.getAccountData<object>("m.megolm_backup.v1");
++                if (backupKeyRaw) {
++                    const decryptedBase64 = ssssKey.decrypt(JSON.stringify(backupKeyRaw), "m.megolm_backup.v1");
++                    const decryptionKey = BackupDecryptionKey.fromBase64(decryptedBase64);
++                    await this.machine.enableBackupV1(decryptionKey.megolmV1PublicKey.publicKeyBase64, existingVersion);
++                    await this.machine.saveBackupDecryptionKey(decryptionKey, existingVersion);
++                    return;
++                }
++            } catch {
++                // Account data is missing, encrypted with a different SSSS key, or corrupted.
++                // Fall through to create a new backup version under the current SSSS key.
++            }
++            // Could not reuse the existing backup — delete it and create a fresh one.
++            await this.client.doRequest("DELETE", `/_matrix/client/v3/room_keys/version/${existingVersion}`);
++        }
 +        if (existingVersion && reset) {
 +            await this.client.doRequest("DELETE", `/_matrix/client/v3/room_keys/version/${existingVersion}`);
 +        }
@@ -713,7 +762,7 @@
 +            null, content,
 +        );
 +    }
- }
++}
 +
 +/**
 + * Extract a UIA challenge from a thrown matrix-bot-sdk request error. A 401 UIA
@@ -746,4 +795,4 @@
 +    const e = err as { body?: { errcode?: string; error?: string } };
 +    const body = e.body ?? (err as { errcode?: string; error?: string });
 +    return Boolean(body && (body as { errcode?: string }).errcode);
-+}
+ }
