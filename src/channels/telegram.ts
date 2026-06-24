@@ -208,7 +208,7 @@ registerChannelAdapter('telegram', {
       adapter: telegramAdapter,
       concurrency: 'concurrent',
       extractReplyContext,
-      supportsThreads: false,
+      supportsThreads: true,
       transformOutboundText: sanitizeTelegramLegacyMarkdown,
       maxTextLength: 4000,
     });
