@@ -46,6 +46,10 @@
  *                                 If unset, voice messages arrive as "[Voice message]".
  *   WHISPER_MODEL               — path to the ggml model file (default:
  *                                 ~/.local/share/whisper/models/ggml-base.en.bin).
+ *   FFMPEG_BIN                  — path to the ffmpeg binary (default: "ffmpeg",
+ *                                 resolved on PATH). Set this if ffmpeg is not on
+ *                                 the service's PATH (e.g. a launchd/systemd unit
+ *                                 that doesn't inherit a Homebrew PATH).
  *
  * Cross-signing + 4S (MATRIX_RECOVERY_KEY): a patch
  * (patches/matrix-bot-sdk@0.8.0.patch) fixes two SDK gaps and adds three new
@@ -110,6 +114,9 @@ const ENV_KEYS = [
   'MATRIX_STORE_PATH',
   'MATRIX_RECOVERY_KEY',
   'MATRIX_INVITE_AUTOJOIN',
+  'WHISPER_BIN',
+  'WHISPER_MODEL',
+  'FFMPEG_BIN',
 ] as const;
 
 const DEFAULT_CRYPTO_STORE = 'data/v2-matrix-crypto';
@@ -137,6 +144,9 @@ export interface MatrixConfig {
   fsStorePath: string;
   recoveryKey?: string;
   autojoin: boolean;
+  whisperBin?: string;
+  whisperModel?: string;
+  ffmpegBin: string;
 }
 
 /**
@@ -180,6 +190,9 @@ export function parseMatrixConfig(env: Record<string, string | undefined>): Matr
     fsStorePath,
     recoveryKey: env.MATRIX_RECOVERY_KEY?.trim() || undefined,
     autojoin,
+    whisperBin: env.WHISPER_BIN?.trim() || undefined,
+    whisperModel: env.WHISPER_MODEL?.trim() || undefined,
+    ffmpegBin: env.FFMPEG_BIN?.trim() || 'ffmpeg',
   };
 }
 
@@ -764,7 +777,7 @@ export function createMatrixAdapter(config: MatrixConfig, deps: MatrixClientDeps
    * Audio never leaves the machine.
    */
   async function transcribeMatrixAudio(event: MatrixMessageEvent): Promise<string | null> {
-    const whisperBin = process.env.WHISPER_BIN;
+    const whisperBin = config.whisperBin;
     if (!whisperBin) return null;
 
     const content = event.content;
@@ -788,19 +801,22 @@ export function createMatrixAdapter(config: MatrixConfig, deps: MatrixClientDeps
 
     const cleanup = () => {
       for (const f of [audioPath, wavPath, txtPath]) {
-        try { unlinkSync(f); } catch {}
+        try {
+          unlinkSync(f);
+        } catch {}
       }
-      try { rmdirSync(tmpDir); } catch {}
+      try {
+        rmdirSync(tmpDir);
+      } catch {}
     };
 
     try {
       writeFileSync(audioPath, audioData);
 
-      execSync(`ffmpeg -y -loglevel error -i "${audioPath}" -ar 16000 -ac 1 "${wavPath}"`, {
+      execSync(`"${config.ffmpegBin}" -y -loglevel error -i "${audioPath}" -ar 16000 -ac 1 "${wavPath}"`, {
         stdio: 'ignore',
       });
-      const model =
-        process.env.WHISPER_MODEL ?? path.join(homedir(), '.local/share/whisper/models/ggml-base.en.bin');
+      const model = config.whisperModel ?? path.join(homedir(), '.local/share/whisper/models/ggml-base.en.bin');
       const out = execSync(`"${whisperBin}" -m "${model}" -f "${wavPath}" -nt -otxt -of "${wavPath}"`, {
         encoding: 'utf-8',
         stdio: ['ignore', 'pipe', 'ignore'],
@@ -808,7 +824,7 @@ export function createMatrixAdapter(config: MatrixConfig, deps: MatrixClientDeps
       const text = out.replace(/\[[^\]]*\]/g, '').trim();
       return text || null;
     } catch (err) {
-      log.debug('Matrix: local whisper transcription failed', { err });
+      log.warn('Matrix: local whisper transcription failed', { err });
       return null;
     } finally {
       cleanup();

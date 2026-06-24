@@ -232,6 +232,7 @@ function baseConfig(overrides: Partial<MatrixConfig> = {}): MatrixConfig {
     cryptoStorePath: path.join(tmpRoot, 'crypto'),
     fsStorePath: path.join(tmpRoot, 'store.json'),
     autojoin: true,
+    ffmpegBin: 'ffmpeg',
     ...overrides,
   };
 }
