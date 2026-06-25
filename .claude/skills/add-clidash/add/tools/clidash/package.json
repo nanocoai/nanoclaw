@@ -9,6 +9,6 @@
     "test": "node --test 'test/*.test.js'"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5"
   }
 }
