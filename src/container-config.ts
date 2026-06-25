@@ -67,9 +67,38 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
 }
 
 /**
+ * Expand `${VAR_NAME}` references in MCP server env values using process.env.
+ * Called at materialize time so the DB stores references, not secrets.
+ * Unresolved references are left as-is.
+ */
+function expandMcpEnvRefs(
+  mcpServers: Record<string, McpServerConfig>,
+): Record<string, McpServerConfig> {
+  return Object.fromEntries(
+    Object.entries(mcpServers).map(([name, cfg]) => [
+      name,
+      {
+        ...cfg,
+        env: cfg.env
+          ? Object.fromEntries(
+              Object.entries(cfg.env).map(([k, v]) => [
+                k,
+                v.replace(/\$\{([^}]+)\}/g, (_, varName) => process.env[varName] ?? v),
+              ]),
+            )
+          : undefined,
+      },
+    ]),
+  );
+}
+
+/**
  * Materialize `container.json` from the DB. Called at spawn time so the
  * container always sees fresh config. Returns the `ContainerConfig` for
  * use by the caller (buildMounts, buildContainerArgs, etc.).
+ *
+ * MCP server env values support `${VAR_NAME}` references — resolved from
+ * process.env so secrets live in `.env`, not the DB.
  */
 export function materializeContainerJson(agentGroupId: string): ContainerConfig {
   const group = getAgentGroup(agentGroupId);
@@ -79,11 +108,15 @@ export function materializeContainerJson(agentGroupId: string): ContainerConfig 
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
   const config = configFromDb(row, group);
+  const serialized = {
+    ...config,
+    mcpServers: expandMcpEnvRefs(config.mcpServers),
+  };
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');
   const dir = path.dirname(p);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(config, null, 2) + '\n');
+  fs.writeFileSync(p, JSON.stringify(serialized, null, 2) + '\n');
 
   return config;
 }
