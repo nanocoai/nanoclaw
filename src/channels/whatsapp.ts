@@ -38,8 +38,7 @@ import {
 } from '@whiskeysockets/baileys';
 import type { GroupMetadata, WAMessageKey, WAMessage, WASocket } from '@whiskeysockets/baileys';
 
-import { isSafeAttachmentName } from '../attachment-safety.js';
-import { ASSISTANT_HAS_OWN_NUMBER, ASSISTANT_NAME, DATA_DIR } from '../config.js';
+import { ASSISTANT_HAS_OWN_NUMBER, ASSISTANT_NAME } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { registerChannelAdapter } from './channel-registry.js';
@@ -423,41 +422,66 @@ registerChannelAdapter('whatsapp', {
       }
     }
 
-    /** Download media from an inbound message, save to /workspace/attachments/. */
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    /**
+     * Download inbound media as base64 `data` on each attachment object. The
+     * host's session-manager.extractAttachmentFiles stages every entry into
+     * <sessionDir>/inbox/<msgId>/<filename>, reachable in the container at
+     * /workspace/inbox/<msgId>/<filename>. Routing the bytes through the
+     * shared extractor keeps WhatsApp on the same code path as chat-sdk
+     * channels and inherits its path-traversal hardening for filenames.
+     *
+     * Do NOT save to data/attachments/ and tag a localPath instead: that
+     * directory is never mounted into the container, so the agent is handed a
+     * /workspace/attachments/<file> path that resolves nowhere — only the
+     * filename appears to arrive.
+     */
     async function downloadInboundMedia(
       msg: WAMessage,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       normalized: any,
-    ): Promise<Array<{ type: string; name: string; localPath: string }>> {
+    ): Promise<
+      Array<{
+        type: string;
+        name: string;
+        mimeType: string | undefined;
+        size: number;
+        data: string;
+      }>
+    > {
+      // Non-document WhatsApp media (image/video/audio) usually has no
+      // fileName, so we must supply a typed extension. Without it, the shared
+      // extractor falls back to a generic extensionless `attachment-<ts>`, and
+      // when the agent forwards the saved file via `send_file`,
+      // `buildMediaMessage` keys on the extension to pick image/video/audio
+      // vs. document — extensionless ⇒ wrongly sent as a document.
       const mediaTypes: Array<{ key: string; type: string; ext: string }> = [
         { key: 'imageMessage', type: 'image', ext: '.jpg' },
         { key: 'videoMessage', type: 'video', ext: '.mp4' },
         { key: 'audioMessage', type: 'audio', ext: '.ogg' },
         { key: 'documentMessage', type: 'document', ext: '' },
       ];
-      const results: Array<{ type: string; name: string; localPath: string }> = [];
+      const results: Array<{
+        type: string;
+        name: string;
+        mimeType: string | undefined;
+        size: number;
+        data: string;
+      }> = [];
       for (const { key, type, ext } of mediaTypes) {
         if (!normalized[key]) continue;
         try {
           const buffer = await downloadMediaMessage(msg, 'buffer', {});
-          // documentMessage.fileName is attacker-controlled and rides through
-          // WhatsApp's E2E channel — Meta can't sanitize it server-side. Without
-          // this guard, a `..`-laden fileName escapes attachDir on path.join.
-          const rawFilename = normalized[key].fileName;
-          const fallback = `${type}-${Date.now()}${ext}`;
-          const filename = isSafeAttachmentName(rawFilename) ? rawFilename : fallback;
-          if (rawFilename && filename !== rawFilename) {
-            log.warn('Refused unsafe attachment filename — would escape attachments dir', {
-              rawFilename,
-              replacement: filename,
-            });
-          }
-          const attachDir = path.join(DATA_DIR, 'attachments');
-          fs.mkdirSync(attachDir, { recursive: true });
-          const filePath = path.join(attachDir, filename);
-          fs.writeFileSync(filePath, buffer);
-          results.push({ type, name: filename, localPath: `attachments/${filename}` });
-          log.info('Media downloaded', { type, filename });
+          const rawName = normalized[key].fileName as string | undefined;
+          const name = rawName && rawName.length > 0 ? rawName : `${type}-${Date.now()}${ext}`;
+          const mimeType = normalized[key].mimetype as string | undefined;
+          results.push({
+            type,
+            name,
+            mimeType,
+            size: buffer.byteLength,
+            data: buffer.toString('base64'),
+          });
+          log.info('Media downloaded', { type, name, size: buffer.byteLength });
         } catch (err) {
           log.warn('Failed to download media', { type, err });
         }
