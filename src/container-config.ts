@@ -71,9 +71,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
  * Called at materialize time so the DB stores references, not secrets.
  * Unresolved references are left as-is.
  */
-function expandMcpEnvRefs(
-  mcpServers: Record<string, McpServerConfig>,
-): Record<string, McpServerConfig> {
+function expandMcpEnvRefs(mcpServers: Record<string, McpServerConfig>): Record<string, McpServerConfig> {
   return Object.fromEntries(
     Object.entries(mcpServers).map(([name, cfg]) => [
       name,
