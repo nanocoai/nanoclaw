@@ -30,7 +30,7 @@ import {
   readonlyMountArgs,
   stopContainer,
 } from './container-runtime.js';
-import { detectAuthMode } from './credential-proxy.js';
+import { getEffectiveMode } from './auth-state.js';
 import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
@@ -270,11 +270,13 @@ function buildContainerArgs(
     `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
   );
 
-  // Mirror the host's auth method with a placeholder value.
+  // Mirror the current effective auth mode with a placeholder value. This is
+  // the runtime posture (subscription-primary, API-key failover), so the NEXT
+  // container picks up a failover/recovery automatically.
   // API key mode: SDK sends x-api-key, proxy replaces with real key.
   // OAuth mode:   SDK exchanges placeholder token for temp API key,
   //               proxy injects real OAuth token on that exchange request.
-  const authMode = detectAuthMode();
+  const authMode = getEffectiveMode();
   if (authMode === 'api-key') {
     args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
   } else {

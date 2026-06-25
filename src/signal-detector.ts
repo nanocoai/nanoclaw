@@ -23,6 +23,7 @@
 import { appendFileSync, existsSync, mkdirSync } from 'fs';
 import path from 'path';
 
+import { getEffectiveMode } from './auth-state.js';
 import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 
@@ -41,34 +42,43 @@ const ANTHROPIC_VERSION = '2023-06-01';
 const OAUTH_BETA = 'oauth-2025-04-20';
 
 // Anthropic credential: either a Claude Code OAuth token (subscription) or a
-// raw API key. We prefer OAuth — on 2026-06-13 the ANTHROPIC_API_KEY hit a
-// spend cap and silently killed ambient capture (and the main agent), so this
-// detector deliberately decouples from the api-key path the way the credential
-// proxy fell back to OAuth. See project_andy_auth_oauth_switch.
+// raw API key. The detector follows the shared auth posture (auth-state):
+// subscription (OAuth) is primary, the API key is the failover. The credential
+// proxy drives failover/recovery from agent traffic; the detector reads the
+// same effective mode so ambient capture stays consistent with the main agent.
 interface AnthropicCreds {
   mode: 'oauth' | 'api-key';
   token: string;
 }
 
-// Lazy-load creds. Cache ONLY on success — caching the missing state would
-// prevent picking up a credential added mid-process (the failure mode observed
-// 2026-05-12 14:46). The miss-warning is rate-limited via `warnedMissing` so we
-// don't spam the log every message.
-let credsCache: AnthropicCreds | null = null;
+// Lazy-load the env tokens. Re-read while BOTH are missing so a credential
+// added mid-process is picked up (failure mode observed 2026-05-12 14:46); once
+// at least one token is present the env read is cached. The effective MODE is
+// re-evaluated every call via getEffectiveMode() so failover/recovery is
+// followed live. The miss-warning is rate-limited via `warnedMissing`.
+let envCache: Record<string, string> | null = null;
 let warnedMissing = false;
 function getAnthropicCreds(): AnthropicCreds | null {
-  if (credsCache) return credsCache;
-  const env = readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
-  // Prefer OAuth (subscription) over the API key — see note above.
-  if (env.CLAUDE_CODE_OAUTH_TOKEN) {
-    credsCache = { mode: 'oauth', token: env.CLAUDE_CODE_OAUTH_TOKEN };
-    warnedMissing = false; // reset so a future remove + re-add re-warns
-    return credsCache;
+  if (
+    !envCache ||
+    (!envCache.CLAUDE_CODE_OAUTH_TOKEN && !envCache.ANTHROPIC_API_KEY)
+  ) {
+    envCache = readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
   }
-  if (env.ANTHROPIC_API_KEY) {
-    credsCache = { mode: 'api-key', token: env.ANTHROPIC_API_KEY };
+  const oauth = envCache.CLAUDE_CODE_OAUTH_TOKEN;
+  const apiKey = envCache.ANTHROPIC_API_KEY;
+  // Subscription-primary: use OAuth unless the shared posture has failed over.
+  if (getEffectiveMode() === 'oauth' && oauth) {
     warnedMissing = false;
-    return credsCache;
+    return { mode: 'oauth', token: oauth };
+  }
+  if (apiKey) {
+    warnedMissing = false;
+    return { mode: 'api-key', token: apiKey };
+  }
+  if (oauth) {
+    warnedMissing = false;
+    return { mode: 'oauth', token: oauth };
   }
   if (!warnedMissing) {
     logger.warn(
