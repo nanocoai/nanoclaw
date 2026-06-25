@@ -1,4 +1,6 @@
 import { spawn, type ChildProcess } from 'child_process';
+import fs from 'fs';
+import path from 'path';
 
 import { createOpencodeClient, type OpencodeClient } from '@opencode-ai/sdk';
 
@@ -222,6 +224,19 @@ export class OpenCodeProvider implements AgentProvider {
   isSessionInvalid(err: unknown): boolean {
     const msg = err instanceof Error ? err.message : String(err);
     return STALE_SESSION_RE.test(msg);
+  }
+
+  maybeRotateContinuation(_continuation: string, cwd: string): string | null {
+    const signalPath = path.join(cwd, '.clear-provider-session');
+    try {
+      if (fs.existsSync(signalPath)) {
+        fs.rmSync(signalPath, { force: true });
+        return 'host ceiling-kill signal';
+      }
+    } catch {
+      // best effort
+    }
+    return null;
   }
 
   query(input: QueryInput): AgentQuery {
