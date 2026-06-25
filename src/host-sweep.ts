@@ -28,6 +28,7 @@
  */
 import type Database from 'better-sqlite3';
 import fs from 'fs';
+import path from 'path';
 
 import { ensureEgressNetwork } from './egress-lockdown.js';
 import { getActiveSessions } from './db/sessions.js';
@@ -46,6 +47,7 @@ import {
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
 import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
+import { GROUPS_DIR } from './config.js';
 import type { Session } from './types.js';
 
 /**
@@ -206,7 +208,7 @@ async function sweepSession(session: Session): Promise<void> {
     // yet. Without this grace period, stale claims cause an immediate
     // spawn-kill loop.
     if (alive && outDb && !justWoke) {
-      enforceRunningContainerSla(inDb, outDb, session, agentGroup.id);
+      enforceRunningContainerSla(inDb, outDb, session, agentGroup.id, agentGroup.folder);
     }
 
     // 4. Crashed-container cleanup: processing rows left behind get retried.
@@ -242,11 +244,21 @@ function bashTimeoutMs(state: ContainerState | null): number | null {
   return typeof state.tool_declared_timeout_ms === 'number' ? state.tool_declared_timeout_ms : null;
 }
 
+function writeClearSessionSignal(agentGroupFolder: string): void {
+  const signalPath = path.join(GROUPS_DIR, agentGroupFolder, '.clear-provider-session');
+  try {
+    fs.writeFileSync(signalPath, new Date().toISOString());
+  } catch {
+    // best effort — if the group dir doesn't exist yet the next container will start fresh anyway
+  }
+}
+
 function enforceRunningContainerSla(
   inDb: Database.Database,
   outDb: Database.Database,
   session: Session,
   agentGroupId: string,
+  agentGroupFolder: string,
 ): void {
   const decision = decideStuckAction({
     now: Date.now(),
@@ -264,6 +276,7 @@ function enforceRunningContainerSla(
       ceilingMs: decision.ceilingMs,
     });
     killContainer(session.id, 'absolute-ceiling');
+    writeClearSessionSignal(agentGroupFolder);
     resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling');
     return;
   }

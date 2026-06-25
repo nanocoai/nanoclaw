@@ -252,6 +252,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
       }
+      // Provider returned nothing — session is likely degraded. Clear so the
+      // next container starts a fresh session rather than resuming a dead one.
+      if (result.hadEmptyResult && continuation) {
+        log(`Empty result with active session (${continuation}) — clearing for fresh retry`);
+        continuation = undefined;
+        clearContinuation(config.providerName);
+      }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       log(`Query error: ${errMsg}`);
@@ -321,6 +328,8 @@ function formatMessagesWithCommands(messages: MessageInRow[], nativeSlashCommand
 
 interface QueryResult {
   continuation?: string;
+  /** True if every result event had empty text — provider returned nothing. */
+  hadEmptyResult: boolean;
 }
 
 export async function processQuery(
@@ -335,6 +344,8 @@ export async function processQuery(
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  let resultCount = 0;
+  let emptyResultCount = 0;
   // Prompt queue for the exchange hook — each result event consumes the
   // oldest unanswered prompt, except a wrapping-retry result, which answers
   // the same prompt again. Unused (and unmaintained) when the provider
@@ -481,6 +492,7 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        resultCount++;
         if (event.text) {
           const { sent, hasUnwrapped } = dispatchResultText(event.text, routing);
           if (sent === 0 && event.isError === true) {
@@ -520,6 +532,7 @@ export async function processQuery(
             if (!willRetryWrapping) archivePrompts.shift();
           }
         } else {
+          emptyResultCount++;
           archivePrompts.shift();
         }
       }
@@ -538,7 +551,7 @@ export async function processQuery(
     clearInterval(pollHandle);
   }
 
-  return { continuation: queryContinuation };
+  return { continuation: queryContinuation, hadEmptyResult: resultCount > 0 && emptyResultCount === resultCount };
 }
 
 function notifyExchangeComplete(
