@@ -117,8 +117,8 @@ export function materializeContainerJson(agentGroupId: string): ContainerConfig 
   const referencedVars = [
     ...new Set(
       Object.values(config.mcpServers)
-        .flatMap(srv => Object.values(srv.env ?? {}))
-        .flatMap(v => [...v.matchAll(/\$\{([^}]+)\}/g)].map(m => m[1])),
+        .flatMap((srv) => Object.values(srv.env ?? {}))
+        .flatMap((v) => [...v.matchAll(/\$\{([^}]+)\}/g)].map((m) => m[1])),
     ),
   ];
   const envFileVars = referencedVars.length > 0 ? readEnvFile(referencedVars) : {};
