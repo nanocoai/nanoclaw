@@ -13,7 +13,14 @@ import { getCurrentInReplyTo } from '../current-batch.js';
 import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
-import { registerTools } from './server.js';
+import {
+  registerTools,
+  runEmitExternalTargetGuard,
+  runEmitFilename,
+  runEmitPostHook,
+  runEmitPreHook,
+  runEmitSourceGuard,
+} from './server.js';
 import type { McpToolDefinition } from './types.js';
 
 function log(msg: string): void {
@@ -115,6 +122,12 @@ export const sendMessage: McpToolDefinition = {
     const routing = resolveRouting(args.to as string | undefined);
     if ('error' in routing) return err(routing.error);
 
+    // Emit-hook (pre-hook) (no-op with no registrant): a downstream
+    // overlay may park a cross-conversation send for admin approval (a
+    // broadcast gate).
+    const parked = runEmitPreHook('send_message', args, routing);
+    if (parked) return parked;
+
     const id = generateId();
     const seq = writeMessageOut({
       id,
@@ -126,6 +139,9 @@ export const sendMessage: McpToolDefinition = {
       content: JSON.stringify({ text }),
     });
 
+    // Emit-hook (post-hook) (no-op with no registrant): a downstream
+    // overlay may mark a same-conversation dedup flag.
+    runEmitPostHook('send_message', routing);
     log(`send_message: #${seq} → ${routing.resolvedName}`);
     return ok(`Message sent to ${routing.resolvedName} (id: ${seq})`);
   },
@@ -153,11 +169,26 @@ export const sendFile: McpToolDefinition = {
     const routing = resolveRouting(args.to as string | undefined);
     if ('error' in routing) return err(routing.error);
 
+    // Emit-hook (pre-hook) (no-op with no registrant): a downstream
+    // overlay may park a broadcast send for approval.
+    const parked = runEmitPreHook('send_file', args, routing);
+    if (parked) return parked;
+
     const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve('/workspace/agent', filePath);
     if (!fs.existsSync(resolvedPath)) return err(`File not found: ${filePath}`);
 
+    // Emit-hook (source-guard) (no-op with no registrant): a downstream
+    // overlay may enforce send_file source-path confinement. realpathSync
+    // collapses `..` AND symlinks (existence already checked above) before the
+    // overlay's prefix check.
+    const sourceDenied = runEmitSourceGuard('send_file', fs.realpathSync(resolvedPath));
+    if (sourceDenied) return sourceDenied;
+
     const id = generateId();
-    const filename = (args.filename as string) || path.basename(resolvedPath);
+    // Emit-hook (filename): default is upstream `filename || basename`; a
+    // downstream overlay may force a single basename segment (outbox-write
+    // confinement).
+    const filename = runEmitFilename('send_file', args.filename as string | undefined, resolvedPath);
 
     const outboxDir = path.join('/workspace/outbox', id);
     fs.mkdirSync(outboxDir, { recursive: true });
@@ -173,6 +204,8 @@ export const sendFile: McpToolDefinition = {
       content: JSON.stringify({ text: (args.text as string) || '', files: [filename] }),
     });
 
+    // Emit-hook (post-hook) (no-op with no registrant): same-conv dedup mark.
+    runEmitPostHook('send_file', routing);
     log(`send_file: ${id} → ${routing.resolvedName} (${filename})`);
     return ok(`File sent to ${routing.resolvedName} (id: ${id}, filename: ${filename})`);
   },
@@ -203,6 +236,12 @@ export const editMessage: McpToolDefinition = {
     if (!routing || !routing.channel_type || !routing.platform_id) {
       return err(`Cannot determine destination for message #${seq}`);
     }
+
+    // Emit-hook (external-target guard) (no-op with no registrant): a downstream
+    // overlay may refuse a cross-conversation edit on a confined session (an
+    // exfil bypass of the broadcast gate).
+    const externalDenied = runEmitExternalTargetGuard('edit_message', routing);
+    if (externalDenied) return externalDenied;
 
     const id = generateId();
     writeMessageOut({
@@ -244,6 +283,12 @@ export const addReaction: McpToolDefinition = {
     if (!routing || !routing.channel_type || !routing.platform_id) {
       return err(`Cannot determine destination for message #${seq}`);
     }
+
+    // Emit-hook (external-target guard) (no-op with no registrant): a downstream
+    // overlay may refuse a cross-conversation reaction on a confined session
+    // (consistent with edit_message).
+    const externalDenied = runEmitExternalTargetGuard('add_reaction', routing);
+    if (externalDenied) return externalDenied;
 
     const id = generateId();
     writeMessageOut({

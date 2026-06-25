@@ -43,6 +43,7 @@ import {
   syncProcessingAcks,
   type ContainerState,
 } from './db/session-db.js';
+import { runDueMessageGates, getRecurrenceTzResolverFor } from './host-sweep-extensions.js';
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
 import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
@@ -188,6 +189,15 @@ async function sweepSession(session: Session): Promise<void> {
     // container/agent-runner/src/db/connection.ts). Otherwise the reset path
     // would keep bumping process_after into the future, dueCount would stay 0,
     // and the wake would never fire.
+    // Due-message gate hook (extension contract): registered gates may mark due rows completed
+    // BEFORE the due-count below (e.g. an install-overlay's idle/stale-group runner suppression)
+    // so they drop out of dueCount and never wake the container; the recurrence fanout (step 5)
+    // still advances them. This is WORK-suppression, not wake-only: it runs every tick regardless
+    // of container state — an already-running container that polls due rows itself must be gated
+    // container-side by the overlay (the host gate can't win that race). Each gate is fail-isolated
+    // AND atomic (rolled back on throw). No gates registered by default ⇒ this is a no-op.
+    runDueMessageGates(inDb, agentGroup.folder);
+
     const dueCount = countDueMessages(inDb);
     let justWoke = false;
     if (dueCount > 0 && !isContainerRunning(session.id)) {
@@ -217,10 +227,13 @@ async function sweepSession(session: Session): Promise<void> {
       resetStuckProcessingRows(inDb, outDb, session, 'container not running');
     }
 
-    // 5. Recurrence fanout for completed recurring tasks.
+    // 5. Recurrence fanout for completed recurring tasks. A registered per-row timezone resolver
+    // (extension contract) may interpret some rows' crons in a non-global zone; every other row
+    // falls back to the global TIMEZONE inside handleRecurrence. No resolver registered by
+    // default ⇒ undefined ⇒ global TIMEZONE for all rows.
     // MODULE-HOOK:scheduling-recurrence:start
     const { handleRecurrence } = await import('./modules/scheduling/recurrence.js');
-    await handleRecurrence(inDb, session);
+    await handleRecurrence(inDb, session, getRecurrenceTzResolverFor(agentGroup.folder));
     // MODULE-HOOK:scheduling-recurrence:end
   } finally {
     inDb.close();

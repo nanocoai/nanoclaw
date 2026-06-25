@@ -53,6 +53,32 @@ export function createDestination(row: AgentDestination): void {
     .run(row);
 }
 
+/**
+ * Insert a destination only if `(agent_group_id, local_name)` isn't already
+ * present. Returns true when a row was inserted, false when one already existed
+ * — so callers can gate the follow-up `writeDestinations()` projection on an
+ * actual change. The idempotent insert-if-absent the provisioning paths repeat;
+ * NOT for the backfills, which must DETECT a wrong-target collision rather than
+ * silently skip.
+ */
+export function createDestinationIfAbsent(
+  agentGroupId: string,
+  localName: string,
+  targetType: 'channel' | 'agent',
+  targetId: string,
+  createdAt: string,
+): boolean {
+  if (getDestinationByName(agentGroupId, localName)) return false;
+  createDestination({
+    agent_group_id: agentGroupId,
+    local_name: localName,
+    target_type: targetType,
+    target_id: targetId,
+    created_at: createdAt,
+  });
+  return true;
+}
+
 export function getDestinations(agentGroupId: string): AgentDestination[] {
   return getDb()
     .prepare('SELECT * FROM agent_destinations WHERE agent_group_id = ?')

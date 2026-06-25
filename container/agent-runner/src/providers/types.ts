@@ -7,6 +7,15 @@ export interface AgentProvider {
   readonly supportsNativeSlashCommands: boolean;
 
   /**
+   * Optional capability flag. True if the provider HONORS `query({ confinedExternal:
+   * true })` by dropping every built-in fs/bash tool and exposing only the nanoclaw
+   * MCP server. Absent ⇒ treated as false: a caller requesting a confined turn from a
+   * provider without this support must fail closed (skip), never run it unconfined.
+   * Providers OPT IN.
+   */
+  readonly supportsConfinedExternal?: boolean;
+
+  /**
    * Optional. When true, the runner scaffolds a persistent `memory/` tree in the
    * agent's workspace at boot. Providers with their own native memory (e.g.
    * Claude's `CLAUDE.local.md`) omit this and get nothing — memory is opt-in per
@@ -101,6 +110,15 @@ export interface QueryInput {
   systemContext?: {
     instructions?: string;
   };
+
+  /**
+   * Optional. Run this query in CONFINED mode: the provider must drop ALL built-in
+   * fs/bash tools, exposing only the nanoclaw MCP server. Pair with a neutral `cwd`
+   * and a minimal `systemContext`. A provider that does not implement a confined mode
+   * (see `AgentProvider.supportsConfinedExternal`) MUST treat the turn as unsupported
+   * rather than run it unconfined.
+   */
+  confinedExternal?: boolean;
 }
 
 export interface McpServerConfig {
@@ -139,4 +157,11 @@ export type ProviderEvent =
    * event (tool call, thinking, partial message, anything) so the
    * poll-loop's idle timer stays honest during long tool runs.
    */
-  | { type: 'activity' };
+  | { type: 'activity' }
+  /**
+   * The provider's underlying SDK auto-compacted the conversation context. A
+   * consumer (e.g. an install-overlay's memory capture) may react by persisting
+   * a session summary and/or re-injecting context. Providers without on-disk
+   * compaction never emit it. Optional capability, additive to the union.
+   */
+  | { type: 'compacted'; text: string };

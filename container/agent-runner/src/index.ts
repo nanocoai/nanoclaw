@@ -27,6 +27,9 @@ import { fileURLToPath } from 'url';
 
 import { loadConfig } from './config.js';
 import { buildSystemPromptAddendum } from './destinations.js';
+import { collectSystemPromptAddenda, runBootSteps } from './extensions.js';
+import './extensions-register.js';
+import { buildMcpServers } from './mcp-server-config.js';
 import { ensureMemoryScaffold } from './memory-scaffold.js';
 // Providers barrel — each enabled provider self-registers on import.
 // Provider skills append imports to providers/index.ts.
@@ -52,7 +55,9 @@ async function main(): Promise<void> {
   // /workspace/agent/CLAUDE.md — the composed entry imports the shared
   // base (/app/CLAUDE.md) and each enabled module's fragment. Per-group
   // memory lives in /workspace/agent/CLAUDE.local.md (auto-loaded).
-  const instructions = buildSystemPromptAddendum(config.assistantName || undefined);
+  // Boot-step extensions (overlay-registered; no-op by default).
+  runBootSteps();
+  const instructions = buildSystemPromptAddendum(config.assistantName || undefined) + collectSystemPromptAddenda();
 
   // Discover additional directories mounted at /workspace/extra/*
   const additionalDirectories: string[] = [];
@@ -73,19 +78,15 @@ async function main(): Promise<void> {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const mcpServerPath = path.join(__dirname, 'mcp-tools', 'index.ts');
 
-  // Build MCP servers config: nanoclaw built-in + any from container.json
-  const mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {
-    nanoclaw: {
-      command: 'bun',
-      args: ['run', mcpServerPath],
-      env: {},
-    },
-  };
-
-  for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
-    mcpServers[name] = serverConfig;
-    log(`Additional MCP server: ${name} (${serverConfig.command})`);
-  }
+  // Build MCP servers config: nanoclaw built-in + any from container.json. The built-in name is
+  // RESERVED — a configured server can never override it (see buildMcpServers), so a confined turn
+  // that exposes only `nanoclaw` always gets the trusted gated server, not a config-supplied one.
+  const mcpServers = buildMcpServers(
+    { nanoclaw: { command: 'bun', args: ['run', mcpServerPath], env: {} } },
+    config.mcpServers,
+    (name) => log(`Ignoring configured MCP server "${name}" — built-in name is reserved and cannot be overridden`),
+    (name, serverConfig) => log(`Additional MCP server: ${name} (${serverConfig.command})`),
+  );
 
   const provider = createProvider(providerName, {
     assistantName: config.assistantName || undefined,
@@ -107,6 +108,10 @@ async function main(): Promise<void> {
     providerName,
     cwd: CWD,
     systemContext: { instructions },
+    // Forwarded for install-overlays whose poll-loop tags outbound rows with the
+    // bot name / agent-group prefix. Upstream's poll-loop ignores them (optional).
+    assistantName: config.assistantName,
+    agentGroupId: config.agentGroupId,
   });
 }
 

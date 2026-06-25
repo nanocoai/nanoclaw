@@ -66,12 +66,24 @@ describe('poll loop — /upload-trace command', () => {
 });
 
 async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSignal, timeoutMs: number): Promise<void> {
+  // Own an internal stop signal so the loop ALWAYS exits — on caller abort AND on timeout.
+  // The pristine helper never even forwarded `signal` to runPollLoop, so the loop polled
+  // forever (no abort path), kept an open MockProvider stream, and stole later test files'
+  // messages from whatever DB was open (see PollLoopConfig.signal; MockProvider stays open).
+  const stop = new AbortController();
+  if (signal.aborted) stop.abort();
+  else signal.addEventListener('abort', () => stop.abort());
   return Promise.race([
-    runPollLoop({ provider, providerName: 'mock', cwd: '/tmp' }),
+    runPollLoop({ provider, providerName: 'mock', cwd: '/tmp', signal: stop.signal }),
     new Promise<void>((_, reject) => {
       signal.addEventListener('abort', () => reject(new Error('aborted')));
     }),
-    new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
+    new Promise<void>((_, reject) =>
+      setTimeout(() => {
+        stop.abort();
+        reject(new Error('timeout'));
+      }, timeoutMs),
+    ),
   ]);
 }
 

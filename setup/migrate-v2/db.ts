@@ -27,6 +27,11 @@ import {
   updateMessagingGroup,
 } from '../../src/db/messaging-groups.js';
 import { runMigrations } from '../../src/db/migrations/index.js';
+import { runMigrateV2Steps, type MigratedGroup, type SkippedGroup } from '../../src/migrate-v2-steps.js';
+// Install-overlay append point: importing this runs any registered overlay's
+// post-seed step registration (e.g. a downstream flag carry-over).
+// Empty with no registrant.
+import '../../src/migrate-v2-steps-register.js';
 import { readEnvFile } from '../../src/env.js';
 import { buildDiscordResolver, type DiscordResolver } from './discord-resolver.js';
 import {
@@ -63,9 +68,11 @@ async function main(): Promise<void> {
   const v1Db = new Database(v1DbPath, { readonly: true, fileMustExist: true });
 
   // v1 schema varies — channel_name was a late addition. Query only the
-  // columns we know exist in all v1 installs.
+  // columns we know exist in all v1 installs. ORDER BY rowid gives a stable
+  // iteration order so post-seed steps that pick "the first" matching row are
+  // deterministic across reruns.
   const v1Groups = v1Db
-    .prepare('SELECT jid, name, folder, trigger_pattern, requires_trigger, is_main FROM registered_groups')
+    .prepare('SELECT jid, name, folder, trigger_pattern, requires_trigger, is_main FROM registered_groups ORDER BY rowid')
     .all() as V1Group[];
   v1Db.close();
 
@@ -83,6 +90,13 @@ async function main(): Promise<void> {
   let reused = 0;
   let skipped = 0;
   const errors: string[] = [];
+  // Generic seed-outcome context passed to the post-seed step registry
+  // (src/migrate-v2-steps.ts). Core records every created/reused group and
+  // every skipped row (with its v1 is_main flag) so an install-overlay step —
+  // e.g. a downstream flag carry-over — can interpret them without
+  // any downstream logic living here. By default zero steps are registered.
+  const ctxMigrated: MigratedGroup[] = [];
+  const ctxSkipped: SkippedGroup[] = [];
 
   // v1 stored Discord groups as `dc:<channelId>` with no guild/DM signal.
   // v2 needs either `discord:<guildId>:<channelId>` (guild) or
@@ -113,6 +127,7 @@ async function main(): Promise<void> {
     if (!parsed) {
       skipped++;
       errors.push(`Could not parse JID: ${g.jid}`);
+      ctxSkipped.push({ folder: g.folder, jid: g.jid, reason: 'JID parse failure', v1IsMain: g.is_main === 1 });
       continue;
     }
 
@@ -127,6 +142,7 @@ async function main(): Promise<void> {
           : 'not found in any guild the bot can see — re-add the bot to that server and re-run, or rewire after migration';
         skipped++;
         errors.push(`Discord channel ${parsed.id} (${g.folder}): ${why}`);
+        ctxSkipped.push({ folder: g.folder, jid: g.jid, reason: why, v1IsMain: g.is_main === 1 });
         continue;
       }
       platformId = resolved;
@@ -201,11 +217,24 @@ async function main(): Promise<void> {
       } else {
         reused++;
       }
+
+      // Record AFTER wiring is confirmed (created or reused). Any group that
+      // errors mid-create lands in ctxSkipped instead, so a post-seed step
+      // (e.g. a downstream flag carry-over) never promotes a group
+      // with no wiring row.
+      ctxMigrated.push({ folder: g.folder, messagingGroupId: mg.id, v1IsMain: g.is_main === 1 });
     } catch (err) {
       skipped++;
-      errors.push(`${g.folder}: ${err instanceof Error ? err.message : String(err)}`);
+      const reason = err instanceof Error ? err.message : String(err);
+      errors.push(`${g.folder}: ${reason}`);
+      ctxSkipped.push({ folder: g.folder, jid: g.jid, reason, v1IsMain: g.is_main === 1 });
     }
   }
+
+  // Run install-overlay post-seed steps (empty with no registrant). A downstream
+  // overlay may register a flag carry-over here. Steps
+  // may return `key=value` fragments to append to the OK: summary line.
+  const stepFields = await runMigrateV2Steps({ migrated: ctxMigrated, skipped: ctxSkipped });
 
   v2Db.close();
 
@@ -219,7 +248,14 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log(`OK:groups=${v1Groups.length},created=${created},reused=${reused},skipped=${skipped}`);
+  const okFields = [
+    `groups=${v1Groups.length}`,
+    `created=${created}`,
+    `reused=${reused}`,
+    `skipped=${skipped}`,
+    ...stepFields,
+  ];
+  console.log(`OK:${okFields.join(',')}`);
   if (errors.length > 0) {
     for (const e of errors) console.log(`ERROR:${e}`);
   }

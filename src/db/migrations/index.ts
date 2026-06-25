@@ -65,6 +65,26 @@ interface FkViolation {
 const fkIdentity = (v: FkViolation): string =>
   JSON.stringify({ table: v.table, rowid: v.rowid, parent: v.parent, fkid: v.fkid });
 
+// Generic extension point: install-overlay modules register their migrations at
+// import time via registerMigration(); runMigrations() applies the core array
+// first, then the registered ones. Pristine core registers ZERO, so behaviour is
+// identical to upstream. Name-keyed idempotency (below) is unchanged.
+const registeredModuleMigrations: Migration[] = [];
+
+export function registerMigration(m: Migration): void {
+  // Name-keyed dup guard (consistent with the sibling registries). A duplicate
+  // name — double-register or a collision with a core migration — would silently
+  // never re-apply (apply-layer dedup is on `name`), so fail loud at registration.
+  if (registeredModuleMigrations.some((x) => x.name === m.name) || migrations.some((x) => x.name === m.name)) {
+    throw new Error(`migration "${m.name}" already registered`);
+  }
+  registeredModuleMigrations.push(m);
+}
+
+export function getRegisteredMigrations(): readonly Migration[] {
+  return registeredModuleMigrations;
+}
+
 export function runMigrations(db: Database.Database, list: Migration[] = migrations): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_version (
@@ -84,7 +104,7 @@ export function runMigrations(db: Database.Database, list: Migration[] = migrati
   const applied = new Set<string>(
     (db.prepare('SELECT name FROM schema_version').all() as { name: string }[]).map((r) => r.name),
   );
-  const pending = list.filter((m) => !applied.has(m.name));
+  const pending = [...list, ...registeredModuleMigrations].filter((m) => !applied.has(m.name));
   if (pending.length === 0) return;
 
   log.info('Running migrations', { count: pending.length });

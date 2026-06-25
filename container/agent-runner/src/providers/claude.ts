@@ -5,7 +5,13 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
+import { applyInputTransform } from './input-transform.js';
+import { applyPreCompactCapture, preCompactCaptureTimeoutSec } from './precompact-capture.js';
 import { registerProvider } from './provider-registry.js';
+import { applyQueryConfinement, isQueryConfinementRegistered } from './query-confinement.js';
+import { mapCompactBoundaryMessage, mapResultMessage } from './result-events.js';
+import { policyAllowsTool, policyExtraDenied, policyHidesMcpServer, policySettingSources } from './tool-policy.js';
+import { applyToolResultMiddleware } from './tool-result-middleware.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
 function log(msg: string): void {
@@ -23,7 +29,7 @@ function log(msg: string): void {
 //   the question and blocks on the real reply.
 // - EnterPlanMode / ExitPlanMode / EnterWorktree / ExitWorktree: Claude
 //   Code UI affordances; in a headless container they'd appear stuck.
-const SDK_DISALLOWED_TOOLS = [
+const BASE_DISALLOWED_TOOLS = [
   'CronCreate',
   'CronDelete',
   'CronList',
@@ -34,6 +40,16 @@ const SDK_DISALLOWED_TOOLS = [
   'EnterWorktree',
   'ExitWorktree',
 ];
+
+/**
+ * The effective denylist = the provider's base + any tools a registered
+ * ProviderToolPolicy adds (ADDITIVE only — a registrant can tighten the
+ * security boundary, never loosen it). No policy registered ⇒ the base set,
+ * identical to upstream.
+ */
+function disallowedTools(): string[] {
+  return [...BASE_DISALLOWED_TOOLS, ...policyExtraDenied()];
+}
 
 // Tool allowlist for NanoClaw agent containers. MCP-tool entries are derived
 // at the call site from the registered `mcpServers` map so that any server
@@ -86,7 +102,7 @@ class MessageStream {
   push(text: string): void {
     this.queue.push({
       type: 'user',
-      message: { role: 'user', content: text },
+      message: { role: 'user', content: applyInputTransform(text, 'prompt') },
       parent_tool_use_id: null,
       session_id: '',
     });
@@ -155,13 +171,13 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
 /**
  * PreToolUse hook: record the current tool + its declared timeout so the host
  * sweep can widen its stuck tolerance while Bash is running a long-declared
- * script. Defense-in-depth: if SDK_DISALLOWED_TOOLS slips through somehow,
+ * script. Defense-in-depth: if a disallowed tool slips through somehow,
  * block the call here instead of letting the agent hang.
  */
 const preToolUseHook: HookCallback = async (input) => {
   const i = input as { tool_name?: string; tool_input?: Record<string, unknown> };
   const toolName = i.tool_name ?? '';
-  if (SDK_DISALLOWED_TOOLS.includes(toolName)) {
+  if (disallowedTools().includes(toolName)) {
     return {
       decision: 'block',
       stopReason: `Tool '${toolName}' is not available in this environment — use the nanoclaw equivalent.`,
@@ -179,12 +195,28 @@ const preToolUseHook: HookCallback = async (input) => {
   return { continue: true };
 };
 
-/** Clear in-flight tool on PostToolUse / PostToolUseFailure. */
-const postToolUseHook: HookCallback = async () => {
+/**
+ * Clear in-flight tool on PostToolUse / PostToolUseFailure, then run any
+ * registered tool-result middleware over the tool_response. INERT on pristine
+ * core: with no registrant the middleware is identity (changed:false), so this
+ * returns { continue: true } unchanged. An overlay registrant can rewrite the
+ * tool output (emitted as `updatedToolOutput`) before the SDK records it.
+ */
+const postToolUseHook: HookCallback = async (input) => {
   try {
     clearContainerToolInFlight();
   } catch (err) {
     log(`PostToolUse: failed to clear container_state: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const resp = (input as { tool_response?: unknown }).tool_response;
+  if (resp !== undefined) {
+    const { value, changed } = applyToolResultMiddleware(resp);
+    if (changed) {
+      return {
+        continue: true,
+        hookSpecificOutput: { hookEventName: 'PostToolUse', updatedToolOutput: value },
+      } as unknown as ReturnType<HookCallback>;
+    }
   }
   return { continue: true };
 };
@@ -192,19 +224,34 @@ const postToolUseHook: HookCallback = async () => {
 /**
  * Read a Claude transcript .jsonl, render a markdown summary, and drop it into
  * the agent's `conversations/` folder so context survives a compaction or a
- * session rotation. Best-effort: returns false (and logs) on any failure.
+ * session rotation. Returns the PARSED messages (so a caller can reuse them
+ * without re-reading the file), or null on a read/parse failure or empty
+ * transcript. The markdown write is independently best-effort: if ONLY the write
+ * fails the parsed messages are still returned (logs), so a post-archive consumer
+ * still runs.
  */
-function archiveTranscriptFile(transcriptPath: string | undefined, sessionId: string | undefined, assistantName?: string): boolean {
+function archiveTranscriptFile(transcriptPath: string | undefined, sessionId: string | undefined, assistantName?: string): ParsedMessage[] | null {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) {
     log('No transcript found for archiving');
-    return false;
+    return null;
   }
 
+  // Read + parse first. A read/parse failure (or an empty transcript) yields null — nothing to
+  // archive OR hand to a post-archive consumer.
+  let messages: ParsedMessage[];
   try {
     const content = fs.readFileSync(transcriptPath, 'utf-8');
-    const messages = parseTranscript(content);
-    if (messages.length === 0) return false;
+    messages = parseTranscript(content);
+  } catch (err) {
+    log(`Failed to read transcript: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+  if (messages.length === 0) return null;
 
+  // The markdown WRITE is independently best-effort: a failure here (EACCES/ENOSPC on the
+  // conversations dir) must NOT prevent a post-archive consumer (the PreCompact capture seam)
+  // from running — the transcript is already parsed. Swallow + still return the parsed messages.
+  try {
     // Try to get summary from sessions index
     let summary: string | undefined;
     const indexPath = path.join(path.dirname(transcriptPath), 'sessions-index.json');
@@ -226,17 +273,23 @@ function archiveTranscriptFile(transcriptPath: string | undefined, sessionId: st
     const filename = `${new Date().toISOString().split('T')[0]}-${name}.md`;
     fs.writeFileSync(path.join(conversationsDir, filename), formatTranscriptMarkdown(messages, summary, assistantName));
     log(`Archived conversation to ${filename}`);
-    return true;
   } catch (err) {
     log(`Failed to archive transcript: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
   }
+  // Parse succeeded → return the messages regardless of write outcome (best-effort archive).
+  return messages;
 }
 
 function createPreCompactHook(assistantName?: string): HookCallback {
   return async (input) => {
     const preCompact = input as PreCompactHookInput;
-    archiveTranscriptFile(preCompact.transcript_path, preCompact.session_id, assistantName);
+    const messages = archiveTranscriptFile(preCompact.transcript_path, preCompact.session_id, assistantName);
+    // Post-archive capture seam (INERT by default): an overlay may distil durable facts
+    // from the SAME parsed transcript into a memory store. Runs only when a registrant exists and
+    // is best-effort (applyPreCompactCapture swallows failures) so it can never break compaction.
+    if (messages) {
+      await applyPreCompactCapture({ messages, sessionId: preCompact.session_id ?? 'unknown' });
+    }
     return {};
   };
 }
@@ -331,6 +384,16 @@ const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not fou
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
 
+  /**
+   * Honest capability (per-turn query-confinement seam, INERT by default).
+   * The provider can run a `query({ confinedExternal: true })` turn iff an overlay
+   * registered HOW to confine it. Pristine core has no registrant ⇒ false ⇒ a caller
+   * requesting a confined turn fails closed (skips it) before query() ever runs.
+   */
+  get supportsConfinedExternal(): boolean {
+    return isQueryConfinementRegistered();
+  }
+
   private assistantName?: string;
   private mcpServers: Record<string, McpServerConfig>;
   private env: Record<string, string | undefined>;
@@ -394,34 +457,74 @@ export class ClaudeProvider implements AgentProvider {
     const stream = new MessageStream();
     stream.push(input.prompt);
 
-    const instructions = input.systemContext?.instructions;
+    const rawInstructions = input.systemContext?.instructions;
+    const instructions = rawInstructions ? applyInputTransform(rawInstructions, 'instructions') : undefined;
+
+    // Provider tool-policy seam (INERT by default): registered policies may only TIGHTEN
+    // the tool surface — drop allowlisted tools, hide MCP servers, restrict settingSources. With
+    // no policy registered every accessor returns the upstream default.
+    const visibleMcpServers = Object.fromEntries(
+      Object.entries(this.mcpServers).filter(([name]) => !policyHidesMcpServer(name)),
+    );
+
+    // Normal-mode turn surface: the full (policy-filtered) allowlist, every visible MCP
+    // server, and any extra workspace dirs.
+    let allowedTools = [
+      ...TOOL_ALLOWLIST.filter((t) => policyAllowsTool(t)),
+      ...Object.keys(visibleMcpServers).map(mcpAllowPattern),
+    ];
+    let mcpServers = visibleMcpServers;
+    let additionalDirectories = this.additionalDirectories;
+
+    // Per-turn query-confinement seam (INERT by default). A confined-external turn
+    // routes the normal surface through applyQueryConfinement, which a registered overlay
+    // tightens (MCP-only / no built-ins / no extra workspace dirs). FAIL-CLOSED: a flagged turn with
+    // no registrant throws rather than run unconfined (see query-confinement.ts).
+    //
+    // Note: confinement narrows the MCP servers + dirs (and prunes allowedTools as
+    // defense-in-depth). The actual fs/bash lockdown is NOT owned here — built-in tools are
+    // denied every turn by `disallowedTools()` (a registered ProviderToolPolicy adds
+    // Bash/Read/Write/Edit/Glob/Grep/… to the base denylist), and under bypassPermissions
+    // `allowedTools` only auto-approves. Do not assume this block alone blocks built-ins.
+    if (input.confinedExternal === true) {
+      const confined = applyQueryConfinement({
+        allowedTools,
+        visibleMcpServerNames: Object.keys(visibleMcpServers),
+        additionalDirectories: this.additionalDirectories ?? [],
+      });
+      allowedTools = [...confined.allowedTools];
+      mcpServers = Object.fromEntries(
+        Object.entries(visibleMcpServers).filter(([name]) => confined.visibleMcpServerNames.includes(name)),
+      );
+      additionalDirectories = [...confined.additionalDirectories];
+    }
 
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {
         cwd: input.cwd,
-        additionalDirectories: this.additionalDirectories,
+        additionalDirectories,
         resume: input.continuation,
         pathToClaudeCodeExecutable: '/pnpm/claude',
         systemPrompt: instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions } : undefined,
-        allowedTools: [
-          ...TOOL_ALLOWLIST,
-          ...Object.keys(this.mcpServers).map(mcpAllowPattern),
-        ],
-        disallowedTools: SDK_DISALLOWED_TOOLS,
+        allowedTools,
+        disallowedTools: disallowedTools(),
         env: this.env,
         model: this.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.effort as any,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
-        settingSources: ['project', 'user', 'local'],
-        mcpServers: this.mcpServers,
+        settingSources: policySettingSources(['project', 'user', 'local']),
+        mcpServers,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],
           PostToolUse: [{ hooks: [postToolUseHook] }],
           PostToolUseFailure: [{ hooks: [postToolUseHook] }],
-          PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],
+          // timeout widens to what a registered PreCompact capture needs (undefined ⇒ SDK
+          // default, matching upstream) so an overlay's extraction writes cleanly before the
+          // SDK could kill the hook.
+          PreCompact: [{ timeout: preCompactCaptureTimeoutSec(), hooks: [createPreCompactHook(this.assistantName)] }],
         },
       },
     });
@@ -440,21 +543,23 @@ export class ClaudeProvider implements AgentProvider {
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'result') {
-          // `result` text exists only on subtype:"success"; error subtypes
-          // (e.g. a non-retryable 403 billing_error) carry their message in
-          // `errors[]` instead. Surface either so the poll-loop can deliver a
-          // billing/quota notice to the user rather than dropping the turn.
-          const m = message as { result?: string; is_error?: boolean; errors?: string[] };
-          const text = m.result ?? (m.errors && m.errors.length > 0 ? m.errors.join('\n') : null);
-          yield { type: 'result', text, isError: m.is_error === true };
+          // `result` text exists only on subtype:"success"; error subtypes (e.g. a non-retryable
+          // 403 billing_error) carry their message in `errors[]`. The mapping is routed through
+          // the result-event seam (INERT on core — base default surfaces either so the poll-loop
+          // can deliver a billing/quota notice rather than dropping the turn). An overlay may
+          // replace it (e.g. to guarantee non-null error text).
+          for (const ev of mapResultMessage(message as { result?: string; is_error?: boolean; errors?: string[] })) {
+            yield ev;
+          }
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
           yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
-          const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
-          const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';
-          yield { type: 'result', text: `Context compacted${detail}.` };
+          // Routed through the result-event seam (INERT on core — base default delivers the
+          // notice as a `result`). An overlay may emit a `compacted` event the poll-loop
+          // suppresses instead.
+          yield mapCompactBoundaryMessage(message as { compact_metadata?: { pre_tokens?: number } });
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
           const tn = message as { summary?: string };
           yield { type: 'progress', message: tn.summary || 'Task notification' };

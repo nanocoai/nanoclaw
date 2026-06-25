@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { MessageInRow } from '../db/messages-in.js';
 import { touchHeartbeat } from '../db/connection.js';
+import { applyPreTaskScriptGuards } from '../poll-loop-extensions.js';
 
 const SCRIPT_TIMEOUT_MS = 30_000;
 const SCRIPT_MAX_BUFFER = 1024 * 1024;
@@ -97,6 +98,19 @@ export async function applyPreTaskScripts(messages: MessageInRow[]): Promise<Tas
     const script = typeof content.script === 'string' ? (content.script as string) : null;
     if (!script) {
       keep.push(msg);
+      continue;
+    }
+
+    // Extension seam (INERT with no registrant). A downstream overlay may veto running a pre-agent
+    // script for this task: a pre-agent script is a shell-exec primitive (bash on /tmp) that on a
+    // confined session may need to NEVER run (confined scheduled tasks may be prompt-only; a scripted
+    // task is anomalous legacy/injection), so it is the authoritative EXECUTION gate that also
+    // neutralises a pre-existing scripted task a confined agent re-times or resumes. No registrant ⇒
+    // null ⇒ the script runs exactly as upstream.
+    const scriptGuardReason = applyPreTaskScriptGuards(msg);
+    if (scriptGuardReason) {
+      log(`task ${msg.id} skipped: ${scriptGuardReason}`);
+      skipped.push(msg.id);
       continue;
     }
 

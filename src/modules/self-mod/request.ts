@@ -14,6 +14,7 @@
  */
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { log } from '../../log.js';
+import { isReservedMcpServerName } from '../../mcp-reserved-names.js';
 import type { Session } from '../../types.js';
 import { notifyAgent, requestApproval } from '../approvals/index.js';
 
@@ -73,6 +74,15 @@ export async function handleAddMcpServer(content: Record<string, unknown>, sessi
   const command = content.command as string;
   if (!serverName || !command) {
     notifyAgent(session, 'add_mcp_server failed: name and command are required.');
+    return;
+  }
+  if (isReservedMcpServerName(serverName)) {
+    // Fail loud: the runner reserves built-in names, so a configured `nanoclaw` would be dropped
+    // at next boot. Reject up front rather than queue an approval for a server that won't load.
+    notifyAgent(
+      session,
+      `add_mcp_server failed: "${serverName}" is a reserved built-in MCP server name and cannot be added.`,
+    );
     return;
   }
   await requestApproval({

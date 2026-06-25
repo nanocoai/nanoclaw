@@ -1,5 +1,6 @@
 import { findByRouting } from './destinations.js';
 import type { MessageInRow } from './db/messages-in.js';
+import { applyChatSenderResolver } from './formatter-extensions.js';
 import { TIMEZONE, formatLocalTime } from './timezone.js';
 
 /**
@@ -168,7 +169,10 @@ function formatChatMessages(messages: MessageInRow[]): string {
 
 function formatSingleChat(msg: MessageInRow): string {
   const content = parseContent(msg.content);
-  const sender = content.sender || content.author?.fullName || content.author?.userName || 'Unknown';
+  // Inert on pristine: no registrant ⇒ null ⇒ default sender + no extra attrs.
+  const senderOverride = applyChatSenderResolver(content);
+  const sender = senderOverride?.sender ?? (content.sender || content.author?.fullName || content.author?.userName || 'Unknown');
+  const actorTypeAttr = senderOverride?.attrs ?? '';
   const time = formatLocalTime(msg.timestamp, TIMEZONE);
   const text = content.text || '';
   const idAttr = msg.seq != null ? ` id="${msg.seq}"` : '';
@@ -178,7 +182,7 @@ function formatSingleChat(msg: MessageInRow): string {
 
   const fromAttr = originAttr(msg);
 
-  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${attachmentsSuffix}</message>`;
+  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}"${actorTypeAttr} time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${attachmentsSuffix}</message>`;
 }
 
 /**
@@ -201,9 +205,13 @@ function formatTaskMessage(msg: MessageInRow): string {
   const time = formatLocalTime(msg.timestamp, TIMEZONE);
   const parts: string[] = [];
   if (content.scriptOutput) {
-    parts.push('Script output:', JSON.stringify(content.scriptOutput, null, 2), '');
+    // escapeXml: JSON.stringify does NOT escape </>, so an embedded `</task>` (or a spoofed
+    // <system_response>) would otherwise break out of the XML envelope and inject structure.
+    parts.push('Script output:', escapeXml(JSON.stringify(content.scriptOutput, null, 2)), '');
   }
-  parts.push('Instructions:', content.prompt || '');
+  // Escape the task prompt too — chat text is escaped (formatSingleChat) but this path was not,
+  // so a crafted scheduled-task prompt could inject tags into the agent's next-turn context.
+  parts.push('Instructions:', content.prompt ? escapeXml(content.prompt) : '');
   return `<task${from} time="${escapeXml(time)}">${parts.join('\n')}</task>`;
 }
 

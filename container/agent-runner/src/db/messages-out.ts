@@ -5,6 +5,7 @@
  * The host polls this DB (read-only) for undelivered messages.
  */
 import { getInboundDb, getOutboundDb } from './connection.js';
+import { applyOutboundTransform } from './outbound-transform.js';
 
 export interface MessageOutRow {
   id: string;
@@ -43,6 +44,13 @@ export interface WriteMessageOut {
  * the agent's "edit message #5" could resolve to the wrong row.
  */
 export function writeMessageOut(msg: WriteMessageOut): number {
+  // Outbound transform extension point (ADR 0006 contract 7). By
+  // default an identity transform is registered → `msg` is unchanged. A
+  // downstream overlay may register a routing-aware reply gate here. A
+  // throw from the transform PROPAGATES (fail-closed) — a routing-keyed
+  // reply must never fall back to writing the plain chat row.
+  msg = applyOutboundTransform(msg);
+
   const outbound = getOutboundDb();
   const inbound = getInboundDb();
 

@@ -6,7 +6,8 @@
  */
 import path from 'path';
 
-import { backfillContainerConfigs } from './backfill-container-configs.js';
+import { backfillContainerConfigs, runBackfillSteps } from './backfill-container-configs.js';
+import { runStartupPhase } from './startup-registry.js';
 import { DATA_DIR } from './config.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
@@ -87,9 +88,18 @@ async function main(): Promise<void> {
   // 1b. Backfill container_configs from legacy container.json files.
   // Idempotent — skips groups that already have a config row.
   backfillContainerConfigs();
+  // Post-backfill extension point: registered overlay steps augment the seeded
+  // rows. No-op by default (empty registry).
+  runBackfillSteps();
 
   // 1c. One-time filesystem cutover — idempotent, no-op after first run.
   migrateGroupsToClaudeLocal();
+
+  // 1d. Drain registered post-DB startup hooks. No-op by default. Runs after
+  // DB init + backfill, BEFORE container runtime / channel adapters / delivery polls —
+  // so an overlay can establish state the delivery layer depends on. A critical hook
+  // that throws aborts startup (fail-loud).
+  await runStartupPhase('post-db', { dataDir: DATA_DIR });
 
   // 2. Container runtime
   ensureContainerRuntimeRunning();
@@ -167,6 +177,11 @@ async function main(): Promise<void> {
   // 6. Start host sweep
   startHostSweep();
   log.info('Host sweep started');
+
+  // 6a. Drain registered post-services startup hooks. No-op by default. Runs
+  // after delivery polls + host sweep are up, BEFORE the CLI server — for background
+  // feeders/timers. Non-critical: a throwing hook is logged and skipped.
+  await runStartupPhase('post-services', { dataDir: DATA_DIR });
 
   // 7. Start the `ncl` CLI socket server (data/ncl.sock).
   await startCliServer();

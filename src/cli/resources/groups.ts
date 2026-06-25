@@ -3,6 +3,7 @@ import { buildAgentGroupImage, killContainer, wakeContainer } from '../../contai
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { getDb, hasTable } from '../../db/connection.js';
 import { getSession } from '../../db/sessions.js';
+import { isReservedMcpServerName } from '../../mcp-reserved-names.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import {
   getContainerConfig,
@@ -263,6 +264,8 @@ registerResource({
         if (!id) throw new Error('--id is required');
         const name = args.name as string;
         if (!name) throw new Error('--name is required');
+        if (isReservedMcpServerName(name))
+          throw new Error(`"${name}" is a reserved built-in MCP server name and cannot be added.`);
         const command = args.command as string;
         if (!command) throw new Error('--command is required');
 

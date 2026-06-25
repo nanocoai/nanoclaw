@@ -1,5 +1,27 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
-import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
+import {
+  getPendingMessages,
+  markProcessing,
+  markCompleted,
+  deferProcessing,
+  type MessageInRow,
+} from './db/messages-in.js';
+import {
+  applyMessageFilter,
+  applyPromptTransform,
+  applyPrefilterSteps,
+  applyIdleSteps,
+  applyTurnStart,
+  applyTurnEnd,
+  applyTurnInterceptor,
+  applyPostTaskInterceptor,
+  reconcileTurn,
+  applyPostReconcile,
+  applyRunStart,
+  applyResultDispatch,
+  applyFollowupDrop,
+  applyFollowupEndStream,
+} from './poll-loop-extensions.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
@@ -69,6 +91,14 @@ export interface PollLoopConfig {
    * polling forever and stealing messages from the next test's DB.
    */
   signal?: AbortSignal;
+  /**
+   * Optional bot name / agent-group id, forwarded from index.ts. Upstream's loop
+   * ignores them; a downstream overlay poll-loop uses them to tag outbound rows
+   * (e.g. sender_name / source-id prefix on cross-group sends). Optional so the
+   * default call site type-checks and stays inert.
+   */
+  assistantName?: string;
+  agentGroupId?: string;
 }
 
 /**
@@ -110,12 +140,23 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // This lets the new container re-process those messages.
   clearStaleProcessingAcks();
 
+  // Run-start seam: per-run, config-bound registration of the turn-interceptor
+  // registrants (confined-provider closure + routing config). Called ONCE per
+  // runPollLoop, before the poll loop. Inert by default ⇒ no registrant ⇒ no-op.
+  applyRunStart(config);
+
   let pollCount = 0;
   let isFirstPoll = true;
   while (true) {
     if (config.signal?.aborted) return;
+    // Capture before the reset below — the turn-interceptor ctx reports it.
+    const firstPoll = isFirstPoll;
+    // Inert on pristine: no registrant ⇒ applyPrefilterSteps is a no-op and
+    // applyMessageFilter returns the batch unchanged.
+    const allPending = getPendingMessages(isFirstPoll);
+    await applyPrefilterSteps(allPending);
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
-    const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
+    let messages = applyMessageFilter(allPending.filter((m) => m.kind !== 'system'));
     isFirstPoll = false;
     pollCount++;
 
@@ -125,6 +166,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     }
 
     if (messages.length === 0) {
+      // Idle iteration — no agent turn. Overlay hook: drain deferred cross-conversation
+      // notifications even while idle. Inert by default ⇒ no-op.
+      await applyIdleSteps();
       await sleep(POLL_INTERVAL_MS);
       continue;
     }
@@ -138,14 +182,58 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // the "store as context, don't engage" contract. Host-side countDueMessages
     // gates the same way for wake-from-cold (see src/db/session-db.ts).
     if (!messages.some((m) => m.trigger === 1)) {
+      // Accumulate-only batch — also a no-turn iteration; same idle drain hook so a conversation
+      // that keeps receiving context-only messages still flushes pending notifications. Inert ⇒ no-op.
+      await applyIdleSteps();
       await sleep(POLL_INTERVAL_MS);
       continue;
     }
 
-    const ids = messages.map((m) => m.id);
+    let ids = messages.map((m) => m.id);
     markProcessing(ids);
 
-    const routing = extractRouting(messages);
+    let routing = extractRouting(messages);
+
+    // Turn-interceptor seam (routing-context fail-closed / confined-external /
+    // routing-domain split). Unlike the transform/side-effect seams, an interceptor has
+    // CONTROL-FLOW AUTHORITY over the turn: a registrant may rewrite the surviving batch +
+    // routing, defer rows (leave them PENDING for a later poll), or fully handle & drain the
+    // batch (model-bypass). Runs AFTER markProcessing (we already own every id) + extractRouting,
+    // BEFORE the command loop, so a deferred/rewritten batch is reflected everywhere downstream.
+    // Inert by default: no registrant ⇒ {handled:undefined, keep:messages, routing, deferIds:[]}
+    // ⇒ control flow byte-identical to upstream.
+    const interception = await applyTurnInterceptor({
+      keep: messages,
+      allPending,
+      routing,
+      isFirstPoll: firstPoll,
+      assistantName: config.assistantName,
+      agentGroupId: config.agentGroupId,
+    });
+    // Reconcile the registrant's decision against the OWNED (marked) id set so no row can
+    // leak past the model-bypass surface: every owned id ends kept | completed | deferred,
+    // out-of-set defer/complete ids are dropped, and any row silently dropped from keep is
+    // auto-deferred (re-read next poll) rather than orphaned in 'processing'.
+    const recon = reconcileTurn(ids, interception);
+    if (recon.unaccounted.length > 0) {
+      log(
+        `WARNING: turn interceptor left ${recon.unaccounted.length} owned row(s) unaccounted ` +
+          `(dropped without defer/complete) — auto-deferring to avoid orphaning: ${recon.unaccounted.join(', ')}`,
+      );
+    }
+    if (recon.deferIds.length > 0) {
+      deferProcessing(recon.deferIds);
+      log(`Turn interceptor deferred ${recon.deferIds.length} message(s)`);
+    }
+    if (recon.handled) {
+      // Model-bypass: mark exactly the registrant-owned rows completed, skip the normal query.
+      markCompleted(recon.completedIds);
+      log(`Turn interceptor handled ${recon.completedIds.length} message(s), skipping query`);
+      continue;
+    }
+    messages = recon.keep;
+    routing = interception.routing;
+    ids = messages.map((m) => m.id);
 
     // Command handling: the host router gates filtered and unauthorized
     // admin commands before they reach the container. The only command
@@ -219,69 +307,136 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
+    // SITE 2 — post-pre-task turn interceptor (routing-domain split; later a deterministic fast-path).
+    // Runs on the FINAL `keep` (post command-handling + post pre-task gating) so a
+    // registrant sees exactly the post-pre-task batch. Reconciled against keep's
+    // owned ids by the same reconcileTurn chokepoint: handled ⇒ markCompleted + skip query
+    // (model-bypass); defer ⇒ deferProcessing (un-mark → re-read) + drop from keep; rewrite
+    // ⇒ thread the narrowed keep/routing. Inert by default ⇒ keep/routing unchanged, no
+    // defer/handled ⇒ control flow byte-identical to upstream.
+    const postTaskDeferred = new Set<string>();
+    const ptInterception = await applyPostTaskInterceptor({
+      keep,
+      allPending,
+      routing,
+      isFirstPoll: firstPoll,
+      assistantName: config.assistantName,
+      agentGroupId: config.agentGroupId,
+    });
+    const postTask = reconcileTurn(
+      keep.map((m) => m.id),
+      ptInterception,
+    );
+    if (postTask.unaccounted.length > 0) {
+      log(
+        `WARNING: post-task interceptor left ${postTask.unaccounted.length} owned row(s) unaccounted ` +
+          `— auto-deferring to avoid orphaning: ${postTask.unaccounted.join(', ')}`,
+      );
+    }
+    if (postTask.deferIds.length > 0) {
+      deferProcessing(postTask.deferIds);
+      for (const id of postTask.deferIds) postTaskDeferred.add(id);
+      log(`Post-task interceptor deferred ${postTask.deferIds.length} message(s)`);
+    }
+    if (postTask.handled) {
+      markCompleted(postTask.completedIds);
+      log(`Post-task interceptor handled ${postTask.completedIds.length} message(s), skipping query`);
+      continue;
+    }
+    keep = postTask.keep;
+    routing = ptInterception.routing;
+    if (keep.length === 0) {
+      log('Post-task interceptor deferred all surviving message(s), skipping query');
+      continue;
+    }
+
+    // Post-reconcile hook: `keep` is now FINAL for this turn — narrowed by
+    // Site-1 + Site-2 reconcile, command handling, and pre-task gating. Re-derive any per-turn
+    // loop-local state that must track the queried batch (e.g. a per-turn routing key) HERE, off
+    // the rows that actually reach the query, not inside an interceptor body where a later narrowing
+    // would desync it. Inert by default ⇒ no-op.
+    applyPostReconcile(keep);
+
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
-    const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+    // Inert on pristine: no registrant ⇒ applyPromptTransform resolves to the prompt unchanged.
+    const prompt = await applyPromptTransform(
+      formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands),
+      keep,
+    );
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
-    const query = config.provider.query({
-      prompt,
-      continuation,
-      cwd: config.cwd,
-      systemContext: config.systemContext,
-    });
-
-    // Process the query while concurrently polling for new messages
-    const skippedSet = new Set(skipped);
-    const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
-    // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
-    // can stamp it on outbound rows — needed for a2a return-path routing.
-    setCurrentInReplyTo(routing.inReplyTo);
+    // Inert on pristine: no registrant ⇒ applyTurnStart/applyTurnEnd are no-ops.
+    // After a successful turn-start, turn-end MUST run (finally) so a registered
+    // per-turn actor pin can never leak across turns — even on a synchronous
+    // provider.query() failure, a catch-path write failure, or a markCompleted throw.
+    applyTurnStart(keep);
     try {
-      const result = await processQuery(
-        query,
-        routing,
-        processingIds,
-        config.providerName,
-        config.provider.onExchangeComplete?.bind(config.provider),
+      const query = config.provider.query({
         prompt,
         continuation,
-      );
-      if (result.continuation && result.continuation !== continuation) {
-        continuation = result.continuation;
-        setContinuation(config.providerName, continuation);
-      }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      log(`Query error: ${errMsg}`);
-
-      // Stale/corrupt continuation recovery: ask the provider whether
-      // this error means the stored continuation is unusable, and clear
-      // it so the next attempt starts fresh.
-      if (continuation && config.provider.isSessionInvalid(err)) {
-        log(`Stale session detected (${continuation}) — clearing for next retry`);
-        continuation = undefined;
-        clearContinuation(config.providerName);
-      }
-
-      // Write error response so the user knows something went wrong
-      writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        cwd: config.cwd,
+        systemContext: config.systemContext,
       });
-    } finally {
-      clearCurrentInReplyTo();
-    }
 
-    // Ensure completed even if processQuery ended without a result event
-    // (e.g. stream closed unexpectedly).
-    markCompleted(processingIds);
-    log(`Completed ${ids.length} message(s)`);
+      // Process the query while concurrently polling for new messages
+      const skippedSet = new Set(skipped);
+      const processingIds = ids.filter(
+        (id) => !commandIds.includes(id) && !skippedSet.has(id) && !postTaskDeferred.has(id),
+      );
+      // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
+      // can stamp it on outbound rows — needed for a2a return-path routing.
+      setCurrentInReplyTo(routing.inReplyTo);
+      try {
+        const result = await processQuery(
+          query,
+          routing,
+          processingIds,
+          config.providerName,
+          config.provider.onExchangeComplete?.bind(config.provider),
+          prompt,
+          continuation,
+          config.signal,
+        );
+        if (result.continuation && result.continuation !== continuation) {
+          continuation = result.continuation;
+          setContinuation(config.providerName, continuation);
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        log(`Query error: ${errMsg}`);
+
+        // Stale/corrupt continuation recovery: ask the provider whether
+        // this error means the stored continuation is unusable, and clear
+        // it so the next attempt starts fresh.
+        if (continuation && config.provider.isSessionInvalid(err)) {
+          log(`Stale session detected (${continuation}) — clearing for next retry`);
+          continuation = undefined;
+          clearContinuation(config.providerName);
+        }
+
+        // Write error response so the user knows something went wrong
+        writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        });
+      } finally {
+        clearCurrentInReplyTo();
+      }
+
+      // Ensure completed even if processQuery ended without a result event
+      // (e.g. stream closed unexpectedly).
+      markCompleted(processingIds);
+      log(`Completed ${ids.length} message(s)`);
+    } finally {
+      // Inert on pristine: no registrant ⇒ applyTurnEnd is a no-op.
+      await applyTurnEnd();
+    }
   }
 }
 
@@ -331,6 +486,7 @@ export async function processQuery(
   onExchangeComplete: ((exchange: ProviderExchange) => void) | undefined,
   initialPrompt: string,
   initialContinuation: string | undefined,
+  signal?: AbortSignal,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -354,12 +510,39 @@ export async function processQuery(
   let endedForCommand = false;
   let corruptionStreak = 0;
   const pollHandle = setInterval(() => {
+    // Loop owner aborted (tests pass config.signal; production leaves it undefined → this never
+    // fires → byte-identical upstream). The for-await on query.events would otherwise block until
+    // the stream ends on its own, so an abandoned test loop with a long-lived query would leak.
+    // Abort (not end) the stream so the for-await unwinds and runPollLoop returns at its top check.
+    if (signal?.aborted) {
+      query.abort();
+      return;
+    }
     if (done || pollInFlight || endedForCommand) return;
     pollInFlight = true;
 
     void (async () => {
       try {
         const pending = getPendingMessages();
+
+        // Follow-up DROP seam (BEFORE the slash-command check): an overlay may claim
+        // follow-up rows that belong to a DIFFERENT (e.g. confined-external) turn —
+        // markComplete them and withhold them from this stream's push. Clamp to
+        // the current batch so a hook can never complete a row outside it. Inert by
+        // default ⇒ no drops, `active` === `pending`.
+        let active = pending;
+        const followupDrops = applyFollowupDrop({ pending, routing });
+        if (followupDrops.length > 0) {
+          const batchIds = new Set(pending.map((m) => m.id));
+          const dropIds = followupDrops.filter((id) => batchIds.has(id));
+          if (dropIds.length > 0) {
+            markCompleted(dropIds);
+            const dropSet = new Set(dropIds);
+            active = pending.filter((m) => !dropSet.has(m.id));
+            log(`Follow-up interceptor dropped ${dropIds.length} message(s)`);
+          }
+        }
+        if (active.length === 0) return;
 
         // Slash commands need a fresh query: /clear resets the SDK's
         // resume id (fixed at sdkQuery() time); admin/passthrough commands
@@ -371,10 +554,24 @@ export async function processQuery(
         // not end: end() lets an in-flight turn run to completion, which
         // can block the command (e.g. /clear during a long task) for as
         // long as the turn takes.
-        if (pending.some((m) => isRunnerCommand(m))) {
+        if (active.some((m) => isRunnerCommand(m))) {
           log('Pending slash command — aborting active stream so outer loop can process');
           endedForCommand = true;
           query.abort();
+          return;
+        }
+
+        // Follow-up END-STREAM seam (AFTER the slash-command check): an overlay may
+        // decide the batch crosses a turn boundary (routing-domain) and the
+        // active stream should END — let the in-flight turn finish + deliver, then leave
+        // the rows PENDING (we return before markProcessing) so the outer loop re-routes
+        // them with correct actor/routing. query.end(), NOT abort: abort would discard
+        // the in-flight reply. `endedForCommand` is reused as the "this poll handed the
+        // stream back to the outer loop — stop re-entering" guard. Inert ⇒ never ends.
+        if (applyFollowupEndStream({ pending: active, routing })) {
+          log('Follow-up interceptor — batch crosses a turn boundary; ending stream for the outer loop');
+          endedForCommand = true;
+          query.end();
           return;
         }
 
@@ -385,8 +582,16 @@ export async function processQuery(
         // everything. Filtering on thread_id here caused deadlocks when the
         // initial batch and follow-ups had mismatched thread_ids (e.g. a
         // host-generated welcome trigger with null thread vs a Discord DM reply).
-        const newMessages = pending.filter((m) => m.kind !== 'system');
+        const newMessages = applyMessageFilter(active.filter((m) => m.kind !== 'system'));
         if (newMessages.length === 0) return;
+
+        // Accumulate gate — mirror the main read at the top of the loop: a follow-up batch with only
+        // trigger=0 context rows (router-stored under ignored_message_policy='accumulate') must NOT
+        // wake/push the active turn. Leave them pending to ride the next trigger=1 message ("store as
+        // context, don't engage"). Without this, the follow-up path engages on background chatter the
+        // main read would have accumulated — and markProcessing'ing them here drops them from that
+        // later accumulate batch.
+        if (!newMessages.some((m) => m.trigger === 1)) return;
 
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
@@ -482,13 +687,26 @@ export async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          const { sent, hasUnwrapped } = dispatchResultText(event.text, routing);
+          // Result-dispatch replacement seam: an overlay may register a gated dispatcher
+          // (model-final send-gating, mutation-card dedup, confined-external reply). Inert by
+          // default ⇒ applyResultDispatch returns null ⇒ the base dispatch runs (byte-identical).
+          const { sent, hasUnwrapped } =
+            applyResultDispatch(event.text, routing) ?? dispatchResultText(event.text, routing);
           if (sent === 0 && event.isError === true) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
             // scratchpad, and skip the re-wrap nudge — it would just re-hammer
             // the failing gateway turn after turn.
-            deliverErrorResult(event.text, routing);
+            //
+            // Only deliver here when the dispatcher did NOT already deliver it. The
+            // base dispatchResultText never bare-delivers (hasUnwrapped === true for
+            // an undelivered error → this fires, byte-identical to upstream). A registered
+            // overlay dispatcher MAY bare-deliver the error text (e.g. a confined/gated
+            // reply); it then reports hasUnwrapped === false (delivered), so gating on
+            // hasUnwrapped avoids a double-send while keeping the error status + no-nudge.
+            if (hasUnwrapped) {
+              deliverErrorResult(event.text, routing);
+            }
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,

@@ -7,6 +7,11 @@ import { getContinuation, setContinuation } from './db/session-state.js';
 import { MockProvider } from './providers/mock.js';
 import type { ProviderExchange } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
+import {
+  registerFollowupDrop,
+  registerFollowupEndStream,
+  __resetFollowupHooksForTest,
+} from './poll-loop-extensions.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -300,17 +305,31 @@ describe('poll loop integration', () => {
 
 // Helper: run poll loop until aborted or timeout
 async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSignal, timeoutMs: number): Promise<void> {
+  // Own an internal stop signal so an abandoned loop ALWAYS exits — on caller abort AND on
+  // timeout. MockProvider's stream stays open, so a loop left running with a non-aborted
+  // signal keeps an active follow-up poll and steals the next test's messages (see the
+  // PollLoopConfig.signal note). The pristine helper only aborted on caller abort, so a test
+  // that relied on the timeout leaked a message-stealing poller — a cross-test flake that
+  // only surfaced under slow CI scheduling.
+  const stop = new AbortController();
+  if (signal.aborted) stop.abort();
+  else signal.addEventListener('abort', () => stop.abort());
   return Promise.race([
     runPollLoop({
       provider,
       providerName: 'mock',
       cwd: '/tmp',
-      signal,
+      signal: stop.signal,
     }),
     new Promise<void>((_, reject) => {
       signal.addEventListener('abort', () => reject(new Error('aborted')));
     }),
-    new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
+    new Promise<void>((_, reject) =>
+      setTimeout(() => {
+        stop.abort();
+        reject(new Error('timeout'));
+      }, timeoutMs),
+    ),
   ]);
 }
 
@@ -571,6 +590,35 @@ describe('poll loop — slash command during active query', () => {
   });
 });
 
+describe('poll loop — test helper loop isolation', () => {
+  // Guards the property the PollLoopConfig.signal comment promises: an abandoned loop
+  // must stop, not "poll forever and steal messages from the next test's DB". MockProvider's
+  // stream stays open, so a loop whose caller relied on the helper TIMEOUT (never called
+  // controller.abort()) keeps an active follow-up poll. Before the fix it grabbed the next
+  // message a later test inserted — the exact cross-test flake that made the '/clear during
+  // active query' test fail under slow CI scheduling (confirmed via CI instrumentation).
+  it('a loop the caller let time out does not steal a later message', async () => {
+    insertMessage('m-keepalive', { sender: 'Alice', text: 'hello' }, { platformId: 'chan-1', channelType: 'discord' });
+    const orphan = new MockProvider({}, () => 'thinking, no reply');
+    const orphanController = new AbortController();
+    // Caller never aborts — it lets the helper's timeout end the await (a real pattern).
+    await runPollLoopWithTimeout(orphan, orphanController.signal, 600).catch(() => {});
+
+    // A fresh /clear must remain pending for a real loop to handle. A still-polling abandoned
+    // loop would grab it: abort its own stream, write "Session cleared.", and ack the row.
+    insertMessage('m-clear-orphan', { sender: 'Alice', text: '/clear' }, { platformId: 'chan-1', channelType: 'discord' });
+    await sleep(1200); // > 2 follow-up poll intervals — ample time for a leftover loop to steal
+
+    const stillPending = getPendingMessages().some((m) => m.id === 'm-clear-orphan');
+    const sessionCleared = getUndeliveredMessages().some((msg) => JSON.parse(msg.content).text === 'Session cleared.');
+    orphanController.abort(); // clean up regardless of outcome
+    await sleep(50);
+
+    expect(sessionCleared).toBe(false); // the abandoned loop must not have processed /clear
+    expect(stillPending).toBe(true); // /clear stays pending for a real loop
+  });
+});
+
 /**
  * Provider whose query never completes until ended/aborted — for testing how
  * the loop interrupts an active stream.
@@ -617,3 +665,91 @@ class BlockingProvider {
     };
   }
 }
+
+/**
+ * Follow-up interceptor seam — the cross-turn partner of the main turn
+ * interceptor, exercised through processQuery's inner poll via the BlockingProvider
+ * (a stream that stays open until end()/abort()). Hooks are registered inline and
+ * reset in afterEach (self-contained — the apply* are only called by the poll).
+ */
+describe('poll loop — follow-up interceptor seam', () => {
+  afterEach(() => __resetFollowupHooksForTest());
+
+  function ackStatus(id: string): string | undefined {
+    const row = getOutboundDb()
+      .prepare('SELECT status FROM processing_ack WHERE message_id = ?')
+      .get(id) as { status: string } | undefined;
+    return row?.status;
+  }
+
+  it('DROP hook markCompletes the claimed follow-up rows and leaves the stream open', async () => {
+    // A drop hook claims external-flagged follow-up rows (they belong to a confined turn).
+    registerFollowupDrop((ctx) =>
+      ctx.pending.filter((m) => JSON.parse(m.content).text === 'external').map((m) => m.id),
+    );
+    insertMessage('m-active', { sender: 'Alice', text: 'long request' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new BlockingProvider();
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000);
+
+    await waitFor(() => provider.queries === 1, 2000);
+    insertMessage('m-ext', { sender: 'Ext', text: 'external' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    // The dropped row is markCompleted (acked completed), never re-read, never pushed.
+    await waitFor(() => ackStatus('m-ext') === 'completed', 2000);
+    expect(provider.ends).toBe(0); // drop does NOT end the stream
+    expect(provider.aborts).toBe(0); // and does NOT abort it
+
+    controller.abort();
+    await loopPromise.catch(() => {});
+  });
+
+  it('END-STREAM hook ends (NOT aborts) the active stream so the in-flight reply is not discarded', async () => {
+    // An end-stream hook decides any follow-up crosses a turn boundary → end() the stream.
+    registerFollowupEndStream(() => true);
+    insertMessage('m-active', { sender: 'Alice', text: 'long request' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new BlockingProvider();
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2500);
+
+    await waitFor(() => provider.queries === 1, 2000);
+    insertMessage('m-boundary', { sender: 'Bob', text: 'crosses boundary' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    await waitFor(() => provider.ends === 1, 2000);
+    // query.end(), NOT abort — abort would discard the in-flight turn's reply (the Q-B regression).
+    expect(provider.aborts).toBe(0);
+
+    controller.abort();
+    await loopPromise.catch(() => {});
+  });
+
+  it('accumulate gate: a trigger=0 context-only follow-up is left PENDING, never pushed/processed', async () => {
+    // Mirrors the main read's accumulate gate: a follow-up batch with only trigger=0 rows must not
+    // wake/push the active turn ("store as context, don't engage"). Without the follow-up gate it
+    // would be markProcessing'd here and dropped from the next real accumulate batch.
+    insertMessage('m-active', { sender: 'Alice', text: 'long request' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new BlockingProvider();
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2500);
+
+    await waitFor(() => provider.queries === 1, 2000);
+    // a trigger=0 (accumulate) context row arrives mid-stream
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, trigger, content)
+         VALUES ('m-ctx', 'chat', datetime('now'), 'pending', 'chan-1', 'discord', 0, ?)`,
+      )
+      .run(JSON.stringify({ sender: 'C', text: 'background chatter' }));
+
+    await new Promise((r) => setTimeout(r, 700)); // let the follow-up poll tick a couple of times
+    // NOT processed: still pending (never markProcessing'd), so it can ride the next trigger=1 batch.
+    expect(getPendingMessages().map((m) => m.id)).toContain('m-ctx');
+    expect(ackStatus('m-ctx')).toBeUndefined();
+
+    controller.abort();
+    await loopPromise.catch(() => {});
+  });
+});
