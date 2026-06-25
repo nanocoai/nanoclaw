@@ -14,6 +14,7 @@ import path from 'path';
 import { GROUPS_DIR } from './config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { readEnvFile } from './env.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
 
 export interface McpServerConfig {
@@ -67,11 +68,15 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
 }
 
 /**
- * Expand `${VAR_NAME}` references in MCP server env values using process.env.
- * Called at materialize time so the DB stores references, not secrets.
+ * Expand `${VAR_NAME}` references in MCP server env values.
+ * process.env takes precedence; envFile values are the fallback so secrets
+ * stay in .env and never enter process.env (which would leak them to children).
  * Unresolved references are left as-is.
  */
-function expandMcpEnvRefs(mcpServers: Record<string, McpServerConfig>): Record<string, McpServerConfig> {
+function expandMcpEnvRefs(
+  mcpServers: Record<string, McpServerConfig>,
+  envFile: Record<string, string>,
+): Record<string, McpServerConfig> {
   return Object.fromEntries(
     Object.entries(mcpServers).map(([name, cfg]) => [
       name,
@@ -81,7 +86,7 @@ function expandMcpEnvRefs(mcpServers: Record<string, McpServerConfig>): Record<s
           ? Object.fromEntries(
               Object.entries(cfg.env).map(([k, v]) => [
                 k,
-                v.replace(/\$\{([^}]+)\}/g, (_, varName) => process.env[varName] ?? v),
+                v.replace(/\$\{([^}]+)\}/g, (_, varName) => process.env[varName] ?? envFile[varName] ?? v),
               ]),
             )
           : undefined,
@@ -106,9 +111,21 @@ export function materializeContainerJson(agentGroupId: string): ContainerConfig 
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
   const config = configFromDb(row, group);
+
+  // Collect ${VAR_NAME} refs across all MCP env blocks and resolve them from
+  // .env — secrets stay out of process.env so they don't leak to children.
+  const referencedVars = [
+    ...new Set(
+      Object.values(config.mcpServers)
+        .flatMap(srv => Object.values(srv.env ?? {}))
+        .flatMap(v => [...v.matchAll(/\$\{([^}]+)\}/g)].map(m => m[1])),
+    ),
+  ];
+  const envFileVars = referencedVars.length > 0 ? readEnvFile(referencedVars) : {};
+
   const serialized = {
     ...config,
-    mcpServers: expandMcpEnvRefs(config.mcpServers),
+    mcpServers: expandMcpEnvRefs(config.mcpServers, envFileVars),
   };
 
   const p = path.join(GROUPS_DIR, group.folder, 'container.json');
