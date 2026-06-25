@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { describe, expect, it } from 'vitest';
 
-import { resolveProviderName } from './container-runner.js';
+import { buildResourceLimitArgs, resolveProviderName } from './container-runner.js';
 
 describe('resolveProviderName', () => {
   it('prefers session over container config', () => {
@@ -58,5 +58,39 @@ describe('container boot-failure tripwire (structural)', () => {
     const src = fs.readFileSync(path.join(process.cwd(), 'src', 'container-runner.ts'), 'utf-8');
     expect(src).toContain('stderrTail.push(line)');
     expect(src).toMatch(/Container exited non-zero.*stderrTail/s);
+  });
+});
+
+describe('buildResourceLimitArgs', () => {
+  it('emits all three flags when all values are set', () => {
+    expect(buildResourceLimitArgs('512m', '1', '512')).toEqual([
+      '--memory',
+      '512m',
+      '--cpus',
+      '1',
+      '--pids-limit',
+      '512',
+    ]);
+  });
+
+  it('omits a flag when its value is "0" (Docker unlimited convention)', () => {
+    expect(buildResourceLimitArgs('0', '1', '512')).toEqual(['--cpus', '1', '--pids-limit', '512']);
+    expect(buildResourceLimitArgs('512m', '0', '512')).toEqual(['--memory', '512m', '--pids-limit', '512']);
+    expect(buildResourceLimitArgs('512m', '1', '0')).toEqual(['--memory', '512m', '--cpus', '1']);
+  });
+
+  it('omits a flag when its value is empty', () => {
+    expect(buildResourceLimitArgs('', '', '')).toEqual([]);
+  });
+
+  it('passes values through verbatim — runtime is the unit-validation authority', () => {
+    expect(buildResourceLimitArgs('1g', '0.5', '1024')).toEqual([
+      '--memory',
+      '1g',
+      '--cpus',
+      '0.5',
+      '--pids-limit',
+      '1024',
+    ]);
   });
 });

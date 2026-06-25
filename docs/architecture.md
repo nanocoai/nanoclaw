@@ -128,7 +128,7 @@ Non-Chat-SDK channels (WhatsApp via Baileys, Gmail, custom integrations) impleme
 The host is an orchestrator:
 1. **Spawn** — when wakeUpAgent is called and no container exists for the session
 2. **Idle kill** — when a container has no unprocessed messages for some timeout period
-3. **Limits** — MAX_CONCURRENT_CONTAINERS caps active containers
+3. **Limits** — MAX_CONCURRENT_CONTAINERS caps active containers; per-container `--memory` / `--cpus` / `--pids-limit` (`CONTAINER_MEMORY`, `CONTAINER_CPUS`, `CONTAINER_PIDS_LIMIT`) cap individual agents — `0` disables a given cap
 
 When a container spins up, the agent-runner immediately starts polling its session DB. Messages are already there waiting.
 

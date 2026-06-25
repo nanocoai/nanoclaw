@@ -33,6 +33,18 @@ export const INSTALL_SLUG = getInstallSlug(PROJECT_ROOT);
 export const CONTAINER_INSTALL_LABEL = `nanoclaw-install=${INSTALL_SLUG}`;
 export const CONTAINER_TIMEOUT = parseInt(process.env.CONTAINER_TIMEOUT || '1800000', 10);
 export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(process.env.CONTAINER_MAX_OUTPUT_SIZE || '10485760', 10); // 10MB default
+
+// Per-container resource caps. Defend against runaway agents (LLM loops, fork
+// bombs, accidental Promise.all-of-shell-commands) taking out the whole host.
+// Set any value to `0` to disable that specific cap (Docker's unlimited convention).
+//   - CONTAINER_MEMORY: hard memory ceiling (Docker `--memory` syntax: `512m`, `1g`)
+//   - CONTAINER_CPUS:   CPU quota in fractional cores (`1`, `0.5`, `2`)
+//   - CONTAINER_PIDS_LIMIT: max processes/threads in cgroup; 512 leaves headroom
+//     for Chromium-via-agent-browser (renderer/GPU/network/utility) and build
+//     tool subprocesses while still defending against fork-bomb-class failures.
+export const CONTAINER_MEMORY = process.env.CONTAINER_MEMORY ?? '512m';
+export const CONTAINER_CPUS = process.env.CONTAINER_CPUS ?? '1';
+export const CONTAINER_PIDS_LIMIT = process.env.CONTAINER_PIDS_LIMIT ?? '512';
 export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
 export const ONECLI_API_KEY = process.env.ONECLI_API_KEY || envConfig.ONECLI_API_KEY;
 export const MAX_MESSAGES_PER_PROMPT = Math.max(1, parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10);

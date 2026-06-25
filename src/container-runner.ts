@@ -10,9 +10,12 @@ import path from 'path';
 import { OneCLI } from '@onecli-sh/sdk';
 
 import {
+  CONTAINER_CPUS,
   CONTAINER_IMAGE,
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
+  CONTAINER_MEMORY,
+  CONTAINER_PIDS_LIMIT,
   DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
@@ -423,6 +426,24 @@ function selectedSkillNames(containerConfig: import('./container-config.js').Con
     : [];
 }
 
+/**
+ * Per-container resource caps (`--memory`, `--cpus`, `--pids-limit`).
+ *
+ * Each value is passed through to the Docker / Apple Container CLI as-is.
+ * `0` (or empty) is the documented escape hatch for "no cap" — we omit the
+ * flag entirely so the runtime applies its own default (i.e. unlimited),
+ * mirroring Docker's own convention. We don't try to validate units here:
+ * the runtime is the source of truth, and a malformed value should fail loud
+ * at container start rather than be silently coerced.
+ */
+export function buildResourceLimitArgs(memory: string, cpus: string, pidsLimit: string): string[] {
+  const args: string[] = [];
+  if (memory && memory !== '0') args.push('--memory', memory);
+  if (cpus && cpus !== '0') args.push('--cpus', cpus);
+  if (pidsLimit && pidsLimit !== '0') args.push('--pids-limit', pidsLimit);
+  return args;
+}
+
 async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
@@ -433,6 +454,11 @@ async function buildContainerArgs(
   agentIdentifier?: string,
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
+
+  // Resource caps — defend the host against runaway agents (LLM loops, fork
+  // bombs, accidental Promise.all-of-shell-commands). Tunable via env vars in
+  // config.ts; `0` per-flag disables that cap (Docker's unlimited convention).
+  args.push(...buildResourceLimitArgs(CONTAINER_MEMORY, CONTAINER_CPUS, CONTAINER_PIDS_LIMIT));
 
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
