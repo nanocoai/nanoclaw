@@ -77,3 +77,12 @@ export function setContinuation(providerName: string, id: string): void {
 export function clearContinuation(providerName: string): void {
   deleteValue(continuationKey(providerName));
 }
+
+export function getContinuationAge(providerName: string): number | null {
+  const row = getOutboundDb()
+    .prepare('SELECT updated_at FROM session_state WHERE key = ?')
+    .get(continuationKey(providerName)) as { updated_at: string } | undefined;
+  if (!row?.updated_at) return null;
+  const t = Date.parse(row.updated_at.endsWith('Z') ? row.updated_at : row.updated_at + 'Z');
+  return Number.isNaN(t) ? null : Date.now() - t;
+}
