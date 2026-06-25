@@ -4,6 +4,10 @@
  * Thin orchestrator: init DB, run migrations, start channel adapters,
  * start delivery polls, start sweep, handle shutdown.
  */
+// Must be first: installs a console filter that drops libsignal's session
+// debug spam (incl. raw key material) before any channel adapter can run.
+import './silence-libsignal.js';
+
 import path from 'path';
 
 import { backfillContainerConfigs } from './backfill-container-configs.js';
