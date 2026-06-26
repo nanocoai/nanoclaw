@@ -70,12 +70,14 @@ import {
   setSession,
   storeChatMetadata,
   storeMessage,
+  getActiveDelegationByGroup,
   storeMessageDirect,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
 import {
   finalizeDelegationOnTurnEnd,
+  shouldCarryReply,
   startIpcWatcher,
   type ReportMeta,
 } from './ipc.js';
@@ -476,6 +478,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       ? `[对话上下文]\n${voiceCtxParts.join('\n')}`
       : undefined;
 
+  // 本轮消息全部来自跨群 IPC（delegate 投递 / report_to_main）时，
+  // agent 回复的受众是 agent 自己，不推语音播报
+  const isIpcOnlyTurn = missedMessages.length > 0 && missedMessages.every((m) =>
+    m.id.startsWith('ipc_'),
+  );
+
+  /** 统一发送 agent 回复，自动 merge 跨群静音标记 */
+  const sendAgentMessage = (text: string, options?: import('./types.js').SendMessageOptions) =>
+    channel.sendMessage(chatJid, text, {
+      ...options,
+      skipVoiceNotify: isIpcOnlyTurn || options?.skipVoiceNotify,
+      voiceContext: isIpcOnlyTurn ? undefined : (options?.voiceContext ?? voiceContext),
+    });
+
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
     const triggerPattern = getTriggerPattern(group.trigger);
@@ -546,8 +562,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let streamingApiErrorDetected = false;
   let streamingApiErrorText = '';
 
-  // R8.1: 收集 Agent 回复文本（用于记忆更新）
+  // R8.1: 收集 Agent 回复文本（用于记忆更新）——整轮累计，不按 query 清空
   const agentReplies: string[] = [];
+  // 当前 query 级回复（每轮 IPC query 开始时清空），自动终态只用这个，
+  // 避免跨 query 串旧任务内容（大杰 2026-06-23 实锤 delegate 汇报内容被覆盖）
+  let currentQueryReplies: string[] = [];
   let memoryEnqueued = false; // 标记是否已在 onOutput 中入队记忆
   let lastFeishuMsgId: string | undefined; // 最后一条正式回复的飞书 message_id
 
@@ -794,9 +813,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
       if (text) {
         await channel.setTyping?.(chatJid, false);
-        const feishuMsgId = await channel.sendMessage(chatJid, text, {
-          voiceContext,
-        });
+        const feishuMsgId = await sendAgentMessage(text);
         logger.info(
           { group: group.name, feishuMsgId, textLen: text.length },
           '[reply] sendMessage 返回',
@@ -806,6 +823,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         textSentToUser = true;
         everSentToUser = true;
         agentReplies.push(text);
+        currentQueryReplies.push(text);
         autoFollowupSummaryTextParts.push(text);
 
         // 实时索引聊天记录（不等 agent 退出，因为 agent 可能跑数小时）
@@ -946,25 +964,29 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           channel as { cleanupProgressCard: (jid: string) => Promise<void> }
         ).cleanupProgressCard(chatJid);
       }
-      // 重置状态：IPC pipe 模式下下一轮 query 需要从干净状态开始
-      outputSentToUser = false;
-      textSentToUser = false;
-      autoFollowupSummaryTextParts = [];
-
       // Commander 自动终态兜底：目标群一轮 query 正常结束时，若本群仍有进行态
       // delegation 任务（agent 干完但忘了调 report_to_main），host 自动补 done，
       // 避免账本卡 dispatched/progress 直到 15 分钟失联。仅进行态生效；
       // agent 已自主汇报或留 blocked/question 时本函数不触发（见函数内说明）。
+      // 归因判断：只有本轮消息全部来自 IPC 且只含该任务 task_id 时，才携带回复内容；
+      // 混合消息场景下不传回复，避免串内容。（大杰 2026-06-23 三次实锤 + C3 review）
       try {
-        finalizeDelegationOnTurnEnd(
-          group.folder,
-          true,
-          agentReplies.join('\n'),
-          { injectReportToActiveAgent },
-        );
+        const activeTask = getActiveDelegationByGroup(group.folder);
+        const finalReply = activeTask && shouldCarryReply(missedMessages, activeTask)
+          ? currentQueryReplies.join('\n\n')
+          : undefined;
+        finalizeDelegationOnTurnEnd(group.folder, true, finalReply, {
+          injectReportToActiveAgent,
+        });
       } catch (err) {
         logger.warn({ err, group: group.folder }, '自动终态汇报(done)异常');
       }
+
+      // 重置状态：IPC pipe 模式下下一轮 query 需要从干净状态开始
+      outputSentToUser = false;
+      textSentToUser = false;
+      autoFollowupSummaryTextParts = [];
+      currentQueryReplies = [];
 
       // R8.1 实时记忆入队：agent 回复完成后立即入队，不等进程退出
       // agent-runner 完成回复后会进入 IPC 等待循环（可达 8 小时），
@@ -1286,14 +1308,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               return;
             }
             if (text) {
-              const retryFmid = await channel.sendMessage(chatJid, text, {
-                voiceContext,
-              });
+              const retryFmid = await sendAgentMessage(text);
               if (retryFmid) lastFeishuMsgId = retryFmid;
               outputSentToUser = true;
               textSentToUser = true;
               everSentToUser = true;
               agentReplies.push(text);
+              currentQueryReplies.push(text);
               autoFollowupSummaryTextParts.push(text);
             }
           }
@@ -1392,20 +1413,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       },
       '[session-recovery] 已通知用户并保留 cursor，等待用户决定是否 /new',
     );
-    await channel.sendMessage(chatJid, text, { isCommandReply: true });
+    await sendAgentMessage(text, { isCommandReply: true });
     everSentToUser = true;
   }
 
   if (output.status === 'error' || hadError) {
     // Commander 自动终态兜底：目标群容器异常结束时，若仍有进行态 delegation 任务，
     // host 自动补 failed，避免账本卡 dispatched/progress 直到 15 分钟失联。
+    // 不带 agent 回复内容（异常终态无归因意义）。
     try {
-      finalizeDelegationOnTurnEnd(
-        group.folder,
-        false,
-        agentReplies.join('\n'),
-        { injectReportToActiveAgent },
-      );
+      finalizeDelegationOnTurnEnd(group.folder, false, undefined, {
+        injectReportToActiveAgent,
+      });
     } catch (err) {
       logger.warn({ err, group: group.folder }, '自动终态汇报(failed)异常');
     }

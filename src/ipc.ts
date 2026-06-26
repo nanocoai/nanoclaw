@@ -768,6 +768,33 @@ function deliverReportToSource(
  *
  * @returns 是否实际触发了一次自动汇报（用于日志）
  */
+
+/**
+ * 判断当前 query 的回复内容是否应携带进自动终态汇报。
+ * 三重归因校验：
+ * 1. 触发消息全部为 ipc_（跨群派工触发，非用户直接消息）
+ * 2. 所有 ipc_ 消息只含一个 task_id（避免多任务混合）
+ * 3. task_id 与活跃 delegation 任务匹配
+ */
+export function shouldCarryReply(
+  missedMessages: Array<{ id: string; content: string }>,
+  activeTask: { taskId: string },
+): boolean {
+  // 必须全部是 IPC 消息
+  if (!missedMessages.every((m) => m.id.startsWith('ipc_'))) return false;
+
+  // 提取消息中引用的 task_id（格式：(task dlg_xxx)）
+  const taskIds = new Set<string>();
+  for (const m of missedMessages) {
+    const match = m.content.match(/\(task (dlg_[a-z0-9_]+)\)/);
+    if (match) taskIds.add(match[1]);
+  }
+
+  // 只含一个 task_id 且与活跃任务匹配
+  if (taskIds.size !== 1) return false;
+  return taskIds.has(activeTask.taskId);
+}
+
 export function finalizeDelegationOnTurnEnd(
   reportingGroup: string,
   ok: boolean,
