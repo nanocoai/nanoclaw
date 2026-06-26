@@ -94,6 +94,14 @@ function nextIpcTimestamp(jid: string): string {
   return new Date(ms).toISOString();
 }
 
+/** report 消息的完整元信息，storeReportToSource 返回，注入回调和测试共用 */
+export type ReportMeta = {
+  id: string;
+  timestamp: string;
+  text: string;
+  sender: string;
+};
+
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<string | undefined>;
   registeredGroups: () => Record<string, RegisteredGroup>;
@@ -109,6 +117,16 @@ export interface IpcDeps {
   onTasksChanged: () => void;
   onFeishuAuthRequest?: (chatJid: string, groupFolder: string) => Promise<void>;
   renameChat?: (jid: string, name: string) => Promise<void>;
+  /** 尝试将 report 实时注入发起群活跃 agent（通过 queue.sendMessage），返回是否成功 */
+  injectReportToActiveAgent?: (
+    sourceJid: string,
+    reportMeta: ReportMeta,
+  ) => boolean;
+  /** report 被拒时通知 reporting agent（通过 queue.sendMessage 注入错误消息） */
+  notifyReportRejected?: (
+    reportingGroupFolder: string,
+    reason: string,
+  ) => void;
 }
 
 /**
@@ -360,7 +378,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
               // --- Commander：汇报 report（目标群回任务发起群）---
               if (data.type === 'report' && data.status && data.summary) {
-                handleReport(data, sourceGroup, registeredGroups);
+                handleReport(data, sourceGroup, registeredGroups, deps);
               }
             } catch (err) {
               logger.error(
@@ -601,6 +619,7 @@ function handleReport(
   },
   sourceGroup: string,
   registeredGroups: Record<string, RegisteredGroup>,
+  deps?: Pick<IpcDeps, 'injectReportToActiveAgent' | 'notifyReportRejected'>,
 ): void {
   const reportingGroup = sourceGroup;
 
@@ -623,6 +642,12 @@ function handleReport(
     logger.warn(
       { reportingGroup, status },
       'report 该群无在办任务，拒绝汇报（疑似越界）',
+    );
+    deps?.notifyReportRejected?.(
+      reportingGroup,
+      '⚠️ 你当前没有在办的 delegation 任务，report 已被 host 拒绝。' +
+        '刚才工具返回的成功只是本地提交成功，host 实际拒绝了该 report。' +
+        '请直接回复用户而不是使用汇报工具。',
     );
     return;
   }
@@ -662,10 +687,21 @@ function handleReport(
   lines.push(`(task ${task.taskId})`);
   const reportText = lines.join('\n');
 
-  storeReportToSource(task.sourceJid, reportingGroup, reportText);
+  const meta = deliverReportToSource(
+    task.sourceJid,
+    reportingGroup,
+    reportText,
+    deps,
+  );
   logger.info(
-    { reportingGroup, status, taskId: task.taskId, sourceJid: task.sourceJid },
-    'report stored to source group DB',
+    {
+      reportingGroup,
+      status,
+      taskId: task.taskId,
+      sourceJid: task.sourceJid,
+      reportId: meta.id,
+    },
+    'report delivered to source group',
   );
 }
 
@@ -680,18 +716,42 @@ function storeReportToSource(
   sourceJid: string,
   reportingGroup: string,
   reportText: string,
-): void {
+): ReportMeta {
   const reportSender = `${ASSISTANT_NAME}(${reportingGroup})`;
+  const id = `ipc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const timestamp = nextIpcTimestamp(sourceJid);
   storeMessageDirect({
-    id: `ipc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    id,
     chat_jid: sourceJid,
     sender: reportSender,
     sender_name: reportSender,
     content: reportText,
-    timestamp: nextIpcTimestamp(sourceJid),
+    timestamp,
     is_from_me: false,
     is_bot_message: false,
   });
+  return { id, timestamp, text: reportText, sender: reportSender };
+}
+
+/**
+ * 统一投递：DB 写入 + 尝试注入活跃 agent。
+ * handleReport 和 finalizeDelegationOnTurnEnd 共用此函数。
+ */
+function deliverReportToSource(
+  sourceJid: string,
+  reportingGroup: string,
+  reportText: string,
+  deps?: Pick<IpcDeps, 'injectReportToActiveAgent'>,
+): ReportMeta {
+  const meta = storeReportToSource(sourceJid, reportingGroup, reportText);
+  if (deps?.injectReportToActiveAgent) {
+    const injected = deps.injectReportToActiveAgent(sourceJid, meta);
+    logger.info(
+      { sourceJid, reportId: meta.id, injected },
+      'deliverReportToSource: injection attempt',
+    );
+  }
+  return meta;
 }
 
 /**
@@ -712,6 +772,7 @@ export function finalizeDelegationOnTurnEnd(
   reportingGroup: string,
   ok: boolean,
   finalReply?: string,
+  deps?: Pick<IpcDeps, 'injectReportToActiveAgent'>,
 ): boolean {
   const task = getActiveDelegationByGroup(reportingGroup);
   if (!task) return false;
@@ -737,7 +798,22 @@ export function finalizeDelegationOnTurnEnd(
   if (details) reportText += `\n结果：${details}`;
   reportText += `\n(task ${task.taskId}，自动终态)`;
   try {
-    storeReportToSource(task.sourceJid, reportingGroup, reportText);
+    const meta = deliverReportToSource(
+      task.sourceJid,
+      reportingGroup,
+      reportText,
+      deps,
+    );
+    logger.info(
+      {
+        reportingGroup,
+        taskId: task.taskId,
+        status,
+        sourceJid: task.sourceJid,
+        reportId: meta.id,
+      },
+      '自动终态汇报已投递发起群',
+    );
   } catch (storeErr) {
     logger.error(
       {
@@ -750,10 +826,6 @@ export function finalizeDelegationOnTurnEnd(
       '自动终态汇报入发起群库失败',
     );
   }
-  logger.info(
-    { reportingGroup, taskId: task.taskId, status, sourceJid: task.sourceJid },
-    '自动终态汇报已写入发起群',
-  );
   return true;
 }
 

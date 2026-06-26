@@ -74,7 +74,11 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
-import { finalizeDelegationOnTurnEnd, startIpcWatcher } from './ipc.js';
+import {
+  finalizeDelegationOnTurnEnd,
+  startIpcWatcher,
+  type ReportMeta,
+} from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { restoreRemoteControl } from './remote-control.js';
 import {
@@ -102,6 +106,34 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+
+/**
+ * 单调推进 per-JID cursor。只有 ts > 当前值才写入，防止被旧值覆盖回退。
+ * 所有对 lastAgentTimestamp 的赋值都必须走这个函数。
+ */
+function advanceAgentCursor(jid: string, ts: string, save = true): void {
+  const current = lastAgentTimestamp[jid] || '';
+  if (ts > current) {
+    lastAgentTimestamp[jid] = ts;
+    if (save) saveState();
+  }
+}
+
+/** 注入回调：finalizeDelegationOnTurnEnd 和 startIpcWatcher 共用 */
+function injectReportToActiveAgent(
+  sourceJid: string,
+  reportMeta: ReportMeta,
+): boolean {
+  const ok = queue.sendMessage(sourceJid, reportMeta.text);
+  if (ok) {
+    advanceAgentCursor(sourceJid, reportMeta.timestamp);
+    logger.info(
+      { sourceJid, reportId: reportMeta.id, ts: reportMeta.timestamp },
+      'report injected into active agent, cursor advanced',
+    );
+  }
+  return ok;
+}
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 
@@ -218,8 +250,7 @@ function getOrRecoverCursor(chatJid: string): string {
       { chatJid, recoveredFrom: botTs },
       'Recovered message cursor from last bot reply',
     );
-    lastAgentTimestamp[chatJid] = botTs;
-    saveState();
+    advanceAgentCursor(chatJid, botTs);
     return botTs;
   }
   return '';
@@ -929,6 +960,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           group.folder,
           true,
           agentReplies.join('\n'),
+          { injectReportToActiveAgent },
         );
       } catch (err) {
         logger.warn({ err, group: group.folder }, '自动终态汇报(done)异常');
@@ -1003,8 +1035,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (idleTimer) clearTimeout(idleTimer);
 
   if (queue.consumeStopRequested(chatJid)) {
-    lastAgentTimestamp[chatJid] = newCursor;
-    saveState();
+    advanceAgentCursor(chatJid, newCursor);
     logger.info(
       { group: group.name, chatJid },
       '/stop: 用户主动停止，cursor 已推进且不触发重试',
@@ -1373,6 +1404,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         group.folder,
         false,
         agentReplies.join('\n'),
+        { injectReportToActiveAgent },
       );
     } catch (err) {
       logger.warn({ err, group: group.folder }, '自动终态汇报(failed)异常');
@@ -1381,8 +1413,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // the user got their response and re-processing would send duplicates.
     if (everSentToUser) {
       // error 但已有回复发给用户：推进 cursor（防止重启后重复回复）+ 入队记忆
-      lastAgentTimestamp[chatJid] = newCursor;
-      saveState();
+      advanceAgentCursor(chatJid, newCursor);
       if (!memoryEnqueued && isMemoryEnabled() && agentReplies.length > 0) {
         const memoryMessages = [
           ...missedMessages.map((m) => ({
@@ -1440,8 +1471,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   // 成功处理完毕，推进 cursor（在回复入库之后，确保进程被杀时不丢消息）
-  lastAgentTimestamp[chatJid] = newCursor;
-  saveState();
+  advanceAgentCursor(chatJid, newCursor);
 
   // chatIndex 已在 onOutput 回调中实时索引，此处无需重复
 
@@ -2055,8 +2085,18 @@ async function startMessageLoop(): Promise<void> {
             ASSISTANT_NAME,
             MAX_MESSAGES_PER_PROMPT,
           );
-          const messagesToSend =
-            allPending.length > 0 ? allPending : groupMessages;
+          let messagesToSend: NewMessage[];
+          if (allPending.length > 0) {
+            messagesToSend = allPending;
+          } else {
+            // 防 double-feed：只过滤已注入的 ipc_ report，保留用户消息
+            const cursor = lastAgentTimestamp[chatJid] || '';
+            const undelivered = groupMessages.filter(
+              (m) => !(m.id.startsWith('ipc_') && m.timestamp <= cursor),
+            );
+            if (undelivered.length === 0) continue; // 全是已注入的 report，skip
+            messagesToSend = undelivered;
+          }
           logger.info(
             {
               chatJid,
@@ -2162,9 +2202,10 @@ async function startMessageLoop(): Promise<void> {
                 }
               ).setUsage(chatJid, undefined, thinkVal);
             }
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
-            saveState();
+            advanceAgentCursor(
+              chatJid,
+              messagesToSend[messagesToSend.length - 1].timestamp,
+            );
             // Show typing indicator while the container processes the piped message
             channel
               .setTyping?.(chatJid, true)
@@ -2208,8 +2249,7 @@ function recoverPendingMessages(): void {
           { group: group.name, pendingCount: pending.length, lastBotTs },
           'Recovery: bot already replied after pending messages, advancing cursor (skip re-processing)',
         );
-        lastAgentTimestamp[chatJid] = lastBotTs;
-        saveState();
+        advanceAgentCursor(chatJid, lastBotTs);
         continue;
       }
 
@@ -2296,10 +2336,7 @@ async function main(): Promise<void> {
           registeredGroups,
           deleteSession,
           setRegisteredGroup,
-          advanceCursor: (jid, ts) => {
-            lastAgentTimestamp[jid] = ts;
-            saveState();
-          },
+          advanceCursor: (jid, ts) => advanceAgentCursor(jid, ts),
         });
         if (handled) return;
       }
@@ -2455,6 +2492,37 @@ async function main(): Promise<void> {
         logger.warn(
           { jid, hasChannel: !!channel },
           '[rename] channel 不支持 renameChat',
+        );
+      }
+    },
+    injectReportToActiveAgent,
+    notifyReportRejected: (reportingGroupFolder, reason) => {
+      // 反查 reporting group 的 JID
+      let reportingJid: string | undefined;
+      for (const [jid, g] of Object.entries(registeredGroups)) {
+        if (g.folder === reportingGroupFolder) {
+          reportingJid = jid;
+          break;
+        }
+      }
+      if (!reportingJid) {
+        logger.warn(
+          { reportingGroupFolder, reason },
+          'notifyReportRejected: 无法反查 JID，跳过反馈',
+        );
+        return;
+      }
+      const sent = queue.sendMessage(
+        reportingJid,
+        reason,
+        undefined,
+        undefined,
+        'system',
+      );
+      if (!sent) {
+        logger.debug(
+          { reportingJid, reportingGroupFolder },
+          'notifyReportRejected: agent 不活跃，静默忽略',
         );
       }
     },
