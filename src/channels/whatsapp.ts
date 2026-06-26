@@ -368,19 +368,20 @@ registerChannelAdapter('whatsapp', {
       const cached = groupMetadataCache.get(jid);
       if (cached && cached.expiresAt > Date.now()) return cached.metadata;
 
+      // IMPORTANT: this metadata is consumed ONLY by Baileys' `cachedGroupMetadata`
+      // hook, which uses the participant list to encrypt outbound group messages
+      // (sender-key distribution). It MUST keep participants in their native
+      // addressing (LID for v7 LID-addressed groups). Translating participant
+      // IDs to phone JIDs here misdirects sender-key distribution, so the message
+      // gets a server ID ("delivered") but no member can decrypt it — the reply
+      // silently never appears in the group. Inbound sender→phone-JID mapping is
+      // handled separately via translateJid at message-receive time.
       const metadata = await sock.groupMetadata(jid);
-      const participants = await Promise.all(
-        metadata.participants.map(async (p) => ({
-          ...p,
-          id: await translateJid(p.id),
-        })),
-      );
-      const normalized = { ...metadata, participants };
       groupMetadataCache.set(jid, {
-        metadata: normalized,
+        metadata,
         expiresAt: Date.now() + GROUP_METADATA_CACHE_TTL_MS,
       });
-      return normalized;
+      return metadata;
     }
 
     async function syncGroupMetadata(force = false): Promise<void> {
