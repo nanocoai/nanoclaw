@@ -107,6 +107,18 @@ let messageLoopRunning = false;
 const channels: Channel[] = [];
 const queue = new GroupQueue();
 
+/**
+ * 单调推进 per-JID cursor。只有 ts > 当前值才写入，防止被旧值覆盖回退。
+ * 所有对 lastAgentTimestamp 的赋值都必须走这个函数。
+ */
+function advanceAgentCursor(jid: string, ts: string, save = true): void {
+  const current = lastAgentTimestamp[jid] || '';
+  if (ts > current) {
+    lastAgentTimestamp[jid] = ts;
+    if (save) saveState();
+  }
+}
+
 /** 注入回调：finalizeDelegationOnTurnEnd 和 startIpcWatcher 共用 */
 function injectReportToActiveAgent(
   sourceJid: string,
@@ -114,8 +126,7 @@ function injectReportToActiveAgent(
 ): boolean {
   const ok = queue.sendMessage(sourceJid, reportMeta.text);
   if (ok) {
-    lastAgentTimestamp[sourceJid] = reportMeta.timestamp;
-    saveState();
+    advanceAgentCursor(sourceJid, reportMeta.timestamp);
     logger.info(
       { sourceJid, reportId: reportMeta.id, ts: reportMeta.timestamp },
       'report injected into active agent, cursor advanced',
@@ -239,8 +250,7 @@ function getOrRecoverCursor(chatJid: string): string {
       { chatJid, recoveredFrom: botTs },
       'Recovered message cursor from last bot reply',
     );
-    lastAgentTimestamp[chatJid] = botTs;
-    saveState();
+    advanceAgentCursor(chatJid, botTs);
     return botTs;
   }
   return '';
@@ -1025,8 +1035,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (idleTimer) clearTimeout(idleTimer);
 
   if (queue.consumeStopRequested(chatJid)) {
-    lastAgentTimestamp[chatJid] = newCursor;
-    saveState();
+    advanceAgentCursor(chatJid, newCursor);
     logger.info(
       { group: group.name, chatJid },
       '/stop: 用户主动停止，cursor 已推进且不触发重试',
@@ -1404,8 +1413,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // the user got their response and re-processing would send duplicates.
     if (everSentToUser) {
       // error 但已有回复发给用户：推进 cursor（防止重启后重复回复）+ 入队记忆
-      lastAgentTimestamp[chatJid] = newCursor;
-      saveState();
+      advanceAgentCursor(chatJid, newCursor);
       if (!memoryEnqueued && isMemoryEnabled() && agentReplies.length > 0) {
         const memoryMessages = [
           ...missedMessages.map((m) => ({
@@ -1463,8 +1471,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   // 成功处理完毕，推进 cursor（在回复入库之后，确保进程被杀时不丢消息）
-  lastAgentTimestamp[chatJid] = newCursor;
-  saveState();
+  advanceAgentCursor(chatJid, newCursor);
 
   // chatIndex 已在 onOutput 回调中实时索引，此处无需重复
 
@@ -2195,9 +2202,10 @@ async function startMessageLoop(): Promise<void> {
                 }
               ).setUsage(chatJid, undefined, thinkVal);
             }
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
-            saveState();
+            advanceAgentCursor(
+              chatJid,
+              messagesToSend[messagesToSend.length - 1].timestamp,
+            );
             // Show typing indicator while the container processes the piped message
             channel
               .setTyping?.(chatJid, true)
@@ -2241,8 +2249,7 @@ function recoverPendingMessages(): void {
           { group: group.name, pendingCount: pending.length, lastBotTs },
           'Recovery: bot already replied after pending messages, advancing cursor (skip re-processing)',
         );
-        lastAgentTimestamp[chatJid] = lastBotTs;
-        saveState();
+        advanceAgentCursor(chatJid, lastBotTs);
         continue;
       }
 
@@ -2329,10 +2336,7 @@ async function main(): Promise<void> {
           registeredGroups,
           deleteSession,
           setRegisteredGroup,
-          advanceCursor: (jid, ts) => {
-            lastAgentTimestamp[jid] = ts;
-            saveState();
-          },
+          advanceCursor: (jid, ts) => advanceAgentCursor(jid, ts),
         });
         if (handled) return;
       }
