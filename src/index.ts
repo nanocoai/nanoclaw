@@ -74,7 +74,11 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
-import { finalizeDelegationOnTurnEnd, startIpcWatcher } from './ipc.js';
+import {
+  finalizeDelegationOnTurnEnd,
+  startIpcWatcher,
+  type ReportMeta,
+} from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { restoreRemoteControl } from './remote-control.js';
 import {
@@ -102,6 +106,23 @@ let messageLoopRunning = false;
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
+
+/** 注入回调：finalizeDelegationOnTurnEnd 和 startIpcWatcher 共用 */
+function injectReportToActiveAgent(
+  sourceJid: string,
+  reportMeta: ReportMeta,
+): boolean {
+  const ok = queue.sendMessage(sourceJid, reportMeta.text);
+  if (ok) {
+    lastAgentTimestamp[sourceJid] = reportMeta.timestamp;
+    saveState();
+    logger.info(
+      { sourceJid, reportId: reportMeta.id, ts: reportMeta.timestamp },
+      'report injected into active agent, cursor advanced',
+    );
+  }
+  return ok;
+}
 
 const onecli = new OneCLI({ url: ONECLI_URL });
 
@@ -929,6 +950,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           group.folder,
           true,
           agentReplies.join('\n'),
+          { injectReportToActiveAgent },
         );
       } catch (err) {
         logger.warn({ err, group: group.folder }, '自动终态汇报(done)异常');
@@ -1373,6 +1395,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         group.folder,
         false,
         agentReplies.join('\n'),
+        { injectReportToActiveAgent },
       );
     } catch (err) {
       logger.warn({ err, group: group.folder }, '自动终态汇报(failed)异常');
@@ -2055,8 +2078,18 @@ async function startMessageLoop(): Promise<void> {
             ASSISTANT_NAME,
             MAX_MESSAGES_PER_PROMPT,
           );
-          const messagesToSend =
-            allPending.length > 0 ? allPending : groupMessages;
+          let messagesToSend: NewMessage[];
+          if (allPending.length > 0) {
+            messagesToSend = allPending;
+          } else {
+            // 防 double-feed：只过滤已注入的 ipc_ report，保留用户消息
+            const cursor = lastAgentTimestamp[chatJid] || '';
+            const undelivered = groupMessages.filter(
+              (m) => !(m.id.startsWith('ipc_') && m.timestamp <= cursor),
+            );
+            if (undelivered.length === 0) continue; // 全是已注入的 report，skip
+            messagesToSend = undelivered;
+          }
           logger.info(
             {
               chatJid,
@@ -2455,6 +2488,37 @@ async function main(): Promise<void> {
         logger.warn(
           { jid, hasChannel: !!channel },
           '[rename] channel 不支持 renameChat',
+        );
+      }
+    },
+    injectReportToActiveAgent,
+    notifyReportRejected: (reportingGroupFolder, reason) => {
+      // 反查 reporting group 的 JID
+      let reportingJid: string | undefined;
+      for (const [jid, g] of Object.entries(registeredGroups)) {
+        if (g.folder === reportingGroupFolder) {
+          reportingJid = jid;
+          break;
+        }
+      }
+      if (!reportingJid) {
+        logger.warn(
+          { reportingGroupFolder, reason },
+          'notifyReportRejected: 无法反查 JID，跳过反馈',
+        );
+        return;
+      }
+      const sent = queue.sendMessage(
+        reportingJid,
+        reason,
+        undefined,
+        undefined,
+        'system',
+      );
+      if (!sent) {
+        logger.debug(
+          { reportingJid, reportingGroupFolder },
+          'notifyReportRejected: agent 不活跃，静默忽略',
         );
       }
     },
