@@ -105,25 +105,39 @@ function startLogTail(config: PusherConfig): void {
 
   // Send last 200 lines as backfill
   try {
-    const allLines = fs.readFileSync(logFile, 'utf-8').split('\n').filter((l) => l.trim());
+    const allLines = fs
+      .readFileSync(logFile, 'utf-8')
+      .split('\n')
+      .filter((l) => l.trim());
     logOffset = fs.statSync(logFile).size;
     const tail = allLines.slice(-200).map((l) => l.replace(ANSI_RE, ''));
     if (tail.length > 0) postJson(config, '/api/logs/push', { lines: tail });
-  } catch { return; }
+  } catch {
+    return;
+  }
 
   // Poll every 2s for new lines
   logTimer = setInterval(() => {
     try {
       const stat = fs.statSync(logFile);
-      if (stat.size <= logOffset) { logOffset = stat.size; return; }
+      if (stat.size <= logOffset) {
+        logOffset = stat.size;
+        return;
+      }
       const buf = Buffer.alloc(stat.size - logOffset);
       const fd = fs.openSync(logFile, 'r');
       fs.readSync(fd, buf, 0, buf.length, logOffset);
       fs.closeSync(fd);
       logOffset = stat.size;
-      const lines = buf.toString().split('\n').filter((l) => l.trim()).map((l) => l.replace(ANSI_RE, ''));
+      const lines = buf
+        .toString()
+        .split('\n')
+        .filter((l) => l.trim())
+        .map((l) => l.replace(ANSI_RE, ''));
       if (lines.length > 0) postJson(config, '/api/logs/push', { lines });
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }, 2000);
 }
 
@@ -147,6 +161,22 @@ function collectSnapshot(): Record<string, unknown> {
     activity: collectActivity(),
     messages: collectMessages(),
   };
+}
+
+function resolveEffectiveModel(
+  agentProvider: string | null,
+  containerConfig: ReturnType<typeof getContainerConfig> | null,
+): string | null {
+  const provider = agentProvider ?? containerConfig?.provider ?? null;
+  if (provider === 'opencode') {
+    const envVars = readEnvFile(['OPENCODE_PROVIDER', 'OPENCODE_MODEL']);
+    const p = process.env.OPENCODE_PROVIDER || envVars.OPENCODE_PROVIDER;
+    const m = process.env.OPENCODE_MODEL || envVars.OPENCODE_MODEL;
+    if (m) return m;
+    if (p) return p;
+    return null;
+  }
+  return containerConfig?.model ?? null;
 }
 
 function collectAgentGroups() {
@@ -174,12 +204,15 @@ function collectAgentGroups() {
       )
       .all(g.id) as Array<Record<string, unknown>>;
 
+    const containerConfig = getContainerConfig(g.id) ?? null;
+
     return {
       id: g.id,
       name: g.name,
       folder: g.folder,
       agent_provider: g.agent_provider,
-      container_config: getContainerConfig(g.id) ?? null,
+      effective_model: resolveEffectiveModel(g.agent_provider, containerConfig),
+      container_config: containerConfig,
       sessionCount: sessions.length,
       runningSessions: running.length,
       wirings,
@@ -285,30 +318,79 @@ function collectUsers() {
 
 function collectTokens() {
   const sessionsDir = path.join(DATA_DIR, 'v2-sessions');
-  const allEntries: Array<{ model: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; agentGroupId: string }> = [];
+  const allEntries: Array<{
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    agentGroupId: string;
+  }> = [];
   const agentGroups = getAllAgentGroups();
   const nameMap = new Map(agentGroups.map((g) => [g.id, g.name]));
+  // Build a set of agent group IDs that use the opencode provider.
+  // For opencode groups we skip JSONL (stale pre-switch Claude data); for
+  // claude groups we skip the opencode DB (no sessions there).
+  const opencodeGroupIds = new Set(
+    agentGroups
+      .filter((g) => {
+        const p = g.agent_provider ?? getContainerConfig(g.id)?.provider ?? null;
+        return p === 'opencode';
+      })
+      .map((g) => g.id),
+  );
 
   if (fs.existsSync(sessionsDir)) {
-    for (const agDir of fs.readdirSync(sessionsDir).filter((d) => d.startsWith('ag-'))) {
-      const entries = scanJsonlTokens(path.join(sessionsDir, agDir));
-      allEntries.push(...entries.map((e) => ({ ...e, agentGroupId: agDir })));
+    for (const group of agentGroups) {
+      const agPath = path.join(sessionsDir, group.id);
+      if (!fs.existsSync(agPath)) continue;
+      const isOpencode = opencodeGroupIds.has(group.id);
+      const entries = isOpencode ? scanOpencodeTokens(agPath) : scanJsonlTokens(agPath);
+      allEntries.push(...entries.map((e) => ({ ...e, agentGroupId: group.id })));
     }
   }
 
-  const byModel: Record<string, { requests: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number }> = {};
-  const byGroup: Record<string, { requests: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; name: string }> = {};
+  const byModel: Record<
+    string,
+    {
+      requests: number;
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheCreationTokens: number;
+    }
+  > = {};
+  const byGroup: Record<
+    string,
+    {
+      requests: number;
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheCreationTokens: number;
+      name: string;
+    }
+  > = {};
   const totals = { requests: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
 
   for (const e of allEntries) {
-    if (!byModel[e.model]) byModel[e.model] = { requests: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+    if (!byModel[e.model])
+      byModel[e.model] = { requests: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
     byModel[e.model].requests++;
     byModel[e.model].inputTokens += e.inputTokens;
     byModel[e.model].outputTokens += e.outputTokens;
     byModel[e.model].cacheReadTokens += e.cacheReadTokens;
     byModel[e.model].cacheCreationTokens += e.cacheCreationTokens;
 
-    if (!byGroup[e.agentGroupId]) byGroup[e.agentGroupId] = { requests: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, name: nameMap.get(e.agentGroupId) || e.agentGroupId };
+    if (!byGroup[e.agentGroupId])
+      byGroup[e.agentGroupId] = {
+        requests: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        name: nameMap.get(e.agentGroupId) || e.agentGroupId,
+      };
     byGroup[e.agentGroupId].requests++;
     byGroup[e.agentGroupId].inputTokens += e.inputTokens;
     byGroup[e.agentGroupId].outputTokens += e.outputTokens;
@@ -329,7 +411,13 @@ function scanJsonlTokens(agentDir: string) {
   const claudeDir = path.join(agentDir, '.claude-shared', 'projects');
   if (!fs.existsSync(claudeDir)) return [];
 
-  const entries: Array<{ model: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number }> = [];
+  const entries: Array<{
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  }> = [];
 
   const walk = (dir: string): void => {
     try {
@@ -352,60 +440,146 @@ function scanJsonlTokens(agentDir: string) {
                     cacheCreationTokens: u.cache_creation_input_tokens || 0,
                   });
                 }
-              } catch { /* skip line */ }
+              } catch {
+                /* skip line */
+              }
             }
-          } catch { /* skip file */ }
+          } catch {
+            /* skip file */
+          }
         }
       }
-    } catch { /* skip dir */ }
+    } catch {
+      /* skip dir */
+    }
   };
   walk(claudeDir);
   return entries;
 }
 
-function collectContextWindows() {
-  const sessionsDir = path.join(DATA_DIR, 'v2-sessions');
-  if (!fs.existsSync(sessionsDir)) return [];
+const OPENCODE_MAX_CONTEXT: Record<string, number> = {
+  'google/gemini-2.5-flash': 1048576,
+  'google/gemini-2.5-pro': 1048576,
+  'google/gemini-2.0-flash': 1048576,
+  'openrouter/google/gemini-2.5-flash': 1048576,
+  'openrouter/google/gemini-2.5-pro': 1048576,
+};
 
-  const results: unknown[] = [];
-  const agentGroups = getAllAgentGroups();
-  const nameMap = new Map(agentGroups.map((g) => [g.id, g.name]));
+function scanOpencodeTokens(agentDir: string) {
+  const entries: Array<{
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  }> = [];
 
-  for (const agDir of fs.readdirSync(sessionsDir).filter((d) => d.startsWith('ag-'))) {
-    const claudeDir = path.join(sessionsDir, agDir, '.claude-shared', 'projects');
-    if (!fs.existsSync(claudeDir)) continue;
-
-    // Find most recent JSONL
-    const jsonlFiles: string[] = [];
-    const walk = (dir: string): void => {
+  try {
+    for (const sessDir of fs.readdirSync(agentDir).filter((d) => d.startsWith('sess-'))) {
+      const dbPath = path.join(agentDir, sessDir, 'opencode-xdg', 'opencode', 'opencode.db');
+      if (!fs.existsSync(dbPath)) continue;
       try {
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-          const full = path.join(dir, entry.name);
-          if (entry.isDirectory()) walk(full);
-          else if (entry.name.endsWith('.jsonl')) jsonlFiles.push(full);
+        const db = new Database(dbPath, { readonly: true });
+
+        const modelRow = db
+          .prepare(
+            `SELECT json_extract(data, '$.model.providerID') || '/' || json_extract(data, '$.model.modelID') as model
+             FROM message
+             WHERE json_extract(data, '$.role') = 'user'
+               AND json_extract(data, '$.model') IS NOT NULL
+             LIMIT 1`,
+          )
+          .get() as { model: string } | undefined;
+        const model = modelRow?.model ?? 'unknown';
+
+        const rows = db
+          .prepare(
+            `SELECT
+              json_extract(data, '$.tokens.input') as inputTokens,
+              json_extract(data, '$.tokens.output') as outputTokens,
+              json_extract(data, '$.tokens.cache.write') as cacheCreationTokens,
+              json_extract(data, '$.tokens.cache.read') as cacheReadTokens
+             FROM message
+             WHERE json_extract(data, '$.role') = 'assistant'
+               AND json_extract(data, '$.tokens') IS NOT NULL`,
+          )
+          .all() as Array<{
+          inputTokens: number | null;
+          outputTokens: number | null;
+          cacheCreationTokens: number | null;
+          cacheReadTokens: number | null;
+        }>;
+
+        for (const row of rows) {
+          entries.push({
+            model,
+            inputTokens: row.inputTokens ?? 0,
+            outputTokens: row.outputTokens ?? 0,
+            cacheReadTokens: row.cacheReadTokens ?? 0,
+            cacheCreationTokens: row.cacheCreationTokens ?? 0,
+          });
         }
-      } catch { /* skip */ }
-    };
-    walk(claudeDir);
-    if (jsonlFiles.length === 0) continue;
 
-    jsonlFiles.sort((a, b) => {
-      try { return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs; } catch { return 0; }
-    });
+        db.close();
+      } catch {
+        /* skip */
+      }
+    }
+  } catch {
+    /* skip */
+  }
 
-    // Read last assistant turn from newest file
-    const content = fs.readFileSync(jsonlFiles[0], 'utf-8');
-    const lines = content.split('\n');
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if (!lines[i].trim()) continue;
-      try {
-        const r = JSON.parse(lines[i]);
-        if (r.type === 'assistant' && r.message?.usage) {
-          const u = r.message.usage;
-          const model = r.message.model || 'unknown';
-          const ctx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
-          const max = 200000;
-          results.push({
+  return entries;
+}
+
+type ContextWindowEntry = { data: unknown; ts: number };
+
+function latestClaudeContextWindow(
+  agentDir: string,
+  agDir: string,
+  nameMap: Map<string, string>,
+): ContextWindowEntry | null {
+  const claudeDir = path.join(agentDir, '.claude-shared', 'projects');
+  if (!fs.existsSync(claudeDir)) return null;
+
+  const jsonlFiles: string[] = [];
+  const walk = (dir: string): void => {
+    try {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith('.jsonl')) jsonlFiles.push(full);
+      }
+    } catch {
+      /* skip */
+    }
+  };
+  walk(claudeDir);
+  if (jsonlFiles.length === 0) return null;
+
+  jsonlFiles.sort((a, b) => {
+    try {
+      return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs;
+    } catch {
+      return 0;
+    }
+  });
+
+  const content = fs.readFileSync(jsonlFiles[0], 'utf-8');
+  const lines = content.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].trim()) continue;
+    try {
+      const r = JSON.parse(lines[i]);
+      if (r.type === 'assistant' && r.message?.usage) {
+        const u = r.message.usage;
+        const model = r.message.model || 'unknown';
+        const ctx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+        const max = 200000;
+        const ts = r.timestamp ? new Date(r.timestamp).getTime() : 0;
+        return {
+          ts,
+          data: {
             agentGroupId: agDir,
             agentGroupName: nameMap.get(agDir),
             sessionId: path.basename(jsonlFiles[0], '.jsonl'),
@@ -417,10 +591,136 @@ function collectContextWindows() {
             maxContext: max,
             usagePercent: max > 0 ? Math.round((ctx / max) * 100) : 0,
             timestamp: r.timestamp || '',
-          });
-          break;
-        }
-      } catch { /* skip */ }
+          },
+        };
+      }
+    } catch {
+      /* skip */
+    }
+  }
+  return null;
+}
+
+function latestOpencodeContextWindow(
+  agentDir: string,
+  agDir: string,
+  nameMap: Map<string, string>,
+): ContextWindowEntry | null {
+  const sessDirs = fs.readdirSync(agentDir).filter((d) => d.startsWith('sess-'));
+  const candidates: Array<{ sessDir: string; dbPath: string; mtime: number }> = [];
+
+  for (const sessDir of sessDirs) {
+    const dbPath = path.join(agentDir, sessDir, 'opencode-xdg', 'opencode', 'opencode.db');
+    if (!fs.existsSync(dbPath)) continue;
+    try {
+      candidates.push({ sessDir, dbPath, mtime: fs.statSync(dbPath).mtimeMs });
+    } catch {
+      /* skip */
+    }
+  }
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => b.mtime - a.mtime);
+
+  for (const { sessDir, dbPath } of candidates) {
+    try {
+      const db = new Database(dbPath, { readonly: true });
+
+      const modelRow = db
+        .prepare(
+          `SELECT json_extract(data, '$.model.providerID') || '/' || json_extract(data, '$.model.modelID') as model
+           FROM message
+           WHERE json_extract(data, '$.role') = 'user'
+             AND json_extract(data, '$.model') IS NOT NULL
+           LIMIT 1`,
+        )
+        .get() as { model: string } | undefined;
+      const model = modelRow?.model ?? 'unknown';
+
+      const row = db
+        .prepare(
+          `SELECT
+            json_extract(data, '$.tokens.input') as inputTokens,
+            json_extract(data, '$.tokens.output') as outputTokens,
+            json_extract(data, '$.tokens.cache.write') as cacheCreationTokens,
+            json_extract(data, '$.tokens.cache.read') as cacheReadTokens,
+            time_created as timeCreated
+           FROM message
+           WHERE json_extract(data, '$.role') = 'assistant'
+             AND json_extract(data, '$.tokens') IS NOT NULL
+           ORDER BY time_created DESC
+           LIMIT 1`,
+        )
+        .get() as
+        | {
+            inputTokens: number | null;
+            outputTokens: number | null;
+            cacheCreationTokens: number | null;
+            cacheReadTokens: number | null;
+            timeCreated: number;
+          }
+        | undefined;
+
+      db.close();
+
+      if (!row) continue;
+
+      const inputTokens = row.inputTokens ?? 0;
+      const cacheReadTokens = row.cacheReadTokens ?? 0;
+      const cacheCreationTokens = row.cacheCreationTokens ?? 0;
+      const ctx = inputTokens + cacheReadTokens + cacheCreationTokens;
+      const max = OPENCODE_MAX_CONTEXT[model] ?? 200000;
+      const ts = row.timeCreated;
+
+      return {
+        ts,
+        data: {
+          agentGroupId: agDir,
+          agentGroupName: nameMap.get(agDir),
+          sessionId: sessDir,
+          model,
+          contextTokens: ctx,
+          outputTokens: row.outputTokens ?? 0,
+          cacheReadTokens,
+          cacheCreationTokens,
+          maxContext: max,
+          usagePercent: max > 0 ? Math.round((ctx / max) * 100) : 0,
+          timestamp: new Date(ts).toISOString(),
+        },
+      };
+    } catch {
+      /* skip */
+    }
+  }
+  return null;
+}
+
+function collectContextWindows() {
+  const sessionsDir = path.join(DATA_DIR, 'v2-sessions');
+  if (!fs.existsSync(sessionsDir)) return [];
+
+  const results: unknown[] = [];
+  const agentGroups = getAllAgentGroups();
+  const nameMap = new Map(agentGroups.map((g) => [g.id, g.name]));
+  const opencodeGroupIds = new Set(
+    agentGroups
+      .filter((g) => {
+        const p = g.agent_provider ?? getContainerConfig(g.id)?.provider ?? null;
+        return p === 'opencode';
+      })
+      .map((g) => g.id),
+  );
+
+  for (const group of agentGroups) {
+    const agPath = path.join(sessionsDir, group.id);
+    if (!fs.existsSync(agPath)) continue;
+    try {
+      const isOpencode = opencodeGroupIds.has(group.id);
+      const result = isOpencode
+        ? latestOpencodeContextWindow(agPath, group.id, nameMap)
+        : latestClaudeContextWindow(agPath, group.id, nameMap);
+      if (result) results.push(result.data);
+    } catch {
+      /* skip */
     }
   }
 
@@ -442,26 +742,36 @@ function collectActivity() {
   const cutoff = new Date(now - 86400000).toISOString();
 
   try {
-    for (const agDir of fs.readdirSync(sessionsDir).filter((d) => d.startsWith('ag-'))) {
+    for (const agDir of fs.readdirSync(sessionsDir)) {
       const agPath = path.join(sessionsDir, agDir);
+      if (!fs.statSync(agPath).isDirectory()) continue;
       for (const sessDir of fs.readdirSync(agPath).filter((d) => d.startsWith('sess-'))) {
-        for (const [dbName, direction] of [['outbound.db', 'outbound'], ['inbound.db', 'inbound']] as const) {
+        for (const [dbName, direction] of [
+          ['outbound.db', 'outbound'],
+          ['inbound.db', 'inbound'],
+        ] as const) {
           const dbPath = path.join(agPath, sessDir, dbName);
           if (!fs.existsSync(dbPath)) continue;
           try {
             const db = new Database(dbPath, { readonly: true });
             const table = direction === 'outbound' ? 'messages_out' : 'messages_in';
-            const rows = db.prepare(`SELECT timestamp FROM ${table} WHERE timestamp > ?`).all(cutoff) as { timestamp: string }[];
+            const rows = db.prepare(`SELECT timestamp FROM ${table} WHERE timestamp > ?`).all(cutoff) as {
+              timestamp: string;
+            }[];
             for (const row of rows) {
               const key = row.timestamp.slice(0, 13);
               if (buckets[key]) buckets[key][direction]++;
             }
             db.close();
-          } catch { /* skip */ }
+          } catch {
+            /* skip */
+          }
         }
       }
     }
-  } catch { /* skip */ }
+  } catch {
+    /* skip */
+  }
 
   return toBucketArray(buckets);
 }
@@ -480,8 +790,9 @@ function collectMessages() {
   const limit = 50;
 
   try {
-    for (const agDir of fs.readdirSync(sessionsDir).filter((d) => d.startsWith('ag-'))) {
+    for (const agDir of fs.readdirSync(sessionsDir)) {
       const agPath = path.join(sessionsDir, agDir);
+      if (!fs.statSync(agPath).isDirectory()) continue;
       for (const sessDir of fs.readdirSync(agPath).filter((d) => d.startsWith('sess-'))) {
         const inbound: unknown[] = [];
         const outbound: unknown[] = [];
@@ -493,7 +804,9 @@ function collectMessages() {
             const rows = db.prepare('SELECT * FROM messages_in ORDER BY seq DESC LIMIT ?').all(limit);
             inbound.push(...(rows as unknown[]).reverse());
             db.close();
-          } catch { /* skip */ }
+          } catch {
+            /* skip */
+          }
         }
 
         const outDbPath = path.join(agPath, sessDir, 'outbound.db');
@@ -503,7 +816,9 @@ function collectMessages() {
             const rows = db.prepare('SELECT * FROM messages_out ORDER BY seq DESC LIMIT ?').all(limit);
             outbound.push(...(rows as unknown[]).reverse());
             db.close();
-          } catch { /* skip */ }
+          } catch {
+            /* skip */
+          }
         }
 
         if (inbound.length > 0 || outbound.length > 0) {
@@ -511,7 +826,9 @@ function collectMessages() {
         }
       }
     }
-  } catch { /* skip */ }
+  } catch {
+    /* skip */
+  }
 
   return results;
 }

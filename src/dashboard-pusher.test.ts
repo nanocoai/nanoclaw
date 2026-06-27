@@ -46,10 +46,16 @@ function startFakeDashboard(): Promise<{ port: number; posts: CapturedPost[]; cl
   const posts: CapturedPost[] = [];
   const server = http.createServer((req, res) => {
     let raw = '';
-    req.on('data', (c) => { raw += c; });
+    req.on('data', (c) => {
+      raw += c;
+    });
     req.on('end', () => {
       let body: Record<string, unknown> = {};
-      try { body = JSON.parse(raw); } catch { /* leave empty */ }
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        /* leave empty */
+      }
       posts.push({ path: req.url || '', auth: req.headers.authorization, body });
       res.writeHead(200);
       res.end('ok');
@@ -104,7 +110,16 @@ describe('add-dashboard integration point (startDashboard)', () => {
     const groups = ingest.body.agent_groups as Array<{ id: string }>;
     expect(groups.map((g) => g.id)).toContain('ag-1');
 
-    for (const key of ['timestamp', 'sessions', 'channels', 'users', 'tokens', 'context_windows', 'activity', 'messages']) {
+    for (const key of [
+      'timestamp',
+      'sessions',
+      'channels',
+      'users',
+      'tokens',
+      'context_windows',
+      'activity',
+      'messages',
+    ]) {
       expect(ingest.body).toHaveProperty(key);
     }
 
