@@ -49,6 +49,11 @@ const SIGNAL_HOST = process.env.SIGNAL_HOST || '127.0.0.1';
 const SIGNAL_PORT = parseInt(process.env.SIGNAL_PORT || '17583', 10);
 const TRIGGER_RE = /^@andy\b/i;
 const SIGNAL_MAX_CHARS = 3500; // Signal client limit is ~4000; leave headroom
+// Bound the daemon stderr buffer: the line count alone doesn't cap memory since
+// a single line (e.g. a one-line stack trace, or stderr with no newlines) can
+// be arbitrarily long. Cap per line and the number of retained lines.
+const STDERR_MAX_LINES = 20;
+const STDERR_MAX_LINE_CHARS = 2000;
 
 // Append-only JSONL archive of every text-bearing envelope the daemon
 // delivers. Consumed by bd-brain-sync/scripts/sync_signal.py to write
@@ -210,10 +215,17 @@ class SignalChannel implements Channel {
       const text = chunk.toString().trim();
       if (!text) return;
       logger.debug({ line: text }, 'signal-cli stderr');
-      // Keep the last 20 lines so an abnormal exit can report the real reason.
+      // Keep the last N lines so an abnormal exit can report the real reason,
+      // truncating each so one pathological line can't balloon the buffer.
       for (const l of text.split('\n')) {
-        this.recentStderr.push(l);
-        if (this.recentStderr.length > 20) this.recentStderr.shift();
+        const capped =
+          l.length > STDERR_MAX_LINE_CHARS
+            ? l.slice(0, STDERR_MAX_LINE_CHARS) + '…[truncated]'
+            : l;
+        this.recentStderr.push(capped);
+        if (this.recentStderr.length > STDERR_MAX_LINES) {
+          this.recentStderr.shift();
+        }
       }
     });
 
