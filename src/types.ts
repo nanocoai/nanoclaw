@@ -51,6 +51,12 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  // Optional platform thread identifier (e.g. Telegram forum topic / message_thread_id).
+  thread_id?: string;
+  // Optional quoted/reply context (set by channels that deliver it, e.g. Telegram).
+  reply_to_message_id?: string;
+  reply_to_message_content?: string;
+  reply_to_sender_name?: string;
 }
 
 export interface ScheduledTask {
