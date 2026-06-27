@@ -41,6 +41,7 @@ Recurso Coolify do tipo **Docker Compose**, apontando para `zczDief/nanoclaw` br
 - **Inspecionar chats:** `docker exec <container> sqlite3 /app/store/messages.db "SELECT jid,name,folder FROM registered_groups"`.
 
 ## Troubleshooting
+- **Container em crash-loop logo no boot (`FATAL: No channels connected`):** nenhum canal conectou. Quase sempre `TELEGRAM_BOT_TOKEN` ausente/inválido. Confirme a env var no Coolify; o processo só fica de pé com pelo menos um canal conectado.
 - **Bot não responde:** conferir `getMe` (`curl .../getMe`), chat registrado no SQLite, token presente no `.env` (`docker exec <c> cat /app/.env`).
 - **dockerd não sobe:** ver `/var/log/dockerd.log` no container; confirmar `privileged: true`; em kernel sem overlay2, setar a env `DOCKERD_FLAGS=--storage-driver=vfs`.
 - **Agentes sem credenciais:** o credential proxy (porta 3001) precisa do `ANTHROPIC_API_KEY` no `.env`; conferir logs de boot do nanoclaw.
