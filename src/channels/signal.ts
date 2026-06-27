@@ -108,12 +108,78 @@ class SignalChannel implements Channel {
   private restartTimer: NodeJS.Timeout | null = null;
   private restartDelayMs = 5000;
   private intentionallyClosed = false;
+  // True while connect()'s retry loop is in charge of the daemon lifecycle, so
+  // the exit/close handlers don't kick off a competing background reconnect.
+  private connecting = false;
+  // Rolling buffer of the daemon's recent stderr lines, surfaced on abnormal
+  // exit so the actual failure reason (e.g. account lock, captcha) is visible.
+  private recentStderr: string[] = [];
 
   constructor(private opts: ChannelOpts) {}
 
   async connect(): Promise<void> {
     this.intentionallyClosed = false;
-    await this.spawnDaemonAndConnect();
+    this.connecting = true;
+    // Initial boot is brittle: signal-cli sometimes exits before binding its
+    // port (e.g. a stale account lock from a not-yet-dead prior daemon). Retry
+    // with backoff here instead of throwing — a single flap should not take the
+    // whole process down and rely on launchd to relaunch everything.
+    const maxAttempts = 6;
+    let delay = 2000;
+    try {
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await this.spawnDaemonAndConnect();
+          return;
+        } catch (err) {
+          await this.cleanupDaemon();
+          const msg = err instanceof Error ? err.message : String(err);
+          if (attempt >= maxAttempts) {
+            logger.error(
+              { err: msg, attempt },
+              'signal channel failed to connect after retries; handing off to background reconnect',
+            );
+            // Don't crash the process — let scheduleRestart keep trying so the
+            // rest of NanoClaw boots and Signal self-heals once it can.
+            if (!this.intentionallyClosed) this.scheduleRestart();
+            return;
+          }
+          logger.warn(
+            { err: msg, attempt, maxAttempts, delayMs: delay },
+            'signal channel initial connect failed; retrying',
+          );
+          await new Promise((r) => setTimeout(r, delay));
+          delay = Math.min(delay * 2, 30_000);
+        }
+      }
+    } finally {
+      this.connecting = false;
+    }
+  }
+
+  // Tear down a half-spawned daemon/socket before a retry so each attempt
+  // starts clean and any lock held by the dying daemon is released.
+  private async cleanupDaemon(): Promise<void> {
+    if (this.socket) {
+      try {
+        this.socket.removeAllListeners();
+        this.socket.destroy();
+      } catch {
+        // best effort
+      }
+      this.socket = null;
+    }
+    if (this.daemon && !this.daemon.killed) {
+      try {
+        this.daemon.kill('SIGTERM');
+        await new Promise((r) => setTimeout(r, 500));
+        if (this.daemon && !this.daemon.killed) this.daemon.kill('SIGKILL');
+      } catch {
+        // best effort
+      }
+    }
+    this.daemon = null;
+    this.connected = false;
   }
 
   private async spawnDaemonAndConnect(): Promise<void> {
@@ -136,19 +202,44 @@ class SignalChannel implements Channel {
       { stdio: ['ignore', 'pipe', 'pipe'] },
     );
 
+    this.recentStderr = [];
+    let daemonExited: { code: number | null; signal: string | null } | null =
+      null;
+
     this.daemon.stderr?.on('data', (chunk: Buffer) => {
-      const line = chunk.toString().trim();
-      if (line) logger.debug({ line }, 'signal-cli stderr');
+      const text = chunk.toString().trim();
+      if (!text) return;
+      logger.debug({ line: text }, 'signal-cli stderr');
+      // Keep the last 20 lines so an abnormal exit can report the real reason.
+      for (const l of text.split('\n')) {
+        this.recentStderr.push(l);
+        if (this.recentStderr.length > 20) this.recentStderr.shift();
+      }
     });
 
     this.daemon.on('exit', (code, signal) => {
-      logger.warn({ code, signal }, 'signal-cli daemon exited');
+      daemonExited = { code, signal };
+      if (code != null && code !== 0) {
+        logger.warn(
+          { code, signal, stderr: this.recentStderr.slice(-10) },
+          'signal-cli daemon exited abnormally',
+        );
+      } else {
+        logger.warn({ code, signal }, 'signal-cli daemon exited');
+      }
       this.connected = false;
       this.daemon = null;
-      if (!this.intentionallyClosed) this.scheduleRestart();
+      // While connect()'s retry loop is active it owns retries; only the
+      // background path (a drop after a good connection) self-schedules here.
+      if (!this.intentionallyClosed && !this.connecting) this.scheduleRestart();
     });
 
-    await this.waitForPort(SIGNAL_HOST, SIGNAL_PORT, 30_000);
+    await this.waitForPort(
+      SIGNAL_HOST,
+      SIGNAL_PORT,
+      30_000,
+      () => daemonExited,
+    );
 
     this.socket = net.createConnection({
       host: SIGNAL_HOST,
@@ -162,7 +253,7 @@ class SignalChannel implements Channel {
     this.socket.on('close', () => {
       this.connected = false;
       this.socket = null;
-      if (!this.intentionallyClosed) this.scheduleRestart();
+      if (!this.intentionallyClosed && !this.connecting) this.scheduleRestart();
     });
 
     await new Promise<void>((resolve, reject) => {
@@ -257,9 +348,18 @@ class SignalChannel implements Channel {
     host: string,
     port: number,
     timeoutMs: number,
+    hasExited?: () => { code: number | null; signal: string | null } | null,
   ): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      // Fail fast instead of burning the full timeout when the daemon has
+      // already died (the common code-3 flap) — lets connect() retry sooner.
+      const exited = hasExited?.();
+      if (exited) {
+        throw new Error(
+          `signal-cli daemon exited before binding ${host}:${port} (code ${exited.code}, signal ${exited.signal})`,
+        );
+      }
       try {
         await new Promise<void>((resolve, reject) => {
           const probe = net.createConnection({ host, port });
