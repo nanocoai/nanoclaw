@@ -18,7 +18,7 @@ import {
   storeChatMetadata,
   updateDelegationOnReport,
 } from './db.js';
-import { finalizeDelegationOnTurnEnd } from './ipc.js';
+import { finalizeDelegationOnTurnEnd, shouldCarryReply } from './ipc.js';
 
 beforeEach(() => {
   _initTestDatabase();
@@ -367,5 +367,64 @@ describe('finalizeDelegationOnTurnEnd 自动终态兜底', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].chat_jid).toBe('fs:oc_source');
     expect(rows[0].content).toContain(t.taskId);
+  });
+});
+
+describe('shouldCarryReply', () => {
+  it('全部 ipc_ 消息且 task_id 匹配 → true', () => {
+    const task = createTestDelegation({
+      targetGroup: 'sub',
+      targetJid: 'fs:oc_sub',
+    });
+    const msgs = [
+      { id: 'ipc_1', content: `派工内容 (task ${task.taskId})` },
+    ];
+    expect(shouldCarryReply(msgs, task)).toBe(true);
+  });
+
+  it('含非 ipc_ 消息 → false', () => {
+    const task = createTestDelegation({
+      targetGroup: 'sub',
+      targetJid: 'fs:oc_sub',
+    });
+    const msgs = [
+      { id: 'ipc_1', content: `派工内容 (task ${task.taskId})` },
+      { id: 'user_msg_1', content: '用户直接发的消息' },
+    ];
+    expect(shouldCarryReply(msgs, task)).toBe(false);
+  });
+
+  it('task_id 不匹配活跃任务 → false', () => {
+    const task = createTestDelegation({
+      targetGroup: 'sub',
+      targetJid: 'fs:oc_sub',
+    });
+    const msgs = [
+      { id: 'ipc_1', content: '派工内容 (task dlg_other_task)' },
+    ];
+    expect(shouldCarryReply(msgs, task)).toBe(false);
+  });
+
+  it('多个不同 task_id → false', () => {
+    const task = createTestDelegation({
+      targetGroup: 'sub',
+      targetJid: 'fs:oc_sub',
+    });
+    const msgs = [
+      { id: 'ipc_1', content: `内容A (task ${task.taskId})` },
+      { id: 'ipc_2', content: '内容B (task dlg_other_task)' },
+    ];
+    expect(shouldCarryReply(msgs, task)).toBe(false);
+  });
+
+  it('ipc_ 消息无 task_id 标记 → false（taskIds 为空集）', () => {
+    const task = createTestDelegation({
+      targetGroup: 'sub',
+      targetJid: 'fs:oc_sub',
+    });
+    const msgs = [
+      { id: 'ipc_1', content: '没有 task 标记的 IPC 消息' },
+    ];
+    expect(shouldCarryReply(msgs, task)).toBe(false);
   });
 });
