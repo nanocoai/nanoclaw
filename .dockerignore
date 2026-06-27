@@ -1,0 +1,11 @@
+node_modules
+dist
+.git
+data
+store
+groups
+logs
+*.log
+.env
+DEV
+.superpowers

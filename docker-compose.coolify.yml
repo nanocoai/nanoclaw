@@ -1,0 +1,23 @@
+services:
+  nanoclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile.host
+    privileged: true
+    restart: unless-stopped
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      ASSISTANT_NAME: ${ASSISTANT_NAME:-Andy}
+      TZ: ${TZ:-America/Sao_Paulo}
+    volumes:
+      - nanoclaw-store:/app/store
+      - nanoclaw-groups:/app/groups
+      - nanoclaw-data:/app/data
+      - nanoclaw-docker:/var/lib/docker
+
+volumes:
+  nanoclaw-store:
+  nanoclaw-groups:
+  nanoclaw-data:
+  nanoclaw-docker:
