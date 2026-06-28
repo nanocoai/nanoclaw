@@ -21,21 +21,21 @@ Na planilha → **Share** → cole o e-mail do service account → permissão **
 ## B. Colocar credenciais no servidor (Terminal do Coolify, no recurso nanoclaw)
 
 ```bash
-mkdir -p /app/groups/main/.config
+mkdir -p /app/groups/telegram_main/.config
 
 # 1. Cole o conteúdo do JSON do service account:
-cat > /app/groups/main/.config/sheets-sa.json <<'JSON'
+cat > /app/groups/telegram_main/.config/sheets-sa.json <<'JSON'
 <COLE_AQUI_O_CONTEUDO_DO_JSON>
 JSON
 
 # 2. Crie a config apontando para a planilha (use o ID copiado em A.1):
-cat > /app/groups/main/.config/finance.json <<'JSON'
+cat > /app/groups/telegram_main/.config/finance.json <<'JSON'
 { "sheetId": "<ID_DA_PLANILHA>", "tab": "Lançamentos" }
 JSON
 
 # 3. Permissões: o agente roda como o usuário `node` (uid 1000), NÃO root.
 #    Os arquivos precisam ser legíveis por ele — use 644 (não 600/root-only):
-chmod 644 /app/groups/main/.config/sheets-sa.json /app/groups/main/.config/finance.json
+chmod 644 /app/groups/telegram_main/.config/sheets-sa.json /app/groups/telegram_main/.config/finance.json
 ```
 
 > Esses arquivos ficam no volume `nanoclaw-groups` (persistem entre deploys) e nunca vão ao git.
@@ -48,11 +48,11 @@ O código da skill (`container/skills/finance-sheet/`) ships pela imagem. Após 
 ## D. Verificação
 
 1. Teste o script direto no servidor (Terminal do Coolify). Como isso roda no
-   container host, aponte os caminhos para `/app/groups/main/.config/`:
+   container host, aponte os caminhos para `/app/groups/telegram_main/.config/`:
    ```bash
    cd /app && \
-   SA_PATH=/app/groups/main/.config/sheets-sa.json \
-   FINANCE_CONFIG=/app/groups/main/.config/finance.json \
+   SA_PATH=/app/groups/telegram_main/.config/sheets-sa.json \
+   FINANCE_CONFIG=/app/groups/telegram_main/.config/finance.json \
    TZ=America/Sao_Paulo node container/skills/finance-sheet/append-row.mjs \
      --data "$(TZ=America/Sao_Paulo date +%d/%m/%Y)" --valor "1.23" \
      --descricao "Teste setup" --categoria "Outros" --forma "Pix"
@@ -65,7 +65,7 @@ O código da skill (`container/skills/finance-sheet/`) ships pela imagem. Após 
 3. Mande uma foto de um comprovante. Esperado: campos extraídos + linha gravada + confirmação.
 
 ## Troubleshooting
-- `Service account ausente` / `Config ausente`: arquivos não estão em `/app/groups/main/.config/`. Refaça a seção B.
+- `Service account ausente` / `Config ausente`: arquivos não estão em `/app/groups/telegram_main/.config/`. Refaça a seção B.
 - `Falha ao obter token (401): invalid_grant`: relógio do servidor torto ou chave inválida — confira o JSON do SA.
 - `Falha ao gravar (403)`: a planilha não foi compartilhada com o e-mail do service account (seção A.3).
 - `Falha ao gravar (404)`: `sheetId` errado em `finance.json`.
