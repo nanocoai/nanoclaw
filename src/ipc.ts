@@ -783,10 +783,10 @@ export function shouldCarryReply(
   // 必须全部是 IPC 消息
   if (!missedMessages.every((m) => m.id.startsWith('ipc_'))) return false;
 
-  // 提取消息中引用的 task_id（格式：(task dlg_xxx)）
+  // 提取消息中引用的 task_id（格式：[task_id:dlg_xxx]，由 delegate 注入）
   const taskIds = new Set<string>();
   for (const m of missedMessages) {
-    const match = m.content.match(/\(task (dlg_[a-z0-9_]+)\)/);
+    const match = m.content.match(/\[task_id:(dlg_[a-z0-9_]+)\]/);
     if (match) taskIds.add(match[1]);
   }
 

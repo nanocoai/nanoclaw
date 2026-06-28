@@ -377,7 +377,7 @@ describe('shouldCarryReply', () => {
       targetJid: 'fs:oc_sub',
     });
     const msgs = [
-      { id: 'ipc_1', content: `派工内容 (task ${task.taskId})` },
+      { id: 'ipc_1', content: `派工内容 [task_id:${task.taskId}]` },
     ];
     expect(shouldCarryReply(msgs, task)).toBe(true);
   });
@@ -388,7 +388,7 @@ describe('shouldCarryReply', () => {
       targetJid: 'fs:oc_sub',
     });
     const msgs = [
-      { id: 'ipc_1', content: `派工内容 (task ${task.taskId})` },
+      { id: 'ipc_1', content: `派工内容 [task_id:${task.taskId}]` },
       { id: 'user_msg_1', content: '用户直接发的消息' },
     ];
     expect(shouldCarryReply(msgs, task)).toBe(false);
@@ -400,7 +400,7 @@ describe('shouldCarryReply', () => {
       targetJid: 'fs:oc_sub',
     });
     const msgs = [
-      { id: 'ipc_1', content: '派工内容 (task dlg_other_task)' },
+      { id: 'ipc_1', content: '派工内容 [task_id:dlg_other_task]' },
     ];
     expect(shouldCarryReply(msgs, task)).toBe(false);
   });
@@ -411,8 +411,8 @@ describe('shouldCarryReply', () => {
       targetJid: 'fs:oc_sub',
     });
     const msgs = [
-      { id: 'ipc_1', content: `内容A (task ${task.taskId})` },
-      { id: 'ipc_2', content: '内容B (task dlg_other_task)' },
+      { id: 'ipc_1', content: `内容A [task_id:${task.taskId}]` },
+      { id: 'ipc_2', content: '内容B [task_id:dlg_other_task]' },
     ];
     expect(shouldCarryReply(msgs, task)).toBe(false);
   });
