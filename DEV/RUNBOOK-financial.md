@@ -70,3 +70,7 @@ O código da skill (`container/skills/finance-sheet/`) ships pela imagem. Após 
 - `Falha ao gravar (403)`: a planilha não foi compartilhada com o e-mail do service account (seção A.3).
 - `Falha ao gravar (404)`: `sheetId` errado em `finance.json`.
 - ted não tenta gravar: a skill pode não ter sincronizado — confirme o redeploy e que `container/skills/finance-sheet/` está na imagem.
+
+## Exclusão de lançamentos
+
+A skill `finance-sheet` também exclui lançamentos quando o usuário pede explicitamente (`query-rows.mjs` localiza, `delete-row.mjs` remove via `batchUpdate`). Usa a **mesma** service account e scope (`.../auth/spreadsheets`) — nenhuma credencial, permissão ou config adicional é necessária.
