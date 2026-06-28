@@ -54,7 +54,7 @@ Só exclua quando o usuário pedir **explicitamente** (ex.: "exclui/apaga/remove
    - **1 linha** → mostre-a e peça confirmação: `Achei: R$ 50,00 · Almoço · 27/06. Confirma excluir?` Só prossiga após um "sim" claro.
    - **Várias linhas** → liste-as numeradas (com data/valor/descrição) e peça para o usuário escolher qual. Confirme a escolha.
 
-3. **Excluir** a linha escolhida, passando o `row` e os valores atuais como guarda de segurança:
+3. **Excluir** a linha escolhida, passando o `row` e os valores atuais como guarda de segurança. Em `--expect-valor`/`--expect-descricao` use **exatamente** o valor e a descrição **completos** daquela linha (copie do JSON do passo 1, não uma versão abreviada) — é o que impede excluir a linha errada caso a planilha tenha mudado:
 
    ```bash
    node ~/.claude/skills/finance-sheet/delete-row.mjs \
