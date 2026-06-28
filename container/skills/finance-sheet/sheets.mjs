@@ -115,3 +115,89 @@ export function normalizeValor(s) {
   const n = Number.parseFloat(cleaned);
   return Number.isNaN(n) ? null : n;
 }
+
+/** Parse optional query filters. */
+export function parseQueryArgs(argv) {
+  const out = { valor: '', descricao: '', data: '' };
+  const keys = { '--valor': 'valor', '--descricao': 'descricao', '--data': 'data' };
+  for (let i = 0; i < argv.length; i += 2) {
+    const key = keys[argv[i]];
+    if (key) out[key] = argv[i + 1] ?? '';
+  }
+  return out;
+}
+
+/** Parse delete args: required --row (>=2 integer) + optional --expect-*. */
+export function parseDeleteArgs(argv) {
+  const out = { row: undefined, expectValor: '', expectDescricao: '' };
+  const keys = {
+    '--row': 'row',
+    '--expect-valor': 'expectValor',
+    '--expect-descricao': 'expectDescricao',
+  };
+  for (let i = 0; i < argv.length; i += 2) {
+    const key = keys[argv[i]];
+    if (key) out[key] = argv[i + 1] ?? '';
+  }
+  if (out.row === undefined) throw new Error('--row é obrigatório');
+  const n = Number(out.row);
+  if (!Number.isInteger(n) || n < 2) {
+    throw new Error('--row deve ser um inteiro >= 2 (linha 1 é cabeçalho)');
+  }
+  out.row = n;
+  return out;
+}
+
+/** Map a Sheets values matrix to data rows with 1-based row numbers. */
+export function valuesToRows(values) {
+  if (!Array.isArray(values)) return [];
+  const rows = [];
+  for (let i = 1; i < values.length; i += 1) {
+    const v = values[i] || [];
+    rows.push({
+      row: i + 1,
+      data: v[0] ?? '',
+      valor: v[1] ?? '',
+      descricao: v[2] ?? '',
+      categoria: v[3] ?? '',
+      forma: v[4] ?? '',
+    });
+  }
+  return rows;
+}
+
+/** True if the row satisfies every provided (non-empty) filter. */
+export function rowMatches(row, { valor, descricao, data }) {
+  if (valor) {
+    const want = normalizeValor(valor);
+    if (want !== null) {
+      const got = normalizeValor(row.valor);
+      if (got === null || got !== want) return false;
+    }
+  }
+  if (descricao && !String(row.descricao).toLowerCase().includes(descricao.toLowerCase())) {
+    return false;
+  }
+  if (data && !String(row.data).toLowerCase().includes(data.toLowerCase())) {
+    return false;
+  }
+  return true;
+}
+
+/** Build the batchUpdate body that removes one row (shift-up). */
+export function buildDeleteRequest({ gid, rowNumber }) {
+  return {
+    requests: [
+      {
+        deleteDimension: {
+          range: {
+            sheetId: gid,
+            dimension: 'ROWS',
+            startIndex: rowNumber - 1,
+            endIndex: rowNumber,
+          },
+        },
+      },
+    ],
+  };
+}

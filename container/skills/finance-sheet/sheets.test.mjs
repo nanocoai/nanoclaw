@@ -9,6 +9,11 @@ import {
   loadConfig,
   getAccessToken,
   normalizeValor,
+  parseQueryArgs,
+  parseDeleteArgs,
+  valuesToRows,
+  rowMatches,
+  buildDeleteRequest,
 } from './sheets.mjs';
 
 describe('base64url', () => {
@@ -176,5 +181,109 @@ describe('getAccessToken', () => {
         buildAssertion: () => 'j',
       }),
     ).rejects.toThrow('Falha ao obter token (401): invalid_grant');
+  });
+});
+
+describe('parseQueryArgs', () => {
+  it('parses provided filters and defaults the rest', () => {
+    expect(parseQueryArgs(['--valor', '50', '--descricao', 'almoço'])).toEqual({
+      valor: '50',
+      descricao: 'almoço',
+      data: '',
+    });
+    expect(parseQueryArgs([])).toEqual({ valor: '', descricao: '', data: '' });
+  });
+});
+
+describe('parseDeleteArgs', () => {
+  it('parses row and expectations', () => {
+    expect(
+      parseDeleteArgs(['--row', '5', '--expect-valor', '50.00', '--expect-descricao', 'Almoço']),
+    ).toEqual({ row: 5, expectValor: '50.00', expectDescricao: 'Almoço' });
+  });
+  it('throws when --row is missing', () => {
+    expect(() => parseDeleteArgs(['--expect-valor', '5'])).toThrow(
+      '--row é obrigatório',
+    );
+  });
+  it('throws when --row < 2 or not an integer', () => {
+    expect(() => parseDeleteArgs(['--row', '1'])).toThrow(
+      '--row deve ser um inteiro >= 2 (linha 1 é cabeçalho)',
+    );
+    expect(() => parseDeleteArgs(['--row', 'x'])).toThrow(
+      '--row deve ser um inteiro >= 2 (linha 1 é cabeçalho)',
+    );
+  });
+});
+
+describe('valuesToRows', () => {
+  it('skips the header and returns 1-based row numbers with padded cells', () => {
+    const values = [
+      ['Data', 'Valor', 'Descrição', 'Categoria', 'Forma'],
+      ['27/06/2026', '50.00', 'Almoço', 'Alimentação', 'Cartão'],
+      ['28/06/2026', '12'], // short row
+    ];
+    expect(valuesToRows(values)).toEqual([
+      {
+        row: 2,
+        data: '27/06/2026',
+        valor: '50.00',
+        descricao: 'Almoço',
+        categoria: 'Alimentação',
+        forma: 'Cartão',
+      },
+      {
+        row: 3,
+        data: '28/06/2026',
+        valor: '12',
+        descricao: '',
+        categoria: '',
+        forma: '',
+      },
+    ]);
+  });
+  it('returns [] when there is only a header or nothing', () => {
+    expect(valuesToRows([['Data', 'Valor']])).toEqual([]);
+    expect(valuesToRows([])).toEqual([]);
+    expect(valuesToRows(undefined)).toEqual([]);
+  });
+});
+
+describe('rowMatches', () => {
+  const row = {
+    row: 2,
+    data: '27/06/2026',
+    valor: '50.00',
+    descricao: 'Almoço no shopping',
+    categoria: 'Alimentação',
+    forma: 'Cartão',
+  };
+  it('matches numeric valor regardless of formatting', () => {
+    expect(rowMatches(row, { valor: '50', descricao: '', data: '' })).toBe(true);
+    expect(rowMatches(row, { valor: 'R$ 50,00', descricao: '', data: '' })).toBe(true);
+    expect(rowMatches(row, { valor: '51', descricao: '', data: '' })).toBe(false);
+  });
+  it('matches descricao as case-insensitive substring', () => {
+    expect(rowMatches(row, { valor: '', descricao: 'almoço', data: '' })).toBe(true);
+    expect(rowMatches(row, { valor: '', descricao: 'uber', data: '' })).toBe(false);
+  });
+  it('ANDs provided filters and ignores empty ones', () => {
+    expect(rowMatches(row, { valor: '50', descricao: 'almoço', data: '27/06' })).toBe(true);
+    expect(rowMatches(row, { valor: '50', descricao: 'uber', data: '' })).toBe(false);
+    expect(rowMatches(row, { valor: '', descricao: '', data: '' })).toBe(true);
+  });
+});
+
+describe('buildDeleteRequest', () => {
+  it('builds a DeleteDimensionRequest with 0-based half-open range', () => {
+    expect(buildDeleteRequest({ gid: 0, rowNumber: 5 })).toEqual({
+      requests: [
+        {
+          deleteDimension: {
+            range: { sheetId: 0, dimension: 'ROWS', startIndex: 4, endIndex: 5 },
+          },
+        },
+      ],
+    });
   });
 });
