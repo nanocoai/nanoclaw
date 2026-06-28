@@ -61,6 +61,28 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 
+  it('rejects path-traversal folders on create', async () => {
+    const resp = await dispatch(
+      { id: 'req-create-bad-folder', command: 'groups-create', args: { name: 'bad', folder: '../../etc' } },
+      { caller: 'host' },
+    );
+
+    expect(resp.ok).toBe(false);
+    expect((resp as { ok: false; error: { code: string; message: string } }).error.code).toBe('handler-error');
+    expect((resp as { ok: false; error: { message: string } }).error.message).toMatch(/invalid group folder/i);
+    expect(count('SELECT COUNT(*) AS c FROM agent_groups')).toBe(0);
+  });
+
+  it('accepts valid folders on create', async () => {
+    const resp = await dispatch(
+      { id: 'req-create-good-folder', command: 'groups-create', args: { name: 'good', folder: 'good-group' } },
+      { caller: 'host' },
+    );
+
+    expect(resp.ok).toBe(true);
+    expect(count('SELECT COUNT(*) AS c FROM agent_groups WHERE folder = ?', 'good-group')).toBe(1);
+  });
+
   it('deletes a group with sessions, destinations, approvals, members, roles, and wirings', async () => {
     const GID = 'ag-victim';
     const SID = 'sess-victim-1';
