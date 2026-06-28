@@ -86,7 +86,35 @@ vi.mock('child_process', async () => {
   };
 });
 
-import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import {
+  runContainerAgent,
+  ContainerOutput,
+  isMissingSessionError,
+} from './container-runner.js';
+
+describe('isMissingSessionError', () => {
+  it('detects the missing-session error (parsed agent result)', () => {
+    expect(
+      isMissingSessionError(
+        'Claude Code returned an error result: No conversation found with session ID: 31e53c36',
+      ),
+    ).toBe(true);
+  });
+
+  it('detects it inside a container-exit wrapper string', () => {
+    expect(
+      isMissingSessionError(
+        'Container exited with code 1: ...No conversation found with session ID: abc...',
+      ),
+    ).toBe(true);
+  });
+
+  it('is false for unrelated errors and undefined', () => {
+    expect(isMissingSessionError('Container spawn error: ENOENT')).toBe(false);
+    expect(isMissingSessionError(undefined)).toBe(false);
+    expect(isMissingSessionError('')).toBe(false);
+  });
+});
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {

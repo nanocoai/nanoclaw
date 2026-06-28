@@ -2,14 +2,17 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import {
   _initTestDatabase,
+  clearSession,
   createTask,
   deleteTask,
   getAllChats,
   getAllRegisteredGroups,
   getMessagesSince,
   getNewMessages,
+  getSession,
   getTaskById,
   setRegisteredGroup,
+  setSession,
   storeChatMetadata,
   storeMessage,
   updateTask,
@@ -480,5 +483,20 @@ describe('registered group isMain', () => {
     const group = groups['group@g.us'];
     expect(group).toBeDefined();
     expect(group.isMain).toBeUndefined();
+  });
+});
+
+describe('sessions', () => {
+  it('stores, reads, and clears a session id', () => {
+    expect(getSession('telegram_main')).toBeUndefined();
+    setSession('telegram_main', 'sess-123');
+    expect(getSession('telegram_main')).toBe('sess-123');
+    clearSession('telegram_main');
+    expect(getSession('telegram_main')).toBeUndefined();
+  });
+
+  it('clearSession on a missing folder is a no-op', () => {
+    expect(() => clearSession('does_not_exist')).not.toThrow();
+    expect(getSession('does_not_exist')).toBeUndefined();
   });
 });

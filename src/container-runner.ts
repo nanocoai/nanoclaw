@@ -50,6 +50,15 @@ export interface ContainerOutput {
   error?: string;
 }
 
+/**
+ * True when an agent error means the stored session's conversation no longer
+ * exists (Claude Code's resume failed). The stored session id must be cleared
+ * so the next attempt starts fresh instead of looping on the same bad id.
+ */
+export function isMissingSessionError(error?: string): boolean {
+  return !!error && /no conversation found with session/i.test(error);
+}
+
 interface VolumeMount {
   hostPath: string;
   containerPath: string;

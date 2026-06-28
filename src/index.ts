@@ -17,6 +17,7 @@ import {
 } from './channels/registry.js';
 import {
   ContainerOutput,
+  isMissingSessionError,
   runContainerAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
@@ -27,6 +28,7 @@ import {
   PROXY_BIND_HOST,
 } from './container-runtime.js';
 import {
+  clearSession,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -332,6 +334,17 @@ async function runAgent(
     }
 
     if (output.status === 'error') {
+      // A stale session id (its conversation no longer exists) fails resume on
+      // every attempt. Clear it so the retry / next message starts fresh
+      // instead of looping forever on the same bad id.
+      if (isMissingSessionError(output.error)) {
+        delete sessions[group.folder];
+        clearSession(group.folder);
+        logger.warn(
+          { group: group.name },
+          'Cleared stale session after missing-conversation error',
+        );
+      }
       logger.error(
         { group: group.name, error: output.error },
         'Container agent error',
