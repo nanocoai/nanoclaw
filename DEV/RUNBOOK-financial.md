@@ -45,13 +45,19 @@ O código da skill (`container/skills/finance-sheet/`) ships pela imagem. Após 
 
 ## D. Verificação
 
-1. Teste o script direto no servidor (Terminal do Coolify):
+1. Teste o script direto no servidor (Terminal do Coolify). Como isso roda no
+   container host, aponte os caminhos para `/app/groups/main/.config/`:
    ```bash
-   cd /app && TZ=America/Sao_Paulo node container/skills/finance-sheet/append-row.mjs \
+   cd /app && \
+   SA_PATH=/app/groups/main/.config/sheets-sa.json \
+   FINANCE_CONFIG=/app/groups/main/.config/finance.json \
+   TZ=America/Sao_Paulo node container/skills/finance-sheet/append-row.mjs \
      --data "$(TZ=America/Sao_Paulo date +%d/%m/%Y)" --valor "1.23" \
      --descricao "Teste setup" --categoria "Outros" --forma "Pix"
    ```
    Esperado: `OK Lançamentos!A<n>:E<n>` e uma linha nova na planilha. Apague a linha de teste depois.
+   (No container do agente, em mensagens reais do Telegram, os caminhos padrão
+   `/workspace/group/.config/` já funcionam sem sobrescrever.)
 2. No Telegram, mande ao ted: `gastei 50 no almoço no cartão`.
    Esperado: linha gravada + resposta `✅ Lancei: R$ 50,00 · Almoço · Alimentação · Cartão · <DD/MM>`.
 3. Mande uma foto de um comprovante. Esperado: campos extraídos + linha gravada + confirmação.
