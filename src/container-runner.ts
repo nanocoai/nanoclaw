@@ -59,6 +59,39 @@ export function isMissingSessionError(error?: string): boolean {
   return !!error && /no conversation found with session/i.test(error);
 }
 
+// The agent container runs as the image's `node` user (uid/gid 1000); Claude
+// Code refuses to run as root. When the host process itself runs as root
+// (e.g. inside the Coolify DinD container), the writable mounts it creates are
+// owned by root, so the agent (uid 1000) cannot create sessions, IPC files, or
+// its session-env dir — it fails with EACCES. Hand ownership of those dirs to
+// the agent user. No-op on normal hosts where the host process isn't root.
+const AGENT_UID = 1000;
+const AGENT_GID = 1000;
+
+function makeAgentWritable(targetPath: string): void {
+  if (process.getuid?.() !== 0) return;
+  const stack = [targetPath];
+  while (stack.length > 0) {
+    const p = stack.pop() as string;
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(p);
+    } catch {
+      continue;
+    }
+    try {
+      fs.chownSync(p, AGENT_UID, AGENT_GID);
+    } catch {
+      /* best effort — don't fail the run over a single path */
+    }
+    if (st.isDirectory()) {
+      for (const entry of fs.readdirSync(p)) {
+        stack.push(path.join(p, entry));
+      }
+    }
+  }
+}
+
 interface VolumeMount {
   hostPath: string;
   containerPath: string;
@@ -216,6 +249,12 @@ function buildVolumeMounts(
       isMain,
     );
     mounts.push(...validatedMounts);
+  }
+
+  // When the host runs as root, the writable dirs above were created root-owned
+  // but the agent runs as uid 1000 — hand them over so it can write.
+  for (const mount of mounts) {
+    if (!mount.readonly) makeAgentWritable(mount.hostPath);
   }
 
   return mounts;
