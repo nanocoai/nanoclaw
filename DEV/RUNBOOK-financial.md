@@ -33,11 +33,13 @@ cat > /app/groups/main/.config/finance.json <<'JSON'
 { "sheetId": "<ID_DA_PLANILHA>", "tab": "Lançamentos" }
 JSON
 
-# 3. Proteja a chave:
-chmod 600 /app/groups/main/.config/sheets-sa.json
+# 3. Permissões: o agente roda como o usuário `node` (uid 1000), NÃO root.
+#    Os arquivos precisam ser legíveis por ele — use 644 (não 600/root-only):
+chmod 644 /app/groups/main/.config/sheets-sa.json /app/groups/main/.config/finance.json
 ```
 
 > Esses arquivos ficam no volume `nanoclaw-groups` (persistem entre deploys) e nunca vão ao git.
+> ⚠️ Não use `chmod 600`: o Terminal do Coolify roda como root, mas o container do agente roda como `node` (uid 1000) e não conseguiria ler uma chave `600` de dono root — o ted reportaria "Service account ausente".
 
 ## C. Deploy do código
 
