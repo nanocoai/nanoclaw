@@ -52,3 +52,66 @@ export function buildJwtAssertion({ clientEmail, privateKey, now }) {
 export function buildAppendBody({ data, valor, descricao, categoria, forma }) {
   return { values: [[data, valor, descricao, categoria, forma]] };
 }
+
+/** Read+parse the service account JSON, with a friendly error. */
+export function loadServiceAccount(path, readFileSync) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf-8'));
+  } catch {
+    throw new Error(`Service account ausente em ${path}`);
+  }
+}
+
+/** Read+parse finance.json, validating required fields. */
+export function loadConfig(path, readFileSync) {
+  let cfg;
+  try {
+    cfg = JSON.parse(readFileSync(path, 'utf-8'));
+  } catch {
+    throw new Error(`Config ausente em ${path}`);
+  }
+  if (!cfg.sheetId || !cfg.tab) {
+    throw new Error('finance.json precisa de "sheetId" e "tab"');
+  }
+  return cfg;
+}
+
+/** Exchange a signed JWT for a Google OAuth access token. */
+export async function getAccessToken({
+  sa,
+  fetchImpl,
+  now,
+  buildAssertion = buildJwtAssertion,
+}) {
+  const assertion = buildAssertion({
+    clientEmail: sa.client_email,
+    privateKey: sa.private_key,
+    now,
+  });
+  const res = await fetchImpl('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body:
+      'grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer' +
+      `&assertion=${encodeURIComponent(assertion)}`,
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(`Falha ao obter token (${res.status}): ${detail}`);
+  }
+  const { access_token: accessToken } = await res.json();
+  return accessToken;
+}
+
+/** Normalize a BRL-ish value string to a Number, or null if not numeric. */
+export function normalizeValor(s) {
+  if (s == null) return null;
+  const cleaned = String(s)
+    .replace(/R\$/gi, '')
+    .replace(/\s/g, '')
+    .replace(/\.(?=\d{3}(\D|$))/g, '') // thousands dots
+    .replace(',', '.');
+  if (cleaned === '') return null;
+  const n = Number.parseFloat(cleaned);
+  return Number.isNaN(n) ? null : n;
+}
