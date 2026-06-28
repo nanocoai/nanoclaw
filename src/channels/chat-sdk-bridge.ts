@@ -651,14 +651,19 @@ async function handleForwardedEvent(
       const interactionId = interaction.id as string;
       const interactionToken = interaction.token as string;
 
-      // Parse the selected option from custom_id
+      // Parse the selected option from custom_id.
+      // The Discord adapter encodes custom_id as `actionId + '\n' + value`
+      // (DISCORD_CUSTOM_ID_DELIMITER = '\n'). Strip the value suffix first.
+      const nlIdx = customId?.indexOf('\n') ?? -1;
+      const actionId = nlIdx !== -1 ? customId.slice(0, nlIdx) : customId;
+      const buttonValue = nlIdx !== -1 ? customId.slice(nlIdx + 1) : undefined;
       let questionId: string | undefined;
       let tail: string | undefined;
-      if (customId?.startsWith('ncq:')) {
-        const colonIdx = customId.indexOf(':', 4); // after "ncq:"
+      if (actionId?.startsWith('ncq:')) {
+        const colonIdx = actionId.indexOf(':', 4); // after "ncq:"
         if (colonIdx !== -1) {
-          questionId = customId.slice(4, colonIdx);
-          tail = customId.slice(colonIdx + 1);
+          questionId = actionId.slice(4, colonIdx);
+          tail = actionId.slice(colonIdx + 1);
         }
       }
 
@@ -667,9 +672,9 @@ async function handleForwardedEvent(
         ((interaction.message as Record<string, unknown>)?.embeds as Array<Record<string, unknown>>) || [];
       const originalDescription = (originalEmbeds[0]?.description as string) || '';
       const render = questionId ? getAskQuestionRender(questionId) : undefined;
-      // Discord custom_id mirrors the new index-based encoding (see Button
-      // construction). Decode back to the real option value for downstream.
-      const selectedOption = resolveSelectedOption(render, tail, tail);
+      // buttonValue is the numeric index (from Discord adapter's encoded value).
+      // tail is the same index from the actionId suffix. Either resolves correctly.
+      const selectedOption = resolveSelectedOption(render, buttonValue, tail);
       const cardTitle = render?.title ?? ((originalEmbeds[0]?.title as string) || '❓ Question');
       const matchedOpt = render?.options.find((o) => o.value === selectedOption);
       const selectedLabel = matchedOpt?.selectedLabel ?? selectedOption ?? customId;
