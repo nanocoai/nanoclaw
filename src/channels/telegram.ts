@@ -12,6 +12,7 @@ import { grantRole, hasAnyOwner } from '../modules/permissions/db/user-roles.js'
 import { upsertUser } from '../modules/permissions/db/users.js';
 import { createChatSdkBridge, type ReplyContext } from './chat-sdk-bridge.js';
 import { sanitizeTelegramLegacyMarkdown } from './telegram-markdown-sanitize.js';
+import { wrapTelegramRichSend, richTablesEnabled, richConstructsEnabled } from './telegram-rich-message.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 import { tryConsume } from './telegram-pairing.js';
@@ -211,13 +212,19 @@ function createPairingInterceptor(
 
 registerChannelAdapter('telegram', {
   factory: () => {
-    const env = readEnvFile(['TELEGRAM_BOT_TOKEN']);
+    const env = readEnvFile(['TELEGRAM_BOT_TOKEN', 'TELEGRAM_RICH_TABLES', 'TELEGRAM_RICH_CONSTRUCTS']);
     if (!env.TELEGRAM_BOT_TOKEN) return null;
     const token = env.TELEGRAM_BOT_TOKEN;
-    const telegramAdapter = createTelegramAdapter({
-      botToken: token,
-      mode: 'polling',
-    });
+    // Route messages carrying MarkdownV2-impossible constructs (tables, headings,
+    // <details>, dividers, math, task lists) to Bot API 10.1 sendRichMessage,
+    // with transparent fallback to the normal path. No-op when both toggles off.
+    const telegramAdapter = wrapTelegramRichSend(
+      createTelegramAdapter({
+        botToken: token,
+        mode: 'polling',
+      }),
+      { token, richTables: richTablesEnabled(env), richConstructs: richConstructsEnabled(env) },
+    );
     const bridge = createChatSdkBridge({
       adapter: telegramAdapter,
       concurrency: 'concurrent',
