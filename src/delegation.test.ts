@@ -370,6 +370,61 @@ describe('finalizeDelegationOnTurnEnd 自动终态兜底', () => {
   });
 });
 
+describe('finalizeDelegationOnTurnEnd 多次调用幂等（共享函数场景）', () => {
+  function regMain() {
+    setRegisteredGroup('fs:oc_main', {
+      name: 'main',
+      folder: 'main',
+      trigger: '@bot',
+      added_at: new Date().toISOString(),
+      isMain: true,
+    });
+  }
+
+  it('success 后再次调用不重复触发（幂等）', () => {
+    regMain();
+    const t = createTestDelegation({
+      sourceGroup: 'main',
+      sourceJid: 'fs:oc_main',
+      targetGroup: 'sub3',
+      targetJid: 'fs:oc_3',
+    } as never);
+    // 第一次 success → done
+    expect(finalizeDelegationOnTurnEnd('sub3', true, '回复内容')).toBe(true);
+    expect(getDelegation(t.taskId)?.status).toBe('done');
+    expect(getDelegation(t.taskId)?.details).toBe('回复内容');
+    // 第二次调用（模拟 main + retry 两个 onOutput 都调用）→ 不重复触发
+    expect(finalizeDelegationOnTurnEnd('sub3', true, '不同内容')).toBe(false);
+    // details 不变
+    expect(getDelegation(t.taskId)?.details).toBe('回复内容');
+  });
+
+  it('error 终态标记 failed 且不携带回复', () => {
+    regMain();
+    const t = createTestDelegation({
+      sourceGroup: 'main',
+      sourceJid: 'fs:oc_main',
+      targetGroup: 'sub3',
+      targetJid: 'fs:oc_3',
+    } as never);
+    expect(finalizeDelegationOnTurnEnd('sub3', false)).toBe(true);
+    expect(getDelegation(t.taskId)?.status).toBe('failed');
+    expect(getDelegation(t.taskId)?.details).toBeUndefined();
+  });
+
+  it('error 后再次调用不重复触发', () => {
+    regMain();
+    createTestDelegation({
+      sourceGroup: 'main',
+      sourceJid: 'fs:oc_main',
+      targetGroup: 'sub3',
+      targetJid: 'fs:oc_3',
+    } as never);
+    expect(finalizeDelegationOnTurnEnd('sub3', false)).toBe(true);
+    expect(finalizeDelegationOnTurnEnd('sub3', false)).toBe(false);
+  });
+});
+
 describe('shouldCarryReply', () => {
   it('全部 ipc_ 消息且 task_id 匹配 → true', () => {
     const task = createTestDelegation({

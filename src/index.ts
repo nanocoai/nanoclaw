@@ -671,6 +671,58 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   };
 
+  // Commander 自动终态兜底共享函数
+  // 在 mainOnOutput 和 retry onOutput 的 success/error 分支都调用，
+  // 避免逻辑重复和遗漏（C2 review 2026-06-29 要求抽出）。
+  const finalizeActiveDelegationForTurn = (opts: {
+    ok: boolean;
+    logPrefix: string;
+  }) => {
+    try {
+      const activeTask = getActiveDelegationByGroup(group.folder);
+      if (!opts.ok) {
+        // error 终态：不携带回复内容（异常终态无归因意义）
+        finalizeDelegationOnTurnEnd(group.folder, false, undefined, {
+          injectReportToActiveAgent,
+        });
+        return;
+      }
+      let carryResult = activeTask ? shouldCarryReply(missedMessages, activeTask) : false;
+      // IPC pipe 模式补偿：missedMessages 是 turn 开始时的快照，后续 query 不刷新。
+      if (!carryResult && activeTask && currentQueryReplies.length > 0) {
+        const dbHasTrigger = hasIpcTriggerForTask(chatJid, activeTask.taskId);
+        if (dbHasTrigger) {
+          carryResult = true;
+          logger.info(
+            { group: group.folder, taskId: activeTask.taskId },
+            `${opts.logPrefix} IPC pipe 补偿：DB 有对应触发消息，携带回复`,
+          );
+        }
+      }
+      logger.info(
+        {
+          group: group.folder,
+          hasActiveTask: !!activeTask,
+          taskId: activeTask?.taskId,
+          carryResult,
+          missedCount: missedMessages.length,
+          missedIds: missedMessages.map((m) => m.id).slice(0, 5),
+          currentQueryRepliesLen: currentQueryReplies.length,
+          firstReplyPreview: currentQueryReplies[0]?.slice(0, 80),
+        },
+        `${opts.logPrefix} auto-finalize debug: shouldCarryReply 判断`,
+      );
+      const finalReply = activeTask && carryResult
+        ? currentQueryReplies.join('\n\n')
+        : undefined;
+      finalizeDelegationOnTurnEnd(group.folder, true, finalReply, {
+        injectReportToActiveAgent,
+      });
+    } catch (err) {
+      logger.warn({ err, group: group.folder }, `${opts.logPrefix} 自动终态汇报异常`);
+    }
+  };
+
   // 主 onOutput 回调（提取为命名 const 以便 API error 重试 loop 复用）
   const mainOnOutput = async (result: ContainerOutput) => {
     // 进度消息 — 转发给 channel 显示进度卡片
@@ -965,50 +1017,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           channel as { cleanupProgressCard: (jid: string) => Promise<void> }
         ).cleanupProgressCard(chatJid);
       }
-      // Commander 自动终态兜底：目标群一轮 query 正常结束时，若本群仍有进行态
-      // delegation 任务（agent 干完但忘了调 report_to_main），host 自动补 done，
-      // 避免账本卡 dispatched/progress 直到 15 分钟失联。仅进行态生效；
-      // agent 已自主汇报或留 blocked/question 时本函数不触发（见函数内说明）。
-      // 归因判断：只有本轮消息全部来自 IPC 且只含该任务 task_id 时，才携带回复内容；
-      // 混合消息场景下不传回复，避免串内容。（大杰 2026-06-23 三次实锤 + C3 review）
-      try {
-        const activeTask = getActiveDelegationByGroup(group.folder);
-        let carryResult = activeTask ? shouldCarryReply(missedMessages, activeTask) : false;
-        // IPC pipe 模式补偿：missedMessages 是 turn 开始时的快照，后续 query 不刷新。
-        // 第二次+ query 的触发消息不在 missedMessages 中，shouldCarryReply 必然 false。
-        // 此时直接查 DB 确认当前活跃任务是否有对应的 ipc_ 触发消息。
-        if (!carryResult && activeTask && currentQueryReplies.length > 0) {
-          const dbHasTrigger = hasIpcTriggerForTask(chatJid, activeTask.taskId);
-          if (dbHasTrigger) {
-            carryResult = true;
-            logger.info(
-              { group: group.folder, taskId: activeTask.taskId },
-              'IPC pipe 补偿：missedMessages 过期但 DB 有对应触发消息，携带回复',
-            );
-          }
-        }
-        logger.info(
-          {
-            group: group.folder,
-            hasActiveTask: !!activeTask,
-            taskId: activeTask?.taskId,
-            carryResult,
-            missedCount: missedMessages.length,
-            missedIds: missedMessages.map((m) => m.id).slice(0, 5),
-            currentQueryRepliesLen: currentQueryReplies.length,
-            firstReplyPreview: currentQueryReplies[0]?.slice(0, 80),
-          },
-          'auto-finalize debug: shouldCarryReply 判断',
-        );
-        const finalReply = activeTask && carryResult
-          ? currentQueryReplies.join('\n\n')
-          : undefined;
-        finalizeDelegationOnTurnEnd(group.folder, true, finalReply, {
-          injectReportToActiveAgent,
-        });
-      } catch (err) {
-        logger.warn({ err, group: group.folder }, '自动终态汇报(done)异常');
-      }
+      // Commander 自动终态兜底（共享函数，main/retry onOutput 统一调用）
+      finalizeActiveDelegationForTurn({ ok: true, logPrefix: '[main]' });
 
       // 重置状态：IPC pipe 模式下下一轮 query 需要从干净状态开始
       outputSentToUser = false;
@@ -1046,6 +1056,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
     if (result.status === 'error') {
       hadError = true;
+      // pipe 模式下进程不退出，外层 error path 的 failed 兜底不会立刻执行，
+      // 必须在此补 failed 终态（C2 review 2026-06-29 指出）
+      finalizeActiveDelegationForTurn({ ok: false, logPrefix: '[main-error]' });
     }
   };
 
@@ -1365,43 +1378,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 }
               ).cleanupProgressCard(chatJid);
             }
-            // Commander 自动终态兜底（同主回调逻辑）
-            // rate-limit retry 的 agent 进程跑完后进入 IPC pipe 等待，
-            // 后续 pipe query（如 delegation 派工）完成时也走这个回调，
-            // 必须在此补 auto-finalize，否则任务永远卡 dispatched。
-            try {
-              const activeTask = getActiveDelegationByGroup(group.folder);
-              let carryResult = activeTask ? shouldCarryReply(missedMessages, activeTask) : false;
-              if (!carryResult && activeTask && currentQueryReplies.length > 0) {
-                const dbHasTrigger = hasIpcTriggerForTask(chatJid, activeTask.taskId);
-                if (dbHasTrigger) {
-                  carryResult = true;
-                  logger.info(
-                    { group: group.folder, taskId: activeTask.taskId },
-                    '[retry] IPC pipe 补偿：missedMessages 过期但 DB 有对应触发消息，携带回复',
-                  );
-                }
-              }
-              logger.info(
-                {
-                  group: group.folder,
-                  hasActiveTask: !!activeTask,
-                  taskId: activeTask?.taskId,
-                  carryResult,
-                  currentQueryRepliesLen: currentQueryReplies.length,
-                  firstReplyPreview: currentQueryReplies[0]?.slice(0, 80),
-                },
-                '[retry] auto-finalize debug: shouldCarryReply 判断',
-              );
-              const finalReply = activeTask && carryResult
-                ? currentQueryReplies.join('\n\n')
-                : undefined;
-              finalizeDelegationOnTurnEnd(group.folder, true, finalReply, {
-                injectReportToActiveAgent,
-              });
-            } catch (err) {
-              logger.warn({ err, group: group.folder }, '[retry] 自动终态汇报(done)异常');
-            }
+            // Commander 自动终态兜底（共享函数，与 mainOnOutput 统一）
+            finalizeActiveDelegationForTurn({ ok: true, logPrefix: '[retry]' });
             outputSentToUser = false;
             textSentToUser = false;
             autoFollowupSummaryTextParts = [];
@@ -1410,6 +1388,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           }
           if (result.status === 'error') {
             hadError = true;
+            finalizeActiveDelegationForTurn({ ok: false, logPrefix: '[retry-error]' });
           }
         },
         latestUserMessage,
