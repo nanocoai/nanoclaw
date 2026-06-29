@@ -160,6 +160,25 @@ function collectSnapshot(): Record<string, unknown> {
     context_windows: collectContextWindows(),
     activity: collectActivity(),
     messages: collectMessages(),
+    scheduled_tasks: collectScheduledTasks(),
+    alerts: collectAlerts(),
+  };
+}
+
+function parseContainerConfig(cc: ReturnType<typeof getContainerConfig> | null) {
+  if (!cc) return null;
+  const parse = (v: unknown, fallback: unknown) => {
+    if (v === null || v === undefined) return fallback;
+    if (typeof v === 'string') { try { return JSON.parse(v); } catch { return fallback; } }
+    return v;
+  };
+  return {
+    ...cc,
+    mcp_servers: parse(cc.mcp_servers, {}),
+    packages_apt: parse(cc.packages_apt, []),
+    packages_npm: parse(cc.packages_npm, []),
+    skills: parse(cc.skills, []),
+    additional_mounts: parse(cc.additional_mounts, []),
   };
 }
 
@@ -205,6 +224,7 @@ function collectAgentGroups() {
       .all(g.id) as Array<Record<string, unknown>>;
 
     const containerConfig = getContainerConfig(g.id) ?? null;
+    const parsedConfig = parseContainerConfig(containerConfig);
 
     return {
       id: g.id,
@@ -212,7 +232,7 @@ function collectAgentGroups() {
       folder: g.folder,
       agent_provider: g.agent_provider,
       effective_model: resolveEffectiveModel(g.agent_provider, containerConfig),
-      container_config: containerConfig,
+      container_config: parsedConfig,
       sessionCount: sessions.length,
       runningSessions: running.length,
       wirings,
@@ -725,6 +745,69 @@ function collectContextWindows() {
   }
 
   return results;
+}
+
+function collectScheduledTasks(): Array<{ agentGroupId: string; agentGroupName: string; tasks: unknown[] }> {
+  const sessionsDir = path.join(DATA_DIR, 'v2-sessions');
+  if (!fs.existsSync(sessionsDir)) return [];
+
+  const agentGroups = getAllAgentGroups();
+  const nameMap = new Map(agentGroups.map((g) => [g.id, g.name]));
+  const results: Array<{ agentGroupId: string; agentGroupName: string; tasks: unknown[] }> = [];
+
+  for (const group of agentGroups) {
+    const agPath = path.join(sessionsDir, group.id);
+    if (!fs.existsSync(agPath)) continue;
+
+    const allTasks: unknown[] = [];
+    try {
+      for (const sessDir of fs.readdirSync(agPath).filter((d) => d.startsWith('sess-'))) {
+        const dbPath = path.join(agPath, sessDir, 'inbound.db');
+        if (!fs.existsSync(dbPath)) continue;
+        try {
+          const db = new Database(dbPath, { readonly: true });
+          const rows = db
+            .prepare(
+              `SELECT id, status, recurrence, process_after,
+                      substr(json_extract(content, '$.prompt'), 1, 100) AS prompt
+               FROM messages_in
+               WHERE kind = 'task' AND status != 'completed'
+               ORDER BY process_after ASC`,
+            )
+            .all();
+          allTasks.push(...rows);
+          db.close();
+        } catch { /* skip */ }
+      }
+    } catch { /* skip */ }
+
+    if (allTasks.length > 0) {
+      results.push({ agentGroupId: group.id, agentGroupName: nameMap.get(group.id) ?? group.id, tasks: allTasks });
+    }
+  }
+
+  return results;
+}
+
+function collectAlerts(): { pendingApprovals: unknown[]; droppedMessages: unknown[] } {
+  const db = getDb();
+  try {
+    const pendingApprovals = db
+      .prepare(
+        `SELECT approval_id, agent_group_id, action, title, created_at, expires_at, status
+         FROM pending_approvals WHERE status = 'pending' ORDER BY created_at ASC`,
+      )
+      .all() as unknown[];
+    const droppedMessages = db
+      .prepare(
+        `SELECT channel_type, platform_id, sender_name, reason, message_count, first_seen, last_seen
+         FROM unregistered_senders ORDER BY last_seen DESC`,
+      )
+      .all() as unknown[];
+    return { pendingApprovals, droppedMessages };
+  } catch {
+    return { pendingApprovals: [], droppedMessages: [] };
+  }
 }
 
 function collectActivity() {
