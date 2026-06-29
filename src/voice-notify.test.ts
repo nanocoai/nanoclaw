@@ -42,6 +42,7 @@ vi.mock('./memory/config.js', () => ({
 
 import {
   buildSpokenText,
+  classifyIntent,
   classifyContent,
   needsSummarization,
   notifyVoice,
@@ -373,68 +374,216 @@ describe('needsSummarization 短文本跳过 LLM', () => {
   });
 });
 
-describe('classifyContent 内容分类器', () => {
-  it('短纯文本 → concise', () => {
-    expect(classifyContent('搞定了，已经合并并部署到 dev 环境。')).toBe(
-      'concise',
-    );
-    expect(classifyContent('我'.repeat(100))).toBe('concise');
+describe('classifyIntent 意图分类器（v3）', () => {
+  // ── action：需要用户拍板 ──
+  it('含"你决定/确认/拍板" → action', () => {
+    expect(classifyIntent('两个方案你决定用哪个？方案A快但风险高，方案B稳。')).toBe('action');
+    expect(classifyIntent('需要你确认一下这个PR是否可以合并。')).toBe('action');
+    expect(classifyIntent('你看先搞哪个？A是修bug，B是加功能。')).toBe('action');
+    expect(classifyIntent('批不批？批了我就开worktree搞。')).toBe('action');
   });
 
-  it('有代码块 → skip_code（不管长度）', () => {
-    expect(classifyContent('改好了\n```js\nconst a = 1;\n```\n测试通过')).toBe(
-      'skip_code',
-    );
-    // 哪怕很短也走 skip_code
-    expect(classifyContent('```x\na\n```')).toBe('skip_code');
+  it('含选项结构 → action', () => {
+    expect(classifyIntent('有两个方案：方案一是重构，方案二是打补丁。你选哪个？')).toBe('action');
   });
 
-  it('有表格 → skip_table', () => {
-    expect(
-      classifyContent('对比如下：\n| 方案 | 优势 |\n|---|---|\n| A | 快 |'),
-    ).toBe('skip_table');
+  // ── navigate：长文导航 ──
+  it('>=500 字 → navigate', () => {
+    const text = '分析结果如下，' + '详细内容'.repeat(200);
+    expect(classifyIntent(text)).toBe('navigate');
   });
 
-  it('代码块优先于表格', () => {
-    const text = '```js\ncode\n```\n\n| a | b |\n|---|---|';
-    expect(classifyContent(text)).toBe('skip_code');
+  it('>=300 字含方案/复盘关键词 → navigate', () => {
+    const text = '这个方案的核心思路是' + '详细分析'.repeat(100);
+    expect(classifyIntent(text)).toBe('navigate');
   });
 
-  it('有 ## 标题且 >=300 字 → navigate', () => {
-    const text = '## 总结\n' + '内容'.repeat(200) + '\n## 下一步\n继续';
-    expect(classifyContent(text)).toBe('navigate');
+  it('3+ 个标题 → navigate', () => {
+    const text = '## 背景\n内容\n## 方案\n内容\n## 风险\n内容\n## 结论\n完成';
+    expect(classifyIntent(text)).toBe('navigate');
   });
 
-  it('有 ## 标题但 <300 字 → concise（短文档不需要导航）', () => {
-    expect(classifyContent('## 结论\n搞定了。')).toBe('concise');
-  });
-
-  it('>=300 字纯文本无结构 → digest', () => {
-    const text = '分析'.repeat(200);
-    expect(classifyContent(text)).toBe('digest');
-  });
-
-  it('>=300 字有列表但无标题 → digest', () => {
+  it('3+ 列表段且 >=300 字 → navigate', () => {
     const text =
       '操作步骤：\n' +
-      Array.from({ length: 50 }, (_, i) => `- 第${i + 1}步`).join('\n');
-    expect(classifyContent(text)).toBe('digest');
+      Array.from({ length: 50 }, (_, i) => `- 第${i + 1}步详细说明`).join('\n');
+    expect(classifyIntent(text)).toBe('navigate');
   });
 
-  it('v2 灰度：summaryV2=true 时 notifyVoice 走分流日志', async () => {
-    // 需要给 dashscope key 才能走到分流逻辑（否则提前 fallback 跳过摘要）
+  // ── silent：代码/表格噪音占主体 ──
+  it('代码块占比 >40% → silent', () => {
+    const code = '```js\n' + 'const a = 1;\n'.repeat(20) + '```';
+    const text = '改好了\n' + code;
+    expect(classifyIntent(text)).toBe('silent');
+  });
+
+  it('长代码块（>500字）→ silent 不是 navigate（P1 修复）', () => {
+    const code = '```python\n' + 'result = process(data)\n'.repeat(50) + '```';
+    const text = '执行结果：\n' + code;
+    expect(text.length).toBeGreaterThan(500);
+    expect(classifyIntent(text)).toBe('silent');
+  });
+
+  it('长表格（>500字）→ silent 不是 navigate', () => {
+    const header = '| 名称 | 状态 | 耗时 |\n|---|---|---|\n';
+    const rows = '| task_001 | success | 12ms |\n'.repeat(30);
+    const text = '测试报告：\n' + header + rows;
+    expect(text.length).toBeGreaterThan(500);
+    expect(classifyIntent(text)).toBe('silent');
+  });
+
+  it('代码块占比 <40%（短代码+长说明）→ tech_status', () => {
+    const text = '修复完成，根因是网关重启后连接丢失。\n```js\nfix()\n```\n测试已通过，部署到dev环境没有报错。';
+    expect(classifyIntent(text)).toBe('tech_status');
+  });
+
+  // ── tech_status：技术汇报 ──
+  it('中等长度含技术信号 → tech_status', () => {
+    expect(
+      classifyIntent(
+        '修复完成了，根因是网关重启后 undici 只触发 error 不触发 close，重连逻辑挂在 close 上永远不会执行，现在两个事件都挂了。',
+      ),
+    ).toBe('tech_status');
+  });
+
+  it('含 PR/deploy/测试 → tech_status', () => {
+    expect(
+      classifyIntent('已合并PR并部署到dev环境，E2E测试全部通过，没有遗留问题。'),
+    ).toBe('tech_status');
+  });
+
+  // ── notify：短通知（默认） ──
+  it('短纯文本 → notify', () => {
+    expect(classifyIntent('搞定了。')).toBe('notify');
+    expect(classifyIntent('好的，收到。')).toBe('notify');
+    expect(classifyIntent('在，听到了。')).toBe('notify');
+  });
+
+  // ── 优先级：action > silent > navigate ──
+  it('带表格的决策方案 → action（不是 silent）', () => {
+    const text = '对比如下：\n| 方案 | 优势 |\n|---|---|\n| A | 快 |\n| B | 稳 |\n你决定用哪个？';
+    expect(classifyIntent(text)).toBe('action');
+  });
+
+  it('带代码的决策 → action（不是 silent）', () => {
+    const text = '两种修法：\n```js\nfixA()\n```\n```js\nfixB()\n```\n你选哪个？';
+    expect(classifyIntent(text)).toBe('action');
+  });
+
+  // ── classifyContent 兼容别名 ──
+  it('classifyContent 是 classifyIntent 的别名', () => {
+    expect(classifyContent).toBe(classifyIntent);
+  });
+
+  // ── v3 意图分流日志 ──
+  it('notifyVoice 走 v3 意图分流日志（不需要 summaryV2 开关）', async () => {
     mockDashscopeKey = 'test-key';
     const longText = '## 方案\n' + '详细内容'.repeat(200) + '\n## 结论\n完成';
     notifyVoice({
       groupFolder: 'feishu_some_group',
       text: longText,
       chatJid: 'fs:oc_group',
-      containerConfig: { voiceNotify: { push: true, summaryV2: true } },
+      containerConfig: { voiceNotify: { push: true } },
     });
     await flushAsync();
-    // v2 分流日志应该被记录（LLM 调用会失败，但分流日志在 LLM 调用前）
-    const v2Log = loggerCalls.info.find((c) => /v2 摘要分流/.test(c[1] ?? ''));
-    expect(v2Log).toBeTruthy();
-    expect(v2Log[0].category).toBe('navigate');
+    const v3Log = loggerCalls.info.find(
+      (c) => /v3 意图分流/.test(c[1] ?? '') && c[0].chars === longText.length,
+    );
+    expect(v3Log).toBeTruthy();
+    expect(v3Log[0].intent).toBe('navigate');
+  });
+});
+
+// ── VOICE_SUMMARY_VERSION=off kill-switch 测试 ──
+// getVoiceSummaryVersion() 运行时读 env，无需 resetModules
+describe('VOICE_SUMMARY_VERSION=off kill-switch', () => {
+  let savedVersion: string | undefined;
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    savedVersion = process.env.VOICE_SUMMARY_VERSION;
+    loggerCalls.warn = [];
+    loggerCalls.info = [];
+    loggerCalls.debug = [];
+    mockDashscopeKey = 'test-key'; // 有 key 才会走到 version 判断
+
+    delete process.env.VOICE_GATEWAY_TOKEN;
+    mockEnvFile.VOICE_GATEWAY_TOKEN = 'test-token';
+
+    fetchSpy = vi.fn(async () => ({
+      ok: true,
+      status: 202,
+      text: async () => '{"ok":true}',
+    }));
+    vi.stubGlobal('fetch', fetchSpy);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (savedVersion !== undefined) process.env.VOICE_SUMMARY_VERSION = savedVersion;
+    else delete process.env.VOICE_SUMMARY_VERSION;
+    delete mockEnvFile.VOICE_GATEWAY_TOKEN;
+  });
+
+  it('off 模式跳过 LLM，不产生 v3 意图分流日志', async () => {
+    process.env.VOICE_SUMMARY_VERSION = 'off';
+
+    const longText = '这是一段需要摘要的较长文本，' + '详细内容说明'.repeat(20);
+    notifyVoice({
+      groupFolder: 'feishu_some_group',
+      text: longText,
+      chatJid: 'fs:oc_group',
+      containerConfig: { voiceNotify: { push: true } },
+    });
+    await flushAsync();
+
+    // 不应有 v3 意图分流日志
+    const v3Log = loggerCalls.info.find((c) =>
+      c.some((arg: any) => /v3 意图分流/.test(String(arg))),
+    );
+    expect(v3Log).toBeFalsy();
+
+    // 应有 off 模式日志
+    const offLog = loggerCalls.info.find((c) =>
+      c.some((arg: any) => /摘要已关闭/.test(String(arg))),
+    );
+    expect(offLog).toBeTruthy();
+
+    // fetch 只有网关推送，无 LLM 调用（URL 不含 example.com）
+    const llmCall = fetchSpy.mock.calls.find((c: any[]) =>
+      String(c[0]).includes('example.com'),
+    );
+    expect(llmCall).toBeFalsy();
+  });
+
+  it('默认 v3 模式正常走 LLM 摘要', async () => {
+    delete process.env.VOICE_SUMMARY_VERSION; // 默认 v3
+
+    // mock LLM 响应
+    fetchSpy.mockImplementation(async (url: any) => {
+      if (String(url).includes('example.com')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ 'content-type': 'application/json' }),
+          text: async () => JSON.stringify({ choices: [{ message: { content: '测试摘要' } }] }),
+          json: async () => ({ choices: [{ message: { content: '测试摘要' } }] }),
+        };
+      }
+      return { ok: true, status: 202, text: async () => '{"ok":true}' };
+    });
+
+    const longText = '这是一段需要摘要的较长文本，' + '详细内容说明'.repeat(20);
+    notifyVoice({
+      groupFolder: 'feishu_some_group',
+      text: longText,
+      chatJid: 'fs:oc_group',
+      containerConfig: { voiceNotify: { push: true } },
+    });
+    await flushAsync();
+
+    // 应有 v3 意图分流日志
+    const v3Log = loggerCalls.info.find((c) => /v3 意图分流/.test(c[1] ?? ''));
+    expect(v3Log).toBeTruthy();
   });
 });
