@@ -771,10 +771,12 @@ function deliverReportToSource(
 
 /**
  * 判断当前 query 的回复内容是否应携带进自动终态汇报。
- * 三重归因校验：
+ * 归因校验：
  * 1. 触发消息全部为 ipc_（跨群派工触发，非用户直接消息）
- * 2. 所有 ipc_ 消息只含一个 task_id（避免多任务混合）
- * 3. task_id 与活跃 delegation 任务匹配
+ * 2. 至少一条消息含活跃任务的 task_id（允许混入旧任务的 stale 消息）
+ *
+ * 放宽原因：进程重启/游标未推进时，DB 可能残留上一次派工的 ipc_ 消息，
+ * 其 task_id 与当前活跃任务不同。旧的"只含一个 task_id"检查会误判 false。
  */
 export function shouldCarryReply(
   missedMessages: Array<{ id: string; content: string }>,
@@ -790,8 +792,8 @@ export function shouldCarryReply(
     if (match) taskIds.add(match[1]);
   }
 
-  // 只含一个 task_id 且与活跃任务匹配
-  if (taskIds.size !== 1) return false;
+  // 至少一条消息含活跃任务的 task_id（容忍旧 stale 消息混入）
+  if (taskIds.size === 0) return false;
   return taskIds.has(activeTask.taskId);
 }
 

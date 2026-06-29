@@ -405,7 +405,7 @@ describe('shouldCarryReply', () => {
     expect(shouldCarryReply(msgs, task)).toBe(false);
   });
 
-  it('多个不同 task_id → false', () => {
+  it('混入旧 task_id 的 stale 消息但包含活跃任务 → true', () => {
     const task = createTestDelegation({
       targetGroup: 'sub',
       targetJid: 'fs:oc_sub',
@@ -413,6 +413,17 @@ describe('shouldCarryReply', () => {
     const msgs = [
       { id: 'ipc_1', content: `内容A [task_id:${task.taskId}]` },
       { id: 'ipc_2', content: '内容B [task_id:dlg_other_task]' },
+    ];
+    expect(shouldCarryReply(msgs, task)).toBe(true);
+  });
+
+  it('只有旧 stale task_id 不含活跃任务 → false', () => {
+    const task = createTestDelegation({
+      targetGroup: 'sub',
+      targetJid: 'fs:oc_sub',
+    });
+    const msgs = [
+      { id: 'ipc_1', content: '旧派工 [task_id:dlg_stale_old]' },
     ];
     expect(shouldCarryReply(msgs, task)).toBe(false);
   });
