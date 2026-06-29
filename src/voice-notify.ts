@@ -31,118 +31,118 @@ const SUMMARIZE_TIMEOUT_MS = 15000;
 // 关思考是关键——开思考会慢到 20s+ 必超时降级发原文。
 const VOICE_SUMMARY_MODEL = process.env.VOICE_SUMMARY_MODEL || 'qwen3.7-max';
 const PUSH_TIMEOUT_MS = 3000;
+// 灰度/回滚开关：VOICE_SUMMARY_VERSION=off 跳过 LLM 直接播原文截断，默认 v3
+// 运行时读 env 而非模块级 const，方便热切换和测试
+function getVoiceSummaryVersion(): string {
+  return process.env.VOICE_SUMMARY_VERSION || 'v3';
+}
 
-// ────────────── v1 摘要 prompt（120 字一刀切，灰度期间保留） ──────────────
-const SYSTEM_PROMPT = `你把一段给用户的 AI 回复改写成口语化的语音播报版本，供 TTS 朗读。语音是线性的，用户只能听、不能跳读，所以要让他第一耳朵就抓住重点。
+// ────────────── v3 意图分流摘要 ──────────────
+// v1（120 字一刀切）和 v2（内容类型分流但 prompt 差异太小导致输出趋同）均已废弃。
+// v3 核心思路：按"用户听完要做什么"分流，每个 mode 有强结构约束（固定句式模板），
+// 模型对结构差异比字数差异敏感得多。
 
-规则：
-- 第一句话必须是结论或最重要的信息，不要先讲背景再下结论
-- 简短优先，控制在 120 字以内（极简单的一句话就够，别硬凑）
-- 口语化，流畅连贯，像当面对用户说话；用"我"指代你自己、"你"指代用户
-- 代码块、表格、命令行、长路径全部略去，换成"我写了代码"、"我查了日志"这种概括
-- 大段技术细节只保留结论
-- 所有符号编号按语义转成自然语言：「PR#数字」说成"几号PR"，「issue#数字」说成"几号issue"，commit 哈希绝不念出来、直接略去或说"那个提交"，「v数字」说成"几点几版本"，「#话题」直接说话题名——绝不能留下井号、星号等任何让 TTS 干念的符号
-- 链接绝不念 URL 本身，按语义转成一句话：GitHub PR 链接说成"某某仓库的几号PR"，文档链接说成"某某文档"，普通网页说成"一个关于某某的链接"；上下文里看不出指向的就说"详情有链接，看文字版"
-- 不要保留任何 Markdown 格式符号（* _ # \` [ ] 等）
-- 不要说"以下是摘要"、"总结一下"这种元语言，直接说内容
-- 待用户决策的选项要明确编号说清楚，比如"有两个选择：第一……第二……"
-- 严禁编造：输出里的每个事实、编号、数字都必须来自原文；原文里没有的信息一个字都不能加。原文本身已经很短很口语时，原样输出即可
-- 如果输入包含 [对话上下文]，参考它理解当前话题，在第一句话里自然带出话题背景（不要用固定的"关于xxx"格式，用你觉得最自然的方式融入）。上下文模糊时不硬加。没有 [对话上下文] 时也不加
+/** 意图类型（确定性分类，零 LLM 开销） */
+export type IntentCategory =
+  | 'action' // 需要用户拍板/确认/选择
+  | 'navigate' // 长文/方案/复盘，播章节地图
+  | 'silent' // 代码/表格/日志为主体，不适合语音
+  | 'tech_status' // 技术排查/代码修改汇报
+  | 'notify'; // 纯结果通知（默认）
 
-只输出改写后的文本，不要任何前缀后缀。`;
+// 极短公共前缀，只保留 TTS 必须规则
+const V3_COMMON = `你把 AI 回复改写成 iOS 语音播报。用户在听，不能跳读。只输出播报文本。第一句话直接给结论。口语自然，不读代码、表格、日志、命令原文。不使用 Markdown。符号转自然语言：PR#数字说"几号PR"，commit 哈希略去，链接不念 URL。严禁编造。如有 [对话上下文]，在第一句自然融入话题。`;
 
-// ────────────── v2 智能摘要：按内容类型分流不同 prompt ──────────────
+const V3_PROMPTS: Record<IntentCategory, string> = {
+  notify: `${V3_COMMON}
+模式：纯通知。让用户 5 秒内知道结果。1-2 句，最多 80 字。只说发生了什么、完没完成。不展开过程，不列点。`,
 
-/** 内容类型（确定性分类，零 LLM 开销） */
-export type ContentCategory =
-  | 'concise' // 40-300 字纯文本对话：120 字精简够用
-  | 'navigate' // >=300 字有 ## 标题的多章节文档：导航式摘要
-  | 'digest' // >=300 字纯文本/列表长回复：概括式
-  | 'skip_code' // 含代码块：跳过代码细节
-  | 'skip_table'; // 含表格：跳过数据细节
+  action: `${V3_COMMON}
+模式：需要用户拍板。第一句固定用"现在需要你决定"或"需要你确认"开头，说清楚要决定什么。随后最多 3 个选项，每个选项一句话。最多 140 字。不解释技术细节，只说影响和推荐。`,
 
-// 所有 v2 prompt 共享的通用规则尾部（符号处理、编造禁令等），DRY
-const V2_COMMON_RULES = `
-通用规则（每条都必须遵守）：
-- 口语化，流畅连贯，像当面对用户说话；用"我"指代 AI、"你"指代用户
-- 所有符号编号按语义转自然语言：PR#数字说"几号PR"，commit 哈希直接略去，v数字说"几点几版本"
-- 链接绝不念 URL，按语义转一句话：GitHub PR 说"某某仓库的几号PR"
-- 不保留任何 Markdown 格式符号（* _ # \` [ ] | 等）
-- 不说"以下是摘要"这种元语言，直接说内容
-- 严禁编造：每个事实、编号、数字都必须来自原文
-- 禁止在结尾加"看文字版"、"详情看屏幕"等引导语——用户自己知道可以看屏幕，不需要每次提醒
-- 如果输入包含 [对话上下文]，参考它理解当前话题，在第一句话里自然带出话题背景（不要用固定的"关于xxx"格式，用你觉得最自然的方式融入）。上下文模糊时不硬加。没有 [对话上下文] 时也不加
-只输出改写后的文本，不要任何前缀后缀。`;
+  tech_status: `${V3_COMMON}
+模式：技术进展汇报。严格输出 3 句话：第一句说结论（做了什么、结果如何），第二句说关键证据或验证结果，第三句说遗留风险或下一步。最多 160 字。跳过代码、日志、堆栈。`,
 
-const V2_PROMPTS: Record<ContentCategory, string> = {
-  concise: `你把一段给用户的 AI 回复改写成口语化的语音播报版本。语音是线性的，用户只能听不能跳读。
+  navigate: `${V3_COMMON}
+模式：长文导航。不总结全部细节，改成听觉目录。第一句说总体结论；然后用"这段主要分几块"自然过渡，最多列 4 块，每块只说主题。如果某块需要用户拍板，必须点出。最多 220 字。`,
 
-策略：精简直说，控制在 120 字以内（极简单的一句话就够，别硬凑）。
-- 第一句话必须是结论或最重要的信息
-- 大段技术细节只保留结论
-- 如果需要用户决策/拍板，把选项说清楚
-- 结尾自然收住，不用引导"去看屏幕"
-${V2_COMMON_RULES}`,
-
-  navigate: `你把一段多章节的 AI 回复改写成"导航式"语音播报。用户听完要能判断：这篇讲了什么、有没有要他拍板的。
-
-策略：结论 + 章节地图 + 行动点，控制在 200 字以内。
-- 第一句必须是全文结论（一句话，不展开）
-- 然后列出章节结构："一共 N 部分——第一部分讲什么、第二部分讲什么"（只到标题级，不展开内容）
-- 如果某一节需要用户决策/拍板，必须点出来："第几部分需要你定"
-- 不要展开任何章节的具体内容、不要复述数据/代码
-${V2_COMMON_RULES}`,
-
-  digest: `你把一段较长的 AI 回复改写成口语化的语音播报版本。原文可能是列表、多步骤操作、长段分析。
-
-策略：结论 + 关键几条，控制在 150 字以内。
-- 第一句必须是结论或最终结果
-- 如果原文有多个要点/步骤，只说最关键的 2-3 条，余下的说"一共几条"即可
-- 不要逐条复述所有步骤
-- 代码块、命令行略去，换成"我跑了命令"、"我改了代码"这种概括
-- 如果有需要用户拍板的点，放在最后强调
-${V2_COMMON_RULES}`,
-
-  skip_code: `你把一段包含代码的 AI 回复改写成口语化的语音播报版本。原文里有代码块，TTS 念代码是噪音。
-
-策略：只说做了什么、结果如何，完全跳过代码，控制在 120 字以内。
-- 第一句必须是结论
-- 代码块、命令行、文件路径全部跳过，换成"我写了一段代码来做什么"、"改了哪个文件"这种概括
-- 如果代码运行了，报运行结果（成功/失败/输出关键数字）
-- 代码的存在对听者透明，不要提"代码如下"、"具体代码"这种说法
-${V2_COMMON_RULES}`,
-
-  skip_table: `你把一段包含表格的 AI 回复改写成口语化的语音播报版本。原文里有表格数据，TTS 逐行念表格听不懂。
-
-策略：说表格的结论而非数据，控制在 150 字以内。
-- 第一句必须是结论
-- 表格不要逐行念，改成概括："对比了 N 个方案"、"列了 N 项数据"这种
-- 如果表格里有明确的赢家/推荐/最大值/异常值，直接说结论："推荐方案 A，因为什么"
-- 如果需要用户看表做决定，把决策点说清楚，不要甩一句"去看表"
-${V2_COMMON_RULES}`,
+  silent: `${V3_COMMON}
+模式：内容主要是代码、表格、日志或测试输出，不适合语音完整播报。只输出 1-2 句：先说结论（做了什么、结果如何），不要描述代码/表格内容。最多 70 字。`,
 };
 
+// ────── 决策/拍板信号检测 ──────
+// 优先级最高：用户需要做决定时，不管内容有没有代码/表格，都走 action
+const ACTION_PATTERNS = [
+  /你.{0,6}(决定|拍板|确认|选|批|定)/,
+  /需要你.{0,4}(看|定|选|批|确认)/,
+  /要.{0,2}(你|大杰).{0,4}(拍|定|选|确认|批准)/,
+  /(方案|选项|选择).{0,6}(一|二|三|四|A|B|C)/,
+  /你(想|要|觉得|看).{0,6}(先|哪|怎|还是)/,
+  /(合不合|行不行|要不要|批不批|搞不搞|改不改)/,
+  /二选一|三选一/,
+];
+
+// ────── 长文/导航信号检测 ──────
+// v2 的 navigate 从未触发（条件太窄：>=300 且有 ##）。放宽条件：
+// 满足任一即可：>=500 字、含 3+ 小标题、含 3+ 列表段、或出现方案/复盘等关键词
+const NAVIGATE_KEYWORDS =
+  /方案|复盘|总结|设计|PRD|OpenSpec|architecture|retrospective/i;
+
+// ────── 噪音内容检测（代码/表格/日志占主体） ──────
+function calcNoiseRatio(text: string): number {
+  const total = text.length;
+  if (total === 0) return 0;
+  // 代码块
+  let noiseChars = 0;
+  for (const m of text.matchAll(/```[\s\S]*?```/g)) noiseChars += m[0].length;
+  // 表格行（含 | 的行）
+  for (const m of text.matchAll(/^.*\|.*$/gm)) noiseChars += m[0].length;
+  return noiseChars / total;
+}
+
 /**
- * 确定性内容分类器：用正则检测 markdown 结构特征 + 长度，零 LLM 开销。
- * 优先级：代码块 > 表格 > 多章节标题 > 长列表/长文 > 短对话
+ * 意图分类器：按"用户听完要做什么"分流，零 LLM 开销。
+ * 优先级：action > silent > navigate > tech_status > notify
+ * （silent 必须在 navigate 前：1000 字纯代码不该走"长文导航"）
  */
-export function classifyContent(text: string): ContentCategory {
+export function classifyIntent(text: string): IntentCategory {
   const len = text.length;
+
+  // 1. 最高优先：需要用户拍板/决策
+  if (ACTION_PATTERNS.some((p) => p.test(text))) return 'action';
+
+  // 2. 噪音检测（代码/表格/日志占主体）—— 必须在 navigate 前，
+  //    否则 len>=500 的长代码块会被误判成 navigate
   const hasCodeBlock = /```[\s\S]*?```/.test(text);
   const hasTable = /\|[\s]*---/.test(text);
-  const hasHeadings = /(?:^|\n)#{1,3}\s+\S/.test(text);
+  if (hasCodeBlock || hasTable) {
+    if (calcNoiseRatio(text) > 0.4) return 'silent';
+  }
 
-  // 代码块优先：有代码就走 skip_code，不管长度
-  if (hasCodeBlock) return 'skip_code';
-  // 表格次优先
-  if (hasTable) return 'skip_table';
-  // 有标题结构且够长：导航模式
-  if (hasHeadings && len >= 300) return 'navigate';
-  // 长文本无特殊结构：概括模式
-  if (len >= 300) return 'digest';
-  // 默认短对话
-  return 'concise';
+  // 3. 长文导航：多种信号放宽触发
+  const headingCount = (text.match(/(?:^|\n)#{1,3}\s+\S/g) || []).length;
+  const listSegments = (text.match(/(?:^|\n)(?:[-*+]\s|\d+\.\s)/g) || []).length;
+  if (
+    len >= 500 ||
+    headingCount >= 3 ||
+    (listSegments >= 3 && len >= 300) ||
+    (NAVIGATE_KEYWORDS.test(text) && len >= 300)
+  ) {
+    return 'navigate';
+  }
+
+  // 4. 中等长度技术内容（含技术信号词）
+  const techSignals =
+    /修复|bug|PR|commit|deploy|测试|报错|异常|日志|E2E|worktree|合并|分支|回滚/i;
+  if (len >= 20 && techSignals.test(text)) return 'tech_status';
+
+  // 5. 默认：短通知
+  return 'notify';
 }
+
+// 保留旧名字的导出，兼容可能的外部引用（v2 classifyContent → v3 classifyIntent）
+/** @deprecated 使用 classifyIntent 代替 */
+export const classifyContent = classifyIntent;
 
 export interface VoiceNotifyContext {
   groupFolder: string | null;
@@ -249,12 +249,11 @@ export function needsSummarization(text: string): boolean {
 
 /**
  * 调 LLM 做语音摘要。失败时 fallback 原文截断到 1024 字符。
- * summaryV2=true 时按内容类型分流不同 prompt（灰度开关）。
- * conversationContext 有值时，LLM 会在摘要开头加"关于 xxx"一句话点明话题。
+ * v3：按意图分流 prompt，每个 mode 有强结构约束。
+ * conversationContext 有值时，LLM 会在摘要开头自然融入话题背景。
  */
 async function summarizeForSpeech(
   text: string,
-  summaryV2 = false,
   conversationContext?: string,
 ): Promise<string> {
   if (!needsSummarization(text)) {
@@ -270,15 +269,16 @@ async function summarizeForSpeech(
     return text.slice(0, MAX_SPEAK_CHARS);
   }
 
-  // v2 分流：确定性分类 → 对应 prompt
-  let prompt: string;
-  if (summaryV2) {
-    const category = classifyContent(text);
-    prompt = V2_PROMPTS[category];
-    logger.info({ category, chars: text.length }, '[voice-notify] v2 摘要分流');
-  } else {
-    prompt = SYSTEM_PROMPT;
+  // 灰度回滚：VOICE_SUMMARY_VERSION=off 时跳过 LLM，直接截断原文
+  if (getVoiceSummaryVersion() === 'off') {
+    logger.info('[voice-notify] 摘要已关闭（VOICE_SUMMARY_VERSION=off）');
+    return sanitizeForSpeech(text).slice(0, MAX_SPEAK_CHARS);
   }
+
+  // v3 意图分流：确定性分类 → 对应 prompt
+  const intent = classifyIntent(text);
+  const prompt = V3_PROMPTS[intent];
+  logger.info({ intent, chars: text.length }, '[voice-notify] v3 意图分流');
 
   const client = new OpenAI({
     apiKey: config.dashscopeApiKey,
@@ -311,6 +311,7 @@ async function summarizeForSpeech(
     if (!summary) return text.slice(0, MAX_SPEAK_CHARS);
     logger.info(
       {
+        intent,
         origChars: text.length,
         summaryChars: summary.length,
         hasContext: !!conversationContext,
@@ -403,14 +404,11 @@ export function notifyVoice(
 
   if (!shouldNotifyPushover(context)) return;
 
-  const useV2 = context.containerConfig?.voiceNotify?.summaryV2 === true;
-
   // 异步 IIFE，异常全吃掉，不影响主链路
   void (async () => {
     try {
       const summary = await summarizeForSpeech(
         context.text,
-        useV2,
         context.conversationContext,
       );
       const label = resolveVoiceGroupLabel(context);
