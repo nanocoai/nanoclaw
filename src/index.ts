@@ -1365,9 +1365,47 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 }
               ).cleanupProgressCard(chatJid);
             }
+            // Commander 自动终态兜底（同主回调逻辑）
+            // rate-limit retry 的 agent 进程跑完后进入 IPC pipe 等待，
+            // 后续 pipe query（如 delegation 派工）完成时也走这个回调，
+            // 必须在此补 auto-finalize，否则任务永远卡 dispatched。
+            try {
+              const activeTask = getActiveDelegationByGroup(group.folder);
+              let carryResult = activeTask ? shouldCarryReply(missedMessages, activeTask) : false;
+              if (!carryResult && activeTask && currentQueryReplies.length > 0) {
+                const dbHasTrigger = hasIpcTriggerForTask(chatJid, activeTask.taskId);
+                if (dbHasTrigger) {
+                  carryResult = true;
+                  logger.info(
+                    { group: group.folder, taskId: activeTask.taskId },
+                    '[retry] IPC pipe 补偿：missedMessages 过期但 DB 有对应触发消息，携带回复',
+                  );
+                }
+              }
+              logger.info(
+                {
+                  group: group.folder,
+                  hasActiveTask: !!activeTask,
+                  taskId: activeTask?.taskId,
+                  carryResult,
+                  currentQueryRepliesLen: currentQueryReplies.length,
+                  firstReplyPreview: currentQueryReplies[0]?.slice(0, 80),
+                },
+                '[retry] auto-finalize debug: shouldCarryReply 判断',
+              );
+              const finalReply = activeTask && carryResult
+                ? currentQueryReplies.join('\n\n')
+                : undefined;
+              finalizeDelegationOnTurnEnd(group.folder, true, finalReply, {
+                injectReportToActiveAgent,
+              });
+            } catch (err) {
+              logger.warn({ err, group: group.folder }, '[retry] 自动终态汇报(done)异常');
+            }
             outputSentToUser = false;
             textSentToUser = false;
             autoFollowupSummaryTextParts = [];
+            currentQueryReplies = [];
             queue.notifyIdle(chatJid);
           }
           if (result.status === 'error') {
