@@ -691,6 +691,24 @@ export function getNewMessages(
   return { messages: rows, newTimestamp };
 }
 
+/**
+ * 检查 DB 中是否存在某任务的 ipc_ 触发消息。
+ * 用于 IPC pipe 模式下 missedMessages 过期时的补偿判断。
+ */
+export function hasIpcTriggerForTask(
+  chatJid: string,
+  taskId: string,
+): boolean {
+  const row = db
+    .prepare(
+      `SELECT 1 FROM messages
+       WHERE chat_jid = ? AND id LIKE 'ipc_%' AND content LIKE ?
+       LIMIT 1`,
+    )
+    .get(chatJid, `%[task_id:${taskId}]%`);
+  return !!row;
+}
+
 export function getMessagesSince(
   chatJid: string,
   sinceTimestamp: string,
@@ -725,17 +743,22 @@ export function getRecentUserMessages(
   chatJid: string,
   limit: number = 5,
 ): Array<{ content: string; timestamp: string }> {
+  // 排除 IPC 跨群消息（sender 格式 "大狗(fs_oc_xxx)"）：
+  // 这些消息 is_bot_message=0（为了让 message loop 能扫到投递给目标 agent），
+  // 但本质是其他 agent 的汇报/派工，不是用户消息，混入语音上下文会让 LLM 跑偏。
+  const ipcSenderPrefix = `${ASSISTANT_NAME}(%`;
   const sql = `
     SELECT content, timestamp FROM (
       SELECT content, timestamp
       FROM messages
       WHERE chat_jid = ? AND is_from_me = 0 AND is_bot_message = 0
         AND content != '' AND content IS NOT NULL
+        AND COALESCE(sender_name, '') NOT LIKE ?
       ORDER BY timestamp DESC
       LIMIT ?
     ) ORDER BY timestamp
   `;
-  return db.prepare(sql).all(chatJid, limit) as Array<{
+  return db.prepare(sql).all(chatJid, ipcSenderPrefix, limit) as Array<{
     content: string;
     timestamp: string;
   }>;

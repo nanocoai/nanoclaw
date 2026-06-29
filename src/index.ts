@@ -71,6 +71,7 @@ import {
   storeChatMetadata,
   storeMessage,
   getActiveDelegationByGroup,
+  hasIpcTriggerForTask,
   storeMessageDirect,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
@@ -972,7 +973,34 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       // 混合消息场景下不传回复，避免串内容。（大杰 2026-06-23 三次实锤 + C3 review）
       try {
         const activeTask = getActiveDelegationByGroup(group.folder);
-        const finalReply = activeTask && shouldCarryReply(missedMessages, activeTask)
+        let carryResult = activeTask ? shouldCarryReply(missedMessages, activeTask) : false;
+        // IPC pipe 模式补偿：missedMessages 是 turn 开始时的快照，后续 query 不刷新。
+        // 第二次+ query 的触发消息不在 missedMessages 中，shouldCarryReply 必然 false。
+        // 此时直接查 DB 确认当前活跃任务是否有对应的 ipc_ 触发消息。
+        if (!carryResult && activeTask && currentQueryReplies.length > 0) {
+          const dbHasTrigger = hasIpcTriggerForTask(chatJid, activeTask.taskId);
+          if (dbHasTrigger) {
+            carryResult = true;
+            logger.info(
+              { group: group.folder, taskId: activeTask.taskId },
+              'IPC pipe 补偿：missedMessages 过期但 DB 有对应触发消息，携带回复',
+            );
+          }
+        }
+        logger.info(
+          {
+            group: group.folder,
+            hasActiveTask: !!activeTask,
+            taskId: activeTask?.taskId,
+            carryResult,
+            missedCount: missedMessages.length,
+            missedIds: missedMessages.map((m) => m.id).slice(0, 5),
+            currentQueryRepliesLen: currentQueryReplies.length,
+            firstReplyPreview: currentQueryReplies[0]?.slice(0, 80),
+          },
+          'auto-finalize debug: shouldCarryReply 判断',
+        );
+        const finalReply = activeTask && carryResult
           ? currentQueryReplies.join('\n\n')
           : undefined;
         finalizeDelegationOnTurnEnd(group.folder, true, finalReply, {
