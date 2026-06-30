@@ -350,9 +350,13 @@ RCLONE_DEST="$RCLONE_REMOTE_NAME:nanoclaw-backups"
 
 **12e. Deploy the backup script:**
 
-The repo already ships `scripts/backup-synapse.sh`. Update the two install-specific values at the top:
+Copy the bundled backup script into the install, then wire in the two install-specific
+values — your **generated** age public key (from 12b) and your rclone destination. The
+script ships a placeholder key and refuses to run until this `sed` writes yours in:
 ```bash
 NANOCLAW_DIR="$(pwd)"
+mkdir -p scripts
+cp "$SKILL_DIR"/assets/scripts/backup-synapse.sh scripts/backup-synapse.sh
 sed -i.bak \
   -e "s|^AGE_PUBLIC_KEY=.*|AGE_PUBLIC_KEY=\"$AGE_PUBKEY\"|" \
   -e "s|gdrive:nanoclaw-backups/synapse|$RCLONE_DEST/synapse|" \
