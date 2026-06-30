@@ -78,6 +78,13 @@ export interface CodexTextProgressState {
   lastAgentMessage?: string;
 }
 
+export interface CodexMcpServerConfig {
+  name: string;
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
 // ---- 纯函数（可单元测试） ----
 
 /** 解析 codex JSONL 单行 → CodexEvent，畸形输入返回 null */
@@ -205,10 +212,11 @@ export function buildCodexConfigToml(config: {
   ipcDir: string;
   senderId?: string;
   isScheduledTask?: boolean;
+  extraMcpServers?: CodexMcpServerConfig[];
 }): string {
   // 路径用 JSON.stringify 做 TOML 字符串转义（双引号 + 反斜杠）
   const q = (s: string) => JSON.stringify(s);
-  return [
+  const lines = [
     '[mcp_servers.nanoclaw]',
     'command = "node"',
     `args = [${q(config.mcpServerPath)}]`,
@@ -223,7 +231,69 @@ export function buildCodexConfigToml(config: {
       ([key, value]) => `${key} = ${q(value)}`,
     ),
     '',
-  ].join('\n');
+  ];
+
+  for (const server of config.extraMcpServers ?? []) {
+    lines.push(`[mcp_servers.${server.name}]`);
+    lines.push(`command = ${q(server.command)}`);
+    if (server.args && server.args.length > 0) {
+      lines.push(`args = [${server.args.map(q).join(', ')}]`);
+    }
+    if (server.env && Object.keys(server.env).length > 0) {
+      lines.push('');
+      lines.push(`[mcp_servers.${server.name}.env]`);
+      for (const [key, value] of Object.entries(server.env)) {
+        lines.push(`${key} = ${q(value)}`);
+      }
+    }
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+export function buildGitNexusMcpServerConfig(): CodexMcpServerConfig {
+  return {
+    name: 'gitnexus',
+    command: 'bash',
+    args: [
+      '-lc',
+      'if [ -f "$HOME/.gitnexus/env" ]; then . "$HOME/.gitnexus/env"; fi; exec "${GITNEXUS_BIN:-gitnexus}" mcp',
+    ],
+  };
+}
+
+export function isGitNexusCommandAvailable(
+  env: Record<string, string | undefined>,
+): boolean {
+  const configured = env.GITNEXUS_BIN?.trim();
+  if (configured) {
+    if (configured.includes('/')) {
+      try {
+        fs.accessSync(configured, fs.constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return findExecutableOnPath(configured, env.PATH);
+  }
+  return findExecutableOnPath('gitnexus', env.PATH);
+}
+
+function findExecutableOnPath(command: string, pathValue?: string): boolean {
+  const searchPath = pathValue ?? process.env.PATH ?? '';
+  for (const dir of searchPath.split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, command);
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return true;
+    } catch {
+      // continue
+    }
+  }
+  return false;
 }
 
 /** 把 item.started 工具事件映射成进度输出（agent_message 不在此处理） */
@@ -468,6 +538,12 @@ export async function runCodexQuery(
   log: (message: string) => void,
 ): Promise<{ newSessionId?: string; result?: string }> {
   // 准备 CODEX_HOME（auth + MCP config）
+  const extraMcpServers = isGitNexusCommandAvailable(config.env)
+    ? [buildGitNexusMcpServerConfig()]
+    : [];
+  if (extraMcpServers.length === 0) {
+    log('[codex-runner] GitNexus MCP not injected: gitnexus command not found');
+  }
   const configToml = buildCodexConfigToml({
     mcpServerPath: config.mcpServerPath,
     chatJid: config.chatJid,
@@ -476,6 +552,7 @@ export async function runCodexQuery(
     ipcDir: config.ipcDir,
     senderId: config.senderId,
     isScheduledTask: config.isScheduledTask,
+    extraMcpServers,
   });
   const homeDir = config.env.HOME || os.homedir();
   prepareCodexHome(config.codexHome, homeDir, configToml, log);

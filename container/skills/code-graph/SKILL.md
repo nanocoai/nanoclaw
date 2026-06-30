@@ -1,23 +1,43 @@
 ---
 name: code-graph
-description: "代码逻辑查询工具。用户说'查 XX 代码逻辑'、'XX 的调用链'、'XX 怎么实现的'时触发。支持任意 Git 项目，首次查询自动建索引。基于 GitNexus 知识图谱，提供符号上下文（调用方/被调用方）、执行流搜索、影响分析。"
+description: "代码逻辑查询工具。用户说'查 XX 代码逻辑'、'XX 的调用链'、'XX 怎么实现的'时触发。支持任意已索引 Git 项目；未索引项目必须先提示并确认后再建索引。基于 GitNexus 知识图谱，提供符号上下文（调用方/被调用方）、执行流搜索、影响分析。"
 ---
 
 # Code Graph — 代码逻辑查询
 
-用户问代码逻辑时用这个。支持任意 Git 项目，首次使用时自动建索引。
+用户问代码逻辑时用这个。支持任意已索引 Git 项目；未索引项目必须先向用户说明并确认，不能自动静默建索引。
 
 ## 环境配置
 
-**所有本机 gitnexus 命令必须先加载 DashScope embedding 环境变量：**
+本机 `gitnexus` 命令优先加载 DashScope embedding 环境变量；如果 env 文件不存在，也要继续执行已索引仓库查询，不能因为缺 env 文件短路。
 
 ```bash
-source ~/.gitnexus/env && gitnexus <command> ...
+if [ -f "$HOME/.gitnexus/env" ]; then . "$HOME/.gitnexus/env"; fi; gitnexus <command> ...
 ```
 
-或者用内联方式：
+跨平台超时 helper（macOS 无 GNU `timeout` 时也能跑）。执行索引命令前，必须先在同一个 shell 中定义这个 helper：
+
 ```bash
-$(cat ~/.gitnexus/env | sed 's/export //g' | tr '\n' ' ') gitnexus <command> ...
+with_gitnexus_timeout() {
+  seconds="$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+    return $?
+  fi
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$seconds" "$@"
+    return $?
+  fi
+  "$@" &
+  pid=$!
+  ( sleep "$seconds"; kill -TERM "$pid" 2>/dev/null ) &
+  watcher=$!
+  wait "$pid"
+  rc=$?
+  kill "$watcher" 2>/dev/null
+  return "$rc"
+}
 ```
 
 ## 使用流程
@@ -25,19 +45,39 @@ $(cat ~/.gitnexus/env | sed 's/export //g' | tr '\n' ' ') gitnexus <command> ...
 ### 第一步：确认索引是否存在
 
 ```bash
-source ~/.gitnexus/env && gitnexus list 2>&1 | grep -i "<项目名>"
+if [ -f "$HOME/.gitnexus/env" ]; then . "$HOME/.gitnexus/env"; fi; gitnexus list 2>&1 | grep -i "<项目名>"
 ```
 
-### 第二步：如果没有索引 → 在项目目录下建索引
+### 第二步：如果没有索引 → 先 fail-visible，再确认是否建索引
+
+如果 `gitnexus list` 查不到目标仓库，必须先告诉用户：
+
+> 仓库 `<项目名>` 尚未建立 GitNexus 索引。快速静态索引通常较快，但没有 embedding 语义搜索；完整语义索引会调用 embedding，可能耗时较久。是否现在执行？
+
+必须先询问用户确认，不能自动运行 embedding 索引。用户确认后按场景执行：
+
+快速静态索引（默认推荐，120 秒超时）：
 
 ```bash
-cd <项目路径> && source ~/.gitnexus/env && gitnexus analyze . --name <项目名> --embeddings
+cd <项目路径> && if [ -f "$HOME/.gitnexus/env" ]; then . "$HOME/.gitnexus/env"; fi; with_gitnexus_timeout 120 gitnexus analyze . --name <项目名>
+```
+
+完整语义索引（用户明确确认后才跑，120 秒超时）：
+
+```bash
+cd <项目路径> && if [ -f "$HOME/.gitnexus/env" ]; then . "$HOME/.gitnexus/env"; fi; with_gitnexus_timeout 120 gitnexus analyze . --name <项目名> --embeddings
+```
+
+如果超时，停止命令并把下面的手动续跑命令发给用户，不要把后续 `rg` / `git diff` 兜底说成 GitNexus 已成功：
+
+```bash
+cd <项目路径> && if [ -f "$HOME/.gitnexus/env" ]; then . "$HOME/.gitnexus/env"; fi; gitnexus analyze . --name <项目名> --embeddings
 ```
 
 例如：
 ```bash
-cd /Users/dajay/AI_Workspace/nine && source ~/.gitnexus/env && gitnexus analyze . --name nine --embeddings
-cd /Users/dajay/AI_Workspace/nanoclaw && source ~/.gitnexus/env && gitnexus analyze . --name nanoclaw --embeddings
+cd /Users/dajay/AI_Workspace/nine && if [ -f "$HOME/.gitnexus/env" ]; then . "$HOME/.gitnexus/env"; fi; with_gitnexus_timeout 120 gitnexus analyze . --name nine
+cd /Users/dajay/AI_Workspace/nanoclaw && if [ -f "$HOME/.gitnexus/env" ]; then . "$HOME/.gitnexus/env"; fi; with_gitnexus_timeout 120 gitnexus analyze . --name nanoclaw
 ```
 
 索引完成后告知用户，然后继续查询。
@@ -46,7 +86,7 @@ cd /Users/dajay/AI_Workspace/nanoclaw && source ~/.gitnexus/env && gitnexus anal
 
 本机项目直接用 gitnexus CLI：
 ```bash
-source ~/.gitnexus/env && gitnexus <command> [options] -r <项目名>
+if [ -f "$HOME/.gitnexus/env" ]; then . "$HOME/.gitnexus/env"; fi; gitnexus <command> [options] -r <项目名>
 ```
 
 Mothership 项目（在 Metal 容器中）：
@@ -109,5 +149,5 @@ gitnexus list
 ssh metal 'docker exec gitnexus-server gitnexus list'
 
 # 更新已有索引
-cd <项目路径> && git pull && gitnexus analyze . --name <项目名> --embeddings --force
+cd <项目路径> && git pull && if [ -f "$HOME/.gitnexus/env" ]; then . "$HOME/.gitnexus/env"; fi; with_gitnexus_timeout 120 gitnexus analyze . --name <项目名> --embeddings --force
 ```
