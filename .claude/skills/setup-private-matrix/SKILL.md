@@ -110,7 +110,16 @@ grep -q "import './matrix.js'" src/channels/index.ts || printf "\nimport './matr
 # remove the legacy WASM adapter dep if present, add the native stack (pinned)
 pnpm remove @beeper/chat-adapter-matrix 2>/dev/null || true
 pnpm add matrix-bot-sdk@0.8.0
-# the native crypto binding has an install build script → must be allowlisted (supply-chain policy)
+```
+
+**5a-ii. [OPERATOR APPROVAL REQUIRED — supply-chain gate]** The native crypto binding
+`@matrix-org/matrix-sdk-crypto-nodejs` ships an **install build script** (it downloads a
+prebuilt native binary), so pnpm must be told to allow it via `onlyBuiltDependencies`.
+Per this repo's supply-chain policy, an assistant **must not** add a package to
+`onlyBuiltDependencies` automatically — build scripts execute arbitrary code at install
+time. **Show the operator the exact line below, explain it, and wait for explicit
+approval. Only after the operator approves, run:**
+```bash
 grep -q '@matrix-org/matrix-sdk-crypto-nodejs' pnpm-workspace.yaml || \
   printf "\nonlyBuiltDependencies:\n  - '@matrix-org/matrix-sdk-crypto-nodejs'\n" >> pnpm-workspace.yaml
 ```
