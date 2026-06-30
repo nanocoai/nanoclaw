@@ -33,6 +33,7 @@ import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
+import { ensureManagedDirectory } from './safe-managed-path.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
 import './providers/index.js';
@@ -369,10 +370,11 @@ export function buildMounts(
  * so it's dangling on the host but valid inside the container.
  */
 function syncSkillSymlinks(claudeDir: string, containerConfig: import('./container-config.js').ContainerConfig): void {
-  const skillsDir = path.join(claudeDir, 'skills');
-  if (!fs.existsSync(skillsDir)) {
-    fs.mkdirSync(skillsDir, { recursive: true });
+  if (!fs.existsSync(claudeDir)) {
+    fs.mkdirSync(claudeDir, { recursive: true });
   }
+  const skillsDir = path.join(claudeDir, 'skills');
+  ensureManagedDirectory(claudeDir, skillsDir, 'Claude skills directory');
 
   const desired = selectedSkillNames(containerConfig);
   const desiredSet = new Set(desired);

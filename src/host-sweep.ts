@@ -341,6 +341,10 @@ function resetStuckProcessingRows(
   // would re-read them, see the old status_changed timestamp, conclude the
   // freshly respawned container is stuck, and SIGKILL it before its
   // agent-runner has a chance to run clearStaleProcessingAcks() on startup.
+  // We're safe to write outbound.db here because we just killed the container
+  // that owned it (or it crashed and left no writer behind). Production sweep
+  // opens outbound.db readonly for normal reads, so reopen the real DB with
+  // write access unless tests supplied an in-memory writable handle.
   const ownsDb = !writableOutDb;
   let useDb: Database.Database | null = writableOutDb ?? null;
   try {

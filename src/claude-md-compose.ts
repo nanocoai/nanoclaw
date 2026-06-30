@@ -21,6 +21,7 @@ import { GROUPS_DIR } from './config.js';
 import type { McpServerConfig } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { log } from './log.js';
+import { ensureManagedDirectory } from './safe-managed-path.js';
 import type { AgentGroup } from './types.js';
 
 // Symlink targets are container paths — dangling on host (hence the readlink
@@ -50,9 +51,7 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
   syncSymlink(sharedLink, SHARED_CLAUDE_MD_CONTAINER_PATH);
 
   const fragmentsDir = path.join(groupDir, '.claude-fragments');
-  if (!fs.existsSync(fragmentsDir)) {
-    fs.mkdirSync(fragmentsDir, { recursive: true });
-  }
+  ensureManagedDirectory(groupDir, fragmentsDir, 'CLAUDE fragment directory');
 
   // Desired fragment set.
   const configRow = getContainerConfig(group.id);
