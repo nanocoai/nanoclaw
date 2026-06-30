@@ -122,18 +122,17 @@ async function main(): Promise<void> {
   // 2. Pick the agent group
   let agentGroupId = args.agentGroupId;
   if (!agentGroupId) {
-    const agents = db.prepare('SELECT id, name, is_admin FROM agent_groups ORDER BY is_admin DESC, created_at ASC')
-      .all() as Array<{ id: string; name: string; is_admin: number }>;
+    const agents = db.prepare('SELECT id, name FROM agent_groups ORDER BY created_at ASC')
+      .all() as Array<{ id: string; name: string }>;
     if (agents.length === 0) throw new Error('no agent groups exist — create one first');
 
-    const adminAgents = agents.filter((a) => a.is_admin === 1);
-    if (adminAgents.length === 1 && !args.interactive) {
-      agentGroupId = adminAgents[0].id;
-      console.log(`Auto-selected sole admin agent group: ${adminAgents[0].name} (${agentGroupId})`);
+    if (agents.length === 1 && !args.interactive) {
+      agentGroupId = agents[0].id;
+      console.log(`Auto-selected sole agent group: ${agents[0].name} (${agentGroupId})`);
     } else if (args.interactive) {
       console.log('Agent groups:');
       agents.forEach((a, i) => {
-        console.log(`  ${i + 1}. ${a.name} (${a.id})${a.is_admin ? ' [admin]' : ''}`);
+        console.log(`  ${i + 1}. ${a.name} (${a.id})`);
       });
       const pick = await prompt('Pick one [1]: ');
       const idx = pick === '' ? 0 : parseInt(pick, 10) - 1;
@@ -155,8 +154,10 @@ async function main(): Promise<void> {
 
     db.prepare(`
       INSERT INTO messaging_group_agents
-        (id, messaging_group_id, agent_group_id, trigger_rules, response_scope, session_mode, priority, created_at)
-      VALUES (?, ?, ?, '', 'all', ?, 10, datetime('now'))
+        (id, messaging_group_id, agent_group_id,
+         engage_mode, engage_pattern, sender_scope, ignored_message_policy,
+         session_mode, priority, created_at)
+      VALUES (?, ?, ?, 'pattern', '.', 'all', 'drop', ?, 10, datetime('now'))
     `).run(generateId('mga'), mg.id, ag.id, args.sessionMode);
   });
   tx();

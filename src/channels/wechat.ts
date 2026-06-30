@@ -148,6 +148,9 @@ registerChannelAdapter('wechat', {
           isGroup,
         },
         timestamp: new Date(msg.create_time_ms ?? Date.now()).toISOString(),
+        // DMs address the bot directly; router auto-creates messaging_groups only when isMention=true.
+        isMention: !isGroup,
+        isGroup,
       };
 
       setupConfig.onInbound(platformId, null, inbound);
