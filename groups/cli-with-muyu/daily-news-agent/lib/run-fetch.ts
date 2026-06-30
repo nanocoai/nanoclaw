@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   buildScriptOutput,
@@ -54,7 +54,7 @@ async function main(): Promise<void> {
 
 const isMain =
   process.argv[1] !== undefined &&
-  fileURLToPath(import.meta.url) === fileURLToPath(process.argv[1]);
+  resolve(fileURLToPath(import.meta.url)) === resolve(process.argv[1]);
 
 if (isMain) {
   main().catch((error) => {
