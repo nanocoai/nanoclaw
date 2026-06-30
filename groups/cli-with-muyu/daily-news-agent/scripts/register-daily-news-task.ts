@@ -2,13 +2,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import Database from 'better-sqlite3';
-
 import { inboundDbPath } from '../lib/inbound-paths.js';
 import { nextLocal9am } from '../lib/next-local-9am.js';
 import { resolveNanoclawRoot } from '../lib/nanoclaw-root.js';
 import { registerDailyNewsTask } from '../lib/register-daily-news-task.js';
 import { resolveTaskPrompt } from '../lib/task-prompt.js';
+
+async function loadDatabase(nanoclawRoot: string) {
+  const modulePath = path.join(nanoclawRoot, 'node_modules/better-sqlite3/lib/index.js');
+  const { default: Database } = await import(pathToFileURL(modulePath).href);
+  return Database as typeof import('better-sqlite3').default;
+}
 
 function generateTaskId(): string {
   return `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -30,6 +34,7 @@ async function main(): Promise<void> {
   const prompt = resolveTaskPrompt(nanoclawRoot);
   const processAfter = nextLocal9am(new Date());
   const taskId = generateTaskId();
+  const Database = await loadDatabase(nanoclawRoot);
   const db = new Database(dbPath);
 
   try {

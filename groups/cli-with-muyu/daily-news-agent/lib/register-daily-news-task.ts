@@ -1,10 +1,23 @@
-import type Database from 'better-sqlite3';
-
 import { RECURRENCE } from './inbound-paths.js';
 import { DAILY_NEWS_SCRIPT } from './task-prompt.js';
 
+export interface TaskDbRow {
+  id: string;
+  content: string;
+  kind: string;
+  status: string;
+  recurrence: string | null;
+}
+
+export interface TaskDb {
+  prepare(sql: string): {
+    all(recurrence: string): TaskDbRow[];
+    run(...params: unknown[]): void;
+  };
+}
+
 export function findExistingPendingTask(
-  db: Database.Database,
+  db: TaskDb,
   recurrence: string,
   script: string,
 ): string | null {
@@ -12,7 +25,7 @@ export function findExistingPendingTask(
     .prepare(
       "SELECT id, content FROM messages_in WHERE kind = 'task' AND status = 'pending' AND recurrence = ?",
     )
-    .all(recurrence) as Array<{ id: string; content: string }>;
+    .all(recurrence);
 
   for (const row of rows) {
     try {
@@ -32,17 +45,19 @@ export type RegisterTaskResult =
   | { status: 'inserted'; taskId: string }
   | { status: 'skipped'; taskId: string };
 
+export type TaskInsert = {
+  id: string;
+  processAfter: string;
+  recurrence: string | null;
+  platformId: string | null;
+  channelType: string | null;
+  threadId: string | null;
+  content: string;
+};
+
 export function registerDailyNewsTask(
-  db: Database.Database,
-  insertTask: (db: Database.Database, task: {
-    id: string;
-    processAfter: string;
-    recurrence: string | null;
-    platformId: string | null;
-    channelType: string | null;
-    threadId: string | null;
-    content: string;
-  }) => void,
+  db: TaskDb,
+  insertTask: (db: TaskDb, task: TaskInsert) => void,
   options: { taskId: string; processAfter: string; prompt: string },
 ): RegisterTaskResult {
   const existingId = findExistingPendingTask(db, RECURRENCE, DAILY_NEWS_SCRIPT);
