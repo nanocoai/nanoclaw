@@ -10,10 +10,9 @@ export const EMBEDDED_TASK_PROMPT = `你是 AI 技术日报助手。本次任务
 1. 从 scriptOutput.items 中筛选 AI/ML/LLM/Agent/开源模型/AI 工具 相关条目（纯 LLM 判断，不凑非 AI 条目）
 2. 按重要性排序，取最多 5 条合格条目；有几条用几条
 3. 每条输出：中文标题 + 一句话摘要（≤120 字）+ 原始 URL
-4. 使用 format-digest 规则组装正文（或等价格式）：
-   - 标题行：📰 AI 技术日报 · {YYYY-MM-DD}
-   - 分隔线：---
-   - 列表：1. 标题\n   摘要\n   链接
+4. 组装正文**必须**调用 format-digest 脚本（禁止手写拼接以免遗漏脚注）：
+   echo '{"dateLabel":"YYYY-MM-DD","qualifiedCount":N,"entries":[{"rank":1,"title":"...","summary":"...","url":"..."}]}' | bash /workspace/agent/daily-news-agent/scripts/format-digest.sh
+   将 stdout 作为 send_message 的 text
 5. 若合格条目数 N 满足 0 ≤ N < 5，正文末尾必须追加一行：
    今日仅 N 条合格条目 (候选池 < 5)
 6. 若 N = 5，不得追加上述脚注
@@ -33,7 +32,6 @@ export function resolveTaskPrompt(nanoclawRoot: string): string {
   const candidates = [
     process.env.DAILY_NEWS_TASK_PROMPT_PATH,
     path.resolve(nanoclawRoot, '../../../specs/001-daily-news-agent/contracts/task-prompt.md'),
-    '/Users/wangzhongxin/projects/specs/001-daily-news-agent/contracts/task-prompt.md',
   ].filter((p): p is string => Boolean(p));
 
   for (const candidate of candidates) {

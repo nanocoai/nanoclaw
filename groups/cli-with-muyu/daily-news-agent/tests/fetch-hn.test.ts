@@ -65,4 +65,37 @@ describe('fetch-hn', () => {
     expect(result.items).toHaveLength(1);
     expect(result.items.find((item) => item.id === '2')).toBeUndefined();
   });
+
+  it('fetchHn respects topStories limit and batches item fetches', async () => {
+    const ids = Array.from({ length: 12 }, (_, i) => i + 1);
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href.endsWith('/topstories.json')) {
+        return { ok: true, json: async () => ids } as Response;
+      }
+      const itemMatch = href.match(/\/item\/(\d+)\.json$/);
+      if (itemMatch) {
+        const id = Number(itemMatch[1]);
+        return {
+          ok: true,
+          json: async () => ({
+            id,
+            title: `Story ${id}`,
+            url: `https://example.com/${id}`,
+            score: id,
+            time: 1719756000,
+          }),
+        } as Response;
+      }
+      throw new Error(`unexpected: ${href}`);
+    });
+
+    const result = await fetchHn({ topStories: 10, concurrency: 5, fetchImpl });
+
+    expect(result.items).toHaveLength(10);
+    const itemCalls = fetchImpl.mock.calls.filter((c) =>
+      String(c[0]).includes('/item/'),
+    );
+    expect(itemCalls.length).toBe(10);
+  });
 });

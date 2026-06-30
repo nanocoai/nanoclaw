@@ -14,7 +14,13 @@ import type { FeedsConfig } from './types.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 
-function loadConfig(): FeedsConfig {
+export type RunFetchDeps = {
+  fetchHn?: typeof import('./fetch-hn.js').fetchHn;
+  fetchAllRss?: typeof import('./fetch-rss.js').fetchAllRss;
+  loadConfig?: () => FeedsConfig;
+};
+
+function defaultLoadConfig(): FeedsConfig {
   const raw = readFileSync(join(ROOT, 'config/feeds.json'), 'utf8');
   return JSON.parse(raw) as FeedsConfig;
 }
@@ -23,15 +29,22 @@ function resolveTimezone(): string {
   return process.env.TZ || 'Asia/Shanghai';
 }
 
-export async function runFetch(now = new Date()): Promise<string> {
-  const config = loadConfig();
+export async function runFetch(
+  now = new Date(),
+  deps: RunFetchDeps = {},
+): Promise<string> {
+  const config = (deps.loadConfig ?? defaultLoadConfig)();
   const timezone = resolveTimezone();
   const errors: Array<{ source: string; message: string }> = [];
 
-  const hn = await fetchHn({ topStories: config.hn.topStories });
+  const fetchHnImpl = deps.fetchHn ?? (await import('./fetch-hn.js')).fetchHn;
+  const fetchAllRssImpl =
+    deps.fetchAllRss ?? (await import('./fetch-rss.js')).fetchAllRss;
+
+  const hn = await fetchHnImpl({ topStories: config.hn.topStories });
   errors.push(...hn.errors);
 
-  const rss = await fetchAllRss(config.feeds);
+  const rss = await fetchAllRssImpl(config.feeds);
   errors.push(...rss.errors);
 
   const merged = dedupeByUrl([...hn.items, ...rss.items]);

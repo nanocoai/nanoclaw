@@ -27,6 +27,7 @@ describe('format-digest', () => {
       entries: [{ rank: 1, title: 'A', summary: 's', url: 'https://a.com' }],
     });
     expect(message).toContain('2026-06-30');
+    expect(message).toContain('---');
   });
 
   it('formatDigestMessage appends pool footer when N < 5', () => {

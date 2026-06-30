@@ -6,7 +6,7 @@ export function formatDigestMessage(msg: {
   qualifiedCount: number;
   emptyMessage?: string;
 }): string {
-  const lines: string[] = [`📰 AI 技术日报 · ${msg.dateLabel}`, ''];
+  const lines: string[] = [`📰 AI 技术日报 · ${msg.dateLabel}`, '---', ''];
 
   if (msg.entries.length === 0) {
     lines.push(msg.emptyMessage ?? '今日无 notable AI 热点');
