@@ -1,0 +1,21 @@
+{
+  "name": "daily-news-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^4.0.18"
+  },
+  "dependencies": {
+    "rss-parser": "3.13.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

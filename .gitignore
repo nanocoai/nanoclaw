@@ -13,6 +13,13 @@ logs/
 
 # Groups - per-installation state, not tracked
 groups/*
+!groups/cli-with-muyu/
+groups/cli-with-muyu/*
+!groups/cli-with-muyu/daily-news-agent/
+!groups/cli-with-muyu/daily-news-agent/**
+
+# Worktrees (isolated development)
+.worktrees/
 
 # Composer-managed CLAUDE.md artifacts (regenerated every spawn) and
 # per-group memory (CLAUDE.local.md) must never be committed.

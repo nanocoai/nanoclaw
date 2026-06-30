@@ -1,0 +1,18 @@
+{
+  "feeds": [
+    {
+      "id": "openai-blog",
+      "type": "rss",
+      "url": "https://openai.com/blog/rss.xml",
+      "maxItems": 20
+    },
+    {
+      "id": "techcrunch-ai",
+      "type": "rss",
+      "url": "https://techcrunch.com/category/artificial-intelligence/feed/",
+      "maxItems": 20
+    }
+  ],
+  "hn": { "topStories": 50 },
+  "windowHours": 24
+}
