@@ -519,6 +519,26 @@ registerChannelAdapter('whatsapp', {
     // --- Socket creation ---
 
     async function connectSocket(): Promise<void> {
+      // End the previous socket before creating a new one. Reconnects re-enter
+      // this function and reassign `sock`. Without ending the old socket and
+      // removing its listeners, each orphaned graph (the WebSocket, Baileys'
+      // keep-alive and query timers, and the four sock.ev.on() closures) stays
+      // referenced by those internal timers and is never collected. WhatsApp
+      // closes with reason 408 often, so on a long-running host this grows
+      // without bound until the process runs out of memory.
+      // removeAllListeners() runs first so end()'s own connection.update
+      // 'close' cannot re-enter the reconnect path and loop.
+      if (sock) {
+        try {
+          // Baileys' typed emitter requires an event name on removeAllListeners;
+          // at runtime it is a Node EventEmitter, so the no-arg form clears all.
+          (sock.ev as unknown as import('events').EventEmitter).removeAllListeners();
+          sock.end(undefined);
+        } catch {
+          // Old socket already closing or closed. Nothing to tear down.
+        }
+      }
+
       const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
       const version = await resolveWaWebVersion();
