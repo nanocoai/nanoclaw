@@ -546,14 +546,19 @@ async function handleForwardedEvent(
       const interactionId = interaction.id as string;
       const interactionToken = interaction.token as string;
 
-      // Parse the selected option from custom_id
+      // Parse the selected option from custom_id.
+      // @chat-adapter/discord encodes custom_id as "<actionId>\n<value>", so
+      // strip the "\n<value>" suffix first before parsing the actionId segments.
+      // Without this, tail becomes "0\n0" instead of "0", which fails the
+      // digit-only regex in resolveSelectedOption and causes every tap to reject.
+      const actionId = customId?.includes('\n') ? customId.slice(0, customId.indexOf('\n')) : customId;
       let questionId: string | undefined;
       let tail: string | undefined;
-      if (customId?.startsWith('ncq:')) {
-        const colonIdx = customId.indexOf(':', 4); // after "ncq:"
+      if (actionId?.startsWith('ncq:')) {
+        const colonIdx = actionId.indexOf(':', 4); // after "ncq:"
         if (colonIdx !== -1) {
-          questionId = customId.slice(4, colonIdx);
-          tail = customId.slice(colonIdx + 1);
+          questionId = actionId.slice(4, colonIdx);
+          tail = actionId.slice(colonIdx + 1);
         }
       }
 
