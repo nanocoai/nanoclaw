@@ -43,6 +43,11 @@ export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CO
 // Operators opt in: CONTAINER_CPU_LIMIT=2, CONTAINER_MEMORY_LIMIT=8g.
 export const CONTAINER_CPU_LIMIT = process.env.CONTAINER_CPU_LIMIT || '';
 export const CONTAINER_MEMORY_LIMIT = process.env.CONTAINER_MEMORY_LIMIT || '';
+// How much shared memory (/dev/shm) each agent container gets. Docker's default
+// is only 64MB, which headless Chromium (agent-browser, in every image) runs out
+// of on large pages and then spills to disk or crashes. Defaults to 1g; the
+// memory is only actually used as Chromium needs it. Set to empty to disable.
+export const CONTAINER_SHM_SIZE = process.env.CONTAINER_SHM_SIZE || '1g';
 
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

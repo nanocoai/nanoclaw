@@ -15,6 +15,7 @@ import {
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
   CONTAINER_MEMORY_LIMIT,
+  CONTAINER_SHM_SIZE,
   DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
@@ -435,6 +436,19 @@ async function buildContainerArgs(
   agentIdentifier?: string,
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
+
+  // Every agent image runs headless Chromium (via agent-browser). Two container
+  // flags keep it stable on heavy pages:
+  //   --init runs a tiny init as PID 1, so the many short-lived helper processes
+  //     Chromium spawns get cleaned up instead of piling up as zombie processes
+  //     over a long run. This is always on, since it's just a flag with nothing
+  //     to configure.
+  //   --shm-size sets the shared-memory size. Docker gives a container only 64MB
+  //     of /dev/shm by default, which Chromium runs out of on large pages and
+  //     then either spills to disk (slow) or crashes. Defaults to 1g; set
+  //     CONTAINER_SHM_SIZE to empty to turn it off.
+  args.push('--init');
+  if (CONTAINER_SHM_SIZE) args.push(`--shm-size=${CONTAINER_SHM_SIZE}`);
 
   // Per-container resource caps (opt-in; empty = unbounded, today's behavior).
   // Only --memory is set. Whether that's a hard cap depends on the host having no
