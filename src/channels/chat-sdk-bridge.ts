@@ -112,6 +112,42 @@ function resolveSelectedOption(
   return candidate;
 }
 
+/**
+ * Render a thread's prior messages (fetched fresh from the platform, not
+ * from our own session/continuation state) as a text block, for a wiring
+ * that requires re-mention on every turn and so never sees un-tagged
+ * messages. See DECISIONS.md "Reload thread from platform on @mention"
+ * for why this replaces continuation-based memory for that case.
+ *
+ * Returns undefined when there's nothing to add (thread has no messages
+ * besides the one that triggered this fetch) or when the platform read
+ * fails — callers treat this as a best-effort enrichment, never a
+ * precondition for delivering the triggering message.
+ */
+export async function fetchThreadContext(
+  adapter: Pick<Adapter, 'fetchMessages'>,
+  threadId: string,
+  currentMessageId: string,
+): Promise<string | undefined> {
+  try {
+    const { messages } = await adapter.fetchMessages(threadId, { direction: 'forward', limit: 200 });
+    const prior = messages.filter((m) => m.id !== currentMessageId);
+    if (prior.length === 0) return undefined;
+    const lines = prior.map((m) => {
+      const name = m.author?.fullName ?? m.author?.userName ?? 'unknown';
+      const time = m.metadata?.dateSent ? new Date(m.metadata.dateSent).toISOString().slice(11, 16) : '';
+      return `[${time}] ${name}: ${m.text}`;
+    });
+    return (
+      `[Thread context — ${prior.length} earlier message(s) in this thread, fetched fresh from the platform]\n` +
+      `${lines.join('\n')}\n[End of thread context]`
+    );
+  } catch (err) {
+    log.warn('Failed to fetch thread history for mention context', { threadId, err });
+    return undefined;
+  }
+}
+
 export function splitForLimit(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
@@ -259,9 +295,23 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       });
 
       // @mention in an unsubscribed thread — SDK-confirmed bot mention.
+      //
+      // engage_mode='mention' wirings never subscribe the thread (see
+      // router.ts subscribe-on-mention-sticky comment), so every reply here
+      // — including a re-mention deep in an existing thread — would
+      // otherwise only see this one message. Reload the thread from the
+      // platform so re-tagging picks up everything since the bot last
+      // spoke, without depending on the agent's own (fragile,
+      // container-lifecycle-bound) session continuation.
       chat.onNewMention(async (thread, message) => {
         const channelId = adapter.channelIdFromThreadId(thread.id);
-        await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, true, true));
+        const inbound = await messageToInbound(message, true, true);
+        const threadContext = await fetchThreadContext(adapter, thread.id, message.id);
+        if (threadContext) {
+          const content = inbound.content as Record<string, unknown>;
+          content.text = `${threadContext}\n\n[New tagged message]: ${content.text ?? ''}`;
+        }
+        await setupConfig.onInbound(channelId, thread.id, inbound);
       });
 
       // DMs — by definition addressed to the bot. Thread id flows through

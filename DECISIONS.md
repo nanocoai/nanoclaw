@@ -1,0 +1,15 @@
+# Decisions
+
+Non-obvious design choices, recorded where they land. Newest entries at the top. If a later entry supersedes an earlier one, it says so explicitly.
+
+## Reload thread from platform on @mention, instead of relying on session continuation (2026-07-01)
+
+**Decision:** For chat-sdk channels (Slack, Discord), when `chat.onNewMention` fires, fetch the thread's prior messages directly from the platform (`adapter.fetchMessages`) and prepend them as context, rather than depending on the agent provider's own multi-turn session/continuation state to carry memory forward. Implemented in `src/channels/chat-sdk-bridge.ts` (`fetchThreadContext`).
+
+**Why:** An `engage_mode: 'mention'` wiring (bot only replies when explicitly `@`-tagged, every turn) never calls `adapter.subscribe()`, so it never dispatches through `onSubscribedMessage`. That means any message posted in the thread without a mention is invisible to the agent — not stored, not forwarded — even though humans keep discussing the bot's answer in that thread. The bot's own continuation chain (Claude Code's `--resume`) only ever contained the messages actually sent to it, so it was already missing the human back-and-forth; it also turned out to be fragile in its own right — a container hitting its lifecycle ceiling and getting killed mid-turn corrupted the stored resume id, and the next `@mention` came back with `No conversation found with session ID: ...` and a fully wiped conversation.
+
+**Alternative considered and rejected:** Set `ignored_message_policy: 'accumulate'` so un-tagged messages get stored and included in the next turn's prompt. Rejected because it still routes all memory through the same continuation chain that's already shown itself to be fragile under container-lifecycle churn (kills, restarts, provider swaps) — it would have narrowed the gap without removing the failure mode that actually caused the visible incident.
+
+**Trade-off accepted:** Every `@mention` now costs one extra platform read (`conversations.replies` on Slack) and the agent starts each turn without the model's own cached reasoning/tool state from its previous turn — it re-derives from source data if asked to explain an earlier answer. Considered acceptable: thread reads are cheap for the thread sizes this bot handles, and re-deriving avoids restating a possibly-stale cached number.
+
+**Verified by:** `src/channels/chat-sdk-bridge.test.ts` — `fetchThreadContext` unit tests cover: no prior messages → `undefined`; prior messages formatted and ordered, current message excluded; missing author name falls back to `'unknown'`; adapter read failure → `undefined`, not a thrown error. The `onNewMention` wiring itself (the two-line splice into `content.text`) is not separately covered — none of this file's four SDK dispatch handlers are exercised by a test harness today (dispatch logic is intentionally deferred to `host-core.test.ts`'s end-to-end router tests per this file's existing top-of-suite comment), and building that harness was out of scope for this fix.

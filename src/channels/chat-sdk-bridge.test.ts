@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
+import type { Adapter, AdapterPostableMessage, Message, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, fetchThreadContext, splitForLimit } from './chat-sdk-bridge.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
@@ -10,6 +10,30 @@ vi.mock('../webhook-server.js', () => ({
 
 function stubAdapter(partial: Partial<Adapter>): Adapter {
   return { name: 'stub', ...partial } as unknown as Adapter;
+}
+
+interface FakeMessageOverrides {
+  id: string;
+  text?: string;
+  author?: { fullName?: string; userName?: string };
+  dateSent?: string;
+}
+
+// fetchThreadContext only reads id/text/author/metadata.dateSent — this fake
+// covers exactly that surface and is cast to Message since building a full
+// Message (formatted/raw/attachments/links) adds nothing this test reads.
+function fakeMessage({
+  id,
+  text = 'default message text',
+  author = { fullName: 'Default Author' },
+  dateSent = '2026-01-01T09:05:00.000Z',
+}: FakeMessageOverrides): Message {
+  return {
+    id,
+    text,
+    author,
+    metadata: { dateSent: new Date(dateSent) },
+  } as unknown as Message;
 }
 
 interface PostCall {
@@ -51,6 +75,65 @@ describe('splitForLimit', () => {
     expect(chunks.length).toBe(Math.ceil(100 / 30));
     for (const c of chunks) expect(c.length).toBeLessThanOrEqual(30);
     expect(chunks.join('')).toBe(text);
+  });
+});
+
+describe('fetchThreadContext', () => {
+  it('returns undefined when the thread has no messages besides the one that triggered the fetch', async () => {
+    const adapter = stubAdapter({
+      fetchMessages: async () => ({ messages: [fakeMessage({ id: 'm1' })] }),
+    });
+
+    const context = await fetchThreadContext(adapter, 'thread-1', 'm1');
+
+    expect(context).toBeUndefined();
+  });
+
+  it('formats prior messages in chronological order, excluding the triggering message', async () => {
+    const adapter = stubAdapter({
+      fetchMessages: async () => ({
+        messages: [
+          fakeMessage({ id: 'm1', text: 'what are the most viewed flags?', author: { fullName: 'Greg' } }),
+          fakeMessage({ id: 'm2', text: 'maybe ask about instances instead', author: { fullName: 'Alice' } }),
+          fakeMessage({ id: 'm3', text: 'the re-mention that triggered this fetch' }),
+        ],
+      }),
+    });
+
+    const context = await fetchThreadContext(adapter, 'thread-1', 'm3');
+
+    expect(context).toContain('2 earlier message(s)');
+    expect(context).toContain('Greg: what are the most viewed flags?');
+    expect(context).toContain('Alice: maybe ask about instances instead');
+    expect(context).not.toContain('the re-mention that triggered this fetch');
+    expect(context!.indexOf('Greg:')).toBeLessThan(context!.indexOf('Alice:'));
+  });
+
+  it("falls back to 'unknown' when the message has no author name", async () => {
+    const adapter = stubAdapter({
+      fetchMessages: async () => ({
+        messages: [
+          fakeMessage({ id: 'm1', author: {}, text: 'a message with no author name' }),
+          fakeMessage({ id: 'm2' }),
+        ],
+      }),
+    });
+
+    const context = await fetchThreadContext(adapter, 'thread-1', 'm2');
+
+    expect(context).toContain('unknown: a message with no author name');
+  });
+
+  it('returns undefined, not a thrown error, when the platform read fails', async () => {
+    const adapter = stubAdapter({
+      fetchMessages: async () => {
+        throw new Error('Slack API rate limited');
+      },
+    });
+
+    const context = await fetchThreadContext(adapter, 'thread-1', 'm1');
+
+    expect(context).toBeUndefined();
   });
 });
 
