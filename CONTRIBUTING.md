@@ -125,6 +125,10 @@ Instructions here...
 - Put code in separate files, not inline in the markdown
 - See the [skills standard](https://code.claude.com/docs/en/skills) for all available frontmatter fields
 
+## Templates
+
+Agent templates (reusable bundles of instructions + MCP servers + skills) ship in the separate [`nanocoai/nanoclaw-templates`](https://github.com/nanocoai/nanoclaw-templates) repo, not this one. Contribute them there via PR (its README has the anatomy and checklist). For how templates load and the OneCLI credential model, see [docs/templates.md](docs/templates.md).
+
 ## Testing
 
 Test your contribution on a fresh clone before submitting. For skills, run the skill end-to-end and verify it works.
