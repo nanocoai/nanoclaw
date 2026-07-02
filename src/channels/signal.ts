@@ -276,6 +276,69 @@ class EchoCache {
 }
 
 // ---------------------------------------------------------------------------
+// ask_question text fallback
+//
+// Signal has no native interactive/button support, so `deliver()` renders
+// approval and ask_user_question cards (content.type === 'ask_question') as
+// plain numbered text. This cache remembers the pending card per DM so the
+// next plain-text reply from that sender can be matched against an option
+// and routed through the normal onAction path — the same path a button
+// click would take on a Chat-SDK channel.
+// ---------------------------------------------------------------------------
+
+interface NormalizedOption {
+  label: string;
+  selectedLabel: string;
+  value: string;
+}
+
+const ARMED_QUESTION_TTL_MS = 30 * 60 * 1000;
+
+/**
+ * DB-stored DM platform IDs are usually 'signal:'-prefixed, but some callers
+ * (`ensureUserDm`'s direct-addressable path) mint an unprefixed messaging_group
+ * for the same contact — see the note in ensureUserDm/openDM. Normalizing to
+ * the bare number/UUID here keeps arm() and match() keyed consistently
+ * regardless of which messaging_group a given delivery went through.
+ */
+function stripSignalPrefix(id: string): string {
+  return id.startsWith('signal:') ? id.slice('signal:'.length) : id;
+}
+
+class ArmedQuestions {
+  private entries = new Map<string, { questionId: string; options: NormalizedOption[]; expiresAt: number }>();
+
+  arm(platformId: string, questionId: string, options: NormalizedOption[]): void {
+    this.entries.set(platformId, { questionId, options, expiresAt: Date.now() + ARMED_QUESTION_TTL_MS });
+  }
+
+  /** Matches free text against the armed options by 1-based index, value, or label (case-insensitive). */
+  match(platformId: string, text: string): { questionId: string; value: string } | undefined {
+    const entry = this.entries.get(platformId);
+    if (!entry) return undefined;
+    if (Date.now() > entry.expiresAt) {
+      this.entries.delete(platformId);
+      return undefined;
+    }
+    const trimmed = text.trim();
+    const asIndex = Number(trimmed);
+    let option: NormalizedOption | undefined;
+    if (Number.isInteger(asIndex) && asIndex >= 1 && asIndex <= entry.options.length) {
+      option = entry.options[asIndex - 1];
+    } else {
+      const lower = trimmed.toLowerCase();
+      option = entry.options.find(
+        (o) =>
+          o.label.toLowerCase() === lower || o.value.toLowerCase() === lower || o.selectedLabel.toLowerCase() === lower,
+      );
+    }
+    if (!option) return undefined;
+    this.entries.delete(platformId);
+    return { questionId: entry.questionId, value: option.value };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Signal envelope types
 // ---------------------------------------------------------------------------
 
@@ -530,6 +593,7 @@ export function createSignalAdapter(config: {
   let tcp: SignalTcpClient | null = null;
   let connected = false;
   const echoCache = new EchoCache();
+  const armedQuestions = new ArmedQuestions();
   let setup: ChannelSetup | null = null;
 
   // -- inbound handling --
@@ -607,6 +671,22 @@ export function createSignalAdapter(config: {
     const isGroup = Boolean(groupId);
 
     const platformId = isGroup ? `group:${groupId}` : `signal:${sender}`;
+
+    // A DM reply to a pending ask_question/approval card wins over normal
+    // routing — it's the text-only equivalent of a button click. Non-matches
+    // (or expired cards) fall through to normal chat handling below.
+    if (!isGroup && text) {
+      const matched = armedQuestions.match(sender, text);
+      if (matched) {
+        setup.onAction(matched.questionId, matched.value, sender);
+        log.info('Signal: text reply matched pending question', {
+          platformId,
+          questionId: matched.questionId,
+          value: matched.value,
+        });
+        return;
+      }
+    }
 
     if (text && echoCache.isEcho(platformId, text)) {
       log.debug('Signal: skipping echo', { platformId });
@@ -724,8 +804,7 @@ export function createSignalAdapter(config: {
           params.groupId = platformId.slice('group:'.length);
         } else {
           // DB stores DM platform IDs with 'signal:' prefix; signal-cli wants the raw UUID/number
-          const recipient = platformId.startsWith('signal:') ? platformId.slice('signal:'.length) : platformId;
-          params.recipient = [recipient];
+          params.recipient = [stripSignalPrefix(platformId)];
         }
 
         try {
@@ -776,8 +855,7 @@ export function createSignalAdapter(config: {
       if (platformId.startsWith('group:')) {
         params.groupId = platformId.slice('group:'.length);
       } else {
-        const recipient = platformId.startsWith('signal:') ? platformId.slice('signal:'.length) : platformId;
-        params.recipient = [recipient];
+        params.recipient = [stripSignalPrefix(platformId)];
       }
       await tcp.rpc('send', params);
       log.info('Signal attachments sent', { platformId, count: files.length, filenames: files.map((f) => f.filename) });
@@ -903,6 +981,24 @@ export function createSignalAdapter(config: {
         text = content;
       } else if (content && typeof content === 'object' && typeof content.text === 'string') {
         text = content.text;
+      } else if (content && typeof content === 'object' && content.type === 'ask_question') {
+        // No native buttons on Signal — render the card as numbered text and
+        // arm the DM so the next plain-text reply resolves it (see
+        // ArmedQuestions above and the inbound match in handleEnvelope).
+        const title = typeof content.title === 'string' ? content.title : '';
+        const question = typeof content.question === 'string' ? content.question : '';
+        const questionId = typeof content.questionId === 'string' ? content.questionId : '';
+        const options = Array.isArray(content.options) ? (content.options as NormalizedOption[]) : [];
+
+        if (questionId && options.length > 0) {
+          const numbered = options.map((o, i) => `${i + 1}. ${o.label}`).join('\n');
+          text = [title, question, numbered, 'Reply with the number (or text) of your choice.']
+            .filter(Boolean)
+            .join('\n\n');
+          armedQuestions.arm(stripSignalPrefix(platformId), questionId, options);
+        } else {
+          text = [title, question].filter(Boolean).join('\n\n') || null;
+        }
       }
 
       const files = message.files ?? [];
@@ -920,12 +1016,26 @@ export function createSignalAdapter(config: {
       if (platformId.startsWith('group:')) return;
 
       try {
-        const params: Record<string, unknown> = { recipient: [platformId] };
+        const params: Record<string, unknown> = { recipient: [stripSignalPrefix(platformId)] };
         if (config.account) params.account = config.account;
         await tcp.rpc('sendTyping', params);
       } catch (err) {
         log.debug('Signal: typing indicator failed', { platformId, err });
       }
+    },
+
+    /**
+     * Signal DMs don't fit the "handle IS the DM chat id" bucket cleanly:
+     * unlike Telegram/WhatsApp/iMessage, this codebase's convention stores
+     * Signal DM platform_ids with a 'signal:' prefix (to disambiguate from
+     * 'group:'-prefixed group ids). Without this method, ensureUserDm's
+     * direct-addressable fallback used the bare handle, minting a second,
+     * unprefixed messaging_group for the same contact on every cold-DM
+     * (approvals, pairing) — duplicate rows that never lined up with the
+     * prefixed group the router uses for normal inbound messages.
+     */
+    async openDM(userHandle: string): Promise<string> {
+      return `signal:${userHandle}`;
     },
   };
 
