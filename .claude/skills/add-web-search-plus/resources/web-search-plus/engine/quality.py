@@ -2,7 +2,7 @@
 
 import hashlib
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 
@@ -110,7 +110,127 @@ CANONICAL_DOMAIN_RULES: Dict[str, Dict[str, List[str]]] = {
 
 
 def _domain_matches_rule(domain: str, rule: str) -> bool:
-    return domain == rule or domain.endswith(f".{rule}") or domain.startswith(rule)
+    if rule.endswith("."):
+        # Label-prefix rules such as "docs." / "investor." / "ir." match a
+        # leading host label (docs.python.org), never a bare domain (notdocs.com).
+        return domain.startswith(rule)
+    # Exact domain or true subdomain only. A bare startswith would let
+    # look-alike registrations such as openai.com.evil.example inherit
+    # authority boosts (same reasoning as _blocked_domain_matches below).
+    return domain == rule or domain.endswith(f".{rule}")
+
+
+# Known content mirrors and SEO scraper sites that republish Stack Overflow,
+# GitHub, and documentation content. These add no information over the
+# canonical source and frequently outrank it; they are removed from results
+# rather than merely demoted. Operators can extend via config
+# quality.blocked_domains or rescue a domain via quality.allowed_domains.
+SPAM_MIRROR_DOMAINS: List[str] = [
+    # Stack Overflow / Q&A scrapers
+    "newbedev.com",
+    "stackoom.com",
+    "stackovergo.com",
+    "syntaxfix.com",
+    "copyprogramming.com",
+    "devcodef1.com",
+    "exceptionshub.com",
+    "code-examples.net",
+    "i-harness.com",
+    "fixmycodeerror.com",
+    "stacklesson.com",
+    # GitHub issue/readme mirrors
+    "githubmemory.com",
+    "gitmemory.com",
+    "issueexplorer.com",
+    "bleepcoder.com",
+    "gitanswer.com",
+    # Documentation mirrors
+    "w3cub.com",
+    # Generic AI/SEO content farms already demoted by the intent reranker
+    "aizolo.com",
+]
+
+
+def _blocked_domain_matches(domain: str, rule: str) -> bool:
+    """Strict matcher for domain block/allow lists.
+
+    Only the exact domain or true subdomains match (``newbedev.com``,
+    ``de.newbedev.com``). Unlike ``_domain_matches_rule`` there is no
+    ``startswith`` clause, so look-alike registrations such as
+    ``newbedev.com.evil.example`` do NOT match.
+    """
+    return domain == rule or domain.endswith(f".{rule}")
+
+
+_SITE_OPERATOR_RE = re.compile(r"\bsite:([a-z0-9][a-z0-9.-]*)", re.IGNORECASE)
+
+
+def extract_domain_constraints(query: str, include_domains: Optional[List[str]] = None) -> List[str]:
+    """Domains the user explicitly constrained the search to.
+
+    Collects ``site:`` operators from the query plus ``include_domains``.
+    Explicit constraints express intent: constrained domains are exempt from
+    spam filtering, and domain-diversity reranking is skipped entirely.
+    """
+    domains = [d.lower().rstrip(".") for d in _SITE_OPERATOR_RE.findall(query or "")]
+    for entry in include_domains or []:
+        if entry and entry.strip():
+            domains.append(entry.lower().strip())
+    return sorted(set(domains))
+
+
+def filter_spam_results(
+    results: List[Dict[str, Any]],
+    extra_blocked: Optional[List[str]] = None,
+    allowed: Optional[List[str]] = None,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Drop results from known mirror/SEO-spam domains.
+
+    Returns the kept results and the sorted unique domains that were removed.
+    ``allowed`` rescues a domain from both the builtin and extra blocklists.
+    """
+    blocked_rules = SPAM_MIRROR_DOMAINS + [d.lower().strip() for d in (extra_blocked or []) if d and d.strip()]
+    allowed_rules = [d.lower().strip() for d in (allowed or []) if d and d.strip()]
+    kept: List[Dict[str, Any]] = []
+    removed_domains: List[str] = []
+    for item in results:
+        domain = _result_domain(item.get("url", ""))
+        if (
+            domain
+            and not any(_blocked_domain_matches(domain, rule) for rule in allowed_rules)
+            and any(_blocked_domain_matches(domain, rule) for rule in blocked_rules)
+        ):
+            removed_domains.append(domain)
+            continue
+        kept.append(item)
+    return kept, sorted(set(removed_domains))
+
+
+def rerank_domain_diversity(
+    results: List[Dict[str, Any]],
+    max_per_domain: int = 2,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Stable rerank that stops one domain from crowding out the result list.
+
+    The first ``max_per_domain`` results per domain keep their original order;
+    overflow results are moved behind the diverse head (also in original
+    order) instead of being dropped. Returns the reranked list and how many
+    results were demoted.
+    """
+    if max_per_domain < 1 or len(results) < 3:
+        return results, 0
+    head: List[Dict[str, Any]] = []
+    overflow: List[Dict[str, Any]] = []
+    per_domain: Dict[str, int] = {}
+    for item in results:
+        domain = _result_domain(item.get("url", ""))
+        count = per_domain.get(domain, 0)
+        if domain and count >= max_per_domain:
+            overflow.append(item)
+            continue
+        per_domain[domain] = count + 1
+        head.append(item)
+    return head + overflow, len(overflow)
 
 
 def _url_matches_rule(url: str, rule: str) -> bool:
@@ -272,6 +392,7 @@ def build_quality_report(
         "extract_recommended": bool(extract_reasons),
         "extract_reasons": extract_reasons,
         "scores": routing_info.get("scores", {}),
+        "adaptive_adjustments": routing_info.get("adaptive_adjustments", {}),
         "authority_signals": authority_signals,
     }
 

@@ -5,10 +5,128 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from config import DEFAULT_CONFIG, get_api_key
 from provider_registry import DEFAULT_PROVIDER_PRIORITY
+from provider_stats import performance_adjustments
 from quality import _choose_tie_winner
 
 
 ROUTING_POLICY = "routing-v2"
+
+
+# Ordered routing-class rules from the qualitative 25-query benchmark.
+# Each entry maps a class name to one or more regex pattern groups; a class
+# matches when every group matches the lowercased query. Entries are evaluated
+# top to bottom and the first match wins, so order is part of the behavior.
+# Synthesis/briefing queries should prefer broad real-time/search providers,
+# but Web Search Plus no longer exposes a separate answer tool.
+ROUTING_CLASS_RULES: List[Tuple[str, Tuple[str, ...]]] = [
+    ("briefing_synthesis", (
+        r'\b(difference|differences|unterschiede|vergleich|compare|comparison|brief(?:ing)?|summari[sz]e|zusammenfass(?:en|ung)|was sind|what are)\b',
+    )),
+    ("security_advisory", (
+        r'\b(advisory|security advisory|cve|mitigation|openssl|openssh|vulnerability|zero[-\s]?day)\b',
+    )),
+    ("patents", (
+        r'\b(patent|patents|patentscope|espacenet|uspto|google patents)\b',
+    )),
+    ("policy_pdf", (
+        r'\b(pdf|whitepaper|code of practice)\b',
+        r'\b(nist|eu ai act|regulation|regulatory|policy|commission|government|official|rmf)\b',
+    )),
+    ("official_regulatory", (
+        r'\b(eu ai act|european commission|regulation|regulatory|obligations?)\b',
+    )),
+    ("finance_earnings_official", (
+        r'\b(nvidia|earnings|gross margin|investor relations|guidance|10-[qk]|eps|revenue|quarterly results?)\b',
+    )),
+    ("finance_investor_monthly", (
+        r'\b(investor monthly|monthly factsheet|monthly report|aum|fund flows?)\b',
+    )),
+    ("reddit_community", (
+        r'\bsite:\s*reddit\.com\b|\br/\w+|\breddit\s+(thread|post|community|users?|discussion|comments?)\b',
+    )),
+    ("shopping_reviews_local", (
+        r'\b(geizhals|preis|prices?|buy|kaufen|österreich|austria|shop|händler|deal|angebot)\b',
+        r'\b(sony|denon|iphone|samsung|bose|kef|marantz|yamaha|lg|asus|laptop|tv|headphones?|speaker|receiver|avc|wh-|[a-z]{1,5}[-\s]?\d{3,}[a-z0-9-]*)\b',
+        r'\b(review(s)?|test|tests?|vergleich|best|beste|under|unter|erfahrungen)\b',
+    )),
+    ("shopping_specs", (
+        r'\b(geizhals|preis|prices?|buy|kaufen|österreich|austria|shop|händler|deal|angebot)\b',
+        r'\b(sony|denon|iphone|samsung|bose|kef|marantz|yamaha|lg|asus|laptop|tv|headphones?|speaker|receiver|avc|wh-|[a-z]{1,5}[-\s]?\d{3,}[a-z0-9-]*)\b',
+    )),
+    ("community_forum", (
+        r'\b(forum|forums|community|discussion|comments?|erfahrungen|review(s)?|measurements?|head-fi|audiosciencereview|hifi-forum)\b',
+    )),
+    ("academic_arxiv", (
+        r'\barxiv\b|\bpaper(s)?\b|\bscaling laws\b|\brandomi[sz]ed trial\b|\bprimary sources?\b',
+    )),
+    ("github_docs", (
+        r'\b(github\b|repo(sitory)?\b|plugin docs\b)',
+    )),
+    ("official_docs", (
+        r'\b(official docs?|official documentation|api reference|developer docs?|official manual)\b',
+    )),
+    ("official_vendor_release", (
+        r'\b(official|release|announcement|launch|changelog|release notes?)\b',
+        r'\b(mistral|anthropic|openai|google|meta|nvidia|apple|microsoft|claude|gemini|llama)\b',
+    )),
+    ("docs_api", (
+        r'\b(python|pydantic|node\.js|api docs?|documentation|docs|changelog|release notes?|taskgroup|basemodel)\b',
+    )),
+    ("official_regulatory", (
+        r'\b(official|regulatory filing|public authority)\b',
+    )),
+    ("local_at", (
+        r'\b(graz|öffnungszeiten|adresse|restaurants?|vegan|hifi team)\b',
+    )),
+    ("sports_current", (
+        r'\b(bundesliga|standings?|fixtures?|tabelle|punkte|spieltag|matchday|lineups?|scores?|sturm|salzburg|lask)\b|\b(league|liga|standings?|points?)\s+table\b',
+    )),
+    ("weather_local", (
+        r'\b(wetter|weather|forecast|regen|rain)\b',
+    )),
+    ("oss_discovery", (
+        r'\b(alternatives? to|open source|self hosted|competitors?|similar to)\b',
+    )),
+]
+
+# Fallback classes assigned when no rule above matches.
+MULTILINGUAL_ROUTING_CLASS = "multilingual_current"
+DEFAULT_ROUTING_CLASS = "general"
+
+# Script/language-aware boosts for current queries in non-en/de languages:
+# You performed best as the safe fast default, with Exa/Firecrawl/Linkup
+# useful by script. Kept modest so strong class rules win.
+LANGUAGE_HINT_PROVIDER_BOOSTS: Dict[str, List[Tuple[str, float]]] = {
+    "zh": [("exa", 7.0), ("you", 6.0), ("firecrawl", 4.0), ("linkup", 3.0), ("serper", 2.5)],
+    "ar": [("you", 8.0), ("linkup", 5.0), ("serper", 4.0), ("firecrawl", 2.0)],
+    "default": [("you", 8.0), ("exa", 5.0), ("firecrawl", 4.0), ("linkup", 3.0), ("tavily", 2.0)],
+}
+
+# Conservative class-aware provider boosts (positive) and penalties (negative)
+# from the qualitative routing benchmark, applied on top of the signal scores.
+ROUTING_CLASS_PROVIDER_BOOSTS: Dict[str, List[Tuple[str, float]]] = {
+    "shopping_at": [("serper", 8.0), ("firecrawl", 6.0), ("linkup", 4.0), ("you", 2.0), ("exa", -2.0)],
+    "local_at": [("firecrawl", 8.0), ("serper", 6.0), ("linkup", 4.0), ("you", 2.0)],
+    "official_vendor_release": [("you", 14.0), ("linkup", 10.0), ("exa", 7.0), ("serper", 4.0), ("firecrawl", 3.0)],
+    "official_docs": [("exa", 12.0), ("you", 7.0), ("firecrawl", 5.0), ("serper", 3.0), ("tavily", 2.0)],
+    "policy_pdf": [("linkup", 10.0), ("exa", 8.0), ("serper", 7.0), ("firecrawl", 6.0), ("you", 4.0)],
+    "official_regulatory": [("exa", 8.0), ("firecrawl", 6.0), ("serper", 5.0), ("you", 3.0)],
+    "sports_current": [("you", 8.0), ("serper", 6.0), ("linkup", 5.0), ("tavily", 2.0)],
+    "github_docs": [("exa", 10.0), ("you", 6.0), ("firecrawl", 5.0), ("serper", 4.0)],
+    "docs_api": [("serper", 6.0), ("exa", 5.0), ("you", 4.0), ("firecrawl", 3.0), ("tavily", 3.0)],
+    "academic_arxiv": [("exa", 12.0), ("serper", 3.0), ("linkup", 2.0), ("you", 1.5)],
+    "oss_discovery": [("exa", 8.0), ("firecrawl", 5.0), ("tavily", 4.0), ("you", 3.0)],
+    "reddit_community": [("serper", 10.0), ("firecrawl", 8.0), ("tavily", 6.0), ("exa", -20.0)],
+    "security_advisory": [("serper", 10.0), ("exa", 8.0), ("linkup", 5.0), ("you", 2.0), ("firecrawl", -20.0)],
+    "finance_earnings_official": [("linkup", 14.0), ("you", 9.0), ("exa", 7.0), ("serper", 6.0), ("firecrawl", 4.0)],
+    "finance_investor_monthly": [("linkup", 12.0), ("serper", 7.0), ("you", 5.0), ("exa", 4.0)],
+    "community_forum": [("firecrawl", 10.0), ("serper", 8.0), ("tavily", 5.0), ("you", 4.0), ("exa", -18.0)],
+    "shopping_specs": [("serper", 9.0), ("firecrawl", 6.0), ("linkup", 4.0), ("you", 2.0), ("exa", -2.0)],
+    "shopping_reviews_local": [("serper", 9.0), ("firecrawl", 7.0), ("you", 4.0), ("tavily", 3.0), ("exa", -4.0)],
+    "patents": [("exa", 10.0), ("serper", 7.0), ("linkup", 4.0), ("you", 3.0)],
+    "weather_local": [("serper", 8.0), ("firecrawl", 6.0), ("you", 2.0)],
+    "briefing_synthesis": [("you", 16.0), ("tavily", 4.0), ("linkup", 3.0), ("exa", 2.0)],
+}
 
 
 class QueryAnalyzer:
@@ -640,56 +758,12 @@ class QueryAnalyzer:
     def _detect_routing_class(self, query: str, language_hint: str) -> str:
         """Coarse class labels from the qualitative 25-query benchmark."""
         q = query.lower()
-        # Synthesis/briefing queries should prefer broad real-time/search providers,
-        # but Web Search Plus no longer exposes a separate answer tool.
-        if re.search(r'\b(difference|differences|unterschiede|vergleich|compare|comparison|brief(?:ing)?|summari[sz]e|zusammenfass(?:en|ung)|was sind|what are)\b', q):
-            return "briefing_synthesis"
-        if re.search(r'\b(advisory|security advisory|cve|mitigation|openssl|openssh|vulnerability|zero[-\s]?day)\b', q):
-            return "security_advisory"
-        if re.search(r'\b(patent|patents|patentscope|espacenet|uspto|google patents)\b', q):
-            return "patents"
-        if re.search(r'\b(pdf|whitepaper|code of practice)\b', q) and re.search(r'\b(nist|eu ai act|regulation|regulatory|policy|commission|government|official|rmf)\b', q):
-            return "policy_pdf"
-        if re.search(r'\b(eu ai act|european commission|regulation|regulatory|obligations?)\b', q):
-            return "official_regulatory"
-        if re.search(r'\b(nvidia|earnings|gross margin|investor relations|guidance|10-[qk]|eps|revenue|quarterly results?)\b', q):
-            return "finance_earnings_official"
-        if re.search(r'\b(investor monthly|monthly factsheet|monthly report|aum|fund flows?)\b', q):
-            return "finance_investor_monthly"
-        if re.search(r'\bsite:\s*reddit\.com\b|\br/\w+|\breddit\s+(thread|post|community|users?|discussion|comments?)\b', q):
-            return "reddit_community"
-        if (
-            re.search(r'\b(geizhals|preis|prices?|buy|kaufen|österreich|austria|shop|händler|deal|angebot)\b', q)
-            and re.search(r'\b(sony|denon|iphone|samsung|bose|kef|marantz|yamaha|lg|asus|laptop|tv|headphones?|speaker|receiver|avc|wh-|[a-z]{1,5}[-\s]?\d{3,}[a-z0-9-]*)\b', q)
-        ):
-            if re.search(r'\b(review(s)?|test|tests?|vergleich|best|beste|under|unter|erfahrungen)\b', q):
-                return "shopping_reviews_local"
-            return "shopping_specs"
-        if re.search(r'\b(forum|forums|community|discussion|comments?|erfahrungen|review(s)?|measurements?|head-fi|audiosciencereview|hifi-forum)\b', q):
-            return "community_forum"
-        if re.search(r'\barxiv\b|\bpaper(s)?\b|\bscaling laws\b|\brandomi[sz]ed trial\b|\bprimary sources?\b', q):
-            return "academic_arxiv"
-        if re.search(r'\b(github\b|repo(sitory)?\b|plugin docs\b)', q):
-            return "github_docs"
-        if re.search(r'\b(official docs?|official documentation|api reference|developer docs?|official manual)\b', q):
-            return "official_docs"
-        if re.search(r'\b(official|release|announcement|launch|changelog|release notes?)\b', q) and re.search(r'\b(mistral|anthropic|openai|google|meta|nvidia|apple|microsoft|claude|gemini|llama)\b', q):
-            return "official_vendor_release"
-        if re.search(r'\b(python|pydantic|node\.js|api docs?|documentation|docs|changelog|release notes?|taskgroup|basemodel)\b', q):
-            return "docs_api"
-        if re.search(r'\b(official|regulatory filing|public authority)\b', q):
-            return "official_regulatory"
-        if re.search(r'\b(graz|öffnungszeiten|adresse|restaurants?|vegan|hifi team)\b', q):
-            return "local_at"
-        if re.search(r'\b(bundesliga|standings?|fixtures?|tabelle|punkte|spieltag|matchday|lineups?|scores?|sturm|salzburg|lask)\b|\b(league|liga|standings?|points?)\s+table\b', q):
-            return "sports_current"
-        if re.search(r'\b(wetter|weather|forecast|regen|rain)\b', q):
-            return "weather_local"
-        if re.search(r'\b(alternatives? to|open source|self hosted|competitors?|similar to)\b', q):
-            return "oss_discovery"
+        for routing_class, patterns in ROUTING_CLASS_RULES:
+            if all(re.search(pattern, q) for pattern in patterns):
+                return routing_class
         if language_hint not in {"en", "de"}:
-            return "multilingual_current"
-        return "general"
+            return MULTILINGUAL_ROUTING_CLASS
+        return DEFAULT_ROUTING_CLASS
 
     def _apply_vnext_routing_boosts(
         self,
@@ -713,56 +787,14 @@ class QueryAnalyzer:
         # Script/language-aware current queries: You performed best as the safe fast default,
         # with Exa/Firecrawl/Linkup useful by script. Keep this modest so strong class rules win.
         if language_hint not in {"en", "de"}:
-            if language_hint == "zh":
-                boost_many([("exa", 7.0), ("you", 6.0), ("firecrawl", 4.0), ("linkup", 3.0), ("serper", 2.5)])
-            elif language_hint == "ar":
-                boost_many([("you", 8.0), ("linkup", 5.0), ("serper", 4.0), ("firecrawl", 2.0)])
-            else:
-                boost_many([("you", 8.0), ("exa", 5.0), ("firecrawl", 4.0), ("linkup", 3.0), ("tavily", 2.0)])
+            boost_many(LANGUAGE_HINT_PROVIDER_BOOSTS.get(
+                language_hint, LANGUAGE_HINT_PROVIDER_BOOSTS["default"]
+            ))
             boost("you", min(recency_score, 3.0))
 
-        if routing_class == "shopping_at":
-            boost_many([("serper", 8.0), ("firecrawl", 6.0), ("linkup", 4.0), ("you", 2.0), ("exa", -2.0)])
-        elif routing_class == "local_at":
-            boost_many([("firecrawl", 8.0), ("serper", 6.0), ("linkup", 4.0), ("you", 2.0)])
-        elif routing_class == "official_vendor_release":
-            boost_many([("you", 14.0), ("linkup", 10.0), ("exa", 7.0), ("serper", 4.0), ("firecrawl", 3.0)])
-        elif routing_class == "official_docs":
-            boost_many([("exa", 12.0), ("you", 7.0), ("firecrawl", 5.0), ("serper", 3.0), ("tavily", 2.0)])
-        elif routing_class == "policy_pdf":
-            boost_many([("linkup", 10.0), ("exa", 8.0), ("serper", 7.0), ("firecrawl", 6.0), ("you", 4.0)])
-        elif routing_class == "official_regulatory":
-            boost_many([("exa", 8.0), ("firecrawl", 6.0), ("serper", 5.0), ("you", 3.0)])
-        elif routing_class == "sports_current":
-            boost_many([("you", 8.0), ("serper", 6.0), ("linkup", 5.0), ("tavily", 2.0)])
-        elif routing_class == "github_docs":
-            boost_many([("exa", 10.0), ("you", 6.0), ("firecrawl", 5.0), ("serper", 4.0)])
-        elif routing_class == "docs_api":
-            boost_many([("serper", 6.0), ("exa", 5.0), ("you", 4.0), ("firecrawl", 3.0), ("tavily", 3.0)])
-        elif routing_class == "academic_arxiv":
-            boost_many([("exa", 12.0), ("serper", 3.0), ("linkup", 2.0), ("you", 1.5)])
-        elif routing_class == "oss_discovery":
-            boost_many([("exa", 8.0), ("firecrawl", 5.0), ("tavily", 4.0), ("you", 3.0)])
-        elif routing_class == "reddit_community":
-            boost_many([("serper", 10.0), ("firecrawl", 8.0), ("tavily", 6.0), ("exa", -20.0)])
-        elif routing_class == "security_advisory":
-            boost_many([("serper", 10.0), ("exa", 8.0), ("linkup", 5.0), ("you", 2.0), ("firecrawl", -20.0)])
-        elif routing_class == "finance_earnings_official":
-            boost_many([("linkup", 14.0), ("you", 9.0), ("exa", 7.0), ("serper", 6.0), ("firecrawl", 4.0)])
-        elif routing_class == "finance_investor_monthly":
-            boost_many([("linkup", 12.0), ("serper", 7.0), ("you", 5.0), ("exa", 4.0)])
-        elif routing_class == "community_forum":
-            boost_many([("firecrawl", 10.0), ("serper", 8.0), ("tavily", 5.0), ("you", 4.0), ("exa", -18.0)])
-        elif routing_class == "shopping_specs":
-            boost_many([("serper", 9.0), ("firecrawl", 6.0), ("linkup", 4.0), ("you", 2.0), ("exa", -2.0)])
-        elif routing_class == "shopping_reviews_local":
-            boost_many([("serper", 9.0), ("firecrawl", 7.0), ("you", 4.0), ("tavily", 3.0), ("exa", -4.0)])
-        elif routing_class == "patents":
-            boost_many([("exa", 10.0), ("serper", 7.0), ("linkup", 4.0), ("you", 3.0)])
-        elif routing_class == "weather_local":
-            boost_many([("serper", 8.0), ("firecrawl", 6.0), ("you", 2.0)])
-        elif routing_class == "briefing_synthesis":
-            boost_many([("you", 16.0), ("tavily", 4.0), ("linkup", 3.0), ("exa", 2.0)])
+        class_boosts = ROUTING_CLASS_PROVIDER_BOOSTS.get(routing_class)
+        if class_boosts:
+            boost_many(class_boosts)
 
     def analyze(self, query: str) -> Dict[str, Any]:
         """
@@ -925,6 +957,19 @@ class QueryAnalyzer:
                 "auto_allow_excluded": auto_excluded,
             }
 
+        # Adaptive routing: blend in bounded, learned performance adjustments
+        # (latency / success / empty-result history of real calls). Only when
+        # query-class signals matched at all — performance memory breaks close
+        # calls but never invents a winner out of silence.
+        adaptive_adjustments: Dict[str, float] = {}
+        if max(available.values()) > 0 and self.auto_config.get("adaptive_routing", True):
+            adaptive_adjustments = performance_adjustments(list(available))
+            if adaptive_adjustments:
+                available = {
+                    p: max(0.0, s + adaptive_adjustments.get(p, 0.0))
+                    for p, s in available.items()
+                }
+
         # Find the winner
         max_score = max(available.values())
 
@@ -994,6 +1039,7 @@ class QueryAnalyzer:
             "routing_policy": ROUTING_POLICY,
             "exa_depth": exa_depth,
             "scores": {p: round(s, 2) for p, s in available.items()},
+            "adaptive_adjustments": adaptive_adjustments,
             "winning_score": round(max_score, 2),
             "top_signals": [
                 {"matched": s["matched"], "weight": s["weight"]}

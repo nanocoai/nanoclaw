@@ -120,5 +120,5 @@ cooldown state, and the cache status.
 
 The engine under `engine/` is vendored from
 [`hermes-web-search-plus`](https://github.com/robbyczgw-cla/hermes-web-search-plus)
-(v2.4.0 @ `373024c`). Pure stdlib, zero Python dependencies. Engine bugs are
+(v2.8.1 @ `373024c`). Pure stdlib, zero Python dependencies. Engine bugs are
 fixed upstream and pulled in via sync commits to this skill, never patched here.

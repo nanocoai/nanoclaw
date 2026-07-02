@@ -26,6 +26,18 @@ def clean_env_value(value: str) -> Optional[str]:
     return None if is_placeholder_env_value(stripped) else stripped
 
 
+_TRUTHY_VALUES = {"1", "true", "yes", "on"}
+
+
+def is_truthy(value: object) -> bool:
+    """Strict opt-in parse: only 1/true/yes/on are truthy, so a present-but-false value never enables an egress flag."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().strip('"').strip("'").lower() in _TRUTHY_VALUES
+
+
 def get_hermes_env_path() -> Path:
     """Return Hermes' profile-aware .env path when available."""
     try:
@@ -66,7 +78,7 @@ def load_env_files(anchor_file: Union[str, Path], environ: Optional[MutableMappi
         if not env_path.exists():
             continue
         loaded.append(env_path)
-        for raw_line in env_path.read_text().splitlines():
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
             line = raw_line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue

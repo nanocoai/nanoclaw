@@ -1,13 +1,18 @@
 """Provider implementations for Web Search Plus search and extraction backends."""
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 import json
 import re
+import socket
+import sys
+import threading
+import time
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from daemon_tasks import DaemonTask
 from http_client import (
     DEFAULT_USER_AGENT,
     ProviderRequestError,
@@ -18,6 +23,85 @@ from http_client import (
     make_request,
 )
 from quality import _title_from_url
+
+
+# Extra scheduling headroom added on top of the per-request HTTP timeout when
+# bounding a concurrent extraction batch.
+_BATCH_TIMEOUT_GRACE_SECONDS = 5
+
+
+# =============================================================================
+# Unified freshness filter
+# =============================================================================
+
+FRESHNESS_VALUES = ("day", "week", "month", "year")
+
+# Native recency formats per provider, derived from the request bodies the
+# provider functions in this module already send. Providers absent from this
+# table (tavily, exa, linkup, parallel, serpbase) have no relative-recency
+# parameter in their current API calls, so no native value is invented for them.
+PROVIDER_FRESHNESS_FORMATS: Dict[str, Dict[str, str]] = {
+    # search_serper: body["tbs"]
+    "serper": {"day": "qdr:d", "week": "qdr:w", "month": "qdr:m", "year": "qdr:y"},
+    # search_brave: params["freshness"]
+    "brave": {"day": "pd", "week": "pw", "month": "pm", "year": "py"},
+    # search_querit: filters["timeRange"]["date"]
+    "querit": {"day": "d1", "week": "w1", "month": "m1", "year": "y1"},
+    # search_firecrawl: body["tbs"]
+    "firecrawl": {"day": "qdr:d", "week": "qdr:w", "month": "qdr:m", "year": "qdr:y"},
+    # search_keenable: body["published_after"]
+    "keenable": {"day": "1d", "week": "7d", "month": "1mo", "year": "1y"},
+    # search_you: params["freshness"] (native values match the unified ones)
+    "you": {"day": "day", "week": "week", "month": "month", "year": "year"},
+    # search_perplexity: body["search_recency_filter"]
+    "perplexity": {"day": "day", "week": "week", "month": "month", "year": "year"},
+    "kilo-perplexity": {"day": "day", "week": "week", "month": "month", "year": "year"},
+    # search_searxng: params["time_range"]
+    "searxng": {"day": "day", "week": "week", "month": "month", "year": "year"},
+}
+
+
+def normalize_freshness(value: Optional[str]) -> Optional[str]:
+    """Return the canonical lowercase freshness value, or None when unset.
+
+    Raises ValueError for values outside day|week|month|year so callers can
+    surface the standard error dict instead of silently dropping the filter.
+    """
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if not normalized:
+        return None
+    if normalized not in FRESHNESS_VALUES:
+        raise ValueError(
+            "Invalid freshness value: {!r}. Valid values: {}".format(value, ", ".join(FRESHNESS_VALUES))
+        )
+    return normalized
+
+
+def provider_supports_freshness(provider: str) -> bool:
+    """Return whether a provider's current API call can apply a freshness filter."""
+    return provider in PROVIDER_FRESHNESS_FORMATS
+
+
+def map_freshness_for_provider(provider: str, freshness: Optional[str]) -> Optional[str]:
+    """Translate the unified freshness value into the provider's native format."""
+    if not freshness:
+        return None
+    return PROVIDER_FRESHNESS_FORMATS.get(provider, {}).get(freshness)
+
+
+def freshness_metadata(provider: str, requested: str) -> Dict[str, Any]:
+    """Describe whether a provider applied the requested freshness filter."""
+    native = map_freshness_for_provider(provider, requested)
+    if native is not None:
+        return {"requested": requested, "applied": True, "provider": provider, "native_value": native}
+    return {
+        "requested": requested,
+        "applied": False,
+        "provider": provider,
+        "reason": "provider {} does not support freshness".format(provider),
+    }
 
 
 def search_serper(
@@ -705,12 +789,30 @@ def extract_linkup(
     if len(urls) <= 1:
         return {"provider": "linkup", "results": [fetch_one(url) for url in urls]}
 
-    indexed_results: Dict[int, Dict[str, Any]] = {}
-    with ThreadPoolExecutor(max_workers=min(len(urls), 5)) as executor:
-        futures = {executor.submit(fetch_one, url): idx for idx, url in enumerate(urls)}
-        for future in as_completed(futures):
-            indexed_results[futures[future]] = future.result()
-    results = [indexed_results[idx] for idx in range(len(urls)) if idx in indexed_results]
+    workers = min(len(urls), 5)
+    # Bound the total wait so one hung fetch cannot stall the whole batch beyond
+    # the per-request HTTP timeout window (plus a small scheduling grace).
+    # Daemon tasks (instead of a ThreadPoolExecutor) keep overdue fetches from
+    # blocking interpreter exit in the CLI/subprocess path.
+    overall_timeout = timeout * ((len(urls) + workers - 1) // workers) + _BATCH_TIMEOUT_GRACE_SECONDS
+    gate = threading.Semaphore(workers)
+
+    def fetch_gated(url: str) -> Dict[str, Any]:
+        with gate:
+            return fetch_one(url)
+
+    tasks = [DaemonTask(fetch_gated, url) for url in urls]
+    deadline = time.monotonic() + overall_timeout
+    results = []
+    for url, task in zip(urls, tasks):
+        try:
+            results.append(task.result(timeout=max(0.0, deadline - time.monotonic())))
+        except FuturesTimeoutError:
+            # Keep partial results; the overdue fetch finishes in the background
+            # bounded by the HTTP timeout without blocking caller or process exit.
+            results.append(_normalize_extract_result(
+                "linkup", url, error=f"Extraction timed out after {overall_timeout}s",
+            ))
     return {"provider": "linkup", "results": results}
 
 def extract_tavily(
@@ -1302,9 +1404,9 @@ def search_you(
         raise ProviderRequestError(f"{friendly_msg} (HTTP {e.code})", status_code=e.code, transient=e.code in TRANSIENT_HTTP_CODES)
     except URLError as e:
         reason = str(getattr(e, "reason", e))
-        is_timeout = "timed out" in reason.lower()
+        is_timeout = isinstance(getattr(e, "reason", None), socket.timeout) or "timed out" in reason.lower()
         raise ProviderRequestError(f"Network error: {reason}. Check your internet connection.", transient=is_timeout)
-    except TimeoutError:
+    except (TimeoutError, socket.timeout):
         raise ProviderRequestError("You.com request timed out after 30s.", transient=True)
 
     # Parse results
@@ -1461,9 +1563,9 @@ def search_searxng(
         raise ProviderRequestError(f"{friendly_msg} (HTTP {e.code})", status_code=e.code, transient=e.code in TRANSIENT_HTTP_CODES)
     except URLError as e:
         reason = str(getattr(e, "reason", e))
-        is_timeout = "timed out" in reason.lower()
+        is_timeout = isinstance(getattr(e, "reason", None), socket.timeout) or "timed out" in reason.lower()
         raise ProviderRequestError(f"Cannot reach SearXNG instance at {instance_url}. Error: {reason}", transient=is_timeout)
-    except TimeoutError:
+    except (TimeoutError, socket.timeout):
         raise ProviderRequestError("SearXNG request timed out after 30s. Check instance health.", transient=True)
 
     # Parse results
@@ -1510,3 +1612,122 @@ def search_searxng(
             "instance_url": instance_url,
         }
     }
+
+
+_KEENABLE_TIME_RANGE = {"hour": "1h", "day": "1d", "week": "7d", "month": "1mo", "year": "1y"}
+
+
+_KEENABLE_PUBLIC_WARNED = False
+
+
+def _warn_keenable_public_once() -> None:
+    global _KEENABLE_PUBLIC_WARNED
+    if _KEENABLE_PUBLIC_WARNED:
+        return
+    _KEENABLE_PUBLIC_WARNED = True
+    print(json.dumps({
+        "warning": (
+            "Keenable keyless public endpoint in use: queries and fetched URLs are sent "
+            "to an unauthenticated shared service (https://keenable.ai) with no SLA. "
+            "Set KEENABLE_API_KEY for the authenticated endpoint."
+        )
+    }), file=sys.stderr)
+
+
+def _keenable_endpoint(api_url: str, api_key: Optional[str], public: bool) -> tuple:
+    """Return (endpoint, headers). A present key always uses the authenticated route;
+    with no key, the keyless /public route is used when public is enabled."""
+    headers = {"X-Keenable-Title": "hermes-web-search-plus"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+        return api_url, headers
+    if public:
+        _warn_keenable_public_once()
+        return f"{api_url}/public", headers
+    raise ValueError("Keenable requires an API key or an enabled public endpoint")
+
+
+def search_keenable(
+    query: str,
+    api_key: Optional[str] = None,
+    max_results: int = 5,
+    time_range: Optional[str] = None,
+    include_domains: Optional[List[str]] = None,
+    public: bool = False,
+    api_url: str = "https://api.keenable.ai/v1/search",
+    timeout: int = 30,
+) -> dict:
+    """Search using Keenable's independent web index.
+
+    Uses the authenticated endpoint when api_key is set; with no key, public=True
+    selects the keyless /public endpoint.
+    """
+    body: Dict[str, Any] = {"query": query}
+    if time_range and time_range in _KEENABLE_TIME_RANGE:
+        body["published_after"] = _KEENABLE_TIME_RANGE[time_range]
+    if include_domains:
+        body["site"] = include_domains[0]
+
+    url, headers = _keenable_endpoint(api_url, api_key, public)
+    headers["Content-Type"] = "application/json"
+
+    data = make_request(url, headers, body, timeout=timeout)
+    results = []
+    for i, item in enumerate(data.get("results", [])[:max_results]):
+        item_url = item.get("url", "")
+        results.append({
+            "title": item.get("title") or _title_from_url(item_url),
+            "url": item_url,
+            "snippet": item.get("snippet") or item.get("description", ""),
+            "score": round(1.0 - i * 0.05, 3),
+            "date": item.get("published_at"),
+            "acquired_at": item.get("acquired_at"),
+        })
+
+    answer = results[0]["snippet"] if results else ""
+    return {
+        "provider": "keenable",
+        "query": query,
+        "results": results,
+        "images": [],
+        "answer": answer,
+        "metadata": {"number_of_results": data.get("number_of_results")},
+    }
+
+
+def extract_keenable(
+    urls: List[str],
+    api_key: Optional[str] = None,
+    output_format: str = "markdown",
+    include_images: bool = False,
+    include_raw_html: bool = False,
+    render_js: bool = False,
+    public: bool = False,
+    api_url: str = "https://api.keenable.ai/v1/fetch",
+    timeout: int = 30,
+) -> dict:
+    """Extract page content via Keenable's fetch endpoint (clean markdown).
+
+    Uses the authenticated endpoint when api_key is set; with no key, public=True
+    selects the keyless /public endpoint.
+    """
+    base_url, headers = _keenable_endpoint(api_url, api_key, public)
+
+    results: List[Dict[str, Any]] = []
+    for url in urls:
+        try:
+            endpoint = f"{base_url}?url={quote(url, safe='')}"
+            data = make_get_request(endpoint, headers, timeout=timeout)
+            content = data.get("content") or ""
+            results.append(_normalize_extract_result(
+                "keenable",
+                data.get("url") or url,
+                title=data.get("title", ""),
+                content=content,
+                raw_content=content,
+                author=data.get("author"),
+                description=data.get("description"),
+            ))
+        except Exception as e:
+            results.append(_normalize_extract_result("keenable", url, error=str(e)))
+    return {"provider": "keenable", "results": results}

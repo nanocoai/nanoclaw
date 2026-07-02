@@ -28,6 +28,7 @@ class ProviderSpec:
     free_tier: str = "API key required"
     signup_url: str = ""
     upstream_capabilities: Tuple[str, ...] = ()
+    keyless: bool = False
 
 
 _PROVIDER_SPECS = (
@@ -94,7 +95,7 @@ _PROVIDER_SPECS = (
         capability_labels=("search", "multilingual"),
         auto_allowed_by_default=False,
         free_tier="1,000 free searches/month",
-        signup_url="https://querit.com",
+        signup_url="https://www.querit.ai",
     ),
     ProviderSpec(
         provider="linkup",
@@ -195,11 +196,24 @@ _PROVIDER_SPECS = (
         free_tier="Free if self-hosted",
         signup_url="https://docs.searxng.org/admin/installation.html",
     ),
+    ProviderSpec(
+        provider="keenable",
+        env_var="KEENABLE_API_KEY",
+        display_name="Keenable",
+        description="Independent web index for search and extraction; works keyless, optional key raises rate limits.",
+        config_section="keenable",
+        supports_search=True,
+        supports_extract=True,
+        capability_labels=("search", "extract"),
+        free_tier="Keyless public tier; optional key for higher limits",
+        signup_url="https://keenable.ai",
+        keyless=True,
+    ),
 )
 
 PROVIDER_SPECS: Dict[str, ProviderSpec] = {spec.provider: spec for spec in _PROVIDER_SPECS}
 SEARCH_PROVIDER_IDS = tuple(spec.provider for spec in _PROVIDER_SPECS if spec.supports_search)
-EXTRACT_PROVIDER_IDS = ("tavily", "exa", "linkup", "parallel", "firecrawl", "you")
+EXTRACT_PROVIDER_IDS = ("tavily", "exa", "linkup", "parallel", "firecrawl", "you", "keenable")
 DEFAULT_PROVIDER_PRIORITY = (
     "you",
     "serper",
@@ -214,6 +228,7 @@ DEFAULT_PROVIDER_PRIORITY = (
     "kilo-perplexity",
     "perplexity",
     "searxng",
+    "keenable",
 )
 DEFAULT_AUTO_ALLOW = {
     spec.provider: False
@@ -222,6 +237,14 @@ DEFAULT_AUTO_ALLOW = {
 }
 PROVIDER_ENV_KEYS = tuple(spec.env_var for spec in _PROVIDER_SPECS)
 EXTRACT_PROVIDER_ENV_KEYS = tuple(spec.env_var for spec in _PROVIDER_SPECS if spec.supports_extract)
+KEYLESS_PROVIDER_IDS = tuple(spec.provider for spec in _PROVIDER_SPECS if spec.keyless)
+KEYLESS_EXTRACT_PROVIDER_IDS = tuple(
+    spec.provider for spec in _PROVIDER_SPECS if spec.keyless and spec.supports_extract
+)
+
+
+def keyless_public_env_var(provider: str) -> str:
+    return f"{PROVIDER_SPECS[provider].config_section.upper()}_ALLOW_PUBLIC"
 
 
 def doctor_catalog() -> Dict[str, Dict[str, object]]:

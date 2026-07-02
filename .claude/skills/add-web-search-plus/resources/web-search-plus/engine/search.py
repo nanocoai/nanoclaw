@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Web Search Plus — Unified Multi-Provider Search and Extraction with Intelligent Auto-Routing
-Version: 2.4.0
+Version: 2.8.1
 Supports search providers: You.com, Serper, Exa, Firecrawl, Tavily, Linkup,
-Brave Search, SerpBase, Querit, Parallel, Perplexity, Kilo Perplexity, SearXNG.
-Supports extract providers: Firecrawl, Linkup, Parallel, Tavily, Exa, You.com.
+Brave Search, SerpBase, Querit, Parallel, Perplexity, Kilo Perplexity, SearXNG, Keenable.
+Supports extract providers: Firecrawl, Linkup, Parallel, Tavily, Exa, You.com, Keenable.
 
 Smart Routing uses multi-signal analysis:
   - Routing v2 language/script and query-class detection
@@ -54,7 +54,9 @@ from config import (  # noqa: F401 - re-exported for backward-compatible tests/i
     _validate_runtime_config,
     _validate_searxng_url,
     get_api_key,
+    keyless_public_allowed,
     load_config,
+    provider_configured,
     validate_api_key,
 )
 from provider_health import (  # noqa: F401 - re-exported for backward-compatible tests/imports
@@ -66,21 +68,26 @@ from provider_health import (  # noqa: F401 - re-exported for backward-compatibl
     provider_in_cooldown,
     reset_provider_health,
 )
+from provider_stats import record_provider_outcome
 from quality import (  # noqa: F401 - re-exported for backward-compatible tests/imports
     _choose_tie_winner,
     _domain_matches_rule,
     build_authority_signals,
     build_quality_report,
     deduplicate_results_across_providers,
+    extract_domain_constraints,
+    filter_spam_results,
+    rerank_domain_diversity,
     rerank_results_for_intent,
     select_research_providers,
 )
-from provider_registry import SEARCH_PROVIDER_IDS, doctor_catalog
+from provider_registry import PROVIDER_SPECS, SEARCH_PROVIDER_IDS, doctor_catalog
 from env_loader import load_env_files
 from research import run_research_mode
 import providers as _providers
 import routing as _routing
 import extract as _extract
+import bench as _bench
 
 # Backward-compatible cache helper aliases for older imports/tests.
 get_cached_result = cache_get
@@ -278,6 +285,27 @@ def _sync_provider_dependencies() -> None:
     _providers.execute_provider_with_retry = execute_provider_with_retry
 
 
+# Unified freshness helpers (re-exported for tests and callers).
+FRESHNESS_VALUES = _providers.FRESHNESS_VALUES
+PROVIDER_FRESHNESS_FORMATS = _providers.PROVIDER_FRESHNESS_FORMATS
+
+
+def normalize_freshness(*args, **kwargs):
+    return _providers.normalize_freshness(*args, **kwargs)
+
+
+def provider_supports_freshness(*args, **kwargs):
+    return _providers.provider_supports_freshness(*args, **kwargs)
+
+
+def map_freshness_for_provider(*args, **kwargs):
+    return _providers.map_freshness_for_provider(*args, **kwargs)
+
+
+def freshness_metadata(*args, **kwargs):
+    return _providers.freshness_metadata(*args, **kwargs)
+
+
 def search_serper(*args, **kwargs):
     _sync_provider_dependencies()
     return _providers.search_serper(*args, **kwargs)
@@ -388,6 +416,16 @@ def search_searxng(*args, **kwargs):
     return _providers.search_searxng(*args, **kwargs)
 
 
+def search_keenable(*args, **kwargs):
+    _sync_provider_dependencies()
+    return _providers.search_keenable(*args, **kwargs)
+
+
+def extract_keenable(*args, **kwargs):
+    _sync_provider_dependencies()
+    return _providers.extract_keenable(*args, **kwargs)
+
+
 
 # =============================================================================
 # Exa (Neural/Semantic/Deep Search)
@@ -442,6 +480,7 @@ def _sync_extract_dependencies() -> None:
     _extract.extract_exa = extract_exa
     _extract.extract_you = extract_you
     _extract.extract_parallel = extract_parallel
+    _extract.extract_keenable = extract_keenable
 
 
 EXTRACT_PROVIDER_PRIORITY = _extract.EXTRACT_PROVIDER_PRIORITY
@@ -496,12 +535,18 @@ def _build_doctor_report(config: Dict[str, Any], *, live: bool = False) -> Dict[
             key_present = False
             errors.append(_doctor_error("config", "invalid provider configuration"))
 
+        spec_obj = PROVIDER_SPECS.get(provider)
+        keyless = bool(spec_obj and spec_obj.keyless)
+        keyless_enabled = keyless and keyless_public_allowed(provider, config)
+
         provider_report = {
             "provider": provider,
             "env_var": spec["env_var"],
             "search_capable": spec["search_capable"],
             "extract_capable": spec["extract_capable"],
             "key_present": key_present,
+            "keyless": keyless,
+            "keyless_public_enabled": keyless_enabled,
             "auto_allowed": _provider_auto_allowed(provider, auto_config),
             "disabled": provider in disabled,
             "cooldown": cooldown,
@@ -510,7 +555,7 @@ def _build_doctor_report(config: Dict[str, Any], *, live: bool = False) -> Dict[
             provider_report["error"] = errors[0] if len(errors) == 1 else errors
         providers.append(provider_report)
 
-    usable = [p for p in providers if p["key_present"] and not p["disabled"]]
+    usable = [p for p in providers if (p["key_present"] or p["keyless_public_enabled"]) and not p["disabled"]]
     config_errors = [p for p in providers if _doctor_provider_has_error_type(p, "config")]
     return {
         "ok": bool(usable) and not config_errors,
@@ -531,6 +576,19 @@ def _build_doctor_report(config: Dict[str, Any], *, live: bool = False) -> Dict[
     }
 
 
+def run_provider_bench(config: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+    """Run the in-process provider bakeoff (see bench.py) and return its report.
+
+    Passes this module as the provider seam so bench honours the same
+    monkeypatch surface as the rest of the pipeline (``search.search_you``
+    etc.), and never records provider health cooldowns or provider stats.
+    """
+    return _bench.run_bench(config, search_module=sys.modules[__name__], **kwargs)
+
+
+format_bench_text = _bench.format_bench_text
+
+
 def _format_doctor_text(report: Dict[str, Any]) -> str:
     lines = ["Web Search Plus Doctor", f"Mode: {report['mode']}", f"OK: {report['ok']}", "", "Providers:"]
     for provider in report["providers"]:
@@ -541,9 +599,13 @@ def _format_doctor_text(report: Dict[str, Any]) -> str:
             capabilities.append("extract")
         cooldown = provider["cooldown"]
         cooldown_text = f"cooldown {cooldown['remaining_seconds']}s" if cooldown["active"] else "no cooldown"
+        keyless_text = ""
+        if provider.get("keyless"):
+            keyless_text = f"keyless={'on' if provider.get('keyless_public_enabled') else 'off'} "
         lines.append(
             f"- {provider['provider']}: env={provider['env_var']} "
             f"key={'yes' if provider['key_present'] else 'no'} "
+            f"{keyless_text}"
             f"capabilities={','.join(capabilities)} "
             f"auto_allowed={'yes' if provider['auto_allowed'] else 'no'} "
             f"disabled={'yes' if provider['disabled'] else 'no'} "
@@ -608,11 +670,16 @@ Full docs: See README.md and SKILL.md
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["doctor"],
-        help="Run a maintenance command such as 'doctor'",
+        choices=["doctor", "bench"],
+        help="Run a maintenance command such as 'doctor' or 'bench'",
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON for maintenance commands")
     parser.add_argument("--live", action="store_true", help="Allow doctor to run live provider smokes (reserved; offline by default)")
+    parser.add_argument(
+        "--bench",
+        action="store_true",
+        help="Benchmark configured search providers against a fixed live query suite and recommend an auto_routing.provider_priority (alias for the 'bench' command; spends real provider quota)",
+    )
 
     # Common arguments
     parser.add_argument(
@@ -679,8 +746,19 @@ Full docs: See README.md and SKILL.md
         choices=["search", "news", "images", "videos", "places", "shopping"]
     )
     parser.add_argument(
-        "--time-range", 
+        "--time-range",
         choices=["hour", "day", "week", "month", "year"]
+    )
+    parser.add_argument(
+        "--freshness",
+        type=str.lower,
+        choices=list(_providers.FRESHNESS_VALUES),
+        help=(
+            "Unified recency filter (day, week, month, year; case-insensitive). "
+            "Applied natively where the provider supports it (serper, brave, querit, firecrawl, "
+            "keenable, you, perplexity, kilo-perplexity, searxng); otherwise the search runs "
+            "unfiltered and result metadata reports freshness.applied=false"
+        )
     )
     
     # Tavily-specific
@@ -778,11 +856,6 @@ Full docs: See README.md and SKILL.md
         default=you_config.get("safesearch", "moderate"),
         choices=["off", "moderate", "strict"],
         help="You.com SafeSearch filter"
-    )
-    parser.add_argument(
-        "--freshness",
-        choices=["day", "week", "month", "year"],
-        help="Filter results by recency (You.com/Serper)"
     )
     parser.add_argument(
         "--livecrawl",
@@ -895,7 +968,16 @@ def main():
         else:
             print(_format_doctor_text(report))
         return
-    
+
+    if args.command == "bench" or args.bench:
+        report = run_provider_bench(config, max_results=args.max_results)
+        if args.json or args.compact:
+            indent = None if args.compact else 2
+            print(json.dumps(report, indent=indent, ensure_ascii=False))
+        else:
+            print(format_bench_text(report))
+        return
+
     # Handle cache management commands first (before query validation)
     if args.clear_cache:
         result = cache_clear()
@@ -942,6 +1024,54 @@ def main():
     else:
         print(json.dumps(payload, indent=2), file=sys.stderr)
         sys.exit(1)
+
+
+def _apply_result_quality_pipeline(
+    result: Dict[str, Any],
+    config: Dict[str, Any],
+    query: str = "",
+    include_domains: Optional[List[str]] = None,
+) -> None:
+    """Filter mirror/SEO-spam domains and cap per-domain dominance, in place.
+
+    Explicit domain constraints (``site:`` operators, ``include_domains``)
+    express user intent and win: constrained domains are exempt from the spam
+    filter, and the diversity rerank is skipped entirely — a deliberately
+    one-domain query must not have its order shuffled.
+
+    Both steps are truthful: removals and demotions are reported in
+    ``result["metadata"]`` so quality reports and callers can see what changed.
+    """
+    results = result.get("results")
+    if not isinstance(results, list) or not results:
+        return
+    quality_config = config.get("quality") if isinstance(config.get("quality"), dict) else {}
+    constrained_domains = extract_domain_constraints(query, include_domains)
+    if quality_config.get("filter_spam", True):
+        allowed = list(quality_config.get("allowed_domains") or []) + constrained_domains
+        kept, removed_domains = filter_spam_results(
+            results,
+            extra_blocked=quality_config.get("blocked_domains"),
+            allowed=allowed,
+        )
+        if removed_domains:
+            result["results"] = kept
+            result.setdefault("metadata", {})["spam_filtered"] = {
+                "removed_count": len(results) - len(kept),
+                "domains": removed_domains,
+            }
+            results = kept
+    if constrained_domains:
+        return
+    try:
+        max_per_domain = int(quality_config.get("max_results_per_domain", 2))
+    except (TypeError, ValueError):
+        max_per_domain = 2
+    if max_per_domain > 0:
+        reranked, demoted = rerank_domain_diversity(results, max_per_domain=max_per_domain)
+        if demoted:
+            result["results"] = reranked
+            result.setdefault("metadata", {})["domain_diversity_demoted"] = demoted
 
 
 def execute_search_request(args, config: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
@@ -1005,7 +1135,7 @@ def execute_search_request(args, config: Dict[str, Any]) -> Tuple[Dict[str, Any]
     providers_to_try = [provider] if provider else []
     if not strict_provider_mode:
         for p in provider_priority:
-            if p not in providers_to_try and p not in disabled_providers and _provider_auto_allowed(p, auto_config) and get_api_key(p, config):
+            if p not in providers_to_try and p not in disabled_providers and _provider_auto_allowed(p, auto_config) and provider_configured(p, config):
                 providers_to_try.append(p)
 
     # Skip providers currently in cooldown
@@ -1032,7 +1162,7 @@ def execute_search_request(args, config: Dict[str, Any]) -> Tuple[Dict[str, Any]
                 country=args.country,
                 language=args.language,
                 search_type=args.search_type,
-                time_range=args.time_range,
+                time_range=args.time_range or args.freshness,
                 include_images=args.images,
             )
         elif prov == "serpbase":
@@ -1181,14 +1311,40 @@ def execute_search_request(args, config: Dict[str, Any]) -> Tuple[Dict[str, Any]
                 categories=args.categories,
                 engines=args.engines,
                 language=args.language,
-                time_range=args.time_range,
+                time_range=args.time_range or args.freshness,
                 safesearch=args.searxng_safesearch,
+            )
+        elif prov == "keenable":
+            keenable_config = config.get("keenable", {})
+            return search_keenable(
+                query=args.query,
+                api_key=key,
+                max_results=args.max_results,
+                time_range=args.time_range or args.freshness,
+                include_domains=args.include_domains,
+                public=keyless_public_allowed(prov, config),
+                api_url=keenable_config.get("search_url", "https://api.keenable.ai/v1/search"),
+                timeout=int(keenable_config.get("timeout", 30)),
             )
         else:
             raise ValueError(f"Unknown provider: {prov}")
 
     def execute_with_retry(prov: str) -> Dict[str, Any]:
-        return execute_provider_with_retry(prov, lambda: execute_search(prov))
+        started = time.monotonic()
+        try:
+            provider_result = execute_provider_with_retry(prov, lambda: execute_search(prov))
+        except ProviderRequestError:
+            # Only real provider interactions count as performance signal;
+            # config/validation errors (e.g. missing keys) are not recorded.
+            record_provider_outcome(prov, latency_seconds=time.monotonic() - started, result_count=0, error=True)
+            raise
+        record_provider_outcome(
+            prov,
+            latency_seconds=time.monotonic() - started,
+            result_count=len(provider_result.get("results", []) or []),
+            error=False,
+        )
+        return provider_result
 
     cache_context = {
         "locale": f"{args.country}:{args.language}",
@@ -1214,14 +1370,14 @@ def execute_search_request(args, config: Dict[str, Any]) -> Tuple[Dict[str, Any]
     if args.mode == "research":
         available_research_providers = {
             p for p in providers_to_try
-            if p not in disabled_providers and _provider_auto_allowed(p, auto_config) and get_api_key(p, config) and not provider_in_cooldown(p)[0]
+            if p not in disabled_providers and _provider_auto_allowed(p, auto_config) and provider_configured(p, config) and not provider_in_cooldown(p)[0]
         }
-        if provider and get_api_key(provider, config) and not provider_in_cooldown(provider)[0]:
+        if provider and provider_configured(provider, config) and not provider_in_cooldown(provider)[0]:
             available_research_providers.add(provider)
         if args.research_providers:
             research_providers = [
                 p for p in args.research_providers
-                if p not in disabled_providers and _provider_auto_allowed(p, auto_config) and get_api_key(p, config) and not provider_in_cooldown(p)[0]
+                if p not in disabled_providers and _provider_auto_allowed(p, auto_config) and provider_configured(p, config) and not provider_in_cooldown(p)[0]
             ]
         else:
             research_providers = select_research_providers(
@@ -1258,6 +1414,14 @@ def execute_search_request(args, config: Dict[str, Any]) -> Tuple[Dict[str, Any]
         routing_info["mode"] = "research"
         routing_info["provider"] = "research"
         result["routing"].update(routing_info)
+        if args.freshness:
+            result.setdefault("metadata", {})["freshness"] = {
+                "requested": args.freshness,
+                "providers": [
+                    _providers.freshness_metadata(p, args.freshness) for p in research_providers
+                ],
+            }
+        _apply_result_quality_pipeline(result, config, query=args.query or "", include_domains=args.include_domains)
         result["quality_report"] = build_quality_report(
             query=args.query,
             result=result,
@@ -1308,9 +1472,18 @@ def execute_search_request(args, config: Dict[str, Any]) -> Tuple[Dict[str, Any]
             # Only continue collecting from lower-priority providers when fallback was needed.
             if not errors:
                 break
+        except ProviderConfigError as e:
+            # Missing/invalid local credentials are configuration errors, not
+            # provider health failures. Do not poison shared cooldown state for
+            # a provider the runtime never actually contacted.
+            errors.append({
+                "provider": current_provider,
+                "error": str(e),
+            })
+            continue
         except Exception as e:
             error_msg = str(e)
-            cooldown_info = mark_provider_failure(current_provider, error_msg)
+            cooldown_info = mark_provider_failure(current_provider, error_msg, retry_after=getattr(e, "retry_after", None))
             errors.append({
                 "provider": current_provider,
                 "error": error_msg,
@@ -1356,8 +1529,14 @@ def execute_search_request(args, config: Dict[str, Any]) -> Tuple[Dict[str, Any]
             result["results"] = reranked
             if rerank_metadata.get("reranked"):
                 result.setdefault("metadata", {})["intent_rerank"] = rerank_metadata
+            _apply_result_quality_pipeline(result, config, query=args.query or "", include_domains=args.include_domains)
 
         result["routing"] = routing_info
+
+        if args.freshness:
+            result.setdefault("metadata", {})["freshness"] = _providers.freshness_metadata(
+                successful_provider or provider, args.freshness
+            )
 
         if not cache_hit and not args.no_cache and args.query:
             cache_put(
@@ -1405,6 +1584,7 @@ def run_search_request(
     count: int = 5,
     exa_depth: str = "normal",
     time_range: Optional[str] = None,
+    freshness: Optional[str] = None,
     include_domains: Optional[List[str]] = None,
     exclude_domains: Optional[List[str]] = None,
     mode: str = "normal",
@@ -1422,6 +1602,10 @@ def run_search_request(
     """
     if not query and not (include_domains or exclude_domains):
         return {"error": "query is required", "provider": provider, "query": query, "results": []}
+    try:
+        freshness = _providers.normalize_freshness(freshness)
+    except ValueError as exc:
+        return {"error": str(exc), "provider": provider, "query": query, "results": []}
     config = config or load_config()
     argv: List[str] = [
         "--query", query or "",
@@ -1432,6 +1616,8 @@ def run_search_request(
         argv += ["--exa-depth", exa_depth]
     if time_range and time_range != "none":
         argv += ["--time-range", time_range]
+    if freshness:
+        argv += ["--freshness", freshness]
     if include_domains:
         argv += ["--include-domains", *include_domains]
     if exclude_domains:
