@@ -431,6 +431,76 @@ describe('router', () => {
     expect(rows[0].trigger).toBe(0);
   });
 
+  it('routes an embed-only (empty-text) message with trigger=1 when engage_mode=pattern pat=dot (regression: axiom-wake-bug)', async () => {
+    // Regression for AGE-16: Axiom webhook alerts are Discord messages whose
+    // `content` field is empty — only `embeds` carry the alert body.
+    // The Chat SDK's onNewMessage was registered with /./  which does NOT
+    // match empty string, silently dropping these messages before they reached
+    // routeInbound. The fix changed the pattern to /.*/ which does match "".
+    // Here we test that routeInbound itself correctly assigns trigger=1 for
+    // empty-text messages with a pattern='.' (match-all) wiring, so if the
+    // bridge pattern were accidentally reverted, the router's own side would
+    // still be auditable.
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: null,
+      message: {
+        id: 'msg-embed-only',
+        kind: 'chat-sdk',
+        // Empty text — simulates a Discord webhook embed-only message (e.g. Axiom alert)
+        content: JSON.stringify({ text: '', author: { userId: 'axiom-webhook', isBot: true } }),
+        timestamp: now(),
+      },
+    });
+
+    expect(wakeContainer).toHaveBeenCalled();
+
+    const session = findSession('mg-1', null);
+    expect(session).toBeDefined();
+    const db = new Database(inboundDbPath('ag-1', session!.id));
+    const rows = db.prepare('SELECT trigger FROM messages_in').all() as Array<{ trigger: number }>;
+    db.close();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].trigger).toBe(1);
+  });
+
+  it('per-thread wiring: top-level channel post (threadId = platformId) opens and wakes a session', async () => {
+    // Regression for AGE-16 hypothesis 1: with session_mode=per-thread the
+    // router must create (or find) a session for top-level Discord posts,
+    // where threadId equals the channel platformId. If no session matches,
+    // one is created and the container is woken with trigger=1.
+    const { updateMessagingGroupAgent } = await import('./db/messaging-groups.js');
+    updateMessagingGroupAgent('mga-1', { session_mode: 'per-thread' });
+
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: 'chan-123', // top-level post: threadId === platformId (no Discord thread suffix)
+      message: {
+        id: 'msg-toplevel',
+        kind: 'chat-sdk',
+        content: JSON.stringify({ text: 'alert fired in channel' }),
+        timestamp: now(),
+      },
+    });
+
+    expect(wakeContainer).toHaveBeenCalled();
+
+    const { getSessionsByAgentGroup } = await import('./db/sessions.js');
+    const sessions = getSessionsByAgentGroup('ag-1');
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].thread_id).toBe('chan-123');
+  });
+
   it('drops silently when engage fails + ignored_message_policy=drop', async () => {
     const { routeInbound } = await import('./router.js');
     const { wakeContainer } = await import('./container-runner.js');
