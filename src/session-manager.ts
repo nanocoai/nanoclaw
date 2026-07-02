@@ -18,6 +18,7 @@ import { deriveAttachmentName } from './attachment-naming.js';
 import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
+import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import {
   createSession,
@@ -37,11 +38,6 @@ import {
 } from './db/session-db.js';
 import { log } from './log.js';
 import type { Session } from './types.js';
-
-function isPathInside(parent: string, child: string): boolean {
-  const relative = path.relative(parent, child);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
-}
 
 /** Root directory for all session data. */
 export function sessionsBaseDir(): string {
@@ -288,6 +284,14 @@ function extractAttachmentFiles(
     return contentStr;
   }
 
+  const inboxRoot = path.join(sessionDir(agentGroupId, sessionId), 'inbox');
+  // Resolved lazily on the first attachment that actually carries bytes, so a
+  // message whose attachments have no inline `data` never creates an inbox dir.
+  // ensureContainedInboxDir refuses a pre-placed symlink at the inbox root or
+  // the per-message subdir before any write lands outside the sandbox (#2828).
+  let inboxDir: string | null = null;
+  let inboxResolved = false;
+
   let changed = false;
   for (const att of attachments) {
     if (typeof att.data !== 'string') continue;
@@ -302,32 +306,12 @@ function extractAttachmentFiles(
       });
     }
 
-    const inboxDir = path.join(sessionDir(agentGroupId, sessionId), 'inbox', messageId);
-
-    // Refuse to mkdir through a symlink that the container may have pre placed
-    // at inboxDir. With recursive:true, mkdirSync would silently no op on a
-    // pre existing symlink and the subsequent writeFileSync would follow it.
-    if (fs.existsSync(inboxDir)) {
-      const stat = fs.lstatSync(inboxDir);
-      if (stat.isSymbolicLink() || !stat.isDirectory()) {
-        log.warn('Rejecting unsafe inbox directory', { messageId, inboxDir });
-        continue;
-      }
+    if (!inboxResolved) {
+      inboxDir = ensureContainedInboxDir(inboxRoot, messageId, { messageId });
+      inboxResolved = true;
     }
-    fs.mkdirSync(inboxDir, { recursive: true });
-
-    let realInboxDir: string;
-    try {
-      realInboxDir = fs.realpathSync(inboxDir);
-    } catch (err) {
-      log.warn('Failed to resolve inbox directory', { messageId, err });
-      continue;
-    }
-    const inboxRoot = path.join(sessionDir(agentGroupId, sessionId), 'inbox');
-    if (!isPathInside(fs.realpathSync(inboxRoot), realInboxDir)) {
-      log.warn('Inbox directory escaped session inbox root', { messageId, inboxDir });
-      continue;
-    }
+    // Unsafe inbox (symlink / escape) — no attachment can be written safely.
+    if (!inboxDir) break;
 
     const filePath = path.join(inboxDir, filename);
     try {
