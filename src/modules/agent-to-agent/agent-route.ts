@@ -22,6 +22,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { isSafeAttachmentName } from '../../attachment-safety.js';
+import { ensureContainedInboxDir, isPathInside } from '../../inbox-safety.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getInboundSourceSessionId, getMostRecentPeerSourceSessionId } from '../../db/session-db.js';
 import { getSession } from '../../db/sessions.js';
@@ -40,11 +41,6 @@ export interface ForwardedAttachment {
   filename: string;
   type: 'file';
   localPath: string;
-}
-
-function isPathInside(parent: string, child: string): boolean {
-  const relative = path.relative(parent, child);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
 /**
@@ -98,8 +94,20 @@ export function forwardAttachedFiles(
     return [];
   }
 
-  const targetInboxDir = path.join(sessionDir(target.agentGroupId, target.sessionId), 'inbox', target.messageId);
-  fs.mkdirSync(targetInboxDir, { recursive: true });
+  // Target-side containment — shared with the channel-inbound path. A
+  // compromised target agent can write inside its own session dir, so it could
+  // pre-place `inbox` (or `inbox/<future-msgId>`) as a symlink pointing
+  // anywhere host-writable; ensureContainedInboxDir refuses the symlink before
+  // any copy lands outside the sandbox (#2828, CWE-59).
+  const inboxRoot = path.join(sessionDir(target.agentGroupId, target.sessionId), 'inbox');
+  const targetInboxDir = ensureContainedInboxDir(inboxRoot, target.messageId, {
+    targetGroup: target.agentGroupId,
+    targetSession: target.sessionId,
+    targetMsgId: target.messageId,
+  });
+  if (!targetInboxDir) {
+    return [];
+  }
 
   const attachments: ForwardedAttachment[] = [];
   for (const filename of source.filenames) {
@@ -137,7 +145,20 @@ export function forwardAttachedFiles(
       continue;
     }
     const dst = path.join(targetInboxDir, filename);
-    fs.copyFileSync(realSrc, dst);
+    try {
+      // COPYFILE_EXCL: fail with EEXIST rather than follow or overwrite a
+      // pre-placed symlink / existing file at dst — the host is the sole
+      // writer of these attachments.
+      fs.copyFileSync(realSrc, dst, fs.constants.COPYFILE_EXCL);
+    } catch (err) {
+      log.warn('agent-route: refusing to write target inbox file', {
+        sourceMsgId: source.messageId,
+        targetMsgId: target.messageId,
+        filename,
+        err,
+      });
+      continue;
+    }
     attachments.push({
       name: filename,
       filename,
