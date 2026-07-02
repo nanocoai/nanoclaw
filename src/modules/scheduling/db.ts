@@ -125,6 +125,20 @@ export function getCompletedRecurring(db: Database.Database): RecurringMessage[]
     .all() as RecurringMessage[];
 }
 
+// True if the series already has a live (pending/paused) occurrence carrying the
+// recurrence forward. Guards handleRecurrence against forking a series into
+// parallel chains when two completed-recurring rows of the same series coexist
+// (e.g. a retry after a container kill double-completes an occurrence).
+export function hasLivePendingRecurrence(db: Database.Database, seriesId: string): boolean {
+  return (
+    db
+      .prepare(
+        "SELECT 1 FROM messages_in WHERE series_id = ? AND status IN ('pending', 'paused') AND recurrence IS NOT NULL LIMIT 1",
+      )
+      .get(seriesId) !== undefined
+  );
+}
+
 export function insertRecurrence(
   db: Database.Database,
   msg: RecurringMessage,

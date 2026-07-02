@@ -16,13 +16,28 @@ import type Database from 'better-sqlite3';
 import { TIMEZONE } from '../../config.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
-import { clearRecurrence, getCompletedRecurring, insertRecurrence } from './db.js';
+import {
+  clearRecurrence,
+  getCompletedRecurring,
+  hasLivePendingRecurrence,
+  insertRecurrence,
+} from './db.js';
 
 export async function handleRecurrence(inDb: Database.Database, session: Session): Promise<void> {
   const recurring = getCompletedRecurring(inDb);
 
   for (const msg of recurring) {
     try {
+      // Idempotency guard: at most one live occurrence per series. Without it,
+      // two completed-recurring rows of the same series each fan out a next
+      // occurrence, permanently forking the series into parallel chains that
+      // only grow. Retire the extra completed row instead of cloning it. The
+      // insertRecurrence below makes the guard true for the rest of this pass.
+      if (hasLivePendingRecurrence(inDb, msg.series_id)) {
+        clearRecurrence(inDb, msg.id);
+        continue;
+      }
+
       const { CronExpressionParser } = await import('cron-parser');
       // Interpret the cron expression in the user's timezone. v1 did this
       // (src/v1/task-scheduler.ts:20-49); without it, a task written "0 9 * * *"
