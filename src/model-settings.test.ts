@@ -25,9 +25,9 @@ afterEach(() => {
 });
 
 describe('normalizeClaudeModelName', () => {
-  it('剥离历史 1m 后缀', () => {
+  it('保留 [1m] 后缀传给 SDK', () => {
     expect(normalizeClaudeModelName('claude-opus-4-8[1m]')).toBe(
-      'claude-opus-4-8',
+      'claude-opus-4-8[1m]',
     );
   });
 
@@ -52,7 +52,7 @@ describe('readGroupModelSettings', () => {
         groupFolder: 'g',
       }),
     ).toEqual({
-      model: 'claude-fable-5',
+      model: 'claude-fable-5[1m]',
       effortLevel: 'medium',
     });
   });

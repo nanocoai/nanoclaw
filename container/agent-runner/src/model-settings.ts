@@ -10,7 +10,7 @@ export function normalizeClaudeModelName(model: unknown): string | undefined {
   if (typeof model !== 'string') return undefined;
   const trimmed = model.trim();
   if (!trimmed) return undefined;
-  return trimmed.replace(/\[[^\]]+\]$/u, '');
+  return trimmed;
 }
 
 export function readGroupModelSettings(input: {
