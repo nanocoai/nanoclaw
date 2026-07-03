@@ -135,6 +135,15 @@ export function initGroupFilesystem(
     }
   }
 
+  // Per-group persistent skill data directory. Mounted at
+  // /workspace/skill-data inside the container; set as SKILL_DATA_DIR env.
+  // Survives container restarts; isolated per agent group.
+  const skillDataDir = path.join(DATA_DIR, 'v2-sessions', group.id, 'skill-data');
+  if (!fs.existsSync(skillDataDir)) {
+    fs.mkdirSync(skillDataDir, { recursive: true });
+    initialized.push('skill-data/');
+  }
+
   if (initialized.length > 0) {
     log.info('Initialized group filesystem', {
       group: group.name,

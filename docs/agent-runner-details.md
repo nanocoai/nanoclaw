@@ -712,11 +712,17 @@ These are ephemeral to the container's lifetime. When the container is killed an
 
 The agent-runner receives configuration via:
 
-- **Environment variables:** `AGENT_PROVIDER` (claude/codex/opencode), `NANOCLAW_ADMIN_USER_ID`, provider-specific vars (API keys, model overrides), `TZ`
+- **Environment variables:** `AGENT_PROVIDER` (claude/codex/opencode), `NANOCLAW_ADMIN_USER_ID`, provider-specific vars (API keys, model overrides), `TZ`, `SKILL_DATA_DIR` (per-group persistent skill state path; see below)
 - **Fixed mount paths:** Session DB at `/workspace/session.db`. Agent group folder at `/workspace/agent/`. System prompt from `/workspace/agent/CLAUDE.md` and `/workspace/global/CLAUDE.md`.
 - **Optional startup config:** Some config may be passed as a JSON file at a fixed path (e.g., `/workspace/config.json`) for things like the session ID to resume, assistant name, and admin user ID. This avoids overloading environment variables.
 
 The agent-runner reads config, creates the provider, and enters the poll loop. No stdin, no initial prompt — messages are already in the session DB.
+
+### Persistent Skill Data (`SKILL_DATA_DIR`)
+
+Every agent container has `SKILL_DATA_DIR=/workspace/skill-data` set, mounted from `data/v2-sessions/<group-id>/skill-data/` (RW, per-group). Skills that need to persist state across container restarts — caches, OAuth tokens, small databases, scratch artifacts — write here. Distinct from `/workspace/agent` (the agent's working dir for user-facing files) and `/workspace` (session DBs + heartbeat). Each agent group has its own dir; sessions within a group share it.
+
+Created by `group-init.ts` at first spawn; mounted by `container-runner.ts`'s `buildMounts`. Bypasses the operator-side mount allowlist (`validateAdditionalMounts`) because it's host-managed, not operator-declared. The `/manage-mounts` skill enumerates it as an informational "host-managed" row so operators auditing the per-group write surface see the complete picture.
 
 ### Provider Factory
 

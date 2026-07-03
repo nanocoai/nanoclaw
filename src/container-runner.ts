@@ -339,6 +339,18 @@ export function buildMounts(
     mounts.push({ hostPath: claudeDir, containerPath: '/home/node/.claude', readonly: false });
   }
 
+  // Per-group persistent skill data at /workspace/skill-data. Skills
+  // (e.g. ones that cache API responses, store OAuth state, or maintain
+  // small databases) write here and reads survive across container
+  // restarts. Distinct from /workspace/agent which is the agent's working
+  // dir for user-facing files; skill-data is for skill-internal state.
+  // Host-managed (not operator-declared); intentionally bypasses
+  // validateAdditionalMounts. The /manage-mounts skill enumerates this as
+  // an informational "host-managed" row so operators can audit the full
+  // per-group write surface.
+  const skillDataDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, 'skill-data');
+  mounts.push({ hostPath: skillDataDir, containerPath: '/workspace/skill-data', readonly: false });
+
   // Shared agent-runner source — read-only, same code for all groups.
   const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
   mounts.push({ hostPath: agentRunnerSrc, containerPath: '/app/src', readonly: true });
@@ -446,6 +458,11 @@ async function buildContainerArgs(
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Per-group persistent state dir for skill-internal use. The mount is
+  // wired in buildMounts; the env var tells skills (and any tooling that
+  // wants to persist data across container restarts) where to land.
+  args.push('-e', 'SKILL_DATA_DIR=/workspace/skill-data');
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
