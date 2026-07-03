@@ -32,6 +32,11 @@ export interface WriteMessageOut {
   content: string;
 }
 
+export interface MessageTarget {
+  messageId: string;
+  source: 'inbound' | 'outbound';
+}
+
 /**
  * Write a new outbound message, auto-assigning an odd seq number.
  * Container uses odd seq (1, 3, 5...), host uses even (2, 4, 6...).
@@ -80,21 +85,32 @@ export function writeMessageOut(msg: WriteMessageOut): number {
  * Look up a message's platform ID by seq number.
  * Searches both inbound and outbound DBs since seq spans both.
  *
- * For inbound messages, the Chat SDK message ID is already the platform message ID
- * (e.g., "6037840640:42" for Telegram).
+ * For inbound messages, messages_in.id is NanoClaw's internal routed ID.
+ * messages_in.platform_message_id carries the raw platform ID when available.
  *
  * For outbound messages, the internal ID (msg-xxx) won't work for edits/reactions.
  * Instead, look up the platform_message_id from the delivered table (host writes this
  * after successful delivery).
  */
-export function getMessageIdBySeq(seq: number): string | null {
+export function getMessageTargetBySeq(seq: number): MessageTarget | null {
   const inbound = getInboundDb();
 
-  // Inbound messages: ID is already the platform message ID
-  const inRow = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(seq) as
-    | { id: string }
+  const inRow = inbound.prepare('SELECT id, platform_message_id FROM messages_in WHERE seq = ?').get(seq) as
+    | { id: string; platform_message_id: string | null }
     | undefined;
-  if (inRow) return inRow.id;
+  if (inRow) {
+    if (!inRow.platform_message_id) {
+      console.error(
+        JSON.stringify({
+          severity: 'warn',
+          component: 'messages-out',
+          event: 'missing_platform_message_id',
+          seq,
+        }),
+      );
+    }
+    return { messageId: inRow.platform_message_id ?? inRow.id, source: 'inbound' };
+  }
 
   // Outbound messages: look up platform message ID from delivered table
   const outRow = getOutboundDb().prepare('SELECT id FROM messages_out WHERE seq = ?').get(seq) as
@@ -106,10 +122,14 @@ export function getMessageIdBySeq(seq: number): string | null {
   const deliveredRow = inbound
     .prepare('SELECT platform_message_id FROM delivered WHERE message_out_id = ?')
     .get(outRow.id) as { platform_message_id: string | null } | undefined;
-  if (deliveredRow?.platform_message_id) return deliveredRow.platform_message_id;
+  if (deliveredRow?.platform_message_id) return { messageId: deliveredRow.platform_message_id, source: 'outbound' };
 
   // Fallback to internal ID (edits/reactions on undelivered messages won't work)
-  return outRow.id;
+  return { messageId: outRow.id, source: 'outbound' };
+}
+
+export function getMessageIdBySeq(seq: number): string | null {
+  return getMessageTargetBySeq(seq)?.messageId ?? null;
 }
 
 /**

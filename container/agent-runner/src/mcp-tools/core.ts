@@ -11,7 +11,7 @@ import path from 'path';
 
 import { getCurrentInReplyTo } from '../current-batch.js';
 import { findByName, getAllDestinations } from '../destinations.js';
-import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
+import { getMessageTargetBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -196,8 +196,9 @@ export const editMessage: McpToolDefinition = {
     const text = args.text as string;
     if (!seq || !text) return err('messageId and text are required');
 
-    const platformId = getMessageIdBySeq(seq);
-    if (!platformId) return err(`Message #${seq} not found`);
+    const target = getMessageTargetBySeq(seq);
+    if (!target) return err(`Message #${seq} not found`);
+    if (target.source === 'inbound') return err(`Cannot edit inbound message #${seq}`);
 
     const routing = getRoutingBySeq(seq);
     if (!routing || !routing.channel_type || !routing.platform_id) {
@@ -211,10 +212,10 @@ export const editMessage: McpToolDefinition = {
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
       thread_id: routing.thread_id,
-      content: JSON.stringify({ operation: 'edit', messageId: platformId, text }),
+      content: JSON.stringify({ operation: 'edit', messageId: target.messageId, text }),
     });
 
-    log(`edit_message: #${seq} → ${platformId}`);
+    log(`edit_message: #${seq} → ${target.messageId}`);
     return ok(`Message edit queued for #${seq}`);
   },
 };
@@ -237,8 +238,8 @@ export const addReaction: McpToolDefinition = {
     const emoji = args.emoji as string;
     if (!seq || !emoji) return err('messageId and emoji are required');
 
-    const platformId = getMessageIdBySeq(seq);
-    if (!platformId) return err(`Message #${seq} not found`);
+    const target = getMessageTargetBySeq(seq);
+    if (!target) return err(`Message #${seq} not found`);
 
     const routing = getRoutingBySeq(seq);
     if (!routing || !routing.channel_type || !routing.platform_id) {
@@ -252,10 +253,10 @@ export const addReaction: McpToolDefinition = {
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
       thread_id: routing.thread_id,
-      content: JSON.stringify({ operation: 'reaction', messageId: platformId, emoji }),
+      content: JSON.stringify({ operation: 'reaction', messageId: target.messageId, emoji }),
     });
 
-    log(`add_reaction: #${seq} → ${emoji} on ${platformId}`);
+    log(`add_reaction: #${seq} → ${emoji} on ${target.messageId}`);
     return ok(`Reaction queued for #${seq}`);
   },
 };

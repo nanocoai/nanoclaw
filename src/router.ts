@@ -471,6 +471,7 @@ async function deliverToAgent(
     kind: event.message.kind,
     timestamp: event.message.timestamp,
     platformId: deliveryAddr.platformId,
+    platformMessageId: event.message.id || null,
     channelType: deliveryAddr.channelType,
     threadId: deliveryAddr.threadId,
     content: event.message.content,

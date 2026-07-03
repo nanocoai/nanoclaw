@@ -35,6 +35,7 @@ export interface MessageInRow {
   /** 1 = wake-eligible (default); 0 = accumulated context only */
   trigger: number;
   platform_id: string | null;
+  platform_message_id: string | null;
   channel_type: string | null;
   thread_id: string | null;
   content: string;
@@ -163,4 +164,3 @@ export function findQuestionResponse(questionId: string): MessageInRow | undefin
     inbound.close();
   }
 }
-

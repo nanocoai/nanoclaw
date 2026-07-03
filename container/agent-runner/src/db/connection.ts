@@ -194,6 +194,7 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
       tries          INTEGER DEFAULT 0,
       trigger        INTEGER NOT NULL DEFAULT 1,
       platform_id    TEXT,
+      platform_message_id TEXT,
       channel_type   TEXT,
       thread_id      TEXT,
       content        TEXT NOT NULL,

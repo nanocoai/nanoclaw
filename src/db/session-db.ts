@@ -98,6 +98,7 @@ export function insertMessage(
     kind: string;
     timestamp: string;
     platformId: string | null;
+    platformMessageId?: string | null;
     channelType: string | null;
     threadId: string | null;
     content: string;
@@ -122,10 +123,11 @@ export function insertMessage(
   },
 ): void {
   db.prepare(
-    `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger, source_session_id, on_wake)
-     VALUES (@id, @seq, @kind, @timestamp, 'pending', @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @id, @trigger, @sourceSessionId, @onWake)`,
+    `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, platform_message_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger, source_session_id, on_wake)
+     VALUES (@id, @seq, @kind, @timestamp, 'pending', @platformId, @platformMessageId, @channelType, @threadId, @content, @processAfter, @recurrence, @id, @trigger, @sourceSessionId, @onWake)`,
   ).run({
     ...message,
+    platformMessageId: message.platformMessageId ?? null,
     trigger: message.trigger ?? 1,
     onWake: message.onWake ?? 0,
     sourceSessionId: message.sourceSessionId ?? null,
@@ -328,6 +330,19 @@ export function migrateMessagesInTable(db: Database.Database): void {
     // 1 = only deliver on the container's first poll (fresh start).
     // All existing rows are normal messages, so default 0.
     db.prepare('ALTER TABLE messages_in ADD COLUMN on_wake INTEGER NOT NULL DEFAULT 0').run();
+  }
+  if (!cols.has('platform_message_id')) {
+    db.prepare('ALTER TABLE messages_in ADD COLUMN platform_message_id TEXT').run();
+    db.prepare(
+      `UPDATE messages_in
+       SET platform_message_id =
+         CASE
+           WHEN instr(id, ':') > 0 THEN substr(id, 1, instr(id, ':') - 1)
+           ELSE id
+         END
+       WHERE channel_type = 'discord'
+         AND platform_message_id IS NULL`,
+    ).run();
   }
 }
 

@@ -173,6 +173,7 @@ CREATE TABLE IF NOT EXISTS messages_in (
   trigger        INTEGER NOT NULL DEFAULT 1,
                  -- 0 = accumulated context (don't wake), 1 = wake agent
   platform_id    TEXT,
+  platform_message_id TEXT,
   channel_type   TEXT,
   thread_id      TEXT,
   content        TEXT NOT NULL,
