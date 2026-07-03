@@ -7,8 +7,8 @@
  *
  * Ported from v1 — see v1 source for commit history.
  */
-import { execFileSync, execSync, spawn } from 'node:child_process';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createConnection, type Socket } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -351,70 +351,6 @@ function resolveMentions(text: string, mentions?: SignalMention[]): string {
   return result;
 }
 
-/**
- * Optional voice-note transcription. Tries (in order):
- *   1. local whisper.cpp CLI when `WHISPER_BIN` is set
- *   2. OpenAI Whisper API when `OPENAI_API_KEY` is set
- * Returns null if neither path is configured or transcription fails — caller
- * falls back to a `[Voice Message]` placeholder.
- *
- * Signal voice notes are AAC/ADTS; whisper-cpp wants WAV. ffmpeg is invoked
- * if available to convert; if ffmpeg is missing the local path is skipped.
- */
-async function transcribeAudioOptional(filePath: string): Promise<string | null> {
-  const whisperBin = process.env.WHISPER_BIN;
-  if (whisperBin) {
-    try {
-      const wavPath = `${filePath}.wav`;
-      execSync(`ffmpeg -y -loglevel error -i "${filePath}" -ar 16000 -ac 1 "${wavPath}"`, { stdio: 'ignore' });
-      const model = process.env.WHISPER_MODEL || `${homedir()}/.local/share/whisper/models/ggml-base.en.bin`;
-      const out = execSync(`"${whisperBin}" -m "${model}" -f "${wavPath}" -nt -otxt -of "${wavPath}"`, {
-        encoding: 'utf-8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-      });
-      try {
-        unlinkSync(wavPath);
-        unlinkSync(`${wavPath}.txt`);
-      } catch {}
-      const text = out.replace(/\[[^\]]*\]/g, '').trim();
-      if (text) return text;
-    } catch (err) {
-      log.debug('Signal: local whisper transcription failed, trying OpenAI', { err });
-    }
-  }
-
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (apiKey) {
-    try {
-      const buf = readFileSync(filePath);
-      const boundary = `----nanoclaw-${Date.now()}`;
-      const body = Buffer.concat([
-        Buffer.from(
-          `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.aac"\r\nContent-Type: audio/aac\r\n\r\n`,
-        ),
-        buf,
-        Buffer.from(`\r\n--${boundary}--\r\n`),
-      ]);
-      const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-        },
-        body,
-      });
-      if (res.ok) {
-        const json = (await res.json()) as { text?: string };
-        if (json.text) return json.text.trim();
-      }
-    } catch (err) {
-      log.debug('Signal: OpenAI transcription failed', { err });
-    }
-  }
-
-  return null;
-}
-
 function chunkText(text: string, limit: number): string[] {
   const chunks: string[] = [];
   let remaining = text;
@@ -620,9 +556,11 @@ export function createSignalAdapter(config: {
 
     let content = text;
 
-    // Voice attachment — try transcription if WHISPER_BIN or OPENAI_API_KEY
-    // is configured; otherwise fall back to the original placeholder so
-    // operators who don't want transcription get the same UX as before.
+    // Voice attachment — surface as a structured `attachments` entry so the
+    // container's auto-transcribe pass can run whisper-cli locally and
+    // inject `[Voice (local-whisper): "..."]` into the prompt. No host-side
+    // transcription: audio never leaves the machine, sovereignty by default.
+    let audioRef: { name: string; mimeType: string; localPath: string } | null = null;
     if (hasVoice && audioAttachment?.id) {
       const attachmentPath = join(config.signalDataDir, 'attachments', audioAttachment.id);
       if (existsSync(attachmentPath)) {
@@ -631,13 +569,11 @@ export function createSignalAdapter(config: {
           attachmentId: audioAttachment.id,
           path: attachmentPath,
         });
-        const transcript = await transcribeAudioOptional(attachmentPath);
-        if (transcript) {
-          content = `[Voice: ${transcript}]`;
-          log.info('Signal: voice transcribed', { platformId, length: transcript.length });
-        } else {
-          content = '[Voice Message]';
-        }
+        audioRef = {
+          name: audioAttachment.id,
+          mimeType: audioAttachment.contentType || 'audio/aac',
+          localPath: attachmentPath,
+        };
       } else {
         log.warn('Signal: voice attachment file not found', {
           id: audioAttachment.id,
@@ -651,7 +587,14 @@ export function createSignalAdapter(config: {
     // tool can pick them up, and surface the structured `attachments` array
     // for consumers that prefer that shape. Without this, vision-capable
     // models never see images sent over Signal.
-    const attachmentRefs: Array<{ path: string; contentType: string }> = [];
+    const attachmentRefs: Array<{
+      path?: string;
+      contentType?: string;
+      name?: string;
+      mimeType?: string;
+      localPath?: string;
+    }> = [];
+    if (audioRef) attachmentRefs.push(audioRef);
     for (const img of imageAttachments) {
       const imagePath = join(config.signalDataDir, 'attachments', img.id!);
       const imageLine = `[Image: ${imagePath}]`;
