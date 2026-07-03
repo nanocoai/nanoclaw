@@ -170,7 +170,7 @@ function readState(db: Database.Database): Snapshot {
     }
   }
 
-  const pendingApprovals = (db.prepare('SELECT COUNT(*) as c FROM pending_approvals').get() as any).c as number;
+  const pendingApprovals = (db.prepare("SELECT COUNT(*) as c FROM pending_approvals WHERE status = 'pending'").get() as any).c as number;
   const unregisteredSenders = (db.prepare('SELECT COUNT(*) as c FROM unregistered_senders').get() as any).c as number;
 
   const env = readEnvFile(['OPENCODE_MODEL', 'OPENCODE_SMALL_MODEL']);
