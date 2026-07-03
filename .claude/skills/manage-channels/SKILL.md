@@ -94,11 +94,36 @@ When adding another group/chat on an already-configured platform (e.g. a second 
 3. Delete the old `messaging_group_agents` entry, create a new one
 4. Note: existing sessions stay with the old agent group; new messages route to the new one. The `agent_destinations` row created for the old wiring is NOT automatically removed — if you want the old agent to stop seeing the channel as a named target, delete it from `agent_destinations` manually.
 
+
+## Group Model Override
+
+Each agent group can use a specific Claude model instead of the container-wide default.
+
+**How to set it:** Edit `groups/<folder>/container.json` and add or update the `model` field:
+
+```json
+{
+  "model": "claude-haiku-4-5-20251001"
+}
+```
+
+The host injects the value as `AGENT_MODEL` when spawning the container. Omitting the field (or leaving it blank) falls back to the `AGENT_MODEL` env var set on the host, or the SDK default if that is also unset.
+
+**Valid values:** Any `claude-*` model ID (e.g. `claude-haiku-4-5-20251001`, `claude-sonnet-4-6`, `claude-opus-4-7`). Unrecognized prefixes are forwarded with a warning so newly-released models work before the pattern is updated.
+
+**When to use this:**
+- Route high-volume or low-stakes groups to a faster/cheaper model (e.g. Haiku).
+- Pin a group to a specific model version for reproducibility.
+- Keep the default group on the latest capable model while side groups use something lighter.
+
+After editing `container.json`, the change takes effect on the next container spawn (new message to that group). No rebuild or restart needed for a model-only change.
+
 ## Show Configuration
 
 Display a readable summary showing:
 
 - **Agent groups** with their wired channels (from `messaging_group_agents`)
+- **Model override** for each group (from `groups/<folder>/container.json` — show `model` field or "default" if absent)
 - **Configured-but-unwired** channels (credentials present, no DB entities)
 - **Unconfigured** channels
 - **Privileged users**: `SELECT user_id, role, agent_group_id FROM user_roles ORDER BY role='owner' DESC`
