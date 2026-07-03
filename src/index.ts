@@ -4,6 +4,8 @@
  * Thin orchestrator: init DB, run migrations, start channel adapters,
  * start delivery polls, start sweep, handle shutdown.
  */
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import { backfillContainerConfigs } from './backfill-container-configs.js';
@@ -12,7 +14,8 @@ import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
 import { initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
-import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
+import { ensureContainerRuntimeRunning, cleanupOrphans, IS_APPLE_CONTAINER } from './container-runtime.js';
+import { startOneCliForwarder, stopOneCliForwarder } from './onecli-forwarder.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
@@ -71,6 +74,25 @@ import {
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
 
+  // Apple Container only shares mount sources under the operator's home dir, and
+  // the OneCLI SDK writes its CA cert / credential stubs to os.tmpdir(). Pin
+  // TMPDIR under HOME and assert the install lives under HOME — failing fast
+  // rather than spawning containers with silently-missing mounts.
+  if (IS_APPLE_CONTAINER) {
+    const home = process.env.HOME || os.homedir();
+    const root = process.cwd();
+    if (root !== home && !root.startsWith(home + path.sep)) {
+      throw new Error(
+        `Apple Container requires the install to live under your home directory (${home}); it is at ${root}. ` +
+          `Bind mounts from outside HOME silently fail under Apple Container.`,
+      );
+    }
+    const tmpd = path.join(home, '.config', 'nanoclaw', 'tmp');
+    fs.mkdirSync(tmpd, { recursive: true });
+    process.env.TMPDIR = tmpd;
+    log.info('Apple Container: TMPDIR pinned under HOME', { tmpd });
+  }
+
   // 0. Circuit breaker — backoff on rapid restarts
   await enforceStartupBackoff();
 
@@ -94,6 +116,13 @@ async function main(): Promise<void> {
   // 2. Container runtime
   ensureContainerRuntimeRunning();
   cleanupOrphans();
+
+  // 2.5 OneCLI bridge forwarder (Apple Container only; no-op under Docker).
+  // Must listen before any container spawns; runs after the runtime is up
+  // (builder start brought bridge100 up). Throws/aborts startup if the OneCLI
+  // gateway is unreachable on loopback or its control API is exposed off-loopback.
+  await startOneCliForwarder();
+  onShutdown(() => stopOneCliForwarder());
 
   // 3. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {

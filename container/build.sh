@@ -5,6 +5,11 @@
 #   INSTALL_CJK_FONTS=true   — add Chinese/Japanese/Korean fonts (~200MB)
 # setup/container.ts reads the same file, so both build paths stay in sync.
 # Callers can also override by exporting INSTALL_CJK_FONTS directly.
+#
+# Runtime: builds with $CONTAINER_RUNTIME (docker | container), default docker.
+# For Apple Container:  CONTAINER_RUNTIME=container ./container/build.sh
+# The Dockerfile + --build-arg are byte-compatible with `container build`; the
+# image lands in the Apple OCI store runnable by its slug tag — no `image load`.
 
 set -e
 

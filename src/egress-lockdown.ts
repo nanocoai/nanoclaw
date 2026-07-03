@@ -9,15 +9,16 @@
  */
 import { execFileSync } from 'child_process';
 
-import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
+import { CONTAINER_RUNTIME_BIN, IS_APPLE_CONTAINER } from './container-runtime.js';
+import { EGRESS_LOCKDOWN } from './config.js';
 import { log } from './log.js';
 
 /** Locked-down, no-internet network agents are placed on. */
 export const EGRESS_NETWORK = process.env.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
 /** The OneCLI gateway container attached as the only egress hop. */
 const ONECLI_GATEWAY_CONTAINER = process.env.ONECLI_GATEWAY_CONTAINER || 'onecli';
-/** Off by default; set NANOCLAW_EGRESS_LOCKDOWN=true to opt in. */
-const EGRESS_LOCKDOWN = process.env.NANOCLAW_EGRESS_LOCKDOWN === 'true';
+// EGRESS_LOCKDOWN is centralized in config.ts (read via readEnvFile so it is
+// honored under launchd/systemd, where .env is never loaded into process.env).
 
 /** Raised when lockdown is requested but can't be established. */
 export class EgressLockdownError extends Error {
@@ -63,6 +64,12 @@ function gatewayAttached(): boolean {
  */
 export function ensureEgressNetwork(): boolean {
   if (!EGRESS_LOCKDOWN) return false;
+
+  // Egress lockdown is built on Docker `network --internal` primitives Apple
+  // Container does not expose. Fail fast rather than spawn with open egress.
+  if (IS_APPLE_CONTAINER) {
+    throw new EgressLockdownError('the runtime is Apple Container, which has no Docker bridge networking');
+  }
 
   if (
     !dockerOk(['network', 'inspect', EGRESS_NETWORK]) &&
