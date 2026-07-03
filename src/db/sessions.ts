@@ -52,10 +52,24 @@ export function findSessionForAgent(
     .get(agentGroupId, messagingGroupId) as Session | undefined;
 }
 
-/** Find an active session scoped to an agent group (ignoring messaging group). */
+/**
+ * Find an active session scoped to an agent group (ignoring messaging group).
+ *
+ * Order preference: most-recently-active session first, falling back to
+ * most-recently-created. Sessions with NULL `last_active` (never touched
+ * since creation) sort last so a stale never-used session can't beat a
+ * session that's actively in use.
+ *
+ * Used as the destination resolver when a synthesized message (e.g. an
+ * agent-to-agent reply) lacks channel context to bind to a specific
+ * (messaging_group, session) pair. Picking the most-active session avoids
+ * misrouting replies into a dormant session for the same agent group.
+ */
 export function findSessionByAgentGroup(agentGroupId: string): Session | undefined {
   return getDb()
-    .prepare("SELECT * FROM sessions WHERE agent_group_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1")
+    .prepare(
+      "SELECT * FROM sessions WHERE agent_group_id = ? AND status = 'active' ORDER BY last_active IS NULL, last_active DESC, created_at DESC LIMIT 1",
+    )
     .get(agentGroupId) as Session | undefined;
 }
 
