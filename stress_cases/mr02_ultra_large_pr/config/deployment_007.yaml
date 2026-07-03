@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mr2-large-pr-sentinel
+spec:
+  containers:
+    - name: worker
+      image: example.com/internal/worker:latest
+      securityContext:
+        privileged: true  # STRESS_ID: MR2-F06
+      env:
+        - name: PROFILE
+          value: mr2

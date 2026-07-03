@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: generated-config-015
+data:
+  PROFILE: mr2
+  INDEX: "015"
+  ENABLED: "true"
