@@ -38,6 +38,12 @@ function destinationList(): string {
   return all.map((d) => d.name).join(', ');
 }
 
+const SEND_FILE_ROOT = '/workspace/agent';
+
+function isWithinSendFileRoot(sourcePath: string): boolean {
+  return sourcePath === SEND_FILE_ROOT || sourcePath.startsWith(`${SEND_FILE_ROOT}/`);
+}
+
 /**
  * Resolve a destination name to routing fields.
  *
@@ -139,7 +145,7 @@ export const sendFile: McpToolDefinition = {
       type: 'object' as const,
       properties: {
         to: { type: 'string', description: 'Destination name. Optional if you have only one destination.' },
-        path: { type: 'string', description: 'File path (relative to /workspace/agent/ or absolute)' },
+        path: { type: 'string', description: 'File path (relative to /workspace/agent/ or absolute within /workspace/agent/)' },
         text: { type: 'string', description: 'Optional accompanying message' },
         filename: { type: 'string', description: 'Display name (default: basename of path)' },
       },
@@ -153,15 +159,27 @@ export const sendFile: McpToolDefinition = {
     const routing = resolveRouting(args.to as string | undefined);
     if ('error' in routing) return err(routing.error);
 
-    const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve('/workspace/agent', filePath);
+    const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(SEND_FILE_ROOT, filePath);
     if (!fs.existsSync(resolvedPath)) return err(`File not found: ${filePath}`);
 
+    let sourcePath: string;
+    try {
+      sourcePath = fs.realpathSync(resolvedPath);
+    } catch {
+      return err(`File not found: ${filePath}`);
+    }
+    if (!isWithinSendFileRoot(sourcePath)) {
+      return err('path must be within /workspace/agent');
+    }
+
     const id = generateId();
-    const filename = (args.filename as string) || path.basename(resolvedPath);
+    const requestedFilename = (args.filename as string | undefined) || path.basename(sourcePath);
+    const filename = path.basename(requestedFilename);
+    if (!filename || filename === '.' || filename === '..') return err('filename must be a file name');
 
     const outboxDir = path.join('/workspace/outbox', id);
     fs.mkdirSync(outboxDir, { recursive: true });
-    fs.copyFileSync(resolvedPath, path.join(outboxDir, filename));
+    fs.copyFileSync(sourcePath, path.join(outboxDir, filename));
 
     writeMessageOut({
       id,

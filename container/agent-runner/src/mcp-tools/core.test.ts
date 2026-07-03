@@ -5,12 +5,13 @@
  * send_file) must pick it up so a2a return-path routing on the host can
  * correlate replies back to the originating session.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, spyOn, mock } from 'bun:test';
+import fs from 'fs';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb } from '../db/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
 import { setCurrentInReplyTo, clearCurrentInReplyTo } from '../current-batch.js';
-import { sendMessage } from './core.js';
+import { sendMessage, sendFile } from './core.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -25,6 +26,7 @@ beforeEach(() => {
 
 afterEach(() => {
   clearCurrentInReplyTo();
+  mock.restore();
   closeSessionDb();
 });
 
@@ -46,5 +48,73 @@ describe('send_message MCP tool — in_reply_to plumbing', () => {
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
     expect(out[0].in_reply_to).toBeNull();
+  });
+});
+
+describe('send_file MCP tool — workspace/agent confinement', () => {
+  function mockFile(realPath: string) {
+    spyOn(fs, 'existsSync').mockReturnValue(true);
+    spyOn(fs, 'realpathSync').mockReturnValue(realPath);
+    spyOn(fs, 'mkdirSync').mockReturnValue(undefined as never);
+    return spyOn(fs, 'copyFileSync').mockReturnValue(undefined as never);
+  }
+
+  it('rejects absolute paths whose canonical location is outside /workspace/agent', async () => {
+    mockFile('/etc/passwd');
+
+    const result = await sendFile.handler({ to: 'peer', path: '/etc/passwd' });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('path must be within /workspace/agent');
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('rejects /workspace/agent symlinks that resolve outside /workspace/agent', async () => {
+    mockFile('/host/secrets/token');
+
+    const result = await sendFile.handler({ to: 'peer', path: '/workspace/agent/link-to-secret' });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('path must be within /workspace/agent');
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('rejects canonical paths in sibling /workspace directories', async () => {
+    mockFile('/workspace/extra/secret.txt');
+
+    const result = await sendFile.handler({ to: 'peer', path: '/workspace/extra/secret.txt' });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('path must be within /workspace/agent');
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('rejects /workspace/agent-prefix canonical paths', async () => {
+    mockFile('/workspace/agent-secrets/token.txt');
+
+    const result = await sendFile.handler({ to: 'peer', path: '/workspace/agent-secrets/token.txt' });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('path must be within /workspace/agent');
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('basenames caller-provided filenames before writing to the outbox', async () => {
+    const copyFile = mockFile('/workspace/agent/report.txt');
+
+    const result = await sendFile.handler({
+      to: 'peer',
+      path: '/workspace/agent/report.txt',
+      filename: '../../skills/evil/SKILL.md',
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(copyFile).toHaveBeenCalledTimes(1);
+    expect(copyFile.mock.calls[0][0]).toBe('/workspace/agent/report.txt');
+    expect(String(copyFile.mock.calls[0][1])).toMatch(/^\/workspace\/outbox\/[^/]+\/SKILL\.md$/);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).files).toEqual(['SKILL.md']);
   });
 });
