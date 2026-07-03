@@ -41,37 +41,54 @@ export interface WriteMessageOut {
  * by edit_message / add_reaction, and getMessageIdBySeq() below looks up
  * by seq across BOTH tables. If inbound and outbound could share a seq,
  * the agent's "edit message #5" could resolve to the wrong row.
+ *
+ * Concurrency: the MCP server runs in a child bun process (spawned by
+ * index.ts) with its own connection to outbound.db. So writeMessageOut
+ * has at least two concurrent writers — the parent poll-loop and the
+ * MCP child. We wrap MAX(seq)→INSERT in BEGIN IMMEDIATE so SQLite
+ * serializes the seq allocation across connections; without it, both
+ * processes could compute the same nextSeq from a stale read and the
+ * loser would hit SQLITE_CONSTRAINT on the UNIQUE seq column.
  */
 export function writeMessageOut(msg: WriteMessageOut): number {
   const outbound = getOutboundDb();
   const inbound = getInboundDb();
 
-  // Read max seq from both DBs to maintain global ordering.
-  // Safe: each side only reads the other DB, never writes to it.
-  const maxOut = (outbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number }).m;
-  const maxIn = (inbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_in').get() as { m: number }).m;
-  const max = Math.max(maxOut, maxIn);
-  const nextSeq = max % 2 === 0 ? max + 1 : max + 2; // next odd
+  outbound.exec('BEGIN IMMEDIATE');
+  let nextSeq: number;
+  try {
+    const maxOut = (outbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number }).m;
+    // maxIn read is intentionally outside any transaction on inbound (we
+    // only have a read-only handle there) — the host's even-seq writes are
+    // independent of our parity, so a stale value here can't collide.
+    const maxIn = (inbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_in').get() as { m: number }).m;
+    const max = Math.max(maxOut, maxIn);
+    nextSeq = max % 2 === 0 ? max + 1 : max + 2; // next odd
 
-  // bun:sqlite requires named parameters to be passed with the prefix character
-  // in the JS object keys (better-sqlite3 auto-stripped it, bun:sqlite does not).
-  outbound
-    .prepare(
-      `INSERT INTO messages_out (id, seq, in_reply_to, timestamp, deliver_after, recurrence, kind, platform_id, channel_type, thread_id, content)
-     VALUES ($id, $seq, $in_reply_to, datetime('now'), $deliver_after, $recurrence, $kind, $platform_id, $channel_type, $thread_id, $content)`,
-    )
-    .run({
-      $id: msg.id,
-      $seq: nextSeq,
-      $in_reply_to: msg.in_reply_to ?? null,
-      $deliver_after: msg.deliver_after ?? null,
-      $recurrence: msg.recurrence ?? null,
-      $kind: msg.kind,
-      $platform_id: msg.platform_id ?? null,
-      $channel_type: msg.channel_type ?? null,
-      $thread_id: msg.thread_id ?? null,
-      $content: msg.content,
-    });
+    // bun:sqlite requires named parameters to be passed with the prefix character
+    // in the JS object keys (better-sqlite3 auto-stripped it, bun:sqlite does not).
+    outbound
+      .prepare(
+        `INSERT INTO messages_out (id, seq, in_reply_to, timestamp, deliver_after, recurrence, kind, platform_id, channel_type, thread_id, content)
+       VALUES ($id, $seq, $in_reply_to, datetime('now'), $deliver_after, $recurrence, $kind, $platform_id, $channel_type, $thread_id, $content)`,
+      )
+      .run({
+        $id: msg.id,
+        $seq: nextSeq,
+        $in_reply_to: msg.in_reply_to ?? null,
+        $deliver_after: msg.deliver_after ?? null,
+        $recurrence: msg.recurrence ?? null,
+        $kind: msg.kind,
+        $platform_id: msg.platform_id ?? null,
+        $channel_type: msg.channel_type ?? null,
+        $thread_id: msg.thread_id ?? null,
+        $content: msg.content,
+      });
+    outbound.exec('COMMIT');
+  } catch (err) {
+    outbound.exec('ROLLBACK');
+    throw err;
+  }
 
   return nextSeq;
 }
