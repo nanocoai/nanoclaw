@@ -62,6 +62,8 @@ interface WiringSnap {
 
 interface TaskSnap {
   id: string;
+  seriesId: string | null;
+  stableKey: string;
   recurrence: string | null;
   processAfter: string | null;
 }
@@ -148,7 +150,7 @@ function readState(db: Database.Database): Snapshot {
     try {
       inDb.pragma('journal_mode = DELETE');
       const tasks = inDb.prepare(
-        "SELECT id, recurrence, process_after FROM messages_in WHERE kind='task' ORDER BY id",
+        "SELECT id, series_id, recurrence, process_after FROM messages_in WHERE kind='task' AND status='pending' ORDER BY id",
       ).all() as any[];
 
       scheduledTasks.push({
@@ -156,6 +158,8 @@ function readState(db: Database.Database): Snapshot {
         agentGroupName: group.name,
         tasks: tasks.map(t => ({
           id: t.id,
+          seriesId: t.series_id ?? null,
+          stableKey: t.series_id ?? t.id,
           recurrence: t.recurrence ?? null,
           // For one-shot tasks only — recurring process_after advances daily, not meaningful to diff
           processAfter: t.recurrence ? null : (t.process_after ?? null),
@@ -254,8 +258,8 @@ function diffState(prev: Snapshot, curr: Snapshot): Record<string, Change[]> {
     const prevGroup = prevGroupMap.get(gid);
     const prevTasks = prevGroup ? prevGroup.tasks : [];
     const inner = diffArrayByKey(
-      prevTasks, group.tasks, 'id',
-      t => `[${group.agentGroupName}] ${t.id}`,
+      prevTasks, group.tasks, 'stableKey',
+      t => `[${group.agentGroupName}] ${t.seriesId ?? t.id}`,
       ['recurrence', 'processAfter'],
     );
     taskChanges.push(...inner);
