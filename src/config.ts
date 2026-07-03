@@ -55,7 +55,8 @@ function escapeRegex(str: string): string {
 }
 
 export function buildTriggerPattern(trigger: string): RegExp {
-  return new RegExp(`^${escapeRegex(trigger.trim())}\\b`, 'i');
+  // Match trigger at start of message OR after a media prefix like [Photo], [Video], [Document: x.pdf]
+  return new RegExp(`(?:^|\\]\\s*)${escapeRegex(trigger.trim())}\\b`, 'i');
 }
 
 export const DEFAULT_TRIGGER = `@${ASSISTANT_NAME}`;
