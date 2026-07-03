@@ -15,28 +15,7 @@ import { sanitizeTelegramLegacyMarkdown } from './telegram-markdown-sanitize.js'
 import { registerChannelAdapter } from './channel-registry.js';
 import type { ChannelAdapter, ChannelSetup, InboundMessage } from './adapter.js';
 import { tryConsume } from './telegram-pairing.js';
-
-/**
- * Retry a one-shot operation that can fail on transient network errors at
- * cold-start (DNS hiccups, brief upstream outages). Exponential backoff capped
- * at 5 attempts — if the network is truly down we surface it instead of
- * hanging the service indefinitely.
- */
-async function withRetry<T>(fn: () => Promise<T>, label: string, maxAttempts = 5): Promise<T> {
-  let lastErr: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastErr = err;
-      if (attempt === maxAttempts) break;
-      const delay = Math.min(16000, 1000 * 2 ** (attempt - 1));
-      log.warn('Telegram setup failed, retrying', { label, attempt, delayMs: delay, err });
-      await new Promise((r) => setTimeout(r, delay));
-    }
-  }
-  throw lastErr;
-}
+import { probeBotPollingFreedom, withSetupRetry } from './telegram-polling-probe.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
@@ -233,11 +212,18 @@ registerChannelAdapter('telegram', {
         }
       },
       async setup(hostConfig: ChannelSetup) {
+        // Pre-flight: probe the bot's polling session before doing any
+        // real setup work. If another client is holding it (HTTP 409), no
+        // amount of retry will recover — fail fast with a clear error so
+        // the operator knows to find the orphan instead of seeing the
+        // adapter silently miss its registration.
+        await probeBotPollingFreedom(token);
+
         const intercepted: ChannelSetup = {
           ...hostConfig,
           onInbound: createPairingInterceptor(botUsernamePromise, hostConfig.onInbound, token),
         };
-        return withRetry(() => bridge.setup(intercepted), 'bridge.setup');
+        return withSetupRetry(() => bridge.setup(intercepted), 'bridge.setup');
       },
     };
     return wrapped;
