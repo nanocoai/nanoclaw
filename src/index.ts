@@ -9,6 +9,7 @@ import path from 'path';
 import { backfillContainerConfigs } from './backfill-container-configs.js';
 import { DATA_DIR } from './config.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
+import { acquireSingleInstanceLock, SingleInstanceError, type SingleInstanceHandle } from './single-instance.js';
 import { migrateGroupsToClaudeLocal } from './claude-md-compose.js';
 import { initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
@@ -68,10 +69,31 @@ import {
   createChannelDeliveryAdapter,
 } from './channels/channel-registry.js';
 
+// Held for the lifetime of the process. Released on graceful shutdown so the
+// next start doesn't have to wait for the stale-reclaim path.
+let singleInstanceHandle: SingleInstanceHandle | null = null;
+
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
 
-  // 0. Circuit breaker — backoff on rapid restarts
+  // 0a. Single-instance lock — runs before everything else so a duplicate
+  //     host aborts before it can race for the CLI socket, the Telegram bot
+  //     polling session, or the per-session DBs. See src/single-instance.ts.
+  try {
+    singleInstanceHandle = acquireSingleInstanceLock();
+    log.info('Acquired host lock', { lockFile: singleInstanceHandle.lockFile, pid: process.pid });
+  } catch (err) {
+    if (err instanceof SingleInstanceError) {
+      log.fatal('Another NanoClaw host is already running — exiting', {
+        holderPid: err.holderPid,
+        lockFile: err.lockFile,
+      });
+      process.exit(1);
+    }
+    throw err;
+  }
+
+  // 0b. Circuit breaker — backoff on rapid restarts
   await enforceStartupBackoff();
 
   // 0.5 Upgrade tripwire — refuse to start if this install was updated
@@ -194,6 +216,9 @@ async function shutdown(signal: string): Promise<void> {
     // via SIGTERM/SIGINT, not a crash, so the next start shouldn't be counted
     // as one.
     resetCircuitBreaker();
+    // Release the host lock so the next start doesn't have to reclaim a
+    // stale file. Best-effort — even if this throws, exit(0) still runs.
+    singleInstanceHandle?.release();
     process.exit(0);
   }
 }
