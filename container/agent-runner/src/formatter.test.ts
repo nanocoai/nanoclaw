@@ -165,6 +165,44 @@ describe('XML escaping', () => {
   });
 });
 
+describe('formatTaskMessage', () => {
+  function insertTask(id: string, content: object, opts: { timestamp: string; processAfter: string | null }) {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, process_after, content)
+         VALUES (?, 'task', ?, 'pending', ?, ?)`,
+      )
+      .run(id, opts.timestamp, opts.processAfter, JSON.stringify(content));
+  }
+
+  it('exposes scheduled_for distinct from row timestamp', () => {
+    // Recurring task: the row was inserted yesterday (10:31 UTC) when the
+    // previous fire scheduled this occurrence, but it's due today at 07:30 UTC.
+    insertTask(
+      't1',
+      { prompt: 'Run daily digest' },
+      { timestamp: '2026-05-12T07:31:34Z', processAfter: '2026-05-13T07:30:00Z' },
+    );
+    const result = formatMessages(getPendingMessages());
+    expect(result).toMatch(/<task[^>]* time="[^"]*May 12[^"]*"/);
+    expect(result).toMatch(/<task[^>]* scheduled_for="[^"]*May 13[^"]*"/);
+    expect(result).toContain('Instructions:\nRun daily digest');
+  });
+
+  it('falls back to timestamp when process_after is null', () => {
+    insertTask(
+      't2',
+      { prompt: 'One-shot' },
+      { timestamp: '2026-05-13T07:30:00Z', processAfter: null },
+    );
+    const result = formatMessages(getPendingMessages());
+    // Both attributes should render the same local time string.
+    const match = result.match(/<task[^>]* time="([^"]+)" scheduled_for="([^"]+)"/);
+    expect(match).not.toBeNull();
+    expect(match![1]).toBe(match![2]);
+  });
+});
+
 describe('stripInternalTags', () => {
   it('strips single-line internal tags and trims', () => {
     expect(stripInternalTags('hello <internal>secret</internal> world')).toBe('hello  world');

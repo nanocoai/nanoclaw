@@ -198,13 +198,19 @@ function originAttr(msg: MessageInRow): string {
 function formatTaskMessage(msg: MessageInRow): string {
   const content = parseContent(msg.content);
   const from = originAttr(msg);
+  // `time` reflects when the task row was created (often the previous fire).
+  // `scheduled_for` is what the agent actually cares about: the wall-clock
+  // time this fire was scheduled to run. Without it, agents have been
+  // observed mis-reading `time` as the scheduled fire and skipping today's
+  // run as a "duplicate" of a past delivery.
   const time = formatLocalTime(msg.timestamp, TIMEZONE);
+  const scheduledFor = msg.process_after ? formatLocalTime(msg.process_after, TIMEZONE) : time;
   const parts: string[] = [];
   if (content.scriptOutput) {
     parts.push('Script output:', JSON.stringify(content.scriptOutput, null, 2), '');
   }
   parts.push('Instructions:', content.prompt || '');
-  return `<task${from} time="${escapeXml(time)}">${parts.join('\n')}</task>`;
+  return `<task${from} time="${escapeXml(time)}" scheduled_for="${escapeXml(scheduledFor)}">${parts.join('\n')}</task>`;
 }
 
 function formatWebhookMessage(msg: MessageInRow): string {
