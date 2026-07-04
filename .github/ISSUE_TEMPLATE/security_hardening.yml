@@ -1,0 +1,53 @@
+name: Security hardening / non-exploitable concern
+description: Propose a defense-in-depth improvement or report a non-exploitable security concern. Do NOT use this for exploitable vulnerabilities.
+title: "[hardening] "
+labels: ["Hardening"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Found an exploitable vulnerability?** Stop — report it privately via [GitHub private vulnerability reporting](https://github.com/nanocoai/nanoclaw/security/advisories/new), not here. See our [security policy](https://github.com/nanocoai/nanoclaw/blob/main/.github/SECURITY.md).
+
+        This form is for **hardening / defense-in-depth** improvements and non-sensitive security concerns — things that do not cross a trust boundary on a correctly configured deployment.
+  - type: checkboxes
+    id: not-a-vuln
+    attributes:
+      label: Confirmation
+      options:
+        - label: This is NOT an exploitable vulnerability. I understand exploitable vulnerabilities must be reported privately.
+          required: true
+  - type: textarea
+    id: concern
+    attributes:
+      label: What is the hardening improvement or concern?
+      description: What should be more resilient, and why?
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Reproduction or evidence
+      description: Steps, input, or reasoning. Note if it requires host access, source changes, or a malicious mount/config — that keeps it hardening rather than a vulnerability, and is fine here.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Affected version
+      description: nanoclaw version or commit you tested.
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Related trust boundary (optional)
+      description: Which boundary from docs/SECURITY.md does this relate to?
+    validations:
+      required: false
+  - type: checkboxes
+    id: ai-disclosure
+    attributes:
+      label: AI disclosure
+      options:
+        - label: If I used an AI tool, I have personally verified this is real and reproducible and can explain it in my own words.
+          required: true
