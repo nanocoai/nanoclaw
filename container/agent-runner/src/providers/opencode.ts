@@ -87,7 +87,7 @@ function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> 
   const provider = process.env.OPENCODE_PROVIDER || 'anthropic';
   const model = process.env.OPENCODE_MODEL;
   const smallModel = process.env.OPENCODE_SMALL_MODEL;
-  const proxyUrl = process.env.ANTHROPIC_BASE_URL;
+  const proxyUrl = process.env.OPENCODE_BASE_URL || process.env.ANTHROPIC_BASE_URL;
 
   const providerModelId = model ? model.replace(new RegExp(`^${provider}/`), '') : undefined;
   const providerSmallModelId = smallModel ? smallModel.replace(new RegExp(`^${provider}/`), '') : undefined;

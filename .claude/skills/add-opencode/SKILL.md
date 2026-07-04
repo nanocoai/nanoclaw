@@ -126,7 +126,7 @@ These variables are read **on the host** and passed into the container only when
 - `OPENCODE_PROVIDER` — OpenCode provider id, e.g. `openrouter`, `anthropic`, `deepseek`.
 - `OPENCODE_MODEL` — full model id in `provider/model` form, e.g. `deepseek/deepseek-chat`.
 - `OPENCODE_SMALL_MODEL` — optional second model for lighter tasks; defaults to `OPENCODE_MODEL` if unset.
-- `ANTHROPIC_BASE_URL` — **required for non-`anthropic` providers.** The opencode container provider passes this as the `baseURL` for the upstream provider config so requests route through OneCLI's credential proxy or directly to the provider's API. Set it to the provider's API base URL (e.g. `https://api.deepseek.com/v1`, `https://openrouter.ai/api/v1`).
+- `OPENCODE_BASE_URL` — **required for non-`anthropic` providers.** The opencode container provider passes this as the `baseURL` for the upstream provider config so requests route through OneCLI's credential proxy or directly to the provider's API. Set it to the provider's API base URL (e.g. `https://api.deepseek.com/v1`, `https://openrouter.ai/api/v1`, or a local router `http://host.docker.internal:4000/v1`). `ANTHROPIC_BASE_URL` is still read as a deprecated fallback, but **avoid it** — the Claude SDK also reads that var, so sharing it misroutes a Claude fallback turn to the OpenAI-shaped endpoint.
 
 Credentials: register provider API keys in OneCLI with the matching `--host-pattern` (e.g. `api.deepseek.com`, `openrouter.ai`). OneCLI injects them via `HTTPS_PROXY` in the container — the key never lives in `.env` or the container environment.
 
@@ -145,7 +145,7 @@ Always include existing secret IDs in the list — `set-secrets` replaces, not a
 OPENCODE_PROVIDER=deepseek
 OPENCODE_MODEL=deepseek/deepseek-chat
 OPENCODE_SMALL_MODEL=deepseek/deepseek-chat
-ANTHROPIC_BASE_URL=https://api.deepseek.com/v1
+OPENCODE_BASE_URL=https://api.deepseek.com/v1
 ```
 
 Register the key:
@@ -161,7 +161,7 @@ onecli secrets create --name "DeepSeek" --type generic \
 OPENCODE_PROVIDER=openrouter
 OPENCODE_MODEL=openrouter/anthropic/claude-sonnet-4
 OPENCODE_SMALL_MODEL=openrouter/anthropic/claude-haiku-4.5
-ANTHROPIC_BASE_URL=https://openrouter.ai/api/v1
+OPENCODE_BASE_URL=https://openrouter.ai/api/v1
 ```
 
 Register the key:
@@ -193,7 +193,7 @@ Zen's HTTP API (e.g. `POST …/zen/v1/messages`) expects the key in the **`x-api
 OPENCODE_PROVIDER=opencode
 OPENCODE_MODEL=opencode/big-pickle
 OPENCODE_SMALL_MODEL=opencode/big-pickle
-ANTHROPIC_BASE_URL=https://opencode.ai/zen/v1
+OPENCODE_BASE_URL=https://opencode.ai/zen/v1
 ```
 
 Use a real Zen model id from the docs; `big-pickle` is one example.
@@ -216,7 +216,7 @@ Extra MCP servers still come from **`NANOCLAW_MCP_SERVERS`** / `container_config
 
 - OpenCode keeps a local **`opencode serve`** process and SSE subscription; the provider tears down with **`stream.return`** and **SIGKILL** on the server process on **`abort()`** / shared runtime reset to avoid MCP/zombie hangs.
 - Session continuation uses UUID format (SDK 1.4.x / CLI 1.4.x). Stale sessions are cleared by `isSessionInvalid` on OpenCode-specific error patterns. If you see UUID-related errors after an accidental CLI upgrade, clear `session_state` in `outbound.db` and wipe the `opencode-xdg` directory under the session folder.
-- **`NO_PROXY`** for localhost matters when the OpenCode client talks to `127.0.0.1` inside the container while HTTP(S)_PROXY is set (e.g. OneCLI).
+- **`NO_PROXY`** for localhost + `host.docker.internal` matters when the OpenCode client talks to `127.0.0.1` or a host-side router inside the container while HTTP(S)_PROXY is set (e.g. OneCLI); the provider adds both automatically.
 
 ## Verify
 
