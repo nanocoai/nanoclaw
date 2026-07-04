@@ -17,6 +17,19 @@ import { registerResponseHandler, type ResponsePayload } from '../../response-re
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 
+function pendingQuestionThreadMatchesPayload(
+  pq: { platform_id: string | null; thread_id: string | null },
+  payload: ResponsePayload,
+): boolean {
+  if ((pq.thread_id ?? null) === (payload.threadId ?? null)) return true;
+
+  // Non-threaded/root-channel deliveries are persisted with a null thread_id,
+  // but some Chat SDK adapters report button-click events with the root chat
+  // id in event.threadId (for example Telegram DMs). Treat that root-thread
+  // spelling as equivalent to null while keeping channel_type/platform_id strict.
+  return pq.thread_id === null && payload.threadId === pq.platform_id;
+}
+
 function pendingQuestionMatchesPayload(
   pq: { channel_type: string | null; platform_id: string | null; thread_id: string | null },
   payload: ResponsePayload,
@@ -24,7 +37,7 @@ function pendingQuestionMatchesPayload(
   return (
     pq.channel_type === payload.channelType &&
     pq.platform_id === payload.platformId &&
-    (pq.thread_id ?? null) === (payload.threadId ?? null)
+    pendingQuestionThreadMatchesPayload(pq, payload)
   );
 }
 
