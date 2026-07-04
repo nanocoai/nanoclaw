@@ -2,6 +2,32 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // --- Mocks ---
 
+const approvalState = vi.hoisted(() => ({
+  requestApproval: vi.fn(),
+  approvalHandler: null as
+    | null
+    | ((args: {
+        session: unknown;
+        payload: Record<string, unknown>;
+        userId: string;
+        notify: (text: string) => void;
+      }) => Promise<void>),
+  registerApprovalHandler: vi.fn(
+    (
+      action: string,
+      handler: (args: {
+        session: unknown;
+        payload: Record<string, unknown>;
+        userId: string;
+        notify: (text: string) => void;
+      }) => Promise<void>,
+    ) => {
+      if (action === 'cli_command') approvalState.approvalHandler = handler;
+    },
+  ),
+  observedContexts: [] as CallerContext[],
+}));
+
 vi.mock('../log.js', () => ({
   log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
@@ -29,8 +55,8 @@ vi.mock('./crud.js', () => ({
 }));
 
 vi.mock('../modules/approvals/index.js', () => ({
-  registerApprovalHandler: vi.fn(),
-  requestApproval: vi.fn(),
+  registerApprovalHandler: approvalState.registerApprovalHandler,
+  requestApproval: approvalState.requestApproval,
 }));
 
 // Register a test command so dispatch has something to find
@@ -98,6 +124,18 @@ register({
   handler: async (args) => ({ echo: args }),
 });
 
+register({
+  name: 'approval-context-command',
+  description: 'approval command that records caller context',
+  resource: 'groups',
+  access: 'approval',
+  parseArgs: (raw) => raw,
+  handler: async (_args, ctx) => {
+    approvalState.observedContexts.push(ctx);
+    return { caller: ctx.caller };
+  },
+});
+
 // Commands that return data shaped like real resources (for post-handler filtering tests)
 register({
   name: 'groups-list-data',
@@ -147,11 +185,22 @@ register({
   handler: async (args) => ({ id: (args as Record<string, unknown>).id, agent_group_id: 'g1' }),
 });
 
+// Echoes args back — used to assert dash-joined positional id resolution.
+register({
+  name: 'groups-get',
+  description: 'test command (groups get)',
+  resource: 'groups',
+  access: 'open',
+  parseArgs: (raw) => raw,
+  handler: async (args) => ({ echo: args }),
+});
+
 import { dispatch } from './dispatch.js';
 import type { CallerContext } from './frame.js';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  approvalState.observedContexts.length = 0;
   // Default: the four CLI-whitelisted resources with their real scopeFields.
   const scopeFields: Record<string, string> = {
     groups: 'id',
@@ -391,6 +440,39 @@ describe('CLI scope enforcement', () => {
     expect(mockGetContainerConfig).not.toHaveBeenCalled();
   });
 
+  it('approval replay preserves the original agent caller context', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockGetSession.mockReturnValue({ id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' });
+    mockGetAgentGroup.mockReturnValue({ id: 'g1', name: 'Group One' });
+
+    const ctx = agentCtx();
+    const resp = await dispatch({ id: '1', command: 'approval-context-command', args: {} }, ctx);
+
+    expect(resp.ok).toBe(false);
+    expect(approvalState.requestApproval).toHaveBeenCalledTimes(1);
+
+    const approval = approvalState.requestApproval.mock.calls[0][0] as { payload: Record<string, unknown> };
+    expect(approval.payload).toEqual({
+      frame: {
+        id: '1',
+        command: 'approval-context-command',
+        args: { agent_group_id: 'g1', group: 'g1', id: 'g1' },
+      },
+      callerContext: ctx,
+    });
+
+    expect(approvalState.approvalHandler).toBeTypeOf('function');
+    await approvalState.approvalHandler!({
+      session: { id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' },
+      payload: approval.payload,
+      userId: 'telegram:admin',
+      notify: vi.fn(),
+    });
+
+    expect(approvalState.observedContexts).toEqual([ctx]);
+    expect(approvalState.requestApproval).toHaveBeenCalledTimes(1);
+  });
+
   // --- Post-handler filtering ---
 
   it('group: groups list filters out other groups', async () => {
@@ -509,6 +591,22 @@ describe('CLI scope enforcement', () => {
     if (!resp.ok) {
       expect(resp.error.code).toBe('forbidden');
       expect(resp.error.message).toContain('not available in group scope');
+    }
+  });
+});
+
+// --- Dash-joined positional id resolution (generated ids contain dashes) ---
+
+describe('dash-joined positional id resolution', () => {
+  it('resolves `groups-get-<uuid-with-dashes>` to (groups get, id=<uuid>)', async () => {
+    const uuid = '550e8400-e29b-41d4-a716-446655440000';
+
+    const resp = await dispatch({ id: '1', command: `groups-get-${uuid}`, args: {} }, { caller: 'host' });
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) {
+      const data = resp.data as { echo: Record<string, unknown> };
+      expect(data.echo.id).toBe(uuid);
     }
   });
 });

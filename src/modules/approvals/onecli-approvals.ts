@@ -254,16 +254,46 @@ async function sweepStaleApprovals(): Promise<void> {
   }
 }
 
+/** The hosted gateway's structured request summary — not yet in the SDK's
+ *  ApprovalRequest type (observed on api.onecli.sh, 2026-07): the action being
+ *  performed plus labeled fields (To / Subject / Body for email sends). */
+interface ApprovalSummary {
+  action?: string;
+  details?: { label: string; value: string }[];
+}
+
+const SUMMARY_VALUE_EXCERPT_CHARS = 900;
+
 function buildQuestion(request: ApprovalRequest, agentName: string): string {
-  const lines = [
-    'Credential access request',
-    `Agent: ${agentName}`,
-    '```',
-    `${request.method} ${request.host}${request.path}`,
-    '```',
-  ];
-  if (request.bodyPreview) {
-    lines.push('Body:', '```', request.bodyPreview, '```');
+  const lines = [`*Agent:* ${agentName}`];
+
+  const summary = (request as ApprovalRequest & { summary?: ApprovalSummary }).summary;
+  if (summary?.details?.length) {
+    if (summary.action) lines.push(`*Action:* ${summary.action}`);
+    // A render bug here must never decide the request: handleRequest's catch
+    // returns 'deny', so stay defensive — coerce non-string values instead of
+    // assuming the gateway's shape, and keep the card under Slack's 3000-char
+    // section limit or delivery itself fails.
+    let budget = 2600;
+    for (const { label, value } of summary.details) {
+      const raw = typeof value === 'string' ? value : (JSON.stringify(value) ?? String(value));
+      const cap = Math.min(SUMMARY_VALUE_EXCERPT_CHARS, Math.max(0, budget));
+      if (cap === 0) {
+        lines.push(`_…${summary.details.length} field(s) omitted for length — see the audit payload._`);
+        break;
+      }
+      const v = raw.length > cap ? `${raw.slice(0, cap)}…` : raw;
+      budget -= v.length + String(label).length + 8;
+      // Multi-line values (message bodies) read better fenced; short labeled
+      // fields (To, Subject) inline.
+      if (v.includes('\n')) lines.push(`*${label}:*`, '```', v, '```');
+      else lines.push(`*${label}:* ${v}`);
+    }
+  } else if (request.bodyPreview) {
+    lines.push('```', request.bodyPreview.slice(0, SUMMARY_VALUE_EXCERPT_CHARS * 2), '```');
+    lines.push(`_${request.method} ${request.host}${request.path}_`);
+  } else {
+    lines.push(`_${request.method} ${request.host}${request.path}_`);
   }
   return lines.join('\n');
 }

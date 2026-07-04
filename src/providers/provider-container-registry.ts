@@ -7,7 +7,7 @@
  * the registered config fn, and merges the returned mounts/env into the spawn
  * args.
  *
- * Providers without host-side needs (e.g. `claude`, `mock`) don't appear in
+ * Providers without host-side needs (e.g. `claude`) don't appear in
  * this registry at all — the lookup returns `undefined` and the spawn path
  * proceeds with only the default mounts and env.
  *
