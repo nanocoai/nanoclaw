@@ -32,9 +32,10 @@ cloud providers (OpenAI, Anthropic, …) behind the same endpoint. See the
 2. **At least one model server** with ≥1 model, reachable from this host:
    - Ollama (default): `curl -s http://<host>:11434/api/tags`
    - any OpenAI-compatible server: `curl -s http://<host>:<port>/v1/models`
-   No server yet? Install Ollama first (https://ollama.com/download) or
-   declare keyed cloud backends per `/add-litellm` — a keyed-only stack is
-   supported (`--hosts ''`).
+   No server yet? Stage 2 (`/add-litellm`) detects this and **offers** to
+   install Ollama and pull a default model, each with confirmation (it never
+   installs or downloads silently) — or declare keyed cloud backends per
+   `/add-litellm`, a keyed-only stack is supported (`--hosts ''`).
 
 ## Install
 
