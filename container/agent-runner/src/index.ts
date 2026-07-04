@@ -938,12 +938,7 @@ async function runQuery(
 
   const queryStartTime = Date.now();
   const override = containerInput.modelOverride;
-  const resolvedCliPath = path.resolve(
-    process.env.AGENT_RUNNER_DIR || '.',
-    'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'cli.js',
-  );
-  log(`[query-start] sessionId=${sessionId || 'new'}, resumeAt=${resumeAt || 'latest'}, modelOverride=${override ? JSON.stringify(override) : 'none'}`);
-  log(`[query-start] AGENT_RUNNER_DIR=${process.env.AGENT_RUNNER_DIR}, cliPath=${resolvedCliPath}, exists=${fs.existsSync(resolvedCliPath)}`);
+  log(`[query-start] sessionId=${sessionId || 'new'}, resumeAt=${resumeAt || 'latest'}, modelOverride=${override ? JSON.stringify(override) : 'none'}`);;
   // 日志：显示当前 proxy 用的 access token 前缀（用于验证 per-group 账号隔离）
   const proxyUrl = process.env.HTTPS_PROXY || '';
   const tokenMatch = proxyUrl.match(/x:([^@]{8})/);
@@ -999,8 +994,8 @@ async function runQuery(
     prompt: stream,
     options: {
       model: targetModel,
-      pathToClaudeCodeExecutable: resolvedCliPath,
-      executable: 'node' as const,  // 显式指定用 node 运行 cli.js
+      // 0.3.x SDK 自带 native binary，不再需要 pathToClaudeCodeExecutable / executable
+      // 旧版（0.2.x）需要显式传 cli.js 路径 + node，新版 SDK 自动定位内置 binary
       stderr: (data: string) => log(`[cli-stderr] ${data.trim()}`),
       cwd: resolvedQueryCwd.cwd,
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
