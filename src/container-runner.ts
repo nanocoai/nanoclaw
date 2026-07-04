@@ -463,11 +463,15 @@ async function buildContainerArgs(
     args.push(...hostGatewayArgs());
   }
 
-  // User mapping
+  // User mapping. Start as root so the entrypoint can do its privileged
+  // setup (mount --bind /dev/null over .env, patch /etc/hosts for the
+  // host.docker.internal alias Apple Container lacks). The entrypoint
+  // then setpriv-drops to RUN_UID/RUN_GID before exec'ing the agent.
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
-  if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
-    args.push('--user', `${hostUid}:${hostGid}`);
+  if (hostUid != null && hostUid !== 0) {
+    args.push('-e', `RUN_UID=${hostUid}`);
+    args.push('-e', `RUN_GID=${hostGid ?? hostUid}`);
     args.push('-e', 'HOME=/home/node');
   }
 
@@ -505,7 +509,18 @@ async function buildContainerArgs(
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
   args.push(imageTag);
 
-  args.push('-c', 'exec bun run /app/src/index.ts');
+  // Pre-bun setup, runs as root (we don't pass --user, see above):
+  //   1. Patch /etc/hosts with host.docker.internal — Apple Container has no
+  //      --add-host flag and OneCLI's proxy URL bakes that hostname in.
+  //   2. Drop privileges to RUN_UID/RUN_GID via setpriv if set (i.e. when the
+  //      host uid is non-root). Falls through to bare exec when RUN_UID unset.
+  const bunCmd =
+    'echo "192.168.64.1 host.docker.internal" >> /etc/hosts; ' +
+    'if [ -n "$RUN_UID" ]; then ' +
+    'exec setpriv --reuid="$RUN_UID" --regid="${RUN_GID:-$RUN_UID}" --clear-groups -- bun run /app/src/index.ts; ' +
+    'fi; ' +
+    'exec bun run /app/src/index.ts';
+  args.push('-c', bunCmd);
 
   return args;
 }
@@ -535,7 +550,8 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
     const allowlist = npmPackages.map((p) => `echo 'only-built-dependencies[]=${p}' >> /root/.npmrc`).join(' && ');
     dockerfile += `RUN ${allowlist} && pnpm install -g ${npmPackages.join(' ')}\n`;
   }
-  dockerfile += 'USER node\n';
+  // No USER directive — main-group containers start as root so the entrypoint
+  // can `mount --bind /dev/null` over .env. Mirrors the base image's behavior.
 
   const imageTag = `${CONTAINER_IMAGE_BASE}:${agentGroupId}`;
 
