@@ -29,7 +29,7 @@ import {
 import { findSessionForAgent } from './db/sessions.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
-import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
+import { openInboundDb, resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
@@ -380,7 +380,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  *                      a thread has engaged us once, follow-ups arrive
  *                      with no mention and should still fire.
  */
-function evaluateEngage(
+export function evaluateEngage(
   agent: MessagingGroupAgent,
   text: string,
   isMention: boolean,
@@ -405,11 +405,34 @@ function evaluateEngage(
       // Sticky follow-up: session already exists for this (agent, mg, thread)
       // — the thread was activated before, keep firing.
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
+      // Only genuine sub-threads are sticky. At channel level threadId equals
+      // the channel's own platform id, so a channel-root session would
+      // subscribe the entire channel to every message after a single mention.
+      if (!threadId || threadId === mg.platform_id) return false;
       const existing = findSessionForAgent(agent.agent_group_id, mg.id, threadId);
-      return existing !== undefined;
+      if (!existing) return false;
+      // ignored_message_policy='accumulate' creates sessions for
+      // non-engaging messages (silent context), so session existence alone
+      // doesn't prove the thread ever engaged. Only a session that has seen
+      // a triggered message counts as subscribed.
+      return sessionHasEngagedMessage(agent.agent_group_id, existing.id);
     }
     default:
       return false;
+  }
+}
+
+/**
+ * True when the session's inbound DB contains at least one triggered
+ * (engaged) message. Sessions created purely by 'accumulate' hold only
+ * trigger=0 context rows and must not count as a sticky subscription.
+ */
+function sessionHasEngagedMessage(agentGroupId: string, sessionId: string): boolean {
+  try {
+    const db = openInboundDb(agentGroupId, sessionId);
+    return db.prepare('SELECT 1 FROM messages_in WHERE trigger = 1 LIMIT 1').get() !== undefined;
+  } catch {
+    return false; // no inbound DB yet — the session never engaged
   }
 }
 
