@@ -257,12 +257,6 @@ Read `/workspace/project/data/registered_groups.json` and format it nicely.
 
 ---
 
-## Global Memory
-
-You can read and write to `/workspace/global/CLAUDE.md` for facts that should apply to all groups. Only update global memory when explicitly asked to "remember this globally" or similar.
-
----
-
 ## Scheduling for Other Groups
 
 When scheduling tasks for other groups, use the `target_group_jid` parameter with the group's JID from `registered_groups.json`:
