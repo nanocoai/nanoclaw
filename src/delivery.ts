@@ -254,6 +254,17 @@ async function deliverMessage(
 
   const content = JSON.parse(msg.content);
 
+  // Inbound message ids are namespaced as `<platform-id>:<agent_group_id>`
+  // (router's messageIdForAgent, for fan-out uniqueness). The agent targets
+  // reactions/edits with the id it saw, so strip the namespace before the id
+  // goes back to the platform — Discord rejects non-snowflake message ids.
+  if (typeof content.messageId === 'string' && content.messageId.endsWith(`:${session.agent_group_id}`)) {
+    content.messageId = content.messageId.slice(0, -(session.agent_group_id.length + 1));
+    // The adapter receives msg.content (the raw string), not the parsed
+    // object — re-serialize so the stripped id is what actually ships.
+    msg.content = JSON.stringify(content);
+  }
+
   // System actions — handle internally (schedule_task, cancel_task, etc.)
   if (msg.kind === 'system') {
     await handleSystemAction(content, session, inDb);
