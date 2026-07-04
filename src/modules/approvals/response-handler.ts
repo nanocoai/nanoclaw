@@ -16,14 +16,14 @@
  * core iterates handlers and the first one to return `true` claims the response.
  */
 import { wakeContainer } from '../../container-runner.js';
-import { deletePendingApproval, getPendingApproval, getSession } from '../../db/sessions.js';
+import { deletePendingApproval, findSessionByAgentGroup, getPendingApproval, getSession } from '../../db/sessions.js';
 import type { ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval } from '../../types.js';
 import { hasAdminPrivilege, isGlobalAdmin, isOwner } from '../permissions/db/user-roles.js';
 import { finalizeReject } from './finalize.js';
-import { ONECLI_ACTION, resolveOneCLIApproval } from './onecli-approvals.js';
+import { holdOneCLIApprovalForReason, ONECLI_ACTION, resolveOneCLIApproval } from './onecli-approvals.js';
 import { getApprovalHandler, notifyApprovalResolved, REJECT_WITH_REASON_VALUE } from './primitive.js';
 import { armReasonCapture } from './reason-capture.js';
 
@@ -42,6 +42,28 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
   }
 
   if (approval.action === ONECLI_ACTION) {
+    // "Reject with reason…" — the gateway decision is HELD open while the
+    // reason is captured, so the agent's pending HTTP call fails only after
+    // the reason is already relayed into its session (finalizeReject relays,
+    // then the approval-resolved handler in onecli-approvals releases the
+    // deny; the gateway TTL is the safety valve). OneCLI rows carry no
+    // session_id; resolve the session via the originating agent group.
+    if (payload.value === REJECT_WITH_REASON_VALUE) {
+      const session = approval.agent_group_id ? findSessionByAgentGroup(approval.agent_group_id) : undefined;
+      if (!session) {
+        log.warn('OneCLI reject-with-reason: no active session to relay to — plain reject', {
+          approvalId: approval.approval_id,
+          agentGroupId: approval.agent_group_id,
+        });
+        if (!resolveOneCLIApproval(payload.questionId, 'reject')) deletePendingApproval(payload.questionId);
+        return true;
+      }
+      // false ⇒ the resolver died with a previous process (the gateway side is
+      // already settled) — the reason relay is still worth arming.
+      holdOneCLIApprovalForReason(payload.questionId);
+      await armReasonCapture(approval, session, namespacedUserId(payload) ?? '');
+      return true;
+    }
     if (resolveOneCLIApproval(payload.questionId, payload.value)) {
       return true;
     }

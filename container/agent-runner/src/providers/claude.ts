@@ -179,12 +179,60 @@ const preToolUseHook: HookCallback = async (input) => {
   return { continue: true };
 };
 
-/** Clear in-flight tool on PostToolUse / PostToolUseFailure. */
-const postToolUseHook: HookCallback = async () => {
+/**
+ * OneCLI reject-with-reason handoff: when an admin rejects a gateway request
+ * with a reason, the host drops it at /workspace/onecli-rejection.json BEFORE
+ * releasing the deny, so the failed tool call and the reason arrive as one
+ * event. Consume the file (single use) and hand the reason to the model as
+ * additional context on this tool result. Freshness-gated: a stale file from
+ * an interrupted run must not annotate an unrelated failure.
+ */
+const ONECLI_REJECTION_FILE = '/workspace/onecli-rejection.json';
+const ONECLI_REJECTION_FRESH_MS = 10 * 60 * 1000;
+
+function consumeOneCLIRejection(input: unknown): string | null {
+  try {
+    if (!fs.existsSync(ONECLI_REJECTION_FILE)) return null;
+    const info = JSON.parse(fs.readFileSync(ONECLI_REJECTION_FILE, 'utf8')) as {
+      rejectedAt?: string;
+      reason?: string;
+      host?: string | null;
+    };
+    // The rejection annotates a FAILED gateway call — require failure-shaped
+    // output (or the target host) in this tool result before consuming.
+    const resp = JSON.stringify((input as { tool_response?: unknown }).tool_response ?? '');
+    const looksRelated =
+      /denied|reject|403|approval|forbidden/i.test(resp) || (info.host ? resp.includes(info.host) : false);
+    if (!looksRelated) return null;
+    fs.unlinkSync(ONECLI_REJECTION_FILE);
+    if (!info.reason || Date.now() - new Date(info.rejectedAt ?? 0).getTime() > ONECLI_REJECTION_FRESH_MS) {
+      return null;
+    }
+    return (
+      `This request was rejected by the admin with the following reason: "${info.reason}". ` +
+      'Do not retry the same request as-is — address the reason first (revise and re-attempt, or explain to the user).'
+    );
+  } catch (err) {
+    log(`PostToolUse: rejection-file check failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+/** Clear in-flight tool on PostToolUse / PostToolUseFailure; inject a held
+ *  OneCLI rejection reason into the failed call's context when present. */
+const postToolUseHook: HookCallback = async (input) => {
   try {
     clearContainerToolInFlight();
   } catch (err) {
     log(`PostToolUse: failed to clear container_state: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const rejection = consumeOneCLIRejection(input);
+  if (rejection) {
+    log('PostToolUse: injected OneCLI rejection reason into tool response context');
+    return {
+      continue: true,
+      hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: rejection },
+    } as unknown as Awaited<ReturnType<HookCallback>>;
   }
   return { continue: true };
 };

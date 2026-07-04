@@ -17,9 +17,20 @@
  * Startup sweep edits any leftover cards from a previous process to
  * "Expired (host restarted)" and drops the rows.
  */
+import fs from 'fs';
+import path from 'path';
+
 import { OneCLI, type ApprovalRequest, type ManualApprovalHandle } from '@onecli-sh/sdk';
 
-import { pickApprovalDelivery, pickApprover } from './primitive.js';
+import { finalizeReject } from './finalize.js';
+import {
+  notifyApprovalResolved,
+  pickApprovalDelivery,
+  pickApprover,
+  registerApprovalResolvedHandler,
+  registerReasonRejectFinalizer,
+  REJECT_WITH_REASON_VALUE,
+} from './primitive.js';
 import { ONECLI_API_KEY, ONECLI_URL } from '../../config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import {
@@ -30,7 +41,8 @@ import {
 } from '../../db/sessions.js';
 import type { ChannelDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
-import type { PendingApproval } from '../../types.js';
+import { sessionDir } from '../../session-manager.js';
+import type { PendingApproval, Session } from '../../types.js';
 
 export const ONECLI_ACTION = 'onecli_credential';
 
@@ -41,6 +53,9 @@ const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 interface PendingState {
   resolve: (decision: Decision) => void;
   timer: NodeJS.Timeout;
+  /** Reject-with-reason: the gateway decision is held open until the reason
+   *  is captured and relayed (or the gateway TTL forces the deny out). */
+  heldForReason?: boolean;
 }
 
 const pending = new Map<string, PendingState>();
@@ -82,9 +97,100 @@ export function resolveOneCLIApproval(approvalId: string, selectedOption: string
   return true;
 }
 
+/**
+ * Reject-with-reason: keep the gateway decision UNRESOLVED while the reason is
+ * being captured, so the agent's held HTTP call fails only after the reason is
+ * available to it. The row stays for reason-capture; the TTL timer stays armed
+ * as the safety valve — if the approver types slower than the gateway TTL, the
+ * deny goes out then and a late reason still relays through the
+ * awaiting_reason row.
+ */
+export function holdOneCLIApprovalForReason(approvalId: string): boolean {
+  const state = pending.get(approvalId);
+  if (!state) return false;
+  state.heldForReason = true;
+  log.info('OneCLI approval held awaiting rejection reason', { approvalId });
+  return true;
+}
+
+/**
+ * Custom reason delivery for OneCLI rejects (registered with reason-capture's
+ * finalizer registry): drop the reason where the agent-runner's PostToolUse
+ * hook can inject it into the FAILED TOOL CALL itself — the session workspace,
+ * mounted at /workspace in the container — then release the held deny. The
+ * agent experiences one coherent event: its gmail call fails carrying the
+ * admin's reason, instead of a bare denial plus a separate chat message.
+ *
+ * Falls back to the chat-message relay when the decision is no longer held
+ * (gateway TTL beat the approver, or a restart lost the resolver) — the tool
+ * call already failed bare, so a session message is the only remaining path.
+ */
+async function finalizeOneCLIReasonReject(
+  approval: PendingApproval,
+  session: Session,
+  userId: string,
+  reason?: string,
+): Promise<void> {
+  const state = pending.get(approval.approval_id);
+  if (!state || !reason) {
+    await finalizeReject(approval, session, userId, reason);
+    return;
+  }
+
+  let requestMeta: { host?: string; method?: string; path?: string } = {};
+  try {
+    requestMeta = JSON.parse(approval.payload ?? '{}') as typeof requestMeta;
+  } catch {
+    /* best-effort metadata */
+  }
+  fs.writeFileSync(
+    path.join(sessionDir(session.agent_group_id, session.id), 'onecli-rejection.json'),
+    JSON.stringify({
+      rejectedAt: new Date().toISOString(),
+      reason,
+      host: requestMeta.host ?? null,
+      method: requestMeta.method ?? null,
+      path: requestMeta.path ?? null,
+    }),
+  );
+
+  pending.delete(approval.approval_id);
+  clearTimeout(state.timer);
+  updatePendingApprovalStatus(approval.approval_id, 'rejected');
+  deletePendingApproval(approval.approval_id);
+  await notifyApprovalResolved({ approval, session, outcome: 'reject', userId });
+  // Release the deny LAST — the reason file is already in place when the
+  // gateway fails the agent's held HTTP call.
+  state.resolve('deny');
+  log.info('OneCLI approval denied with reason injected into tool response', {
+    approvalId: approval.approval_id,
+    sessionId: session.id,
+  });
+}
+
+registerReasonRejectFinalizer(ONECLI_ACTION, finalizeOneCLIReasonReject);
+
+let resolvedHandlerRegistered = false;
+
 export function startOneCLIApprovalHandler(deliveryAdapter: ChannelDeliveryAdapter): void {
   if (handle) return;
   adapterRef = deliveryAdapter;
+
+  // Releases a held reject-with-reason decision once finalizeReject has
+  // relayed the reason (or the sweep gave up on the approver) — the reason
+  // reaches the agent's session BEFORE its held HTTP call fails.
+  if (!resolvedHandlerRegistered) {
+    resolvedHandlerRegistered = true;
+    registerApprovalResolvedHandler(async (event) => {
+      if (event.approval.action !== ONECLI_ACTION) return;
+      const state = pending.get(event.approval.approval_id);
+      if (!state) return; // TTL already released the deny — nothing held
+      pending.delete(event.approval.approval_id);
+      clearTimeout(state.timer);
+      state.resolve('deny');
+      log.info('OneCLI approval denied after reason relay', { approvalId: event.approval.approval_id });
+    });
+  }
 
   // Sweep any rows left over from a previous process.
   sweepStaleApprovals().catch((err) => log.error('OneCLI approval sweep failed', { err }));
@@ -149,6 +255,7 @@ async function handleRequest(request: ApprovalRequest): Promise<Decision> {
   const onecliOptions = [
     { label: 'Approve', selectedLabel: '✅ Approved', value: 'approve' },
     { label: 'Reject', selectedLabel: '❌ Rejected', value: 'reject' },
+    { label: 'Reject with reason…', selectedLabel: '📝 Rejected — reason requested', value: REJECT_WITH_REASON_VALUE },
   ];
   let platformMessageId: string | undefined;
   try {
@@ -202,8 +309,17 @@ async function handleRequest(request: ApprovalRequest): Promise<Decision> {
 
   return new Promise<Decision>((resolve) => {
     const timer = setTimeout(() => {
-      if (!pending.has(approvalId)) return;
+      const state = pending.get(approvalId);
+      if (!state) return;
       pending.delete(approvalId);
+      if (state.heldForReason) {
+        // Gateway TTL caught up while the approver was still typing the
+        // reason. Release the deny; keep the awaiting_reason row so the late
+        // reason (or the ghost sweep) still relays to the agent.
+        log.info('OneCLI approval TTL reached while awaiting reason — denying now', { approvalId });
+        resolve('deny');
+        return;
+      }
       expireApproval(approvalId, 'no response').catch((err) =>
         log.error('Failed to mark OneCLI approval expired', { approvalId, err }),
       );

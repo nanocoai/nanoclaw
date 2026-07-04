@@ -32,9 +32,19 @@ export async function finalizeReject(
   userId: string,
   reason?: string,
 ): Promise<void> {
-  const text = reason
-    ? `Your ${approval.action} request was rejected by admin: "${reason}"`
-    : `Your ${approval.action} request was rejected by admin.`;
+  // 'onecli_credential' is an internal action key — describe the actual
+  // request (host from the persisted payload) to the agent instead.
+  let what = `${approval.action} request`;
+  if (approval.action === 'onecli_credential') {
+    let host: string | undefined;
+    try {
+      host = (JSON.parse(approval.payload ?? '{}') as { host?: string }).host;
+    } catch {
+      /* keep generic */
+    }
+    what = host ? `credential request to ${host}` : 'credential request';
+  }
+  const text = reason ? `Your ${what} was rejected by admin: "${reason}"` : `Your ${what} was rejected by admin.`;
 
   writeSessionMessage(session.agent_group_id, session.id, {
     id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

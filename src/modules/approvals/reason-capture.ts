@@ -22,6 +22,7 @@ import type { InboundEvent } from '../../channels/adapter.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import {
   deletePendingApproval,
+  findSessionByAgentGroup,
   getExpiredAwaitingReasonApprovals,
   getPendingApproval,
   getSession,
@@ -32,6 +33,7 @@ import { registerMessageInterceptor } from '../../router.js';
 import type { PendingApproval, Session } from '../../types.js';
 import { ensureUserDm } from '../permissions/user-dm.js';
 import { finalizeReject } from './finalize.js';
+import { getReasonRejectFinalizer } from './primitive.js';
 
 /** How long an awaiting-reason hold waits for the admin's reply before the sweep finalizes a plain reject. */
 const REASON_CAPTURE_WINDOW_MS = 5 * 60 * 1000;
@@ -136,14 +138,21 @@ export async function captureReasonReply(event: InboundEvent): Promise<boolean> 
     return false;
   }
 
-  const session = approval.session_id ? getSession(approval.session_id) : null;
+  // OneCLI credential rows carry no session_id — fall back to the originating
+  // agent group's active session so the reason still reaches the agent.
+  const session =
+    (approval.session_id ? getSession(approval.session_id) : null) ??
+    (approval.agent_group_id ? findSessionByAgentGroup(approval.agent_group_id) : null);
   if (!session) {
     deletePendingApproval(approval.approval_id);
     return true;
   }
 
   const reason = clampReason(extractText(event));
-  await finalizeReject(approval, session, arming.userId, reason || undefined);
+  // Action-specific delivery (e.g. OneCLI injects the reason into the failed
+  // tool call); default is the chat-message relay.
+  const finalizer = getReasonRejectFinalizer(approval.action) ?? finalizeReject;
+  await finalizer(approval, session, arming.userId, reason || undefined);
   log.info('reject-with-reason: reason captured and relayed', {
     approvalId: approval.approval_id,
     hasReason: reason.length > 0,
@@ -162,7 +171,9 @@ registerMessageInterceptor(captureReasonReply);
 export async function sweepAwaitingReasonRejects(): Promise<void> {
   const rows = getExpiredAwaitingReasonApprovals(new Date().toISOString());
   for (const approval of rows) {
-    const session = approval.session_id ? getSession(approval.session_id) : null;
+    const session =
+      (approval.session_id ? getSession(approval.session_id) : null) ??
+      (approval.agent_group_id ? findSessionByAgentGroup(approval.agent_group_id) : null);
     if (!session) {
       deletePendingApproval(approval.approval_id);
       continue;

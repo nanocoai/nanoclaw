@@ -107,6 +107,29 @@ export function registerApprovalResolvedHandler(handler: ApprovalResolvedHandler
   approvalResolvedHandlers.push(handler);
 }
 
+// ── Reason-reject finalizer overrides ──
+// By default a captured rejection reason is relayed as a session chat message
+// (finalizeReject). An action can register a custom finalizer to deliver the
+// reason differently — e.g. OneCLI credential rejects inject it into the
+// agent's failed tool call instead of a separate message.
+
+export type ReasonRejectFinalizer = (
+  approval: PendingApproval,
+  session: Session,
+  userId: string,
+  reason?: string,
+) => Promise<void>;
+
+const reasonRejectFinalizers = new Map<string, ReasonRejectFinalizer>();
+
+export function registerReasonRejectFinalizer(action: string, finalizer: ReasonRejectFinalizer): void {
+  reasonRejectFinalizers.set(action, finalizer);
+}
+
+export function getReasonRejectFinalizer(action: string): ReasonRejectFinalizer | undefined {
+  return reasonRejectFinalizers.get(action);
+}
+
 /** Fire every registered approval-resolved callback. Called by the response handler. */
 export async function notifyApprovalResolved(event: ApprovalResolvedEvent): Promise<void> {
   for (const handler of approvalResolvedHandlers) {
