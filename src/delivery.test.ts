@@ -341,3 +341,61 @@ describe('deliverSessionMessages — permission check', () => {
     expect(delivered.has('out-unauth')).toBe(true);
   });
 });
+
+describe('deliverMessage — namespaced messageId strip', () => {
+  it('strips the agent-group namespace from reaction targets before delivery', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    // Inbound ids are namespaced `<platform-id>:<agent_group_id>` by the
+    // router (messageIdForAgent). The agent echoes that id when it targets
+    // a reaction; the platform must receive the raw id back.
+    const db = new Database(outboundDbPath('ag-1', session.id));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+       VALUES (?, datetime('now'), 'chat', 'telegram:123', 'telegram', ?)`,
+    ).run(
+      'out-reaction',
+      JSON.stringify({ operation: 'reaction', messageId: '1522925583908999188:ag-1', emoji: '👀' }),
+    );
+    db.close();
+
+    const received: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_channelType, _platformId, _threadId, _kind, content) {
+        received.push(content);
+        return 'plat-1';
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    expect(received).toHaveLength(1);
+    expect(JSON.parse(received[0]).messageId).toBe('1522925583908999188');
+  });
+
+  it('leaves foreign messageIds untouched', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    const db = new Database(outboundDbPath('ag-1', session.id));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+       VALUES (?, datetime('now'), 'chat', 'telegram:123', 'telegram', ?)`,
+    ).run('out-plain', JSON.stringify({ operation: 'reaction', messageId: '424242', emoji: '👍' }));
+    db.close();
+
+    const received: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_channelType, _platformId, _threadId, _kind, content) {
+        received.push(content);
+        return 'plat-2';
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    expect(received).toHaveLength(1);
+    expect(JSON.parse(received[0]).messageId).toBe('424242');
+  });
+});
