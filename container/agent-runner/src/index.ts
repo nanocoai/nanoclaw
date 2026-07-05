@@ -86,20 +86,40 @@ async function main(): Promise<void> {
     log(`Additional MCP server: ${name} (${serverConfig.command})`);
   }
 
-  const provider = createProvider(providerName, {
+  const providerOptions = {
     assistantName: config.assistantName || undefined,
     mcpServers,
     env: { ...process.env },
     additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
     model: config.model,
     effort: config.effort,
-  });
+  };
+  const provider = createProvider(providerName, providerOptions);
+
+  // Optional quota-overflow provider. Model/effort are primary-provider
+  // settings — the fallback uses its own defaults (e.g. CODEX_MODEL env).
+  let fallback: { provider: ReturnType<typeof createProvider>; providerName: string } | undefined;
+  const fallbackName = config.fallbackProvider?.toLowerCase() as ProviderName | undefined;
+  if (fallbackName && fallbackName !== providerName) {
+    try {
+      fallback = {
+        provider: createProvider(fallbackName, { ...providerOptions, model: undefined, effort: undefined }),
+        providerName: fallbackName,
+      };
+      log(`Fallback provider enabled: ${fallbackName}`);
+    } catch (err) {
+      log(
+        `Fallback provider '${fallbackName}' not available (${err instanceof Error ? err.message : String(err)}) — continuing without fallback`,
+      );
+    }
+  }
 
   await runPollLoop({
     provider,
     providerName,
     cwd: CWD,
     systemContext: { instructions },
+    fallback,
   });
 }
 

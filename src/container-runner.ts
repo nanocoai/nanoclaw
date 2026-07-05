@@ -228,14 +228,26 @@ function resolveProviderContribution(
   containerConfig: import('./container-config.js').ContainerConfig,
 ): { provider: string; contribution: ProviderContainerContribution } {
   const provider = resolveProviderName(session.agent_provider, containerConfig.provider);
+  const ctx = {
+    sessionDir: sessionDir(agentGroup.id, session.id),
+    agentGroupId: agentGroup.id,
+    hostEnv: process.env,
+  };
   const fn = getProviderContainerConfig(provider);
-  const contribution = fn
-    ? fn({
-        sessionDir: sessionDir(agentGroup.id, session.id),
-        agentGroupId: agentGroup.id,
-        hostEnv: process.env,
-      })
-    : {};
+  const contribution = fn ? fn(ctx) : {};
+
+  // The quota-fallback provider needs its host-side contribution (auth
+  // mounts, env passthrough) in the same container, otherwise the runner
+  // can't switch to it mid-session. Merged with primary-wins on env keys.
+  const fallbackName = containerConfig.fallbackProvider?.toLowerCase();
+  if (fallbackName && fallbackName !== provider) {
+    const fbFn = getProviderContainerConfig(fallbackName);
+    if (fbFn) {
+      const fb = fbFn(ctx);
+      contribution.mounts = [...(contribution.mounts ?? []), ...(fb.mounts ?? [])];
+      contribution.env = { ...(fb.env ?? {}), ...(contribution.env ?? {}) };
+    }
+  }
   return { provider, contribution };
 }
 

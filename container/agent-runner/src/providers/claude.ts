@@ -4,6 +4,7 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
+import { QUOTA_ERROR_RE } from '../quota.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -328,11 +329,28 @@ export class ClaudeProvider implements AgentProvider {
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'result') {
           const text = 'result' in message ? (message as { result?: string }).result ?? null : null;
-          yield { type: 'result', text };
+          const isError = (message as { is_error?: boolean }).is_error === true;
+          if (isError && text && QUOTA_ERROR_RE.test(text)) {
+            // Usage-limit / out-of-quota turn ("Claude AI usage limit
+            // reached|<ts>" and friends). Surface as a quota error so the
+            // poll-loop can fall back instead of delivering the error text.
+            yield { type: 'error', message: text, retryable: false, classification: 'quota' };
+          } else {
+            yield { type: 'result', text };
+          }
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
-          yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
+          // rate_limit_event fires with a status field on every check —
+          // only `rejected` means the request was actually blocked. Treating
+          // informational statuses (allowed/allowed_warning) as quota would
+          // trigger the fallback on perfectly healthy turns.
+          const status = (message as { rate_limit?: { status?: string } }).rate_limit?.status;
+          if (status === 'rejected') {
+            yield { type: 'error', message: 'Rate limit exceeded', retryable: false, classification: 'quota' };
+          } else {
+            yield { type: 'progress', message: `Rate limit status: ${status ?? 'unknown'}` };
+          }
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
           const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';

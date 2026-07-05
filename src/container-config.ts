@@ -37,6 +37,8 @@ export interface ContainerConfig {
   additionalMounts: AdditionalMountConfig[];
   skills: string[] | 'all';
   provider?: string;
+  /** Overflow provider used when the primary fails a turn on quota. */
+  fallbackProvider?: string;
   groupName?: string;
   assistantName?: string;
   agentGroupId?: string;
@@ -57,6 +59,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     additionalMounts: JSON.parse(row.additional_mounts) as AdditionalMountConfig[],
     skills: JSON.parse(row.skills) as string[] | 'all',
     provider: row.provider ?? undefined,
+    fallbackProvider: row.fallback_provider ?? undefined,
     groupName: group.name,
     assistantName: row.assistant_name ?? group.name,
     agentGroupId: group.id,

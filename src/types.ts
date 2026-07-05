@@ -14,6 +14,8 @@ export interface AgentGroup {
 export interface ContainerConfigRow {
   agent_group_id: string;
   provider: string | null;
+  /** Overflow provider used when the primary fails a turn on quota. */
+  fallback_provider: string | null;
   model: string | null;
   effort: string | null;
   image_tag: string | null;
