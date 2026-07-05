@@ -24,6 +24,7 @@ interface LegacyContainerJson {
   provider?: string;
   assistantName?: string;
   maxMessagesPerPrompt?: number;
+  env?: Record<string, string>;
 }
 
 export function backfillContainerConfigs(): void {
@@ -65,6 +66,7 @@ export function backfillContainerConfigs(): void {
       packages_npm: JSON.stringify(legacy.packages?.npm ?? []),
       additional_mounts: JSON.stringify(legacy.additionalMounts ?? []),
       cli_scope: 'group',
+      env: JSON.stringify(legacy.env ?? {}),
       updated_at: new Date().toISOString(),
     };
 

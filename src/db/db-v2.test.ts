@@ -31,6 +31,9 @@ import {
   createPendingQuestion,
   getPendingQuestion,
   deletePendingQuestion,
+  ensureContainerConfig,
+  getContainerConfig,
+  updateContainerConfigJson,
 } from './index.js';
 
 function now() {
@@ -426,5 +429,36 @@ describe('pending questions', () => {
     });
     deletePendingQuestion('q-1');
     expect(getPendingQuestion('q-1')).toBeUndefined();
+  });
+});
+
+// ── Container config env vars ──
+
+describe('container config env', () => {
+  function makeGroup(id: string) {
+    createAgentGroup({ id, name: id, folder: id, agent_provider: null, created_at: now() });
+    ensureContainerConfig(id);
+  }
+
+  it('defaults to an empty object on new rows', () => {
+    makeGroup('ag-env-1');
+    const row = getContainerConfig('ag-env-1');
+    expect(row).toBeDefined();
+    expect(JSON.parse(row!.env)).toEqual({});
+  });
+
+  it('round-trips env vars through updateContainerConfigJson', () => {
+    makeGroup('ag-env-2');
+    updateContainerConfigJson('ag-env-2', 'env', { MY_API_KEY: 'abc123', NO_PROXY: 'example.com' });
+
+    const row = getContainerConfig('ag-env-2');
+    expect(JSON.parse(row!.env)).toEqual({ MY_API_KEY: 'abc123', NO_PROXY: 'example.com' });
+
+    // Unset one key by writing the filtered object back (what
+    // `ncl groups config unset-env` does).
+    const env = JSON.parse(row!.env) as Record<string, string>;
+    delete env.MY_API_KEY;
+    updateContainerConfigJson('ag-env-2', 'env', env);
+    expect(JSON.parse(getContainerConfig('ag-env-2')!.env)).toEqual({ NO_PROXY: 'example.com' });
   });
 });

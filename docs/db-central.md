@@ -316,6 +316,7 @@ CREATE TABLE container_configs (
   packages_npm           TEXT NOT NULL DEFAULT '[]',
   additional_mounts      TEXT NOT NULL DEFAULT '[]',
   cli_scope              TEXT NOT NULL DEFAULT 'group',   -- disabled | group | global
+  env                    TEXT NOT NULL DEFAULT '{}',      -- JSON: Record<string,string>, passed as -e flags at spawn
   updated_at             TEXT NOT NULL
 );
 ```
@@ -344,6 +345,7 @@ Migrations live in `src/db/migrations/`, one file per migration. Runner: `runMig
 | 009 | `009-drop-pending-credentials.ts` | Drop the defunct `pending_credentials` table |
 | 014 | `014-container-configs.ts` | `container_configs` — per-agent-group container runtime config |
 | 015 | `015-cli-scope.ts` | `ALTER TABLE container_configs ADD COLUMN cli_scope` |
+| 019 | `019-container-config-env.ts` | `ALTER TABLE container_configs ADD COLUMN env` — per-group container env vars |
 
 Numbers 005 and 006 are intentionally absent — migrations were renumbered during early development.
 

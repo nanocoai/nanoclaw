@@ -97,7 +97,7 @@ ncl help
 
 | Resource | Verbs | What it is |
 |----------|-------|------------|
-| groups | list, get, create, update, delete, restart, config get/update, config add-mcp-server/remove-mcp-server, config add-package/remove-package | Agent groups (workspace, personality, container config) |
+| groups | list, get, create, update, delete, restart, config get/update, config add-mcp-server/remove-mcp-server, config add-package/remove-package, config set-env/unset-env | Agent groups (workspace, personality, container config) |
 | messaging-groups | list, get, create, update, delete | A single chat/channel on one platform |
 | wirings | list, get, create, update, delete | Links a messaging group to an agent group (session mode, triggers) |
 | users | list, get, create, update | Platform identities (`<channel>:<handle>`) |
