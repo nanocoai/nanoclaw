@@ -79,11 +79,13 @@ export class CodexProvider implements AgentProvider {
   private readonly mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   private readonly model: string;
   private readonly baseUrl?: string;
+  private readonly effort?: string;
 
   constructor(options: ProviderOptions = {}) {
     this.mcpServers = options.mcpServers ?? {};
     this.model = (options.env?.CODEX_MODEL as string | undefined) ?? 'gpt-5.4-mini';
     this.baseUrl = options.env?.OPENAI_BASE_URL as string | undefined;
+    this.effort = options.effort;
   }
 
   isSessionInvalid(err: unknown): boolean {
@@ -109,7 +111,7 @@ export class CodexProvider implements AgentProvider {
       // query active per batch of pending messages and ends it on idle, so
       // spawn-per-query matches that cadence naturally.
       writeCodexMcpConfigToml(self.mcpServers);
-      const server = spawnCodexAppServer(createCodexConfigOverrides(self.baseUrl));
+      const server = spawnCodexAppServer(createCodexConfigOverrides(self.baseUrl, self.effort));
       attachCodexAutoApproval(server);
 
       let threadId: string | undefined = input.continuation;
