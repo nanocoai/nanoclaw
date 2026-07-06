@@ -124,7 +124,7 @@ registerResource({
       access: 'approval',
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
-        'Use --id <group-id> and any of: --provider, --fallback-provider (or "none" to clear), --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',
+        'Use --id <group-id> and any of: --provider, --fallback-provider (or "none" to clear), --model, --effort, --image-tag (or "none" to clear), --assistant-name, --max-messages-per-prompt, --cli-scope.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -152,7 +152,11 @@ registerResource({
         }
         if (args.model !== undefined) updates.model = args.model as string;
         if (args.effort !== undefined) updates.effort = args.effort as string;
-        if (args.image_tag !== undefined) updates.image_tag = args.image_tag as string;
+        if (args['image-tag'] !== undefined || args.image_tag !== undefined) {
+          const tag = (args['image-tag'] ?? args.image_tag) as string;
+          // "none" clears back to the default image (CLI flags can't pass null directly)
+          updates.image_tag = tag === 'none' ? null : tag;
+        }
         if (args.assistant_name !== undefined) updates.assistant_name = args.assistant_name as string;
         if (args.max_messages_per_prompt !== undefined)
           updates.max_messages_per_prompt = Number(args.max_messages_per_prompt);
