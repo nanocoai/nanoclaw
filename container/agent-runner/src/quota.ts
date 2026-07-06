@@ -1,20 +1,51 @@
 /**
  * Quota-exhaustion detection, shared by providers and the poll-loop's
- * fallback path. A "quota" error means the provider cannot serve any more
- * turns right now (subscription usage limit, hard rate limit, empty credit
- * balance) — as opposed to transient errors the SDK retries internally.
+ * fallback path.
+ *
+ * There are TWO distinct signal classes and conflating them was the source
+ * of a production false-positive (2026-07-06): a transient 429 right after a
+ * container restart was misread as usage-exhaustion and tripped the Codex
+ * fallback while real usage was only ~63% of the session window.
+ *
+ *   GENUINE   — the subscription / credit is actually spent; the provider
+ *               cannot serve another turn until it resets. This is the ONLY
+ *               class that may trip the fallback and notify the user.
+ *   TRANSIENT — the server is briefly throttling or overloaded (HTTP 429/529,
+ *               "overloaded", "temporarily limiting requests"). The Claude
+ *               SDK already retries these internally; we must NOT switch
+ *               providers and must NOT notify.
  */
 
-// Checked against ANY result text, not just is_error results — confirmed in
-// production (2026-07-06, daniela's server) that a subscription session-limit
-// hit comes back as the literal *successful* result text ("You've hit your
-// session limit · resets 7:30am (UTC)"), not as an SDK-level error. A normal
-// agent reply is exceedingly unlikely to contain these phrases by accident.
-export const QUOTA_ERROR_RE =
-  /usage limit reached|hit your session limit|session limit.*reset|rate.?limit|quota|credit balance|insufficient credits|\b429\b|overloaded/i;
+// Genuine, durable exhaustion. Anthropic subscription limits surface either
+// as the literal "…usage limit reached|<resetEpoch>" error, or — confirmed
+// live 2026-07-06 — as a *successful* result whose text is the session-limit
+// banner ("You've hit your session limit · resets 7:30am (UTC)"). The credit
+// / quota phrases cover the API-key billing case. None of these appear in an
+// ordinary agent reply, and (critically) NOT a bare 429 / rate-limit / overload.
+export const GENUINE_QUOTA_RE =
+  /usage limit reached|hit your session limit|session limit[^\n]*reset|reached your usage limit|credit balance (is )?too low|insufficient credits|quota (exceeded|exhausted|has been used)/i;
 
-export function isQuotaErrorMessage(message: string): boolean {
-  return QUOTA_ERROR_RE.test(message);
+// Transient throttling / overload — explicitly NOT a genuine exhaustion.
+// Retried by the SDK; surfaced here only so callers can positively recognise
+// a "wait and retry" condition versus a "switch providers" one.
+export const TRANSIENT_LIMIT_RE =
+  /\b429\b|\b529\b|rate.?limit|overloaded|temporarily (limiting|unavailable)|server (is )?(busy|overloaded)|please try again/i;
+
+/**
+ * True only for a genuine, durable usage/credit exhaustion — the sole
+ * condition that may trip the Codex fallback + user notification.
+ */
+export function isGenuineQuotaError(message: string): boolean {
+  return GENUINE_QUOTA_RE.test(message);
+}
+
+/**
+ * True for a transient throttle/overload that is NOT a genuine exhaustion.
+ * Genuine wording always wins, so a message that is both (e.g. a limit error
+ * that happens to include "429") is treated as genuine, not transient.
+ */
+export function isTransientLimit(message: string): boolean {
+  return !GENUINE_QUOTA_RE.test(message) && TRANSIENT_LIMIT_RE.test(message);
 }
 
 /**

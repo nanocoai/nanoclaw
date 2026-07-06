@@ -38,8 +38,13 @@ function log(msg: string): void {
 /** Cumulative input tokens before triggering native compaction. */
 const COMPACT_THRESHOLD = 40_000;
 
-/** Hard ceiling for a single turn. Guards against app-server wedging. */
-const TURN_TIMEOUT_MS = 5 * 60 * 1000;
+/**
+ * Hard ceiling for a single turn. Guards against the app-server wedging
+ * after `turn/start` (model never streams, no turn/completed). Overridable
+ * via env; kept well under the poll-loop's fallback deadline so the codex
+ * side fails first with a clean abort rather than being force-torn-down.
+ */
+const TURN_TIMEOUT_MS = Number(process.env.CODEX_TURN_TIMEOUT_MS) || 120_000;
 
 /**
  * Errors that indicate the stored thread ID is unusable — typically
@@ -98,6 +103,13 @@ export class CodexProvider implements AgentProvider {
     let waiting: (() => void) | null = null;
     let ended = false;
     let aborted = false;
+    // Live app-server handle, hoisted so abort() can kill the process
+    // synchronously. Without this, an abort while blocked inside an awaited
+    // JSON-RPC request (e.g. a hung thread/resume) can't take effect until
+    // that request's own timeout fires — the generator only re-checks
+    // `aborted` between awaits. Killing the process rejects every pending
+    // request immediately, so the abort is honoured at once.
+    let server: AppServer | null = null;
     const kick = (): void => {
       waiting?.();
     };
@@ -111,8 +123,13 @@ export class CodexProvider implements AgentProvider {
       // query active per batch of pending messages and ends it on idle, so
       // spawn-per-query matches that cadence naturally.
       writeCodexMcpConfigToml(self.mcpServers);
-      const server = spawnCodexAppServer(createCodexConfigOverrides(self.baseUrl, self.effort));
+      server = spawnCodexAppServer(createCodexConfigOverrides(self.baseUrl, self.effort));
       attachCodexAutoApproval(server);
+      // If abort() already fired before the server came up, tear down now.
+      if (aborted) {
+        killCodexAppServer(server);
+        return;
+      }
 
       let threadId: string | undefined = input.continuation;
       let initYielded = false;
@@ -177,7 +194,8 @@ export class CodexProvider implements AgentProvider {
           }
         }
       } finally {
-        killCodexAppServer(server);
+        if (server) killCodexAppServer(server);
+        server = null;
       }
     }
 
@@ -193,6 +211,9 @@ export class CodexProvider implements AgentProvider {
       abort: () => {
         aborted = true;
         kick();
+        // Kill the process now so an in-flight JSON-RPC request rejects
+        // immediately rather than waiting out its per-request timeout.
+        if (server) killCodexAppServer(server);
       },
       events: gen(),
     };

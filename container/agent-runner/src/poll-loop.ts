@@ -2,8 +2,15 @@ import { findByName, getAllDestinations, type DestinationEntry } from './destina
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut, getMaxOutSeq, countChatSendsSince } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
-import { clearContinuation, getContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
-import { QuotaExhaustedError, isQuotaErrorMessage } from './quota.js';
+import {
+  clearContinuation,
+  getContinuation,
+  isQuotaDegraded,
+  migrateLegacyContinuation,
+  setContinuation,
+  setQuotaDegraded,
+} from './db/session-state.js';
+import { QuotaExhaustedError, isGenuineQuotaError, isTransientLimit } from './quota.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
 import {
   formatMessages,
@@ -57,11 +64,27 @@ const FALLBACK_SWITCH_NOTICE =
   '⚠️ מכסת Claude נגמרה כרגע — ממשיך לענות דרך Codex (OpenAI). אחזור ל-Claude אוטומטית כשהמכסה תתחדש.';
 const FALLBACK_RETURN_NOTICE = '✅ מכסת Claude התחדשה — חזרתי לענות דרך Claude.';
 const FALLBACK_FAILED_NOTICE = '❌ גם מנוע הגיבוי (Codex) לא הצליח לענות כרגע. נסו שוב מאוחר יותר.';
+// Genuine quota exhaustion when NO fallback provider is configured. Shown
+// once (deduped via the quota-degraded flag) instead of dumping the raw
+// English "You've hit your session limit" banner on every message.
+const NO_FALLBACK_QUOTA_NOTICE =
+  '⚠️ מכסת Claude נגמרה כרגע. אנסה שוב אוטומטית כשהמכסה תתחדש — נסו שוב מאוחר יותר.';
+// Sent once when the primary recovers and no fallback was involved (mirror of
+// FALLBACK_RETURN_NOTICE for the no-fallback path).
+const QUOTA_RENEWED_NOTICE = '✅ מכסת Claude התחדשה — חזרתי לפעול כרגיל.';
+// Shown when the primary throws a *transient* throttle (429/overload) that
+// the SDK gave up retrying. This is NOT quota exhaustion — do not switch
+// providers, just tell the user to retry shortly.
+const TRANSIENT_BUSY_NOTICE = '⚠️ השרת עמוס כרגע (הגבלת קצב זמנית) — נסו שוב עוד רגע.';
 
-// Set when a turn was served by the fallback provider; the next successful
-// primary result sends FALLBACK_RETURN_NOTICE so the user knows they're
-// back on the primary engine.
-let pendingReturnNotice = false;
+// Hard ceiling on a single fallback turn: init + thread resume/start + the
+// model turn combined. A stuck Codex turn must fail fast back to the primary
+// (next turn retries Claude) instead of freezing the whole poll-loop.
+// Overridable via env for deployments that run a slower fallback model, and
+// read at call time so tests can drive the timeout path.
+function fallbackTurnDeadlineMs(): number {
+  return Number(process.env.FALLBACK_TURN_DEADLINE_MS) || 150_000;
+}
 
 /**
  * Main poll loop. Runs indefinitely until the process is killed.
@@ -204,7 +227,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName, prompt);
+      const result = await processQuery(
+        query,
+        routing,
+        processingIds,
+        config.providerName,
+        prompt,
+        Boolean(config.fallback),
+      );
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -215,21 +245,47 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
       // Quota exhaustion on the primary → retry the unanswered prompt on the
       // fallback provider. QuotaExhaustedError carries the exact prompt
-      // segment that went unanswered; a plain thrown error that reads like
-      // quota (SDK subprocess died on a usage-limit response) retries the
-      // batch's initial prompt.
+      // segment that went unanswered; a plain thrown error that reads like a
+      // GENUINE usage-limit (SDK subprocess died on a usage-limit response)
+      // retries the batch's initial prompt. A transient 429/overload is
+      // explicitly excluded here — it must NOT switch providers.
       const quotaPrompt =
-        err instanceof QuotaExhaustedError ? err.lastPrompt : isQuotaErrorMessage(errMsg) ? prompt : null;
+        err instanceof QuotaExhaustedError ? err.lastPrompt : isGenuineQuotaError(errMsg) ? prompt : null;
 
       if (quotaPrompt !== null && config.fallback) {
-        log(`Primary quota exhausted — retrying on fallback provider '${config.fallback.providerName}'`);
-        writeNotice(routing, FALLBACK_SWITCH_NOTICE);
+        // Announce the switch to the user only on the TRANSITION into fallback
+        // mode. During a multi-hour outage the primary is exhausted on every
+        // turn, so an unconditional notice here spammed the user with the same
+        // "switched to Codex" banner after every single message (observed live
+        // 2026-07-06). The persisted flag makes it fire exactly once per
+        // outage; the matching return notice fires once when the primary
+        // recovers (see the result path in processQuery).
+        if (!isQuotaDegraded()) {
+          log(`Primary quota exhausted — switching to fallback provider '${config.fallback.providerName}'`);
+          writeNotice(routing, FALLBACK_SWITCH_NOTICE);
+          setQuotaDegraded(true);
+        } else {
+          log(
+            `Primary still quota-exhausted — continuing on fallback '${config.fallback.providerName}' (notice suppressed)`,
+          );
+        }
         try {
           await runFallbackTurn(config.fallback, quotaPrompt, routing, config.cwd, config.systemContext);
-          pendingReturnNotice = true;
         } catch (fbErr) {
           const fbMsg = fbErr instanceof Error ? fbErr.message : String(fbErr);
           log(`Fallback turn failed: ${fbMsg}`);
+          // Self-heal a poisoned fallback thread. Bug B (2026-07-06): a Codex
+          // thread that hangs on RESUME timed out, but the bad continuation
+          // stayed stored — so every subsequent message resumed the same
+          // wedged thread and hung again, in a loop. Dropping the stored
+          // continuation on failure means the next fallback attempt starts a
+          // FRESH thread instead of re-resuming the poisoned one. We only skip
+          // this when the failure was the fallback provider's OWN quota (the
+          // thread is fine, just out of budget), so its memory is preserved.
+          if (!/quota exhausted/i.test(fbMsg)) {
+            log(`Clearing fallback continuation for '${config.fallback.providerName}' after failure`);
+            clearContinuation(config.fallback.providerName);
+          }
           writeNotice(routing, FALLBACK_FAILED_NOTICE);
         }
       } else {
@@ -242,15 +298,34 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
           clearContinuation(config.providerName);
         }
 
-        // Write error response so the user knows something went wrong
-        writeMessageOut({
-          id: generateId(),
-          kind: 'chat',
-          platform_id: routing.platformId,
-          channel_type: routing.channelType,
-          thread_id: routing.threadId,
-          content: JSON.stringify({ text: `Error: ${errMsg}` }),
-        });
+        // Genuine quota exhaustion but no fallback provider configured
+        // (quotaPrompt was set yet config.fallback is undefined). Show a
+        // friendly Hebrew notice ONCE — deduped via the same quota-degraded
+        // flag — instead of dumping the raw English "session limit" banner on
+        // every message for the whole outage (observed live 2026-07-06).
+        if (quotaPrompt !== null && !config.fallback) {
+          if (!isQuotaDegraded()) {
+            log('Primary quota exhausted, no fallback configured — notifying user once');
+            writeNotice(routing, NO_FALLBACK_QUOTA_NOTICE);
+            setQuotaDegraded(true);
+          } else {
+            log('Primary still quota-exhausted, no fallback — notice suppressed');
+          }
+        } else {
+          // Write error response so the user knows something went wrong. A
+          // transient throttle (429/overload the SDK exhausted its retries on)
+          // gets a friendly "try again" notice rather than a raw error dump —
+          // it is NOT a provider-switch condition.
+          const userText = isTransientLimit(errMsg) ? TRANSIENT_BUSY_NOTICE : `Error: ${errMsg}`;
+          writeMessageOut({
+            id: generateId(),
+            kind: 'chat',
+            platform_id: routing.platformId,
+            channel_type: routing.channelType,
+            thread_id: routing.threadId,
+            content: JSON.stringify({ text: userText }),
+          });
+        }
       }
     } finally {
       clearCurrentInReplyTo();
@@ -307,6 +382,7 @@ async function processQuery(
   initialBatchIds: string[],
   providerName: string,
   initialPrompt: string,
+  hasFallback: boolean,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -440,11 +516,17 @@ async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
-        // A prior turn ran on the fallback provider; this successful
-        // primary turn means quota recovered — tell the user once.
-        if (pendingReturnNotice) {
-          pendingReturnNotice = false;
-          writeNotice(routing, FALLBACK_RETURN_NOTICE);
+        // The session was quota-degraded and the primary just produced a real
+        // result — quota recovered. Clear the flag and tell the user once,
+        // with the message that matches how they were notified going in
+        // (fallback → "back to Claude"; no fallback → "quota renewed").
+        // Persisted, so this fires even if the container restarted mid-outage.
+        // (Quota exhaustion never reaches this branch: claude.ts emits it as
+        // an `error`/quota event, which processQuery rethrows as
+        // QuotaExhaustedError before we get here.)
+        if (isQuotaDegraded()) {
+          setQuotaDegraded(false);
+          writeNotice(routing, hasFallback ? FALLBACK_RETURN_NOTICE : QUOTA_RENEWED_NOTICE);
         }
         if (event.text) {
           const { hasUnwrapped } = dispatchResultText(event.text, routing);
@@ -510,6 +592,17 @@ export async function runFallbackTurn(
 
   let nudged = false;
   let gotResult = false;
+  // Hard wall-clock deadline. If the fallback provider wedges anywhere —
+  // JSON-RPC init, a hung thread-resume, or a turn that never streams a
+  // result — abort() tears down its process and we throw, so the primary
+  // path recovers on the next turn instead of the whole poll-loop freezing.
+  let timedOut = false;
+  const deadlineMs = fallbackTurnDeadlineMs();
+  const deadline = setTimeout(() => {
+    timedOut = true;
+    log(`Fallback turn exceeded ${deadlineMs}ms — aborting`);
+    query.abort();
+  }, deadlineMs);
   try {
     for await (const event of query.events) {
       touchHeartbeat();
@@ -544,7 +637,11 @@ export async function runFallbackTurn(
       }
     }
   } finally {
+    clearTimeout(deadline);
     if (!gotResult) query.abort();
+  }
+  if (timedOut) {
+    throw new Error(`Fallback provider timed out after ${deadlineMs}ms`);
   }
   if (!gotResult) {
     throw new Error('Fallback provider produced no result');

@@ -4,7 +4,7 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
-import { QUOTA_ERROR_RE } from '../quota.js';
+import { isGenuineQuotaError } from '../quota.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -329,12 +329,17 @@ export class ClaudeProvider implements AgentProvider {
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'result') {
           const text = 'result' in message ? (message as { result?: string }).result ?? null : null;
-          // Checked regardless of is_error: confirmed in production that a
-          // subscription session-limit hit ("You've hit your session limit
-          // · resets 7:30am (UTC)") comes back as a *successful* result
-          // whose text IS the limit banner — not flagged is_error at all.
-          // Gating on is_error let every one of these through undetected.
-          if (text && QUOTA_ERROR_RE.test(text)) {
+          // A genuine subscription limit comes back as a *successful* result
+          // whose text IS the bare limit banner ("You've hit your session
+          // limit · resets 7:30am (UTC)") — not flagged is_error at all, so
+          // we must inspect the text. But an ordinary agent reply is ALWAYS
+          // wrapped in <message to="…"> blocks; a bare banner never is (the
+          // agent never got to author anything). Requiring the absence of a
+          // wrapper stops the agent's own reply — e.g. one that discusses the
+          // quota-fallback feature and mentions "usage limit" — from being
+          // misread as a quota error and dumped raw to the user (2026-07-06).
+          const isAuthoredReply = /<message\s+to="/i.test(text ?? '');
+          if (text && !isAuthoredReply && isGenuineQuotaError(text)) {
             yield { type: 'error', message: text, retryable: false, classification: 'quota' };
           } else {
             yield { type: 'result', text };

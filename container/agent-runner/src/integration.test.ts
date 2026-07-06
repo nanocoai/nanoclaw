@@ -328,7 +328,8 @@ describe('poll loop — provider error recovery', () => {
   it('writes error to outbound and continues loop on provider throw', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'trigger error' }, { platformId: 'chan-1', channelType: 'discord' });
 
-    const provider = new ThrowingProvider('API rate limit exceeded');
+    // A generic (non-throttle) failure — surfaced verbatim to the user.
+    const provider = new ThrowingProvider('Claude Code process exited with code 1');
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2000);
 
@@ -338,11 +339,34 @@ describe('poll loop — provider error recovery', () => {
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].content).text).toContain('Error:');
-    expect(JSON.parse(out[0].content).text).toContain('API rate limit exceeded');
+    expect(JSON.parse(out[0].content).text).toContain('Claude Code process exited with code 1');
 
     // Input message should be marked completed despite the error
     const pending = getPendingMessages();
     expect(pending).toHaveLength(0);
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('does NOT switch/error-dump on a transient throttle — friendly notice instead', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'trigger throttle' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    // A transient 429 the SDK exhausted its retries on. No fallback configured
+    // here, so the else-branch runs: it must NOT raw-dump "Error: 429…" and
+    // must NOT claim a provider switch — just a friendly retry notice.
+    const provider = new ThrowingProvider('429 {"type":"rate_limit_error"} Server is temporarily limiting requests');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    const text = JSON.parse(out[0].content).text as string;
+    expect(text).not.toContain('Error:');
+    expect(text).not.toContain('429');
+    expect(text).not.toContain('Codex');
 
     await loopPromise.catch(() => {});
   });

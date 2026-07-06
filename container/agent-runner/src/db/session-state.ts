@@ -66,6 +66,27 @@ export function migrateLegacyContinuation(providerName: string): string | undefi
   return legacy;
 }
 
+// ── Quota-degraded flag ─────────────────────────────────────────────────────
+// Tracks whether the primary provider is currently quota-exhausted AND the
+// user has already been told about it (either "switched to the backup engine"
+// when a fallback is configured, or "quota is out, try later" when none is).
+// Persisted here — not a module-level variable — so it survives container
+// restarts: during a multi-hour outage the container may be killed and
+// respawned repeatedly, and the degraded/recovered notices must fire exactly
+// ONCE per outage, not once per message and not again after every restart.
+const QUOTA_DEGRADED_KEY = 'quota_degraded';
+
+/** True while the primary is quota-exhausted and the user has been notified. */
+export function isQuotaDegraded(): boolean {
+  return getValue(QUOTA_DEGRADED_KEY) === '1';
+}
+
+/** Mark (or clear) the quota-degraded state. */
+export function setQuotaDegraded(degraded: boolean): void {
+  if (degraded) setValue(QUOTA_DEGRADED_KEY, '1');
+  else deleteValue(QUOTA_DEGRADED_KEY);
+}
+
 export function getContinuation(providerName: string): string | undefined {
   return getValue(continuationKey(providerName));
 }
