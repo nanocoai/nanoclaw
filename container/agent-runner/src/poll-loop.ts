@@ -5,10 +5,12 @@ import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/con
 import {
   clearContinuation,
   getContinuation,
+  getQuotaWarnedWindow,
   isQuotaDegraded,
   migrateLegacyContinuation,
   setContinuation,
   setQuotaDegraded,
+  setQuotaWarnedWindow,
 } from './db/session-state.js';
 import { QuotaExhaustedError, isGenuineQuotaError, isTransientLimit } from './quota.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
@@ -72,6 +74,19 @@ const NO_FALLBACK_QUOTA_NOTICE =
 // Sent once when the primary recovers and no fallback was involved (mirror of
 // FALLBACK_RETURN_NOTICE for the no-fallback path).
 const QUOTA_RENEWED_NOTICE = '✅ מכסת Claude התחדשה — חזרתי לפעול כרגיל.';
+
+// Proactive heads-up sent ONCE per plan window when usage crosses the warning
+// threshold, BEFORE the quota actually runs out. Deduped per window via
+// get/setQuotaWarnedWindow. Threshold is operator-tunable via env.
+function quotaWarnThresholdPct(): number {
+  const v = Number(process.env.QUOTA_WARN_THRESHOLD_PCT);
+  return Number.isFinite(v) && v > 0 && v < 100 ? v : 90;
+}
+function nearQuotaNotice(pctText: string, hasFallback: boolean): string {
+  return hasFallback
+    ? `⚠️ הגעת ל-${pctText} ממכסת Claude. כשהיא תיגמר אעבור אוטומטית לענות דרך Codex (OpenAI) — שתדע.`
+    : `⚠️ הגעת ל-${pctText} ממכסת Claude. כשהיא תיגמר לא אוכל לענות עד שהמכסה תתחדש.`;
+}
 // Shown when the primary throws a *transient* throttle (429/overload) that
 // the SDK gave up retrying. This is NOT quota exhaustion — do not switch
 // providers, just tell the user to retry shortly.
@@ -508,6 +523,10 @@ async function processQuery(
         // segment on the fallback provider (when one is configured).
         query.abort();
         throw new QuotaExhaustedError(event.message, lastPrompt);
+      } else if (event.type === 'quota_status') {
+        // Informational plan-usage update. Warn the user ONCE per window when
+        // they cross the threshold, before the quota actually runs out.
+        maybeWarnApproachingQuota(event, routing, hasFallback);
       } else if (event.type === 'result') {
         // A result — with or without text — means the turn is done. Mark
         // the initial batch completed now so the host sweep doesn't see
@@ -555,6 +574,39 @@ async function processQuery(
   }
 
   return { continuation: queryContinuation };
+}
+
+/**
+ * Send the proactive "approaching quota" heads-up at most once per plan
+ * window. Fires when reported utilization crosses the configured threshold
+ * (default 90%) or the SDK itself flags the window as warning. The window's
+ * reset timestamp is the de-dup key, so a fresh window re-arms the warning.
+ *
+ * Exported for tests.
+ */
+export function maybeWarnApproachingQuota(
+  event: { utilization?: number; warning?: boolean; resetsAt?: number | null; window?: string },
+  routing: RoutingContext,
+  hasFallback: boolean,
+): void {
+  const threshold = quotaWarnThresholdPct();
+  // Normalize: the field is documented 0-100 on the usage endpoint, but guard
+  // against a 0-1 fraction encoding just in case.
+  let pct = event.utilization;
+  if (pct !== undefined && pct > 0 && pct <= 1) pct = pct * 100;
+
+  const approaching = (pct !== undefined && pct >= threshold) || event.warning === true;
+  if (!approaching) return;
+
+  // One warning per window: key on the reset timestamp when present (so the
+  // key naturally changes each window), else fall back to the window name.
+  const windowKey = event.resetsAt != null ? `r:${event.resetsAt}` : `w:${event.window ?? 'default'}`;
+  if (getQuotaWarnedWindow() === windowKey) return;
+  setQuotaWarnedWindow(windowKey);
+
+  const pctText = pct !== undefined ? `${Math.round(pct)}%` : 'סף השימוש';
+  log(`Approaching quota (${pctText}, window ${windowKey}) — sending one-time heads-up`);
+  writeNotice(routing, nearQuotaNotice(pctText, hasFallback));
 }
 
 /** Write a short system notice to the turn's origin destination. */
@@ -663,6 +715,12 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       break;
     case 'progress':
       log(`Progress: ${event.message}`);
+      break;
+    case 'quota_status':
+      log(
+        `Quota status: ${event.utilization !== undefined ? `${Math.round(event.utilization)}%` : 'n/a'}` +
+          `${event.warning ? ' (warning)' : ''}${event.window ? ` [${event.window}]` : ''}`,
+      );
       break;
   }
 }

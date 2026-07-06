@@ -9,7 +9,7 @@ import { initTestSessionDb, closeSessionDb } from './db/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { getContinuation, isQuotaDegraded, setQuotaDegraded } from './db/session-state.js';
 import { isGenuineQuotaError, isTransientLimit, QuotaExhaustedError } from './quota.js';
-import { runFallbackTurn } from './poll-loop.js';
+import { maybeWarnApproachingQuota, runFallbackTurn } from './poll-loop.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, QueryInput } from './providers/types.js';
 import type { Database } from 'bun:sqlite';
 
@@ -132,6 +132,59 @@ describe('quota-degraded flag (notice de-dup)', () => {
     // recovery notice fires exactly once.
     setQuotaDegraded(false);
     expect(isQuotaDegraded()).toBe(false);
+  });
+});
+
+describe('maybeWarnApproachingQuota (proactive heads-up)', () => {
+  const onlyText = () => getUndeliveredMessages().map((m) => JSON.parse(m.content).text);
+
+  it('warns once when utilization crosses the 90% threshold', () => {
+    maybeWarnApproachingQuota({ utilization: 91, resetsAt: 1000 }, ROUTING, true);
+    const out = onlyText();
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain('91%');
+    expect(out[0]).toContain('Codex'); // fallback wording
+  });
+
+  it('does NOT warn below the threshold', () => {
+    maybeWarnApproachingQuota({ utilization: 80, resetsAt: 1000 }, ROUTING, true);
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('warns on the SDK warning flag even without a utilization number', () => {
+    maybeWarnApproachingQuota({ warning: true, resetsAt: 1000 }, ROUTING, true);
+    expect(getUndeliveredMessages()).toHaveLength(1);
+  });
+
+  it('normalizes a 0-1 fraction encoding', () => {
+    maybeWarnApproachingQuota({ utilization: 0.93, resetsAt: 1000 }, ROUTING, true);
+    const out = onlyText();
+    expect(out).toHaveLength(1);
+    expect(out[0]).toContain('93%');
+  });
+
+  it('fires at most once per window (same resetsAt)', () => {
+    maybeWarnApproachingQuota({ utilization: 92, resetsAt: 1000 }, ROUTING, true);
+    maybeWarnApproachingQuota({ utilization: 95, resetsAt: 1000 }, ROUTING, true);
+    maybeWarnApproachingQuota({ utilization: 99, resetsAt: 1000 }, ROUTING, true);
+    expect(getUndeliveredMessages()).toHaveLength(1);
+  });
+
+  it('re-arms for a new window (different resetsAt)', () => {
+    // Distinct percentages so the identical-text idempotent-outbound guard
+    // (60s window) doesn't collapse them — in production the two windows are
+    // hours apart anyway.
+    maybeWarnApproachingQuota({ utilization: 92, resetsAt: 1000 }, ROUTING, true);
+    maybeWarnApproachingQuota({ utilization: 96, resetsAt: 2000 }, ROUTING, true);
+    expect(getUndeliveredMessages()).toHaveLength(2);
+  });
+
+  it('uses no-fallback wording when no overflow provider is configured', () => {
+    maybeWarnApproachingQuota({ utilization: 91, resetsAt: 1000 }, ROUTING, false);
+    const out = onlyText();
+    expect(out).toHaveLength(1);
+    expect(out[0]).not.toContain('Codex');
+    expect(out[0]).toContain('Claude');
   });
 });
 

@@ -346,16 +346,28 @@ export class ClaudeProvider implements AgentProvider {
           }
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
-        } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
-          // rate_limit_event fires with a status field on every check —
-          // only `rejected` means the request was actually blocked. Treating
-          // informational statuses (allowed/allowed_warning) as quota would
-          // trigger the fallback on perfectly healthy turns.
-          const status = (message as { rate_limit?: { status?: string } }).rate_limit?.status;
+        } else if (message.type === 'rate_limit_event') {
+          // `rate_limit_event` is a TOP-LEVEL SDK message (not a system
+          // subtype) carrying `rate_limit_info` for claude.ai subscription
+          // users. Only `rejected` means the request was actually blocked —
+          // treating informational statuses (allowed/allowed_warning) as quota
+          // would trip the fallback on healthy turns. Everything else is an
+          // informational utilization update we forward as `quota_status` so
+          // the poll-loop can warn the user once as they approach the limit.
+          const info = (message as {
+            rate_limit_info?: { status?: string; utilization?: number; resetsAt?: number; rateLimitType?: string };
+          }).rate_limit_info;
+          const status = info?.status;
           if (status === 'rejected') {
             yield { type: 'error', message: 'Rate limit exceeded', retryable: false, classification: 'quota' };
           } else {
-            yield { type: 'progress', message: `Rate limit status: ${status ?? 'unknown'}` };
+            yield {
+              type: 'quota_status',
+              utilization: info?.utilization,
+              warning: status === 'allowed_warning',
+              resetsAt: info?.resetsAt ?? null,
+              window: info?.rateLimitType,
+            };
           }
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;

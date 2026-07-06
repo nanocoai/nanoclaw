@@ -87,6 +87,23 @@ export function setQuotaDegraded(degraded: boolean): void {
   else deleteValue(QUOTA_DEGRADED_KEY);
 }
 
+// ── Approaching-quota warning dedup ─────────────────────────────────────────
+// Remembers which plan window we've already sent the "you're near your quota"
+// heads-up for, so the warning fires exactly ONCE per window. Keyed by the
+// window's reset timestamp: when the window rolls over (new resetsAt), the key
+// changes and the next approach re-arms the warning automatically.
+const QUOTA_WARNED_KEY = 'quota_warned_window';
+
+/** The window key we last warned the user about, or undefined if none. */
+export function getQuotaWarnedWindow(): string | undefined {
+  return getValue(QUOTA_WARNED_KEY);
+}
+
+/** Record that we've warned for this window key. */
+export function setQuotaWarnedWindow(windowKey: string): void {
+  setValue(QUOTA_WARNED_KEY, windowKey);
+}
+
 export function getContinuation(providerName: string): string | undefined {
   return getValue(continuationKey(providerName));
 }

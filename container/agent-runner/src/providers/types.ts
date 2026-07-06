@@ -85,6 +85,23 @@ export type ProviderEvent =
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
   /**
+   * Plan quota-utilization update for the active subscription window. Emitted
+   * by providers that expose it (Claude via `rate_limit_event`) so the
+   * poll-loop can warn the user once as they approach exhaustion. Purely
+   * informational — never gates a turn.
+   */
+  | {
+      type: 'quota_status';
+      /** Percentage of the active plan window used, 0-100 (undefined if unknown). */
+      utilization?: number;
+      /** True when the SDK itself flagged the window as approaching its limit. */
+      warning?: boolean;
+      /** Epoch ms when the active window resets — de-dup key so we warn once per window. */
+      resetsAt?: number | null;
+      /** Which plan window this refers to (e.g. 'five_hour', 'seven_day'). */
+      window?: string;
+    }
+  /**
    * Liveness signal. Providers MUST yield this on every underlying SDK
    * event (tool call, thinking, partial message, anything) so the
    * poll-loop's idle timer stays honest during long tool runs.
