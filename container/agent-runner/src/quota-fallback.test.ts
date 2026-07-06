@@ -69,6 +69,10 @@ describe('isQuotaErrorMessage', () => {
     expect(isQuotaErrorMessage('429 {"type":"rate_limit_error"}')).toBe(true);
     expect(isQuotaErrorMessage('Your credit balance is too low to access the API')).toBe(true);
     expect(isQuotaErrorMessage('quota exceeded for this billing period')).toBe(true);
+    // Confirmed live on daniela's server 2026-07-06 — this is what a
+    // subscription session-limit hit actually looks like, and it arrives
+    // as a normal (non-error) result, not an SDK error.
+    expect(isQuotaErrorMessage("You've hit your session limit · resets 7:30am (UTC)")).toBe(true);
   });
 
   it('does not match unrelated errors', () => {

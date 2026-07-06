@@ -5,10 +5,13 @@
  * balance) — as opposed to transient errors the SDK retries internally.
  */
 
-// Applied ONLY to error messages / is_error result text — never to normal
-// agent output — so loose terms like "rate limit" are safe here.
+// Checked against ANY result text, not just is_error results — confirmed in
+// production (2026-07-06, daniela's server) that a subscription session-limit
+// hit comes back as the literal *successful* result text ("You've hit your
+// session limit · resets 7:30am (UTC)"), not as an SDK-level error. A normal
+// agent reply is exceedingly unlikely to contain these phrases by accident.
 export const QUOTA_ERROR_RE =
-  /usage limit reached|rate.?limit|quota|credit balance|insufficient credits|\b429\b|overloaded/i;
+  /usage limit reached|hit your session limit|session limit.*reset|rate.?limit|quota|credit balance|insufficient credits|\b429\b|overloaded/i;
 
 export function isQuotaErrorMessage(message: string): boolean {
   return QUOTA_ERROR_RE.test(message);

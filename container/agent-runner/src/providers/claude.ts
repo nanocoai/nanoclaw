@@ -329,11 +329,12 @@ export class ClaudeProvider implements AgentProvider {
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'result') {
           const text = 'result' in message ? (message as { result?: string }).result ?? null : null;
-          const isError = (message as { is_error?: boolean }).is_error === true;
-          if (isError && text && QUOTA_ERROR_RE.test(text)) {
-            // Usage-limit / out-of-quota turn ("Claude AI usage limit
-            // reached|<ts>" and friends). Surface as a quota error so the
-            // poll-loop can fall back instead of delivering the error text.
+          // Checked regardless of is_error: confirmed in production that a
+          // subscription session-limit hit ("You've hit your session limit
+          // · resets 7:30am (UTC)") comes back as a *successful* result
+          // whose text IS the limit banner — not flagged is_error at all.
+          // Gating on is_error let every one of these through undetected.
+          if (text && QUOTA_ERROR_RE.test(text)) {
             yield { type: 'error', message: text, retryable: false, classification: 'quota' };
           } else {
             yield { type: 'result', text };
