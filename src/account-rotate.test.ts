@@ -133,6 +133,10 @@ describe('detectRateLimit', () => {
     expect(detectRateLimit('You have hit your usage limit')).toBe(true);
   });
 
+  it('匹配 "You\'ve hit your session limit" 变体', () => {
+    expect(detectRateLimit("You've hit your session limit · resets 5:10am (Asia/Shanghai)")).toBe(true);
+  });
+
   // --- 误匹配防御测试（回归 bug：正常对话被误判为限流） ---
 
   it('不误匹配单独的 429（如 bug 编号）', () => {

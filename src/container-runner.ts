@@ -71,8 +71,8 @@ export function detectRateLimit(text: string): boolean {
     /rate_limit_error/,
     /overloaded_error/,
     // Claude Code "假成功" 限流提示（强信号）
-    /you['\u2019]ve\s+hit\s+your\s+(?:usage\s+)?limit/i,
-    /you\s+have\s+hit\s+your\s+(?:usage\s+)?limit/i,
+    /you['\u2019]ve\s+hit\s+your\s+(?:(?:usage|session)\s+)?limit/i,
+    /you\s+have\s+hit\s+your\s+(?:(?:usage|session)\s+)?limit/i,
     // 经典限流完整短语
     /rate[\s-]?limit\s+exceeded/i,
     /(?:api\s+)?quota\s+exceeded/i,
