@@ -120,17 +120,29 @@ export function insertMessage(
      */
     onWake?: 0 | 1;
   },
-): void {
-  db.prepare(
-    `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger, source_session_id, on_wake)
-     VALUES (@id, @seq, @kind, @timestamp, 'pending', @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @id, @trigger, @sourceSessionId, @onWake)`,
-  ).run({
-    ...message,
-    trigger: message.trigger ?? 1,
-    onWake: message.onWake ?? 0,
-    sourceSessionId: message.sourceSessionId ?? null,
-    seq: nextEvenSeq(db),
-  });
+): boolean {
+  // INSERT OR IGNORE makes the write idempotent on the id primary key. The
+  // same message id can legitimately arrive twice — e.g. a sender-approval
+  // replay re-routes a message already written on the original delivery, and
+  // a channel can redeliver an inbound with the same client-generated id. The
+  // first write wins; a duplicate is a silent no-op rather than a thrown
+  // UNIQUE-constraint error that would crash routeInbound / the approval
+  // replay. Mirrors how messages_out and delivered already dedup. Returns
+  // true when a row was actually inserted, false when an existing id was
+  // ignored, so callers can avoid re-waking on a redelivery.
+  const info = db
+    .prepare(
+      `INSERT OR IGNORE INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger, source_session_id, on_wake)
+       VALUES (@id, @seq, @kind, @timestamp, 'pending', @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @id, @trigger, @sourceSessionId, @onWake)`,
+    )
+    .run({
+      ...message,
+      trigger: message.trigger ?? 1,
+      onWake: message.onWake ?? 0,
+      sourceSessionId: message.sourceSessionId ?? null,
+      seq: nextEvenSeq(db),
+    });
+  return info.changes > 0;
 }
 
 export function countDueMessages(db: Database.Database): number {

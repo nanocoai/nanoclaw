@@ -245,6 +245,12 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     approval_id: approvalId,
     session_id: session.id,
     request_id: approvalId,
+    // Stamp the originating group so the response handler's approve-path
+    // authorization (hasAdminPrivilege(clicker, agent_group_id)) can run.
+    // Without it the row's agent_group_id is NULL, the gate fails closed, and
+    // every clicked Approve is dropped as "unauthorized" — the card can be
+    // delivered but never resolved.
+    agent_group_id: session.agent_group_id,
     action,
     payload: JSON.stringify(payload),
     created_at: new Date().toISOString(),
