@@ -1,0 +1,473 @@
+#!/usr/bin/env python3
+"""ncc — NanoClaw Control: host-side operational & health CLI.
+
+Sibling to `ncl` (which does central-DB entity CRUD). `ncc` covers the
+operational surface `ncl` does not: host service lifecycle, a component
+health scan, and visibility into scheduled work.
+
+Standalone by design (stdlib only): it reads the SQLite DBs directly and
+shells out to launchctl/systemctl/docker, so it works even when the host
+service is DOWN — which is exactly when you need `health` and `service start`.
+
+Cross-platform: launchd on macOS, systemd (--user) on Linux.
+"""
+
+import argparse
+import glob
+import json
+import os
+import platform
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+
+__version__ = "0.1.0"
+
+# ── Locate the NanoClaw checkout ────────────────────────────────────────────
+# Installed layout mirrors /claw: the real file lives at <repo>/scripts/ncc and
+# is symlinked onto PATH. realpath() resolves the symlink, so repo root is the
+# parent of the scripts/ dir. NANOCLAW_HOME overrides for unusual setups.
+def find_repo() -> str:
+    env = os.environ.get("NANOCLAW_HOME")
+    if env and os.path.isfile(os.path.join(env, "data", "v2.db")):
+        return env
+    here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    if os.path.isfile(os.path.join(here, "data", "v2.db")):
+        return here
+    # Fallback: current working directory (run from inside the checkout).
+    cwd = os.getcwd()
+    if os.path.isfile(os.path.join(cwd, "data", "v2.db")):
+        return cwd
+    return here
+
+
+REPO = find_repo()
+CENTRAL_DB = os.path.join(REPO, "data", "v2.db")
+SESSIONS_GLOB = os.path.join(REPO, "data", "v2-sessions", "*", "*", "inbound.db")
+ERROR_LOG = os.path.join(REPO, "logs", "nanoclaw.error.log")
+
+IS_MAC = platform.system() == "Darwin"
+IS_LINUX = platform.system() == "Linux"
+
+# ── Output helpers (mirror ncl's format.ts) ─────────────────────────────────
+_TTY = sys.stdout.isatty()
+def _c(code: str) -> str:
+    return code if _TTY else ""
+GREEN, YELLOW, RED, OFF = _c("\033[32m"), _c("\033[33m"), _c("\033[31m"), _c("\033[0m")
+
+
+def render_table(headers, rows) -> str:
+    if not rows:
+        return "(no rows)"
+    widths = [len(h) for h in headers]
+    for r in rows:
+        for i, cell in enumerate(r):
+            widths[i] = max(widths[i], len(str(cell)))
+    line = lambda cells: "  ".join(str(c).ljust(widths[i]) for i, c in enumerate(cells)).rstrip()
+    out = [line(headers), "  ".join("─" * w for w in widths)]
+    out += [line(r) for r in rows]
+    return "\n".join(out)
+
+
+def die(msg: str, code: int = 2):
+    sys.stderr.write(f"ncc: {msg}\n")
+    sys.exit(code)
+
+
+# ── Subprocess + SQLite helpers ─────────────────────────────────────────────
+def run(cmd, timeout: int = 20):
+    """Run a command; return (rc, stdout, stderr). rc=127 if binary missing."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout.strip(), p.stderr.strip()
+    except FileNotFoundError:
+        return 127, "", f"{cmd[0]}: not found"
+    except subprocess.TimeoutExpired:
+        return 124, "", f"{cmd[0]}: timed out"
+
+
+def query(db_path: str, sql: str, params=()):
+    """Read-only SQLite query. Returns list of tuples, or [] if unreadable."""
+    if not os.path.isfile(db_path):
+        return []
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+        try:
+            return con.execute(sql, params).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return []
+
+
+def ag_name(agent_group_id: str) -> str:
+    rows = query(CENTRAL_DB, "SELECT name FROM agent_groups WHERE id = ?", (agent_group_id,))
+    return rows[0][0] if rows and rows[0][0] else agent_group_id
+
+
+def session_dbs():
+    return sorted(glob.glob(SESSIONS_GLOB))
+
+
+def ag_id_from_session_db(db_path: str) -> str:
+    # .../data/v2-sessions/<agent_group_id>/<session_id>/inbound.db
+    return os.path.basename(os.path.dirname(os.path.dirname(db_path)))
+
+
+def docker_ok() -> bool:
+    return run(["docker", "info"])[0] == 0
+
+
+# ── Service control (platform-detected) ─────────────────────────────────────
+def _mac_plist():
+    hits = sorted(glob.glob(os.path.expanduser("~/Library/LaunchAgents/com.nanoclaw*.plist")))
+    return hits[0] if hits else None
+
+
+def _mac_label(plist: str):
+    import plistlib
+    try:
+        with open(plist, "rb") as f:
+            return plistlib.load(f).get("Label")
+    except Exception:
+        return None
+
+
+def _linux_unit():
+    rc, out, _ = run(["systemctl", "--user", "list-unit-files", "nanoclaw*.service",
+                      "--no-legend", "--plain"])
+    if rc == 0 and out:
+        return out.splitlines()[0].split()[0]
+    rc, out, _ = run(["systemctl", "--user", "list-units", "nanoclaw*.service",
+                      "--all", "--no-legend", "--plain"])
+    if rc == 0 and out:
+        return out.splitlines()[0].split()[0]
+    return None
+
+
+def service_identity():
+    """Return (kind, id, label) where kind is 'launchd'|'systemd'."""
+    if IS_MAC:
+        plist = _mac_plist()
+        if not plist:
+            die("no NanoClaw launchd plist found in ~/Library/LaunchAgents")
+        return "launchd", plist, (_mac_label(plist) or os.path.basename(plist)[:-6])
+    if IS_LINUX:
+        unit = _linux_unit()
+        if not unit:
+            die("no NanoClaw systemd --user unit found (looked for nanoclaw*.service)")
+        return "systemd", unit, unit
+    die(f"unsupported platform: {platform.system()}")
+
+
+def service_status_line():
+    kind, sid, label = service_identity()
+    if kind == "launchd":
+        rc, out, _ = run(["launchctl", "list", label])
+        if rc != 0:
+            return label, None, "stopped"
+        pid = None
+        for ln in out.splitlines():
+            if '"PID"' in ln:
+                digits = "".join(ch for ch in ln.split("=")[-1] if ch.isdigit())
+                pid = digits or None
+        return label, pid, ("running" if pid else "loaded")
+    # systemd
+    active = run(["systemctl", "--user", "is-active", sid])[1]
+    pid = run(["systemctl", "--user", "show", sid, "-p", "MainPID", "--value"])[1]
+    pid = pid if pid and pid != "0" else None
+    return label, pid, ("running" if active == "active" else active or "stopped")
+
+
+def cmd_service(args):
+    action = args.action
+    kind, sid, label = service_identity()
+    if action == "status":
+        label, pid, state = service_status_line()
+        if pid:
+            print(f"{label} is running (PID {pid})")
+        elif state == "loaded":
+            print(f"{label} is loaded (no PID yet — may be starting)")
+        else:
+            print(f"{label} is {state}")
+        return
+    if kind == "launchd":
+        ops = {"start": [["launchctl", "load", sid]],
+               "stop": [["launchctl", "unload", sid]],
+               "restart": [["launchctl", "unload", sid], ["launchctl", "load", sid]]}
+    else:
+        ops = {"start": [["systemctl", "--user", "start", sid]],
+               "stop": [["systemctl", "--user", "stop", sid]],
+               "restart": [["systemctl", "--user", "restart", sid]]}
+    for i, cmd in enumerate(ops[action]):
+        if action == "restart" and kind == "launchd" and i == 1:
+            time.sleep(1)
+        rc, _, err = run(cmd)
+        if rc != 0:
+            die(f"{action} failed: {err or 'see logs'}", 1)
+    print(f"{label}: {action} ok")
+
+
+# ── tasks / crons ───────────────────────────────────────────────────────────
+def _running_containers():
+    rc, out, _ = run(["docker", "ps", "--filter", "name=nanoclaw-v2",
+                      "--format", "{{.Names}}\t{{.Status}}"])
+    if rc != 0 or not out:
+        return []
+    return [tuple(l.split("\t", 1)) for l in out.splitlines()]
+
+
+def _collect_tasks(recurring: bool):
+    rows = []
+    for db in session_dbs():
+        name = ag_name(ag_id_from_session_db(db))
+        if recurring:
+            sql = ("SELECT recurrence, COALESCE(datetime(process_after),'?'), status, "
+                   "substr(replace(replace(COALESCE(json_extract(content,'$.prompt'),content),"
+                   "char(10),' '),char(13),' '),1,104) "
+                   "FROM messages_in WHERE recurrence IS NOT NULL AND recurrence != '' "
+                   "AND status='pending' ORDER BY process_after")
+            for rec, nxt, status, task in query(db, sql):
+                rows.append({"agent": name, "cron": rec, "next_run_utc": nxt,
+                             "status": status, "task": task})
+        else:
+            sql = ("SELECT status, COALESCE(datetime(process_after),'now'), "
+                   "substr(replace(replace(json_extract(content,'$.prompt'),"
+                   "char(10),' '),char(13),' '),1,104) "
+                   "FROM messages_in WHERE status='pending' "
+                   "AND (recurrence IS NULL OR recurrence='') "
+                   "AND json_extract(content,'$.prompt') IS NOT NULL ORDER BY process_after")
+            for status, due, task in query(db, sql):
+                rows.append({"agent": name, "status": status, "due_utc": due, "task": task})
+    return rows
+
+
+def cmd_crons(args):
+    rows = _collect_tasks(recurring=True)
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+    print("Recurring scheduled tasks (cron jobs)\n")
+    if not rows:
+        print("  (no recurring tasks scheduled)")
+        return
+    print(render_table(["AGENT", "CRON", "NEXT RUN (UTC)", "STATUS", "TASK"],
+                       [[r["agent"], r["cron"], r["next_run_utc"], r["status"], r["task"]] for r in rows]))
+
+
+def cmd_tasks(args):
+    containers = _running_containers()
+    rows = _collect_tasks(recurring=False)
+    if args.json:
+        print(json.dumps({
+            "containers": [{"name": n, "status": s} for n, s in containers],
+            "pending_tasks": rows,
+        }, indent=2))
+        return
+    print("Running / queued tasks\n")
+    print("Active agent containers:")
+    if containers:
+        for n, s in containers:
+            print(f"  {n}  ({s})")
+    else:
+        print("  (none running — idle)")
+    print("\nPending ad-hoc / one-off tasks (for the recurring schedule, run: ncc crons):")
+    if not rows:
+        print("  (no ad-hoc tasks queued)")
+    else:
+        print(render_table(["AGENT", "STATUS", "DUE (UTC)", "TASK"],
+                           [[r["agent"], r["status"], r["due_utc"], r["task"]] for r in rows]))
+
+
+# ── health ──────────────────────────────────────────────────────────────────
+class Health:
+    def __init__(self):
+        self.checks = []
+        self.warns = 0
+        self.fails = 0
+
+    def add(self, status, label, detail=None):
+        self.checks.append({"status": status, "label": label, "detail": detail})
+        if status == "WARN":
+            self.warns += 1
+        elif status == "FAIL":
+            self.fails += 1
+
+    def render_text(self):
+        mark = {"OK": f"{GREEN}[ OK ]{OFF}", "WARN": f"{YELLOW}[WARN]{OFF}", "FAIL": f"{RED}[FAIL]{OFF}"}
+        lines = ["NanoClaw health scan", ""]
+        for c in self.checks:
+            tail = f" — {c['detail']}" if c["detail"] else ""
+            lines.append(f"  {mark[c['status']]} {c['label']}{tail}")
+        lines.append("")
+        if self.fails:
+            lines.append(f"{RED}Overall: {self.fails} failure(s), {self.warns} warning(s).{OFF}")
+        elif self.warns:
+            lines.append(f"{YELLOW}Overall: {self.warns} warning(s) (advisory).{OFF}")
+        else:
+            lines.append(f"{GREEN}Overall: HEALTHY — all checks passed.{OFF}")
+        return "\n".join(lines)
+
+    def render_json(self):
+        overall = "fail" if self.fails else ("warn" if self.warns else "ok")
+        return json.dumps({"overall": overall, "issues": self.warns + self.fails,
+                           "fails": self.fails, "warns": self.warns, "checks": self.checks}, indent=2)
+
+
+def _tail(path, max_bytes=200_000):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def cmd_health(args):
+    h = Health()
+    now = time.time()
+
+    # 1. service
+    try:
+        label, pid, state = service_status_line()
+        if pid:
+            h.add("OK", f"service ({label}, PID {pid})")
+        elif state in ("loaded",):
+            h.add("WARN", "service loaded, no PID", "may be starting / crash-looping")
+        else:
+            h.add("FAIL", "service", f"{label} is {state} — run: ncc service start")
+    except SystemExit:
+        h.add("FAIL", "service", "no NanoClaw service unit found")
+
+    # 2. docker daemon
+    if docker_ok():
+        h.add("OK", "docker daemon")
+    else:
+        h.add("FAIL", "docker daemon", "not responding — start Docker")
+
+    # 3. central DB integrity
+    ic = query(CENTRAL_DB, "PRAGMA integrity_check")
+    if ic and ic[0][0] == "ok":
+        h.add("OK", "central DB (data/v2.db) integrity")
+    else:
+        h.add("FAIL", "central DB integrity", (ic[0][0] if ic else "unreadable"))
+
+    # 4. host disk
+    try:
+        free_g = shutil.disk_usage(REPO).free / (1024 ** 3)
+        if free_g < 20:
+            h.add("WARN", "host disk", f"{free_g:.0f}G free (<20G — clean up)")
+        else:
+            h.add("OK", f"host disk ({free_g:.0f}G free)")
+    except OSError:
+        pass
+
+    # 5. OneCLI gateway
+    rc, out, _ = run(["docker", "ps", "--filter", "name=^onecli$", "--format", "{{.Status}}"])
+    if rc != 0:
+        pass  # docker already reported
+    elif not out:
+        h.add("WARN", "OneCLI gateway", "container not running (agents may 401)")
+    elif "healthy" in out.lower():
+        h.add("OK", f"OneCLI gateway ({out})")
+    else:
+        h.add("WARN", "OneCLI gateway", out)
+
+    # 6. agent containers: thrash + zombies + heartbeat
+    rc, out, _ = run(["docker", "ps", "--filter", "name=nanoclaw-v2", "--format", "{{.Names}}"])
+    containers = out.splitlines() if (rc == 0 and out) else []
+    if not containers:
+        if docker_ok():
+            h.add("OK", "agent containers (none running — idle)")
+    for cn in containers:
+        up = run(["docker", "ps", "--filter", f"name=^{cn}$", "--format", "{{.Status}}"])[1]
+        logs = run(["docker", "logs", "--tail", "300", cn])
+        thrash = (logs[1] + logs[2]).count("Autocompact is thrashing")
+        if thrash:
+            h.add("FAIL", f"container {cn}", "autocompact THRASHING — send /clear")
+        else:
+            h.add("OK", f"container {cn} ({up})")
+        zrc, zout, _ = run(["docker", "exec", cn, "sh", "-c", "ps -eo args 2>/dev/null"])
+        if zrc == 0:
+            z = sum(1 for l in zout.splitlines() if "defunct" in l)
+            if z > 3:
+                h.add("WARN", f"container {cn} zombies", f"{z} defunct processes (crashed browser tool?)")
+        # heartbeat: map container -> session
+        folder = cn[len("nanoclaw-v2-"):].rsplit("-", 1)[0] if cn.startswith("nanoclaw-v2-") else None
+        if folder:
+            r = query(CENTRAL_DB,
+                      "SELECT s.agent_group_id FROM sessions s JOIN agent_groups g "
+                      "ON g.id = s.agent_group_id WHERE g.folder = ? LIMIT 1", (folder,))
+            if r:
+                hbs = glob.glob(os.path.join(REPO, "data", "v2-sessions", r[0][0], "*", ".heartbeat"))
+                if hbs:
+                    age = int(now - os.stat(hbs[0]).st_mtime)
+                    if age > 180:
+                        h.add("WARN", f"container {cn} heartbeat", f"stale {age}s (long turn or wedged)")
+                    else:
+                        h.add("OK", f"container {cn} heartbeat ({age}s fresh)")
+
+    # 7. recent permanent delivery failures
+    delerr = _tail(ERROR_LOG).count("delivery failed permanently")
+    if delerr:
+        h.add("WARN", "message delivery", f"{delerr} permanent failure(s) in recent error log")
+    else:
+        h.add("OK", "message delivery (no recent permanent failures)")
+
+    # 8. overdue scheduled tasks
+    overdue = 0
+    for db in session_dbs():
+        r = query(db, "SELECT COUNT(*) FROM messages_in WHERE status='pending' "
+                      "AND process_after IS NOT NULL "
+                      "AND datetime(process_after) < datetime('now','-10 minutes')")
+        overdue += (r[0][0] if r else 0)
+    if overdue:
+        h.add("WARN", "scheduler", f"{overdue} task(s) overdue >10min (host-sweep stuck?)")
+    else:
+        h.add("OK", "scheduler (no overdue tasks)")
+
+    print(h.render_json() if args.json else h.render_text())
+    sys.exit(2 if h.fails else 0)
+
+
+# ── argument parsing ─────────────────────────────────────────────────────────
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="ncc",
+        description="NanoClaw Control — host operational & health CLI (sibling to ncl).")
+    p.add_argument("--version", action="version", version=f"ncc {__version__}")
+    sub = p.add_subparsers(dest="cmd", metavar="<command>")
+
+    ps = sub.add_parser("service", help="manage the host service (start/stop/restart/status)")
+    ps.add_argument("action", choices=["status", "start", "stop", "restart"])
+    ps.set_defaults(func=cmd_service)
+
+    ph = sub.add_parser("health", help="scan every component; exit 2 on hard FAIL")
+    ph.add_argument("--json", action="store_true", help="machine-readable output")
+    ph.set_defaults(func=cmd_health)
+
+    pt = sub.add_parser("tasks", help="running containers + pending ad-hoc/one-off tasks")
+    pt.add_argument("--json", action="store_true", help="machine-readable output")
+    pt.set_defaults(func=cmd_tasks)
+
+    pc = sub.add_parser("crons", help="recurring scheduled tasks (cron jobs)")
+    pc.add_argument("--json", action="store_true", help="machine-readable output")
+    pc.set_defaults(func=cmd_crons)
+    return p
+
+
+def main(argv=None):
+    p = build_parser()
+    args = p.parse_args(argv)
+    if not getattr(args, "func", None):
+        p.print_help()
+        sys.exit(0)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
