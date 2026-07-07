@@ -77,6 +77,44 @@ describe('handleRecurrence', () => {
     expect(new Date(follow.process_after).getTime()).toBeGreaterThan(Date.now());
   });
 
+  it('does not fork a series when two completed-recurring rows share a series_id', async () => {
+    // Simulates the fork bug: a retry after a container kill leaves two
+    // completed rows carrying the same series_id + recurrence. handleRecurrence
+    // must fan out exactly ONE next occurrence, not one per completed row.
+    const db = freshDb();
+    for (const id of ['task-a', 'task-b']) {
+      insertTask(db, {
+        id,
+        processAfter: '2020-01-01T00:00:00.000Z',
+        recurrence: '0 9 * * *',
+        platformId: null,
+        channelType: null,
+        threadId: null,
+        content: JSON.stringify({ prompt: 'daily digest' }),
+      });
+    }
+    // Both rows belong to the same series and are completed but still recurring.
+    db.prepare(
+      `UPDATE messages_in SET status='completed', series_id='series-x' WHERE id IN ('task-a','task-b')`,
+    ).run();
+
+    await handleRecurrence(db, fakeSession());
+
+    const pending = db
+      .prepare(`SELECT id FROM messages_in WHERE status='pending' AND recurrence IS NOT NULL`)
+      .all() as Array<{ id: string }>;
+    expect(pending).toHaveLength(1); // exactly one next occurrence, not two
+
+    const stillRecurringCompleted = (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM messages_in WHERE status='completed' AND recurrence IS NOT NULL`,
+        )
+        .get() as { c: number }
+    ).c;
+    expect(stillRecurringCompleted).toBe(0); // both completed rows retired
+  });
+
   it('does not clone rows whose recurrence is already cleared', async () => {
     const db = freshDb();
     insertTask(db, {
