@@ -16,6 +16,7 @@ NanoClaw doesn't ship channels in trunk. This skill copies the Resend adapter in
 Skip to **Credentials** if all of these are already in place:
 
 - `src/channels/resend.ts` exists
+- `src/channels/resend-registration.test.ts` exists
 - `src/channels/index.ts` contains `import './resend.js';`
 - `@resend/chat-sdk-adapter` is listed in `package.json` dependencies
 
@@ -27,10 +28,11 @@ Otherwise continue. Every step below is safe to re-run.
 git fetch origin channels
 ```
 
-### 2. Copy the adapter
+### 2. Copy the adapter and its registration test
 
 ```bash
-git show origin/channels:src/channels/resend.ts > src/channels/resend.ts
+git show origin/channels:src/channels/resend.ts                 > src/channels/resend.ts
+git show origin/channels:src/channels/resend-registration.test.ts > src/channels/resend-registration.test.ts
 ```
 
 ### 3. Append the self-registration import
@@ -47,11 +49,14 @@ import './resend.js';
 pnpm install @resend/chat-sdk-adapter@0.1.1
 ```
 
-### 5. Build
+### 5. Build and validate
 
 ```bash
 pnpm run build
+pnpm exec vitest run src/channels/resend-registration.test.ts
 ```
+
+Both must be clean before proceeding. `resend-registration.test.ts` is the one integration test: it imports the real channel barrel and asserts the registry contains `resend`. It goes red if the `import './resend.js';` line is deleted or drifts, if the barrel fails to evaluate, or if `@resend/chat-sdk-adapter` isn't installed (the import throws) — so it also implicitly verifies the dependency from step 4. The adapter also calls core's `createChatSdkBridge(...)`; that typed core-API consumption is guarded by `pnpm run build`.
 
 ## Credentials
 

@@ -14,6 +14,7 @@ The adapter drives the `@deltachat/stdio-rpc-server` JSON-RPC subprocess directl
 Skip to **Credentials** if all of these are already in place:
 
 - `src/channels/deltachat.ts` exists
+- `src/channels/deltachat-registration.test.ts` exists
 - `src/channels/index.ts` contains `import './deltachat.js';`
 - `@deltachat/stdio-rpc-server` is listed in `package.json` dependencies
 
@@ -25,10 +26,11 @@ Otherwise continue. Every step below is safe to re-run.
 git fetch origin channels
 ```
 
-### 2. Copy the adapter
+### 2. Copy the adapter and its registration test
 
 ```bash
-git show origin/channels:src/channels/deltachat.ts > src/channels/deltachat.ts
+git show origin/channels:src/channels/deltachat.ts                 > src/channels/deltachat.ts
+git show origin/channels:src/channels/deltachat-registration.test.ts > src/channels/deltachat-registration.test.ts
 ```
 
 ### 3. Append the self-registration import
@@ -45,11 +47,16 @@ import './deltachat.js';
 pnpm install @deltachat/stdio-rpc-server@2.49.0
 ```
 
-### 5. Build
+### 5. Build and validate
 
 ```bash
 pnpm run build
+pnpm exec vitest run src/channels/deltachat-registration.test.ts
 ```
+
+Both must be clean before proceeding. `deltachat-registration.test.ts` is the one integration test: it imports the real channel barrel and asserts the registry contains `deltachat`. It goes red if the `import './deltachat.js';` line is deleted or drifts, if the barrel fails to evaluate (so the channel genuinely would not register), or if `@deltachat/stdio-rpc-server` isn't installed (the import throws) — so it also implicitly verifies the dependency from step 4. Importing is safe: deltachat instantiates the rpc client only in `setup()` (at host startup), never at import.
+
+End-to-end message delivery against a real email account is verified manually once the service is running — see Wiring and Troubleshooting.
 
 ## Account Setup
 

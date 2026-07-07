@@ -22,6 +22,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { isSafeAttachmentName } from '../../attachment-safety.js';
+import { ensureContainedInboxDir, isPathInside } from '../../inbox-safety.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getInboundSourceSessionId, getMostRecentPeerSourceSessionId } from '../../db/session-db.js';
 import { getSession } from '../../db/sessions.js';
@@ -29,7 +30,9 @@ import { wakeContainer } from '../../container-runner.js';
 import { log } from '../../log.js';
 import { openInboundDb, resolveSession, sessionDir, writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
+import { requestApproval } from '../approvals/index.js';
 import { hasDestination } from './db/agent-destinations.js';
+import { getMessagePolicy } from './db/agent-message-policies.js';
 
 export { isSafeAttachmentName };
 
@@ -57,6 +60,11 @@ export function forwardAttachedFiles(
 ): ForwardedAttachment[] {
   if (source.filenames.length === 0) return [];
 
+  if (!isSafeAttachmentName(source.messageId)) {
+    log.warn('agent-route: rejecting unsafe source outbox message id', { sourceMsgId: source.messageId });
+    return [];
+  }
+
   const sourceDir = path.join(sessionDir(source.agentGroupId, source.sessionId), 'outbox', source.messageId);
   if (!fs.existsSync(sourceDir)) {
     log.warn('agent-route: source outbox dir missing, no files forwarded', {
@@ -66,8 +74,40 @@ export function forwardAttachedFiles(
     return [];
   }
 
-  const targetInboxDir = path.join(sessionDir(target.agentGroupId, target.sessionId), 'inbox', target.messageId);
-  fs.mkdirSync(targetInboxDir, { recursive: true });
+  let realSourceDir: string;
+  try {
+    const sourceDirStat = fs.lstatSync(sourceDir);
+    if (!sourceDirStat.isDirectory() || sourceDirStat.isSymbolicLink()) {
+      log.warn('agent-route: rejecting unsafe source outbox dir', {
+        sourceMsgId: source.messageId,
+        sourceDir,
+      });
+      return [];
+    }
+    realSourceDir = fs.realpathSync(sourceDir);
+  } catch (err) {
+    log.warn('agent-route: failed to inspect source outbox dir', {
+      sourceMsgId: source.messageId,
+      sourceDir,
+      err,
+    });
+    return [];
+  }
+
+  // Target-side containment — shared with the channel-inbound path. A
+  // compromised target agent can write inside its own session dir, so it could
+  // pre-place `inbox` (or `inbox/<future-msgId>`) as a symlink pointing
+  // anywhere host-writable; ensureContainedInboxDir refuses the symlink before
+  // any copy lands outside the sandbox (#2828, CWE-59).
+  const inboxRoot = path.join(sessionDir(target.agentGroupId, target.sessionId), 'inbox');
+  const targetInboxDir = ensureContainedInboxDir(inboxRoot, target.messageId, {
+    targetGroup: target.agentGroupId,
+    targetSession: target.sessionId,
+    targetMsgId: target.messageId,
+  });
+  if (!targetInboxDir) {
+    return [];
+  }
 
   const attachments: ForwardedAttachment[] = [];
   for (const filename of source.filenames) {
@@ -79,15 +119,46 @@ export function forwardAttachedFiles(
       continue;
     }
     const src = path.join(sourceDir, filename);
-    if (!fs.existsSync(src)) {
+    let realSrc: string;
+    try {
+      const srcStat = fs.lstatSync(src);
+      if (!srcStat.isFile() || srcStat.isSymbolicLink()) {
+        log.warn('agent-route: rejecting unsafe source outbox file', {
+          sourceMsgId: source.messageId,
+          filename,
+        });
+        continue;
+      }
+      realSrc = fs.realpathSync(src);
+    } catch {
       log.warn('agent-route: referenced file missing in source outbox, skipped', {
         sourceMsgId: source.messageId,
         filename,
       });
       continue;
     }
+    if (!isPathInside(realSourceDir, realSrc)) {
+      log.warn('agent-route: rejecting source file outside source outbox dir', {
+        sourceMsgId: source.messageId,
+        filename,
+      });
+      continue;
+    }
     const dst = path.join(targetInboxDir, filename);
-    fs.copyFileSync(src, dst);
+    try {
+      // COPYFILE_EXCL: fail with EEXIST rather than follow or overwrite a
+      // pre-placed symlink / existing file at dst — the host is the sole
+      // writer of these attachments.
+      fs.copyFileSync(realSrc, dst, fs.constants.COPYFILE_EXCL);
+    } catch (err) {
+      log.warn('agent-route: refusing to write target inbox file', {
+        sourceMsgId: source.messageId,
+        targetMsgId: target.messageId,
+        filename,
+        err,
+      });
+      continue;
+    }
     attachments.push({
       name: filename,
       filename,
@@ -160,21 +231,90 @@ function resolveTargetSession(msg: RoutableAgentMessage, sourceSession: Session,
 }
 
 export async function routeAgentMessage(msg: RoutableAgentMessage, session: Session): Promise<void> {
+  const sourceAgentGroupId = session.agent_group_id;
   const targetAgentGroupId = msg.platform_id;
   if (!targetAgentGroupId) {
     throw new Error(`agent-to-agent message ${msg.id} is missing a target agent group id`);
   }
-  if (
-    targetAgentGroupId !== session.agent_group_id &&
-    !hasDestination(session.agent_group_id, 'agent', targetAgentGroupId)
-  ) {
-    throw new Error(
-      `unauthorized agent-to-agent: ${session.agent_group_id} has no destination for ${targetAgentGroupId}`,
-    );
+  const isSelf = targetAgentGroupId === sourceAgentGroupId;
+  if (!isSelf && !hasDestination(sourceAgentGroupId, 'agent', targetAgentGroupId)) {
+    throw new Error(`unauthorized agent-to-agent: ${sourceAgentGroupId} has no destination for ${targetAgentGroupId}`);
   }
   if (!getAgentGroup(targetAgentGroupId)) {
     throw new Error(`target agent group ${targetAgentGroupId} not found for message ${msg.id}`);
   }
+
+  // Gated edge: hold the message and return (not throw) so the delivery loop
+  // consumes the outbound row; `applyA2aMessageGate` re-routes it on approve.
+  if (!isSelf) {
+    const policy = getMessagePolicy(sourceAgentGroupId, targetAgentGroupId);
+    if (policy) {
+      const { approver } = policy;
+      const sourceName = getAgentGroup(sourceAgentGroupId)?.name ?? sourceAgentGroupId;
+      const targetName = getAgentGroup(targetAgentGroupId)?.name ?? targetAgentGroupId;
+      await requestApproval({
+        session,
+        agentName: sourceName,
+        action: A2A_MESSAGE_GATE_ACTION,
+        approverUserId: approver,
+        title: 'Message approval',
+        question: buildGateQuestion(sourceName, targetName, msg.content),
+        payload: {
+          id: msg.id,
+          platform_id: targetAgentGroupId,
+          content: msg.content,
+          in_reply_to: msg.in_reply_to,
+        },
+      });
+      log.info('Agent message held for approval', {
+        from: sourceAgentGroupId,
+        to: targetAgentGroupId,
+        msgId: msg.id,
+      });
+      return;
+    }
+  }
+
+  await performAgentRoute(msg, session, targetAgentGroupId);
+}
+
+export const A2A_MESSAGE_GATE_ACTION = 'a2a_message_gate';
+
+const GATE_CARD_BODY_MAX = 1500;
+
+function parseMessageContent(contentStr: string): { text: string; files: string[] } {
+  try {
+    const parsed = JSON.parse(contentStr) as { text?: unknown; files?: unknown };
+    return {
+      text: typeof parsed.text === 'string' ? parsed.text : '',
+      files: Array.isArray(parsed.files) ? parsed.files.filter((f): f is string => typeof f === 'string') : [],
+    };
+  } catch {
+    return { text: contentStr, files: [] };
+  }
+}
+
+function buildGateQuestion(sourceName: string, targetName: string, contentStr: string): string {
+  const { text, files } = parseMessageContent(contentStr);
+  const body = text.length > GATE_CARD_BODY_MAX ? `${text.slice(0, GATE_CARD_BODY_MAX)}… (truncated)` : text;
+  const lines = [`Agent "${sourceName}" wants to send a message to "${targetName}":`, '', body];
+  if (files.length > 0) lines.push('', `Attachments: ${files.join(', ')}`);
+  lines.push(
+    '',
+    `Approve, Reject, or "Reject with reason…" to decline and then type a short reason I'll relay to "${sourceName}".`,
+  );
+  return lines.join('\n');
+}
+
+/**
+ * Cross-session route: pick the target session, forward files, write to its
+ * inbound DB, wake it. Authorization is the caller's responsibility.
+ */
+export async function performAgentRoute(
+  msg: RoutableAgentMessage,
+  session: Session,
+  targetAgentGroupId: string,
+): Promise<void> {
   const targetSession = resolveTargetSession(msg, session, targetAgentGroupId);
   const a2aMsgId = `a2a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 

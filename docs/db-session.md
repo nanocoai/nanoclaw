@@ -17,7 +17,7 @@ data/v2-sessions/<agent_group_id>/<session_id>/
   outbox/<message_id>/    ← attachments the agent produced
 ```
 
-One session = one folder = one pair of DBs. The `agent_group_id` parent directory also holds per-group state (`.claude-shared/`, `agent-runner-src/`) that is shared across every session of that agent group.
+One session = one folder = one pair of DBs. The `agent_group_id` parent directory also holds per-group state (`.claude-shared/`) that is shared across every session of that agent group. (The agent-runner source is not copied per group — it's a shared read-only mount from `container/agent-runner/src` into every container; see `src/container-runner.ts`.)
 
 Path helpers in `src/session-manager.ts`: `sessionDir()`, `inboundDbPath()`, `outboundDbPath()`, `heartbeatPath()`.
 
@@ -55,7 +55,7 @@ CREATE INDEX idx_messages_in_series ON messages_in(series_id);
 
 Content shapes: see [api-details.md §Session DB Schema Details](api-details.md#session-db-schema-details).
 
-**Writers (host):** `insertMessage()`, `insertTask()`, `insertRecurrence()` — all in `src/db/session-db.ts`. Each calls `nextEvenSeq()`.
+**Writers (host):** `insertMessage()` (and `nextEvenSeq()`) in `src/db/session-db.ts`; `insertTask()` and `insertRecurrence()` in `src/modules/scheduling/db.ts`. Each calls `nextEvenSeq()`.
 **Reader (container):** `container/agent-runner/src/db/messages-in.ts` — polls `status='pending' AND (process_after IS NULL OR process_after <= now)`.
 
 ### 2.2 `delivered`

@@ -220,6 +220,76 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
   });
 });
 
+describe('deliverSessionMessages — instance resolution', () => {
+  it('delivers via the origin session instance when sibling rows share (channel_type, platform_id)', async () => {
+    createAgentGroup({
+      id: 'ag-1',
+      name: 'Test Agent',
+      folder: 'test-agent',
+      agent_provider: null,
+      created_at: now(),
+    });
+    // Two instances own the same chat address. The named row sorts before
+    // 'slack', so a plain by-platform lookup (default-instance-first) would
+    // pick mg-default — only origin-session preference selects mg-tester.
+    createMessagingGroup({
+      id: 'mg-default',
+      channel_type: 'slack',
+      platform_id: 'slack:C1',
+      name: 'Default',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    createMessagingGroup({
+      id: 'mg-tester',
+      channel_type: 'slack',
+      platform_id: 'slack:C1',
+      instance: 'alpha-tester',
+      name: 'Tester',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+
+    const { session } = resolveSession('ag-1', 'mg-tester', null, 'shared');
+    const db = new Database(outboundDbPath('ag-1', session.id));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+       VALUES ('out-inst', datetime('now'), 'chat', 'slack:C1', 'slack', ?)`,
+    ).run(JSON.stringify({ text: 'hi' }));
+    db.close();
+
+    const instances: Array<string | undefined> = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, _kind, _content, _files, instance) {
+        instances.push(instance);
+        return 'plat-1';
+      },
+    });
+
+    await deliverSessionMessages(session);
+    expect(instances).toEqual(['alpha-tester']);
+  });
+
+  it('default session passes the backfilled default instance (= channel_type)', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-default-inst');
+
+    const instances: Array<string | undefined> = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, _kind, _content, _files, instance) {
+        instances.push(instance);
+        return 'plat-2';
+      },
+    });
+
+    await deliverSessionMessages(session);
+    expect(instances).toEqual(['telegram']);
+  });
+});
+
 describe('deliverSessionMessages — permission check', () => {
   it('rejects delivery to an unauthorized channel destination', async () => {
     seedAgentAndChannel();

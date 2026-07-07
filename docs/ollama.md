@@ -53,6 +53,80 @@ Model selection considerations for Apple Silicon:
 
 The agent uses tool calls extensively (read/write files, shell commands). Models that support tool use reliably work best. Gemma 4 and Qwen 3 Coder both handle structured tool calls well.
 
+## Allowing Prompt Caching (filter the cache-busting hash)
+
+Out of the box this path is slow — every reply re-reads the whole multi-thousand-token system prompt from scratch, even for a one-word answer. Ollama has a prompt cache that should skip that repeated work, but on this path it never kicks in.
+
+**Cause.** The Claude Agent SDK adds a per-request hash to the front of every prompt — `x-anthropic-billing-header: ...; cch=<hash>;`. It changes on every request, and Ollama's cache only reuses a prompt whose start is unchanged. So that one shifting value at the front makes Ollama treat every prompt as new and re-read all of it. (Ollama ignores the hash itself, so filtering it has no effect on output.)
+
+**Fix.** Run a tiny proxy between the container and Ollama that filters the hash out (pins `cch=<hash>` to a constant). The start of the prompt is now stable, so the cache kicks in and only the new message gets processed. In our setup — a 31B model on Apple Silicon — follow-up replies dropped from ~80s to ~4s; your numbers will vary with model size and hardware. Output is unchanged, since Ollama ignores the value anyway.
+
+Point the agent group's `ANTHROPIC_BASE_URL` at the proxy instead of Ollama directly (everything else from the sections above is unchanged):
+
+```
+ANTHROPIC_BASE_URL=http://host.docker.internal:11999   # the proxy
+# proxy forwards to http://127.0.0.1:11434 (Ollama)
+```
+
+The proxy is ~40 lines of dependency-free Node:
+
+```js
+// ollama-cch-proxy.mjs — normalize the SDK's per-request cch nonce so Ollama's
+// prefix cache survives across turns. Listens on :11999, forwards to Ollama.
+import http from 'node:http';
+
+const TARGET_HOST = process.env.OLLAMA_HOST || '127.0.0.1';
+const TARGET_PORT = Number(process.env.OLLAMA_PORT || 11434);
+const LISTEN_PORT = Number(process.env.PROXY_PORT || 11999);
+
+const server = http.createServer((req, res) => {
+  const chunks = [];
+  req.on('data', (c) => chunks.push(c));
+  req.on('end', () => {
+    let body = Buffer.concat(chunks);
+    if (req.method === 'POST' && body.length) {
+      body = Buffer.from(body.toString('utf8').replace(/cch=[0-9a-f]+;/g, 'cch=00000;'), 'utf8');
+    }
+    const headers = { ...req.headers, host: `${TARGET_HOST}:${TARGET_PORT}`, 'content-length': String(body.length) };
+    const proxyReq = http.request(
+      { host: TARGET_HOST, port: TARGET_PORT, method: req.method, path: req.url, headers },
+      (proxyRes) => {
+        res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
+        proxyRes.pipe(res);
+      },
+    );
+    proxyReq.on('error', (e) => { res.writeHead(502); res.end(String(e)); });
+    proxyReq.end(body);
+  });
+});
+server.listen(LISTEN_PORT, '0.0.0.0', () => console.log(`cch-proxy :${LISTEN_PORT} -> ${TARGET_HOST}:${TARGET_PORT}`));
+```
+
+Run it durably so it survives reboots. On Linux, a systemd user service:
+
+```ini
+# ~/.config/systemd/user/ollama-cch-proxy.service
+[Unit]
+Description=Ollama cch-normalizing proxy for NanoClaw
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/node %h/.config/nanoclaw/ollama-cch-proxy.mjs
+Restart=always
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user enable --now ollama-cch-proxy
+loginctl enable-linger "$USER"   # so it runs without an active login session
+```
+
+On macOS use a `launchd` user agent (`~/Library/LaunchAgents/`) running the same script.
+
+**Scope.** This only affects the Claude-Code-CLI → Ollama path described here. Codex and OpenCode don't use the Claude Agent SDK, so they never emit the `cch` hash and get prompt caching for free.
+
 ## What Changes at the Code Level
 
 Three files need to support this feature. See `/add-ollama-provider` for the exact changes.

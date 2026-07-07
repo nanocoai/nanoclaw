@@ -21,6 +21,7 @@ import path from 'path';
 
 import { DATA_DIR } from '../src/config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
+import { updateContainerConfigScalars } from '../src/db/container-configs.js';
 import { initDb } from '../src/db/connection.js';
 import {
   createMessagingGroup,
@@ -102,6 +103,7 @@ async function main(): Promise<void> {
 
   // 2. Agent group + filesystem.
   const folder = args.folder || `cli-with-${normalizeName(args.displayName)}`;
+  const pickedProvider = process.env.NANOCLAW_PICKED_PROVIDER?.trim().toLowerCase();
   let ag: AgentGroup | undefined = getAgentGroupByFolder(folder);
   if (!ag) {
     const agId = generateId('ag');
@@ -123,6 +125,10 @@ async function main(): Promise<void> {
       `You are ${args.agentName}, a personal NanoClaw agent for ${args.displayName}. ` +
       'When the user first reaches out, introduce yourself briefly and invite them to chat. Keep replies concise.',
   });
+  // Runtime provider lives on the config row, not the deprecated agent_provider.
+  if (pickedProvider && pickedProvider !== 'claude') {
+    updateContainerConfigScalars(ag.id, { provider: pickedProvider });
+  }
 
   // 3. CLI messaging group + wiring.
   let cliMg: MessagingGroup | undefined = getMessagingGroupByPlatform(CLI_CHANNEL, CLI_PLATFORM_ID);

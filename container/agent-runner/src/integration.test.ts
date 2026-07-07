@@ -5,6 +5,7 @@ import { getUndeliveredMessages } from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
 import { getContinuation, setContinuation } from './db/session-state.js';
 import { MockProvider } from './providers/mock.js';
+import type { ProviderExchange } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
 
 beforeEach(() => {
@@ -304,6 +305,7 @@ async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSigna
       provider,
       providerName: 'mock',
       cwd: '/tmp',
+      signal,
     }),
     new Promise<void>((_, reject) => {
       signal.addEventListener('abort', () => reject(new Error('aborted')));
@@ -323,6 +325,86 @@ async function waitFor(condition: () => boolean, timeoutMs: number): Promise<voi
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+describe('poll loop — exchange hook (onExchangeComplete)', () => {
+  // A provider that declares the per-exchange hook. The hook call is the
+  // wiring under test — these tests go red if the poll-loop seam is severed.
+  // What the provider DOES with an exchange (e.g. write markdown into
+  // conversations/) ships with the provider, not the runner.
+  class HookedMockProvider extends MockProvider {
+    readonly exchanges: ProviderExchange[] = [];
+    onExchangeComplete(exchange: ProviderExchange): void {
+      this.exchanges.push(exchange);
+    }
+  }
+
+  it('reports each exchange to a provider that declares the hook', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'please archive this' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new HookedMockProvider({}, () => '<message to="discord-test">archived answer</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => provider.exchanges.length > 0, 2000);
+    controller.abort();
+
+    expect(provider.exchanges.length).toBe(1);
+    const exchange = provider.exchanges[0];
+    expect(exchange.prompt).toContain('please archive this');
+    expect(exchange.result).toContain('archived answer');
+    expect(exchange.continuation).toStartWith('mock-session-');
+    expect(exchange.status).toBe('completed');
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('does not report the internal wrapping-retry nudge as a user prompt', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'wrap this later' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    let calls = 0;
+    const provider = new HookedMockProvider({}, () => {
+      calls += 1;
+      // First result is unwrapped (triggers the retry nudge), second is wrapped.
+      return calls === 1 ? 'unwrapped text' : '<message to="discord-test">wrapped now</message>';
+    });
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 3000);
+
+    await waitFor(() => provider.exchanges.length >= 2, 3000);
+    controller.abort();
+
+    // Both exchanges attribute themselves to the real user prompt, never the nudge.
+    for (const exchange of provider.exchanges) {
+      expect(exchange.prompt).not.toContain('Your response was not delivered');
+      expect(exchange.prompt).toContain('wrap this later');
+    }
+    expect(provider.exchanges.map((e) => e.status)).toEqual(['undelivered', 'completed']);
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('a throwing hook never breaks delivery', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'still deliver this' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    class ThrowingHookProvider extends MockProvider {
+      onExchangeComplete(): void {
+        throw new Error('hook exploded');
+      }
+    }
+    const provider = new ThrowingHookProvider({}, () => '<message to="discord-test">delivered anyway</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    expect(out.length).toBe(1);
+    expect(out[0].content).toContain('delivered anyway');
+
+    await loopPromise.catch(() => {});
+  });
+});
 
 describe('poll loop — provider error recovery', () => {
   it('writes error to outbound and continues loop on provider throw', async () => {
@@ -458,6 +540,79 @@ class InvalidSessionProvider {
       events: (async function* () {
         yield { type: 'init' as const, continuation: 'doomed-session' };
         throw new Error('session not found');
+      })(),
+    };
+  }
+}
+
+describe('poll loop — slash command during active query', () => {
+  it('aborts the active query when /clear arrives as a follow-up', async () => {
+    insertMessage('m-active', { sender: 'Alice', text: 'long running request' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new BlockingProvider();
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000);
+
+    await waitFor(() => provider.queries === 1, 2000);
+    insertMessage('m-clear-active', { sender: 'Alice', text: '/clear' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    await waitFor(() => provider.aborts === 1, 2000);
+    await waitFor(
+      () => getUndeliveredMessages().some((msg) => JSON.parse(msg.content).text === 'Session cleared.'),
+      2000,
+    );
+    controller.abort();
+
+    expect(provider.ends).toBe(0);
+    expect(getContinuation('mock')).toBeUndefined();
+    expect(getPendingMessages()).toHaveLength(0);
+
+    await loopPromise.catch(() => {});
+  });
+});
+
+/**
+ * Provider whose query never completes until ended/aborted — for testing how
+ * the loop interrupts an active stream.
+ */
+class BlockingProvider {
+  readonly supportsNativeSlashCommands = false;
+  queries = 0;
+  aborts = 0;
+  ends = 0;
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  query() {
+    const owner = this;
+    this.queries += 1;
+    let wake: (() => void) | null = null;
+    let ended = false;
+    let aborted = false;
+
+    return {
+      push() {},
+      end: () => {
+        owner.ends += 1;
+        ended = true;
+        wake?.();
+      },
+      abort: () => {
+        owner.aborts += 1;
+        aborted = true;
+        wake?.();
+      },
+      events: (async function* () {
+        yield { type: 'activity' as const };
+        yield { type: 'init' as const, continuation: 'blocking-session' };
+        while (!ended && !aborted) {
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+          wake = null;
+        }
       })(),
     };
   }

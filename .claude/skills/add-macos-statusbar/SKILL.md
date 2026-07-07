@@ -124,10 +124,4 @@ Tell the user:
 >
 > Use **Restart** after making code changes, and **View Logs** to open the log file directly.
 
-## Removal
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.statusbar.plist
-rm ~/Library/LaunchAgents/com.nanoclaw.statusbar.plist
-rm dist/statusbar
-```
+To uninstall, follow [REMOVE.md](REMOVE.md).

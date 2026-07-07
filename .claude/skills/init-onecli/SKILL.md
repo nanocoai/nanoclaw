@@ -98,13 +98,13 @@ for i in $(seq 1 15); do
 done
 ```
 
-If it never becomes healthy, check if the gateway process is running:
+If it never becomes healthy, check the gateway containers. The gateway is a Docker Compose stack (project `onecli`, compose file at `~/.onecli/docker-compose.yml`). Inspect it through Docker rather than the host process list:
 
 ```bash
-ps aux | grep -i onecli | grep -v grep
+docker ps -a --filter "label=com.docker.compose.project=onecli" --format '{{.Names}}\t{{.Status}}'
 ```
 
-If it's not running, try starting it manually: `onecli start`. If that fails, show the error and stop — the user needs to debug their OneCLI installation.
+Both services have `restart: unless-stopped`, so they come back automatically once the Docker daemon is up. If Docker isn't running, start it (`open -a Docker` on macOS) and they'll restart on their own. To bring the stack up manually: `docker compose -f ~/.onecli/docker-compose.yml up -d`. If that fails, show the error and stop — the user needs to debug their OneCLI installation.
 
 ## Phase 3: Migrate existing credentials
 
@@ -299,7 +299,7 @@ If an agent uses `git` or `gh`, add to `data/v2-sessions/<agent-group-id>/.claud
 
 ## Troubleshooting
 
-**"OneCLI gateway not reachable" in logs:** The gateway isn't running. Check with `curl -sf ${ONECLI_URL}/health`. Start it with `onecli start` if needed.
+**"OneCLI gateway not reachable" in logs:** The gateway isn't running. Check with `curl -sf ${ONECLI_URL}/health`. The most common cause is that Docker itself is down (the gateway is a Compose stack) — start Docker (`open -a Docker` on macOS) and the containers restart automatically. To bring them up manually: `docker compose -f ~/.onecli/docker-compose.yml up -d`.
 
 **Container gets no credentials:** Verify `ONECLI_URL` is set in `.env` and the gateway has an Anthropic secret (`onecli secrets list`).
 

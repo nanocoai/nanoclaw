@@ -4,8 +4,9 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { isCorruptionError } from './poll-loop.js';
+import { isCorruptionError, processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
+import type { AgentQuery, ProviderEvent } from './providers/types.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -376,6 +377,64 @@ describe('end-to-end with mock provider', () => {
     expect(outMessages).toHaveLength(1);
     expect(JSON.parse(outMessages[0].content).text).toBe('The answer is 4');
     expect(outMessages[0].in_reply_to).toBe('m1');
+  });
+});
+
+/**
+ * Build a one-shot stub query that yields init + a single result event, then
+ * ends. `pushes` records any follow-ups the loop tried to inject (e.g. the
+ * re-wrap nudge), so a test can assert the loop did NOT re-hammer.
+ */
+function makeResultQuery(result: ProviderEvent): { query: AgentQuery; pushes: string[] } {
+  const pushes: string[] = [];
+  async function* events(): AsyncGenerator<ProviderEvent> {
+    yield { type: 'init', continuation: 'sess-1' };
+    yield result;
+  }
+  return {
+    pushes,
+    query: {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    },
+  };
+}
+
+const ERR_ROUTING = {
+  platformId: 'chan-1',
+  channelType: 'discord',
+  threadId: null,
+  inReplyTo: 'm1',
+};
+
+describe('error result with no <message> envelope', () => {
+  it('delivers a budget/billing error to the triggering channel and does not nudge', async () => {
+    const budgetText = 'Spending limit reached. Add your own key at https://example.com/keys';
+    const { query, pushes } = makeResultQuery({ type: 'result', text: budgetText, isError: true });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe(budgetText);
+    expect(out[0].platform_id).toBe('chan-1');
+    expect(out[0].channel_type).toBe('discord');
+    // No re-wrap nudge — an error result must not re-hammer the gateway.
+    expect(pushes).toHaveLength(0);
+  });
+
+  it('still nudges (and does not deliver) a normal unwrapped result', async () => {
+    const { query, pushes } = makeResultQuery({ type: 'result', text: 'bare text, no envelope' });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    expect(getUndeliveredMessages()).toHaveLength(0);
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]).toContain('was not delivered');
   });
 });
 

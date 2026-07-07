@@ -7,10 +7,15 @@
  * and rendering.
  */
 
+/** Chat SDK button styles — Slack maps primary→green, danger→red; platforms
+ *  without button colors (Telegram) ignore it. */
+export type OptionStyle = 'primary' | 'danger' | 'default';
+
 export interface OptionInput {
   label: string;
   selectedLabel?: string;
   value?: string;
+  style?: OptionStyle;
 }
 
 export type RawOption = string | OptionInput;
@@ -19,6 +24,7 @@ export interface NormalizedOption {
   label: string;
   selectedLabel: string;
   value: string;
+  style?: OptionStyle;
 }
 
 export function normalizeOption(raw: RawOption): NormalizedOption {
@@ -30,6 +36,7 @@ export function normalizeOption(raw: RawOption): NormalizedOption {
     label,
     selectedLabel: raw.selectedLabel ?? label,
     value: raw.value ?? label,
+    style: raw.style === 'primary' || raw.style === 'danger' || raw.style === 'default' ? raw.style : undefined,
   };
 }
 

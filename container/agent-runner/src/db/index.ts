@@ -1,7 +1,6 @@
 export {
   getInboundDb,
   getOutboundDb,
-  getSessionDb,
   initTestSessionDb,
   closeSessionDb,
   touchHeartbeat,

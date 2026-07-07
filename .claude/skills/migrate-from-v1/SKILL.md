@@ -72,21 +72,30 @@ v2 auto-creates a `users` row for every sender it sees (via `extractAndUpsertUse
 2. If exactly one user exists, confirm: `AskUserQuestion`: "Is `<display_name>` (`<id>`) you?" — Yes / No, let me type it.
 3. If multiple users exist, present them as options in `AskUserQuestion`.
 4. If no users exist yet (service hasn't received a message), ask the user to send a test message first, then re-query.
-5. Once confirmed, check `user_roles` — if the owner role already exists, skip. Otherwise insert:
-   ```sql
-   INSERT INTO user_roles (user_id, role, agent_group_id, granted_by, granted_at)
-   VALUES ('<user_id>', 'owner', NULL, NULL, datetime('now'))
-   ```
+5. Once confirmed, check `user_roles` via `getUserRoles(userId)`. If an `owner` row already exists, skip. Otherwise grant it with `grantRole`. `grantRole` inserts a new row per call, so the `getUserRoles` check keeps this re-runnable.
 
-Use the DB helpers in `src/db/user-roles.ts` — they keep indexes correct. Init the DB first:
+Use the DB helpers in `src/modules/permissions/db/user-roles.ts` (`getUserRoles`, `grantRole`). Init the DB first, then call the helpers:
 
 ```ts
+import path from 'path';
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import { DATA_DIR } from '../src/config.js';
-import path from 'path';
+import { getUserRoles, grantRole } from '../src/modules/permissions/db/user-roles.js';
+
 const db = initDb(path.join(DATA_DIR, 'v2.db'));
-runMigrations(db);
+runMigrations(db); // idempotent
+
+const userId = '<user_id>';
+if (!getUserRoles(userId).some((r) => r.role === 'owner')) {
+  grantRole({
+    user_id: userId,
+    role: 'owner',
+    agent_group_id: null, // owner role must be global
+    granted_by: null,
+    granted_at: new Date().toISOString(),
+  });
+}
 ```
 
 ### Access policy
@@ -95,9 +104,11 @@ After seeding the owner, discuss the access policy. v2's `messaging_groups.unkno
 
 Present the options via `AskUserQuestion`:
 
-1. **Public** (current) — anyone can message the bot. Good for personal DM bots.
-2. **Known users only** — only users in `agent_group_members` can trigger the bot. Others are silently dropped.
-3. **Approval required** — unknown senders trigger an approval request to the owner. Good for group chats where you want to vet new members.
+1. **Public** (`public`, current) — anyone can message the bot. Good for personal DM bots.
+2. **Known users only** (`strict`) — only users the access gate accepts (owner, admin, or `agent_group_members`) can trigger the bot. Others are silently dropped.
+3. **Approval required** (`request_approval`) — unknown senders trigger an approval request to the owner. Good for group chats where you want to vet new members.
+
+The `unknown_sender_policy` column accepts exactly these three values; use the parenthesized value for `<chosen_policy>` below.
 
 If the user picks option 2 or 3, seed the known users from v1's message history. The v1 database is at `<handoff.v1_path>/store/messages.db`. It has a `messages` table with `sender` and `sender_name` columns. For each group:
 
@@ -186,7 +197,7 @@ If there are commits:
 
 1. Show the commit list to the user.
 2. `AskUserQuestion`: "How do you want to handle your v1 customizations?"
-   - **Copy portable items** (recommended) — copy `container/skills/*`, `.claude/skills/*`, `docs/*`. Scan each with `scanForV1Patterns` from `setup/migrate-v2/shared.ts`.
+   - **Copy portable items** (recommended) — copy `container/skills/*`, `.claude/skills/*`, `docs/*`. Grep each copied file for v1-only references that won't resolve in v2 and flag them to the user: workspace paths (`/workspace/group/`, `/workspace/project/`, `/workspace/ipc/`, `/workspace/extra/`), the v1 IPC mechanism, `registered_groups` / `is_main`, the v1 sender allowlist, and `store/messages.db`.
    - **Full walkthrough** — go commit by commit, decide together.
    - **Reference only** — stash to `docs/v1-fork-reference/` for later.
 3. Source code (`src/*`, `container/agent-runner/src/*`) is NOT portable — v2's architecture is fundamentally different. Stash to `docs/v1-fork-reference/` with a README explaining what each file did. Don't translate.
@@ -223,10 +234,12 @@ pnpm exec tsx setup/index.ts --step <name>
    pnpm exec tsx setup/index.ts --step verify
    ```
 2. Delete `logs/setup-migration/handoff.json` — offer to save as `docs/migration-<date>.md` first.
-3. Restart the service if running so changes take effect:
+3. Restart the service if running so changes take effect. The v2 service label is install-specific (`nanoclaw-v2-<slug>` / `com.nanoclaw-v2-<slug>`), so derive it from `src/install-slug.ts` rather than guessing:
    ```bash
    # Linux
-   systemctl --user restart nanoclaw-v2-*
+   UNIT=$(pnpm exec tsx -e "import{getSystemdUnit}from'./src/install-slug.js';console.log(getSystemdUnit())")
+   systemctl --user restart "$UNIT"
    # macOS
-   launchctl kickstart -k gui/$(id -u)/com.nanoclaw-v2-*
+   LABEL=$(pnpm exec tsx -e "import{getLaunchdLabel}from'./src/install-slug.js';console.log(getLaunchdLabel())")
+   launchctl kickstart -k "gui/$(id -u)/$LABEL"
    ```

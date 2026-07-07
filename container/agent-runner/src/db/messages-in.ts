@@ -56,7 +56,7 @@ function getMaxMessagesPerPrompt(): number {
  * Reads from inbound.db (read-only), filters against processing_ack in outbound.db
  * to skip messages already picked up by this or a previous container run.
  *
- * Returns the most recent `MAX_MESSAGES_PER_PROMPT` pending rows in
+ * Returns the most recent `maxMessagesPerPrompt` pending rows in
  * chronological order, regardless of their `trigger` flag: accumulated
  * context (trigger=0) rides along with the wake-eligible rows so the agent
  * sees the prior context it missed. Host's countDueMessages gates waking on
@@ -163,4 +163,3 @@ export function findQuestionResponse(questionId: string): MessageInRow | undefin
     inbound.close();
   }
 }
-

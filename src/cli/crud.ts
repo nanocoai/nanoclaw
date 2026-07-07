@@ -10,13 +10,12 @@ import { randomUUID } from 'crypto';
 
 import { getDb } from '../db/connection.js';
 import { register } from './registry.js';
+import type { Access } from './registry.js';
 import type { CallerContext } from './frame.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-export type Access = 'open' | 'approval' | 'hidden';
 
 export interface ColumnDef {
   name: string;
@@ -30,6 +29,8 @@ export interface ColumnDef {
   updatable?: boolean;
   /** Default value on create when not provided. */
   default?: unknown;
+  /** Default to another column's resolved value on create when not provided. */
+  defaultFrom?: string;
   /** Allowed values (shown in help). */
   enum?: string[];
 }
@@ -150,6 +151,8 @@ function genericCreate(def: ResourceDef) {
         throw new Error(`--${col.name.replace(/_/g, '-')} is required`);
       } else if (col.default !== undefined) {
         values[col.name] = col.default;
+      } else if (col.defaultFrom !== undefined && values[col.defaultFrom] !== undefined) {
+        values[col.name] = values[col.defaultFrom];
       }
     }
 

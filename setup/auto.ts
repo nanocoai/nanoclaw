@@ -12,6 +12,8 @@
  *   NANOCLAW_AGENT_NAME    messaging-channel agent name (consumed by the
  *                          channel flow). The CLI scratch agent is always
  *                          "Terminal Agent".
+ *   NANOCLAW_AGENT_PROVIDER preselect the setup provider and skip the picker
+ *                          (for packaged flows). Example: claude.
  *   NANOCLAW_SKIP          comma-separated step names to skip
  *                          (environment|container|onecli|auth|mounts|
  *                           service|cli-agent|timezone|channel|
@@ -38,8 +40,12 @@ import { runTeamsChannel } from './channels/teams.js';
 import { runTelegramChannel } from './channels/telegram.js';
 import { runWhatsAppChannel } from './channels/whatsapp.js';
 import { pingCliAgent, type PingResult } from './lib/agent-ping.js';
+import { getSetupProvider, listSetupProviders } from './providers/registry.js';
+// Provider payloads self-register their picker entry + auth on import.
+import './providers/index.js';
 import { brightSelect } from './lib/bright-select.js';
 import { offerClaudeOnFailure } from './lib/claude-handoff.js';
+import { setPickedProvider } from './lib/picked-provider.js';
 import {
   applyToEnv,
   parseFlags,
@@ -48,6 +54,8 @@ import {
 } from './lib/setup-config-parse.js';
 import { runAdvancedScreen } from './lib/setup-config-screen.js';
 import { runWindowedStep } from './lib/windowed-runner.js';
+import { runUninstallFlow } from './uninstall/flow.js';
+import { detectExistingInstall } from './uninstall/scan.js';
 import { detectRegisteredGroups, detectExistingDisplayName } from './environment.js';
 import { pollHealth } from './onecli.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
@@ -88,6 +96,17 @@ async function main(): Promise<void> {
   let configValues = { ...readFromEnv(), ...flagResult.values };
   applyToEnv(configValues);
 
+  // --uninstall routes to the uninstall flow before any setup side effects —
+  // in particular before initProgressionLog(), so an uninstall never resets
+  // logs/setup.log on its way to (possibly) deleting logs/ entirely.
+  if (configValues.uninstall === true) {
+    await runUninstallFlow({
+      dryRun: configValues.dryRun === true,
+      yes: configValues.yes === true,
+      invokedFrom: 'flag',
+    });
+  }
+
   printIntro();
   initProgressionLog();
   phEmit('auto_started');
@@ -120,6 +139,37 @@ async function main(): Promise<void> {
       .map((s) => s.trim())
       .filter(Boolean),
   );
+
+  // Offer removal when setup lands on an existing install. Skipped on every
+  // resume path — both the fail() retry and the sg-docker re-exec pass
+  // NANOCLAW_SKIP (and the latter sets NANOCLAW_REEXEC_SG) — so the prompt
+  // appears at most once per fresh run.
+  const isResume = process.env.NANOCLAW_REEXEC_SG === '1' || skip.size > 0;
+  if (!isResume && detectExistingInstall(process.cwd())) {
+    const action = ensureAnswer(
+      await brightSelect<'keep' | 'uninstall'>({
+        message: 'NanoClaw is already installed in this folder. What would you like to do?',
+        options: [
+          {
+            value: 'keep',
+            label: 'Keep it & continue setup',
+            hint: 'recommended — re-running setup is safe',
+          },
+          {
+            value: 'uninstall',
+            label: 'Uninstall NanoClaw & exit',
+            hint: 'removes service, data, and agent files — asks before each step',
+          },
+        ],
+        initialValue: 'keep',
+      }),
+    ) as 'keep' | 'uninstall';
+    setupLog.userInput('existing_install', action);
+    phEmit('existing_install_detected', { action });
+    if (action === 'uninstall') {
+      await runUninstallFlow({ dryRun: false, yes: false, invokedFrom: 'setup-detection' });
+    }
+  }
 
   if (!skip.has('environment')) {
     const res = await runQuietStep('environment', {
@@ -277,8 +327,54 @@ async function main(): Promise<void> {
     }
   }
 
+  let agentProvider: string | undefined;
   if (!skip.has('auth')) {
-    await runAuthStep();
+    // Agent runtime pick. Claude is the default and a no-op — choosing it
+    // runs the existing Claude auth flow unchanged. A branch provider walks
+    // its own auth (e.g. Codex: ChatGPT subscription or API key, vault-only)
+    // and verifies its payload is wired. The pick installs and authenticates
+    // the runtime; it is NOT an install-wide default — and it is NOT a
+    // creation flag. Provider is a DB property of a group: the creation flows
+    // create provider-agnostic groups, and setup sets the picked provider on
+    // each via `ncl groups config update --provider` right after creating it
+    // (the creation scripts inherit it and apply at create — see picked-provider). Existing groups switch the
+    // same way (docs/provider-migration.md).
+    agentProvider = await askAgentProviderChoice();
+    setPickedProvider(agentProvider);
+    let providerEntry = getSetupProvider(agentProvider);
+    if (agentProvider !== 'claude' && !providerEntry) {
+      // A non-claude provider picked from the hard-wired list isn't wired in
+      // this install yet — install it via its self-contained script (channel
+      // style, idempotent: self-skips if already installed), rebuild the image
+      // (the container step already ran, the Dockerfile just changed), then
+      // load the payload's setup module so it self-registers.
+      const install = await runQuietChild(
+        `add-${agentProvider}`,
+        'bash',
+        [`setup/add-${agentProvider}.sh`],
+        {
+          running: `Installing ${agentProvider}…`,
+          done: `${agentProvider} installed.`,
+        },
+      );
+      if (!install.ok) {
+        await fail(
+          `add-${agentProvider}`,
+          `Couldn't install ${agentProvider}.`,
+          'See logs/setup-steps/ for details, then retry setup.',
+        );
+      }
+      p.log.info(brandBody('Rebuilding the container image with the new provider…'));
+      spawnSync('./container/build.sh', [], { stdio: 'inherit' });
+      await import(`./providers/${agentProvider}.js`);
+      providerEntry = getSetupProvider(agentProvider);
+    }
+    if (providerEntry?.runAuth) {
+      await providerEntry.runAuth();
+      await providerEntry.runInstallCheck?.();
+    } else {
+      await runAuthStep();
+    }
   }
 
   if (!skip.has('mounts')) {
@@ -703,6 +799,48 @@ function sendChatMessage(message: string): Promise<void> {
 }
 
 // ─── auth step (select → branch) ────────────────────────────────────────
+
+// Providers offered for install are hard-wired in trunk — an audited control
+// surface (no branch enumeration that anyone with write access could extend).
+// Codex is the only one offered here; opencode/ollama install via their own
+// /add-* skills. Each is installed by its self-contained setup/add-<name>.sh.
+const INSTALLABLE_PROVIDERS = [
+  { value: 'codex', label: 'Codex', hint: 'OpenAI — ChatGPT subscription or API key' },
+] as const;
+
+async function askAgentProviderChoice(): Promise<string> {
+  const installed = listSetupProviders();
+  const installedNames = new Set(installed.map((entry) => entry.value));
+  // Offer the hard-wired installable providers this install hasn't wired yet —
+  // selecting one installs it via setup/add-<name>.sh.
+  const available = INSTALLABLE_PROVIDERS.filter((prov) => !installedNames.has(prov.value));
+  const options = [
+    ...installed.map(({ value, label, hint }) => ({ value, label, hint })),
+    ...available.map((prov) => ({ value: prov.value, label: prov.label, hint: `${prov.hint} — installs now` })),
+  ];
+  const preset = process.env.NANOCLAW_AGENT_PROVIDER?.trim().toLowerCase();
+  if (preset) {
+    if (!options.some((option) => option.value === preset)) {
+      throw new Error(`NANOCLAW_AGENT_PROVIDER=${preset} is not available in this NanoClaw install`);
+    }
+    setupLog.userInput('agent_provider', preset);
+    phEmit('agent_provider_chosen', { provider: preset, preset: true });
+    return preset;
+  }
+  // The pick installs and authenticates a runtime — it is not an
+  // install-wide default, so re-runs safely Enter-through on claude (its
+  // auth flow short-circuits when the secret already exists).
+  const choice = ensureAnswer(
+    await brightSelect<string>({
+      message: 'Which agent runtime should power your assistant?',
+      options,
+      initialValue: 'claude',
+    }),
+  ) as string;
+  setupLog.userInput('agent_provider', choice);
+  phEmit('agent_provider_chosen', { provider: choice });
+  return choice;
+}
 
 async function runAuthStep(): Promise<void> {
   if (anthropicSecretExists()) {
@@ -1217,7 +1355,7 @@ function detectExistingOnecli(): { version: string; apiHost: string } | null {
     } catch {
       // not JSON — try to extract a URL directly
     }
-    const m = raw.match(/https?:\/\/[\w.\-]+(?::\d+)?/);
+    const m = raw.match(/https?:\/\/[\w.-]+(?::\d+)?/);
     return m ? { version, apiHost: m[0] } : null;
   } catch {
     return null;

@@ -93,6 +93,7 @@ function buildApprovalOptions(agentGroups: AgentGroup[], approverUserId?: string
       label: `Connect to ${visibleAgentGroups[0].name}`,
       selectedLabel: `✅ Connected to ${visibleAgentGroups[0].name}`,
       value: `${CONNECT_PREFIX}${visibleAgentGroups[0].id}`,
+      style: 'primary',
     });
   } else if (visibleAgentGroups.length > 1) {
     options.push({
@@ -110,6 +111,7 @@ function buildApprovalOptions(agentGroups: AgentGroup[], approverUserId?: string
     label: 'Reject',
     selectedLabel: '🙅 Rejected',
     value: REJECT_VALUE,
+    style: 'danger',
   });
   return options;
 }
@@ -292,6 +294,8 @@ export function createNewAgentGroup(name: string): AgentGroup {
   });
 
   const ag = getAgentGroup(agId)!;
+  // Channel-approved groups get the built-in default provider (claude); the
+  // operator flips a group with `ncl groups config update --provider`.
   initGroupFilesystem(ag);
   return ag;
 }

@@ -116,15 +116,6 @@ function main(): void {
     channelsProcessed++;
   }
 
-  // Sync to data/env/env
-  if (fs.existsSync(v2EnvPath)) {
-    const containerEnvDir = path.join(process.cwd(), 'data', 'env');
-    try {
-      fs.mkdirSync(containerEnvDir, { recursive: true });
-      fs.copyFileSync(v2EnvPath, path.join(containerEnvDir, 'env'));
-    } catch { /* non-fatal */ }
-  }
-
   console.log(`OK:channels=${channelsProcessed},env_keys=${envKeysCopied},files=${filesCopied}`);
   if (missing.length > 0) {
     console.log(`MISSING:${missing.join(',')}`);

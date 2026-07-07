@@ -20,6 +20,7 @@ NanoClaw doesn't ship channels in trunk. This skill copies the GitHub adapter in
 Skip to **Credentials** if all of these are already in place:
 
 - `src/channels/github.ts` exists
+- `src/channels/github-registration.test.ts` exists
 - `src/channels/index.ts` contains `import './github.js';`
 - `@chat-adapter/github` is listed in `package.json` dependencies
 
@@ -31,10 +32,11 @@ Otherwise continue. Every step below is safe to re-run.
 git fetch origin channels
 ```
 
-### 2. Copy the adapter
+### 2. Copy the adapter and its registration test
 
 ```bash
-git show origin/channels:src/channels/github.ts > src/channels/github.ts
+git show origin/channels:src/channels/github.ts                 > src/channels/github.ts
+git show origin/channels:src/channels/github-registration.test.ts > src/channels/github-registration.test.ts
 ```
 
 ### 3. Append the self-registration import
@@ -48,14 +50,19 @@ import './github.js';
 ### 4. Install the adapter package (pinned)
 
 ```bash
-pnpm install @chat-adapter/github@4.27.0
+pnpm install @chat-adapter/github@4.29.0
 ```
 
-### 5. Build
+### 5. Build and validate
 
 ```bash
 pnpm run build
+pnpm exec vitest run src/channels/github-registration.test.ts
 ```
+
+Both must be clean before proceeding. `github-registration.test.ts` is the one integration test: it imports the real channel barrel and asserts the registry contains `github`. It goes red if the `import './github.js';` line is deleted or drifts, if the barrel fails to evaluate, or if `@chat-adapter/github` isn't installed (the import throws) — so it also implicitly verifies the dependency from step 4. The adapter also calls core's `createChatSdkBridge(...)`; that typed core-API consumption is guarded by `pnpm run build`.
+
+End-to-end message delivery against a real GitHub repo is verified manually once the service is running — see Next Steps and the webhook setup above.
 
 ## Credentials
 
@@ -104,8 +111,8 @@ Run `/manage-channels` to wire the GitHub channel to an agent group, or insert m
 
 ```sql
 -- Create messaging group (one per repo)
-INSERT INTO messaging_groups (id, channel_type, platform_id, name, is_group, unknown_sender_policy, created_at)
-VALUES ('mg-github-myrepo', 'github', 'github:owner/repo', 'owner/repo', 1, '<policy>', datetime('now'));
+INSERT INTO messaging_groups (id, channel_type, platform_id, instance, name, is_group, unknown_sender_policy, created_at)
+VALUES ('mg-github-myrepo', 'github', 'github:owner/repo', 'github', 'owner/repo', 1, '<policy>', datetime('now'));
 
 -- Wire to agent group
 INSERT INTO messaging_group_agents (id, messaging_group_id, agent_group_id, trigger_rules, response_scope, session_mode, priority, created_at)

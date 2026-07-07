@@ -43,7 +43,7 @@ Note the group ID (e.g. `ag-1776342942165-ptgddd`). Repeat Steps 3–5 for each 
 
 ## Step 3 — Mount rtk into the container config
 
-`additional_mounts` is a JSON column not exposed via `ncl config update`. Update it directly via the DB helper, merging with any existing mounts.
+`additional_mounts` is a JSON array column on `container_configs`. Read the current value, merge in the rtk entry, and write the merged array back.
 
 Read current mounts first:
 
@@ -52,14 +52,18 @@ pnpm exec tsx scripts/q.ts data/v2.db \
   "SELECT additional_mounts FROM container_configs WHERE agent_group_id = '<group-id>'"
 ```
 
-Then write the merged array (include all existing entries plus the rtk entry):
+Build the merged array: keep every existing entry, drop any entry whose `containerPath` is `/usr/local/bin/rtk` (so re-running replaces rather than duplicates), then add the rtk entry:
+
+```json
+{"hostPath":"/home/<user>/.local/bin/rtk","containerPath":"/usr/local/bin/rtk","readonly":true}
+```
+
+Write the merged array back:
 
 ```bash
 pnpm exec tsx scripts/q.ts data/v2.db \
   "UPDATE container_configs SET additional_mounts = '<merged-json>' WHERE agent_group_id = '<group-id>'"
 ```
-
-The rtk entry to append: `{"hostPath":"/home/<user>/.local/bin/rtk","containerPath":"/usr/local/bin/rtk","readonly":true}`
 
 Verify:
 
@@ -78,19 +82,14 @@ data/v2-sessions/<group-id>/.claude-shared/settings.json
 
 This file is mounted at `/home/node/.claude/settings.json` inside the container and is read by Claude Code for hooks, env, and model config.
 
-Add the `PreToolUse` entry using `jq` to merge safely:
+Add the `PreToolUse` entry with `jq`. This drops any existing rtk Bash hook first, then appends a fresh one, so it is safe to re-run without creating duplicates:
 
 ```bash
 SETTINGS="data/v2-sessions/<group-id>/.claude-shared/settings.json"
 
-jq '.hooks.PreToolUse = [{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]' \
-  "$SETTINGS" > /tmp/rtk-settings.json && mv /tmp/rtk-settings.json "$SETTINGS"
-```
-
-If `PreToolUse` already exists, append instead of overwriting:
-
-```bash
-jq '.hooks.PreToolUse += [{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]' \
+jq '.hooks.PreToolUse = ((.hooks.PreToolUse // [])
+      | map(select((.hooks // []) | any(.command == "rtk hook claude") | not)))
+    + [{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]' \
   "$SETTINGS" > /tmp/rtk-settings.json && mv /tmp/rtk-settings.json "$SETTINGS"
 ```
 
@@ -100,11 +99,15 @@ jq '.hooks.PreToolUse += [{"matcher":"Bash","hooks":[{"type":"command","command"
 ncl groups restart --id <group-id>
 ```
 
-No `--message` needed — the hook is transparent and requires no agent awareness.
-
 ## Verify
 
-Ask the agent to run `git status` or any other supported command. rtk intercepts it silently. Check savings with:
+Confirm the binary is executable inside the container so a missing or non-executable mount surfaces immediately rather than as a silent hook failure:
+
+```bash
+docker exec "$(docker ps --filter "name=<group-id>" --format '{{.Names}}' | head -1)" rtk --version
+```
+
+Then ask the agent to run `git status` or any other supported command. rtk intercepts it silently. Check savings with:
 
 ```bash
 ~/.local/bin/rtk gain

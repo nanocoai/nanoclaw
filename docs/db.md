@@ -35,7 +35,6 @@ data/
   v2-sessions/
     <agent_group_id>/
       .claude-shared/                     ← shared Claude state for the agent group
-      agent-runner-src/                   ← per-group agent-runner overlay
       <session_id>/
         inbound.db                        ← host writes, container reads
         outbound.db                       ← container writes, host reads

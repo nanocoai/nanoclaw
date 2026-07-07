@@ -597,6 +597,189 @@ describe('router', () => {
   });
 });
 
+describe('router — channel instances', () => {
+  beforeEach(() => {
+    createAgentGroup({
+      id: 'ag-1',
+      name: 'Default Bot',
+      folder: 'default-bot',
+      agent_provider: null,
+      created_at: now(),
+    });
+    createAgentGroup({
+      id: 'ag-2',
+      name: 'Tester Bot',
+      folder: 'tester-bot',
+      agent_provider: null,
+      created_at: now(),
+    });
+    // Two messaging groups on the SAME (channel_type, platform_id), owned
+    // by different adapter instances and wired to different agents.
+    createMessagingGroup({
+      id: 'mg-default',
+      channel_type: 'slack',
+      platform_id: 'slack:C1',
+      name: 'Default chat',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    createMessagingGroup({
+      id: 'mg-tester',
+      channel_type: 'slack',
+      platform_id: 'slack:C1',
+      instance: 'slack-tester',
+      name: 'Tester chat',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    for (const [mgaId, mgId, agId] of [
+      ['mga-default', 'mg-default', 'ag-1'],
+      ['mga-tester', 'mg-tester', 'ag-2'],
+    ] as const) {
+      createMessagingGroupAgent({
+        id: mgaId,
+        messaging_group_id: mgId,
+        agent_group_id: agId,
+        engage_mode: 'pattern',
+        engage_pattern: '.',
+        sender_scope: 'all',
+        ignored_message_policy: 'drop',
+        session_mode: 'shared',
+        priority: 0,
+        created_at: now(),
+      });
+    }
+  });
+
+  it('routes by receiving instance: named instance lands in its own mg/agent, default in the default', async () => {
+    const { routeInbound } = await import('./router.js');
+    const { registerChannelAdapter, initChannelAdapters, teardownChannelAdapters } =
+      await import('./channels/channel-registry.js');
+    const { getSessionsByAgentGroup } = await import('./db/sessions.js');
+
+    // Default 'slack' adapter is THREADED; the named instance is NOT.
+    // The same arm therefore also pins the thread-policy lookup at the
+    // receiving instance: if the router resolved the adapter by
+    // channelType, the tester event's threadId would survive.
+    const makeAdapter = (instance: string | undefined, supportsThreads: boolean) => ({
+      name: instance ?? 'slack',
+      channelType: 'slack',
+      instance,
+      supportsThreads,
+      async setup() {},
+      async teardown() {},
+      isConnected: () => true,
+      async deliver() {
+        return undefined;
+      },
+    });
+    registerChannelAdapter('slack', { factory: () => makeAdapter(undefined, true) });
+    registerChannelAdapter('slack-tester', { factory: () => makeAdapter('slack-tester', false) });
+    await initChannelAdapters(() => ({
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: () => {},
+    }));
+
+    try {
+      // Inbound on the named instance, with a threadId the non-threaded
+      // adapter must collapse.
+      await routeInbound({
+        channelType: 'slack',
+        instance: 'slack-tester',
+        platformId: 'slack:C1',
+        threadId: 'thread-9',
+        message: {
+          id: 'msg-tester',
+          kind: 'chat',
+          content: JSON.stringify({ sender: 'U', text: 'to tester' }),
+          timestamp: now(),
+        },
+      });
+
+      const testerSessions = getSessionsByAgentGroup('ag-2');
+      expect(testerSessions).toHaveLength(1);
+      expect(testerSessions[0].messaging_group_id).toBe('mg-tester');
+      expect(getSessionsByAgentGroup('ag-1')).toHaveLength(0);
+
+      const tDb = new Database(inboundDbPath('ag-2', testerSessions[0].id));
+      const tRow = tDb.prepare('SELECT thread_id, content FROM messages_in').get() as {
+        thread_id: string | null;
+        content: string;
+      };
+      tDb.close();
+      expect(JSON.parse(tRow.content).text).toBe('to tester');
+      // Collapsed by the named instance's thread policy.
+      expect(tRow.thread_id).toBeNull();
+
+      // Same address, no instance ⇒ default instance ⇒ default mg/agent,
+      // and the default adapter is threaded so the threadId survives.
+      await routeInbound({
+        channelType: 'slack',
+        platformId: 'slack:C1',
+        threadId: 'thread-9',
+        message: {
+          id: 'msg-default',
+          kind: 'chat',
+          content: JSON.stringify({ sender: 'U', text: 'to default' }),
+          timestamp: now(),
+        },
+      });
+
+      const defaultSessions = getSessionsByAgentGroup('ag-1');
+      expect(defaultSessions).toHaveLength(1);
+      expect(defaultSessions[0].messaging_group_id).toBe('mg-default');
+      const dDb = new Database(inboundDbPath('ag-1', defaultSessions[0].id));
+      const dRow = dDb.prepare('SELECT thread_id FROM messages_in').get() as { thread_id: string | null };
+      dDb.close();
+      expect(dRow.thread_id).toBe('thread-9');
+    } finally {
+      await teardownChannelAdapters();
+    }
+  });
+
+  it('auto-create persists the receiving instance instead of hijacking the default row', async () => {
+    const { routeInbound } = await import('./router.js');
+    const { getMessagingGroupByPlatform } = await import('./db/messaging-groups.js');
+
+    // No row exists for this address on ANY instance yet; create an
+    // unwired default row to prove the named event doesn't reuse it.
+    createMessagingGroup({
+      id: 'mg-plain',
+      channel_type: 'slack',
+      platform_id: 'slack:C-NEW',
+      name: null,
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+
+    await routeInbound({
+      channelType: 'slack',
+      instance: 'slack-tester',
+      platformId: 'slack:C-NEW',
+      threadId: null,
+      message: {
+        id: 'msg-mention',
+        kind: 'chat',
+        content: JSON.stringify({ sender: 'U', text: '@tester hi' }),
+        timestamp: now(),
+        isMention: true,
+      },
+    });
+
+    const created = getMessagingGroupByPlatform('slack', 'slack:C-NEW', 'slack-tester');
+    expect(created).toBeDefined();
+    expect(created!.instance).toBe('slack-tester');
+    expect(created!.id).not.toBe('mg-plain');
+    // The default row is untouched.
+    expect(getMessagingGroupByPlatform('slack', 'slack:C-NEW', 'slack')!.id).toBe('mg-plain');
+  });
+});
+
 describe('routing metadata preservation', () => {
   beforeEach(() => {
     createAgentGroup({

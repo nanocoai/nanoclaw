@@ -43,7 +43,6 @@ interface V1Group {
   folder: string;
   trigger_pattern: string | null;
   requires_trigger: number | null;
-  is_main: number | null;
 }
 
 async function main(): Promise<void> {
@@ -65,7 +64,7 @@ async function main(): Promise<void> {
   // v1 schema varies — channel_name was a late addition. Query only the
   // columns we know exist in all v1 installs.
   const v1Groups = v1Db
-    .prepare('SELECT jid, name, folder, trigger_pattern, requires_trigger, is_main FROM registered_groups')
+    .prepare('SELECT jid, name, folder, trigger_pattern, requires_trigger FROM registered_groups')
     .all() as V1Group[];
   v1Db.close();
 

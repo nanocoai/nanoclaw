@@ -24,6 +24,14 @@ registerResource({
       required: true,
     },
     {
+      name: 'instance',
+      type: 'string',
+      description:
+        'Adapter instance that owns this chat, when running N adapters of one channel type. Defaults to channel_type (the default instance) when omitted.',
+      defaultFrom: 'channel_type',
+      updatable: true,
+    },
+    {
       name: 'name',
       type: 'string',
       description: 'Display name. Often auto-populated by the channel adapter.',

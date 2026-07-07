@@ -22,16 +22,21 @@ CREATE TABLE agent_groups (
 -- only matters if something inserts without specifying the field, which no
 -- current callsite does. Router auto-create hardcodes "request_approval"
 -- (see src/router.ts:151); setup scripts pick per context.
+-- instance = adapter-instance name; the default instance IS the channel
+-- type (migration 016 backfill), so single-instance installs never see it.
+-- Inbound lookups are exact-on-instance; outbound lookups default-first.
 CREATE TABLE messaging_groups (
   id                    TEXT PRIMARY KEY,
   channel_type          TEXT NOT NULL,
   platform_id           TEXT NOT NULL,
+  instance              TEXT NOT NULL,
   name                  TEXT,
   is_group              INTEGER DEFAULT 0,
   unknown_sender_policy TEXT NOT NULL DEFAULT 'strict',
                         -- 'strict' | 'request_approval' | 'public'
   created_at            TEXT NOT NULL,
-  UNIQUE(channel_type, platform_id)
+  denied_at             TEXT,
+  UNIQUE(channel_type, platform_id, instance)
 );
 
 -- Which agent groups handle which messaging groups.

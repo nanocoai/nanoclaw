@@ -1,170 +1,155 @@
 ---
 name: use-native-credential-proxy
-description: Replace OneCLI gateway with the built-in credential proxy. For users who want simple .env-based credential management without installing OneCLI. Reads API key or OAuth token from .env and injects into container API requests.
+description: Opt out of the OneCLI gateway and supply Anthropic credentials from .env instead. For users who want simple .env-based credential management without the OneCLI agent vault. Reads the API key or OAuth token from .env and injects it into the container's API requests.
 ---
 
 # Use Native Credential Proxy
 
-This skill replaces the OneCLI gateway with NanoClaw's built-in credential proxy. Containers get credentials injected via a local HTTP proxy that reads from `.env` — no external services needed.
+This skill adds a **native, `.env`-based credential path** for the container agent — an explicit opt-out of the OneCLI gateway. With it enabled, NanoClaw reads the Anthropic credential straight from `.env` and threads it into the container as standard environment variables, which the Claude Agent SDK reads natively. No OneCLI vault, no HTTPS proxy, no certificates.
+
+> **Credential-home inversion — read this first.** NanoClaw's default is that credentials live in the OneCLI agent vault and are injected per request, never threaded into the container via `-e`. This skill deliberately inverts that: the credential lives in `.env` on the host and is passed into the container's environment. That inversion is the *entire point* of this skill (simple `.env` credentials without OneCLI). Use it only if you accept that tradeoff; everywhere else in NanoClaw, env-threaded credentials are an anti-pattern.
+
+The skill is **additive**: it ships its proxy logic and tests in this folder, copies them into `src/`, and makes a single one-line reach-in at the container-spawn seam (gated by an env flag). It does not remove or rewrite the OneCLI gateway — when the flag is unset, the gateway path is exactly as it was, and the native proxy is a no-op.
+
+## How it works
+
+- `src/native-credential-proxy.ts` exports `nativeCredentialEnvArgs()`. It reads `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN` (and optional `ANTHROPIC_BASE_URL`) from `.env` via core's `readEnvFile`, and returns the Docker `-e VAR=value` arguments.
+- All gating lives inside that function: it returns an empty array unless `NANOCLAW_NATIVE_CREDENTIALS=true`. So the reach-in in core is a single unconditional `args.push(...nativeCredentialEnvArgs())`.
+- The seam is `buildContainerArgs` in `src/container-runner.ts`, right after the `TZ` env line — the same place container env vars are assembled, just before the OneCLI gateway is applied. With the flag on, the direct credential env vars take precedence in the container; with it off, nothing changes.
 
 ## Phase 1: Pre-flight
 
 ### Check if already applied
 
-Check if `src/credential-proxy.ts` is imported in `src/index.ts`:
-
 ```bash
-grep "credential-proxy" src/index.ts
+test -f src/native-credential-proxy.ts && grep -q 'nativeCredentialEnvArgs' src/container-runner.ts && echo applied || echo not-applied
 ```
 
-If it shows an import for `startCredentialProxy`, the native proxy is already active. Skip to Phase 3 (Setup).
+If it prints `applied`, the native proxy is already wired — skip to Phase 3 (Configure).
 
-### Check if OneCLI is active
+### Confirm the seam exists
 
 ```bash
-grep "@onecli-sh/sdk" package.json
+grep -n "args.push('-e', \`TZ=" src/container-runner.ts
 ```
 
-If `@onecli-sh/sdk` appears, OneCLI is the active credential provider. Proceed with Phase 2 to replace it.
+This should print the `TZ` env line inside `buildContainerArgs`. If it does not, the file has drifted — read `buildContainerArgs` in `src/container-runner.ts` and find the spot where container `-e` env vars are first pushed; the reach-in goes there.
 
-If neither check matches, you may be on an older version. Run `/update-nanoclaw` first, then retry.
+## Phase 2: Apply code changes
 
-## Phase 2: Apply Code Changes
-
-### Ensure upstream remote
+### Copy the skill's source and tests into `src/`
 
 ```bash
-git remote -v
+S=.claude/skills/use-native-credential-proxy
+cp $S/native-credential-proxy.ts              src/native-credential-proxy.ts
+cp $S/native-credential-proxy.test.ts         src/native-credential-proxy.test.ts
+cp $S/native-credential-proxy-wiring.test.ts  src/native-credential-proxy-wiring.test.ts
 ```
 
-If `upstream` is missing, add it:
+`native-credential-proxy.test.ts` is the behavior test (it drives `nativeCredentialEnvArgs()` against a real `.env` read through core's `readEnvFile`). `native-credential-proxy-wiring.test.ts` asserts the one-line reach-in is present in `buildContainerArgs`.
 
-```bash
-git remote add upstream https://github.com/nanocoai/nanoclaw.git
+### Import the proxy in `src/container-runner.ts`
+
+Add this import alongside the other local imports (e.g. right after the `./container-config.js` import):
+
+```ts
+import { nativeCredentialEnvArgs } from './native-credential-proxy.js';
 ```
 
-### Merge the skill branch
+### Make the one-line reach-in
 
-```bash
-git fetch upstream skill/native-credential-proxy
-git merge upstream/skill/native-credential-proxy || {
-  git checkout --theirs pnpm-lock.yaml
-  git add pnpm-lock.yaml
-  git merge --continue
-}
+In `buildContainerArgs`, find the `TZ` env line and add the call right after it:
+
+```ts
+  args.push('-e', `TZ=${TIMEZONE}`);
+  args.push(...nativeCredentialEnvArgs());
 ```
 
-This merges in:
-- `src/credential-proxy.ts` and `src/credential-proxy.test.ts` (the proxy implementation)
-- Restored credential proxy usage in `src/index.ts`, `src/container-runner.ts`, `src/container-runtime.ts`, `src/config.ts`
-- Removed `@onecli-sh/sdk` dependency
-- Restored `CREDENTIAL_PROXY_PORT` config (default 3001)
-- Restored platform-aware proxy bind address detection
-- Reverted setup skill to `.env`-based credential instructions
+That is the only edit to core. `native-credential-proxy-wiring.test.ts` asserts this `args.push(...nativeCredentialEnvArgs())` call exists inside `buildContainerArgs` — delete the reach-in and it goes red.
 
-If the merge reports conflicts beyond `pnpm-lock.yaml`, resolve them by reading the conflicted files and understanding the intent of both sides.
+### Add the env flag stub to `.env.example`
 
-### Update main group CLAUDE.md
-
-Replace the OneCLI auth reference with the native proxy:
-
-In `groups/main/CLAUDE.md`, replace:
-> OneCLI manages credentials (including Anthropic auth) — run `onecli --help`.
-
-with:
-> The native credential proxy manages credentials (including Anthropic auth) via `.env` — see `src/credential-proxy.ts`.
-
-### Validate code changes
+Append to `.env.example`:
 
 ```bash
-pnpm install
+# Native credential proxy (.claude/skills/use-native-credential-proxy)
+# Opt out of the OneCLI gateway and supply Anthropic credentials from .env.
+# When true, the credential below is injected into the container env directly.
+# NANOCLAW_NATIVE_CREDENTIALS=true
+# One of the following is required when the flag is true:
+# ANTHROPIC_API_KEY=
+# CLAUDE_CODE_OAUTH_TOKEN=
+# Optional custom endpoint:
+# ANTHROPIC_BASE_URL=https://api.anthropic.com
+```
+
+### Validate
+
+```bash
 pnpm run build
-pnpm exec vitest run src/credential-proxy.test.ts src/container-runner.test.ts
+pnpm exec vitest run src/native-credential-proxy.test.ts src/native-credential-proxy-wiring.test.ts
 ```
 
-All tests must pass and build must be clean before proceeding.
+The build must be clean and both tests must pass. The build leg confirms the proxy's import of core's `readEnvFile` still resolves; the behavior test confirms the `.env` → `-e` injection; the wiring test confirms the reach-in into `buildContainerArgs` is in place.
 
-## Phase 3: Setup Credentials
+## Phase 3: Configure credentials
 
-AskUserQuestion: Do you want to use your **Claude subscription** (Pro/Max) or an **Anthropic API key**?
+Ask the user (multiple choice): do they want to use their **Claude subscription** (Pro/Max) or an **Anthropic API key**?
 
-1. **Claude subscription (Pro/Max)** — description: "Uses your existing Claude Pro or Max subscription. You'll run `claude setup-token` in another terminal to get your token."
-2. **Anthropic API key** — description: "Pay-per-use API key from console.anthropic.com."
+1. **Claude subscription (Pro/Max)** — uses an existing Claude Pro or Max subscription. They run `claude setup-token` in another terminal to mint a token.
+2. **Anthropic API key** — pay-per-use API key from console.anthropic.com.
 
 ### Subscription path
 
 Tell the user to run `claude setup-token` in another terminal and copy the token it outputs. Do NOT collect the token in chat.
 
-Once they have the token, add it to `.env`:
+Once they have it, add it to `.env` along with the opt-out flag:
 
 ```bash
-# Add to .env (create file if needed)
+grep -q '^NANOCLAW_NATIVE_CREDENTIALS=' .env && sed -i.bak 's/^NANOCLAW_NATIVE_CREDENTIALS=.*/NANOCLAW_NATIVE_CREDENTIALS=true/' .env && rm -f .env.bak || echo 'NANOCLAW_NATIVE_CREDENTIALS=true' >> .env
 echo 'CLAUDE_CODE_OAUTH_TOKEN=<token>' >> .env
 ```
 
-Note: `ANTHROPIC_AUTH_TOKEN` is also supported as a fallback.
+`ANTHROPIC_AUTH_TOKEN` is also accepted as an alternative to `CLAUDE_CODE_OAUTH_TOKEN`.
 
 ### API key path
 
-Tell the user to get an API key from https://console.anthropic.com/settings/keys if they don't have one.
-
-Add it to `.env`:
+Tell the user to get an API key from https://console.anthropic.com/settings/keys if they don't have one, then:
 
 ```bash
+grep -q '^NANOCLAW_NATIVE_CREDENTIALS=' .env && sed -i.bak 's/^NANOCLAW_NATIVE_CREDENTIALS=.*/NANOCLAW_NATIVE_CREDENTIALS=true/' .env && rm -f .env.bak || echo 'NANOCLAW_NATIVE_CREDENTIALS=true' >> .env
 echo 'ANTHROPIC_API_KEY=<key>' >> .env
 ```
 
-### After either path
+### Optional custom endpoint
 
-**If the user's response happens to contain a token or key** (starts with `sk-ant-` or looks like a token): write it to `.env` on their behalf using the appropriate variable name.
+For a custom API endpoint, add `ANTHROPIC_BASE_URL=<url>` to `.env` (it is forwarded into the container when present; defaults to `https://api.anthropic.com`).
 
-**Optional:** If the user needs a custom API endpoint, they can add `ANTHROPIC_BASE_URL=<url>` to `.env` (defaults to `https://api.anthropic.com`).
+## Phase 4: Restart and verify
 
-## Phase 4: Verify
-
-1. Rebuild and restart:
-
-```bash
-pnpm run build
-```
-
-Then restart the service.
+### Restart the service
 
 Run from your NanoClaw project root:
 
-- macOS: `launchctl kickstart -k gui/$(id -u)/"$(. setup/lib/install-slug.sh && launchd_label)"`
-- Linux: `systemctl --user restart "$(. setup/lib/install-slug.sh && systemd_unit)"`
-- WSL/manual: stop and re-run `bash start-nanoclaw.sh`
-
-2. Check logs for successful proxy startup:
-
 ```bash
-tail -20 logs/nanoclaw.log | grep "Credential proxy"
+source setup/lib/install-slug.sh
+launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
+# Linux: systemctl --user restart $(systemd_unit)
+# WSL/manual: stop and re-run bash start-nanoclaw.sh
 ```
 
-Expected: `Credential proxy started` with port and auth mode.
+### Verify
 
-3. Send a test message in the registered chat to verify the agent responds.
-
-4. Note: after applying this skill, the OneCLI credential steps in `/setup` no longer apply. `.env` is now the credential source.
+Send a test message in a registered chat and confirm the agent responds. If the container starts and the agent answers, the credential is reaching the API.
 
 ## Troubleshooting
 
-**"Credential proxy upstream error" in logs:** Check that `.env` has a valid `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`. Verify the API is reachable: `curl -s https://api.anthropic.com/v1/messages -H "x-api-key: test" | head`.
+**Container fails to spawn with "no Anthropic credential found in .env":** `NANOCLAW_NATIVE_CREDENTIALS=true` is set but none of `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `CLAUDE_CODE_OAUTH_TOKEN` is present in `.env`. Add one.
 
-**Port 3001 already in use:** Set `CREDENTIAL_PROXY_PORT=<other port>` in `.env` or as an environment variable.
+**401 errors from the API:** The credential in `.env` is invalid or expired. For a subscription token, re-run `claude setup-token` and update `CLAUDE_CODE_OAUTH_TOKEN`. For an API key, check it at console.anthropic.com.
 
-**Container can't reach proxy (Linux):** The proxy binds to the `docker0` bridge IP by default. If that interface doesn't exist (e.g. rootless Docker), set `CREDENTIAL_PROXY_HOST=0.0.0.0` as an environment variable.
-
-**OAuth token expired (401 errors):** Re-run `claude setup-token` in a terminal and update the token in `.env`.
+**Agent still goes through OneCLI:** Confirm `NANOCLAW_NATIVE_CREDENTIALS=true` is in `.env` and the service was restarted. With the flag unset, `nativeCredentialEnvArgs()` is a no-op and the OneCLI gateway remains the credential source.
 
 ## Removal
 
-To revert to OneCLI gateway:
-
-1. Find the merge commit: `git log --oneline --merges -5`
-2. Revert it: `git revert <merge-commit> -m 1` (undoes the skill branch merge, keeps your other changes)
-3. `pnpm install` (re-adds `@onecli-sh/sdk`)
-4. `pnpm run build`
-5. Follow `/setup` step 4 to configure OneCLI credentials
-6. Remove `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` from `.env`
+See `REMOVE.md` — it deletes the copied files, removes the reach-in and import, strips the `.env` keys, and restarts.

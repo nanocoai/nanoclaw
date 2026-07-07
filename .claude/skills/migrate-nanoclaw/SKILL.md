@@ -28,6 +28,15 @@ Two phases: **Extract** (build the migration guide) and **Upgrade** (use it). If
 
 ---
 
+# Phase 0: Refresh this skill first
+
+The migration process itself evolves, so run its newest version before doing anything else:
+- Ensure the `upstream` remote exists (default `https://github.com/nanocoai/nanoclaw.git`) and fetch: `git fetch upstream --prune`. Detect the upstream branch (`main` or `master`).
+- Refresh this skill from upstream: `git checkout upstream/<branch> -- .claude/skills/migrate-nanoclaw/`
+- Re-read `.claude/skills/migrate-nanoclaw/SKILL.md`. If it changed, **follow the updated version from the top** instead of this one.
+
+This is the only working-tree change expected before the preflight check below; changes limited to `.claude/skills/migrate-nanoclaw/` are this self-refresh — ignore them in the 1.0 clean-tree check and proceed.
+
 # Phase 1: Extract
 
 ## 1.0 Preflight
@@ -73,9 +82,9 @@ Conditions:
 ### Tier 3: Complex
 
 Conditions (any of):
-- Many new files added (indicates many skills applied) — discount files that come purely from skill merges when assessing complexity; a fork with 3 skills and no other changes is simpler than it looks by file count alone
+- Many new files added (indicates many skills applied) — discount files that a skill's own apply owns when assessing complexity; a fork with 3 skills and no other changes is simpler than it looks by file count alone
 - Deep source changes to core files (`src/index.ts`, `src/container-runner.ts`, etc.) beyond what skills introduced
-- Lots of insertions/deletions in user-authored code (not skill-merged code)
+- Lots of insertions/deletions in user-authored code (not skill-owned code)
 - Many skills applied (3+) AND the user confirms or sub-agents find customizations on top of them
 
 Use the full process: multiple sub-agents in parallel, directory-based guide, migration plan.
@@ -91,7 +100,7 @@ For Tier 2/3 (with or without existing guide):
 - If guide exists but is stale: **Update guide** (recommended) / **Re-extract from scratch** / **Skip to upgrade anyway**
 - If no guide: **Yes, let me describe my customizations first** / **Just figure it out** / **A bit of both**
 
-This single interaction replaces what were previously separate steps for scope assessment, user input, and existing guide check.
+Present the scope summary, gather the user's input, and resolve the existing-guide choice in this single interaction.
 
 ## 1.2 Update existing guide (if applicable)
 
@@ -112,18 +121,16 @@ Spawn a haiku sub-agent (Agent tool, model: haiku) for initial exploration:
 > Explore this NanoClaw fork to identify all changes from the upstream base. Run these commands and report back:
 >
 > 1. `git diff --name-only $BASE..HEAD` — all changed files
-> 2. `git log --oneline $BASE..HEAD` — all commits (look for skill branch merges like `Merge branch 'skill/*'`)
-> 3. `git branch -r --list 'upstream/skill/*'` — available upstream skill branches
-> 4. `ls .claude/skills/` — installed skills
-> 5. For each skill merge found, record the merge commit hash
+> 2. `git log --oneline $BASE..HEAD` — all commits
+> 3. `ls .claude/skills/` — installed skills, then for each `add-*` skill read its `SKILL.md` to learn which files it fetches/writes (e.g. `src/channels/<name>.ts`, `import './<name>.js';` in a barrel, pinned deps)
 >
-> Report: (a) list of applied skills with their merge commit hashes, (b) list of all changed files, (c) any custom skill directories that don't match upstream branches.
+> Report: (a) list of installed `add-*` skills and the files each one owns, (b) list of all changed files, (c) any custom skill directories under `.claude/skills/` not matching an upstream `add-*` skill.
 
 From the sub-agent results, identify:
-- **Which files came purely from skill merges** — these will be reapplied by re-merging skill branches in Phase 2
-- **Everything else** — all remaining changes are customizations to analyze (whether they're on skill-touched files or not)
+- **Which files an `add-<name>` skill owns** — these are reapplied by re-running that skill's own apply in Phase 2
+- **Everything else** — all remaining changes are customizations to analyze (whether they're on skill-owned files or not)
 
-Don't try to distinguish "user modified a skill file" from "user made their own change" at this stage. The sub-agents in 1.4 will look at all non-skill changes together and surface what matters.
+Don't try to distinguish "user modified a skill-owned file" from "user made their own change" at this stage. The sub-agents in 1.4 will look at all non-skill changes together and surface what matters.
 
 ## 1.4 Analyze customizations
 
@@ -137,27 +144,27 @@ Then spawn sub-agents to analyze all non-skill changes. For Tier 2, one or two a
 
 - **Config + build files** — one sub-agent
 - **Source files** (`src/*.ts`) — one sub-agent
-- **Skills the user flagged as modified** (or all of them for Tier 3) — one sub-agent per skill, comparing the user's current files against the skill merge commit version:
+- **Skills the user flagged as modified** (or all of them for Tier 3) — one sub-agent per skill, comparing the user's current skill-owned files against the pristine version the skill fetches. For a file the skill writes from `origin/<branch>`, diff the working copy against that source:
   ```
-  git diff <merge-commit-hash>..HEAD -- <files-touched-by-skill>
+  diff <(git show origin/<branch>:<path>) <path>
   ```
 - **Container files** — one sub-agent (if changes exist)
 
 Each sub-agent task:
 
 > Read these diffs and the current file contents. For each change:
-> 1. `git diff $BASE..HEAD -- <file>` (or `git diff <skill-merge-hash>..HEAD -- <file>` for skill-modified files)
+> 1. `git diff $BASE..HEAD -- <file>` (or `diff <(git show origin/<branch>:<file>) <file>` for skill-owned files)
 > 2. Read the full current file for context
 > 3. Summarize: what changed, what the likely intent is
 > 4. Assess detail level: could a fresh Claude session reproduce this from intent alone, or does it need specific code snippets, API details, import paths?
 > 5. For non-standard changes, extract the key code, imports, API calls, and configurations verbatim.
 
 **Inter-skill conflicts:** If multiple skills are applied, spawn an additional sub-agent to check for interactions between them. Look for:
-- Duplicate declarations (same variable/constant defined by two skill branches)
+- Duplicate declarations (same variable/constant defined by two skills)
 - Conflicting approaches (one skill throws on missing env var, another provides a fallback)
 - Shared files modified by multiple skills
 
-Document any findings in the "Skill Interactions" section of the migration guide so they can be resolved after skill branches are re-merged during upgrade.
+Document any findings in the "Skill Interactions" section of the migration guide so they can be resolved after the skills are reapplied during upgrade.
 
 ## 1.5 Confirm with user
 
@@ -207,10 +214,10 @@ Upstream: <upstream HEAD hash>
 
 ## Applied Skills
 
-List each skill with its branch name. These are reapplied by merging the upstream skill branch.
+List each installed skill by its slash-command name. Each is reapplied by re-running its own `/add-<name>` apply on the clean base — those skills fetch their files additively and pin their own deps, so re-running them is safe and reproducible.
 
-- `add-telegram` — branch `skill/telegram`
-- `add-voice-transcription` — branch `skill/voice-transcription`
+- `add-telegram`
+- `add-slack`
 
 Custom skills (user-created, not from upstream): `.claude/skills/my-custom-skill/` — copy as-is from main tree.
 
@@ -218,9 +225,9 @@ Custom skills (user-created, not from upstream): `.claude/skills/my-custom-skill
 
 (Document known conflicts or interactions between applied skills.
 When two or more skills modify the same file or depend on shared
-config, describe the conflict and how to resolve it after merging.
+config, describe the conflict and how to resolve it after reapplying.
 Example: skill A and skill B both add a PROXY_BIND_HOST declaration —
-after merging both, deduplicate. Or: skill A throws if ENV_VAR is
+after reapplying both, deduplicate. Or: skill A throws if ENV_VAR is
 missing, but skill B provides a fallback — use the fallback version.)
 
 ## Modifications to Applied Skills
@@ -231,7 +238,7 @@ missing, but skill B provides a fallback — use the fallback version.)
 
 **Files:** ...
 
-**How to apply:** (after the skill branch has been merged)
+**How to apply:** (after the skill's `/add-<name>` apply has been re-run)
 
 ...
 
@@ -361,15 +368,14 @@ Store `$PROJECT_ROOT` and `$WORKTREE` as absolute paths. Use `$WORKTREE` in all 
 
 ## 2.4 Reapply skills in worktree
 
+The clean upstream base already carries every skill's `SKILL.md` under `.claude/skills/`. Reapply each installed skill by re-running its own apply against the worktree — each `/add-<name>` skill fetches its files additively (`git fetch origin <branch>` + `git show origin/<branch>:path > path`), pins its own dependencies, and is safe to re-run, so this reproduces the install on the new base without merging branches.
+
 For each skill listed in the migration guide's "Applied Skills" section:
 
-1. Check if branch exists: `git branch -r --list "upstream/$branch"`
-2. If yes, merge it in the worktree:
-   ```bash
-   cd "$WORKTREE" && git merge upstream/skill/<name> --no-edit
-   ```
-3. If missing, warn the user (skill may have been removed or renamed upstream).
-4. If any skill merge conflicts, stop and tell the user — the skill needs updating for the new upstream.
+1. Confirm the skill exists on the new base: check `$WORKTREE/.claude/skills/<name>/SKILL.md`.
+2. If present, follow that `SKILL.md`'s apply steps with the worktree as the working tree — run its `git fetch origin <branch>`, write its files with `git show origin/<branch>:path > $WORKTREE/path`, append its import lines, and run its pinned `pnpm install`/`bun install` inside the worktree.
+3. If the skill is missing from the new base, warn the user (it may have been removed or renamed upstream).
+4. If reapplying a skill fails (a fetched path no longer exists, or its apply errors), stop and tell the user — the skill needs updating for the new upstream.
 
 Copy any custom skills mentioned in the guide from the main tree into the worktree.
 
@@ -404,9 +410,13 @@ Ask (AskUserQuestion):
 
 If testing live:
 
-1. Stop the service (do this directly):
+1. Stop the service (do this directly). Service labels are per-install — derive them from `setup/lib/install-slug.sh`:
    ```bash
-   launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist 2>/dev/null || true
+   source setup/lib/install-slug.sh
+   # macOS (Darwin):
+   launchctl bootout gui/$(id -u)/$(launchd_label) 2>/dev/null || true
+   # Linux:
+   # systemctl --user stop $(systemd_unit) 2>/dev/null || true
    ```
 
 2. Symlink data into the worktree:
@@ -457,15 +467,24 @@ git add .nanoclaw-migrations/
 git commit -m "chore: upgrade to upstream $(git rev-parse --short upstream/$UPSTREAM_BRANCH)"
 ```
 
-Do NOT use `git checkout -B` to create an intermediate branch — this caused issues in practice. The `git reset --hard` to the upgrade commit is the cleanest path since the backup tag already preserves the pre-upgrade state.
+Point the branch at the upgraded state with `git reset --hard <upgrade-commit>` (step 4 above). The backup tag from 2.1 preserves the pre-upgrade state, so this is the cleanest path.
 
 ## 2.9 Post-upgrade
 
-Run `npm install && pnpm run build` in the main tree to confirm.
+Run `pnpm install && pnpm run build` in the main tree to confirm.
 
-Restart the service:
+Stamp the upgrade marker (required — without it the startup tripwire stops the host on next start). Only do this after the build above succeeds:
 ```bash
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
+pnpm exec tsx scripts/upgrade-state.ts set "" migrate-nanoclaw
+```
+
+Restart the service. Service labels are per-install — derive them from `setup/lib/install-slug.sh`:
+```bash
+source setup/lib/install-slug.sh
+# macOS (Darwin):
+launchctl kickstart -k gui/$(id -u)/$(launchd_label)
+# Linux:
+# systemctl --user restart $(systemd_unit)
 ```
 
 Show summary:

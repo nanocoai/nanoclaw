@@ -15,14 +15,14 @@ importers:
         specifier: ^1.2.0
         version: 1.2.0
       '@onecli-sh/sdk':
-        specifier: ^0.5.0
-        version: 0.5.0
+        specifier: 2.2.1
+        version: 2.2.1
       better-sqlite3:
         specifier: 11.10.0
         version: 11.10.0
       chat:
-        specifier: ^4.24.0
-        version: 4.26.0
+        specifier: 4.29.0
+        version: 4.29.0
       cron-parser:
         specifier: 5.5.0
         version: 5.5.0
@@ -303,8 +303,8 @@ packages:
       '@emnapi/core': ^1.7.1
       '@emnapi/runtime': ^1.7.1
 
-  '@onecli-sh/sdk@0.5.0':
-    resolution: {integrity: sha512-oe5Yx9o98v6N1PgzcCR7nULHHqcqKWNJIDOHGOSNX+l20mLlZpFUqfKPeFmsojBNRQMoqbvZQKUlFMp6gVuYBA==}
+  '@onecli-sh/sdk@2.2.1':
+    resolution: {integrity: sha512-q2mCW4ZsARlLEoTxz/P0NQ4MiCh7Z2n28pxkSc7srS+tozyw40PdTnWYW7NI8hfSYplZTx5856Adq1iPi4KN3Q==}
     engines: {node: '>=20'}
 
   '@oxc-project/types@0.124.0':
@@ -609,8 +609,17 @@ packages:
   character-entities@2.0.2:
     resolution: {integrity: sha512-shx7oQ0Awen/BRIdkjkvz54PnEEI/EjwXDSIZp86/KKdbafHh1Df/RYGBhn4hbe2+uKC9FnT5UCEdyPz3ai9hQ==}
 
-  chat@4.26.0:
-    resolution: {integrity: sha512-QToDnIEGpyb8yQA6YLMHOSRK30YVk4RtsyFyuWFYyB2c4jQlyIrSWtwVK7qyvmvqzQp9uDwCdJRAhS8GtCHAGQ==}
+  chat@4.29.0:
+    resolution: {integrity: sha512-KdPfzaie5ivYytyRICTERg5xT+LeCbYefokvNAqTHe92eqkFaoTMXXkSitikxJVWhZIb2YoXF1b9UZHyzSzKzw==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      ai: ^6.0.182
+      zod: ^3.0.0 || ^4.0.0
+    peerDependenciesMeta:
+      ai:
+        optional: true
+      zod:
+        optional: true
 
   chownr@1.1.4:
     resolution: {integrity: sha512-jJ0bqzaylmJtVnNgzTeSOs8DPavpbYgEr/b0YL8/2GO3xJEhInFmhKMUnEJQjZumK7KXGFhUy89PrsJWlakBVg==}
@@ -1665,7 +1674,7 @@ snapshots:
       '@tybys/wasm-util': 0.10.1
     optional: true
 
-  '@onecli-sh/sdk@0.5.0': {}
+  '@onecli-sh/sdk@2.2.1': {}
 
   '@oxc-project/types@0.124.0': {}
 
@@ -1963,7 +1972,7 @@ snapshots:
 
   character-entities@2.0.2: {}
 
-  chat@4.26.0:
+  chat@4.29.0:
     dependencies:
       '@workflow/serde': 4.1.0-beta.2
       mdast-util-to-string: 4.0.0

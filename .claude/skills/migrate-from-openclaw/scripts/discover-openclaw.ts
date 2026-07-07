@@ -418,23 +418,22 @@ interface GroupInfo {
 }
 
 /**
- * Map OpenClaw session key channel:kind:id to NanoClaw JID format.
- * OpenClaw keys: "whatsapp:group:120...@g.us", "telegram:group:-10012345"
- * NanoClaw JIDs: "120...@g.us", "tg:-10012345", "dc:12345", "slack:C12345"
+ * Map an OpenClaw session key (channel:kind:id) to the v2 platform_id the
+ * router stores. Mirrors src/platform-id.ts:namespacedPlatformId — Chat SDK
+ * channels prefix with "<channel>:"; native channels (WhatsApp/iMessage with
+ * an "@", Signal "+"/"group:") pass through unprefixed. setup/register.ts
+ * applies the same normalization to whatever you pass as --platform-id, so the
+ * value emitted here is what to feed register.
+ *
+ *   OpenClaw keys: "whatsapp:group:120...@g.us", "telegram:group:-10012345"
+ *   v2 platform_id: "120...@g.us", "telegram:-10012345", "discord:12345"
  */
-function toNanoClawJid(channel: string, id: string): string {
-  switch (channel) {
-    case 'whatsapp':
-      return id; // Already in JID format (120...@g.us)
-    case 'telegram':
-      return `tg:${id}`;
-    case 'discord':
-      return `dc:${id}`;
-    case 'slack':
-      return `slack:${id}`;
-    default:
-      return `${channel}:${id}`;
-  }
+function toV2PlatformId(channel: string, id: string): string {
+  if (id.startsWith(`${channel}:`)) return id;
+  if (id.includes('@')) return id; // WhatsApp / iMessage JIDs and emails
+  if (id.startsWith('+') || id.startsWith('group:')) return id; // Signal
+  if (channel === 'deltachat') return id;
+  return `${channel}:${id}`;
 }
 
 function detectGroups(
@@ -672,11 +671,12 @@ function main(): void {
     .map((c) => c.name)
     .join(',');
 
-  // Format groups as "channel:id(name)" — also include NanoClaw JID mapping
+  // Format groups as "channel:id(name)=>v2_platform_id". The right-hand value
+  // is what to pass as --platform-id to setup/register.ts.
   const groupList = groups
     .map(
       (g) =>
-        `${g.channel}:${g.id}(${g.name})=>${toNanoClawJid(g.channel, g.id)}`,
+        `${g.channel}:${g.id}(${g.name})=>${toV2PlatformId(g.channel, g.id)}`,
     )
     .join('|');
 

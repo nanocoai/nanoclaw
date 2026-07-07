@@ -16,6 +16,7 @@ NanoClaw doesn't ship channels in trunk. This skill copies the Telegram adapter,
 Skip to **Credentials** if all of these are already in place:
 
 - `src/channels/telegram.ts`, `telegram-pairing.ts`, `telegram-markdown-sanitize.ts` (and their `.test.ts` siblings) all exist
+- `src/channels/telegram-registration.test.ts` exists
 - `src/channels/index.ts` contains `import './telegram.js';`
 - `setup/pair-telegram.ts` exists and `setup/index.ts`'s `STEPS` map contains `'pair-telegram':`
 - `@chat-adapter/telegram` is listed in `package.json` dependencies
@@ -28,10 +29,11 @@ Otherwise continue. Every step below is safe to re-run.
 git fetch origin channels
 ```
 
-### 2. Copy the adapter, helpers, tests, and setup step
+### 2. Copy the adapter, helpers, tests, registration test, and setup step
 
 ```bash
 git show origin/channels:src/channels/telegram.ts                        > src/channels/telegram.ts
+git show origin/channels:src/channels/telegram-registration.test.ts      > src/channels/telegram-registration.test.ts
 git show origin/channels:src/channels/telegram-pairing.ts                > src/channels/telegram-pairing.ts
 git show origin/channels:src/channels/telegram-pairing.test.ts           > src/channels/telegram-pairing.test.ts
 git show origin/channels:src/channels/telegram-markdown-sanitize.ts      > src/channels/telegram-markdown-sanitize.ts
@@ -58,14 +60,19 @@ In `setup/index.ts`, add this entry to the `STEPS` map (right after the `registe
 ### 5. Install the adapter package (pinned)
 
 ```bash
-pnpm install @chat-adapter/telegram@4.27.0
+pnpm install @chat-adapter/telegram@4.29.0
 ```
 
-### 6. Build
+### 6. Build and validate
 
 ```bash
 pnpm run build
+pnpm exec vitest run src/channels/telegram-registration.test.ts
 ```
+
+Both must be clean before proceeding. `telegram-registration.test.ts` is the one integration test: it imports the real channel barrel and asserts the registry contains `telegram`. It goes red if the `import './telegram.js';` line is deleted or drifts, if the barrel fails to evaluate, or if `@chat-adapter/telegram` isn't installed (the import throws) — so it also implicitly verifies the dependency from step 5. The adapter also calls core's `createChatSdkBridge(...)`; that typed core-API consumption is guarded by `pnpm run build`.
+
+End-to-end message delivery against a real Telegram bot is verified manually once the service is running — see Next Steps and the pairing flow in Channel Info.
 
 ## Credentials
 

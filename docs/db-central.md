@@ -27,21 +27,24 @@ CREATE TABLE agent_groups (
 
 ### 1.2 `messaging_groups`
 
-One row per platform chat (one WhatsApp group, one Slack channel, one 1:1 DM, etc.).
+One row per platform chat (one WhatsApp group, one Slack channel, one 1:1 DM, etc.) per adapter instance.
 
 ```sql
 CREATE TABLE messaging_groups (
   id                    TEXT PRIMARY KEY,
   channel_type          TEXT NOT NULL,
   platform_id           TEXT NOT NULL,
+  instance              TEXT NOT NULL,
   name                  TEXT,
   is_group              INTEGER DEFAULT 0,
   unknown_sender_policy TEXT NOT NULL DEFAULT 'strict',
   created_at            TEXT NOT NULL,
-  UNIQUE(channel_type, platform_id)
+  denied_at             TEXT,
+  UNIQUE(channel_type, platform_id, instance)
 );
 ```
 
+- `instance`: adapter-instance name — N adapters of one platform (e.g. three Slack apps in one workspace) each own their rows. The default instance IS the channel type: migration 016 backfills `instance = channel_type` and `createMessagingGroup` stamps the same default, so single-instance installs never see the dimension. Inbound lookups are exact-on-instance (an unknown named instance auto-creates its own row); outbound lookups resolve default-instance-first.
 - `unknown_sender_policy`: `strict` (drop), `request_approval` (ask admin), `public` (allow).
 - **Readers:** `src/router.ts`, `src/delivery.ts`, `src/session-manager.ts`
 - **Writers:** `src/db/messaging-groups.ts`, channel setup flows
@@ -134,7 +137,7 @@ CREATE TABLE user_dms (
 );
 ```
 
-Populated lazily by `ensureUserDm()` in `src/user-dm.ts`.
+Populated lazily by `ensureUserDm()` in `src/user-dm.ts`. Cold DMs resolve via the channel's default adapter instance — `PRIMARY KEY (user_id, channel_type)` is per-platform, not per-instance.
 
 ### 1.8 `sessions`
 

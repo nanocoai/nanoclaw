@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Install the Telegram adapter, persist the bot token to .env + data/env/env,
+# Install the Telegram adapter, persist the bot token to .env,
 # restart the service, and open the bot's chat page in the local Telegram
 # client. Non-interactive — the operator-facing "Create a bot" instructions
 # and token paste live in setup/auto.ts. The token comes in via the
@@ -15,7 +15,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # Keep in sync with .claude/skills/add-telegram/SKILL.md.
-ADAPTER_VERSION="@chat-adapter/telegram@4.26.0"
+ADAPTER_VERSION="@chat-adapter/telegram@4.29.0"
 
 # Resolve which remote carries the channels branch — handles forks where
 # upstream lives on a different remote than `origin`.
@@ -133,10 +133,6 @@ BOT_USERNAME=""
 if echo "$INFO" | grep -q '"ok":true'; then
   BOT_USERNAME=$(echo "$INFO" | sed -nE 's/.*"username":"([^"]+)".*/\1/p')
 fi
-
-# Container reads from data/env/env (the host mounts it).
-mkdir -p data/env
-cp .env data/env/env
 
 # Browser/app deep-link is done by the parent driver (setup/channels/telegram.ts)
 # BEFORE this script runs — gated on a clack confirm so focus-stealing doesn't

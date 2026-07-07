@@ -11,7 +11,7 @@
 export type RequestFrame = {
   /** Correlation key set by the client. */
   id: string;
-  /** Registry name, e.g. "list-groups". */
+  /** Registry name, e.g. "groups-list". */
   command: string;
   /** Command-specific. Each command's parseArgs validates. */
   args: Record<string, unknown>;
@@ -24,10 +24,8 @@ export type ResponseFrame =
 export type ErrorCode =
   | 'unknown-command'
   | 'invalid-args'
-  | 'permission-denied'
   | 'forbidden'
   | 'approval-pending'
-  | 'not-found'
   | 'handler-error'
   | 'transport-error';
 
