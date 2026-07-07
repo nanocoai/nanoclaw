@@ -74,7 +74,7 @@ record is the point of having the policy.
 > Thanks for the report. To triage this as a security issue we need a minimal,
 > reproducible proof of concept that works on a correctly configured deployment,
 > using only input an attacker controls — see our
-> [security policy](../.github/SECURITY.md). Could you add the exact steps or
+> [security policy](https://github.com/nanocoai/nanoclaw/blob/main/.github/SECURITY.md). Could you add the exact steps or
 > input that trigger it, and the version you tested? If the reproduction requires
 > host access, source changes, or a malicious mount/config, it is out of scope as
 > a vulnerability, but may be a good **Hardening** report.
@@ -82,7 +82,7 @@ record is the point of having the policy.
 **Closing for no repro** (after a fair wait):
 
 > Closing for now — we could not confirm an in-scope, reproducible issue against
-> a correctly configured deployment (see the [security policy](../.github/SECURITY.md)).
+> a correctly configured deployment (see the [security policy](https://github.com/nanocoai/nanoclaw/blob/main/.github/SECURITY.md)).
 > This is not a judgment that nothing is here: if you can share a working
 > reproduction that meets the policy, please re-open this or file a new report
 > and we will take another look.
@@ -92,7 +92,7 @@ record is the point of having the policy.
 > Relabelling this as **Hardening**. It is a real resilience improvement, but it
 > does not cross a trust boundary on a correctly configured deployment (it
 > requires <host access / source changes / a malicious mount>), so under our
-> [security policy](../.github/SECURITY.md) we track it as a defense-in-depth
+> [security policy](https://github.com/nanocoai/nanoclaw/blob/main/.github/SECURITY.md) we track it as a defense-in-depth
 > improvement rather than a vulnerability. Thanks — this is still welcome.
 
 ## Labels

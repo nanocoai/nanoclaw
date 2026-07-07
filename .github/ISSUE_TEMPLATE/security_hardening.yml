@@ -41,7 +41,7 @@ body:
     id: boundary
     attributes:
       label: Related trust boundary (optional)
-      description: Which boundary from docs/SECURITY.md does this relate to?
+      description: Which boundary from the trust model (https://docs.nanoclaw.dev/concepts/security) does this relate to?
     validations:
       required: false
   - type: checkboxes
