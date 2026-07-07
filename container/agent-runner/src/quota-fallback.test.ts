@@ -138,8 +138,15 @@ describe('quota-degraded flag (notice de-dup)', () => {
 describe('maybeWarnApproachingQuota (proactive heads-up)', () => {
   const onlyText = () => getUndeliveredMessages().map((m) => JSON.parse(m.content).text);
 
-  it('warns once when utilization crosses the 90% threshold', () => {
-    maybeWarnApproachingQuota({ utilization: 91, resetsAt: 1000 }, ROUTING, true);
+  const fiveHour = (util: number, resetsAt: number, warning = false) => ({
+    utilization: util,
+    resetsAt,
+    warning,
+    window: 'five_hour',
+  });
+
+  it('warns once when the five_hour window crosses the 90% threshold', () => {
+    maybeWarnApproachingQuota(fiveHour(91, 1000), ROUTING, true);
     const out = onlyText();
     expect(out).toHaveLength(1);
     expect(out[0]).toContain('91%');
@@ -147,26 +154,35 @@ describe('maybeWarnApproachingQuota (proactive heads-up)', () => {
   });
 
   it('does NOT warn below the threshold', () => {
-    maybeWarnApproachingQuota({ utilization: 80, resetsAt: 1000 }, ROUTING, true);
+    maybeWarnApproachingQuota(fiveHour(80, 1000), ROUTING, true);
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
-  it('warns on the SDK warning flag even without a utilization number', () => {
-    maybeWarnApproachingQuota({ warning: true, resetsAt: 1000 }, ROUTING, true);
-    expect(getUndeliveredMessages()).toHaveLength(1);
+  it('does NOT warn on a non-session window even at high utilization', () => {
+    // The false-alarm shape from production: a weekly window at 95% while the
+    // 5-hour session window is nearly empty. Must stay silent.
+    maybeWarnApproachingQuota({ utilization: 95, resetsAt: 1000, window: 'seven_day' }, ROUTING, true);
+    maybeWarnApproachingQuota({ utilization: 99, resetsAt: 1000, window: 'seven_day_opus' }, ROUTING, true);
+    expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
-  it('normalizes a 0-1 fraction encoding', () => {
-    maybeWarnApproachingQuota({ utilization: 0.93, resetsAt: 1000 }, ROUTING, true);
-    const out = onlyText();
-    expect(out).toHaveLength(1);
-    expect(out[0]).toContain('93%');
+  it('does NOT warn on the SDK warning flag alone (unreliable — fires at 1%)', () => {
+    // Exact production shape: five_hour flagged warning but only 1% used.
+    maybeWarnApproachingQuota(fiveHour(1, 1000, true), ROUTING, true);
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('treats utilization as a straight 0-100 percentage (1 means 1%, not 100%)', () => {
+    // Regression guard: an earlier fraction-rescale turned a genuine `1` (1%)
+    // into 100% and false-alarmed. A value of 1 must stay 1% → no warning.
+    maybeWarnApproachingQuota(fiveHour(1, 1000), ROUTING, true);
+    expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
   it('fires at most once per window (same resetsAt)', () => {
-    maybeWarnApproachingQuota({ utilization: 92, resetsAt: 1000 }, ROUTING, true);
-    maybeWarnApproachingQuota({ utilization: 95, resetsAt: 1000 }, ROUTING, true);
-    maybeWarnApproachingQuota({ utilization: 99, resetsAt: 1000 }, ROUTING, true);
+    maybeWarnApproachingQuota(fiveHour(92, 1000), ROUTING, true);
+    maybeWarnApproachingQuota(fiveHour(95, 1000), ROUTING, true);
+    maybeWarnApproachingQuota(fiveHour(99, 1000), ROUTING, true);
     expect(getUndeliveredMessages()).toHaveLength(1);
   });
 
@@ -174,13 +190,13 @@ describe('maybeWarnApproachingQuota (proactive heads-up)', () => {
     // Distinct percentages so the identical-text idempotent-outbound guard
     // (60s window) doesn't collapse them — in production the two windows are
     // hours apart anyway.
-    maybeWarnApproachingQuota({ utilization: 92, resetsAt: 1000 }, ROUTING, true);
-    maybeWarnApproachingQuota({ utilization: 96, resetsAt: 2000 }, ROUTING, true);
+    maybeWarnApproachingQuota(fiveHour(92, 1000), ROUTING, true);
+    maybeWarnApproachingQuota(fiveHour(96, 2000), ROUTING, true);
     expect(getUndeliveredMessages()).toHaveLength(2);
   });
 
   it('uses no-fallback wording when no overflow provider is configured', () => {
-    maybeWarnApproachingQuota({ utilization: 91, resetsAt: 1000 }, ROUTING, false);
+    maybeWarnApproachingQuota(fiveHour(91, 1000), ROUTING, false);
     const out = onlyText();
     expect(out).toHaveLength(1);
     expect(out[0]).not.toContain('Codex');

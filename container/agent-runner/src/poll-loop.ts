@@ -589,23 +589,33 @@ export function maybeWarnApproachingQuota(
   routing: RoutingContext,
   hasFallback: boolean,
 ): void {
+  // Only the 5-hour SESSION window maps to the "about to run out and switch to
+  // Codex" experience — it's the window whose exhaustion produces "You've hit
+  // your session limit". The 7-day / per-model weekly windows are a slower,
+  // separate budget; warning on them produced confusing false alarms (observed
+  // live: a longer window at 95% firing while the session window was nearly
+  // empty, so the user was genuinely far from the limit that matters).
+  if (event.window !== 'five_hour') return;
+
   const threshold = quotaWarnThresholdPct();
-  // Normalize: the field is documented 0-100 on the usage endpoint, but guard
-  // against a 0-1 fraction encoding just in case.
-  let pct = event.utilization;
-  if (pct !== undefined && pct > 0 && pct <= 1) pct = pct * 100;
+  // Utilization is a straight 0-100 percentage (confirmed live: a 1% window
+  // reports `1`). Do NOT rescale — an earlier 0-1 "fraction guard" turned a
+  // genuine `1` (1%) into 100% and false-alarmed.
+  const pct = event.utilization;
 
-  const approaching = (pct !== undefined && pct >= threshold) || event.warning === true;
-  if (!approaching) return;
+  // Require a real utilization reading at/over the threshold. The SDK's
+  // `allowed_warning` status is NOT a trigger on its own — observed firing on
+  // the seven_day window at 1% utilization, which would spam a bogus warning.
+  if (pct === undefined || pct < threshold) return;
 
-  // One warning per window: key on the reset timestamp when present (so the
-  // key naturally changes each window), else fall back to the window name.
-  const windowKey = event.resetsAt != null ? `r:${event.resetsAt}` : `w:${event.window ?? 'default'}`;
+  // One warning per window: key on the reset timestamp so the key naturally
+  // changes each new session window and re-arms the warning.
+  const windowKey = event.resetsAt != null ? `r:${event.resetsAt}` : 'five_hour';
   if (getQuotaWarnedWindow() === windowKey) return;
   setQuotaWarnedWindow(windowKey);
 
-  const pctText = pct !== undefined ? `${Math.round(pct)}%` : 'סף השימוש';
-  log(`Approaching quota (${pctText}, window ${windowKey}) — sending one-time heads-up`);
+  const pctText = `${Math.round(pct)}%`;
+  log(`Approaching quota (${pctText}, five_hour window ${windowKey}) — sending one-time heads-up`);
   writeNotice(routing, nearQuotaNotice(pctText, hasFallback));
 }
 
