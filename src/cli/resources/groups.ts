@@ -32,6 +32,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     packages_npm: JSON.parse(row.packages_npm),
     additional_mounts: JSON.parse(row.additional_mounts),
     cli_scope: row.cli_scope,
+    env: JSON.parse(row.env),
     updated_at: row.updated_at,
   };
 }
@@ -397,6 +398,49 @@ registerResource({
           removed: { apt: apt || null, npm: npm || null },
           note: 'Image rebuild required for package changes to take effect.',
         };
+      },
+    },
+    'config set-env': {
+      access: 'approval',
+      description:
+        'Set a container env var for a group. Requires `ncl groups restart` to take effect. Use --id <group-id> --key <VAR_NAME> --value <val>.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+        const key = args.key as string | undefined;
+        const value = args.value as string | undefined;
+        if (!key) throw new Error('--key is required');
+        if (value === undefined) throw new Error('--value is required');
+
+        const row = getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
+
+        const env = JSON.parse(row.env) as Record<string, string>;
+        env[key] = value;
+        updateContainerConfigJson(id, 'env', env);
+
+        return { set: { [key]: value }, env };
+      },
+    },
+    'config unset-env': {
+      access: 'approval',
+      description:
+        'Remove a container env var from a group. Requires `ncl groups restart` to take effect. Use --id <group-id> --key <VAR_NAME>.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+        const key = args.key as string | undefined;
+        if (!key) throw new Error('--key is required');
+
+        const row = getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
+
+        const env = JSON.parse(row.env) as Record<string, string>;
+        if (!(key in env)) throw new Error(`Env var "${key}" not set on this group`);
+        delete env[key];
+        updateContainerConfigJson(id, 'env', env);
+
+        return { unset: key, env };
       },
     },
   },
