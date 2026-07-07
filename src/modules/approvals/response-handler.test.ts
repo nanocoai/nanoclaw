@@ -204,4 +204,54 @@ describe('approval response authorization', () => {
     expect(handler).toHaveBeenCalledTimes(1);
     expect(getPendingApproval('appr-4')).toBeUndefined();
   });
+
+  it('runs the approve handler exactly once under concurrent double-resolution', async () => {
+    upsertUser({ id: 'telegram:owner', kind: 'telegram', display_name: 'Owner', created_at: now() });
+    grantRole({ user_id: 'telegram:owner', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now() });
+
+    const { registerApprovalHandler } = await import('./primitive.js');
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+
+    // Gate the handler open so both resolutions are in flight before it settles:
+    // the guard must be the up-front claim, not handler timing. Without the
+    // claim-before-apply CAS, the second resolution reads the still-present row
+    // (the row was deleted only after the handler) and runs the irreversible
+    // handler a second time.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const handler = vi.fn().mockImplementation(() => gate);
+    registerApprovalHandler('irreversible_send', handler);
+
+    createPendingApproval({
+      approval_id: 'appr-race',
+      session_id: 'sess-1',
+      request_id: 'appr-race',
+      action: 'irreversible_send',
+      payload: JSON.stringify({ to: 'x@example.com' }),
+      created_at: now(),
+      title: 'Send mail',
+      options_json: JSON.stringify([]),
+    });
+
+    const fire = () =>
+      handleApprovalsResponse({
+        questionId: 'appr-race',
+        value: 'approve',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+
+    const first = fire();
+    const second = fire();
+    release();
+    const [firstClaimed] = await Promise.all([first, second]);
+
+    expect(firstClaimed).toBe(true);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(getPendingApproval('appr-race')).toBeUndefined();
+  });
 });
