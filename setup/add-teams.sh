@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Install the Teams adapter, persist TEAMS_APP_ID / _PASSWORD / _TENANT_ID /
-# _TYPE to .env + data/env/env, and restart the service. Non-interactive —
+# _TYPE to .env, and restart the service. Non-interactive —
 # the operator-facing Azure portal walkthroughs live in
 # setup/channels/teams.ts. Credentials come in via env vars:
 #   TEAMS_APP_ID            (required)
@@ -18,7 +18,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # Keep in sync with .claude/skills/add-teams/SKILL.md.
-ADAPTER_VERSION="@chat-adapter/teams@4.26.0"
+ADAPTER_VERSION="@chat-adapter/teams@4.29.0"
 
 # Resolve which remote carries the channels branch — handles forks where
 # upstream lives on a different remote than `origin`.
@@ -113,10 +113,6 @@ upsert_env TEAMS_APP_TYPE "$TEAMS_APP_TYPE"
 if [ -n "${TEAMS_APP_TENANT_ID:-}" ]; then
   upsert_env TEAMS_APP_TENANT_ID "$TEAMS_APP_TENANT_ID"
 fi
-
-# Container reads from data/env/env (the host mounts it).
-mkdir -p data/env
-cp .env data/env/env
 
 log "Restarting service so the new adapter picks up the credentials…"
 # shellcheck source=setup/lib/install-slug.sh

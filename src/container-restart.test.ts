@@ -26,6 +26,12 @@ vi.mock('./db/sessions.js', () => ({
 const mockWriteSessionMessage = vi.fn();
 vi.mock('./session-manager.js', () => ({
   writeSessionMessage: (...args: unknown[]) => mockWriteSessionMessage(...args),
+  openInboundDb: () => ({}),
+}));
+
+const mockCountDueMessages = vi.fn((..._args: unknown[]) => 0);
+vi.mock('./db/session-db.js', () => ({
+  countDueMessages: (...args: unknown[]) => mockCountDueMessages(...args),
 }));
 
 import { restartAgentGroupContainers } from './container-restart.js';
@@ -147,5 +153,22 @@ describe('restartAgentGroupContainers', () => {
     // Each session gets its own on-wake message
     expect(mockWriteSessionMessage.mock.calls[0][1]).toBe('s1');
     expect(mockWriteSessionMessage.mock.calls[1][1]).toBe('s2');
+  });
+
+  it('wakes even without a wake message when in-flight messages are pending', () => {
+    // A provider switch mid-conversation kills a container holding claimed
+    // messages — without an immediate respawn those messages stay dark until
+    // the next inbound or a slow sweep backoff.
+    mockGetSessionsByAgentGroup.mockReturnValue([makeSession('s1', 'ag1')]);
+    mockIsContainerRunning.mockReturnValue(true);
+    mockCountDueMessages.mockReturnValue(2);
+
+    restartAgentGroupContainers('ag1', 'provider switch');
+
+    const onExit = mockKillContainer.mock.calls[0][2] as () => void;
+    expect(typeof onExit).toBe('function');
+    mockGetSession.mockReturnValue(makeSession('s1', 'ag1'));
+    onExit();
+    expect(mockWakeContainer).toHaveBeenCalled();
   });
 });

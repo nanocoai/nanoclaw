@@ -30,10 +30,11 @@
  * For direct-addressable channels (telegram, whatsapp, etc.), --platform-id
  * is typically the same as the handle in --user-id, with the channel prefix.
  */
+import fs from 'fs';
 import net from 'net';
 import path from 'path';
 
-import { DATA_DIR } from '../src/config.js';
+import { DATA_DIR, GROUPS_DIR } from '../src/config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import { initDb } from '../src/db/connection.js';
 import {
@@ -47,8 +48,7 @@ import { normalizeName } from '../src/modules/agent-to-agent/db/agent-destinatio
 import { addMember } from '../src/modules/permissions/db/agent-group-members.js';
 import { getUserRoles, grantRole } from '../src/modules/permissions/db/user-roles.js';
 import { upsertUser } from '../src/modules/permissions/db/users.js';
-import { updateContainerConfigScalars } from '../src/db/container-configs.js';
-import { initGroupFilesystem } from '../src/group-init.js';
+import { ensureContainerConfig, updateContainerConfigScalars } from '../src/db/container-configs.js';
 import { namespacedPlatformId } from '../src/platform-id.js';
 import type { AgentGroup, MessagingGroup } from '../src/types.js';
 
@@ -189,6 +189,7 @@ async function main(): Promise<void> {
 
   // 2. Agent group + filesystem.
   const folder = `dm-with-${normalizeName(args.displayName)}`;
+  const pickedProvider = process.env.NANOCLAW_PICKED_PROVIDER?.trim().toLowerCase();
   let ag: AgentGroup | undefined = getAgentGroupByFolder(folder);
   if (!ag) {
     const agId = generateId('ag');
@@ -204,12 +205,23 @@ async function main(): Promise<void> {
   } else {
     console.log(`Reusing agent group: ${ag.id} (${folder})`);
   }
-  initGroupFilesystem(ag, {
-    instructions:
-      `# ${args.agentName}\n\n` +
+  // Ensure the config row exists; defer workspace scaffolding to the first
+  // spawn (group-init), where the DB-resolved provider decides the surface
+  // (Claude: CLAUDE.local.md; a surfaces-owning provider: the memory scaffold)
+  // — so a non-Claude group never gets stale CLAUDE.* files written here.
+  ensureContainerConfig(ag.id);
+  // Runtime provider lives on the config row, not the deprecated agent_provider.
+  if (pickedProvider && pickedProvider !== 'claude') {
+    updateContainerConfigScalars(ag.id, { provider: pickedProvider });
+  }
+  const groupDir = path.resolve(GROUPS_DIR, folder);
+  fs.mkdirSync(groupDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(groupDir, '.seed.md'),
+    `# ${args.agentName}\n\n` +
       `You are ${args.agentName}, a personal NanoClaw agent for ${args.displayName}. ` +
-      'When the user first reaches out (or you receive a system welcome prompt), introduce yourself briefly and invite them to chat. Keep replies concise.',
-  });
+      'When the user first reaches out (or you receive a system welcome prompt), introduce yourself briefly and invite them to chat. Keep replies concise.\n',
+  );
 
   // 2b. Assign the user a role for this agent group. The caller picks via
   // --role; the channel drivers default to 'owner' for the self-host case.

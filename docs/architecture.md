@@ -1,5 +1,7 @@
 # NanoClaw Architecture (Draft)
 
+> **Draft — design intent, not a line-by-line spec.** Some passages predate the current implementation and can drift from it. The root [CLAUDE.md](../CLAUDE.md) and the cited source files (`src/`, `container/agent-runner/src/`) are the source of truth; when this doc and the code disagree, trust the code. Notably, scheduling MCP tools do **not** write `inbound.db` directly — they emit `messages_out` system actions that the host applies (see [agent-runner-details.md](agent-runner-details.md) and `src/modules/scheduling/`).
+
 ## Core Idea
 
 Each agent session has a mounted SQLite DB. The DB is the one and only IO mechanism between host and container. No IPC files, no stdin piping. Two tables: messages_in (host → agent-runner) and messages_out (agent-runner → host). Everything is a message.
@@ -128,7 +130,6 @@ Non-Chat-SDK channels (WhatsApp via Baileys, Gmail, custom integrations) impleme
 The host is an orchestrator:
 1. **Spawn** — when wakeUpAgent is called and no container exists for the session
 2. **Idle kill** — when a container has no unprocessed messages for some timeout period
-3. **Limits** — MAX_CONCURRENT_CONTAINERS caps active containers
 
 When a container spins up, the agent-runner immediately starts polling its session DB. Messages are already there waiting.
 
@@ -244,7 +245,7 @@ One-shot and recurring tasks use the same tables — no separate scheduler.
 
 **Active container poll** (~1s) checks the same conditions but only for sessions with running containers.
 
-**Agent-runner creates schedules** by writing messages_in (to itself) or messages_out (reminders/notifications) with `process_after` and optionally `recurrence`.
+**Agent-runner creates schedules** by emitting a `messages_out` row with `kind: 'system'` and an `action` (`schedule_task`, `cancel_task`, …) — it cannot write host-owned `inbound.db` directly. The host applies the action during delivery (`src/modules/scheduling/actions.ts`), inserting/updating the `kind: 'task'` `messages_in` row with `process_after` and optionally `recurrence`.
 
 ### messages_in content by kind
 
@@ -555,7 +556,7 @@ const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const GMAIL_CREDS = process.env.GMAIL_CREDENTIALS_PATH;
 ```
 
-Shared config (DATA_DIR, TIMEZONE, MAX_CONCURRENT_CONTAINERS) stays in `config.ts`. Channel/skill-specific config stays in the module that uses it.
+Shared config (DATA_DIR, TIMEZONE) stays in `config.ts`. Channel/skill-specific config stays in the module that uses it.
 
 ### Code Style
 
@@ -668,15 +669,19 @@ CREATE TABLE agent_groups (
 );
 
 -- Platform groups/channels (WhatsApp group, Slack channel, Discord channel, email thread, etc.)
+-- One row per chat PER ADAPTER INSTANCE. instance defaults to channel_type
+-- (the "default instance"), so single-instance installs never see it.
 CREATE TABLE messaging_groups (
   id                     TEXT PRIMARY KEY,
   channel_type           TEXT NOT NULL,     -- 'whatsapp', 'slack', 'discord', 'telegram', 'email'
   platform_id            TEXT NOT NULL,     -- platform-specific ID (JID, channel ID, etc.)
+  instance               TEXT NOT NULL,     -- adapter-instance name; default = channel_type
   name                   TEXT,
   is_group               INTEGER DEFAULT 0,
   unknown_sender_policy  TEXT NOT NULL DEFAULT 'strict',  -- 'strict' | 'request_approval' | 'public'
   created_at             TEXT NOT NULL,
-  UNIQUE(channel_type, platform_id)
+  denied_at              TEXT,
+  UNIQUE(channel_type, platform_id, instance)
 );
 
 -- Users (messaging platform identities, namespaced "<channel_type>:<handle>")
@@ -825,7 +830,7 @@ Mixed batches (e.g., a chat message + a system result both pending) are combined
 
 ### MCP Tools
 
-MCP tools write directly to the session DB.
+MCP tools write to the container's own `outbound.db`. Anything that needs a change in host-owned `inbound.db` (schedule/cancel/pause/resume/update a task, register a group) is emitted as a `kind: 'system'` `messages_out` action that the host applies during delivery — the container never writes `inbound.db`.
 
 **Core tools:**
 
@@ -833,9 +838,9 @@ MCP tools write directly to the session DB.
 |------|-------------|
 | `send_message` | Write `messages_out` row, `kind: 'chat'` |
 | `send_file` | Move file to `outbox/{msg_id}/`, write `messages_out` with filenames |
-| `schedule_task` | Write `messages_in` row (to self) with `process_after` + `recurrence`. Or `messages_out` with `deliver_after` for outbound reminders. |
-| `list_tasks` | Query `messages_in WHERE recurrence IS NOT NULL` |
-| `pause_task` / `resume_task` / `cancel_task` | Modify `messages_in` rows (update status, clear/set recurrence) |
+| `schedule_task` | Write `messages_out`, `kind: 'system'`, `action: 'schedule_task'`; host inserts the `kind: 'task'` `messages_in` row with `process_after` + optional `recurrence` |
+| `list_tasks` | Read `messages_in` (read-only mount) — one row per series: `kind = 'task' AND status IN ('pending','paused') GROUP BY series_id` |
+| `pause_task` / `resume_task` / `cancel_task` | Write `messages_out`, `kind: 'system'`, matching `action`; host updates the live `messages_in` row(s) |
 | `register_agent_group` | Write `messages_out`, `kind: 'system'`, `action: 'register_agent_group'` |
 
 **New tools:**

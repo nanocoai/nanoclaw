@@ -181,14 +181,6 @@ export function syncProcessingAcks(inDb: Database.Database, outDb: Database.Data
   })();
 }
 
-export function getStuckProcessingIds(outDb: Database.Database): string[] {
-  return (
-    outDb.prepare("SELECT message_id FROM processing_ack WHERE status = 'processing'").all() as Array<{
-      message_id: string;
-    }>
-  ).map((r) => r.message_id);
-}
-
 export interface ProcessingClaim {
   message_id: string;
   status_changed: string;

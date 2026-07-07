@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Install the iMessage adapter, persist mode/creds to .env + data/env/env,
+# Install the iMessage adapter, persist mode/creds to .env,
 # and restart the service. Non-interactive — the Full Disk Access walkthrough
 # (local mode) and Photon URL/key prompts (remote mode) live in
 # setup/channels/imessage.ts. Creds come in via env vars:
@@ -134,10 +134,6 @@ else
   upsert_env IMESSAGE_API_KEY "$IMESSAGE_API_KEY"
   remove_env IMESSAGE_ENABLED
 fi
-
-# Container reads from data/env/env (the host mounts it).
-mkdir -p data/env
-cp .env data/env/env
 
 log "Restarting service so the new adapter picks up the creds…"
 # shellcheck source=setup/lib/install-slug.sh

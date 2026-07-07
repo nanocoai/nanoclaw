@@ -7,6 +7,8 @@ description: Add a persistent wiki knowledge base to a NanoClaw group. Based on 
 
 Set up a persistent wiki knowledge base on NanoClaw, based on Karpathy's LLM Wiki pattern.
 
+Each step is safe to re-run: directory creation uses `mkdir -p`, initial wiki files are created only if absent, the container skill is preserved unless the user opts to update it, and the group CLAUDE.md section is replaced in place via marker comments rather than duplicated.
+
 ## Step 1: Read the pattern
 
 Read `${CLAUDE_SKILL_DIR}/llm-wiki.md` — this is the full LLM Wiki idea as written by Karpathy. Understand it thoroughly before proceeding. Summarize the core idea to the user briefly, then discuss what they want to build.
@@ -33,15 +35,26 @@ Based on this discussion, create three things:
 
 ### 3a. Directory structure
 
-Create `wiki/` and `sources/` directories in the group folder. Create initial `index.md` and `log.md` per the pattern's Indexing and Logging section. Adapt to the user's domain.
+Create `wiki/` and `sources/` directories in the group folder (`mkdir -p` — safe if they already exist). Create initial `index.md` and `log.md` per the pattern's Indexing and Logging section, adapted to the user's domain. Skip any of these files that already exist so a populated wiki is never clobbered on re-run.
 
 ### 3b. Container skill
 
-Create a `container/skills/wiki/SKILL.md` tailored to this user's wiki. This is the schema layer from the pattern — it tells the agent how to maintain the wiki. Base it on the pattern's Operations section (ingest, query, lint) and the conventions you agreed on with the user. Don't over-prescribe — the pattern says "your LLM figures out the rest."
+Create `container/skills/wiki/SKILL.md` tailored to this user's wiki. This is the schema layer from the pattern — it tells the agent how to maintain the wiki. Base it on the pattern's Operations section (ingest, query, lint) and the conventions you agreed on with the user. Don't over-prescribe — the pattern says "your LLM figures out the rest."
+
+If `container/skills/wiki/SKILL.md` already exists, ask the user whether to update it before overwriting, so an existing tailored schema is preserved on re-run.
 
 ### 3c. Group CLAUDE.md
 
-Edit the group's CLAUDE.md to add a wiki section. This is critical — it's what turns the agent into a wiki maintainer. It should:
+Edit the group's CLAUDE.md to add a wiki section, wrapped in marker comments so it can be located and replaced on re-run:
+
+```markdown
+<!-- BEGIN karpathy-llm-wiki -->
+## Wiki
+...section body...
+<!-- END karpathy-llm-wiki -->
+```
+
+If a `<!-- BEGIN karpathy-llm-wiki -->` block already exists, replace it in place rather than appending a second copy. This is critical — it's what turns the agent into a wiki maintainer. The section should:
 
 - Explain the wiki system concisely: what it is, the three layers (sources, wiki, schema), the three operations (ingest, query, lint)
 - Index the key files and folders (`wiki/`, `sources/`, `wiki/index.md`, `wiki/log.md`)

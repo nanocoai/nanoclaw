@@ -13,7 +13,7 @@ Tools exposed:
 
 Model management (download, delete) is done through the **Atomic Chat desktop UI** — the app is a fork of Jan and manages its own model library.
 
-The skill ships the MCP server source in this folder and copies it into the agent-runner tree at install time, then wires it up with small edits to `index.ts`, `providers/claude.ts`, and `container-runner.ts`. No branch merge — all edits are additive and idempotent.
+The skill ships the MCP server source (and its test) in this folder and copies them into the agent-runner tree at install time, then registers the server in `index.ts` and forwards host env vars in `container-runner.ts`. Registering the server is enough to expose its tools — the agent's allow-pattern (`mcp__atomic_chat__*`) is derived from the registered server name.
 
 ## Phase 1: Pre-flight
 
@@ -39,10 +39,19 @@ If the request fails:
 
 ## Phase 2: Apply Code Changes
 
-### Copy the MCP server source
+### Copy the skill's source and tests into both trees
+
+This skill reaches into both the container (Bun) tree and the host (Node) tree, so its
+files go into both, alongside the integration points they cover.
 
 ```bash
-cp .claude/skills/add-atomic-chat-tool/atomic-chat-mcp-stdio.ts container/agent-runner/src/atomic-chat-mcp-stdio.ts
+S=.claude/skills/add-atomic-chat-tool
+# Container (Bun) tree — the MCP server and the registration wiring test
+cp $S/atomic-chat-mcp-stdio.ts        container/agent-runner/src/atomic-chat-mcp-stdio.ts
+cp $S/atomic-chat-registration.test.ts container/agent-runner/src/atomic-chat-registration.test.ts
+# Host (Node) tree — the env-forwarding helper and the wiring test
+cp $S/atomic-chat-env.ts              src/atomic-chat-env.ts
+cp $S/atomic-chat-wiring.test.ts      src/atomic-chat-wiring.test.ts
 ```
 
 ### Register the MCP server in the agent-runner
@@ -79,39 +88,30 @@ Add an `atomic_chat` entry alongside `nanoclaw`:
   };
 ```
 
-### Add the tool glob to the allowlist
-
-Edit `container/agent-runner/src/providers/claude.ts`. Find `'mcp__nanoclaw__*',` in the `TOOL_ALLOWLIST` array and add `'mcp__atomic_chat__*',` on the following line:
-
-```ts
-  'mcp__nanoclaw__*',
-  'mcp__atomic_chat__*',
-];
-```
+`atomic-chat-registration.test.ts` asserts this entry is present and points at the server module — the tool only appears to the agent if it is registered here.
 
 ### Forward host env vars into the container
 
-Edit `src/container-runner.ts` in `buildContainerArgs`. Find the `TZ` env line:
+The env-forwarding logic lives in the copied `src/atomic-chat-env.ts` (`atomicChatEnvArgs()`), so the reach-in into `buildContainerArgs` is a single call.
+
+Import it in `src/container-runner.ts` (alongside the other local imports):
+
+```ts
+import { atomicChatEnvArgs } from './atomic-chat-env.js';
+```
+
+Then, in `buildContainerArgs`, find the `TZ` env line and add the call right after it:
 
 ```ts
   args.push('-e', `TZ=${TIMEZONE}`);
+  args.push(...atomicChatEnvArgs());
 ```
 
-Add ATOMIC_CHAT forwarding right after it:
-
-```ts
-  args.push('-e', `TZ=${TIMEZONE}`);
-
-  // Atomic Chat MCP tool: forward host overrides if set (default is host.docker.internal:1337).
-  if (process.env.ATOMIC_CHAT_HOST) {
-    args.push('-e', `ATOMIC_CHAT_HOST=${process.env.ATOMIC_CHAT_HOST}`);
-  }
-  if (process.env.ATOMIC_CHAT_API_KEY) {
-    args.push('-e', `ATOMIC_CHAT_API_KEY=${process.env.ATOMIC_CHAT_API_KEY}`);
-  }
-```
+`atomic-chat-wiring.test.ts` asserts this `args.push(...atomicChatEnvArgs())` call exists inside `buildContainerArgs`.
 
 ### Surface `[ATOMIC]` log lines at info level
+
+> **Shared block.** This rewrites the `container.stderr` logger, which other local-model tools (e.g. `add-ollama-tool` for `[OLLAMA]`) also edit to surface their own prefix. Touch only the `[ATOMIC]` branch and leave the rest of the block intact, so the edits coexist and removal restores it cleanly.
 
 In the same file, find the stderr logger:
 
@@ -157,10 +157,18 @@ Append to `.env.example`:
 ```bash
 pnpm run build
 pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
+# Host tree: buildContainerArgs wiring
+pnpm exec vitest run src/atomic-chat-wiring.test.ts
+# Container tree: index.ts registration
+(cd container/agent-runner && bun test src/atomic-chat-registration.test.ts)
 ./container/build.sh
 ```
 
-All three must be clean before proceeding.
+All must be clean before proceeding. The wiring and registration tests confirm the two
+integration points — the `buildContainerArgs` call and the `index.ts` registration — are
+actually in place; a failure means one drifted. (The MCP server's own request/response
+behavior against Atomic Chat is the author's build-time concern, not part of these tests —
+verify it manually in Phase 4.)
 
 ## Phase 3: Configure
 
@@ -218,9 +226,8 @@ Look for:
 
 The agent is looking for a CLI that doesn't exist instead of using the MCP tools. This means:
 1. The MCP server wasn't copied — check `container/agent-runner/src/atomic-chat-mcp-stdio.ts` exists
-2. The MCP server wasn't registered — check `container/agent-runner/src/index.ts` has the `atomic_chat` entry in `mcpServers`
-3. The allowlist wasn't updated — check `container/agent-runner/src/providers/claude.ts` includes `mcp__atomic_chat__*` in `TOOL_ALLOWLIST`
-4. The container wasn't rebuilt — run `./container/build.sh`
+2. The MCP server wasn't registered — check `container/agent-runner/src/index.ts` has the `atomic_chat` entry in `mcpServers` (the allow-pattern is derived from this, so registration is the only thing to check)
+3. The container wasn't rebuilt — run `./container/build.sh`
 
 ### "Failed to connect to Atomic Chat"
 

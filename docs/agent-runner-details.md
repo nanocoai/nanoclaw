@@ -596,7 +596,7 @@ Schedule a one-shot or recurring task.
 }
 ```
 
-Implementation: write a `messages_in` row (to self) with `kind: 'task'`, `process_after`, and optionally `recurrence`. The host sweep picks it up when due.
+Implementation: the container can't write host-owned `inbound.db`, so this writes a `messages_out` row with `kind: 'system'` and `action: 'schedule_task'` (`container/agent-runner/src/mcp-tools/scheduling.ts`). During delivery the host's action handler (`src/modules/scheduling/actions.ts` → `insertTask()` in `src/modules/scheduling/db.ts`) inserts the `kind: 'task'` row into `inbound.db` with `process_after` and optionally `recurrence`. The host sweep picks it up when due.
 
 #### list_tasks
 
@@ -609,7 +609,7 @@ List active scheduled/recurring tasks.
 }
 ```
 
-Implementation: query `messages_in WHERE recurrence IS NOT NULL AND status != 'failed'`.
+Implementation: a read, not a write — the container may read the read-only `inbound.db` mount directly. Returns one row per series (the live pending/paused occurrence): `SELECT series_id AS id, ... FROM messages_in WHERE kind = 'task' AND status IN ('pending','paused') GROUP BY series_id`. See `container/agent-runner/src/mcp-tools/scheduling.ts`.
 
 #### cancel_task / pause_task / resume_task / update_task
 
@@ -625,7 +625,7 @@ Modify a scheduled task.
 // update_task: merge { prompt?, recurrence?, processAfter?, script? } into the live row
 ```
 
-Implementation: cancel/pause/resume update the live row(s) directly. update_task is sent as a system action — the host reads current content, merges supplied fields, and writes back. All four match by `(id = ? OR series_id = ?) AND kind='task' AND status IN ('pending','paused')`, so they reach the live next occurrence of a recurring task even when the agent passes the original (now-completed) id.
+Implementation: all four are sent as system actions (`messages_out`, `kind: 'system'`, `action: 'cancel_task' | 'pause_task' | 'resume_task' | 'update_task'`) — the container never writes `inbound.db`. The host's handlers in `src/modules/scheduling/actions.ts` apply the change against `inbound.db` via `src/modules/scheduling/db.ts`: cancel/pause/resume flip status on the live row(s); update_task reads current content, merges supplied fields, and writes back. All four match by `(id = ? OR series_id = ?) AND kind='task' AND status IN ('pending','paused')`, so they reach the live next occurrence of a recurring task even when the agent passes the original (now-completed) id.
 
 #### register_agent_group
 
@@ -712,9 +712,9 @@ These are ephemeral to the container's lifetime. When the container is killed an
 
 The agent-runner receives configuration via:
 
-- **Environment variables:** `AGENT_PROVIDER` (claude/codex/opencode), `NANOCLAW_ADMIN_USER_ID`, provider-specific vars (API keys, model overrides), `TZ`
+- **`container.json`:** The provider name, model, assistant name, MCP servers, and other NanoClaw config are read from `/workspace/agent/container.json` (materialized by the host from the `container_configs` table), not from environment variables. See `container/agent-runner/src/config.ts`.
+- **Environment variables:** provider-specific vars only (API keys, model overrides), `TZ`.
 - **Fixed mount paths:** Session DB at `/workspace/session.db`. Agent group folder at `/workspace/agent/`. System prompt from `/workspace/agent/CLAUDE.md` and `/workspace/global/CLAUDE.md`.
-- **Optional startup config:** Some config may be passed as a JSON file at a fixed path (e.g., `/workspace/config.json`) for things like the session ID to resume, assistant name, and admin user ID. This avoids overloading environment variables.
 
 The agent-runner reads config, creates the provider, and enters the poll loop. No stdin, no initial prompt — messages are already in the session DB.
 
@@ -731,7 +731,7 @@ function createProvider(name: ProviderName, config: ProviderConfig): AgentProvid
 }
 ```
 
-The provider name comes from the container's environment (`AGENT_PROVIDER` env var), set by the host based on `agent_groups.agent_provider` or `sessions.agent_provider`.
+The provider name comes from the `provider` key in `/workspace/agent/container.json` (defaulting to `'claude'`), which the host materializes from the `container_configs` table — set it with `ncl groups config update --provider`. It is not an environment variable.
 
 `ProviderConfig` contains provider-specific settings (API keys, model overrides, etc.) passed via environment variables — not via the interface. Each provider reads what it needs from `env`.
 

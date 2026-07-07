@@ -22,16 +22,16 @@ Adds Linear support via the Chat SDK bridge. The agent participates in issue com
 
 ## Install
 
-NanoClaw doesn't ship channels in trunk. This skill copies the Linear adapter in from the `channels` branch and patches the Chat SDK bridge to support catch-all message forwarding (Linear OAuth apps can't be @-mentioned).
+NanoClaw doesn't ship channels in trunk. This skill copies the Linear adapter in from the `channels` branch and wires it into the channel registry. Linear OAuth apps post and read comments under an app identity that can't be @-mentioned, so when you wire the channel in `/manage-channels`, pick an engage mode that responds to plain comments rather than mention-only.
 
 ### Pre-flight (idempotent)
 
 Skip to **Credentials** if all of these are already in place:
 
 - `src/channels/linear.ts` exists
+- `src/channels/linear-registration.test.ts` exists
 - `src/channels/index.ts` contains `import './linear.js';`
 - `@chat-adapter/linear` is listed in `package.json` dependencies
-- `src/channels/chat-sdk-bridge.ts` contains `catchAll`
 
 Otherwise continue. Every step below is safe to re-run.
 
@@ -41,10 +41,11 @@ Otherwise continue. Every step below is safe to re-run.
 git fetch origin channels
 ```
 
-### 2. Copy the adapter
+### 2. Copy the adapter and its registration test
 
 ```bash
-git show origin/channels:src/channels/linear.ts > src/channels/linear.ts
+git show origin/channels:src/channels/linear.ts                 > src/channels/linear.ts
+git show origin/channels:src/channels/linear-registration.test.ts > src/channels/linear-registration.test.ts
 ```
 
 ### 3. Append the self-registration import
@@ -55,46 +56,22 @@ Append to `src/channels/index.ts` (skip if the line is already present):
 import './linear.js';
 ```
 
-### 4. Patch the Chat SDK bridge for catch-all message forwarding
-
-Linear OAuth apps can't be @-mentioned, so the bridge's `onNewMention` handler never fires. Add `catchAll` support to `src/channels/chat-sdk-bridge.ts`:
-
-**4a.** Add `catchAll?: boolean` to the `ChatSdkBridgeConfig` interface:
-
-```typescript
-  /**
-   * Forward ALL messages in unsubscribed threads, not just @-mentions.
-   * Use for platforms where the bot identity can't be @-mentioned (e.g.
-   * Linear OAuth apps). The thread is auto-subscribed on first message.
-   */
-  catchAll?: boolean;
-```
-
-**4b.** Add this handler block right after the `chat.onNewMention(...)` block (before the DMs block):
-
-```typescript
-      // Catch-all for platforms where @-mention isn't possible (e.g. Linear
-      // OAuth apps). Forward every unsubscribed message and auto-subscribe.
-      if (config.catchAll) {
-        chat.onNewMessage(/.*/, async (thread, message) => {
-          const channelId = adapter.channelIdFromThreadId(thread.id);
-          await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message));
-          await thread.subscribe();
-        });
-      }
-```
-
-### 5. Install the adapter package (pinned)
+### 4. Install the adapter package (pinned)
 
 ```bash
-pnpm install @chat-adapter/linear@4.27.0
+pnpm install @chat-adapter/linear@4.29.0
 ```
 
-### 6. Build
+### 5. Build and validate
 
 ```bash
 pnpm run build
+pnpm exec vitest run src/channels/linear-registration.test.ts
 ```
+
+Both must be clean before proceeding. `linear-registration.test.ts` is the one integration test: it imports the real channel barrel and asserts the registry contains `linear`. It goes red if the `import './linear.js';` line is deleted or drifts, if the barrel fails to evaluate, or if `@chat-adapter/linear` isn't installed (the import throws) — so it also implicitly verifies the dependency from step 4. The adapter calls core's `createChatSdkBridge(...)`; that typed core-API consumption is guarded by `pnpm run build`.
+
+End-to-end message delivery against a real Linear workspace is verified manually once the service is running — see Wiring and Next Steps.
 
 ## Credentials
 
@@ -142,8 +119,8 @@ Run `/manage-channels` to wire the Linear channel to an agent group, or insert m
 
 ```sql
 -- Create messaging group (one per team)
-INSERT INTO messaging_groups (id, channel_type, platform_id, name, is_group, unknown_sender_policy, created_at)
-VALUES ('mg-linear-eng', 'linear', 'linear:ENG', 'Engineering', 1, 'public', datetime('now'));
+INSERT INTO messaging_groups (id, channel_type, platform_id, instance, name, is_group, unknown_sender_policy, created_at)
+VALUES ('mg-linear-eng', 'linear', 'linear:ENG', 'linear', 'Engineering', 1, 'public', datetime('now'));
 
 -- Wire to agent group
 INSERT INTO messaging_group_agents (id, messaging_group_id, agent_group_id, trigger_rules, response_scope, session_mode, priority, created_at)

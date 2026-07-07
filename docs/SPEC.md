@@ -1,5 +1,7 @@
 # NanoClaw Specification
 
+> **⚠️ Historical v1 spec.** This document describes the original NanoClaw v1 architecture — the single `store/messages.db`, the file-based IPC watcher, the `task-scheduler.ts` loop, the `MAX_CONCURRENT_CONTAINERS` cap, and the `groups/{channel}_{name}/` folder convention. **None of these exist in v2.** v2 replaced them with the two-DB session split (`inbound.db`/`outbound.db`), the entity model (users → messaging groups → agent groups → sessions), and the system-action delivery path. Kept for reference only. For the current architecture start at [architecture.md](architecture.md) and the root [CLAUDE.md](../CLAUDE.md); the v1→v2 diff is in [v1-to-v2-changes.md](v1-to-v2-changes.md).
+
 A personal Claude assistant with multi-channel support, persistent memory per conversation, scheduled tasks, and container-isolated agent execution.
 
 ---
@@ -289,10 +291,7 @@ nanoclaw/
 │       ├── debug/SKILL.md              # /debug - Container debugging
 │       ├── add-telegram/SKILL.md       # /add-telegram - Telegram channel
 │       ├── add-gmail/SKILL.md          # /add-gmail - Gmail integration
-│       ├── add-voice-transcription/    # /add-voice-transcription - Whisper
-│       ├── x-integration/SKILL.md      # /x-integration - X/Twitter
-│       ├── convert-to-apple-container/  # /convert-to-apple-container - Apple Container runtime
-│       └── add-parallel/SKILL.md       # /add-parallel - Parallel agents
+│       └── add-voice-transcription/    # /add-voice-transcription - Whisper
 │
 ├── groups/
 │   ├── CLAUDE.md                  # Global memory (all groups read this)
@@ -344,6 +343,12 @@ export const CONTAINER_IMAGE = process.env.CONTAINER_IMAGE || 'nanoclaw-agent:la
 export const CONTAINER_TIMEOUT = parseInt(process.env.CONTAINER_TIMEOUT || '1800000', 10); // 30min default
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min — keep container alive after last result
 export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5);
+// Per-container resource caps → `docker run --cpus/--memory`. Empty default =
+// no flag = unbounded (today's behavior). Opt in to bound a fleet sharing one
+// host: CONTAINER_CPU_LIMIT=2, CONTAINER_MEMORY_LIMIT=8g. Swap is a host concern
+// (run the host swapless to make --memory a hard cap); not managed here.
+export const CONTAINER_CPU_LIMIT = process.env.CONTAINER_CPU_LIMIT || '';
+export const CONTAINER_MEMORY_LIMIT = process.env.CONTAINER_MEMORY_LIMIT || '';
 
 export const TRIGGER_PATTERN = new RegExp(`^@${ASSISTANT_NAME}\\b`, 'i');
 ```

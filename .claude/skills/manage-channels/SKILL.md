@@ -7,7 +7,7 @@ description: Wire channels to agent groups, manage isolation levels, add new cha
 
 Wire messaging channels to agent groups. See `docs/isolation-model.md` for the full isolation model.
 
-Privilege is a **user-level** concept, not a channel-level one (see `src/db/user-roles.ts`, `src/access.ts`). There is no "main channel" / "main group" — any user can be granted `owner` or `admin` (global or scoped to an agent group) via `grantRole()`, and messages from unknown senders are gated per-messaging-group by `unknown_sender_policy` (`strict` | `request_approval` | `public`).
+Privilege is a **user-level** concept, not a channel-level one (see `src/modules/permissions/db/user-roles.ts`, `src/modules/permissions/access.ts`). There is no "main channel" / "main group" — any user can be granted `owner` or `admin` (global or scoped to an agent group) via `grantRole()`, and messages from unknown senders are gated per-messaging-group by `unknown_sender_policy` (`strict` | `request_approval` | `public`).
 
 ## Assess Current State
 
@@ -65,7 +65,9 @@ pnpm exec tsx setup/index.ts --step register -- \
   --assistant-name "<name>"
 ```
 
-The `register` step creates the agent group (reusing it if the folder already exists), the messaging group, and the wiring row. `createMessagingGroupAgent` auto-creates the companion `agent_destinations` row so the agent can address the channel by name — no separate destination step needed.
+The `register` step creates the agent group (reusing it if the folder already exists), the messaging group, and the wiring row. `createMessagingGroupAgent` auto-creates the companion `agent_destinations` row so the agent can address the channel by name.
+
+When creating a NEW agent group on a non-default provider, append `--provider <name>` (e.g. `--provider codex`) — there is no install-wide default; existing groups switch via `ncl groups config update --provider` instead.
 
 For separate agents, also ask for a folder name and optionally a different assistant name.
 
@@ -73,7 +75,7 @@ For separate agents, also ask for a folder name and optionally a different assis
 
 When adding another group/chat on an already-configured platform (e.g. a second Telegram group):
 
-1. **Telegram:** ask the isolation question first to determine intent (`wire-to:<folder>` for an existing agent, `new-agent:<folder>` for a fresh one). Run `pnpm exec tsx setup/index.ts --step pair-telegram -- --intent <intent>`, show the CODE (follow the `REMINDER_TO_ASSISTANT` line in the `PAIR_TELEGRAM_ISSUED` block) and tell the user to post `@<botname> CODE` in the target group (or DM the bot for a private chat). Wait for the `PAIR_TELEGRAM` block. The inbound interceptor has already created the `messaging_groups` row with `unknown_sender_policy = 'strict'` and upserted the paired user — `register` only needs to add the wiring:
+1. **Telegram:** ask the isolation question first to determine intent (`wire-to:<folder>` for an existing agent, `new-agent:<folder>` for a fresh one). Run `pnpm exec tsx setup/index.ts --step pair-telegram -- --intent <intent>`, show the `CODE` from the `PAIR_TELEGRAM_CODE` status block, and tell the user to post `@<botname> CODE` in the target group (or DM the bot for a private chat). Wait for the final `PAIR_TELEGRAM` block. The inbound interceptor has already created the `messaging_groups` row with `unknown_sender_policy = 'strict'` and upserted the paired user — `register` only needs to add the wiring:
 
    ```bash
    pnpm exec tsx setup/index.ts --step register -- \
@@ -83,7 +85,7 @@ When adding another group/chat on an already-configured platform (e.g. a second 
      --assistant-name "<name>"
    ```
 
-2. **Other channels:** read the channel's SKILL.md `## Channel Info` for terminology and how-to-find-id. Ask for the new group/chat ID, ask the isolation question, then register. No package or credential changes needed.
+2. **Other channels:** read the channel's SKILL.md `## Channel Info` for terminology and how-to-find-id. Ask for the new group/chat ID, ask the isolation question, then register.
 
 ## Change Wiring
 

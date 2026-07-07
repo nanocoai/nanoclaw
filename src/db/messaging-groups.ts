@@ -21,19 +21,43 @@ import { getDb, hasTable } from './connection.js';
 export function createMessagingGroup(group: MessagingGroup): void {
   getDb()
     .prepare(
-      `INSERT INTO messaging_groups (id, channel_type, platform_id, name, is_group, unknown_sender_policy, created_at)
-       VALUES (@id, @channel_type, @platform_id, @name, @is_group, @unknown_sender_policy, @created_at)`,
+      `INSERT INTO messaging_groups (id, channel_type, platform_id, instance, name, is_group, unknown_sender_policy, created_at)
+       VALUES (@id, @channel_type, @platform_id, @instance, @name, @is_group, @unknown_sender_policy, @created_at)`,
     )
-    .run(group);
+    .run({ ...group, instance: group.instance ?? group.channel_type });
 }
 
 export function getMessagingGroup(id: string): MessagingGroup | undefined {
   return getDb().prepare('SELECT * FROM messaging_groups WHERE id = ?').get(id) as MessagingGroup | undefined;
 }
 
-export function getMessagingGroupByPlatform(channelType: string, platformId: string): MessagingGroup | undefined {
+/**
+ * Outbound / cold-DM / setup lookup by platform address.
+ *
+ * Instance semantics are deliberately ASYMMETRIC with the router's
+ * `getMessagingGroupWithAgentCount` (exact-only): outbound callers usually
+ * don't know (or care) which adapter instance owns a chat, so an unset
+ * `instance` resolves the default instance first (instance = channel_type),
+ * falling back deterministically to the lexically-first named instance.
+ * A set `instance` is exact-only — unknown instance returns undefined.
+ */
+export function getMessagingGroupByPlatform(
+  channelType: string,
+  platformId: string,
+  instance?: string,
+): MessagingGroup | undefined {
+  if (instance !== undefined) {
+    return getDb()
+      .prepare('SELECT * FROM messaging_groups WHERE channel_type = ? AND platform_id = ? AND instance = ?')
+      .get(channelType, platformId, instance) as MessagingGroup | undefined;
+  }
   return getDb()
-    .prepare('SELECT * FROM messaging_groups WHERE channel_type = ? AND platform_id = ?')
+    .prepare(
+      `SELECT * FROM messaging_groups
+        WHERE channel_type = ? AND platform_id = ?
+     ORDER BY (instance = channel_type) DESC, instance ASC
+        LIMIT 1`,
+    )
     .get(channelType, platformId) as MessagingGroup | undefined;
 }
 
@@ -46,23 +70,31 @@ export function getMessagingGroupByPlatform(channelType: string, platformId: str
  *
  * Returns `null` when no messaging_groups row exists for this channel.
  * Returns `{ mg, agentCount: 0 }` when the row exists but has no wired
- * agents. Uses the `UNIQUE(channel_type, platform_id)` index plus the
- * `UNIQUE(messaging_group_id, agent_group_id)` index for the JOIN — both
+ * agents. Uses the `UNIQUE(channel_type, platform_id, instance)` index plus
+ * the `UNIQUE(messaging_group_id, agent_group_id)` index for the JOIN — both
  * covered by existing SQLite auto-indexes from the UNIQUE constraints.
+ *
+ * `instance` is EXACT-ONLY, with no fallback — deliberately asymmetric with
+ * `getMessagingGroupByPlatform`'s default-instance-first resolution. An
+ * unknown named instance must return null so the router auto-creates a
+ * per-instance group instead of hijacking a sibling instance's row. The
+ * default param (= channelType) keeps instance-less callers resolving the
+ * default instance, identical to pre-instance behavior.
  */
 export function getMessagingGroupWithAgentCount(
   channelType: string,
   platformId: string,
+  instance: string = channelType,
 ): { mg: MessagingGroup; agentCount: number } | null {
   const row = getDb()
     .prepare(
       `SELECT mg.*, COUNT(mga.id) AS agent_count
          FROM messaging_groups mg
     LEFT JOIN messaging_group_agents mga ON mga.messaging_group_id = mg.id
-        WHERE mg.channel_type = ? AND mg.platform_id = ?
+        WHERE mg.channel_type = ? AND mg.platform_id = ? AND mg.instance = ?
      GROUP BY mg.id`,
     )
-    .get(channelType, platformId) as (MessagingGroup & { agent_count: number }) | undefined;
+    .get(channelType, platformId, instance) as (MessagingGroup & { agent_count: number }) | undefined;
   if (!row) return null;
   const { agent_count, ...mg } = row;
   return { mg: mg as MessagingGroup, agentCount: agent_count };
@@ -72,6 +104,12 @@ export function getAllMessagingGroups(): MessagingGroup[] {
   return getDb().prepare('SELECT * FROM messaging_groups ORDER BY name').all() as MessagingGroup[];
 }
 
+/**
+ * All messaging groups on a platform, across every adapter instance.
+ * Semantics intentionally unchanged by the instance dimension — channel_type
+ * stays the semantic platform key. No live caller today; if a caller needs
+ * a single instance's rows, filter on `mg.instance`.
+ */
 export function getMessagingGroupsByChannel(channelType: string): MessagingGroup[] {
   return getDb().prepare('SELECT * FROM messaging_groups WHERE channel_type = ?').all(channelType) as MessagingGroup[];
 }

@@ -27,6 +27,7 @@ import path from 'path';
 import * as p from '@clack/prompts';
 import k from 'kleur';
 
+import { extractClaudeOAuthToken } from './captured-token.js';
 import { ensureAnswer } from './runner.js';
 import { brandBody, fitToWidth, fmtDuration, note } from './theme.js';
 
@@ -207,16 +208,11 @@ export async function ensureClaudeReady(projectRoot: string): Promise<boolean> {
       });
 
       if (!isClaudeAuthenticated() && fs.existsSync(tmpfile)) {
-        const raw = fs.readFileSync(tmpfile, 'utf-8');
-        const stripped = raw
-          .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-          .replace(/[\n\r]/g, '');
-        const matches = stripped.match(/(sk-ant-oat[A-Za-z0-9_-]{80,500}AA)/g);
-        if (matches) {
-          process.env.CLAUDE_CODE_OAUTH_TOKEN = matches[matches.length - 1];
-        }
+        const token = extractClaudeOAuthToken(fs.readFileSync(tmpfile, 'utf-8'));
+        if (token) process.env.CLAUDE_CODE_OAUTH_TOKEN = token;
       }
     } finally {
+      // eslint-disable-next-line no-empty -- best-effort temp cleanup
       try { fs.unlinkSync(tmpfile); } catch {}
     }
 

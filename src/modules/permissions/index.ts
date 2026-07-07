@@ -22,7 +22,7 @@ import {
   routeInbound,
   setAccessGate,
   setChannelRequestGate,
-  setMessageInterceptor,
+  registerMessageInterceptor,
   setSenderResolver,
   setSenderScopeGate,
   type AccessGateResult,
@@ -521,7 +521,7 @@ registerResponseHandler(handleChannelApprovalResponse);
 // Captures the next DM from an approver who clicked "Create new agent",
 // creates the agent immediately, wires the channel, and replays.
 
-setMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
+registerMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
   const userId = extractAndUpsertUser(event);
   if (!userId) return false;
 

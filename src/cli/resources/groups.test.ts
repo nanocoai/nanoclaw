@@ -90,8 +90,8 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
       now(),
     );
     db.prepare(
-      `INSERT INTO messaging_groups (id, channel_type, platform_id, name, is_group, unknown_sender_policy, created_at)
-       VALUES (?, 'telegram', 'tg-1', 'chat', 1, 'strict', ?)`,
+      `INSERT INTO messaging_groups (id, channel_type, platform_id, instance, name, is_group, unknown_sender_policy, created_at)
+       VALUES (?, 'telegram', 'tg-1', 'telegram', 'chat', 1, 'strict', ?)`,
     ).run(MGID, now());
 
     db.prepare(

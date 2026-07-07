@@ -16,7 +16,13 @@ const INSTALL_ID_PATH = path.join('data', 'install-id');
 
 let cached: string | null = null;
 
-export function installId(): string {
+/**
+ * `persist: false` reads an existing id but never creates `data/install-id`
+ * — required by the uninstall path, which must not mutate the filesystem
+ * before (or instead of) removing it. Events in one process still join:
+ * the generated id is cached.
+ */
+export function installId(persist = true): string {
   if (cached) return cached;
   try {
     const existing = fs.readFileSync(INSTALL_ID_PATH, 'utf-8').trim();
@@ -28,11 +34,13 @@ export function installId(): string {
     // fall through to create
   }
   const id = randomUUID().toLowerCase();
-  try {
-    fs.mkdirSync(path.dirname(INSTALL_ID_PATH), { recursive: true });
-    fs.writeFileSync(INSTALL_ID_PATH, id);
-  } catch {
-    // best-effort; still return the id so the event fires
+  if (persist) {
+    try {
+      fs.mkdirSync(path.dirname(INSTALL_ID_PATH), { recursive: true });
+      fs.writeFileSync(INSTALL_ID_PATH, id);
+    } catch {
+      // best-effort; still return the id so the event fires
+    }
   }
   cached = id;
   return id;
@@ -41,6 +49,7 @@ export function installId(): string {
 export function emit(
   event: string,
   props: Record<string, string | number | boolean | undefined> = {},
+  opts: { persistId?: boolean } = {},
 ): void {
   if (process.env.NANOCLAW_NO_DIAGNOSTICS === '1') return;
 
@@ -53,7 +62,7 @@ export function emit(
   const body = JSON.stringify({
     api_key: POSTHOG_KEY,
     event,
-    distinct_id: installId(),
+    distinct_id: installId(opts.persistId !== false),
     properties: cleaned,
   });
 

@@ -1,11 +1,17 @@
 # Remove DeltaChat
 
-## 1. Disable the adapter
+## 1. Remove the adapter
 
-Comment out the import in `src/channels/index.ts`:
+Delete the self-registration import from `src/channels/index.ts` (skip if already gone):
 
 ```typescript
-// import './deltachat.js';
+import './deltachat.js';
+```
+
+Then delete the copied adapter and its registration test:
+
+```bash
+rm -f src/channels/deltachat.ts src/channels/deltachat-registration.test.ts
 ```
 
 ## 2. Remove credentials

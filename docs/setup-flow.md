@@ -187,7 +187,7 @@ leaking the token to disk outweighs the debugging value.
 
 | File | Role |
 |---|---|
-| `nanoclaw.sh` | Top-level wrapper. Phase 1 (bootstrap) and phase 2 (setup:auto) orchestration. Writes bootstrap's raw log + progression entry. |
+| `nanoclaw.sh` | Top-level wrapper. Phase 1 (bootstrap) and phase 2 (setup:auto) orchestration. Writes bootstrap's raw log + progression entry. `--uninstall` bypasses bootstrap entirely — it execs setup:auto directly (the flow lives in `setup/uninstall/`), or prints manual-cleanup guidance and exits 1 when the TS toolchain is missing. |
 | `setup.sh` | Phase 1 bootstrap: Node, pnpm, native-module verify. Emits its own `BOOTSTRAP` status block (historically printed to stdout; now goes to the bootstrap raw log). |
 | `setup/auto.ts` | Phase 2 driver. Orchestrates the clack UI, step execution, user prompts, and writes to all three log levels for every step it spawns. |
 | `setup/logs.ts` | The logging primitives (`logStep`, `logUserInput`, `logComplete`, `stepRawLog`, `initSetupLog`). Single source of truth for level 2/3 formatting and file paths. |

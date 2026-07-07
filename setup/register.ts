@@ -11,6 +11,7 @@ import { DATA_DIR } from '../src/config.js';
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
+import { ensureContainerConfig } from '../src/db/container-configs.js';
 import {
   createMessagingGroup,
   createMessagingGroupAgent,
@@ -18,7 +19,6 @@ import {
   getMessagingGroupAgentByPair,
 } from '../src/db/messaging-groups.js';
 import { isValidGroupFolder } from '../src/group-folder.js';
-import { initGroupFilesystem } from '../src/group-init.js';
 import { log } from '../src/log.js';
 import { namespacedPlatformId } from '../src/platform-id.js';
 import { resolveSession, writeSessionMessage } from '../src/session-manager.js';
@@ -118,7 +118,7 @@ export async function run(args: string[]): Promise<void> {
   // Chat SDK adapters prefix, native adapters (WhatsApp/iMessage/Signal) don't.
   parsed.platformId = namespacedPlatformId(parsed.channel, parsed.platformId);
 
-  log.info('Registering channel', parsed);
+  log.info('Registering channel', { ...parsed });
 
   // Init v2 central DB
   fs.mkdirSync(path.join(projectRoot, 'data'), { recursive: true });
@@ -126,7 +126,11 @@ export async function run(args: string[]): Promise<void> {
   const db = initDb(dbPath);
   runMigrations(db);
 
-  // 1. Create or find agent group
+  // 1. Create or find agent group. Provider-agnostic: provider is a DB
+  // property set via `ncl groups config update --provider`, not a creation
+  // flag. The workspace is scaffolded at the first spawn (group-init), where
+  // the DB-resolved provider is known; here we only ensure the config row
+  // exists so that update has a row to write.
   let agentGroup = getAgentGroupByFolder(parsed.folder);
   if (!agentGroup) {
     const agId = generateId('ag');
@@ -140,7 +144,7 @@ export async function run(args: string[]): Promise<void> {
     agentGroup = getAgentGroupByFolder(parsed.folder)!;
     log.info('Created agent group', { id: agId, folder: parsed.folder });
   }
-  initGroupFilesystem(agentGroup);
+  ensureContainerConfig(agentGroup.id);
 
   // 2. Create or find messaging group
   let messagingGroup = getMessagingGroupByPlatform(parsed.channel, parsed.platformId);

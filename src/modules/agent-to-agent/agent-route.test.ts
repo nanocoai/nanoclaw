@@ -3,7 +3,8 @@ import fs from 'fs';
 import path from 'path';
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 
-import { isSafeAttachmentName, routeAgentMessage } from './agent-route.js';
+import { forwardAttachedFiles, isSafeAttachmentName, routeAgentMessage } from './agent-route.js';
+import { log } from '../../log.js';
 import { createDestination } from './db/agent-destinations.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
 import { createSession, updateSession } from '../../db/sessions.js';
@@ -442,5 +443,154 @@ describe('routeAgentMessage return-path', () => {
     const targetPath = path.join(sessionDir(B, SB.id), parsed.attachments[0].localPath);
     expect(fs.existsSync(targetPath)).toBe(true);
     expect(fs.readFileSync(targetPath, 'utf-8')).toBe('fake-pdf-bytes');
+  });
+
+  it('file forwarding: skips symlinked source files', async () => {
+    const secretPath = path.join(TEST_DIR, 'host-secret.txt');
+    fs.writeFileSync(secretPath, 'host-secret-bytes');
+
+    const outboxDir = path.join(sessionDir(A, S1.id), 'outbox', 'msg-with-symlink');
+    fs.mkdirSync(outboxDir, { recursive: true });
+    fs.symlinkSync(secretPath, path.join(outboxDir, 'safe-name.txt'));
+
+    await routeAgentMessage(
+      {
+        id: 'msg-with-symlink',
+        platform_id: B,
+        content: JSON.stringify({ text: 'see attached', files: ['safe-name.txt'] }),
+        in_reply_to: null,
+      },
+      S1,
+    );
+
+    const bRows = readInbound(B, SB.id);
+    expect(bRows).toHaveLength(1);
+    const parsed = JSON.parse(bRows[0].content);
+    expect(parsed.attachments).toHaveLength(0);
+  });
+
+  // #2828 — target-side symlink containment. A compromised target agent can
+  // write inside its own session dir; these tests prove it cannot redirect a
+  // forwarded attachment outside the session sandbox via a pre-placed symlink.
+
+  it('file forwarding (#2828): skips a symlinked target inbox dir, writes nothing outside', async () => {
+    const warnSpy = vi.spyOn(log, 'warn');
+    const canaryDir = path.join(TEST_DIR, 'canary-outside-inbox');
+    fs.mkdirSync(canaryDir, { recursive: true });
+
+    // Source has a real attachment to forward.
+    const outboxDir = path.join(sessionDir(A, S1.id), 'outbox', 'msg-evil-inbox');
+    fs.mkdirSync(outboxDir, { recursive: true });
+    fs.writeFileSync(path.join(outboxDir, 'pwn.txt'), 'attacker-bytes');
+
+    // Target pre-places its whole `inbox` as a symlink pointing outside.
+    const targetInbox = path.join(sessionDir(B, SB.id), 'inbox');
+    fs.rmSync(targetInbox, { recursive: true, force: true });
+    fs.symlinkSync(canaryDir, targetInbox);
+
+    await routeAgentMessage(
+      {
+        id: 'msg-evil-inbox',
+        platform_id: B,
+        content: JSON.stringify({ text: 'see attached', files: ['pwn.txt'] }),
+        in_reply_to: null,
+      },
+      S1,
+    );
+
+    // Message still routes — just with no attachments.
+    const bRows = readInbound(B, SB.id);
+    expect(bRows).toHaveLength(1);
+    expect(JSON.parse(bRows[0].content).attachments).toHaveLength(0);
+
+    // Nothing was written through the symlink to the canary location.
+    expect(fs.readdirSync(canaryDir)).toHaveLength(0);
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it('file forwarding (#2828): skips a symlinked inbox/<msgId> subdir, writes nothing outside', async () => {
+    const warnSpy = vi.spyOn(log, 'warn');
+    const canaryDir = path.join(TEST_DIR, 'canary-outside-subdir');
+    fs.mkdirSync(canaryDir, { recursive: true });
+
+    const outboxDir = path.join(sessionDir(A, S1.id), 'outbox', 'msg-evil-subdir');
+    fs.mkdirSync(outboxDir, { recursive: true });
+    fs.writeFileSync(path.join(outboxDir, 'pwn.txt'), 'attacker-bytes');
+
+    // The forwarded a2a msg id generated inside routeAgentMessage is random, so
+    // a symlink can't be pre-placed at inbox/<that-id>. Drive forwardAttachedFiles
+    // directly with a fixed target message id and plant the symlink at that path.
+    const targetMsgId = 'evil-subdir-msg';
+    const realInbox = path.join(sessionDir(B, SB.id), 'inbox');
+    fs.mkdirSync(realInbox, { recursive: true });
+    fs.symlinkSync(canaryDir, path.join(realInbox, targetMsgId));
+
+    const attachments = forwardAttachedFiles(
+      { agentGroupId: A, sessionId: S1.id, messageId: 'msg-evil-subdir', filenames: ['pwn.txt'] },
+      { agentGroupId: B, sessionId: SB.id, messageId: targetMsgId },
+    );
+
+    expect(attachments).toHaveLength(0);
+    expect(fs.readdirSync(canaryDir)).toHaveLength(0);
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it('file forwarding (#2828): refuses a pre-existing symlinked dst file (COPYFILE_EXCL)', async () => {
+    const warnSpy = vi.spyOn(log, 'warn');
+    const canaryFile = path.join(TEST_DIR, 'canary-dst-target.txt');
+    fs.writeFileSync(canaryFile, 'original-canary');
+
+    const outboxDir = path.join(sessionDir(A, S1.id), 'outbox', 'msg-evil-dst');
+    fs.mkdirSync(outboxDir, { recursive: true });
+    fs.writeFileSync(path.join(outboxDir, 'doc.txt'), 'attacker-bytes');
+
+    // inbox/<msgId>/ is a real dir, but contains a pre-placed symlink named
+    // exactly like the incoming attachment, pointing at the canary file.
+    // We can only do this once we know the a2a msg id, which is generated
+    // inside routeAgentMessage. So we instead drive forwardAttachedFiles
+    // directly with a fixed target message id.
+    const targetMsgId = 'fixed-evil-dst';
+    const realInboxSubdir = path.join(sessionDir(B, SB.id), 'inbox', targetMsgId);
+    fs.mkdirSync(realInboxSubdir, { recursive: true });
+    fs.symlinkSync(canaryFile, path.join(realInboxSubdir, 'doc.txt'));
+
+    const attachments = forwardAttachedFiles(
+      { agentGroupId: A, sessionId: S1.id, messageId: 'msg-evil-dst', filenames: ['doc.txt'] },
+      { agentGroupId: B, sessionId: SB.id, messageId: targetMsgId },
+    );
+
+    // The exclusive write failed → nothing forwarded.
+    expect(attachments).toHaveLength(0);
+    // Canary file untouched (symlink not followed/overwritten).
+    expect(fs.readFileSync(canaryFile, 'utf-8')).toBe('original-canary');
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it('file forwarding (#2828 regression): a normal forward still works end-to-end', async () => {
+    const outboxDir = path.join(sessionDir(A, S1.id), 'outbox', 'msg-ok-file');
+    fs.mkdirSync(outboxDir, { recursive: true });
+    fs.writeFileSync(path.join(outboxDir, 'ok.txt'), 'legit-bytes');
+
+    await routeAgentMessage(
+      {
+        id: 'msg-ok-file',
+        platform_id: B,
+        content: JSON.stringify({ text: 'see attached', files: ['ok.txt'] }),
+        in_reply_to: null,
+      },
+      S1,
+    );
+
+    const bRows = readInbound(B, SB.id);
+    expect(bRows).toHaveLength(1);
+    const parsed = JSON.parse(bRows[0].content);
+    expect(parsed.attachments).toHaveLength(1);
+    expect(parsed.attachments[0].name).toBe('ok.txt');
+    const targetPath = path.join(sessionDir(B, SB.id), parsed.attachments[0].localPath);
+    expect(fs.existsSync(targetPath)).toBe(true);
+    expect(fs.readFileSync(targetPath, 'utf-8')).toBe('legit-bytes');
   });
 });

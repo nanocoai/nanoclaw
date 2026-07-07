@@ -12,7 +12,7 @@ import type Database from 'better-sqlite3';
 import { getRunningSessions, getActiveSessions, createPendingQuestion } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
-import { getMessagingGroupByPlatform } from './db/messaging-groups.js';
+import { getMessagingGroup, getMessagingGroupByPlatform } from './db/messaging-groups.js';
 import {
   getDueOutboundMessages,
   getDeliveredIds,
@@ -57,8 +57,11 @@ export interface ChannelDeliveryAdapter {
     kind: string,
     content: string,
     files?: OutboundFile[],
+    /** Delivering adapter instance (defaults to channelType downstream).
+     *  Host-internal only — containers never see instance. */
+    instance?: string,
   ): Promise<string | undefined>;
-  setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
+  setTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
 }
 
 let deliveryAdapter: ChannelDeliveryAdapter | null = null;
@@ -286,8 +289,18 @@ async function deliverMessage(
   // path in deliverSessionMessages and eventually marks the message as failed
   // (instead of marking it delivered when nothing was actually delivered,
   // which was the pre-refactor bug).
+  let deliverInstance: string | undefined;
   if (msg.channel_type && msg.platform_id) {
-    const mg = getMessagingGroupByPlatform(msg.channel_type, msg.platform_id);
+    // Resolve the messaging group ORIGIN-SESSION-FIRST: when the message
+    // targets the session's own chat address, the origin row wins even if
+    // sibling instances share the same (channel_type, platform_id) — so the
+    // reply goes out through the instance the message came in on. Otherwise
+    // fall back to the by-platform lookup (default-instance-first).
+    const originMg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
+    const mg =
+      originMg && originMg.channel_type === msg.channel_type && originMg.platform_id === msg.platform_id
+        ? originMg
+        : getMessagingGroupByPlatform(msg.channel_type, msg.platform_id);
     if (!mg) {
       throw new Error(`unknown messaging group for ${msg.channel_type}/${msg.platform_id} (message ${msg.id})`);
     }
@@ -308,6 +321,7 @@ async function deliverMessage(
         );
       }
     }
+    deliverInstance = mg.instance;
   }
 
   // Track pending questions for ask_user_question flow.
@@ -360,6 +374,7 @@ async function deliverMessage(
     msg.kind,
     msg.content,
     files,
+    deliverInstance,
   );
   log.info('Message delivered', {
     id: msg.id,
@@ -400,6 +415,11 @@ export function registerDeliveryAction(action: string, handler: DeliveryActionHa
     log.warn('Delivery action handler overwritten', { action });
   }
   actionHandlers.set(action, handler);
+}
+
+/** Look up a registered delivery-action handler. Lets module registrations be behavior-tested. */
+export function getDeliveryAction(action: string): DeliveryActionHandler | undefined {
+  return actionHandlers.get(action);
 }
 
 /**

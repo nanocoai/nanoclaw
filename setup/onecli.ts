@@ -17,6 +17,7 @@ import os from 'os';
 import path from 'path';
 
 import { log } from '../src/log.js';
+import { readVersionPin } from './lib/version-pins.js';
 import { emitStatus } from './status.js';
 
 const LOCAL_BIN = path.join(os.homedir(), '.local', 'bin');
@@ -102,19 +103,17 @@ function writeEnvOnecliUrl(url: string): void {
   writeEnvVar('ONECLI_URL', url);
 }
 
-// Last-known-good CLI release. Used only if BOTH the upstream installer
-// and the redirect-based version probe fail. Bump deliberately when a
-// new CLI release ships.
-const ONECLI_GATEWAY_VERSION = '1.23.0';
-const ONECLI_CLI_FALLBACK_VERSION = '1.3.0';
+// The SANCTIONED gateway version: fresh installs pin to it. Upgrading an
+// existing gateway is NOT done here — the gateway is a separate out-of-band
+// component, and the migrator is the user's coding agent following
+// docs/onecli-upgrades.md during /update-nanoclaw. The pin lives in
+// versions.json ("onecli-gateway") so that flow can diff it across updates and
+// route the agent to the doc; bump it there deliberately on a new release.
+const ONECLI_GATEWAY_VERSION = readVersionPin('onecli-gateway');
+// The CLI binary follows the same convention: installed at its pin
+// ("onecli-cli" in versions.json), never at whatever "latest" means today.
+const ONECLI_CLI_VERSION = readVersionPin('onecli-cli');
 const ONECLI_CLI_REPO = 'onecli/onecli-cli';
-
-function installOnecliCliOnly(): { stdout: string; ok: boolean } {
-  const upstream = runInstall('curl -fsSL onecli.sh/cli/install | sh');
-  if (upstream.ok) return { stdout: upstream.stdout, ok: true };
-  const fallback = installOnecliCliDirect();
-  return { stdout: upstream.stdout + (upstream.stderr ?? '') + '\n' + fallback.stdout, ok: fallback.ok };
-}
 
 // Remove containers in the "onecli" compose project whose service name isn't
 // in the v2 set. Pre-v2 OneCLI used service "app" (container onecli-app-1);
@@ -161,24 +160,10 @@ function installOnecli(): { stdout: string; ok: boolean } {
     return { stdout: stdout + (gw.stderr ?? ''), ok: false };
   }
 
-  // CLI install. The upstream script calls the GitHub releases API
-  // (api.github.com) to resolve the latest tag — which 403s anonymous
-  // callers after 60 requests/hour per IP. Try upstream first; on failure
-  // resolve the version ourselves (via HTTP redirect, which isn't
-  // API-throttled) and download the release archive directly.
-  const upstream = runInstall('curl -fsSL onecli.sh/cli/install | sh');
-  stdout += upstream.stdout;
-  if (upstream.ok) return { stdout, ok: true };
-
-  log.warn('Upstream CLI installer failed — falling back to direct download', {
-    stderr: upstream.stderr,
-  });
-  stdout += (upstream.stderr ?? '') + '\n';
-
-  const fallback = installOnecliCliDirect();
-  stdout += fallback.stdout;
-  if (!fallback.ok) {
-    log.error('OneCLI CLI install failed (both upstream and direct fallback)');
+  const cli = installOnecliCliDirect();
+  stdout += cli.stdout;
+  if (!cli.ok) {
+    log.error('OneCLI CLI install failed');
     return { stdout, ok: false };
   }
   return { stdout, ok: true };
@@ -198,11 +183,11 @@ function runInstall(cmd: string): { stdout: string; stderr?: string; ok: boolean
 }
 
 /**
- * Reinstate the OneCLI CLI install without hitting GitHub's rate-limited
- * releases API. Resolves the version via the HTTP redirect from
- * /releases/latest → /releases/tag/vX.Y.Z, then downloads the archive
- * directly. Falls back to ONECLI_CLI_FALLBACK_VERSION if the redirect
- * probe also fails.
+ * Install the OneCLI CLI at the sanctioned pin by downloading the release
+ * archive straight from GitHub. Deliberately no "latest" resolution — the
+ * upstream installer script always chases the newest release, which would
+ * drift from the pin. PATH setup is not lost by skipping it:
+ * ensureShellProfilePath() in run() covers it.
  */
 function installOnecliCliDirect(): { stdout: string; ok: boolean } {
   const lines: string[] = [];
@@ -221,24 +206,7 @@ function installOnecliCliDirect(): { stdout: string; ok: boolean } {
     return { stdout: lines.join('\n'), ok: false };
   }
 
-  let version: string | null = null;
-  try {
-    const redirect = execSync(
-      `curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/${ONECLI_CLI_REPO}/releases/latest`,
-      { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] },
-    ).trim();
-    const m = redirect.match(/\/tag\/v?([^/]+)$/);
-    if (m) version = m[1];
-  } catch {
-    // redirect probe failed — we'll pin the fallback
-  }
-  if (!version) {
-    version = ONECLI_CLI_FALLBACK_VERSION;
-    append(`Version probe failed; installing pinned fallback ${version}.`);
-  } else {
-    append(`Resolved onecli CLI ${version} via release redirect.`);
-  }
-
+  const version = ONECLI_CLI_VERSION;
   const archive = `onecli_${version}_${osName}_${arch}.tar.gz`;
   const url = `https://github.com/${ONECLI_CLI_REPO}/releases/download/v${version}/${archive}`;
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'onecli-'));
@@ -275,6 +243,39 @@ function installOnecliCliDirect(): { stdout: string; ok: boolean } {
   }
 }
 
+/**
+ * /v1 API compatibility check. @onecli-sh/sdk 2.x requires the server's /v1
+ * API; servers older than the cutover answer 404 on every SDK call (permanent,
+ * but presents as transient per-spawn failures). This is detect-only — setup
+ * does not migrate the gateway. The upgrade is an out-of-band action on a
+ * separate component that the agent runs via docs/onecli-upgrades.md during
+ * /update-nanoclaw, so this step only surfaces the condition and points there.
+ */
+export async function verifyGatewayV1(
+  url: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<'ok' | 'incompatible' | 'unreachable'> {
+  try {
+    const res = await fetchImpl(`${url}/v1/health`, { signal: AbortSignal.timeout(5000) });
+    return res.ok ? 'ok' : 'incompatible';
+  } catch {
+    return 'unreachable';
+  }
+}
+
+/**
+ * Detect-and-warn helper: returns a status HINT (and logs) when the gateway is
+ * pre-/v1, else null. Never fails the step or auto-upgrades — the agent owns
+ * the upgrade via docs/onecli-upgrades.md.
+ */
+function gatewayV1Hint(result: 'ok' | 'incompatible' | 'unreachable'): string | null {
+  if (result !== 'incompatible') return null;
+  log.warn('OneCLI gateway lacks the /v1 API @onecli-sh/sdk 2.x requires', {
+    pin: ONECLI_GATEWAY_VERSION,
+  });
+  return 'OneCLI gateway lacks the /v1 API @onecli-sh/sdk 2.x requires — upgrade it: docs/onecli-upgrades.md';
+}
+
 export async function pollHealth(url: string, timeoutMs: number): Promise<boolean> {
   // `/api/health` matches the path probe.sh uses — keep them aligned.
   const deadline = Date.now() + timeoutMs;
@@ -300,7 +301,7 @@ export async function run(args: string[]): Promise<void> {
     // Remote-mode: install only the CLI, point it at the remote gateway, and
     // record the URL in .env. No local gateway is started.
     log.info('Installing OneCLI CLI for remote gateway', { remoteUrl });
-    const res = installOnecliCliOnly();
+    const res = installOnecliCliDirect();
     if (!res.ok || !onecliVersion()) {
       emitStatus('ONECLI', {
         INSTALLED: false,
@@ -339,12 +340,14 @@ export async function run(args: string[]): Promise<void> {
       log.info('Wrote ONECLI_API_KEY to .env');
     }
     const healthy = await pollHealth(remoteUrl, 5000);
+    const v1Hint = healthy ? gatewayV1Hint(await verifyGatewayV1(remoteUrl)) : null;
     emitStatus('ONECLI', {
       INSTALLED: true,
       REMOTE: true,
       ONECLI_URL: remoteUrl,
       HEALTHY: healthy,
       STATUS: 'success',
+      ...(v1Hint ? { GATEWAY_HINT: v1Hint } : {}),
       LOG: 'logs/setup.log',
     });
     return;
@@ -378,12 +381,14 @@ export async function run(args: string[]): Promise<void> {
     writeEnvOnecliUrl(url);
     log.info('Reusing existing OneCLI', { url });
     const healthy = await pollHealth(url, 5000);
+    const v1Hint = healthy ? gatewayV1Hint(await verifyGatewayV1(url)) : null;
     emitStatus('ONECLI', {
       INSTALLED: true,
       REUSED: true,
       ONECLI_URL: url,
       HEALTHY: healthy,
       STATUS: 'success',
+      ...(v1Hint ? { GATEWAY_HINT: v1Hint } : {}),
       LOG: 'logs/setup.log',
     });
     return;
@@ -436,6 +441,7 @@ export async function run(args: string[]): Promise<void> {
   log.info('Wrote ONECLI_URL to .env', { url });
 
   const healthy = await pollHealth(url, 15000);
+  const v1Hint = healthy ? gatewayV1Hint(await verifyGatewayV1(url)) : null;
 
   emitStatus('ONECLI', {
     INSTALLED: true,
@@ -446,6 +452,7 @@ export async function run(args: string[]): Promise<void> {
     // The next step (auth) will surface a genuinely broken gateway via
     // `onecli secrets list`, so don't trigger rescue attempts from here.
     STATUS: 'success',
+    ...(v1Hint ? { GATEWAY_HINT: v1Hint } : {}),
     ...(healthy
       ? {}
       : {

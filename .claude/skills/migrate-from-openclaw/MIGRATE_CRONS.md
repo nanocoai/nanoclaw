@@ -1,100 +1,120 @@
-# Migrating OpenClaw Cron Jobs to NanoClaw Scheduled Tasks
+# Migrating OpenClaw Cron Jobs to NanoClaw v2 Tasks
 
 This file is referenced by SKILL.md Phase 5 when cron jobs are detected.
 
-**Before inserting tasks:** Read `src/db.ts` and search for `scheduled_tasks` to verify the current table schema. The schema below is a reference — if columns have been added, removed, or renamed, use the current schema from the source code.
+## How tasks work in NanoClaw v2
 
-Also verify the `createTask` function signature in `src/db.ts` — it may be simpler to call it via a script than raw SQL.
+There is no `scheduled_tasks` table and no `store/messages.db`. A v2 task is a
+`messages_in` row with `kind='task'` living in a **session's** `inbound.db`
+(under `data/v2-sessions/<agent-group>/<session>/inbound.db`). The row carries:
+
+- `process_after` — ISO 8601 timestamp for the next run.
+- `recurrence` — a cron expression for repeating tasks; `NULL` for one-shot.
+- `content` — JSON `{ "prompt": "...", "script": "<optional pre-agent bash>" }`.
+- `series_id` — stable handle linking every occurrence of a recurring task.
+
+The host recurrence sweep (`src/modules/scheduling/recurrence.ts`, called each
+60s tick from `src/host-sweep.ts`) finds completed rows that still carry a
+`recurrence`, computes the next fire with `cron-parser` **in the user's
+timezone** (`TIMEZONE` from `src/config.ts`), and clones a fresh pending row
+forward. One-shot tasks are marked `completed` after running, never deleted.
+
+Because `inbound.db` is host-owned and per-session, you do **not** write task
+rows by hand. The supported path is to let the running agent create them
+through its `schedule_task` MCP tool — the agent writes a system message, the
+host's `schedule_task` delivery action (`src/modules/scheduling/actions.ts`)
+inserts the `messages_in` row. So migrating crons means **handing the agent a
+clear instruction per job and letting it call `schedule_task`**.
 
 ## OpenClaw Cron Job Format
 
-Source: `<STATE_DIR>/cron/jobs.json` (from `src/cron/types.ts`). If the file format doesn't match what's described below, read the actual file and adapt — OpenClaw may have changed the schema.
+Source: `<STATE_DIR>/cron/jobs.json` (from OpenClaw's `src/cron/types.ts`). If
+the file format doesn't match what's described here, read the actual file and
+adapt — OpenClaw may have changed its schema.
 
 The jobs file is `{ version: 1, jobs: CronJob[] }`. Each job has:
+
 - `id`, `name`, `description`, `enabled`, `deleteAfterRun`
-- `schedule`: `{ kind: "cron", expr: string, tz?: string }` | `{ kind: "every", everyMs: number }` | `{ kind: "at", at: string }`
-- `payload`: `{ kind: "agentTurn", message: string, model?, thinking?, timeoutSeconds? }` | `{ kind: "systemEvent", text: string }`
+- `schedule`: `{ kind: "cron", expr, tz? }` | `{ kind: "every", everyMs }` | `{ kind: "at", at }`
+- `payload`: `{ kind: "agentTurn", message, model?, thinking?, timeoutSeconds? }` | `{ kind: "systemEvent", text }`
 - `sessionTarget`: `"main"` | `"isolated"` | `"current"` | `"session:<id>"`
 - `wakeMode`: `"next-heartbeat"` | `"now"`
 - `delivery`: `{ mode: "none" | "announce" | "webhook", channel?, to?, threadId?, bestEffort? }`
-- `failureAlert`: `{ after?: number, channel?, to?, cooldownMs? }` | `false`
-- `state`: runtime state (nextRunAtMs, lastRunStatus, consecutiveErrors, etc.)
+- `failureAlert`: `{ after?, channel?, to?, cooldownMs? }` | `false`
+- `state`: runtime state (nextRunAtMs, lastRunStatus, …)
 
-## NanoClaw `scheduled_tasks` Table
+## Schedule mapping (use the shipped transform)
 
-Source: `src/db.ts`
+`scripts/transform.ts` exports `mapCronToRecurrence`, which converts an
+OpenClaw `schedule` into the v2 `{ processAfter, recurrence, notes }` shape:
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | TEXT PK | Unique task ID |
-| `group_folder` | TEXT | Target group directory (e.g. `"main"`) |
-| `chat_jid` | TEXT | Target chat JID |
-| `prompt` | TEXT | Task instructions |
-| `script` | TEXT | Optional bash pre-check script |
-| `schedule_type` | TEXT | `"cron"`, `"interval"`, or `"once"` |
-| `schedule_value` | TEXT | Cron expr, ms interval, or ISO timestamp |
-| `context_mode` | TEXT | `"group"` or `"isolated"` (default) |
-| `next_run` | TEXT | ISO timestamp — must be computed at insert time |
-| `last_run` | TEXT | null initially |
-| `last_result` | TEXT | null initially |
-| `status` | TEXT | `"active"`, `"paused"`, or `"completed"` |
-| `created_at` | TEXT | ISO timestamp |
+- `kind:"cron"` → `recurrence = expr`; `processAfter` = next fire of `expr`
+  (computed with `cron-parser` in the job's `tz`, falling back to the user's TZ).
+- `kind:"at"` → one-shot; `recurrence = null`; `processAfter = at`.
+- `kind:"every"` → v2 recurrence is cron-based, so a fixed interval is
+  approximated as the nearest cron when it divides cleanly into minutes/hours
+  (e.g. `everyMs: 900000` → `*/15 * * * *`); otherwise it's flagged in `notes`
+  and left one-shot for you to set a cron by hand.
 
-## Field Mapping
+`payload.message` (agentTurn) or `payload.text` (systemEvent) becomes the task
+`prompt`.
 
-- `schedule.kind:"cron"` + `schedule.expr` → `schedule_type:"cron"`, `schedule_value:<expr>`
-- `schedule.kind:"every"` + `schedule.everyMs` → `schedule_type:"interval"`, `schedule_value:<ms as string>`
-- `schedule.kind:"at"` + `schedule.at` → `schedule_type:"once"`, `schedule_value:<ISO timestamp>`
-- `payload.message` or `payload.text` → `prompt`
-- `sessionTarget:"isolated"` → `context_mode:"isolated"`, `sessionTarget:"main"` or `"current"` → `context_mode:"group"`
+## What doesn't map
 
-## What Doesn't Map
+- `delivery.mode:"webhook"` — v2 has no webhook delivery. Fold the webhook into
+  the task `prompt` ("…then POST the result to <url>") or a pre-agent `script`
+  that `curl`s the endpoint.
+- `delivery.mode:"announce"` / `channel` / `to` — a v2 task runs inside the
+  session it was scheduled in and replies through that session's normal
+  delivery path. Cross-channel announce isn't a task field; if the job targeted
+  a different chat, schedule the task from the agent in *that* group.
+- `failureAlert` — no failure-alert system. Note it to the user.
+- `wakeMode` — v2 wakes a container when a task's `process_after` is due; there
+  is no next-heartbeat vs now distinction.
+- `payload.model` / `thinking` / `timeoutSeconds` — per-task model/thinking
+  config isn't a task field. Per-group model lives in the container config
+  (`ncl groups config update`).
+- `deleteAfterRun` — v2 one-shot tasks become `completed`, not deleted.
+- `sessionTarget` — `isolated` vs `main`/`current` selected a session in
+  OpenClaw. In v2 the task lands in whichever session the agent schedules it
+  from. Schedule from the group/DM whose session should own the task.
 
-- `delivery.mode:"webhook"` — NanoClaw has no webhook delivery. Discuss with the user: this could be implemented as a task `script` that runs `curl` to hit the webhook endpoint.
-- `failureAlert` — NanoClaw has no failure alert system. Note this to the user.
-- `wakeMode` — NanoClaw tasks always wake the agent immediately.
-- `payload.model`, `payload.thinking`, `payload.timeoutSeconds` — NanoClaw doesn't support per-task model/thinking config. These are handled by the SDK.
-- `deleteAfterRun` — NanoClaw `"once"` tasks are marked `"completed"` after running, not deleted.
+## For each enabled job
 
-## For Each Enabled Job
+1. Show what it does: name, schedule, prompt, original delivery mode.
+2. Run the schedule through `mapCronToRecurrence` and show the resulting
+   `processAfter` / `recurrence`, plus any `notes` (interval approximation,
+   webhook caveats).
+3. Explain the differences (no failure alerts, webhook folded into the prompt,
+   announce → runs in the scheduling session).
+4. Ask whether to keep this task.
 
-1. Show what it does: name, schedule, prompt, delivery mode
-2. Explain any differences (no retry config, no webhook delivery, no failure alerts)
-3. If `delivery.mode:"webhook"`: discuss with the user — a task `script` with `curl` often suffices
-4. Ask if they want to keep this task
+## Creating the task
 
-## Inserting Tasks
+Tasks are created **by the agent** via its `schedule_task` MCP tool, which is
+why the agent group and its DM/group session must already exist (Phase 1) and
+the service must be running. Hand the agent one instruction per kept job, e.g.:
 
-Insert directly into the SQLite database. This requires groups to be registered first (Phase 1). Use the registered group's `folder` and `chat_jid`:
+> Schedule a recurring task: prompt = "Summarize my unread email and send me
+> the digest.", recurrence = "0 9 * * 1-5", first run = "2026-06-09T09:00:00"
+> (my local time).
+
+The agent calls `schedule_task` with `prompt`, `processAfter` (ISO; a naive
+local timestamp is interpreted in the user's timezone), `recurrence` (the cron
+expression, or omitted for one-shot), and an optional `script`. The host
+inserts the `messages_in` row and the recurrence sweep takes over.
+
+To confirm afterwards, ask the agent to run `list_tasks`, or inspect the
+session's inbound DB directly:
 
 ```bash
-pnpm exec tsx -e "
-const Database = require('better-sqlite3');
-const { CronExpressionParser } = require('cron-parser');
-const db = new Database('store/messages.db');
-// Compute next_run for cron tasks:
-// const interval = CronExpressionParser.parse('<expr>', { tz: process.env.TZ || 'UTC' });
-// const nextRun = interval.next().toISOString();
-db.prepare(\`INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, script, schedule_type, schedule_value, context_mode, next_run, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\`).run(
-  'migrated-<original-id>',
-  '<group_folder>',
-  '<chat_jid>',
-  '<mapped prompt>',
-  null,
-  '<mapped schedule_type>',
-  '<mapped schedule_value>',
-  '<mapped context_mode>',
-  '<computed next_run ISO>',
-  'active',
-  new Date().toISOString()
-);
-db.close();
-"
+pnpm exec tsx scripts/q.ts \
+  data/v2-sessions/<agent-group>/<session>/inbound.db \
+  "SELECT series_id, status, process_after, recurrence FROM messages_in WHERE kind='task'"
 ```
 
-**Computing `next_run`:**
-- `cron` tasks: use `CronExpressionParser.parse(expr, { tz }).next().toISOString()`
-- `interval` tasks: `new Date(Date.now() + ms).toISOString()`
-- `once` tasks: `next_run` equals `schedule_value`
-
-If groups haven't been registered yet (database doesn't exist), save the task details to `groups/main/openclaw-migration-tasks.md` with the exact SQL payloads, and tell the user: "These tasks will be created after `/setup` registers your groups."
+If the agent group / session doesn't exist yet (Phase 1 deferred, or the
+channel isn't installed), record the mapped tasks in the group's
+`groups/<folder>/openclaw-migration-tasks.md` with prompt + processAfter +
+recurrence per job, and tell the user the agent will schedule them on first run
+once the channel is wired.

@@ -71,6 +71,8 @@ Parse the `PAIR_TELEGRAM_ISSUED` status block for `CODE` and follow the `REMINDE
 
 ## 4. Run the init script
 
+First, pick the agent provider. Read `src/providers/index.ts` and collect the installed providers from its `import './<name>.js';` lines — `claude` is always available as the built-in default. If a non-default provider is installed (e.g. codex), ask the user which one this agent should run on; if only claude is available, skip the question and omit the flag.
+
 ```bash
 npx tsx scripts/init-first-agent.ts \
   --channel "${CHANNEL}" \
@@ -80,7 +82,7 @@ npx tsx scripts/init-first-agent.ts \
   --agent-name "${AGENT_NAME}"
 ```
 
-Add `--welcome "System instruction: ..."` to override the default welcome prompt.
+Add `--provider <name>` when the user picked a non-default provider (there is no install-wide default — the choice is explicit per group). Add `--welcome "System instruction: ..."` to override the default welcome prompt.
 
 The script:
 1. Upserts the `users` row and grants `owner` role if no owner exists.
@@ -103,9 +105,9 @@ Wait for the user's reply. If they confirm receipt, the skill is done.
 
 If they say it didn't arrive, then diagnose using the DB directly (no waiting loops required — the message either delivered or it didn't):
 
-- `pnpm exec tsx scripts/q.ts data/v2-sessions/<agent-group-id>/sessions/<session-id>/outbound.db "SELECT id, status, created_at FROM messages_out ORDER BY created_at DESC LIMIT 5"` — check for stuck `pending` rows. Replace `<agent-group-id>` and `<session-id>` with the values from the script's output.
+- `pnpm exec tsx scripts/q.ts data/v2-sessions/<agent-group-id>/<session-id>/outbound.db "SELECT id, status, created_at FROM messages_out ORDER BY created_at DESC LIMIT 5"` — check for stuck `pending` rows. Replace `<agent-group-id>` and `<session-id>` with the values from the script's output.
 - `grep -E 'Unauthorized channel destination|container.*exited|error' logs/nanoclaw.log | tail -20` — look for ACL rejections or container crashes.
-- `ls data/v2-sessions/<agent-group-id>/sessions/*/outbound.db` — confirm the session exists.
+- `ls data/v2-sessions/<agent-group-id>/*/outbound.db` — confirm the session exists.
 
 ## Troubleshooting
 

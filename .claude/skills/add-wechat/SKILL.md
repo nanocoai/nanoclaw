@@ -29,6 +29,7 @@ NanoClaw doesn't ship channels in trunk. This skill copies the WeChat adapter in
 Skip to **Credentials** if all of these are already in place:
 
 - `src/channels/wechat.ts` exists
+- `src/channels/wechat-registration.test.ts` exists
 - `src/channels/index.ts` contains `import './wechat.js';`
 - `wechat-ilink-client` is listed in `package.json` dependencies
 
@@ -40,10 +41,11 @@ Otherwise continue. Every step below is safe to re-run.
 git fetch origin channels
 ```
 
-### 2. Copy the adapter
+### 2. Copy the adapter and its registration test
 
 ```bash
-git show origin/channels:src/channels/wechat.ts > src/channels/wechat.ts
+git show origin/channels:src/channels/wechat.ts                 > src/channels/wechat.ts
+git show origin/channels:src/channels/wechat-registration.test.ts > src/channels/wechat-registration.test.ts
 ```
 
 ### 3. Append the self-registration import
@@ -60,11 +62,16 @@ import './wechat.js';
 pnpm install wechat-ilink-client@0.1.0
 ```
 
-### 5. Build
+### 5. Build and validate
 
 ```bash
 pnpm run build
+pnpm exec vitest run src/channels/wechat-registration.test.ts
 ```
+
+Both must be clean before proceeding. `wechat-registration.test.ts` is the one integration test: it imports the real channel barrel and asserts the registry contains `wechat`. It goes red if the `import './wechat.js';` line is deleted or drifts, if the barrel fails to evaluate (so the channel genuinely would not register), or if `wechat-ilink-client` isn't installed (the import throws) — so it also implicitly verifies the dependency from step 4. Importing is safe: the adapter opens its long-poll connection only in `setup()` (at host startup), never at import.
+
+End-to-end message delivery against a real WeChat account is verified manually once the service is running — see Credentials and Wire your first DM above.
 
 ## Credentials
 

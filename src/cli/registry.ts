@@ -1,19 +1,28 @@
 /**
  * Command registry — single source of truth for what `ncl` can do.
  *
- * Each command file under `commands/` calls `register()` at top level,
- * and `commands/index.ts` imports them all for side effects so the
- * registry is populated before the host's CLI server accepts connections.
+ * Most commands come from resource modules under `resources/`, which call
+ * `registerResource()` (one `register()` per CRUD verb); the top-level `help`
+ * command and the per-resource help commands register directly. The barrel
+ * `commands/index.ts` imports the resource barrel for its side effects and then
+ * registers the help commands, so the registry is populated before the host's
+ * CLI server accepts connections.
  */
 import type { CallerContext } from './frame.js';
 
-export type Access = 'open' | 'approval' | 'hidden';
+export type Access = 'open' | 'approval';
 
 export type CommandDef<TArgs = unknown, TData = unknown> = {
   name: string;
   description: string;
   access: Access;
-  /** Resource this command belongs to (for help grouping). */
+  /**
+   * The group-scope whitelist key. Under `cli_scope: 'group'` the dispatcher
+   * only lets an agent run commands whose `resource` is on the whitelist
+   * (`groups`, `sessions`, `destinations`, `members`); it also drives help
+   * grouping. Omitting `resource` exempts the command from the whitelist —
+   * that's how general commands like `help` stay reachable in group scope.
+   */
   resource?: string;
   /**
    * Set on the auto-generated `list` / `get` handlers (see `registerResource`).

@@ -16,6 +16,8 @@ NanoClaw doesn't ship channels in trunk. This skill copies the native WhatsApp (
 Skip to **Credentials** if all of these are already in place:
 
 - `src/channels/whatsapp.ts` exists
+- `src/channels/whatsapp-registration.test.ts` exists
+- `src/channels/whatsapp.test.ts` exists
 - `src/channels/index.ts` contains `import './whatsapp.js';`
 - `setup/whatsapp-auth.ts` and `setup/groups.ts` both exist
 - `setup/index.ts`'s `STEPS` map contains both `'whatsapp-auth':` and `groups:`
@@ -33,9 +35,11 @@ git fetch origin channels
 ### 2. Copy the adapter and setup steps
 
 ```bash
-git show origin/channels:src/channels/whatsapp.ts > src/channels/whatsapp.ts
-git show origin/channels:setup/whatsapp-auth.ts   > setup/whatsapp-auth.ts
-git show origin/channels:setup/groups.ts          > setup/groups.ts
+git show origin/channels:src/channels/whatsapp.ts                      > src/channels/whatsapp.ts
+git show origin/channels:src/channels/whatsapp-registration.test.ts    > src/channels/whatsapp-registration.test.ts
+git show origin/channels:src/channels/whatsapp.test.ts                 > src/channels/whatsapp.test.ts
+git show origin/channels:setup/whatsapp-auth.ts                        > setup/whatsapp-auth.ts
+git show origin/channels:setup/groups.ts                               > setup/groups.ts
 ```
 
 ### 3. Append the self-registration import
@@ -61,11 +65,16 @@ groups: () => import('./groups.js'),
 pnpm install @whiskeysockets/baileys@7.0.0-rc.9 qrcode@1.5.4 @types/qrcode@1.5.6 pino@9.6.0
 ```
 
-### 6. Build
+### 6. Build and validate
 
 ```bash
 pnpm run build
+pnpm exec vitest run src/channels/whatsapp-registration.test.ts
 ```
+
+Both must be clean before proceeding. `whatsapp-registration.test.ts` is the one integration test: it imports the real channel barrel and asserts the registry contains `whatsapp`. It goes red if the `import './whatsapp.js';` line is deleted or drifts, if the barrel fails to evaluate (so the channel genuinely would not register), or if `@whiskeysockets/baileys` isn't installed (the import throws) — so it also implicitly verifies the dependency from step 5.
+
+End-to-end message delivery against a real WhatsApp number is verified manually once the service is running — see Credentials, Wiring, and Troubleshooting.
 
 ## Credentials
 

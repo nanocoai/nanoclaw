@@ -123,7 +123,9 @@ This prints a `tsdevice:` URI. Scan it as a QR code on your phone: **Settings â†
 
 Skip to **Credentials** if all of these are already in place:
 
-- `src/channels/signal.ts` and `src/channels/signal.test.ts` both exist
+- `src/channels/signal.ts` exists
+- `src/channels/signal.test.ts` exists
+- `src/channels/signal-registration.test.ts` exists
 - `src/channels/index.ts` contains `import './signal.js';`
 
 Otherwise continue. Every step below is safe to re-run.
@@ -137,8 +139,9 @@ git fetch origin channels
 ### 2. Copy the adapter and tests
 
 ```bash
-git show origin/channels:src/channels/signal.ts      > src/channels/signal.ts
-git show origin/channels:src/channels/signal.test.ts > src/channels/signal.test.ts
+git show origin/channels:src/channels/signal.ts                   > src/channels/signal.ts
+git show origin/channels:src/channels/signal.test.ts             > src/channels/signal.test.ts
+git show origin/channels:src/channels/signal-registration.test.ts > src/channels/signal-registration.test.ts
 ```
 
 ### 3. Append the self-registration import
@@ -149,13 +152,14 @@ Append to `src/channels/index.ts` (skip if the line is already present):
 import './signal.js';
 ```
 
-### 4. Build
+### 4. Build and validate
 
 ```bash
 pnpm run build
+pnpm exec vitest run src/channels/signal-registration.test.ts
 ```
 
-No npm packages to install â€” the adapter uses only Node.js builtins.
+Both must be clean before proceeding. `signal-registration.test.ts` is the one integration test: it imports the real channel barrel and asserts the registry contains `signal`. It goes red if the `import './signal.js';` line is deleted or drifts, or if the barrel fails to evaluate (so the channel genuinely would not register). The adapter consumes only Node.js builtins, so there is no npm dependency to guard for this channel. The adapter's typed core-API consumption is guarded by `pnpm run build`.
 
 ## Credentials
 

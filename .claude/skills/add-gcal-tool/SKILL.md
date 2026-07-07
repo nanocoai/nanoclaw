@@ -120,7 +120,18 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "@cocal/google-calendar-mcp@${CALENDAR_MCP_VERSION}"
 ```
 
-**No `TOOL_ALLOWLIST` edit needed.** `container/agent-runner/src/providers/claude.ts` derives the allow-pattern dynamically from each group's `mcpServers` map (`Object.keys(this.mcpServers).map(mcpAllowPattern)`), so registering `calendar` in Phase 3 automatically allows `mcp__calendar__*`. Earlier versions of this skill instructed a static `TOOL_ALLOWLIST` edit — that's now redundant.
+`container/agent-runner/src/providers/claude.ts` derives the allow-pattern dynamically from each group's `mcpServers` map (`Object.keys(this.mcpServers).map(mcpAllowPattern)`), so registering `calendar` in Phase 3 automatically allows `mcp__calendar__*`.
+
+### Install the dependency-guard test
+
+`@cocal/google-calendar-mcp` is a stdio CLI installed in the image, not an imported module, so `tsc` and the runtime tests never reference it — only the Dockerfile edit above proves it is present. Copy the guard test into the host test tree (vitest) so the Dockerfile `ARG` + install line stay covered:
+
+```bash
+cp .claude/skills/add-gcal-tool/gcal-dockerfile.test.ts src/gcal-dockerfile.test.ts
+pnpm exec vitest run src/gcal-dockerfile.test.ts
+```
+
+`cp` overwrites in place, so re-running this skill is safe.
 
 ### Rebuild the container image
 
@@ -213,26 +224,10 @@ Common signals:
 
 ## Removal
 
-1. For each group that had Calendar wired, remove the MCP server from the DB:
-   ```bash
-   ncl groups config remove-mcp-server --id <group-id> --name calendar
-   ```
-2. Remove the `.calendar-mcp` mount from the DB (no `remove-mount` verb yet — same #2395 dependency):
-   ```bash
-   pnpm exec tsx scripts/q.ts data/v2.db "UPDATE container_configs \
-     SET additional_mounts = (SELECT json_group_array(value) FROM json_each(additional_mounts) \
-                              WHERE json_extract(value, '\$.containerPath') != '.calendar-mcp'), \
-         updated_at = datetime('now') \
-     WHERE agent_group_id = '<group-id>';"
-   ```
-3. Remove `CALENDAR_MCP_VERSION` ARG and the calendar package from the Dockerfile install block.
-4. `pnpm run build && ./container/build.sh && systemctl --user restart "$(. setup/lib/install-slug.sh && systemd_unit)"`.
-5. Optional: `rm -rf ~/.calendar-mcp/` and `onecli apps disconnect --provider google-calendar`.
-
-No `TOOL_ALLOWLIST` removal step — Phase 2 no longer edits it.
+See [REMOVE.md](REMOVE.md) — unregisters the MCP server, drops the `.calendar-mcp` mount, deletes the copied test, reverts the Dockerfile edits, and rebuilds.
 
 ## Credits & references
 
 - **MCP server:** [`@cocal/google-calendar-mcp`](https://github.com/cocal-com/google-calendar-mcp) — MIT-licensed, actively maintained, multi-account and multi-calendar.
-- **Why not gongrzhe:** earlier versions of this skill used `@gongrzhe/server-calendar-autoauth-mcp@1.0.2` which only supports the primary calendar with 5 event-level tools. The cocal server supersedes it.
+- **Why not gongrzhe:** `@gongrzhe/server-calendar-autoauth-mcp` only supports the primary calendar with 5 event-level tools. The cocal server supports multi-account and multi-calendar with the full tool surface.
 - **Skill pattern:** direct sibling of [`/add-gmail-tool`](../add-gmail-tool/SKILL.md); same OneCLI stub mechanism.
