@@ -51,7 +51,7 @@ export type IntentCategory =
   | 'notify'; // 纯结果通知（默认）
 
 // 极短公共前缀，只保留 TTS 必须规则
-const V3_COMMON = `你把 AI 回复改写成 iOS 语音播报。用户在听，不能跳读。只输出播报文本。第一句话直接给结论。口语自然，不读代码、表格、日志、命令原文。不使用 Markdown。符号转自然语言：PR#数字说"几号PR"，commit 哈希略去，链接不念 URL。严禁编造。如有 [对话上下文]，在第一句自然融入话题。`;
+const V3_COMMON = `你把 AI 回复改写成 iOS 语音播报。用户在听，不能跳读。只输出播报文本。第一句话直接给结论。口语自然，不读代码、表格、日志、命令原文。不使用 Markdown。符号转自然语言：PR#数字说"几号PR"，commit 哈希略去，链接不念 URL。严禁编造原文没有的信息——不能添加原文未提到的建议、推测、下一步或风险。摘要必须比原文短，每个信息点必须能在原文中找到出处。如有 [对话上下文]，在第一句自然融入话题。`;
 
 const V3_PROMPTS: Record<IntentCategory, string> = {
   notify: `${V3_COMMON}
