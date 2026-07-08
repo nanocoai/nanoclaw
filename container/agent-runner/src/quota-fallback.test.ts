@@ -7,7 +7,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb } from './db/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
-import { getContinuation, isQuotaDegraded, setQuotaDegraded } from './db/session-state.js';
+import {
+  getContinuation,
+  isFallbackFailureNotified,
+  isQuotaDegraded,
+  setContinuation,
+  setFallbackFailureNotified,
+  setQuotaDegraded,
+} from './db/session-state.js';
 import { isGenuineQuotaError, isTransientLimit, QuotaExhaustedError } from './quota.js';
 import { maybeWarnApproachingQuota, runFallbackTurn } from './poll-loop.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, QueryInput } from './providers/types.js';
@@ -133,6 +140,14 @@ describe('quota-degraded flag (notice de-dup)', () => {
     setQuotaDegraded(false);
     expect(isQuotaDegraded()).toBe(false);
   });
+
+  it('fallback-failure ❌ notice flag round-trips (one banner per streak)', () => {
+    expect(isFallbackFailureNotified()).toBe(false);
+    setFallbackFailureNotified(true); // first ❌ sent
+    expect(isFallbackFailureNotified()).toBe(true); // subsequent failures suppressed
+    setFallbackFailureNotified(false); // fallback success / primary recovery re-arms
+    expect(isFallbackFailureNotified()).toBe(false);
+  });
 });
 
 describe('maybeWarnApproachingQuota (proactive heads-up)', () => {
@@ -256,6 +271,92 @@ describe('runFallbackTurn', () => {
     await expect(runFallbackTurn(fallbackOf(provider), 'prompt', ROUTING, '/workspace/agent')).rejects.toThrow(
       /no result/i,
     );
+  });
+
+  it('retries once on a FRESH thread when the stored thread wedges (self-heal in-turn)', async () => {
+    // The live failure mode: resuming the stored Codex thread hangs forever,
+    // but a fresh thread works. The same turn must recover transparently —
+    // the user gets an answer, not a ❌.
+    setContinuation('codex', 'poisoned-thread');
+    let queries = 0;
+    const resumesSeen: Array<string | undefined> = [];
+    const provider: AgentProvider = {
+      supportsNativeSlashCommands: false,
+      isSessionInvalid: () => false,
+      query(input: QueryInput): AgentQuery {
+        queries++;
+        resumesSeen.push(input.continuation);
+        if (input.continuation !== undefined) {
+          // Attempt 1: wedged resume — emits nothing until aborted.
+          let release: () => void = () => {};
+          const hung = new Promise<void>((r) => {
+            release = r;
+          });
+          return {
+            push() {},
+            end() {},
+            abort() {
+              release();
+            },
+            events: (async function* () {
+              await hung;
+            })(),
+          };
+        }
+        // Attempt 2: fresh thread answers normally.
+        let ended = false;
+        return {
+          push() {},
+          end() {
+            ended = true;
+          },
+          abort() {
+            ended = true;
+          },
+          events: (async function* () {
+            for (const e of [
+              { type: 'init', continuation: 'codex-fresh' } as ProviderEvent,
+              { type: 'result', text: '<message to="user">תשובה מה-thread החדש</message>' } as ProviderEvent,
+            ]) {
+              if (ended) return;
+              yield e;
+            }
+          })(),
+        };
+      },
+    };
+
+    process.env.FALLBACK_TURN_DEADLINE_MS = '150';
+    try {
+      await runFallbackTurn(fallbackOf(provider), 'prompt', ROUTING, '/workspace/agent');
+    } finally {
+      delete process.env.FALLBACK_TURN_DEADLINE_MS;
+    }
+
+    expect(queries).toBe(2);
+    expect(resumesSeen).toEqual(['poisoned-thread', undefined]);
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('תשובה מה-thread החדש');
+    // The poisoned continuation was replaced by the fresh thread's id.
+    expect(getContinuation('codex')).toBe('codex-fresh');
+  });
+
+  it('does NOT retry when the fallback itself is out of quota (thread kept)', async () => {
+    setContinuation('codex', 'healthy-thread');
+    let queries = 0;
+    const provider = scriptedProvider(
+      [{ type: 'error', message: 'credit balance too low', retryable: false, classification: 'quota' }],
+      () => {
+        queries++;
+      },
+    );
+
+    await expect(runFallbackTurn(fallbackOf(provider), 'prompt', ROUTING, '/workspace/agent')).rejects.toThrow(
+      /quota exhausted/i,
+    );
+    expect(queries).toBe(1); // no pointless fresh-thread retry
+    expect(getContinuation('codex')).toBe('healthy-thread'); // memory preserved
   });
 
   it('times out and aborts a stuck fallback turn (Defect 2)', async () => {

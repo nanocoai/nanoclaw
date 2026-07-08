@@ -39,10 +39,13 @@ function log(msg: string): void {
 const COMPACT_THRESHOLD = 40_000;
 
 /**
- * Hard ceiling for a single turn. Guards against the app-server wedging
- * after `turn/start` (model never streams, no turn/completed). Overridable
- * via env; kept well under the poll-loop's fallback deadline so the codex
- * side fails first with a clean abort rather than being force-torn-down.
+ * IDLE ceiling for a single turn: trips only after this long with NO
+ * notifications from the app-server. Guards against the app-server wedging
+ * after `turn/start` (model never streams, no turn/completed) while letting
+ * a genuinely long, tool-heavy turn run — a working turn streams item/*
+ * notifications constantly and keeps re-arming the timer. A fixed wall-clock
+ * ceiling here killed every heavy fallback turn mid-work (live, 2026-07-07).
+ * Overridable via env.
  */
 const TURN_TIMEOUT_MS = Number(process.env.CODEX_TURN_TIMEOUT_MS) || 120_000;
 
@@ -251,13 +254,27 @@ async function* runOneTurn(
     waker = null;
   };
 
+  // Idle watchdog: re-armed on every notification. Only sustained SILENCE
+  // (a wedged resume/turn) trips it — steady tool/stream traffic never does.
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const armIdleTimer = (): void => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      turnState.error = new Error(`Turn stalled: no app-server events for ${TURN_TIMEOUT_MS}ms`);
+      turnDone = true;
+      kick();
+    }, TURN_TIMEOUT_MS);
+  };
+
   const handler = (n: JsonRpcNotification): void => {
     const method = n.method;
     const params = n.params;
 
-    // Every inbound notification counts as activity for the poll-loop's
-    // idle timer — yield before any event-specific translation so even
-    // long tool executions keep the loop awake.
+    // Every inbound notification proves liveness — re-arm the idle watchdog
+    // and count as activity for the poll-loop's idle timer; yield before any
+    // event-specific translation so even long tool executions keep the loop
+    // awake.
+    armIdleTimer();
     buffer.push({ type: 'activity' });
 
     switch (method) {
@@ -308,12 +325,7 @@ async function* runOneTurn(
   };
 
   server.notificationHandlers.push(handler);
-
-  const timer = setTimeout(() => {
-    turnState.error = new Error(`Turn timed out after ${TURN_TIMEOUT_MS}ms`);
-    turnDone = true;
-    kick();
-  }, TURN_TIMEOUT_MS);
+  armIdleTimer();
 
   try {
     // If we yield init before turn/start, the poll-loop stores
@@ -346,7 +358,7 @@ async function* runOneTurn(
 
     yield { type: 'result', text: resultText || null };
   } finally {
-    clearTimeout(timer);
+    clearTimeout(idleTimer);
     const idx = server.notificationHandlers.indexOf(handler);
     if (idx >= 0) server.notificationHandlers.splice(idx, 1);
   }

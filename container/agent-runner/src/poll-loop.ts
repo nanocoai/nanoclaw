@@ -6,9 +6,11 @@ import {
   clearContinuation,
   getContinuation,
   getQuotaWarnedWindow,
+  isFallbackFailureNotified,
   isQuotaDegraded,
   migrateLegacyContinuation,
   setContinuation,
+  setFallbackFailureNotified,
   setQuotaDegraded,
   setQuotaWarnedWindow,
 } from './db/session-state.js';
@@ -92,13 +94,26 @@ function nearQuotaNotice(pctText: string, hasFallback: boolean): string {
 // providers, just tell the user to retry shortly.
 const TRANSIENT_BUSY_NOTICE = '⚠️ השרת עמוס כרגע (הגבלת קצב זמנית) — נסו שוב עוד רגע.';
 
-// Hard ceiling on a single fallback turn: init + thread resume/start + the
-// model turn combined. A stuck Codex turn must fail fast back to the primary
-// (next turn retries Claude) instead of freezing the whole poll-loop.
-// Overridable via env for deployments that run a slower fallback model, and
-// read at call time so tests can drive the timeout path.
+// Timeout model for a fallback turn — two distinct guards, because "hung" and
+// "working hard" must be told apart by ACTIVITY, not wall-clock time:
+//
+//   IDLE timeout   — trips only after a long stretch with NO streamed events.
+//                    A wedged thread-resume emits nothing and trips this fast;
+//                    a real work turn (editing a file, running tools) streams
+//                    notifications constantly and never trips it.
+//   ABSOLUTE cap   — generous backstop against a pathological event-emitting
+//                    loop. Kept under the host's 30-min heartbeat ceiling.
+//
+// Lesson learned live (2026-07-07): the original 150s WALL-CLOCK deadline
+// killed every heavy Codex turn mid-work (CV editing, file reading) while
+// light chat replies squeaked through — the user saw "❌ backup engine
+// failed" on precisely the messages that mattered.
+// Both read at call time so tests can drive the timeout paths.
+function fallbackIdleTimeoutMs(): number {
+  return Number(process.env.FALLBACK_IDLE_TIMEOUT_MS) || 180_000;
+}
 function fallbackTurnDeadlineMs(): number {
-  return Number(process.env.FALLBACK_TURN_DEADLINE_MS) || 150_000;
+  return Number(process.env.FALLBACK_TURN_DEADLINE_MS) || 1_200_000;
 }
 
 /**
@@ -286,22 +301,27 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         }
         try {
           await runFallbackTurn(config.fallback, quotaPrompt, routing, config.cwd, config.systemContext);
+          // A fallback turn just answered — end any ❌-notice streak so a
+          // future failure is announced again.
+          setFallbackFailureNotified(false);
         } catch (fbErr) {
           const fbMsg = fbErr instanceof Error ? fbErr.message : String(fbErr);
-          log(`Fallback turn failed: ${fbMsg}`);
-          // Self-heal a poisoned fallback thread. Bug B (2026-07-06): a Codex
-          // thread that hangs on RESUME timed out, but the bad continuation
-          // stayed stored — so every subsequent message resumed the same
-          // wedged thread and hung again, in a loop. Dropping the stored
-          // continuation on failure means the next fallback attempt starts a
-          // FRESH thread instead of re-resuming the poisoned one. We only skip
-          // this when the failure was the fallback provider's OWN quota (the
-          // thread is fine, just out of budget), so its memory is preserved.
+          log(`Fallback turn failed (after fresh-thread retry): ${fbMsg}`);
+          // Backstop self-heal: runFallbackTurn already retried once on a
+          // fresh thread; make sure no poisoned continuation survives into
+          // the next turn either (skip when it's the fallback's own quota —
+          // the thread is fine, just out of budget).
           if (!/quota exhausted/i.test(fbMsg)) {
-            log(`Clearing fallback continuation for '${config.fallback.providerName}' after failure`);
             clearContinuation(config.fallback.providerName);
           }
-          writeNotice(routing, FALLBACK_FAILED_NOTICE);
+          // Tell the user ONCE per failure streak — repeated failures during
+          // one outage were spamming a ❌ banner on every message.
+          if (!isFallbackFailureNotified()) {
+            setFallbackFailureNotified(true);
+            writeNotice(routing, FALLBACK_FAILED_NOTICE);
+          } else {
+            log('Fallback failed again — ❌ notice suppressed (already sent this streak)');
+          }
         }
       } else {
         // Stale/corrupt continuation recovery: ask the provider whether
@@ -545,6 +565,7 @@ async function processQuery(
         // QuotaExhaustedError before we get here.)
         if (isQuotaDegraded()) {
           setQuotaDegraded(false);
+          setFallbackFailureNotified(false);
           writeNotice(routing, hasFallback ? FALLBACK_RETURN_NOTICE : QUOTA_RENEWED_NOTICE);
         }
         if (event.text) {
@@ -639,6 +660,13 @@ function writeNotice(routing: RoutingContext, text: string): void {
  * close the query so the outer loop returns to the primary provider on the
  * next batch.
  *
+ * Resilience: the first attempt resumes the stored fallback thread (so the
+ * fallback conversation keeps its memory). If that attempt fails for any
+ * reason other than the fallback's own quota, the stored thread is presumed
+ * poisoned (the live failure mode: a resume that wedges) — it is cleared and
+ * the SAME turn is retried once on a fresh thread before giving up. The user
+ * only sees ❌ if the fresh attempt also fails.
+ *
  * Exported for tests.
  */
 export async function runFallbackTurn(
@@ -648,25 +676,62 @@ export async function runFallbackTurn(
   cwd: string,
   systemContext?: { instructions?: string },
 ): Promise<void> {
-  const continuation = getContinuation(fallback.providerName);
+  const stored = getContinuation(fallback.providerName);
+  try {
+    await fallbackAttempt(fallback, prompt, routing, cwd, systemContext, stored);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Quota on the fallback itself: retrying won't help, and the thread is
+    // fine — keep its memory for when credit returns.
+    if (stored === undefined || /quota exhausted/i.test(msg)) throw err;
+    log(`Fallback attempt on stored thread failed (${msg}) — clearing thread, retrying once fresh`);
+    clearContinuation(fallback.providerName);
+    await fallbackAttempt(fallback, prompt, routing, cwd, systemContext, undefined);
+  }
+}
+
+/** One fallback attempt against a specific continuation (or a fresh thread). */
+async function fallbackAttempt(
+  fallback: { provider: AgentProvider; providerName: string },
+  prompt: string,
+  routing: RoutingContext,
+  cwd: string,
+  systemContext: { instructions?: string } | undefined,
+  continuation: string | undefined,
+): Promise<void> {
   const promptSeqMark = getMaxOutSeq();
   const query = fallback.provider.query({ prompt, continuation, cwd, systemContext });
 
   let nudged = false;
   let gotResult = false;
-  // Hard wall-clock deadline. If the fallback provider wedges anywhere —
-  // JSON-RPC init, a hung thread-resume, or a turn that never streams a
-  // result — abort() tears down its process and we throw, so the primary
+  // Liveness guards (see the comment block at the timeout functions above):
+  // idle timer trips on prolonged SILENCE — the signature of a wedged
+  // resume/init — while a genuinely working turn streams events and stays
+  // alive. The absolute cap is a generous backstop. abort() tears down the
+  // provider process, so a stuck await rejects immediately and the primary
   // path recovers on the next turn instead of the whole poll-loop freezing.
-  let timedOut = false;
-  const deadlineMs = fallbackTurnDeadlineMs();
-  const deadline = setTimeout(() => {
-    timedOut = true;
-    log(`Fallback turn exceeded ${deadlineMs}ms — aborting`);
+  let timedOut: string | null = null;
+  const idleMs = fallbackIdleTimeoutMs();
+  const capMs = fallbackTurnDeadlineMs();
+  let lastEventAt = Date.now();
+  const idleTimer = setInterval(
+    () => {
+      if (Date.now() - lastEventAt >= idleMs) {
+        timedOut = `no events for ${idleMs}ms`;
+        log(`Fallback turn stalled (${timedOut}) — aborting`);
+        query.abort();
+      }
+    },
+    Math.min(Math.max(idleMs / 4, 50), 5_000),
+  );
+  const capTimer = setTimeout(() => {
+    timedOut = `exceeded ${capMs}ms deadline`;
+    log(`Fallback turn ${timedOut} — aborting`);
     query.abort();
-  }, deadlineMs);
+  }, capMs);
   try {
     for await (const event of query.events) {
+      lastEventAt = Date.now();
       touchHeartbeat();
       if (event.type === 'init') {
         setContinuation(fallback.providerName, event.continuation);
@@ -699,11 +764,12 @@ export async function runFallbackTurn(
       }
     }
   } finally {
-    clearTimeout(deadline);
+    clearInterval(idleTimer);
+    clearTimeout(capTimer);
     if (!gotResult) query.abort();
   }
   if (timedOut) {
-    throw new Error(`Fallback provider timed out after ${deadlineMs}ms`);
+    throw new Error(`Fallback provider timed out: ${timedOut}`);
   }
   if (!gotResult) {
     throw new Error('Fallback provider produced no result');

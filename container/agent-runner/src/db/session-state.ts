@@ -87,6 +87,25 @@ export function setQuotaDegraded(degraded: boolean): void {
   else deleteValue(QUOTA_DEGRADED_KEY);
 }
 
+// ── Fallback-failure notice dedup ───────────────────────────────────────────
+// Remembers that the user was already shown "❌ the backup engine failed too"
+// during the current failure streak, so repeated fallback failures within one
+// outage don't spam the notice on every message (observed live 2026-07-07/08:
+// four ❌ banners across one outage). Cleared when a fallback turn succeeds
+// or the primary recovers.
+const FALLBACK_FAILURE_NOTIFIED_KEY = 'fallback_failure_notified';
+
+/** True if the ❌ fallback-failed notice was already sent this streak. */
+export function isFallbackFailureNotified(): boolean {
+  return getValue(FALLBACK_FAILURE_NOTIFIED_KEY) === '1';
+}
+
+/** Mark (or clear) that the ❌ fallback-failed notice was sent. */
+export function setFallbackFailureNotified(notified: boolean): void {
+  if (notified) setValue(FALLBACK_FAILURE_NOTIFIED_KEY, '1');
+  else deleteValue(FALLBACK_FAILURE_NOTIFIED_KEY);
+}
+
 // ── Approaching-quota warning dedup ─────────────────────────────────────────
 // Remembers which plan window we've already sent the "you're near your quota"
 // heads-up for, so the warning fires exactly ONCE per window. Keyed by the
