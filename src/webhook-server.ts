@@ -159,6 +159,23 @@ function ensureServer(): void {
     }
   });
 
+  // Without an 'error' listener a bind failure (e.g. EADDRINUSE) becomes an
+  // uncaught exception that takes the whole host down with it — polling,
+  // delivery, sweep and all. Better to log the port and keep running; only the
+  // webhook-backed adapters go quiet until the conflict is cleared.
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    server = null;
+    log.error('Webhook server failed to start', {
+      port,
+      code: err.code,
+      err,
+      hint:
+        err.code === 'EADDRINUSE'
+          ? `Port ${port} is already in use (another process or nanoclaw copy). Set WEBHOOK_PORT to a free port.`
+          : undefined,
+    });
+  });
+
   server.listen(port, '0.0.0.0', () => {
     log.info('Webhook server started', { port, adapters: [...routes.keys()] });
   });
