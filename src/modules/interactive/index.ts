@@ -33,6 +33,12 @@ async function handleInteractiveResponse(payload: ResponsePayload): Promise<bool
   writeSessionMessage(session.agent_group_id, session.id, {
     id: `qr-${payload.questionId}-${Date.now()}`,
     kind: 'system',
+    // trigger=0: consumed in place by the ask_user_question tool poll
+    // (findQuestionResponse ignores trigger), never by a cold-woken container
+    // (poll-loop filters kind='system'). Same pattern as the cli_response
+    // write in delivery-action.ts. Without this, a click after the tool's
+    // timeout leaves an orphaned trigger=1 row that re-wakes containers forever.
+    trigger: 0,
     timestamp: new Date().toISOString(),
     platformId: pq.platform_id,
     channelType: pq.channel_type,

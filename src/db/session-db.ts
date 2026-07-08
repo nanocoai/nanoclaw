@@ -137,9 +137,15 @@ export function countDueMessages(db: Database.Database): number {
   return (
     db
       .prepare(
+        // kind='system' rows are consumed in place by an in-container tool poll
+        // (e.g. ask_user_question's findQuestionResponse); a cold-woken
+        // container's main loop filters them out entirely (poll-loop.ts), so
+        // waking for them is always wasted — and an orphaned system row would
+        // otherwise re-wake an idle container forever.
         `SELECT COUNT(*) as count FROM messages_in
        WHERE status = 'pending'
          AND trigger = 1
+         AND kind != 'system'
          AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))`,
       )
       .get() as { count: number }

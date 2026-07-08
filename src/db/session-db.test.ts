@@ -10,7 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, afterEach } from 'vitest';
 
-import { getInboundSourceSessionId, migrateMessagesInTable } from './session-db.js';
+import { countDueMessages, getInboundSourceSessionId, migrateMessagesInTable } from './session-db.js';
 
 const TEST_DIR = '/tmp/nanoclaw-session-db-test';
 const DB_PATH = path.join(TEST_DIR, 'inbound.db');
@@ -89,6 +89,47 @@ describe('migrateMessagesInTable', () => {
 
     expect(getInboundSourceSessionId(db, 'legacy-2')).toBeNull();
     expect(getInboundSourceSessionId(db, 'does-not-exist')).toBeNull();
+    db.close();
+  });
+});
+
+describe('countDueMessages', () => {
+  it("excludes kind='system' and trigger=0 rows from the due count", () => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+
+    const db = new Database(DB_PATH);
+    db.exec(`
+      CREATE TABLE messages_in (
+        id             TEXT PRIMARY KEY,
+        seq            INTEGER UNIQUE,
+        kind           TEXT NOT NULL,
+        timestamp      TEXT NOT NULL,
+        status         TEXT DEFAULT 'pending',
+        process_after  TEXT,
+        recurrence     TEXT,
+        tries          INTEGER DEFAULT 0,
+        platform_id    TEXT,
+        channel_type   TEXT,
+        thread_id      TEXT,
+        content        TEXT NOT NULL
+      );
+    `);
+    migrateMessagesInTable(db); // adds trigger (default 1) among others
+
+    const insert = db.prepare(
+      `INSERT INTO messages_in (id, seq, kind, timestamp, status, trigger, process_after, content)
+       VALUES (?, ?, ?, datetime('now'), ?, ?, ?, '{}')`,
+    );
+    insert.run('chat-due', 2, 'chat', 'pending', 1, null); // the only due row
+    // Orphaned question_response (click after the tool poll timed out) must
+    // never re-wake a container: cold containers filter out system messages.
+    insert.run('system-orphan', 4, 'system', 'pending', 1, null);
+    insert.run('context-only', 6, 'chat', 'pending', 0, null);
+    insert.run('already-done', 8, 'chat', 'completed', 1, null);
+    insert.run('not-yet-due', 10, 'chat', 'pending', 1, '2999-01-01 00:00:00');
+
+    expect(countDueMessages(db)).toBe(1);
     db.close();
   });
 });
