@@ -70,6 +70,15 @@ function loadAgentBaseInstructions(): string | undefined {
       break;
     }
   }
+  // Per-group memory (user preferences, project context). Claude Code picks
+  // this up automatically from cwd; Codex has no such convention, so without
+  // loading it explicitly the fallback engine loses everything the agent
+  // "knows" about the user — a big part of why a Claude→Codex switch felt
+  // like talking to a different person (reported live 2026-07-08).
+  const localMd = '/workspace/agent/CLAUDE.local.md';
+  if (fs.existsSync(localMd)) {
+    parts.push(fs.readFileSync(localMd, 'utf-8'));
+  }
   return parts.length > 0 ? parts.join('\n\n') : undefined;
 }
 

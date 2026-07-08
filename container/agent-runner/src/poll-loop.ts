@@ -15,6 +15,7 @@ import {
   setQuotaWarnedWindow,
 } from './db/session-state.js';
 import { QuotaExhaustedError, isGenuineQuotaError, isTransientLimit } from './quota.js';
+import { buildHandoffRecap } from './handoff.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
 import {
   formatMessages,
@@ -239,7 +240,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
-    const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+    let prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+
+    // Reverse handoff: while quota-degraded, recent turns were answered by
+    // the fallback engine — the primary's own transcript never saw them. If
+    // this attempt succeeds (quota recovered), the recap lets the primary
+    // continue the conversation instead of resuming from a hole; if quota is
+    // still out, the prompt flows to the fallback with the recap attached,
+    // which is equally useful there (the recap wording is direction-neutral).
+    if (isQuotaDegraded()) {
+      prompt = buildHandoffRecap() + prompt;
+    }
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
@@ -290,7 +301,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         // 2026-07-06). The persisted flag makes it fire exactly once per
         // outage; the matching return notice fires once when the primary
         // recovers (see the result path in processQuery).
-        if (!isQuotaDegraded()) {
+        const isFirstFallbackOfOutage = !isQuotaDegraded();
+        if (isFirstFallbackOfOutage) {
           log(`Primary quota exhausted — switching to fallback provider '${config.fallback.providerName}'`);
           writeNotice(routing, FALLBACK_SWITCH_NOTICE);
           setQuotaDegraded(true);
@@ -299,8 +311,18 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
             `Primary still quota-exhausted — continuing on fallback '${config.fallback.providerName}' (notice suppressed)`,
           );
         }
+        // Conversation handoff: the fallback engine has its own private
+        // thread and never saw the primary-era turns. On the first fallback
+        // turn of an outage — or whenever the fallback thread is fresh (none
+        // stored, e.g. after a self-heal wipe) — prepend a recap of the
+        // recent exchange so the switch doesn't read as "a different person
+        // who remembers nothing" (reported live 2026-07-08). Mid-outage turns
+        // resume the fallback's own thread, which already saw them.
+        const fallbackHasThread = getContinuation(config.fallback.providerName) !== undefined;
+        const fbPrompt =
+          isFirstFallbackOfOutage || !fallbackHasThread ? buildHandoffRecap() + quotaPrompt : quotaPrompt;
         try {
-          await runFallbackTurn(config.fallback, quotaPrompt, routing, config.cwd, config.systemContext);
+          await runFallbackTurn(config.fallback, fbPrompt, routing, config.cwd, config.systemContext);
           // A fallback turn just answered — end any ❌-notice streak so a
           // future failure is announced again.
           setFallbackFailureNotified(false);
