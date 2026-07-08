@@ -44,7 +44,7 @@ import './slack.js';
 ### 4. Install the adapter package (pinned)
 
 ```bash
-pnpm install @chat-adapter/slack@4.29.0
+pnpm install @chat-adapter/slack@4.32.0
 ```
 
 ### 5. Build

@@ -44,7 +44,7 @@ import './gchat.js';
 ### 4. Install the adapter package (pinned)
 
 ```bash
-pnpm install @chat-adapter/gchat@4.29.0
+pnpm install @chat-adapter/gchat@4.32.0
 ```
 
 ### 5. Build
