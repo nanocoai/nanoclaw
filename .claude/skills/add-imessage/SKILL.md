@@ -31,6 +31,7 @@ git fetch origin channels
 ### 2. Copy the adapter and its registration test
 
 ```bash
+mkdir -p src/channels
 git show origin/channels:src/channels/imessage.ts                    > src/channels/imessage.ts
 git show origin/channels:src/channels/imessage-registration.test.ts > src/channels/imessage-registration.test.ts
 ```
