@@ -1,0 +1,178 @@
+diff --git a/dist/router.js b/dist/router.js
+index 326434d184af3d5496de61b07c79bca0ceff7e7f..c9cf713dc439f9b6d8c54cc94195f30741df18d8 100644
+--- a/dist/router.js
++++ b/dist/router.js
+@@ -65,6 +65,7 @@ export async function dispatch(method, path, params, res) {
+         const group = s.agent_groups.find((g) => g.id === id);
+         if (!group)
+             return json(res, { error: 'Not found' }, 404);
++        const groupTasks = (s.scheduled_tasks || []).find((t) => t.agentGroupId === id);
+         return json(res, {
+             group,
+             sessions: s.sessions.filter((x) => x.agent_group_id === id),
+@@ -72,6 +73,7 @@ export async function dispatch(method, path, params, res) {
+             destinations: group.destinations,
+             members: group.members,
+             admins: group.admins,
++            scheduledTasks: groupTasks ? groupTasks.tasks : [],
+         });
+     }
+     if (method === 'GET' && path === '/api/sessions') {
+@@ -114,6 +116,16 @@ export async function dispatch(method, path, params, res) {
+             return json(res, { error: 'No data yet' }, 503);
+         return json(res, { sessions: s.context_windows });
+     }
++    if (method === 'GET' && path === '/api/scheduled-tasks') {
++        if (!s)
++            return json(res, { error: 'No data yet' }, 503);
++        return json(res, s.scheduled_tasks || []);
++    }
++    if (method === 'GET' && path === '/api/alerts') {
++        if (!s)
++            return json(res, { error: 'No data yet' }, 503);
++        return json(res, s.alerts || { pendingApprovals: [], droppedMessages: [] });
++    }
+     // --- HTML pages ---
+     if (method === 'GET') {
+         if (path === '/dashboard')
+diff --git a/dist/ui/pages/agent-groups.js b/dist/ui/pages/agent-groups.js
+index 0c33db833aafdcf9d7292c670bad41fbf8bcc1d7..1d7efb91c534c350f931e94375403be56c0b26ba 100644
+--- a/dist/ui/pages/agent-groups.js
++++ b/dist/ui/pages/agent-groups.js
+@@ -53,12 +53,22 @@ export function agentGroupsPage() {
+         html += detailRow('Created', g.created_at);
+         if (g.container_config) {
+           const cc = g.container_config;
+-          if (cc.packages) {
+-            const pkgs = [...(cc.packages.apt || []), ...(cc.packages.npm || [])];
+-            if (pkgs.length) html += detailRow('Packages', pkgs.join(', '));
+-          }
+-          if (cc.mcpServers) {
+-            html += detailRow('MCP Servers', Object.keys(cc.mcpServers).join(', '));
++          if (g.effective_model) html += detailRow('Model', g.effective_model);
++          const aptPkgs = Array.isArray(cc.packages_apt) ? cc.packages_apt : (typeof cc.packages_apt === 'string' ? JSON.parse(cc.packages_apt || '[]') : []);
++          const npmPkgs = Array.isArray(cc.packages_npm) ? cc.packages_npm : (typeof cc.packages_npm === 'string' ? JSON.parse(cc.packages_npm || '[]') : []);
++          const allPkgs = [...aptPkgs, ...npmPkgs];
++          if (allPkgs.length) html += detailRow('Packages', allPkgs.join(', '));
++          const mcpServers = cc.mcp_servers && typeof cc.mcp_servers === 'object' ? cc.mcp_servers : (typeof cc.mcp_servers === 'string' ? JSON.parse(cc.mcp_servers || '{}') : {});
++          const mcpNames = Object.keys(mcpServers);
++          if (mcpNames.length) {
++            html += '<div class="detail-row"><span class="detail-label">MCP Servers</span><span class="detail-value">';
++            for (var mi = 0; mi < mcpNames.length; mi++) {
++              var srv = mcpServers[mcpNames[mi]];
++              var srvType = srv.url ? 'http' : 'stdio';
++              html += badge(mcpNames[mi], 'blue') + ' <span style="font-size:11px;color:#666">' + esc(srvType) + '</span>';
++              if (mi < mcpNames.length - 1) html += '&nbsp; ';
++            }
++            html += '</span></div>';
+           }
+         }
+         html += '</div>';
+@@ -101,6 +111,28 @@ export function agentGroupsPage() {
+           html += '</table>';
+         }
+ 
++        // Scheduled Tasks
++        var tasks = data.scheduledTasks || [];
++        html += '<h3 class="section-title">Scheduled Tasks (' + tasks.length + ')</h3>';
++        if (tasks.length > 0) {
++          var now = Date.now();
++          html += '<table><tr><th>ID</th><th>Recurrence</th><th>Next fire</th><th>Status</th><th>Prompt</th></tr>';
++          for (var ti = 0; ti < tasks.length; ti++) {
++            var task = tasks[ti];
++            var nextFire = task.process_after ? new Date(task.process_after) : null;
++            var overdue = nextFire && nextFire.getTime() < now;
++            var nextStr = nextFire ? (overdue ? '<span style="color:#f87171">' + timeAgo(task.process_after) + ' (overdue)</span>' : timeAgo(task.process_after)) : '—';
++            html += '<tr>' +
++              '<td style="font-size:11px;color:#666">' + esc(task.id) + '</td>' +
++              '<td>' + badge(task.recurrence || 'once', 'blue') + '</td>' +
++              '<td>' + nextStr + '</td>' +
++              '<td>' + badge(task.status, task.status === 'pending' ? 'green' : 'yellow') + '</td>' +
++              '<td style="font-size:11px;color:#999;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(task.prompt || '') + '">' + esc((task.prompt || '').slice(0, 80)) + '</td>' +
++              '</tr>';
++          }
++          html += '</table>';
++        }
++
+         // Members & Admins
+         html += '<h3 class="section-title">Members (' + data.members.length + ') &amp; Admins (' + data.admins.length + ')</h3>';
+         if (data.admins.length > 0 || data.members.length > 0) {
+diff --git a/dist/ui/pages/overview.js b/dist/ui/pages/overview.js
+index 3e0cc9e7eea0c3eff47ac352b547dbe59f3cfc81..5042ffc6cb7a84b8aaa747bc3674dbe4f152277d 100644
+--- a/dist/ui/pages/overview.js
++++ b/dist/ui/pages/overview.js
+@@ -4,6 +4,9 @@ export function overviewPage() {
+     <h2 class="page-title">Overview</h2>
+     <div id="cards" class="cards"><div class="loading">Loading...</div></div>
+ 
++    <h3 class="section-title">Alerts</h3>
++    <div id="alerts"><div class="loading">Loading...</div></div>
++
+     <h3 class="section-title">Token Usage</h3>
+     <div id="tokens" class="cards"><div class="loading">Loading...</div></div>
+     <div id="token-detail"></div>
+@@ -19,23 +22,62 @@ export function overviewPage() {
+     <script>
+     (async () => {
+       try {
+-        const [data, activity, tokenData, ctxData] = await Promise.all([
++        const [data, activity, tokenData, ctxData, alertsData, tasksData] = await Promise.all([
+           api('/api/overview'),
+           api('/api/activity'),
+           api('/api/tokens/summary'),
+           api('/api/context'),
++          api('/api/alerts'),
++          api('/api/scheduled-tasks'),
+         ]);
++        var now = Date.now();
+ 
+         // Cards
++        var taskGroups = tasksData || [];
++        var totalTasks = taskGroups.reduce(function(n, tg) { return n + tg.tasks.length; }, 0);
++        var overdueTasks = taskGroups.reduce(function(n, tg) {
++          return n + tg.tasks.filter(function(t) { return t.process_after && new Date(t.process_after).getTime() < now; }).length;
++        }, 0);
++        var taskSub = totalTasks === 0 ? 'none' : (overdueTasks > 0 ? overdueTasks + ' overdue' : 'all on schedule');
+         document.getElementById('cards').innerHTML = [
+           cardHtml('Agent Groups', data.agentGroups.total),
+           cardHtml('Active Sessions', data.sessions.active, data.sessions.running + ' running'),
+           cardHtml('Live Channels', data.channels.live.length, data.channels.live.join(', ') || 'none'),
+           cardHtml('Messaging Groups', data.channels.messagingGroups),
+-          cardHtml('Users', data.users.total, data.users.owners + ' owners, ' + data.users.globalAdmins + ' admins'),
++          cardHtml('Scheduled Tasks', totalTasks, taskSub),
+           cardHtml('Uptime', formatUptime(data.uptime), data.assistantName),
+         ].join('');
+ 
++        // Alerts
++        var approvals = alertsData.pendingApprovals || [];
++        var dropped = alertsData.droppedMessages || [];
++        if (approvals.length === 0 && dropped.length === 0) {
++          document.getElementById('alerts').innerHTML = '<div style="color:#666;font-size:13px">No pending approvals or dropped messages.</div>';
++        } else {
++          var aHtml = '';
++          if (approvals.length > 0) {
++            aHtml += '<div class="detail-panel" style="margin-bottom:12px"><h4 style="color:#f87171;margin-bottom:8px">Pending Approvals (' + approvals.length + ')</h4>';
++            aHtml += '<table><tr><th>Title</th><th>Action</th><th>Group</th><th>Created</th></tr>';
++            for (var ai = 0; ai < approvals.length; ai++) {
++              var ap = approvals[ai];
++              aHtml += '<tr><td>' + esc(ap.title || ap.approval_id) + '</td><td>' + badge(ap.action, 'yellow') + '</td>' +
++                '<td>' + esc(ap.agent_group_id || '') + '</td><td>' + timeAgo(ap.created_at) + '</td></tr>';
++            }
++            aHtml += '</table></div>';
++          }
++          if (dropped.length > 0) {
++            aHtml += '<div class="detail-panel"><h4 style="color:#facc15;margin-bottom:8px">Dropped Messages (' + dropped.length + ')</h4>';
++            aHtml += '<table><tr><th>Channel</th><th>Sender</th><th>Reason</th><th>Count</th><th>Last seen</th></tr>';
++            for (var di = 0; di < dropped.length; di++) {
++              var dm = dropped[di];
++              aHtml += '<tr><td>' + badge(dm.channel_type, 'blue') + '</td><td>' + esc(dm.sender_name || dm.platform_id) + '</td>' +
++                '<td>' + badge(dm.reason, 'gray') + '</td><td>' + dm.message_count + '</td><td>' + timeAgo(dm.last_seen) + '</td></tr>';
++            }
++            aHtml += '</table></div>';
++          }
++          document.getElementById('alerts').innerHTML = aHtml;
++        }
++
+         // Token summary cards
+         var t = tokenData.totals || {};
+         var cacheHitRate = (t.cacheReadTokens && (t.inputTokens + t.cacheReadTokens + t.cacheCreationTokens))

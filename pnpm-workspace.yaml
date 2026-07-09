@@ -3,6 +3,8 @@ onlyBuiltDependencies:
   - esbuild
   - protobufjs
   - sharp
+patchedDependencies:
+  '@nanoco/nanoclaw-dashboard@0.3.0': patches/@nanoco__nanoclaw-dashboard@0.3.0.patch
 
 pnpm:
   minimumReleaseAge: 4320

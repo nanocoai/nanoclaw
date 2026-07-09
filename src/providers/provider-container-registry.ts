@@ -16,6 +16,8 @@
  * `import './<name>.js';` to `src/providers/index.ts` (the barrel).
  */
 
+import type { ContainerConfig } from '../container-config.js';
+
 export interface VolumeMount {
   hostPath: string;
   containerPath: string;
@@ -42,6 +44,8 @@ export interface ProviderContainerContext {
   selectedSkills: string[];
   /** `process.env` at spawn time — pull passthrough values from here. */
   hostEnv: NodeJS.ProcessEnv;
+  /** Resolved container config for this agent group. */
+  containerConfig: ContainerConfig;
 }
 
 export interface ProviderContainerContribution {

@@ -259,6 +259,7 @@ function resolveProviderContribution(
         groupDir: path.resolve(GROUPS_DIR, agentGroup.folder),
         selectedSkills: selectedSkillNames(containerConfig),
         hostEnv: process.env,
+        containerConfig,
       })
     : {};
   return { provider, contribution };
