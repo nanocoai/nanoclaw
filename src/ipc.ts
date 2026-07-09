@@ -619,7 +619,7 @@ function handleReport(
   },
   sourceGroup: string,
   registeredGroups: Record<string, RegisteredGroup>,
-  deps?: Pick<IpcDeps, 'injectReportToActiveAgent' | 'notifyReportRejected'>,
+  deps?: Pick<IpcDeps, 'injectReportToActiveAgent' | 'notifyReportRejected' | 'sendMessage'>,
 ): void {
   const reportingGroup = sourceGroup;
 
@@ -734,14 +734,17 @@ function storeReportToSource(
 }
 
 /**
- * 统一投递：DB 写入 + 尝试注入活跃 agent。
+ * 统一投递：DB 写入 + 尝试注入活跃 agent + 直发飞书通知。
  * handleReport 和 finalizeDelegationOnTurnEnd 共用此函数。
+ *
+ * 飞书直发保底：不管 agent 在不在、后续怎么处理，用户都能在群里看到
+ * delegation 结果。解决 agent 收到结果后闷头干活不汇报用户的问题。
  */
 function deliverReportToSource(
   sourceJid: string,
   reportingGroup: string,
   reportText: string,
-  deps?: Pick<IpcDeps, 'injectReportToActiveAgent'>,
+  deps?: Pick<IpcDeps, 'injectReportToActiveAgent' | 'sendMessage'>,
 ): ReportMeta {
   const meta = storeReportToSource(sourceJid, reportingGroup, reportText);
   if (deps?.injectReportToActiveAgent) {
@@ -750,6 +753,15 @@ function deliverReportToSource(
       { sourceJid, reportId: meta.id, injected },
       'deliverReportToSource: injection attempt',
     );
+  }
+  // 直发飞书群通知（保底，不依赖 agent 行为）
+  if (deps?.sendMessage) {
+    deps.sendMessage(sourceJid, reportText).catch((err) => {
+      logger.warn(
+        { sourceJid, reportId: meta.id, err: String(err) },
+        'deliverReportToSource: 飞书直发通知失败（不影响 DB 投递）',
+      );
+    });
   }
   return meta;
 }
@@ -801,7 +813,7 @@ export function finalizeDelegationOnTurnEnd(
   reportingGroup: string,
   ok: boolean,
   finalReply?: string,
-  deps?: Pick<IpcDeps, 'injectReportToActiveAgent'>,
+  deps?: Pick<IpcDeps, 'injectReportToActiveAgent' | 'sendMessage'>,
 ): boolean {
   const task = getActiveDelegationByGroup(reportingGroup);
   if (!task) return false;

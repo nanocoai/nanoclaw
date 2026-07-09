@@ -684,6 +684,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // error 终态：不携带回复内容（异常终态无归因意义）
         finalizeDelegationOnTurnEnd(group.folder, false, undefined, {
           injectReportToActiveAgent,
+          sendMessage: async (jid, text) => { await channel.sendMessage(jid, text); return undefined; },
         });
         return;
       }
@@ -717,6 +718,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         : undefined;
       finalizeDelegationOnTurnEnd(group.folder, true, finalReply, {
         injectReportToActiveAgent,
+        sendMessage: async (jid, text) => { await channel.sendMessage(jid, text); return undefined; },
       });
     } catch (err) {
       logger.warn({ err, group: group.folder }, `${opts.logPrefix} 自动终态汇报异常`);
@@ -1469,6 +1471,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     try {
       finalizeDelegationOnTurnEnd(group.folder, false, undefined, {
         injectReportToActiveAgent,
+        sendMessage: async (jid, text) => { await channel.sendMessage(jid, text); return undefined; },
       });
     } catch (err) {
       logger.warn({ err, group: group.folder }, '自动终态汇报(failed)异常');
