@@ -240,7 +240,11 @@ describe('startContainerRuntimeWatchdog', () => {
     const onDown = vi.fn();
     const onRecovered = vi.fn();
 
-    startContainerRuntimeWatchdog({ initiallyDown: false, onDown, onRecovered });
+    startContainerRuntimeWatchdog({
+      initiallyDown: false,
+      onDown,
+      onRecovered,
+    });
     vi.advanceTimersByTime(2 * 60 * 1000 * 3); // 3 healthy-poll intervals
 
     expect(onDown).not.toHaveBeenCalled();
