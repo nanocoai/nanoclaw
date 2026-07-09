@@ -145,8 +145,13 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // 0. Apply the adapter's thread policy. Non-threaded adapters (Telegram,
   //    WhatsApp, iMessage, email) collapse threads to the channel.
   const adapter = getChannelAdapter(event.channelType);
-  if (adapter && !adapter.supportsThreads) {
-    event = { ...event, threadId: null };
+  if (adapter) {
+    const useThreads = adapter.shouldUseThreadsFor
+      ? adapter.shouldUseThreadsFor(event.platformId)
+      : adapter.supportsThreads;
+    if (!useThreads) {
+      event = { ...event, threadId: null };
+    }
   }
 
   const isMention = event.message.isMention === true;

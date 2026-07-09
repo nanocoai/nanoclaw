@@ -124,6 +124,14 @@ export interface ChannelAdapter {
    */
   supportsThreads: boolean;
 
+  /**
+   * Per-destination thread policy override. When defined, the router consults
+   * this instead of `supportsThreads` to decide whether to collapse the inbound
+   * threadId. Useful for platforms like Slack where threads make sense in
+   * channels (C/G-prefixed IDs) but not in DMs (D-prefixed IDs).
+   */
+  shouldUseThreadsFor?(platformId: string): boolean;
+
   // Lifecycle
   setup(config: ChannelSetup): Promise<void>;
   teardown(): Promise<void>;
