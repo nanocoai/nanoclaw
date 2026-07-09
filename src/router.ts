@@ -289,6 +289,28 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   const parsed = safeParseContent(event.message.content);
   const messageText = parsed.text ?? '';
 
+  // Lazy, memoized parent-message fetch for thread context seeding. Only
+  // resolved when an agent's session creation actually needs it (see
+  // deliverToAgent). Cached so multiple agents wired to the same channel
+  // share one platform API call. Fail-open — never blocks routing.
+  let parentPromise: Promise<{ id: string; sender: string; text: string } | null> | null = null;
+  const getThreadParent = (): Promise<{ id: string; sender: string; text: string } | null> => {
+    if (parentPromise) return parentPromise;
+    if (!event.threadId || !adapter?.supportsThreads || !adapter.fetchThreadParent) {
+      parentPromise = Promise.resolve(null);
+      return parentPromise;
+    }
+    parentPromise = adapter.fetchThreadParent(event.platformId, event.threadId).catch((err) => {
+      log.warn('adapter.fetchThreadParent threw', {
+        channelType: event.channelType,
+        threadId: event.threadId,
+        err,
+      });
+      return null;
+    });
+    return parentPromise;
+  };
+
   let engagedCount = 0;
   let accumulatedCount = 0;
   let subscribed = false;
@@ -303,7 +325,16 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
 
     if (engages && accessOk && scopeOk) {
-      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, true);
+      await deliverToAgent(
+        agent,
+        agentGroup,
+        mg,
+        event,
+        userId,
+        adapter?.supportsThreads === true,
+        true,
+        getThreadParent,
+      );
       engagedCount++;
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
@@ -334,7 +365,16 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       // message (which also stages their attachments to disk via
       // writeSessionMessage → extractAttachmentFiles) is exactly what the
       // gate is meant to prevent.
-      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, false);
+      await deliverToAgent(
+        agent,
+        agentGroup,
+        mg,
+        event,
+        userId,
+        adapter?.supportsThreads === true,
+        false,
+        getThreadParent,
+      );
       accumulatedCount++;
     } else {
       log.debug('Message not engaged for agent (drop policy)', {
@@ -421,6 +461,7 @@ async function deliverToAgent(
   userId: string | null,
   adapterSupportsThreads: boolean,
   wake: boolean,
+  getThreadParent: () => Promise<{ id: string; sender: string; text: string } | null>,
 ): Promise<void> {
   // Apply the adapter thread policy: threaded adapter in a group chat →
   // per-thread session regardless of wiring. agent-shared preserved (it's
@@ -432,6 +473,38 @@ async function deliverToAgent(
   }
 
   const { session, created } = resolveSession(agent.agent_group_id, mg.id, event.threadId, effectiveSessionMode);
+
+  // Seed the thread-parent message into the inbound's `replyTo` when this
+  // is the first wake of a per-thread session and the inbound doesn't
+  // already carry one. The container's formatter renders `replyTo` as
+  // `<quoted_message>` inside the message tag, giving the agent the
+  // originating message it would otherwise have no view of. Fail-open:
+  // any error from the adapter fetch leaves the inbound unmodified.
+  let messageContent = event.message.content;
+  if (created && event.threadId && adapterSupportsThreads) {
+    let parsedContent: Record<string, unknown> | null = null;
+    try {
+      const candidate = JSON.parse(messageContent);
+      if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+        parsedContent = candidate as Record<string, unknown>;
+      }
+    } catch {
+      // Non-JSON content (legacy/native adapters) — skip seeding.
+    }
+    if (parsedContent && parsedContent.replyTo == null) {
+      const parent = await getThreadParent();
+      if (parent && parent.id !== event.message.id) {
+        parsedContent.replyTo = { id: parent.id, sender: parent.sender, text: parent.text };
+        messageContent = JSON.stringify(parsedContent);
+        log.info('Seeded thread parent into fresh per-thread session', {
+          sessionId: session.id,
+          agentGroup: agent.agent_group_id,
+          threadId: event.threadId,
+          parentSender: parent.sender,
+        });
+      }
+    }
+  }
 
   // The inbound row's (channel_type, platform_id, thread_id) is the address
   // the agent's reply will be delivered to. Normally it mirrors the source
@@ -473,7 +546,7 @@ async function deliverToAgent(
     platformId: deliveryAddr.platformId,
     channelType: deliveryAddr.channelType,
     threadId: deliveryAddr.threadId,
-    content: event.message.content,
+    content: messageContent,
     trigger: wake ? 1 : 0,
   });
 
