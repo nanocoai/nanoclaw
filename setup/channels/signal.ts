@@ -10,7 +10,7 @@
  *   2. Install the adapter + qrcode via setup/add-signal.sh (idempotent).
  *   3. Run the signal-auth step, rendering each SIGNAL_AUTH_QR block as
  *      a terminal QR the operator scans from Signal → Linked Devices.
- *   4. Persist SIGNAL_ACCOUNT to .env (+ data/env/env).
+ *   4. Persist SIGNAL_ACCOUNT to .env.
  *   5. Kick the service so the adapter picks up the new credentials.
  *   6. Ask operator role + agent name.
  *   7. Wire the agent via scripts/init-first-agent.ts; the existing welcome
@@ -333,7 +333,7 @@ async function renderQr(url: string): Promise<string[]> {
   }
 }
 
-/** Persist SIGNAL_ACCOUNT to .env and mirror to data/env/env for the container. */
+/** Persist SIGNAL_ACCOUNT to .env. */
 function writeSignalAccount(account: string): void {
   const envPath = path.join(process.cwd(), '.env');
   let contents = '';
@@ -352,10 +352,6 @@ function writeSignalAccount(account: string): void {
     contents += `SIGNAL_ACCOUNT=${account}\n`;
   }
   fs.writeFileSync(envPath, contents);
-
-  const containerEnvDir = path.join(process.cwd(), 'data', 'env');
-  fs.mkdirSync(containerEnvDir, { recursive: true });
-  fs.copyFileSync(envPath, path.join(containerEnvDir, 'env'));
 
   setupLog.userInput('signal_account', account);
 }

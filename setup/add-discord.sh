@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Install the Discord adapter, persist DISCORD_BOT_TOKEN / APPLICATION_ID /
-# PUBLIC_KEY to .env + data/env/env, and restart the service. Non-interactive —
+# PUBLIC_KEY to .env, and restart the service. Non-interactive —
 # the operator-facing "Create a bot" walkthrough, owner confirmation, and
 # server-invite step live in setup/channels/discord.ts. Credentials come in via
 # env vars: DISCORD_BOT_TOKEN, DISCORD_APPLICATION_ID, DISCORD_PUBLIC_KEY.
@@ -15,7 +15,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # Keep in sync with .claude/skills/add-discord/SKILL.md.
-ADAPTER_VERSION="@chat-adapter/discord@4.26.0"
+ADAPTER_VERSION="@chat-adapter/discord@4.29.0"
 
 # Resolve which remote carries the channels branch — handles forks where
 # upstream lives on a different remote than `origin`.
@@ -104,10 +104,6 @@ upsert_env() {
 upsert_env DISCORD_BOT_TOKEN "$DISCORD_BOT_TOKEN"
 upsert_env DISCORD_APPLICATION_ID "$DISCORD_APPLICATION_ID"
 upsert_env DISCORD_PUBLIC_KEY "$DISCORD_PUBLIC_KEY"
-
-# Container reads from data/env/env (the host mounts it).
-mkdir -p data/env
-cp .env data/env/env
 
 log "Restarting service so the new adapter picks up the credentials…"
 # shellcheck source=setup/lib/install-slug.sh

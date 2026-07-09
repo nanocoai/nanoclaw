@@ -65,15 +65,6 @@ function main(): void {
     fs.writeFileSync(v2EnvPath, result);
   }
 
-  // Sync to data/env/env (container reads from here)
-  const containerEnvDir = path.join(process.cwd(), 'data', 'env');
-  try {
-    fs.mkdirSync(containerEnvDir, { recursive: true });
-    fs.copyFileSync(v2EnvPath, path.join(containerEnvDir, 'env'));
-  } catch {
-    // Non-fatal
-  }
-
   console.log(`OK:copied=${copied.length},skipped=${skipped.length}`);
   if (copied.length > 0) console.log(`COPIED:${copied.join(',')}`);
 }

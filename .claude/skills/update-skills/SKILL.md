@@ -85,6 +85,7 @@ For each selected skill (process one at a time):
 After all selected skills are re-applied:
 - `pnpm run build`
 - `pnpm test` (do not fail the flow if tests are not configured)
+- If the re-apply changed any files under `container/` (`git diff --name-only -- container/` is non-empty), rebuild the agent image so new sessions pick up the new code: `./container/build.sh`. Skill code that lives in the container (e.g. a provider's runtime) keeps running the old image until this is done — the rebuild is what makes the fix live, not the file copy. If nothing under `container/` changed (e.g. only a channel adapter was re-applied), skip it.
 
 Each channel/provider skill copies in its own registration test; those run as part of `pnpm test` and assert the barrel still registers the adapter against the freshly fetched code.
 

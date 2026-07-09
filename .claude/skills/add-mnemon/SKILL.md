@@ -9,13 +9,13 @@ Installs [mnemon](https://github.com/mnemon-dev/mnemon) in the agent container i
 
 ## Provider Compatibility
 
-mnemon hooks fire only under `--target claude-code`. Use this skill on agent groups that run the default Claude provider (`AGENT_PROVIDER=claude`). Confirm the provider before applying:
+mnemon hooks fire only under `--target claude-code`. Use this skill on agent groups that run the default Claude provider. The provider is the materialized `provider` key in each group's `container.json` (absent or `claude` = default Claude provider). Confirm it before applying:
 
 ```bash
-grep AGENT_PROVIDER .env groups/*/container.json 2>/dev/null
+grep -H '"provider"' groups/*/container.json 2>/dev/null   # no match, or "provider": "claude" = Claude
 ```
 
-If a group uses a different provider (e.g. `AGENT_PROVIDER=opencode`), it spawns its own process and never invokes the `claude` CLI, so the hooks registered by `mnemon setup` do not run for that group.
+If a group sets a different provider (e.g. `"provider": "opencode"`), it spawns its own process and never invokes the `claude` CLI, so the hooks registered by `mnemon setup` do not run for that group.
 
 ## Phase 1: Pre-flight
 

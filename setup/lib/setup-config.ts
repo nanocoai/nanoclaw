@@ -124,6 +124,14 @@ export const CONFIG: Entry[] = [
     type: 'string',
   },
   {
+    key: 'agentProvider',
+    envVar: 'NANOCLAW_AGENT_PROVIDER',
+    label: 'Agent provider',
+    help: 'Preselect the setup provider and skip the provider picker.',
+    surface: 'flag',
+    type: 'string',
+  },
+  {
     key: 'assistMode',
     envVar: 'NANOCLAW_SETUP_ASSIST_MODE',
     label: 'Assist mode',

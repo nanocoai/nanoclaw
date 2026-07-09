@@ -72,6 +72,12 @@ export async function run(_args: string[]): Promise<void> {
       labels: peerReport.unloaded.map((p) => p.label),
     });
   }
+  if (peerReport.removed.length > 0) {
+    log.warn('Removed dead peer NanoClaw registrations (target binary missing)', {
+      count: peerReport.removed.length,
+      labels: peerReport.removed.map((p) => p.label),
+    });
+  }
 
   if (platform === 'macos') {
     setupLaunchd(projectRoot, nodePath, homeDir);

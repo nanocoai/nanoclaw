@@ -1,9 +1,14 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
-import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
-import { writeMessageOut } from './db/messages-out.js';
+import { getPendingMessages, markProcessing, markCompleted, markScriptSkipped, type MessageInRow } from './db/messages-in.js';
+import { hasIdenticalSend, writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
-import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
-import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
+import {
+  clearContinuation,
+  clearCurrentInReplyTo,
+  migrateLegacyContinuation,
+  setContinuation,
+  setCurrentInReplyTo,
+} from './db/session-state.js';
 import {
   formatMessages,
   extractRouting,
@@ -202,15 +207,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Without the scheduling module, the marker block is empty, `keep`
     // falls back to `normalMessages`, and no gating happens.
     let keep: MessageInRow[] = normalMessages;
-    let skipped: string[] = [];
+    let skipped: Array<{ id: string; reason: string }> = [];
     // MODULE-HOOK:scheduling-pre-task:start
     const { applyPreTaskScripts } = await import('./scheduling/task-script.js');
     const preTask = await applyPreTaskScripts(normalMessages);
     keep = preTask.keep;
     skipped = preTask.skipped;
     if (skipped.length > 0) {
-      markCompleted(skipped);
-      log(`Pre-task script skipped ${skipped.length} task(s): ${skipped.join(', ')}`);
+      markScriptSkipped(skipped);
+      log(`Pre-task script skipped ${skipped.length} task(s): ${skipped.map((s) => s.id).join(', ')}`);
     }
     // MODULE-HOOK:scheduling-pre-task:end
 
@@ -233,7 +238,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     });
 
     // Process the query while concurrently polling for new messages
-    const skippedSet = new Set(skipped);
+    const skippedSet = new Set(skipped.map((s) => s.id));
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
@@ -396,15 +401,15 @@ export async function processQuery(
         // its script gate and always wakes the agent, defeating the gate.
         // Mirrors the initial-batch hook above.
         let keep = newMessages;
-        let skipped: string[] = [];
+        let skipped: Array<{ id: string; reason: string }> = [];
         // MODULE-HOOK:scheduling-pre-task-followup:start
         const { applyPreTaskScripts } = await import('./scheduling/task-script.js');
         const preTask = await applyPreTaskScripts(newMessages);
         keep = preTask.keep;
         skipped = preTask.skipped;
         if (skipped.length > 0) {
-          markCompleted(skipped);
-          log(`Pre-task script skipped ${skipped.length} follow-up task(s): ${skipped.join(', ')}`);
+          markScriptSkipped(skipped);
+          log(`Pre-task script skipped ${skipped.length} follow-up task(s): ${skipped.map((s) => s.id).join(', ')}`);
         }
         // MODULE-HOOK:scheduling-pre-task-followup:end
 
@@ -645,6 +650,15 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
+  // Task fires: an explicitly-addressed final-text block is either the echo of
+  // an MCP send the agent already made this turn (drop it HERE, where the
+  // duplication originates) or the agent's only deliberate send (write it
+  // in_reply_to-null like the MCP path, or the host's task-fire suppression
+  // would discard it — zero delivery).
+  if (routing.taskFire && hasIdenticalSend(platformId, channelType, body)) {
+    log(`Dropping turn-final echo of an already-sent task message to ${dest.name}`);
+    return;
+  }
   // Resolve thread_id per-destination from the most recent inbound message
   // that came from this same channel+platform. In agent-shared sessions,
   // different destinations have different thread contexts — using a single
@@ -652,7 +666,7 @@ function sendToDestination(dest: DestinationEntry, body: string, routing: Routin
   const destRouting = resolveDestinationThread(channelType, platformId);
   writeMessageOut({
     id: generateId(),
-    in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
+    in_reply_to: destRouting?.inReplyTo ?? (routing.taskFire ? null : routing.inReplyTo),
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,

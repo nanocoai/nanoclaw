@@ -32,8 +32,15 @@ describe('setup flow consumes the registry (structural)', () => {
     const src = fs.readFileSync(path.join(process.cwd(), 'setup', 'auto.ts'), 'utf-8');
     expect(src).toContain('listSetupProviders()');
     expect(src).toContain("import './providers/index.js'");
+    expect(src).toContain('NANOCLAW_AGENT_PROVIDER');
     // The capability-keyed branch — a provider's own auth runs iff it declares one.
     expect(src).toMatch(/providerEntry\?\.runAuth/);
+  });
+
+  it('the provider preset is exposed as an env setup knob', () => {
+    const src = fs.readFileSync(path.join(process.cwd(), 'setup', 'lib', 'setup-config.ts'), 'utf-8');
+    expect(src).toContain('NANOCLAW_AGENT_PROVIDER');
+    expect(src).toContain("key: 'agentProvider'");
   });
 
   it('the standalone provider-auth step is reachable from the STEPS map', () => {

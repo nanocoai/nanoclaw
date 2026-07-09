@@ -13,6 +13,8 @@ interface ChannelSetup {
 
   // Host callbacks
   onInbound(platformId: string, threadId: string | null, message: InboundMessage): void;
+  // Admin-transport adapters (e.g. CLI) route to an arbitrary channel via this instead of onInbound
+  onInboundEvent(event: InboundEvent): void;
   onMetadata(platformId: string, name?: string, isGroup?: boolean): void;
 }
 
@@ -34,7 +36,7 @@ interface ChannelAdapter {
   isConnected(): boolean;
 
   // Outbound delivery
-  deliver(platformId: string, threadId: string | null, message: OutboundMessage): Promise<void>;
+  deliver(platformId: string, threadId: string | null, message: OutboundMessage): Promise<string | undefined>;
 
   // Optional
   setTyping?(platformId: string, threadId: string | null): Promise<void>;
@@ -307,7 +309,7 @@ function createWhatsAppChannel(): ChannelAdapter {
 **Ask user question:**
 ```json
 {
-  "operation": "ask_question",
+  "type": "ask_question",
   "questionId": "q-123",
   "title": "Failing Test",
   "question": "How should we handle the failing test?",

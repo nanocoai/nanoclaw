@@ -168,25 +168,27 @@ export function getMessageForRetry(
 
 export function syncProcessingAcks(inDb: Database.Database, outDb: Database.Database): void {
   const completed = outDb
-    .prepare("SELECT message_id FROM processing_ack WHERE status IN ('completed', 'failed')")
-    .all() as Array<{ message_id: string }>;
+    .prepare(
+      "SELECT message_id, status FROM processing_ack WHERE status IN ('completed', 'failed', 'script-skip:error')",
+    )
+    .all() as Array<{ message_id: string; status: string }>;
 
   if (completed.length === 0) return;
 
-  const updateStmt = inDb.prepare("UPDATE messages_in SET status = 'completed' WHERE id = ? AND status != 'completed'");
+  // `script-skip:error` (pre-task script crashed) lands as a FAILED run —
+  // semantically true, and it lets recurrence derive the trailing failed
+  // streak from the occurrence rows themselves (no stored counter).
+  const completeStmt = inDb.prepare(
+    "UPDATE messages_in SET status = 'completed' WHERE id = ? AND status NOT IN ('completed', 'failed')",
+  );
+  const failStmt = inDb.prepare(
+    "UPDATE messages_in SET status = 'failed' WHERE id = ? AND status NOT IN ('completed', 'failed')",
+  );
   inDb.transaction(() => {
-    for (const { message_id } of completed) {
-      updateStmt.run(message_id);
+    for (const { message_id, status } of completed) {
+      (status === 'script-skip:error' ? failStmt : completeStmt).run(message_id);
     }
   })();
-}
-
-export function getStuckProcessingIds(outDb: Database.Database): string[] {
-  return (
-    outDb.prepare("SELECT message_id FROM processing_ack WHERE status = 'processing'").all() as Array<{
-      message_id: string;
-    }>
-  ).map((r) => r.message_id);
 }
 
 export interface ProcessingClaim {
@@ -302,9 +304,11 @@ export function migrateDeliveredTable(db: Database.Database): void {
   }
 }
 
-// Adds columns added to messages_in after the initial v2 schema to
-// pre-existing session DBs. No-op on fresh installs where the columns are
-// in the baseline schema. Backfills existing rows so invariants hold.
+// LEGACY-COMPAT(v1-tasks): adds columns added to messages_in after the initial
+// v2 schema to pre-existing session DBs — this lazy, on-open migration IS the
+// upgrade path for old installs (there is no central migration for session
+// DBs). No-op on fresh installs where the columns are in the baseline schema.
+// Backfills existing rows so invariants hold (series_id = id).
 export function migrateMessagesInTable(db: Database.Database): void {
   const cols = new Set(
     (db.prepare("PRAGMA table_info('messages_in')").all() as Array<{ name: string }>).map((c) => c.name),

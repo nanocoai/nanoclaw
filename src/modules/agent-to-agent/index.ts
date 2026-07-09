@@ -22,7 +22,11 @@
  */
 import { registerDeliveryAction } from '../../delivery.js';
 import { registerApprovalHandler } from '../approvals/index.js';
+import { A2A_MESSAGE_GATE_ACTION } from './agent-route.js';
 import { applyCreateAgent, handleCreateAgent } from './create-agent.js';
+import { applyA2aMessageGate } from './message-gate.js';
 
 registerDeliveryAction('create_agent', handleCreateAgent);
 registerApprovalHandler('create_agent', applyCreateAgent);
+
+registerApprovalHandler(A2A_MESSAGE_GATE_ACTION, applyA2aMessageGate);

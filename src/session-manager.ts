@@ -18,12 +18,15 @@ import { deriveAttachmentName } from './attachment-naming.js';
 import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
+import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import {
   createSession,
+  findSystemSession,
   findSessionByAgentGroup,
   findSessionForAgent,
   getSession,
+  taskThreadId,
   updateSession,
 } from './db/sessions.js';
 import {
@@ -37,11 +40,6 @@ import {
 } from './db/session-db.js';
 import { log } from './log.js';
 import type { Session } from './types.js';
-
-function isPathInside(parent: string, child: string): boolean {
-  const relative = path.relative(parent, child);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
-}
 
 /** Root directory for all session data. */
 export function sessionsBaseDir(): string {
@@ -66,14 +64,6 @@ export function outboundDbPath(agentGroupId: string, sessionId: string): string 
 /** Path to the container heartbeat file (touched instead of DB writes). */
 export function heartbeatPath(agentGroupId: string, sessionId: string): string {
   return path.join(sessionDir(agentGroupId, sessionId), '.heartbeat');
-}
-
-/**
- * @deprecated Use inboundDbPath / outboundDbPath instead.
- * Kept temporarily for test compatibility during migration.
- */
-export function sessionDbPath(agentGroupId: string, sessionId: string): string {
-  return inboundDbPath(agentGroupId, sessionId);
 }
 
 function generateId(): string {
@@ -128,6 +118,33 @@ export function resolveSession(
   createSession(session);
   initSessionFolder(agentGroupId, id);
   log.info('Session created', { id, agentGroupId, messagingGroupId, threadId: lookupThreadId, sessionMode });
+
+  return { session, created: true };
+}
+
+/** Find or create the per-agent-group session used for scheduled tasks. */
+/** Find or create the isolated session for one task series (thread `system:tasks:<seriesId>`). */
+export function resolveTaskSession(agentGroupId: string, seriesId: string): { session: Session; created: boolean } {
+  const threadId = taskThreadId(seriesId);
+  const existing = findSystemSession(agentGroupId, threadId);
+  if (existing) return { session: existing, created: false };
+
+  const id = generateId();
+  const session: Session = {
+    id,
+    agent_group_id: agentGroupId,
+    messaging_group_id: null,
+    thread_id: threadId,
+    agent_provider: null,
+    status: 'active',
+    container_status: 'stopped',
+    last_active: null,
+    created_at: new Date().toISOString(),
+  };
+
+  createSession(session);
+  initSessionFolder(agentGroupId, id);
+  log.info('Task session created', { id, agentGroupId, seriesId });
 
   return { session, created: true };
 }
@@ -223,6 +240,16 @@ export function writeSessionMessage(
     onWake?: 0 | 1;
   },
 ): void {
+  // Documented reset: operators `rm -rf` a session folder to clear a stuck
+  // session. The sessions row survives, so the next message takes the
+  // existing-session path and lands here with a missing inbound.db — the open
+  // below would throw and the message would be logged-and-dropped forever.
+  // Re-provision the folder + DBs (initSessionFolder is idempotent) so the
+  // documented reset actually re-provisions instead of killing the chat.
+  if (!fs.existsSync(inboundDbPath(agentGroupId, sessionId))) {
+    initSessionFolder(agentGroupId, sessionId);
+  }
+
   // Extract base64 attachment data, save to inbox, replace with file paths
   const content = extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
 
@@ -288,6 +315,14 @@ function extractAttachmentFiles(
     return contentStr;
   }
 
+  const inboxRoot = path.join(sessionDir(agentGroupId, sessionId), 'inbox');
+  // Resolved lazily on the first attachment that actually carries bytes, so a
+  // message whose attachments have no inline `data` never creates an inbox dir.
+  // ensureContainedInboxDir refuses a pre-placed symlink at the inbox root or
+  // the per-message subdir before any write lands outside the sandbox (#2828).
+  let inboxDir: string | null = null;
+  let inboxResolved = false;
+
   let changed = false;
   for (const att of attachments) {
     if (typeof att.data !== 'string') continue;
@@ -302,32 +337,12 @@ function extractAttachmentFiles(
       });
     }
 
-    const inboxDir = path.join(sessionDir(agentGroupId, sessionId), 'inbox', messageId);
-
-    // Refuse to mkdir through a symlink that the container may have pre placed
-    // at inboxDir. With recursive:true, mkdirSync would silently no op on a
-    // pre existing symlink and the subsequent writeFileSync would follow it.
-    if (fs.existsSync(inboxDir)) {
-      const stat = fs.lstatSync(inboxDir);
-      if (stat.isSymbolicLink() || !stat.isDirectory()) {
-        log.warn('Rejecting unsafe inbox directory', { messageId, inboxDir });
-        continue;
-      }
+    if (!inboxResolved) {
+      inboxDir = ensureContainedInboxDir(inboxRoot, messageId, { messageId });
+      inboxResolved = true;
     }
-    fs.mkdirSync(inboxDir, { recursive: true });
-
-    let realInboxDir: string;
-    try {
-      realInboxDir = fs.realpathSync(inboxDir);
-    } catch (err) {
-      log.warn('Failed to resolve inbox directory', { messageId, err });
-      continue;
-    }
-    const inboxRoot = path.join(sessionDir(agentGroupId, sessionId), 'inbox');
-    if (!isPathInside(fs.realpathSync(inboxRoot), realInboxDir)) {
-      log.warn('Inbox directory escaped session inbox root', { messageId, inboxDir });
-      continue;
-    }
+    // Unsafe inbox (symlink / escape) — no attachment can be written safely.
+    if (!inboxDir) break;
 
     const filePath = path.join(inboxDir, filename);
     try {
@@ -362,6 +377,16 @@ export function openInboundDb(agentGroupId: string, sessionId: string): Database
   const db = openInboundDbRaw(inboundDbPath(agentGroupId, sessionId));
   migrateMessagesInTable(db);
   return db;
+}
+
+/** Open a session's inbound DB, run `fn`, and always close it. */
+export function withInboundDb<T>(agentGroupId: string, sessionId: string, fn: (db: Database.Database) => T): T {
+  const db = openInboundDb(agentGroupId, sessionId);
+  try {
+    return fn(db);
+  } finally {
+    db.close();
+  }
 }
 
 /** Open the outbound DB for a session (host reads only). */
@@ -406,34 +431,6 @@ export function writeOutboundDirect(
   } finally {
     db.close();
   }
-}
-
-/**
- * @deprecated Use openInboundDb / openOutboundDb instead.
- */
-export function openSessionDb(agentGroupId: string, sessionId: string): Database.Database {
-  return openInboundDb(agentGroupId, sessionId);
-}
-
-/** Write a system response to a session's inbound.db so the container's findQuestionResponse() picks it up. */
-export function writeSystemResponse(
-  agentGroupId: string,
-  sessionId: string,
-  requestId: string,
-  status: string,
-  result: Record<string, unknown>,
-): void {
-  writeSessionMessage(agentGroupId, sessionId, {
-    id: `sys-resp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    kind: 'system',
-    timestamp: new Date().toISOString(),
-    content: JSON.stringify({
-      type: 'question_response',
-      questionId: requestId,
-      status,
-      result,
-    }),
-  });
 }
 
 /**

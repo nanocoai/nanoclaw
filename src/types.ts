@@ -142,7 +142,7 @@ export interface Session {
 // ── Session DB entities ──
 
 export type MessageInKind = 'chat' | 'chat-sdk' | 'task' | 'webhook' | 'system';
-export type MessageInStatus = 'pending' | 'processing' | 'completed' | 'failed';
+export type MessageInStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
 
 export interface MessageIn {
   id: string;
@@ -200,10 +200,17 @@ export interface PendingApproval {
   channel_type: string | null;
   platform_id: string | null;
   platform_message_id: string | null;
+  /**
+   * For OneCLI credential rows, the gateway's request TTL. For a module
+   * approval held by "Reject with reason…", the deadline after which the
+   * host sweep finalizes a plain reject (set by markApprovalAwaitingReason).
+   */
   expires_at: string | null;
-  status: 'pending' | 'approved' | 'rejected' | 'expired';
+  status: 'pending' | 'approved' | 'rejected' | 'expired' | 'awaiting_reason';
   title: string;
   options_json: string;
+  /** When set, only this exact user may resolve the approval. */
+  approver_user_id: string | null;
 }
 
 // ── Agent destinations (central DB) ──
@@ -213,5 +220,12 @@ export interface AgentDestination {
   local_name: string;
   target_type: 'channel' | 'agent';
   target_id: string;
+  created_at: string;
+}
+
+export interface AgentMessagePolicy {
+  from_agent_group_id: string;
+  to_agent_group_id: string;
+  approver: string;
   created_at: string;
 }

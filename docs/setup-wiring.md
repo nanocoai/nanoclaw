@@ -14,7 +14,7 @@ Last updated: 2026-04-09
 - Container clears stale `processing_ack` entries on startup (crash recovery)
 - Files: `src/db/schema.ts` (INBOUND_SCHEMA + OUTBOUND_SCHEMA), `src/session-manager.ts`, `src/delivery.ts`, `src/host-sweep.ts`, `container/agent-runner/src/db/connection.ts`, `messages-in.ts`, `messages-out.ts`, `poll-loop.ts`, `mcp-tools/scheduling.ts`, `mcp-tools/interactive.ts`
 - Container image rebuilt with tsconfig (`container/agent-runner/tsconfig.json`)
-- E2E verified: host → Docker container → Claude responds → "E2E works!" ✓
+- E2E verified: host → Docker container → agent responds → "E2E works!" ✓
 
 ### OneCLI Integration
 - `ensureAgent()` call added before `applyContainerConfig()` in `src/container-runner.ts`
@@ -65,11 +65,11 @@ Added `session_mode: 'agent-shared'` for cross-channel shared sessions (e.g. Git
 
 ### Entity Model
 ```
-agent_groups (id, name, folder, agent_provider, container_config)
-    ↕ many-to-many
-messaging_groups (id, channel_type, platform_id, name, is_group, unknown_sender_policy)
+agent_groups (id, name, folder, agent_provider)
+    ↕ many-to-many                       (container runtime config lives in the separate container_configs table)
+messaging_groups (id, channel_type, platform_id, instance, name, is_group, unknown_sender_policy, denied_at)
     via
-messaging_group_agents (messaging_group_id, agent_group_id, trigger_rules, session_mode, priority)
+messaging_group_agents (messaging_group_id, agent_group_id, engage_mode, engage_pattern, sender_scope, ignored_message_policy, session_mode, priority)
 
 users (id, kind, display_name)          -- namespaced as "<channel>:<handle>"
 user_roles (user_id, role, agent_group_id)    -- owner / admin (global or scoped)

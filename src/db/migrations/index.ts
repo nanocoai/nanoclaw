@@ -4,6 +4,7 @@ import { log } from '../../log.js';
 import { migration001 } from './001-initial.js';
 import { migration002 } from './002-chat-sdk-state.js';
 import { moduleAgentToAgentDestinations } from './module-agent-to-agent-destinations.js';
+import { migration017 } from './017-agent-message-policies.js';
 import { migration008 } from './008-dropped-messages.js';
 import { migration009 } from './009-drop-pending-credentials.js';
 import { migration010 } from './010-engage-modes.js';
@@ -15,6 +16,7 @@ import { migration015 } from './015-cli-scope.js';
 import { migration016 } from './016-messaging-group-instance.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
+import { migration018 } from './018-approvals-approver-user-id.js';
 
 export interface Migration {
   version: number;
@@ -36,7 +38,9 @@ export const migrations: Migration[] = [
   migration002,
   moduleApprovalsPendingApprovals,
   moduleAgentToAgentDestinations,
+  migration017,
   moduleApprovalsTitleOptions,
+  migration018,
   migration008,
   migration009,
   migration010,

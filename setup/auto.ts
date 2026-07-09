@@ -12,6 +12,8 @@
  *   NANOCLAW_AGENT_NAME    messaging-channel agent name (consumed by the
  *                          channel flow). The CLI scratch agent is always
  *                          "Terminal Agent".
+ *   NANOCLAW_AGENT_PROVIDER preselect the setup provider and skip the picker
+ *                          (for packaged flows). Example: claude.
  *   NANOCLAW_SKIP          comma-separated step names to skip
  *                          (environment|container|onecli|auth|mounts|
  *                           service|cli-agent|timezone|channel|
@@ -816,6 +818,15 @@ async function askAgentProviderChoice(): Promise<string> {
     ...installed.map(({ value, label, hint }) => ({ value, label, hint })),
     ...available.map((prov) => ({ value: prov.value, label: prov.label, hint: `${prov.hint} — installs now` })),
   ];
+  const preset = process.env.NANOCLAW_AGENT_PROVIDER?.trim().toLowerCase();
+  if (preset) {
+    if (!options.some((option) => option.value === preset)) {
+      throw new Error(`NANOCLAW_AGENT_PROVIDER=${preset} is not available in this NanoClaw install`);
+    }
+    setupLog.userInput('agent_provider', preset);
+    phEmit('agent_provider_chosen', { provider: preset, preset: true });
+    return preset;
+  }
   // The pick installs and authenticates a runtime — it is not an
   // install-wide default, so re-runs safely Enter-through on claude (its
   // auth flow short-circuits when the secret already exists).

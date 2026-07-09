@@ -58,10 +58,39 @@ registerResource({
       type: 'string',
       description: "The target's ID — messaging_groups.id for channels, agent_groups.id for agents.",
     },
+    { name: 'channel_type', type: 'string', description: 'Resolved channel type for channel destinations.' },
+    { name: 'display_name', type: 'string', description: 'Resolved chat title or agent name.' },
     { name: 'created_at', type: 'string', description: 'Auto-set.' },
   ],
-  operations: { list: 'open' },
+  operations: {},
   customOperations: {
+    list: {
+      access: 'open',
+      description: 'List destinations with resolved channel/title labels.',
+      handler: async (args) => {
+        const agentGroupId = (args.agent_group_id as string | undefined) ?? (args.id as string | undefined);
+        const params: unknown[] = [];
+        const where = agentGroupId ? 'WHERE ad.agent_group_id = ?' : '';
+        if (agentGroupId) params.push(agentGroupId);
+        return getDb()
+          .prepare(
+            `SELECT
+               ad.agent_group_id,
+               ad.local_name,
+               ad.target_type,
+               ad.target_id,
+               CASE WHEN ad.target_type = 'channel' THEN mg.channel_type ELSE NULL END AS channel_type,
+               CASE WHEN ad.target_type = 'channel' THEN mg.name ELSE ag.name END AS display_name,
+               ad.created_at
+             FROM agent_destinations ad
+             LEFT JOIN messaging_groups mg ON ad.target_type = 'channel' AND ad.target_id = mg.id
+             LEFT JOIN agent_groups ag ON ad.target_type = 'agent' AND ad.target_id = ag.id
+             ${where}
+             ORDER BY ad.agent_group_id, ad.local_name`,
+          )
+          .all(...params);
+      },
+    },
     add: {
       access: 'approval',
       description: 'Add a destination for an agent. Use --agent-group-id, --local-name, --target-type, --target-id.',

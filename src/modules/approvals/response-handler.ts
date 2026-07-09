@@ -5,7 +5,10 @@
  *   1. Module-initiated actions — the module called `requestApproval()` with
  *      some free-form `action` string and registered a handler via
  *      `registerApprovalHandler(action, handler)`. On approve, we look up the
- *      handler and call it; on reject, we notify the agent and move on.
+ *      handler and call it; on plain reject we relay a decline to the agent; on
+ *      "Reject with reason…" we hold the row and capture the admin's next DM as
+ *      a one-line reason (see reason-capture.ts). Reject finalization is shared
+ *      via finalizeReject.
  *   2. OneCLI credential approvals (`action = 'onecli_credential'`). Resolved
  *      via an in-memory Promise — see onecli-approvals.ts.
  *
@@ -19,8 +22,10 @@ import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval } from '../../types.js';
 import { hasAdminPrivilege, isGlobalAdmin, isOwner } from '../permissions/db/user-roles.js';
+import { finalizeReject } from './finalize.js';
 import { ONECLI_ACTION, resolveOneCLIApproval } from './onecli-approvals.js';
-import { getApprovalHandler, notifyApprovalResolved } from './primitive.js';
+import { getApprovalHandler, notifyApprovalResolved, REJECT_WITH_REASON_VALUE } from './primitive.js';
+import { armReasonCapture } from './reason-capture.js';
 
 export async function handleApprovalsResponse(payload: ResponsePayload): Promise<boolean> {
   const approval = getPendingApproval(payload.questionId);
@@ -65,6 +70,21 @@ async function handleRegisteredApproval(
     return;
   }
 
+  // "Reject with reason…" — hold the row and capture the admin's next DM
+  // instead of finalizing now. The agent is notified exactly once: after the
+  // reason arrives, or after the sweep's timeout if the admin ghosts.
+  if (selectedOption === REJECT_WITH_REASON_VALUE) {
+    await armReasonCapture(approval, session, userId);
+    return;
+  }
+
+  // Plain Reject (or any other non-approve value) — instant fast path.
+  if (selectedOption !== 'approve') {
+    await finalizeReject(approval, session, userId);
+    return;
+  }
+
+  // Approved — dispatch to the module that registered for this action.
   const notify = (text: string): void => {
     writeSessionMessage(session.agent_group_id, session.id, {
       id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -77,16 +97,6 @@ async function handleRegisteredApproval(
     });
   };
 
-  if (selectedOption !== 'approve') {
-    notify(`Your ${approval.action} request was rejected by admin.`);
-    log.info('Approval rejected', { approvalId: approval.approval_id, action: approval.action, userId });
-    deletePendingApproval(approval.approval_id);
-    await notifyApprovalResolved({ approval, session, outcome: 'reject', userId });
-    await wakeContainer(session);
-    return;
-  }
-
-  // Approved — dispatch to the module that registered for this action.
   const handler = getApprovalHandler(approval.action);
   if (!handler) {
     log.warn('No approval handler registered — row dropped', {
@@ -124,6 +134,11 @@ function namespacedUserId(payload: ResponsePayload): string | null {
 function isAuthorizedApprovalClick(approval: PendingApproval, payload: ResponsePayload): boolean {
   const userId = namespacedUserId(payload);
   if (!userId) return false;
+
+  // An approval may name a specific approver; only that exact user may resolve it.
+  if (approval.approver_user_id) {
+    return userId === approval.approver_user_id;
+  }
 
   const agentGroupId =
     approval.agent_group_id ?? (approval.session_id ? getSession(approval.session_id)?.agent_group_id : null);

@@ -59,7 +59,7 @@ import './linear.js';
 ### 4. Install the adapter package (pinned)
 
 ```bash
-pnpm install @chat-adapter/linear@4.27.0
+pnpm install @chat-adapter/linear@4.29.0
 ```
 
 ### 5. Build and validate

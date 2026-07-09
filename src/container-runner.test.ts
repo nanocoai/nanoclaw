@@ -47,6 +47,41 @@ describe('buildContainerArgs ordering invariant (structural)', () => {
   });
 });
 
+describe('per-container resource limits (structural)', () => {
+  // CONTAINER_CPU_LIMIT / CONTAINER_MEMORY_LIMIT pass through to `docker run` as
+  // --cpus / --memory, but only when set. The default is empty string → no flag →
+  // today's unbounded behavior (don't OOM existing OSS workloads). Swap is not
+  // managed here (a swapless host makes --memory a hard cap). buildContainerArgs
+  // needs a live gateway to drive, so guard the wiring structurally: the flags
+  // must be pushed, and each must be guarded by its env knob so empty emits nothing.
+  it('reads both limit knobs from config', () => {
+    const src = fs.readFileSync(path.join(process.cwd(), 'src', 'container-runner.ts'), 'utf-8');
+    expect(src).toContain('CONTAINER_CPU_LIMIT');
+    expect(src).toContain('CONTAINER_MEMORY_LIMIT');
+  });
+
+  it('guards --cpus behind a truthy CONTAINER_CPU_LIMIT', () => {
+    const src = fs.readFileSync(path.join(process.cwd(), 'src', 'container-runner.ts'), 'utf-8');
+    expect(src).toMatch(/if \(CONTAINER_CPU_LIMIT\)[\s\S]*?args\.push\('--cpus', CONTAINER_CPU_LIMIT\)/);
+  });
+
+  it('guards --memory behind a truthy CONTAINER_MEMORY_LIMIT (and sets no swap flag)', () => {
+    const src = fs.readFileSync(path.join(process.cwd(), 'src', 'container-runner.ts'), 'utf-8');
+    expect(src).toMatch(/if \(CONTAINER_MEMORY_LIMIT\) args\.push\('--memory', CONTAINER_MEMORY_LIMIT\)/);
+    expect(src).not.toContain('--memory-swap');
+  });
+
+  it('defaults both knobs to empty string in config (no flag = unbounded)', () => {
+    const cfg = fs.readFileSync(path.join(process.cwd(), 'src', 'config.ts'), 'utf-8');
+    expect(cfg).toContain(
+      "CONTAINER_CPU_LIMIT = process.env.CONTAINER_CPU_LIMIT || envConfig.CONTAINER_CPU_LIMIT || ''",
+    );
+    expect(cfg).toContain(
+      "CONTAINER_MEMORY_LIMIT = process.env.CONTAINER_MEMORY_LIMIT || envConfig.CONTAINER_MEMORY_LIMIT || ''",
+    );
+  });
+});
+
 describe('container boot-failure tripwire (structural)', () => {
   // A container that dies at boot (unknown provider, missing CLI binary, bad
   // config) explains itself only on stderr — which logs at debug, below the

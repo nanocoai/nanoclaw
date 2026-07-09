@@ -56,7 +56,7 @@ function getMaxMessagesPerPrompt(): number {
  * Reads from inbound.db (read-only), filters against processing_ack in outbound.db
  * to skip messages already picked up by this or a previous container run.
  *
- * Returns the most recent `MAX_MESSAGES_PER_PROMPT` pending rows in
+ * Returns the most recent `maxMessagesPerPrompt` pending rows in
  * chronological order, regardless of their `trigger` flag: accumulated
  * context (trigger=0) rides along with the wake-eligible rows so the agent
  * sees the prior context it missed. Host's countDueMessages gates waking on
@@ -120,6 +120,24 @@ export function markCompleted(ids: string[]): void {
   })();
 }
 
+/**
+ * Ack task messages whose pre-task script gated the run. The reason decides
+ * the ack: `gated` (wakeAgent=false) is the monitor working as designed → a
+ * plain `completed`; `error` (broken script) → `script-skip:error`, which the
+ * host's ack sync records as a FAILED run so recurrence can read the trailing
+ * failed streak off the occurrence rows and back the series off.
+ */
+export function markScriptSkipped(skips: Array<{ id: string; reason: string }>): void {
+  if (skips.length === 0) return;
+  const db = getOutboundDb();
+  const stmt = db.prepare(
+    "INSERT OR REPLACE INTO processing_ack (message_id, status, status_changed) VALUES (?, ?, datetime('now'))",
+  );
+  db.transaction(() => {
+    for (const s of skips) stmt.run(s.id, s.reason === 'error' ? 'script-skip:error' : 'completed');
+  })();
+}
+
 /** Mark a single message as failed — writes to processing_ack in outbound.db. */
 export function markFailed(id: string): void {
   getOutboundDb()
@@ -163,4 +181,3 @@ export function findQuestionResponse(questionId: string): MessageInRow | undefin
     inbound.close();
   }
 }
-

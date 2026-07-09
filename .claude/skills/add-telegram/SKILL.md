@@ -60,7 +60,7 @@ In `setup/index.ts`, add this entry to the `STEPS` map (right after the `registe
 ### 5. Install the adapter package (pinned)
 
 ```bash
-pnpm install @chat-adapter/telegram@4.27.0
+pnpm install @chat-adapter/telegram@4.29.0
 ```
 
 ### 6. Build and validate

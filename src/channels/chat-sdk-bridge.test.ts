@@ -238,6 +238,77 @@ describe('createChatSdkBridge.setup — webhook route and state namespace', () =
   });
 });
 
+describe('createChatSdkBridge.deliver — ask_question cards (button styles)', () => {
+  // Approval cards color their buttons (Slack: primary→green, danger→red).
+  // The bridge must forward the normalized option style into Button() and
+  // omit it when unset — an invalid style surviving to Block Kit would fail
+  // the whole card with invalid_blocks (effective auto-deny).
+
+  interface CapturedButton {
+    type?: string;
+    id?: string;
+    label?: string;
+    value?: string;
+    style?: string;
+  }
+
+  function buttonsFrom(calls: PostCall[]): CapturedButton[] {
+    const msg = calls[0].message as {
+      card?: { children?: Array<{ type?: string; children?: CapturedButton[] }> };
+    };
+    const actionsRow = msg.card?.children?.find((c) => c.type === 'actions');
+    expect(actionsRow).toBeDefined();
+    return actionsRow?.children ?? [];
+  }
+
+  it('passes each option style through to the Button, and omits it when unset', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('slack:C1', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'q-1',
+        title: 'Approval needed',
+        question: 'Allow the tool call?',
+        options: [
+          { label: 'Approve', style: 'primary' },
+          { label: 'Deny', style: 'danger' },
+          'Skip', // string shorthand — never styled
+        ],
+      },
+    });
+    expect(calls).toHaveLength(1);
+    const buttons = buttonsFrom(calls);
+    expect(buttons.map((b) => b.label)).toEqual(['Approve', 'Deny', 'Skip']);
+    expect(buttons.map((b) => b.style)).toEqual(['primary', 'danger', undefined]);
+  });
+
+  it('drops invalid styles before they reach the Button (delivery goes through normalizeOptions)', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('slack:C1', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'q-2',
+        title: 'Approval needed',
+        question: 'Allow the tool call?',
+        options: [{ label: 'Approve', style: 'chartreuse' }],
+      },
+    });
+    const buttons = buttonsFrom(calls);
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0].style).toBeUndefined();
+  });
+});
+
 describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
   // The send_card MCP tool writes outbound rows with `{ type: 'card', card, fallbackText }`.
   // Before this branch existed the bridge silently dropped them: cards have no

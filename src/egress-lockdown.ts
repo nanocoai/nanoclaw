@@ -9,15 +9,13 @@
  */
 import { execFileSync } from 'child_process';
 
+import { EGRESS_LOCKDOWN, EGRESS_NETWORK, ONECLI_GATEWAY_CONTAINER } from './config.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
 import { log } from './log.js';
 
-/** Locked-down, no-internet network agents are placed on. */
-export const EGRESS_NETWORK = process.env.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
-/** The OneCLI gateway container attached as the only egress hop. */
-const ONECLI_GATEWAY_CONTAINER = process.env.ONECLI_GATEWAY_CONTAINER || 'onecli';
-/** Off by default; set NANOCLAW_EGRESS_LOCKDOWN=true to opt in. */
-const EGRESS_LOCKDOWN = process.env.NANOCLAW_EGRESS_LOCKDOWN === 'true';
+// Perimeter knobs (locked-down network, gateway container, on/off flag) are read
+// via config.ts so they honor .env under the shipped service, not just process.env.
+export { EGRESS_NETWORK };
 
 /** Raised when lockdown is requested but can't be established. */
 export class EgressLockdownError extends Error {

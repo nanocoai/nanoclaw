@@ -1,10 +1,9 @@
 /**
- * Step: set-env — Write or update a KEY=VALUE in .env, with optional sync to
- * data/env/env (the container-mounted copy).
+ * Step: set-env — Write or update a KEY=VALUE in .env.
  *
  * Usage:
  *   pnpm exec tsx setup/index.ts --step set-env -- \
- *     --key TELEGRAM_BOT_TOKEN --value "<token>" [--sync-container]
+ *     --key TELEGRAM_BOT_TOKEN --value "<token>"
  *
  * Exists so channel-install flows don't have to invent grep/sed/rm pipelines
  * (which can't be allowlisted tightly — sed can read any file, and each
@@ -21,7 +20,6 @@ import { emitStatus } from './status.js';
 export async function run(args: string[]): Promise<void> {
   const keyIdx = args.indexOf('--key');
   const valueIdx = args.indexOf('--value');
-  const syncContainer = args.includes('--sync-container');
 
   if (keyIdx === -1 || !args[keyIdx + 1]) {
     throw new Error('--key <KEY> is required');
@@ -59,19 +57,9 @@ export async function run(args: string[]): Promise<void> {
   fs.writeFileSync(envFile, content);
   log.info('Updated .env', { key, existed });
 
-  let synced = false;
-  if (syncContainer) {
-    const dataEnvDir = path.join(projectRoot, 'data', 'env');
-    fs.mkdirSync(dataEnvDir, { recursive: true });
-    fs.copyFileSync(envFile, path.join(dataEnvDir, 'env'));
-    synced = true;
-    log.info('Synced .env to container mount', { path: 'data/env/env' });
-  }
-
   emitStatus('SET_ENV', {
     KEY: key,
     EXISTED: existed,
-    SYNCED_TO_CONTAINER: synced,
     STATUS: 'success',
   });
 }

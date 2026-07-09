@@ -1,11 +1,21 @@
 /**
  * Command registry — single source of truth for what `ncl` can do.
  *
- * Each command file under `commands/` calls `register()` at top level,
- * and `commands/index.ts` imports them all for side effects so the
- * registry is populated before the host's CLI server accepts connections.
+ * Most commands come from resource modules under `resources/`, which call
+ * `registerResource()` (one `register()` per CRUD verb); the top-level `help`
+ * command and the per-resource help commands register directly. The barrel
+ * `commands/index.ts` imports the resource barrel for its side effects and then
+ * registers the help commands, so the registry is populated before the host's
+ * CLI server accepts connections.
  */
 import type { CallerContext } from './frame.js';
+
+/**
+ * Resources an agent under `cli_scope=group` may touch. Single source —
+ * consumed by both dispatch enforcement and `ncl help` filtering, so the
+ * agent is never shown a resource the gate would reject (or vice versa).
+ */
+export const GROUP_SCOPE_RESOURCES = new Set(['groups', 'sessions', 'destinations', 'members', 'tasks']);
 
 export type Access = 'open' | 'approval' | 'hidden';
 
@@ -13,7 +23,13 @@ export type CommandDef<TArgs = unknown, TData = unknown> = {
   name: string;
   description: string;
   access: Access;
-  /** Resource this command belongs to (for help grouping). */
+  /**
+   * The group-scope whitelist key. Under `cli_scope: 'group'` the dispatcher
+   * only lets an agent run commands whose `resource` is on the whitelist
+   * (`groups`, `sessions`, `destinations`, `members`); it also drives help
+   * grouping. Omitting `resource` exempts the command from the whitelist —
+   * that's how general commands like `help` stay reachable in group scope.
+   */
   resource?: string;
   /**
    * Set on the auto-generated `list` / `get` handlers (see `registerResource`).
@@ -25,6 +41,14 @@ export type CommandDef<TArgs = unknown, TData = unknown> = {
   /** Validates `frame.args` and produces the typed handler input. Throws on invalid. */
   parseArgs: (raw: Record<string, unknown>) => TArgs;
   handler: (args: TArgs, ctx: CallerContext) => Promise<TData>;
+  /**
+   * Optional presentational renderer. When set, dispatch attaches its output
+   * as the response frame's `human` field (server-rendered once, printed
+   * verbatim by every client in human mode). Runs after post-handler scope
+   * filtering, so it only ever sees data the caller is allowed to see. A
+   * throwing formatter is ignored — clients fall back to rendering `data`.
+   */
+  formatHuman?: (data: TData) => string;
 };
 
 const registry = new Map<string, CommandDef>();

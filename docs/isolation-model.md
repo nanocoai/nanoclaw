@@ -80,7 +80,7 @@ agent_groups (workspace, memory, CLAUDE.md, personality)
     ↕ many-to-many
 messaging_groups (a specific channel/chat/group on a platform)
     via
-messaging_group_agents (session_mode, trigger_rules, priority)
+messaging_group_agents (session_mode, engage_mode, engage_pattern, sender_scope, ignored_message_policy, priority)
 ```
 
 - **Shared session:** multiple messaging_groups → same agent_group, `session_mode = 'agent-shared'`

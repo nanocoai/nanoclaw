@@ -1,6 +1,6 @@
 import path from 'path';
 
-import { DATA_DIR, GROUPS_DIR } from './config.js';
+import { GROUPS_DIR } from './config.js';
 
 const GROUP_FOLDER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const RESERVED_FOLDERS = new Set(['global']);
@@ -33,12 +33,4 @@ export function resolveGroupFolderPath(folder: string): string {
   const groupPath = path.resolve(GROUPS_DIR, folder);
   ensureWithinBase(GROUPS_DIR, groupPath);
   return groupPath;
-}
-
-export function resolveGroupIpcPath(folder: string): string {
-  assertValidGroupFolder(folder);
-  const ipcBaseDir = path.resolve(DATA_DIR, 'ipc');
-  const ipcPath = path.resolve(ipcBaseDir, folder);
-  ensureWithinBase(ipcBaseDir, ipcPath);
-  return ipcPath;
 }

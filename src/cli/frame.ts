@@ -11,23 +11,28 @@
 export type RequestFrame = {
   /** Correlation key set by the client. */
   id: string;
-  /** Registry name, e.g. "list-groups". */
+  /** Registry name, e.g. "groups-list". */
   command: string;
   /** Command-specific. Each command's parseArgs validates. */
   args: Record<string, unknown>;
 };
 
 export type ResponseFrame =
-  | { id: string; ok: true; data: unknown }
+  // `human` is an optional server-rendered presentational string. It lets
+  // every transport — host CLI and the Bun container client — print one
+  // canonical rendering without importing host-only formatters (the two
+  // runtimes share no modules, so client-side formatters drift). `data`
+  // stays the machine contract; --json callers ignore `human`. Additive:
+  // old clients that don't know the field just fall back to their own
+  // rendering of `data`.
+  | { id: string; ok: true; data: unknown; human?: string }
   | { id: string; ok: false; error: { code: ErrorCode; message: string } };
 
 export type ErrorCode =
   | 'unknown-command'
   | 'invalid-args'
-  | 'permission-denied'
   | 'forbidden'
   | 'approval-pending'
-  | 'not-found'
   | 'handler-error'
   | 'transport-error';
 

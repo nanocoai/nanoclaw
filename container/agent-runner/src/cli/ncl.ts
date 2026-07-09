@@ -22,7 +22,9 @@ type RequestFrame = {
 };
 
 type ResponseFrame =
-  | { id: string; ok: true; data: unknown }
+  // `human` mirrors src/cli/frame.ts: an optional server-rendered string we
+  // print verbatim instead of running our own (drift-prone) formatter.
+  | { id: string; ok: true; data: unknown; human?: string }
   | { id: string; ok: false; error: { code: string; message: string } };
 
 // ---------------------------------------------------------------------------
@@ -244,6 +246,9 @@ if (!resp) {
 
 if (json) {
   process.stdout.write(JSON.stringify(resp, null, 2) + '\n');
+} else if (resp.ok && resp.human !== undefined) {
+  // Server-rendered view — print verbatim.
+  process.stdout.write(resp.human + '\n');
 } else {
   const output = formatHuman(resp);
   if (!resp.ok) {

@@ -29,9 +29,11 @@ export interface AllowedRoot {
   description?: string;
 }
 
-// Cache the allowlist in memory - only reloads on process restart
-let cachedAllowlist: MountAllowlist | null = null;
-let allowlistLoadError: string | null = null;
+// Cache the last successfully-parsed allowlist, keyed on the file's path +
+// mtime. A changed or fixed file is picked up on the next call (no restart),
+// and a parse error is never cached permanently — one bad edit blocks mounts
+// only until the file is fixed.
+let cache: { path: string; mtimeMs: number; allowlist: MountAllowlist } | null = null;
 
 /**
  * Default blocked patterns - paths that should never be mounted
@@ -57,60 +59,108 @@ const DEFAULT_BLOCKED_PATTERNS = [
 ];
 
 /**
- * Load the mount allowlist from the external config location.
- * Returns null if the file doesn't exist or is invalid.
- * Result is cached in memory for the lifetime of the process.
+ * Normalize a raw allowed-root entry into an {@link AllowedRoot}.
+ *
+ * The read-only decision is per-root. Historically this validator only read
+ * `allowReadWrite`, but the /manage-mounts skill and setup write `readOnly`
+ * instead — so a `readOnly: false` grant was silently forced read-only.
+ * Translate `readOnly` → `allowReadWrite = !readOnly` (with a warning) unless an
+ * explicit `allowReadWrite` is already present. With neither key, default to
+ * read-only (fail safe).
  */
-export function loadMountAllowlist(): MountAllowlist | null {
-  if (cachedAllowlist !== null) {
-    return cachedAllowlist;
+function normalizeRoot(root: Record<string, unknown>): AllowedRoot {
+  const rootPath = typeof root.path === 'string' ? root.path : '';
+  const description = typeof root.description === 'string' ? root.description : undefined;
+
+  let allowReadWrite: boolean;
+  if (typeof root.allowReadWrite === 'boolean') {
+    allowReadWrite = root.allowReadWrite;
+  } else if (typeof root.readOnly === 'boolean') {
+    allowReadWrite = !root.readOnly;
+    log.warn('Mount allowlist root uses "readOnly" — translating to allowReadWrite', {
+      root: rootPath,
+      readOnly: root.readOnly,
+    });
+  } else {
+    allowReadWrite = false;
   }
 
-  if (allowlistLoadError !== null) {
-    // Already tried and failed, don't spam logs
+  return { path: rootPath, allowReadWrite, description };
+}
+
+/**
+ * Load the mount allowlist from the external config location.
+ * Returns null if the file doesn't exist or is invalid.
+ * Re-reads on every call, but serves from an in-memory cache while the file's
+ * mtime is unchanged. A parse error is never cached — fix the file and the next
+ * call recovers without a service restart.
+ */
+export function loadMountAllowlist(): MountAllowlist | null {
+  // Missing-file behavior: warn and block additional mounts, but do NOT cache
+  // the miss — the file may be created later without a restart.
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(MOUNT_ALLOWLIST_PATH);
+  } catch {
+    log.warn(
+      'Mount allowlist not found - additional mounts will be BLOCKED. Create the file to enable additional mounts.',
+      { path: MOUNT_ALLOWLIST_PATH },
+    );
     return null;
   }
 
-  try {
-    if (!fs.existsSync(MOUNT_ALLOWLIST_PATH)) {
-      // Do NOT cache this as an error — file may be created later without restart.
-      // Only parse/structural errors are permanently cached.
-      log.warn(
-        'Mount allowlist not found - additional mounts will be BLOCKED. Create the file to enable additional mounts.',
-        { path: MOUNT_ALLOWLIST_PATH },
-      );
-      return null;
-    }
+  // Serve from cache only while the same file is unchanged since the last
+  // successful load. Any edit (including fixing a previously broken file) bumps
+  // the mtime and is picked up on the next call.
+  if (cache !== null && cache.path === MOUNT_ALLOWLIST_PATH && cache.mtimeMs === stat.mtimeMs) {
+    return cache.allowlist;
+  }
 
+  try {
     const content = fs.readFileSync(MOUNT_ALLOWLIST_PATH, 'utf-8');
-    const allowlist = JSON.parse(content) as MountAllowlist;
+    const raw = JSON.parse(content) as Record<string, unknown>;
 
     // Validate structure
-    if (!Array.isArray(allowlist.allowedRoots)) {
+    if (!Array.isArray(raw.allowedRoots)) {
       throw new Error('allowedRoots must be an array');
     }
 
-    if (!Array.isArray(allowlist.blockedPatterns)) {
+    if (!Array.isArray(raw.blockedPatterns)) {
       throw new Error('blockedPatterns must be an array');
     }
 
-    // Merge with default blocked patterns
-    const mergedBlockedPatterns = [...new Set([...DEFAULT_BLOCKED_PATTERNS, ...allowlist.blockedPatterns])];
-    allowlist.blockedPatterns = mergedBlockedPatterns;
+    // Warn-and-ignore the top-level `nonMainReadOnly` key. Setup writes it into
+    // every fresh install, but this validator has no concept of a "main" agent —
+    // read-only is decided per-root. Do NOT throw: a hard reject would fail
+    // closed and brick all mounts on a standard install.
+    if ('nonMainReadOnly' in raw) {
+      log.warn('Mount allowlist has unsupported top-level "nonMainReadOnly" key — ignoring (read-only is per-root)', {
+        path: MOUNT_ALLOWLIST_PATH,
+      });
+    }
 
-    cachedAllowlist = allowlist;
+    const allowedRoots = (raw.allowedRoots as Array<Record<string, unknown>>).map(normalizeRoot);
+
+    // Merge with default blocked patterns
+    const blockedPatterns = [...new Set([...DEFAULT_BLOCKED_PATTERNS, ...(raw.blockedPatterns as string[])])];
+
+    const allowlist: MountAllowlist = { allowedRoots, blockedPatterns };
+
+    cache = { path: MOUNT_ALLOWLIST_PATH, mtimeMs: stat.mtimeMs, allowlist };
     log.info('Mount allowlist loaded successfully', {
       path: MOUNT_ALLOWLIST_PATH,
       allowedRoots: allowlist.allowedRoots.length,
       blockedPatterns: allowlist.blockedPatterns.length,
     });
 
-    return cachedAllowlist;
+    return allowlist;
   } catch (err) {
-    allowlistLoadError = err instanceof Error ? err.message : String(err);
+    // Do NOT poison the cache — a corrupt edit blocks mounts only until it's
+    // fixed, then the next call re-reads and recovers.
+    cache = null;
     log.error('Failed to load mount allowlist - additional mounts will be BLOCKED', {
       path: MOUNT_ALLOWLIST_PATH,
-      error: allowlistLoadError,
+      error: err instanceof Error ? err.message : String(err),
     });
     return null;
   }

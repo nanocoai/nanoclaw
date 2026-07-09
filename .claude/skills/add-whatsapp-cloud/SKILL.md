@@ -46,7 +46,7 @@ import './whatsapp-cloud.js';
 ### 4. Install the adapter package (pinned)
 
 ```bash
-pnpm install @chat-adapter/whatsapp@4.27.0
+pnpm install @chat-adapter/whatsapp@4.29.0
 ```
 
 ### 5. Build and validate
