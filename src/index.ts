@@ -28,6 +28,7 @@ import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
   PROXY_BIND_HOST,
+  startContainerRuntimeWatchdog,
 } from './container-runtime.js';
 import {
   getAllChats,
@@ -539,13 +540,22 @@ function recoverPendingMessages(): void {
   }
 }
 
-function ensureContainerSystemRunning(): void {
-  ensureContainerRuntimeRunning();
-  cleanupOrphans();
-}
-
 async function main(): Promise<void> {
-  ensureContainerSystemRunning();
+  // A missing/unreachable container runtime must not take down the whole
+  // process — channels and the scheduler still need to come up so the
+  // watchdog (started below, once channels are connected) has a way to
+  // retry and eventually notify. See startContainerRuntimeWatchdog.
+  let containerRuntimeInitiallyDown = false;
+  try {
+    ensureContainerRuntimeRunning();
+    cleanupOrphans();
+  } catch (err) {
+    containerRuntimeInitiallyDown = true;
+    logger.warn(
+      { err },
+      'Container runtime unavailable at startup — channels will still connect; retrying in background',
+    );
+  }
   initDatabase();
   logger.info('Database initialized');
   loadState();
@@ -670,6 +680,35 @@ async function main(): Promise<void> {
     logger.fatal('No channels connected');
     process.exit(1);
   }
+
+  // Notify the main group's channel — best-effort, used by the container
+  // runtime watchdog below to report sustained outages/recovery.
+  async function notifyMainChannel(text: string): Promise<void> {
+    const mainEntry = Object.entries(registeredGroups).find(
+      ([, g]) => g.isMain,
+    );
+    if (!mainEntry) return;
+    const [mainJid] = mainEntry;
+    const channel = findChannel(channels, mainJid);
+    if (!channel) return;
+    await channel.sendMessage(mainJid, formatOutbound(text));
+  }
+
+  startContainerRuntimeWatchdog({
+    initiallyDown: containerRuntimeInitiallyDown,
+    onDown: () => {
+      notifyMainChannel(
+        '⚠️ Docker/container runtime לא זמין — משימות סוכן מושהות. אני ממשיך לנסות אוטומטית ואעדכן כשזה יחזור.',
+      ).catch((err) =>
+        logger.error({ err }, 'Failed to send runtime-down notice'),
+      );
+    },
+    onRecovered: () => {
+      notifyMainChannel('✅ Docker חזר לפעול — הכל תקין.').catch((err) =>
+        logger.error({ err }, 'Failed to send runtime-recovered notice'),
+      );
+    },
+  });
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({

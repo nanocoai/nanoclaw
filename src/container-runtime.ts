@@ -2,7 +2,7 @@
  * Container runtime abstraction for NanoClaw.
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 
@@ -128,5 +128,147 @@ export function cleanupOrphans(): void {
     }
   } catch (err) {
     logger.warn({ err }, 'Failed to clean up orphaned containers');
+  }
+}
+
+// --- Watchdog: retry in the background instead of crashing the process ---
+
+const HEALTHY_POLL_MS = 2 * 60 * 1000; // interval between checks while healthy
+const DOWN_RETRY_BASE_MS = 30 * 1000; // first retry, 30s after going down
+const DOWN_RETRY_MAX_MS = 5 * 60 * 1000; // backoff cap while down
+const DOWN_NOTIFY_THRESHOLD_MS = 5 * 60 * 1000; // notify once down this long
+
+let runtimeAvailable = true;
+
+/** Whether the container runtime was reachable at last check. */
+export function isContainerRuntimeAvailable(): boolean {
+  return runtimeAvailable;
+}
+
+/** Quiet reachability probe for the watchdog's repeated checks — no banner, no throw. */
+function probeRuntimeReachable(): boolean {
+  try {
+    execSync(`${CONTAINER_RUNTIME_BIN} info`, {
+      stdio: 'pipe',
+      timeout: 10000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Best-effort attempt to launch the container runtime's desktop app.
+ * Swallows all errors — this is a convenience nudge, not a guarantee.
+ */
+export function tryLaunchContainerRuntime(): void {
+  try {
+    const platform = os.platform();
+    if (platform === 'win32') {
+      const dockerDesktopPath =
+        'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe';
+      if (fs.existsSync(dockerDesktopPath)) {
+        spawn(dockerDesktopPath, [], {
+          detached: true,
+          stdio: 'ignore',
+        }).unref();
+        logger.info('Attempting to auto-launch Docker Desktop');
+      }
+    } else if (platform === 'darwin') {
+      spawn('open', ['-a', 'Docker'], {
+        detached: true,
+        stdio: 'ignore',
+      }).unref();
+      logger.info('Attempting to auto-launch Docker Desktop');
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Failed to auto-launch container runtime');
+  }
+}
+
+export interface ContainerRuntimeWatchdogOpts {
+  /** Called once, the first time the runtime has been down past DOWN_NOTIFY_THRESHOLD_MS. */
+  onDown: () => void;
+  /** Called once, when the runtime recovers after onDown has fired. */
+  onRecovered: () => void;
+  /** Whether the runtime was already found down at startup. */
+  initiallyDown: boolean;
+}
+
+/**
+ * Watches the container runtime in the background: retries with backoff while
+ * down, makes one best-effort attempt to launch it, and reports sustained
+ * outages/recovery via callbacks — instead of crashing the whole process like
+ * a single failed startup check used to.
+ */
+export function startContainerRuntimeWatchdog(
+  opts: ContainerRuntimeWatchdogOpts,
+): void {
+  let consecutiveErrors = 0;
+  let downSince: number | null = null;
+  let notifiedDown = false;
+
+  const scheduleHealthyCheck = () => setTimeout(checkHealthy, HEALTHY_POLL_MS);
+
+  function checkHealthy(): void {
+    if (probeRuntimeReachable()) {
+      scheduleHealthyCheck();
+    } else {
+      enterDownState();
+    }
+  }
+
+  function enterDownState(): void {
+    runtimeAvailable = false;
+    downSince = Date.now();
+    consecutiveErrors = 0;
+    logger.error(
+      'Container runtime unreachable — agent tasks will queue until it recovers',
+    );
+    tryLaunchContainerRuntime();
+    scheduleRetry();
+  }
+
+  function scheduleRetry(): void {
+    const delayMs = Math.min(
+      DOWN_RETRY_BASE_MS * Math.pow(2, consecutiveErrors),
+      DOWN_RETRY_MAX_MS,
+    );
+    setTimeout(retryCheck, delayMs);
+  }
+
+  function retryCheck(): void {
+    if (probeRuntimeReachable()) {
+      cleanupOrphans();
+      runtimeAvailable = true;
+      downSince = null;
+      consecutiveErrors = 0;
+      logger.info('Container runtime recovered');
+      if (notifiedDown) {
+        notifiedDown = false;
+        opts.onRecovered();
+      }
+      scheduleHealthyCheck();
+      return;
+    }
+
+    consecutiveErrors++;
+    logger.warn({ consecutiveErrors }, 'Container runtime still unavailable');
+    if (
+      downSince !== null &&
+      !notifiedDown &&
+      Date.now() - downSince >= DOWN_NOTIFY_THRESHOLD_MS
+    ) {
+      notifiedDown = true;
+      opts.onDown();
+    }
+    scheduleRetry();
+  }
+
+  if (opts.initiallyDown) {
+    enterDownState();
+  } else {
+    scheduleHealthyCheck();
   }
 }
