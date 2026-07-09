@@ -754,8 +754,10 @@ function deliverReportToSource(
     );
   }
   // 直发飞书群通知（保底，不依赖 agent 是否在线/是否主动汇报）
+  // 加系统通知前缀，与 agent 正常回复区分，避免用户混淆重复消息
   if (deps?.sendDirectNotify) {
-    deps.sendDirectNotify(sourceJid, reportText).catch((err) => {
+    const notifyText = `[系统通知] 子群任务结果已送达：\n${reportText}`;
+    deps.sendDirectNotify(sourceJid, notifyText).catch((err) => {
       logger.warn(
         { sourceJid, reportId: meta.id, err: String(err) },
         'deliverReportToSource: 飞书直发通知失败（不影响 DB 投递）',

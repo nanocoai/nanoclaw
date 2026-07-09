@@ -534,6 +534,7 @@ describe('sendDirectNotify 飞书直发通知', () => {
 
     expect(notifyCalls).toHaveLength(1);
     expect(notifyCalls[0].jid).toBe('fs:oc_main');
+    expect(notifyCalls[0].text).toContain('[系统通知]');
     expect(notifyCalls[0].text).toContain('sub3');
   });
 
@@ -625,6 +626,7 @@ describe('sendDirectNotify 飞书直发通知', () => {
 
     expect(notifyCalls).toHaveLength(1);
     expect(notifyCalls[0].jid).toBe('fs:oc_main');
+    expect(notifyCalls[0].text).toContain('[系统通知]');
     expect(notifyCalls[0].text).toContain('修复完成');
     expect(getDelegation(t.taskId)?.status).toBe('done');
   });
