@@ -49,7 +49,7 @@ export const scheduleTask: McpToolDefinition = {
         recurrence: {
           type: 'string',
           description:
-            'Cron expression for recurring tasks (e.g., "0 9 * * 1-5" = weekdays at 9am user-local). Evaluated in the user\'s timezone.',
+            'Recurrence rule for repeating tasks. Two formats: (1) Cron expression (e.g., "0 9 * * 1-5" = weekdays at 9am user-local) — evaluated in the user\'s timezone. (2) Fixed interval: "@every:<ms>" where <ms> is the interval in milliseconds (e.g., "@every:18000000" = every 5 hours). Interval is drift-free: anchored to the last scheduled time, not wall-clock.',
         },
         script: { type: 'string', description: 'Optional pre-agent script to run before processing' },
       },
