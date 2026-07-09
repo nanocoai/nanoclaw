@@ -107,10 +107,30 @@ export interface RoutingContext {
 
 /**
  * Extract routing context from a batch of messages.
- * Uses the first message's routing fields.
+ *
+ * Picks the first message that carries platform routing context, with a
+ * 3-tier fallback to avoid system actions ("agent" channel, no thread)
+ * at the head of a mixed batch from null-ing out the chat reply's
+ * thread context.
+ *
+ * Tiers:
+ *   1. message with both platform_id and thread_id (preserves thread)
+ *   2. message with platform_id only (channel-level reply)
+ *   3. messages[0] (legacy fallback for empty/system-only batches)
+ *
+ * Background — incident 2026-05-08, sess-1778201595257-akx9i0:
+ * after an install_packages approval the next batch had a
+ * channel_type='agent' approval-note row at messages[0] with
+ * thread_id=NULL. The legacy `messages[0]` pick propagated null into
+ * messages_out.thread_id for every subsequent chat reply (seq 15/17/19),
+ * so the chat-sdk-bridge dropped the Slack thread_ts and posted at
+ * channel root instead of in the thread.
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
-  const first = messages[0];
+  const first =
+    messages.find((m) => m.platform_id && m.thread_id) ??
+    messages.find((m) => m.platform_id) ??
+    messages[0];
   return {
     platformId: first?.platform_id ?? null,
     channelType: first?.channel_type ?? null,

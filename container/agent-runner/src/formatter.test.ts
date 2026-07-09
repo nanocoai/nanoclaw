@@ -13,7 +13,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb } from './db/connection.js';
 import { getPendingMessages } from './db/messages-in.js';
-import { formatMessages, stripInternalTags } from './formatter.js';
+import { formatMessages, stripInternalTags, extractRouting } from './formatter.js';
+import type { MessageInRow } from './db/messages-in.js';
 import { TIMEZONE } from './timezone.js';
 
 beforeEach(() => {
@@ -192,5 +193,124 @@ describe('stripInternalTags', () => {
     expect(stripInternalTags('<internal>thinking</internal>The answer is 42')).toBe(
       'The answer is 42',
     );
+  });
+});
+
+// --- extractRouting (Slack thread context preservation) ---
+
+function row(overrides: Partial<MessageInRow>): MessageInRow {
+  return {
+    id: 'm-default',
+    seq: 0,
+    kind: 'chat-sdk',
+    timestamp: '2026-05-08T01:00:00.000Z',
+    status: 'pending',
+    platform_id: null,
+    channel_type: null,
+    thread_id: null,
+    content: '{}',
+    process_after: null,
+    recurrence: null,
+    trigger: 1,
+    tries: 0,
+    ...overrides,
+  };
+}
+
+describe('extractRouting', () => {
+  it('uses messages[0] when first row has full routing', () => {
+    const messages = [
+      row({
+        id: 'm-1',
+        platform_id: 'slack:C06HTHNR3DH',
+        channel_type: 'slack',
+        thread_id: 'slack:C06HTHNR3DH:1778199266.779799',
+      }),
+    ];
+    const r = extractRouting(messages);
+    expect(r.platformId).toBe('slack:C06HTHNR3DH');
+    expect(r.threadId).toBe('slack:C06HTHNR3DH:1778199266.779799');
+    expect(r.inReplyTo).toBe('m-1');
+  });
+
+  it('skips a system "agent" channel row at messages[0] and uses the chat row behind it', () => {
+    // Reproduces incident 2026-05-08 (sess-1778201595257-akx9i0):
+    // an install_packages approval-note (channel_type='agent', no thread)
+    // landed at messages[0] and previously null-ed out the chat reply's
+    // thread context.
+    const messages = [
+      row({
+        id: 'appr-note-1',
+        kind: 'chat',
+        channel_type: 'agent',
+        platform_id: 'ag-1777563454330-or4qfh',
+        thread_id: null,
+      }),
+      row({
+        id: 'm-real-2',
+        platform_id: 'slack:C06HTHNR3DH',
+        channel_type: 'slack',
+        thread_id: 'slack:C06HTHNR3DH:1778201592.978489',
+      }),
+    ];
+    const r = extractRouting(messages);
+    expect(r.platformId).toBe('slack:C06HTHNR3DH');
+    expect(r.channelType).toBe('slack');
+    expect(r.threadId).toBe('slack:C06HTHNR3DH:1778201592.978489');
+    expect(r.inReplyTo).toBe('m-real-2');
+  });
+
+  it('falls back to platform-only row when no row carries thread_id', () => {
+    const messages = [
+      row({ id: 'sys-1', channel_type: 'agent', platform_id: 'ag-x', thread_id: null }),
+      row({
+        id: 'm-channel-2',
+        platform_id: 'slack:C06HTHNR3DH',
+        channel_type: 'slack',
+        thread_id: null, // top-level channel mention
+      }),
+    ];
+    const r = extractRouting(messages);
+    expect(r.platformId).toBe('slack:C06HTHNR3DH');
+    expect(r.threadId).toBe(null);
+    expect(r.inReplyTo).toBe('m-channel-2');
+  });
+
+  it('falls back to messages[0] when no row carries platform_id (system-only batch)', () => {
+    const messages = [
+      row({ id: 'sys-only-1', channel_type: 'agent', platform_id: null, thread_id: null }),
+    ];
+    const r = extractRouting(messages);
+    expect(r.platformId).toBe(null);
+    expect(r.channelType).toBe('agent');
+    expect(r.inReplyTo).toBe('sys-only-1');
+  });
+
+  it('returns all-null routing for an empty batch', () => {
+    const r = extractRouting([]);
+    expect(r.platformId).toBe(null);
+    expect(r.channelType).toBe(null);
+    expect(r.threadId).toBe(null);
+    expect(r.inReplyTo).toBe(null);
+  });
+
+  it('prefers a thread-bearing chat row over an earlier platform-only row', () => {
+    const messages = [
+      row({
+        id: 'm-channel-1',
+        platform_id: 'slack:C06HTHNR3DH',
+        channel_type: 'slack',
+        thread_id: null,
+      }),
+      row({
+        id: 'm-thread-2',
+        platform_id: 'slack:C06HTHNR3DH',
+        channel_type: 'slack',
+        thread_id: 'slack:C06HTHNR3DH:1778199266.779799',
+      }),
+    ];
+    const r = extractRouting(messages);
+    expect(r.threadId).toBe('slack:C06HTHNR3DH:1778199266.779799');
+    expect(r.inReplyTo).toBe('m-thread-2');
   });
 });
