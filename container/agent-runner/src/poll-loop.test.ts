@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
-import { getUndeliveredMessages } from './db/messages-out.js';
+import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { isCorruptionError, processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
@@ -435,6 +435,127 @@ describe('error result with no <message> envelope', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
     expect(pushes).toHaveLength(1);
     expect(pushes[0]).toContain('was not delivered');
+  });
+});
+
+/**
+ * Build a stub query that simulates the agent calling send_message mid-turn
+ * and then ending the turn with `result`. In production the MCP tool runs
+ * in a SEPARATE process, so the only signal the poll loop can see is the
+ * messages_out row the tool writes — which is exactly what this helper
+ * writes, after the query has started (i.e. after the dedup floor was
+ * snapshotted at processQuery entry).
+ */
+function makeToolSendingQuery(
+  toolTexts: string[],
+  result: ProviderEvent,
+): { query: AgentQuery; pushes: string[] } {
+  const pushes: string[] = [];
+  async function* events(): AsyncGenerator<ProviderEvent> {
+    yield { type: 'init', continuation: 'sess-1' };
+    for (const [i, text] of toolTexts.entries()) {
+      writeMessageOut({
+        id: `tool-sent-${i}-${Math.random().toString(36).slice(2, 8)}`,
+        kind: 'chat',
+        platform_id: ERR_ROUTING.platformId,
+        channel_type: ERR_ROUTING.channelType,
+        thread_id: null,
+        content: JSON.stringify({ text }),
+      });
+    }
+    yield result;
+  }
+  return {
+    pushes,
+    query: {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    },
+  };
+}
+
+describe('duplicate-send suppression (tool send + restated final output)', () => {
+  it('does not deliver a wrapped <message> block that repeats content already sent via the tool', async () => {
+    // The real-world shape: the agent sends the reply via send_message,
+    // then ALSO wraps the same text in its own <message> block as the
+    // turn's final output — previously delivered twice.
+    getInboundDb()
+      .prepare('INSERT INTO destinations (name, display_name, type, channel_type, platform_id) VALUES (?, ?, ?, ?, ?)')
+      .run('discord-test', 'Discord', 'channel', ERR_ROUTING.channelType, ERR_ROUTING.platformId);
+
+    const { query, pushes } = makeToolSendingQuery(['Here is your briefing.'], {
+      type: 'result',
+      text: '<message to="discord-test">Here is your briefing.</message>',
+    });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    expect(getUndeliveredMessages()).toHaveLength(1);
+    expect(pushes).toHaveLength(0);
+  });
+
+  it('still delivers a wrapped <message> block whose content differs from what the tool sent', async () => {
+    // A tool-based ack followed by genuinely different final content must
+    // not be treated as a duplicate — dedup is content-exact, not "a tool
+    // fired at some point."
+    getInboundDb()
+      .prepare('INSERT INTO destinations (name, display_name, type, channel_type, platform_id) VALUES (?, ?, ?, ?, ?)')
+      .run('discord-test', 'Discord', 'channel', ERR_ROUTING.channelType, ERR_ROUTING.platformId);
+
+    const { query } = makeToolSendingQuery(['On it, checking now…'], {
+      type: 'result',
+      text: '<message to="discord-test">Here is the actual answer.</message>',
+    });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(2);
+    expect(out.map((m) => JSON.parse(m.content).text)).toEqual(
+      expect.arrayContaining(['On it, checking now…', 'Here is the actual answer.']),
+    );
+  });
+
+  it('treats bare text that repeats tool-sent content as delivered — no re-wrap nudge', async () => {
+    // Without this, the restatement flags hasUnwrapped, the loop nudges,
+    // and the agent's dutiful re-wrap of the same text delivers the
+    // duplicate after all.
+    const { query, pushes } = makeToolSendingQuery(['Here is your briefing.'], {
+      type: 'result',
+      text: 'Here is your briefing.',
+    });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    expect(getUndeliveredMessages()).toHaveLength(1);
+    expect(pushes).toHaveLength(0);
+  });
+
+  it('does not leak tool-sent content into the next turn', async () => {
+    getInboundDb()
+      .prepare('INSERT INTO destinations (name, display_name, type, channel_type, platform_id) VALUES (?, ?, ?, ?, ?)')
+      .run('discord-test', 'Discord', 'channel', ERR_ROUTING.channelType, ERR_ROUTING.platformId);
+
+    // Turn 1: tool send + identical wrapped restatement → suppressed.
+    const first = makeToolSendingQuery(['same text'], {
+      type: 'result',
+      text: '<message to="discord-test">same text</message>',
+    });
+    await processQuery(first.query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+    expect(getUndeliveredMessages()).toHaveLength(1);
+
+    // Turn 2 (new query): the same wrapped text with no tool call this
+    // turn must deliver — the dedup window is per turn, not forever.
+    const second = makeResultQuery({
+      type: 'result',
+      text: '<message to="discord-test">same text</message>',
+    });
+    await processQuery(second.query, ERR_ROUTING, ['m2'], 'claude', undefined, 'prompt', undefined);
+    expect(getUndeliveredMessages()).toHaveLength(2);
   });
 });
 

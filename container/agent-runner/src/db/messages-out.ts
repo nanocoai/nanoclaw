@@ -76,6 +76,46 @@ export function writeMessageOut(msg: WriteMessageOut): number {
   return nextSeq;
 }
 
+/** Highest seq currently in messages_out — the floor for a per-turn dedup window. */
+export function getMaxMessageOutSeq(): number {
+  return (getOutboundDb().prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number }).m;
+}
+
+/**
+ * Trimmed text bodies send_message / send_file delivered since `floorSeq`
+ * — the poll loop's view of "content already sent during the turn in
+ * flight", used for exact-content duplicate suppression.
+ *
+ * This is read from messages_out rather than tracked in memory because
+ * the MCP tools run in a separate process (the SDK spawns the tools
+ * server via `bun run`); the rows those tools write to outbound.db are
+ * the only ledger both processes can see. (Same reason the a2a
+ * in_reply_to stamp lives in session_state — see db/session-state.ts.)
+ *
+ * Excludes scheduled sends (deliver_after set — nothing was delivered
+ * now) and edit/reaction operations.
+ */
+export function getToolSentTextsSince(floorSeq: number): string[] {
+  const rows = getOutboundDb()
+    .prepare(`SELECT content FROM messages_out WHERE seq > ? AND kind = 'chat' AND deliver_after IS NULL`)
+    .all(floorSeq) as { content: string }[];
+
+  const texts: string[] = [];
+  for (const row of rows) {
+    let parsed: { text?: unknown; operation?: unknown };
+    try {
+      parsed = JSON.parse(row.content);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== 'object' || parsed.operation) continue;
+    if (typeof parsed.text === 'string' && parsed.text.trim()) {
+      texts.push(parsed.text.trim());
+    }
+  }
+  return texts;
+}
+
 /**
  * Look up a message's platform ID by seq number.
  * Searches both inbound and outbound DBs since seq spans both.

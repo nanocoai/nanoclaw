@@ -1,6 +1,6 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
-import { writeMessageOut } from './db/messages-out.js';
+import { getMaxMessageOutSeq, getToolSentTextsSince, writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
   clearContinuation,
@@ -340,6 +340,13 @@ export async function processQuery(
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  // Floor of the per-turn duplicate-send window: any chat row the MCP tools
+  // write above this seq was delivered during the turn in flight. Read from
+  // the DB (not in-memory state) because the tools run in a separate process
+  // — see getToolSentTextsSince in db/messages-out.ts. Advanced past this
+  // turn's own writes after each result event so one turn's sends never
+  // dedup a later turn's.
+  let toolSentFloorSeq = getMaxMessageOutSeq();
   // Prompt queue for the exchange hook — each result event consumes the
   // oldest unanswered prompt, except a wrapping-retry result, which answers
   // the same prompt again. Unused (and unmaintained) when the provider
@@ -486,8 +493,9 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        const toolSentTexts = getToolSentTextsSince(toolSentFloorSeq);
         if (event.text) {
-          const { sent, hasUnwrapped } = dispatchResultText(event.text, routing);
+          const { sent, hasUnwrapped } = dispatchResultText(event.text, routing, toolSentTexts);
           if (sent === 0 && event.isError === true) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
@@ -527,6 +535,9 @@ export async function processQuery(
         } else {
           archivePrompts.shift();
         }
+        // Move the dedup floor past everything this turn wrote (tool sends
+        // and dispatched blocks alike) so the next turn starts clean.
+        toolSentFloorSeq = getMaxMessageOutSeq();
       }
     }
   } catch (err) {
@@ -605,8 +616,20 @@ function deliverErrorResult(text: string, routing: RoutingContext): void {
  * The agent must always wrap output in <message to="name">...</message>
  * blocks, even with a single destination. Bare text is scratchpad only.
  */
-function dispatchResultText(text: string, routing: RoutingContext): { sent: number; hasUnwrapped: boolean } {
+function dispatchResultText(
+  text: string,
+  routing: RoutingContext,
+  alreadySent: string[],
+): { sent: number; hasUnwrapped: boolean } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
+
+  // `alreadySent` — exact bodies send_message/send_file delivered earlier
+  // in this same turn, read from messages_out (the tools run in a separate
+  // process, so the DB rows are the only ledger both sides see). A turn
+  // that calls the tool and then *also* repeats that content in a
+  // <message> block of its final output was delivering it a second time —
+  // the "double message" bug. Dedup is content-exact, so a tool-based ack
+  // followed by a genuinely different wrapped message is untouched.
 
   let match: RegExpExecArray | null;
   let sent = 0;
@@ -627,6 +650,10 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
       scratchpadParts.push(`[dropped: unknown destination "${toName}"] ${body}`);
       continue;
     }
+    if (alreadySent.includes(body)) {
+      log(`Dropping <message to="${toName}"> — identical content already sent via send_message/send_file this turn`);
+      continue;
+    }
     sendToDestination(dest, body, routing);
     sent++;
   }
@@ -635,12 +662,23 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
   }
 
   const scratchpad = stripInternalTags(scratchpadParts.join(''));
+  // Bare text that verbatim repeats tool-sent content is a restatement of
+  // something already delivered, not an undelivered response — flagging it
+  // hasUnwrapped would trigger the re-wrap nudge, and the agent's dutiful
+  // re-wrap of the same text would deliver the duplicate after all.
+  const scratchpadIsDuplicate = !!scratchpad && alreadySent.includes(scratchpad.trim());
 
   if (scratchpad) {
-    log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
+    if (scratchpadIsDuplicate) {
+      log(
+        `[scratchpad, already sent via send_message/send_file this turn] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`,
+      );
+    } else {
+      log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
+    }
   }
 
-  const hasUnwrapped = sent === 0 && !!scratchpad;
+  const hasUnwrapped = sent === 0 && !!scratchpad && !scratchpadIsDuplicate;
   if (hasUnwrapped) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
   }
