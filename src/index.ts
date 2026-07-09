@@ -138,6 +138,21 @@ function injectReportToActiveAgent(
   return ok;
 }
 
+/** 直发飞书群通知：finalizeDelegationOnTurnEnd 和 startIpcWatcher 共用 */
+async function sendDirectNotify(jid: string, text: string): Promise<void> {
+  const channel = findChannel(channels, jid);
+  if (!channel) throw new Error(`sendDirectNotify: No channel for JID: ${jid}`);
+  if ('sendDirectMessage' in channel) {
+    await (
+      channel as {
+        sendDirectMessage: (jid: string, text: string) => Promise<void>;
+      }
+    ).sendDirectMessage(jid, text);
+  } else {
+    await channel.sendMessage(jid, text);
+  }
+}
+
 const onecli = new OneCLI({ url: ONECLI_URL });
 
 function ensureOneCLIAgent(jid: string, group: RegisteredGroup): void {
@@ -684,6 +699,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         // error 终态：不携带回复内容（异常终态无归因意义）
         finalizeDelegationOnTurnEnd(group.folder, false, undefined, {
           injectReportToActiveAgent,
+          sendDirectNotify,
         });
         return;
       }
@@ -717,6 +733,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         : undefined;
       finalizeDelegationOnTurnEnd(group.folder, true, finalReply, {
         injectReportToActiveAgent,
+        sendDirectNotify,
       });
     } catch (err) {
       logger.warn({ err, group: group.folder }, `${opts.logPrefix} 自动终态汇报异常`);
@@ -1469,6 +1486,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     try {
       finalizeDelegationOnTurnEnd(group.folder, false, undefined, {
         injectReportToActiveAgent,
+        sendDirectNotify,
       });
     } catch (err) {
       logger.warn({ err, group: group.folder }, '自动终态汇报(failed)异常');
@@ -2560,6 +2578,7 @@ async function main(): Promise<void> {
       }
     },
     injectReportToActiveAgent,
+    sendDirectNotify,
     notifyReportRejected: (reportingGroupFolder, reason) => {
       // 反查 reporting group 的 JID
       let reportingJid: string | undefined;

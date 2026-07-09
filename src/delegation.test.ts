@@ -494,3 +494,103 @@ describe('shouldCarryReply', () => {
     expect(shouldCarryReply(msgs, task)).toBe(false);
   });
 });
+
+describe('sendDirectNotify 飞书直发通知', () => {
+  function regMain() {
+    setRegisteredGroup('fs:oc_main', {
+      name: 'main',
+      folder: 'main',
+      trigger: '@bot',
+      added_at: new Date().toISOString(),
+      isMain: true,
+    });
+  }
+
+  it('finalizeDelegationOnTurnEnd 调用 sendDirectNotify', () => {
+    regMain();
+    storeChatMetadata(
+      'fs:oc_main',
+      new Date().toISOString(),
+      'main',
+      'mock',
+      true,
+    );
+    createTestDelegation({
+      sourceGroup: 'main',
+      sourceJid: 'fs:oc_main',
+      targetGroup: 'sub3',
+      targetJid: 'fs:oc_3',
+    } as never);
+
+    const notifyCalls: Array<{ jid: string; text: string }> = [];
+    const sendDirectNotify = async (jid: string, text: string) => {
+      notifyCalls.push({ jid, text });
+    };
+
+    finalizeDelegationOnTurnEnd('sub3', true, '已完成', {
+      injectReportToActiveAgent: () => false,
+      sendDirectNotify,
+    });
+
+    expect(notifyCalls).toHaveLength(1);
+    expect(notifyCalls[0].jid).toBe('fs:oc_main');
+    expect(notifyCalls[0].text).toContain('sub3');
+  });
+
+  it('sendDirectNotify 失败不影响 DB 投递', () => {
+    regMain();
+    storeChatMetadata(
+      'fs:oc_main',
+      new Date().toISOString(),
+      'main',
+      'mock',
+      true,
+    );
+    const t = createTestDelegation({
+      sourceGroup: 'main',
+      sourceJid: 'fs:oc_main',
+      targetGroup: 'sub3',
+      targetJid: 'fs:oc_3',
+    } as never);
+
+    const failingNotify = async () => {
+      throw new Error('飞书 API 炸了');
+    };
+
+    finalizeDelegationOnTurnEnd('sub3', true, '结果', {
+      injectReportToActiveAgent: () => false,
+      sendDirectNotify: failingNotify,
+    });
+
+    // DB 投递正常，任务状态已更新
+    expect(getDelegation(t.taskId)?.status).toBe('done');
+    const rows = getDb()
+      .prepare('SELECT chat_jid FROM messages WHERE chat_jid = ?')
+      .all('fs:oc_main') as Array<{ chat_jid: string }>;
+    expect(rows.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('不传 sendDirectNotify 时不报错（向后兼容）', () => {
+    regMain();
+    storeChatMetadata(
+      'fs:oc_main',
+      new Date().toISOString(),
+      'main',
+      'mock',
+      true,
+    );
+    createTestDelegation({
+      sourceGroup: 'main',
+      sourceJid: 'fs:oc_main',
+      targetGroup: 'sub3',
+      targetJid: 'fs:oc_3',
+    } as never);
+
+    // 不传 sendDirectNotify，只传 injectReportToActiveAgent
+    expect(() =>
+      finalizeDelegationOnTurnEnd('sub3', true, '完成', {
+        injectReportToActiveAgent: () => false,
+      }),
+    ).not.toThrow();
+  });
+});
