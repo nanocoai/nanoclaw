@@ -40,3 +40,28 @@ export function readEnvFile(keys: string[]): Record<string, string> {
 
   return result;
 }
+
+/**
+ * Return the names of all keys defined in the .env file (without reading their
+ * values into memory beyond what's needed to find the key). Used by adapters
+ * that discover multiple instances from a naming convention (e.g. Telegram's
+ * TELEGRAM_BOT_TOKEN_<INSTANCE>). Returns [] if .env is absent.
+ */
+export function listEnvKeys(): string[] {
+  const envFile = path.join(process.cwd(), '.env');
+  let content: string;
+  try {
+    content = fs.readFileSync(envFile, 'utf-8');
+  } catch {
+    return [];
+  }
+  const keys: string[] = [];
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1) continue;
+    keys.push(trimmed.slice(0, eqIdx).trim());
+  }
+  return keys;
+}
