@@ -18,7 +18,7 @@ import {
   storeChatMetadata,
   updateDelegationOnReport,
 } from './db.js';
-import { finalizeDelegationOnTurnEnd, shouldCarryReply } from './ipc.js';
+import { finalizeDelegationOnTurnEnd, shouldCarryReply, __testing as ipcTesting } from './ipc.js';
 
 beforeEach(() => {
   _initTestDatabase();
@@ -592,5 +592,40 @@ describe('sendDirectNotify 飞书直发通知', () => {
         injectReportToActiveAgent: () => false,
       }),
     ).not.toThrow();
+  });
+
+  it('显式 report 路径（handleReport）也调用 sendDirectNotify', () => {
+    regMain();
+    storeChatMetadata(
+      'fs:oc_main',
+      new Date().toISOString(),
+      'main',
+      'mock',
+      true,
+    );
+    const t = createTestDelegation({
+      sourceGroup: 'main',
+      sourceJid: 'fs:oc_main',
+      targetGroup: 'sub3',
+      targetJid: 'fs:oc_3',
+    } as never);
+
+    const notifyCalls: Array<{ jid: string; text: string }> = [];
+    ipcTesting.handleReport(
+      { status: 'done', summary: '修复完成' },
+      'sub3',
+      {},
+      {
+        injectReportToActiveAgent: () => false,
+        sendDirectNotify: async (jid, text) => {
+          notifyCalls.push({ jid, text });
+        },
+      },
+    );
+
+    expect(notifyCalls).toHaveLength(1);
+    expect(notifyCalls[0].jid).toBe('fs:oc_main');
+    expect(notifyCalls[0].text).toContain('修复完成');
+    expect(getDelegation(t.taskId)?.status).toBe('done');
   });
 });

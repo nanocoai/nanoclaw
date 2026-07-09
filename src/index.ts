@@ -142,9 +142,9 @@ function injectReportToActiveAgent(
 async function sendDirectNotify(jid: string, text: string): Promise<void> {
   const channel = findChannel(channels, jid);
   if (!channel) throw new Error(`sendDirectNotify: No channel for JID: ${jid}`);
-  if ('sendDirectMessage' in channel) {
+  if (typeof (channel as unknown as Record<string, unknown>).sendDirectMessage === 'function') {
     await (
-      channel as {
+      channel as unknown as {
         sendDirectMessage: (jid: string, text: string) => Promise<void>;
       }
     ).sendDirectMessage(jid, text);
@@ -2519,9 +2519,9 @@ async function main(): Promise<void> {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
       // 优先用 sendDirectMessage（跳过进度卡片清理），fallback 到 sendMessage
-      if ('sendDirectMessage' in channel) {
+      if (typeof (channel as unknown as Record<string, unknown>).sendDirectMessage === 'function') {
         await (
-          channel as {
+          channel as unknown as {
             sendDirectMessage: (jid: string, text: string) => Promise<void>;
           }
         ).sendDirectMessage(jid, text);
