@@ -11,6 +11,8 @@ import {
   sendRichMessageRaw,
   wrapTelegramRichSend,
   RICH_MESSAGE_MAX_CHARS,
+  TELEGRAM_PLAIN_MAX_CHARS,
+  richRoutable,
 } from './telegram-rich-message.js';
 
 const TABLE = ['| # | Titel | Typ |', '|---|-------|-----|', '| 1 | foo | bug |'].join('\n');
@@ -148,5 +150,149 @@ describe('wrapTelegramRichSend', () => {
     const a = wrapTelegramRichSend(stubAdapter(calls), { token: 'T', richTables: false, richConstructs: false });
     await a.postMessage('telegram:123', { markdown: TABLE });
     expect(calls.plain).toBe(1);
+  });
+
+  it('sends a long rich message (over the plain cap) as ONE rich send', async () => {
+    const longRich = `# Release notes\n\n${'lorem ipsum dolor sit amet. '.repeat(400)}`; // ~11k chars, heading → rich
+    expect(longRich.length).toBeGreaterThan(TELEGRAM_PLAIN_MAX_CHARS);
+    const richFetch = vi.fn(async () => ({
+      json: async () => ({ ok: true, result: { message_id: 7 } }),
+    })) as unknown as typeof fetch;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = richFetch;
+    try {
+      const calls = { rich: 0, plain: 0 };
+      const a = wrapTelegramRichSend(stubAdapter(calls), { token: 'T', richTables: true, richConstructs: true });
+      const out = await a.postMessage('telegram:123', { markdown: longRich });
+      expect((richFetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
+      expect(calls.plain).toBe(0);
+      expect(out.id).toBe('7');
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('splits (not truncates) an over-4k message on rich fallback', async () => {
+    const longRich = `# Heading\n\n${'paragraph of prose here. '.repeat(400)}`; // > 4k, rich-routable
+    const richFetch = vi.fn(async () => ({
+      json: async () => ({ ok: false, error_code: 400, description: 'Bad Request' }),
+    })) as unknown as typeof fetch;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = richFetch;
+    try {
+      const seen: string[] = [];
+      const adapter = {
+        postMessage: async (_tid: string, m: { markdown?: string }) => {
+          seen.push(m.markdown ?? '');
+          return { id: `p${seen.length}`, threadId: _tid, raw: {} };
+        },
+      };
+      const a = wrapTelegramRichSend(adapter, { token: 'T', richTables: true, richConstructs: true });
+      const out = await a.postMessage('telegram:123', { markdown: longRich });
+      expect(seen.length).toBeGreaterThan(1); // split, not a single truncated send
+      for (const chunk of seen) expect(chunk.length).toBeLessThanOrEqual(TELEGRAM_PLAIN_MAX_CHARS);
+      expect(seen.join(' ').replace(/\s+/g, ' ')).toBe(longRich.replace(/\s+/g, ' ')); // no content lost
+      expect(out.id).toBe('p1'); // head chunk id returned for edits/reactions
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+describe('wrapTelegramRichSend path-specific sanitization', () => {
+  const sanitize = (t: string) => t.replace(/^- /gm, '• ');
+
+  it('rich path gets RAW markdown; plain path gets sanitized text', async () => {
+    const richBodies: string[] = [];
+    const richFetch = vi.fn(async (_url: string, init: { body: string }) => {
+      richBodies.push(JSON.parse(init.body).rich_message.markdown);
+      return { json: async () => ({ ok: true, result: { message_id: 7 } }) };
+    }) as unknown as typeof fetch;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = richFetch;
+    try {
+      const plainSeen: string[] = [];
+      const adapter = {
+        postMessage: async (_tid: string, m: { markdown?: string }) => {
+          plainSeen.push(m.markdown ?? '');
+          return { id: 'p', threadId: _tid, raw: {} };
+        },
+      };
+      const a = wrapTelegramRichSend(adapter, {
+        token: 'T',
+        richTables: true,
+        richConstructs: true,
+        sanitizeForPlain: sanitize,
+      });
+      const richMsg = '# Release\n\n- one\n- two'; // heading → rich
+      const plainMsg = 'hello\n- one\n- two'; // no rich construct → plain
+      await a.postMessage('telegram:123', { markdown: richMsg });
+      await a.postMessage('telegram:123', { markdown: plainMsg });
+      expect(richBodies).toEqual([richMsg]); // raw bullets survive to the rich renderer
+      expect(plainSeen).toEqual(['hello\n• one\n• two']); // plain path sanitized
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('sanitizes each chunk on rich fallback', async () => {
+    const richFetch = vi.fn(async () => ({
+      json: async () => ({ ok: false, error_code: 400, description: 'Bad Request' }),
+    })) as unknown as typeof fetch;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = richFetch;
+    try {
+      const plainSeen: string[] = [];
+      const adapter = {
+        postMessage: async (_tid: string, m: { markdown?: string }) => {
+          plainSeen.push(m.markdown ?? '');
+          return { id: `p${plainSeen.length}`, threadId: _tid, raw: {} };
+        },
+      };
+      const a = wrapTelegramRichSend(adapter, {
+        token: 'T',
+        richTables: true,
+        richConstructs: true,
+        sanitizeForPlain: sanitize,
+      });
+      const long = `# Heading\n\n${'- a bullet item with some prose\n'.repeat(200)}`; // > 4k, rich-routable
+      await a.postMessage('telegram:123', { markdown: long });
+      expect(plainSeen.length).toBeGreaterThan(1);
+      for (const chunk of plainSeen) expect(chunk).not.toMatch(/^- /m); // every chunk sanitized
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+
+  it('sanitizes edits (always plain path)', async () => {
+    const edits: string[] = [];
+    const adapter = {
+      postMessage: async (_tid: string, _m: unknown) => ({ id: 'p', threadId: _tid, raw: {} }),
+      editMessage: async (_tid: string, _id: string, m: { markdown?: string }) => {
+        edits.push(m.markdown ?? '');
+        return { id: _id, threadId: _tid, raw: {} };
+      },
+    };
+    const a = wrapTelegramRichSend(adapter, {
+      token: 'T',
+      richTables: true,
+      richConstructs: true,
+      sanitizeForPlain: sanitize,
+    });
+    await a.editMessage!('telegram:123', '9', { markdown: '- one\n- two' });
+    expect(edits).toEqual(['• one\n• two']);
+  });
+});
+
+describe('richRoutable', () => {
+  it('true for rich constructs within the cap, false for plain / oversize / crash shape', () => {
+    const opts = { richTables: true, richConstructs: true };
+    expect(richRoutable('# heading\n\nbody', opts)).toBe(true);
+    expect(richRoutable(TABLE, opts)).toBe(true);
+    expect(richRoutable('plain text', opts)).toBe(false);
+    expect(richRoutable('', opts)).toBe(false);
+    expect(richRoutable(`# h\n${'x'.repeat(RICH_MESSAGE_MAX_CHARS)}`, opts)).toBe(false);
+    expect(richRoutable('<details>\n$$x^2$$\n</details>', opts)).toBe(false); // TDesktop crash shape
+    expect(richRoutable(TABLE, { richTables: false, richConstructs: true })).toBe(false);
   });
 });

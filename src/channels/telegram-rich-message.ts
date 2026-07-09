@@ -22,6 +22,12 @@
 import type { RawMessage } from 'chat';
 
 import { log } from '../log.js';
+import { splitForLimit } from './chat-sdk-bridge.js';
+
+/** Effective outbound cap for the normal (MarkdownV2) path — mirrors the
+ * bridge's maxTextLength for Telegram. Used when a rich-routed message falls
+ * back: the adapter would otherwise silently truncate anything longer. */
+export const TELEGRAM_PLAIN_MAX_CHARS = 4000;
 
 /** A GFM table divider line, e.g. `|---|:--:|`, `--- | ---`. Requires ≥2 columns. */
 const TABLE_SEPARATOR_RE = /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)+\|?\s*$/;
@@ -100,6 +106,23 @@ export function richConstructsEnabled(env: Record<string, string | undefined>): 
 }
 
 /**
+ * True when `markdown` would route to the rich path under these toggles: carries
+ * a rich-only construct, fits the rich char cap, and doesn't hit the TDesktop
+ * crash shape. Shared by wrapTelegramRichSend and the bridge's per-message
+ * chunk-limit hook so the two can never disagree on what counts as "rich" —
+ * a rich-routable message must be chunked against RICH_MESSAGE_MAX_CHARS, not
+ * the 4k plain-text limit.
+ */
+export function richRoutable(markdown: string, opts: { richTables: boolean; richConstructs: boolean }): boolean {
+  return (
+    markdown.length > 0 &&
+    markdown.length <= RICH_MESSAGE_MAX_CHARS &&
+    ((opts.richTables && isTablePrimary(markdown)) ||
+      (opts.richConstructs && hasRichOnlyConstruct(markdown) && !hasTDesktopCrashShape(markdown)))
+  );
+}
+
+/**
  * The endpoint itself is unavailable (a Bot API server without 10.1) — as
  * opposed to a per-message rejection. Callers latch rich OFF on these so they
  * don't pay a failed roundtrip on every send. NOTE: must NOT key off a bare
@@ -172,33 +195,46 @@ export interface RichWrapDeps {
   token: string;
   richTables: boolean;
   richConstructs: boolean;
+  /**
+   * Sanitizer for the plain (legacy Markdown parse mode) path — applied to
+   * sends that do NOT route rich, and to message edits. Must NOT be applied
+   * upstream of this wrapper (e.g. via the bridge's transformOutboundText):
+   * the rich path needs the agent's raw markdown, and the sanitizer's
+   * `- item` → `• item` rewrite turns markdown lists into soft-wrapped prose
+   * that the rich renderer collapses onto a single line.
+   */
+  sanitizeForPlain?: (text: string) => string;
 }
 
 /**
  * Wrap an adapter's `postMessage` so messages carrying a MarkdownV2-impossible
- * construct route to `sendRichMessage`, with transparent fallback to the
- * original send on any failure. A genuine capability error latches rich OFF for
- * the process. No-op (returns the adapter unchanged) when both toggles are off.
+ * construct route to `sendRichMessage` (with the agent's RAW markdown), with
+ * transparent fallback to the original send on any failure. A genuine
+ * capability error latches rich OFF for the process.
+ *
+ * The plain path (non-rich sends, rich fallbacks, and message edits) gets
+ * `deps.sanitizeForPlain` applied here — NOT in the bridge — so the two paths
+ * can receive different text: raw markdown for the rich renderer, sanitized
+ * text for the legacy Markdown parse mode.
  */
-export function wrapTelegramRichSend<A extends { postMessage: (...args: any[]) => Promise<any> }>(
-  adapter: A,
-  deps: RichWrapDeps,
-): A {
-  if (!deps.richTables && !deps.richConstructs) return adapter;
+export function wrapTelegramRichSend<
+  A extends {
+    postMessage: (...args: any[]) => Promise<any>;
+    editMessage?: (...args: any[]) => Promise<any>;
+  },
+>(adapter: A, deps: RichWrapDeps): A {
+  const sanitize = deps.sanitizeForPlain ?? ((t: string) => t);
   const origPost = adapter.postMessage.bind(adapter) as (tid: string, m: any) => Promise<any>;
+  const postPlain = (tid: string, message: any, md: string): Promise<any> =>
+    origPost(tid, md ? { ...message, markdown: sanitize(md) } : message);
   let richDisabled = false;
   adapter.postMessage = (async (tid: string, message: any): Promise<any> => {
     const md = typeof message?.markdown === 'string' ? message.markdown : '';
     const hasMedia = !!(message?.attachments?.length || message?.files?.length);
-    const route =
-      !richDisabled &&
-      md.length > 0 &&
-      md.length <= RICH_MESSAGE_MAX_CHARS &&
-      !hasMedia &&
-      ((deps.richTables && isTablePrimary(md)) ||
-        (deps.richConstructs && hasRichOnlyConstruct(md) && !hasTDesktopCrashShape(md)));
+    const route = !richDisabled && !hasMedia && richRoutable(md, deps);
     if (route) {
       try {
+        // RAW markdown — the rich renderer needs real `- ` list items etc.
         return await sendRichMessageRaw({ token: deps.token }, tid, md);
       } catch (re: unknown) {
         const errMsg = String((re as { message?: string })?.message ?? re);
@@ -210,8 +246,30 @@ export function wrapTelegramRichSend<A extends { postMessage: (...args: any[]) =
         }
         // fall through to the normal send path
       }
+      // Rich-routable messages bypass the bridge's 4k chunking (the bridge's
+      // per-message limit hook allows up to RICH_MESSAGE_MAX_CHARS), so on
+      // fallback anything longer than the plain-path cap must be split here —
+      // the underlying adapter would silently truncate it otherwise.
+      if (md.length > TELEGRAM_PLAIN_MAX_CHARS) {
+        const parts = splitForLimit(md, TELEGRAM_PLAIN_MAX_CHARS);
+        let first: RawMessage<unknown> | undefined;
+        for (let i = 0; i < parts.length; i++) {
+          const res = await postPlain(tid, message, parts[i]);
+          if (i === 0) first = res;
+        }
+        return first;
+      }
     }
-    return await origPost(tid, message);
+    return await postPlain(tid, message, md);
   }) as A['postMessage'];
+  // Edits always take the plain path — sanitize them here since the bridge
+  // no longer does.
+  if (deps.sanitizeForPlain && typeof adapter.editMessage === 'function') {
+    const origEdit = adapter.editMessage.bind(adapter) as (tid: string, id: string, m: any) => Promise<any>;
+    adapter.editMessage = (async (tid: string, id: string, m: any): Promise<any> => {
+      const md = typeof m?.markdown === 'string' ? m.markdown : '';
+      return origEdit(tid, id, md ? { ...m, markdown: sanitize(md) } : m);
+    }) as A['editMessage'];
+  }
   return adapter;
 }
