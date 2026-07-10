@@ -58,9 +58,11 @@ const REPORT_ALLOWED_STATUSES = new Set<string>([
   'question',
 ]);
 
-function fmtGroupLabel(jid: string): string {
+function fmtGroupLabel(jidOrFolder: string): string {
+  // group_aliases.chat_jid 用 JID 格式 (fs:oc_xxx)，folder 格式 (fs_oc_xxx) 需转换
+  const jid = jidOrFolder.includes(':') ? jidOrFolder : jidOrFolder.replace('_', ':');
   const alias = getAliasByJid(jid);
-  return alias ? `${alias}(${jid})` : jid;
+  return alias ? `${alias}(${jidOrFolder})` : jidOrFolder;
 }
 
 /** 自动终态兜底汇报里携带的子群最终回复摘要上限（防超长撑爆主群 context） */
@@ -608,7 +610,12 @@ async function handleDelegate(
 
   await notifySource(
     `⏳ 已派工给 ${fmtGroupLabel(targetJid)}，等待结果...\n(task ${task.taskId})`,
-  );
+  ).catch((err) => {
+    logger.warn(
+      { err, taskId: task.taskId, sourceGroup },
+      'delegate 成功但源群通知发送失败（非致命）',
+    );
+  });
 
   logger.info(
     { taskId: task.taskId, targetFolder, sourceGroup },
@@ -882,6 +889,7 @@ export function finalizeDelegationOnTurnEnd(
 }
 
 export const __testing = {
+  fmtGroupLabel,
   handleDelegate,
   handleReport,
 };

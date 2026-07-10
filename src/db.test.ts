@@ -10,6 +10,7 @@ import {
   createTaskLedgerTask,
   deleteTask,
   getAllChats,
+  getAliasByJid,
   getAllGroupAliases,
   getAllRegisteredGroups,
   getGroupAlias,
@@ -799,6 +800,15 @@ describe('group aliases', () => {
 
   it('空别名会被拒绝', () => {
     expect(() => setGroupAlias('   ', 'fs:oc_two')).toThrow('别名不能为空');
+  });
+
+  it('getAliasByJid 按 JID 反查别名', () => {
+    setGroupAlias('C2', 'fs:oc_two');
+    setGroupAlias('C3', 'fs:oc_three');
+
+    expect(getAliasByJid('fs:oc_two')).toBe('C2');
+    expect(getAliasByJid('fs:oc_three')).toBe('C3');
+    expect(getAliasByJid('fs:oc_nonexistent')).toBeUndefined();
   });
 });
 

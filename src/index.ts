@@ -132,6 +132,9 @@ function injectReportToActiveAgent(
     advanceAgentCursor(sourceJid, reportMeta.timestamp);
     // report 注入触发新一轮 query，必须清除 progressDone 使新 progress 能创建卡片。
     // 普通 message-loop pipe 在 index.ts:563 已有 setTyping(true)，此处是注入路径的对等操作。
+    // 已知限制：若 report 抵达时上一 query 仍在执行，其 success 的 cleanupProgressCard
+    // 会在 setTyping 之后重新置 progressDone，新 query progress 仍会被拦截。
+    // 完整修复需 per-query 序号隔离 progress lifecycle，留作后续。
     const ch = findChannel(channels, sourceJid);
     ch?.setTyping?.(sourceJid, true).catch((err) => {
       logger.warn({ err, sourceJid }, 'injectReport: setTyping failed (non-fatal)');
