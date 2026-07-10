@@ -60,6 +60,34 @@ export type ProgressPresentationEvent =
   | { kind: 'tool'; progress: StructuredProgress }
   | { kind: 'turn_end' };
 
+export function redactProgressText(text: string): string {
+  return text
+    .replace(
+      /-----BEGIN(?: [A-Z]+)* PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z]+)* PRIVATE KEY-----/giu,
+      '[REDACTED_PRIVATE_KEY]',
+    )
+    .replace(
+      /\bBearer\s+[A-Za-z0-9._~+\/-]{8,}={0,2}/giu,
+      'Bearer [REDACTED]',
+    )
+    .replace(
+      /\b(?:sk-[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AKIA[A-Z0-9]{12,})\b/gu,
+      '[REDACTED_TOKEN]',
+    )
+    .replace(
+      /(https?:\/\/)[^\/\s:@]+:[^\/\s@]+@/giu,
+      '$1[REDACTED]@',
+    )
+    .replace(
+      /([?&](?:access_token|api[_-]?key|token|secret|password)=)[^&\s]+/giu,
+      '$1[REDACTED]',
+    )
+    .replace(
+      /((?:[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD)|authorization)["']?\s*[:=]\s*["']?)[^"'\s,;]+/giu,
+      '$1[REDACTED]',
+    );
+}
+
 export function isStructuredProgress(value: unknown): value is StructuredProgress {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const progress = value as Record<string, unknown>;
@@ -87,6 +115,18 @@ export function serializeProgressPayload(output: {
     ...(output.detail ? { detail: output.detail } : {}),
     ...(output.progress ? { progress: output.progress } : {}),
   });
+}
+
+export function progressLogFields(
+  progress: StructuredProgress | undefined,
+): Record<string, string | undefined> {
+  if (!progress) return {};
+  return {
+    provider: progress.provider,
+    lifecycle: progress.lifecycle,
+    toolName: progress.toolName,
+    toolCallId: progress.toolCallId,
+  };
 }
 
 function inputString(

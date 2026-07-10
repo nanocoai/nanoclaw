@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyProgressAction,
   createProgressPresentationState,
+  progressLogFields,
   reduceProgressPresentation,
+  redactProgressText,
   serializeProgressPayload,
   type StructuredProgress,
 } from './progress-display.js';
@@ -19,6 +21,33 @@ describe('serializeProgressPayload', () => {
       detail: '```bash\nnpm test\n```',
       progress,
     });
+  });
+});
+
+describe('progressLogFields', () => {
+  it('只输出关联字段，不记录 input 和结果正文', () => {
+    const fields = progressLogFields(started(
+      'Bash',
+      { command: 'Authorization: Bearer log-canary-123456' },
+      'log-1',
+    ));
+    expect(fields).toEqual({
+      provider: 'codex',
+      lifecycle: 'started',
+      toolName: 'Bash',
+      toolCallId: 'log-1',
+    });
+    expect(JSON.stringify(fields)).not.toContain('log-canary');
+  });
+});
+
+describe('redactProgressText', () => {
+  it('host 持久化前再次脱敏 synthetic canary', () => {
+    const output = redactProgressText(
+      'token=host-canary-123456 https://u:p@example.com?a=1',
+    );
+    expect(output).not.toContain('host-canary');
+    expect(output).not.toContain('u:p@');
   });
 });
 

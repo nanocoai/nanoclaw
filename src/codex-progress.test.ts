@@ -109,6 +109,17 @@ describe('mapCodexProgress — 回归', () => {
     expect(out[0].detail).toBe('12 tests passed');
   });
 
+  it('completed aggregated_output 在进入 detail 和 summary 前脱敏', () => {
+    const out = mapCodexProgress(completed({
+      id: 'secret-output',
+      type: 'command_execution',
+      status: 'completed',
+      aggregated_output: 'Authorization: Bearer codex-canary-123456',
+    }));
+    expect(out[0].detail).not.toContain('codex-canary');
+    expect(out[0].progress?.resultSummary).not.toContain('codex-canary');
+  });
+
   it('completed 事件的 failed 状态不会误报成功', () => {
     const out = mapCodexProgress(
       completed({

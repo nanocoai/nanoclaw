@@ -21,6 +21,34 @@ export interface ClaudeToolResultProgress {
   progress: StructuredProgress;
 }
 
+export function redactProgressText(text: string): string {
+  return text
+    .replace(
+      /-----BEGIN(?: [A-Z]+)* PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z]+)* PRIVATE KEY-----/giu,
+      '[REDACTED_PRIVATE_KEY]',
+    )
+    .replace(
+      /\bBearer\s+[A-Za-z0-9._~+\/-]{8,}={0,2}/giu,
+      'Bearer [REDACTED]',
+    )
+    .replace(
+      /\b(?:sk-[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AKIA[A-Z0-9]{12,})\b/gu,
+      '[REDACTED_TOKEN]',
+    )
+    .replace(
+      /(https?:\/\/)[^\/\s:@]+:[^\/\s@]+@/giu,
+      '$1[REDACTED]@',
+    )
+    .replace(
+      /([?&](?:access_token|api[_-]?key|token|secret|password)=)[^&\s]+/giu,
+      '$1[REDACTED]',
+    )
+    .replace(
+      /((?:[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD)|authorization)["']?\s*[:=]\s*["']?)[^"'\s,;]+/giu,
+      '$1[REDACTED]',
+    );
+}
+
 function toolResultText(content: unknown): string {
   if (typeof content === 'string') return content.trim();
   if (!Array.isArray(content)) return '';
@@ -38,7 +66,7 @@ export function buildClaudeToolResultProgress(
   block: ClaudeToolResultBlock,
 ): ClaudeToolResultProgress | null {
   if (block.type !== 'tool_result') return null;
-  const text = toolResultText(block.content);
+  const text = redactProgressText(toolResultText(block.content));
   const lifecycle = block.is_error ? 'failed' : 'completed';
   const short = text ? text.slice(0, 60) + (text.length > 60 ? '...' : '') : '';
   return {

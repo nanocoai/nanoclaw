@@ -643,6 +643,22 @@ describe('FeishuChannel', () => {
       expect(detail).toContain('12 passed');
     });
 
+    it('过程记录持久化前脱敏技术详情', async () => {
+      const jid = 'fs:oc_progress_secret_redaction';
+      await channel.sendMessage(jid, JSON.stringify({
+        title: '🔧 curl service',
+        detail: 'Authorization: Bearer feishu-canary-123456',
+        progress: {
+          provider: 'codex', lifecycle: 'started', toolName: 'command_execution',
+          toolCallId: 'redact-1', input: { command: 'curl service' },
+        },
+      }), { isProgress: true });
+      const entry = (channel as any).progressCards.get(jid);
+      const persisted = _getSessionForTest(entry.sessionId)?.steps[0].detail ?? '';
+      expect(persisted).not.toContain('feishu-canary');
+      expect(persisted).toContain('[REDACTED]');
+    });
+
     it('同一 call ID 的富 started 事件升级原步骤而不重复追加', async () => {
       const jid = 'fs:oc_progress_started_upgrade';
       await channel.sendMessage(

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { boundProgressInput, buildClaudeToolResultProgress } from './progress-types.js';
+import {
+  boundProgressInput,
+  buildClaudeToolResultProgress,
+  redactProgressText,
+} from './progress-types.js';
 
 describe('boundProgressInput', () => {
   it('保留分类字段并限制长度', () => {
@@ -68,5 +72,35 @@ describe('buildClaudeToolResultProgress', () => {
       result: '✅ 执行完成',
       progress: { lifecycle: 'completed', toolCallId: 'tool-ok' },
     });
+  });
+});
+
+describe('redactProgressText', () => {
+  it('脱敏常见凭证 canary，同时保留普通测试输出', () => {
+    const input = [
+      'Authorization: Bearer bearer-canary-123456',
+      'OPENAI_API_KEY=sk-canary-1234567890',
+      'https://user:pass@example.com/path?access_token=query-canary-123',
+      '-----BEGIN PRIVATE KEY-----',
+      'private-canary-body',
+      '-----END PRIVATE KEY-----',
+      '12 tests passed',
+    ].join('\n');
+    const output = redactProgressText(input);
+    expect(output).not.toContain('bearer-canary');
+    expect(output).not.toContain('sk-canary');
+    expect(output).not.toContain('user:pass');
+    expect(output).not.toContain('query-canary');
+    expect(output).not.toContain('private-canary-body');
+    expect(output).toContain('12 tests passed');
+  });
+
+  it('Claude tool result 在生成 detail 和 summary 前脱敏', () => {
+    const result = buildClaudeToolResultProgress({
+      type: 'tool_result',
+      tool_use_id: 'secret-result',
+      content: 'Authorization: Bearer tool-result-canary-123456',
+    });
+    expect(JSON.stringify(result)).not.toContain('tool-result-canary');
   });
 });

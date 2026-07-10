@@ -15,6 +15,7 @@ import { logger } from '../logger.js';
 import {
   createProgressPresentationState,
   isStructuredProgress,
+  redactProgressText,
   reduceProgressPresentation,
   type PresentationStep,
   type ProgressPresentationState,
@@ -136,10 +137,13 @@ interface ProgressStep {
 }
 
 function progressRecordSteps(steps: ProgressStep[]): ProgressStep[] {
-  return steps.map(({ technicalDetail, ...step }) => ({
-    ...step,
-    detail: technicalDetail ?? step.detail,
-  }));
+  return steps.map(({ technicalDetail, ...step }) => {
+    const detail = technicalDetail ?? step.detail;
+    return {
+      ...step,
+      detail: detail ? redactProgressText(detail) : undefined,
+    };
+  });
 }
 
 function mergeTechnicalDetail(

@@ -18,7 +18,7 @@ import path from 'path';
 import os from 'os';
 import type { ContainerOutput } from './cli-runner.js';
 import { buildSendMessageToolEnv } from './mcp-tool-policy.js';
-import { boundProgressInput } from './progress-types.js';
+import { boundProgressInput, redactProgressText } from './progress-types.js';
 
 // ---- 类型定义 ----
 
@@ -313,7 +313,7 @@ export function mapCodexProgress(event: CodexEvent): ContainerOutput[] {
     const exitCode = typeof it.exit_code === 'number' ? it.exit_code : null;
     const status = it.status?.toLowerCase();
     const resultText = typeof it.aggregated_output === 'string'
-      ? it.aggregated_output.trim()
+      ? redactProgressText(it.aggregated_output.trim())
       : '';
     const lifecycle = status && ['cancelled', 'canceled', 'interrupted'].includes(status)
       ? 'cancelled'

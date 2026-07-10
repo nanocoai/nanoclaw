@@ -76,7 +76,10 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
-import { serializeProgressPayload } from './progress-display.js';
+import {
+  progressLogFields,
+  serializeProgressPayload,
+} from './progress-display.js';
 import {
   finalizeDelegationOnTurnEnd,
   shouldCarryReply,
@@ -757,7 +760,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         {
           chatJid,
           progressType: result.progressType,
-          preview: result.result.slice(0, 80),
+          preview: result.progress ? undefined : result.result.slice(0, 80),
+          ...progressLogFields(result.progress),
         },
         '[progress] 转发到 channel',
       );
