@@ -142,6 +142,11 @@ describe('mapCodexUsage', () => {
       model: 'gpt-5.5',
       modelContextWindow: 258400,
       lastTurnContext: 169477,
+      lastTurnUsage: {
+        input_tokens: 169477,
+        cached_input_tokens: 0,
+        output_tokens: 0,
+      },
     });
   });
 });

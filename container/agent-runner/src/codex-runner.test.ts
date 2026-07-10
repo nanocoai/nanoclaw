@@ -126,7 +126,7 @@ describe('readCodexModelInfo', () => {
     expect(result).toEqual({});
   });
 
-  it('从 rollout 解析 model + context window + last_token_usage', () => {
+  it('首轮单次调用：turnUsage = total 本身', () => {
     const threadId = '019f4aab-d3cd-7143-b579-f447faaea015';
     const sessDir = path.join(tmpDir, 'sessions', '2026', '07', '10');
     fs.mkdirSync(sessDir, { recursive: true });
@@ -141,7 +141,7 @@ describe('readCodexModelInfo', () => {
         payload: {
           type: 'token_count',
           info: {
-            total_token_usage: { input_tokens: 383000000, cached_input_tokens: 359000000, output_tokens: 869000 },
+            total_token_usage: { input_tokens: 13128, cached_input_tokens: 9984, output_tokens: 18 },
             last_token_usage: { input_tokens: 13128, cached_input_tokens: 9984, output_tokens: 18 },
             model_context_window: 353400,
           },
@@ -164,8 +164,119 @@ describe('readCodexModelInfo', () => {
     });
   });
 
-  it('缺少 cached_input_tokens 时默认 0', () => {
-    const threadId = 'test-thread-no-cache';
+  it('多次调用同一 turn：turnUsage = 增量（total_end - baseline）', () => {
+    const threadId = 'test-multi-call';
+    const sessDir = path.join(tmpDir, 'sessions', '2026', '07', '10');
+    fs.mkdirSync(sessDir, { recursive: true });
+
+    // 模拟一个 turn 中 3 次模型调用：初始推理 → 工具 → 再推理
+    const rolloutLines = [
+      JSON.stringify({
+        type: 'turn_context',
+        payload: { model: 'gpt-5.6-sol' },
+      }),
+      // 第 1 次调用
+      JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: {
+            total_token_usage: { input_tokens: 10000, cached_input_tokens: 8000, output_tokens: 500 },
+            last_token_usage: { input_tokens: 10000, cached_input_tokens: 8000, output_tokens: 500 },
+          },
+        },
+      }),
+      // 第 2 次调用（工具后再推理）
+      JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: {
+            total_token_usage: { input_tokens: 22000, cached_input_tokens: 16000, output_tokens: 1200 },
+            last_token_usage: { input_tokens: 12000, cached_input_tokens: 8000, output_tokens: 700 },
+          },
+        },
+      }),
+      // 第 3 次调用（最终回复）
+      JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: {
+            total_token_usage: { input_tokens: 35000, cached_input_tokens: 25000, output_tokens: 1800 },
+            last_token_usage: { input_tokens: 13000, cached_input_tokens: 9000, output_tokens: 600 },
+          },
+        },
+      }),
+    ];
+    fs.writeFileSync(
+      path.join(sessDir, `rollout-2026-07-10T00-00-00-${threadId}.jsonl`),
+      rolloutLines.join('\n'),
+    );
+
+    const result = readCodexModelInfo(tmpDir, threadId);
+    // baseline = first_total - first_last = (10000-10000, 8000-8000, 500-500) = (0, 0, 0)
+    // turnUsage = latest_total - baseline = (35000, 25000, 1800)
+    expect(result.lastTurnUsage).toEqual({
+      input_tokens: 35000,
+      cached_input_tokens: 25000,
+      output_tokens: 1800,
+    });
+    // lastTurnContext = 最后一次调用的 input（context 占用大小）
+    expect(result.lastTurnContext).toBe(13000);
+  });
+
+  it('续接线程（有历史累计）：turnUsage 只算本轮增量', () => {
+    const threadId = 'test-resumed-thread';
+    const sessDir = path.join(tmpDir, 'sessions', '2026', '07', '10');
+    fs.mkdirSync(sessDir, { recursive: true });
+
+    // 模拟续接线程：total 起步就很大（历史累计）
+    const rolloutLines = [
+      JSON.stringify({
+        type: 'turn_context',
+        payload: { model: 'gpt-5.6-sol' },
+      }),
+      // 本轮第 1 次调用：total 已经包含历史 380000
+      JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: {
+            total_token_usage: { input_tokens: 393000, cached_input_tokens: 360000, output_tokens: 870000 },
+            last_token_usage: { input_tokens: 13000, cached_input_tokens: 10000, output_tokens: 500 },
+          },
+        },
+      }),
+      // 本轮第 2 次调用
+      JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: {
+            total_token_usage: { input_tokens: 406000, cached_input_tokens: 370000, output_tokens: 871200 },
+            last_token_usage: { input_tokens: 13000, cached_input_tokens: 10000, output_tokens: 1200 },
+          },
+        },
+      }),
+    ];
+    fs.writeFileSync(
+      path.join(sessDir, `rollout-2026-07-10T00-00-00-${threadId}.jsonl`),
+      rolloutLines.join('\n'),
+    );
+
+    const result = readCodexModelInfo(tmpDir, threadId);
+    // baseline = first_total - first_last = (393000-13000, 360000-10000, 870000-500) = (380000, 350000, 869500)
+    // turnUsage = latest_total - baseline = (406000-380000, 370000-350000, 871200-869500) = (26000, 20000, 1700)
+    expect(result.lastTurnUsage).toEqual({
+      input_tokens: 26000,
+      cached_input_tokens: 20000,
+      output_tokens: 1700,
+    });
+  });
+
+  it('缺少 total_token_usage 但有 last_token_usage 时无 turnUsage', () => {
+    const threadId = 'test-thread-no-total';
     const sessDir = path.join(tmpDir, 'sessions', '2026', '07', '10');
     fs.mkdirSync(sessDir, { recursive: true });
 
@@ -186,11 +297,8 @@ describe('readCodexModelInfo', () => {
     );
 
     const result = readCodexModelInfo(tmpDir, threadId);
-    expect(result.lastTurnUsage).toEqual({
-      input_tokens: 5000,
-      cached_input_tokens: 0,
-      output_tokens: 0,
-    });
+    expect(result.lastTurnUsage).toBeUndefined();
+    expect(result.lastTurnContext).toBe(5000);
   });
 
   it('畸形 JSON 行被跳过不崩溃', () => {
