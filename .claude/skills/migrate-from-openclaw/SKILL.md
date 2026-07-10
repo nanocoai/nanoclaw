@@ -194,8 +194,10 @@ Notes:
   runtime, so pass the `=>` value discovery emitted (or the raw OpenClaw id).
 - Reuse a `--folder` to put a group on an existing agent (shared base/separate
   conversations); use a new `--folder` for a fully separate agent.
-- Group chats default to mention-only; pass `--trigger` to set a regex, or
-  `--no-trigger-required` for respond-to-everything.
+- Engage defaults come from the channel adapter's declaration (most group
+  chats default to mention-based engagement; channels without a mention
+  signal default to a name pattern). Pass `--trigger` to set an explicit
+  regex, or `--no-trigger-required` for respond-to-everything.
 - Register groups from channels v2 doesn't support yet too — the messaging
   group and wiring persist and activate when that channel is installed.
 
@@ -238,10 +240,13 @@ model, which is **not** a JSON file. Each messaging group has an
 - `dmPolicy: "disabled"` → don't wire that chat (or leave it registered but
   unwired).
 
-The messaging groups `register` / `init-first-agent` create already default to
-`unknown_sender_policy = 'strict'`, so unknown senders are gated until you add
-them. Show the user the OpenClaw allowlist and confirm who to grant before
-running the commands.
+The messaging groups `register` / `init-first-agent` create default their
+`unknown_sender_policy` to whatever the channel adapter declares for that
+context (DM vs group) — `strict` when the channel has no declaration — so
+unknown senders are gated until you add them (or an admin approves the
+adapter-declared approval card). Pass `--unknown-sender-policy` to `register`
+to override. Show the user the OpenClaw allowlist and confirm who to grant
+before running the commands.
 
 ## Phase 3: Identity and Memory
 

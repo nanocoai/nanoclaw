@@ -124,6 +124,15 @@ export interface MessagingGroupAgent {
   ignored_message_policy: IgnoredMessagePolicy;
   session_mode: 'shared' | 'per-thread' | 'agent-shared';
   priority: number;
+  /**
+   * Per-wiring thread-policy override (migration 019). NULL = inherit the
+   * channel adapter's declared default for the wiring's context (DM vs
+   * group); 1/0 = explicit override, hard-ANDed with the adapter's raw
+   * capability at router fanout (resolveThreadPolicy). Optional on the TS
+   * type per the denied_at convention so pre-migration fixtures don't need
+   * updating.
+   */
+  threads?: number | null;
   created_at: string;
 }
 

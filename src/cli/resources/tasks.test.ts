@@ -455,7 +455,8 @@ describe('tasks CLI resource', () => {
       expect(resp.ok).toBe(true);
       if (!resp.ok) return;
       const content = fs.readFileSync(logFile('ag-1', 'my-task-1'), 'utf8').trim();
-      expect(content).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z — did the thing; it worked$/);
+      // Local-time stamp (formatLocalStamp): "YYYY-MM-DD HH:mm".
+      expect(content).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2} — did the thing; it worked$/);
     });
 
     it('derives the series from the caller task session when --id is omitted', async () => {

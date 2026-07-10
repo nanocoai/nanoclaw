@@ -151,9 +151,8 @@ export function markMessageFailed(db: Database.Database, messageId: string): voi
 }
 
 export function retryWithBackoff(db: Database.Database, messageId: string, backoffSec: number): void {
-  db.prepare(
-    `UPDATE messages_in SET tries = tries + 1, process_after = datetime('now', '+${backoffSec} seconds') WHERE id = ?`,
-  ).run(messageId);
+  const processAfter = new Date(Date.now() + backoffSec * 1000).toISOString();
+  db.prepare('UPDATE messages_in SET tries = tries + 1, process_after = ? WHERE id = ?').run(processAfter, messageId);
 }
 
 export function getMessageForRetry(
@@ -261,7 +260,7 @@ export function getDueOutboundMessages(db: Database.Database): OutboundMessage[]
   return db
     .prepare(
       `SELECT * FROM messages_out
-       WHERE (deliver_after IS NULL OR deliver_after <= datetime('now'))
+       WHERE (deliver_after IS NULL OR datetime(deliver_after) <= datetime('now'))
        ORDER BY timestamp ASC`,
     )
     .all() as OutboundMessage[];
@@ -281,14 +280,14 @@ export function getDeliveredIds(db: Database.Database): Set<string> {
 
 export function markDelivered(db: Database.Database, messageOutId: string, platformMessageId: string | null): void {
   db.prepare(
-    "INSERT OR IGNORE INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES (?, ?, 'delivered', datetime('now'))",
-  ).run(messageOutId, platformMessageId ?? null);
+    "INSERT OR IGNORE INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES (?, ?, 'delivered', ?)",
+  ).run(messageOutId, platformMessageId ?? null, new Date().toISOString());
 }
 
 export function markDeliveryFailed(db: Database.Database, messageOutId: string): void {
   db.prepare(
-    "INSERT OR IGNORE INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES (?, NULL, 'failed', datetime('now'))",
-  ).run(messageOutId);
+    "INSERT OR IGNORE INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES (?, NULL, 'failed', ?)",
+  ).run(messageOutId, new Date().toISOString());
 }
 
 /** Ensure the delivered table has columns added after initial schema. */

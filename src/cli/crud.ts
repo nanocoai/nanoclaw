@@ -84,6 +84,26 @@ export interface ResourceDef {
   /** Non-standard verbs (grant, revoke, add, remove, restart, etc.). */
   customOperations?: Record<string, CustomOperation>;
   /**
+   * Runs on `create` between explicit-arg collection and static column
+   * defaults (two-pass create): fills omitted columns with context-aware
+   * values (e.g. channel adapter declarations) and cross-validates the
+   * combination, throwing an actionable Error to reject. Mutates `values`
+   * in place. Explicit caller args are already present and must win — only
+   * fill what's still undefined. Static `col.default` / `defaultFrom` apply
+   * afterwards, only to columns the hook left unset, so a static default can
+   * never pre-empt context-aware resolution.
+   */
+  resolveDefaults?: (values: Record<string, unknown>) => void;
+  /**
+   * Runs on `update` after the update set is built, before the UPDATE
+   * executes. `current` is the existing row; `updates` holds only the
+   * changed columns and is mutable (coercions land here). Throw to reject.
+   * Mirror of the create-side validation in `resolveDefaults` for resources
+   * whose column combinations need cross-checks — a partial update must not
+   * be able to produce a combination `create` would have rejected.
+   */
+  preUpdate?: (updates: Record<string, unknown>, current: Record<string, unknown>) => void;
+  /**
    * Runs after a successful `create` INSERT, with the row that was just
    * written. Used to wire in side effects that the central row alone
    * doesn't trigger — e.g. creating a `container_configs` row when a new
@@ -172,6 +192,10 @@ function genericCreate(def: ResourceDef) {
   return async (args: Record<string, unknown>) => {
     const values: Record<string, unknown> = {};
 
+    // Pass 1: generated columns + explicit caller args only. Static defaults
+    // wait until after resolveDefaults so the hook sees exactly what the
+    // caller provided and a static default never pre-empts context-aware
+    // resolution.
     for (const col of def.columns) {
       if (col.generated) {
         if (col.name === def.idColumn) {
@@ -190,7 +214,16 @@ function genericCreate(def: ResourceDef) {
         values[col.name] = col.type === 'number' ? Number(v) : v;
       } else if (col.required) {
         throw new Error(`--${col.name.replace(/_/g, '-')} is required`);
-      } else if (col.default !== undefined) {
+      }
+    }
+
+    // Pass 2: context-aware defaults + cross-column validation.
+    if (def.resolveDefaults) def.resolveDefaults(values);
+
+    // Pass 3: static defaults for whatever is still unset.
+    for (const col of def.columns) {
+      if (col.generated || values[col.name] !== undefined) continue;
+      if (col.default !== undefined) {
         values[col.name] = col.default;
       } else if (col.defaultFrom !== undefined && values[col.defaultFrom] !== undefined) {
         values[col.name] = values[col.defaultFrom];
@@ -217,6 +250,7 @@ function genericCreate(def: ResourceDef) {
 
 function genericUpdate(def: ResourceDef) {
   const updatableCols = def.columns.filter((c) => c.updatable);
+  const cols = visibleColumns(def).join(', ');
   return async (args: Record<string, unknown>) => {
     const id = args.id as string;
     if (!id) throw new Error(`${def.name} id is required`);
@@ -237,6 +271,14 @@ function genericUpdate(def: ResourceDef) {
       );
     }
 
+    if (def.preUpdate) {
+      const current = getDb().prepare(`SELECT ${cols} FROM ${def.table} WHERE ${def.idColumn} = ?`).get(id) as
+        | Record<string, unknown>
+        | undefined;
+      if (!current) throw new Error(`${def.name} not found: ${id}`);
+      def.preUpdate(updates, current);
+    }
+
     const setClause = Object.keys(updates)
       .map((k) => `${k} = @${k}`)
       .join(', ');
@@ -245,7 +287,6 @@ function genericUpdate(def: ResourceDef) {
       .run({ ...updates, _id: id });
     if (result.changes === 0) throw new Error(`${def.name} not found: ${id}`);
 
-    const cols = visibleColumns(def).join(', ');
     return getDb().prepare(`SELECT ${cols} FROM ${def.table} WHERE ${def.idColumn} = ?`).get(id);
   };
 }

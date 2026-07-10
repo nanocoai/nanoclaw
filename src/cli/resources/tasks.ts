@@ -24,7 +24,7 @@ import {
   type TaskUpdate,
 } from '../../modules/scheduling/db.js';
 import { inboundDbPath, resolveTaskSession, withInboundDb } from '../../session-manager.js';
-import { parseZonedToUtc } from '../../timezone.js';
+import { formatLocalStamp, parseZonedToUtc } from '../../timezone.js';
 import { registerResource } from '../crud.js';
 import { formatTasksTable } from '../format-tasks.js';
 import type { CallerContext } from '../frame.js';
@@ -288,7 +288,7 @@ function createTask(args: Record<string, unknown>, ctx: CallerContext) {
     `• MESSAGE (only if asked): if the task says to report/notify the user, send your result with an EXPLICIT destination — <message to="name">…</message> or send_message({ to: "name", … }). This run has no chat attached: an unaddressed reply is DISCARDED, so the explicit send is the ONLY thing the user receives.\n` +
     `• RUN LOG (ALWAYS — even if you sent no message and did nothing else this run): after any sends, end the run with:\n` +
     `    ncl tasks append-log --msg "<what you did, and why it mattered>"\n` +
-    `  Write it like a work-log entry a human keeps — concrete: what you did and WHY (a no-op run still gets a line saying why nothing was needed). If you wrote or modified files this run, name them in --msg. Not a greeting, not a copy of the message you sent. The host stamps the UTC time (do NOT add one), do NOT edit tasks/${id}.md by hand, and this NEVER goes to the user.\n` +
+    `  Write it like a work-log entry a human keeps — concrete: what you did and WHY (a no-op run still gets a line saying why nothing was needed). If you wrote or modified files this run, name them in --msg. Not a greeting, not a copy of the message you sent. The host stamps the local time (do NOT add one), do NOT edit tasks/${id}.md by hand, and this NEVER goes to the user.\n` +
     `Need context from past runs? Read tasks/${id}.md first.]`;
 
   const created = withInbound(session, (db) => {
@@ -339,7 +339,7 @@ function appendTaskLog(
   const ag = getAgentGroup(group);
   if (!ag) throw new Error(`agent group not found: ${group}`);
 
-  const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const timestamp = formatLocalStamp(new Date(), TIMEZONE);
   const dir = `${GROUPS_DIR}/${ag.folder}/tasks`;
   const file = `${dir}/${series}.md`;
   fs.mkdirSync(dir, { recursive: true });
@@ -659,7 +659,7 @@ registerResource({
     'append-log': {
       access: 'open',
       description:
-        'Append a one-line run summary to a task run log (tasks/<id>.md).\n\nThe host stamps the UTC timestamp; you supply --msg. This is a LOG ENTRY, not a message — it sends nothing to anyone. Inside a task fire --id is auto-derived from your session. If you wrote or modified files during the run, name them in --msg.',
+        'Append a one-line run summary to a task run log (tasks/<id>.md).\n\nThe host stamps the local timestamp; you supply --msg. This is a LOG ENTRY, not a message — it sends nothing to anyone. Inside a task fire --id is auto-derived from your session. If you wrote or modified files during the run, name them in --msg.',
       examples: [
         `# Inside a task fire (--id auto-derived) — the run's work-log line:\nncl tasks append-log --msg "posted the daily digest to slack; one feed returned 403, skipped"`,
       ],
@@ -668,7 +668,7 @@ registerResource({
           name: 'msg',
           type: 'string',
           description:
-            'Your work-log entry: what you did and why it mattered (like a human work log). The host prepends the UTC timestamp; this is logged, never sent to the user.',
+            'Your work-log entry: what you did and why it mattered (like a human work log). The host prepends the local timestamp; this is logged, never sent to the user.',
           required: true,
         },
         {

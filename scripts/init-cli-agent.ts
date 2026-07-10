@@ -10,7 +10,8 @@
  * CLAUDE.md.
  *
  * Runs alongside the service (WAL-mode sqlite) — does NOT initialize
- * channel adapters, so there's no Gateway conflict.
+ * channel adapters, so there's no Gateway conflict. (The channels barrel
+ * import below only registers factories + declarations; nothing connects.)
  *
  * Usage:
  *   pnpm exec tsx scripts/init-cli-agent.ts \
@@ -19,6 +20,13 @@
  */
 import path from 'path';
 
+// Registration-only: makes the in-tree cli adapter's declared defaults
+// (pattern '.', no threads, 'public') resolvable below.
+import '../src/channels/index.js';
+import {
+  resolveUnknownSenderPolicy,
+  resolveWiringDefaults,
+} from '../src/channels/channel-defaults.js';
 import { DATA_DIR } from '../src/config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import { updateContainerConfigScalars } from '../src/db/container-configs.js';
@@ -139,7 +147,9 @@ async function main(): Promise<void> {
       platform_id: CLI_PLATFORM_ID,
       name: 'Local CLI',
       is_group: 0,
-      unknown_sender_policy: 'public',
+      // cli declares 'public' for DMs: the socket is chmod 0600, so
+      // "connected" ≈ "is the owner".
+      unknown_sender_policy: resolveUnknownSenderPolicy(CLI_CHANNEL, false),
       created_at: now,
     };
     createMessagingGroup(cliMg);
@@ -148,12 +158,15 @@ async function main(): Promise<void> {
 
   const existing = getMessagingGroupAgentByPair(cliMg.id, ag.id);
   if (!existing) {
+    // cli declares pattern '.' for DMs — every line the operator types is
+    // for the agent. Identical to the pre-declaration hardcodes.
+    const engage = resolveWiringDefaults(CLI_CHANNEL, false, ag.name);
     createMessagingGroupAgent({
       id: generateId('mga'),
       messaging_group_id: cliMg.id,
       agent_group_id: ag.id,
-      engage_mode: 'pattern',
-      engage_pattern: '.',
+      engage_mode: engage.engage_mode,
+      engage_pattern: engage.engage_pattern,
       sender_scope: 'all',
       ignored_message_policy: 'drop',
       session_mode: 'shared',

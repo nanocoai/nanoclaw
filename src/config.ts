@@ -19,7 +19,17 @@ const envConfig = readEnvFile([
   'ONECLI_GATEWAY_CONTAINER',
 ]);
 
+/**
+ * @deprecated WhatsApp adapter copies now read the ASSISTANT_NAME .env key
+ * directly. Re-export retained one release for stale adapter copies
+ * (origin/channels whatsapp.ts:42 imports it); scheduled for deletion.
+ */
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
+/**
+ * @deprecated WhatsApp adapter copies now read the ASSISTANT_HAS_OWN_NUMBER
+ * .env key directly. Re-export retained one release for stale adapter copies
+ * (origin/channels whatsapp.ts:42 imports it); scheduled for deletion.
+ */
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER || envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
 

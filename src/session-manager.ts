@@ -426,8 +426,16 @@ export function writeOutboundDirect(
   try {
     db.prepare(
       `INSERT OR IGNORE INTO messages_out (id, seq, timestamp, kind, platform_id, channel_type, thread_id, content)
-       VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 2 FROM messages_out), datetime('now'), ?, ?, ?, ?, ?)`,
-    ).run(message.id, message.kind, message.platformId, message.channelType, message.threadId, message.content);
+       VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 2 FROM messages_out), ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      message.id,
+      new Date().toISOString(),
+      message.kind,
+      message.platformId,
+      message.channelType,
+      message.threadId,
+      message.content,
+    );
   } finally {
     db.close();
   }

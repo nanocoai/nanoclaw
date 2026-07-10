@@ -780,8 +780,198 @@ describe('router — channel instances', () => {
   });
 });
 
-describe('routing metadata preservation', () => {
+describe('router — per-wiring thread policy', () => {
+  // Slack-like threaded adapter on a unique channel type (the registry maps
+  // are module-global; unique names avoid cross-test collisions).
+  const makeThreadedAdapter = () => ({
+    name: 'tp-slack',
+    channelType: 'tp-slack',
+    supportsThreads: true,
+    async setup() {},
+    async teardown() {},
+    isConnected: () => true,
+    async deliver() {
+      return undefined;
+    },
+  });
+
   beforeEach(() => {
+    createAgentGroup({
+      id: 'ag-tp',
+      name: 'Thread Agent',
+      folder: 'thread-agent',
+      agent_provider: null,
+      created_at: now(),
+    });
+    createMessagingGroup({
+      id: 'mg-tp',
+      channel_type: 'tp-slack',
+      platform_id: 'tp:C1',
+      name: 'Threaded chat',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    createMessagingGroupAgent({
+      id: 'mga-tp',
+      messaging_group_id: 'mg-tp',
+      agent_group_id: 'ag-tp',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: now(),
+    });
+  });
+
+  async function withThreadedAdapter(fn: () => Promise<void>): Promise<void> {
+    const { registerChannelAdapter, initChannelAdapters, teardownChannelAdapters } =
+      await import('./channels/channel-registry.js');
+    registerChannelAdapter('tp-slack', { factory: makeThreadedAdapter });
+    await initChannelAdapters(() => ({
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: () => {},
+    }));
+    try {
+      await fn();
+    } finally {
+      await teardownChannelAdapters();
+    }
+  }
+
+  const threadedEvent = (id: string): InboundEvent => ({
+    channelType: 'tp-slack',
+    platformId: 'tp:C1',
+    threadId: 'thread-42',
+    message: {
+      id,
+      kind: 'chat',
+      content: JSON.stringify({ sender: 'U', text: 'hi' }),
+      timestamp: now(),
+      isGroup: true,
+    },
+  });
+
+  it('NULL-threads wiring (inherit) on a threaded adapter keeps thread routing as before', async () => {
+    await withThreadedAdapter(async () => {
+      const { routeInbound } = await import('./router.js');
+      const { getSessionsByAgentGroup } = await import('./db/sessions.js');
+
+      await routeInbound(threadedEvent('msg-null-threads'));
+
+      // threads=NULL inherits the (fallback) declaration → supportsThreads →
+      // per-thread session with the platform thread id, message addressed
+      // in-thread. Identical to pre-declaration routing.
+      const sessions = getSessionsByAgentGroup('ag-tp');
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].thread_id).toBe('thread-42');
+
+      const db = new Database(inboundDbPath('ag-tp', sessions[0].id));
+      const row = db.prepare('SELECT thread_id FROM messages_in').get() as { thread_id: string | null };
+      db.close();
+      expect(row.thread_id).toBe('thread-42');
+    });
+  });
+
+  it('wiring threads=0 nulls the event-derived thread for session and delivery', async () => {
+    getDb().prepare("UPDATE messaging_group_agents SET threads = 0 WHERE id = 'mga-tp'").run();
+
+    await withThreadedAdapter(async () => {
+      const { routeInbound } = await import('./router.js');
+      const { getSessionsByAgentGroup } = await import('./db/sessions.js');
+
+      await routeInbound(threadedEvent('msg-opt-out'));
+
+      // Session collapses (no per-thread force, thread id stripped) and the
+      // reply address is top-level.
+      const sessions = getSessionsByAgentGroup('ag-tp');
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].thread_id).toBeNull();
+
+      const db = new Database(inboundDbPath('ag-tp', sessions[0].id));
+      const row = db.prepare('SELECT thread_id FROM messages_in').get() as { thread_id: string | null };
+      db.close();
+      expect(row.thread_id).toBeNull();
+    });
+  });
+
+  it('wiring threads=0 never strips replyTo (operator intent)', async () => {
+    getDb().prepare("UPDATE messaging_group_agents SET threads = 0 WHERE id = 'mga-tp'").run();
+
+    await withThreadedAdapter(async () => {
+      const { routeInbound } = await import('./router.js');
+      const { getSessionsByAgentGroup } = await import('./db/sessions.js');
+
+      await routeInbound({
+        ...threadedEvent('msg-replyto'),
+        replyTo: { channelType: 'cli', platformId: 'cli:operator', threadId: 'term-1' },
+      });
+
+      const sessions = getSessionsByAgentGroup('ag-tp');
+      expect(sessions).toHaveLength(1);
+      const db = new Database(inboundDbPath('ag-tp', sessions[0].id));
+      const row = db.prepare('SELECT channel_type, thread_id FROM messages_in').get() as {
+        channel_type: string;
+        thread_id: string | null;
+      };
+      db.close();
+      // The reply address is the operator's, thread id intact — only the
+      // event-derived address is policy-stripped.
+      expect(row.channel_type).toBe('cli');
+      expect(row.thread_id).toBe('term-1');
+    });
+  });
+
+  it('auto-create takes unknown_sender_policy from the declaration and falls back faithfully', async () => {
+    const { registerChannelAdapter } = await import('./channels/channel-registry.js');
+    const { routeInbound } = await import('./router.js');
+    const { getMessagingGroupByPlatform } = await import('./db/messaging-groups.js');
+
+    // Registration-tier declaration is enough — no live adapter needed.
+    registerChannelAdapter('tp-declared', {
+      factory: () => null,
+      defaults: {
+        dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'strict' },
+        group: { engageMode: 'mention', threads: false, unknownSenderPolicy: 'public' },
+        mentions: 'platform',
+      },
+    });
+
+    const mention = (channelType: string, platformId: string, isGroup: boolean): InboundEvent => ({
+      channelType,
+      platformId,
+      threadId: null,
+      message: {
+        id: `msg-${platformId}`,
+        kind: 'chat',
+        content: JSON.stringify({ sender: 'U', text: '@bot hi' }),
+        timestamp: now(),
+        isMention: true,
+        isGroup,
+      },
+    });
+
+    // Declared adapter: group context reads the group declaration...
+    await routeInbound(mention('tp-declared', 'tp:G1', true));
+    expect(getMessagingGroupByPlatform('tp-declared', 'tp:G1')!.unknown_sender_policy).toBe('public');
+
+    // ...and DM context reads the dm declaration.
+    await routeInbound(mention('tp-declared', 'tp:D1', false));
+    expect(getMessagingGroupByPlatform('tp-declared', 'tp:D1')!.unknown_sender_policy).toBe('strict');
+
+    // Undeclared channel: the behavior-faithful fallback reproduces the
+    // historical hardcoded 'request_approval'.
+    await routeInbound(mention('tp-undeclared', 'tp:U1', true));
+    expect(getMessagingGroupByPlatform('tp-undeclared', 'tp:U1')!.unknown_sender_policy).toBe('request_approval');
+  });
+});
+
+describe('routing metadata preservation', () => {
+  beforeEach(async () => {
     createAgentGroup({
       id: 'ag-1',
       name: 'Test Agent',
@@ -810,6 +1000,34 @@ describe('routing metadata preservation', () => {
       priority: 0,
       created_at: now(),
     });
+    // A live threaded adapter, matching real Discord routing — inbound
+    // platform events always have their receiving adapter live, and the
+    // per-wiring thread policy hard-ANDs the live capability.
+    const { registerChannelAdapter, initChannelAdapters } = await import('./channels/channel-registry.js');
+    registerChannelAdapter('discord', {
+      factory: () => ({
+        name: 'discord',
+        channelType: 'discord',
+        supportsThreads: true,
+        async setup() {},
+        async teardown() {},
+        isConnected: () => true,
+        async deliver() {
+          return undefined;
+        },
+      }),
+    });
+    await initChannelAdapters(() => ({
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: () => {},
+    }));
+  });
+
+  afterEach(async () => {
+    const { teardownChannelAdapters } = await import('./channels/channel-registry.js');
+    await teardownChannelAdapters();
   });
 
   it('routed message carries platformId, channelType, threadId on the messages_in row', async () => {
@@ -822,7 +1040,8 @@ describe('routing metadata preservation', () => {
       message: { id: 'msg-r1', kind: 'chat', content: JSON.stringify({ sender: 'A', text: 'hi' }), timestamp: now() },
     });
 
-    const session = findSession('mg-1', null);
+    // Threaded adapter in a group chat forces a per-thread session.
+    const session = findSession('mg-1', 'thread-42');
     const db = new Database(inboundDbPath('ag-1', session!.id));
     const row = db
       .prepare('SELECT platform_id, channel_type, thread_id FROM messages_in WHERE id LIKE ?')

@@ -46,10 +46,12 @@ export function backupEnv(envPath: string): string {
   const dir = path.dirname(envPath);
   let backup = path.join(dir, '.env.bak');
   if (fs.existsSync(backup)) {
+    // Local time (system TZ) — the stamp is read by the human running the
+    // uninstall. sv-SE renders "YYYY-MM-DD HH:mm:ss".
     const stamp = new Date()
-      .toISOString()
+      .toLocaleString('sv-SE', { hour12: false })
       .replace(/[-:]/g, '')
-      .replace('T', '-')
+      .replace(' ', '-')
       .slice(0, 15);
     backup = path.join(dir, `.env.bak.${stamp}`);
   }

@@ -5,6 +5,7 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
+import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -223,7 +224,9 @@ function archiveTranscriptFile(transcriptPath: string | undefined, sessionId: st
 
     const conversationsDir = process.env.NANOCLAW_CONVERSATIONS_DIR || '/workspace/agent/conversations';
     fs.mkdirSync(conversationsDir, { recursive: true });
-    const filename = `${new Date().toISOString().split('T')[0]}-${name}.md`;
+    // Local calendar date — the fallback `name` above already uses local
+    // hours, and the agent navigates conversations/ by these date prefixes.
+    const filename = `${formatLocalStamp(new Date(), TIMEZONE).slice(0, 10)}-${name}.md`;
     fs.writeFileSync(path.join(conversationsDir, filename), formatTranscriptMarkdown(messages, summary, assistantName));
     log(`Archived conversation to ${filename}`);
     return true;

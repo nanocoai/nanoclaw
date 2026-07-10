@@ -20,6 +20,7 @@ Skip to **Credentials** if all of these are already in place:
 - `src/channels/whatsapp.test.ts` exists
 - `src/channels/index.ts` contains `import './whatsapp.js';`
 - `setup/whatsapp-auth.ts` and `setup/groups.ts` both exist
+- `container/skills/whatsapp-formatting/instructions.md` exists
 - `setup/index.ts`'s `STEPS` map contains both `'whatsapp-auth':` and `groups:`
 - `@whiskeysockets/baileys`, `qrcode`, `pino` are listed in `package.json` dependencies
 - `.claude/skills/add-whatsapp/scripts/wa-qr-browser.ts` exists (ships with this skill)
@@ -40,7 +41,16 @@ git show origin/channels:src/channels/whatsapp-registration.test.ts    > src/cha
 git show origin/channels:src/channels/whatsapp.test.ts                 > src/channels/whatsapp.test.ts
 git show origin/channels:setup/whatsapp-auth.ts                        > setup/whatsapp-auth.ts
 git show origin/channels:setup/groups.ts                               > setup/groups.ts
+mkdir -p container/skills/whatsapp-formatting
+git show origin/channels:container/skills/whatsapp-formatting/SKILL.md        > container/skills/whatsapp-formatting/SKILL.md
+git show origin/channels:container/skills/whatsapp-formatting/instructions.md > container/skills/whatsapp-formatting/instructions.md
 ```
+
+The `whatsapp-formatting` container skill is part of the channel payload: its
+`instructions.md` becomes the `skill-whatsapp-formatting.md` fragment in every
+group's composed CLAUDE.md (see `src/claude-md-compose.ts`), teaching agents
+WhatsApp's formatting syntax. Trunk does not ship it — without this copy step
+agents format WhatsApp messages with generic markdown that renders literally.
 
 ### 3. Append the self-registration import
 
@@ -82,7 +92,7 @@ WhatsApp uses linked-device authentication — no API key, just a one-time pairi
 
 ### Check current state
 
-Check if WhatsApp is already authenticated. If `store/auth/creds.json` exists, skip to "Shared vs dedicated number".
+Check if WhatsApp is already authenticated. If `store/auth/creds.json` exists, skip to "Dedicated vs personal number".
 
 ```bash
 test -f store/auth/creds.json && echo "WhatsApp auth exists" || echo "No WhatsApp auth"
@@ -192,16 +202,60 @@ for i in $(seq 1 60); do grep -q 'STATUS: authenticated' /tmp/wa-auth.log 2>/dev
 test -f store/auth/creds.json && echo "Authentication successful" || echo "Authentication failed"
 ```
 
-### Shared vs dedicated number
+## Dedicated vs personal number
+
+The adapter behaves fundamentally differently depending on whether the linked number is the assistant's own or the operator's personal one. The switch is `ASSISTANT_HAS_OWN_NUMBER` in `.env`, read by the adapter itself at startup. **Inference rule: absent (or anything other than `true`) means shared/personal** — the safe default, since misreading a personal number as dedicated makes the bot claim messages addressed to the human.
+
+- **Shared/personal number** (`ASSISTANT_HAS_OWN_NUMBER` unset or not `true`) — DMs to this number and group @-tags of it address the *human*, not the bot. The adapter never emits a mention signal (`mentions: 'never'` in its declared channel defaults), so: no stranger DM ever auto-creates a messaging group or raises an admin approval card; group wirings default to a name pattern (`\b<AgentName>\b`) instead of platform mentions; auto-created chats default to `unknown_sender_policy: 'strict'`; outbound messages are prefixed with the assistant's name.
+- **Dedicated number** (`ASSISTANT_HAS_OWN_NUMBER=true`) — everything sent to the number is for the bot. DMs and group mentions carry a real mention signal (`mentions: 'platform'`), unknown senders escalate via `request_approval` approval cards, and card-approved groups wire with `engage_mode: 'mention'`. No name prefix on outbound.
 
 AskUserQuestion: Is this a shared phone number (personal WhatsApp) or a dedicated number?
 - **Shared number** — your personal WhatsApp (bot prefixes messages with its name)
 - **Dedicated number** — a separate phone/SIM for the assistant
 
-If dedicated, add to `.env`:
+Write the answer to `.env` **explicitly in both cases** (don't rely on the inference rule for new installs):
 
 ```bash
+# Dedicated:
 ASSISTANT_HAS_OWN_NUMBER=true
+# Shared/personal:
+ASSISTANT_HAS_OWN_NUMBER=false
+```
+
+### Update path: existing install, flag unset
+
+If WhatsApp auth already exists (`store/auth/creds.json` present) but `.env` has no `ASSISTANT_HAS_OWN_NUMBER` line, the install predates the explicit switch. Ask the operator which mode applies and write it explicitly.
+
+Suggest a default by comparing the authed number against the wired DM chat:
+
+```bash
+# The number this install is authenticated as
+node -e "const c=JSON.parse(require('fs').readFileSync('store/auth/creds.json','utf-8'));console.log(c.me?.id?.split(':')[0])"
+# The wired WhatsApp DM chats
+pnpm exec tsx scripts/q.ts data/v2.db "SELECT mg.platform_id FROM messaging_groups mg JOIN messaging_group_agents mga ON mg.id=mga.messaging_group_id WHERE mg.channel_type='whatsapp' AND mg.is_group=0"
+```
+
+If the wired DM's phone **equals** the authed number, the operator is talking to the bot in their own self-chat — that's a personal number: suggest **Shared**. If they differ, the operator messages the bot from a different number: suggest **Dedicated**. Confirm with the operator either way, then write the flag and restart the service.
+
+### Migration audit: spam-era group wirings
+
+Before the shared-number fix, group chats approved via the channel-registration card were wired `engage_mode='pattern'` with pattern `.` — respond-to-everything — because the card flow couldn't tell groups from DMs on non-threaded platforms. On a personal number this shows up as the bot answering every message in family/work groups after someone once tapped Connect on a spam-triggered card.
+
+List the suspect wirings (host service running — `ncl` is socket-only):
+
+```bash
+ncl wirings list --engage-mode pattern --engage-pattern "." --json
+```
+
+Cross-reference against WhatsApp group chats (`ncl messaging-groups list --channel-type whatsapp --is-group 1`). For each wiring with pattern `.` on a WhatsApp group that is *not* the operator's deliberate always-on chat (e.g. their self-chat), offer:
+
+- **Flip to name-based engagement**: `ncl wirings update <wiring-id> --engage-mode pattern --engage-pattern '\b<AgentName>\b'` (or `--engage-mode mention` on a dedicated number)
+- **Delete the wiring**: `ncl wirings delete <wiring-id>`
+
+Stale approval cards from that era can also linger. Clear pending channel approvals for chats the operator doesn't want wired:
+
+```bash
+pnpm exec tsx scripts/q.ts data/v2.db "DELETE FROM pending_channel_approvals WHERE messaging_group_id IN (SELECT id FROM messaging_groups WHERE channel_type='whatsapp')"
 ```
 
 ## Next Steps
@@ -279,3 +333,12 @@ systemctl --user start $(systemd_unit)
 ### "conflict" disconnection
 
 Two instances connected with same credentials. Ensure only one NanoClaw process is running.
+
+### Trunk updated but shared-number behavior unchanged (stale adapter copy)
+
+The shared-number behavior (no stranger approval cards, name-pattern group defaults) lives in the **adapter copy** at `src/channels/whatsapp.ts`, installed from the `channels` branch — not in trunk. If you updated trunk via `/update-nanoclaw` but skipped the skill-update step, the old adapter copy neither reads `ASSISTANT_HAS_OWN_NUMBER` itself nor declares channel defaults, so trunk falls back to the legacy behavior: approval cards still fire on a personal number, and new wirings get the channel-blind defaults. Symptoms of the skew:
+
+- `.env` says `ASSISTANT_HAS_OWN_NUMBER=false` (or unset) but strangers' DMs still raise approval cards
+- `ncl wirings create` on a WhatsApp group defaults to `mention` instead of a name pattern
+
+Fix: re-run `/add-whatsapp` (or `/update-skills`) to pull the current adapter from the `channels` branch, then restart the service. The reverse skew (new adapter, old trunk) can't happen — the adapter's `defaults` field is optional and old trunk ignores it.

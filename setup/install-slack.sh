@@ -15,6 +15,7 @@ echo "=== NANOCLAW SETUP: INSTALL_SLACK ==="
 
 needs_install=false
 [[ -f src/channels/slack.ts ]] || needs_install=true
+[[ -f container/skills/slack-formatting/SKILL.md ]] || needs_install=true
 grep -q "import './slack.js';" src/channels/index.ts || needs_install=true
 grep -q '"@chat-adapter/slack"' package.json || needs_install=true
 [[ -d node_modules/@chat-adapter/slack ]] || needs_install=true
@@ -30,6 +31,8 @@ git fetch origin channels
 
 echo "STEP: copy-files"
 git show origin/channels:src/channels/slack.ts > src/channels/slack.ts
+mkdir -p container/skills/slack-formatting
+git show origin/channels:container/skills/slack-formatting/SKILL.md > container/skills/slack-formatting/SKILL.md
 
 echo "STEP: register-import"
 if ! grep -q "import './slack.js';" src/channels/index.ts; then

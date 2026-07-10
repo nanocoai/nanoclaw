@@ -92,7 +92,7 @@ Skills that run inside the agent container, not on the host. These teach the Nan
 
 **Location:** `container/skills/<name>/`
 
-**Examples:** `agent-browser` (web browsing), `frontend-engineer`, `onecli-gateway` (OneCLI proxy usage), `self-customize`, `slack-formatting` (Slack mrkdwn syntax), `vercel-cli`, `welcome`, `whatsapp-formatting`
+**Examples:** `agent-browser` (web browsing), `frontend-engineer`, `onecli-gateway` (OneCLI proxy usage), `self-customize`, `vercel-cli`, `welcome`; channel-specific: `slack-formatting` (Slack mrkdwn syntax) and `whatsapp-formatting` (channels branch; installed by `/add-slack` / `/add-whatsapp`)
 
 **Key difference:** You never invoke these from a coding-agent session on the host, the way you run `/setup` or `/update-nanoclaw` in Claude Code/Codex/OpenCode. They're mounted into the sandbox and loaded by the NanoClaw agent itself, shaping how it behaves when you chat with it.
 

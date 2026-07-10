@@ -43,6 +43,7 @@ log() { echo "[add-whatsapp] $*" >&2; }
 need_install() {
   [ ! -f src/channels/whatsapp.ts ] && return 0
   [ ! -f setup/groups.ts ] && return 0
+  [ ! -f container/skills/whatsapp-formatting/instructions.md ] && return 0
   ! grep -q "^import './whatsapp.js';" src/channels/index.ts 2>/dev/null && return 0
   ! grep -q "'whatsapp-auth':" setup/index.ts 2>/dev/null && return 0
   ! grep -q "^  groups:" setup/index.ts 2>/dev/null && return 0
@@ -63,6 +64,12 @@ if need_install; then
   log "Copying adapter + group step from ${CHANNELS_BRANCH}…"
   git show "${CHANNELS_BRANCH}:src/channels/whatsapp.ts" > src/channels/whatsapp.ts
   git show "${CHANNELS_BRANCH}:setup/groups.ts"          > setup/groups.ts
+
+  # WhatsApp formatting container skill — feeds the composed CLAUDE.md
+  # (skill-whatsapp-formatting.md fragment) and ~/.claude/skills.
+  mkdir -p container/skills/whatsapp-formatting
+  git show "${CHANNELS_BRANCH}:container/skills/whatsapp-formatting/SKILL.md"        > container/skills/whatsapp-formatting/SKILL.md
+  git show "${CHANNELS_BRANCH}:container/skills/whatsapp-formatting/instructions.md" > container/skills/whatsapp-formatting/instructions.md
 
   # Append self-registration import if missing.
   if ! grep -q "^import './whatsapp.js';" src/channels/index.ts; then

@@ -18,8 +18,8 @@
  *      so it can be re-routed on connect/create.
  *
  * On connect (handler in index.ts):
- *   - Create `messaging_group_agents` with defaults
- *     (mention-sticky for groups / pattern='.' for DMs,
+ *   - Create `messaging_group_agents` with the channel's declared engage
+ *     defaults (resolveWiringDefaults, DM vs group context;
  *      sender_scope='known', ignored_message_policy='accumulate')
  *   - Add the triggering sender to `agent_group_members` so sender_scope
  *     doesn't bounce the replayed message into a sender-approval cascade
@@ -45,6 +45,7 @@
  *   - Delivery adapter missing.
  */
 import { normalizeOptions, type NormalizedOption, type RawOption } from '../../channels/ask-question.js';
+import { resolveWiringDefaults } from '../../channels/channel-defaults.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder, getAllAgentGroups } from '../../db/agent-groups.js';
 import { getChannelAdapter } from '../../channels/channel-registry.js';
 import { getMessagingGroup, updateMessagingGroup } from '../../db/messaging-groups.js';
@@ -121,13 +122,39 @@ function buildQuestionText(
   senderName: string | undefined,
   channelName: string | null,
   channelType: string,
+  ruleNote: string | null,
 ): string {
   const who = senderName ?? 'Someone';
+  const note = ruleNote ? ` If connected, the agent ${ruleNote}.` : '';
   if (isGroup) {
     const where = channelName ? `${channelName} on ${channelType}` : `a ${channelType} channel`;
-    return `${who} mentioned your bot in ${where}. How would you like to handle this channel?`;
+    return `${who} mentioned your bot in ${where}.${note} How would you like to handle this channel?`;
   }
-  return `${who} sent your bot a DM on ${channelType}. How would you like to handle it?`;
+  return `${who} sent your bot a DM on ${channelType}.${note} How would you like to handle it?`;
+}
+
+/**
+ * Human summary of the engage rule an approval would create, from the same
+ * resolution the wire step uses. Null when the declaration is unresolvable
+ * (mis-declared pattern mode) — the card still works without the preview.
+ */
+function describeResolvedRule(
+  channelKey: string,
+  isGroup: boolean,
+  agentGroupName: string,
+  channelType: string,
+): string | null {
+  try {
+    const engage = resolveWiringDefaults(channelKey, isGroup, agentGroupName, channelType);
+    if (engage.engage_mode !== 'pattern') {
+      return isGroup ? 'will respond to @-mentions in this group' : 'will respond to @-mentions';
+    }
+    return engage.engage_pattern === '.'
+      ? 'will respond to all messages'
+      : `will respond to messages matching ${engage.engage_pattern}`;
+  } catch {
+    return null;
+  }
 }
 
 // ── Main flow ──
@@ -168,9 +195,10 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
   const originMg = getMessagingGroup(messagingGroupId);
   const originChannelType = originMg?.channel_type ?? '';
 
-  // Resolve channel name if not yet persisted.
+  // Resolve channel name if not yet persisted. Key by instance so a named
+  // instance's own adapter (and bot identity) does the lookup.
   if (originMg && !originMg.name) {
-    const channelAdapter = getChannelAdapter(originChannelType);
+    const channelAdapter = getChannelAdapter(originMg.instance ?? originMg.channel_type);
     if (channelAdapter?.resolveChannelName) {
       try {
         const name = await channelAdapter.resolveChannelName(originMg.platform_id);
@@ -205,7 +233,16 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
 
   const channelName = originMg?.name ?? null;
   const title = isGroup ? '📣 Bot mentioned in new channel' : '💬 New direct message';
-  const question = buildQuestionText(isGroup, senderName, channelName, originChannelType);
+  // Preview the engage rule an approval would create. The reference group's
+  // name only feeds {name} pattern substitution — a best-effort preview when
+  // the approver ends up picking a different agent.
+  const ruleNote = describeResolvedRule(
+    originMg?.instance ?? originChannelType,
+    isGroup,
+    referenceGroup.name,
+    originChannelType,
+  );
+  const question = buildQuestionText(isGroup, senderName, channelName, originChannelType, ruleNote);
   const options = normalizeOptions(buildApprovalOptions(agentGroups, delivery.userId));
 
   createPendingChannelApproval({

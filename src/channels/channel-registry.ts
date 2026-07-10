@@ -4,7 +4,7 @@
  * Channels self-register on import. The host calls initChannelAdapters() at startup
  * to instantiate and set up all registered adapters.
  */
-import type { ChannelAdapter, ChannelRegistration, ChannelSetup, OutboundFile } from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults, ChannelRegistration, ChannelSetup, OutboundFile } from './adapter.js';
 import type { ChannelDeliveryAdapter } from '../delivery.js';
 import { log } from '../log.js';
 
@@ -100,6 +100,97 @@ export function createChannelDeliveryAdapter(): ChannelDeliveryAdapter {
       await adapter?.setTyping?.(platformId, threadId);
     },
   };
+}
+
+/**
+ * Behavior-faithful fallback for adapters with no `defaults` declaration
+ * (stale skill-installed copies, unknown channel types). Values reproduce
+ * what trunk did before declarations existed, so a trunk update alone
+ * changes nothing for undeclared adapters:
+ *  - dm: pattern '.' (every DM message engages), router auto-create policy
+ *    'request_approval' (src/router.ts auto-create branch).
+ *  - group: mention-sticky (what the card-approval flow stamped on group
+ *    channels), same 'request_approval' policy.
+ *  - threads follow the raw capability in BOTH contexts — a NULL (inherit)
+ *    wiring resolved through this fallback behaves exactly like today's
+ *    supportsThreads-derived routing.
+ *  - mentions 'platform': never blocks a mention wiring at creation time.
+ */
+export function fallbackChannelDefaults(supportsThreads: boolean): ChannelDefaults {
+  return {
+    dm: {
+      engageMode: 'pattern',
+      engagePattern: '.',
+      threads: supportsThreads,
+      unknownSenderPolicy: 'request_approval',
+    },
+    group: {
+      engageMode: 'mention-sticky',
+      threads: supportsThreads,
+      unknownSenderPolicy: 'request_approval',
+    },
+    mentions: 'platform',
+  };
+}
+
+/**
+ * Resolve a channel's declared wiring defaults. Never returns undefined.
+ *
+ * `key` follows the same discipline as getChannelAdapter: mg.instance ??
+ * mg.channel_type. Tiers, first hit wins:
+ *  1. live adapter, instance-exact — lets an instance carry env-computed
+ *     declarations (e.g. WhatsApp shared-number mode);
+ *  2. live adapter of that channelType (mirrors getChannelAdapter's scan);
+ *  3. registration entry under the key — covers offline scripts and
+ *     factories that returned null for missing creds;
+ *  4. registration entry under the channelType — resolved from the live
+ *     adapter found in tiers 1-2 (a stale adapter copy without a declaration
+ *     whose registration has one), else from the optional `channelType`
+ *     hint, which callers holding a named-instance mg row should pass so a
+ *     dead instance still resolves its platform's declaration;
+ *  5. fallbackChannelDefaults on the live adapter's capability (false when
+ *     no adapter is live — conservative, reachable only from manual creation
+ *     surfaces since the router never sees events for unregistered channels).
+ */
+export function getChannelDefaults(key: string, channelType?: string): ChannelDefaults {
+  const { live, decl } = lookupDeclaredDefaults(key, channelType);
+  return decl ?? fallbackChannelDefaults(live?.supportsThreads ?? false);
+}
+
+/**
+ * True iff getChannelDefaults would resolve from an actual declaration (tiers
+ * 1-4) rather than fallbackChannelDefaults. Manual creation surfaces (`ncl`)
+ * gate declaration-derived defaults on this: for stale (undeclared) adapters
+ * they keep the legacy static schema defaults — engage_mode 'mention',
+ * unknown_sender_policy 'strict' — so a trunk update alone changes nothing.
+ * The faithful fallback exists for the ROUTER's auto-create/runtime paths,
+ * whose historical behavior it reproduces; it is not what `ncl` did.
+ */
+export function hasDeclaredChannelDefaults(key: string, channelType?: string): boolean {
+  return lookupDeclaredDefaults(key, channelType).decl !== undefined;
+}
+
+/** Shared tiers 1-4 of getChannelDefaults (see its doc); `decl` undefined
+ *  means only tier 5 (fallback) remains. */
+function lookupDeclaredDefaults(
+  key: string,
+  channelType?: string,
+): { live: ChannelAdapter | undefined; decl: ChannelDefaults | undefined } {
+  let live = activeAdapters.get(key);
+  if (!live) {
+    for (const adapter of activeAdapters.values()) {
+      if (adapter.channelType === key) {
+        live = adapter;
+        break;
+      }
+    }
+  }
+  if (live?.defaults) return { live, decl: live.defaults };
+
+  const typeKey = live?.channelType ?? channelType;
+  const registered =
+    registry.get(key)?.defaults ?? (typeKey !== undefined ? registry.get(typeKey)?.defaults : undefined);
+  return { live, decl: registered };
 }
 
 /** Get all active adapters. */

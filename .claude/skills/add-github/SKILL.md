@@ -107,16 +107,17 @@ Ask the user: **Is this a private or public repo?**
 - **Private repo** — use `unknown_sender_policy: 'public'`. Only collaborators can comment anyway, so it's safe to let all comments through.
 - **Public repo** — use `unknown_sender_policy: 'strict'`. Only registered members can trigger the agent, preventing strangers from consuming agent resources. Add trusted collaborators as members (see below).
 
-Run `/manage-channels` to wire the GitHub channel to an agent group, or insert manually:
+Run `/manage-channels` to wire the GitHub channel to an agent group, or create the rows directly with `ncl`. **The host service must be running** — `ncl` connects to it over a Unix socket:
 
-```sql
--- Create messaging group (one per repo)
-INSERT INTO messaging_groups (id, channel_type, platform_id, instance, name, is_group, unknown_sender_policy, created_at)
-VALUES ('mg-github-myrepo', 'github', 'github:owner/repo', 'github', 'owner/repo', 1, '<policy>', datetime('now'));
+```bash
+# Create messaging group (one per repo)
+ncl messaging-groups create --channel-type github --platform-id "github:owner/repo" \
+  --name "owner/repo" --is-group 1 --unknown-sender-policy <policy>
 
--- Wire to agent group
-INSERT INTO messaging_group_agents (id, messaging_group_id, agent_group_id, trigger_rules, response_scope, session_mode, priority, created_at)
-VALUES ('mga-github-myrepo', 'mg-github-myrepo', '<your-agent-group-id>', '', 'all', 'per-thread', 10, datetime('now'));
+# Wire to agent group (engage mode/pattern default to the GitHub adapter's
+# declared channel defaults; grab the mg id from the create output above)
+ncl wirings create --messaging-group-id <mg-id> --agent-group-id <your-agent-group-id> \
+  --session-mode per-thread
 ```
 
 Replace `<policy>` with `public` or `strict` based on the user's choice above.
@@ -125,14 +126,12 @@ Replace `<policy>` with `public` or `strict` based on the user's choice above.
 
 When using `strict`, add each GitHub user who should be able to trigger the agent:
 
-```sql
--- Add user (kind = 'github', id = 'github:<numeric-user-id>')
-INSERT OR IGNORE INTO users (id, kind, display_name, created_at)
-VALUES ('github:<user-id>', 'github', '<username>', datetime('now'));
+```bash
+# Add user (kind = 'github', id = 'github:<numeric-user-id>')
+ncl users create --id "github:<user-id>" --kind github --display-name "<username>"
 
--- Grant membership to the agent group
-INSERT OR IGNORE INTO agent_group_members (user_id, agent_group_id)
-VALUES ('github:<user-id>', '<agent-group-id>');
+# Grant membership to the agent group
+ncl members add --user "github:<user-id>" --group "<agent-group-id>"
 ```
 
 To find a GitHub user's numeric ID: `gh api users/<username> --jq .id`

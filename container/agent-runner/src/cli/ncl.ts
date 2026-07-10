@@ -65,10 +65,11 @@ function writeRequest(req: RequestFrame): void {
 
     db.prepare(
       `INSERT INTO messages_out (id, seq, timestamp, kind, content)
-       VALUES ($id, $seq, datetime('now'), 'system', $content)`,
+       VALUES ($id, $seq, $timestamp, 'system', $content)`,
     ).run({
       $id: req.id,
       $seq: nextSeq,
+      $timestamp: new Date().toISOString(),
       $content: JSON.stringify({
         action: 'cli_request',
         requestId: req.id,
@@ -110,9 +111,9 @@ function pollResponse(requestId: string, timeoutMs: number): ResponseFrame | nul
         outDb.exec('PRAGMA busy_timeout = 5000');
         outDb
           .prepare(
-            "INSERT OR REPLACE INTO processing_ack (message_id, status, status_changed) VALUES (?, 'completed', datetime('now'))",
+            "INSERT OR REPLACE INTO processing_ack (message_id, status, status_changed) VALUES (?, 'completed', ?)",
           )
-          .run(row.id);
+          .run(row.id, new Date().toISOString());
         outDb.close();
 
         const parsed = JSON.parse(row.content);
@@ -184,12 +185,46 @@ function printUsage(): void {
 // Formatting (mirrors src/cli/format.ts on the host)
 // ---------------------------------------------------------------------------
 
+// Mirrors localizeIsoTimestamps in src/cli/format.ts (self-contained — no
+// imports from agent-runner). Human display shows local time (container TZ
+// env = install timezone); --json keeps the ISO machine contract. Only whole
+// ISO-instant strings convert — embedded occurrences may be machine payloads.
+const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?Z$/;
+
+// "YYYY-MM-DD HH:mm" — round-trips through parseZonedToUtc (naive = local
+// wall-clock), so a value copied from human output into --process-after
+// means what it shows.
+function localTime(iso: string): string {
+  return new Date(iso).toLocaleString('sv-SE', {
+    timeZone: process.env.TZ || 'UTC',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function localizeIsoTimestamps(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return ISO_UTC_RE.test(value) ? localTime(value) : value;
+  }
+  if (Array.isArray(value)) return value.map(localizeIsoTimestamps);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, localizeIsoTimestamps(v)]),
+    );
+  }
+  return value;
+}
+
 function formatHuman(resp: ResponseFrame): string {
   if (!resp.ok) {
     return `error (${resp.error.code}): ${resp.error.message}\n`;
   }
 
-  const data = resp.data;
+  const data = localizeIsoTimestamps(resp.data);
   if (!Array.isArray(data) || data.length === 0) {
     return JSON.stringify(data, null, 2) + '\n';
   }

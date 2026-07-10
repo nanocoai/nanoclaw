@@ -11,6 +11,7 @@ import { getAgentGroup } from '../db/agent-groups.js';
 import { getSession } from '../db/sessions.js';
 import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
 import type { CallerContext, ErrorCode, RequestFrame, ResponseFrame } from './frame.js';
+import { localizeIsoTimestamps } from './format.js';
 import { getResource } from './crud.js';
 import { listVerbs, renderVerbHelp } from './help-render.js';
 import { GROUP_SCOPE_RESOURCES, listCommands, lookup } from './registry.js';
@@ -221,7 +222,8 @@ registerApprovalHandler('cli_command', async ({ payload, notify }) => {
   const response = await dispatch(frame, callerContext, { approved: true });
 
   if (response.ok) {
-    const data = typeof response.data === 'string' ? response.data : JSON.stringify(response.data, null, 2);
+    const localized = localizeIsoTimestamps(response.data);
+    const data = typeof localized === 'string' ? localized : JSON.stringify(localized, null, 2);
     notify(`Your \`ncl ${frame.command}\` request was approved and executed.\n\n${data}`);
   } else {
     notify(`Your \`ncl ${frame.command}\` request was approved but failed: ${response.error.message}`);

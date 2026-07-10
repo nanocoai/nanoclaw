@@ -1,24 +1,32 @@
 /**
  * WhatsApp (community/Baileys) channel flow for setup:auto.
  *
- * `runWhatsAppChannel(displayName)` owns the full branch from auth-method
- * picker through the welcome DM:
+ * `runWhatsAppChannel(displayName)` owns the full branch from number-
+ * ownership picker through the welcome DM:
  *
- *   1. Ask how to authenticate (QR code in terminal, default, or pairing code)
- *   2. If pairing-code: collect the phone number
- *   3. Install the adapter + Baileys + QR + pino via setup/add-whatsapp.sh
- *   4. Run the whatsapp-auth step, rendering status blocks as clack UI:
+ *   1. Ask whether the agent gets a dedicated number or shares the
+ *      operator's personal one. Personal ⇒ interception screen that spells
+ *      out self-chat-only mode and steers toward alternatives (default is
+ *      back to channel selection)
+ *   2. Ask how to authenticate (QR code in terminal, default, or pairing code)
+ *   3. If pairing-code: collect the phone number
+ *   4. Install the adapter + Baileys + QR + pino via setup/add-whatsapp.sh
+ *   5. Run the whatsapp-auth step, rendering status blocks as clack UI:
  *      - WHATSAPP_AUTH_QR (repeating): render the QR as terminal block art
  *        inside a clack note. On rotation we clear the previous QR in-place
  *        via ANSI escapes so the terminal doesn't fill up with stale codes.
  *      - WHATSAPP_AUTH_PAIRING_CODE (one-shot): centred code card.
- *   5. Read store/auth/creds.json → extract the authenticated (bot) phone
- *   6. Kick the service so the adapter picks up the new credentials
- *   7. Ask the operator for the phone they'll chat from (defaults to the
- *      authed number). Different number ⇒ dedicated mode ⇒ also writes
- *      ASSISTANT_HAS_OWN_NUMBER=true so outbound replies aren't prefixed
- *   8. Ask for the messaging-agent name (defaulting to "Nano")
- *   9. Wire the agent via scripts/init-first-agent.ts; the existing welcome
+ *   6. Read store/auth/creds.json → extract the authenticated (bot) phone
+ *   7. Dedicated: ask for the operator's personal number (the one they'll
+ *      chat from) and write ASSISTANT_HAS_OWN_NUMBER=true so outbound
+ *      replies aren't prefixed. Entering the bot's own number routes back
+ *      through the interception screen. Shared: chat number = bot number
+ *   8. Ask for the messaging-agent name (defaulting to "Nano"); persist it
+ *      as ASSISTANT_NAME so the adapter's outbound prefix matches. Shared
+ *      mode also offers an @<name>-only engage pattern for the self-chat
+ *   9. Kick the service — AFTER the env writes, since the adapter reads
+ *      ASSISTANT_HAS_OWN_NUMBER / ASSISTANT_NAME once at module load
+ *  10. Wire the agent via scripts/init-first-agent.ts; the existing welcome
  *      DM path delivers the greeting through the adapter
  *
  * All output obeys the three-level contract: clack UI for the user, structured
@@ -55,6 +63,14 @@ const AUTH_CREDS_PATH = path.join(process.cwd(), 'store', 'auth', 'creds.json');
 type AuthMethod = 'qr' | 'pairing-code';
 
 export async function runWhatsAppChannel(displayName: string): Promise<ChannelFlowResult> {
+  const ownership = await askNumberOwnership();
+  if (ownership === 'back') return BACK_TO_CHANNEL_SELECTION;
+  let mode: 'dedicated' | 'shared' = ownership;
+  if (mode === 'shared') {
+    const proceed = await confirmSharedNumber();
+    if (proceed === 'back') return BACK_TO_CHANNEL_SELECTION;
+  }
+
   const method = await askAuthMethod();
   if (method === 'back') return BACK_TO_CHANNEL_SELECTION;
   const phone = method === 'pairing-code' ? await askPhoneNumber() : undefined;
@@ -98,18 +114,35 @@ export async function runWhatsAppChannel(displayName: string): Promise<ChannelFl
     );
   }
 
-  await restartService();
-
-  const chatPhone = await askChatPhone(botPhone);
-  const isDedicated = chatPhone !== botPhone;
-  if (isDedicated) {
-    writeAssistantHasOwnNumber();
+  let chatPhone = botPhone;
+  if (mode === 'dedicated') {
+    chatPhone = await askChatPhone(botPhone);
+    if (chatPhone === botPhone) {
+      // Chatting from the bot's own number IS the shared-number setup —
+      // route through the same interception screen as the up-front pick.
+      const proceed = await confirmSharedNumber();
+      if (proceed === 'back') return BACK_TO_CHANNEL_SELECTION;
+      mode = 'shared';
+    }
   }
+  // Written in both modes so a re-run that switches dedicated → shared
+  // doesn't leave a stale `true` behind.
+  writeEnvVar('ASSISTANT_HAS_OWN_NUMBER', mode === 'dedicated' ? 'true' : 'false');
 
   const role = await askOperatorRole('WhatsApp');
   setupLog.userInput('whatsapp_role', role);
 
   const agentName = await resolveAgentName();
+  // Both modes: keep the adapter's outbound prefix / mention normalization
+  // in sync with the chosen agent name (config default is 'Andy' otherwise).
+  writeEnvVar('ASSISTANT_NAME', agentName);
+
+  const engagePattern = mode === 'shared' ? await askSelfChatEngage(agentName) : undefined;
+
+  // Restart only after ASSISTANT_HAS_OWN_NUMBER / ASSISTANT_NAME land in
+  // .env — the adapter computes its shared/dedicated mode and name once at
+  // module load, so restarting earlier would leave it running with defaults.
+  await restartService();
 
   const platformId = `${chatPhone}@s.whatsapp.net`;
 
@@ -124,10 +157,11 @@ export async function runWhatsAppChannel(displayName: string): Promise<ChannelFl
       '--display-name', displayName,
       '--agent-name', agentName,
       '--role', role,
+      ...(engagePattern ? ['--engage-pattern', engagePattern] : []),
     ],
     {
       running: `Connecting ${agentName} to WhatsApp…`,
-      done: isDedicated
+      done: mode === 'dedicated'
         ? `${agentName} is ready. Check WhatsApp for a welcome message.`
         : `${agentName} is ready. Look in your "You" chat on WhatsApp for the welcome.`,
     },
@@ -136,7 +170,7 @@ export async function runWhatsAppChannel(displayName: string): Promise<ChannelFl
         CHANNEL: 'whatsapp',
         AGENT_NAME: agentName,
         PLATFORM_ID: platformId,
-        MODE: isDedicated ? 'dedicated' : 'shared',
+        MODE: mode,
         ROLE: role,
       },
     },
@@ -148,6 +182,112 @@ export async function runWhatsAppChannel(displayName: string): Promise<ChannelFl
       'You can retry later with `/manage-channels`.',
     );
   }
+  if (mode === 'shared') {
+    note(
+      [
+        'Only your self-chat is connected. Messages other people send to your',
+        'number are ignored — never seen, never asked about.',
+        '',
+        k.dim('Wire a specific chat later with /manage-channels.'),
+      ].join('\n'),
+      'Self-chat mode',
+    );
+  }
+}
+
+async function askNumberOwnership(): Promise<'dedicated' | 'shared' | 'back'> {
+  const choice = ensureAnswer(
+    await brightSelect({
+      message: 'Which WhatsApp number will your agent use?',
+      options: [
+        {
+          value: 'dedicated',
+          label: 'A dedicated number just for the agent',
+          hint: 'recommended — spare SIM, eSIM, or old phone',
+        },
+        {
+          value: 'shared',
+          label: 'My own personal number',
+        },
+        {
+          value: 'back',
+          label: '← Back to channel selection',
+        },
+      ],
+    }),
+  ) as 'dedicated' | 'shared' | 'back';
+  if (choice !== 'back') setupLog.userInput('whatsapp_number_ownership', choice);
+  return choice;
+}
+
+/**
+ * Interception screen for the shared-number path: make the self-chat-only
+ * tradeoff explicit and steer toward alternatives before any install or
+ * auth happens. Default is bailing back to channel selection.
+ */
+async function confirmSharedNumber(): Promise<'continue' | 'back'> {
+  note(
+    [
+      'On your personal number, the agent lives only in your "You" / self-chat.',
+      'Messages other people send you are ignored entirely — never read, never',
+      'answered, never flagged for approval. Nobody else can talk to the agent.',
+      '',
+      'If you want the agent reachable as its own contact, consider:',
+      '',
+      `  • ${brandBold('Telegram')} — a bot takes ~2 minutes to set up`,
+      `  • ${brandBold('a dedicated WhatsApp number')} — spare SIM, eSIM, or old phone`,
+      `  • ${brandBold('/add-whatsapp-cloud')} — the official Meta Business API`,
+    ].join('\n'),
+    'Personal number = self-chat only',
+  );
+  const choice = ensureAnswer(
+    await brightSelect({
+      message: 'How would you like to proceed?',
+      options: [
+        { value: 'back', label: '← Pick a different channel' },
+        { value: 'continue', label: 'Continue — self-chat only' },
+      ],
+      initialValue: 'back',
+    }),
+  ) as 'continue' | 'back';
+  setupLog.userInput('whatsapp_shared_confirm', choice);
+  return choice;
+}
+
+/**
+ * Shared mode only: choose whether the agent answers everything in the
+ * self-chat or only messages addressed to it by name. Returns the engage
+ * regex for init-first-agent's --engage-pattern, or undefined for the
+ * respond-to-everything default.
+ */
+async function askSelfChatEngage(agentName: string): Promise<string | undefined> {
+  const choice = ensureAnswer(
+    await brightSelect({
+      message: `Respond to every self-chat message, or only messages starting with @${agentName}?`,
+      options: [
+        {
+          value: 'all',
+          label: 'Every message',
+          hint: "the self-chat becomes the agent's inbox",
+        },
+        {
+          value: 'mention',
+          label: `Only messages starting with @${agentName}`,
+          hint: 'keep the self-chat for your own notes too',
+        },
+      ],
+    }),
+  ) as 'all' | 'mention';
+  setupLog.userInput('whatsapp_selfchat_engage', choice);
+  return choice === 'all' ? undefined : selfChatEngagePattern(agentName);
+}
+
+/** Engage regex for "only messages starting with @<name>". Exported for tests. */
+export function selfChatEngagePattern(agentName: string): string {
+  const escaped = agentName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // \b only terminates a match after a word character — skip it for names
+  // ending in punctuation, where it would never match.
+  return /\w$/.test(agentName) ? `^@${escaped}\\b` : `^@${escaped}`;
 }
 
 async function askAuthMethod(): Promise<AuthMethod | 'back'> {
@@ -359,7 +499,7 @@ function readAuthedPhone(): string {
 
 async function restartService(): Promise<void> {
   const s = p.spinner();
-  s.start('Restarting NanoClaw so it sees your WhatsApp credentials…');
+  s.start('Restarting NanoClaw so it sees your WhatsApp credentials and settings…');
   const start = Date.now();
   const platform = process.platform;
   try {
@@ -402,25 +542,20 @@ async function restartService(): Promise<void> {
 async function askChatPhone(authedPhone: string): Promise<string> {
   note(
     [
-      `Authenticated with ${k.cyan('+' + authedPhone)}.`,
+      `The agent is signed in as ${k.cyan('+' + authedPhone)}.`,
       '',
-      "What's the phone number you'll chat with your agent from?",
-      '',
-      k.dim(
-        'Same number = messages will land in your "You" / self-chat on WhatsApp\n' +
-          "(you won't be able to reply to yourself — use a different number for a\n" +
-          'two-way chat).',
-      ),
+      "Now, your personal number — the one you'll chat with the agent from.",
+      "It'll show up as a normal two-way conversation with the agent's contact.",
     ].join('\n'),
-    'Your chat number',
+    'Your personal number',
   );
   const answer = ensureAnswer(
     await p.text({
-      message: 'Your personal phone number',
-      placeholder: authedPhone,
-      defaultValue: authedPhone,
+      message: "Your personal number, where you'll chat from",
+      placeholder: 'e.g. 14155551234',
       validate: (v) => {
-        const t = (v ?? authedPhone).trim();
+        const t = (v ?? '').trim();
+        if (!t) return 'Phone number is required';
         if (!/^\d{8,15}$/.test(t)) {
           return 'Digits only, country code included.';
         }
@@ -428,28 +563,31 @@ async function askChatPhone(authedPhone: string): Promise<string> {
       },
     }),
   );
-  const phone = ((answer as string) || authedPhone).trim();
+  const phone = (answer as string).trim();
   setupLog.userInput('whatsapp_chat_phone', phone);
   return phone;
 }
 
-/** Persist ASSISTANT_HAS_OWN_NUMBER=true to .env. */
-function writeAssistantHasOwnNumber(): void {
-  const envPath = path.join(process.cwd(), '.env');
+/** Persist KEY=value to .env, replacing any existing KEY line. Exported for tests. */
+export function writeEnvVar(
+  key: string,
+  value: string,
+  envPath: string = path.join(process.cwd(), '.env'),
+): void {
   let contents = '';
   try {
     contents = fs.readFileSync(envPath, 'utf-8');
   } catch {
     contents = '';
   }
-  if (/^ASSISTANT_HAS_OWN_NUMBER=/m.test(contents)) {
-    contents = contents.replace(
-      /^ASSISTANT_HAS_OWN_NUMBER=.*$/m,
-      'ASSISTANT_HAS_OWN_NUMBER=true',
-    );
+  const line = `${key}=${value}`;
+  const existing = new RegExp(`^${key}=.*$`, 'm');
+  if (existing.test(contents)) {
+    // Replacement via callback so `$`-sequences in the value stay literal.
+    contents = contents.replace(existing, () => line);
   } else {
     if (contents.length > 0 && !contents.endsWith('\n')) contents += '\n';
-    contents += 'ASSISTANT_HAS_OWN_NUMBER=true\n';
+    contents += line + '\n';
   }
   fs.writeFileSync(envPath, contents);
 }

@@ -115,19 +115,20 @@ Ask the user: **Is this a private or public Linear workspace?**
 - **Private workspace** — use `unknown_sender_policy: 'public'`. Only workspace members can comment.
 - **Public workspace** — use `unknown_sender_policy: 'strict'` and add trusted members (see GitHub skill for member registration example).
 
-Run `/manage-channels` to wire the Linear channel to an agent group, or insert manually:
+Run `/manage-channels` to wire the Linear channel to an agent group, or create the rows directly with `ncl`. **The host service must be running** — `ncl` connects to it over a Unix socket:
 
-```sql
--- Create messaging group (one per team)
-INSERT INTO messaging_groups (id, channel_type, platform_id, instance, name, is_group, unknown_sender_policy, created_at)
-VALUES ('mg-linear-eng', 'linear', 'linear:ENG', 'linear', 'Engineering', 1, 'public', datetime('now'));
+```bash
+# Create messaging group (one per team)
+ncl messaging-groups create --channel-type linear --platform-id "linear:ENG" \
+  --name "Engineering" --is-group 1 --unknown-sender-policy <policy>
 
--- Wire to agent group
-INSERT INTO messaging_group_agents (id, messaging_group_id, agent_group_id, trigger_rules, response_scope, session_mode, priority, created_at)
-VALUES ('mga-linear-eng', 'mg-linear-eng', '<your-agent-group-id>', '', 'all', 'per-thread', 10, datetime('now'));
+# Wire to agent group (engage mode/pattern default to the Linear adapter's
+# declared channel defaults; grab the mg id from the create output above)
+ncl wirings create --messaging-group-id <mg-id> --agent-group-id <your-agent-group-id> \
+  --session-mode per-thread
 ```
 
-The `platform_id` must be `linear:<TEAM_KEY>` matching the `LINEAR_TEAM_KEY` env var. Use `per-thread` session mode so each issue comment thread gets its own agent session.
+Replace `<policy>` with `public` or `strict` based on the user's choice above. The `platform_id` must be `linear:<TEAM_KEY>` matching the `LINEAR_TEAM_KEY` env var. Use `per-thread` session mode so each issue comment thread gets its own agent session.
 
 ## Next Steps
 

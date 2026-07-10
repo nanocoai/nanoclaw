@@ -20,6 +20,8 @@ CHANNEL_FILES=(
   src/channels/whatsapp.ts
   setup/whatsapp-auth.ts
   setup/groups.ts
+  container/skills/whatsapp-formatting/SKILL.md
+  container/skills/whatsapp-formatting/instructions.md
 )
 
 needs_install=false
@@ -45,6 +47,7 @@ git fetch origin channels
 
 echo "STEP: copy-files"
 for f in "${CHANNEL_FILES[@]}"; do
+  mkdir -p "$(dirname "$f")"
   git show "origin/channels:$f" > "$f"
 done
 

@@ -29,10 +29,11 @@ vi.mock('../modules/agent-to-agent/write-destinations.js', () => ({
   writeDestinations: (...args: unknown[]) => writeDestinationsSpy(...args),
 }));
 
-import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from '../db/index.js';
+import { initTestDb, closeDb, getDb, runMigrations, createAgentGroup, createMessagingGroup } from '../db/index.js';
 import { createSession } from '../db/sessions.js';
 import { getContainerConfig } from '../db/container-configs.js';
 import { getDestinations } from '../modules/agent-to-agent/db/agent-destinations.js';
+import { registerResource } from './crud.js';
 import { lookup } from './registry.js';
 
 // Importing these for side effects: each calls `registerResource` at
@@ -42,6 +43,31 @@ import '../cli/resources/groups.js';
 import '../cli/resources/wirings.js';
 
 const hostCtx = { caller: 'host' as const };
+
+// Synthetic resource exercising the two-pass create: pass 1 collects explicit
+// args, pass 2 runs the resolveDefaults hook, pass 3 fills static defaults.
+// Registered once at module load like the real resources above; its table is
+// created per-test in the describe's beforeEach.
+const hookCalls: Record<string, unknown>[] = [];
+registerResource({
+  name: 'hooktest',
+  plural: 'hooktests',
+  table: 'hooktest_rows',
+  description: 'Synthetic resource for resolveDefaults hook-ordering tests.',
+  idColumn: 'id',
+  columns: [
+    { name: 'id', type: 'string', description: 'UUID.', generated: true },
+    { name: 'kind', type: 'string', description: 'test input', required: true },
+    { name: 'mode', type: 'string', description: 'hook-fillable column', default: 'static' },
+    { name: 'created_at', type: 'string', description: 'Auto-set.', generated: true },
+  ],
+  operations: { create: 'open' },
+  resolveDefaults: (values) => {
+    hookCalls.push({ ...values });
+    if (values.kind === 'boom') throw new Error('hook rejected');
+    if (values.mode === undefined && values.kind === 'fill') values.mode = 'hooked';
+  },
+});
 
 beforeEach(() => {
   const db = initTestDb();
@@ -172,5 +198,41 @@ describe('genericCreate postCommit hook', () => {
     // No live session for ag-2 → nothing to project, and the central
     // destination row was still written (covered above).
     expect(writeDestinationsSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('genericCreate resolveDefaults hook (two-pass create)', () => {
+  beforeEach(() => {
+    getDb().exec(
+      `CREATE TABLE hooktest_rows (id TEXT PRIMARY KEY, kind TEXT NOT NULL, mode TEXT, created_at TEXT NOT NULL)`,
+    );
+    hookCalls.length = 0;
+  });
+
+  it('runs between explicit args and static defaults — a hook fill beats the static default', async () => {
+    const row = (await lookup('hooktests-create')!.handler({ kind: 'fill' }, hostCtx)) as { mode: string };
+    expect(row.mode).toBe('hooked');
+    // The hook saw the pre-static-default state: mode still unset. Were the
+    // static default applied first, the hook could never fill it.
+    expect(hookCalls[0].mode).toBeUndefined();
+  });
+
+  it('static default still applies when the hook leaves the column unset', async () => {
+    const row = (await lookup('hooktests-create')!.handler({ kind: 'plain' }, hostCtx)) as { mode: string };
+    expect(row.mode).toBe('static');
+  });
+
+  it('explicit args always win over the hook', async () => {
+    const row = (await lookup('hooktests-create')!.handler({ kind: 'fill', mode: 'explicit' }, hostCtx)) as {
+      mode: string;
+    };
+    expect(row.mode).toBe('explicit');
+    expect(hookCalls[0].mode).toBe('explicit');
+  });
+
+  it('a hook throw rejects the create and nothing is inserted', async () => {
+    await expect(lookup('hooktests-create')!.handler({ kind: 'boom' }, hostCtx)).rejects.toThrow('hook rejected');
+    const count = getDb().prepare('SELECT COUNT(*) AS n FROM hooktest_rows').get() as { n: number };
+    expect(count.n).toBe(0);
   });
 });

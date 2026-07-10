@@ -189,11 +189,11 @@ HOST_PATH="$HOME/.gmail-mcp"
 MOUNT=$(jq -cn --arg h "$HOST_PATH" '{hostPath:$h, containerPath:".gmail-mcp", readonly:false}')
 pnpm exec tsx scripts/q.ts data/v2.db "UPDATE container_configs \
   SET additional_mounts = json_insert(additional_mounts, '\$[#]', json('$MOUNT')), \
-      updated_at = datetime('now') \
+      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') \
   WHERE agent_group_id = '$GROUP_ID';"
 ```
 
-Run from your NanoClaw project root (where `data/v2.db` lives). The `$[#]` placeholder is SQLite JSON1's append-to-end notation; it's `\$`-escaped so bash doesn't arithmetic-expand it before sqlite sees it. `updated_at` is ISO-string everywhere else in the schema, so use `datetime('now')` — not `strftime('%s','now')`, which would silently mix epoch ints into a column of YYYY-MM-DD HH:MM:SS strings.
+Run from your NanoClaw project root (where `data/v2.db` lives). The `$[#]` placeholder is SQLite JSON1's append-to-end notation; it's `\$`-escaped so bash doesn't arithmetic-expand it before sqlite sees it. `updated_at` is an ISO-with-Z string everywhere else in the schema (`new Date().toISOString()`), so stamp the same shape with `strftime` — plain `datetime('now')` would mix naive UTC strings into the column, and `strftime('%s','now')` epoch ints.
 
 **Switch to `ncl groups config add-mount` once #2395 lands.** Update this skill at that time.
 

@@ -167,7 +167,14 @@ pnpm exec tsx scripts/init-first-agent.ts \
 
 ### Groups
 
-Add the bot email to a DeltaChat group. When any member sends a message, the router creates a `messaging_groups` row with `is_group = 1`. Run `/manage-channels` to wire it to an agent group.
+Add the bot email to a DeltaChat group. When any member sends a message, the router creates a `messaging_groups` row with `is_group = 1`. Run `/manage-channels` to wire it to an agent group, or wire it directly with `ncl` — **the host service must be running** (`ncl` connects to it over a Unix socket):
+
+```bash
+# Engage mode/pattern default to the DeltaChat adapter's declared channel
+# defaults — for DeltaChat groups that's a name pattern (the platform has no
+# mention metadata), so the agent responds when addressed by name.
+ncl wirings create --messaging-group-id <mg-id> --agent-group-id <ag-id>
+```
 
 ## Next Steps
 
@@ -184,7 +191,7 @@ Otherwise, run `/init-first-agent` to create an agent and wire it to your DeltaC
 - **user-id-format**: `deltachat:{email}` — the contact's email address
 - **how-to-find-id**: Send a message from DeltaChat to the bot email, then query `messaging_groups` as shown above
 - **typical-use**: Personal assistant over DeltaChat DMs; small groups where participants use DeltaChat
-- **default-isolation**: One agent per bot identity. Multiple chats with the same operator can share an agent group; groups with other people should typically use `isolated` session mode
+- **default-isolation**: One agent per bot identity. Multiple chats with the same operator can share an agent group; groups with other people should typically get their own agent group (the default `shared` session mode already gives each messaging group its own session)
 
 ### Features
 

@@ -26,7 +26,7 @@ GROUP_ID='<group-id>'
 pnpm exec tsx scripts/q.ts data/v2.db "UPDATE container_configs \
   SET additional_mounts = (SELECT json_group_array(value) FROM json_each(additional_mounts) \
                            WHERE json_extract(value, '\$.containerPath') != '.gmail-mcp'), \
-      updated_at = datetime('now') \
+      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') \
   WHERE agent_group_id = '$GROUP_ID';"
 ```
 

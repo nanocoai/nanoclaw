@@ -18,6 +18,7 @@ import type Database from 'better-sqlite3';
 import { CronExpressionParser } from 'cron-parser';
 
 import { GROUPS_DIR, TIMEZONE } from '../../config.js';
+import { formatLocalStamp } from '../../timezone.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
@@ -44,7 +45,7 @@ function appendHostTaskNote(agentGroupId: string, seriesId: string, note: string
   const ag = getAgentGroup(agentGroupId);
   if (!ag) return;
   const dir = path.join(GROUPS_DIR, ag.folder, 'tasks');
-  const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const timestamp = formatLocalStamp(new Date(), TIMEZONE);
   fs.mkdirSync(dir, { recursive: true });
   fs.appendFileSync(path.join(dir, `${seriesId}.md`), `${timestamp} — ${note}\n`);
 }

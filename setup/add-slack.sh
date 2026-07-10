@@ -51,6 +51,7 @@ fi
 
 need_install() {
   [ ! -f src/channels/slack.ts ] && return 0
+  [ ! -f container/skills/slack-formatting/SKILL.md ] && return 0
   ! grep -q "^import './slack.js';" src/channels/index.ts 2>/dev/null && return 0
   return 1
 }
@@ -66,6 +67,10 @@ if need_install; then
 
   log "Copying adapter from ${CHANNELS_BRANCH}…"
   git show "${CHANNELS_BRANCH}:src/channels/slack.ts" > src/channels/slack.ts
+
+  # Slack formatting container skill — reaches agents via ~/.claude/skills.
+  mkdir -p container/skills/slack-formatting
+  git show "${CHANNELS_BRANCH}:container/skills/slack-formatting/SKILL.md" > container/skills/slack-formatting/SKILL.md
 
   # Append self-registration import if missing.
   if ! grep -q "^import './slack.js';" src/channels/index.ts; then
