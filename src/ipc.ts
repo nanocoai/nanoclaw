@@ -127,6 +127,8 @@ export interface IpcDeps {
     reportingGroupFolder: string,
     reason: string,
   ) => void;
+  /** 直发飞书群消息（保底通知，不依赖 agent 是否在线） */
+  sendDirectNotify?: (jid: string, text: string) => Promise<void>;
 }
 
 /**
@@ -619,7 +621,7 @@ function handleReport(
   },
   sourceGroup: string,
   registeredGroups: Record<string, RegisteredGroup>,
-  deps?: Pick<IpcDeps, 'injectReportToActiveAgent' | 'notifyReportRejected'>,
+  deps?: Pick<IpcDeps, 'injectReportToActiveAgent' | 'notifyReportRejected' | 'sendDirectNotify'>,
 ): void {
   const reportingGroup = sourceGroup;
 
@@ -741,7 +743,7 @@ function deliverReportToSource(
   sourceJid: string,
   reportingGroup: string,
   reportText: string,
-  deps?: Pick<IpcDeps, 'injectReportToActiveAgent'>,
+  deps?: Pick<IpcDeps, 'injectReportToActiveAgent' | 'sendDirectNotify'>,
 ): ReportMeta {
   const meta = storeReportToSource(sourceJid, reportingGroup, reportText);
   if (deps?.injectReportToActiveAgent) {
@@ -750,6 +752,17 @@ function deliverReportToSource(
       { sourceJid, reportId: meta.id, injected },
       'deliverReportToSource: injection attempt',
     );
+  }
+  // 直发飞书群通知（保底，不依赖 agent 是否在线/是否主动汇报）
+  // 加系统通知前缀，与 agent 正常回复区分，避免用户混淆重复消息
+  if (deps?.sendDirectNotify) {
+    const notifyText = `[系统通知] 子群任务结果已送达：\n${reportText}`;
+    deps.sendDirectNotify(sourceJid, notifyText).catch((err) => {
+      logger.warn(
+        { sourceJid, reportId: meta.id, err: String(err) },
+        'deliverReportToSource: 飞书直发通知失败（不影响 DB 投递）',
+      );
+    });
   }
   return meta;
 }
@@ -801,7 +814,7 @@ export function finalizeDelegationOnTurnEnd(
   reportingGroup: string,
   ok: boolean,
   finalReply?: string,
-  deps?: Pick<IpcDeps, 'injectReportToActiveAgent'>,
+  deps?: Pick<IpcDeps, 'injectReportToActiveAgent' | 'sendDirectNotify'>,
 ): boolean {
   const task = getActiveDelegationByGroup(reportingGroup);
   if (!task) return false;
