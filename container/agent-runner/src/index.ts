@@ -33,7 +33,7 @@ import {
   shouldEmitInteractiveSessionKeepalive,
 } from './interactive-cli-runner.js';
 import { buildSendMessageToolEnv } from './mcp-tool-policy.js';
-import { readGroupModelSettings } from './model-settings.js';
+import { readGroupModelSettings, readCodexModelSettings } from './model-settings.js';
 import { resolveQueryCwdForSession } from './session-cwd.js';
 import { isFinalizingOnly } from './finalizing-tools.js';
 
@@ -960,7 +960,7 @@ async function runQuery(
     groupFolder: containerInput.groupFolder,
   });
   if (modelSettings.model) defaultModel = modelSettings.model;
-  if (modelSettings.effortLevel) defaultEffort = modelSettings.effortLevel;
+  if (modelSettings.effortLevel) defaultEffort = modelSettings.effortLevel as 'low' | 'medium' | 'high';
 
   const targetModel = override?.model || defaultModel;
   const targetEffort = override?.thinking ? effortForThinking(override.thinking) : defaultEffort;
@@ -1772,11 +1772,16 @@ async function main(): Promise<void> {
         cxTranscript.push({ role: 'user', content: prompt });
 
         const override = containerInput.modelOverride;
+        const codexGroupSettings = readCodexModelSettings({
+          groupPath: PATHS.group,
+          groupFolder: containerInput.groupFolder,
+        });
         const cxResult = await runCodexQuery(
           {
             prompt: turnPrompt,
             sessionId,
-            model: override?.model || 'gpt-5.5',
+            model: override?.model || codexGroupSettings.model || 'gpt-5.6',
+            effort: codexGroupSettings.effortLevel || 'medium',
             mcpServerPath,
             chatJid: containerInput.chatJid,
             groupFolder: containerInput.groupFolder,

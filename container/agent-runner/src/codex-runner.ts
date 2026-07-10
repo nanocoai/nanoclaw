@@ -60,6 +60,7 @@ export interface CodexRunnerConfig {
   /** codex thread_id，作为 session 续接标识 */
   sessionId?: string;
   model?: string;
+  effort?: string;
   mcpServerPath: string;
   chatJid: string;
   groupFolder: string;
@@ -162,6 +163,7 @@ export function mapCodexTextProgress(
 export function buildCodexArgs(config: {
   sessionId?: string;
   model?: string;
+  effort?: string;
 }): string[] {
   const args: string[] = ['exec'];
 
@@ -179,6 +181,10 @@ export function buildCodexArgs(config: {
 
   if (config.model) {
     args.push('-m', config.model);
+  }
+
+  if (config.effort) {
+    args.push('-c', `model_reasoning_effort="${config.effort}"`);
   }
 
   return args;
@@ -560,6 +566,7 @@ export async function runCodexQuery(
   const args = buildCodexArgs({
     sessionId: config.sessionId,
     model: config.model,
+    effort: config.effort,
   });
   // prompt 作为末位位置参数
   args.push(config.prompt);

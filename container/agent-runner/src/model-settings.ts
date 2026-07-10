@@ -1,9 +1,26 @@
 import fs from 'fs';
 import path from 'path';
 
+/** SDK 模式 effort（Claude Code 原生三档） */
+export type SdkEffortLevel = 'low' | 'medium' | 'high';
+/** Codex 模式 effort（5 档，对应 Codex CLI model_reasoning_effort） */
+export type CodexEffortLevel = 'light' | 'medium' | 'high' | 'extra_high' | 'ultra';
+export type EffortLevel = SdkEffortLevel | CodexEffortLevel;
+
 export interface GroupModelSettings {
   model?: string;
-  effortLevel?: 'low' | 'medium' | 'high';
+  effortLevel?: EffortLevel;
+}
+
+/** settings.json 磁盘结构：claude/codex 各自独立命名空间 */
+interface SettingsFile {
+  /** 旧格式兼容（扁平 model/effortLevel） */
+  model?: unknown;
+  effortLevel?: unknown;
+  /** Claude SDK 模式配置 */
+  claude?: { model?: unknown; effortLevel?: unknown };
+  /** Codex CLI 模式配置 */
+  codex?: { model?: unknown; effortLevel?: unknown };
 }
 
 export function normalizeClaudeModelName(model: unknown): string | undefined {
@@ -13,11 +30,8 @@ export function normalizeClaudeModelName(model: unknown): string | undefined {
   return trimmed;
 }
 
-export function readGroupModelSettings(input: {
-  groupPath: string;
-  groupFolder: string;
-}): GroupModelSettings {
-  const settingsPath = path.join(
+function resolveSettingsPath(input: { groupPath: string; groupFolder: string }): string {
+  return path.join(
     input.groupPath,
     '..',
     '..',
@@ -27,25 +41,65 @@ export function readGroupModelSettings(input: {
     '.claude',
     'settings.json',
   );
+}
 
+function readSettingsFile(settingsPath: string): SettingsFile | null {
   try {
-    if (!fs.existsSync(settingsPath)) return {};
-    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
-      model?: unknown;
-      effortLevel?: unknown;
-    };
-    const result: GroupModelSettings = {};
-    const model = normalizeClaudeModelName(settings.model);
-    if (model) result.model = model;
-    if (
-      settings.effortLevel === 'low' ||
-      settings.effortLevel === 'medium' ||
-      settings.effortLevel === 'high'
-    ) {
-      result.effortLevel = settings.effortLevel;
-    }
-    return result;
+    if (!fs.existsSync(settingsPath)) return null;
+    return JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as SettingsFile;
   } catch {
-    return {};
+    return null;
   }
+}
+
+/**
+ * 读取群级 Claude SDK 模式配置。
+ * 优先读 settings.claude 命名空间，兼容旧格式顶层字段。
+ */
+export function readGroupModelSettings(input: {
+  groupPath: string;
+  groupFolder: string;
+}): GroupModelSettings {
+  const settings = readSettingsFile(resolveSettingsPath(input));
+  if (!settings) return {};
+
+  const ns = settings.claude;
+  const rawModel = ns?.model ?? settings.model;
+  const rawEffort = ns?.effortLevel ?? settings.effortLevel;
+
+  const result: GroupModelSettings = {};
+  const model = normalizeClaudeModelName(rawModel);
+  if (model) result.model = model;
+
+  const validEfforts: SdkEffortLevel[] = ['low', 'medium', 'high'];
+  if (validEfforts.includes(rawEffort as SdkEffortLevel)) {
+    result.effortLevel = rawEffort as SdkEffortLevel;
+  }
+  return result;
+}
+
+/**
+ * 读取群级 Codex CLI 模式配置。
+ * 优先读 settings.codex 命名空间，兼容旧格式顶层字段。
+ */
+export function readCodexModelSettings(input: {
+  groupPath: string;
+  groupFolder: string;
+}): GroupModelSettings {
+  const settings = readSettingsFile(resolveSettingsPath(input));
+  if (!settings) return {};
+
+  const ns = settings.codex;
+  const rawModel = ns?.model ?? settings.model;
+  const rawEffort = ns?.effortLevel ?? settings.effortLevel;
+
+  const result: GroupModelSettings = {};
+  const model = normalizeClaudeModelName(rawModel);
+  if (model) result.model = model;
+
+  const validEfforts: CodexEffortLevel[] = ['light', 'medium', 'high', 'extra_high', 'ultra'];
+  if (validEfforts.includes(rawEffort as CodexEffortLevel)) {
+    result.effortLevel = rawEffort as CodexEffortLevel;
+  }
+  return result;
 }
