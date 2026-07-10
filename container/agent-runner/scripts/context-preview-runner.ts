@@ -235,7 +235,7 @@ async function main(): Promise<void> {
         continuation: captured?.continuation ?? null,
         systemPromptAddendum: instructions,
         sdkOptions,
-        mcpTools: listRegisteredTools().map((t) => ({ name: t.tool.name, description: t.tool.description })),
+        mcpTools: listRegisteredTools().map((t) => ({ name: t.tool.name, description: t.tool.description, inputSchema: t.tool.inputSchema })),
         provider: config.provider,
         batch,
       },
