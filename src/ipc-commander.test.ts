@@ -314,3 +314,16 @@ describe('Commander IPC delegation', () => {
     );
   });
 });
+
+describe('fmtGroupLabel', () => {
+  const { fmtGroupLabel } = __testing;
+
+  it('JID 有别名时显示 alias(jid)', () => {
+    dbMod.setGroupAlias('C2', 'fs:oc_abc');
+    expect(fmtGroupLabel('fs:oc_abc')).toBe('C2(fs:oc_abc)');
+  });
+
+  it('JID 无别名时返回原样', () => {
+    expect(fmtGroupLabel('fs:oc_unknown')).toBe('fs:oc_unknown');
+  });
+});
