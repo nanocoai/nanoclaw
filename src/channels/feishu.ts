@@ -15,6 +15,7 @@ import { logger } from '../logger.js';
 import {
   createProgressPresentationState,
   isStructuredProgress,
+  presentationPhaseTitle,
   progressTransitionLogFields,
   redactProgressText,
   reduceProgressPresentation,
@@ -132,6 +133,7 @@ interface ProgressStep {
   detail?: string;
   technicalDetail?: string;
   toolCallId?: string;
+  presentationId?: string;
   isPlan?: boolean;
   /** 该步骤进入主进程的时间戳（毫秒，用于进度页每步时间显示） */
   ts?: number;
@@ -169,6 +171,17 @@ function planPresentationTitle(step: PresentationStep): string {
   if (step.status === 'running') return `进行中：${step.title}`;
   if (step.status === 'unknown') return `状态未知：${step.title}`;
   return `待处理：${step.title}`;
+}
+
+function visiblePresentationSteps(
+  state: ProgressPresentationState,
+): ProgressStep[] {
+  return state.phases.slice(-3).map((phase) => ({
+    title: presentationPhaseTitle(phase),
+    presentationId: phase.id,
+    isPlan: phase.source === 'plan',
+    ts: Date.now(),
+  }));
 }
 
 /** 截断 step 标题：取第一行，最多 80 字符 */
@@ -688,75 +701,17 @@ export class FeishuChannel implements Channel {
               (step) => step.toolCallId === structuredProgress.toolCallId,
             )
           : undefined;
-        const updatesExistingStep = structuredProgress.toolCallId
-          ? previous.steps.some(
-              (step) => step.toolCallId === structuredProgress.toolCallId,
-            )
-          : false;
         const next = reduceProgressPresentation(previous, {
           kind: 'tool',
           progress: structuredProgress,
         });
         this.progressPresentations.set(jid, next);
-        const realPlanSteps = next.steps.filter((step) => step.source === 'plan');
-        if (
-          structuredProgress.lifecycle === 'started' &&
-          structuredProgress.toolName.toLowerCase() === 'todowrite' &&
-          realPlanSteps.length > 0
-        ) {
-          const cardPlanSteps: ProgressStep[] = realPlanSteps.map((step) => ({
-            title: planPresentationTitle(step),
-            toolCallId: step.toolCallId,
-            isPlan: true,
-            ts: Date.now(),
-          }));
-          const chatId = chatIdFromJid(jid);
-          if (!this.progressCards.has(jid)) {
-            this.progressCards.set(jid, {
-              messageId: '',
-              sessionId: '',
-              steps: [],
-              allSteps: [],
-              frame: 0,
-              startTime: Date.now(),
-            });
-            await Promise.all([
-              this.removeTypingReaction(jid),
-              this.createProgressCard(jid, chatId, cardPlanSteps[0]),
-            ]);
-          }
-          const planCard = this.progressCards.get(jid);
-          if (!planCard) return;
-          const previousAll = planCard.allSteps.filter((step) => !step.isPlan);
-          const previousVisible = planCard.steps.filter((step) => !step.isPlan);
-          planCard.allSteps = [...previousAll, ...cardPlanSteps].slice(-500);
-          planCard.steps = [...previousVisible, ...cardPlanSteps].slice(-3);
-          upsertSession(
-            planCard.sessionId,
-            progressRecordSteps(planCard.allSteps),
-            planCard.startTime,
-          );
-          if (planCard.messageId) {
-            planCard.frame++;
-            await this.client.im.message.patch({
-              path: { message_id: planCard.messageId },
-              data: {
-                content: buildProgressCard(
-                  planCard.steps,
-                  planCard.frame,
-                  planCard.startTime,
-                  planCard.sessionId,
-                ),
-              },
-            });
-          }
-          this.resetSpinnerTimer(jid);
-          return;
-        }
         toolCallId = structuredProgress.toolCallId;
         const displayStep = toolCallId
           ? next.steps.find((step) => step.toolCallId === toolCallId)
           : next.steps.at(-1);
+        const visibleSteps = visiblePresentationSteps(next);
+        const toolName = structuredProgress.toolName.toLowerCase();
         if (displayStep) {
           title = presentationStepTitle(displayStep);
         }
@@ -773,63 +728,109 @@ export class FeishuChannel implements Channel {
         }
         technicalDetail = detail ?? structuredProgress.resultSummary;
         detail = undefined;
+        const isPlanControl =
+          toolName === 'todowrite' ||
+          toolName === 'taskcreate' ||
+          toolName === 'taskupdate' ||
+          displayStep?.source === 'plan';
+        const recordStep: ProgressStep = {
+          title,
+          technicalDetail,
+          toolCallId,
+          isPlan: displayStep?.source === 'plan',
+          ts: Date.now(),
+        };
 
-        if (
-          structuredProgress.lifecycle !== 'started' ||
-          updatesExistingStep
-        ) {
-          const existing = this.progressCards.get(jid);
-          if (!existing || !toolCallId) return;
-          const update = (steps: ProgressStep[]): boolean => {
-            const step = [...steps]
-              .reverse()
-              .find((item) => item.toolCallId === toolCallId);
-            if (!step) return false;
-            step.title = title;
-            step.technicalDetail = mergeTechnicalDetail(
-              step.technicalDetail,
+        if (!this.progressCards.has(jid)) {
+          if (structuredProgress.lifecycle !== 'started') return;
+          this.progressCards.set(jid, {
+            messageId: '',
+            sessionId: '',
+            steps: [],
+            allSteps: [],
+            frame: 0,
+            startTime: Date.now(),
+          });
+          const chatId = chatIdFromJid(jid);
+          await Promise.all([
+            this.removeTypingReaction(jid),
+            this.createProgressCard(
+              jid,
+              chatId,
+              visibleSteps[0] ?? recordStep,
+              recordStep,
+            ),
+          ]);
+        }
+
+        const existing = this.progressCards.get(jid);
+        if (!existing) return;
+        existing.steps = visibleSteps;
+
+        if (isPlanControl) {
+          const planSteps = next.phases
+            .filter((phase) => phase.source === 'plan')
+            .map((phase) => ({
+              title: presentationPhaseTitle(phase),
+              presentationId: phase.id,
+              isPlan: true,
+              ts: Date.now(),
+            }));
+          existing.allSteps = [
+            ...existing.allSteps.filter((step) => !step.isPlan),
+            ...planSteps,
+          ].slice(-500);
+        } else if (toolCallId) {
+          const existingRecord = [...existing.allSteps]
+            .reverse()
+            .find((step) => step.toolCallId === toolCallId);
+          if (existingRecord) {
+            existingRecord.title = title;
+            existingRecord.technicalDetail = mergeTechnicalDetail(
+              existingRecord.technicalDetail,
               technicalDetail,
             );
-            return true;
-          };
-          const updatedVisible = update(existing.steps);
-          update(existing.allSteps);
-          upsertSession(
-            existing.sessionId,
-            progressRecordSteps(existing.allSteps),
-            existing.startTime,
-          );
-          if (displayStep) {
-            logger.info(
-              {
-                jid,
-                ...progressTransitionLogFields({
-                  cardMessageId: existing.messageId,
-                  toolCallId,
-                  stepCount: existing.allSteps.length,
-                  fromStatus: previousDisplayStep?.status ?? 'missing',
-                  toStatus: displayStep.status,
-                }),
-              },
-              '[progress-state] 工具步骤状态更新',
-            );
+          } else if (structuredProgress.lifecycle === 'started') {
+            existing.allSteps.push(recordStep);
           }
-          if (!updatedVisible || !existing.messageId) return;
-          existing.frame++;
-          await this.client.im.message.patch({
-            path: { message_id: existing.messageId },
-            data: {
-              content: buildProgressCard(
-                existing.steps,
-                existing.frame,
-                existing.startTime,
-                existing.sessionId,
-              ),
-            },
-          });
-          this.resetSpinnerTimer(jid);
-          return;
+          if (existing.allSteps.length > 500) existing.allSteps.shift();
         }
+
+        upsertSession(
+          existing.sessionId,
+          progressRecordSteps(existing.allSteps),
+          existing.startTime,
+        );
+        if (displayStep && toolCallId) {
+          logger.info(
+            {
+              jid,
+              ...progressTransitionLogFields({
+                cardMessageId: existing.messageId,
+                toolCallId,
+                stepCount: existing.allSteps.length,
+                fromStatus: previousDisplayStep?.status ?? 'missing',
+                toStatus: displayStep.status,
+              }),
+            },
+            '[progress-state] 工具步骤状态更新',
+          );
+        }
+        if (!existing.messageId) return;
+        existing.frame++;
+        await this.client.im.message.patch({
+          path: { message_id: existing.messageId },
+          data: {
+            content: buildProgressCard(
+              existing.steps,
+              existing.frame,
+              existing.startTime,
+              existing.sessionId,
+            ),
+          },
+        });
+        this.resetSpinnerTimer(jid);
+        return;
       }
 
       // 首次工具进度到达：移除 emoji + 创建卡片
@@ -1193,17 +1194,17 @@ export class FeishuChannel implements Channel {
       const finalPresentation = reduceProgressPresentation(presentation, {
         kind: 'turn_end',
       });
+      progressEntry.steps = visiblePresentationSteps(finalPresentation);
       for (const presentationStep of finalPresentation.steps) {
         if (!presentationStep.toolCallId) continue;
-        for (const steps of [progressEntry.steps, progressEntry.allSteps]) {
-          const cardStep = [...steps]
-            .reverse()
-            .find((step) => step.toolCallId === presentationStep.toolCallId);
-          if (cardStep) {
-            cardStep.title = presentationStep.source === 'plan'
+        const cardStep = [...progressEntry.allSteps]
+          .reverse()
+          .find((step) => step.toolCallId === presentationStep.toolCallId);
+        if (cardStep) {
+          cardStep.title =
+            presentationStep.source === 'plan'
               ? planPresentationTitle(presentationStep)
               : presentationStepTitle(presentationStep);
-          }
         }
       }
       upsertSession(
@@ -1508,6 +1509,7 @@ export class FeishuChannel implements Channel {
     jid: string,
     chatId: string,
     initialStep: ProgressStep,
+    initialRecordStep: ProgressStep = initialStep,
   ): Promise<void> {
     const SPINNER_INTERVAL_MS = 1000;
     const SPINNER_MAX_DURATION_MS = 60 * 60 * 1000; // 60 分钟硬上限
@@ -1516,7 +1518,7 @@ export class FeishuChannel implements Channel {
     this.spinnerStopped.delete(jid);
     const sessionId = crypto.randomBytes(8).toString('hex');
     const initialSteps: ProgressStep[] = [initialStep];
-    upsertSession(sessionId, progressRecordSteps(initialSteps), now);
+    upsertSession(sessionId, progressRecordSteps([initialRecordStep]), now);
     logger.info(
       { jid, chatId, sessionId, step: initialStep.title },
       '[card] 开始创建进度卡片（调飞书 API）',
@@ -1546,12 +1548,25 @@ export class FeishuChannel implements Channel {
       }
       // 合并缓冲期间（卡片创建 await 期间）积累的步骤
       const bufferedSteps = placeholder?.steps ?? [];
+      const bufferedAllSteps = placeholder?.allSteps ?? [];
       logger.info(
         { jid, bufferedCount: bufferedSteps.length },
         '[card] 合并缓冲步骤',
       );
-      const mergedSteps = [...initialSteps, ...bufferedSteps];
-      const mergedAllSteps = [...initialSteps, ...bufferedSteps];
+      const mergedSteps = [...initialSteps, ...bufferedSteps].filter(
+        (step, index, steps) =>
+          !step.presentationId ||
+          steps.findIndex(
+            (candidate) => candidate.presentationId === step.presentationId,
+          ) === index,
+      );
+      const mergedAllSteps = [initialRecordStep, ...bufferedAllSteps].filter(
+        (step, index, steps) =>
+          !step.toolCallId ||
+          steps.findIndex(
+            (candidate) => candidate.toolCallId === step.toolCallId,
+          ) === index,
+      );
       while (mergedSteps.length > 3) mergedSteps.shift();
       while (mergedAllSteps.length > 500) mergedAllSteps.shift();
 

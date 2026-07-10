@@ -27,18 +27,12 @@ export function redactProgressText(text: string): string {
       /-----BEGIN(?: [A-Z]+)* PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z]+)* PRIVATE KEY-----/giu,
       '[REDACTED_PRIVATE_KEY]',
     )
-    .replace(
-      /\bBearer\s+[A-Za-z0-9._~+\/-]{8,}={0,2}/giu,
-      'Bearer [REDACTED]',
-    )
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]{8,}={0,2}/giu, 'Bearer [REDACTED]')
     .replace(
       /\b(?:sk-[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AKIA[A-Z0-9]{12,})\b/gu,
       '[REDACTED_TOKEN]',
     )
-    .replace(
-      /(https?:\/\/)[^\/\s:@]+:[^\/\s@]+@/giu,
-      '$1[REDACTED]@',
-    )
+    .replace(/(https?:\/\/)[^\/\s:@]+:[^\/\s@]+@/giu, '$1[REDACTED]@')
     .replace(
       /([?&](?:access_token|api[_-]?key|token|secret|password)=)[^&\s]+/giu,
       '$1[REDACTED]',
@@ -88,12 +82,16 @@ export function buildClaudeToolResultProgress(
 
 const MAX_VALUE_LENGTH = 2_000;
 const SAFE_STRING_KEYS = new Set([
+  'activeForm',
   'command',
   'file_path',
   'path',
   'pattern',
   'query',
   'server',
+  'status',
+  'subject',
+  'taskId',
   'tool',
 ]);
 
@@ -137,12 +135,15 @@ export function boundProgressInput(
       const content = boundedString(todo.content);
       const status = boundedString(todo.status);
       if (!content) return [];
-      return [{
-        content: content.slice(0, 200),
-        status: status && ['pending', 'in_progress', 'completed'].includes(status)
-          ? status
-          : 'pending',
-      }];
+      return [
+        {
+          content: content.slice(0, 200),
+          status:
+            status && ['pending', 'in_progress', 'completed'].includes(status)
+              ? status
+              : 'pending',
+        },
+      ];
     });
   }
   return Object.keys(bounded).length > 0 ? bounded : undefined;
