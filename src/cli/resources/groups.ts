@@ -12,6 +12,7 @@ import {
   updateContainerConfigScalars,
   updateContainerConfigJson,
 } from '../../db/container-configs.js';
+import { initGroupFilesystem } from '../../group-init.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
 import type { AgentGroup, ContainerConfigRow } from '../../types.js';
 import { registerResource } from '../crud.js';
@@ -90,6 +91,15 @@ registerResource({
           created_at: new Date().toISOString(),
         };
         createAgentGroup(group);
+        // Provision the workspace folder and the `container_configs` row that
+        // `getContainerConfig` and the spawn path require. Without this, a
+        // group created via `ncl groups create` would throw "Container config
+        // not found" on first spawn and stay broken until the host restart
+        // backfill ran (#2415). The template branch above provisions its own
+        // config + folder in `createAgentFromTemplate`; this covers the bare
+        // path. Mirrors what `setup/register.ts` does after creating an agent
+        // group via the setup flow.
+        initGroupFilesystem(group);
         return group;
       },
     },
