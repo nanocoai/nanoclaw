@@ -160,6 +160,8 @@ export async function run(_args: string[]): Promise<void> {
     'RESEND_API_KEY',
     'WHATSAPP_ACCESS_TOKEN',
     'IMESSAGE_ENABLED',
+    'PHOTON_PROJECT_ID',
+    'PHOTON_PROJECT_SECRET',
   ]);
 
   const has = (key: string) => !!(process.env[key] || envVars[key]);
@@ -184,6 +186,9 @@ export async function run(_args: string[]): Promise<void> {
   if (has('RESEND_API_KEY')) channelAuth.resend = 'configured';
   if (has('WHATSAPP_ACCESS_TOKEN')) channelAuth['whatsapp-cloud'] = 'configured';
   if (has('IMESSAGE_ENABLED')) channelAuth.imessage = 'configured';
+  if (has('PHOTON_PROJECT_ID') && has('PHOTON_PROJECT_SECRET')) {
+    channelAuth['imessage-cloud'] = 'configured';
+  }
 
   const configuredChannels = Object.keys(channelAuth);
 
