@@ -33,10 +33,11 @@ export function insertTaskRow(
 ): void {
   db.prepare(
     `INSERT INTO messages_in (id, seq, timestamp, status, tries, process_after, recurrence, kind, platform_id, channel_type, thread_id, content, series_id)
-     VALUES (@id, @seq, datetime('now'), @status, 0, @processAfter, @recurrence, 'task', NULL, NULL, NULL, @content, @seriesId)`,
+     VALUES (@id, @seq, @timestamp, @status, 0, @processAfter, @recurrence, 'task', NULL, NULL, NULL, @content, @seriesId)`,
   ).run({
     status: 'pending',
     ...row,
+    timestamp: new Date().toISOString(),
     seq: nextEvenSeq(db),
   });
 }

@@ -390,40 +390,48 @@ export class ClaudeProvider implements AgentProvider {
     return reason;
   }
 
+  /**
+   * The exact SDK options a query runs with. Public so the context-preview
+   * tool (scripts/context-preview.ts) can render the agent-visible
+   * configuration without spawning the SDK subprocess.
+   */
+  buildQueryOptions(input: QueryInput): NonNullable<Parameters<typeof sdkQuery>[0]['options']> {
+    const instructions = input.systemContext?.instructions;
+    return {
+      cwd: input.cwd,
+      additionalDirectories: this.additionalDirectories,
+      resume: input.continuation,
+      pathToClaudeCodeExecutable: '/pnpm/claude',
+      systemPrompt: instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions } : undefined,
+      allowedTools: [
+        ...TOOL_ALLOWLIST,
+        ...Object.keys(this.mcpServers).map(mcpAllowPattern),
+      ],
+      disallowedTools: SDK_DISALLOWED_TOOLS,
+      env: this.env,
+      model: this.model,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      effort: this.effort as any,
+      permissionMode: 'bypassPermissions',
+      allowDangerouslySkipPermissions: true,
+      settingSources: ['project', 'user', 'local'],
+      mcpServers: this.mcpServers,
+      hooks: {
+        PreToolUse: [{ hooks: [preToolUseHook] }],
+        PostToolUse: [{ hooks: [postToolUseHook] }],
+        PostToolUseFailure: [{ hooks: [postToolUseHook] }],
+        PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],
+      },
+    };
+  }
+
   query(input: QueryInput): AgentQuery {
     const stream = new MessageStream();
     stream.push(input.prompt);
 
-    const instructions = input.systemContext?.instructions;
-
     const sdkResult = sdkQuery({
       prompt: stream,
-      options: {
-        cwd: input.cwd,
-        additionalDirectories: this.additionalDirectories,
-        resume: input.continuation,
-        pathToClaudeCodeExecutable: '/pnpm/claude',
-        systemPrompt: instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions } : undefined,
-        allowedTools: [
-          ...TOOL_ALLOWLIST,
-          ...Object.keys(this.mcpServers).map(mcpAllowPattern),
-        ],
-        disallowedTools: SDK_DISALLOWED_TOOLS,
-        env: this.env,
-        model: this.model,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        effort: this.effort as any,
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        settingSources: ['project', 'user', 'local'],
-        mcpServers: this.mcpServers,
-        hooks: {
-          PreToolUse: [{ hooks: [preToolUseHook] }],
-          PostToolUse: [{ hooks: [postToolUseHook] }],
-          PostToolUseFailure: [{ hooks: [postToolUseHook] }],
-          PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],
-        },
-      },
+      options: this.buildQueryOptions(input),
     });
 
     let aborted = false;

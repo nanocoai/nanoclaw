@@ -52,6 +52,11 @@ export function loadConfig(): RunnerConfig {
   return _config;
 }
 
+/** Inject a config directly — for tests and the context-preview harness. */
+export function setTestConfig(config: RunnerConfig): void {
+  _config = config;
+}
+
 /** Get the loaded config. Throws if loadConfig() hasn't been called. */
 export function getConfig(): RunnerConfig {
   if (!_config) throw new Error('Config not loaded — call loadConfig() first');

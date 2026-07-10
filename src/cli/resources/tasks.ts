@@ -268,6 +268,23 @@ function taskId(args: Record<string, unknown>): string {
   return id;
 }
 
+/**
+ * The run-log directive appended to every task prompt. Exported so the
+ * context-preview tool (scripts/context-preview.ts) stages task fires with
+ * the exact content createTask writes.
+ */
+export function taskPromptWithLog(prompt: string, seriesId: string): string {
+  return (
+    `${prompt}\n\n` +
+    `[A task serves the user two separate ways — do whichever the task above asks for, and ALWAYS the run log:\n` +
+    `• MESSAGE (only if asked): if the task says to report/notify the user, send your result with an EXPLICIT destination — <message to="name">…</message> or send_message({ to: "name", … }). This run has no chat attached: an unaddressed reply is DISCARDED, so the explicit send is the ONLY thing the user receives.\n` +
+    `• RUN LOG (ALWAYS — even if you sent no message and did nothing else this run): after any sends, end the run with:\n` +
+    `    ncl tasks append-log --msg "<what you did, and why it mattered>"\n` +
+    `  Write it like a work-log entry a human keeps — concrete: what you did and WHY (a no-op run still gets a line saying why nothing was needed). If you wrote or modified files this run, name them in --msg. Not a greeting, not a copy of the message you sent. The host stamps the UTC time (do NOT add one), do NOT edit tasks/${seriesId}.md by hand, and this NEVER goes to the user.\n` +
+    `Need context from past runs? Read tasks/${seriesId}.md first.]`
+  );
+}
+
 function createTask(args: Record<string, unknown>, ctx: CallerContext) {
   const group = groupArg(args, ctx);
   if (!group) throw new Error('--group is required');
@@ -282,14 +299,7 @@ function createTask(args: Record<string, unknown>, ctx: CallerContext) {
   const originSessionId = ctx.caller === 'agent' ? ctx.sessionId : null;
   // Each series runs in its own isolated session; point the fire at its own log.
   const { session } = resolveTaskSession(group, id);
-  const promptWithLog =
-    `${prompt}\n\n` +
-    `[A task serves the user two separate ways — do whichever the task above asks for, and ALWAYS the run log:\n` +
-    `• MESSAGE (only if asked): if the task says to report/notify the user, send your result with an EXPLICIT destination — <message to="name">…</message> or send_message({ to: "name", … }). This run has no chat attached: an unaddressed reply is DISCARDED, so the explicit send is the ONLY thing the user receives.\n` +
-    `• RUN LOG (ALWAYS — even if you sent no message and did nothing else this run): after any sends, end the run with:\n` +
-    `    ncl tasks append-log --msg "<what you did, and why it mattered>"\n` +
-    `  Write it like a work-log entry a human keeps — concrete: what you did and WHY (a no-op run still gets a line saying why nothing was needed). If you wrote or modified files this run, name them in --msg. Not a greeting, not a copy of the message you sent. The host stamps the UTC time (do NOT add one), do NOT edit tasks/${id}.md by hand, and this NEVER goes to the user.\n` +
-    `Need context from past runs? Read tasks/${id}.md first.]`;
+  const promptWithLog = taskPromptWithLog(prompt, id);
 
   const created = withInbound(session, (db) => {
     insertTaskRow(db, {

@@ -3,7 +3,9 @@
  * `registerTools([...])` call, then starts the MCP server.
  *
  * Adding a new tool module: create the file, call `registerTools([...])`
- * at module scope, and append the import here. No central list.
+ * at module scope, and append the import here AND to
+ * scripts/context-preview-runner.ts (which mirrors this list to render
+ * the tool surface). No central list.
  */
 import './core.js';
 import './interactive.js';

@@ -19,6 +19,8 @@
  */
 import { Database } from 'bun:sqlite';
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 const DEFAULT_INBOUND_PATH = '/workspace/inbound.db';
 const DEFAULT_OUTBOUND_PATH = '/workspace/outbound.db';
@@ -183,6 +185,10 @@ export function clearStaleProcessingAcks(): void {
 /** For tests — creates in-memory DBs with the session schemas. */
 export function initTestSessionDb(): { inbound: Database; outbound: Database } {
   _testMode = true;
+  // Redirect the heartbeat out of /workspace — on hosts where that path
+  // exists and is writable (Linux devcontainers, CI), touchHeartbeat would
+  // otherwise write outside the test/preview sandbox.
+  _heartbeatPath = path.join(os.tmpdir(), 'nanoclaw-test-heartbeat');
   _inbound = new Database(':memory:');
   _inbound.exec('PRAGMA foreign_keys = ON');
   _inbound.exec(`

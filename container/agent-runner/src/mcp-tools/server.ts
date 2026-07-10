@@ -21,6 +21,11 @@ function log(msg: string): void {
 const allTools: McpToolDefinition[] = [];
 const toolMap = new Map<string, McpToolDefinition>();
 
+/** Everything registered so far — read by the context-preview harness. */
+export function listRegisteredTools(): McpToolDefinition[] {
+  return [...allTools];
+}
+
 export function registerTools(tools: McpToolDefinition[]): void {
   for (const t of tools) {
     if (toolMap.has(t.tool.name)) {
