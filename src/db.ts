@@ -567,6 +567,13 @@ export function getAllGroupAliases(): Record<string, string> {
   return result;
 }
 
+export function getAliasByJid(chatJid: string): string | undefined {
+  const row = db
+    .prepare('SELECT alias FROM group_aliases WHERE chat_jid = ? LIMIT 1')
+    .get(chatJid) as { alias: string } | undefined;
+  return row?.alias;
+}
+
 export function deleteGroupAlias(alias: string): boolean {
   const normalizedAlias = normalizeGroupAlias(alias);
   const result = db
