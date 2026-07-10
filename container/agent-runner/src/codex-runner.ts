@@ -18,6 +18,7 @@ import path from 'path';
 import os from 'os';
 import type { ContainerOutput } from './cli-runner.js';
 import { buildSendMessageToolEnv } from './mcp-tool-policy.js';
+import { boundProgressInput, redactProgressText } from './progress-types.js';
 
 // ---- 类型定义 ----
 
@@ -39,6 +40,9 @@ export interface CodexEvent {
     aggregated_output?: string;
     exit_code?: number | null;
     status?: string;
+    server?: string;
+    tool?: string;
+    arguments?: Record<string, unknown>;
     /** file_change 事件：改动的文件列表（实测 codex-cli 0.136.0：path + kind:add|modify|delete） */
     changes?: { path: string; kind: string }[];
   };
@@ -304,6 +308,39 @@ function findExecutableOnPath(command: string, pathValue?: string): boolean {
 
 /** 把 item.started 工具事件映射成进度输出（agent_message 不在此处理） */
 export function mapCodexProgress(event: CodexEvent): ContainerOutput[] {
+  if (event.type === 'item.completed' && event.item && event.item.type !== 'agent_message') {
+    const it = event.item;
+    const exitCode = typeof it.exit_code === 'number' ? it.exit_code : null;
+    const status = it.status?.toLowerCase();
+    const resultText = typeof it.aggregated_output === 'string'
+      ? redactProgressText(it.aggregated_output.trim())
+      : '';
+    const lifecycle = status && ['cancelled', 'canceled', 'interrupted'].includes(status)
+      ? 'cancelled'
+      : (exitCode != null && exitCode !== 0) || status === 'failed'
+        ? 'failed'
+        : 'completed';
+    return [{
+      status: 'progress',
+      result: lifecycle === 'cancelled'
+        ? '⏹️ 已取消'
+        : lifecycle === 'failed'
+          ? '❌ 执行失败'
+          : '✅ 执行完成',
+      progressType: 'tool_result',
+      detail: resultText ? resultText.slice(0, 1000) : undefined,
+      progress: {
+        provider: 'codex', lifecycle, toolName: it.type, toolCallId: it.id,
+        input: boundProgressInput(it.command ? { command: it.command } : it.type === 'mcp_tool_call'
+          ? { server: it.server, tool: it.tool, arguments: it.arguments }
+          : undefined),
+        exitCode,
+        resultSummary: resultText
+          ? resultText.slice(0, 200) + (resultText.length > 200 ? '...' : '')
+          : undefined,
+      },
+    }];
+  }
   if (event.type === 'item.started' && event.item) {
     const it = event.item;
     if (it.type === 'agent_message') return [];
@@ -337,6 +374,11 @@ export function mapCodexProgress(event: CodexEvent): ContainerOutput[] {
           result: `📝 ${short}`,
           progressType: 'tool_use',
           detail: `\`\`\`\n${detailBody}\n\`\`\``,
+          progress: {
+            provider: 'codex', lifecycle: 'started', toolName: 'file_change',
+            toolCallId: it.id,
+            input: boundProgressInput({ changes: files.slice(0, 20) }),
+          },
         },
       ];
     }
@@ -355,6 +397,13 @@ export function mapCodexProgress(event: CodexEvent): ContainerOutput[] {
         result: `🔧 ${short}`,
         progressType: 'tool_use',
         detail,
+        progress: {
+          provider: 'codex', lifecycle: 'started', toolName: it.type,
+          toolCallId: it.id,
+          input: boundProgressInput(it.command ? { command: it.command } : it.type === 'mcp_tool_call'
+            ? { server: it.server, tool: it.tool, arguments: it.arguments }
+            : undefined),
+        },
       },
     ];
   }

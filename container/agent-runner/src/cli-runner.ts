@@ -14,17 +14,32 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { buildSendMessageToolEnv } from './mcp-tool-policy.js';
+import {
+  boundProgressInput,
+  buildClaudeToolResultProgress,
+  type ClaudeToolResultBlock,
+  type StructuredProgress,
+} from './progress-types.js';
 
 // ---- 类型定义 ----
 
 /** CLI stream-json 每行 JSON 的类型 */
 export interface CliStreamMessage {
-  type: 'system' | 'assistant' | 'result' | 'rate_limit_event';
+  type: 'system' | 'assistant' | 'user' | 'result' | 'rate_limit_event';
   subtype?: string;
   session_id?: string;
   message?: {
     role?: string;
-    content?: Array<{ type: string; text?: string; name?: string; input?: unknown }>;
+    content?: Array<{
+      type: string;
+      id?: string;
+      tool_use_id?: string;
+      text?: string;
+      name?: string;
+      input?: unknown;
+      content?: unknown;
+      is_error?: boolean;
+    }>;
     model?: string;
     usage?: Record<string, number>;
   };
@@ -45,6 +60,7 @@ export interface ContainerOutput {
   error?: string;
   progressType?: 'tool_use' | 'tool_result' | 'thinking' | 'text';
   detail?: string;
+  progress?: StructuredProgress;
   /** CLI interactive 模式：终端态错误已污染当前 Claude session，需要提示用户决定是否清理。 */
   terminalSessionCorruption?: boolean;
   usage?: {
@@ -207,6 +223,10 @@ export function mapToContainerOutput(
           status: 'progress',
           result: `${emoji} ${block.name}: ${shortInput}`,
           progressType: 'tool_use',
+          progress: {
+            provider: 'claude', lifecycle: 'started', toolName: block.name,
+            toolCallId: block.id, input: boundProgressInput(input),
+          },
         });
       }
 
@@ -223,6 +243,17 @@ export function mapToContainerOutput(
     }
 
     return outputs;
+  }
+
+  if (msg.type === 'user' && msg.message?.content) {
+    return msg.message.content.flatMap((block) => {
+      const mapped = buildClaudeToolResultProgress(
+        block as ClaudeToolResultBlock,
+      );
+      return mapped
+        ? [{ status: 'progress' as const, ...mapped, progressType: 'tool_result' as const }]
+        : [];
+    });
   }
 
   // result — 最终结果

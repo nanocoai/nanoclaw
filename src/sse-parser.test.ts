@@ -387,6 +387,12 @@ describe('mapSseEventToProgress', () => {
       status: 'progress',
       result: '🔧 Bash',
       progressType: 'tool_use',
+      progress: {
+        provider: 'claude',
+        lifecycle: 'started',
+        toolName: 'Bash',
+        toolCallId: 'toolu_01',
+      },
     });
   });
 
