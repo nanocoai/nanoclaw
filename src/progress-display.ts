@@ -40,6 +40,8 @@ export interface ProgressAction {
 
 export interface PresentationStep extends ProgressAction {
   toolCallId?: string;
+  planTaskId?: string;
+  phaseId?: string;
   source?: 'tool' | 'plan';
   status:
     | 'pending'
@@ -50,9 +52,26 @@ export interface PresentationStep extends ProgressAction {
     | 'unknown';
 }
 
+export interface PresentationPhase {
+  id: string;
+  goal: string;
+  source: 'narration' | 'plan' | 'fallback';
+  status: PresentationStep['status'];
+  currentAction?: string;
+  categories: ProgressCategory[];
+  toolCallIds: string[];
+  outcome?: string;
+  planTaskId?: string;
+  testPassCount?: number;
+  matchCount?: number;
+  timingValueCount?: number;
+}
+
 export interface ProgressPresentationState {
-  pendingPhase?: string;
+  activePhaseGoal?: string;
+  activePhaseId?: string;
   steps: PresentationStep[];
+  phases: PresentationPhase[];
 }
 
 export type ProgressPresentationEvent =
@@ -66,18 +85,12 @@ export function redactProgressText(text: string): string {
       /-----BEGIN(?: [A-Z]+)* PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z]+)* PRIVATE KEY-----/giu,
       '[REDACTED_PRIVATE_KEY]',
     )
-    .replace(
-      /\bBearer\s+[A-Za-z0-9._~+\/-]{8,}={0,2}/giu,
-      'Bearer [REDACTED]',
-    )
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]{8,}={0,2}/giu, 'Bearer [REDACTED]')
     .replace(
       /\b(?:sk-[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AKIA[A-Z0-9]{12,})\b/gu,
       '[REDACTED_TOKEN]',
     )
-    .replace(
-      /(https?:\/\/)[^\/\s:@]+:[^\/\s@]+@/giu,
-      '$1[REDACTED]@',
-    )
+    .replace(/(https?:\/\/)[^\/\s:@]+:[^\/\s@]+@/giu, '$1[REDACTED]@')
     .replace(
       /([?&](?:access_token|api[_-]?key|token|secret|password)=)[^&\s]+/giu,
       '$1[REDACTED]',
@@ -88,19 +101,26 @@ export function redactProgressText(text: string): string {
     );
 }
 
-export function isStructuredProgress(value: unknown): value is StructuredProgress {
+export function isStructuredProgress(
+  value: unknown,
+): value is StructuredProgress {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const progress = value as Record<string, unknown>;
   return (
-    ['claude', 'codex', 'gemini', 'legacy'].includes(String(progress.provider)) &&
+    ['claude', 'codex', 'gemini', 'legacy'].includes(
+      String(progress.provider),
+    ) &&
     ['started', 'completed', 'failed', 'cancelled', 'unknown'].includes(
       String(progress.lifecycle),
     ) &&
     typeof progress.toolName === 'string' &&
     progress.toolName.trim().length > 0 &&
-    (progress.toolCallId === undefined || typeof progress.toolCallId === 'string') &&
+    (progress.toolCallId === undefined ||
+      typeof progress.toolCallId === 'string') &&
     (progress.input === undefined ||
-      (!!progress.input && typeof progress.input === 'object' && !Array.isArray(progress.input)))
+      (!!progress.input &&
+        typeof progress.input === 'object' &&
+        !Array.isArray(progress.input)))
   );
 }
 
@@ -155,6 +175,22 @@ function inputString(
 
 function commandOf(progress: StructuredProgress): string {
   return inputString(progress.input, 'command').trim();
+}
+
+function taskStatus(progress: StructuredProgress): PresentationStep['status'] {
+  const status = inputString(progress.input, 'status').toLowerCase();
+  if (status === 'in_progress') return 'running';
+  if (status === 'completed') return 'completed';
+  if (status === 'pending') return 'pending';
+  return 'pending';
+}
+
+function taskSubject(progress: StructuredProgress): string {
+  const subject = sanitizeUserText(
+    inputString(progress.input, 'subject') ||
+      inputString(progress.input, 'activeForm'),
+  );
+  return subject || '计划任务';
 }
 
 function mcpToolOf(progress: StructuredProgress): string {
@@ -216,7 +252,7 @@ function planSteps(progress: StructuredProgress): PresentationStep[] {
 }
 
 function sanitizeUserText(text: string): string {
-  return text
+  return redactProgressText(text)
     .replace(/```[\s\S]*?```/gu, '技术操作')
     .replace(/(?:\/[\w.@-]+){2,}/gu, '相关文件')
     .replace(/\b(?:oc|om|ou|trace)_[\w-]+\b/giu, '相关标识')
@@ -346,7 +382,7 @@ export function classifyProgressAction(
     };
   }
   if (
-    /\b(pytest|vitest|jest)\b|\b(go|cargo)\s+test\b|\b(npm|pnpm|yarn)\s+(run\s+)?test\b/.test(
+    /\b(pytest|vitest|jest)\b|\bnode\s+--test\b|\b(go|cargo)\s+test\b|\b(npm|pnpm|yarn)\s+(run\s+)?test\b/.test(
       lower,
     )
   ) {
@@ -480,28 +516,215 @@ export function classifyProgressAction(
 function firstSentence(text: string): string | undefined {
   const normalized = sanitizeUserText(text.replace(/^💬\s*/u, '').trim());
   if (!normalized) return undefined;
-  const match = normalized.match(/^.*?[。！？!?]/u);
-  const sentence = (match?.[0] ?? normalized.split('\n')[0]).trim();
-  return sentence.length > 42 ? sentence.slice(0, 42) + '…' : sentence;
+  const sentences = normalized
+    .split(/[。！？!?\n]+/u)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const sentence =
+    sentences.find(
+      (part) => !/^(?:继续|收到|明白|好的?|可以|没问题)$/u.test(part),
+    ) ?? sentences[0];
+  const core = sentence?.split(/[：:；;]/u)[0]?.trim();
+  if (!core) return undefined;
+  return core.length > 42 ? core.slice(0, 42) + '…' : core;
 }
 
-function completedTitle(category: ProgressCategory): string {
-  const labels: Partial<Record<ProgressCategory, string>> = {
-    test: '已完成测试',
-    build: '已完成编译',
-    read: '已完成读取',
-    search: '已完成搜索',
-    change: '已完成修改',
-    inspect: '已完成检查',
-    observe: '已完成日志查询',
-    delivery: '已完成交付操作',
-    communicate: '已完成协作操作',
-    web: '已完成资料搜索',
-    script: '已执行分析脚本',
-    destructive: '已完成删除操作',
-    system: '已执行系统检查',
+const CATEGORY_LABELS: Partial<Record<ProgressCategory, string>> = {
+  read: '读取',
+  search: '搜索',
+  change: '修改',
+  test: '测试',
+  build: '编译',
+  inspect: '检查',
+  observe: '日志查询',
+  delivery: '交付',
+  communicate: '协作',
+  web: '资料搜索',
+  script: '分析脚本',
+  destructive: '删除操作',
+  system: '系统检查',
+};
+
+function resultCount(
+  summary: string | undefined,
+  pattern: RegExp,
+): number | undefined {
+  if (!summary) return undefined;
+  const match = summary.match(pattern);
+  if (!match) return undefined;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function testPassCount(summary: string | undefined): number | undefined {
+  return (
+    resultCount(summary, /\b(\d+)\s+(?:tests?\s+)?passed\b/iu) ??
+    resultCount(summary, /\bpass(?:ed)?\s*[:=]?\s*(\d+)\b/iu) ??
+    resultCount(summary, /\b(\d+)\s*项(?:测试)?通过\b/iu)
+  );
+}
+
+function timingValueCount(summary: string | undefined): number | undefined {
+  if (!summary) return undefined;
+  const match = summary.match(
+    /(?:^|\s)(-?\d+(?:\.\d+)?(?:\s*,\s*-?\d+(?:\.\d+)?){1,})(?:\s|$)/u,
+  );
+  return match ? match[1].split(',').length : undefined;
+}
+
+function chineseList(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? '';
+  return `${items.slice(0, -1).join('、')}和${items.at(-1)}`;
+}
+
+function aggregateOutcome(
+  phase: PresentationPhase,
+  progress: StructuredProgress,
+  status: PresentationStep['status'],
+): string {
+  if (status === 'failed') {
+    if (progress.exitCode != null)
+      return `命令执行失败（退出码 ${progress.exitCode}）`;
+    return phase.categories.includes('test') ? '测试失败' : '执行失败';
+  }
+  if (status === 'cancelled') return '已取消';
+  if (status === 'unknown') return '已执行，结果未知';
+
+  const summary = progress.resultSummary;
+  if (phase.categories.includes('communicate')) {
+    const count = phase.matchCount ?? resultCount(summary, /\b(\d+)\s*条/iu);
+    if (count != null) return `找到 ${count} 条匹配消息`;
+  }
+  if (/计时|耗时|延迟/u.test(phase.goal)) {
+    const count = phase.timingValueCount ?? timingValueCount(summary);
+    if (count != null) return `已获得 ${count} 个计时值`;
+  }
+
+  const labels = phase.categories.map(
+    (category) => CATEGORY_LABELS[category] ?? '操作',
+  );
+  const testCount = phase.categories.includes('test')
+    ? (phase.testPassCount ?? testPassCount(summary))
+    : undefined;
+  if (
+    labels.length === 1 &&
+    phase.categories[0] === 'test' &&
+    testCount != null
+  )
+    return `${testCount} 项测试通过`;
+  const base = `已完成${chineseList(labels)}`;
+  return testCount != null ? `${base}（${testCount} 项通过）` : base;
+}
+
+function mergeResultFacts(
+  phase: PresentationPhase,
+  progress: StructuredProgress,
+): PresentationPhase {
+  const summary = progress.resultSummary;
+  return {
+    ...phase,
+    testPassCount:
+      phase.testPassCount ??
+      (phase.categories.includes('test') ? testPassCount(summary) : undefined),
+    matchCount:
+      phase.matchCount ??
+      (phase.categories.includes('communicate')
+        ? resultCount(summary, /\b(\d+)\s*条/iu)
+        : undefined),
+    timingValueCount:
+      phase.timingValueCount ??
+      (/计时|耗时|延迟/u.test(phase.goal)
+        ? timingValueCount(summary)
+        : undefined),
   };
-  return labels[category] ?? '已执行';
+}
+
+export function presentationPhaseTitle(phase: PresentationPhase): string {
+  if (phase.status === 'pending') return `待处理：${phase.goal}`;
+  if (phase.status === 'running') {
+    if (phase.source === 'plan' && !phase.currentAction)
+      return `进行中：${phase.goal}`;
+    if (!phase.currentAction || phase.currentAction === phase.goal)
+      return phase.goal;
+    return `${phase.goal} · ${phase.currentAction}`;
+  }
+  if (phase.source === 'fallback')
+    return phase.outcome ?? phase.currentAction ?? phase.goal;
+  if (phase.status === 'unknown')
+    return `${phase.goal} · ${phase.outcome ?? '已执行，结果未知'}`;
+  if (phase.outcome) return `${phase.goal} · ${phase.outcome}`;
+  if (phase.status === 'completed') return `已完成：${phase.goal}`;
+  if (phase.status === 'cancelled') return `${phase.goal} · 已取消`;
+  return `${phase.goal} · 执行失败`;
+}
+
+function upsertPhaseForStarted(
+  state: ProgressPresentationState,
+  action: ProgressAction,
+  toolCallId: string | undefined,
+  planStep?: PresentationStep,
+): {
+  phases: PresentationPhase[];
+  phaseId: string;
+  activePhaseId?: string;
+} {
+  const phases = [...state.phases];
+  const source: PresentationPhase['source'] = planStep
+    ? 'plan'
+    : state.activePhaseGoal
+      ? 'narration'
+      : 'fallback';
+  const goal = planStep?.title ?? state.activePhaseGoal ?? action.title;
+  let phaseIndex = planStep
+    ? phases.findIndex(
+        (phase) =>
+          phase.source === 'plan' &&
+          ((planStep.planTaskId && phase.planTaskId === planStep.planTaskId) ||
+            phase.goal === planStep.title),
+      )
+    : state.activePhaseId
+      ? phases.findIndex((phase) => phase.id === state.activePhaseId)
+      : -1;
+  if (phaseIndex < 0) {
+    const id = `phase-${phases.length + 1}`;
+    phases.push({
+      id,
+      goal,
+      source,
+      status: 'running',
+      currentAction: action.title,
+      categories: [action.category],
+      toolCallIds: toolCallId ? [toolCallId] : [],
+      planTaskId: planStep?.planTaskId,
+    });
+    phaseIndex = phases.length - 1;
+  } else {
+    const phase = phases[phaseIndex];
+    phases[phaseIndex] = {
+      ...phase,
+      status: 'running',
+      currentAction: action.title,
+      categories: phase.categories.includes(action.category)
+        ? phase.categories
+        : [...phase.categories, action.category],
+      toolCallIds:
+        toolCallId && !phase.toolCallIds.includes(toolCallId)
+          ? [...phase.toolCallIds, toolCallId]
+          : phase.toolCallIds,
+      outcome: undefined,
+      planTaskId: phase.planTaskId ?? planStep?.planTaskId,
+    };
+  }
+  return {
+    phases,
+    phaseId: phases[phaseIndex].id,
+    activePhaseId: planStep ? state.activePhaseId : phases[phaseIndex].id,
+  };
+}
+
+function completedTitle(step: PresentationStep): string {
+  if (step.title.startsWith('正在')) return `已${step.title.slice(2)}`;
+  return step.title;
 }
 
 function failedTitle(category: ProgressCategory): string {
@@ -522,7 +745,16 @@ function unknownTitle(category: ProgressCategory): string {
 }
 
 export function createProgressPresentationState(): ProgressPresentationState {
-  return { steps: [] };
+  return { steps: [], phases: [] };
+}
+
+function unknownPhaseOutcome(phase: PresentationPhase): string {
+  const labels = phase.categories.map(
+    (category) => CATEGORY_LABELS[category] ?? '操作',
+  );
+  return labels.length > 0
+    ? `已执行${chineseList(labels)}，结果未知`
+    : '已执行，结果未知';
 }
 
 export function reduceProgressPresentation(
@@ -530,11 +762,16 @@ export function reduceProgressPresentation(
   event: ProgressPresentationEvent,
 ): ProgressPresentationState {
   if (event.kind === 'narration')
-    return { ...state, pendingPhase: firstSentence(event.text) };
+    return {
+      ...state,
+      activePhaseGoal: firstSentence(event.text),
+      activePhaseId: undefined,
+    };
   if (event.kind === 'turn_end') {
     return {
       ...state,
-      pendingPhase: undefined,
+      activePhaseGoal: undefined,
+      activePhaseId: undefined,
       steps: state.steps.map((step) =>
         step.status === 'running'
           ? step.source === 'plan'
@@ -542,20 +779,97 @@ export function reduceProgressPresentation(
             : { ...step, status: 'unknown', title: unknownTitle(step.category) }
           : step,
       ),
+      phases: state.phases.map((phase) =>
+        phase.status === 'running'
+          ? { ...phase, status: 'unknown', outcome: unknownPhaseOutcome(phase) }
+          : phase,
+      ),
     };
   }
 
   const progress = event.progress;
   if (progress.lifecycle === 'started') {
-    if (progress.toolName.toLowerCase() === 'todowrite') {
+    const toolName = progress.toolName.toLowerCase();
+    if (toolName === 'todowrite') {
       const realPlan = planSteps(progress);
       if (realPlan.length > 0) {
         return {
-          pendingPhase: undefined,
+          activePhaseGoal: undefined,
+          activePhaseId: undefined,
           steps: [
             ...state.steps.filter((step) => step.source !== 'plan'),
             ...realPlan,
           ],
+          phases: [
+            ...state.phases.filter((phase) => phase.source !== 'plan'),
+            ...realPlan.map((step, index) => ({
+              id: `plan-${index + 1}`,
+              goal: step.title,
+              source: 'plan' as const,
+              status: step.status,
+              categories: [] as ProgressCategory[],
+              toolCallIds: [],
+            })),
+          ],
+        };
+      }
+    }
+    if (toolName === 'taskcreate') {
+      return {
+        ...state,
+        activePhaseGoal: undefined,
+        activePhaseId: undefined,
+        steps: [
+          ...state.steps,
+          {
+            title: taskSubject(progress),
+            category: 'system',
+            confidence: 'exact',
+            toolCallId: progress.toolCallId,
+            source: 'plan',
+            status: 'pending',
+          },
+        ],
+        phases: [
+          ...state.phases,
+          {
+            id: `plan-${state.phases.length + 1}`,
+            goal: taskSubject(progress),
+            source: 'plan',
+            status: 'pending',
+            categories: [],
+            toolCallIds: [],
+          },
+        ],
+      };
+    }
+    if (toolName === 'taskupdate') {
+      const taskId = inputString(progress.input, 'taskId');
+      const taskIndex = state.steps.findIndex(
+        (step) => step.source === 'plan' && step.planTaskId === taskId,
+      );
+      if (taskIndex >= 0) {
+        const steps = [...state.steps];
+        steps[taskIndex] = {
+          ...steps[taskIndex],
+          title: inputString(progress.input, 'subject')
+            ? taskSubject(progress)
+            : steps[taskIndex].title,
+          toolCallId: progress.toolCallId,
+          status: taskStatus(progress),
+        };
+        const phases = state.phases.map((phase) =>
+          phase.source === 'plan' &&
+          (phase.planTaskId === taskId || phase.goal === steps[taskIndex].title)
+            ? { ...phase, status: taskStatus(progress) }
+            : phase,
+        );
+        return {
+          ...state,
+          activePhaseGoal: undefined,
+          activePhaseId: undefined,
+          steps,
+          phases,
         };
       }
     }
@@ -564,27 +878,49 @@ export function reduceProgressPresentation(
     );
     const action = classifyProgressAction(
       progress,
-      state.pendingPhase ?? runningPlan?.title,
+      runningPlan?.title ?? state.activePhaseGoal,
     );
     const existingIndex = progress.toolCallId
       ? state.steps.findIndex((step) => step.toolCallId === progress.toolCallId)
       : -1;
     if (existingIndex >= 0) {
       const steps = [...state.steps];
+      const existingStep = steps[existingIndex];
       steps[existingIndex] = {
-        ...steps[existingIndex],
+        ...existingStep,
         ...action,
-        phase: action.phase ?? steps[existingIndex].phase,
+        phase: action.phase ?? existingStep.phase,
         status: 'running',
       };
-      return { pendingPhase: undefined, steps };
+      const phases = state.phases.map((phase) =>
+        phase.id === existingStep.phaseId
+          ? {
+              ...phase,
+              goal: phase.source === 'fallback' ? action.title : phase.goal,
+              currentAction: action.title,
+              categories: [action.category],
+              status: 'running' as const,
+              outcome: undefined,
+            }
+          : phase,
+      );
+      return { ...state, steps, phases };
     }
+    const phase = upsertPhaseForStarted(
+      state,
+      action,
+      progress.toolCallId,
+      runningPlan,
+    );
     return {
-      pendingPhase: undefined,
+      ...state,
+      activePhaseId: phase.activePhaseId,
+      phases: phase.phases,
       steps: [
         ...state.steps,
         {
           ...action,
+          phaseId: phase.phaseId,
           toolCallId: progress.toolCallId,
           source: 'tool',
           status: 'running',
@@ -598,6 +934,20 @@ export function reduceProgressPresentation(
     : -1;
   if (index < 0) return state;
   const step = state.steps[index];
+  if (step.source === 'plan') {
+    const createdTaskId = progress.resultSummary?.match(
+      /\bTask\s+#(\d+)\s+created\b/iu,
+    )?.[1];
+    if (!createdTaskId) return state;
+    const steps = [...state.steps];
+    steps[index] = { ...step, planTaskId: createdTaskId };
+    const phases = state.phases.map((phase) =>
+      phase.source === 'plan' && phase.goal === step.title
+        ? { ...phase, planTaskId: createdTaskId }
+        : phase,
+    );
+    return { ...state, steps, phases };
+  }
   const status =
     progress.lifecycle === 'completed' &&
     (progress.exitCode == null || progress.exitCode === 0)
@@ -610,7 +960,7 @@ export function reduceProgressPresentation(
           : 'unknown';
   const title =
     status === 'completed'
-      ? completedTitle(step.category)
+      ? completedTitle(step)
       : status === 'failed'
         ? failedTitle(step.category)
         : status === 'cancelled'
@@ -618,5 +968,27 @@ export function reduceProgressPresentation(
           : unknownTitle(step.category);
   const steps = [...state.steps];
   steps[index] = { ...step, status, title };
-  return { ...state, steps };
+  const phases = state.phases.map((phase) => {
+    if (phase.id !== step.phaseId) return phase;
+    const runningTool = [...steps]
+      .reverse()
+      .find(
+        (candidate) =>
+          candidate.phaseId === phase.id && candidate.status === 'running',
+      );
+    const hasRunningTool = !!runningTool;
+    const phaseStatus: PresentationStep['status'] = hasRunningTool
+      ? 'running'
+      : status;
+    const enrichedPhase = mergeResultFacts(phase, progress);
+    return {
+      ...enrichedPhase,
+      status: phaseStatus,
+      currentAction: runningTool?.title ?? title,
+      outcome: hasRunningTool
+        ? enrichedPhase.outcome
+        : aggregateOutcome(enrichedPhase, progress, phaseStatus),
+    };
+  });
+  return { ...state, steps, phases };
 }

@@ -41,34 +41,65 @@ describe('boundProgressInput', () => {
   });
 
   it('真实计划只保留有界内容和合法状态', () => {
-    expect(boundProgressInput({
-      todos: [
-        { content: '核对实现', status: 'in_progress', activeForm: '正在核对' },
-        { content: '运行测试', status: 'invalid' },
-      ],
-    })).toEqual({
+    expect(
+      boundProgressInput({
+        todos: [
+          {
+            content: '核对实现',
+            status: 'in_progress',
+            activeForm: '正在核对',
+          },
+          { content: '运行测试', status: 'invalid' },
+        ],
+      }),
+    ).toEqual({
       todos: [
         { content: '核对实现', status: 'in_progress' },
         { content: '运行测试', status: 'pending' },
       ],
     });
   });
+
+  it('新版 Task 工具只透传计划展示所需字段', () => {
+    expect(
+      boundProgressInput({
+        subject: '运行长测试',
+        activeForm: '运行长测试中',
+        taskId: '2',
+        status: 'in_progress',
+        description: '不要透传的内部说明',
+      }),
+    ).toEqual({
+      subject: '运行长测试',
+      activeForm: '运行长测试中',
+      taskId: '2',
+      status: 'in_progress',
+    });
+  });
 });
 
 describe('buildClaudeToolResultProgress', () => {
   it('空内容的显式失败仍产生 failed 终态', () => {
-    expect(buildClaudeToolResultProgress({
-      type: 'tool_result', tool_use_id: 'tool-failed', is_error: true,
-    })).toMatchObject({
+    expect(
+      buildClaudeToolResultProgress({
+        type: 'tool_result',
+        tool_use_id: 'tool-failed',
+        is_error: true,
+      }),
+    ).toMatchObject({
       result: '❌ 执行失败',
       progress: { lifecycle: 'failed', toolCallId: 'tool-failed' },
     });
   });
 
   it('空内容的显式成功仍产生 completed 终态', () => {
-    expect(buildClaudeToolResultProgress({
-      type: 'tool_result', tool_use_id: 'tool-ok', content: '',
-    })).toMatchObject({
+    expect(
+      buildClaudeToolResultProgress({
+        type: 'tool_result',
+        tool_use_id: 'tool-ok',
+        content: '',
+      }),
+    ).toMatchObject({
       result: '✅ 执行完成',
       progress: { lifecycle: 'completed', toolCallId: 'tool-ok' },
     });

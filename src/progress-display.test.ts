@@ -13,11 +13,15 @@ import {
 describe('serializeProgressPayload', () => {
   it('完整保留结构化 progress，供主路径和重试路径复用', () => {
     const progress = started('Bash', { command: 'npm test' }, 'retry-1');
-    expect(JSON.parse(serializeProgressPayload({
-      result: '🔧 npm test',
-      detail: '```bash\nnpm test\n```',
-      progress,
-    }))).toEqual({
+    expect(
+      JSON.parse(
+        serializeProgressPayload({
+          result: '🔧 npm test',
+          detail: '```bash\nnpm test\n```',
+          progress,
+        }),
+      ),
+    ).toEqual({
       title: '🔧 npm test',
       detail: '```bash\nnpm test\n```',
       progress,
@@ -27,11 +31,13 @@ describe('serializeProgressPayload', () => {
 
 describe('progressLogFields', () => {
   it('只输出关联字段，不记录 input 和结果正文', () => {
-    const fields = progressLogFields(started(
-      'Bash',
-      { command: 'Authorization: Bearer log-canary-123456' },
-      'log-1',
-    ));
+    const fields = progressLogFields(
+      started(
+        'Bash',
+        { command: 'Authorization: Bearer log-canary-123456' },
+        'log-1',
+      ),
+    );
     expect(fields).toEqual({
       provider: 'codex',
       lifecycle: 'started',
@@ -44,13 +50,15 @@ describe('progressLogFields', () => {
 
 describe('progressTransitionLogFields', () => {
   it('只输出同卡状态对账字段', () => {
-    expect(progressTransitionLogFields({
-      cardMessageId: 'om_card_1',
-      toolCallId: 'call-1',
-      stepCount: 3,
-      fromStatus: 'running',
-      toStatus: 'completed',
-    })).toEqual({
+    expect(
+      progressTransitionLogFields({
+        cardMessageId: 'om_card_1',
+        toolCallId: 'call-1',
+        stepCount: 3,
+        fromStatus: 'running',
+        toStatus: 'completed',
+      }),
+    ).toEqual({
       cardMessageId: 'om_card_1',
       toolCallId: 'call-1',
       stepCount: 3,
@@ -102,6 +110,11 @@ describe('classifyProgressAction', () => {
       '正在修改文件',
     ],
     ['运行测试', started('Bash', { command: 'npm test' }), '正在运行测试'],
+    [
+      'Node 原生测试',
+      started('Bash', { command: 'node --test fixture.test.mjs' }),
+      '正在运行测试',
+    ],
     [
       '编译项目',
       started('command_execution', { command: '/bin/zsh -lc "npm run build"' }),
@@ -229,7 +242,7 @@ describe('classifyProgressAction', () => {
     let state = createProgressPresentationState();
     state = reduceProgressPresentation(state, {
       kind: 'narration',
-      text: '检查 /Users/test/project/src/index.ts 和 oc_secret，再访问 10.0.0.8。',
+      text: '检查 /Users/test/project/src/index.ts 和 oc_secret，再访问 10.0.0.8，Bearer phase-secret-123456。',
     });
     state = reduceProgressPresentation(state, {
       kind: 'tool',
@@ -239,6 +252,8 @@ describe('classifyProgressAction', () => {
     expect(visible).not.toContain('/Users');
     expect(visible).not.toContain('oc_secret');
     expect(visible).not.toContain('10.0.0.8');
+    expect(visible).not.toContain('phase-secret');
+    expect(visible).toContain('[REDACTED]');
   });
 
   it('MCP 工具名恢复为业务动作', () => {
@@ -254,6 +269,234 @@ describe('classifyProgressAction', () => {
 });
 
 describe('reduceProgressPresentation', () => {
+  function complete(
+    state: ReturnType<typeof createProgressPresentationState>,
+    toolCallId: string,
+    options: Partial<StructuredProgress> = {},
+  ) {
+    return reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: {
+        provider: 'claude',
+        lifecycle: 'completed',
+        toolName: 'tool_result',
+        toolCallId,
+        ...options,
+      },
+    });
+  }
+
+  it('同一阶段的读取搜索修改测试聚合为一条用户进度', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'narration',
+      text: '核对进度展示链路。',
+    });
+    const calls: Array<[string, Record<string, unknown>, string, string?]> = [
+      ['Read', { file_path: '/tmp/input.txt' }, 'read-1'],
+      ['Grep', { pattern: 'needle' }, 'grep-1'],
+      ['Write', { file_path: '/tmp/output.txt' }, 'write-1'],
+      [
+        'Bash',
+        { command: 'node --test fixture.test.mjs' },
+        'test-1',
+        '1 test passed',
+      ],
+    ];
+    for (const [toolName, input, toolCallId, resultSummary] of calls) {
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: started(toolName, input, toolCallId),
+      });
+      state = complete(state, toolCallId, { resultSummary });
+    }
+
+    expect((state as any).phases).toEqual([
+      expect.objectContaining({
+        goal: '核对进度展示链路',
+        status: 'completed',
+        categories: ['read', 'search', 'change', 'test'],
+        outcome: '已完成读取、搜索、修改和测试（1 项通过）',
+      }),
+    ]);
+  });
+
+  it('聊天搜索完成后保留阶段目标并展示匹配数量', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'narration',
+      text: '核对目标聊天记录。',
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started(
+        'mcp__nanoclaw__search_chat',
+        { query: 'RPC-seed' },
+        'search-chat-1',
+      ),
+    });
+    state = complete(state, 'search-chat-1', {
+      resultSummary: '找到 1 条匹配消息',
+    });
+
+    expect((state as any).phases).toEqual([
+      expect.objectContaining({
+        goal: '核对目标聊天记录',
+        status: 'completed',
+        outcome: '找到 1 条匹配消息',
+      }),
+    ]);
+  });
+
+  it('计时脚本只提取明确的数值数量，不猜测业务结论', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'narration',
+      text: '汇总本地三次计时结果。',
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started(
+        'Bash',
+        { command: "python3 - <<'PY'\nprint('10,20,30')\nPY" },
+        'timing-1',
+      ),
+    });
+    state = complete(state, 'timing-1', {
+      resultSummary: 'RPC-marker 10,20,30',
+    });
+
+    expect((state as any).phases[0]).toMatchObject({
+      goal: '汇总本地三次计时结果',
+      outcome: '已获得 3 个计时值',
+    });
+  });
+
+  it('阶段内后续普通动作不会覆盖已经取得的测试结果', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'narration',
+      text: '验证完整执行链路。',
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started(
+        'Bash',
+        { command: 'node --test fixture.test.mjs' },
+        'keep-test',
+      ),
+    });
+    state = complete(state, 'keep-test', { resultSummary: '# pass 1' });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started('Grep', { pattern: 'evidence' }, 'after-test'),
+    });
+    state = complete(state, 'after-test');
+
+    expect((state as any).phases[0].outcome).toBe(
+      '已完成测试和搜索（1 项通过）',
+    );
+  });
+
+  it('并行工具先完成一个时仍展示另一个运行中的动作', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'narration',
+      text: '并行核对证据。',
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started('Read', { file_path: '/tmp/a' }, 'parallel-read'),
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started('Grep', { pattern: 'needle' }, 'parallel-search'),
+    });
+    state = complete(state, 'parallel-read');
+
+    expect((state as any).phases[0]).toMatchObject({
+      status: 'running',
+      currentAction: '正在搜索相关内容',
+    });
+  });
+
+  it('失败终态保留阶段目标和退出码', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'narration',
+      text: '验证失败状态展示。',
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started('Bash', { command: "sh -c 'exit 7'" }, 'fail-7'),
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: {
+        provider: 'codex',
+        lifecycle: 'failed',
+        toolName: 'command_execution',
+        toolCallId: 'fail-7',
+        exitCode: 7,
+      },
+    });
+
+    expect((state as any).phases).toEqual([
+      expect.objectContaining({
+        goal: '验证失败状态展示',
+        status: 'failed',
+        outcome: '命令执行失败（退出码 7）',
+      }),
+    ]);
+  });
+
+  it('阶段上下文持续生效且不会被四十个工具步骤挤掉', () => {
+    let state = createProgressPresentationState();
+    for (let phaseIndex = 1; phaseIndex <= 4; phaseIndex++) {
+      state = reduceProgressPresentation(state, {
+        kind: 'narration',
+        text: `阶段 ${phaseIndex}。`,
+      });
+      for (let toolIndex = 0; toolIndex < 10; toolIndex++) {
+        const toolCallId = `phase-${phaseIndex}-tool-${toolIndex}`;
+        state = reduceProgressPresentation(state, {
+          kind: 'tool',
+          progress: started('Grep', { pattern: `p${toolIndex}` }, toolCallId),
+        });
+        state = complete(state, toolCallId);
+      }
+    }
+
+    const phases = (state as any).phases;
+    expect(phases).toHaveLength(4);
+    expect(phases.slice(-3).map((phase: any) => phase.goal)).toEqual([
+      '阶段 2',
+      '阶段 3',
+      '阶段 4',
+    ]);
+    expect(phases.every((phase: any) => phase.toolCallIds.length === 10)).toBe(
+      true,
+    );
+  });
+
+  it.each([
+    ['部署已确认生效：新 PID 62099，飞书 WebSocket 已连接。', '部署已确认生效'],
+    ['真链路环境已确认：账号有效，测试群可用。', '真链路环境已确认'],
+    ['RPC-01 已真实跑通：四类工具状态全部闭环。', 'RPC-01 已真实跑通'],
+    [
+      '继续。构建物已经完整复制并逐文件一致；我现在只核验重启是否生效。',
+      '构建物已经完整复制并逐文件一致',
+    ],
+  ])('从真实过程说明提取短阶段名：%s', (narration, expectedGoal) => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'narration',
+      text: narration,
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started(
+        'Bash',
+        { command: 'git status' },
+        `goal-${expectedGoal}`,
+      ),
+    });
+    expect((state as any).phases[0].goal).toBe(expectedGoal);
+  });
+
   it('真实 TodoWrite 计划优先保留原状态，不从命令猜未来步骤', () => {
     const state = reduceProgressPresentation(
       createProgressPresentationState(),
@@ -284,9 +527,13 @@ describe('reduceProgressPresentation', () => {
   it('后续工具动作归入当前进行中的真实计划', () => {
     let state = reduceProgressPresentation(createProgressPresentationState(), {
       kind: 'tool',
-      progress: started('TodoWrite', {
-        todos: [{ content: '补齐单元测试', status: 'in_progress' }],
-      }, 'todo-parent'),
+      progress: started(
+        'TodoWrite',
+        {
+          todos: [{ content: '补齐单元测试', status: 'in_progress' }],
+        },
+        'todo-parent',
+      ),
     });
     state = reduceProgressPresentation(state, {
       kind: 'tool',
@@ -306,7 +553,7 @@ describe('reduceProgressPresentation', () => {
       progress: started('Grep', { pattern: 'opus-4.8' }),
     });
     expect(state.steps).toHaveLength(1);
-    expect(state.steps[0].phase).toBe('我先核对模型配置为什么没有生效。');
+    expect(state.steps[0].phase).toBe('我先核对模型配置为什么没有生效');
     expect(state.steps[0].title).toBe('正在搜索模型配置相关位置');
   });
 
@@ -328,8 +575,109 @@ describe('reduceProgressPresentation', () => {
       },
     });
     expect(state.steps).toHaveLength(1);
-    expect(state.steps[0].title).toBe('已完成测试');
+    expect(state.steps[0].title).toBe('已运行测试');
     expect(state.steps[0].status).toBe('completed');
+  });
+
+  it('完成态保留动作对象，不退化成宽泛分类', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'tool',
+      progress: started(
+        'mcp__nanoclaw__search_chat',
+        { query: 'marker' },
+        'search-chat-1',
+      ),
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: {
+        provider: 'claude',
+        lifecycle: 'completed',
+        toolName: 'tool_result',
+        toolCallId: 'search-chat-1',
+      },
+    });
+    expect(state.steps[0].title).toBe('已搜索聊天记录');
+  });
+
+  it('新版 TaskCreate/TaskUpdate 维护同一组真实计划', () => {
+    let state = createProgressPresentationState();
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started('TaskCreate', { subject: '核对 fixture' }, 'create-1'),
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: {
+        provider: 'claude',
+        lifecycle: 'completed',
+        toolName: 'tool_result',
+        toolCallId: 'create-1',
+        resultSummary: 'Task #1 created successfully: 核对 fixture',
+      },
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started(
+        'TaskUpdate',
+        { taskId: '1', status: 'completed' },
+        'update-1',
+      ),
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: {
+        provider: 'claude',
+        lifecycle: 'completed',
+        toolName: 'tool_result',
+        toolCallId: 'update-1',
+        resultSummary: 'Updated task #1 status',
+      },
+    });
+
+    expect(state.steps).toHaveLength(1);
+    expect(state.steps[0]).toMatchObject({
+      title: '核对 fixture',
+      status: 'completed',
+      source: 'plan',
+      planTaskId: '1',
+    });
+  });
+
+  it('新版 Task 进行中计划成为后续工具的阶段标题', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'tool',
+      progress: started('TaskCreate', { subject: '运行长测试' }, 'create-2'),
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: {
+        provider: 'claude',
+        lifecycle: 'completed',
+        toolName: 'tool_result',
+        toolCallId: 'create-2',
+        resultSummary: 'Task #2 created successfully: 运行长测试',
+      },
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started(
+        'TaskUpdate',
+        { taskId: '2', status: 'in_progress' },
+        'update-2',
+      ),
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started(
+        'Bash',
+        { command: 'node --test fixture.test.mjs' },
+        'bash-2',
+      ),
+    });
+
+    expect(state.steps.at(-1)?.phase).toBe('运行长测试');
+    expect(state.steps.at(-1)?.title).toBe('正在运行测试');
   });
 
   it('同一 toolCallId 的 started 更新原步骤，不重复追加', () => {

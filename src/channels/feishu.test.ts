@@ -461,6 +461,84 @@ describe('FeishuChannel', () => {
   });
 
   describe('进度消息聚合', () => {
+    it('默认卡只展示阶段聚合，过程记录保留完整工具流水', async () => {
+      const jid = 'fs:oc_progress_phase_summary';
+      (channel as any).opts.registeredGroups = () => ({
+        [jid]: {
+          name: 'phase-summary',
+          folder: 'fs_oc_progress_phase_summary',
+          trigger: '@bot',
+          added_at: new Date().toISOString(),
+          containerConfig: { cliMode: 'codex' },
+        },
+      });
+
+      await channel.sendMessage(jid, '💬 核对进度展示链路。', {
+        isProgress: true,
+      });
+      const calls: Array<[string, Record<string, unknown>, string, string?]> = [
+        ['Read', { file_path: '/tmp/input.txt' }, 'phase-read'],
+        ['Grep', { pattern: 'needle' }, 'phase-grep'],
+        ['Write', { file_path: '/tmp/output.txt' }, 'phase-write'],
+        [
+          'Bash',
+          { command: 'node --test fixture.test.mjs' },
+          'phase-test',
+          '1 test passed',
+        ],
+      ];
+      for (const [toolName, input, toolCallId, resultSummary] of calls) {
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: `🔧 ${toolName}`,
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName,
+              toolCallId,
+              input,
+            },
+          }),
+          { isProgress: true },
+        );
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '✅ result',
+            progress: {
+              provider: 'claude',
+              lifecycle: 'completed',
+              toolName: 'tool_result',
+              toolCallId,
+              resultSummary,
+            },
+          }),
+          { isProgress: true },
+        );
+      }
+
+      const entry = (channel as any).progressCards.get(jid);
+      expect(entry.steps).toHaveLength(1);
+      expect(entry.steps[0].title).toBe(
+        '核对进度展示链路 · 已完成读取、搜索、修改和测试（1 项通过）',
+      );
+      expect(
+        entry.allSteps
+          .filter((step: any) => step.toolCallId)
+          .map((step: any) => step.toolCallId),
+      ).toEqual(['phase-read', 'phase-grep', 'phase-write', 'phase-test']);
+
+      const patchArg = mockPatch.mock.calls.at(-1)?.[0];
+      const serialized = JSON.stringify(
+        JSON.parse(patchArg?.data?.content ?? '{}'),
+      );
+      expect(serialized).toContain(
+        '核对进度展示链路 · 已完成读取、搜索、修改和测试（1 项通过）',
+      );
+      expect(serialized).not.toContain('已完成协作操作');
+    });
+
     it('真实 TodoWrite 计划按状态展示且不暴露工具名', async () => {
       const jid = 'fs:oc_progress_real_plan';
       await channel.sendMessage(
@@ -492,6 +570,120 @@ describe('FeishuChannel', () => {
       expect(serialized).toContain('进行中：补齐单元测试');
       expect(serialized).toContain('待处理：执行真实 E2E');
       expect(serialized).not.toContain('TodoWrite');
+    });
+
+    it('新版 Task 工具按 taskId 原地更新计划，不显示系统检查', async () => {
+      const jid = 'fs:oc_progress_task_plan';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '⚙️ TaskCreate',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'TaskCreate',
+            toolCallId: 'create-2',
+            input: { subject: '运行长测试' },
+          },
+        }),
+        { isProgress: true },
+      );
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '✅ created',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'completed',
+            toolName: 'tool_result',
+            toolCallId: 'create-2',
+            resultSummary: 'Task #2 created successfully: 运行长测试',
+          },
+        }),
+        { isProgress: true },
+      );
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '⚙️ TaskUpdate',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'TaskUpdate',
+            toolCallId: 'update-2',
+            input: { taskId: '2', status: 'in_progress' },
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const entry = (channel as any).progressCards.get(jid);
+      expect(entry.allSteps).toHaveLength(1);
+      expect(entry.allSteps[0].title).toContain('运行长测试');
+      expect(entry.allSteps[0].title).not.toContain('系统检查');
+    });
+
+    it('真实计划中的工具结果更新计划阶段而不追加工具行', async () => {
+      const jid = 'fs:oc_progress_plan_outcome';
+      const send = (payload: unknown) =>
+        channel.sendMessage(jid, JSON.stringify(payload), { isProgress: true });
+      await send({
+        title: '⚙️ TaskCreate',
+        progress: {
+          provider: 'claude',
+          lifecycle: 'started',
+          toolName: 'TaskCreate',
+          toolCallId: 'plan-create',
+          input: { subject: '运行长测试' },
+        },
+      });
+      await send({
+        title: '✅ created',
+        progress: {
+          provider: 'claude',
+          lifecycle: 'completed',
+          toolName: 'tool_result',
+          toolCallId: 'plan-create',
+          resultSummary: 'Task #2 created successfully: 运行长测试',
+        },
+      });
+      await send({
+        title: '⚙️ TaskUpdate',
+        progress: {
+          provider: 'claude',
+          lifecycle: 'started',
+          toolName: 'TaskUpdate',
+          toolCallId: 'plan-update',
+          input: { taskId: '2', status: 'in_progress' },
+        },
+      });
+      await send({
+        title: '🔧 test',
+        progress: {
+          provider: 'claude',
+          lifecycle: 'started',
+          toolName: 'Bash',
+          toolCallId: 'plan-test',
+          input: { command: 'node --test fixture.test.mjs' },
+        },
+      });
+      await send({
+        title: '✅ 1 test passed',
+        progress: {
+          provider: 'claude',
+          lifecycle: 'completed',
+          toolName: 'tool_result',
+          toolCallId: 'plan-test',
+          resultSummary: '1 test passed',
+        },
+      });
+
+      const entry = (channel as any).progressCards.get(jid);
+      expect(entry.steps).toHaveLength(1);
+      expect(entry.steps[0].title).toBe('运行长测试 · 1 项测试通过');
+      expect(
+        entry.allSteps.filter((step: any) => step.toolCallId === 'plan-test'),
+      ).toHaveLength(1);
     });
 
     it('结构化工具进度显示用户语义并隐藏原始命令', async () => {
@@ -570,48 +762,80 @@ describe('FeishuChannel', () => {
     it('滑出可见窗口的步骤完成后仍更新过程记录', async () => {
       const jid = 'fs:oc_progress_hidden_result';
       for (let index = 0; index < 4; index++) {
-        await channel.sendMessage(jid, JSON.stringify({
-          title: `🔧 command ${index}`,
-          progress: {
-            provider: 'codex', lifecycle: 'started', toolName: 'command_execution',
-            toolCallId: `hidden-${index}`, input: { command: `./unknown-${index}` },
-          },
-        }), { isProgress: true });
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: `🔧 command ${index}`,
+            progress: {
+              provider: 'codex',
+              lifecycle: 'started',
+              toolName: 'command_execution',
+              toolCallId: `hidden-${index}`,
+              input: { command: `./unknown-${index}` },
+            },
+          }),
+          { isProgress: true },
+        );
       }
       const entry = (channel as any).progressCards.get(jid);
-      expect(entry.steps.some((step: any) => step.toolCallId === 'hidden-0')).toBe(false);
+      expect(
+        entry.steps.some((step: any) => step.toolCallId === 'hidden-0'),
+      ).toBe(false);
 
-      await channel.sendMessage(jid, JSON.stringify({
-        title: '✅ 执行完成',
-        progress: {
-          provider: 'codex', lifecycle: 'completed', toolName: 'command_execution',
-          toolCallId: 'hidden-0', exitCode: 0,
-        },
-      }), { isProgress: true });
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '✅ 执行完成',
+          progress: {
+            provider: 'codex',
+            lifecycle: 'completed',
+            toolName: 'command_execution',
+            toolCallId: 'hidden-0',
+            exitCode: 0,
+          },
+        }),
+        { isProgress: true },
+      );
 
       const record = _getSessionForTest(entry.sessionId);
-      expect(record?.steps.find((step: any) => step.toolCallId === 'hidden-0')?.title)
-        .toBe('已执行系统检查');
+      expect(
+        record?.steps.find((step: any) => step.toolCallId === 'hidden-0')
+          ?.title,
+      ).toBe('已执行系统检查');
     });
 
     it('完成结果与 started 技术详情有界合并，不覆盖原命令', async () => {
       const jid = 'fs:oc_progress_technical_merge';
-      await channel.sendMessage(jid, JSON.stringify({
-        title: '🔧 npm test',
-        detail: '```bash\nnpm test\n```',
-        progress: {
-          provider: 'codex', lifecycle: 'started', toolName: 'command_execution',
-          toolCallId: 'merge-1', input: { command: 'npm test' },
-        },
-      }), { isProgress: true });
-      await channel.sendMessage(jid, JSON.stringify({
-        title: '❌ 执行失败',
-        detail: 'AssertionError: expected 1 to be 2',
-        progress: {
-          provider: 'codex', lifecycle: 'failed', toolName: 'command_execution',
-          toolCallId: 'merge-1', exitCode: 1,
-        },
-      }), { isProgress: true });
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 npm test',
+          detail: '```bash\nnpm test\n```',
+          progress: {
+            provider: 'codex',
+            lifecycle: 'started',
+            toolName: 'command_execution',
+            toolCallId: 'merge-1',
+            input: { command: 'npm test' },
+          },
+        }),
+        { isProgress: true },
+      );
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '❌ 执行失败',
+          detail: 'AssertionError: expected 1 to be 2',
+          progress: {
+            provider: 'codex',
+            lifecycle: 'failed',
+            toolName: 'command_execution',
+            toolCallId: 'merge-1',
+            exitCode: 1,
+          },
+        }),
+        { isProgress: true },
+      );
 
       const entry = (channel as any).progressCards.get(jid);
       const detail = _getSessionForTest(entry.sessionId)?.steps[0].detail ?? '';
@@ -622,21 +846,35 @@ describe('FeishuChannel', () => {
 
     it('短结果摘要也写入过程记录', async () => {
       const jid = 'fs:oc_progress_short_summary';
-      await channel.sendMessage(jid, JSON.stringify({
-        title: '🔧 npm test',
-        detail: '```bash\nnpm test\n```',
-        progress: {
-          provider: 'claude', lifecycle: 'started', toolName: 'Bash',
-          toolCallId: 'summary-1', input: { command: 'npm test' },
-        },
-      }), { isProgress: true });
-      await channel.sendMessage(jid, JSON.stringify({
-        title: '✅ 结果: 12 passed',
-        progress: {
-          provider: 'claude', lifecycle: 'completed', toolName: 'tool_result',
-          toolCallId: 'summary-1', resultSummary: '12 passed',
-        },
-      }), { isProgress: true });
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 npm test',
+          detail: '```bash\nnpm test\n```',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Bash',
+            toolCallId: 'summary-1',
+            input: { command: 'npm test' },
+          },
+        }),
+        { isProgress: true },
+      );
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '✅ 结果: 12 passed',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'completed',
+            toolName: 'tool_result',
+            toolCallId: 'summary-1',
+            resultSummary: '12 passed',
+          },
+        }),
+        { isProgress: true },
+      );
       const entry = (channel as any).progressCards.get(jid);
       const detail = _getSessionForTest(entry.sessionId)?.steps[0].detail ?? '';
       expect(detail).toContain('npm test');
@@ -645,16 +883,24 @@ describe('FeishuChannel', () => {
 
     it('过程记录持久化前脱敏技术详情', async () => {
       const jid = 'fs:oc_progress_secret_redaction';
-      await channel.sendMessage(jid, JSON.stringify({
-        title: '🔧 curl service',
-        detail: 'Authorization: Bearer feishu-canary-123456',
-        progress: {
-          provider: 'codex', lifecycle: 'started', toolName: 'command_execution',
-          toolCallId: 'redact-1', input: { command: 'curl service' },
-        },
-      }), { isProgress: true });
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 curl service',
+          detail: 'Authorization: Bearer feishu-canary-123456',
+          progress: {
+            provider: 'codex',
+            lifecycle: 'started',
+            toolName: 'command_execution',
+            toolCallId: 'redact-1',
+            input: { command: 'curl service' },
+          },
+        }),
+        { isProgress: true },
+      );
       const entry = (channel as any).progressCards.get(jid);
-      const persisted = _getSessionForTest(entry.sessionId)?.steps[0].detail ?? '';
+      const persisted =
+        _getSessionForTest(entry.sessionId)?.steps[0].detail ?? '';
       expect(persisted).not.toContain('feishu-canary');
       expect(persisted).toContain('[REDACTED]');
     });
@@ -666,7 +912,9 @@ describe('FeishuChannel', () => {
         JSON.stringify({
           title: '🔧 Bash',
           progress: {
-            provider: 'claude', lifecycle: 'started', toolName: 'Bash',
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Bash',
             toolCallId: 'tool-1',
           },
         }),
@@ -680,8 +928,11 @@ describe('FeishuChannel', () => {
           title: '🔧 Bash: npm test',
           detail: '```bash\nnpm test\n```',
           progress: {
-            provider: 'claude', lifecycle: 'started', toolName: 'Bash',
-            toolCallId: 'tool-1', input: { command: 'npm test' },
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Bash',
+            toolCallId: 'tool-1',
+            input: { command: 'npm test' },
           },
         }),
         { isProgress: true },
@@ -756,13 +1007,25 @@ describe('FeishuChannel', () => {
 
     it('畸形 structured progress 降级为安全文案而不抛错', async () => {
       const jid = 'fs:oc_progress_malformed';
-      await expect(channel.sendMessage(jid, JSON.stringify({
-        title: '🔧 /bin/zsh -lc "cat /secret"',
-        detail: '```bash\ncat /secret\n```',
-        progress: { provider: 'codex', lifecycle: 'started', toolName: null },
-      }), { isProgress: true })).resolves.toBeUndefined();
+      await expect(
+        channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '🔧 /bin/zsh -lc "cat /secret"',
+            detail: '```bash\ncat /secret\n```',
+            progress: {
+              provider: 'codex',
+              lifecycle: 'started',
+              toolName: null,
+            },
+          }),
+          { isProgress: true },
+        ),
+      ).resolves.toBeUndefined();
       const callArg = mockCreate.mock.calls[0]?.[0];
-      const serialized = JSON.stringify(JSON.parse(callArg?.data?.content ?? '{}'));
+      const serialized = JSON.stringify(
+        JSON.parse(callArg?.data?.content ?? '{}'),
+      );
       expect(serialized).toContain('正在执行系统检查');
       expect(serialized).not.toContain('/secret');
     });
