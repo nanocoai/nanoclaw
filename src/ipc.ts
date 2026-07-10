@@ -606,6 +606,10 @@ async function handleDelegate(
 
   if (msgId) setDelegationDispatchMsgId(task.taskId, msgId);
 
+  await notifySource(
+    `⏳ 已派工给 ${fmtGroupLabel(targetJid)}，等待结果...\n(task ${task.taskId})`,
+  );
+
   logger.info(
     { taskId: task.taskId, targetFolder, sourceGroup },
     'delegate dispatched',
