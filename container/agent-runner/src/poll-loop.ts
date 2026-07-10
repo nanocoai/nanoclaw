@@ -1,6 +1,6 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, markScriptSkipped, type MessageInRow } from './db/messages-in.js';
-import { hasIdenticalSend, writeMessageOut } from './db/messages-out.js';
+import { getMaxSeq, hasIdenticalSend, writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
   clearContinuation,
@@ -340,6 +340,11 @@ export async function processQuery(
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  // Floor for hasIdenticalSend: only rows written from this point on count as
+  // "this turn". Captured once, before any turn-final <message> dispatch, so
+  // a fixed-text recurring reminder never matches its own send from a
+  // previous fire (#2997).
+  const sendFloorSeq = getMaxSeq();
   // Prompt queue for the exchange hook — each result event consumes the
   // oldest unanswered prompt, except a wrapping-retry result, which answers
   // the same prompt again. Unused (and unmaintained) when the provider
@@ -487,7 +492,7 @@ export async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          const { sent, hasUnwrapped } = dispatchResultText(event.text, routing);
+          const { sent, hasUnwrapped } = dispatchResultText(event.text, routing, sendFloorSeq);
           if (sent === 0 && event.isError === true) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
@@ -605,7 +610,11 @@ function deliverErrorResult(text: string, routing: RoutingContext): void {
  * The agent must always wrap output in <message to="name">...</message>
  * blocks, even with a single destination. Bare text is scratchpad only.
  */
-function dispatchResultText(text: string, routing: RoutingContext): { sent: number; hasUnwrapped: boolean } {
+function dispatchResultText(
+  text: string,
+  routing: RoutingContext,
+  sendFloorSeq: number,
+): { sent: number; hasUnwrapped: boolean } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
   let match: RegExpExecArray | null;
@@ -627,7 +636,7 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
       scratchpadParts.push(`[dropped: unknown destination "${toName}"] ${body}`);
       continue;
     }
-    sendToDestination(dest, body, routing);
+    sendToDestination(dest, body, routing, sendFloorSeq);
     sent++;
   }
   if (lastIndex < text.length) {
@@ -647,7 +656,12 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
   return { sent, hasUnwrapped };
 }
 
-function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
+function sendToDestination(
+  dest: DestinationEntry,
+  body: string,
+  routing: RoutingContext,
+  sendFloorSeq: number,
+): void {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
   // Task fires: an explicitly-addressed final-text block is either the echo of
@@ -655,7 +669,7 @@ function sendToDestination(dest: DestinationEntry, body: string, routing: Routin
   // duplication originates) or the agent's only deliberate send (write it
   // in_reply_to-null like the MCP path, or the host's task-fire suppression
   // would discard it — zero delivery).
-  if (routing.taskFire && hasIdenticalSend(platformId, channelType, body)) {
+  if (routing.taskFire && hasIdenticalSend(platformId, channelType, body, sendFloorSeq)) {
     log(`Dropping turn-final echo of an already-sent task message to ${dest.name}`);
     return;
   }

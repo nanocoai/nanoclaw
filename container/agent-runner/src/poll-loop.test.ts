@@ -411,6 +411,69 @@ const ERR_ROUTING = {
   inReplyTo: 'm1',
 };
 
+describe('hasIdenticalSend seq floor (#2997)', () => {
+  it('delivers a recurring task reminder even when an identical row exists from a previous fire', async () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run('discord-test', 'Discord', 'channel', 'discord', 'chan-1');
+
+    const { writeMessageOut } = await import('./db/messages-out.js');
+
+    // Yesterday's fire: identical text, in_reply_to null, written before this turn starts.
+    writeMessageOut({
+      id: 'previous-fire',
+      kind: 'chat',
+      platform_id: 'chan-1',
+      channel_type: 'discord',
+      thread_id: null,
+      content: JSON.stringify({ text: 'Water the plants!' }),
+    });
+
+    const { query } = makeResultQuery({
+      type: 'result',
+      text: '<message to="discord-test">Water the plants!</message>',
+    });
+
+    const taskRouting = {
+      platformId: 'chan-1',
+      channelType: 'discord',
+      threadId: null,
+      inReplyTo: 'm1',
+      taskFire: true,
+    };
+
+    await processQuery(query, taskRouting, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    // Both rows survive: the previous fire's row, and today's reminder.
+    // Before the seq floor, today's send matched the previous-fire row and
+    // was dropped as a turn-final echo — only 1 row.
+    expect(getUndeliveredMessages()).toHaveLength(2);
+  });
+
+  it('still drops the turn-final echo of an MCP send made within the same turn', async () => {
+    const { getMaxSeq, hasIdenticalSend, writeMessageOut } = await import('./db/messages-out.js');
+
+    // Floor captured at the top of this (simulated) turn, before the MCP
+    // send_message call below — this is the case hasIdenticalSend was
+    // introduced (#2981) to guard against, and it must still match because
+    // the row lands above the floor.
+    const floorSeq = getMaxSeq();
+
+    writeMessageOut({
+      id: 'mcp-send-this-turn',
+      kind: 'chat',
+      platform_id: 'chan-1',
+      channel_type: 'discord',
+      thread_id: null,
+      content: JSON.stringify({ text: 'Water the plants!' }),
+    });
+
+    expect(hasIdenticalSend('chan-1', 'discord', 'Water the plants!', floorSeq)).toBe(true);
+  });
+});
+
 describe('error result with no <message> envelope', () => {
   it('delivers a budget/billing error to the triggering channel and does not nudge', async () => {
     const budgetText = 'Spending limit reached. Add your own key at https://example.com/keys';

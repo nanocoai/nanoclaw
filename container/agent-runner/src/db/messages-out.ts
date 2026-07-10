@@ -33,6 +33,22 @@ export interface WriteMessageOut {
 }
 
 /**
+ * Current maximum seq across both DBs. Used both to assign the next seq
+ * (writeMessageOut below) and as a floor for scoping a lookup to writes
+ * made after a given point in time (hasIdenticalSend's sinceSeq).
+ */
+export function getMaxSeq(): number {
+  const outbound = getOutboundDb();
+  const inbound = getInboundDb();
+
+  // Read max seq from both DBs to maintain global ordering.
+  // Safe: each side only reads the other DB, never writes to it.
+  const maxOut = (outbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number }).m;
+  const maxIn = (inbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_in').get() as { m: number }).m;
+  return Math.max(maxOut, maxIn);
+}
+
+/**
  * Write a new outbound message, auto-assigning an odd seq number.
  * Container uses odd seq (1, 3, 5...), host uses even (2, 4, 6...).
  *
@@ -44,13 +60,8 @@ export interface WriteMessageOut {
  */
 export function writeMessageOut(msg: WriteMessageOut): number {
   const outbound = getOutboundDb();
-  const inbound = getInboundDb();
 
-  // Read max seq from both DBs to maintain global ordering.
-  // Safe: each side only reads the other DB, never writes to it.
-  const maxOut = (outbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number }).m;
-  const maxIn = (inbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_in').get() as { m: number }).m;
-  const max = Math.max(maxOut, maxIn);
+  const max = getMaxSeq();
   const nextSeq = max % 2 === 0 ? max + 1 : max + 2; // next odd
 
   // bun:sqlite requires named parameters to be passed with the prefix character
@@ -148,16 +159,23 @@ export function getUndeliveredMessages(): MessageOutRow[] {
  * (an MCP send_message row from the current turn). Used by the task-fire
  * final-text dispatcher to drop the turn-final <message> echo of a send the
  * agent already made — the dedup happens where the duplication originates.
+ *
+ * `sinceSeq` bounds the lookup to the turn in flight (rows with seq >
+ * sinceSeq). Without it, a fixed-text recurring reminder matches its OWN
+ * send from a previous fire and never gets delivered again (#2997) — the
+ * turn-final echo this guards against always lands above the floor
+ * captured at the start of the current turn, so that case still matches.
  */
-export function hasIdenticalSend(platformId: string, channelType: string, text: string): boolean {
+export function hasIdenticalSend(platformId: string, channelType: string, text: string, sinceSeq: number): boolean {
   const row = getOutboundDb()
     .prepare(
       `SELECT 1 FROM messages_out
         WHERE platform_id = $platform_id AND channel_type = $channel_type
           AND (in_reply_to IS NULL OR in_reply_to = '')
           AND json_extract(content, '$.text') = $text
+          AND seq > $since_seq
         LIMIT 1`,
     )
-    .get({ $platform_id: platformId, $channel_type: channelType, $text: text });
+    .get({ $platform_id: platformId, $channel_type: channelType, $text: text, $since_seq: sinceSeq });
   return row != null;
 }
