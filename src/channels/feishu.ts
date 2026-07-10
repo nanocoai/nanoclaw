@@ -743,7 +743,7 @@ export class FeishuChannel implements Channel {
         if (displayStep) {
           title = presentationStepTitle(displayStep);
         }
-        technicalDetail = detail;
+        technicalDetail = detail ?? structuredProgress.resultSummary;
         detail = undefined;
 
         if (

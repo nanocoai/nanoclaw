@@ -620,6 +620,29 @@ describe('FeishuChannel', () => {
       expect(detail.length).toBeLessThanOrEqual(2000);
     });
 
+    it('短结果摘要也写入过程记录', async () => {
+      const jid = 'fs:oc_progress_short_summary';
+      await channel.sendMessage(jid, JSON.stringify({
+        title: '🔧 npm test',
+        detail: '```bash\nnpm test\n```',
+        progress: {
+          provider: 'claude', lifecycle: 'started', toolName: 'Bash',
+          toolCallId: 'summary-1', input: { command: 'npm test' },
+        },
+      }), { isProgress: true });
+      await channel.sendMessage(jid, JSON.stringify({
+        title: '✅ 结果: 12 passed',
+        progress: {
+          provider: 'claude', lifecycle: 'completed', toolName: 'tool_result',
+          toolCallId: 'summary-1', resultSummary: '12 passed',
+        },
+      }), { isProgress: true });
+      const entry = (channel as any).progressCards.get(jid);
+      const detail = _getSessionForTest(entry.sessionId)?.steps[0].detail ?? '';
+      expect(detail).toContain('npm test');
+      expect(detail).toContain('12 passed');
+    });
+
     it('同一 call ID 的富 started 事件升级原步骤而不重复追加', async () => {
       const jid = 'fs:oc_progress_started_upgrade';
       await channel.sendMessage(

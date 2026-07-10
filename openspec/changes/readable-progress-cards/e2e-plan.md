@@ -1,70 +1,91 @@
 # 可读过程卡片 Real E2E 计划
 
-## 目标
+## 目标与判定边界
 
-验证真实飞书链路中的过程卡片做到：用户看得懂、未知命令不乱猜、结果原地更新、默认卡片不泄露技术细节、过程记录仍可调试。配置和单测存在不算 E2E 通过，必须读取真实 interactive 消息内容。
+真实飞书链路验证用户实际看到的卡片、同卡更新和过程记录。配置存在、单元测试通过、日志声称成功都不能替代飞书消息证据。
 
-## 环境与证据
+取消、缺少 completion、限流重试依赖不可稳定控制的 provider 时序，不在真实账号上伪造通过：它们以结构化协议探针和全量回归作为补充证据，不能计入 Real E2E 通过数。
 
-- Claude 模式测试群和 Codex 模式测试群各一个，记录 chat ID、触发消息 ID、过程卡 message ID 和 session/process URL。
-- 每个场景使用唯一 marker，按 marker 对齐消息、runner 日志和过程记录。
-- 原始证据保存卡片文本、过程记录步骤和结构化 runner 事件摘录；不得只写口头结论。
+## 环境准备
 
-## 用例
+1. PR 以 merge commit 合入 `main`，本机 `git rev-parse HEAD` 与 merge commit 一致。
+2. 在 NanoClaw 根目录执行 `npm run build`，用 `launchctl kickstart -k gui/$(id -u)/com.nanoclaw` 重启。
+3. 确认只有一个 `dist/index.js` 主进程，并记录启动时间、PID、merge commit。
+4. 从注册群配置中选择一个 Claude 群和一个 Codex 群；不得临时修改生产群模式。
+5. 每条用例使用唯一 marker：`RPC-<ID>-<epoch>`，逐条发送、逐条取证。
+6. 原始证据写入 `/tmp/nanoclaw-artifacts/readable-progress-cards/`，不把用户消息和内部标识提交进 Git。
 
-### RPC-01 明确命令语义
+## 统一证据要求
 
-- 触发一个需要读取文件、搜索文本、修改临时测试文件并运行测试的安全任务。
-- 卡片 SHALL 展示读取、搜索、修改、测试等用户动作。
-- 卡片 SHALL NOT 出现 `zsh -lc`、完整命令和绝对路径。
-- 过程记录 SHALL 保留有界技术详情。
+每个 Real E2E 用例必须保存：
 
-### RPC-02 复合 Bash 聚合
+- 用户触发消息的 `message_id`、群 ID、marker 和发送时间；
+- 对应 interactive 卡的 `message_id`、完整 card JSON、`updated` 和 `reply_to`；
+- 最终回复内容；
+- 卡片中“过程记录”链接对应的步骤快照；
+- 同一时间窗 NanoClaw 日志摘录，确认没有未处理异常。
 
-- 触发 `git diff --check`、规范断言和测试组成的复合验证命令。
-- 卡片 SHALL 聚合为验证类动作，SHALL NOT 按 shell 分隔符拆出多条噪音。
-- 任一子命令失败时，步骤 SHALL 显示失败而不是完成。
+用户可见卡片必须反向断言不含：`zsh -lc`、`bash -lc`、绝对路径、`oc_`/`om_`/trace ID、内部地址、裸 `mcp_tool_call` 和重复“结果”行。
 
-### RPC-03 复杂 Python 继承阶段
+## Real E2E 用例
 
-- Agent 先产生“汇总多次请求耗时”的中间叙述，再运行无法可靠静态理解的 Python heredoc。
-- 卡片 SHALL 将脚本归入该阶段并使用保守动作。
-- 卡片 SHALL NOT 声称脚本已经定位根因或预测后续修复。
+### RPC-01 Claude 常见动作语义
 
-### RPC-04 无上下文未知命令
+在 Claude 群发送：先读取 `package.json`，搜索构建脚本，向 `/tmp` 写入 marker 文件，再运行一个安全的定向测试；要求使用实际工具，不只口头描述。
 
-- 通过测试 fixture/受控工具产生未知命令事件，且不提供 plan 或阶段锚点。
-- 卡片 SHALL 使用“运行脚本/系统检查”类 fallback。
-- 卡片 SHALL NOT 展示命令正文或虚构业务对象。
+通过标准：同一张过程卡依次出现读取、搜索、修改、测试类用户动作；原始命令和路径为零；最终回复正常送达；过程记录仍能看到有界命令依据。
 
-### RPC-05 MCP 名称和结果关联
+### RPC-02 真实计划归属
 
-- 触发一次聊天搜索或评审派发 MCP 调用。
-- 卡片 SHALL 展示真实业务动作，SHALL NOT 出现裸 `mcp_tool_call`。
-- MCP 结果 SHALL 更新原步骤，不新增重复结果行。
+在 Claude 群发送：先用真实计划工具建立三项计划，其中第一项完成、第二项进行中、第三项待处理；随后在第二项下执行安全测试。
 
-### RPC-06 真实计划与动态阶段边界
+通过标准：卡片展示三项真实状态；测试动作标题带第二项计划作为父阶段；不得额外生成一条无阶段的重复测试步骤，也不得根据命令预测第四项计划。
 
-- 一轮提供真实 plan，验证待办/进行中/完成状态按 plan 展示。
-- 另一轮不提供 plan，只产生过程叙述和工具调用。
-- 无 plan 的一轮 SHALL 只展示已发生和进行中的阶段，SHALL NOT 生成未来待办。
+### RPC-03 复杂脚本保守降级
 
-### RPC-07 Claude/Codex 一致性
+在 Claude 群发送：先明确说明“汇总本地三次计时结果”，再运行只输出 marker 和三组数字的 Python heredoc。
 
-- 在 Claude 和 Codex 分别执行等价的读取与测试任务。
-- 两种模式 SHALL 使用相同动作类别和用户语义。
-- Codex `item.completed` SHALL 原地更新 `item.started` 创建的步骤。
+通过标准：脚本动作归入“汇总本地三次计时结果”阶段，使用“分析脚本/系统检查”类保守文案；卡片不得声称已经定位根因或展示 heredoc 正文。
 
-### RPC-08 失败、取消和结果缺失
+### RPC-04 MCP 业务语义
 
-- 分别触发非零退出码、取消和缺少 completion fixture。
-- 卡片 SHALL 显示失败、已取消、已执行/结果未知，SHALL NOT统一标记成功。
-- 最终回复 SHALL 正常送达。
+在 Claude 群触发一次 `search_chat`，查询当前 marker，并返回匹配数量。
+
+通过标准：卡片显示“搜索聊天记录”或等价业务动作；不得出现裸 `mcp_tool_call`；结果回到原步骤，卡片与过程记录均无重复结果行。
+
+### RPC-05 Codex started/completed 同卡更新
+
+在 Codex 群执行与 RPC-01 等价的读取和安全测试任务。
+
+通过标准：用户语义与 Claude 同类动作一致；结构化日志中 started/completed 使用相同 item ID；飞书只保留一条对应步骤并从“正在”更新为终态。
+
+### RPC-06 失败如实展示
+
+在 Claude 或 Codex 群运行受控命令 `sh -c 'echo <marker> >&2; exit 7'`，不得附带破坏性操作。
+
+通过标准：对应步骤显示失败，不显示完成；最终回复仍送达；过程记录保留有界错误依据；默认卡片不出现命令正文。
+
+### RPC-07 技术详情分层
+
+复用 RPC-01、RPC-05、RPC-06 的三张卡进行横向核对。
+
+通过标准：三张默认卡技术泄露计数均为 0；三个过程记录均包含足以对应真实调用的有界详情；普通日志不新增完整参数副本。
+
+## 协议与降级补充验证
+
+以下不计入 Real E2E 通过数，但必须随证据报告：
+
+1. print `user/tool_result`、SDK 空内容 `is_error`、Codex `cancelled/canceled/interrupted` 的结构化映射测试。
+2. 工具步骤滑出三行窗口后，完成事件仍更新过程记录的测试。
+3. turn 结束缺 completion 时持久化“结果未知”的测试。
+4. 畸形 structured progress 使用安全 fallback 的测试。
+5. `NANOCLAW_READABLE_PROGRESS=0` 恢复旧展示且不影响最终回复的测试。
+6. 限流重试直接复用 `mainOnOutput`，序列化结果含 progress 的测试和源码证据。
 
 ## 通过门槛
 
-- 8 个场景全部通过；任何“只看配置/单测但未读取真实卡片”的结果不计通过。
-- 默认卡片原始命令泄露数为 0，裸 `mcp_tool_call` 为 0，重复结果行为 0。
-- 未知命令误报具体业务目的为 0。
-- Claude 和 Codex 核心动作语义一致。
-- 过程记录仍有足够技术详情，且普通日志不新增完整工具参数。
+- RPC-01 至 RPC-07 全部通过，任何一条缺少真实 interactive card JSON 即失败。
+- 默认卡片 raw command、绝对路径、内部 ID、裸 MCP 名和重复结果行均为 0。
+- Claude/Codex 核心动作语义一致，失败不误报成功。
+- 补充协议验证全部通过，但在报告中与 Real E2E 分栏，不混算。
+- 证据交 C2 复核，C2 明确 GO 后才能向用户汇报完成。

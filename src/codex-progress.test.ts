@@ -94,6 +94,7 @@ describe('mapCodexProgress — 回归', () => {
         command: 'npm test',
         exit_code: 0,
         status: 'completed',
+        aggregated_output: '12 tests passed',
       }),
     );
     expect(out).toHaveLength(1);
@@ -103,7 +104,9 @@ describe('mapCodexProgress — 回归', () => {
       lifecycle: 'completed',
       toolCallId: 'c1',
       exitCode: 0,
+      resultSummary: '12 tests passed',
     });
+    expect(out[0].detail).toBe('12 tests passed');
   });
 
   it('completed 事件的 failed 状态不会误报成功', () => {

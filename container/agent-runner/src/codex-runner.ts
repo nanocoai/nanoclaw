@@ -312,6 +312,9 @@ export function mapCodexProgress(event: CodexEvent): ContainerOutput[] {
     const it = event.item;
     const exitCode = typeof it.exit_code === 'number' ? it.exit_code : null;
     const status = it.status?.toLowerCase();
+    const resultText = typeof it.aggregated_output === 'string'
+      ? it.aggregated_output.trim()
+      : '';
     const lifecycle = status && ['cancelled', 'canceled', 'interrupted'].includes(status)
       ? 'cancelled'
       : (exitCode != null && exitCode !== 0) || status === 'failed'
@@ -325,12 +328,16 @@ export function mapCodexProgress(event: CodexEvent): ContainerOutput[] {
           ? '❌ 执行失败'
           : '✅ 执行完成',
       progressType: 'tool_result',
+      detail: resultText ? resultText.slice(0, 1000) : undefined,
       progress: {
         provider: 'codex', lifecycle, toolName: it.type, toolCallId: it.id,
         input: boundProgressInput(it.command ? { command: it.command } : it.type === 'mcp_tool_call'
           ? { server: it.server, tool: it.tool, arguments: it.arguments }
           : undefined),
         exitCode,
+        resultSummary: resultText
+          ? resultText.slice(0, 200) + (resultText.length > 200 ? '...' : '')
+          : undefined,
       },
     }];
   }
