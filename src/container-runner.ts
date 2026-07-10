@@ -330,6 +330,8 @@ export interface ContainerOutput {
     model?: string;
     /** 最后一轮 API 调用的实际 context 大小（input + output tokens） */
     lastTurnContext?: number;
+    /** 实际使用的 effort 级别 */
+    effort?: string;
   };
 }
 

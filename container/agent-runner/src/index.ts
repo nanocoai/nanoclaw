@@ -89,6 +89,8 @@ interface ContainerOutput {
     model?: string;
     /** 最后一轮 API 调用的实际 context 大小 */
     lastTurnContext?: number;
+    /** 实际使用的 effort 级别 */
+    effort?: string;
   };
 }
 
@@ -834,6 +836,7 @@ async function runQuery(
         if (pipedEffort) {
           try {
             await (queryRef as any).applyFlagSettings({ effortLevel: pipedEffort } as Record<string, unknown>);
+            currentEffort = pipedEffort;
             log(`[model-override] piped effortLevel ${pipedEffort}${msg.modelOverride?.thinking ? ' (override)' : ' (default)'}`);
           } catch (err: unknown) {
             log(`[model-override] piped applyFlagSettings FAILED: ${err instanceof Error ? err.message : String(err)}`);
@@ -968,6 +971,7 @@ async function runQuery(
 
   const targetModel = override?.model || defaultModel;
   const targetEffort = override?.thinking ? effortForThinking(override.thinking) : defaultEffort;
+  let currentEffort: string | undefined = targetEffort;
   const defaultQueryCwd = PATHS.queryCwd || PATHS.group;
   const resolvedQueryCwd = resolveQueryCwdForSession({
     configDir: process.env.CLAUDE_CONFIG_DIR,
@@ -1386,6 +1390,7 @@ async function runQuery(
             model: lastAssistantModel || (rawModelUsage ? Object.keys(rawModelUsage).pop() : undefined),
             // lastAssistantUsage.inputTokens 已经是完整 context（input + cache_creation + cache_read）
             lastTurnContext: lastAssistantUsage?.inputTokens,
+            effort: currentEffort,
           }
         : undefined;
 
