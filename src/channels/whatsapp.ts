@@ -532,7 +532,15 @@ registerChannelAdapter('whatsapp', {
         printQRInTerminal: false,
         logger: baileysLogger,
         browser: Browsers.macOS('Chrome'),
-        cachedGroupMetadata: async (jid: string) => getNormalizedGroupMetadata(jid),
+        // Do NOT pass cachedGroupMetadata here. getNormalizedGroupMetadata
+        // translates participant LID JIDs to PN JIDs for adapter routing,
+        // but Baileys needs the original LID JIDs when building sender-key
+        // distribution stanzas for LID-mode groups. Feeding PN JIDs makes
+        // the server silently drop the SKDM (error 421), leaving every
+        // recipient stuck on "Waiting for this message". Baileys' own
+        // groupMetadata() call is correct and only fires on
+        // sender-key-memory miss — cheap enough. See commit 42583ff for
+        // the original guard.
         getMessage: async (key: WAMessageKey) => {
           // Check in-memory cache first (recently sent messages)
           const cached = sentMessageCache.get(key.id || '');
