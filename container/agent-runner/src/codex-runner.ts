@@ -463,6 +463,7 @@ export function readCodexModelInfo(
       if (!trimmed) continue;
       let obj: {
         payload?: {
+          type?: unknown;
           model?: unknown;
           model_context_window?: unknown;
           info?: {
@@ -488,6 +489,14 @@ export function readCodexModelInfo(
       if (!p) continue;
       if (typeof p.model === 'string') model = p.model;
       if (typeof p.model_context_window === 'number') modelContextWindow = p.model_context_window;
+
+      // task_started 标记新一轮开始，重置 snapshot 只算最后一轮
+      if (p.type === 'task_started') {
+        firstTotal = undefined;
+        firstLast = undefined;
+        latestTotal = undefined;
+        latestLast = undefined;
+      }
 
       const ttu = p.info?.total_token_usage;
       if (ttu && typeof ttu.input_tokens === 'number') {

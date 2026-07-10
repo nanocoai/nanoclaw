@@ -226,39 +226,62 @@ describe('readCodexModelInfo', () => {
     expect(result.lastTurnContext).toBe(13000);
   });
 
-  it('续接线程（有历史累计）：turnUsage 只算本轮增量', () => {
-    const threadId = 'test-resumed-thread';
+  it('同一 rollout 多个 task（真实 resume）：只算最后一个 task 段增量', () => {
+    const threadId = 'test-multi-task-resume';
     const sessDir = path.join(tmpDir, 'sessions', '2026', '07', '10');
     fs.mkdirSync(sessDir, { recursive: true });
 
-    // 模拟续接线程：total 起步就很大（历史累计）
+    // 同一 rollout 文件包含 2 个完整 task 段（真实 resume 场景）
     const rolloutLines = [
-      JSON.stringify({
-        type: 'turn_context',
-        payload: { model: 'gpt-5.6-sol' },
-      }),
-      // 本轮第 1 次调用：total 已经包含历史 380000
+      // === 第 1 轮 task ===
+      JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', model_context_window: 353400 } }),
+      JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-5.6-sol' } }),
       JSON.stringify({
         type: 'event_msg',
         payload: {
           type: 'token_count',
           info: {
-            total_token_usage: { input_tokens: 393000, cached_input_tokens: 360000, output_tokens: 870000 },
+            total_token_usage: { input_tokens: 13000, cached_input_tokens: 10000, output_tokens: 500 },
             last_token_usage: { input_tokens: 13000, cached_input_tokens: 10000, output_tokens: 500 },
           },
         },
       }),
-      // 本轮第 2 次调用
       JSON.stringify({
         type: 'event_msg',
         payload: {
           type: 'token_count',
           info: {
-            total_token_usage: { input_tokens: 406000, cached_input_tokens: 370000, output_tokens: 871200 },
-            last_token_usage: { input_tokens: 13000, cached_input_tokens: 10000, output_tokens: 1200 },
+            total_token_usage: { input_tokens: 34579, cached_input_tokens: 25000, output_tokens: 1200 },
+            last_token_usage: { input_tokens: 21579, cached_input_tokens: 15000, output_tokens: 700 },
           },
         },
       }),
+      JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }),
+
+      // === 第 2 轮 task（resume） ===
+      JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', model_context_window: 353400 } }),
+      JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-5.6-sol' } }),
+      JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: {
+            total_token_usage: { input_tokens: 47579, cached_input_tokens: 35000, output_tokens: 1800 },
+            last_token_usage: { input_tokens: 13000, cached_input_tokens: 10000, output_tokens: 600 },
+          },
+        },
+      }),
+      JSON.stringify({
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: {
+            total_token_usage: { input_tokens: 55630, cached_input_tokens: 42000, output_tokens: 2500 },
+            last_token_usage: { input_tokens: 8051, cached_input_tokens: 7000, output_tokens: 700 },
+          },
+        },
+      }),
+      JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }),
     ];
     fs.writeFileSync(
       path.join(sessDir, `rollout-2026-07-10T00-00-00-${threadId}.jsonl`),
@@ -266,13 +289,19 @@ describe('readCodexModelInfo', () => {
     );
 
     const result = readCodexModelInfo(tmpDir, threadId);
-    // baseline = first_total - first_last = (393000-13000, 360000-10000, 870000-500) = (380000, 350000, 869500)
-    // turnUsage = latest_total - baseline = (406000-380000, 370000-350000, 871200-869500) = (26000, 20000, 1700)
+    // 第 2 轮 task_started 重置 snapshot
+    // first_total = (47579, 35000, 1800), first_last = (13000, 10000, 600)
+    // baseline = (47579-13000, 35000-10000, 1800-600) = (34579, 25000, 1200)
+    // latest_total = (55630, 42000, 2500)
+    // turnUsage = (55630-34579, 42000-25000, 2500-1200) = (21051, 17000, 1300)
     expect(result.lastTurnUsage).toEqual({
-      input_tokens: 26000,
-      cached_input_tokens: 20000,
-      output_tokens: 1700,
+      input_tokens: 21051,
+      cached_input_tokens: 17000,
+      output_tokens: 1300,
     });
+    expect(result.lastTurnContext).toBe(8051);
+    expect(result.model).toBe('gpt-5.6-sol');
+    expect(result.modelContextWindow).toBe(353400);
   });
 
   it('缺少 total_token_usage 但有 last_token_usage 时无 turnUsage', () => {
