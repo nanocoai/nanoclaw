@@ -85,6 +85,39 @@ describe('session cwd resolver', () => {
     expect(resolved.usedTranscriptCwd).toBe(false);
   });
 
+  it('EnterWorktree 后即使最后 cwd 漂移且候选缺少项目根，也恢复到 session 项目目录', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'session-cwd-'));
+    const defaultCwd = path.join(tmp, 'nine');
+    const projectRoot = path.join(defaultCwd, '.claude', 'worktrees', 'moss-central-engine');
+    const driftedCwd = path.join(tmp, 'nanoclaw', 'container', 'skills', 'feishu-docs');
+    fs.mkdirSync(defaultCwd, { recursive: true });
+    fs.mkdirSync(projectRoot, { recursive: true });
+    fs.mkdirSync(driftedCwd, { recursive: true });
+    const projectDir = path.join(tmp, '.claude', 'projects', encodeClaudeProjectPath(projectRoot));
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, 'sess-worktree.jsonl'),
+      [
+        JSON.stringify({ type: 'user', sessionId: 'sess-worktree', cwd: defaultCwd }),
+        JSON.stringify({ type: 'user', sessionId: 'sess-worktree', cwd: projectRoot }),
+        JSON.stringify({ type: 'assistant', sessionId: 'sess-worktree', cwd: driftedCwd }),
+      ].join('\n') + '\n',
+    );
+
+    const resolved = resolveQueryCwdForSession({
+      configDir: path.join(tmp, '.claude'),
+      sessionId: 'sess-worktree',
+      defaultCwd,
+      candidateCwds: [driftedCwd],
+    });
+
+    expect(resolved.cwd).toBe(projectRoot);
+    expect(resolved.projectCwd).toBe(projectRoot);
+    expect(resolved.transcriptCwd).toBe(driftedCwd);
+    expect(resolved.usedProjectCwd).toBe(true);
+    expect(resolved.usedTranscriptCwd).toBe(false);
+  });
+
   it('没有可用 transcript cwd 时保持默认 cwd', () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'session-cwd-'));
     const defaultCwd = path.join(tmp, 'nine');

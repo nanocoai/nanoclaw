@@ -43,18 +43,30 @@ export function findSessionTranscript(
 export function readTranscriptCwd(
   transcriptPath: string | undefined,
 ): string | undefined {
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) return undefined;
+  return readTranscriptCwdInfo(transcriptPath).latestCwd;
+}
+
+function readTranscriptCwdInfo(
+  transcriptPath: string | undefined,
+  projectEntry?: string,
+): { latestCwd?: string; projectCwd?: string } {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return {};
   const lines = fs.readFileSync(transcriptPath, 'utf-8').trim().split('\n').reverse();
+  let latestCwd: string | undefined;
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line) as { cwd?: unknown };
-      if (typeof parsed.cwd === 'string' && parsed.cwd.trim()) return parsed.cwd;
+      if (typeof parsed.cwd !== 'string' || !parsed.cwd.trim()) continue;
+      if (!latestCwd) latestCwd = parsed.cwd;
+      if (projectEntry && encodeClaudeProjectPath(parsed.cwd) === projectEntry) {
+        return { latestCwd, projectCwd: path.resolve(parsed.cwd) };
+      }
     } catch {
       // 跳过损坏行，继续读更早的 transcript 记录。
     }
   }
-  return undefined;
+  return { latestCwd };
 }
 
 export function resolveQueryCwdForSession(input: {
@@ -72,13 +84,18 @@ export function resolveQueryCwdForSession(input: {
   usedTranscriptCwd: boolean;
 } {
   const transcriptInfo = findSessionTranscriptInfo(input.configDir, input.sessionId);
-  const transcriptCwd = readTranscriptCwd(transcriptInfo?.transcriptPath);
+  const transcriptCwdInfo = readTranscriptCwdInfo(
+    transcriptInfo?.transcriptPath,
+    transcriptInfo?.projectEntry,
+  );
+  const transcriptCwd = transcriptCwdInfo.latestCwd;
   const candidateCwds = [input.defaultCwd, ...(input.candidateCwds || [])]
     .filter((cwd): cwd is string => Boolean(cwd?.trim()))
     .map((cwd) => path.resolve(cwd));
   const uniqueCandidateCwds = Array.from(new Set(candidateCwds));
   const projectCwd = transcriptInfo
     ? uniqueCandidateCwds.find((cwd) => encodeClaudeProjectPath(cwd) === transcriptInfo.projectEntry)
+      || transcriptCwdInfo.projectCwd
     : undefined;
   if (projectCwd && fs.existsSync(projectCwd)) {
     return {
