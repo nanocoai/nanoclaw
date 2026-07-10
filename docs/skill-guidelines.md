@@ -130,7 +130,7 @@ You do *not* need to test the dependency's own API contract; that's optional ext
 
 ### When there is genuinely nothing to test in-tree
 
-Some skills' only functional integration is a runtime operator action with no source footprint: registering an MCP server through `ncl`, or a mount through the sanctioned query wrapper (until the `ncl` add-mount verb lands). There's no line in the tree whose deletion a test could catch, so a registration test is structurally inapplicable. **State this explicitly in SKILL.md** rather than inventing a hollow test; conformance is then anatomy plus the dependency guard. This is a conformant outcome, valid only when the reach-in has no in-tree representation. (A raw-SQL write into core's schema to achieve the same thing is a smell, not a workaround.)
+Some skills' only functional integration is a runtime operator action with no source footprint: registering an MCP server through `ncl`, or a mount through `ncl groups config add-mount`. There's no line in the tree whose deletion a test could catch, so a registration test is structurally inapplicable. **State this explicitly in SKILL.md** rather than inventing a hollow test; conformance is then anatomy plus the dependency guard. This is a conformant outcome, valid only when the reach-in has no in-tree representation. (A raw-SQL write into core's schema to achieve the same thing is a smell, not a workaround.)
 
 ### Test rules
 

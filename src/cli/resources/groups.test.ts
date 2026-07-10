@@ -218,3 +218,244 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
     expect((resp as { ok: false; error: { code: string; message: string } }).error.message).toMatch(/not found/i);
   });
 });
+
+/**
+ * `groups config add-mount` / `groups config remove-mount` manage the
+ * `additional_mounts` JSON column on `container_configs`. Mirrors the
+ * `config add-package` / `config remove-package` shape: --id required,
+ * getContainerConfig row lookup, updateContainerConfigJson write-back.
+ */
+describe('groups CLI config add-mount / remove-mount', () => {
+  const GID = 'ag-mounts';
+
+  beforeEach(() => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+
+    const db = initTestDb();
+    runMigrations(db);
+
+    createAgentGroup({ id: GID, name: 'mounts', folder: 'mounts', agent_provider: null, created_at: now() });
+    db.prepare(
+      `INSERT INTO container_configs
+         (agent_group_id, provider, model, effort, image_tag, assistant_name, max_messages_per_prompt,
+          skills, mcp_servers, packages_apt, packages_npm, additional_mounts, cli_scope, updated_at)
+       VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL, '"all"', '{}', '[]', '[]', '[]', 'group', ?)`,
+    ).run(GID, now());
+  });
+
+  afterEach(() => {
+    closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+  });
+
+  function mountsFor(id: string): Array<{ hostPath: string; containerPath: string; readonly?: boolean }> {
+    const row = getDb().prepare('SELECT additional_mounts FROM container_configs WHERE agent_group_id = ?').get(id) as {
+      additional_mounts: string;
+    };
+    return JSON.parse(row.additional_mounts);
+  }
+
+  it('add-mount creates an entry with a default container-path (basename of host path)', async () => {
+    const resp = await dispatch(
+      { id: 'req-1', command: 'groups-config-add-mount', args: { id: GID, 'host-path': '/home/user/data' } },
+      { caller: 'host' },
+    );
+
+    expect(resp.ok).toBe(true);
+    const data = (resp as { ok: true; data: { mounts: unknown[]; note: string } }).data;
+    expect(data.mounts).toEqual([{ hostPath: '/home/user/data', containerPath: 'data', readonly: false }]);
+    expect(data.note).toMatch(/next container spawn/);
+    expect(data.note).toMatch(/mount-allowlist\.json/);
+    expect(data.note).toMatch(/groups restart --id/);
+    expect(mountsFor(GID)).toEqual([{ hostPath: '/home/user/data', containerPath: 'data', readonly: false }]);
+  });
+
+  it('add-mount without --readonly stores an explicit readonly: false (never omits the key)', async () => {
+    // mount-security (src/modules/mount-security/index.ts:336) only grants
+    // read-write when it sees `readonly === false` on the stored entry — an
+    // omitted key is silently forced read-only. The handler must always
+    // write the key.
+    await dispatch(
+      { id: 'req-1b', command: 'groups-config-add-mount', args: { id: GID, 'host-path': '/home/user/data' } },
+      { caller: 'host' },
+    );
+
+    const [mount] = mountsFor(GID);
+    expect(mount).toHaveProperty('readonly', false);
+    expect(Object.prototype.hasOwnProperty.call(mount, 'readonly')).toBe(true);
+  });
+
+  it('add-mount accepts an explicit container-path and --readonly', async () => {
+    const resp = await dispatch(
+      {
+        id: 'req-2',
+        command: 'groups-config-add-mount',
+        args: { id: GID, 'host-path': '/home/user/data', 'container-path': 'mydata', readonly: true },
+      },
+      { caller: 'host' },
+    );
+
+    expect(resp.ok).toBe(true);
+    expect(mountsFor(GID)).toEqual([{ hostPath: '/home/user/data', containerPath: 'mydata', readonly: true }]);
+  });
+
+  it('add-mount no-ops on a duplicate hostPath but still returns the current list', async () => {
+    await dispatch(
+      { id: 'req-3a', command: 'groups-config-add-mount', args: { id: GID, 'host-path': '/home/user/data' } },
+      { caller: 'host' },
+    );
+    const resp = await dispatch(
+      {
+        id: 'req-3b',
+        command: 'groups-config-add-mount',
+        args: { id: GID, 'host-path': '/home/user/data', 'container-path': 'other' },
+      },
+      { caller: 'host' },
+    );
+
+    expect(resp.ok).toBe(true);
+    const data = (resp as { ok: true; data: { mounts: unknown[] } }).data;
+    // Unchanged — the second call's differing --container-path is ignored.
+    expect(data.mounts).toEqual([{ hostPath: '/home/user/data', containerPath: 'data', readonly: false }]);
+    expect(mountsFor(GID)).toHaveLength(1);
+  });
+
+  it('add-mount rejects a relative host path', async () => {
+    const resp = await dispatch(
+      { id: 'req-4', command: 'groups-config-add-mount', args: { id: GID, 'host-path': 'relative/path' } },
+      { caller: 'host' },
+    );
+
+    expect(resp.ok).toBe(false);
+    expect((resp as { ok: false; error: { message: string } }).error.message).toMatch(/absolute/i);
+    expect(mountsFor(GID)).toEqual([]);
+  });
+
+  it('add-mount rejects a container path containing a slash or ".."', async () => {
+    const respSlash = await dispatch(
+      {
+        id: 'req-5a',
+        command: 'groups-config-add-mount',
+        args: { id: GID, 'host-path': '/home/user/data', 'container-path': 'a/b' },
+      },
+      { caller: 'host' },
+    );
+    expect(respSlash.ok).toBe(false);
+    expect((respSlash as { ok: false; error: { message: string } }).error.message).toMatch(/bare name/i);
+
+    const respDotDot = await dispatch(
+      {
+        id: 'req-5b',
+        command: 'groups-config-add-mount',
+        args: { id: GID, 'host-path': '/home/user/data', 'container-path': '..' },
+      },
+      { caller: 'host' },
+    );
+    expect(respDotDot.ok).toBe(false);
+    expect((respDotDot as { ok: false; error: { message: string } }).error.message).toMatch(/bare name/i);
+
+    const respColon = await dispatch(
+      {
+        id: 'req-5c',
+        command: 'groups-config-add-mount',
+        args: { id: GID, 'host-path': '/home/user/data', 'container-path': 'a:b' },
+      },
+      { caller: 'host' },
+    );
+    expect(respColon.ok).toBe(false);
+    expect((respColon as { ok: false; error: { message: string } }).error.message).toMatch(/bare name/i);
+
+    expect(mountsFor(GID)).toEqual([]);
+  });
+
+  it('add-mount rejects a second mount whose container path collides (same basename)', async () => {
+    await dispatch(
+      { id: 'req-5d', command: 'groups-config-add-mount', args: { id: GID, 'host-path': '/home/user/data' } },
+      { caller: 'host' },
+    );
+
+    // Same basename, different host path → both would land at /workspace/extra/data
+    const collision = await dispatch(
+      { id: 'req-5e', command: 'groups-config-add-mount', args: { id: GID, 'host-path': '/mnt/other/data' } },
+      { caller: 'host' },
+    );
+    expect(collision.ok).toBe(false);
+    expect((collision as { ok: false; error: { message: string } }).error.message).toMatch(
+      /already used by mount \/home\/user\/data/,
+    );
+
+    // A distinct --container-path resolves the collision
+    const resolved = await dispatch(
+      {
+        id: 'req-5f',
+        command: 'groups-config-add-mount',
+        args: { id: GID, 'host-path': '/mnt/other/data', 'container-path': 'other-data' },
+      },
+      { caller: 'host' },
+    );
+    expect(resolved.ok).toBe(true);
+    expect(mountsFor(GID)).toEqual([
+      { hostPath: '/home/user/data', containerPath: 'data', readonly: false },
+      { hostPath: '/mnt/other/data', containerPath: 'other-data', readonly: false },
+    ]);
+  });
+
+  it('add-mount requires --id and --host-path', async () => {
+    const respNoId = await dispatch(
+      { id: 'req-6a', command: 'groups-config-add-mount', args: { 'host-path': '/home/user/data' } },
+      { caller: 'host' },
+    );
+    expect(respNoId.ok).toBe(false);
+    expect((respNoId as { ok: false; error: { message: string } }).error.message).toMatch(/--id is required/);
+
+    const respNoHostPath = await dispatch(
+      { id: 'req-6b', command: 'groups-config-add-mount', args: { id: GID } },
+      { caller: 'host' },
+    );
+    expect(respNoHostPath.ok).toBe(false);
+    expect((respNoHostPath as { ok: false; error: { message: string } }).error.message).toMatch(
+      /--host-path is required/,
+    );
+  });
+
+  it('remove-mount filters the array by hostPath', async () => {
+    await dispatch(
+      { id: 'req-7a', command: 'groups-config-add-mount', args: { id: GID, 'host-path': '/home/user/data' } },
+      { caller: 'host' },
+    );
+    await dispatch(
+      { id: 'req-7b', command: 'groups-config-add-mount', args: { id: GID, 'host-path': '/home/user/other' } },
+      { caller: 'host' },
+    );
+
+    const resp = await dispatch(
+      { id: 'req-7c', command: 'groups-config-remove-mount', args: { id: GID, 'host-path': '/home/user/data' } },
+      { caller: 'host' },
+    );
+
+    expect(resp.ok).toBe(true);
+    const data = (resp as { ok: true; data: { mounts: unknown[]; note: string } }).data;
+    expect(data.mounts).toEqual([{ hostPath: '/home/user/other', containerPath: 'other', readonly: false }]);
+    expect(data.note).toMatch(/groups restart --id/);
+    expect(mountsFor(GID)).toEqual([{ hostPath: '/home/user/other', containerPath: 'other', readonly: false }]);
+  });
+
+  it('remove-mount requires --id and --host-path', async () => {
+    const respNoId = await dispatch(
+      { id: 'req-8a', command: 'groups-config-remove-mount', args: { 'host-path': '/home/user/data' } },
+      { caller: 'host' },
+    );
+    expect(respNoId.ok).toBe(false);
+    expect((respNoId as { ok: false; error: { message: string } }).error.message).toMatch(/--id is required/);
+
+    const respNoHostPath = await dispatch(
+      { id: 'req-8b', command: 'groups-config-remove-mount', args: { id: GID } },
+      { caller: 'host' },
+    );
+    expect(respNoHostPath.ok).toBe(false);
+    expect((respNoHostPath as { ok: false; error: { message: string } }).error.message).toMatch(
+      /--host-path is required/,
+    );
+  });
+});

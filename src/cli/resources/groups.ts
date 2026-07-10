@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
+import path from 'path';
 
-import type { McpServerConfig } from '../../container-config.js';
+import type { AdditionalMountConfig, McpServerConfig } from '../../container-config.js';
 import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
@@ -406,6 +407,82 @@ registerResource({
         return {
           removed: { apt: apt || null, npm: npm || null },
           note: 'Image rebuild required for package changes to take effect.',
+        };
+      },
+    },
+    'config add-mount': {
+      access: 'approval',
+      description:
+        'Add a host mount to a group. Use --id <group-id> --host-path <abs-path> [--container-path <name>] [--readonly]. ' +
+        'The host path must also be covered by the mount allowlist (~/.config/nanoclaw/mount-allowlist.json, see /manage-mounts). ' +
+        '`ncl groups restart --id <id>` applies it to a running group; no image rebuild is needed.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+        const hostPath = (args['host-path'] ?? args.host_path) as string | undefined;
+        if (!hostPath) throw new Error('--host-path is required');
+        if (!path.isAbsolute(hostPath)) throw new Error('--host-path must be an absolute path');
+
+        const containerPathArg = (args['container-path'] ?? args.container_path) as string | undefined;
+        const containerPath = containerPathArg ?? path.basename(hostPath);
+        if (containerPath.includes('/') || containerPath.includes('..') || containerPath.includes(':')) {
+          throw new Error('--container-path must be a bare name (no "/", "..", or ":")');
+        }
+
+        const readonly = !!args.readonly;
+
+        const row = getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
+
+        const mounts = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
+        const collision = mounts.find((m) => m.hostPath !== hostPath && m.containerPath === containerPath);
+        if (collision) {
+          throw new Error(
+            `Container path "${containerPath}" is already used by mount ${collision.hostPath} — pass a distinct --container-path`,
+          );
+        }
+        if (!mounts.some((m) => m.hostPath === hostPath)) {
+          // Always write `readonly` explicitly (true or false) — mount-security
+          // grants read-write only when it sees `readonly === false`; leaving
+          // the key undefined is silently treated as read-only.
+          mounts.push({ hostPath, containerPath, readonly });
+          updateContainerConfigJson(id, 'additional_mounts', mounts);
+        }
+
+        return {
+          mounts,
+          note:
+            'Mounts take effect on next container spawn. The host path must also be covered by the mount ' +
+            'allowlist (~/.config/nanoclaw/mount-allowlist.json, see /manage-mounts). ' +
+            '`ncl groups restart --id <id>` applies it to a running group. No image rebuild is needed.',
+        };
+      },
+    },
+    'config remove-mount': {
+      access: 'approval',
+      description:
+        'Remove a host mount from a group. Use --id <group-id> --host-path <abs-path>. ' +
+        '`ncl groups restart --id <id>` applies it to a running group; no image rebuild is needed.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+        const hostPath = (args['host-path'] ?? args.host_path) as string | undefined;
+        if (!hostPath) throw new Error('--host-path is required');
+
+        const row = getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
+
+        const mounts = (JSON.parse(row.additional_mounts) as AdditionalMountConfig[]).filter(
+          (m) => m.hostPath !== hostPath,
+        );
+        updateContainerConfigJson(id, 'additional_mounts', mounts);
+
+        return {
+          mounts,
+          note:
+            'Mounts take effect on next container spawn. The host path must also be covered by the mount ' +
+            'allowlist (~/.config/nanoclaw/mount-allowlist.json, see /manage-mounts). ' +
+            '`ncl groups restart --id <id>` applies it to a running group. No image rebuild is needed.',
         };
       },
     },
