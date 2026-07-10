@@ -34,7 +34,6 @@ import k from 'kleur';
 import { BACK_TO_CHANNEL_SELECTION } from './lib/back-nav.js';
 import { runDiscordChannel } from './channels/discord.js';
 import { runIMessageChannel } from './channels/imessage.js';
-import { runIMessageCloudChannel } from './channels/imessage-cloud.js';
 import { runSignalChannel } from './channels/signal.js';
 import { runSlackChannel } from './channels/slack.js';
 import { runTeamsChannel } from './channels/teams.js';
@@ -78,7 +77,6 @@ type ChannelChoice =
   | 'teams'
   | 'slack'
   | 'imessage'
-  | 'imessage-cloud'
   | 'other'
   | 'skip';
 
@@ -574,8 +572,6 @@ async function main(): Promise<void> {
         result = await runSlackChannel(displayName!);
       } else if (channelChoice === 'imessage') {
         result = await runIMessageChannel(displayName!);
-      } else if (channelChoice === 'imessage-cloud') {
-        result = await runIMessageCloudChannel(displayName!);
       } else if (channelChoice === 'other') {
         result = await askOtherChannelName();
       } else {
@@ -696,8 +692,6 @@ function channelDmLabel(choice: ChannelChoice): string | null {
     case 'teams':
       return 'Teams';
     case 'imessage':
-      return 'iMessage';
-    case 'imessage-cloud':
       return 'iMessage';
     case 'slack':
       return 'Slack DMs';
@@ -1257,8 +1251,9 @@ async function askChannelChoice(): Promise<ChannelChoice> {
           hint: 'needs signal-cli installed',
         },
         {
-          value: 'imessage-cloud',
-          label: 'Yes, connect iMessage (via photon.codes)',
+          value: 'imessage',
+          label: 'Yes, connect iMessage',
+          hint: 'local Mac or hosted iMessage (via photon.codes)',
         },
         {
           value: 'slack',

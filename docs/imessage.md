@@ -1,30 +1,70 @@
-# imessage-cloud — native iMessage via Photon
+# iMessage — one channel, two backends
 
-Photon connects NanoClaw to **iMessage** through [Photon][photon] — a managed
-service that owns the iMessage line, delivery, and abuse-prevention, so you
-don't have to run your own Mac relay. Photon's free tier uses a shared iMessage
-line pool, so anyone can get started without a paid plan.
+NanoClaw connects to **iMessage** through a single `imessage` channel with two
+pluggable backends. Pick one at install time (or force it with
+`IMESSAGE_BACKEND=local|hosted`); only one runs per install.
 
-This is a **native channel** installed with `/add-imessage-cloud`: the adapter
-(`src/channels/imessage-cloud.ts`) is fetched from the `channels` branch and
-self-registers in the channel barrel. It stays dormant until credentials exist.
+- **Local** — the Chat SDK bridge over [`chat-adapter-imessage`][adapter],
+  reading **this Mac's** signed-in iMessage account (`chat.db`). macOS only, and
+  the Node binary needs Full Disk Access. No third-party service — your messages
+  never leave your machine — but NanoClaw must run on the Mac that's signed in.
+- **Hosted** — a native adapter connecting to iMessage through [Photon][photon],
+  a managed service that owns the iMessage line, delivery, and
+  abuse-prevention, so you don't run a Mac relay. Works on any OS. Photon's free
+  tier uses a shared iMessage line pool, so anyone can start without a paid plan.
 
-## Architecture
+Install either flavor with `/add-imessage` (it asks which backend); the adapter
+(`src/channels/imessage.ts`) is fetched from the `channels` branch and
+self-registers in the channel barrel. It stays dormant until a backend is
+configured.
+
+## Choosing a backend
+
+| | Local | Hosted iMessage (via photon.codes) |
+| --- | --- | --- |
+| Runs on | macOS only (reads `chat.db`) | any OS |
+| iMessage line | your own Apple ID | Photon-managed number |
+| Setup | grant Full Disk Access | device-login wizard |
+| Package | `chat-adapter-imessage@0.1.1` | `spectrum-ts@8.0.0` |
+| Credentials | `IMESSAGE_ENABLED=true` | `PHOTON_PROJECT_ID` / `PHOTON_PROJECT_SECRET` |
+| Attachments out / tapbacks | as `chat-adapter-imessage` supports | yes |
+
+The factory picks the backend deterministically: an explicit `IMESSAGE_BACKEND`
+wins; otherwise Photon credentials imply hosted and `IMESSAGE_ENABLED` implies
+local. If both are set without `IMESSAGE_BACKEND`, hosted wins (with a warning).
+
+## Local backend (this Mac)
+
+macOS only. The adapter reads the signed-in account's `chat.db`, which requires
+**Full Disk Access** granted to the Node binary NanoClaw runs under. During
+`/setup` (or `/add-imessage`) we open the Node binary's folder in Finder so you
+can drag it into **System Settings → Privacy & Security → Full Disk Access**.
+
+`.env`:
+
+```bash
+IMESSAGE_BACKEND=local
+IMESSAGE_ENABLED=true
+```
+
+The DM `platform_id` / user id is the phone or email you iMessage with
+(`imessage:+15551234567`).
+
+## Hosted iMessage backend (via photon.codes)
 
 Like Discord and Slack, Photon is a **persistent-connection** channel — no
 public URL, no webhook, no signing secret. The `spectrum-ts` SDK holds a
-long-lived **gRPC stream** to Photon for both directions.
-
-NanoClaw's host runs on Node, and `spectrum-ts` is a TypeScript SDK, so the SDK
-runs **in-process on the host** — there is no Python sidecar (as in Hermes,
-whose gateway is Python) and no loopback HTTP. `deliver()` / `setTyping()` call
-the SDK directly; a re-subscribing consumer loop drains the inbound stream.
+long-lived **gRPC stream** to Photon for both directions. NanoClaw's host runs
+on Node and `spectrum-ts` is a TypeScript SDK, so it runs **in-process on the
+host** — no Python sidecar (as in Hermes), no loopback HTTP. `deliver()` /
+`setTyping()` call the SDK directly; a re-subscribing consumer loop drains the
+inbound stream.
 
 ```
                        gRPC (spectrum-ts, in-process)
 ┌─────────────────────────┐  ◄───────────────►  ┌──────────────────────────┐
 │  Photon Spectrum cloud  │   app.messages       │  NanoClaw host (Node)    │
-│  (iMessage line owner)  │   space.send()       │  imessage-cloud.ts       │
+│  (iMessage line owner)  │   space.send()       │  imessage.ts (hosted)    │
 └─────────────────────────┘                      └──────────┬───────────────┘
                                         onInbound / deliver  │  ▲
                                                              ▼  │
@@ -40,7 +80,7 @@ the SDK directly; a re-subscribing consumer loop drains the inbound stream.
   via `space.create`, or a group by its opaque space id via `space.get`) and
   calls `space.send(markdown | text | attachment | voice | typing | read)`.
 
-## Credentials
+### Credentials
 
 Runtime SDK credentials live in `.env` (host-side; **never** enter a
 container — delivery is host-side, and the container-runner does not mount
@@ -54,15 +94,15 @@ PHOTON_PROJECT_SECRET=<project secret>
 The device-login bearer token used during setup is cached in
 `data/photon-auth.json` (mode `0600`) so re-running the wizard reuses it.
 
-## Setup
+### Setup wizard
 
-During first-time NanoClaw setup, choose **Yes, connect iMessage (via
-photon.codes)**. That path asks for your iMessage phone number, runs the Photon
-device login and provisioning wizard, installs the pinned runtime SDK, restarts
-NanoClaw, and wires the DM to your first agent. It does not ask for a server
-URL or API key.
+During first-time NanoClaw setup, choose **Yes, connect iMessage** and then
+**Hosted iMessage**. That path asks for your iMessage phone number, runs the
+Photon device login and provisioning wizard, installs the pinned runtime SDK,
+restarts NanoClaw, and wires the DM to your first agent. It does not ask for a
+server URL or API key.
 
-The `/add-imessage-cloud` skill provides the same flow for an existing installation.
+`/add-imessage` (Hosted) provides the same flow for an existing installation.
 The underlying commands are:
 
 ```bash
@@ -95,7 +135,7 @@ After setup, restart the service so the adapter connects, then text the
 surfaced number once and wire the DM to an agent with `/init-first-agent`
 (the wizard prints a ready-to-run command).
 
-## Configuration
+### Configuration (hosted)
 
 All optional, set in `.env`:
 
@@ -112,11 +152,12 @@ All optional, set in `.env`:
 ## Platform ids
 
 - **DMs** are direct-addressable: the `platform_id` is the counterpart's bare
-  E.164 number (e.g. `+15551234567`), and the user id is `imessage-cloud:+15551234567`.
-  No channel prefix (see `src/platform-id.ts`).
-- **Groups** use the opaque Spectrum space id, discovered on first message.
+  E.164 number (e.g. `+15551234567`, or an email for the local backend), and the
+  user id is `imessage:+15551234567` (see `src/platform-id.ts`).
+- **Groups** (hosted) use the opaque Spectrum space id, discovered on first
+  message.
 
-## Features
+## Features (hosted)
 
 - **Markdown** — replies are sent via the SDK's `markdown()` builder; iMessage
   renders bold/italics/lists/code natively. `PHOTON_MARKDOWN=false` reverts to
@@ -135,7 +176,10 @@ All optional, set in `.env`:
   matching reply routes to the approval handler instead of waking the agent.
 - **Typing indicators** — sent while the agent is working.
 
-## Upgrading spectrum-ts
+The local backend's feature set is whatever `chat-adapter-imessage` and the
+Chat SDK bridge provide.
+
+## Upgrading spectrum-ts (hosted)
 
 `spectrum-ts` is pinned to an **exact** version in `package.json` because the
 SDK ships breaking majors (v8 is what the adapter targets). Upgrades are
@@ -144,25 +188,23 @@ deliberate:
 1. Read the [SDK release notes][releases] for every version between the current
    pin and the target.
 2. Bump the exact pin and run `pnpm install`.
-3. Reconcile `src/channels/imessage-cloud.ts` against the new typings. The adapter uses
-   `Spectrum`, the `imessage` provider, the `text` / `markdown` / `typing` /
-   `read` / `attachment` / `voice` content builders, and `space.send` /
-   `space.getMessage` / `message.react`.
-4. Run `pnpm run build` and `pnpm exec vitest run src/channels/imessage-cloud.test.ts`.
+3. Reconcile `src/channels/imessage.ts` against the new typings. The hosted
+   backend uses `Spectrum`, the `imessage` provider, the `text` / `markdown` /
+   `typing` / `read` / `attachment` / `voice` content builders, and
+   `space.send` / `space.getMessage` / `message.react`.
+4. Run `pnpm run build` and `pnpm exec vitest run src/channels/imessage.test.ts`.
 
 ## Troubleshooting
 
 | Symptom                                 | Fix                                                                                                                   |
 | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `spectrum-ts is not installed` at setup | `pnpm install spectrum-ts@8.0.0`, then restart                                                                        |
+| `spectrum-ts is not installed` at setup | Hosted backend: `pnpm install spectrum-ts@8.0.0`, then restart                                                        |
 | Device login times out                  | Re-run the wizard (the code expires in ~30 min; a stored token is reused)                                             |
 | No iMessage line assigned               | Re-run `… photon-setup.ts status` or check the [dashboard][photon]; the shared line can take a moment                 |
-| Inbound stops arriving                  | The adapter re-subscribes automatically; if it persists it's usually upstream — restart to force a fresh stream       |
-| Bot silent                              | Check `grep "Photon channel connected" logs/nanoclaw.log`, that the channel is wired, and that the service is running |
-
-Compared to the community `/add-imessage` skill (Photon in "remote mode" via
-the Chat SDK bridge), this native adapter talks to Photon directly, supports
-outbound attachments and tapbacks, and includes the provisioning wizard.
+| Inbound stops arriving (hosted)         | The adapter re-subscribes automatically; if it persists it's usually upstream — restart to force a fresh stream       |
+| Local: no inbound                       | Confirm Full Disk Access is granted to the Node binary NanoClaw runs under, and that it runs on the signed-in Mac     |
+| Bot silent (hosted)                     | Check `grep "Photon channel connected" logs/nanoclaw.log`, that the channel is wired, and that the service is running |
 
 [photon]: https://photon.codes/
+[adapter]: https://www.npmjs.com/package/chat-adapter-imessage
 [releases]: https://github.com/photon-hq/spectrum-ts/releases

@@ -71,15 +71,9 @@ export const STEP_FILES: Record<string, string[]> = {
   'discord-install': ['setup/add-discord.sh', 'setup/channels/discord.ts'],
   'slack-install': ['setup/add-slack.sh', 'setup/channels/slack.ts'],
   'slack-validate': ['setup/channels/slack.ts'],
-  'imessage-install': ['setup/add-imessage.sh', 'setup/channels/imessage.ts'],
-  'imessage': ['setup/channels/imessage.ts'],
-  'imessage-cloud-install': [
-    'setup/add-imessage-cloud.sh',
-    'src/channels/imessage-cloud.ts',
-    'setup/channels/imessage-cloud.ts',
-  ],
-  'imessage-cloud-provision': ['scripts/photon-setup.ts', 'setup/channels/imessage-cloud.ts'],
-  'imessage-cloud-service': ['setup/service.ts', 'src/channels/imessage-cloud.ts'],
+  'imessage-install': ['setup/add-imessage.sh', 'setup/channels/imessage.ts', 'src/channels/imessage.ts'],
+  'imessage-provision': ['scripts/photon-setup.ts', 'setup/channels/imessage.ts'],
+  'imessage-service': ['setup/service.ts', 'src/channels/imessage.ts'],
   'teams-install': ['setup/add-teams.sh', 'setup/channels/teams.ts'],
   'teams-manifest': ['setup/lib/teams-manifest.ts', 'setup/channels/teams.ts'],
   'init-first-agent': [

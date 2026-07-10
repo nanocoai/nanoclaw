@@ -185,9 +185,10 @@ export async function run(_args: string[]): Promise<void> {
   if (has('MATRIX_ACCESS_TOKEN')) channelAuth.matrix = 'configured';
   if (has('RESEND_API_KEY')) channelAuth.resend = 'configured';
   if (has('WHATSAPP_ACCESS_TOKEN')) channelAuth['whatsapp-cloud'] = 'configured';
-  if (has('IMESSAGE_ENABLED')) channelAuth.imessage = 'configured';
-  if (has('PHOTON_PROJECT_ID') && has('PHOTON_PROJECT_SECRET')) {
-    channelAuth['imessage-cloud'] = 'configured';
+  // One `imessage` channel, either backend: local (IMESSAGE_ENABLED) or
+  // hosted (Photon project credentials).
+  if (has('IMESSAGE_ENABLED') || (has('PHOTON_PROJECT_ID') && has('PHOTON_PROJECT_SECRET'))) {
+    channelAuth.imessage = 'configured';
   }
 
   const configuredChannels = Object.keys(channelAuth);

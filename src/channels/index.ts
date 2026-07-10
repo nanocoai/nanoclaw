@@ -7,4 +7,4 @@
 // self-registration import below.
 
 import './cli.js';
-import './imessage-cloud.js';
+import './imessage.js';

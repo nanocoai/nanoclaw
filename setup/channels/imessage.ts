@@ -1,27 +1,25 @@
 /**
- * iMessage channel flow for setup:auto.
+ * iMessage channel flow for setup:auto — one channel, two backends.
  *
- * `runIMessageChannel(displayName)` covers both deployment modes:
+ * `runIMessageChannel(displayName)` asks which backend to run, then drives it:
  *
  *   Local (macOS): the bot runs on this Mac and talks via the signed-in
- *   iMessage account. Reading chat.db needs Full Disk Access granted to
- *   the Node binary — we open the directory for them so they can drag
- *   the `node` file into System Settings.
+ *   iMessage account. Reading chat.db needs Full Disk Access granted to the
+ *   Node binary — we open the directory so they can drag the `node` file into
+ *   System Settings.
  *
- *   Remote (Photon API): the bot talks to a separate server (Photon)
- *   that owns an iMessage account on another Mac. Used when this host
- *   is Linux, or when the operator wants to keep their daily-driver
- *   Mac's chat history out of the loop.
+ *   Hosted iMessage (photon.codes): the service owns the iMessage line and exposes it through a
+ *   persistent Spectrum connection, so there is no relay URL, API key, webhook,
+ *   or public endpoint. A device-login wizard provisions the project, secret,
+ *   user, and iMessage line for you.
  *
  * Flow:
- *   1. Pick mode (auto-defaults to local on macOS, remote elsewhere)
- *   2. Local: FDA walkthrough (open node bin directory, wait for ack)
- *      Remote: prompt for Photon server URL + API key
- *   3. Ask for the phone or email the operator messages from — this is
- *      the platform-id for first-agent wiring
- *   4. Install the adapter (setup/add-imessage.sh, non-interactive)
- *   5. Wire the agent via scripts/init-first-agent.ts — the welcome
- *      iMessage goes out through the normal delivery path
+ *   1. Pick backend (local on macOS by default; hosted-only off macOS)
+ *   2. Local: FDA walkthrough + ask for the phone/email you iMessage from
+ *      Hosted: ask for your E.164 number, run Photon device login + provisioning
+ *   3. Install the adapter + the chosen backend's package (setup/add-imessage.sh)
+ *   4. Restart NanoClaw so the channel connects
+ *   5. Wire the operator's iMessage DM to the first agent (--channel imessage)
  *
  * All output obeys the three-level contract. See docs/setup-flow.md.
  */
@@ -32,73 +30,100 @@ import path from 'path';
 import * as p from '@clack/prompts';
 import k from 'kleur';
 
+import { isE164, main as runPhotonSetup, normalizePhone } from '../../scripts/photon-setup.js';
 import * as setupLog from '../logs.js';
 import { BACK_TO_CHANNEL_SELECTION, type ChannelFlowResult } from '../lib/back-nav.js';
 import { brightSelect } from '../lib/bright-select.js';
 import { askOperatorRole } from '../lib/role-prompt.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
 import { accentGreen, note, wrapForGutter } from '../lib/theme.js';
-import { readEnvKey } from '../environment.js';
 
 const DEFAULT_AGENT_NAME = 'Nano';
 
-type Mode = 'local' | 'remote';
-
-interface RemoteCreds {
-  serverUrl: string;
-  apiKey: string;
-}
+type Backend = 'local' | 'hosted';
 
 export async function runIMessageChannel(displayName: string): Promise<ChannelFlowResult> {
   const isMac = os.platform() === 'darwin';
 
-  const mode = await askMode(isMac);
-  if (mode === 'back') return BACK_TO_CHANNEL_SELECTION;
-  let remoteCreds: RemoteCreds | null = null;
+  const backend = await askBackend(isMac);
+  if (backend === 'back') return BACK_TO_CHANNEL_SELECTION;
 
-  if (mode === 'local') {
-    if (!isMac) {
+  // Backend-specific provisioning + the platform id / user id we wire.
+  let installEnv: Record<string, string>;
+  let userId: string;
+  let platformId: string;
+
+  if (backend === 'local') {
+    await walkThroughFullDiskAccess();
+    const handle = await askOperatorHandle();
+    installEnv = { IMESSAGE_BACKEND: 'local', IMESSAGE_ENABLED: 'true' };
+    userId = handle;
+    platformId = handle;
+  } else {
+    const phone = await askOperatorPhone();
+
+    // Photon device login → auto-provisions project/secret/user/line and writes
+    // PHOTON_PROJECT_ID / PHOTON_PROJECT_SECRET to .env.
+    let provisionCode: number;
+    try {
+      provisionCode = await runPhotonSetup(['setup', '--phone', phone, '--embedded']);
+    } catch (error) {
       await fail(
-        'imessage',
-        "Local iMessage mode only works on macOS.",
-        'Choose remote mode (Photon API) on Linux/WSL, or run setup from your Mac.',
+        'imessage-provision',
+        "Couldn't reach photon.codes to finish account setup.",
+        error instanceof Error ? error.message : 'Re-run setup to retry.',
       );
     }
-    await walkThroughFullDiskAccess();
-  } else {
-    remoteCreds = await collectRemoteCreds();
+    if (provisionCode !== 0) {
+      await fail(
+        'imessage-provision',
+        "Couldn't finish the hosted iMessage (photon.codes) account setup.",
+        'Re-run setup to retry the device login and provisioning flow.',
+      );
+    }
+    installEnv = { IMESSAGE_BACKEND: 'hosted' };
+    userId = `imessage:${phone}`;
+    platformId = phone;
   }
 
-  const handle = await askOperatorHandle();
-
+  // Fetch the adapter from the channels branch, install the chosen backend's
+  // package, and build — mirrors /add-imessage. Idempotent.
   const install = await runQuietChild(
     'imessage-install',
     'bash',
     ['setup/add-imessage.sh'],
     {
-      running:
-        mode === 'local'
-          ? "Connecting the iMessage adapter to this Mac…"
-          : `Connecting the iMessage adapter to ${remoteCreds!.serverUrl}…`,
+      running: 'Installing the iMessage adapter…',
       done: 'iMessage adapter installed.',
     },
-    {
-      env:
-        mode === 'local'
-          ? { IMESSAGE_LOCAL: 'true', IMESSAGE_ENABLED: 'true' }
-          : {
-              IMESSAGE_LOCAL: 'false',
-              IMESSAGE_SERVER_URL: remoteCreds!.serverUrl,
-              IMESSAGE_API_KEY: remoteCreds!.apiKey,
-            },
-      extraFields: { MODE: mode },
-    },
+    { env: installEnv, extraFields: { BACKEND: backend } },
   );
   if (!install.ok) {
     await fail(
       'imessage-install',
       "Couldn't install the iMessage adapter.",
-      'See logs/setup-steps/ for details, then retry setup.',
+      'See logs/setup-steps/imessage-install.log for details, then retry setup.',
+      install.rawLog,
+    );
+  }
+
+  // Re-running the idempotent service step rebuilds dist, reloads the service
+  // manager entry, and starts the adapter with its newly written creds.
+  const restart = await runQuietChild(
+    'imessage-service',
+    'pnpm',
+    ['exec', 'tsx', 'setup/index.ts', '--step', 'service'],
+    {
+      running: 'Restarting NanoClaw with iMessage…',
+      done: 'NanoClaw restarted with iMessage.',
+    },
+  );
+  if (!restart.ok) {
+    await fail(
+      'imessage-service',
+      "Couldn't restart NanoClaw with iMessage.",
+      'See logs/setup-steps/imessage-service.log for details, then retry setup.',
+      restart.rawLog,
     );
   }
 
@@ -113,8 +138,8 @@ export async function runIMessageChannel(displayName: string): Promise<ChannelFl
     [
       'exec', 'tsx', 'scripts/init-first-agent.ts',
       '--channel', 'imessage',
-      '--user-id', handle,
-      '--platform-id', handle,
+      '--user-id', userId,
+      '--platform-id', platformId,
       '--display-name', displayName,
       '--agent-name', agentName,
       '--role', role,
@@ -127,8 +152,8 @@ export async function runIMessageChannel(displayName: string): Promise<ChannelFl
       extraFields: {
         CHANNEL: 'imessage',
         AGENT_NAME: agentName,
-        PLATFORM_ID: handle,
-        MODE: mode,
+        PLATFORM_ID: platformId,
+        BACKEND: backend,
       },
     },
   );
@@ -136,52 +161,53 @@ export async function runIMessageChannel(displayName: string): Promise<ChannelFl
     await fail(
       'init-first-agent',
       `Couldn't finish connecting ${agentName}.`,
-      'Double-check Full Disk Access (local mode) or Photon credentials (remote), then retry.',
+      'Check logs/nanoclaw.error.log for connection errors, then retry setup.',
+      init.rawLog,
     );
   }
 }
 
-async function askMode(isMac: boolean): Promise<Mode | 'back'> {
+async function askBackend(isMac: boolean): Promise<Backend | 'back'> {
   const baseOptions = isMac
     ? [
         {
           value: 'local' as const,
           label: 'Local (this Mac)',
-          hint: "uses this machine's iMessage account",
+          hint: "uses this Mac's iMessage account",
         },
         {
-          value: 'remote' as const,
-          label: 'Remote (Photon API)',
-          hint: 'the bot lives on another server',
+          value: 'hosted' as const,
+          label: 'Hosted iMessage',
+          hint: 'managed line via photon.codes — no Mac needed',
         },
       ]
     : [
         {
-          value: 'remote' as const,
-          label: 'Remote (Photon API)',
-          hint: 'only option off macOS',
+          value: 'hosted' as const,
+          label: 'Hosted iMessage',
+          hint: 'managed line via photon.codes',
         },
       ];
   const choice = ensureAnswer(
-    await brightSelect<Mode | 'back'>({
+    await brightSelect<Backend | 'back'>({
       message: 'How should iMessage run?',
-      initialValue: isMac ? 'local' : 'remote',
+      initialValue: isMac ? 'local' : 'hosted',
       options: [
         ...baseOptions,
         { value: 'back', label: '← Back to channel selection' },
       ],
     }),
   );
-  if (choice !== 'back') setupLog.userInput('imessage_mode', String(choice));
+  if (choice !== 'back') setupLog.userInput('imessage_backend', String(choice));
   return choice;
 }
 
 /**
- * Grant Full Disk Access to the Node binary the host runs under — without
- * it, the adapter can't read chat.db and inbound messages never arrive.
- * Opening the containing directory in Finder makes the drag-and-drop
- * target obvious; falling back to printing the path keeps us working in
- * SSH/headless contexts where `open` is a no-op.
+ * Grant Full Disk Access to the Node binary the host runs under — without it,
+ * the local backend can't read chat.db and inbound messages never arrive.
+ * Opening the containing directory in Finder makes the drag-and-drop target
+ * obvious; falling back to printing the path keeps us working in SSH/headless
+ * contexts where `open` is a no-op.
  */
 async function walkThroughFullDiskAccess(): Promise<void> {
   let nodePath = process.execPath;
@@ -228,62 +254,6 @@ async function walkThroughFullDiskAccess(): Promise<void> {
   setupLog.userInput('imessage_fda_confirmed', 'true');
 }
 
-async function collectRemoteCreds(): Promise<RemoteCreds> {
-  const existingUrl = readEnvKey('IMESSAGE_SERVER_URL');
-  const existingKey = readEnvKey('IMESSAGE_API_KEY');
-  if (existingUrl && existingKey && /^https?:\/\//i.test(existingUrl)) {
-    const reuse = ensureAnswer(await p.confirm({
-      message: `Found existing Photon credentials (${existingUrl}). Use them?`,
-      initialValue: true,
-    }));
-    if (reuse) {
-      setupLog.userInput('imessage_remote_creds', 'reused-existing');
-      return { serverUrl: existingUrl, apiKey: existingKey };
-    }
-  }
-
-  note(
-    [
-      "Photon is a separate service that owns an iMessage account and",
-      "exposes it over HTTP. NanoClaw will talk to it via its API.",
-      '',
-      '  1. Set up a Photon server: https://photon.codes',
-      '  2. Copy the server URL and API key from your Photon dashboard',
-    ].join('\n'),
-    'Remote iMessage via Photon',
-  );
-
-  const urlAnswer = ensureAnswer(
-    await p.text({
-      message: 'Photon server URL',
-      placeholder: 'https://photon.example.com',
-      validate: (v) => {
-        const t = (v ?? '').trim();
-        if (!t) return 'URL is required';
-        if (!/^https?:\/\//i.test(t)) return 'Must start with http:// or https://';
-        return undefined;
-      },
-    }),
-  );
-  const serverUrl = (urlAnswer as string).trim();
-
-  const keyAnswer = ensureAnswer(
-    await p.password({
-      message: 'Photon API key',
-      clearOnError: true,
-      validate: (v) => ((v ?? '').trim() ? undefined : 'API key is required'),
-    }),
-  );
-  const apiKey = (keyAnswer as string).trim();
-
-  setupLog.userInput('imessage_server_url', serverUrl);
-  setupLog.userInput(
-    'imessage_api_key',
-    `${apiKey.slice(0, 4)}…${apiKey.slice(-4)}`,
-  );
-  return { serverUrl, apiKey };
-}
-
 async function askOperatorHandle(): Promise<string> {
   note(
     [
@@ -315,6 +285,30 @@ async function askOperatorHandle(): Promise<string> {
   const handle = (answer as string).trim();
   setupLog.userInput('imessage_handle', handle);
   return handle;
+}
+
+async function askOperatorPhone(): Promise<string> {
+  note(
+    [
+      'Your hosted iMessage line (via photon.codes) provides the number for your assistant.',
+      'Enter the phone number you use to send iMessages to it.',
+      '',
+      k.dim('Use international E.164 format: + followed by country code and number.'),
+      k.dim('Example: +14155551234'),
+    ].join('\n'),
+    'Your iMessage phone number',
+  );
+
+  const answer = ensureAnswer(
+    await p.text({
+      message: 'Your iMessage phone number',
+      validate: (value) =>
+        isE164(normalizePhone(value ?? '')) ? undefined : 'Enter a valid E.164 number, e.g. +15551234567',
+    }),
+  );
+  const phone = normalizePhone(answer as string);
+  setupLog.userInput('imessage_phone', phone);
+  return phone;
 }
 
 async function resolveAgentName(): Promise<string> {

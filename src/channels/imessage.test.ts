@@ -28,7 +28,7 @@ import {
   type SpectrumApp,
   type SpectrumMessage,
   type SpectrumSpace,
-} from './imessage-cloud.js';
+} from './imessage.js';
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -321,7 +321,7 @@ describe('photon adapter (mocked SDK)', () => {
     expect(msg.isMention).toBe(true);
     expect(msg.isGroup).toBe(false);
     expect((msg.content as { text: string }).text).toBe('hi bot');
-    expect((msg.content as { senderId: string }).senderId).toBe('imessage-cloud:+15551112222');
+    expect((msg.content as { senderId: string }).senderId).toBe('imessage:+15551112222');
     expect(host.metadata[0]).toEqual({ platformId: '+15551112222', isGroup: false });
 
     await adapter.teardown();
@@ -589,7 +589,7 @@ describe('photon adapter (mocked SDK)', () => {
         },
       },
     );
-    await expect(adapter.setup(host.config)).rejects.toThrow(/spectrum-ts.*not installed|add-imessage-cloud/i);
+    await expect(adapter.setup(host.config)).rejects.toThrow(/spectrum-ts.*not installed|add-imessage/i);
     expect(adapter.isConnected()).toBe(false);
   });
 

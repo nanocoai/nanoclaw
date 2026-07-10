@@ -724,7 +724,7 @@ async function runSetup(args: Args, fetchFn: FetchFn = fetch, deps: SetupDeps = 
         '  1. Install the runtime SDK (if not already):  pnpm install spectrum-ts@8.0.0',
         '  2. (Re)start the NanoClaw service so the channel connects.',
         phone
-          ? `  3. Wire your DM to an agent:  npx tsx scripts/init-first-agent.ts --channel imessage-cloud --user-id imessage-cloud:${phone} --platform-id ${phone} --display-name "You"`
+          ? `  3. Wire your DM to an agent:  npx tsx scripts/init-first-agent.ts --channel imessage --user-id imessage:${phone} --platform-id ${phone} --display-name "You"`
           : '  3. Run /init-first-agent to wire your DM to an agent.',
       ].join('\n'),
     );

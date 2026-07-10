@@ -1,15 +1,25 @@
 /**
- * Photon (iMessage) channel adapter — native (skill-installed via /add-imessage-cloud).
+ * iMessage channel adapter — one channel, two pluggable backends
+ * (skill-installed via /add-imessage). The factory picks a backend from
+ * config; only one is ever active per install.
  *
- * Connects NanoClaw to iMessage through Photon's managed Spectrum platform
- * using the TypeScript `spectrum-ts` SDK directly on the host. Unlike Hermes
- * (whose gateway is Python and therefore needs a Node sidecar to run the
- * SDK), NanoClaw's host is already Node, so the SDK runs in-process — no
- * sidecar, no loopback HTTP, no extra supervised subprocess.
+ *   - local   — the Chat SDK bridge over `chat-adapter-imessage`, reading
+ *               THIS Mac's signed-in iMessage account (chat.db; macOS + Full
+ *               Disk Access). Selected when IMESSAGE_ENABLED is truthy.
+ *   - hosted  — this native adapter, connecting to iMessage through Photon's
+ *               managed Spectrum platform using the TypeScript `spectrum-ts`
+ *               SDK directly on the host. Selected when PHOTON_PROJECT_ID /
+ *               PHOTON_PROJECT_SECRET are set.
  *
- * Architecture: like Discord/Slack this is a persistent-connection channel —
- * no webhook, no public URL, no signing secret. `spectrum-ts` holds a
- * long-lived gRPC stream to Photon for both directions:
+ * Set IMESSAGE_BACKEND=local|hosted to force one when both are configured.
+ *
+ * Hosted backend (the bulk of this file): unlike Hermes (whose gateway is
+ * Python and therefore needs a Node sidecar to run the SDK), NanoClaw's host
+ * is already Node, so the SDK runs in-process — no sidecar, no loopback HTTP,
+ * no extra supervised subprocess. Like Discord/Slack it is a
+ * persistent-connection channel — no webhook, no public URL, no signing
+ * secret. `spectrum-ts` holds a long-lived gRPC stream to Photon for both
+ * directions:
  *   - Inbound:  the SDK's `app.messages` async iterator yields
  *               `[space, message]` pairs. We normalize each to an
  *               InboundMessage and hand it to the router. The consumer loop
@@ -17,17 +27,20 @@
  *   - Outbound: `deliver()` resolves the target space (a DM by phone, or a
  *               group by its opaque space id) and calls `space.send(...)`.
  *
- * Credentials come from `.env` (host-side; never enters a container):
+ * Hosted credentials come from `.env` (host-side; never enters a container):
  *   PHOTON_PROJECT_ID       — the Spectrum project id (SDK `projectId`)
  *   PHOTON_PROJECT_SECRET   — the project secret
  * Both are provisioned frictionlessly by `scripts/photon-setup.ts`
- * (`/add-imessage-cloud`), which runs Photon's device-login flow and creates the
+ * (`/add-imessage`), which runs Photon's device-login flow and creates the
  * project, secret, user, and iMessage line for you.
  *
- * The `spectrum-ts` dependency is loaded via a runtime dynamic import so the
- * channel barrel evaluates (and this module registers) even when the package
- * isn't installed yet — the factory returns an adapter only when creds exist,
- * and setup() throws a clear "run /add-imessage-cloud" error if the SDK is missing.
+ * Neither backend's package (`chat-adapter-imessage`, `spectrum-ts`) is
+ * imported at module load: `spectrum-ts` loads via a runtime dynamic import in
+ * setup(), and `chat-adapter-imessage` via a dynamic import in the local
+ * factory branch — so the channel barrel evaluates (and this module registers)
+ * even when neither is installed. The factory returns an adapter only when a
+ * backend is configured, and setup() throws a clear "run /add-imessage" error
+ * if the hosted SDK is missing.
  */
 import fs from 'fs';
 import os from 'os';
@@ -39,13 +52,18 @@ import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import { registerChannelAdapter } from './channel-registry.js';
+import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import type { ChannelAdapter, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
+// Type-only import from the baseline `chat` dep — no runtime cost, and the
+// local backend's `chat-adapter-imessage` is loaded dynamically (see the
+// factory) so this module still evaluates without that package installed.
+import type { Adapter } from 'chat';
 
 // ---------------------------------------------------------------------------
 // Minimal structural typings for the slice of `spectrum-ts` we consume.
 //
 // We intentionally do not `import` from 'spectrum-ts' at type level: the
-// package is installed on demand by /add-imessage-cloud, and the barrel must typecheck and
+// package is installed on demand by /add-imessage, and the barrel must typecheck and
 // the barrel must evaluate without it. These interfaces mirror the shapes the
 // SDK returns (see the Hermes sidecar for the reference usage against v8).
 // ---------------------------------------------------------------------------
@@ -143,7 +161,7 @@ export type SpectrumLoader = () => Promise<PhotonSdk>;
 const defaultLoader: SpectrumLoader = async () => {
   // Non-literal specifiers keep tsc from resolving (and failing on) a module
   // that may not be installed. Node resolves the bare specifier + subpath
-  // export at runtime once /add-imessage-cloud has installed spectrum-ts.
+  // export at runtime once /add-imessage has installed spectrum-ts.
   const spectrumSpec: string = 'spectrum-ts';
   const imessageSpec: string = 'spectrum-ts/providers/imessage';
   const spectrum = (await import(spectrumSpec)) as unknown as SpectrumModule;
@@ -518,7 +536,7 @@ export function createPhotonAdapter(
       content: {
         text,
         sender,
-        senderId: `imessage-cloud:${sender}`,
+        senderId: `imessage:${sender}`,
         senderName,
         isGroup,
         ...(out.attachments.length > 0 && { attachments: out.attachments }),
@@ -569,8 +587,8 @@ export function createPhotonAdapter(
   }
 
   const adapter: ChannelAdapter = {
-    name: 'imessage-cloud',
-    channelType: 'imessage-cloud',
+    name: 'imessage',
+    channelType: 'imessage',
     supportsThreads: false,
 
     async setup(hostConfig: ChannelSetup): Promise<void> {
@@ -580,7 +598,7 @@ export function createPhotonAdapter(
         sdk = await loadSpectrum();
       } catch (err) {
         throw new Error(
-          'Photon: the `spectrum-ts` SDK is not installed. Run /add-imessage-cloud ' +
+          'Photon: the `spectrum-ts` SDK is not installed. Run /add-imessage ' +
             '(or `pnpm install spectrum-ts@8.0.0`) to enable the channel.',
           { cause: err },
         );
@@ -724,26 +742,99 @@ export function createPhotonAdapter(
 }
 
 // ---------------------------------------------------------------------------
-// Self-registration
+// Self-registration — one `imessage` channel; the factory picks the backend
 // ---------------------------------------------------------------------------
 
 function truthy(value: string | undefined): boolean {
   return /^(1|true|yes|on)$/i.test((value ?? '').trim());
 }
 
-registerChannelAdapter('imessage-cloud', {
+type Backend = 'local' | 'hosted';
+
+/**
+ * Decide which backend (if any) is configured. An explicit IMESSAGE_BACKEND
+ * wins; otherwise Photon credentials imply hosted and IMESSAGE_ENABLED implies
+ * local. Returns null when neither is set (the channel stays dormant).
+ */
+function pickBackend(env: Record<string, string | undefined>): Backend | null {
+  const explicit = (process.env.IMESSAGE_BACKEND ?? env.IMESSAGE_BACKEND ?? '').trim().toLowerCase();
+  if (explicit === 'local' || explicit === 'hosted') return explicit;
+
+  const hasPhoton =
+    Boolean(process.env.PHOTON_PROJECT_ID ?? env.PHOTON_PROJECT_ID) &&
+    Boolean(process.env.PHOTON_PROJECT_SECRET ?? env.PHOTON_PROJECT_SECRET);
+  const localEnabled = truthy(process.env.IMESSAGE_ENABLED ?? env.IMESSAGE_ENABLED);
+
+  if (hasPhoton && localEnabled) {
+    log.warn(
+      'iMessage: both Photon credentials and IMESSAGE_ENABLED are set — defaulting to the hosted ' +
+        'backend. Set IMESSAGE_BACKEND=local|hosted to choose explicitly.',
+    );
+    return 'hosted';
+  }
+  if (hasPhoton) return 'hosted';
+  if (localEnabled) return 'local';
+  return null;
+}
+
+/**
+ * Build the local backend: the Chat SDK bridge over `chat-adapter-imessage`,
+ * reading this Mac's signed-in iMessage account. The package is pulled via a
+ * non-literal dynamic specifier so tsc never resolves it and the barrel
+ * evaluates without it installed; /add-imessage (Local) installs it on demand.
+ */
+async function createLocalAdapter(): Promise<ChannelAdapter> {
+  const spec: string = 'chat-adapter-imessage';
+  let mod: { createiMessageAdapter: (opts: { local?: boolean }) => Adapter };
+  try {
+    mod = (await import(spec)) as unknown as typeof mod;
+  } catch (err) {
+    throw new Error(
+      'iMessage (local): the `chat-adapter-imessage` package is not installed. Run /add-imessage ' +
+        '(or `pnpm install chat-adapter-imessage@0.1.1`) to enable the local backend.',
+      { cause: err },
+    );
+  }
+  const raw = mod.createiMessageAdapter({ local: true });
+  // The community adapter omits channelIdFromThreadId; polyfill an identity fn.
+  const adapter = Object.assign(raw, { channelIdFromThreadId: (threadId: string) => threadId });
+  return createChatSdkBridge({ adapter, concurrency: 'concurrent', supportsThreads: false });
+}
+
+registerChannelAdapter('imessage', {
   factory: () => {
     const env = readEnvFile([
+      'IMESSAGE_BACKEND',
+      'IMESSAGE_ENABLED',
       'PHOTON_PROJECT_ID',
       'PHOTON_PROJECT_SECRET',
       'PHOTON_MARKDOWN',
       'PHOTON_TELEMETRY',
       'PHOTON_MAX_INLINE_ATTACHMENT_BYTES',
     ]);
+
+    const backend = pickBackend(env);
+    if (!backend) {
+      log.debug(
+        'iMessage: no backend configured — set PHOTON_PROJECT_ID/PHOTON_PROJECT_SECRET for hosted ' +
+          'or IMESSAGE_ENABLED=true for local. Skipping channel.',
+      );
+      return null;
+    }
+
+    if (backend === 'local') {
+      if (os.platform() !== 'darwin') {
+        log.warn("iMessage: the local backend reads this Mac's chat.db and requires macOS — skipping channel");
+        return null;
+      }
+      return createLocalAdapter();
+    }
+
+    // hosted (Photon)
     const projectId = process.env.PHOTON_PROJECT_ID || env.PHOTON_PROJECT_ID;
     const projectSecret = process.env.PHOTON_PROJECT_SECRET || env.PHOTON_PROJECT_SECRET;
     if (!projectId || !projectSecret) {
-      log.debug('Photon: PHOTON_PROJECT_ID / PHOTON_PROJECT_SECRET not set, skipping channel');
+      log.debug('iMessage (hosted): PHOTON_PROJECT_ID / PHOTON_PROJECT_SECRET not set, skipping channel');
       return null;
     }
     const markdownRaw = process.env.PHOTON_MARKDOWN ?? env.PHOTON_MARKDOWN;
