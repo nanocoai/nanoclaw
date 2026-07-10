@@ -43,6 +43,7 @@ import {
   type ProviderContainerContribution,
   type VolumeMount,
 } from './providers/provider-container-registry.js';
+import { deliverSessionMessages } from './delivery.js';
 import {
   heartbeatPath,
   markContainerRunning,
@@ -196,6 +197,13 @@ async function spawnContainer(session: Session): Promise<void> {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
+    // Drain any outbound messages written just before the container exited.
+    // Once container_status = 'stopped', the session is excluded from
+    // getRunningSessions() (active poll, 1 s) and won't be swept for up to
+    // 60 s — draining here closes that window.
+    void deliverSessionMessages(session).catch((err) =>
+      log.error('Post-exit delivery drain failed', { sessionId: session.id, err }),
+    );
     // code null = killed by signal (normal shutdown path), not a boot failure.
     if (code !== 0 && code !== null && stderrTail.length > 0) {
       log.warn('Container exited non-zero', { sessionId: session.id, code, containerName, stderrTail });
