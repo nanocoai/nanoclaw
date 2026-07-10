@@ -1789,7 +1789,7 @@ async function main(): Promise<void> {
           {
             prompt: turnPrompt,
             sessionId,
-            model: override?.model || codexGroupSettings.model || 'gpt-5.6',
+            model: override?.model || codexGroupSettings.model || 'gpt-5.6-sol',
             effort: override?.thinking
               ? codexEffortForThinking(override.thinking)
               : codexGroupSettings.effortLevel || 'medium',
