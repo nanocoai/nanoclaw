@@ -3,6 +3,7 @@ import {
   classifyProgressAction,
   createProgressPresentationState,
   progressLogFields,
+  progressTransitionLogFields,
   reduceProgressPresentation,
   redactProgressText,
   serializeProgressPayload,
@@ -38,6 +39,24 @@ describe('progressLogFields', () => {
       toolCallId: 'log-1',
     });
     expect(JSON.stringify(fields)).not.toContain('log-canary');
+  });
+});
+
+describe('progressTransitionLogFields', () => {
+  it('只输出同卡状态对账字段', () => {
+    expect(progressTransitionLogFields({
+      cardMessageId: 'om_card_1',
+      toolCallId: 'call-1',
+      stepCount: 3,
+      fromStatus: 'running',
+      toStatus: 'completed',
+    })).toEqual({
+      cardMessageId: 'om_card_1',
+      toolCallId: 'call-1',
+      stepCount: 3,
+      fromStatus: 'running',
+      toStatus: 'completed',
+    });
   });
 });
 

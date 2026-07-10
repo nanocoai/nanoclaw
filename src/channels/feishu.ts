@@ -15,6 +15,7 @@ import { logger } from '../logger.js';
 import {
   createProgressPresentationState,
   isStructuredProgress,
+  progressTransitionLogFields,
   redactProgressText,
   reduceProgressPresentation,
   type PresentationStep,
@@ -668,6 +669,13 @@ export class FeishuChannel implements Channel {
 
       let technicalDetail: string | undefined;
       let toolCallId: string | undefined;
+      let startedTransition:
+        | {
+            toolCallId: string;
+            fromStatus: PresentationStep['status'] | 'missing';
+            toStatus: PresentationStep['status'];
+          }
+        | undefined;
       if (
         structuredProgress &&
         process.env.NANOCLAW_READABLE_PROGRESS !== '0'
@@ -675,6 +683,11 @@ export class FeishuChannel implements Channel {
         const previous =
           this.progressPresentations.get(jid) ??
           createProgressPresentationState();
+        const previousDisplayStep = structuredProgress.toolCallId
+          ? previous.steps.find(
+              (step) => step.toolCallId === structuredProgress.toolCallId,
+            )
+          : undefined;
         const updatesExistingStep = structuredProgress.toolCallId
           ? previous.steps.some(
               (step) => step.toolCallId === structuredProgress.toolCallId,
@@ -747,6 +760,17 @@ export class FeishuChannel implements Channel {
         if (displayStep) {
           title = presentationStepTitle(displayStep);
         }
+        if (
+          toolCallId &&
+          displayStep &&
+          structuredProgress.lifecycle === 'started'
+        ) {
+          startedTransition = {
+            toolCallId,
+            fromStatus: previousDisplayStep?.status ?? 'missing',
+            toStatus: displayStep.status,
+          };
+        }
         technicalDetail = detail ?? structuredProgress.resultSummary;
         detail = undefined;
 
@@ -775,6 +799,21 @@ export class FeishuChannel implements Channel {
             progressRecordSteps(existing.allSteps),
             existing.startTime,
           );
+          if (displayStep) {
+            logger.info(
+              {
+                jid,
+                ...progressTransitionLogFields({
+                  cardMessageId: existing.messageId,
+                  toolCallId,
+                  stepCount: existing.allSteps.length,
+                  fromStatus: previousDisplayStep?.status ?? 'missing',
+                  toStatus: displayStep.status,
+                }),
+              },
+              '[progress-state] 工具步骤状态更新',
+            );
+          }
           if (!updatedVisible || !existing.messageId) return;
           existing.frame++;
           await this.client.im.message.patch({
@@ -819,6 +858,22 @@ export class FeishuChannel implements Channel {
             ts: Date.now(),
           }),
         ]);
+        const created = this.progressCards.get(jid);
+        if (created?.messageId && startedTransition) {
+          logger.info(
+            {
+              jid,
+              ...progressTransitionLogFields({
+                cardMessageId: created.messageId,
+                toolCallId: startedTransition.toolCallId,
+                stepCount: created.allSteps.length,
+                fromStatus: startedTransition.fromStatus,
+                toStatus: startedTransition.toStatus,
+              }),
+            },
+            '[progress-state] 工具步骤状态更新',
+          );
+        }
         return;
       }
 
@@ -855,6 +910,21 @@ export class FeishuChannel implements Channel {
           progressRecordSteps(existing.allSteps),
           existing.startTime,
         );
+        if (startedTransition) {
+          logger.info(
+            {
+              jid,
+              ...progressTransitionLogFields({
+                cardMessageId: existing.messageId,
+                toolCallId: startedTransition.toolCallId,
+                stepCount: existing.allSteps.length,
+                fromStatus: startedTransition.fromStatus,
+                toStatus: startedTransition.toStatus,
+              }),
+            },
+            '[progress-state] 工具步骤状态更新',
+          );
+        }
         // 新步骤到来：立即 patch 卡片
         existing.frame++;
         this.client.im.message

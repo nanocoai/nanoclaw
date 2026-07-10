@@ -129,6 +129,22 @@ export function progressLogFields(
   };
 }
 
+export function progressTransitionLogFields(input: {
+  cardMessageId: string;
+  toolCallId: string;
+  stepCount: number;
+  fromStatus: PresentationStep['status'] | 'missing';
+  toStatus: PresentationStep['status'];
+}): Record<string, string | number> {
+  return {
+    cardMessageId: input.cardMessageId,
+    toolCallId: input.toolCallId,
+    stepCount: input.stepCount,
+    fromStatus: input.fromStatus,
+    toStatus: input.toStatus,
+  };
+}
+
 function inputString(
   input: Record<string, unknown> | undefined,
   key: string,
