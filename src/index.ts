@@ -130,6 +130,12 @@ function injectReportToActiveAgent(
   const ok = queue.sendMessage(sourceJid, reportMeta.text);
   if (ok) {
     advanceAgentCursor(sourceJid, reportMeta.timestamp);
+    // report 注入触发新一轮 query，必须清除 progressDone 使新 progress 能创建卡片。
+    // 普通 message-loop pipe 在 index.ts:563 已有 setTyping(true)，此处是注入路径的对等操作。
+    const ch = findChannel(channels, sourceJid);
+    ch?.setTyping?.(sourceJid, true).catch((err) => {
+      logger.warn({ err, sourceJid }, 'injectReport: setTyping failed (non-fatal)');
+    });
     logger.info(
       { sourceJid, reportId: reportMeta.id, ts: reportMeta.timestamp },
       'report injected into active agent, cursor advanced',
