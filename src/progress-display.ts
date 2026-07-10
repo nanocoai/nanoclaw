@@ -60,6 +60,35 @@ export type ProgressPresentationEvent =
   | { kind: 'tool'; progress: StructuredProgress }
   | { kind: 'turn_end' };
 
+export function isStructuredProgress(value: unknown): value is StructuredProgress {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const progress = value as Record<string, unknown>;
+  return (
+    ['claude', 'codex', 'gemini', 'legacy'].includes(String(progress.provider)) &&
+    ['started', 'completed', 'failed', 'cancelled', 'unknown'].includes(
+      String(progress.lifecycle),
+    ) &&
+    typeof progress.toolName === 'string' &&
+    progress.toolName.trim().length > 0 &&
+    (progress.toolCallId === undefined || typeof progress.toolCallId === 'string') &&
+    (progress.input === undefined ||
+      (!!progress.input && typeof progress.input === 'object' && !Array.isArray(progress.input)))
+  );
+}
+
+export function serializeProgressPayload(output: {
+  result: string;
+  detail?: string;
+  progress?: StructuredProgress;
+}): string {
+  if (!output.detail && !output.progress) return output.result;
+  return JSON.stringify({
+    title: output.result,
+    ...(output.detail ? { detail: output.detail } : {}),
+    ...(output.progress ? { progress: output.progress } : {}),
+  });
+}
+
 function inputString(
   input: Record<string, unknown> | undefined,
   key: string,
@@ -474,7 +503,13 @@ export function reduceProgressPresentation(
         };
       }
     }
-    const action = classifyProgressAction(progress, state.pendingPhase);
+    const runningPlan = state.steps.find(
+      (step) => step.source === 'plan' && step.status === 'running',
+    );
+    const action = classifyProgressAction(
+      progress,
+      state.pendingPhase ?? runningPlan?.title,
+    );
     const existingIndex = progress.toolCallId
       ? state.steps.findIndex((step) => step.toolCallId === progress.toolCallId)
       : -1;

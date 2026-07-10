@@ -311,12 +311,19 @@ export function mapCodexProgress(event: CodexEvent): ContainerOutput[] {
   if (event.type === 'item.completed' && event.item && event.item.type !== 'agent_message') {
     const it = event.item;
     const exitCode = typeof it.exit_code === 'number' ? it.exit_code : null;
-    const lifecycle = (exitCode != null && exitCode !== 0) || it.status === 'failed'
-      ? 'failed'
-      : 'completed';
+    const status = it.status?.toLowerCase();
+    const lifecycle = status && ['cancelled', 'canceled', 'interrupted'].includes(status)
+      ? 'cancelled'
+      : (exitCode != null && exitCode !== 0) || status === 'failed'
+        ? 'failed'
+        : 'completed';
     return [{
       status: 'progress',
-      result: lifecycle === 'failed' ? '❌ 执行失败' : '✅ 执行完成',
+      result: lifecycle === 'cancelled'
+        ? '⏹️ 已取消'
+        : lifecycle === 'failed'
+          ? '❌ 执行失败'
+          : '✅ 执行完成',
       progressType: 'tool_result',
       progress: {
         provider: 'codex', lifecycle, toolName: it.type, toolCallId: it.id,

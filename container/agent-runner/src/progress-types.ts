@@ -8,6 +8,56 @@ export interface StructuredProgress {
   resultSummary?: string;
 }
 
+export interface ClaudeToolResultBlock {
+  type?: string;
+  tool_use_id?: string;
+  content?: unknown;
+  is_error?: boolean;
+}
+
+export interface ClaudeToolResultProgress {
+  result: string;
+  detail?: string;
+  progress: StructuredProgress;
+}
+
+function toolResultText(content: unknown): string {
+  if (typeof content === 'string') return content.trim();
+  if (!Array.isArray(content)) return '';
+  return content
+    .flatMap((item) => {
+      if (!item || typeof item !== 'object') return [];
+      const block = item as { type?: string; text?: string };
+      return block.type === 'text' && block.text ? [block.text] : [];
+    })
+    .join('\n')
+    .trim();
+}
+
+export function buildClaudeToolResultProgress(
+  block: ClaudeToolResultBlock,
+): ClaudeToolResultProgress | null {
+  if (block.type !== 'tool_result') return null;
+  const text = toolResultText(block.content);
+  const lifecycle = block.is_error ? 'failed' : 'completed';
+  const short = text ? text.slice(0, 60) + (text.length > 60 ? '...' : '') : '';
+  return {
+    result: text
+      ? `${block.is_error ? '❌' : '✅'} 结果: ${short}`
+      : block.is_error
+        ? '❌ 执行失败'
+        : '✅ 执行完成',
+    detail: text.length > 60 ? text.slice(0, 1000) : undefined,
+    progress: {
+      provider: 'claude',
+      lifecycle,
+      toolName: 'tool_result',
+      toolCallId: block.tool_use_id,
+      resultSummary: short || undefined,
+    },
+  };
+}
+
 const MAX_VALUE_LENGTH = 2_000;
 const SAFE_STRING_KEYS = new Set([
   'command',

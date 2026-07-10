@@ -567,6 +567,59 @@ describe('FeishuChannel', () => {
       expect((channel as any).progressCards.get(jid).steps).toHaveLength(1);
     });
 
+    it('滑出可见窗口的步骤完成后仍更新过程记录', async () => {
+      const jid = 'fs:oc_progress_hidden_result';
+      for (let index = 0; index < 4; index++) {
+        await channel.sendMessage(jid, JSON.stringify({
+          title: `🔧 command ${index}`,
+          progress: {
+            provider: 'codex', lifecycle: 'started', toolName: 'command_execution',
+            toolCallId: `hidden-${index}`, input: { command: `./unknown-${index}` },
+          },
+        }), { isProgress: true });
+      }
+      const entry = (channel as any).progressCards.get(jid);
+      expect(entry.steps.some((step: any) => step.toolCallId === 'hidden-0')).toBe(false);
+
+      await channel.sendMessage(jid, JSON.stringify({
+        title: '✅ 执行完成',
+        progress: {
+          provider: 'codex', lifecycle: 'completed', toolName: 'command_execution',
+          toolCallId: 'hidden-0', exitCode: 0,
+        },
+      }), { isProgress: true });
+
+      const record = _getSessionForTest(entry.sessionId);
+      expect(record?.steps.find((step: any) => step.toolCallId === 'hidden-0')?.title)
+        .toBe('已执行系统检查');
+    });
+
+    it('完成结果与 started 技术详情有界合并，不覆盖原命令', async () => {
+      const jid = 'fs:oc_progress_technical_merge';
+      await channel.sendMessage(jid, JSON.stringify({
+        title: '🔧 npm test',
+        detail: '```bash\nnpm test\n```',
+        progress: {
+          provider: 'codex', lifecycle: 'started', toolName: 'command_execution',
+          toolCallId: 'merge-1', input: { command: 'npm test' },
+        },
+      }), { isProgress: true });
+      await channel.sendMessage(jid, JSON.stringify({
+        title: '❌ 执行失败',
+        detail: 'AssertionError: expected 1 to be 2',
+        progress: {
+          provider: 'codex', lifecycle: 'failed', toolName: 'command_execution',
+          toolCallId: 'merge-1', exitCode: 1,
+        },
+      }), { isProgress: true });
+
+      const entry = (channel as any).progressCards.get(jid);
+      const detail = _getSessionForTest(entry.sessionId)?.steps[0].detail ?? '';
+      expect(detail).toContain('npm test');
+      expect(detail).toContain('AssertionError');
+      expect(detail.length).toBeLessThanOrEqual(2000);
+    });
+
     it('同一 call ID 的富 started 事件升级原步骤而不重复追加', async () => {
       const jid = 'fs:oc_progress_started_upgrade';
       await channel.sendMessage(
@@ -619,6 +672,7 @@ describe('FeishuChannel', () => {
         { isProgress: true },
       );
       mockPatch.mockClear();
+      const sessionId = (channel as any).progressCards.get(jid).sessionId;
 
       await channel.cleanupProgressCard(jid);
 
@@ -628,6 +682,9 @@ describe('FeishuChannel', () => {
       );
       expect(serialized).toContain('已执行测试，结果未知');
       expect(serialized).not.toContain('已完成测试');
+      expect(_getSessionForTest(sessionId)?.steps[0].title).toBe(
+        '已执行测试，结果未知',
+      );
     });
 
     it('可通过环境开关回退旧展示', async () => {
@@ -656,6 +713,19 @@ describe('FeishuChannel', () => {
       } finally {
         delete process.env.NANOCLAW_READABLE_PROGRESS;
       }
+    });
+
+    it('畸形 structured progress 降级为安全文案而不抛错', async () => {
+      const jid = 'fs:oc_progress_malformed';
+      await expect(channel.sendMessage(jid, JSON.stringify({
+        title: '🔧 /bin/zsh -lc "cat /secret"',
+        detail: '```bash\ncat /secret\n```',
+        progress: { provider: 'codex', lifecycle: 'started', toolName: null },
+      }), { isProgress: true })).resolves.toBeUndefined();
+      const callArg = mockCreate.mock.calls[0]?.[0];
+      const serialized = JSON.stringify(JSON.parse(callArg?.data?.content ?? '{}'));
+      expect(serialized).toContain('正在执行系统检查');
+      expect(serialized).not.toContain('/secret');
     });
 
     it('progressDone 后忽略迟到的进度消息', async () => {

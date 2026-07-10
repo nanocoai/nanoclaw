@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { boundProgressInput } from './progress-types.js';
+import { boundProgressInput, buildClaudeToolResultProgress } from './progress-types.js';
 
 describe('boundProgressInput', () => {
   it('保留分类字段并限制长度', () => {
@@ -47,6 +47,26 @@ describe('boundProgressInput', () => {
         { content: '核对实现', status: 'in_progress' },
         { content: '运行测试', status: 'pending' },
       ],
+    });
+  });
+});
+
+describe('buildClaudeToolResultProgress', () => {
+  it('空内容的显式失败仍产生 failed 终态', () => {
+    expect(buildClaudeToolResultProgress({
+      type: 'tool_result', tool_use_id: 'tool-failed', is_error: true,
+    })).toMatchObject({
+      result: '❌ 执行失败',
+      progress: { lifecycle: 'failed', toolCallId: 'tool-failed' },
+    });
+  });
+
+  it('空内容的显式成功仍产生 completed 终态', () => {
+    expect(buildClaudeToolResultProgress({
+      type: 'tool_result', tool_use_id: 'tool-ok', content: '',
+    })).toMatchObject({
+      result: '✅ 执行完成',
+      progress: { lifecycle: 'completed', toolCallId: 'tool-ok' },
     });
   });
 });

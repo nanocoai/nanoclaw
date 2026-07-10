@@ -3,8 +3,24 @@ import {
   classifyProgressAction,
   createProgressPresentationState,
   reduceProgressPresentation,
+  serializeProgressPayload,
   type StructuredProgress,
 } from './progress-display.js';
+
+describe('serializeProgressPayload', () => {
+  it('完整保留结构化 progress，供主路径和重试路径复用', () => {
+    const progress = started('Bash', { command: 'npm test' }, 'retry-1');
+    expect(JSON.parse(serializeProgressPayload({
+      result: '🔧 npm test',
+      detail: '```bash\nnpm test\n```',
+      progress,
+    }))).toEqual({
+      title: '🔧 npm test',
+      detail: '```bash\nnpm test\n```',
+      progress,
+    });
+  });
+});
 
 function started(
   toolName: string,
@@ -215,6 +231,20 @@ describe('reduceProgressPresentation', () => {
       ['补齐单元测试', 'running', 'plan'],
       ['执行真实 E2E', 'pending', 'plan'],
     ]);
+  });
+
+  it('后续工具动作归入当前进行中的真实计划', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'tool',
+      progress: started('TodoWrite', {
+        todos: [{ content: '补齐单元测试', status: 'in_progress' }],
+      }, 'todo-parent'),
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started('Bash', { command: 'npm test' }, 'test-child'),
+    });
+    expect(state.steps.at(-1)?.phase).toBe('补齐单元测试');
   });
 
   it('中间叙述成为下一次工具调用的阶段锚点', () => {

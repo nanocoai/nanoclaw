@@ -14,6 +14,7 @@ import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 import {
   createProgressPresentationState,
+  isStructuredProgress,
   reduceProgressPresentation,
   type PresentationStep,
   type ProgressPresentationState,
@@ -44,7 +45,7 @@ const TYPING_EMOJI_BY_MODE: Record<CliMode, string> = {
 };
 const CARD_THRESHOLD = 500;
 const MD_PATTERN = /```|\*\*|^##?\s|^\|.*\||\*[^*\s]|^[-*+]\s|^>\s/m;
-const PROGRESS_JSON_PATTERN = /^\{"title":"[🔧📖✏️🔍🌐📋⚙️⏳💭💬✅❌📝]/u;
+const PROGRESS_JSON_PATTERN = /^\{"title":"[🔧📖✏️🔍🌐📋⚙️⏳💭💬✅❌📝⏹️]/u;
 const THINKING_PHRASES = ['思考中', '分析中', '处理中', '推理中'];
 
 // ---- 多媒体安全限制 ----
@@ -139,6 +140,16 @@ function progressRecordSteps(steps: ProgressStep[]): ProgressStep[] {
     ...step,
     detail: technicalDetail ?? step.detail,
   }));
+}
+
+function mergeTechnicalDetail(
+  current: string | undefined,
+  incoming: string | undefined,
+): string | undefined {
+  if (!incoming) return current;
+  if (!current) return incoming.slice(0, 2000);
+  if (current.includes(incoming)) return current.slice(0, 2000);
+  return `${current}\n\n${incoming}`.slice(0, 2000);
 }
 
 function presentationStepTitle(step: {
@@ -566,12 +577,23 @@ export class FeishuChannel implements Channel {
           const parsed = JSON.parse(text) as {
             title?: string;
             detail?: string;
-            progress?: StructuredProgress;
+            progress?: unknown;
           };
           if (parsed.title) {
             title = parsed.title;
             detail = parsed.detail;
-            structuredProgress = parsed.progress;
+            if (parsed.progress !== undefined) {
+              if (isStructuredProgress(parsed.progress)) {
+                structuredProgress = parsed.progress;
+              } else {
+                title = '⚙️ 正在执行系统检查';
+                detail = undefined;
+                logger.warn(
+                  { jid },
+                  '[progress] structured progress 格式无效，使用安全展示',
+                );
+              }
+            }
           }
         } catch {
           /* 降级为纯文本 */
@@ -736,17 +758,20 @@ export class FeishuChannel implements Channel {
               .find((item) => item.toolCallId === toolCallId);
             if (!step) return false;
             step.title = title;
-            if (technicalDetail) step.technicalDetail = technicalDetail;
+            step.technicalDetail = mergeTechnicalDetail(
+              step.technicalDetail,
+              technicalDetail,
+            );
             return true;
           };
           const updatedVisible = update(existing.steps);
           update(existing.allSteps);
-          if (!updatedVisible || !existing.messageId) return;
           upsertSession(
             existing.sessionId,
             progressRecordSteps(existing.allSteps),
             existing.startTime,
           );
+          if (!updatedVisible || !existing.messageId) return;
           existing.frame++;
           await this.client.im.message.patch({
             path: { message_id: existing.messageId },
@@ -1107,6 +1132,11 @@ export class FeishuChannel implements Channel {
           }
         }
       }
+      upsertSession(
+        progressEntry.sessionId,
+        progressRecordSteps(progressEntry.allSteps),
+        progressEntry.startTime,
+      );
     }
     this.progressPresentations.delete(jid);
 

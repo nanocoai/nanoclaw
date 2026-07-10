@@ -76,6 +76,7 @@ import {
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { isValidGroupFolder, resolveGroupFolderPath } from './group-folder.js';
+import { serializeProgressPayload } from './progress-display.js';
 import {
   finalizeDelegationOnTurnEnd,
   shouldCarryReply,
@@ -760,11 +761,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         },
         '[progress] 转发到 channel',
       );
-      const payload = result.detail
-        ? JSON.stringify({ title: result.result, detail: result.detail, progress: result.progress })
-        : result.progress
-          ? JSON.stringify({ title: result.result, progress: result.progress })
-        : result.result;
+      const payload = serializeProgressPayload({
+        result: result.result,
+        detail: result.detail,
+        progress: result.progress,
+      });
       await channel.sendMessage(chatJid, payload, { isProgress: true });
       everSentToUser = true; // CLI interactive 模式下中间消息也算"发过消息"
       if (result.progressType === 'text') {
@@ -1256,47 +1257,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         async (result) => {
           // 进度消息 — 与原始回调完全一致
           if (result.status === 'progress' && result.result) {
-            // thinking 类型的 progress 不发给用户（同主回调逻辑）
-            if (shouldFilterProgress(result.progressType)) {
-              logger.info(
-                { chatJid, text: result.result.slice(0, 100) },
-                '[retry-progress] thinking 类型，跳过发送',
-              );
-              return;
-            }
-            logger.info(
-              {
-                chatJid,
-                progressType: result.progressType,
-                preview: result.result.slice(0, 80),
-              },
-              '[retry-progress] 转发到 channel',
-            );
-            const payload = result.detail
-              ? JSON.stringify({ title: result.result, detail: result.detail })
-              : result.result;
-            await channel.sendMessage(chatJid, payload, { isProgress: true });
-            everSentToUser = true; // CLI interactive 模式下中间消息也算"发过消息"
-            if (result.progressType === 'text') {
-              textSentToUser = true;
-              autoFollowupSummaryTextParts.push(result.result);
-            }
-            if (result.progressType === 'tool_use' && result.result) {
-              try {
-                storeMessageDirect({
-                  id: `tool_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-                  chat_jid: chatJid,
-                  sender: ASSISTANT_NAME,
-                  sender_name: ASSISTANT_NAME,
-                  content: result.result,
-                  timestamp: new Date().toISOString(),
-                  is_from_me: true,
-                  is_bot_message: true,
-                });
-              } catch {
-                /* 入库失败不影响主流程 */
-              }
-            }
+            await mainOnOutput(result);
             return;
           }
 

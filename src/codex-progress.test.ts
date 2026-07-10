@@ -124,6 +124,14 @@ describe('mapCodexProgress — 回归', () => {
     });
   });
 
+  it.each(['cancelled', 'canceled', 'interrupted'])('%s 状态映射为取消', (status) => {
+    const out = mapCodexProgress(completed({
+      id: `c-${status}`, type: 'command_execution', status,
+    }));
+    expect(out[0].progress?.lifecycle).toBe('cancelled');
+    expect(out[0].result).toBe('⏹️ 已取消');
+  });
+
   it('结构化输入限制长度且不保留 MCP arguments', () => {
     const out = mapCodexProgress(
       started({

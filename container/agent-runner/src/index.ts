@@ -36,7 +36,12 @@ import { buildSendMessageToolEnv } from './mcp-tool-policy.js';
 import { readGroupModelSettings, readCodexModelSettings } from './model-settings.js';
 import { resolveQueryCwdForSession } from './session-cwd.js';
 import { isFinalizingOnly } from './finalizing-tools.js';
-import { boundProgressInput, type StructuredProgress } from './progress-types.js';
+import {
+  boundProgressInput,
+  buildClaudeToolResultProgress,
+  type ClaudeToolResultBlock,
+  type StructuredProgress,
+} from './progress-types.js';
 
 interface ContainerInput {
   prompt: string;
@@ -1277,35 +1282,16 @@ async function runQuery(
       const content = userMsg.message?.content;
       if (Array.isArray(content)) {
         for (const block of content) {
-          const b = block as { type?: string; content?: unknown; tool_use_id?: string; is_error?: boolean };
-          if (b.type === 'tool_result' && b.content) {
-            let resultText = '';
-            if (typeof b.content === 'string') {
-              resultText = b.content;
-            } else if (Array.isArray(b.content)) {
-              resultText = (b.content as Array<{ type?: string; text?: string }>)
-                .filter(c => c.type === 'text' && c.text)
-                .map(c => c.text!)
-                .join('\n');
-            }
-            if (resultText && resultText.trim().length > 0) {
-              const short = resultText.trim().slice(0, 60) + (resultText.trim().length > 60 ? '...' : '');
-              writeOutput({
-                status: 'progress',
-                result: `✅ 结果: ${short}`,
-                progressType: 'tool_result',
-                detail: resultText.trim().length > 60 ? resultText.trim().slice(0, 1000) : undefined,
-                progress: {
-                  provider: 'claude',
-                  lifecycle: b.is_error ? 'failed' : 'completed',
-                  toolName: 'tool_result',
-                  toolCallId: b.tool_use_id,
-                  resultSummary: short,
-                },
-                newSessionId: undefined,
-              });
-            }
-          }
+          const mapped = buildClaudeToolResultProgress(
+            block as ClaudeToolResultBlock,
+          );
+          if (!mapped) continue;
+          writeOutput({
+            status: 'progress',
+            ...mapped,
+            progressType: 'tool_result',
+            newSessionId: undefined,
+          });
         }
       }
     }

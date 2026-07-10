@@ -276,6 +276,34 @@ describe('mapToContainerOutput', () => {
     expect(outputs[0].result).toContain('echo hello');
   });
 
+  it('user tool_result 映射为同 ID 的完成事件', () => {
+    const outputs = mapToContainerOutput({
+      type: 'user',
+      message: {
+        content: [{
+          type: 'tool_result', tool_use_id: 'tool-1', content: '12 matches',
+        }],
+      },
+    });
+    expect(outputs).toHaveLength(1);
+    expect(outputs[0].progress).toMatchObject({
+      lifecycle: 'completed', toolCallId: 'tool-1',
+    });
+  });
+
+  it('user 空 tool_result 的 is_error 不会被丢弃', () => {
+    const outputs = mapToContainerOutput({
+      type: 'user',
+      message: {
+        content: [{
+          type: 'tool_result', tool_use_id: 'tool-2', is_error: true,
+        }],
+      },
+    });
+    expect(outputs[0].result).toBe('❌ 执行失败');
+    expect(outputs[0].progress?.lifecycle).toBe('failed');
+  });
+
   it('assistant text block 不产生 output（避免与 result 重复发送）', () => {
     const msg = {
       type: 'assistant' as const,
