@@ -383,14 +383,16 @@ export function extractCodexError(event: CodexEvent): string | undefined {
 /** 映射 codex usage → ContainerOutput.usage（modelInfo 来自 rollout，--json 流不暴露 model） */
 export function mapCodexUsage(
   usage: CodexEvent['usage'],
-  modelInfo?: { model?: string; modelContextWindow?: number; lastTurnContext?: number },
+  modelInfo?: CodexModelInfo,
   effort?: string,
 ): ContainerOutput['usage'] | undefined {
   if (!usage) return undefined;
+  // turn.completed 的 usage 是线程累计值，rollout last_token_usage 才是单轮值
+  const ltu = modelInfo?.lastTurnUsage;
   const result: ContainerOutput['usage'] = {
-    inputTokens: usage.input_tokens ?? 0,
-    outputTokens: usage.output_tokens ?? 0,
-    cacheReadInputTokens: usage.cached_input_tokens ?? 0,
+    inputTokens: ltu?.input_tokens ?? usage.input_tokens ?? 0,
+    outputTokens: ltu?.output_tokens ?? usage.output_tokens ?? 0,
+    cacheReadInputTokens: ltu?.cached_input_tokens ?? usage.cached_input_tokens ?? 0,
     cacheCreationInputTokens: 0,
     numTurns: 1,
     durationMs: 0,
@@ -418,10 +420,21 @@ export function mapCodexUsage(
  * turn_context 记录里（payload.model / payload.model_context_window）。
  * rollout 文件名以 threadId 结尾：sessions/YYYY/MM/DD/rollout-<ts>-<threadId>.jsonl
  */
+export interface CodexModelInfo {
+  model?: string;
+  modelContextWindow?: number;
+  lastTurnContext?: number;
+  lastTurnUsage?: {
+    input_tokens: number;
+    cached_input_tokens: number;
+    output_tokens: number;
+  };
+}
+
 export function readCodexModelInfo(
   codexHome: string,
   threadId: string,
-): { model?: string; modelContextWindow?: number; lastTurnContext?: number } {
+): CodexModelInfo {
   try {
     const sessionsDir = path.join(codexHome, 'sessions');
     if (!fs.existsSync(sessionsDir)) return {};
@@ -433,7 +446,7 @@ export function readCodexModelInfo(
     // usage 事件里的 total_token_usage 是整条线程累计值，footer 要用 last_token_usage。
     let model: string | undefined;
     let modelContextWindow: number | undefined;
-    let lastTurnContext: number | undefined;
+    let lastTurnUsage: CodexModelInfo['lastTurnUsage'] | undefined;
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i].trim();
       if (!line) continue;
@@ -441,7 +454,13 @@ export function readCodexModelInfo(
         payload?: {
           model?: unknown;
           model_context_window?: unknown;
-          info?: { last_token_usage?: { input_tokens?: unknown } };
+          info?: {
+            last_token_usage?: {
+              input_tokens?: unknown;
+              cached_input_tokens?: unknown;
+              output_tokens?: unknown;
+            };
+          };
         };
       };
       try {
@@ -460,17 +479,26 @@ export function readCodexModelInfo(
       ) {
         modelContextWindow = p.model_context_window;
       }
-      const maybeLastInput = p.info?.last_token_usage?.input_tokens;
-      if (lastTurnContext === undefined && typeof maybeLastInput === 'number') {
-        lastTurnContext = maybeLastInput;
+      const ltu = p.info?.last_token_usage;
+      if (lastTurnUsage === undefined && typeof ltu?.input_tokens === 'number') {
+        lastTurnUsage = {
+          input_tokens: ltu.input_tokens as number,
+          cached_input_tokens: (typeof ltu.cached_input_tokens === 'number' ? ltu.cached_input_tokens : 0) as number,
+          output_tokens: (typeof ltu.output_tokens === 'number' ? ltu.output_tokens : 0) as number,
+        };
       }
       if (
         model !== undefined &&
         modelContextWindow !== undefined &&
-        lastTurnContext !== undefined
+        lastTurnUsage !== undefined
       ) break;
     }
-    return { model, modelContextWindow, lastTurnContext };
+    return {
+      model,
+      modelContextWindow,
+      lastTurnContext: lastTurnUsage?.input_tokens,
+      lastTurnUsage,
+    };
   } catch {
     return {};
   }
