@@ -77,6 +77,7 @@ vi.mock('../voice-notify.js', () => ({
 }));
 
 import { ASSISTANT_NAME } from '../config.js';
+import { _getSessionForTest } from '../progress-server.js';
 import { FeishuChannel } from './feishu.js';
 import type { ChannelOpts } from './registry.js';
 import type { CliMode } from '../types.js';
@@ -460,6 +461,203 @@ describe('FeishuChannel', () => {
   });
 
   describe('进度消息聚合', () => {
+    it('真实 TodoWrite 计划按状态展示且不暴露工具名', async () => {
+      const jid = 'fs:oc_progress_real_plan';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '⚙️ TodoWrite',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'TodoWrite',
+            toolCallId: 'todo-1',
+            input: {
+              todos: [
+                { content: '核对实现范围', status: 'completed' },
+                { content: '补齐单元测试', status: 'in_progress' },
+                { content: '执行真实 E2E', status: 'pending' },
+              ],
+            },
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const patchArg = mockPatch.mock.calls.at(-1)?.[0];
+      const serialized = JSON.stringify(
+        JSON.parse(patchArg?.data?.content ?? '{}'),
+      );
+      expect(serialized).toContain('已完成：核对实现范围');
+      expect(serialized).toContain('进行中：补齐单元测试');
+      expect(serialized).toContain('待处理：执行真实 E2E');
+      expect(serialized).not.toContain('TodoWrite');
+    });
+
+    it('结构化工具进度显示用户语义并隐藏原始命令', async () => {
+      const jid = 'fs:oc_readable_progress';
+      const payload = JSON.stringify({
+        title: '🔧 /bin/zsh -lc "npm run build -- --secret"',
+        detail: '```bash\n/bin/zsh -lc "npm run build -- --secret"\n```',
+        progress: {
+          provider: 'codex',
+          lifecycle: 'started',
+          toolName: 'command_execution',
+          toolCallId: 'build-1',
+          input: { command: '/bin/zsh -lc "npm run build -- --secret"' },
+        },
+      });
+
+      await channel.sendMessage(jid, payload, { isProgress: true });
+
+      const callArg = mockCreate.mock.calls[0]?.[0];
+      const serialized = JSON.stringify(
+        JSON.parse(callArg?.data?.content ?? '{}'),
+      );
+      expect(serialized).toContain('正在编译项目');
+      expect(serialized).not.toContain('zsh -lc');
+      expect(serialized).not.toContain('--secret');
+      const sessionId = (channel as any).progressCards.get(jid).sessionId;
+      const record = _getSessionForTest(sessionId);
+      expect(record?.steps[0].detail).toContain('npm run build');
+    });
+
+    it('结构化完成事件按 call ID 原地更新步骤', async () => {
+      const jid = 'fs:oc_progress_result_update';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 npm test',
+          detail: '```bash\nnpm test\n```',
+          progress: {
+            provider: 'codex',
+            lifecycle: 'started',
+            toolName: 'command_execution',
+            toolCallId: 'test-1',
+            input: { command: 'npm test' },
+          },
+        }),
+        { isProgress: true },
+      );
+      mockPatch.mockClear();
+
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '✅ 执行完成',
+          progress: {
+            provider: 'codex',
+            lifecycle: 'completed',
+            toolName: 'command_execution',
+            toolCallId: 'test-1',
+            input: { command: 'npm test' },
+            exitCode: 0,
+          },
+        }),
+        { isProgress: true },
+      );
+
+      expect(mockPatch).toHaveBeenCalled();
+      const patchArg = mockPatch.mock.calls.at(-1)?.[0];
+      const serialized = JSON.stringify(
+        JSON.parse(patchArg?.data?.content ?? '{}'),
+      );
+      expect(serialized).toContain('已完成测试');
+      expect(serialized).not.toContain('✅ 执行完成');
+      expect((channel as any).progressCards.get(jid).steps).toHaveLength(1);
+    });
+
+    it('同一 call ID 的富 started 事件升级原步骤而不重复追加', async () => {
+      const jid = 'fs:oc_progress_started_upgrade';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Bash',
+          progress: {
+            provider: 'claude', lifecycle: 'started', toolName: 'Bash',
+            toolCallId: 'tool-1',
+          },
+        }),
+        { isProgress: true },
+      );
+      mockPatch.mockClear();
+
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Bash: npm test',
+          detail: '```bash\nnpm test\n```',
+          progress: {
+            provider: 'claude', lifecycle: 'started', toolName: 'Bash',
+            toolCallId: 'tool-1', input: { command: 'npm test' },
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const entry = (channel as any).progressCards.get(jid);
+      expect(entry.steps).toHaveLength(1);
+      expect(entry.steps[0].title).toBe('正在运行测试');
+      expect(entry.allSteps).toHaveLength(1);
+      expect(mockPatch).toHaveBeenCalledTimes(1);
+    });
+
+    it('清理时将缺少结果的工具收口为结果未知', async () => {
+      const jid = 'fs:oc_progress_unknown_result';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 npm test',
+          progress: {
+            provider: 'codex',
+            lifecycle: 'started',
+            toolName: 'command_execution',
+            toolCallId: 'test-missing',
+            input: { command: 'npm test' },
+          },
+        }),
+        { isProgress: true },
+      );
+      mockPatch.mockClear();
+
+      await channel.cleanupProgressCard(jid);
+
+      const patchArg = mockPatch.mock.calls.at(-1)?.[0];
+      const serialized = JSON.stringify(
+        JSON.parse(patchArg?.data?.content ?? '{}'),
+      );
+      expect(serialized).toContain('已执行测试，结果未知');
+      expect(serialized).not.toContain('已完成测试');
+    });
+
+    it('可通过环境开关回退旧展示', async () => {
+      const jid = 'fs:oc_progress_legacy_fallback';
+      process.env.NANOCLAW_READABLE_PROGRESS = '0';
+      try {
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '🔧 npm run build',
+            progress: {
+              provider: 'codex',
+              lifecycle: 'started',
+              toolName: 'command_execution',
+              toolCallId: 'build-legacy',
+              input: { command: 'npm run build' },
+            },
+          }),
+          { isProgress: true },
+        );
+        const callArg = mockCreate.mock.calls[0]?.[0];
+        const serialized = JSON.stringify(
+          JSON.parse(callArg?.data?.content ?? '{}'),
+        );
+        expect(serialized).toContain('🔧 npm run build');
+      } finally {
+        delete process.env.NANOCLAW_READABLE_PROGRESS;
+      }
+    });
+
     it('progressDone 后忽略迟到的进度消息', async () => {
       const jid = 'fs:oc_progress_done';
       // 模拟 progressDone 已标记（正式回复已到达）

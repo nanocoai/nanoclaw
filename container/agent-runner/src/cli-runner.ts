@@ -14,6 +14,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { buildSendMessageToolEnv } from './mcp-tool-policy.js';
+import { boundProgressInput, type StructuredProgress } from './progress-types.js';
 
 // ---- 类型定义 ----
 
@@ -24,7 +25,7 @@ export interface CliStreamMessage {
   session_id?: string;
   message?: {
     role?: string;
-    content?: Array<{ type: string; text?: string; name?: string; input?: unknown }>;
+    content?: Array<{ type: string; id?: string; text?: string; name?: string; input?: unknown }>;
     model?: string;
     usage?: Record<string, number>;
   };
@@ -45,6 +46,7 @@ export interface ContainerOutput {
   error?: string;
   progressType?: 'tool_use' | 'tool_result' | 'thinking' | 'text';
   detail?: string;
+  progress?: StructuredProgress;
   /** CLI interactive 模式：终端态错误已污染当前 Claude session，需要提示用户决定是否清理。 */
   terminalSessionCorruption?: boolean;
   usage?: {
@@ -207,6 +209,10 @@ export function mapToContainerOutput(
           status: 'progress',
           result: `${emoji} ${block.name}: ${shortInput}`,
           progressType: 'tool_use',
+          progress: {
+            provider: 'claude', lifecycle: 'started', toolName: block.name,
+            toolCallId: block.id, input: boundProgressInput(input),
+          },
         });
       }
 

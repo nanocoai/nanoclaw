@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { PassThrough } from 'stream';
+import { PassThrough } from 'node:stream';
 import type { ChildProcess } from 'child_process';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 

@@ -77,6 +77,67 @@ describe('mapCodexProgress — 回归', () => {
     expect(out[0].result).toBe('🔧 npm test');
     expect(out[0].detail).toContain('```bash');
     expect(out[0].detail).toContain('npm test');
+    expect(out[0].progress).toEqual({
+      provider: 'codex',
+      lifecycle: 'started',
+      toolName: 'command_execution',
+      toolCallId: 'c1',
+      input: { command: 'npm test' },
+    });
+  });
+
+  it('command_execution completed 生成同 ID 的完成事件', () => {
+    const out = mapCodexProgress(
+      completed({
+        id: 'c1',
+        type: 'command_execution',
+        command: 'npm test',
+        exit_code: 0,
+        status: 'completed',
+      }),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0].progressType).toBe('tool_result');
+    expect(out[0].progress).toMatchObject({
+      provider: 'codex',
+      lifecycle: 'completed',
+      toolCallId: 'c1',
+      exitCode: 0,
+    });
+  });
+
+  it('completed 事件的 failed 状态不会误报成功', () => {
+    const out = mapCodexProgress(
+      completed({
+        id: 'c-failed',
+        type: 'mcp_tool_call',
+        status: 'failed',
+        server: 'gitnexus',
+        tool: 'query',
+      }),
+    );
+    expect(out[0].result).toBe('❌ 执行失败');
+    expect(out[0].progress).toMatchObject({
+      lifecycle: 'failed',
+      toolCallId: 'c-failed',
+      input: { server: 'gitnexus', tool: 'query' },
+    });
+  });
+
+  it('结构化输入限制长度且不保留 MCP arguments', () => {
+    const out = mapCodexProgress(
+      started({
+        id: 'mcp-1',
+        type: 'mcp_tool_call',
+        server: 'gitnexus',
+        tool: 'query',
+        arguments: { api_key: 'secret', query: 'x'.repeat(3_000) },
+      }),
+    );
+    expect(out[0].progress?.input).toEqual({
+      server: 'gitnexus',
+      tool: 'query',
+    });
   });
 
   it('agent_message 返回空', () => {

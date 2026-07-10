@@ -13,6 +13,13 @@ import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 import {
+  createProgressPresentationState,
+  reduceProgressPresentation,
+  type PresentationStep,
+  type ProgressPresentationState,
+  type StructuredProgress,
+} from '../progress-display.js';
+import {
   startProgressServer,
   getProgressUrl,
   upsertSession,
@@ -37,7 +44,7 @@ const TYPING_EMOJI_BY_MODE: Record<CliMode, string> = {
 };
 const CARD_THRESHOLD = 500;
 const MD_PATTERN = /```|\*\*|^##?\s|^\|.*\||\*[^*\s]|^[-*+]\s|^>\s/m;
-const PROGRESS_JSON_PATTERN = /^\{"title":"[🔧📖✏️🔍🌐📋⚙️⏳💭💬✅]/u;
+const PROGRESS_JSON_PATTERN = /^\{"title":"[🔧📖✏️🔍🌐📋⚙️⏳💭💬✅❌📝]/u;
 const THINKING_PHRASES = ['思考中', '分析中', '处理中', '推理中'];
 
 // ---- 多媒体安全限制 ----
@@ -120,8 +127,32 @@ function buildCard(
 interface ProgressStep {
   title: string;
   detail?: string;
+  technicalDetail?: string;
+  toolCallId?: string;
+  isPlan?: boolean;
   /** 该步骤进入主进程的时间戳（毫秒，用于进度页每步时间显示） */
   ts?: number;
+}
+
+function progressRecordSteps(steps: ProgressStep[]): ProgressStep[] {
+  return steps.map(({ technicalDetail, ...step }) => ({
+    ...step,
+    detail: technicalDetail ?? step.detail,
+  }));
+}
+
+function presentationStepTitle(step: {
+  title: string;
+  phase?: string;
+}): string {
+  return step.phase ? `${step.phase} · ${step.title}` : step.title;
+}
+
+function planPresentationTitle(step: PresentationStep): string {
+  if (step.status === 'completed') return `已完成：${step.title}`;
+  if (step.status === 'running') return `进行中：${step.title}`;
+  if (step.status === 'unknown') return `状态未知：${step.title}`;
+  return `待处理：${step.title}`;
 }
 
 /** 截断 step 标题：取第一行，最多 80 字符 */
@@ -263,7 +294,8 @@ function appendUsageFooter(
   usage: NonNullable<ContainerOutput['usage']>,
   thinking?: 'adaptive' | 'disabled',
 ): void {
-  const fmtK = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+  const fmtK = (n: number) =>
+    n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
   const inp = fmtK(usage.inputTokens);
   const cacheRead = fmtK(usage.cacheReadInputTokens);
   const cacheCreate = fmtK(usage.cacheCreationInputTokens);
@@ -398,6 +430,7 @@ export class FeishuChannel implements Channel {
 
   // 正式回复已到达标记：防止迟到的进度消息再创建卡片
   private progressDone = new Set<string>();
+  private progressPresentations = new Map<string, ProgressPresentationState>();
 
   // 当前会话的 thinking 模式和 usage（per-jid，setUsage 时写入，sendMessage 时读取并清理）
   // 独立于 progressCards，确保快速回复（无进度卡片）也能拿到
@@ -527,15 +560,18 @@ export class FeishuChannel implements Channel {
       const isProgressJson = PROGRESS_JSON_PATTERN.test(text);
       let title = text;
       let detail: string | undefined;
+      let structuredProgress: StructuredProgress | undefined;
       if (isProgressJson) {
         try {
           const parsed = JSON.parse(text) as {
             title?: string;
             detail?: string;
+            progress?: StructuredProgress;
           };
           if (parsed.title) {
             title = parsed.title;
             detail = parsed.detail;
+            structuredProgress = parsed.progress;
           }
         } catch {
           /* 降级为纯文本 */
@@ -565,6 +601,13 @@ export class FeishuChannel implements Channel {
       if (title.startsWith('💬')) {
         const fullText = (detail ?? title).replace(/^💬\s*/u, '').trim();
         if (!fullText) return;
+
+        const phaseState = reduceProgressPresentation(
+          this.progressPresentations.get(jid) ??
+            createProgressPresentationState(),
+          { kind: 'narration', text: fullText },
+        );
+        this.progressPresentations.set(jid, phaseState);
 
         const group = this.opts.registeredGroups()[jid];
         const cliMode = resolveCliMode(group?.containerConfig);
@@ -597,6 +640,130 @@ export class FeishuChannel implements Channel {
         }
       }
 
+      let technicalDetail: string | undefined;
+      let toolCallId: string | undefined;
+      if (
+        structuredProgress &&
+        process.env.NANOCLAW_READABLE_PROGRESS !== '0'
+      ) {
+        const previous =
+          this.progressPresentations.get(jid) ??
+          createProgressPresentationState();
+        const updatesExistingStep = structuredProgress.toolCallId
+          ? previous.steps.some(
+              (step) => step.toolCallId === structuredProgress.toolCallId,
+            )
+          : false;
+        const next = reduceProgressPresentation(previous, {
+          kind: 'tool',
+          progress: structuredProgress,
+        });
+        this.progressPresentations.set(jid, next);
+        const realPlanSteps = next.steps.filter((step) => step.source === 'plan');
+        if (
+          structuredProgress.lifecycle === 'started' &&
+          structuredProgress.toolName.toLowerCase() === 'todowrite' &&
+          realPlanSteps.length > 0
+        ) {
+          const cardPlanSteps: ProgressStep[] = realPlanSteps.map((step) => ({
+            title: planPresentationTitle(step),
+            toolCallId: step.toolCallId,
+            isPlan: true,
+            ts: Date.now(),
+          }));
+          const chatId = chatIdFromJid(jid);
+          if (!this.progressCards.has(jid)) {
+            this.progressCards.set(jid, {
+              messageId: '',
+              sessionId: '',
+              steps: [],
+              allSteps: [],
+              frame: 0,
+              startTime: Date.now(),
+            });
+            await Promise.all([
+              this.removeTypingReaction(jid),
+              this.createProgressCard(jid, chatId, cardPlanSteps[0]),
+            ]);
+          }
+          const planCard = this.progressCards.get(jid);
+          if (!planCard) return;
+          const previousAll = planCard.allSteps.filter((step) => !step.isPlan);
+          const previousVisible = planCard.steps.filter((step) => !step.isPlan);
+          planCard.allSteps = [...previousAll, ...cardPlanSteps].slice(-500);
+          planCard.steps = [...previousVisible, ...cardPlanSteps].slice(-3);
+          upsertSession(
+            planCard.sessionId,
+            progressRecordSteps(planCard.allSteps),
+            planCard.startTime,
+          );
+          if (planCard.messageId) {
+            planCard.frame++;
+            await this.client.im.message.patch({
+              path: { message_id: planCard.messageId },
+              data: {
+                content: buildProgressCard(
+                  planCard.steps,
+                  planCard.frame,
+                  planCard.startTime,
+                  planCard.sessionId,
+                ),
+              },
+            });
+          }
+          this.resetSpinnerTimer(jid);
+          return;
+        }
+        toolCallId = structuredProgress.toolCallId;
+        const displayStep = toolCallId
+          ? next.steps.find((step) => step.toolCallId === toolCallId)
+          : next.steps.at(-1);
+        if (displayStep) {
+          title = presentationStepTitle(displayStep);
+        }
+        technicalDetail = detail;
+        detail = undefined;
+
+        if (
+          structuredProgress.lifecycle !== 'started' ||
+          updatesExistingStep
+        ) {
+          const existing = this.progressCards.get(jid);
+          if (!existing || !toolCallId) return;
+          const update = (steps: ProgressStep[]): boolean => {
+            const step = [...steps]
+              .reverse()
+              .find((item) => item.toolCallId === toolCallId);
+            if (!step) return false;
+            step.title = title;
+            if (technicalDetail) step.technicalDetail = technicalDetail;
+            return true;
+          };
+          const updatedVisible = update(existing.steps);
+          update(existing.allSteps);
+          if (!updatedVisible || !existing.messageId) return;
+          upsertSession(
+            existing.sessionId,
+            progressRecordSteps(existing.allSteps),
+            existing.startTime,
+          );
+          existing.frame++;
+          await this.client.im.message.patch({
+            path: { message_id: existing.messageId },
+            data: {
+              content: buildProgressCard(
+                existing.steps,
+                existing.frame,
+                existing.startTime,
+                existing.sessionId,
+              ),
+            },
+          });
+          this.resetSpinnerTimer(jid);
+          return;
+        }
+      }
+
       // 首次工具进度到达：移除 emoji + 创建卡片
       if (!this.progressCards.has(jid)) {
         logger.info(
@@ -618,6 +785,8 @@ export class FeishuChannel implements Channel {
           this.createProgressCard(jid, chatId, {
             title,
             detail,
+            technicalDetail,
+            toolCallId,
             ts: Date.now(),
           }),
         ]);
@@ -627,8 +796,20 @@ export class FeishuChannel implements Channel {
       const existing = this.progressCards.get(jid);
       if (existing) {
         const stepTs = Date.now();
-        existing.steps.push({ title, detail, ts: stepTs });
-        existing.allSteps.push({ title, detail, ts: stepTs });
+        existing.steps.push({
+          title,
+          detail,
+          technicalDetail,
+          toolCallId,
+          ts: stepTs,
+        });
+        existing.allSteps.push({
+          title,
+          detail,
+          technicalDetail,
+          toolCallId,
+          ts: stepTs,
+        });
         if (existing.steps.length > 3) existing.steps.shift();
         if (existing.allSteps.length > 500) existing.allSteps.shift();
         // 卡片尚在创建中（messageId 为空），先缓冲步骤，createProgressCard 完成后会统一 patch
@@ -642,7 +823,7 @@ export class FeishuChannel implements Channel {
         // 同步到进度查看页面
         upsertSession(
           existing.sessionId,
-          existing.allSteps,
+          progressRecordSteps(existing.allSteps),
           existing.startTime,
         );
         // 新步骤到来：立即 patch 卡片
@@ -907,8 +1088,28 @@ export class FeishuChannel implements Channel {
     // 注意：正式回复路径在调用此方法前已读取了 pendingUsage
     this.pendingUsage.delete(jid);
     this.thinkingMode.delete(jid);
-
     const progressEntry = this.progressCards.get(jid);
+    const presentation = this.progressPresentations.get(jid);
+    if (progressEntry && presentation) {
+      const finalPresentation = reduceProgressPresentation(presentation, {
+        kind: 'turn_end',
+      });
+      for (const presentationStep of finalPresentation.steps) {
+        if (!presentationStep.toolCallId) continue;
+        for (const steps of [progressEntry.steps, progressEntry.allSteps]) {
+          const cardStep = [...steps]
+            .reverse()
+            .find((step) => step.toolCallId === presentationStep.toolCallId);
+          if (cardStep) {
+            cardStep.title = presentationStep.source === 'plan'
+              ? planPresentationTitle(presentationStep)
+              : presentationStepTitle(presentationStep);
+          }
+        }
+      }
+    }
+    this.progressPresentations.delete(jid);
+
     if (!progressEntry) return;
 
     logger.info(
@@ -1121,6 +1322,7 @@ export class FeishuChannel implements Channel {
       if (isTyping) {
         // 新对话开始，清除上一轮的 progressDone 标记
         this.progressDone.delete(jid);
+        this.progressPresentations.delete(jid);
         // 添加 emoji reaction 到用户消息，不同执行模式使用不同表情。
         const lastMsgId = this.getLastMessageId(jid);
         const group = this.opts.registeredGroups()[jid];
@@ -1210,7 +1412,7 @@ export class FeishuChannel implements Channel {
     this.spinnerStopped.delete(jid);
     const sessionId = crypto.randomBytes(8).toString('hex');
     const initialSteps: ProgressStep[] = [initialStep];
-    upsertSession(sessionId, initialSteps, now);
+    upsertSession(sessionId, progressRecordSteps(initialSteps), now);
     logger.info(
       { jid, chatId, sessionId, step: initialStep.title },
       '[card] 开始创建进度卡片（调飞书 API）',
@@ -1260,7 +1462,7 @@ export class FeishuChannel implements Channel {
 
       // 缓冲期间有新步骤，立即 patch 卡片以显示最新状态
       if (bufferedSteps.length > 0) {
-        upsertSession(sessionId, mergedAllSteps, now);
+        upsertSession(sessionId, progressRecordSteps(mergedAllSteps), now);
         this.client.im.message
           .patch({
             path: { message_id: msgId },

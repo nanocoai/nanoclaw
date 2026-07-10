@@ -5,6 +5,8 @@
  * 所有函数无副作用，可直接单元测试。
  */
 
+import { boundProgressInput, type StructuredProgress } from './progress-types.js';
+
 // ---- SSE 事件类型 ----
 
 export type SseEventType =
@@ -305,6 +307,7 @@ export interface ContainerOutput {
   error?: string;
   progressType?: 'tool_use' | 'tool_result' | 'thinking' | 'text';
   detail?: string;
+  progress?: StructuredProgress;
   /** CLI interactive 模式：终端态错误已污染当前 Claude session，需要提示用户决定是否清理。 */
   terminalSessionCorruption?: boolean;
   /**
@@ -348,6 +351,10 @@ export function mapSseEventToProgress(event: SseEvent): ContainerOutput | null {
     status: 'progress',
     result: `${emoji} ${name}`,
     progressType: 'tool_use',
+    progress: {
+      provider: 'claude', lifecycle: 'started', toolName: name,
+      toolCallId: data.content_block.id,
+    },
   };
 }
 
@@ -427,9 +434,10 @@ export function buildToolUseProgress(block: ToolUseBlock): ContainerOutput | nul
 
   let shortInput: string = name;
   let detail: string | undefined;
+  let input: Record<string, unknown> | undefined;
 
   try {
-    const input = JSON.parse(block.inputJson) as Record<string, unknown>;
+    input = JSON.parse(block.inputJson) as Record<string, unknown>;
     const inputStr = (input.command as string || input.file_path as string ||
                       input.query as string || input.pattern as string || name);
     shortInput = typeof inputStr === 'string' ? inputStr.slice(0, 60) : name;
@@ -454,6 +462,10 @@ export function buildToolUseProgress(block: ToolUseBlock): ContainerOutput | nul
     result: `${emoji} ${name}: ${shortInput}`,
     progressType: 'tool_use',
     detail,
+    progress: {
+      provider: 'claude', lifecycle: 'started', toolName: name,
+      toolCallId: block.id, input: boundProgressInput(input),
+    },
   };
 }
 

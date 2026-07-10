@@ -36,6 +36,7 @@ import { buildSendMessageToolEnv } from './mcp-tool-policy.js';
 import { readGroupModelSettings, readCodexModelSettings } from './model-settings.js';
 import { resolveQueryCwdForSession } from './session-cwd.js';
 import { isFinalizingOnly } from './finalizing-tools.js';
+import { boundProgressInput, type StructuredProgress } from './progress-types.js';
 
 interface ContainerInput {
   prompt: string;
@@ -73,6 +74,7 @@ interface ContainerOutput {
   progressType?: 'tool_use' | 'tool_result' | 'thinking' | 'text';
   /** 可折叠面板的展开内容（markdown 格式） */
   detail?: string;
+  progress?: StructuredProgress;
   /** CLI interactive 模式：终端态错误已污染当前 Claude session，需要提示用户决定是否清理。 */
   terminalSessionCorruption?: boolean;
   /** token 用量（仅 result 消息） */
@@ -1214,6 +1216,11 @@ async function runQuery(
               result: `${emoji} ${block.name}: ${shortInput}`,
               progressType: 'tool_use',
               detail,
+              progress: {
+                provider: 'claude', lifecycle: 'started', toolName: block.name,
+                toolCallId: (block as { id?: string }).id,
+                input: boundProgressInput(input),
+              },
               newSessionId: undefined,
             });
           }
@@ -1270,7 +1277,7 @@ async function runQuery(
       const content = userMsg.message?.content;
       if (Array.isArray(content)) {
         for (const block of content) {
-          const b = block as { type?: string; content?: unknown };
+          const b = block as { type?: string; content?: unknown; tool_use_id?: string; is_error?: boolean };
           if (b.type === 'tool_result' && b.content) {
             let resultText = '';
             if (typeof b.content === 'string') {
@@ -1288,6 +1295,13 @@ async function runQuery(
                 result: `✅ 结果: ${short}`,
                 progressType: 'tool_result',
                 detail: resultText.trim().length > 60 ? resultText.trim().slice(0, 1000) : undefined,
+                progress: {
+                  provider: 'claude',
+                  lifecycle: b.is_error ? 'failed' : 'completed',
+                  toolName: 'tool_result',
+                  toolCallId: b.tool_use_id,
+                  resultSummary: short,
+                },
                 newSessionId: undefined,
               });
             }

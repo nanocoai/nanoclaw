@@ -761,7 +761,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         '[progress] 转发到 channel',
       );
       const payload = result.detail
-        ? JSON.stringify({ title: result.result, detail: result.detail })
+        ? JSON.stringify({ title: result.result, detail: result.detail, progress: result.progress })
+        : result.progress
+          ? JSON.stringify({ title: result.result, progress: result.progress })
         : result.result;
       await channel.sendMessage(chatJid, payload, { isProgress: true });
       everSentToUser = true; // CLI interactive 模式下中间消息也算"发过消息"

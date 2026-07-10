@@ -21,7 +21,7 @@ import net from 'net';
 import tls from 'tls';
 import { EventEmitter } from 'events';
 import { URL } from 'url';
-import { StringDecoder } from 'string_decoder';
+import { StringDecoder } from 'node:string_decoder';
 import {
   parseSseLines,
   parseSseEvent,
