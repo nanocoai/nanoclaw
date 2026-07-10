@@ -384,6 +384,7 @@ export function extractCodexError(event: CodexEvent): string | undefined {
 export function mapCodexUsage(
   usage: CodexEvent['usage'],
   modelInfo?: { model?: string; modelContextWindow?: number; lastTurnContext?: number },
+  effort?: string,
 ): ContainerOutput['usage'] | undefined {
   if (!usage) return undefined;
   const result: ContainerOutput['usage'] = {
@@ -406,6 +407,7 @@ export function mapCodexUsage(
       };
     }
   }
+  if (effort) result.effort = effort;
   return result;
 }
 
@@ -632,7 +634,7 @@ export async function runCodexQuery(
         const modelInfo = newSessionId
           ? readCodexModelInfo(config.codexHome, newSessionId)
           : undefined;
-        usage = mapCodexUsage(event.usage, modelInfo);
+        usage = mapCodexUsage(event.usage, modelInfo, config.effort);
         writeOutput({
           status: 'success',
           result: textProgressState.lastAgentMessage || null,

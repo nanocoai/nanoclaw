@@ -58,6 +58,7 @@ export interface ContainerOutput {
     modelContextWindows?: Record<string, number>;
     model?: string;
     lastTurnContext?: number;
+    effort?: string;
   };
 }
 

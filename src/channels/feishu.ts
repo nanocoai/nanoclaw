@@ -263,10 +263,11 @@ function appendUsageFooter(
   usage: NonNullable<ContainerOutput['usage']>,
   thinking?: 'adaptive' | 'disabled',
 ): void {
-  const inp = usage.inputTokens.toLocaleString();
-  const cacheRead = usage.cacheReadInputTokens.toLocaleString();
-  const cacheCreate = usage.cacheCreationInputTokens.toLocaleString();
-  const out = usage.outputTokens.toLocaleString();
+  const fmtK = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+  const inp = fmtK(usage.inputTokens);
+  const cacheRead = fmtK(usage.cacheReadInputTokens);
+  const cacheCreate = fmtK(usage.cacheCreationInputTokens);
+  const out = fmtK(usage.outputTokens);
   const turns = usage.numTurns;
   const dur = (usage.durationMs / 1000).toFixed(1);
   const cost = usage.totalCostUsd.toFixed(2);
@@ -329,9 +330,10 @@ function appendUsageFooter(
 
   elements.push({ tag: 'hr' });
   const thinkIcon = thinking === 'adaptive' ? '+' : '~';
+  const effortTag = usage.effort ? ` ⚡${usage.effort}` : '';
   elements.push({
     tag: 'markdown',
-    content: `<font color="grey">↑${inp}/${cacheRead}/${cacheCreate} ↓${out} 🔄${turns} ⏱${dur}s 💰≈$${cost} ${ctxBar}ctx${ctxPct}%/${maxK} 🤖${usage.model ? usage.model.replace(/^claude-/, '') : 'unknown'} ${thinkIcon}</font>`,
+    content: `<font color="grey">↑${inp}/${cacheRead}/${cacheCreate} ↓${out} 🔄${turns} ⏱${dur}s 💰≈$${cost} ${ctxBar}ctx${ctxPct}%/${maxK} 🤖${usage.model ? usage.model.replace(/^claude-/, '') : 'unknown'}${effortTag} ${thinkIcon}</font>`,
   });
 }
 
