@@ -58,11 +58,9 @@ const REPORT_ALLOWED_STATUSES = new Set<string>([
   'question',
 ]);
 
-function fmtGroupLabel(jidOrFolder: string): string {
-  // group_aliases.chat_jid 用 JID 格式 (fs:oc_xxx)，folder 格式 (fs_oc_xxx) 需转换
-  const jid = jidOrFolder.includes(':') ? jidOrFolder : jidOrFolder.replace('_', ':');
+function fmtGroupLabel(jid: string): string {
   const alias = getAliasByJid(jid);
-  return alias ? `${alias}(${jidOrFolder})` : jidOrFolder;
+  return alias ? `${alias}(${jid})` : jid;
 }
 
 /** 自动终态兜底汇报里携带的子群最终回复摘要上限（防超长撑爆主群 context） */
@@ -698,7 +696,7 @@ function handleReport(
   });
 
   // 组装可读汇报消息
-  const lines = [`【汇报｜${fmtGroupLabel(reportingGroup)}｜${status}】${data.summary}`];
+  const lines = [`【汇报｜${fmtGroupLabel(task.targetJid)}｜${status}】${data.summary}`];
   if (data.details) lines.push(data.details);
   if (valid.length > 0) lines.push(`产物: ${valid.join(', ')}`);
   if (rejected.length > 0)
@@ -853,7 +851,7 @@ export function finalizeDelegationOnTurnEnd(
     details,
   });
 
-  let reportText = `【汇报｜${fmtGroupLabel(reportingGroup)}｜${status}】${baseSummary}`;
+  let reportText = `【汇报｜${fmtGroupLabel(task.targetJid)}｜${status}】${baseSummary}`;
   if (details) reportText += `\n结果：${details}`;
   reportText += `\n(task ${task.taskId}，自动终态)`;
   try {
