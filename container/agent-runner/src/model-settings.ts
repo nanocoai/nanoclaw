@@ -80,7 +80,8 @@ export function readGroupModelSettings(input: {
 
 /**
  * 读取群级 Codex CLI 模式配置。
- * 优先读 settings.codex 命名空间，兼容旧格式顶层字段。
+ * 只读 settings.codex 命名空间，不 fallback 到顶层扁平字段
+ * （顶层存的是 Claude 配置，model 名如 claude-opus-4-8 喂给 Codex 会炸）。
  */
 export function readCodexModelSettings(input: {
   groupPath: string;
@@ -90,16 +91,15 @@ export function readCodexModelSettings(input: {
   if (!settings) return {};
 
   const ns = settings.codex;
-  const rawModel = ns?.model ?? settings.model;
-  const rawEffort = ns?.effortLevel ?? settings.effortLevel;
+  if (!ns) return {};
 
   const result: GroupModelSettings = {};
-  const model = normalizeClaudeModelName(rawModel);
+  const model = normalizeClaudeModelName(ns.model);
   if (model) result.model = model;
 
   const validEfforts: CodexEffortLevel[] = ['light', 'medium', 'high', 'extra_high', 'ultra'];
-  if (validEfforts.includes(rawEffort as CodexEffortLevel)) {
-    result.effortLevel = rawEffort as CodexEffortLevel;
+  if (validEfforts.includes(ns.effortLevel as CodexEffortLevel)) {
+    result.effortLevel = ns.effortLevel as CodexEffortLevel;
   }
   return result;
 }

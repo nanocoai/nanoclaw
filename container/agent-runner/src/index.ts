@@ -196,6 +196,10 @@ function effortForThinking(thinking: 'adaptive' | 'disabled'): 'low' | 'high' {
   return thinking === 'disabled' ? 'low' : 'high';
 }
 
+function codexEffortForThinking(thinking: 'adaptive' | 'disabled'): 'light' | 'high' {
+  return thinking === 'disabled' ? 'light' : 'high';
+}
+
 function getSessionSummary(
   sessionId: string,
   transcriptPath: string,
@@ -1781,7 +1785,9 @@ async function main(): Promise<void> {
             prompt: turnPrompt,
             sessionId,
             model: override?.model || codexGroupSettings.model || 'gpt-5.6',
-            effort: codexGroupSettings.effortLevel || 'medium',
+            effort: override?.thinking
+              ? codexEffortForThinking(override.thinking)
+              : codexGroupSettings.effortLevel || 'medium',
             mcpServerPath,
             chatJid: containerInput.chatJid,
             groupFolder: containerInput.groupFolder,
