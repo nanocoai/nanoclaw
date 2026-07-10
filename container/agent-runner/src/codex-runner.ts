@@ -383,14 +383,16 @@ export function extractCodexError(event: CodexEvent): string | undefined {
 /** 映射 codex usage → ContainerOutput.usage（modelInfo 来自 rollout，--json 流不暴露 model） */
 export function mapCodexUsage(
   usage: CodexEvent['usage'],
-  modelInfo?: { model?: string; modelContextWindow?: number; lastTurnContext?: number },
+  modelInfo?: CodexModelInfo,
   effort?: string,
 ): ContainerOutput['usage'] | undefined {
   if (!usage) return undefined;
+  // turn.completed 的 usage 是线程累计值，rollout last_token_usage 才是单轮值
+  const ltu = modelInfo?.lastTurnUsage;
   const result: ContainerOutput['usage'] = {
-    inputTokens: usage.input_tokens ?? 0,
-    outputTokens: usage.output_tokens ?? 0,
-    cacheReadInputTokens: usage.cached_input_tokens ?? 0,
+    inputTokens: ltu?.input_tokens ?? usage.input_tokens ?? 0,
+    outputTokens: ltu?.output_tokens ?? usage.output_tokens ?? 0,
+    cacheReadInputTokens: ltu?.cached_input_tokens ?? usage.cached_input_tokens ?? 0,
     cacheCreationInputTokens: 0,
     numTurns: 1,
     durationMs: 0,
@@ -418,59 +420,129 @@ export function mapCodexUsage(
  * turn_context 记录里（payload.model / payload.model_context_window）。
  * rollout 文件名以 threadId 结尾：sessions/YYYY/MM/DD/rollout-<ts>-<threadId>.jsonl
  */
+export interface CodexModelInfo {
+  model?: string;
+  modelContextWindow?: number;
+  lastTurnContext?: number;
+  lastTurnUsage?: {
+    input_tokens: number;
+    cached_input_tokens: number;
+    output_tokens: number;
+  };
+}
+
 export function readCodexModelInfo(
   codexHome: string,
   threadId: string,
-): { model?: string; modelContextWindow?: number; lastTurnContext?: number } {
+): CodexModelInfo {
   try {
     const sessionsDir = path.join(codexHome, 'sessions');
     if (!fs.existsSync(sessionsDir)) return {};
     const rollout = findRolloutByThreadId(sessionsDir, threadId);
     if (!rollout) return {};
     const lines = fs.readFileSync(rollout, 'utf-8').split('\n');
-    // model 和 ctx 分散在不同记录：model 在 turn_context.payload.model，
-    // ctx 在 event_msg(task_started).payload.model_context_window。倒序各取最新一条。
-    // usage 事件里的 total_token_usage 是整条线程累计值，footer 要用 last_token_usage。
+    // model 在 turn_context.payload.model，ctx 在 event_msg 的 model_context_window。
+    // token_count 事件中：total_token_usage 是线程累计值，last_token_usage 是单次调用值。
+    // 一个 turn 中可能多次模型调用（工具调用→再推理），每次产生一条 token_count。
+    // 正确的本轮用量 = 最后一条 total_token_usage - 第一条之前的基准（即第一条 total - 第一条 last）。
     let model: string | undefined;
     let modelContextWindow: number | undefined;
-    let lastTurnContext: number | undefined;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i].trim();
-      if (!line) continue;
+
+    interface TokenUsageSnapshot {
+      input_tokens: number;
+      cached_input_tokens: number;
+      output_tokens: number;
+    }
+    let firstTotal: TokenUsageSnapshot | undefined;
+    let firstLast: TokenUsageSnapshot | undefined;
+    let latestTotal: TokenUsageSnapshot | undefined;
+    let latestLast: TokenUsageSnapshot | undefined;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
       let obj: {
         payload?: {
+          type?: unknown;
           model?: unknown;
           model_context_window?: unknown;
-          info?: { last_token_usage?: { input_tokens?: unknown } };
+          info?: {
+            total_token_usage?: {
+              input_tokens?: unknown;
+              cached_input_tokens?: unknown;
+              output_tokens?: unknown;
+            };
+            last_token_usage?: {
+              input_tokens?: unknown;
+              cached_input_tokens?: unknown;
+              output_tokens?: unknown;
+            };
+          };
         };
       };
       try {
-        obj = JSON.parse(line);
+        obj = JSON.parse(trimmed);
       } catch {
         continue;
       }
       const p = obj?.payload;
       if (!p) continue;
-      if (model === undefined && typeof p.model === 'string') {
-        model = p.model;
+      if (typeof p.model === 'string') model = p.model;
+      if (typeof p.model_context_window === 'number') modelContextWindow = p.model_context_window;
+
+      // task_started 标记新一轮开始，重置 snapshot 只算最后一轮
+      if (p.type === 'task_started') {
+        firstTotal = undefined;
+        firstLast = undefined;
+        latestTotal = undefined;
+        latestLast = undefined;
       }
-      if (
-        modelContextWindow === undefined &&
-        typeof p.model_context_window === 'number'
-      ) {
-        modelContextWindow = p.model_context_window;
+
+      const ttu = p.info?.total_token_usage;
+      if (ttu && typeof ttu.input_tokens === 'number') {
+        const snap: TokenUsageSnapshot = {
+          input_tokens: ttu.input_tokens as number,
+          cached_input_tokens: (typeof ttu.cached_input_tokens === 'number' ? ttu.cached_input_tokens : 0) as number,
+          output_tokens: (typeof ttu.output_tokens === 'number' ? ttu.output_tokens : 0) as number,
+        };
+        if (!firstTotal) firstTotal = snap;
+        latestTotal = snap;
       }
-      const maybeLastInput = p.info?.last_token_usage?.input_tokens;
-      if (lastTurnContext === undefined && typeof maybeLastInput === 'number') {
-        lastTurnContext = maybeLastInput;
+      const ltu = p.info?.last_token_usage;
+      if (ltu && typeof ltu.input_tokens === 'number') {
+        const snap: TokenUsageSnapshot = {
+          input_tokens: ltu.input_tokens as number,
+          cached_input_tokens: (typeof ltu.cached_input_tokens === 'number' ? ltu.cached_input_tokens : 0) as number,
+          output_tokens: (typeof ltu.output_tokens === 'number' ? ltu.output_tokens : 0) as number,
+        };
+        if (!firstLast) firstLast = snap;
+        latestLast = snap;
       }
-      if (
-        model !== undefined &&
-        modelContextWindow !== undefined &&
-        lastTurnContext !== undefined
-      ) break;
     }
-    return { model, modelContextWindow, lastTurnContext };
+
+    // 本轮用量 = 最后 total - 基准值。基准 = 第一条 total - 第一条 last（即 turn 开始前的累计）。
+    let turnUsage: CodexModelInfo['lastTurnUsage'] | undefined;
+    if (latestTotal && firstTotal && firstLast) {
+      const baseline: TokenUsageSnapshot = {
+        input_tokens: firstTotal.input_tokens - firstLast.input_tokens,
+        cached_input_tokens: firstTotal.cached_input_tokens - firstLast.cached_input_tokens,
+        output_tokens: firstTotal.output_tokens - firstLast.output_tokens,
+      };
+      turnUsage = {
+        input_tokens: latestTotal.input_tokens - baseline.input_tokens,
+        cached_input_tokens: latestTotal.cached_input_tokens - baseline.cached_input_tokens,
+        output_tokens: latestTotal.output_tokens - baseline.output_tokens,
+      };
+    } else if (latestTotal) {
+      turnUsage = latestTotal;
+    }
+
+    return {
+      model,
+      modelContextWindow,
+      lastTurnContext: latestLast?.input_tokens,
+      lastTurnUsage: turnUsage,
+    };
   } catch {
     return {};
   }
