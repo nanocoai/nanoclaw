@@ -1511,7 +1511,9 @@ export class FeishuChannel implements Channel {
     initialStep: ProgressStep,
     initialRecordStep: ProgressStep = initialStep,
   ): Promise<void> {
-    const SPINNER_INTERVAL_MS = 1000;
+    // 飞书每次 patch 都会整卡重排。按秒刷新耗时会让长文案持续跳动，
+    // 分钟级刷新既能保留长任务存活感，也不会制造无意义动画。
+    const SPINNER_INTERVAL_MS = 60_000;
     const SPINNER_MAX_DURATION_MS = 60 * 60 * 1000; // 60 分钟硬上限
 
     const now = Date.now();
