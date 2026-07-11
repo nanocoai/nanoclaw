@@ -46,6 +46,7 @@ import {
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
 import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
+import { destroyTemporalSession } from './temporal-session.js';
 import type { Session } from './types.js';
 
 /**
@@ -67,6 +68,9 @@ export const ABSOLUTE_CEILING_MS = 30 * 60 * 1000;
 // Stuck tolerance window applied per 'processing' claim — "did we see any
 // signs of life since this message was claimed?"
 export const CLAIM_STUCK_MS = 60 * 1000;
+// Idle window before an abandoned temporal (incognito) session is torn down.
+// Reuses the running-container ceiling; tunable independently if needed.
+export const TEMPORAL_IDLE_MS = ABSOLUTE_CEILING_MS;
 const MAX_TRIES = 5;
 const BACKOFF_BASE_MS = 5000;
 
@@ -176,6 +180,19 @@ export function shouldCloseTaskSession(
   return isTaskThread(threadId) && !containerRunning && liveTaskCount === 0;
 }
 
+/**
+ * An idle temporal (incognito) session — not running and untouched past the
+ * idle ceiling — is abandoned and should be torn down (its ephemeral workspace
+ * discarded). Measured from last_active, falling back to created_at.
+ */
+export function shouldDestroyTemporalSession(session: Session, containerRunning: boolean, now: number): boolean {
+  if (session.temporal !== 1 || containerRunning) return false;
+  const ref = session.last_active ?? session.created_at;
+  const refMs = parseSqliteUtc(ref);
+  if (Number.isNaN(refMs)) return false;
+  return now - refMs > TEMPORAL_IDLE_MS;
+}
+
 async function sweepSession(session: Session): Promise<void> {
   const agentGroup = getAgentGroup(session.agent_group_id);
   if (!agentGroup) return;
@@ -197,6 +214,7 @@ async function sweepSession(session: Session): Promise<void> {
     // outbound.db might not exist yet (container hasn't started)
   }
 
+  let tearDownTemporal = false;
   try {
     // 1. Sync processing_ack → messages_in status
     if (outDb) {
@@ -261,9 +279,19 @@ async function sweepSession(session: Session): Promise<void> {
         log.info('Closed spent task session', { sessionId: session.id, threadId: session.thread_id });
       }
     }
+
+    // 7. Idle temporal (incognito) session teardown. Decided here (DBs still
+    // open) but executed after the finally — destroyTemporalSession rm -rf's
+    // the session folder, so it must run once the DB handles are closed.
+    tearDownTemporal = shouldDestroyTemporalSession(session, isContainerRunning(session.id), Date.now());
   } finally {
     inDb.close();
     outDb?.close();
+  }
+
+  if (tearDownTemporal) {
+    destroyTemporalSession(session);
+    log.info('Tore down idle temporal session', { sessionId: session.id });
   }
 }
 

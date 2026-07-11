@@ -61,3 +61,21 @@ describe('buildSystemPromptAddendum — multi-destination routing guidance', () 
     expect(prompt).toContain('`casa`');
   });
 });
+
+describe('buildSystemPromptAddendum — temporal (incognito) note', () => {
+  afterEach(() => {
+    delete process.env.NANOCLAW_TEMPORAL;
+  });
+
+  it('includes the incognito note when NANOCLAW_TEMPORAL=1', () => {
+    process.env.NANOCLAW_TEMPORAL = '1';
+    const prompt = buildSystemPromptAddendum('Casa');
+    expect(prompt).toContain('Temporary (incognito) session');
+    expect(prompt).toContain('nothing here persists');
+  });
+
+  it('omits the incognito note when NANOCLAW_TEMPORAL is unset', () => {
+    const prompt = buildSystemPromptAddendum('Casa');
+    expect(prompt).not.toContain('incognito');
+  });
+});
