@@ -1,5 +1,37 @@
 # Plan: Temporal ("Incognito") Sessions
 
+## Status — closed out 2026-07-11
+
+All milestones **[DONE]** on `feature/temporal-session` (one commit each, sequential).
+
+| Milestone | Status | Commit |
+|---|---|---|
+| M1 — schema + temporal flag | [DONE] | `feat(sessions): add temporal flag + temporal-aware lookups` |
+| M2 — lifecycle helpers | [DONE] | `feat(sessions): temporal session lifecycle helpers` |
+| M3 — memory-free spawn | [DONE] | `feat(container): memory-free spawn for temporal sessions` |
+| M4 — /incognito routing | [DONE] | `feat(router): /incognito DM command routing` |
+| M5 — idle teardown + runner note | [DONE] | `feat(sweep): idle temporal teardown + agent-runner incognito note` |
+| M6 — integration tests + docs | [DONE] | `test(incognito): end-to-end routeInbound integration + docs` |
+
+**Verification:** host `tsc --noEmit` clean; `vitest run` = 774 passed. The only failing
+tests are 7 pre-existing `scripts/q.test.ts` cases that `spawnSync('pnpm', …)` — `pnpm` is
+absent from this shell's PATH (only `corepack pnpm` works), unrelated to this change.
+
+**Key decisions / deviations from the plan:**
+- `Session.temporal` is **optional** (`temporal?: number`), not required — the DB column
+  defaults to 0 and is always present on rows read back; `createSession` coalesces a missing
+  value to 0. Avoided churning ~20 pre-existing test `Session` literals (surgical-changes rule).
+- Lifecycle helpers live in a **new `src/temporal-session.ts`** (not `session-manager.ts`) to
+  avoid an import cycle (container-runner already imports `sessionDir` from session-manager).
+- `destroyTemporalSession` closes the row **synchronously**, deferring only the container kill
+  + folder `rm -rf` to the container's exit — so a re-`/incognito` can't reuse a dying session.
+- Incognito control notes (start/end/DM-only) deliver **immediately** via `deliverSessionMessages`
+  (idempotent, re-entry-guarded) rather than waiting up to 60s for the sweep.
+- **Not run in this environment:** container `bun test` + `tsc` for the one agent-runner change
+  (a guarded system-prompt note) — `bun` isn't installed here. Change mirrors the existing
+  `destinations.test.ts` pattern; unit tests added.
+- **Not done (per user request):** the PR was not opened; the branch is left ready.
+
 ## Context
 
 NanoClaw agents always run in their group's shared workspace (`/workspace/agent`, the

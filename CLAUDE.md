@@ -49,6 +49,10 @@ Each session has **two** SQLite files under `data/v2-sessions/<session_id>/`:
 
 Exactly one writer per file — no cross-mount lock contention. Heartbeat is a file touch at `/workspace/.heartbeat`, not a DB update. Host uses even `seq` numbers, container uses odd.
 
+## Temporal ("Incognito") Sessions
+
+`/incognito` (DMs only) starts a throwaway, memory-free session: a distinct row disambiguated from the normal session by `sessions.temporal = 1` (migration 020), storing the **real** `thread_id` + `messaging_group_id` so replies still route back. Its container gets a fresh, empty `/workspace/agent` (composed operating instructions only — no `CLAUDE.local.md`, `memory/`, `conversations/`, or ad-hoc files) plus an isolated `/home/node/.claude`, both under the session folder and `rm -rf`'d on teardown. `NANOCLAW_TEMPORAL=1` adds a "nothing persists" system-prompt note. `/incognito end` (or `/exit`, or ~30 min idle via the sweep) tears it down. All `temporal=0` lookups (`findSessionForAgent`, etc.) exclude temporal rows; `findTemporalSession` matches them. Key files: `src/incognito.ts`, `src/temporal-session.ts`, temporal branch in `src/container-runner.ts` (`buildMounts`). See [docs/temporal-session/](docs/temporal-session/).
+
 ## Central DB
 
 `data/v2.db` holds everything that isn't per-session: users, user_roles, agent_groups, messaging_groups, wiring, pending_approvals, user_dms, chat_sdk_* (for the Chat SDK bridge), schema_version. Migrations live at `src/db/migrations/`.
@@ -64,6 +68,8 @@ For ad-hoc queries from skills or scripts, use the in-tree wrapper rather than t
 | `src/delivery.ts` | Polls `outbound.db`, delivers via adapter, handles system actions (schedule, approvals, etc.) |
 | `src/host-sweep.ts` | 60s sweep: `processing_ack` sync, stale detection, due-message wake, recurrence |
 | `src/session-manager.ts` | Resolves sessions; opens `inbound.db` / `outbound.db`; manages heartbeat path |
+| `src/incognito.ts` | Parses the `/incognito` chat command (start / end); router-side, before the command gate |
+| `src/temporal-session.ts` | Temporal ("incognito") session lifecycle — `resolveTemporalSession` / `destroyTemporalSession` (see below) |
 | `src/container-runner.ts` | Spawns per-agent-group Docker containers with session DB + outbox mounts, OneCLI `ensureAgent` |
 | `src/container-runtime.ts` | Docker CLI wrapper (runtime binary, host-gateway args, mount args), orphan cleanup |
 | `src/modules/permissions/access.ts` | `canAccessAgentGroup` — owner / global admin / scoped admin / member resolution against `user_roles` + `agent_group_members` |
