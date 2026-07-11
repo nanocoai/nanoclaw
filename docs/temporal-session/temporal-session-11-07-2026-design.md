@@ -2,8 +2,22 @@
 
 **Date:** 2026-07-11
 **Branch:** `feature/temporal-session`
-**Status:** Draft — pending review
+**Status:** Implemented (see `temporal-session-11-07-2026-plan.md`)
 **Type:** Design / spec
+
+## Usage
+
+In a **direct message** with the agent:
+
+- `/incognito [message]` — start a fresh, memory-free session. The agent starts
+  with a clean slate (no long-term memory loaded) and nothing said or written
+  persists. Any text after the command becomes the first turn.
+- Follow-up messages continue the incognito conversation (multi-turn).
+- `/incognito end` (or `/exit`, `/endincognito`) — leave incognito; the normal
+  session (with its memory) resumes. Incognito also ends automatically after
+  ~30 minutes idle.
+
+Incognito is **DM-only**; in a group chat the command is refused with a note.
 
 ## 1. Goal
 
