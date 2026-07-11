@@ -152,6 +152,38 @@ export function clearContainerToolInFlight(): void {
     .run(now);
 }
 
+export interface ToolInFlight {
+  tool: string;
+  /** The tool's own declared timeout (Bash exposes one), or null. */
+  declaredTimeoutMs: number | null;
+  /** Epoch ms when the tool started, per its recorded `tool_started_at`. */
+  startedAtMs: number;
+}
+
+/**
+ * Read the tool currently in flight, if any. The PreToolUse hook records it
+ * and PostToolUse clears it, so a non-null result with an old `startedAtMs`
+ * means a tool call is taking a long time (or is hung). Returns null when no
+ * tool is in flight or the row is missing/unparseable. Used by the poll-loop's
+ * stall watchdog to detect a wedged tool call before the host's absolute
+ * ceiling would.
+ */
+export function getContainerToolInFlight(): ToolInFlight | null {
+  const row = getOutboundDb()
+    .prepare(`SELECT current_tool, tool_declared_timeout_ms, tool_started_at FROM container_state WHERE id = 1`)
+    .get() as
+    | { current_tool: string | null; tool_declared_timeout_ms: number | null; tool_started_at: string | null }
+    | undefined;
+  if (!row || !row.current_tool || !row.tool_started_at) return null;
+  const startedAtMs = new Date(row.tool_started_at).getTime();
+  if (Number.isNaN(startedAtMs)) return null;
+  return {
+    tool: row.current_tool,
+    declaredTimeoutMs: typeof row.tool_declared_timeout_ms === 'number' ? row.tool_declared_timeout_ms : null,
+    startedAtMs,
+  };
+}
+
 /**
  * Touch the heartbeat file — replaces the old touchProcessing() DB writes.
  * The host checks this file's mtime for stale container detection.
