@@ -44,16 +44,21 @@ const COMPOSED_HEADER = '<!-- Composed at spawn — do not edit. Edit CLAUDE.loc
  * fragments, and MCP server fragments declared in `container.json`. Creates
  * an empty `CLAUDE.local.md` if missing.
  */
-export function composeGroupClaudeMd(group: AgentGroup): void {
-  const groupDir = path.resolve(GROUPS_DIR, group.folder);
-  if (!fs.existsSync(groupDir)) {
-    fs.mkdirSync(groupDir, { recursive: true });
+export function composeGroupClaudeMd(group: AgentGroup, outputDir?: string): void {
+  const sourceGroupDir = path.resolve(GROUPS_DIR, group.folder);
+  // Writes go to `outputDir` when provided — temporal (incognito) sessions
+  // compose into a fresh ephemeral workspace so the agent gets operating
+  // instructions with no memory. Persona/config are always read from the real
+  // group. Defaults to the group dir, i.e. unchanged behavior.
+  const targetDir = outputDir ?? sourceGroupDir;
+  if (!fs.existsSync(targetDir)) {
+    fs.mkdirSync(targetDir, { recursive: true });
   }
 
-  const sharedLink = path.join(groupDir, '.claude-shared.md');
+  const sharedLink = path.join(targetDir, '.claude-shared.md');
   syncSymlink(sharedLink, SHARED_CLAUDE_MD_CONTAINER_PATH);
 
-  const fragmentsDir = path.join(groupDir, '.claude-fragments');
+  const fragmentsDir = path.join(targetDir, '.claude-fragments');
   if (!fs.existsSync(fragmentsDir)) {
     fs.mkdirSync(fragmentsDir, { recursive: true });
   }
@@ -114,7 +119,7 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
 
   // Template persona (if any) — inline so it survives the prune below; imported
   // first (see the imports assembly) so it prepends the composed system prompt.
-  const persona = readGroupPersona(groupDir);
+  const persona = readGroupPersona(sourceGroupDir);
   if (persona) {
     desired.set(PERSONA_FRAGMENT, { type: 'inline', content: persona });
   }
@@ -145,9 +150,9 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     imports.push(`@./.claude-fragments/${name}`);
   }
   const body = [COMPOSED_HEADER, ...imports, ''].join('\n');
-  writeAtomic(path.join(groupDir, 'CLAUDE.md'), body);
+  writeAtomic(path.join(targetDir, 'CLAUDE.md'), body);
 
-  const localFile = path.join(groupDir, 'CLAUDE.local.md');
+  const localFile = path.join(targetDir, 'CLAUDE.local.md');
   if (!fs.existsSync(localFile)) {
     fs.writeFileSync(localFile, '');
   }

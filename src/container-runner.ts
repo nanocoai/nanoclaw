@@ -156,6 +156,7 @@ async function spawnContainer(session: Session): Promise<void> {
     provider,
     contribution,
     agentIdentifier,
+    session.temporal === 1,
   );
 
   log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
@@ -271,6 +272,14 @@ export function buildMounts(
   provider: string,
   providerContribution: ProviderContainerContribution,
 ): VolumeMount[] {
+  // Temporal (incognito) session: a fresh, memory-free workspace + isolated
+  // .claude, both under the session folder (discarded on teardown). Never
+  // mounts the group dir or the shared .claude-shared, so no long-term memory
+  // or prior transcript can leak in.
+  if (session.temporal === 1) {
+    return buildTemporalMounts(agentGroup, session, containerConfig, provider, providerContribution);
+  }
+
   const projectRoot = process.cwd();
 
   // Default agent surfaces (composed project doc, skill links, provider state
@@ -359,6 +368,98 @@ export function buildMounts(
 }
 
 /**
+ * Mounts for a temporal (incognito) session: a fresh, memory-free workspace and
+ * an isolated Claude state dir, both under the session folder so
+ * `destroyTemporalSession` removes them wholesale. The group dir and the shared
+ * `.claude-shared` are never mounted, so no long-term memory (CLAUDE.local.md,
+ * memory/, conversations/, ad-hoc workspace files) or prior SDK transcript can
+ * leak in. All writes land in the ephemeral dirs and are discarded on teardown.
+ */
+function buildTemporalMounts(
+  agentGroup: AgentGroup,
+  session: Session,
+  containerConfig: import('./container-config.js').ContainerConfig,
+  provider: string,
+  providerContribution: ProviderContainerContribution,
+): VolumeMount[] {
+  const projectRoot = process.cwd();
+  const defaultSurfaces = !providerProvidesAgentSurfaces(provider);
+  const sessDir = sessionDir(agentGroup.id, session.id);
+  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
+  const agentDir = path.join(sessDir, 'agent-ephemeral');
+  const claudeStateDir = path.join(sessDir, 'claude-ephemeral');
+
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  if (defaultSurfaces) {
+    // Compose operating instructions (persona/skills/shared base) INTO the
+    // ephemeral workspace — an empty CLAUDE.local.md, no memory/, no
+    // conversations/, no ad-hoc files. Reads persona/config from the real group.
+    composeGroupClaudeMd(agentGroup, agentDir);
+
+    // container.json so the runner's loadConfig finds it.
+    const srcCfg = path.join(groupDir, 'container.json');
+    if (fs.existsSync(srcCfg)) {
+      fs.copyFileSync(srcCfg, path.join(agentDir, 'container.json'));
+    }
+
+    // Isolated Claude state (settings + skill symlinks), so the incognito
+    // transcript never lands in the group's shared .claude-shared.
+    seedEphemeralClaudeDir(agentGroup.id, claudeStateDir, containerConfig);
+  }
+
+  const mounts: VolumeMount[] = [];
+  mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
+  mounts.push({ hostPath: agentDir, containerPath: '/workspace/agent', readonly: false });
+
+  // Shared base doc — imported by the composed entry via `.claude-shared.md`.
+  const sharedClaudeMd = path.join(projectRoot, 'container', 'CLAUDE.md');
+  if (defaultSurfaces && fs.existsSync(sharedClaudeMd)) {
+    mounts.push({ hostPath: sharedClaudeMd, containerPath: '/app/CLAUDE.md', readonly: true });
+  }
+  if (defaultSurfaces) {
+    mounts.push({ hostPath: claudeStateDir, containerPath: '/home/node/.claude', readonly: false });
+  }
+
+  const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
+  mounts.push({ hostPath: agentRunnerSrc, containerPath: '/app/src', readonly: true });
+
+  const skillsSrc = path.join(projectRoot, 'container', 'skills');
+  if (fs.existsSync(skillsSrc)) {
+    mounts.push({ hostPath: skillsSrc, containerPath: '/app/skills', readonly: true });
+  }
+
+  if (containerConfig.additionalMounts && containerConfig.additionalMounts.length > 0) {
+    mounts.push(...validateAdditionalMounts(containerConfig.additionalMounts, agentGroup.name));
+  }
+  if (providerContribution.mounts) {
+    mounts.push(...providerContribution.mounts);
+  }
+
+  return mounts;
+}
+
+/**
+ * Seed an isolated /home/node/.claude for a temporal session: copy the group's
+ * settings.json (PreCompact hook + env) and create the skill symlinks fresh.
+ * `initGroupFilesystem` seeded the group's `.claude-shared` before buildMounts
+ * ran, so the source settings.json exists.
+ */
+function seedEphemeralClaudeDir(
+  agentGroupId: string,
+  claudeStateDir: string,
+  containerConfig: import('./container-config.js').ContainerConfig,
+): void {
+  fs.mkdirSync(claudeStateDir, { recursive: true });
+  const srcSettings = path.join(DATA_DIR, 'v2-sessions', agentGroupId, '.claude-shared', 'settings.json');
+  if (fs.existsSync(srcSettings)) {
+    fs.copyFileSync(srcSettings, path.join(claudeStateDir, 'settings.json'));
+  }
+  fs.mkdirSync(path.join(claudeStateDir, 'skills'), { recursive: true });
+  syncSkillSymlinks(claudeStateDir, containerConfig);
+}
+
+/**
  * Sync skill symlinks in .claude-shared/skills/ to match the container.json
  * selection. Each symlink points to a container path (/app/skills/<name>)
  * so it's dangling on the host but valid inside the container.
@@ -428,6 +529,7 @@ async function buildContainerArgs(
   _provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
+  temporal = false,
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
@@ -441,6 +543,10 @@ async function buildContainerArgs(
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Temporal (incognito) marker — lets the runner append a "nothing persists"
+  // note to the system prompt. Isolation itself comes from the mount set.
+  if (temporal) args.push('-e', 'NANOCLAW_TEMPORAL=1');
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
