@@ -65,6 +65,15 @@ function fmtGroupLabel(jid: string): string {
 
 /** 自动终态兜底汇报里携带的子群最终回复摘要上限（防超长撑爆主群 context） */
 const FINALIZE_DETAILS_MAX = 2000;
+const REPORT_NOTIFICATION_SUMMARY_MAX = 30;
+
+function buildReportNotification(targetJid: string, summary?: string): string {
+  const normalized = summary?.trim().replace(/\s+/g, ' ') || '已完成处理';
+  const chars = Array.from(normalized);
+  const clipped = chars.slice(0, REPORT_NOTIFICATION_SUMMARY_MAX).join('');
+  const suffix = chars.length > REPORT_NOTIFICATION_SUMMARY_MAX ? '……' : '';
+  return `${fmtGroupLabel(targetJid)} 已处理并回复：${clipped}${suffix}`;
+}
 
 const TASK_LEDGER_STAGE_ORDER = [
   'draft',
@@ -708,6 +717,7 @@ function handleReport(
     task.sourceJid,
     reportingGroup,
     reportText,
+    { targetJid: task.targetJid, summary: data.summary },
     deps,
   );
   logger.info(
@@ -758,6 +768,7 @@ function deliverReportToSource(
   sourceJid: string,
   reportingGroup: string,
   reportText: string,
+  notification: { targetJid: string; summary?: string },
   deps?: Pick<IpcDeps, 'injectReportToActiveAgent' | 'sendDirectNotify'>,
 ): ReportMeta {
   const meta = storeReportToSource(sourceJid, reportingGroup, reportText);
@@ -768,10 +779,12 @@ function deliverReportToSource(
       'deliverReportToSource: injection attempt',
     );
   }
-  // 直发飞书群通知（保底，不依赖 agent 是否在线/是否主动汇报）
-  // 加系统通知前缀，与 agent 正常回复区分，避免用户混淆重复消息
+  // 飞书只展示短摘要；完整汇报仍保留在 DB 和 agent 注入路径中。
   if (deps?.sendDirectNotify) {
-    const notifyText = `[系统通知] 子群任务结果已送达：\n${reportText}`;
+    const notifyText = buildReportNotification(
+      notification.targetJid,
+      notification.summary,
+    );
     deps.sendDirectNotify(sourceJid, notifyText).catch((err) => {
       logger.warn(
         { sourceJid, reportId: meta.id, err: String(err) },
@@ -859,6 +872,7 @@ export function finalizeDelegationOnTurnEnd(
       task.sourceJid,
       reportingGroup,
       reportText,
+      { targetJid: task.targetJid, summary: details || baseSummary },
       deps,
     );
     logger.info(
@@ -887,6 +901,7 @@ export function finalizeDelegationOnTurnEnd(
 }
 
 export const __testing = {
+  buildReportNotification,
   fmtGroupLabel,
   handleDelegate,
   handleReport,

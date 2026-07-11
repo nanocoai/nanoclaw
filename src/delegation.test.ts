@@ -13,6 +13,7 @@ import {
   listDelegations,
   replyDelegation,
   resetDelegationToDispatched,
+  setGroupAlias,
   setDelegationDispatchMsgId,
   setRegisteredGroup,
   storeChatMetadata,
@@ -521,21 +522,30 @@ describe('sendDirectNotify 飞书直发通知', () => {
       targetGroup: 'sub3',
       targetJid: 'fs:oc_3',
     } as never);
+    setGroupAlias('C1', 'fs:oc_3');
 
     const notifyCalls: Array<{ jid: string; text: string }> = [];
     const sendDirectNotify = async (jid: string, text: string) => {
       notifyCalls.push({ jid, text });
     };
 
-    finalizeDelegationOnTurnEnd('sub3', true, '已完成', {
-      injectReportToActiveAgent: () => false,
+    const fullReply = `已完成${'详细结果'.repeat(20)}`;
+    const injectedReports: string[] = [];
+    finalizeDelegationOnTurnEnd('sub3', true, fullReply, {
+      injectReportToActiveAgent: (_jid, meta) => {
+        injectedReports.push(meta.text);
+        return true;
+      },
       sendDirectNotify,
     });
 
     expect(notifyCalls).toHaveLength(1);
     expect(notifyCalls[0].jid).toBe('fs:oc_main');
-    expect(notifyCalls[0].text).toContain('[系统通知]');
-    expect(notifyCalls[0].text).toContain('fs:oc_3');
+    expect(notifyCalls[0].text).toBe(
+      `C1(fs:oc_3) 已处理并回复：${Array.from(fullReply).slice(0, 30).join('')}……`,
+    );
+    expect(injectedReports).toHaveLength(1);
+    expect(injectedReports[0]).toContain(fullReply);
   });
 
   it('sendDirectNotify 失败不影响 DB 投递', () => {
@@ -612,12 +622,19 @@ describe('sendDirectNotify 飞书直发通知', () => {
     } as never);
 
     const notifyCalls: Array<{ jid: string; text: string }> = [];
+    const injectedReports: string[] = [];
+    setGroupAlias('C1', 'fs:oc_3');
+    const summary = `修复完成${'摘要内容'.repeat(20)}`;
+    const details = `完整详情${'不能截断'.repeat(100)}`;
     ipcTesting.handleReport(
-      { status: 'done', summary: '修复完成' },
+      { status: 'done', summary, details },
       'sub3',
       {},
       {
-        injectReportToActiveAgent: () => false,
+        injectReportToActiveAgent: (_jid, meta) => {
+          injectedReports.push(meta.text);
+          return true;
+        },
         sendDirectNotify: async (jid, text) => {
           notifyCalls.push({ jid, text });
         },
@@ -626,8 +643,12 @@ describe('sendDirectNotify 飞书直发通知', () => {
 
     expect(notifyCalls).toHaveLength(1);
     expect(notifyCalls[0].jid).toBe('fs:oc_main');
-    expect(notifyCalls[0].text).toContain('[系统通知]');
-    expect(notifyCalls[0].text).toContain('修复完成');
+    expect(notifyCalls[0].text).toBe(
+      `C1(fs:oc_3) 已处理并回复：${Array.from(summary).slice(0, 30).join('')}……`,
+    );
+    expect(injectedReports).toHaveLength(1);
+    expect(injectedReports[0]).toContain(summary);
+    expect(injectedReports[0]).toContain(details);
     expect(getDelegation(t.taskId)?.status).toBe('done');
   });
 });
