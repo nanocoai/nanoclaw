@@ -76,6 +76,8 @@ export interface CodexRunnerConfig {
   /** per-group CODEX_HOME 目录（持久化，跨轮保留 session 文件供 resume） */
   codexHome: string;
   isScheduledTask?: boolean;
+  /** 仅用于缩短诊断集成测试；生产默认 30 秒。 */
+  diagnosticIntervalMs?: number;
 }
 
 export interface CodexTextProgressState {
@@ -90,6 +92,15 @@ export interface CodexMcpServerConfig {
   env?: Record<string, string>;
 }
 
+export interface CodexRunDiagnostics {
+  startedAt: number;
+  lastActivityAt: number;
+  lastEvent: string;
+  eventCount: number;
+  stdoutBytes: number;
+  stderrBytes: number;
+}
+
 // ---- 纯函数（可单元测试） ----
 
 /** 解析 codex JSONL 单行 → CodexEvent，畸形输入返回 null */
@@ -102,6 +113,45 @@ export function parseCodexEventLine(line: string): CodexEvent | null {
     return parsed as CodexEvent;
   } catch {
     return null;
+  }
+}
+
+export function createCodexRunDiagnostics(now = Date.now()): CodexRunDiagnostics {
+  return {
+    startedAt: now,
+    lastActivityAt: now,
+    lastEvent: 'spawn',
+    eventCount: 0,
+    stdoutBytes: 0,
+    stderrBytes: 0,
+  };
+}
+
+export function formatCodexDiagnosticSnapshot(
+  state: CodexRunDiagnostics,
+  now: number,
+  pid: number | undefined,
+  alive: boolean,
+): Record<string, string | number | boolean | undefined> {
+  return {
+    pid,
+    alive,
+    elapsedMs: Math.max(0, now - state.startedAt),
+    idleMs: Math.max(0, now - state.lastActivityAt),
+    lastEvent: state.lastEvent,
+    eventCount: state.eventCount,
+    stdoutBytes: state.stdoutBytes,
+    stderrBytes: state.stderrBytes,
+  };
+}
+
+export function redactProxyEndpoint(value: string | undefined): string {
+  if (!value) return 'none';
+  try {
+    const parsed = new URL(value);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return 'invalid';
   }
 }
 
@@ -722,6 +772,44 @@ export async function runCodexQuery(
     let stderrAccum = '';
     // codex 通过 type:error/turn.failed 上报鉴权失败/限额等错误，捕获正文供 close 透传
     let lastErrorMessage: string | undefined;
+    const diagnostics = createCodexRunDiagnostics();
+    const diagnosticIntervalMs = config.diagnosticIntervalMs ?? 30_000;
+    let diagnosticModelInfo = config.sessionId
+      ? readCodexModelInfo(config.codexHome, config.sessionId)
+      : undefined;
+
+    const emitDiagnosticSnapshot = () => {
+      const now = Date.now();
+      if (now - diagnostics.lastActivityAt < diagnosticIntervalMs) return;
+      const pid = child.pid;
+      let alive = false;
+      if (pid) {
+        try {
+          process.kill(pid, 0);
+          alive = true;
+        } catch {
+          alive = false;
+        }
+      }
+      const snapshot = {
+        ...formatCodexDiagnosticSnapshot(diagnostics, now, pid, alive),
+        sessionId: newSessionId || 'new',
+        model: config.model || diagnosticModelInfo?.model || 'default',
+        lastTurnContext: diagnosticModelInfo?.lastTurnContext,
+        modelContextWindow: diagnosticModelInfo?.modelContextWindow,
+        httpProxy: redactProxyEndpoint(codexEnv.HTTP_PROXY || codexEnv.http_proxy),
+        httpsProxy: redactProxyEndpoint(codexEnv.HTTPS_PROXY || codexEnv.https_proxy),
+      };
+      const line = `[diagnostic ${new Date(now).toISOString()}] ${JSON.stringify(snapshot)}`;
+      log(`[codex-runner] ${line}`);
+      try {
+        fs.appendFileSync(stderrLogPath, `\n${line}\n`);
+      } catch {
+        /* ignore */
+      }
+    };
+    const diagnosticTimer = setInterval(emitDiagnosticSnapshot, diagnosticIntervalMs);
+    diagnosticTimer.unref?.();
 
     // prompt 已通过 arg 传入，关闭 stdin 避免 codex 等待
     child.stdin!.end();
@@ -730,11 +818,18 @@ export async function runCodexQuery(
       const event = parseCodexEventLine(line);
       if (!event) return;
 
+      diagnostics.lastActivityAt = Date.now();
+      diagnostics.lastEvent = event.item
+        ? `${event.type}/${event.item.type}`
+        : event.type;
+      diagnostics.eventCount++;
+
       log(`[codex-runner] event: ${event.type}${event.item ? `/${event.item.type}` : ''}`);
 
       // 提取 thread_id 作为 session
       if (event.type === 'thread.started' && event.thread_id) {
         newSessionId = event.thread_id;
+        diagnosticModelInfo = readCodexModelInfo(config.codexHome, newSessionId);
         log(`[codex-runner] thread: ${newSessionId}`);
       }
 
@@ -773,6 +868,8 @@ export async function runCodexQuery(
     };
 
     child.stdout!.on('data', (data: Buffer) => {
+      diagnostics.lastActivityAt = Date.now();
+      diagnostics.stdoutBytes += data.length;
       lineBuffer += data.toString();
       const lines = lineBuffer.split('\n');
       lineBuffer = lines.pop() || '';
@@ -781,6 +878,8 @@ export async function runCodexQuery(
 
     child.stderr!.on('data', (data: Buffer) => {
       const text = data.toString();
+      diagnostics.lastActivityAt = Date.now();
+      diagnostics.stderrBytes += data.length;
       stderrAccum += text;
       log(`[codex-stderr] ${text.trim()}`);
       try {
@@ -791,6 +890,7 @@ export async function runCodexQuery(
     });
 
     child.on('close', (code) => {
+      clearInterval(diagnosticTimer);
       if (lineBuffer.trim()) handleLine(lineBuffer);
 
       log(`[codex-runner] process exited code=${code}`);
@@ -847,6 +947,7 @@ export async function runCodexQuery(
     });
 
     child.on('error', (err) => {
+      clearInterval(diagnosticTimer);
       log(`[codex-runner] spawn error: ${err.message}`);
       writeOutput({
         status: 'error',
