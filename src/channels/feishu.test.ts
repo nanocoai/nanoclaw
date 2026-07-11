@@ -461,6 +461,38 @@ describe('FeishuChannel', () => {
   });
 
   describe('进度消息聚合', () => {
+    it('没有真实进度变化时一分钟内不重复刷新卡片', async () => {
+      vi.useFakeTimers();
+      const jid = 'fs:oc_progress_stable';
+
+      try {
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '正在读取配置文件',
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'Read',
+              toolCallId: 'stable-read',
+              input: { file_path: '/tmp/config.json' },
+            },
+          }),
+          { isProgress: true },
+        );
+        mockPatch.mockClear();
+
+        await vi.advanceTimersByTimeAsync(59_999);
+        expect(mockPatch).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(mockPatch).toHaveBeenCalledTimes(1);
+      } finally {
+        (channel as any).clearSpinnerTimer(jid);
+        vi.useRealTimers();
+      }
+    });
+
     it('默认卡只展示阶段聚合，过程记录保留完整工具流水', async () => {
       const jid = 'fs:oc_progress_phase_summary';
       (channel as any).opts.registeredGroups = () => ({
