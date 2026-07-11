@@ -27,13 +27,16 @@ import {
   getMessagingGroupAgents,
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
-import { findSessionForAgent } from './db/sessions.js';
+import { findSessionForAgent, findTemporalSession } from './db/sessions.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
+import { resolveTemporalSession, destroyTemporalSession } from './temporal-session.js';
+import { parseIncognitoCommand, rewriteContentText } from './incognito.js';
+import { deliverSessionMessages } from './delivery.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
-import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
+import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
 
 function generateId(): string {
@@ -467,7 +470,43 @@ async function deliverToAgent(
     effectiveSessionMode = 'per-thread';
   }
 
-  const { session, created } = resolveSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode);
+  // Incognito (`/incognito`) handling — DM-only, before the command gate and
+  // session resolution so the command never reaches the container and routing
+  // can target a distinct, memory-free temporal session.
+  const isChat = event.message.kind === 'chat' || event.message.kind === 'chat-sdk';
+  const lookupThreadId = effectiveSessionMode === 'per-thread' ? effectiveThreadId : null;
+  if (isChat) {
+    const incog = parseIncognitoCommand(event.message.content);
+    if (incog.kind !== 'none' && mg.is_group !== 0) {
+      // Incognito is DM-only; refuse in group chats (a session is thread-scoped,
+      // so one member's /incognito would flip the whole thread — see design doc).
+      await sendIncognitoNote(
+        agent,
+        mg,
+        event,
+        effectiveThreadId,
+        effectiveSessionMode,
+        '🕶️ Incognito is only available in direct messages.',
+      );
+      return;
+    }
+    if (mg.is_group === 0 && incog.kind === 'start') {
+      await startIncognito(agent, mg, event, effectiveThreadId, effectiveSessionMode, lookupThreadId, incog.body);
+      return;
+    }
+    if (mg.is_group === 0 && incog.kind === 'end') {
+      await endIncognito(agent, mg, event, effectiveThreadId, effectiveSessionMode, lookupThreadId);
+      return;
+    }
+  }
+
+  // Route a follow-up message to an active incognito session when one exists
+  // (DM continuation); otherwise resolve the normal session.
+  const activeTemporal =
+    isChat && mg.is_group === 0 ? findTemporalSession(agent.agent_group_id, mg.id, lookupThreadId) : undefined;
+  const { session, created } = activeTemporal
+    ? { session: activeTemporal, created: false }
+    : resolveSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode);
 
   // The inbound row's (channel_type, platform_id, thread_id) is the address
   // the agent's reply will be delivered to. Normally it mirrors the source
@@ -547,6 +586,119 @@ async function deliverToAgent(
       if (!woke) stopTypingRefresh(freshSession.id);
     }
   }
+}
+
+// ── Incognito (`/incognito`) helpers ──
+
+type SessionMode = 'shared' | 'per-thread' | 'agent-shared';
+interface ReplyAddr {
+  channelType: string;
+  platformId: string;
+  threadId: string | null;
+}
+
+/** Reply/note address for a DM incognito interaction. */
+function incognitoAddr(event: InboundEvent, effectiveThreadId: string | null): ReplyAddr {
+  return event.replyTo ?? { channelType: event.channelType, platformId: event.platformId, threadId: effectiveThreadId };
+}
+
+/** Write a control note to a session's outbound DB and deliver it immediately. */
+async function sendControlNote(session: Session, addr: ReplyAddr, text: string): Promise<void> {
+  writeOutboundDirect(session.agent_group_id, session.id, {
+    id: `incognito-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    kind: 'chat',
+    platformId: addr.platformId,
+    channelType: addr.channelType,
+    threadId: addr.threadId,
+    content: JSON.stringify({ text }),
+  });
+  await deliverSessionMessages(session);
+}
+
+/** Deliver an incognito control note via the (normal) session for this DM. */
+async function sendIncognitoNote(
+  agent: MessagingGroupAgent,
+  mg: MessagingGroup,
+  event: InboundEvent,
+  effectiveThreadId: string | null,
+  effectiveSessionMode: SessionMode,
+  text: string,
+): Promise<void> {
+  const { session } = resolveSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode);
+  await sendControlNote(session, incognitoAddr(event, effectiveThreadId), text);
+}
+
+/** Start (or restart) a temporal session for a DM and route the first turn. */
+async function startIncognito(
+  agent: MessagingGroupAgent,
+  mg: MessagingGroup,
+  event: InboundEvent,
+  effectiveThreadId: string | null,
+  effectiveSessionMode: SessionMode,
+  lookupThreadId: string | null,
+  body: string,
+): Promise<void> {
+  const existing = findTemporalSession(agent.agent_group_id, mg.id, lookupThreadId);
+  if (existing) destroyTemporalSession(existing);
+
+  const { session } = resolveTemporalSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode);
+  const addr = incognitoAddr(event, effectiveThreadId);
+
+  if (body) {
+    // Deliver the prefix-stripped first turn and wake the temporal container.
+    writeSessionMessage(session.agent_group_id, session.id, {
+      id: messageIdForAgent(event.message.id, agent.agent_group_id),
+      kind: event.message.kind,
+      timestamp: event.message.timestamp,
+      platformId: addr.platformId,
+      channelType: addr.channelType,
+      threadId: addr.threadId,
+      content: rewriteContentText(event.message.content, body),
+      trigger: 1,
+    });
+    startTypingRefresh(
+      session.id,
+      session.agent_group_id,
+      event.channelType,
+      event.platformId,
+      effectiveThreadId,
+      mg.instance,
+    );
+    const fresh = getSession(session.id);
+    if (fresh) {
+      const woke = await wakeContainer(fresh);
+      if (!woke) stopTypingRefresh(fresh.id);
+    }
+  } else {
+    await sendControlNote(
+      session,
+      addr,
+      '🕶️ Incognito on — clean slate, nothing here is saved. Send /incognito end to exit.',
+    );
+  }
+}
+
+/** End an active temporal session for a DM (or note that none is active). */
+async function endIncognito(
+  agent: MessagingGroupAgent,
+  mg: MessagingGroup,
+  event: InboundEvent,
+  effectiveThreadId: string | null,
+  effectiveSessionMode: SessionMode,
+  lookupThreadId: string | null,
+): Promise<void> {
+  const existing = findTemporalSession(agent.agent_group_id, mg.id, lookupThreadId);
+  // Confirm via the normal session, which survives the temporal teardown.
+  const { session: normal } = resolveSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode);
+  const addr = incognitoAddr(event, effectiveThreadId);
+
+  if (!existing) {
+    await sendControlNote(normal, addr, "You're not in an incognito session.");
+    return;
+  }
+
+  await sendControlNote(normal, addr, '🕶️ Incognito off — back to normal. That conversation was not saved.');
+  destroyTemporalSession(existing);
 }
 
 /**

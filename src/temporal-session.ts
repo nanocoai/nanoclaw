@@ -73,8 +73,13 @@ export function resolveTemporalSession(
  * cleans up immediately.
  */
 export function destroyTemporalSession(session: Session): void {
+  // Close synchronously so the row is immediately excluded from lookups and
+  // sweeps (findTemporalSession filters status='active') even when the
+  // container kill + folder removal is deferred to the container's exit. This
+  // prevents a re-`/incognito` from reusing a session that's being torn down.
+  updateSession(session.id, { status: 'closed' });
+
   const cleanup = (): void => {
-    updateSession(session.id, { status: 'closed' });
     deleteSession(session.id);
     fs.rmSync(sessionDir(session.agent_group_id, session.id), { recursive: true, force: true });
     log.info('Temporal session destroyed', { id: session.id, agentGroupId: session.agent_group_id });
