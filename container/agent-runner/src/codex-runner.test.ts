@@ -9,9 +9,95 @@ import {
   parseCodexEventLine,
   buildCodexArgs,
   extractCodexError,
+  createCodexRunDiagnostics,
+  formatCodexDiagnosticSnapshot,
+  redactProxyEndpoint,
+  runCodexQuery,
   type CodexModelInfo,
   type CodexEvent,
 } from './codex-runner.js';
+
+describe('Codex 卡死诊断', () => {
+  it('快照包含最后事件、静默时长和流量计数', () => {
+    const state = createCodexRunDiagnostics(1_000);
+    state.lastActivityAt = 4_000;
+    state.lastEvent = 'turn.started';
+    state.eventCount = 2;
+    state.stdoutBytes = 128;
+    state.stderrBytes = 64;
+
+    expect(formatCodexDiagnosticSnapshot(state, 10_000, 4321, true)).toEqual({
+      pid: 4321,
+      alive: true,
+      elapsedMs: 9_000,
+      idleMs: 6_000,
+      lastEvent: 'turn.started',
+      eventCount: 2,
+      stdoutBytes: 128,
+      stderrBytes: 64,
+    });
+  });
+
+  it('代理端点只保留协议和地址，不泄露凭证', () => {
+    expect(
+      redactProxyEndpoint(
+        'http://user:secret@127.0.0.1:7897/private?token=hidden',
+      ),
+    ).toBe(
+      'http://127.0.0.1:7897',
+    );
+    expect(redactProxyEndpoint(undefined)).toBe('none');
+  });
+
+  it('子进程静默时周期记录仍存活的诊断快照', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-diagnostic-'));
+    const binDir = path.join(root, 'bin');
+    const codexHome = path.join(root, 'codex-home');
+    fs.mkdirSync(binDir);
+    const fakeCodex = path.join(binDir, 'codex');
+    fs.writeFileSync(
+      fakeCodex,
+      [
+        '#!/bin/bash',
+        `echo '{"type":"thread.started","thread_id":"thread-diag"}'`,
+        `echo '{"type":"turn.started"}'`,
+        'sleep 0.08',
+        `echo '{"type":"turn.completed","usage":{"input_tokens":1}}'`,
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    const logs: string[] = [];
+
+    try {
+      await runCodexQuery(
+        {
+          prompt: 'diagnose',
+          mcpServerPath: '/tmp/mcp.js',
+          chatJid: 'fs:test',
+          groupFolder: 'test',
+          isMain: false,
+          ipcDir: path.join(root, 'ipc'),
+          cwd: root,
+          env: { HOME: root, PATH: `${binDir}:${process.env.PATH}` },
+          codexHome,
+          diagnosticIntervalMs: 20,
+        },
+        () => {},
+        (line) => logs.push(line),
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+
+    const diagnostic = logs.find(
+      (line) =>
+        line.includes('[diagnostic ') &&
+        line.includes('"lastEvent":"turn.started"'),
+    );
+    expect(diagnostic).toContain('"alive":true');
+    expect(diagnostic).toContain('"lastEvent":"turn.started"');
+  });
+});
 
 describe('parseCodexEventLine', () => {
   it('解析合法 JSON 行', () => {
