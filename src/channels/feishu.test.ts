@@ -521,7 +521,7 @@ describe('FeishuChannel', () => {
       const entry = (channel as any).progressCards.get(jid);
       expect(entry.steps).toHaveLength(1);
       expect(entry.steps[0].title).toBe(
-        '核对进度展示链路 · 已完成读取、搜索、修改和测试（1 项通过）',
+        '核对进度展示链路 · 已读取 input.txt、搜索“needle”、修改 output.txt，并测试 fixture.test.mjs（1 项通过）',
       );
       expect(
         entry.allSteps
@@ -534,7 +534,7 @@ describe('FeishuChannel', () => {
         JSON.parse(patchArg?.data?.content ?? '{}'),
       );
       expect(serialized).toContain(
-        '核对进度展示链路 · 已完成读取、搜索、修改和测试（1 项通过）',
+        '核对进度展示链路 · 已读取 input.txt、搜索“needle”、修改 output.txt，并测试 fixture.test.mjs（1 项通过）',
       );
       expect(serialized).not.toContain('已完成协作操作');
     });
@@ -680,7 +680,9 @@ describe('FeishuChannel', () => {
 
       const entry = (channel as any).progressCards.get(jid);
       expect(entry.steps).toHaveLength(1);
-      expect(entry.steps[0].title).toBe('运行长测试 · 1 项测试通过');
+      expect(entry.steps[0].title).toBe(
+        '运行长测试 · 已测试 fixture.test.mjs（1 项通过）',
+      );
       expect(
         entry.allSteps.filter((step: any) => step.toolCallId === 'plan-test'),
       ).toHaveLength(1);
@@ -754,7 +756,7 @@ describe('FeishuChannel', () => {
       const serialized = JSON.stringify(
         JSON.parse(patchArg?.data?.content ?? '{}'),
       );
-      expect(serialized).toContain('已完成测试');
+      expect(serialized).toContain('已运行测试');
       expect(serialized).not.toContain('✅ 执行完成');
       expect((channel as any).progressCards.get(jid).steps).toHaveLength(1);
     });

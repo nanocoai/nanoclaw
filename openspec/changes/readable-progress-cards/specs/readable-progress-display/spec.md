@@ -162,6 +162,22 @@ Claude SDK、print/interactive、Codex 以及能提供工具事件的其他运�
 - **WHEN** “验证失败状态展示”阶段中的命令以退出码 7 结束
 - **THEN** 终态 SHALL 显示该阶段失败及退出码 7，SHALL NOT 显示完成或无对象的“执行失败”
 
+### Requirement: 动作对象在运行态和完成态均可读
+
+默认卡片 SHALL 在结构化参数足够时展示安全、具体的操作对象。文件对象 SHALL 使用 basename，搜索对象 SHALL 使用脱敏且有界的关键词和目标文件，测试对象 SHALL 使用测试文件或套件名称。完成态 SHALL 聚合阶段内去重后的对象动作，不得退化为动作分类清单。
+
+#### Scenario: 文件搜索展示关键词和目标
+- **WHEN** Grep 在 `/workspace/src/progress-display.ts` 中搜索 `turn_end`
+- **THEN** 运行态 SHALL 显示类似“正在 progress-display.ts 中搜索‘turn_end’”，SHALL NOT 只显示“正在搜索相关内容”
+
+#### Scenario: 多动作完成态保留对象
+- **WHEN** 同一阶段读取 `progress-display.ts`、搜索 `turn_end`、修改该文件并运行 `progress-display.test.ts`
+- **THEN** 终态 SHALL 保留这些对象和测试结果，SHALL NOT 只显示“已完成读取、搜索、修改和测试”
+
+#### Scenario: 对象安全降级
+- **WHEN** 参数对象是绝对路径、内部 ID、凭证、内部地址或无法安全概括的未知命令
+- **THEN** 默认卡片 SHALL 仅展示脱敏 basename、领域对象或中性动作；原值只可进入脱敏后的过程记录
+
 ### Requirement: 可见窗口聚合重复动作并优先保留信息
 
 默认卡片最多显示三个阶段时，系统 SHALL 优先保留最近的用户任务阶段及其结果。相同阶段内的重复读取、搜索或检查 SHALL 聚合，不得出现连续的同义分类行。完整工具调用仍 SHALL 保存在过程记录中。

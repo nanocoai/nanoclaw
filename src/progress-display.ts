@@ -33,6 +33,8 @@ export type ProgressCategory =
 
 export interface ProgressAction {
   title: string;
+  completedTitle?: string;
+  actionSummary?: string;
   phase?: string;
   category: ProgressCategory;
   confidence: 'exact' | 'inferred' | 'fallback';
@@ -59,6 +61,7 @@ export interface PresentationPhase {
   status: PresentationStep['status'];
   currentAction?: string;
   categories: ProgressCategory[];
+  actionSummaries?: string[];
   toolCallIds: string[];
   outcome?: string;
   planTaskId?: string;
@@ -198,6 +201,146 @@ function mcpToolOf(progress: StructuredProgress): string {
   return inputString(progress.input, 'tool').toLowerCase();
 }
 
+function safeBasename(value: string): string | undefined {
+  const raw = value.trim().replace(/[?#].*$/u, '');
+  if (!raw || /^-/u.test(raw)) return undefined;
+  const name = raw.split(/[\\/]/u).filter(Boolean).at(-1)?.trim();
+  if (!name || name.length > 64) return undefined;
+  if (/^(?:\.env(?:\..*)?|.*(?:credential|password|secret|token|private[_-]?key).*)$/iu.test(name))
+    return '敏感配置文件';
+  const safe = sanitizeUserText(name);
+  if (
+    !safe ||
+    safe.includes('[REDACTED') ||
+    /相关标识|内部服务|相关文件/u.test(safe)
+  )
+    return undefined;
+  return safe;
+}
+
+function safeQuery(value: string): string | undefined {
+  const raw = value.trim().replace(/^[`'"“”]+|[`'"“”]+$/gu, '');
+  if (!raw || raw.length > 80) return undefined;
+  const safe = sanitizeUserText(raw).replace(/\s+/gu, ' ');
+  if (
+    !safe ||
+    safe.includes('[REDACTED') ||
+    /相关标识|内部服务|相关文件/u.test(safe)
+  )
+    return undefined;
+  return safe.length > 32 ? `${safe.slice(0, 32)}…` : safe;
+}
+
+function fileObject(progress: StructuredProgress): string | undefined {
+  return safeBasename(
+    inputString(progress.input, 'file_path') ||
+      inputString(progress.input, 'path'),
+  );
+}
+
+function testObject(command: string): string | undefined {
+  const match = command.match(
+    /(?:^|[\\/\s'"`])([^\\/\s'"`]+(?:\.test|\.spec)\.[cm]?[jt]sx?|test_[^\\/\s'"`]+\.py|[^\\/\s'"`]+_test\.py)(?=$|\s|['"`])/iu,
+  );
+  return match ? safeBasename(match[1]) : undefined;
+}
+
+function shellSearchAction(
+  command: string,
+  base: { phase?: string },
+): ProgressAction | undefined {
+  const commandMatch = command.match(/\b(?:rg|grep)\b/iu);
+  if (commandMatch?.index == null) return undefined;
+  const tokens =
+    command
+      .slice(commandMatch.index)
+      .match(/"[^"]*"|'[^']*'|[^\s|;&]+/gu)
+      ?.map((token) => token.replace(/^["']|["']$/gu, '')) ?? [];
+  const valueFlags = new Set([
+    '-A',
+    '-B',
+    '-C',
+    '-g',
+    '-m',
+    '-t',
+    '--after-context',
+    '--before-context',
+    '--context',
+    '--glob',
+    '--max-count',
+    '--type',
+  ]);
+  const operands: string[] = [];
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (valueFlags.has(token)) {
+      index += 1;
+      continue;
+    }
+    if (token.startsWith('-')) continue;
+    operands.push(token);
+  }
+  const query = safeQuery(operands[0] ?? '');
+  const target = safeBasename(operands[1] ?? '');
+  if (query && target)
+    return actionText(
+      `正在 ${target} 中搜索“${query}”`,
+      `在 ${target} 中搜索“${query}”`,
+      base,
+      'search',
+      'inferred',
+    );
+  if (query)
+    return actionText(
+      `正在搜索“${query}”`,
+      `搜索“${query}”`,
+      base,
+      'search',
+      'inferred',
+    );
+  return undefined;
+}
+
+function shellReadObject(command: string): string | undefined {
+  const segment = command.match(/\b(?:cat|sed)\b([^|;&\n]*)/iu)?.[1];
+  if (!segment) return undefined;
+  const tokens = segment.match(/"[^"]*"|'[^']*'|\S+/gu) ?? [];
+  const candidate = [...tokens]
+    .reverse()
+    .map((token) => token.replace(/^["']|["']$/gu, ''))
+    .find((token) => !token.startsWith('-') && !/^\d+(?:,\d+)?p$/u.test(token));
+  return candidate ? safeBasename(candidate) : undefined;
+}
+
+function actionText(
+  running: string,
+  completed: string,
+  base: { phase?: string },
+  category: ProgressCategory,
+  confidence: ProgressAction['confidence'] = 'exact',
+): ProgressAction {
+  return {
+    ...base,
+    title: running,
+    completedTitle: `已${completed}`,
+    actionSummary: completed,
+    category,
+    confidence,
+  };
+}
+
+function mergeActionSummary(
+  phase: PresentationPhase,
+  action: ProgressAction,
+): string[] | undefined {
+  if (!action.actionSummary) return phase.actionSummaries;
+  const summaries = [...(phase.actionSummaries ?? [])];
+  const categoryIndex = phase.categories.indexOf(action.category);
+  if (categoryIndex >= 0) summaries[categoryIndex] = action.actionSummary;
+  else summaries.push(action.actionSummary);
+  return summaries;
+}
+
 function searchObject(progress: StructuredProgress): string | undefined {
   const haystack = [
     inputString(progress.input, 'query'),
@@ -281,49 +424,94 @@ export function classifyProgressAction(
       confidence: 'exact',
     };
   }
-  if (tool === 'read')
-    return {
-      ...base,
-      title: '正在读取文件',
-      category: 'read',
-      confidence: 'exact',
-    };
-  if (tool === 'grep' || tool === 'glob')
-    return {
-      ...base,
-      title: searchTitle(progress),
-      category: 'search',
-      confidence: 'exact',
-    };
-  if (tool === 'write' || tool === 'edit' || tool === 'file_change')
-    return {
-      ...base,
-      title: '正在修改文件',
-      category: 'change',
-      confidence: 'exact',
-    };
-  if (tool === 'websearch' || tool === 'web_search' || tool === 'webfetch')
-    return {
-      ...base,
-      title: '正在搜索公开资料',
-      category: 'web',
-      confidence: 'exact',
-    };
+  if (tool === 'read') {
+    const target = fileObject(progress);
+    return target
+      ? actionText(`正在读取 ${target}`, `读取 ${target}`, base, 'read')
+      : actionText('正在读取文件', '读取文件', base, 'read');
+  }
+  if (tool === 'grep' || tool === 'glob') {
+    const target = fileObject(progress);
+    const query = safeQuery(
+      inputString(progress.input, 'pattern') ||
+        inputString(progress.input, 'query'),
+    );
+    if (query && target)
+      return actionText(
+        `正在 ${target} 中搜索“${query}”`,
+        `在 ${target} 中搜索“${query}”`,
+        base,
+        'search',
+      );
+    if (query)
+      return actionText(
+        `正在搜索“${query}”`,
+        `搜索“${query}”`,
+        base,
+        'search',
+      );
+    return actionText(
+      searchTitle(progress),
+      searchObject(progress) ? `搜索${searchObject(progress)}` : '搜索相关内容',
+      base,
+      'search',
+    );
+  }
+  if (tool === 'write' || tool === 'edit' || tool === 'file_change') {
+    const target = fileObject(progress);
+    return target
+      ? actionText(`正在修改 ${target}`, `修改 ${target}`, base, 'change')
+      : actionText('正在修改文件', '修改文件', base, 'change');
+  }
+  if (tool === 'websearch' || tool === 'web_search' || tool === 'webfetch') {
+    const query = safeQuery(inputString(progress.input, 'query'));
+    return query
+      ? actionText(
+          `正在搜索“${query}”公开资料`,
+          `搜索“${query}”公开资料`,
+          base,
+          'web',
+        )
+      : actionText(
+          '正在搜索公开资料',
+          '搜索公开资料',
+          base,
+          'web',
+        );
+  }
 
-  if (tool.includes('gitnexus'))
-    return {
-      ...base,
-      title: '正在分析代码调用关系',
-      category: 'inspect',
-      confidence: 'exact',
-    };
-  if (tool.includes('search_chat'))
-    return {
-      ...base,
-      title: '正在搜索聊天记录',
-      category: 'communicate',
-      confidence: 'exact',
-    };
+  if (tool.includes('gitnexus')) {
+    const symbol = safeQuery(inputString(progress.input, 'query'));
+    return symbol
+      ? actionText(
+          `正在分析 ${symbol} 的代码调用关系`,
+          `分析 ${symbol} 的代码调用关系`,
+          base,
+          'inspect',
+        )
+      : actionText(
+          '正在分析代码调用关系',
+          '分析代码调用关系',
+          base,
+          'inspect',
+        );
+  }
+  if (tool.includes('search_chat')) {
+    const query = safeQuery(inputString(progress.input, 'query'));
+    return query
+      ? actionText(
+          `正在搜索包含“${query}”的聊天记录`,
+          `搜索包含“${query}”的聊天记录`,
+          base,
+          'communicate',
+        )
+      : actionText(
+          '正在搜索聊天记录',
+          '搜索聊天记录',
+          base,
+          'communicate',
+        );
+  }
   if (tool.includes('delegate'))
     return {
       ...base,
@@ -387,12 +575,15 @@ export function classifyProgressAction(
       lower,
     )
   ) {
-    return {
-      ...base,
-      title: '正在运行测试',
-      category: 'test',
-      confidence: 'exact',
-    };
+    const target = testObject(command);
+    return target
+      ? actionText(
+          `正在运行 ${target} 测试`,
+          `测试 ${target}`,
+          base,
+          'test',
+        )
+      : actionText('正在运行测试', '运行测试', base, 'test');
   }
   if (/gh\s+run\s+view\b[^\n]*--log-failed/.test(lower)) {
     return {
@@ -463,27 +654,56 @@ export function classifyProgressAction(
       category: 'inspect',
       confidence: 'exact',
     };
-  if (/\bgit\s+(log|blame|show|status|diff)\b/.test(lower))
-    return {
-      ...base,
-      title: '正在检查代码和历史',
-      category: 'inspect',
-      confidence: 'inferred',
-    };
+  if (/\bgit\s+(log|blame|show|status|diff)\b/.test(lower)) {
+    const historyTarget = /\bgit\s+(?:blame|log|show)\b/iu.test(command)
+      ? safeBasename(command.trim().split(/\s+/u).at(-1) ?? '')
+      : undefined;
+    return historyTarget
+      ? actionText(
+          `正在检查 ${historyTarget} 的代码历史`,
+          `检查 ${historyTarget} 的代码历史`,
+          base,
+          'inspect',
+          'inferred',
+        )
+      : actionText(
+          '正在检查代码和历史',
+          '检查代码和历史',
+          base,
+          'inspect',
+          'inferred',
+        );
+  }
+  if (/\b(rg|grep)\b/.test(lower)) {
+    const action = shellSearchAction(command, base);
+    if (action) return action;
+  }
   if (/\b(rg|grep|find)\b/.test(lower))
-    return {
-      ...base,
-      title: searchTitle(progress),
-      category: 'search',
-      confidence: 'inferred',
-    };
-  if (/\b(cat|sed)\b/.test(lower))
-    return {
-      ...base,
-      title: '正在读取相关内容',
-      category: 'read',
-      confidence: 'inferred',
-    };
+    return actionText(
+      searchTitle(progress),
+      searchObject(progress) ? `搜索${searchObject(progress)}` : '搜索相关内容',
+      base,
+      'search',
+      'inferred',
+    );
+  if (/\b(cat|sed)\b/.test(lower)) {
+    const target = shellReadObject(command);
+    return target
+      ? actionText(
+          `正在读取 ${target}`,
+          `读取 ${target}`,
+          base,
+          'read',
+          'inferred',
+        )
+      : actionText(
+          '正在读取相关内容',
+          '读取相关内容',
+          base,
+          'read',
+          'inferred',
+        );
+  }
   if (/\b(curl|wget)\b/.test(lower))
     return {
       ...base,
@@ -589,7 +809,8 @@ function timingValueCount(summary: string | undefined): number | undefined {
 
 function chineseList(items: string[]): string {
   if (items.length <= 1) return items[0] ?? '';
-  return `${items.slice(0, -1).join('、')}和${items.at(-1)}`;
+  if (items.length === 2) return `${items[0]}，并${items[1]}`;
+  return `${items.slice(0, -1).join('、')}，并${items.at(-1)}`;
 }
 
 function aggregateOutcome(
@@ -621,13 +842,18 @@ function aggregateOutcome(
   const testCount = phase.categories.includes('test')
     ? (phase.testPassCount ?? testPassCount(summary))
     : undefined;
+  const summaries = phase.actionSummaries ?? [];
   if (
+    summaries.length === 0 &&
     labels.length === 1 &&
     phase.categories[0] === 'test' &&
     testCount != null
   )
     return `${testCount} 项测试通过`;
-  const base = `已完成${chineseList(labels)}`;
+  const base =
+    summaries.length > 0
+      ? `已${chineseList(summaries)}`
+      : `已完成${chineseList(labels)}`;
   return testCount != null ? `${base}（${testCount} 项通过）` : base;
 }
 
@@ -711,6 +937,7 @@ function upsertPhaseForStarted(
       status: 'running',
       currentAction: action.title,
       categories: [action.category],
+      actionSummaries: action.actionSummary ? [action.actionSummary] : [],
       toolCallIds: toolCallId ? [toolCallId] : [],
       planTaskId: planStep?.planTaskId,
       matchQuery,
@@ -725,6 +952,7 @@ function upsertPhaseForStarted(
       categories: phase.categories.includes(action.category)
         ? phase.categories
         : [...phase.categories, action.category],
+      actionSummaries: mergeActionSummary(phase, action),
       toolCallIds:
         toolCallId && !phase.toolCallIds.includes(toolCallId)
           ? [...phase.toolCallIds, toolCallId]
@@ -742,6 +970,7 @@ function upsertPhaseForStarted(
 }
 
 function completedTitle(step: PresentationStep): string {
+  if (step.completedTitle) return step.completedTitle;
   if (step.title.startsWith('正在')) return `已${step.title.slice(2)}`;
   return step.title;
 }
@@ -956,6 +1185,9 @@ export function reduceProgressPresentation(
               goal: phase.source === 'fallback' ? action.title : phase.goal,
               currentAction: action.title,
               categories: [action.category],
+              actionSummaries: action.actionSummary
+                ? [action.actionSummary]
+                : phase.actionSummaries,
               status: 'running' as const,
               outcome: undefined,
             }

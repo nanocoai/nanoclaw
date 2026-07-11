@@ -97,23 +97,23 @@ describe('classifyProgressAction', () => {
     [
       '读取文件',
       started('Read', { file_path: '/tmp/config.ts' }),
-      '正在读取文件',
+      '正在读取 config.ts',
     ],
     [
       '搜索模型配置',
       started('Grep', { pattern: 'opus-4.8' }),
-      '正在搜索模型配置相关位置',
+      '正在搜索“opus-4.8”',
     ],
     [
       '修改文件',
       started('Edit', { file_path: '/tmp/config.ts' }),
-      '正在修改文件',
+      '正在修改 config.ts',
     ],
     ['运行测试', started('Bash', { command: 'npm test' }), '正在运行测试'],
     [
       'Node 原生测试',
       started('Bash', { command: 'node --test fixture.test.mjs' }),
-      '正在运行测试',
+      '正在运行 fixture.test.mjs 测试',
     ],
     [
       '编译项目',
@@ -147,7 +147,7 @@ describe('classifyProgressAction', () => {
     [
       '搜索网页',
       started('web_search', { query: 'Claude Code docs' }),
-      '正在搜索公开资料',
+      '正在搜索“Claude Code docs”公开资料',
     ],
     [
       '上传文档',
@@ -191,7 +191,7 @@ describe('classifyProgressAction', () => {
     [
       '分析调用关系',
       started('gitnexus_context', { query: 'sendMessage' }),
-      '正在分析代码调用关系',
+      '正在分析 sendMessage 的代码调用关系',
     ],
     [
       '派发协作任务',
@@ -201,21 +201,127 @@ describe('classifyProgressAction', () => {
     [
       '搜索过程卡片',
       started('Bash', { command: "rg -n 'progress card' src" }),
-      '正在搜索过程卡片相关位置',
+      '正在 src 中搜索“progress card”',
     ],
     [
       '搜索性能数据',
       started('Bash', { command: "grep -n 'latency_ms' trace.log" }),
-      '正在搜索性能数据相关位置',
+      '正在 trace.log 中搜索“latency_ms”',
     ],
     [
       '检查代码历史',
       started('Bash', { command: 'git blame src/index.ts' }),
-      '正在检查代码和历史',
+      '正在检查 index.ts 的代码历史',
     ],
   ];
 
   it.each(cases)('%s', (_name, progress, expected) => {
+    expect(classifyProgressAction(progress).title).toBe(expected);
+  });
+
+  it.each([
+    [
+      'Read 文件名',
+      started('Read', { file_path: '/workspace/src/progress-display.ts' }),
+      '正在读取 progress-display.ts',
+      '读取 progress-display.ts',
+    ],
+    [
+      'Grep 关键词和文件',
+      started('Grep', {
+        pattern: 'turn_end',
+        path: '/workspace/src/progress-display.ts',
+      }),
+      '正在 progress-display.ts 中搜索“turn_end”',
+      '在 progress-display.ts 中搜索“turn_end”',
+    ],
+    [
+      'Edit 文件名',
+      started('Edit', { file_path: '/workspace/src/progress-display.ts' }),
+      '正在修改 progress-display.ts',
+      '修改 progress-display.ts',
+    ],
+    [
+      '测试文件',
+      started('Bash', {
+        command: 'node --test src/progress-display.test.ts',
+      }),
+      '正在运行 progress-display.test.ts 测试',
+      '测试 progress-display.test.ts',
+    ],
+    [
+      '聊天搜索词',
+      started('mcp__nanoclaw__search_chat', { query: '过程卡片显示' }),
+      '正在搜索包含“过程卡片显示”的聊天记录',
+      '搜索包含“过程卡片显示”的聊天记录',
+    ],
+  ])('%s 展示安全对象', (_name, progress, title, actionSummary) => {
+    expect(classifyProgressAction(progress)).toMatchObject({
+      title,
+      completedTitle: `已${actionSummary}`,
+      actionSummary,
+    });
+  });
+
+  it('对象只显示 basename 且敏感 query 安全降级', () => {
+    const read = classifyProgressAction(
+      started('Read', {
+        file_path: '/Users/dajay/private/project/src/config.ts',
+      }),
+    );
+    const search = classifyProgressAction(
+      started('Grep', { pattern: 'Bearer secret-token-123456789' }),
+    );
+    expect(read.title).toBe('正在读取 config.ts');
+    expect(read.title).not.toContain('/Users');
+    expect(search.title).toBe('正在搜索相关内容');
+    expect(search.title).not.toContain('secret-token');
+    expect(
+      classifyProgressAction(
+        started('Read', { file_path: '/workspace/.env.production' }),
+      ).title,
+    ).toBe('正在读取 敏感配置文件');
+  });
+
+  it.each([
+    [
+      'Bash rg',
+      "rg -n -C 2 'turn_end' src/progress-display.ts",
+      '正在 progress-display.ts 中搜索“turn_end”',
+    ],
+    [
+      'Bash sed',
+      "sed -n '620,700p' src/progress-display.ts",
+      '正在读取 progress-display.ts',
+    ],
+    [
+      'Bash cat',
+      'cat /workspace/package.json',
+      '正在读取 package.json',
+    ],
+  ])('%s 从命令提取安全对象', (_name, command, expected) => {
+    expect(
+      classifyProgressAction(started('Bash', { command })).title,
+    ).toBe(expected);
+  });
+
+  it.each([
+    [
+      'WebSearch 查询词',
+      started('WebSearch', { query: 'Claude Code hooks' }),
+      '正在搜索“Claude Code hooks”公开资料',
+    ],
+    [
+      'GitNexus 符号',
+      started('gitnexus_context', { query: 'sendMessage' }),
+      '正在分析 sendMessage 的代码调用关系',
+    ],
+    [
+      'Git 历史文件',
+      started('Bash', { command: 'git blame src/progress-display.ts' }),
+      '正在检查 progress-display.ts 的代码历史',
+    ],
+  ])('%s 保留业务对象', (_name, progress, expected) => {
     expect(classifyProgressAction(progress).title).toBe(expected);
   });
 
@@ -315,7 +421,14 @@ describe('reduceProgressPresentation', () => {
         goal: '核对进度展示链路',
         status: 'completed',
         categories: ['read', 'search', 'change', 'test'],
-        outcome: '已完成读取、搜索、修改和测试（1 项通过）',
+        actionSummaries: [
+          '读取 input.txt',
+          '搜索“needle”',
+          '修改 output.txt',
+          '测试 fixture.test.mjs',
+        ],
+        outcome:
+          '已读取 input.txt、搜索“needle”、修改 output.txt，并测试 fixture.test.mjs（1 项通过）',
       }),
     ]);
   });
@@ -342,7 +455,7 @@ describe('reduceProgressPresentation', () => {
         source: 'narration',
         categories: ['read', 'search'],
         toolCallIds: ['late-read', 'late-grep'],
-        outcome: '已完成读取和搜索',
+        outcome: '已读取 input.txt，并搜索“needle”',
       }),
     ]);
     expect(state.steps.every((step) => step.phaseId === 'phase-1')).toBe(true);
@@ -474,8 +587,29 @@ describe('reduceProgressPresentation', () => {
     state = complete(state, 'after-test');
 
     expect((state as any).phases[0].outcome).toBe(
-      '已完成测试和搜索（1 项通过）',
+      '已测试 fixture.test.mjs，并搜索“evidence”（1 项通过）',
     );
+  });
+
+  it('同一阶段重复类别只保留最新对象，不让默认卡无限增长', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'narration',
+      text: '核对配置文件。',
+    });
+    for (const [id, file] of [
+      ['read-a', '/tmp/a.ts'],
+      ['read-b', '/tmp/b.ts'],
+      ['read-c', '/tmp/c.ts'],
+    ]) {
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: started('Read', { file_path: file }, id),
+      });
+      state = complete(state, id);
+    }
+
+    expect((state as any).phases[0].actionSummaries).toEqual(['读取 c.ts']);
+    expect((state as any).phases[0].outcome).toBe('已读取 c.ts');
   });
 
   it('并行工具先完成一个时仍展示另一个运行中的动作', () => {
@@ -495,7 +629,7 @@ describe('reduceProgressPresentation', () => {
 
     expect((state as any).phases[0]).toMatchObject({
       status: 'running',
-      currentAction: '正在搜索相关内容',
+      currentAction: '正在搜索“needle”',
     });
   });
 
@@ -638,7 +772,7 @@ describe('reduceProgressPresentation', () => {
     });
     expect(state.steps).toHaveLength(1);
     expect(state.steps[0].phase).toBe('我先核对模型配置为什么没有生效');
-    expect(state.steps[0].title).toBe('正在搜索模型配置相关位置');
+    expect(state.steps[0].title).toBe('正在搜索“opus-4.8”');
   });
 
   it('完成事件按 toolCallId 原地更新，不追加结果行', () => {
@@ -681,7 +815,7 @@ describe('reduceProgressPresentation', () => {
         toolCallId: 'search-chat-1',
       },
     });
-    expect(state.steps[0].title).toBe('已搜索聊天记录');
+    expect(state.steps[0].title).toBe('已搜索包含“marker”的聊天记录');
   });
 
   it('新版 TaskCreate/TaskUpdate 维护同一组真实计划', () => {
@@ -761,7 +895,9 @@ describe('reduceProgressPresentation', () => {
     });
 
     expect(state.steps.at(-1)?.phase).toBe('运行长测试');
-    expect(state.steps.at(-1)?.title).toBe('正在运行测试');
+    expect(state.steps.at(-1)?.title).toBe(
+      '正在运行 fixture.test.mjs 测试',
+    );
   });
 
   it('同一 toolCallId 的 started 更新原步骤，不重复追加', () => {

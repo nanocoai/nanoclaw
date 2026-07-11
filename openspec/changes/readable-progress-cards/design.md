@@ -110,6 +110,14 @@ Feishu channel 只消费 `ProgressPresentationState`，不在卡片构建代码�
 
 中性动作不得成为有可用语义信息时的最终展示。最终卡若已有阶段、对象或结果，必须优先展示这些信息并聚合同类动作；不得因为可见窗口截断而退化成连续的分类标签。
 
+### D10. 默认卡片展示安全语义对象，不展示动作空壳
+
+分类器 SHALL 从 runner 已提供的结构化参数中提取有界语义对象：文件工具取 basename，搜索工具取脱敏并截断的 pattern/query 与目标 basename，测试命令取测试文件或测试套件，Git/GitHub 取明确操作对象，MCP 取业务查询对象。阶段 SHALL 累积去重后的动作摘要，完成态继续保留这些摘要，而不是压缩回“读取、搜索、修改、系统检查”等分类词。
+
+对象展示遵循三层降级：明确对象文案 > 已知领域对象 > 中性动作。完整路径、原始 shell、参数串、内部 ID、地址和凭证永远只进入脱敏后的过程记录。未知 Bash 不展示可执行文件名，避免把参数或内部脚本名误当业务语义。
+
+例如，同一阶段依次读取 `progress-display.ts`、搜索 `turn_end`、修改该文件并运行 `progress-display.test.ts` 时，终态应表达“已读取 progress-display.ts、搜索‘turn_end’、修改 progress-display.ts，并通过 progress-display.test.ts 测试”，而不是“已完成读取、搜索、修改和测试”。
+
 ## Risks / Trade-offs
 
 - [自然语言阶段过长或像结论] -> 只使用首句、有界截断，并区分“阶段锚点”和“进展说明”；不据此生成未来步骤。
