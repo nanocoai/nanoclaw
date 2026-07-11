@@ -75,7 +75,7 @@ export function buildClaudeToolResultProgress(
       lifecycle,
       toolName: 'tool_result',
       toolCallId: block.tool_use_id,
-      resultSummary: short || undefined,
+      resultSummary: text ? text.slice(0, 1000) : undefined,
     },
   };
 }

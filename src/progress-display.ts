@@ -761,12 +761,33 @@ export function reduceProgressPresentation(
   state: ProgressPresentationState,
   event: ProgressPresentationEvent,
 ): ProgressPresentationState {
-  if (event.kind === 'narration')
+  if (event.kind === 'narration') {
+    const goal = firstSentence(event.text) ?? '正在处理任务';
+    const fallbackIndex =
+      state.phases.length > 0 &&
+      state.phases.every((phase) => phase.source === 'fallback')
+        ? state.phases.length - 1
+        : -1;
+    if (fallbackIndex >= 0) {
+      const phases = [...state.phases];
+      phases[fallbackIndex] = {
+        ...phases[fallbackIndex],
+        goal,
+        source: 'narration',
+      };
+      return {
+        ...state,
+        activePhaseGoal: goal,
+        activePhaseId: phases[fallbackIndex].id,
+        phases,
+      };
+    }
     return {
       ...state,
-      activePhaseGoal: firstSentence(event.text),
+      activePhaseGoal: goal,
       activePhaseId: undefined,
     };
+  }
   if (event.kind === 'turn_end') {
     return {
       ...state,

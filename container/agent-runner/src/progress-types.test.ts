@@ -79,6 +79,17 @@ describe('boundProgressInput', () => {
 });
 
 describe('buildClaudeToolResultProgress', () => {
+  it('结构化摘要保留脱敏后的完整测试计数', () => {
+    const result = buildClaudeToolResultProgress({
+      type: 'tool_result',
+      tool_use_id: 'test-count',
+      content: `${'warning '.repeat(12)}\n# tests 1\n# pass 1\n# fail 0`,
+    });
+
+    expect(result?.progress.resultSummary).toContain('# pass 1');
+    expect(result?.progress.resultSummary?.length).toBeGreaterThan(60);
+  });
+
   it('空内容的显式失败仍产生 failed 终态', () => {
     expect(
       buildClaudeToolResultProgress({
