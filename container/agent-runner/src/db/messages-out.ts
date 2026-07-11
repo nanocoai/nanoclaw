@@ -143,6 +143,40 @@ export function getUndeliveredMessages(): MessageOutRow[] {
     .all() as MessageOutRow[];
 }
 
+/** Highest seq currently in messages_out (0 when empty). Watermark for the
+ *  per-exchange "did this channel already get the answer" check. */
+export function getMaxSeq(): number {
+  const row = getOutboundDb().prepare(`SELECT COALESCE(MAX(seq), 0) AS s FROM messages_out`).get() as {
+    s: number;
+  };
+  return row.s;
+}
+
+/**
+ * True if a genuine content send to this destination was written after the
+ * given seq watermark — i.e. during the current exchange, via ANY path
+ * (wrapped <message> block, MCP send_message). Used to suppress the
+ * unwrapped-reply fallback when the real answer already went out and the
+ * trailing bare text is just a recap the model forgot to mark <internal>.
+ * edit_message / add_reaction rows share kind='chat' but carry an
+ * `operation` marker and no message body — counting them would suppress
+ * (drop) a real bare answer, so they are excluded.
+ */
+export function hasSendToChannelSince(platformId: string, channelType: string, sinceSeq: number): boolean {
+  const row = getOutboundDb()
+    .prepare(
+      `SELECT 1 FROM messages_out
+        WHERE seq > $since AND platform_id = $platform_id AND channel_type = $channel_type
+          AND kind = 'chat'
+          AND json_extract(content, '$.operation') IS NULL
+          AND (COALESCE(json_extract(content, '$.text'), '') != ''
+               OR json_extract(content, '$.files') IS NOT NULL)
+        LIMIT 1`,
+    )
+    .get({ $since: sinceSeq, $platform_id: platformId, $channel_type: channelType });
+  return row != null;
+}
+
 /**
  * True if a deliberate send with this exact destination + text already exists
  * (an MCP send_message row from the current turn). Used by the task-fire
