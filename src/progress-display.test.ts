@@ -320,6 +320,34 @@ describe('reduceProgressPresentation', () => {
     ]);
   });
 
+  it('阶段说明晚于首个工具结果时合并刚产生的孤立阶段', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'tool',
+      progress: started('Read', { file_path: '/tmp/input.txt' }, 'late-read'),
+    });
+    state = complete(state, 'late-read');
+    state = reduceProgressPresentation(state, {
+      kind: 'narration',
+      text: '核对进度展示链路。',
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started('Grep', { pattern: 'needle' }, 'late-grep'),
+    });
+    state = complete(state, 'late-grep');
+
+    expect((state as any).phases).toEqual([
+      expect.objectContaining({
+        goal: '核对进度展示链路',
+        source: 'narration',
+        categories: ['read', 'search'],
+        toolCallIds: ['late-read', 'late-grep'],
+        outcome: '已完成读取和搜索',
+      }),
+    ]);
+    expect(state.steps.every((step) => step.phaseId === 'phase-1')).toBe(true);
+  });
+
   it('聊天搜索完成后保留阶段目标并展示匹配数量', () => {
     let state = reduceProgressPresentation(createProgressPresentationState(), {
       kind: 'narration',
