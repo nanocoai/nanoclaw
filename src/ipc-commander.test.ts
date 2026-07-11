@@ -327,3 +327,25 @@ describe('fmtGroupLabel', () => {
     expect(fmtGroupLabel('fs:oc_unknown')).toBe('fs:oc_unknown');
   });
 });
+
+describe('buildReportNotification', () => {
+  const { buildReportNotification } = __testing;
+
+  it('短摘要完整展示且不加省略号', () => {
+    expect(buildReportNotification('fs:oc_target', '修复完成')).toBe(
+      'fs:oc_target 已处理并回复：修复完成',
+    );
+  });
+
+  it('折叠换行和连续空格', () => {
+    expect(buildReportNotification('fs:oc_target', '第一行\n  第二行')).toBe(
+      'fs:oc_target 已处理并回复：第一行 第二行',
+    );
+  });
+
+  it('空摘要使用明确兜底文本', () => {
+    expect(buildReportNotification('fs:oc_target', '   ')).toBe(
+      'fs:oc_target 已处理并回复：已完成处理',
+    );
+  });
+});
