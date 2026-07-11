@@ -181,6 +181,10 @@ describe('/incognito routing (integration)', () => {
 
     await routeInbound(dmEvent('/incognito end'));
 
+    // The temporal session is drained before teardown (in-flight reply safety).
+    const { deliverSessionMessages } = await import('./delivery.js');
+    expect(deliverSessionMessages).toHaveBeenCalledWith(expect.objectContaining({ id: temporal.id }));
+
     // Temporal session + folder gone.
     expect(findTemporalSession(ag, dm, null)).toBeUndefined();
     expect(getSession(temporal.id)).toBeUndefined();

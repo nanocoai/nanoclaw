@@ -95,6 +95,25 @@ describe('temporal container mounts', () => {
     expect(claudeMount?.hostPath).toBe(path.join(DATA_DIR, 'v2-sessions', ag, '.claude-shared'));
   });
 
+  it('drops a provider mount rooted under the group dir but keeps out-of-group mounts', () => {
+    const sess = session(1);
+    const groupLeak = {
+      hostPath: path.join(GROUPS_DIR, folder, 'secret-memory'),
+      containerPath: '/workspace/agent/leak',
+      readonly: false,
+    };
+    const sessionScoped = {
+      hostPath: path.join(DATA_DIR, 'v2-sessions', ag, sess.id, 'xdg'),
+      containerPath: '/home/node/.xdg',
+      readonly: false,
+    };
+
+    const mounts = buildMounts(agentGroup, sess, cfg, 'claude', { mounts: [groupLeak, sessionScoped] });
+
+    expect(mounts.some((m) => m.hostPath === groupLeak.hostPath)).toBe(false);
+    expect(mounts.some((m) => m.hostPath === sessionScoped.hostPath)).toBe(true);
+  });
+
   it('composeGroupClaudeMd(group, outputDir) writes to outputDir, not the group dir', () => {
     const outDir = path.join(ROOT, 'compose-out');
     composeGroupClaudeMd(agentGroup, outDir);

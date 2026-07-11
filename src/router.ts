@@ -697,6 +697,11 @@ async function endIncognito(
     return;
   }
 
+  // Drain any reply the incognito turn already wrote to outbound.db but that the
+  // 1s delivery poll hasn't picked up yet — otherwise destroyTemporalSession's
+  // rm -rf would drop it. (Idempotent + re-entry-guarded.)
+  await deliverSessionMessages(existing);
+
   await sendControlNote(normal, addr, '🕶️ Incognito off — back to normal. That conversation was not saved.');
   destroyTemporalSession(existing);
 }

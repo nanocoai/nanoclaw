@@ -432,11 +432,31 @@ function buildTemporalMounts(
   if (containerConfig.additionalMounts && containerConfig.additionalMounts.length > 0) {
     mounts.push(...validateAdditionalMounts(containerConfig.additionalMounts, agentGroup.name));
   }
+  // Provider-contributed mounts — but drop any rooted under the real group dir.
+  // A `providesAgentSurfaces` provider is documented to mount its per-group
+  // memory/state from ctx.groupDir (provider-container-registry.ts); that must
+  // never enter a memory-free temporal container. Session-scoped and other
+  // out-of-group mounts (e.g. opencode-xdg on sessionDir) are kept.
   if (providerContribution.mounts) {
-    mounts.push(...providerContribution.mounts);
+    for (const m of providerContribution.mounts) {
+      if (isPathUnder(m.hostPath, groupDir)) {
+        log.warn('Dropping group-dir provider mount from temporal session', {
+          hostPath: m.hostPath,
+          sessionId: session.id,
+        });
+        continue;
+      }
+      mounts.push(m);
+    }
   }
 
   return mounts;
+}
+
+/** True when `child` is `parent` or nested inside it. */
+function isPathUnder(child: string, parent: string): boolean {
+  const rel = path.relative(parent, path.resolve(child));
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
 /**
