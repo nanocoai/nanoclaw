@@ -13,9 +13,16 @@ All milestones **[DONE]** on `feature/temporal-session` (one commit each, sequen
 | M5 — idle teardown + runner note | [DONE] | `feat(sweep): idle temporal teardown + agent-runner incognito note` |
 | M6 — integration tests + docs | [DONE] | `test(incognito): end-to-end routeInbound integration + docs` |
 
-**Verification:** host `tsc --noEmit` clean; `vitest run` = 774 passed. The only failing
+**Verification:** host `tsc --noEmit` clean; `vitest run` = 775 passed. The only failing
 tests are 7 pre-existing `scripts/q.test.ts` cases that `spawnSync('pnpm', …)` — `pnpm` is
 absent from this shell's PATH (only `corepack pnpm` works), unrelated to this change.
+
+**Gate B (holistic adversarial review):** run over the whole diff. Lifecycle, path isolation,
+DM guard, and the parser verified sound. Two findings fixed (commit `fix(incognito): close
+review findings`): (1) `buildTemporalMounts` now drops provider-contributed mounts rooted under
+the real group dir (a `providesAgentSurfaces` provider could otherwise leak per-group memory —
+not exploitable with any shipped provider, closed structurally); (2) `/incognito end` now drains
+the temporal `outbound.db` before teardown so a just-written, not-yet-polled reply isn't lost.
 
 **Key decisions / deviations from the plan:**
 - `Session.temporal` is **optional** (`temporal?: number`), not required — the DB column
