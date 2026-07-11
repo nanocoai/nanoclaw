@@ -455,7 +455,7 @@ describe('reduceProgressPresentation', () => {
         source: 'narration',
         categories: ['read', 'search'],
         toolCallIds: ['late-read', 'late-grep'],
-        outcome: '已读取 input.txt并搜索“needle”',
+        outcome: '已读取 input.txt，并搜索“needle”',
       }),
     ]);
     expect(state.steps.every((step) => step.phaseId === 'phase-1')).toBe(true);
@@ -587,7 +587,7 @@ describe('reduceProgressPresentation', () => {
     state = complete(state, 'after-test');
 
     expect((state as any).phases[0].outcome).toBe(
-      '已测试 fixture.test.mjs并搜索“evidence”（1 项通过）',
+      '已测试 fixture.test.mjs，并搜索“evidence”（1 项通过）',
     );
   });
 

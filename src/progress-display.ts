@@ -809,7 +809,7 @@ function timingValueCount(summary: string | undefined): number | undefined {
 
 function chineseList(items: string[]): string {
   if (items.length <= 1) return items[0] ?? '';
-  if (items.length === 2) return `${items[0]}并${items[1]}`;
+  if (items.length === 2) return `${items[0]}，并${items[1]}`;
   return `${items.slice(0, -1).join('、')}，并${items.at(-1)}`;
 }
 
