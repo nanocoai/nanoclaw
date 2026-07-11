@@ -3,7 +3,7 @@
 set -euo pipefail
 
 REPO_ROOT="${1:-$(pwd)}"
-DEPLOY_REF="${NANOCLAW_DEPLOY_REF:-origin/main}"
+DEPLOY_REF="origin/main"
 
 git -C "$REPO_ROOT" fetch origin main --quiet
 
