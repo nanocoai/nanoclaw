@@ -64,6 +64,7 @@ export interface PresentationPhase {
   planTaskId?: string;
   testPassCount?: number;
   matchCount?: number;
+  matchQuery?: string;
   timingValueCount?: number;
 }
 
@@ -556,6 +557,20 @@ function resultCount(
   return Number.isFinite(value) ? value : undefined;
 }
 
+function exactMatchCount(
+  summary: string | undefined,
+  query: string | undefined,
+): number | undefined {
+  if (!summary || !query) return undefined;
+  let count = 0;
+  let offset = 0;
+  while ((offset = summary.indexOf(query, offset)) >= 0) {
+    count += 1;
+    offset += query.length;
+  }
+  return count > 0 ? count : undefined;
+}
+
 function testPassCount(summary: string | undefined): number | undefined {
   return (
     resultCount(summary, /\b(\d+)\s+(?:tests?\s+)?passed\b/iu) ??
@@ -629,7 +644,8 @@ function mergeResultFacts(
     matchCount:
       phase.matchCount ??
       (phase.categories.includes('communicate')
-        ? resultCount(summary, /\b(\d+)\s*条/iu)
+        ? (exactMatchCount(summary, phase.matchQuery) ??
+          resultCount(summary, /\b(\d+)\s*条/iu))
         : undefined),
     timingValueCount:
       phase.timingValueCount ??
@@ -663,6 +679,7 @@ function upsertPhaseForStarted(
   action: ProgressAction,
   toolCallId: string | undefined,
   planStep?: PresentationStep,
+  matchQuery?: string,
 ): {
   phases: PresentationPhase[];
   phaseId: string;
@@ -696,6 +713,7 @@ function upsertPhaseForStarted(
       categories: [action.category],
       toolCallIds: toolCallId ? [toolCallId] : [],
       planTaskId: planStep?.planTaskId,
+      matchQuery,
     });
     phaseIndex = phases.length - 1;
   } else {
@@ -713,6 +731,7 @@ function upsertPhaseForStarted(
           : phase.toolCallIds,
       outcome: undefined,
       planTaskId: phase.planTaskId ?? planStep?.planTaskId,
+      matchQuery: phase.matchQuery ?? matchQuery,
     };
   }
   return {
@@ -796,13 +815,15 @@ export function reduceProgressPresentation(
       steps: state.steps.map((step) =>
         step.status === 'running'
           ? step.source === 'plan'
-            ? { ...step, status: 'unknown' }
+            ? step
             : { ...step, status: 'unknown', title: unknownTitle(step.category) }
           : step,
       ),
       phases: state.phases.map((phase) =>
         phase.status === 'running'
-          ? { ...phase, status: 'unknown', outcome: unknownPhaseOutcome(phase) }
+          ? phase.source === 'plan'
+            ? phase
+            : { ...phase, status: 'unknown', outcome: unknownPhaseOutcome(phase) }
           : phase,
       ),
     };
@@ -894,6 +915,21 @@ export function reduceProgressPresentation(
         };
       }
     }
+    if (toolName === 'toolsearch') {
+      const action = classifyProgressAction(progress);
+      return {
+        ...state,
+        steps: [
+          ...state.steps,
+          {
+            ...action,
+            toolCallId: progress.toolCallId,
+            source: 'tool',
+            status: 'running',
+          },
+        ],
+      };
+    }
     const runningPlan = state.steps.find(
       (step) => step.source === 'plan' && step.status === 'running',
     );
@@ -932,6 +968,9 @@ export function reduceProgressPresentation(
       action,
       progress.toolCallId,
       runningPlan,
+      action.category === 'communicate'
+        ? inputString(progress.input, 'query')
+        : undefined,
     );
     return {
       ...state,

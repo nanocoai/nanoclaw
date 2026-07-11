@@ -374,6 +374,62 @@ describe('reduceProgressPresentation', () => {
     ]);
   });
 
+  it('聊天搜索按原始 query 统计精确匹配且忽略 ToolSearch 准备动作', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'tool',
+      progress: started(
+        'ToolSearch',
+        { query: 'select:mcp__nanoclaw__search_chat' },
+        'tool-search',
+      ),
+    });
+    state = complete(state, 'tool-search');
+    state = reduceProgressPresentation(state, {
+      kind: 'narration',
+      text: '核对目标聊天记录。',
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started(
+        'mcp__nanoclaw__search_chat',
+        { query: 'RPC-04-seed' },
+        'search-chat-exact',
+      ),
+    });
+    state = complete(state, 'search-chat-exact', {
+      resultSummary:
+        '{"results":[{"chunk_text":"RPC-04-seed"},{"chunk_text":"other fuzzy result"}]}',
+    });
+
+    expect((state as any).phases).toEqual([
+      expect.objectContaining({
+        goal: '核对目标聊天记录',
+        categories: ['communicate'],
+        outcome: '找到 1 条匹配消息',
+      }),
+    ]);
+    expect(state.steps).toHaveLength(2);
+  });
+
+  it('回合结束保留计划项的进行中状态', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'tool',
+      progress: started('TodoWrite', {
+        todos: [
+          { content: '核对 fixture', status: 'completed' },
+          { content: '整理证据', status: 'in_progress' },
+        ],
+      }),
+    });
+    state = reduceProgressPresentation(state, { kind: 'turn_end' });
+
+    expect(state.steps.at(-1)?.status).toBe('running');
+    expect((state as any).phases.at(-1)).toMatchObject({
+      goal: '整理证据',
+      status: 'running',
+    });
+  });
+
   it('计时脚本只提取明确的数值数量，不猜测业务结论', () => {
     let state = reduceProgressPresentation(createProgressPresentationState(), {
       kind: 'narration',
