@@ -48,6 +48,7 @@ import { normalizeOptions, type NormalizedOption, type RawOption } from '../../c
 import { resolveWiringDefaults } from '../../channels/channel-defaults.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder, getAllAgentGroups } from '../../db/agent-groups.js';
 import { getChannelAdapter } from '../../channels/channel-registry.js';
+import { getAllContainerConfigs, updateContainerConfigScalars } from '../../db/container-configs.js';
 import { getMessagingGroup, updateMessagingGroup } from '../../db/messaging-groups.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { initGroupFilesystem } from '../../group-init.js';
@@ -331,8 +332,36 @@ export function createNewAgentGroup(name: string): AgentGroup {
   });
 
   const ag = getAgentGroup(agId)!;
-  // Channel-approved groups get the built-in default provider (claude); the
-  // operator flips a group with `ncl groups config update --provider`.
-  initGroupFilesystem(ag);
+  // Channel-approved groups have no "parent" to inherit a provider from (unlike
+  // the agent-to-agent `create_agent` tool, where a child adopts its creator's
+  // runtime). So derive a sensible default from the install itself: if every
+  // existing group that declares a provider declares the SAME non-default one,
+  // adopt it — mirroring create_agent's intent that a single-provider install
+  // (e.g. codex-only, where claude isn't authenticated) doesn't spawn an agent
+  // on a runtime it can't reach. If providers are mixed, or none are set, fall
+  // back to the built-in default (claude) — no behavior change for multi-provider
+  // or Claude installs. The operator can flip a group later with
+  // `ncl groups config update --provider`.
+  const inheritedProvider = deriveDefaultProvider();
+  initGroupFilesystem(ag, { provider: inheritedProvider });
+  if (inheritedProvider) {
+    updateContainerConfigScalars(ag.id, { provider: inheritedProvider });
+  }
   return ag;
+}
+
+/**
+ * Derive a default provider for a channel-registered agent from the install's
+ * existing groups. Returns the single non-default provider in use across all
+ * container configs, or `undefined` if there are none or the install runs a
+ * mix (in which case the caller keeps the built-in claude default). Provider-
+ * agnostic — it never names a specific runtime.
+ */
+function deriveDefaultProvider(): string | undefined {
+  const providers = new Set<string>();
+  for (const config of getAllContainerConfigs()) {
+    // An unset/empty provider means the built-in default (claude); ignore it.
+    if (config.provider) providers.add(config.provider);
+  }
+  return providers.size === 1 ? [...providers][0] : undefined;
 }
