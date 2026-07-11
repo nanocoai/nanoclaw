@@ -8,10 +8,10 @@ export const TASKS_SYSTEM_THREAD_ID = 'system:tasks';
 export function createSession(session: Session): void {
   getDb()
     .prepare(
-      `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, agent_provider, status, container_status, last_active, created_at)
-       VALUES (@id, @agent_group_id, @messaging_group_id, @thread_id, @agent_provider, @status, @container_status, @last_active, @created_at)`,
+      `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, agent_provider, status, container_status, last_active, created_at, temporal)
+       VALUES (@id, @agent_group_id, @messaging_group_id, @thread_id, @agent_provider, @status, @container_status, @last_active, @created_at, @temporal)`,
     )
-    .run(session);
+    .run({ ...session, temporal: session.temporal ?? 0 });
 }
 
 export function getSession(id: string): Session | undefined {
@@ -21,11 +21,13 @@ export function getSession(id: string): Session | undefined {
 export function findSession(messagingGroupId: string, threadId: string | null): Session | undefined {
   if (threadId) {
     return getDb()
-      .prepare('SELECT * FROM sessions WHERE messaging_group_id = ? AND thread_id = ? AND status = ?')
+      .prepare('SELECT * FROM sessions WHERE messaging_group_id = ? AND thread_id = ? AND status = ? AND temporal = 0')
       .get(messagingGroupId, threadId, 'active') as Session | undefined;
   }
   return getDb()
-    .prepare('SELECT * FROM sessions WHERE messaging_group_id = ? AND thread_id IS NULL AND status = ?')
+    .prepare(
+      'SELECT * FROM sessions WHERE messaging_group_id = ? AND thread_id IS NULL AND status = ? AND temporal = 0',
+    )
     .get(messagingGroupId, 'active') as Session | undefined;
 }
 
@@ -43,13 +45,37 @@ export function findSessionForAgent(
   if (threadId) {
     return getDb()
       .prepare(
-        "SELECT * FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND thread_id = ? AND status = 'active'",
+        "SELECT * FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND thread_id = ? AND status = 'active' AND temporal = 0",
       )
       .get(agentGroupId, messagingGroupId, threadId) as Session | undefined;
   }
   return getDb()
     .prepare(
-      "SELECT * FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND thread_id IS NULL AND status = 'active'",
+      "SELECT * FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND thread_id IS NULL AND status = 'active' AND temporal = 0",
+    )
+    .get(agentGroupId, messagingGroupId) as Session | undefined;
+}
+
+/**
+ * Find the active temporal (incognito) session for a DM. Mirrors
+ * `findSessionForAgent` but matches `temporal = 1` — the routing side uses it
+ * to detect that a thread is currently in incognito mode.
+ */
+export function findTemporalSession(
+  agentGroupId: string,
+  messagingGroupId: string,
+  threadId: string | null,
+): Session | undefined {
+  if (threadId) {
+    return getDb()
+      .prepare(
+        "SELECT * FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND thread_id = ? AND status = 'active' AND temporal = 1",
+      )
+      .get(agentGroupId, messagingGroupId, threadId) as Session | undefined;
+  }
+  return getDb()
+    .prepare(
+      "SELECT * FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND thread_id IS NULL AND status = 'active' AND temporal = 1",
     )
     .get(agentGroupId, messagingGroupId) as Session | undefined;
 }
@@ -61,6 +87,7 @@ export function findSessionByAgentGroup(agentGroupId: string): Session | undefin
       `SELECT * FROM sessions
        WHERE agent_group_id = ?
          AND status = 'active'
+         AND temporal = 0
          AND NOT (messaging_group_id IS NULL AND thread_id IS NOT NULL AND thread_id LIKE 'system:%')
        ORDER BY created_at DESC
        LIMIT 1`,
@@ -80,6 +107,7 @@ export function findSystemSession(agentGroupId: string, threadId: string): Sessi
          AND messaging_group_id IS NULL
          AND thread_id = ?
          AND status = 'active'
+         AND temporal = 0
        ORDER BY created_at DESC
        LIMIT 1`,
     )
@@ -104,6 +132,7 @@ export function findTaskSessions(agentGroupId: string): Session[] {
        WHERE agent_group_id = ?
          AND messaging_group_id IS NULL
          AND status = 'active'
+         AND temporal = 0
          AND (thread_id = ? OR thread_id LIKE ?)
        ORDER BY created_at DESC`,
     )

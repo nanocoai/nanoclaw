@@ -146,6 +146,12 @@ export interface Session {
   container_status: 'running' | 'idle' | 'stopped';
   last_active: string | null;
   created_at: string;
+  /**
+   * 1 = incognito/ephemeral session (excluded from normal routing); 0 = normal.
+   * Optional on construction (DB column defaults to 0 and is always present on
+   * rows read back); `createSession` coalesces a missing value to 0.
+   */
+  temporal?: number;
 }
 
 // ── Session DB entities ──

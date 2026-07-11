@@ -113,6 +113,7 @@ export function resolveSession(
     container_status: 'stopped',
     last_active: null,
     created_at: new Date().toISOString(),
+    temporal: 0,
   };
 
   createSession(session);
@@ -140,6 +141,7 @@ export function resolveTaskSession(agentGroupId: string, seriesId: string): { se
     container_status: 'stopped',
     last_active: null,
     created_at: new Date().toISOString(),
+    temporal: 0,
   };
 
   createSession(session);

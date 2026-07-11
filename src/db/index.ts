@@ -27,6 +27,7 @@ export {
   createSession,
   getSession,
   findSession,
+  findTemporalSession,
   findSessionByAgentGroup,
   getSessionsByAgentGroup,
   getActiveSessions,
