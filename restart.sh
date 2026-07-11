@@ -16,6 +16,8 @@ echo "[restart] 旧主进程 PID: ${OLDPID:-无}"
 # launchd plist 的 PATH 没有 nvm node，这里显式补上。
 export PATH="/Users/dajay/.nvm/versions/node/v22.22.0/bin:$PATH"
 cd "/Users/dajay/AI_Workspace/nanoclaw"
+echo "[restart] 检查部署来源..."
+./scripts/check-deploy-state.sh "$(pwd)"
 echo "[restart] 编译最新代码 (npm run build)..."
 npm run build
 echo "[restart] 编译完成。"
