@@ -349,9 +349,18 @@ function shellGitHistoryObject(command: string): string | undefined {
   const tokens = shellTokens(command, commandMatch.index).map(cleanShellToken);
   const subcommand = tokens[1]?.toLowerCase();
   if (subcommand === 'blame') {
-    const candidate = tokens
-      .slice(2)
-      .find((token) => token && !token.startsWith('-'));
+    const blameValueFlags = new Set(['-L', '--contents', '--date']);
+    let candidate: string | undefined;
+    for (let index = 2; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if (blameValueFlags.has(token)) {
+        index += 1;
+        continue;
+      }
+      if (!token || token.startsWith('-')) continue;
+      candidate = token;
+      break;
+    }
     return candidate ? safeBasename(candidate) : undefined;
   }
   const separator = tokens.indexOf('--');

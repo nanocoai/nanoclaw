@@ -235,6 +235,11 @@ describe('classifyProgressAction', () => {
       `git blame src/index.ts`,
       '正在检查 index.ts 的代码历史',
     ],
+    [
+      'git blame 跳过 -L 的行号范围',
+      `git blame -L 10,20 src/index.ts`,
+      '正在检查 index.ts 的代码历史',
+    ],
     ['sed 不把 shell 引号当文件名', `sed -n '1,260p' "`, '正在读取相关内容'],
   ])('%s', (_name, command, expected) => {
     expect(classifyProgressAction(started('Bash', { command })).title).toBe(
