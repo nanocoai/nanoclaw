@@ -245,8 +245,8 @@ export function resolveProviderName(
   return (sessionProvider || containerConfigProvider || 'claude').toLowerCase();
 }
 
-function resolveProviderContribution(
-  session: Session,
+export function resolveProviderContribution(
+  session: Pick<Session, 'id' | 'agent_provider'>,
   agentGroup: AgentGroup,
   containerConfig: import('./container-config.js').ContainerConfig,
 ): { provider: string; contribution: ProviderContainerContribution } {
@@ -266,7 +266,7 @@ function resolveProviderContribution(
 
 export function buildMounts(
   agentGroup: AgentGroup,
-  session: Session,
+  session: Pick<Session, 'id'>,
   containerConfig: import('./container-config.js').ContainerConfig,
   provider: string,
   providerContribution: ProviderContainerContribution,

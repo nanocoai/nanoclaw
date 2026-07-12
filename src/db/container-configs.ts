@@ -71,19 +71,17 @@ export function updateContainerConfigScalars(
       values[key] = value;
     }
   }
-  if (fields.length === 0) return true;
+  if (!fields.length) return true;
 
   fields.push('updated_at = @updated_at');
   values.updated_at = new Date().toISOString();
 
-  const where =
-    expectedUpdatedAt === undefined
-      ? 'WHERE agent_group_id = @agent_group_id'
-      : 'WHERE agent_group_id = @agent_group_id AND updated_at = @expected_updated_at';
-  const result = getDb()
-    .prepare(`UPDATE container_configs SET ${fields.join(', ')} ${where}`)
-    .run(values);
-  return result.changes === 1;
+  const staleGuard = expectedUpdatedAt === undefined ? '' : ' AND updated_at = @expected_updated_at';
+  return (
+    getDb()
+      .prepare(`UPDATE container_configs SET ${fields.join(', ')} WHERE agent_group_id = @agent_group_id${staleGuard}`)
+      .run(values).changes === 1
+  );
 }
 
 /** Overwrite a JSON column wholesale. Used for skills, mcp_servers, packages_*, additional_mounts. */

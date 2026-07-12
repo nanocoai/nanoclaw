@@ -6,14 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   spawn: vi.fn(),
   stopContainer: vi.fn(),
-  removeContainer: vi.fn(),
 }));
 
 vi.mock('child_process', () => ({ spawn: mocks.spawn }));
 vi.mock('./container-runtime.js', () => ({
   CONTAINER_RUNTIME_BIN: 'docker',
   stopContainer: mocks.stopContainer,
-  removeContainer: mocks.removeContainer,
 }));
 vi.mock('./config.js', () => ({
   DATA_DIR: '/tmp/nanoclaw-preflight-test',
@@ -52,9 +50,8 @@ vi.mock('./session-manager.js', () => ({
 vi.mock('./container-runner.js', () => ({
   buildMounts: vi.fn(() => []),
   buildContainerArgs: vi.fn(async (...args: unknown[]) => ['run', '-c', args.at(-1)]),
-  resolveProviderName: vi.fn(() => 'codex'),
+  resolveProviderContribution: vi.fn(() => ({ provider: 'codex', contribution: {} })),
 }));
-vi.mock('./providers/provider-container-registry.js', () => ({ getProviderContainerConfig: vi.fn(() => undefined) }));
 vi.mock('./log.js', () => ({ log: { warn: vi.fn() } }));
 
 import { preflightContainerConfig } from './container-preflight.js';
@@ -79,7 +76,6 @@ describe('container provider preflight lifecycle', () => {
     fs.rmSync('/tmp/nanoclaw-preflight-test', { recursive: true, force: true });
     mocks.spawn.mockReset();
     mocks.stopContainer.mockReset();
-    mocks.removeContainer.mockReset();
     vi.useRealTimers();
   });
 
@@ -117,9 +113,6 @@ describe('container provider preflight lifecycle', () => {
 
   it('force-removes a timed-out container before cleanup', async () => {
     vi.useFakeTimers();
-    mocks.stopContainer.mockImplementation(() => {
-      throw new Error('stop failed');
-    });
     const child = childProcess();
     mocks.spawn.mockReturnValue(child);
     const promise = preflightContainerConfig('real-group', candidate);
@@ -128,7 +121,7 @@ describe('container provider preflight lifecycle', () => {
     child.emit('close', null);
 
     await expect(promise).rejects.toThrow(/timed out/);
-    expect(mocks.removeContainer).toHaveBeenCalled();
+    expect(mocks.stopContainer).toHaveBeenCalledWith(expect.stringContaining('preflight'), true);
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');
     expect(fs.readdirSync('/tmp/nanoclaw-preflight-test')).toHaveLength(0);
   });

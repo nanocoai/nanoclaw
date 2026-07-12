@@ -9,14 +9,12 @@ async function main(): Promise<void> {
     assistantName: config.assistantName,
     model: config.model,
     effort: config.effort,
-    mcpServers: Object.fromEntries(Object.entries(config.mcpServers).map(([name, value]) => [name, {
-      command: value.command,
-      args: value.args ?? [],
-      env: value.env ?? {},
-    }])),
     env: { ...process.env },
   });
-  const query = provider.query({ prompt: 'NanoClaw configuration preflight. Reply exactly PREFLIGHT_OK.', cwd: '/workspace/agent' });
+  const query = provider.query({
+    prompt: 'NanoClaw configuration preflight. Reply exactly PREFLIGHT_OK.',
+    cwd: '/workspace/agent',
+  });
   for await (const event of query.events) {
     if (event.type === 'error') throw new Error(`provider error: ${event.message}`);
     if (event.type === 'result') {

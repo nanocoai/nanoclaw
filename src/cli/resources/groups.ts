@@ -290,7 +290,7 @@ registerResource({
 
         const providerFields = ['provider', 'model', 'effort'] as const;
         if (providerFields.some((field) => updates[field] !== undefined)) {
-          const candidate: ContainerConfigRow = { ...row, ...updates, updated_at: new Date().toISOString() };
+          const candidate: ContainerConfigRow = { ...row, ...updates };
           await preflightContainerConfig(id, candidate).catch((error) => {
             throw new Error(
               `Configuration rejected; old configuration was preserved. ${error instanceof Error ? error.message : String(error)}`,
