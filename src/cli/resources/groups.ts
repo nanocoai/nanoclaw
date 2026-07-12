@@ -257,9 +257,9 @@ registerResource({
     'config update': {
       access: 'approval',
       description:
-        'Preflight and update container config scalar fields. Changes are saved but do NOT restart containers; use `ncl groups restart` explicitly. ' +
+        'Update container config scalar fields after preflight. ' +
         'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope. ' +
-        'Dangerous override: --skip-preflight bypasses provider/container validation.',
+        'Provider and container validation runs before the new values are saved.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -293,29 +293,18 @@ registerResource({
           );
         }
 
-        const skipPreflight = args['skip-preflight'] === true || args.skip_preflight === true;
-        let preflight: Awaited<ReturnType<typeof preflightContainerConfig>> | { skipped: true; reason: string };
-        if (skipPreflight) {
-          preflight = {
-            skipped: true,
-            reason: 'Explicit --skip-preflight override; provider/container validation was bypassed.',
-          };
-        } else {
-          const candidate: ContainerConfigRow = { ...row, ...updates, updated_at: new Date().toISOString() };
-          try {
-            preflight = await preflightContainerConfig(id, candidate);
-          } catch (error) {
-            throw new Error(
-              `Configuration rejected; old configuration was preserved. ${error instanceof Error ? error.message : String(error)}`,
-              { cause: error },
-            );
-          }
-        }
+        const candidate: ContainerConfigRow = { ...row, ...updates, updated_at: new Date().toISOString() };
+        await preflightContainerConfig(id, candidate).catch((error) => {
+          throw new Error(
+            `Configuration rejected; old configuration was preserved. ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          );
+        });
 
         updateContainerConfigScalars(id, updates);
 
         const updated = getContainerConfig(id)!;
-        return { config: presentConfig(updated), preflight };
+        return presentConfig(updated);
       },
     },
     'config add-mcp-server': {

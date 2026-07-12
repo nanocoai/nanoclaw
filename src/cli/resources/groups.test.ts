@@ -23,6 +23,10 @@ vi.mock('../../container-runner.js', () => ({
   preflightContainerConfig: vi.fn().mockResolvedValue({ providerOutput: 'PREFLIGHT_OK', exitCode: 0 }),
 }));
 
+vi.mock('../../container-restart.js', () => ({
+  restartAgentGroupContainers: vi.fn(),
+}));
+
 vi.mock('../../config.js', async () => {
   const actual = await vi.importActual('../../config.js');
   return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-cli-groups' };
@@ -34,6 +38,7 @@ import { initTestDb, closeDb, runMigrations, createAgentGroup, getDb } from '../
 import { createSession } from '../../db/sessions.js';
 import { ensureContainerConfig, getContainerConfig } from '../../db/container-configs.js';
 import { preflightContainerConfig } from '../../container-runner.js';
+import { restartAgentGroupContainers } from '../../container-restart.js';
 import { dispatch } from '../dispatch.js';
 // Side-effect import: registers the `groups-*` commands (including delete).
 import './groups.js';
@@ -222,8 +227,8 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
   });
 });
 
-describe('groups config update preflight override', () => {
-  const GID = 'ag-config-preflight-override';
+describe('groups config update preflight', () => {
+  const GID = 'ag-config-preflight';
 
   beforeEach(() => {
     const db = initTestDb();
@@ -241,27 +246,41 @@ describe('groups config update preflight override', () => {
 
   afterEach(() => closeDb());
 
-  it('bypasses preflight only with the explicit dangerous flag and reports it', async () => {
+  it('preflights before persisting and does not restart', async () => {
     const response = await dispatch(
       {
-        id: 'config-skip-preflight',
+        id: 'config-preflight-success',
         command: 'groups-config-update',
-        args: { id: GID, model: 'operator-forced-model', 'skip-preflight': true },
+        args: { id: GID, model: 'candidate-model' },
       },
       { caller: 'host' },
     );
 
     expect(response.ok).toBe(true);
-    if (!response.ok) throw new Error(response.error.message);
-    expect(preflightContainerConfig).not.toHaveBeenCalled();
-    expect(getContainerConfig(GID)?.model).toBe('operator-forced-model');
-    expect(response.data).toEqual(
-      expect.objectContaining({
-        preflight: {
-          skipped: true,
-          reason: expect.stringContaining('--skip-preflight'),
-        },
-      }),
+    expect(preflightContainerConfig).toHaveBeenCalledWith(GID, expect.objectContaining({ model: 'candidate-model' }));
+    expect(getContainerConfig(GID)?.model).toBe('candidate-model');
+    expect(restartAgentGroupContainers).not.toHaveBeenCalled();
+  });
+
+  it('preserves the old config and does not restart when preflight fails', async () => {
+    vi.mocked(preflightContainerConfig).mockRejectedValueOnce(
+      new Error('preflight container exited with code 2: provider returned HTTP 400'),
     );
+
+    const response = await dispatch(
+      {
+        id: 'config-preflight-failure',
+        command: 'groups-config-update',
+        args: { id: GID, model: 'unsupported-model' },
+      },
+      { caller: 'host' },
+    );
+
+    expect(response.ok).toBe(false);
+    if (response.ok) throw new Error('expected config update to fail');
+    expect(response.error.message).toContain('old configuration was preserved');
+    expect(response.error.message).toContain('HTTP 400');
+    expect(getContainerConfig(GID)?.model).toBeNull();
+    expect(restartAgentGroupContainers).not.toHaveBeenCalled();
   });
 });
