@@ -257,9 +257,8 @@ registerResource({
     'config update': {
       access: 'approval',
       description:
-        'Update container config scalar fields after preflight. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope. ' +
-        'Provider and container validation runs before the new values are saved.',
+        'Preflight and update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
+        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
