@@ -258,7 +258,8 @@ registerResource({
       access: 'approval',
       description:
         'Preflight and update container config scalar fields. Changes are saved but do NOT restart containers; use `ncl groups restart` explicitly. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',
+        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope. ' +
+        'Dangerous override: --skip-preflight bypasses provider/container validation.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -292,15 +293,23 @@ registerResource({
           );
         }
 
-        const candidate: ContainerConfigRow = { ...row, ...updates, updated_at: new Date().toISOString() };
-        let preflight: Awaited<ReturnType<typeof preflightContainerConfig>>;
-        try {
-          preflight = await preflightContainerConfig(id, candidate);
-        } catch (error) {
-          throw new Error(
-            `Configuration rejected; old configuration was preserved. ${error instanceof Error ? error.message : String(error)}`,
-            { cause: error },
-          );
+        const skipPreflight = args['skip-preflight'] === true || args.skip_preflight === true;
+        let preflight: Awaited<ReturnType<typeof preflightContainerConfig>> | { skipped: true; reason: string };
+        if (skipPreflight) {
+          preflight = {
+            skipped: true,
+            reason: 'Explicit --skip-preflight override; provider/container validation was bypassed.',
+          };
+        } else {
+          const candidate: ContainerConfigRow = { ...row, ...updates, updated_at: new Date().toISOString() };
+          try {
+            preflight = await preflightContainerConfig(id, candidate);
+          } catch (error) {
+            throw new Error(
+              `Configuration rejected; old configuration was preserved. ${error instanceof Error ? error.message : String(error)}`,
+              { cause: error },
+            );
+          }
         }
 
         updateContainerConfigScalars(id, updates);

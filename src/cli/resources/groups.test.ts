@@ -20,6 +20,7 @@ vi.mock('../../container-runner.js', () => ({
   getActiveContainerCount: vi.fn().mockReturnValue(0),
   killContainer: vi.fn(),
   buildAgentGroupImage: vi.fn().mockResolvedValue(undefined),
+  preflightContainerConfig: vi.fn().mockResolvedValue({ providerOutput: 'PREFLIGHT_OK', exitCode: 0 }),
 }));
 
 vi.mock('../../config.js', async () => {
@@ -31,6 +32,8 @@ const TEST_DIR = '/tmp/nanoclaw-test-cli-groups';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup, getDb } from '../../db/index.js';
 import { createSession } from '../../db/sessions.js';
+import { ensureContainerConfig, getContainerConfig } from '../../db/container-configs.js';
+import { preflightContainerConfig } from '../../container-runner.js';
 import { dispatch } from '../dispatch.js';
 // Side-effect import: registers the `groups-*` commands (including delete).
 import './groups.js';
@@ -216,5 +219,49 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
     expect(resp.ok).toBe(false);
     expect((resp as { ok: false; error: { code: string; message: string } }).error.code).toBe('handler-error');
     expect((resp as { ok: false; error: { code: string; message: string } }).error.message).toMatch(/not found/i);
+  });
+});
+
+describe('groups config update preflight override', () => {
+  const GID = 'ag-config-preflight-override';
+
+  beforeEach(() => {
+    const db = initTestDb();
+    runMigrations(db);
+    createAgentGroup({
+      id: GID,
+      name: 'preflight override',
+      folder: 'preflight-override',
+      agent_provider: null,
+      created_at: now(),
+    });
+    ensureContainerConfig(GID);
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => closeDb());
+
+  it('bypasses preflight only with the explicit dangerous flag and reports it', async () => {
+    const response = await dispatch(
+      {
+        id: 'config-skip-preflight',
+        command: 'groups-config-update',
+        args: { id: GID, model: 'operator-forced-model', 'skip-preflight': true },
+      },
+      { caller: 'host' },
+    );
+
+    expect(response.ok).toBe(true);
+    if (!response.ok) throw new Error(response.error.message);
+    expect(preflightContainerConfig).not.toHaveBeenCalled();
+    expect(getContainerConfig(GID)?.model).toBe('operator-forced-model');
+    expect(response.data).toEqual(
+      expect.objectContaining({
+        preflight: {
+          skipped: true,
+          reason: expect.stringContaining('--skip-preflight'),
+        },
+      }),
+    );
   });
 });
