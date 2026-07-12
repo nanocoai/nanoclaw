@@ -14,6 +14,7 @@ async function main(): Promise<void> {
       args: value.args ?? [],
       env: value.env ?? {},
     }])),
+    env: { ...process.env },
   });
   const query = provider.query({ prompt: 'NanoClaw configuration preflight. Reply exactly PREFLIGHT_OK.', cwd: '/workspace/agent' });
   for await (const event of query.events) {

@@ -296,7 +296,9 @@ registerResource({
           );
         });
 
-        updateContainerConfigScalars(id, updates);
+        if (!updateContainerConfigScalars(id, updates, row.updated_at)) {
+          throw new Error('Configuration changed while it was being validated; nothing was saved. Please retry.');
+        }
 
         const updated = getContainerConfig(id)!;
         return presentConfig(updated);

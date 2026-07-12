@@ -29,37 +29,41 @@ export async function preflightContainerConfig(
   const root = path.join(DATA_DIR, token);
   const groupDir = path.join(root, 'agent');
   const sessDir = sessionDir(token, token);
-  fs.mkdirSync(groupDir, { recursive: true });
-  fs.mkdirSync(sessDir, { recursive: true });
-
-  const ephemeralGroup = { ...agentGroup, id: token, folder: path.relative(GROUPS_DIR, groupDir) };
-  const ephemeralSession = {
-    id: token,
-    agent_group_id: token,
-    messaging_group_id: null,
-    thread_id: null,
-    agent_provider: null,
-    status: 'active' as const,
-    container_status: 'stopped' as const,
-    last_active: null,
-    created_at: new Date().toISOString(),
-  };
-  const candidate = configFromDb(candidateRow, ephemeralGroup);
-  fs.writeFileSync(path.join(groupDir, 'container.json'), JSON.stringify(candidate, null, 2) + '\n');
-
-  const provider = resolveProviderName(ephemeralSession.agent_provider, candidate.provider);
-  const contribution =
-    getProviderContainerConfig(provider)?.({
-      sessionDir: sessDir,
-      agentGroupId: token,
-      groupDir,
-      selectedSkills: [],
-      hostEnv: process.env,
-    }) ?? {};
-  const mounts = buildMounts(ephemeralGroup, ephemeralSession, candidate, provider, contribution);
   const containerName = `nanoclaw-${token}`;
 
   try {
+    fs.mkdirSync(groupDir, { recursive: true });
+    fs.mkdirSync(sessDir, { recursive: true });
+
+    const ephemeralGroup = { ...agentGroup, id: token, folder: path.relative(GROUPS_DIR, groupDir) };
+    const ephemeralSession = {
+      id: token,
+      agent_group_id: token,
+      messaging_group_id: null,
+      thread_id: null,
+      agent_provider: null,
+      status: 'active' as const,
+      container_status: 'stopped' as const,
+      last_active: null,
+      created_at: new Date().toISOString(),
+    };
+    const candidate = configFromDb(candidateRow, ephemeralGroup);
+    // Scalar updates do not need to start unrelated MCP servers or mount
+    // existing host paths during validation.
+    candidate.mcpServers = {};
+    candidate.additionalMounts = [];
+    fs.writeFileSync(path.join(groupDir, 'container.json'), JSON.stringify(candidate, null, 2) + '\n');
+
+    const provider = resolveProviderName(ephemeralSession.agent_provider, candidate.provider);
+    const contribution =
+      getProviderContainerConfig(provider)?.({
+        sessionDir: sessDir,
+        agentGroupId: token,
+        groupDir,
+        selectedSkills: [],
+        hostEnv: process.env,
+      }) ?? {};
+    const mounts = buildMounts(ephemeralGroup, ephemeralSession, candidate, provider, contribution);
     const args = await buildContainerArgs(
       mounts,
       containerName,
@@ -67,17 +71,19 @@ export async function preflightContainerConfig(
       candidate,
       provider,
       contribution,
-      token,
+      agentGroup.id,
+      'exec bun run /app/src/preflight.ts',
     );
-    const commandIndex = args.lastIndexOf('exec bun run /app/src/index.ts');
-    if (commandIndex < 0) throw new Error('production container command not found in preflight args');
-    args[commandIndex] = 'exec bun run /app/src/preflight.ts';
 
     const child = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     const stdout: string[] = [];
     const stderr: string[] = [];
-    child.stdout?.on('data', (data) => stdout.push(data.toString()));
-    child.stderr?.on('data', (data) => stderr.push(data.toString()));
+    const appendOutput = (chunks: string[], data: Buffer): void => {
+      const remaining = 64 * 1024 - chunks.join('').length;
+      if (remaining > 0) chunks.push(data.toString('utf8', 0, remaining));
+    };
+    child.stdout?.on('data', (data) => appendOutput(stdout, data));
+    child.stderr?.on('data', (data) => appendOutput(stderr, data));
 
     const exitCode = await new Promise<number>((resolve, reject) => {
       const timer = setTimeout(() => {

@@ -428,6 +428,7 @@ export async function buildContainerArgs(
   _provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
+  command = 'exec bun run /app/src/index.ts',
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
@@ -500,7 +501,7 @@ export async function buildContainerArgs(
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
   args.push(imageTag);
 
-  args.push('-c', 'exec bun run /app/src/index.ts');
+  args.push('-c', command);
 
   return args;
 }
