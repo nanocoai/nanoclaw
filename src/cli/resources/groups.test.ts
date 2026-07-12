@@ -20,6 +20,9 @@ vi.mock('../../container-runner.js', () => ({
   getActiveContainerCount: vi.fn().mockReturnValue(0),
   killContainer: vi.fn(),
   buildAgentGroupImage: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../../container-preflight.js', () => ({
   preflightContainerConfig: vi.fn().mockResolvedValue({ providerOutput: 'PREFLIGHT_OK', exitCode: 0 }),
 }));
 
@@ -37,7 +40,7 @@ const TEST_DIR = '/tmp/nanoclaw-test-cli-groups';
 import { initTestDb, closeDb, runMigrations, createAgentGroup, getDb } from '../../db/index.js';
 import { createSession } from '../../db/sessions.js';
 import { ensureContainerConfig, getContainerConfig } from '../../db/container-configs.js';
-import { preflightContainerConfig } from '../../container-runner.js';
+import { preflightContainerConfig } from '../../container-preflight.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { dispatch } from '../dispatch.js';
 // Side-effect import: registers the `groups-*` commands (including delete).

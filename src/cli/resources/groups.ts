@@ -1,12 +1,8 @@
 import { randomUUID } from 'crypto';
 
 import type { McpServerConfig } from '../../container-config.js';
-import {
-  buildAgentGroupImage,
-  killContainer,
-  preflightContainerConfig,
-  wakeContainer,
-} from '../../container-runner.js';
+import { preflightContainerConfig } from '../../container-preflight.js';
+import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
 import { getDb, hasTable } from '../../db/connection.js';
