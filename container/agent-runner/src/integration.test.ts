@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it as bunIt, expect, beforeEach, afterEach } from 'bun:test';
+
+// Test DB connections are process-global; never overlap DB-backed tests.
+const it = bunIt.serial;
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
@@ -559,20 +562,19 @@ class InvalidSessionProvider {
 
 describe('poll loop — slash command during active query', () => {
   it('aborts the active query when /clear arrives as a follow-up', async () => {
-    const waitTimeoutMs = 8000;
     insertMessage('m-active', { sender: 'Alice', text: 'long running request' }, { platformId: 'chan-1', channelType: 'discord' });
 
     const provider = new BlockingProvider();
     const controller = new AbortController();
-    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 30000);
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000);
 
-    await waitFor(() => provider.queries === 1, waitTimeoutMs);
+    await waitFor(() => provider.queries === 1, 2000);
     insertMessage('m-clear-active', { sender: 'Alice', text: '/clear' }, { platformId: 'chan-1', channelType: 'discord' });
 
-    await waitFor(() => provider.aborts === 1, waitTimeoutMs);
+    await waitFor(() => provider.aborts === 1, 2000);
     await waitFor(
       () => getUndeliveredMessages().some((msg) => JSON.parse(msg.content).text === 'Session cleared.'),
-      waitTimeoutMs,
+      2000,
     );
     controller.abort();
 
@@ -581,7 +583,7 @@ describe('poll loop — slash command during active query', () => {
     expect(getPendingMessages()).toHaveLength(0);
 
     await loopPromise.catch(() => {});
-  }, 30000);
+  });
 });
 
 /**
