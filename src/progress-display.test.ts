@@ -221,6 +221,34 @@ describe('classifyProgressAction', () => {
 
   it.each([
     [
+      'rg 跳过 glob 排除规则并保留真实搜索对象',
+      `rg -n --glob '"'"'!**/node_modules/**'"'"' --glob '*.{ts,tsx}' '(admin|管理)' apps server | head -240`,
+      '正在 apps 中搜索“(admin|管理)”',
+    ],
+    [
+      'git log 不把后续管道参数当文件名',
+      `/bin/zsh -lc "git log -1 --oneline; node query.mjs --last 300"`,
+      '正在检查代码和历史',
+    ],
+    [
+      'git blame 仍展示真实文件名',
+      `git blame src/index.ts`,
+      '正在检查 index.ts 的代码历史',
+    ],
+    [
+      'git blame 跳过 -L 的行号范围',
+      `git blame -L 10,20 src/index.ts`,
+      '正在检查 index.ts 的代码历史',
+    ],
+    ['sed 不把 shell 引号当文件名', `sed -n '1,260p' "`, '正在读取相关内容'],
+  ])('%s', (_name, command, expected) => {
+    expect(classifyProgressAction(started('Bash', { command })).title).toBe(
+      expected,
+    );
+  });
+
+  it.each([
+    [
       'Read 文件名',
       started('Read', { file_path: '/workspace/src/progress-display.ts' }),
       '正在读取 progress-display.ts',

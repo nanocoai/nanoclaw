@@ -205,7 +205,8 @@ function safeBasename(value: string): string | undefined {
   const raw = value.trim().replace(/[?#].*$/u, '');
   if (!raw || /^-/u.test(raw)) return undefined;
   const name = raw.split(/[\\/]/u).filter(Boolean).at(-1)?.trim();
-  if (!name || name.length > 64) return undefined;
+  if (!name || name.length > 64 || !/[\p{L}\p{N}._-]/u.test(name))
+    return undefined;
   if (/^(?:\.env(?:\..*)?|.*(?:credential|password|secret|token|private[_-]?key).*)$/iu.test(name))
     return '敏感配置文件';
   const safe = sanitizeUserText(name);
@@ -220,7 +221,14 @@ function safeBasename(value: string): string | undefined {
 
 function safeQuery(value: string): string | undefined {
   const raw = value.trim().replace(/^[`'"“”]+|[`'"“”]+$/gu, '');
-  if (!raw || raw.length > 80) return undefined;
+  if (
+    !raw ||
+    raw.length > 80 ||
+    /^!/u.test(raw) ||
+    ((raw.includes('*') || raw.includes('?') || raw.includes('[')) &&
+      /[\\/]/u.test(raw))
+  )
+    return undefined;
   const safe = sanitizeUserText(raw).replace(/\s+/gu, ' ');
   if (
     !safe ||
@@ -245,17 +253,32 @@ function testObject(command: string): string | undefined {
   return match ? safeBasename(match[1]) : undefined;
 }
 
+function shellTokens(command: string, startIndex: number): string[] {
+  const rawTokens =
+    command.slice(startIndex).match(/"[^"]*"|'[^']*'|[|;&\n]|[^\s|;&\n]+/gu) ??
+    [];
+  const controlIndex = rawTokens.findIndex((token) => /^[|;&\n]$/u.test(token));
+  return controlIndex >= 0 ? rawTokens.slice(0, controlIndex) : rawTokens;
+}
+
+function cleanShellToken(token: string): string {
+  return token
+    .trim()
+    .replace(/\\(["'])/gu, '$1')
+    .replace(/^[`'"“”]+|[`'"“”]+$/gu, '');
+}
+
+function isQuoteToken(token: string): boolean {
+  return !cleanShellToken(token);
+}
+
 function shellSearchAction(
   command: string,
   base: { phase?: string },
 ): ProgressAction | undefined {
   const commandMatch = command.match(/\b(?:rg|grep)\b/iu);
   if (commandMatch?.index == null) return undefined;
-  const tokens =
-    command
-      .slice(commandMatch.index)
-      .match(/"[^"]*"|'[^']*'|[^\s|;&]+/gu)
-      ?.map((token) => token.replace(/^["']|["']$/gu, '')) ?? [];
+  const tokens = shellTokens(command, commandMatch.index);
   const valueFlags = new Set([
     '-A',
     '-B',
@@ -272,11 +295,19 @@ function shellSearchAction(
   ]);
   const operands: string[] = [];
   for (let index = 1; index < tokens.length; index += 1) {
-    const token = tokens[index];
+    const token = cleanShellToken(tokens[index]);
     if (valueFlags.has(token)) {
-      index += 1;
+      let valueIndex = index + 1;
+      while (valueIndex < tokens.length && isQuoteToken(tokens[valueIndex]))
+        valueIndex += 1;
+      valueIndex += 1;
+      while (valueIndex < tokens.length && isQuoteToken(tokens[valueIndex]))
+        valueIndex += 1;
+      index = valueIndex - 1;
       continue;
     }
+    if ([...valueFlags].some((flag) => token.startsWith(`${flag}=`))) continue;
+    if (!token) continue;
     if (token.startsWith('-')) continue;
     operands.push(token);
   }
@@ -302,13 +333,39 @@ function shellSearchAction(
 }
 
 function shellReadObject(command: string): string | undefined {
-  const segment = command.match(/\b(?:cat|sed)\b([^|;&\n]*)/iu)?.[1];
-  if (!segment) return undefined;
-  const tokens = segment.match(/"[^"]*"|'[^']*'|\S+/gu) ?? [];
+  const commandMatch = command.match(/\b(?:cat|sed)\b/iu);
+  if (commandMatch?.index == null) return undefined;
+  const tokens = shellTokens(command, commandMatch.index).slice(1);
   const candidate = [...tokens]
     .reverse()
-    .map((token) => token.replace(/^["']|["']$/gu, ''))
+    .map(cleanShellToken)
     .find((token) => !token.startsWith('-') && !/^\d+(?:,\d+)?p$/u.test(token));
+  return candidate ? safeBasename(candidate) : undefined;
+}
+
+function shellGitHistoryObject(command: string): string | undefined {
+  const commandMatch = command.match(/\bgit\s+(?:log|blame|show)\b/iu);
+  if (commandMatch?.index == null) return undefined;
+  const tokens = shellTokens(command, commandMatch.index).map(cleanShellToken);
+  const subcommand = tokens[1]?.toLowerCase();
+  if (subcommand === 'blame') {
+    const blameValueFlags = new Set(['-L', '--contents', '--date']);
+    let candidate: string | undefined;
+    for (let index = 2; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if (blameValueFlags.has(token)) {
+        index += 1;
+        continue;
+      }
+      if (!token || token.startsWith('-')) continue;
+      candidate = token;
+      break;
+    }
+    return candidate ? safeBasename(candidate) : undefined;
+  }
+  const separator = tokens.indexOf('--');
+  if (separator < 0) return undefined;
+  const candidate = tokens.slice(separator + 1).find(Boolean);
   return candidate ? safeBasename(candidate) : undefined;
 }
 
@@ -656,7 +713,7 @@ export function classifyProgressAction(
     };
   if (/\bgit\s+(log|blame|show|status|diff)\b/.test(lower)) {
     const historyTarget = /\bgit\s+(?:blame|log|show)\b/iu.test(command)
-      ? safeBasename(command.trim().split(/\s+/u).at(-1) ?? '')
+      ? shellGitHistoryObject(command)
       : undefined;
     return historyTarget
       ? actionText(
