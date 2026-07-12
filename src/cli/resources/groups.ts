@@ -253,7 +253,7 @@ registerResource({
     'config update': {
       access: 'approval',
       description:
-        'Preflight and update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
+        'Validate provider config and update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
         'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',
       handler: async (args) => {
         const id = args.id as string;
@@ -288,13 +288,16 @@ registerResource({
           );
         }
 
-        const candidate: ContainerConfigRow = { ...row, ...updates, updated_at: new Date().toISOString() };
-        await preflightContainerConfig(id, candidate).catch((error) => {
-          throw new Error(
-            `Configuration rejected; old configuration was preserved. ${error instanceof Error ? error.message : String(error)}`,
-            { cause: error },
-          );
-        });
+        const providerFields = ['provider', 'model', 'effort'] as const;
+        if (providerFields.some((field) => updates[field] !== undefined)) {
+          const candidate: ContainerConfigRow = { ...row, ...updates, updated_at: new Date().toISOString() };
+          await preflightContainerConfig(id, candidate).catch((error) => {
+            throw new Error(
+              `Configuration rejected; old configuration was preserved. ${error instanceof Error ? error.message : String(error)}`,
+              { cause: error },
+            );
+          });
+        }
 
         if (!updateContainerConfigScalars(id, updates, row.updated_at)) {
           throw new Error('Configuration changed while it was being validated; nothing was saved. Please retry.');

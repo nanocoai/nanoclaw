@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { configFromDb } from './container-config.js';
-import { CONTAINER_RUNTIME_BIN, stopContainer } from './container-runtime.js';
+import { CONTAINER_RUNTIME_BIN, removeContainer, stopContainer } from './container-runtime.js';
 import { DATA_DIR, GROUPS_DIR } from './config.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { log } from './log.js';
@@ -86,13 +86,20 @@ export async function preflightContainerConfig(
     child.stderr?.on('data', (data) => appendOutput(stderr, data));
 
     const exitCode = await new Promise<number>((resolve, reject) => {
+      let timedOut = false;
+      const timeoutError = new Error(`preflight container timed out after 120s\n${stderr.join('')}`);
       const timer = setTimeout(() => {
+        timedOut = true;
         try {
           stopContainer(containerName);
         } catch {
-          child.kill('SIGKILL');
+          try {
+            removeContainer(containerName);
+          } catch {
+            /* the container may already have exited */
+          }
         }
-        reject(new Error(`preflight container timed out after 120s\n${stderr.join('')}`));
+        child.kill('SIGKILL');
       }, 120_000);
       child.once('error', (err) => {
         clearTimeout(timer);
@@ -100,7 +107,8 @@ export async function preflightContainerConfig(
       });
       child.once('close', (code) => {
         clearTimeout(timer);
-        resolve(code ?? 1);
+        if (timedOut) reject(timeoutError);
+        else resolve(code ?? 1);
       });
     });
     const providerOutput = `${stdout.join('')}${stderr.join('')}`.trim();
@@ -108,7 +116,7 @@ export async function preflightContainerConfig(
       throw new Error(`preflight container exited with code ${exitCode}: ${providerOutput || 'no output'}`);
     return { providerOutput, exitCode };
   } finally {
-    for (const tempPath of [root, sessDir]) {
+    for (const tempPath of [root, sessDir, path.dirname(sessDir)]) {
       try {
         fs.rmSync(tempPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       } catch (error) {
@@ -117,6 +125,11 @@ export async function preflightContainerConfig(
           error: error instanceof Error ? error.message : String(error),
         });
       }
+    }
+    try {
+      fs.rmdirSync(path.dirname(path.dirname(sessDir)));
+    } catch {
+      /* shared session root is retained when it contains other sessions */
     }
   }
 }

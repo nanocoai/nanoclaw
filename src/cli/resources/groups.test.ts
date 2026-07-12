@@ -265,6 +265,21 @@ describe('groups config update preflight', () => {
     expect(restartAgentGroupContainers).not.toHaveBeenCalled();
   });
 
+  it('does not preflight unrelated scalar fields', async () => {
+    const response = await dispatch(
+      {
+        id: 'config-preflight-unrelated',
+        command: 'groups-config-update',
+        args: { id: GID, assistant_name: 'new name' },
+      },
+      { caller: 'host' },
+    );
+
+    expect(response.ok).toBe(true);
+    expect(preflightContainerConfig).not.toHaveBeenCalled();
+    expect(getContainerConfig(GID)?.assistant_name).toBe('new name');
+  });
+
   it('preserves the old config and does not restart when preflight fails', async () => {
     vi.mocked(preflightContainerConfig).mockRejectedValueOnce(
       new Error('preflight container exited with code 2: provider returned HTTP 400'),
@@ -285,5 +300,28 @@ describe('groups config update preflight', () => {
     expect(response.error.message).toContain('HTTP 400');
     expect(getContainerConfig(GID)?.model).toBeNull();
     expect(restartAgentGroupContainers).not.toHaveBeenCalled();
+  });
+
+  it('does not save a candidate when the row changes during preflight', async () => {
+    vi.mocked(preflightContainerConfig).mockImplementationOnce(async () => {
+      getDb()
+        .prepare('UPDATE container_configs SET model = ?, updated_at = ? WHERE agent_group_id = ?')
+        .run('changed-concurrently', 'changed-concurrently', GID);
+      return { providerOutput: 'PREFLIGHT_OK', exitCode: 0 };
+    });
+
+    const response = await dispatch(
+      {
+        id: 'config-preflight-race',
+        command: 'groups-config-update',
+        args: { id: GID, model: 'candidate-model' },
+      },
+      { caller: 'host' },
+    );
+
+    expect(response.ok).toBe(false);
+    if (response.ok) throw new Error('expected concurrent config update to fail');
+    expect(response.error.message).toContain('changed while it was being validated');
+    expect(getContainerConfig(GID)?.model).toBe('changed-concurrently');
   });
 });
