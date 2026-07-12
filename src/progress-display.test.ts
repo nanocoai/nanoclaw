@@ -317,11 +317,15 @@ describe('classifyProgressAction', () => {
       "sed -n '620,700p' src/progress-display.ts",
       '正在读取 progress-display.ts',
     ],
-    ['Bash cat', 'cat /workspace/package.json', '正在读取 package.json'],
+    [
+      'Bash cat',
+      'cat /workspace/package.json',
+      '正在读取 package.json',
+    ],
   ])('%s 从命令提取安全对象', (_name, command, expected) => {
-    expect(classifyProgressAction(started('Bash', { command })).title).toBe(
-      expected,
-    );
+    expect(
+      classifyProgressAction(started('Bash', { command })).title,
+    ).toBe(expected);
   });
 
   it.each([
@@ -914,7 +918,9 @@ describe('reduceProgressPresentation', () => {
     });
 
     expect(state.steps.at(-1)?.phase).toBe('运行长测试');
-    expect(state.steps.at(-1)?.title).toBe('正在运行 fixture.test.mjs 测试');
+    expect(state.steps.at(-1)?.title).toBe(
+      '正在运行 fixture.test.mjs 测试',
+    );
   });
 
   it('同一 toolCallId 的 started 更新原步骤，不重复追加', () => {

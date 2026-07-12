@@ -207,11 +207,7 @@ function safeBasename(value: string): string | undefined {
   const name = raw.split(/[\\/]/u).filter(Boolean).at(-1)?.trim();
   if (!name || name.length > 64 || !/[\p{L}\p{N}._-]/u.test(name))
     return undefined;
-  if (
-    /^(?:\.env(?:\..*)?|.*(?:credential|password|secret|token|private[_-]?key).*)$/iu.test(
-      name,
-    )
-  )
+  if (/^(?:\.env(?:\..*)?|.*(?:credential|password|secret|token|private[_-]?key).*)$/iu.test(name))
     return '敏感配置文件';
   const safe = sanitizeUserText(name);
   if (
@@ -496,7 +492,12 @@ export function classifyProgressAction(
         'search',
       );
     if (query)
-      return actionText(`正在搜索“${query}”`, `搜索“${query}”`, base, 'search');
+      return actionText(
+        `正在搜索“${query}”`,
+        `搜索“${query}”`,
+        base,
+        'search',
+      );
     return actionText(
       searchTitle(progress),
       searchObject(progress) ? `搜索${searchObject(progress)}` : '搜索相关内容',
@@ -519,7 +520,12 @@ export function classifyProgressAction(
           base,
           'web',
         )
-      : actionText('正在搜索公开资料', '搜索公开资料', base, 'web');
+      : actionText(
+          '正在搜索公开资料',
+          '搜索公开资料',
+          base,
+          'web',
+        );
   }
 
   if (tool.includes('gitnexus')) {
@@ -531,7 +537,12 @@ export function classifyProgressAction(
           base,
           'inspect',
         )
-      : actionText('正在分析代码调用关系', '分析代码调用关系', base, 'inspect');
+      : actionText(
+          '正在分析代码调用关系',
+          '分析代码调用关系',
+          base,
+          'inspect',
+        );
   }
   if (tool.includes('search_chat')) {
     const query = safeQuery(inputString(progress.input, 'query'));
@@ -542,7 +553,12 @@ export function classifyProgressAction(
           base,
           'communicate',
         )
-      : actionText('正在搜索聊天记录', '搜索聊天记录', base, 'communicate');
+      : actionText(
+          '正在搜索聊天记录',
+          '搜索聊天记录',
+          base,
+          'communicate',
+        );
   }
   if (tool.includes('delegate'))
     return {
@@ -609,7 +625,12 @@ export function classifyProgressAction(
   ) {
     const target = testObject(command);
     return target
-      ? actionText(`正在运行 ${target} 测试`, `测试 ${target}`, base, 'test')
+      ? actionText(
+          `正在运行 ${target} 测试`,
+          `测试 ${target}`,
+          base,
+          'test',
+        )
       : actionText('正在运行测试', '运行测试', base, 'test');
   }
   if (/gh\s+run\s+view\b[^\n]*--log-failed/.test(lower)) {
@@ -1079,11 +1100,7 @@ export function reduceProgressPresentation(
         phase.status === 'running'
           ? phase.source === 'plan'
             ? phase
-            : {
-                ...phase,
-                status: 'unknown',
-                outcome: unknownPhaseOutcome(phase),
-              }
+            : { ...phase, status: 'unknown', outcome: unknownPhaseOutcome(phase) }
           : phase,
       ),
     };
