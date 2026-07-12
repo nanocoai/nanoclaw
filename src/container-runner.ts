@@ -5,6 +5,7 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { promisify } from 'util';
 
@@ -53,6 +54,34 @@ import {
 import type { AgentGroup, Session } from './types.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
+
+// Filenames the onecli SDK writes under os.tmpdir() and bind-mounts into every
+// agent container. If Docker ever auto-creates one of these as a directory
+// (missing bind source), the SDK's writeFileSync hits EISDIR and no container
+// spawns. tmpdir-setup.ts points TMPDIR at an aburi-owned ext4 dir so we can
+// actually delete a stray dir here — self-healing the poisoned state instead of
+// needing a manual `sudo rmdir`.
+const ONECLI_CA_TMP_FILES = ['onecli-proxy-ca.pem', 'onecli-combined-ca.pem'];
+
+/**
+ * Remove any onecli CA path that exists as a directory before the SDK tries to
+ * write it as a file. No-op in the normal case. Best-effort: a failure here
+ * just surfaces later as the SDK's own EISDIR, so we log and continue.
+ */
+function clearStrayCaCertDirs(): void {
+  for (const name of ONECLI_CA_TMP_FILES) {
+    const p = path.join(os.tmpdir(), name);
+    try {
+      if (fs.statSync(p).isDirectory()) {
+        fs.rmSync(p, { recursive: true, force: true });
+        log.warn('Removed stray onecli CA directory before spawn', { path: p });
+      }
+    } catch {
+      // ENOENT (normal) or EACCES (still root-owned in a sticky dir) — nothing
+      // more we can do in-process; let the SDK report if it still fails.
+    }
+  }
+}
 
 /** Active containers tracked by session ID. */
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
@@ -487,6 +516,8 @@ async function buildContainerArgs(
   if (agentIdentifier) {
     await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
   }
+  // Self-heal a poisoned CA path (Docker-created root dir) before the SDK writes it.
+  clearStrayCaCertDirs();
   const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
   if (!onecliApplied) {
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');

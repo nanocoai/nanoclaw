@@ -4,6 +4,11 @@
  * Thin orchestrator: init DB, run migrations, start channel adapters,
  * start delivery polls, start sweep, handle shutdown.
  */
+// Must run before any container spawn: relocates TMPDIR off volatile
+// root-sticky /tmp so the onecli proxy CA can't be poisoned into a root-owned
+// dir (EISDIR → no containers spawn → WhatsApp goes silent). See tmpdir-setup.ts.
+import './tmpdir-setup.js';
+
 import path from 'path';
 
 import { backfillContainerConfigs } from './backfill-container-configs.js';
