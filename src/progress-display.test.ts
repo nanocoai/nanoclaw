@@ -221,6 +221,29 @@ describe('classifyProgressAction', () => {
 
   it.each([
     [
+      'rg 跳过 glob 排除规则并保留真实搜索对象',
+      `rg -n --glob '"'"'!**/node_modules/**'"'"' --glob '*.{ts,tsx}' '(admin|管理)' apps server | head -240`,
+      '正在 apps 中搜索“(admin|管理)”',
+    ],
+    [
+      'git log 不把后续管道参数当文件名',
+      `/bin/zsh -lc "git log -1 --oneline; node query.mjs --last 300"`,
+      '正在检查代码和历史',
+    ],
+    [
+      'git blame 仍展示真实文件名',
+      `git blame src/index.ts`,
+      '正在检查 index.ts 的代码历史',
+    ],
+    ['sed 不把 shell 引号当文件名', `sed -n '1,260p' "`, '正在读取相关内容'],
+  ])('%s', (_name, command, expected) => {
+    expect(classifyProgressAction(started('Bash', { command })).title).toBe(
+      expected,
+    );
+  });
+
+  it.each([
+    [
       'Read 文件名',
       started('Read', { file_path: '/workspace/src/progress-display.ts' }),
       '正在读取 progress-display.ts',
@@ -294,15 +317,11 @@ describe('classifyProgressAction', () => {
       "sed -n '620,700p' src/progress-display.ts",
       '正在读取 progress-display.ts',
     ],
-    [
-      'Bash cat',
-      'cat /workspace/package.json',
-      '正在读取 package.json',
-    ],
+    ['Bash cat', 'cat /workspace/package.json', '正在读取 package.json'],
   ])('%s 从命令提取安全对象', (_name, command, expected) => {
-    expect(
-      classifyProgressAction(started('Bash', { command })).title,
-    ).toBe(expected);
+    expect(classifyProgressAction(started('Bash', { command })).title).toBe(
+      expected,
+    );
   });
 
   it.each([
@@ -895,9 +914,7 @@ describe('reduceProgressPresentation', () => {
     });
 
     expect(state.steps.at(-1)?.phase).toBe('运行长测试');
-    expect(state.steps.at(-1)?.title).toBe(
-      '正在运行 fixture.test.mjs 测试',
-    );
+    expect(state.steps.at(-1)?.title).toBe('正在运行 fixture.test.mjs 测试');
   });
 
   it('同一 toolCallId 的 started 更新原步骤，不重复追加', () => {
