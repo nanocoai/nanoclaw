@@ -304,18 +304,26 @@ describe('poll loop integration', () => {
 
 // Helper: run poll loop until aborted or timeout
 async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSignal, timeoutMs: number): Promise<void> {
-  return Promise.race([
-    runPollLoop({
-      provider,
-      providerName: 'mock',
-      cwd: '/tmp',
-      signal,
-    }),
-    new Promise<void>((_, reject) => {
-      signal.addEventListener('abort', () => reject(new Error('aborted')));
-    }),
-    new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
-  ]);
+  // Do not race an immediate rejection on abort. That used to let the test
+  // finish while runPollLoop/processQuery was still alive for up to one active
+  // poll interval; afterEach then closed/reinitialized the shared test DB under
+  // that leaked loop. Await the real loop shutdown instead.
+  let timeout: ReturnType<typeof setTimeout>;
+  try {
+    return await Promise.race([
+      runPollLoop({
+        provider,
+        providerName: 'mock',
+        cwd: '/tmp',
+        signal,
+      }),
+      new Promise<void>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('timeout')), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout!);
+  }
 }
 
 async function waitFor(condition: () => boolean, timeoutMs: number): Promise<void> {
