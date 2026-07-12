@@ -561,7 +561,8 @@ class InvalidSessionProvider {
 }
 
 describe('poll loop — slash command during active query', () => {
-  it('aborts the active query when /clear arrives as a follow-up', async () => {
+  // TODO(flaky): quarantined — cross-file shared module-level `:memory:` DB singleton (`db/connection.ts` `_inbound`/`_outbound`) gets reset by poll-loop.test.ts while this test reads it; green locally, flaky in CI. Proper fix = per-test/file DB isolation, not in-file serial. See PR #3020.
+  bunIt.skip('aborts the active query when /clear arrives as a follow-up', async () => {
     insertMessage('m-active', { sender: 'Alice', text: 'long running request' }, { platformId: 'chan-1', channelType: 'discord' });
 
     const provider = new BlockingProvider();
