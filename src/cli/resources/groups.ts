@@ -1,7 +1,12 @@
 import { randomUUID } from 'crypto';
 
 import type { McpServerConfig } from '../../container-config.js';
-import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
+import {
+  buildAgentGroupImage,
+  killContainer,
+  preflightContainerConfig,
+  wakeContainer,
+} from '../../container-runner.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
 import { getDb, hasTable } from '../../db/connection.js';
@@ -252,7 +257,7 @@ registerResource({
     'config update': {
       access: 'approval',
       description:
-        'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
+        'Preflight and update container config scalar fields. Changes are saved but do NOT restart containers; use `ncl groups restart` explicitly. ' +
         'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',
       handler: async (args) => {
         const id = args.id as string;
@@ -287,10 +292,21 @@ registerResource({
           );
         }
 
+        const candidate: ContainerConfigRow = { ...row, ...updates, updated_at: new Date().toISOString() };
+        let preflight: Awaited<ReturnType<typeof preflightContainerConfig>>;
+        try {
+          preflight = await preflightContainerConfig(id, candidate);
+        } catch (error) {
+          throw new Error(
+            `Configuration rejected; old configuration was preserved. ${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          );
+        }
+
         updateContainerConfigScalars(id, updates);
 
         const updated = getContainerConfig(id)!;
-        return presentConfig(updated);
+        return { config: presentConfig(updated), preflight };
       },
     },
     'config add-mcp-server': {
