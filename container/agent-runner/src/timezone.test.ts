@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'bun:test';
 
-import { formatLocalTime, isValidTimezone, parseZonedToUtc, resolveTimezone } from './timezone.js';
+import { formatLocalTime, isValidTimezone, nowInZone, parseZonedToUtc, resolveTimezone } from './timezone.js';
 
 // --- formatLocalTime ---
 
@@ -12,6 +12,12 @@ describe('formatLocalTime', () => {
     expect(result).toContain('PM');
     expect(result).toContain('Feb');
     expect(result).toContain('2026');
+  });
+
+  it('includes the weekday so the agent does not have to infer day-of-week from the date', () => {
+    // 2026-02-04 is a Wednesday
+    const result = formatLocalTime('2026-02-04T18:30:00.000Z', 'America/New_York');
+    expect(result).toContain('Wednesday');
   });
 
   it('handles different timezones', () => {
@@ -30,6 +36,21 @@ describe('formatLocalTime', () => {
     // Should format as UTC (noon UTC = 12:00 PM)
     expect(result).toContain('12:00');
     expect(result).toContain('PM');
+  });
+});
+
+// --- nowInZone ---
+
+describe('nowInZone', () => {
+  it('renders the current time in the given zone with a weekday', () => {
+    const result = nowInZone('America/New_York');
+    // weekday, month, year and a 12h clock marker are always present
+    expect(result).toMatch(/^(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday),/);
+    expect(result).toMatch(/\b(AM|PM)\b/);
+  });
+
+  it('falls back to UTC on an invalid timezone without throwing', () => {
+    expect(() => nowInZone('Not/AZone')).not.toThrow();
   });
 });
 
