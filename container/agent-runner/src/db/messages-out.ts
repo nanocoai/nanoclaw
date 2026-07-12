@@ -142,3 +142,25 @@ export function getUndeliveredMessages(): MessageOutRow[] {
     )
     .all() as MessageOutRow[];
 }
+
+export function getMaxMessageOutSeq(): number {
+  const row = getOutboundDb().prepare('SELECT COALESCE(MAX(seq), 0) AS seq FROM messages_out').get() as { seq: number };
+  return row.seq;
+}
+
+export function hasChatReplySince(
+  seq: number,
+  platformId: string | null,
+  channelType: string | null,
+): boolean {
+  if (!platformId || !channelType) return false;
+  const row = getOutboundDb()
+    .prepare(
+      `SELECT 1 FROM messages_out
+       WHERE seq > $seq AND kind = 'chat'
+         AND platform_id = $platform_id AND channel_type = $channel_type
+       LIMIT 1`,
+    )
+    .get({ $seq: seq, $platform_id: platformId, $channel_type: channelType });
+  return row != null;
+}

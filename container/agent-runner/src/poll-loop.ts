@@ -6,7 +6,7 @@ import {
   markScriptSkipped,
   type MessageInRow,
 } from './db/messages-in.js';
-import { writeMessageOut } from './db/messages-out.js';
+import { getMaxMessageOutSeq, hasChatReplySince, writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
   clearContinuation,
@@ -348,6 +348,7 @@ export async function processQuery(
   initialPrompt: string,
   initialContinuation: string | undefined,
 ): Promise<QueryResult> {
+  let messageOutSeqAtRoundStart = getMaxMessageOutSeq();
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
@@ -438,6 +439,7 @@ export async function processQuery(
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
         taskBlockNudged = false;
+        messageOutSeqAtRoundStart = getMaxMessageOutSeq();
         query.push(prompt);
         archivePrompts.push(prompt);
         markCompleted(keptIds);
@@ -524,7 +526,12 @@ export async function processQuery(
             });
             archivePrompts.shift();
           } else {
-            const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+            const alreadyReplied = hasChatReplySince(
+              messageOutSeqAtRoundStart,
+              routing.platformId,
+              routing.channelType,
+            );
+            const willRetryWrapping = hasUnwrapped && !unwrappedNudged && !alreadyReplied;
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
