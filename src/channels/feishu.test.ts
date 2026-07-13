@@ -584,7 +584,7 @@ describe('FeishuChannel', () => {
       // 面板 header 只有标题，动作独立成灰色一行
       expect(serialized).toContain('"content":"核对进度展示链路。"');
       expect(serialized).toContain(
-        '<font color=\\"grey\\">已读取 &#47;tmp&#47;input.t….txt，并测试 fixture.test.mjs（1 项通过）</font>',
+        '<font color=\\"grey\\">已读取 &#47;tmp&#47;input&#46;t…&#46;txt，并测试 fixture&#46;test&#46;mjs（1 项通过）</font>',
       );
       expect(serialized).not.toContain('已完成协作操作');
     });
@@ -1072,7 +1072,7 @@ describe('FeishuChannel', () => {
         JSON.parse(patchArg?.data?.content ?? '{}'),
       );
       expect(serialized).toContain(
-        '<font color=\\"grey\\">正在读取 &#47;tmp&#47;notes.md</font>',
+        '<font color=\\"grey\\">正在读取 &#47;tmp&#47;notes&#46;md</font>',
       );
       expect(serialized).not.toContain(' · 正在读取');
     });
@@ -1274,6 +1274,96 @@ describe('FeishuChannel', () => {
         const content: string = createArg?.data?.content ?? '{}';
         expect(content).toContain('plain_text');
         expect(content).not.toContain('&#95;display');
+      } finally {
+        delete process.env.NANOCLAW_READABLE_PROGRESS;
+      }
+    });
+
+    it('行首有序列表与表格竖线同样实体化（. 和 |）', async () => {
+      const jid = 'fs:oc_progress_md_escape_list_table';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '💬 1. 第一项\n|a|b|',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'narration',
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const createArg = mockCreate.mock.calls.at(-1)?.[0];
+      const content: string = createArg?.data?.content ?? '{}';
+      expect(content).toContain('1&#46; 第一项');
+      expect(content).toContain('&#124;a&#124;b&#124;');
+    });
+
+    it('3 个全特殊字符 narration Phase 的最终卡片字节数低于飞书 30KB 上限', async () => {
+      const jid = 'fs:oc_progress_byte_budget';
+      const hostile = '/'.repeat(2000);
+      for (let round = 0; round < 3; round += 1) {
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: `💬 ${hostile}`,
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'narration',
+            },
+          }),
+          { isProgress: true },
+        );
+        // narration 之间夹一个工具事件，避免连续 narration 合并成同一 Phase
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '🔧 Read',
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'Read',
+              toolCallId: `byte-read-${round}`,
+              input: { file_path: `/tmp/file-${round}.ts` },
+            },
+          }),
+          { isProgress: true },
+        );
+      }
+
+      const lastCall =
+        mockPatch.mock.calls.at(-1)?.[0] ?? mockCreate.mock.calls.at(-1)?.[0];
+      const content: string = lastCall?.data?.content ?? '{}';
+      expect(Buffer.byteLength(content, 'utf8')).toBeLessThan(30 * 1024);
+      // 每个面板正文都被截断并提示看过程记录
+      expect(content).toContain('（全文见过程记录）');
+    });
+
+    it('detail 全特殊字符时最终卡片字节数低于飞书 30KB 上限', async () => {
+      process.env.NANOCLAW_READABLE_PROGRESS = '0';
+      try {
+        const jid = 'fs:oc_progress_byte_budget_detail';
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '🔧 apply_patch',
+            detail: `+ ${'/'.repeat(3000)}\n- ${':'.repeat(3000)}`,
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'Bash',
+              toolCallId: 'detail-bytes',
+              input: { command: 'apply_patch < big.diff' },
+            },
+          }),
+          { isProgress: true },
+        );
+
+        const createArg = mockCreate.mock.calls.at(-1)?.[0];
+        const content: string = createArg?.data?.content ?? '{}';
+        expect(Buffer.byteLength(content, 'utf8')).toBeLessThan(30 * 1024);
       } finally {
         delete process.env.NANOCLAW_READABLE_PROGRESS;
       }

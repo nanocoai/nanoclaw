@@ -184,6 +184,32 @@ const PHASE_TITLE_BUDGET = 48;
 const PHASE_ACTION_BUDGET = 48;
 /** 卡片展开区 narration 全文上限（超出截断并提示看过程记录） */
 const NARRATION_CARD_LIMIT = 2000;
+/**
+ * 单个可展开正文的转义后 UTF-8 字节预算（review R5 P1）：飞书卡片整体
+ * 上限 30KB，窗口最多 3 个 narration 面板，6KB×3 + 标题/动作/结构余量
+ * 仍留 ~10KB 空间。实体转义把 / : _ 等常见字符扩成 5 字节，预算必须在
+ * 转义之后按字节算，不能按转义前 code point 算
+ */
+const PANEL_BODY_BYTE_BUDGET = 6144;
+
+/** 按"转义后 UTF-8 字节"预算截断原文：逐 code point 累加其转义产物字节数，绝不切开实体 */
+export function truncateByEscapedBytes(
+  text: string,
+  byteBudget: number,
+): { text: string; truncated: boolean } {
+  let bytes = 0;
+  const cps = Array.from(text);
+  for (let index = 0; index < cps.length; index += 1) {
+    const escapedLength = Buffer.byteLength(
+      escapeCardMarkdownText(cps[index]),
+      'utf8',
+    );
+    if (bytes + escapedLength > byteBudget)
+      return { text: cps.slice(0, index).join(''), truncated: true };
+    bytes += escapedLength;
+  }
+  return { text, truncated: false };
+}
 
 /** 飞书 markdown 特殊字符 → HTML 实体映射（官方文档完整清单） */
 const CARD_MD_ENTITY: Record<string, string> = {
@@ -208,6 +234,8 @@ const CARD_MD_ENTITY: Record<string, string> = {
   '"': '&#34;',
   "'": '&#39;',
   $: '&#36;',
+  '.': '&#46;',
+  '|': '&#124;',
 };
 
 /**
@@ -221,7 +249,7 @@ const CARD_MD_ENTITY: Record<string, string> = {
  */
 export function escapeCardMarkdownText(text: string): string {
   return text.replace(
-    /[&<>*~_`[\]()#!/\\:+"'$-]/gu,
+    /[&<>*~_`[\]()#!/\\:+"'$.|-]/gu,
     (ch) => CARD_MD_ENTITY[ch] ?? ch,
   );
 }
@@ -360,10 +388,16 @@ function stepToElements(step: ProgressStep): unknown[] {
     // Phase 行：可展开查看 narration 全文（展开区只放全文，不放工具历史）。
     // header 为 plain_text（R1：行内灰色待实测支持后升级）；
     // 动作不再拼进 header，独立一行灰色跟在面板下方
-    const body =
-      Array.from(step.narrationFull).length > NARRATION_CARD_LIMIT
-        ? `${escapeCardMarkdownText(truncateCp(step.narrationFull, NARRATION_CARD_LIMIT))}\n\n<font color="grey">（全文见过程记录）</font>`
-        : escapeCardMarkdownText(step.narrationFull);
+    const cpLimited = truncateCp(step.narrationFull, NARRATION_CARD_LIMIT);
+    const byteLimited = truncateByEscapedBytes(
+      cpLimited,
+      PANEL_BODY_BYTE_BUDGET,
+    );
+    const bodyTruncated =
+      byteLimited.truncated || cpLimited !== step.narrationFull;
+    const body = bodyTruncated
+      ? `${escapeCardMarkdownText(byteLimited.text)}\n\n<font color="grey">（全文见过程记录）</font>`
+      : escapeCardMarkdownText(byteLimited.text);
     const panel = {
       tag: 'collapsible_panel',
       expanded: false,
@@ -410,7 +444,14 @@ function stepToElements(step: ProgressStep): unknown[] {
         },
         vertical_spacing: '2px',
         padding: '4px 8px 4px 8px',
-        elements: [{ tag: 'markdown', content: colorizeDiff(step.detail) }],
+        elements: [
+          {
+            tag: 'markdown',
+            content: colorizeDiff(
+              truncateByEscapedBytes(step.detail, PANEL_BODY_BYTE_BUDGET).text,
+            ),
+          },
+        ],
       },
     ];
   }
