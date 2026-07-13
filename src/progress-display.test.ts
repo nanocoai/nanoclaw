@@ -1016,6 +1016,28 @@ describe('reduceProgressPresentation', () => {
       });
     }
 
+    it('非 codex provider 的 failed+exit1 探测命令不做窄覆盖，保持失败', () => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        {
+          kind: 'tool',
+          progress: started('Bash', { command: 'rg needle src' }, 'claude-f1'),
+        },
+      );
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: {
+          provider: 'claude',
+          lifecycle: 'failed',
+          toolName: 'tool_result',
+          toolCallId: 'claude-f1',
+          exitCode: 1,
+        },
+      });
+      expect(state.steps[0].status).toBe('failed');
+      expect(state.steps[0].title).toBe('执行失败');
+    });
+
     it.each([
       ['Grep 工具', started('Grep', { pattern: 'needle' }, 'probe-1')],
       [

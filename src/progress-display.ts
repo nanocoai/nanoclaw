@@ -1491,9 +1491,15 @@ export function reduceProgressPresentation(
   const exitCode = progress.exitCode;
   const nonZeroCompleted =
     progress.lifecycle === 'completed' && exitCode != null && exitCode !== 0;
-  // 探测型命令退出码 1 是正常结果（grep 无匹配 / diff 有差异），按完成渲染
-  const probe =
-    nonZeroCompleted && exitCode === 1 ? step.nonZeroExitMeaning : undefined;
+  // 探测型命令退出码 1 是正常结果（grep 无匹配 / diff 有差异），按完成渲染。
+  // codex 对非零退出的命令统一报 status=failed（authoritative status 还承担
+  // -1/-65536/137 等沙箱与信号真失败哨兵码），runner 原样保留该语义；这里只对
+  // 恰好 exit 1 且已通过可执行体严判的探测步做窄覆盖，其余 failed 一律不碰
+  const probeEligible =
+    exitCode === 1 &&
+    (progress.lifecycle === 'completed' ||
+      (progress.provider === 'codex' && progress.lifecycle === 'failed'));
+  const probe = probeEligible ? step.nonZeroExitMeaning : undefined;
   const status =
     (progress.lifecycle === 'completed' &&
       (exitCode == null || exitCode === 0)) ||

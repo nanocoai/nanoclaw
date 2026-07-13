@@ -365,24 +365,16 @@ export function mapCodexProgress(event: CodexEvent): ContainerOutput[] {
     const resultText = typeof it.aggregated_output === 'string'
       ? redactProgressText(it.aggregated_output.trim())
       : '';
-    // 带数字退出码的命令是"跑完了、退出码非零"，标 completed 并透传 exitCode，
-    // 探测语义（grep 无匹配 exit 1 等）由展示层按可执行体判定；一律标 failed
-    // 会让探测在 codex 路径永远不触发。codex 的 status=failed 对命令项就是
-    // 退出码非零的派生值，不是独立失败信号；无退出码的项（mcp_tool_call 等）
-    // 仍按 status 判失败
     const lifecycle = status && ['cancelled', 'canceled', 'interrupted'].includes(status)
       ? 'cancelled'
-      : exitCode != null
-        ? 'completed'
-        : status === 'failed'
-          ? 'failed'
-          : 'completed';
-    const nonZeroExit = exitCode != null && exitCode !== 0;
+      : (exitCode != null && exitCode !== 0) || status === 'failed'
+        ? 'failed'
+        : 'completed';
     return [{
       status: 'progress',
       result: lifecycle === 'cancelled'
         ? '⏹️ 已取消'
-        : lifecycle === 'failed' || nonZeroExit
+        : lifecycle === 'failed'
           ? '❌ 执行失败'
           : '✅ 执行完成',
       progressType: 'tool_result',
