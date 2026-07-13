@@ -38,6 +38,8 @@ export interface ProgressAction {
   phase?: string;
   category: ProgressCategory;
   confidence: 'exact' | 'inferred' | 'fallback';
+  /** 非零退出码的探测语义：grep/rg 的 1=无匹配、diff 类的 1=发现差异，不按失败渲染 */
+  nonZeroExitMeaning?: 'no-match' | 'diff-found';
 }
 
 export interface PresentationStep extends ProgressAction {
@@ -66,6 +68,8 @@ export interface PresentationPhase {
   currentAction?: string;
   categories: ProgressCategory[];
   actionSummaries?: string[];
+  /** 探测结果事实（如 搜索"x"（无匹配）），独立于 actionSummaries 存储——同类工具并行时 summary 槽位会被后启动者覆盖，文本回查会丢事实 */
+  probeFacts?: string[];
   toolCallIds: string[];
   outcome?: string;
   planTaskId?: string;
@@ -465,7 +469,75 @@ function sanitizeUserText(text: string): string {
     .trim();
 }
 
+/**
+ * 探测归属判定：只有当退出状态**直接由 rg/grep/git diff --check 本体产生**时才赋语义。
+ * 不做"字符串包含 rg"启发式——解释器包装（bash -c/python -c/eval）一律拒绝，
+ * 唯一例外是标准 shell 外壳 `sh|bash|zsh -c/-lc "<单引号串>"`（codex 默认包装），
+ * 解包一层后对内层命令递归同一判定；内层含控制符照样拒绝。
+ */
+const SHELL_WRAPPER =
+  /^(?:\/bin\/)?(?:ba|z)?sh\s+-l?c\s+(['"])([\s\S]*)\1\s*$/u;
+
+function probeExecutableOf(
+  command: string,
+  depth = 0,
+): 'rg' | 'grep' | 'git-diff-check' | undefined {
+  if (depth > 1) return undefined;
+  const trimmed = command.trim();
+  if (!trimmed || trimmed.startsWith('!')) return undefined;
+  const wrapper = trimmed.match(SHELL_WRAPPER);
+  if (wrapper) return probeExecutableOf(wrapper[2], depth + 1);
+  // 命令替换在双引号内仍会执行，须在剥双引号前检查；单引号内是字面量先剥
+  const withoutSingle = trimmed.replace(/'[^']*'/gu, '');
+  if (/\$\(|`/u.test(withoutSingle)) return undefined;
+  const unquoted = withoutSingle.replace(/"[^"]*"/gu, '');
+  if (/[;&|!\n]/u.test(unquoted)) return undefined;
+  // 解析真实 executable：允许前导环境变量赋值与 command 前缀、绝对路径取 basename
+  const tokens = trimmed.split(/\s+/u);
+  let index = 0;
+  while (
+    index < tokens.length &&
+    /^[A-Za-z_][A-Za-z0-9_]*=/u.test(tokens[index])
+  )
+    index += 1;
+  if (tokens[index] === 'command') index += 1;
+  const exe = tokens[index]?.replace(/^.*\//u, '') ?? '';
+  if (exe === 'rg' || exe === 'grep') return exe;
+  if (
+    exe === 'git' &&
+    /^diff\b/u.test(tokens.slice(index + 1).join(' ')) &&
+    tokens.slice(index + 1).includes('--check')
+  )
+    return 'git-diff-check';
+  return undefined;
+}
+
+function nonZeroExitMeaningOf(
+  progress: StructuredProgress,
+): 'no-match' | 'diff-found' | undefined {
+  const tool = progress.toolName.toLowerCase();
+  if (tool === 'grep') return 'no-match';
+  const exe = probeExecutableOf(commandOf(progress));
+  if (exe === 'rg' || exe === 'grep') return 'no-match';
+  if (exe === 'git-diff-check') return 'diff-found';
+  return undefined;
+}
+
 export function classifyProgressAction(
+  progress: StructuredProgress,
+  phase?: string,
+): ProgressAction {
+  const action = classifyProgressActionInner(progress, phase);
+  const meaning = nonZeroExitMeaningOf(progress);
+  // 只在分类结果与命令语义一致时标注，防止管道组合命令误标（如 curl|grep 被分类为检查服务）
+  if (meaning === 'no-match' && action.category === 'search')
+    return { ...action, nonZeroExitMeaning: meaning };
+  if (meaning === 'diff-found' && action.category === 'inspect')
+    return { ...action, nonZeroExitMeaning: meaning };
+  return action;
+}
+
+function classifyProgressActionInner(
   progress: StructuredProgress,
   phase?: string,
 ): ProgressAction {
@@ -892,15 +964,40 @@ function chineseList(items: string[]): string {
   return `${items.slice(0, -1).join('、')}，并${items.at(-1)}`;
 }
 
+// 把探测事实合入聚合 summaries：原文 summary 还在的直接替换为带结果的版本，
+// 已被同类后续工具覆盖掉原文的追加到末尾，保证"无匹配/发现差异"不丢
+function mergeProbeFacts(
+  summaries: string[],
+  facts: string[] | undefined,
+): string[] {
+  if (!facts?.length) return summaries;
+  const merged = [...summaries];
+  for (const fact of facts) {
+    const base = fact.replace(/（[^）]*）$/u, '');
+    const index = merged.indexOf(base);
+    if (index >= 0) merged[index] = fact;
+    else if (!merged.includes(fact)) merged.push(fact);
+  }
+  return merged;
+}
+
 function aggregateOutcome(
   phase: PresentationPhase,
   progress: StructuredProgress,
   status: PresentationStep['status'],
+  probe?: 'no-match' | 'diff-found',
 ): string {
+  // 探测语义已在单步解析，Phase 聚合直接沿用，不重新猜
+  if (probe === 'no-match') return '已搜索，无匹配';
+  if (probe === 'diff-found') return '已检查，发现差异';
   if (status === 'failed') {
+    if (phase.categories.includes('test')) return '测试未通过';
     if (progress.exitCode != null)
-      return `命令执行失败（退出码 ${progress.exitCode}）`;
-    return phase.categories.includes('test') ? '测试失败' : '执行失败';
+      // lifecycle=failed 是真失败保留原文案；completed 但退出码非零用中性文案
+      return progress.lifecycle === 'failed'
+        ? `命令执行失败（退出码 ${progress.exitCode}）`
+        : `命令返回非零（退出码 ${progress.exitCode}）`;
+    return '执行失败';
   }
   if (status === 'cancelled') return '已取消';
   if (status === 'unknown') return '已执行，结果未知';
@@ -921,7 +1018,10 @@ function aggregateOutcome(
   const testCount = phase.categories.includes('test')
     ? (phase.testPassCount ?? testPassCount(summary))
     : undefined;
-  const summaries = phase.actionSummaries ?? [];
+  const summaries = mergeProbeFacts(
+    phase.actionSummaries ?? [],
+    phase.probeFacts,
+  );
   if (
     summaries.length === 0 &&
     labels.length === 1 &&
@@ -1388,24 +1488,38 @@ export function reduceProgressPresentation(
     );
     return { ...state, steps, phases };
   }
+  const exitCode = progress.exitCode;
+  const nonZeroCompleted =
+    progress.lifecycle === 'completed' && exitCode != null && exitCode !== 0;
+  // 探测型命令退出码 1 是正常结果（grep 无匹配 / diff 有差异），按完成渲染
+  const probe =
+    nonZeroCompleted && exitCode === 1 ? step.nonZeroExitMeaning : undefined;
   const status =
-    progress.lifecycle === 'completed' &&
-    (progress.exitCode == null || progress.exitCode === 0)
+    (progress.lifecycle === 'completed' &&
+      (exitCode == null || exitCode === 0)) ||
+    probe
       ? 'completed'
       : progress.lifecycle === 'cancelled'
         ? 'cancelled'
-        : progress.lifecycle === 'failed' ||
-            (progress.exitCode != null && progress.exitCode !== 0)
+        : progress.lifecycle === 'failed' || nonZeroCompleted
           ? 'failed'
           : 'unknown';
   const title =
-    status === 'completed'
-      ? completedTitle(step)
-      : status === 'failed'
-        ? failedTitle(step.category)
-        : status === 'cancelled'
-          ? '已取消'
-          : unknownTitle(step.category);
+    probe === 'no-match'
+      ? '已搜索，无匹配'
+      : probe === 'diff-found'
+        ? '已检查，发现差异'
+        : status === 'completed'
+          ? completedTitle(step)
+          : status === 'failed'
+            ? nonZeroCompleted
+              ? step.category === 'test'
+                ? '测试未通过'
+                : `命令返回非零（退出码 ${exitCode}）`
+              : failedTitle(step.category)
+            : status === 'cancelled'
+              ? '已取消'
+              : unknownTitle(step.category);
   const steps = [...state.steps];
   steps[index] = { ...step, status, title };
   const phases = state.phases.map((phase) => {
@@ -1421,13 +1535,27 @@ export function reduceProgressPresentation(
       ? 'running'
       : status;
     const enrichedPhase = mergeResultFacts(phase, progress);
-    return {
+    // 并行场景 probe 事实持久化：按事实列表记录并去重，不依赖 actionSummaries
+    // 文本回查（同类工具并行时 mergeActionSummary 只保留最后一个 summary，
+    // 先完成的探测按文本找不到自己的槽位，事实会丢）
+    const probeFact =
+      probe && step.actionSummary
+        ? `${step.actionSummary}（${probe === 'no-match' ? '无匹配' : '发现差异'}）`
+        : undefined;
+    const probedPhase = {
       ...enrichedPhase,
+      probeFacts:
+        probeFact && !(enrichedPhase.probeFacts ?? []).includes(probeFact)
+          ? [...(enrichedPhase.probeFacts ?? []), probeFact]
+          : enrichedPhase.probeFacts,
+    };
+    return {
+      ...probedPhase,
       status: phaseStatus,
       currentAction: runningTool?.title ?? title,
       outcome: hasRunningTool
-        ? enrichedPhase.outcome
-        : aggregateOutcome(enrichedPhase, progress, phaseStatus),
+        ? probedPhase.outcome
+        : aggregateOutcome(probedPhase, progress, phaseStatus, probe),
     };
   });
   return { ...state, steps, phases };
