@@ -8,6 +8,10 @@ import {
   mapCodexProgress,
   mapCodexTextProgress,
 } from '../container/agent-runner/src/codex-runner.js';
+import {
+  createProgressPresentationState,
+  reduceProgressPresentation,
+} from './progress-display.js';
 
 function started(item: Record<string, unknown>) {
   return { type: 'item.started', item } as any;
@@ -138,6 +142,66 @@ describe('mapCodexProgress — 回归', () => {
     });
   });
 
+  it('command_execution 非零退出码标 completed 并透传 exitCode（探测语义靠它触发）', () => {
+    const out = mapCodexProgress(
+      completed({
+        id: 'c-exit1',
+        type: 'command_execution',
+        command: 'rg missing_symbol src/',
+        exit_code: 1,
+        status: 'failed',
+        aggregated_output: '',
+      }),
+    );
+    expect(out[0].progress).toMatchObject({
+      lifecycle: 'completed',
+      exitCode: 1,
+      toolCallId: 'c-exit1',
+    });
+    // 兜底文本仍按非零退出提示失败，避免非结构化路径误报成功
+    expect(out[0].result).toBe('❌ 执行失败');
+  });
+
+  it('command_execution exit 2 同样标 completed，真失败/中性文案由展示层判', () => {
+    const out = mapCodexProgress(
+      completed({
+        id: 'c-exit2',
+        type: 'command_execution',
+        command: 'rg pattern /no/perm',
+        exit_code: 2,
+        status: 'failed',
+      }),
+    );
+    expect(out[0].progress).toMatchObject({ lifecycle: 'completed', exitCode: 2 });
+    expect(out[0].result).toBe('❌ 执行失败');
+  });
+
+  it('无退出码且 status=failed 的命令项仍标 failed', () => {
+    const out = mapCodexProgress(
+      completed({
+        id: 'c-nofail',
+        type: 'command_execution',
+        command: 'npm test',
+        status: 'failed',
+      }),
+    );
+    expect(out[0].progress).toMatchObject({ lifecycle: 'failed' });
+    expect(out[0].result).toBe('❌ 执行失败');
+  });
+
+  it('带退出码的取消状态仍优先映射为取消', () => {
+    const out = mapCodexProgress(
+      completed({
+        id: 'c-cancel-exit',
+        type: 'command_execution',
+        command: 'sleep 100',
+        exit_code: 130,
+        status: 'interrupted',
+      }),
+    );
+    expect(out[0].progress?.lifecycle).toBe('cancelled');
+  });
+
   it.each(['cancelled', 'canceled', 'interrupted'])('%s 状态映射为取消', (status) => {
     const out = mapCodexProgress(completed({
       id: `c-${status}`, type: 'command_execution', status,
@@ -160,6 +224,69 @@ describe('mapCodexProgress — 回归', () => {
       server: 'gitnexus',
       tool: 'query',
     });
+  });
+
+  it('跨层集成：codex rg 无匹配 exit 1 经映射+展示层渲染为"已搜索，无匹配"', () => {
+    // 单测漏洞教训：展示层测试直接构造 completed+exit1 事件全绿，
+    // 但 runner 映射层把非零退出一律标 failed，探测在真机永远不触发。
+    // 这条测试把两层串起来，映射契约变了立刻红
+    const startedOut = mapCodexProgress(
+      started({
+        id: 'probe-1',
+        type: 'command_execution',
+        command: '/bin/zsh -lc "rg missing_symbol_xyz src/"',
+      }),
+    );
+    const completedOut = mapCodexProgress(
+      completed({
+        id: 'probe-1',
+        type: 'command_execution',
+        command: '/bin/zsh -lc "rg missing_symbol_xyz src/"',
+        exit_code: 1,
+        status: 'failed',
+        aggregated_output: '',
+      }),
+    );
+    let state = createProgressPresentationState();
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: startedOut[0].progress!,
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: completedOut[0].progress!,
+    });
+    expect(state.steps[0].status).toBe('completed');
+    expect(state.steps[0].title).toBe('已搜索，无匹配');
+  });
+
+  it('跨层集成：codex 命令 exit 2 经映射+展示层渲染为中性非零文案', () => {
+    const completedOut = mapCodexProgress(
+      completed({
+        id: 'probe-2',
+        type: 'command_execution',
+        command: '/bin/zsh -lc "rg pattern /tmp"',
+        exit_code: 2,
+        status: 'failed',
+      }),
+    );
+    let state = createProgressPresentationState();
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: {
+        provider: 'codex',
+        lifecycle: 'started',
+        toolName: 'command_execution',
+        toolCallId: 'probe-2',
+        input: { command: '/bin/zsh -lc "rg pattern /tmp"' },
+      },
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: completedOut[0].progress!,
+    });
+    expect(state.steps[0].status).toBe('failed');
+    expect(state.steps[0].title).toBe('命令返回非零（退出码 2）');
   });
 
   it('agent_message 返回空', () => {
