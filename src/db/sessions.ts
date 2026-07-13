@@ -68,6 +68,27 @@ export function findSessionByAgentGroup(agentGroupId: string): Session | undefin
     .get(agentGroupId) as Session | undefined;
 }
 
+/**
+ * The session agent-shared traffic is pinned to, regardless of status. The
+ * caller decides what a closed anchor means (resolveSession re-anchors and
+ * warns); returning it either way is what lets re-homing be detected at all.
+ */
+export function findAgentSharedAnchor(agentGroupId: string): Session | undefined {
+  return getDb()
+    .prepare('SELECT * FROM sessions WHERE agent_group_id = ? AND agent_shared_anchor = 1 LIMIT 1')
+    .get(agentGroupId) as Session | undefined;
+}
+
+export function setAgentSharedAnchor(agentGroupId: string, sessionId: string): void {
+  const db = getDb();
+  db.transaction(() => {
+    db.prepare('UPDATE sessions SET agent_shared_anchor = 0 WHERE agent_group_id = ? AND agent_shared_anchor = 1').run(
+      agentGroupId,
+    );
+    db.prepare('UPDATE sessions SET agent_shared_anchor = 1 WHERE id = ?').run(sessionId);
+  })();
+}
+
 export function getSessionsByAgentGroup(agentGroupId: string): Session[] {
   return getDb().prepare('SELECT * FROM sessions WHERE agent_group_id = ?').all(agentGroupId) as Session[];
 }

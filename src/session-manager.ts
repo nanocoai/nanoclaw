@@ -22,10 +22,12 @@ import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import {
   createSession,
+  findAgentSharedAnchor,
   findSystemSession,
   findSessionByAgentGroup,
   findSessionForAgent,
   getSession,
+  setAgentSharedAnchor,
   taskThreadId,
   updateSession,
 } from './db/sessions.js';
@@ -85,10 +87,28 @@ export function resolveSession(
   threadId: string | null,
   sessionMode: 'shared' | 'per-thread' | 'agent-shared',
 ): { session: Session; created: boolean } {
-  // agent-shared: single session per agent group, regardless of messaging group
+  // agent-shared: single session per agent group, regardless of messaging group.
+  // Resolution is pinned: the first message anchors whatever session it lands
+  // on, and later messages follow the anchor — never "newest active session",
+  // which silently re-homed all agent-shared channels whenever any newer
+  // session appeared in the group. Only a closed anchor moves the pin.
   if (sessionMode === 'agent-shared') {
+    const anchor = findAgentSharedAnchor(agentGroupId);
+    if (anchor?.status === 'active') {
+      return { session: anchor, created: false };
+    }
     const existing = findSessionByAgentGroup(agentGroupId);
     if (existing) {
+      setAgentSharedAnchor(agentGroupId, existing.id);
+      if (anchor) {
+        log.warn('agent-shared anchor re-homed (previous anchor closed)', {
+          agentGroupId,
+          from: anchor.id,
+          to: existing.id,
+        });
+      } else {
+        log.info('agent-shared traffic anchored', { agentGroupId, sessionId: existing.id });
+      }
       return { session: existing, created: false };
     }
   } else if (messagingGroupId) {
@@ -116,6 +136,9 @@ export function resolveSession(
   };
 
   createSession(session);
+  if (sessionMode === 'agent-shared') {
+    setAgentSharedAnchor(agentGroupId, id);
+  }
   initSessionFolder(agentGroupId, id);
   log.info('Session created', { id, agentGroupId, messagingGroupId, threadId: lookupThreadId, sessionMode });
 

@@ -28,7 +28,7 @@ import {
   readOutboxFiles,
   clearOutbox,
 } from './session-manager.js';
-import { getSession, findSession } from './db/sessions.js';
+import { getSession, findSession, updateSession } from './db/sessions.js';
 import type { InboundEvent } from './channels/adapter.js';
 
 // Mock container runner to prevent actual Docker spawning
@@ -1239,6 +1239,86 @@ describe('agent-shared session resolution', () => {
 
     const { session } = resolveSession('ag-1', null, null, 'agent-shared');
     expect(session.messaging_group_id).toBeNull();
+  });
+
+  // Anchor semantics: agent-shared traffic pins to the session its first
+  // message resolves to. Pre-anchor behavior was "newest active session
+  // wins" — creating any newer session in the group silently re-homed all
+  // agent-shared channels into it (e.g. a newly wired room session
+  // hijacking a live cli wiring mid-conversation).
+  function seedAnchorFixtures() {
+    createAgentGroup({
+      id: 'ag-1',
+      name: 'Agent',
+      folder: 'agent',
+      agent_provider: null,
+      created_at: now(),
+    });
+    for (const [id, platformId] of [
+      ['mg-dm', 'dm-1'],
+      ['mg-room', 'room-1'],
+    ]) {
+      createMessagingGroup({
+        id,
+        channel_type: 'discord',
+        platform_id: platformId,
+        name: id,
+        is_group: 1,
+        unknown_sender_policy: 'strict',
+        created_at: now(),
+      });
+    }
+  }
+
+  /** Force strict created_at ordering — same-ms ISO strings tie in ORDER BY. */
+  function bumpCreatedAt(sessionId: string, offsetMs: number) {
+    getDb()
+      .prepare('UPDATE sessions SET created_at = ? WHERE id = ?')
+      .run(new Date(Date.now() + offsetMs).toISOString(), sessionId);
+  }
+
+  it('stays anchored when a newer session appears in the group', () => {
+    seedAnchorFixtures();
+    const { session: dm } = resolveSession('ag-1', 'mg-dm', null, 'shared');
+    const { session: a1 } = resolveSession('ag-1', null, null, 'agent-shared');
+    expect(a1.id).toBe(dm.id); // first resolution lands on the newest active session and pins it
+
+    const { session: room } = resolveSession('ag-1', 'mg-room', null, 'shared');
+    bumpCreatedAt(room.id, 60_000);
+
+    // Negative control: pre-anchor behavior resolves this to `room`.
+    const { session: a2 } = resolveSession('ag-1', null, null, 'agent-shared');
+    expect(a2.id).toBe(dm.id);
+  });
+
+  it('re-homes to the newest active session only when the anchor closes', () => {
+    seedAnchorFixtures();
+    const { session: dm } = resolveSession('ag-1', 'mg-dm', null, 'shared');
+    resolveSession('ag-1', null, null, 'agent-shared'); // anchor dm
+    const { session: room } = resolveSession('ag-1', 'mg-room', null, 'shared');
+    bumpCreatedAt(room.id, 60_000);
+
+    updateSession(dm.id, { status: 'closed' });
+
+    const { session: a } = resolveSession('ag-1', null, null, 'agent-shared');
+    expect(a.id).toBe(room.id);
+    // ...and the new anchor holds even against a yet-newer session.
+    const { session: dm2 } = resolveSession('ag-1', 'mg-dm', null, 'shared');
+    bumpCreatedAt(dm2.id, 120_000);
+    const { session: a2 } = resolveSession('ag-1', null, null, 'agent-shared');
+    expect(a2.id).toBe(room.id);
+  });
+
+  it('a session created by agent-shared resolution is itself the anchor', () => {
+    seedAnchorFixtures();
+    const { session: first, created } = resolveSession('ag-1', null, null, 'agent-shared');
+    expect(created).toBe(true);
+
+    const { session: dm } = resolveSession('ag-1', 'mg-dm', null, 'shared');
+    bumpCreatedAt(dm.id, 60_000);
+
+    const { session: again } = resolveSession('ag-1', null, null, 'agent-shared');
+    expect(again.id).toBe(first.id);
   });
 });
 
