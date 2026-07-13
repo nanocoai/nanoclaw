@@ -824,6 +824,59 @@ describe('reduceProgressPresentation', () => {
     expect(narrationPhases[1].narrationText).toBe('第二段思路。');
   });
 
+  it.each([
+    [
+      'TodoWrite',
+      () =>
+        started(
+          'TodoWrite',
+          { todos: [{ content: '补齐单元测试', status: 'in_progress' }] },
+          'plan-mid',
+        ),
+    ],
+    ['TaskCreate', () => started('TaskCreate', { subject: '新任务' }, 'plan-mid')],
+    [
+      'TaskUpdate',
+      () => started('TaskUpdate', { taskId: '9', status: 'in_progress' }, 'plan-mid'),
+    ],
+  ])('narration 之后的 %s 不清掉活跃 narration，后续工具仍归属 narration', (
+    _label,
+    makePlanControl,
+  ) => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'narration',
+      text: '先修复回调重试。',
+    });
+    const narrationId = (state as any).phases.at(-1).id;
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: makePlanControl(),
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started('Read', { file_path: '/tmp/a.txt' }, 'after-plan'),
+    });
+    expect(state.steps.at(-1)?.phaseId).toBe(narrationId);
+    const narrationPhase = (state as any).phases.find(
+      (phase: any) => phase.id === narrationId,
+    );
+    expect(narrationPhase.currentAction).toBe('正在读取 a.txt');
+  });
+
+  it('连续 narration 累加超过 4000 code point 时状态层截断存储', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'narration',
+      text: '甲'.repeat(3000),
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'narration',
+      text: '乙'.repeat(3000),
+    });
+    const stored = (state as any).phases[0].narrationText as string;
+    expect(Array.from(stored)).toHaveLength(4001); // 4000 + '…'
+    expect(stored.endsWith('…')).toBe(true);
+  });
+
   it('活跃 narration Phase 存在时工具归属 narration 而非 running plan', () => {
     let state = reduceProgressPresentation(createProgressPresentationState(), {
       kind: 'tool',

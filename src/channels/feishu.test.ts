@@ -1426,6 +1426,105 @@ describe('FeishuChannel', () => {
       expect(lastContent).toContain('正在运行测试');
     });
 
+    it('cleanup 终态卡在在飞 patch 排空后落地，旧进度 patch 不覆盖完成卡', async () => {
+      const jid = 'fs:oc_progress_terminal_race';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Read',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Read',
+            toolCallId: 'term-1',
+            input: { file_path: '/tmp/a.txt' },
+          },
+        }),
+        { isProgress: true },
+      );
+      mockPatch.mockClear();
+
+      // 让下一个进度 patch 悬挂在飞
+      let releaseInflight!: () => void;
+      mockPatch.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseInflight = () => resolve({});
+          }),
+      );
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Grep',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Grep',
+            toolCallId: 'term-2',
+            input: { pattern: 'x' },
+          },
+        }),
+        { isProgress: true },
+      );
+      expect(mockPatch).toHaveBeenCalledTimes(1);
+
+      // 在飞期间再来一个事件（置 pending），随后 cleanup
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Write',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Write',
+            toolCallId: 'term-3',
+            input: { file_path: '/tmp/b.txt' },
+          },
+        }),
+        { isProgress: true },
+      );
+      const cleanupPromise = (channel as any).cleanupProgressCard(jid);
+      releaseInflight();
+      await cleanupPromise;
+
+      // 终态锁生效：pending 的进度补发被丢弃，最后一次 patch 是完成卡
+      const contents = mockPatch.mock.calls.map(
+        (call: any) => call[0]?.data?.content ?? '',
+      );
+      expect(contents.at(-1)).toContain('已完成');
+      expect(contents.at(-1)).not.toContain('思考中');
+      // 完成卡恰一次且位于最后，其后无任何进度 patch
+      expect(
+        contents.filter((item: string) => item.includes('已完成')),
+      ).toHaveLength(1);
+    });
+
+    it('emoji 标题经渲染管线不被二次截断（固定 48 cp 预算贯穿到卡片 JSON）', async () => {
+      const jid = 'fs:oc_progress_emoji_budget';
+      (channel as any).opts.registeredGroups = () => ({
+        [jid]: {
+          name: 'emoji-budget',
+          folder: 'fs_oc_progress_emoji_budget',
+          trigger: '@bot',
+          added_at: new Date().toISOString(),
+          containerConfig: { cliMode: 'codex' },
+        },
+      });
+      await channel.sendMessage(jid, `💬 ${'🚀'.repeat(60)}`, {
+        isProgress: true,
+      });
+      const entry = (channel as any).progressCards.get(jid);
+      expect(Array.from(entry.steps[0].title as string)).toHaveLength(49); // 48 + '…'
+      // 贯穿到卡片 JSON：header 保持 48 个 emoji + 省略号，未被 80 UTF-16 二次截断
+      const createArg = mockCreate.mock.calls.find(
+        (call: any) => call[0]?.data?.msg_type === 'interactive',
+      )?.[0];
+      const content = JSON.parse(createArg?.data?.content ?? '{}');
+      const serialized = JSON.stringify(content);
+      const emojiRun = serialized.match(/🚀+/u)?.[0] ?? '';
+      expect(Array.from(emojiRun)).toHaveLength(48);
+    });
+
     it('💬 quietProgress=false 时独立发送且同时进卡片 Phase（双份）', async () => {
       const jid = 'fs:oc_codex_quiet_off';
       (channel as any).progressDone.delete(jid);

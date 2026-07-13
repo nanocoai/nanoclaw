@@ -795,6 +795,16 @@ export function classifyProgressAction(
   };
 }
 
+/** narrationText 状态层存储上限（code point）；过程记录页另存全文不受此限 */
+const NARRATION_STORE_LIMIT = 4000;
+
+function capNarration(text: string): string {
+  const cps = Array.from(text);
+  return cps.length > NARRATION_STORE_LIMIT
+    ? cps.slice(0, NARRATION_STORE_LIMIT).join('') + '…'
+    : text;
+}
+
 /** narration 展示标题：取 sanitize 后首个非空行（宽度截断交给渲染层的双预算规则） */
 function narrationGoal(sanitizedText: string): string {
   const line = sanitizedText
@@ -1095,9 +1105,11 @@ export function reduceProgressPresentation(
       const phases = [...state.phases];
       phases[phases.length - 1] = {
         ...latest,
-        narrationText: latest.narrationText
-          ? `${latest.narrationText}\n\n${fullText}`
-          : fullText,
+        narrationText: capNarration(
+          latest.narrationText
+            ? `${latest.narrationText}\n\n${fullText}`
+            : fullText,
+        ),
       };
       return {
         ...state,
@@ -1118,7 +1130,7 @@ export function reduceProgressPresentation(
         ...phases[fallbackIndex],
         goal,
         source: 'narration',
-        narrationText: fullText,
+        narrationText: capNarration(fullText),
         hasToolActivity: false,
       };
       return {
@@ -1141,7 +1153,7 @@ export function reduceProgressPresentation(
           goal,
           source: 'narration',
           status: 'running',
-          narrationText: fullText,
+          narrationText: capNarration(fullText),
           hasToolActivity: false,
           categories: [],
           toolCallIds: [],
@@ -1174,14 +1186,26 @@ export function reduceProgressPresentation(
   const progress = event.progress;
   // 消费标记必须在一切 early return 之前（ToolSearch/plan 控制/completion-only 都算工具活动）
   state = withNarrationToolActivity(state);
+  // D3：活跃 narration Phase 存在时，plan 控制工具只推进计划状态，不得清掉 active 指针
+  const activeNarration =
+    !!state.activePhaseId &&
+    state.phases.some(
+      (phase) =>
+        phase.id === state.activePhaseId && phase.source === 'narration',
+    );
+  const preservedActive = activeNarration
+    ? {
+        activePhaseGoal: state.activePhaseGoal,
+        activePhaseId: state.activePhaseId,
+      }
+    : { activePhaseGoal: undefined, activePhaseId: undefined };
   if (progress.lifecycle === 'started') {
     const toolName = progress.toolName.toLowerCase();
     if (toolName === 'todowrite') {
       const realPlan = planSteps(progress);
       if (realPlan.length > 0) {
         return {
-          activePhaseGoal: undefined,
-          activePhaseId: undefined,
+          ...preservedActive,
           steps: [
             ...state.steps.filter((step) => step.source !== 'plan'),
             ...realPlan,
@@ -1203,8 +1227,7 @@ export function reduceProgressPresentation(
     if (toolName === 'taskcreate') {
       return {
         ...state,
-        activePhaseGoal: undefined,
-        activePhaseId: undefined,
+        ...preservedActive,
         steps: [
           ...state.steps,
           {
@@ -1252,8 +1275,7 @@ export function reduceProgressPresentation(
         );
         return {
           ...state,
-          activePhaseGoal: undefined,
-          activePhaseId: undefined,
+          ...preservedActive,
           steps,
           phases,
         };

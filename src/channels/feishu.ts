@@ -266,10 +266,11 @@ function visiblePresentationSteps(
   });
 }
 
-/** 截断 step 标题：取第一行，最多 80 字符 */
+/** 截断 step 标题：取第一行，最多 80 个 Unicode code point（避免切断代理对） */
 function truncateTitle(title: string): string {
   const firstLine = title.split('\n')[0];
-  return firstLine.length > 80 ? firstLine.slice(0, 80) + '…' : firstLine;
+  const cps = Array.from(firstLine);
+  return cps.length > 80 ? cps.slice(0, 80).join('') + '…' : firstLine;
 }
 
 /** 对 diff 内容着色：+ 行绿色，- 行红色 */
@@ -281,7 +282,9 @@ function colorizeDiff(text: string): string {
 
 /** 将 step 转为卡片 element */
 function stepToElement(step: ProgressStep): unknown {
-  const title = truncateTitle(step.title);
+  const isPhaseLine =
+    step.narrationFull !== undefined || step.grayTail !== undefined;
+  const title = isPhaseLine ? step.title : truncateTitle(step.title);
   if (step.narrationFull) {
     // Phase 行：可展开查看 narration 全文（展开区只放全文，不放工具历史）。
     // header 为 plain_text（R1：行内灰色待实测支持后升级），行尾动作用 · 拼接。
@@ -569,6 +572,10 @@ export class FeishuChannel implements Channel {
       /** C9 patch 串行化：在飞时置位，pending 表示需要再发一轮（内容永远取发送时刻最新状态） */
       patchInFlight?: boolean;
       patchPending?: boolean;
+      /** 终态锁：cleanup 置位后拒绝任何后续进度 patch（终态卡拥有最终语义） */
+      finalized?: boolean;
+      /** 当前串行循环的完成句柄，cleanup 等它排空后才发终态卡 */
+      patchLoopPromise?: Promise<void>;
     }
   >();
 
@@ -1071,23 +1078,9 @@ export class FeishuChannel implements Channel {
             '[progress-state] 工具步骤状态更新',
           );
         }
-        // 新步骤到来：立即 patch 卡片
+        // 新步骤到来：经串行队列 patch 卡片（C9）
         existing.frame++;
-        this.client.im.message
-          .patch({
-            path: { message_id: existing.messageId },
-            data: {
-              content: buildProgressCard(
-                existing.steps,
-                existing.frame,
-                existing.startTime,
-                existing.sessionId,
-              ),
-            },
-          })
-          .catch((err: any) =>
-            logger.debug({ err, jid }, '进度步骤实时 patch 失败（非致命）'),
-          );
+        this.schedulePatch(jid);
         // 重置 spinner 定时器
         this.resetSpinnerTimer(jid);
       }
@@ -1372,7 +1365,10 @@ export class FeishuChannel implements Channel {
     );
     this.progressDone.add(jid);
     this.clearSpinnerTimer(jid);
+    // 终态锁：先拒绝后续进度 patch，再等在飞的串行循环排空，保证终态卡最后落地（C9）
+    progressEntry.finalized = true;
     this.progressCards.delete(jid);
+    await progressEntry.patchLoopPromise?.catch(() => {});
 
     if (!progressEntry.messageId) {
       deleteSession(progressEntry.sessionId);
@@ -1551,14 +1547,16 @@ export class FeishuChannel implements Channel {
   private schedulePatch(jid: string): void {
     const entry = this.progressCards.get(jid);
     if (!entry?.messageId) return;
+    if (entry.finalized) return;
     if (entry.patchInFlight) {
       entry.patchPending = true;
       return;
     }
     entry.patchInFlight = true;
-    void (async () => {
+    entry.patchLoopPromise = (async () => {
       do {
         entry.patchPending = false;
+        if (entry.finalized) break;
         try {
           await this.client.im.message.patch({
             path: { message_id: entry.messageId },
@@ -1574,7 +1572,11 @@ export class FeishuChannel implements Channel {
         } catch (err) {
           logger.debug({ err, jid }, '[card] patch 失败（串行队列，非致命）');
         }
-      } while (entry.patchPending && this.progressCards.get(jid) === entry);
+      } while (
+        entry.patchPending &&
+        this.progressCards.get(jid) === entry &&
+        !entry.finalized
+      );
       entry.patchInFlight = false;
     })();
   }
@@ -1761,19 +1763,10 @@ export class FeishuChannel implements Channel {
         startTime: now,
       });
 
-      // 缓冲期间有新步骤，立即 patch 卡片以显示最新状态
+      // 缓冲期间有新步骤，经串行队列 patch 卡片以显示最新状态（C9）
       if (bufferedSteps.length > 0) {
         upsertSession(sessionId, progressRecordSteps(mergedAllSteps), now);
-        this.client.im.message
-          .patch({
-            path: { message_id: msgId },
-            data: {
-              content: buildProgressCard(mergedSteps, 0, now, sessionId),
-            },
-          })
-          .catch((err: any) =>
-            logger.debug({ err, jid }, '缓冲步骤 patch 失败（非致命）'),
-          );
+        this.schedulePatch(jid);
       }
 
       // 启动 spinner 自动刷新定时器
