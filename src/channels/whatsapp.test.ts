@@ -16,12 +16,7 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import {
-  appendMediaFailureNote,
-  computeIsMention,
-  isBotMentionedInGroup,
-  parseWhatsAppMentions,
-} from './whatsapp.js';
+import { appendMediaFailureNote, computeIsMention, isBotMentionedInGroup, parseWhatsAppMentions } from './whatsapp.js';
 
 const BOT_PHONE_JID = '15550009999@s.whatsapp.net';
 const BOT_LID_USER = '987654321';
@@ -172,9 +167,7 @@ describe('appendMediaFailureNote', () => {
   });
 
   it('appends the note on its own line when a captioned message has a failed download', () => {
-    expect(appendMediaFailureNote('check this out', ['image'])).toBe(
-      'check this out\n[image could not be downloaded]',
-    );
+    expect(appendMediaFailureNote('check this out', ['image'])).toBe('check this out\n[image could not be downloaded]');
   });
 
   it('uses the note as the content when an uncaptioned media message fails (would otherwise be dropped)', () => {
