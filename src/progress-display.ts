@@ -209,22 +209,84 @@ function mcpToolOf(progress: StructuredProgress): string {
   return inputString(progress.input, 'tool').toLowerCase();
 }
 
+const SENSITIVE_FILE_NAME =
+  /^(?:\.env(?:\..*)?|.*(?:credential|password|secret|token|private[_-]?key).*)$/iu;
+
+/**
+ * 展示安全字符白名单：进卡片 markdown 的路径/文件名只允许这些字符，
+ * 拦住 <font> 标签与 [ ]( ) * ` 等 markdown 结构注入（… 是截断/ID 降级产物）
+ */
+const DISPLAY_SAFE_CHARS = /^[\p{L}\p{N} ._~+@=,…-]*$/u;
+
 function safeBasename(value: string): string | undefined {
   const raw = value.trim().replace(/[?#].*$/u, '');
   if (!raw || /^-/u.test(raw)) return undefined;
   const name = raw.split(/[\\/]/u).filter(Boolean).at(-1)?.trim();
   if (!name || name.length > 64 || !/[\p{L}\p{N}._-]/u.test(name))
     return undefined;
-  if (/^(?:\.env(?:\..*)?|.*(?:credential|password|secret|token|private[_-]?key).*)$/iu.test(name))
-    return '敏感配置文件';
+  if (SENSITIVE_FILE_NAME.test(name)) return '敏感配置文件';
   const safe = sanitizeUserText(name);
   if (
     !safe ||
     safe.includes('[REDACTED') ||
-    /相关标识|内部服务|相关文件/u.test(safe)
+    /相关标识|内部服务|相关文件/u.test(safe) ||
+    !DISPLAY_SAFE_CHARS.test(safe)
   )
     return undefined;
   return safe;
+}
+
+/** 路径展示上限（code point）：超长截掉头部保尾段，"这个文件在哪"靠后段路径回答 */
+const PATH_DISPLAY_BUDGET = 48;
+
+/**
+ * 文件路径展示：保留路径上下文（不再只给 basename），超长截头留尾。
+ * 敏感文件名与用户文本清洗规则与 safeBasename 一致；路径整体被清洗
+ * 拦截时退回纯文件名，文件名本身也不安全才放弃
+ */
+function displayPath(value: string): string | undefined {
+  const raw = value.trim().replace(/[?#].*$/u, '');
+  if (!raw || /^-/u.test(raw)) return undefined;
+  // 凭证红线（review R1 P1）：redactProgressText 的 URL userinfo 等模式依赖
+  // 完整字符串匹配，拆段后不再可靠。整串脱敏发生任何改写、带 URI scheme、
+  // 或含 user:pass@ 形态，一律退回纯 basename，绝不把目录段拼进卡片
+  if (
+    redactProgressText(raw) !== raw ||
+    /^[a-z][a-z0-9+.-]*:\/\//iu.test(raw) ||
+    /[^\\/\s]+:[^\\/\s]*@/u.test(raw)
+  )
+    return safeBasename(raw);
+  const segments = raw.split(/[\\/]/u).filter(Boolean);
+  const name = segments.at(-1)?.trim();
+  if (!name || name.length > 128 || !/[\p{L}\p{N}._-]/u.test(name))
+    return undefined;
+  if (SENSITIVE_FILE_NAME.test(name)) return '敏感配置文件';
+  // 逐段清洗：sanitizeUserText 的"多段绝对路径→相关文件"整体涂抹规则
+  // 不适用于这里（展示路径正是本函数的目的），但段内的 token/IP 涂抹
+  // 规则照常生效，命中就退回纯文件名；内部 ID（om_/oc_ 等消息标识常出现
+  // 在文件名里）降级为 …，保住扩展名和目录上下文
+  const sanitized = segments.map((segment) =>
+    sanitizeUserText(segment).replace(/相关标识/gu, '…'),
+  );
+  if (
+    sanitized.some(
+      (segment, index) =>
+        !segment ||
+        segment.includes('[REDACTED') ||
+        /内部服务|相关文件/u.test(segment) ||
+        // 展示安全白名单（review R1 P1）：目录段含 <>&[]()*` 等字符会注入
+        // 飞书 markdown/标签，整条退回纯 basename（basename 同样受白名单约束）；
+        // Windows 盘符（C: 等）只在首段放行，冒号在其余段仍被白名单拒绝
+        (!DISPLAY_SAFE_CHARS.test(segment) &&
+          !(index === 0 && /^[A-Za-z]:$/u.test(segment))),
+    )
+  )
+    return safeBasename(name);
+  const safe = (/^[\\/]/u.test(raw) ? '/' : '') + sanitized.join('/');
+  const cps = Array.from(safe);
+  return cps.length > PATH_DISPLAY_BUDGET
+    ? `…${cps.slice(-(PATH_DISPLAY_BUDGET - 1)).join('')}`
+    : safe;
 }
 
 function safeQuery(value: string): string | undefined {
@@ -248,7 +310,7 @@ function safeQuery(value: string): string | undefined {
 }
 
 function fileObject(progress: StructuredProgress): string | undefined {
-  return safeBasename(
+  return displayPath(
     inputString(progress.input, 'file_path') ||
       inputString(progress.input, 'path'),
   );
@@ -320,7 +382,7 @@ function shellSearchAction(
     operands.push(token);
   }
   const query = safeQuery(operands[0] ?? '');
-  const target = safeBasename(operands[1] ?? '');
+  const target = displayPath(operands[1] ?? '');
   if (query && target)
     return actionText(
       `正在 ${target} 中搜索“${query}”`,
@@ -348,7 +410,7 @@ function shellReadObject(command: string): string | undefined {
     .reverse()
     .map(cleanShellToken)
     .find((token) => !token.startsWith('-') && !/^\d+(?:,\d+)?p$/u.test(token));
-  return candidate ? safeBasename(candidate) : undefined;
+  return candidate ? displayPath(candidate) : undefined;
 }
 
 function shellGitHistoryObject(command: string): string | undefined {
@@ -369,12 +431,12 @@ function shellGitHistoryObject(command: string): string | undefined {
       candidate = token;
       break;
     }
-    return candidate ? safeBasename(candidate) : undefined;
+    return candidate ? displayPath(candidate) : undefined;
   }
   const separator = tokens.indexOf('--');
   if (separator < 0) return undefined;
   const candidate = tokens.slice(separator + 1).find(Boolean);
-  return candidate ? safeBasename(candidate) : undefined;
+  return candidate ? displayPath(candidate) : undefined;
 }
 
 function actionText(

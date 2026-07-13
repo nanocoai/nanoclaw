@@ -180,10 +180,79 @@ function planPresentationTitle(step: PresentationStep): string {
 
 /** Phase 行标题预算（Unicode code point）——固定值，不随行尾有无变化，避免冻结时截断点漂移 */
 const PHASE_TITLE_BUDGET = 48;
-/** Phase 行尾动作/结果预算（Unicode code point） */
-const PHASE_TAIL_BUDGET = 18;
+/** Phase 动作行预算（Unicode code point）——动作独占一行后不再与标题抢预算 */
+const PHASE_ACTION_BUDGET = 48;
 /** 卡片展开区 narration 全文上限（超出截断并提示看过程记录） */
 const NARRATION_CARD_LIMIT = 2000;
+/**
+ * 单个可展开正文的转义后 UTF-8 字节预算（review R5 P1）：飞书卡片整体
+ * 上限 30KB，窗口最多 3 个 narration 面板，6KB×3 + 标题/动作/结构余量
+ * 仍留 ~10KB 空间。实体转义把 / : _ 等常见字符扩成 5 字节，预算必须在
+ * 转义之后按字节算，不能按转义前 code point 算
+ */
+const PANEL_BODY_BYTE_BUDGET = 6144;
+
+/** 按"转义后 UTF-8 字节"预算截断原文：逐 code point 累加其转义产物字节数，绝不切开实体 */
+export function truncateByEscapedBytes(
+  text: string,
+  byteBudget: number,
+): { text: string; truncated: boolean } {
+  let bytes = 0;
+  const cps = Array.from(text);
+  for (let index = 0; index < cps.length; index += 1) {
+    const escapedLength = Buffer.byteLength(
+      escapeCardMarkdownText(cps[index]),
+      'utf8',
+    );
+    if (bytes + escapedLength > byteBudget)
+      return { text: cps.slice(0, index).join(''), truncated: true };
+    bytes += escapedLength;
+  }
+  return { text, truncated: false };
+}
+
+/** 飞书 markdown 特殊字符 → HTML 实体映射（官方文档完整清单） */
+const CARD_MD_ENTITY: Record<string, string> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '*': '&#42;',
+  '~': '&#126;',
+  _: '&#95;',
+  '`': '&#96;',
+  '[': '&#91;',
+  ']': '&#93;',
+  '(': '&#40;',
+  ')': '&#41;',
+  '#': '&#35;',
+  '-': '&#45;',
+  '!': '&#33;',
+  '/': '&#47;',
+  '\\': '&#92;',
+  ':': '&#58;',
+  '+': '&#43;',
+  '"': '&#34;',
+  "'": '&#39;',
+  $: '&#36;',
+  '.': '&#46;',
+  '|': '&#124;',
+};
+
+/**
+ * 飞书 markdown 动态文本转义（review R3/R4 P1，官方文档要求特殊字符用
+ * HTML 实体）：按官方完整清单把 markdown 语法字符和 HTML 标签定界符
+ * 全部实体化，动态文本（narration/plan/todo 标题、路径动作、detail
+ * 正文）只能以纯文本渲染，*斜体*、[链接](url)、<at id=all>、行首
+ * #标题/-列表 一概失效。代码自身生成的 <font> wrapper 在转义之后拼接。
+ * plain_text header 不解析 markdown，不走这层。单遍替换：实体产物
+ * （含 & # ; 字符）不会被二次命中
+ */
+export function escapeCardMarkdownText(text: string): string {
+  return text.replace(
+    /[&<>*~_`[\]()#!/\\:+"'$.|-]/gu,
+    (ch) => CARD_MD_ENTITY[ch] ?? ch,
+  );
+}
 
 export function truncateCp(text: string, budget: number): string {
   const cps = Array.from(text);
@@ -200,8 +269,11 @@ export function truncateTailCp(text: string, budget: number): string {
 }
 
 /**
- * Phase 行两段式渲染（飞书专用 helper，不动 presentationPhaseTitle 的领域语义）：
- * frozen（存在更新 Phase）→ 纯标题；current → 标题 + 行尾动作/结果。
+ * Phase 行渲染（飞书专用 helper，不动 presentationPhaseTitle 的领域语义）：
+ * frozen（存在更新 Phase）→ 纯标题一行收口；
+ * current → 标题一行 + 灰色动作独立一行（单行原地刷新，时态即完成标记）。
+ * fallback（无 LLM 叙述的开局）→ 只出灰色动作行：跑时"正在读取 …"，
+ * 完成后整行刷成"已读取 …"，不保留进行时标题（避免两个时态同屏重复）。
  */
 function renderPhaseLine(
   phase: PresentationPhase,
@@ -209,22 +281,31 @@ function renderPhaseLine(
 ): { text: string; gray?: string } {
   const title = truncateCp(phase.goal.split('\n')[0], PHASE_TITLE_BUDGET);
   if (!isCurrent) return { text: title };
-  // 开局裸动作行：整行灰色的当前动作（需求 2），无标题前缀
-  if (
-    phase.source === 'fallback' &&
-    phase.status === 'running' &&
-    (!phase.currentAction || phase.currentAction === phase.goal)
-  ) {
-    return { text: '', gray: title };
+  if (phase.source === 'fallback') {
+    const action =
+      phase.status === 'running'
+        ? (phase.currentAction ?? phase.goal)
+        : phase.status === 'pending'
+          ? phase.goal
+          : (phase.outcome ??
+            (phase.status === 'cancelled'
+              ? '已取消'
+              : phase.status === 'failed'
+                ? '执行失败'
+                : (phase.currentAction ?? phase.goal)));
+    return {
+      text: '',
+      gray: truncateTailCp(action.split('\n')[0], PHASE_ACTION_BUDGET),
+    };
   }
-  let tail: string | undefined;
+  let action: string | undefined;
   if (phase.status === 'running') {
-    tail =
+    action =
       phase.currentAction && phase.currentAction !== phase.goal
         ? phase.currentAction
         : undefined;
   } else if (phase.status !== 'pending') {
-    tail =
+    action =
       phase.outcome ??
       (phase.status === 'cancelled'
         ? '已取消'
@@ -234,7 +315,9 @@ function renderPhaseLine(
   }
   return {
     text: title,
-    gray: tail ? truncateTailCp(tail, PHASE_TAIL_BUDGET) : undefined,
+    gray: action
+      ? truncateTailCp(action.split('\n')[0], PHASE_ACTION_BUDGET)
+      : undefined,
   };
 }
 
@@ -273,63 +356,135 @@ function truncateTitle(title: string): string {
   return cps.length > 80 ? cps.slice(0, 80).join('') + '…' : firstLine;
 }
 
-/** 对 diff 内容着色：+ 行绿色，- 行红色 */
-function colorizeDiff(text: string): string {
-  return text
-    .replace(/^(\+\s?.*)$/gm, '<font color="green">$1</font>')
-    .replace(/^(-\s?.*)$/gm, '<font color="red">$1</font>');
+/** 渲染单条 diff 行：转义正文 + 自有红绿 font 标签（detail 动态文本不允许注入，review R4 P1） */
+function renderDetailLine(line: string, escaped: string): string {
+  if (/^\+\s?/u.test(line)) return `<font color="green">${escaped}</font>`;
+  if (/^-\s?/u.test(line)) return `<font color="red">${escaped}</font>`;
+  return escaped;
 }
 
-/** 将 step 转为卡片 element */
-function stepToElement(step: ProgressStep): unknown {
+/**
+ * detail 正文按"最终 markdown 产物字节"预算生成（review R6 P1）：
+ * 逐行累加"转义正文 + 自有 font 开闭标签 + 换行"的 UTF-8 字节，达到
+ * 预算即停——着色标签开销不再漏算（1000 行单字符 + 的最坏形态曾把
+ * 6KB 正文膨胀到 33KB）。截断时追加灰色提示（review R6 P2）
+ */
+export function buildDetailBody(detail: string, byteBudget: number): string {
+  const rendered: string[] = [];
+  let bytes = 0;
+  let truncated = false;
+  for (const line of detail.split('\n')) {
+    let escaped = escapeCardMarkdownText(line);
+    let finalLine = renderDetailLine(line, escaped);
+    let cost =
+      Buffer.byteLength(finalLine, 'utf8') + (rendered.length > 0 ? 1 : 0);
+    if (bytes + cost > byteBudget) {
+      // 首行就超预算的巨型单行：按剩余预算截行内正文（预留标签开销），不整行丢弃
+      if (rendered.length === 0) {
+        const inner = truncateByEscapedBytes(
+          line,
+          Math.max(0, byteBudget - 64),
+        ).text;
+        if (inner) {
+          escaped = escapeCardMarkdownText(inner);
+          finalLine = renderDetailLine(line, escaped);
+          cost = Buffer.byteLength(finalLine, 'utf8');
+          if (bytes + cost <= byteBudget) rendered.push(finalLine);
+        }
+      }
+      truncated = true;
+      break;
+    }
+    rendered.push(finalLine);
+    bytes += cost;
+  }
+  const body = rendered.join('\n');
+  return truncated
+    ? `${body}\n\n<font color="grey">内容已截断，完整内容见过程记录</font>`
+    : body;
+}
+
+/** 将 step 转为卡片 element 列表（当前 Phase 为标题行 + 动作独立一行） */
+function stepToElements(step: ProgressStep): unknown[] {
   const isPhaseLine =
     step.narrationFull !== undefined || step.grayTail !== undefined;
-  const title = isPhaseLine ? step.title : truncateTitle(step.title);
+  // markdown 插值一律用实体转义版；plain_text header 用原文（不解析 markdown）
+  const rawTitle = isPhaseLine ? step.title : truncateTitle(step.title);
+  const title = escapeCardMarkdownText(rawTitle);
+  const grayTail =
+    step.grayTail === undefined
+      ? undefined
+      : escapeCardMarkdownText(step.grayTail);
   if (step.narrationFull) {
     // Phase 行：可展开查看 narration 全文（展开区只放全文，不放工具历史）。
-    // header 为 plain_text（R1：行内灰色待实测支持后升级），行尾动作用 · 拼接。
-    const headerTitle = step.grayTail ? `${title} · ${step.grayTail}` : title;
-    const body =
-      Array.from(step.narrationFull).length > NARRATION_CARD_LIMIT
-        ? `${truncateCp(step.narrationFull, NARRATION_CARD_LIMIT)}\n\n<font color="grey">（全文见过程记录）</font>`
-        : step.narrationFull;
-    return {
+    // header 为 plain_text（R1：行内灰色待实测支持后升级）；
+    // 动作不再拼进 header，独立一行灰色跟在面板下方
+    const cpLimited = truncateCp(step.narrationFull, NARRATION_CARD_LIMIT);
+    const byteLimited = truncateByEscapedBytes(
+      cpLimited,
+      PANEL_BODY_BYTE_BUDGET,
+    );
+    const bodyTruncated =
+      byteLimited.truncated || cpLimited !== step.narrationFull;
+    const body = bodyTruncated
+      ? `${escapeCardMarkdownText(byteLimited.text)}\n\n<font color="grey">（全文见过程记录）</font>`
+      : escapeCardMarkdownText(byteLimited.text);
+    const panel = {
       tag: 'collapsible_panel',
       expanded: false,
       background_color: 'grey',
       header: {
-        title: { tag: 'plain_text', content: headerTitle },
+        title: { tag: 'plain_text', content: rawTitle },
         vertical_align: 'center',
       },
       vertical_spacing: '2px',
       padding: '4px 8px 4px 8px',
       elements: [{ tag: 'markdown', content: body }],
     };
+    return grayTail
+      ? [
+          panel,
+          {
+            tag: 'markdown',
+            content: `<font color="grey">${grayTail}</font>`,
+          },
+        ]
+      : [panel];
   }
-  if (step.grayTail) {
-    // 无 narration 全文的 Phase 行（fallback 等）：单行 + 灰色行尾；无标题时整行灰色
-    return {
-      tag: 'markdown',
-      content: title
-        ? `${title} <font color="grey">${step.grayTail}</font>`
-        : `<font color="grey">${step.grayTail}</font>`,
-    };
+  if (grayTail) {
+    // 无 narration 全文的 Phase 行（fallback 等）：标题一行 + 灰色动作一行；
+    // 无标题（开局裸动作/兜底完成态）时只出灰色动作行
+    return [
+      {
+        tag: 'markdown',
+        content: title
+          ? `${title}\n<font color="grey">${grayTail}</font>`
+          : `<font color="grey">${grayTail}</font>`,
+      },
+    ];
   }
   if (step.detail) {
-    return {
-      tag: 'collapsible_panel',
-      expanded: false,
-      background_color: 'grey',
-      header: {
-        title: { tag: 'plain_text', content: title },
-        vertical_align: 'center',
+    return [
+      {
+        tag: 'collapsible_panel',
+        expanded: false,
+        background_color: 'grey',
+        header: {
+          title: { tag: 'plain_text', content: rawTitle },
+          vertical_align: 'center',
+        },
+        vertical_spacing: '2px',
+        padding: '4px 8px 4px 8px',
+        elements: [
+          {
+            tag: 'markdown',
+            content: buildDetailBody(step.detail, PANEL_BODY_BYTE_BUDGET),
+          },
+        ],
       },
-      vertical_spacing: '2px',
-      padding: '4px 8px 4px 8px',
-      elements: [{ tag: 'markdown', content: colorizeDiff(step.detail) }],
-    };
+    ];
   }
-  return { tag: 'markdown', content: title };
+  return [{ tag: 'markdown', content: title }];
 }
 
 /** 格式化耗时字符串 */
@@ -401,7 +556,7 @@ function buildProgressCard(
   // 没有步骤时显示占位文字，避免卡片内容区域为空
   const stepElements =
     steps.length > 0
-      ? steps.map(stepToElement)
+      ? steps.flatMap(stepToElements)
       : [
           {
             tag: 'markdown',
@@ -527,7 +682,7 @@ function buildCompletedCard(
 
   const elements: unknown[] = [
     ...buildTitleRow(titleText, progressUrl),
-    ...steps.map(stepToElement),
+    ...steps.flatMap(stepToElements),
   ];
   if (usage) appendUsageFooter(elements, usage, thinking);
 

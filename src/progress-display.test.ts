@@ -97,7 +97,7 @@ describe('classifyProgressAction', () => {
     [
       '读取文件',
       started('Read', { file_path: '/tmp/config.ts' }),
-      '正在读取 config.ts',
+      '正在读取 /tmp/config.ts',
     ],
     [
       '搜索模型配置',
@@ -107,7 +107,7 @@ describe('classifyProgressAction', () => {
     [
       '修改文件',
       started('Edit', { file_path: '/tmp/config.ts' }),
-      '正在修改 config.ts',
+      '正在修改 /tmp/config.ts',
     ],
     ['运行测试', started('Bash', { command: 'npm test' }), '正在运行测试'],
     [
@@ -211,7 +211,7 @@ describe('classifyProgressAction', () => {
     [
       '检查代码历史',
       started('Bash', { command: 'git blame src/index.ts' }),
-      '正在检查 index.ts 的代码历史',
+      '正在检查 src/index.ts 的代码历史',
     ],
   ];
 
@@ -233,12 +233,12 @@ describe('classifyProgressAction', () => {
     [
       'git blame 仍展示真实文件名',
       `git blame src/index.ts`,
-      '正在检查 index.ts 的代码历史',
+      '正在检查 src/index.ts 的代码历史',
     ],
     [
       'git blame 跳过 -L 的行号范围',
       `git blame -L 10,20 src/index.ts`,
-      '正在检查 index.ts 的代码历史',
+      '正在检查 src/index.ts 的代码历史',
     ],
     ['sed 不把 shell 引号当文件名', `sed -n '1,260p' "`, '正在读取相关内容'],
   ])('%s', (_name, command, expected) => {
@@ -251,8 +251,8 @@ describe('classifyProgressAction', () => {
     [
       'Read 文件名',
       started('Read', { file_path: '/workspace/src/progress-display.ts' }),
-      '正在读取 progress-display.ts',
-      '读取 progress-display.ts',
+      '正在读取 /workspace/src/progress-display.ts',
+      '读取 /workspace/src/progress-display.ts',
     ],
     [
       'Grep 关键词和文件',
@@ -260,14 +260,14 @@ describe('classifyProgressAction', () => {
         pattern: 'turn_end',
         path: '/workspace/src/progress-display.ts',
       }),
-      '正在 progress-display.ts 中搜索“turn_end”',
-      '在 progress-display.ts 中搜索“turn_end”',
+      '正在 /workspace/src/progress-display.ts 中搜索“turn_end”',
+      '在 /workspace/src/progress-display.ts 中搜索“turn_end”',
     ],
     [
       'Edit 文件名',
       started('Edit', { file_path: '/workspace/src/progress-display.ts' }),
-      '正在修改 progress-display.ts',
-      '修改 progress-display.ts',
+      '正在修改 /workspace/src/progress-display.ts',
+      '修改 /workspace/src/progress-display.ts',
     ],
     [
       '测试文件',
@@ -291,7 +291,7 @@ describe('classifyProgressAction', () => {
     });
   });
 
-  it('对象只显示 basename 且敏感 query 安全降级', () => {
+  it('路径保留上下文且敏感 query 安全降级', () => {
     const read = classifyProgressAction(
       started('Read', {
         file_path: '/Users/dajay/private/project/src/config.ts',
@@ -300,8 +300,9 @@ describe('classifyProgressAction', () => {
     const search = classifyProgressAction(
       started('Grep', { pattern: 'Bearer secret-token-123456789' }),
     );
-    expect(read.title).toBe('正在读取 config.ts');
-    expect(read.title).not.toContain('/Users');
+    expect(read.title).toBe(
+      '正在读取 /Users/dajay/private/project/src/config.ts',
+    );
     expect(search.title).toBe('正在搜索相关内容');
     expect(search.title).not.toContain('secret-token');
     expect(
@@ -311,21 +312,114 @@ describe('classifyProgressAction', () => {
     ).toBe('正在读取 敏感配置文件');
   });
 
+  it('超长路径截掉头部保尾段（保住文件名和后段目录）', () => {
+    const action = classifyProgressAction(
+      started('Read', {
+        file_path:
+          '/Users/dajay/AI_Workspace/nanoclaw/groups/fs_oc_x/images/photo.jpg',
+      }),
+    );
+    expect(action.title.startsWith('正在读取 …')).toBe(true);
+    expect(action.title.endsWith('images/photo.jpg')).toBe(true);
+    expect(Array.from(action.title.replace('正在读取 ', '')).length).toBe(48);
+  });
+
+  it('超过 64 字符的长哈希文件名不再放弃，截头保留扩展名', () => {
+    const longName = `om_${'a'.repeat(80)}.jpg`;
+    const action = classifyProgressAction(
+      started('Read', { file_path: `/images/${longName}` }),
+    );
+    expect(action.title).toBe('正在读取 /images/….jpg');
+  });
+
+  it('路径中含 token 段被涂抹时退回纯文件名', () => {
+    const action = classifyProgressAction(
+      started('Read', {
+        file_path: '/data/ghp_abcdefgh12345678/config.ts',
+      }),
+    );
+    expect(action.title).toBe('正在读取 config.ts');
+  });
+
+  it.each([
+    [
+      'URL userinfo 凭证',
+      'https://admin:password@example.com/private/file.txt',
+      '正在读取 file.txt',
+    ],
+    [
+      '无 scheme 的 user:pass@ 形态目录段',
+      '/tmp/admin:password@example.com/file.txt',
+      '正在读取 file.txt',
+    ],
+    [
+      'Bearer 形态目录段',
+      '/data/Bearer abcdefgh12345678/file.txt',
+      '正在读取 file.txt',
+    ],
+  ])('凭证红线：%s 退回纯文件名不泄露', (_label, filePath, expected) => {
+    const action = classifyProgressAction(
+      started('Read', { file_path: filePath }),
+    );
+    expect(action.title).toBe(expected);
+    expect(action.title).not.toContain('password');
+    expect(action.title).not.toContain('abcdefgh');
+  });
+
+  it.each([
+    ['font 标签注入', '/tmp/<font color=red>/owned.ts', '正在读取 owned.ts'],
+    [
+      'markdown 链接注入',
+      '/tmp/[x](http://e.com)/owned.ts',
+      '正在读取 owned.ts',
+    ],
+    ['反引号注入', '/tmp/`code`/owned.ts', '正在读取 owned.ts'],
+  ])('注入拦截：%s 目录段整条退回纯文件名', (_label, filePath, expected) => {
+    const action = classifyProgressAction(
+      started('Read', { file_path: filePath }),
+    );
+    expect(action.title).toBe(expected);
+  });
+
+  it('文件名本身含注入字符时放弃对象展示', () => {
+    const action = classifyProgressAction(
+      started('Read', { file_path: '/tmp/<b>owned</b>.ts' }),
+    );
+    expect(action.title).toBe('正在读取文件');
+  });
+
+  it.each([
+    ['正斜杠', 'C:/Users/dajay/project/src/file.ts'],
+    ['反斜杠', 'C:\\Users\\dajay\\project\\src\\file.ts'],
+  ])('Windows 盘符路径（%s）保留路径上下文', (_label, filePath) => {
+    const action = classifyProgressAction(
+      started('Read', { file_path: filePath }),
+    );
+    expect(action.title).toBe('正在读取 C:/Users/dajay/project/src/file.ts');
+  });
+
+  it('非首段的冒号仍被白名单拒绝', () => {
+    const action = classifyProgressAction(
+      started('Read', { file_path: '/tmp/a:b/file.ts' }),
+    );
+    expect(action.title).toBe('正在读取 file.ts');
+  });
+
   it.each([
     [
       'Bash rg',
       "rg -n -C 2 'turn_end' src/progress-display.ts",
-      '正在 progress-display.ts 中搜索“turn_end”',
+      '正在 src/progress-display.ts 中搜索“turn_end”',
     ],
     [
       'Bash sed',
       "sed -n '620,700p' src/progress-display.ts",
-      '正在读取 progress-display.ts',
+      '正在读取 src/progress-display.ts',
     ],
     [
       'Bash cat',
       'cat /workspace/package.json',
-      '正在读取 package.json',
+      '正在读取 /workspace/package.json',
     ],
   ])('%s 从命令提取安全对象', (_name, command, expected) => {
     expect(
@@ -347,7 +441,7 @@ describe('classifyProgressAction', () => {
     [
       'Git 历史文件',
       started('Bash', { command: 'git blame src/progress-display.ts' }),
-      '正在检查 progress-display.ts 的代码历史',
+      '正在检查 src/progress-display.ts 的代码历史',
     ],
   ])('%s 保留业务对象', (_name, progress, expected) => {
     expect(classifyProgressAction(progress).title).toBe(expected);
@@ -450,13 +544,13 @@ describe('reduceProgressPresentation', () => {
         status: 'completed',
         categories: ['read', 'search', 'change', 'test'],
         actionSummaries: [
-          '读取 input.txt',
+          '读取 /tmp/input.txt',
           '搜索“needle”',
-          '修改 output.txt',
+          '修改 /tmp/output.txt',
           '测试 fixture.test.mjs',
         ],
         outcome:
-          '已读取 input.txt、搜索“needle”、修改 output.txt，并测试 fixture.test.mjs（1 项通过）',
+          '已读取 /tmp/input.txt、搜索“needle”、修改 /tmp/output.txt，并测试 fixture.test.mjs（1 项通过）',
       }),
     ]);
   });
@@ -483,7 +577,7 @@ describe('reduceProgressPresentation', () => {
         source: 'narration',
         categories: ['read', 'search'],
         toolCallIds: ['late-read', 'late-grep'],
-        outcome: '已读取 input.txt，并搜索“needle”',
+        outcome: '已读取 /tmp/input.txt，并搜索“needle”',
       }),
     ]);
     expect(state.steps.every((step) => step.phaseId === 'phase-1')).toBe(true);
@@ -636,8 +730,8 @@ describe('reduceProgressPresentation', () => {
       state = complete(state, id);
     }
 
-    expect((state as any).phases[0].actionSummaries).toEqual(['读取 c.ts']);
-    expect((state as any).phases[0].outcome).toBe('已读取 c.ts');
+    expect((state as any).phases[0].actionSummaries).toEqual(['读取 /tmp/c.ts']);
+    expect((state as any).phases[0].outcome).toBe('已读取 /tmp/c.ts');
   });
 
   it('并行工具先完成一个时仍展示另一个运行中的动作', () => {
@@ -875,7 +969,7 @@ describe('reduceProgressPresentation', () => {
     const narrationPhase = (state as any).phases.find(
       (phase: any) => phase.id === narrationId,
     );
-    expect(narrationPhase.currentAction).toBe('正在读取 a.txt');
+    expect(narrationPhase.currentAction).toBe('正在读取 /tmp/a.txt');
   });
 
   it('连续 narration 累加超过 4000 code point 时状态层截断存储', () => {

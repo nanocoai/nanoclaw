@@ -562,9 +562,11 @@ describe('FeishuChannel', () => {
 
       const entry = (channel as any).progressCards.get(jid);
       expect(entry.steps).toHaveLength(1);
-      // 两段式：标题=narration 原文首行（固定预算截断），行尾=结果（独立预算，截中段保尾）
+      // 标题行 + 动作独立一行：动作行独享 48cp 预算，截中段保尾
       expect(entry.steps[0].title).toBe('核对进度展示链路。');
-      expect(entry.steps[0].grayTail).toBe('已读取 in…t.mjs（1 项通过）');
+      expect(entry.steps[0].grayTail).toBe(
+        '已读取 /tmp/input.t….txt，并测试 fixture.test.mjs（1 项通过）',
+      );
       expect(entry.steps[0].narrationFull).toBe('核对进度展示链路。');
       expect(
         entry.allSteps
@@ -579,8 +581,10 @@ describe('FeishuChannel', () => {
         JSON.parse(patchArg?.data?.content ?? '{}'),
       );
       expect(serialized).toContain('collapsible_panel');
+      // 面板 header 只有标题，动作独立成灰色一行
+      expect(serialized).toContain('"content":"核对进度展示链路。"');
       expect(serialized).toContain(
-        '核对进度展示链路。 · 已读取 in…t.mjs（1 项通过）',
+        '<font color=\\"grey\\">已读取 &#47;tmp&#47;input&#46;t…&#46;txt，并测试 fixture&#46;test&#46;mjs（1 项通过）</font>',
       );
       expect(serialized).not.toContain('已完成协作操作');
     });
@@ -995,6 +999,411 @@ describe('FeishuChannel', () => {
       expect(mockPatch).toHaveBeenCalledTimes(1);
     });
 
+    it('开局兜底阶段完成后整行刷成完成态，不保留进行时标题（单时态去重）', async () => {
+      const jid = 'fs:oc_progress_fallback_done';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Read',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Read',
+            toolCallId: 'read-1',
+            input: { file_path: '/tmp/notes.md' },
+          },
+        }),
+        { isProgress: true },
+      );
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '✅ 完成',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'completed',
+            toolName: 'tool_result',
+            toolCallId: 'read-1',
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const entry = (channel as any).progressCards.get(jid);
+      expect(entry.steps).toHaveLength(1);
+      expect(entry.steps[0].title).toBe('');
+      expect(entry.steps[0].grayTail).toBe('已读取 /tmp/notes.md');
+    });
+
+    it('narration Phase 动作独立成行：面板 header 无动作拼接，动作是灰色独立元素', async () => {
+      const jid = 'fs:oc_progress_action_line';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '💬 分析进度卡渲染。',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'narration',
+          },
+        }),
+        { isProgress: true },
+      );
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Read',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Read',
+            toolCallId: 'read-act',
+            input: { file_path: '/tmp/notes.md' },
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const entry = (channel as any).progressCards.get(jid);
+      const phaseRow = entry.steps.at(-1);
+      expect(phaseRow.grayTail).toBe('正在读取 /tmp/notes.md');
+      const patchArg = mockPatch.mock.calls.at(-1)?.[0];
+      const serialized = JSON.stringify(
+        JSON.parse(patchArg?.data?.content ?? '{}'),
+      );
+      expect(serialized).toContain(
+        '<font color=\\"grey\\">正在读取 &#47;tmp&#47;notes&#46;md</font>',
+      );
+      expect(serialized).not.toContain(' · 正在读取');
+    });
+
+    it.each([
+      ['删除线 ~~', '/tmp/~~hidden~~/file.ts', '~~', '&#126;&#126;'],
+      ['粗体 __', '/tmp/__bold__/file.ts', '__', '&#95;&#95;'],
+    ])(
+      '路径中的飞书 markdown 语法（%s）被 HTML 实体转义',
+      async (_label, filePath, pair, entity) => {
+        const jid = `fs:oc_progress_md_escape_${pair === '~~' ? 'tilde' : 'underscore'}`;
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '🔧 Read',
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'Read',
+              toolCallId: 'read-md',
+              input: { file_path: filePath },
+            },
+          }),
+          { isProgress: true },
+        );
+
+        const patchArg = mockPatch.mock.calls.at(-1)?.[0];
+        const content: string = patchArg?.data?.content ?? '{}';
+        expect(content).not.toContain(pair);
+        expect(content).toContain(entity);
+      },
+    );
+
+    it('narration 标题的 *斜体*/链接/<at> 全部实体化，不进 markdown 语法', async () => {
+      const jid = 'fs:oc_progress_md_escape_narration';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '💬 *italic* [x](https://example.com) <at id=all></at> 收尾。',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'narration',
+          },
+        }),
+        { isProgress: true },
+      );
+      // 有工具活动后 narration Phase 冻结为 markdown 标题行，走转义路径
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '💬 下一阶段。',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'narration',
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const patchArg = mockPatch.mock.calls.at(-1)?.[0];
+      const content: string = patchArg?.data?.content ?? '{}';
+      // plain_text header 不解析 markdown 可保留原文；markdown 元素必须全实体化
+      const markdownContents: string[] = [];
+      const collect = (node: unknown): void => {
+        if (Array.isArray(node)) return node.forEach(collect);
+        if (node && typeof node === 'object') {
+          const el = node as Record<string, unknown>;
+          if (el.tag === 'markdown' && typeof el.content === 'string')
+            markdownContents.push(el.content);
+          Object.values(el).forEach(collect);
+        }
+      };
+      collect(JSON.parse(content));
+      const joined = markdownContents.join('\n');
+      expect(joined).not.toContain('<at id=all>');
+      expect(joined).not.toContain('[x](');
+      expect(joined).toContain('&lt;at id=all&gt;');
+      expect(joined).toContain('&#42;italic&#42;');
+      expect(joined).toContain('&#91;x&#93;&#40;');
+    });
+
+    it('plan 任务标题的 markdown 语法同样实体化', async () => {
+      const jid = 'fs:oc_progress_md_escape_plan';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '📋 计划',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'TodoWrite',
+            toolCallId: 'todo-md',
+            input: {
+              todos: [{ content: '<at id=all></at> *加急* 任务', status: 'in_progress' }],
+            },
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const patchArg = mockPatch.mock.calls.at(-1)?.[0];
+      const content: string = patchArg?.data?.content ?? '{}';
+      expect(content).not.toContain('<at id=all>');
+      expect(content).toContain('&lt;at id=all&gt;');
+    });
+
+    it('detail 的 diff 正文实体转义且自有红绿 font 标签保留', async () => {
+      process.env.NANOCLAW_READABLE_PROGRESS = '0';
+      try {
+        const jid = 'fs:oc_progress_md_escape_detail';
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '🔧 apply_patch',
+            detail:
+              '+ added <at id=all></at> line\n- removed [x](https://e.com) line\n* context *bold* line',
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'Bash',
+              toolCallId: 'detail-md',
+              input: { command: 'apply_patch < c.diff' },
+            },
+          }),
+          { isProgress: true },
+        );
+
+        const createArg = mockCreate.mock.calls.at(-1)?.[0];
+        const content: string = createArg?.data?.content ?? '{}';
+        expect(content).not.toContain('<at id=all>');
+        expect(content).not.toContain('[x](');
+        expect(content).toContain('&lt;at id=all&gt;');
+        // 自有着色标签保留：+ 行绿、- 行红
+        expect(content).toContain('<font color=\\"green\\">&#43; added');
+        expect(content).toContain('<font color=\\"red\\">&#45; removed');
+      } finally {
+        delete process.env.NANOCLAW_READABLE_PROGRESS;
+      }
+    });
+
+    it('行首 # 标题与 - 列表语法被实体化，不渲染为标题/列表', async () => {
+      const jid = 'fs:oc_progress_md_escape_heading';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '💬 # 大标题\n- 列表项',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'narration',
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const createArg = mockCreate.mock.calls.at(-1)?.[0];
+      const content: string = createArg?.data?.content ?? '{}';
+      const card = JSON.parse(content) as { body: { elements: unknown[] } };
+      const markdownContents: string[] = [];
+      const collect = (node: unknown): void => {
+        if (Array.isArray(node)) return node.forEach(collect);
+        if (node && typeof node === 'object') {
+          const el = node as Record<string, unknown>;
+          if (el.tag === 'markdown' && typeof el.content === 'string')
+            markdownContents.push(el.content);
+          Object.values(el).forEach(collect);
+        }
+      };
+      collect(card);
+      const body = markdownContents.find((text) => text.includes('大标题'));
+      expect(body).toBeDefined();
+      expect(body).toContain('&#35; 大标题');
+      expect(body).toContain('&#45; 列表项');
+    });
+
+    it('detail 面板 plain_text 头部用原文，不显示实体字面量', async () => {
+      process.env.NANOCLAW_READABLE_PROGRESS = '0';
+      try {
+        const jid = 'fs:oc_progress_detail_raw_header';
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '🔧 read progress_display.py',
+            detail: 'some detail',
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'Bash',
+              toolCallId: 'detail-raw',
+              input: { command: 'cat progress_display.py' },
+            },
+          }),
+          { isProgress: true },
+        );
+
+        const createArg = mockCreate.mock.calls.at(-1)?.[0];
+        const content: string = createArg?.data?.content ?? '{}';
+        expect(content).toContain('plain_text');
+        expect(content).not.toContain('&#95;display');
+      } finally {
+        delete process.env.NANOCLAW_READABLE_PROGRESS;
+      }
+    });
+
+    it('行首有序列表与表格竖线同样实体化（. 和 |）', async () => {
+      const jid = 'fs:oc_progress_md_escape_list_table';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '💬 1. 第一项\n|a|b|',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'narration',
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const createArg = mockCreate.mock.calls.at(-1)?.[0];
+      const content: string = createArg?.data?.content ?? '{}';
+      expect(content).toContain('1&#46; 第一项');
+      expect(content).toContain('&#124;a&#124;b&#124;');
+    });
+
+    it('3 个全特殊字符 narration Phase 的最终卡片字节数低于飞书 30KB 上限', async () => {
+      const jid = 'fs:oc_progress_byte_budget';
+      const hostile = '/'.repeat(2000);
+      for (let round = 0; round < 3; round += 1) {
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: `💬 ${hostile}`,
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'narration',
+            },
+          }),
+          { isProgress: true },
+        );
+        // narration 之间夹一个工具事件，避免连续 narration 合并成同一 Phase
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '🔧 Read',
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'Read',
+              toolCallId: `byte-read-${round}`,
+              input: { file_path: `/tmp/file-${round}.ts` },
+            },
+          }),
+          { isProgress: true },
+        );
+      }
+
+      const lastCall =
+        mockPatch.mock.calls.at(-1)?.[0] ?? mockCreate.mock.calls.at(-1)?.[0];
+      const content: string = lastCall?.data?.content ?? '{}';
+      expect(Buffer.byteLength(content, 'utf8')).toBeLessThan(30 * 1024);
+      // 每个面板正文都被截断并提示看过程记录
+      expect(content).toContain('（全文见过程记录）');
+    });
+
+    it('detail 全特殊字符时最终卡片字节数低于飞书 30KB 上限', async () => {
+      process.env.NANOCLAW_READABLE_PROGRESS = '0';
+      try {
+        const jid = 'fs:oc_progress_byte_budget_detail';
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '🔧 apply_patch',
+            detail: `+ ${'/'.repeat(3000)}\n- ${':'.repeat(3000)}`,
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'Bash',
+              toolCallId: 'detail-bytes',
+              input: { command: 'apply_patch < big.diff' },
+            },
+          }),
+          { isProgress: true },
+        );
+
+        const createArg = mockCreate.mock.calls.at(-1)?.[0];
+        const content: string = createArg?.data?.content ?? '{}';
+        expect(Buffer.byteLength(content, 'utf8')).toBeLessThan(30 * 1024);
+      } finally {
+        delete process.env.NANOCLAW_READABLE_PROGRESS;
+      }
+    });
+
+    it('1000 行短 diff（+/-）的最终卡片字节数低于 30KB 且带截断提示', async () => {
+      process.env.NANOCLAW_READABLE_PROGRESS = '0';
+      try {
+        const jid = 'fs:oc_progress_byte_budget_short_lines';
+        const lines: string[] = [];
+        for (let index = 0; index < 1000; index += 1)
+          lines.push(index % 2 === 0 ? '+' : '-');
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '🔧 apply_patch',
+            detail: lines.join('\n'),
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'Bash',
+              toolCallId: 'detail-short-lines',
+              input: { command: 'apply_patch < many.diff' },
+            },
+          }),
+          { isProgress: true },
+        );
+
+        const createArg = mockCreate.mock.calls.at(-1)?.[0];
+        const content: string = createArg?.data?.content ?? '{}';
+        expect(Buffer.byteLength(content, 'utf8')).toBeLessThan(30 * 1024);
+        expect(content).toContain('内容已截断，完整内容见过程记录');
+        // 预算内的行仍保留自有着色标签
+        expect(content).toContain('<font color=\\"green\\">&#43;</font>');
+        expect(content).toContain('<font color=\\"red\\">&#45;</font>');
+      } finally {
+        delete process.env.NANOCLAW_READABLE_PROGRESS;
+      }
+    });
+
     it('清理时将缺少结果的工具收口为结果未知', async () => {
       const jid = 'fs:oc_progress_unknown_result';
       await channel.sendMessage(
@@ -1325,7 +1734,7 @@ describe('FeishuChannel', () => {
       expect(entry.steps[1].title).toBe('第二阶段目标。');
     });
 
-    it('双预算截断：标题 48/行尾 18 code point，长路径保尾部', () => {
+    it('双行预算：标题 48/动作行 48 code point，长路径保尾部', () => {
       const longTitle = '这是一段非常长的阶段说明文字'.repeat(10);
       const truncated = truncateCp(longTitle, 48);
       expect(Array.from(truncated)).toHaveLength(49); // 48 + '…'
@@ -1333,14 +1742,51 @@ describe('FeishuChannel', () => {
       // emoji 按 code point 计数不被截断成半个
       const emojiText = '🚀'.repeat(50);
       expect(Array.from(truncateCp(emojiText, 48))).toHaveLength(49);
-      // 行尾截中段保尾部（文件名可见）
-      const longPath = '正在读取 server/backend/app/moss/runtime/callback.py';
-      const tail = truncateTailCp(longPath, 18);
+      // 动作行截中段保尾部（文件名可见），emoji 不被切半
+      const longPath = `正在读取 ${'📁'.repeat(20)}/server/backend/app/moss/runtime/callback.py`;
+      const tail = truncateTailCp(longPath, 48);
       expect(tail).toContain('…');
       expect(tail.endsWith('callback.py')).toBe(true);
-      expect(Array.from(tail).length).toBeLessThanOrEqual(19);
+      expect(Array.from(tail).length).toBeLessThanOrEqual(49);
       // 预算内原样返回
-      expect(truncateTailCp('短动作', 18)).toBe('短动作');
+      expect(truncateTailCp('短动作', 48)).toBe('短动作');
+    });
+
+    it('超长动作贯穿到卡片：动作行按 48cp 截中段保尾', async () => {
+      const jid = 'fs:oc_progress_action_budget';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '💬 核对长路径动作行预算。',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'narration',
+          },
+        }),
+        { isProgress: true },
+      );
+      const longDir = 'very-long-directory-name'.repeat(4);
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Read',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Read',
+            toolCallId: 'read-budget',
+            input: { file_path: `/workspace/${longDir}/deep/callback.py` },
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const entry = (channel as any).progressCards.get(jid);
+      const phaseRow = entry.steps.at(-1);
+      expect(phaseRow.grayTail).toContain('…');
+      expect(phaseRow.grayTail.endsWith('callback.py')).toBe(true);
+      expect(Array.from(phaseRow.grayTail).length).toBeLessThanOrEqual(49);
     });
 
     it('patch 串行：在飞期间的新事件合并为一轮补发，内容取最新状态', async () => {
