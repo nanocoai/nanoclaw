@@ -78,7 +78,7 @@ vi.mock('../voice-notify.js', () => ({
 
 import { ASSISTANT_NAME } from '../config.js';
 import { _getSessionForTest } from '../progress-server.js';
-import { FeishuChannel } from './feishu.js';
+import { FeishuChannel, truncateCp, truncateTailCp } from './feishu.js';
 import type { ChannelOpts } from './registry.js';
 import type { CliMode } from '../types.js';
 
@@ -461,7 +461,7 @@ describe('FeishuChannel', () => {
   });
 
   describe('进度消息聚合', () => {
-    it('没有真实进度变化时一分钟内不重复刷新卡片', async () => {
+    it('计时器每秒刷新卡片，行结构不变只有计时文字前进', async () => {
       vi.useFakeTimers();
       const jid = 'fs:oc_progress_stable';
 
@@ -482,11 +482,21 @@ describe('FeishuChannel', () => {
         );
         mockPatch.mockClear();
 
-        await vi.advanceTimersByTimeAsync(59_999);
+        await vi.advanceTimersByTimeAsync(999);
         expect(mockPatch).not.toHaveBeenCalled();
 
         await vi.advanceTimersByTimeAsync(1);
         expect(mockPatch).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(mockPatch).toHaveBeenCalledTimes(3);
+
+        // 行结构稳定：相邻两帧只有计时文字不同
+        const frame = (index: number) =>
+          JSON.parse(mockPatch.mock.calls[index][0].data.content);
+        const stripTimer = (card: any) =>
+          JSON.stringify(card).replace(/\(\d+m?\d*s\)/gu, '(T)');
+        expect(stripTimer(frame(1))).toBe(stripTimer(frame(2)));
       } finally {
         (channel as any).clearSpinnerTimer(jid);
         vi.useRealTimers();
@@ -552,21 +562,25 @@ describe('FeishuChannel', () => {
 
       const entry = (channel as any).progressCards.get(jid);
       expect(entry.steps).toHaveLength(1);
-      expect(entry.steps[0].title).toBe(
-        '核对进度展示链路 · 已读取 input.txt、搜索“needle”、修改 output.txt，并测试 fixture.test.mjs（1 项通过）',
-      );
+      // 两段式：标题=narration 原文首行（固定预算截断），行尾=结果（独立预算，截中段保尾）
+      expect(entry.steps[0].title).toBe('核对进度展示链路。');
+      expect(entry.steps[0].grayTail).toBe('已读取 in…t.mjs（1 项通过）');
+      expect(entry.steps[0].narrationFull).toBe('核对进度展示链路。');
       expect(
         entry.allSteps
           .filter((step: any) => step.toolCallId)
           .map((step: any) => step.toolCallId),
       ).toEqual(['phase-read', 'phase-grep', 'phase-write', 'phase-test']);
+      // narration 全文双写过程记录
+      expect(entry.allSteps[0].title).toBe('💬 核对进度展示链路。');
 
       const patchArg = mockPatch.mock.calls.at(-1)?.[0];
       const serialized = JSON.stringify(
         JSON.parse(patchArg?.data?.content ?? '{}'),
       );
+      expect(serialized).toContain('collapsible_panel');
       expect(serialized).toContain(
-        '核对进度展示链路 · 已读取 input.txt、搜索“needle”、修改 output.txt，并测试 fixture.test.mjs（1 项通过）',
+        '核对进度展示链路。 · 已读取 in…t.mjs（1 项通过）',
       );
       expect(serialized).not.toContain('已完成协作操作');
     });
@@ -974,7 +988,9 @@ describe('FeishuChannel', () => {
 
       const entry = (channel as any).progressCards.get(jid);
       expect(entry.steps).toHaveLength(1);
-      expect(entry.steps[0].title).toBe('正在运行测试');
+      // 开局裸动作行：无标题前缀，动作在灰色行尾（整行灰色）
+      expect(entry.steps[0].title).toBe('');
+      expect(entry.steps[0].grayTail).toBe('正在运行测试');
       expect(entry.allSteps).toHaveLength(1);
       expect(mockPatch).toHaveBeenCalledTimes(1);
     });
@@ -1193,7 +1209,224 @@ describe('FeishuChannel', () => {
       expect(content.body?.elements).toBeDefined();
     });
 
-    it('💬 Codex 模式下 quietProgress=false 时独立发送', async () => {
+    it('TodoWrite 计划展示在首个 narration 后永久切换为 Phase 窗口', async () => {
+      const jid = 'fs:oc_progress_window_switch';
+      (channel as any).opts.registeredGroups = () => ({
+        [jid]: {
+          name: 'window-switch',
+          folder: 'fs_oc_progress_window_switch',
+          trigger: '@bot',
+          added_at: new Date().toISOString(),
+          containerConfig: { cliMode: 'codex' },
+        },
+      });
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '⚙️ TodoWrite',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'TodoWrite',
+            toolCallId: 'todo-win',
+            input: {
+              todos: [{ content: '补齐单元测试', status: 'in_progress' }],
+            },
+          },
+        }),
+        { isProgress: true },
+      );
+      // 切窗前：plan 行照旧展示
+      let entry = (channel as any).progressCards.get(jid);
+      expect(entry.steps.some((step: any) => step.isPlan)).toBe(true);
+
+      await channel.sendMessage(jid, '💬 先修复回调重试。', {
+        isProgress: true,
+      });
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Bash',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Bash',
+            toolCallId: 'bash-win',
+            input: { command: 'npm test' },
+          },
+        }),
+        { isProgress: true },
+      );
+
+      // 切窗后：窗口只剩 narration Phase，plan 行退出卡片（数据仍在过程页）
+      entry = (channel as any).progressCards.get(jid);
+      expect(entry.steps.some((step: any) => step.isPlan)).toBe(false);
+      expect(entry.steps).toHaveLength(1);
+      expect(entry.steps[0].narrationFull).toBe('先修复回调重试。');
+      expect(entry.steps[0].grayTail).toBe('正在运行测试');
+      // plan 数据保留在过程记录
+      expect(entry.allSteps.some((step: any) => step.isPlan)).toBe(true);
+    });
+
+    it('新 narration 冻结旧 Phase 为纯标题，已定格的结果不泄露回渲染', async () => {
+      const jid = 'fs:oc_progress_freeze';
+      (channel as any).opts.registeredGroups = () => ({
+        [jid]: {
+          name: 'freeze',
+          folder: 'fs_oc_progress_freeze',
+          trigger: '@bot',
+          added_at: new Date().toISOString(),
+          containerConfig: { cliMode: 'codex' },
+        },
+      });
+      await channel.sendMessage(jid, '💬 第一阶段目标。', {
+        isProgress: true,
+      });
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Read',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Read',
+            toolCallId: 'fz-read',
+            input: { file_path: '/tmp/a.txt' },
+          },
+        }),
+        { isProgress: true },
+      );
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '✅ result',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'completed',
+            toolName: 'tool_result',
+            toolCallId: 'fz-read',
+          },
+        }),
+        { isProgress: true },
+      );
+      // 完成但仍是当前 Phase：行尾保留结果
+      let entry = (channel as any).progressCards.get(jid);
+      expect(entry.steps.at(-1).grayTail).toBeTruthy();
+
+      await channel.sendMessage(jid, '💬 第二阶段目标。', {
+        isProgress: true,
+      });
+      entry = (channel as any).progressCards.get(jid);
+      expect(entry.steps).toHaveLength(2);
+      // 旧 Phase 冻结为纯标题：无行尾，outcome 不复显
+      expect(entry.steps[0].title).toBe('第一阶段目标。');
+      expect(entry.steps[0].grayTail).toBeUndefined();
+      // 新 Phase 为当前
+      expect(entry.steps[1].title).toBe('第二阶段目标。');
+    });
+
+    it('双预算截断：标题 48/行尾 18 code point，长路径保尾部', () => {
+      const longTitle = '这是一段非常长的阶段说明文字'.repeat(10);
+      const truncated = truncateCp(longTitle, 48);
+      expect(Array.from(truncated)).toHaveLength(49); // 48 + '…'
+      expect(truncated.endsWith('…')).toBe(true);
+      // emoji 按 code point 计数不被截断成半个
+      const emojiText = '🚀'.repeat(50);
+      expect(Array.from(truncateCp(emojiText, 48))).toHaveLength(49);
+      // 行尾截中段保尾部（文件名可见）
+      const longPath = '正在读取 server/backend/app/moss/runtime/callback.py';
+      const tail = truncateTailCp(longPath, 18);
+      expect(tail).toContain('…');
+      expect(tail.endsWith('callback.py')).toBe(true);
+      expect(Array.from(tail).length).toBeLessThanOrEqual(19);
+      // 预算内原样返回
+      expect(truncateTailCp('短动作', 18)).toBe('短动作');
+    });
+
+    it('patch 串行：在飞期间的新事件合并为一轮补发，内容取最新状态', async () => {
+      const jid = 'fs:oc_progress_serial_patch';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Read',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Read',
+            toolCallId: 'sp-1',
+            input: { file_path: '/tmp/a.txt' },
+          },
+        }),
+        { isProgress: true },
+      );
+      mockPatch.mockClear();
+
+      // 第一轮 patch 挂起（模拟飞书慢响应）
+      let releaseFirst!: () => void;
+      mockPatch.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseFirst = () => resolve({});
+          }),
+      );
+
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Grep',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Grep',
+            toolCallId: 'sp-2',
+            input: { pattern: 'needle' },
+          },
+        }),
+        { isProgress: true },
+      );
+      expect(mockPatch).toHaveBeenCalledTimes(1);
+
+      // 在飞期间又来两个事件：只置 pending，不并发 patch
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Write',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Write',
+            toolCallId: 'sp-3',
+            input: { file_path: '/tmp/out.txt' },
+          },
+        }),
+        { isProgress: true },
+      );
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Bash',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Bash',
+            toolCallId: 'sp-4',
+            input: { command: 'npm test' },
+          },
+        }),
+        { isProgress: true },
+      );
+      expect(mockPatch).toHaveBeenCalledTimes(1);
+
+      releaseFirst();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // 补发恰好一轮，内容为最新状态（旧不覆盖新）
+      expect(mockPatch).toHaveBeenCalledTimes(2);
+      const lastContent = mockPatch.mock.calls.at(-1)?.[0]?.data?.content ?? '';
+      expect(lastContent).toContain('正在运行测试');
+    });
+
+    it('💬 quietProgress=false 时独立发送且同时进卡片 Phase（双份）', async () => {
       const jid = 'fs:oc_codex_quiet_off';
       (channel as any).progressDone.delete(jid);
       (channel as any).opts.registeredGroups = () => ({
@@ -1210,8 +1443,15 @@ describe('FeishuChannel', () => {
         isProgress: true,
       });
 
-      expect(mockCreate).toHaveBeenCalled();
-      expect((channel as any).progressCards.has(jid)).toBe(false);
+      // 独立消息照发（sendNarrationSeparately = !quiet）
+      const standalone = mockCreate.mock.calls.find(
+        (call: any) => call[0]?.data?.msg_type !== 'interactive',
+      );
+      expect(standalone).toBeDefined();
+      // narration 同时进卡片 Phase
+      expect((channel as any).progressCards.has(jid)).toBe(true);
+      const entry = (channel as any).progressCards.get(jid);
+      expect(entry.steps[0]?.narrationFull).toBe('我先查证据，不先猜');
     });
 
     it('💬 Codex 模式下单行长文本也保留全文明细', async () => {

@@ -19,6 +19,7 @@ import {
   progressTransitionLogFields,
   redactProgressText,
   reduceProgressPresentation,
+  type PresentationPhase,
   type PresentationStep,
   type ProgressPresentationState,
   type StructuredProgress,
@@ -135,6 +136,10 @@ interface ProgressStep {
   toolCallId?: string;
   presentationId?: string;
   isPlan?: boolean;
+  /** narration 全文（Phase 行专用）：存在时渲染为可展开面板，展开区只放此全文 */
+  narrationFull?: string;
+  /** 行尾灰色动作/结果（仅当前 Phase 行），与标题各自独立截断预算 */
+  grayTail?: string;
   /** 该步骤进入主进程的时间戳（毫秒，用于进度页每步时间显示） */
   ts?: number;
 }
@@ -173,15 +178,92 @@ function planPresentationTitle(step: PresentationStep): string {
   return `待处理：${step.title}`;
 }
 
+/** Phase 行标题预算（Unicode code point）——固定值，不随行尾有无变化，避免冻结时截断点漂移 */
+const PHASE_TITLE_BUDGET = 48;
+/** Phase 行尾动作/结果预算（Unicode code point） */
+const PHASE_TAIL_BUDGET = 18;
+/** 卡片展开区 narration 全文上限（超出截断并提示看过程记录） */
+const NARRATION_CARD_LIMIT = 2000;
+
+export function truncateCp(text: string, budget: number): string {
+  const cps = Array.from(text);
+  return cps.length > budget ? cps.slice(0, budget).join('') + '…' : text;
+}
+
+/** 行尾截断：过长时截中段保尾部（长路径保住文件名） */
+export function truncateTailCp(text: string, budget: number): string {
+  const cps = Array.from(text);
+  if (cps.length <= budget) return text;
+  const head = Math.max(4, Math.floor(budget / 3)); // 头短尾长：保住文件名
+  const tail = budget - head;
+  return `${cps.slice(0, head).join('')}…${cps.slice(cps.length - tail).join('')}`;
+}
+
+/**
+ * Phase 行两段式渲染（飞书专用 helper，不动 presentationPhaseTitle 的领域语义）：
+ * frozen（存在更新 Phase）→ 纯标题；current → 标题 + 行尾动作/结果。
+ */
+function renderPhaseLine(
+  phase: PresentationPhase,
+  isCurrent: boolean,
+): { text: string; gray?: string } {
+  const title = truncateCp(phase.goal.split('\n')[0], PHASE_TITLE_BUDGET);
+  if (!isCurrent) return { text: title };
+  // 开局裸动作行：整行灰色的当前动作（需求 2），无标题前缀
+  if (
+    phase.source === 'fallback' &&
+    phase.status === 'running' &&
+    (!phase.currentAction || phase.currentAction === phase.goal)
+  ) {
+    return { text: '', gray: title };
+  }
+  let tail: string | undefined;
+  if (phase.status === 'running') {
+    tail =
+      phase.currentAction && phase.currentAction !== phase.goal
+        ? phase.currentAction
+        : undefined;
+  } else if (phase.status !== 'pending') {
+    tail =
+      phase.outcome ??
+      (phase.status === 'cancelled'
+        ? '已取消'
+        : phase.status === 'failed'
+          ? '执行失败'
+          : phase.currentAction);
+  }
+  return {
+    text: title,
+    gray: tail ? truncateTailCp(tail, PHASE_TAIL_BUDGET) : undefined,
+  };
+}
+
 function visiblePresentationSteps(
   state: ProgressPresentationState,
 ): ProgressStep[] {
-  return state.phases.slice(-3).map((phase) => ({
-    title: presentationPhaseTitle(phase),
-    presentationId: phase.id,
-    isPlan: phase.source === 'plan',
-    ts: Date.now(),
-  }));
+  // 两阶段窗口：narration/fallback 一旦出现即为窗口唯一来源（永久切换）；此前 plan 照旧展示
+  const display = state.phases.filter((phase) => phase.source !== 'plan');
+  const windowPhases = (display.length > 0 ? display : state.phases).slice(-3);
+  const lastIndex = windowPhases.length - 1;
+  return windowPhases.map((phase, index) => {
+    if (phase.source === 'plan') {
+      return {
+        title: presentationPhaseTitle(phase),
+        presentationId: phase.id,
+        isPlan: true,
+        ts: Date.now(),
+      };
+    }
+    const line = renderPhaseLine(phase, index === lastIndex);
+    return {
+      title: line.text,
+      grayTail: line.gray,
+      narrationFull:
+        phase.source === 'narration' ? phase.narrationText : undefined,
+      presentationId: phase.id,
+      ts: Date.now(),
+    };
+  });
 }
 
 /** 截断 step 标题：取第一行，最多 80 字符 */
@@ -200,6 +282,36 @@ function colorizeDiff(text: string): string {
 /** 将 step 转为卡片 element */
 function stepToElement(step: ProgressStep): unknown {
   const title = truncateTitle(step.title);
+  if (step.narrationFull) {
+    // Phase 行：可展开查看 narration 全文（展开区只放全文，不放工具历史）。
+    // header 为 plain_text（R1：行内灰色待实测支持后升级），行尾动作用 · 拼接。
+    const headerTitle = step.grayTail ? `${title} · ${step.grayTail}` : title;
+    const body =
+      Array.from(step.narrationFull).length > NARRATION_CARD_LIMIT
+        ? `${truncateCp(step.narrationFull, NARRATION_CARD_LIMIT)}\n\n<font color="grey">（全文见过程记录）</font>`
+        : step.narrationFull;
+    return {
+      tag: 'collapsible_panel',
+      expanded: false,
+      background_color: 'grey',
+      header: {
+        title: { tag: 'plain_text', content: headerTitle },
+        vertical_align: 'center',
+      },
+      vertical_spacing: '2px',
+      padding: '4px 8px 4px 8px',
+      elements: [{ tag: 'markdown', content: body }],
+    };
+  }
+  if (step.grayTail) {
+    // 无 narration 全文的 Phase 行（fallback 等）：单行 + 灰色行尾；无标题时整行灰色
+    return {
+      tag: 'markdown',
+      content: title
+        ? `${title} <font color="grey">${step.grayTail}</font>`
+        : `<font color="grey">${step.grayTail}</font>`,
+    };
+  }
   if (step.detail) {
     return {
       tag: 'collapsible_panel',
@@ -454,6 +566,9 @@ export class FeishuChannel implements Channel {
       allSteps: ProgressStep[]; // 完整历史（给网页用，不 shift）
       frame: number;
       startTime: number;
+      /** C9 patch 串行化：在飞时置位，pending 表示需要再发一轮（内容永远取发送时刻最新状态） */
+      patchInFlight?: boolean;
+      patchPending?: boolean;
     }
   >();
 
@@ -657,27 +772,67 @@ export class FeishuChannel implements Channel {
             ? quietProgress
             : cliMode === 'codex';
 
-        if (quiet) {
-          // 安静模式：包装成卡片步骤，继续走 progressCards 路径
-          const firstLine = fullText.split('\n')[0];
-          title = `💬 ${firstLine.length > 80 ? firstLine.slice(0, 80) + '…' : firstLine}`;
-          detail =
-            fullText.length > firstLine.length || firstLine.length > 80
-              ? fullText
-              : undefined;
-          // 不 return，下面走 progressCards 创建/更新
-        } else {
-          // 默认模式：独立发消息
+        // 统一链路：narration 无论 quiet 与否都进卡片 Phase（v4 拍板）；
+        // sendNarrationSeparately = !quiet，非 quiet 额外独立发一条（现有行为保留）
+        if (!quiet) {
           logger.info(
             { jid, len: fullText.length, preview: fullText.slice(0, 80) },
-            '[progress] 中间叙述消息，独立发送（不进进度卡片）',
+            '[progress] 中间叙述：独立发送 + 进卡片 Phase',
           );
           const chatId = chatIdFromJid(jid);
           this.sendPlainOrCard(chatId, fullText).catch((err) =>
             logger.debug({ err, jid }, '中间叙述消息发送失败'),
           );
+        }
+
+        // 过程记录页保留全文（allSteps 双写）
+        const firstLine = fullText.split('\n')[0];
+        const narrationRecord: ProgressStep = {
+          title: `💬 ${firstLine.length > 80 ? firstLine.slice(0, 80) + '…' : firstLine}`,
+          detail:
+            fullText.length > firstLine.length || firstLine.length > 80
+              ? fullText
+              : undefined,
+          ts: Date.now(),
+        };
+        const visibleNow = visiblePresentationSteps(phaseState);
+
+        if (!this.progressCards.has(jid)) {
+          // narration 先于一切工具到达：直接以 Phase 视图建卡
+          this.progressCards.set(jid, {
+            messageId: '',
+            sessionId: '',
+            steps: [],
+            allSteps: [],
+            frame: 0,
+            startTime: Date.now(),
+          });
+          const chatId = chatIdFromJid(jid);
+          await Promise.all([
+            this.removeTypingReaction(jid),
+            this.createProgressCard(
+              jid,
+              chatId,
+              visibleNow[0] ?? narrationRecord,
+              narrationRecord,
+            ),
+          ]);
           return;
         }
+        const narrationCard = this.progressCards.get(jid);
+        if (!narrationCard) return;
+        narrationCard.steps = visibleNow;
+        narrationCard.allSteps.push(narrationRecord);
+        if (narrationCard.allSteps.length > 500) narrationCard.allSteps.shift();
+        upsertSession(
+          narrationCard.sessionId,
+          progressRecordSteps(narrationCard.allSteps),
+          narrationCard.startTime,
+        );
+        if (!narrationCard.messageId) return; // 卡片创建中：steps 已更新，创建完成后统一 patch
+        this.schedulePatch(jid);
+        this.resetSpinnerTimer(jid);
+        return;
       }
 
       let technicalDetail: string | undefined;
@@ -818,17 +973,7 @@ export class FeishuChannel implements Channel {
         }
         if (!existing.messageId) return;
         existing.frame++;
-        await this.client.im.message.patch({
-          path: { message_id: existing.messageId },
-          data: {
-            content: buildProgressCard(
-              existing.steps,
-              existing.frame,
-              existing.startTime,
-              existing.sessionId,
-            ),
-          },
-        });
+        this.schedulePatch(jid);
         this.resetSpinnerTimer(jid);
         return;
       }
@@ -1399,6 +1544,41 @@ export class FeishuChannel implements Channel {
     );
   }
 
+  /**
+   * C9 patch 串行化：同一卡片任意时刻至多一个 patch 在飞；期间新请求只置 pending，
+   * 完成后再补一轮。内容永远在发送时刻从 entry 最新状态构建，天然"旧不覆盖新"。
+   */
+  private schedulePatch(jid: string): void {
+    const entry = this.progressCards.get(jid);
+    if (!entry?.messageId) return;
+    if (entry.patchInFlight) {
+      entry.patchPending = true;
+      return;
+    }
+    entry.patchInFlight = true;
+    void (async () => {
+      do {
+        entry.patchPending = false;
+        try {
+          await this.client.im.message.patch({
+            path: { message_id: entry.messageId },
+            data: {
+              content: buildProgressCard(
+                entry.steps,
+                entry.frame,
+                entry.startTime,
+                entry.sessionId,
+              ),
+            },
+          });
+        } catch (err) {
+          logger.debug({ err, jid }, '[card] patch 失败（串行队列，非致命）');
+        }
+      } while (entry.patchPending && this.progressCards.get(jid) === entry);
+      entry.patchInFlight = false;
+    })();
+  }
+
   private clearSpinnerTimer(jid: string): void {
     this.spinnerStopped.add(jid); // 防止正在运行的 callback 再次调度
     const timer = this.spinnerTimers.get(jid);
@@ -1511,9 +1691,9 @@ export class FeishuChannel implements Channel {
     initialStep: ProgressStep,
     initialRecordStep: ProgressStep = initialStep,
   ): Promise<void> {
-    // 飞书每次 patch 都会整卡重排。按秒刷新耗时会让长文案持续跳动，
-    // 分钟级刷新既能保留长任务存活感，也不会制造无意义动画。
-    const SPINNER_INTERVAL_MS = 60_000;
+    // 需求：计时每秒刷新。防跳动依据：Phase 行结构只在离散事件时变化，
+    // 秒级 patch 仅计时文字在变；patch 一律走 schedulePatch 串行队列（C9）。
+    const SPINNER_INTERVAL_MS = 1_000;
     const SPINNER_MAX_DURATION_MS = 60 * 60 * 1000; // 60 分钟硬上限
 
     const now = Date.now();
@@ -1620,21 +1800,7 @@ export class FeishuChannel implements Channel {
           }
 
           entry.frame++;
-          try {
-            await this.client.im.message.patch({
-              path: { message_id: entry.messageId },
-              data: {
-                content: buildProgressCard(
-                  entry.steps,
-                  entry.frame,
-                  entry.startTime,
-                  entry.sessionId,
-                ),
-              },
-            });
-          } catch (err) {
-            logger.debug({ err, jid }, 'Spinner 自动刷新失败（非致命）');
-          }
+          this.schedulePatch(jid);
 
           if (!this.spinnerStopped.has(jid)) {
             scheduleSpinner();

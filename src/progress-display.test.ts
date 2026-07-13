@@ -446,7 +446,7 @@ describe('reduceProgressPresentation', () => {
 
     expect((state as any).phases).toEqual([
       expect.objectContaining({
-        goal: '核对进度展示链路',
+        goal: '核对进度展示链路。',
         status: 'completed',
         categories: ['read', 'search', 'change', 'test'],
         actionSummaries: [
@@ -479,7 +479,7 @@ describe('reduceProgressPresentation', () => {
 
     expect((state as any).phases).toEqual([
       expect.objectContaining({
-        goal: '核对进度展示链路',
+        goal: '核对进度展示链路。',
         source: 'narration',
         categories: ['read', 'search'],
         toolCallIds: ['late-read', 'late-grep'],
@@ -508,7 +508,7 @@ describe('reduceProgressPresentation', () => {
 
     expect((state as any).phases).toEqual([
       expect.objectContaining({
-        goal: '核对目标聊天记录',
+        goal: '核对目标聊天记录。',
         status: 'completed',
         outcome: '找到 1 条匹配消息',
       }),
@@ -544,7 +544,7 @@ describe('reduceProgressPresentation', () => {
 
     expect((state as any).phases).toEqual([
       expect.objectContaining({
-        goal: '核对目标聊天记录',
+        goal: '核对目标聊天记录。',
         categories: ['communicate'],
         outcome: '找到 1 条匹配消息',
       }),
@@ -589,7 +589,7 @@ describe('reduceProgressPresentation', () => {
     });
 
     expect((state as any).phases[0]).toMatchObject({
-      goal: '汇总本地三次计时结果',
+      goal: '汇总本地三次计时结果。',
       outcome: '已获得 3 个计时值',
     });
   });
@@ -683,7 +683,7 @@ describe('reduceProgressPresentation', () => {
 
     expect((state as any).phases).toEqual([
       expect.objectContaining({
-        goal: '验证失败状态展示',
+        goal: '验证失败状态展示。',
         status: 'failed',
         outcome: '命令执行失败（退出码 7）',
       }),
@@ -710,9 +710,9 @@ describe('reduceProgressPresentation', () => {
     const phases = (state as any).phases;
     expect(phases).toHaveLength(4);
     expect(phases.slice(-3).map((phase: any) => phase.goal)).toEqual([
-      '阶段 2',
-      '阶段 3',
-      '阶段 4',
+      '阶段 2。',
+      '阶段 3。',
+      '阶段 4。',
     ]);
     expect(phases.every((phase: any) => phase.toolCallIds.length === 10)).toBe(
       true,
@@ -720,14 +720,24 @@ describe('reduceProgressPresentation', () => {
   });
 
   it.each([
-    ['部署已确认生效：新 PID 62099，飞书 WebSocket 已连接。', '部署已确认生效'],
-    ['真链路环境已确认：账号有效，测试群可用。', '真链路环境已确认'],
-    ['RPC-01 已真实跑通：四类工具状态全部闭环。', 'RPC-01 已真实跑通'],
+    [
+      '部署已确认生效：新 PID 62099，飞书 WebSocket 已连接。',
+      '部署已确认生效：新 PID 62099，飞书 WebSocket 已连接。',
+    ],
+    [
+      '真链路环境已确认：账号有效，测试群可用。',
+      '真链路环境已确认：账号有效，测试群可用。',
+    ],
+    [
+      'RPC-01 已真实跑通：四类工具状态全部闭环。',
+      'RPC-01 已真实跑通：四类工具状态全部闭环。',
+    ],
     [
       '继续。构建物已经完整复制并逐文件一致；我现在只核验重启是否生效。',
-      '构建物已经完整复制并逐文件一致',
+      '继续。构建物已经完整复制并逐文件一致；我现在只核验重启是否生效。',
     ],
-  ])('从真实过程说明提取短阶段名：%s', (narration, expectedGoal) => {
+    ['先看第一行。\n第二行不进标题。', '先看第一行。'],
+  ])('标题保留 narration 原文首行不做智能摘要：%s', (narration, expectedGoal) => {
     let state = reduceProgressPresentation(createProgressPresentationState(), {
       kind: 'narration',
       text: narration,
@@ -741,6 +751,121 @@ describe('reduceProgressPresentation', () => {
       ),
     });
     expect((state as any).phases[0].goal).toBe(expectedGoal);
+  });
+
+  it('narration 即时建 Phase，无需等待首个工具', () => {
+    const state = reduceProgressPresentation(
+      createProgressPresentationState(),
+      { kind: 'narration', text: '我先梳理回调链路。\n细节：三处调用点。' },
+    );
+    expect((state as any).phases).toHaveLength(1);
+    expect((state as any).phases[0]).toMatchObject({
+      source: 'narration',
+      goal: '我先梳理回调链路。',
+      narrationText: '我先梳理回调链路。\n细节：三处调用点。',
+      hasToolActivity: false,
+    });
+  });
+
+  it('连续 narration 无工具活动时合并进同一 Phase，全文追加', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'narration',
+      text: '第一段思路。',
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'narration',
+      text: '第二段补充。',
+    });
+    expect((state as any).phases).toHaveLength(1);
+    expect((state as any).phases[0].goal).toBe('第一段思路。');
+    expect((state as any).phases[0].narrationText).toBe(
+      '第一段思路。\n\n第二段补充。',
+    );
+  });
+
+  it.each([
+    [
+      'ToolSearch 早退分支',
+      () => started('ToolSearch', { query: 'select:Read' }, 'ts-1'),
+    ],
+    [
+      'plan 控制工具 TaskCreate',
+      () => started('TaskCreate', { subject: '新任务' }, 'tc-1'),
+    ],
+    ['无 toolCallId 的工具事件', () => started('Grep', { pattern: 'x' })],
+    [
+      'completion-only 事件（找不到 started）',
+      () =>
+        ({
+          provider: 'claude',
+          lifecycle: 'completed',
+          toolName: 'tool_result',
+          toolCallId: 'orphan-1',
+        }) as StructuredProgress,
+    ],
+  ])('narration 被 %s 隔开后新 narration 不合并', (_label, makeProgress) => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'narration',
+      text: '第一段思路。',
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: makeProgress(),
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'narration',
+      text: '第二段思路。',
+    });
+    const narrationPhases = (state as any).phases.filter(
+      (phase: any) => phase.source === 'narration',
+    );
+    expect(narrationPhases).toHaveLength(2);
+    expect(narrationPhases[0].narrationText).toBe('第一段思路。');
+    expect(narrationPhases[1].narrationText).toBe('第二段思路。');
+  });
+
+  it('活跃 narration Phase 存在时工具归属 narration 而非 running plan', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'tool',
+      progress: started(
+        'TodoWrite',
+        { todos: [{ content: '补齐单元测试', status: 'in_progress' }] },
+        'todo-1',
+      ),
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'narration',
+      text: '先修复回调重试。',
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started('Bash', { command: 'npm test' }, 'test-1'),
+    });
+    const narrationPhase = (state as any).phases.find(
+      (phase: any) => phase.source === 'narration',
+    );
+    expect(narrationPhase.currentAction).toBe('正在运行测试');
+    expect(state.steps.at(-1)?.phaseId).toBe(narrationPhase.id);
+    const planPhase = (state as any).phases.find(
+      (phase: any) => phase.source === 'plan',
+    );
+    expect(planPhase.currentAction).toBeUndefined();
+  });
+
+  it('开局 fallback 行的 goal 跟随最新动作（纯动作单行）', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'tool',
+      progress: started('Read', { file_path: '/tmp/a.py' }, 'read-1'),
+    });
+    state = complete(state, 'read-1');
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started('Grep', { pattern: 'needle' }, 'grep-1'),
+    });
+    const fallback = (state as any).phases[0];
+    expect(fallback.source).toBe('fallback');
+    expect(fallback.goal).toBe('正在搜索“needle”');
+    expect(fallback.currentAction).toBe('正在搜索“needle”');
   });
 
   it('真实 TodoWrite 计划优先保留原状态，不从命令猜未来步骤', () => {
@@ -799,7 +924,9 @@ describe('reduceProgressPresentation', () => {
       progress: started('Grep', { pattern: 'opus-4.8' }),
     });
     expect(state.steps).toHaveLength(1);
-    expect(state.steps[0].phase).toBe('我先核对模型配置为什么没有生效');
+    expect(state.steps[0].phase).toBe(
+      '我先核对模型配置为什么没有生效。后面还有说明。',
+    );
     expect(state.steps[0].title).toBe('正在搜索“opus-4.8”');
   });
 
