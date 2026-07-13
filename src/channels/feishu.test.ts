@@ -1078,12 +1078,12 @@ describe('FeishuChannel', () => {
     });
 
     it.each([
-      ['删除线 ~~', '/tmp/~~hidden~~/file.ts', '~~'],
-      ['粗体 __', '/tmp/__bold__/file.ts', '__'],
+      ['删除线 ~~', '/tmp/~~hidden~~/file.ts', '~~', '&#126;&#126;'],
+      ['粗体 __', '/tmp/__bold__/file.ts', '__', '&#95;&#95;'],
     ])(
-      '路径中的飞书 markdown 成对语法（%s）被零宽空格中和',
-      async (_label, filePath, pair) => {
-        const jid = `fs:oc_progress_md_neutralize_${pair === '~~' ? 'tilde' : 'underscore'}`;
+      '路径中的飞书 markdown 语法（%s）被 HTML 实体转义',
+      async (_label, filePath, pair, entity) => {
+        const jid = `fs:oc_progress_md_escape_${pair === '~~' ? 'tilde' : 'underscore'}`;
         await channel.sendMessage(
           jid,
           JSON.stringify({
@@ -1101,11 +1101,85 @@ describe('FeishuChannel', () => {
 
         const patchArg = mockPatch.mock.calls.at(-1)?.[0];
         const content: string = patchArg?.data?.content ?? '{}';
-        // 成对字符之间插入 U+200B，原始成对序列不再出现
         expect(content).not.toContain(pair);
-        expect(content).toContain(`${pair[0]}\u200B${pair[1]}`);
+        expect(content).toContain(entity);
       },
     );
+
+    it('narration 标题的 *斜体*/链接/<at> 全部实体化，不进 markdown 语法', async () => {
+      const jid = 'fs:oc_progress_md_escape_narration';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '💬 *italic* [x](https://example.com) <at id=all></at> 收尾。',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'narration',
+          },
+        }),
+        { isProgress: true },
+      );
+      // 有工具活动后 narration Phase 冻结为 markdown 标题行，走转义路径
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '💬 下一阶段。',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'narration',
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const patchArg = mockPatch.mock.calls.at(-1)?.[0];
+      const content: string = patchArg?.data?.content ?? '{}';
+      // plain_text header 不解析 markdown 可保留原文；markdown 元素必须全实体化
+      const markdownContents: string[] = [];
+      const collect = (node: unknown): void => {
+        if (Array.isArray(node)) return node.forEach(collect);
+        if (node && typeof node === 'object') {
+          const el = node as Record<string, unknown>;
+          if (el.tag === 'markdown' && typeof el.content === 'string')
+            markdownContents.push(el.content);
+          Object.values(el).forEach(collect);
+        }
+      };
+      collect(JSON.parse(content));
+      const joined = markdownContents.join('\n');
+      expect(joined).not.toContain('<at id=all>');
+      expect(joined).not.toContain('[x](');
+      expect(joined).toContain('&lt;at id=all&gt;');
+      expect(joined).toContain('&#42;italic&#42;');
+      expect(joined).toContain('&#91;x&#93;&#40;');
+    });
+
+    it('plan 任务标题的 markdown 语法同样实体化', async () => {
+      const jid = 'fs:oc_progress_md_escape_plan';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '📋 计划',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'TodoWrite',
+            toolCallId: 'todo-md',
+            input: {
+              todos: [{ content: '<at id=all></at> *加急* 任务', status: 'in_progress' }],
+            },
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const patchArg = mockPatch.mock.calls.at(-1)?.[0];
+      const content: string = patchArg?.data?.content ?? '{}';
+      expect(content).not.toContain('<at id=all>');
+      expect(content).toContain('&lt;at id=all&gt;');
+    });
 
     it('清理时将缺少结果的工具收口为结果未知', async () => {
       const jid = 'fs:oc_progress_unknown_result';

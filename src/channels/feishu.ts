@@ -186,13 +186,26 @@ const PHASE_ACTION_BUDGET = 48;
 const NARRATION_CARD_LIMIT = 2000;
 
 /**
- * 中和飞书 markdown 成对语法（~~删除线、__粗体、**加粗、``代码）：
- * 在成对字符之间插入零宽空格（U+200B），视觉不变但不再被解析为格式标记。
- * 不依赖飞书未文档化的反斜杠转义，也不靠字符白名单猜"什么是安全的"——
- * 所有进入 markdown 元素的 title/grayTail 统一过这一层（review R2 P1）
+ * 飞书 markdown 动态文本转义（review R3 P1，官方文档要求特殊字符用
+ * HTML 实体）：把 markdown 语法字符和 HTML 标签定界符全部实体化，
+ * 动态文本（narration/plan/todo 标题、路径动作）只能以纯文本渲染，
+ * *斜体*、[链接](url)、<at id=all> 一概失效。代码自身生成的 <font>
+ * wrapper 在转义之后拼接，不受影响。plain_text header 不解析 markdown，
+ * 不走这层。& 必须最先转义
  */
-export function neutralizeCardMarkdown(text: string): string {
-  return text.replace(/([~_*`])(?=\1)/gu, '$1\u200B');
+export function escapeCardMarkdownText(text: string): string {
+  return text
+    .replace(/&/gu, '&amp;')
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;')
+    .replace(/\*/gu, '&#42;')
+    .replace(/~/gu, '&#126;')
+    .replace(/_/gu, '&#95;')
+    .replace(/`/gu, '&#96;')
+    .replace(/\[/gu, '&#91;')
+    .replace(/\]/gu, '&#93;')
+    .replace(/\(/gu, '&#40;')
+    .replace(/\)/gu, '&#41;');
 }
 
 export function truncateCp(text: string, budget: number): string {
@@ -308,28 +321,27 @@ function colorizeDiff(text: string): string {
 function stepToElements(step: ProgressStep): unknown[] {
   const isPhaseLine =
     step.narrationFull !== undefined || step.grayTail !== undefined;
-  // 进 markdown 前统一中和成对语法，路径/叙述文本无法注入格式标记
-  const title = neutralizeCardMarkdown(
-    isPhaseLine ? step.title : truncateTitle(step.title),
-  );
+  // markdown 插值一律用实体转义版；plain_text header 用原文（不解析 markdown）
+  const rawTitle = isPhaseLine ? step.title : truncateTitle(step.title);
+  const title = escapeCardMarkdownText(rawTitle);
   const grayTail =
     step.grayTail === undefined
       ? undefined
-      : neutralizeCardMarkdown(step.grayTail);
+      : escapeCardMarkdownText(step.grayTail);
   if (step.narrationFull) {
     // Phase 行：可展开查看 narration 全文（展开区只放全文，不放工具历史）。
     // header 为 plain_text（R1：行内灰色待实测支持后升级）；
     // 动作不再拼进 header，独立一行灰色跟在面板下方
     const body =
       Array.from(step.narrationFull).length > NARRATION_CARD_LIMIT
-        ? `${truncateCp(step.narrationFull, NARRATION_CARD_LIMIT)}\n\n<font color="grey">（全文见过程记录）</font>`
-        : step.narrationFull;
+        ? `${escapeCardMarkdownText(truncateCp(step.narrationFull, NARRATION_CARD_LIMIT))}\n\n<font color="grey">（全文见过程记录）</font>`
+        : escapeCardMarkdownText(step.narrationFull);
     const panel = {
       tag: 'collapsible_panel',
       expanded: false,
       background_color: 'grey',
       header: {
-        title: { tag: 'plain_text', content: title },
+        title: { tag: 'plain_text', content: rawTitle },
         vertical_align: 'center',
       },
       vertical_spacing: '2px',
