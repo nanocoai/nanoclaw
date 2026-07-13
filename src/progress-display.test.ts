@@ -343,6 +343,53 @@ describe('classifyProgressAction', () => {
 
   it.each([
     [
+      'URL userinfo 凭证',
+      'https://admin:password@example.com/private/file.txt',
+      '正在读取 file.txt',
+    ],
+    [
+      '无 scheme 的 user:pass@ 形态目录段',
+      '/tmp/admin:password@example.com/file.txt',
+      '正在读取 file.txt',
+    ],
+    [
+      'Bearer 形态目录段',
+      '/data/Bearer abcdefgh12345678/file.txt',
+      '正在读取 file.txt',
+    ],
+  ])('凭证红线：%s 退回纯文件名不泄露', (_label, filePath, expected) => {
+    const action = classifyProgressAction(
+      started('Read', { file_path: filePath }),
+    );
+    expect(action.title).toBe(expected);
+    expect(action.title).not.toContain('password');
+    expect(action.title).not.toContain('abcdefgh');
+  });
+
+  it.each([
+    ['font 标签注入', '/tmp/<font color=red>/owned.ts', '正在读取 owned.ts'],
+    [
+      'markdown 链接注入',
+      '/tmp/[x](http://e.com)/owned.ts',
+      '正在读取 owned.ts',
+    ],
+    ['反引号注入', '/tmp/`code`/owned.ts', '正在读取 owned.ts'],
+  ])('注入拦截：%s 目录段整条退回纯文件名', (_label, filePath, expected) => {
+    const action = classifyProgressAction(
+      started('Read', { file_path: filePath }),
+    );
+    expect(action.title).toBe(expected);
+  });
+
+  it('文件名本身含注入字符时放弃对象展示', () => {
+    const action = classifyProgressAction(
+      started('Read', { file_path: '/tmp/<b>owned</b>.ts' }),
+    );
+    expect(action.title).toBe('正在读取文件');
+  });
+
+  it.each([
+    [
       'Bash rg',
       "rg -n -C 2 'turn_end' src/progress-display.ts",
       '正在 src/progress-display.ts 中搜索“turn_end”',

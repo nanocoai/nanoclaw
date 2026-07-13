@@ -212,6 +212,12 @@ function mcpToolOf(progress: StructuredProgress): string {
 const SENSITIVE_FILE_NAME =
   /^(?:\.env(?:\..*)?|.*(?:credential|password|secret|token|private[_-]?key).*)$/iu;
 
+/**
+ * 展示安全字符白名单：进卡片 markdown 的路径/文件名只允许这些字符，
+ * 拦住 <font> 标签与 [ ]( ) * ` 等 markdown 结构注入（… 是截断/ID 降级产物）
+ */
+const DISPLAY_SAFE_CHARS = /^[\p{L}\p{N} ._~+@=,…-]*$/u;
+
 function safeBasename(value: string): string | undefined {
   const raw = value.trim().replace(/[?#].*$/u, '');
   if (!raw || /^-/u.test(raw)) return undefined;
@@ -223,7 +229,8 @@ function safeBasename(value: string): string | undefined {
   if (
     !safe ||
     safe.includes('[REDACTED') ||
-    /相关标识|内部服务|相关文件/u.test(safe)
+    /相关标识|内部服务|相关文件/u.test(safe) ||
+    !DISPLAY_SAFE_CHARS.test(safe)
   )
     return undefined;
   return safe;
@@ -240,6 +247,15 @@ const PATH_DISPLAY_BUDGET = 48;
 function displayPath(value: string): string | undefined {
   const raw = value.trim().replace(/[?#].*$/u, '');
   if (!raw || /^-/u.test(raw)) return undefined;
+  // 凭证红线（review R1 P1）：redactProgressText 的 URL userinfo 等模式依赖
+  // 完整字符串匹配，拆段后不再可靠。整串脱敏发生任何改写、带 URI scheme、
+  // 或含 user:pass@ 形态，一律退回纯 basename，绝不把目录段拼进卡片
+  if (
+    redactProgressText(raw) !== raw ||
+    /^[a-z][a-z0-9+.-]*:\/\//iu.test(raw) ||
+    /[^\\/\s]+:[^\\/\s]*@/u.test(raw)
+  )
+    return safeBasename(raw);
   const segments = raw.split(/[\\/]/u).filter(Boolean);
   const name = segments.at(-1)?.trim();
   if (!name || name.length > 128 || !/[\p{L}\p{N}._-]/u.test(name))
@@ -257,7 +273,10 @@ function displayPath(value: string): string | undefined {
       (segment) =>
         !segment ||
         segment.includes('[REDACTED') ||
-        /内部服务|相关文件/u.test(segment),
+        /内部服务|相关文件/u.test(segment) ||
+        // 展示安全白名单（review R1 P1）：目录段含 <>&[]()*` 等字符会注入
+        // 飞书 markdown/标签，整条退回纯 basename（basename 同样受白名单约束）
+        !DISPLAY_SAFE_CHARS.test(segment),
     )
   )
     return safeBasename(name);

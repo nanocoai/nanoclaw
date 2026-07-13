@@ -1407,7 +1407,7 @@ describe('FeishuChannel', () => {
       expect(entry.steps[1].title).toBe('第二阶段目标。');
     });
 
-    it('双预算截断：标题 48/行尾 18 code point，长路径保尾部', () => {
+    it('双行预算：标题 48/动作行 48 code point，长路径保尾部', () => {
       const longTitle = '这是一段非常长的阶段说明文字'.repeat(10);
       const truncated = truncateCp(longTitle, 48);
       expect(Array.from(truncated)).toHaveLength(49); // 48 + '…'
@@ -1415,14 +1415,51 @@ describe('FeishuChannel', () => {
       // emoji 按 code point 计数不被截断成半个
       const emojiText = '🚀'.repeat(50);
       expect(Array.from(truncateCp(emojiText, 48))).toHaveLength(49);
-      // 行尾截中段保尾部（文件名可见）
-      const longPath = '正在读取 server/backend/app/moss/runtime/callback.py';
-      const tail = truncateTailCp(longPath, 18);
+      // 动作行截中段保尾部（文件名可见），emoji 不被切半
+      const longPath = `正在读取 ${'📁'.repeat(20)}/server/backend/app/moss/runtime/callback.py`;
+      const tail = truncateTailCp(longPath, 48);
       expect(tail).toContain('…');
       expect(tail.endsWith('callback.py')).toBe(true);
-      expect(Array.from(tail).length).toBeLessThanOrEqual(19);
+      expect(Array.from(tail).length).toBeLessThanOrEqual(49);
       // 预算内原样返回
-      expect(truncateTailCp('短动作', 18)).toBe('短动作');
+      expect(truncateTailCp('短动作', 48)).toBe('短动作');
+    });
+
+    it('超长动作贯穿到卡片：动作行按 48cp 截中段保尾', async () => {
+      const jid = 'fs:oc_progress_action_budget';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '💬 核对长路径动作行预算。',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'narration',
+          },
+        }),
+        { isProgress: true },
+      );
+      const longDir = 'very-long-directory-name'.repeat(4);
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Read',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Read',
+            toolCallId: 'read-budget',
+            input: { file_path: `/workspace/${longDir}/deep/callback.py` },
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const entry = (channel as any).progressCards.get(jid);
+      const phaseRow = entry.steps.at(-1);
+      expect(phaseRow.grayTail).toContain('…');
+      expect(phaseRow.grayTail.endsWith('callback.py')).toBe(true);
+      expect(Array.from(phaseRow.grayTail).length).toBeLessThanOrEqual(49);
     });
 
     it('patch 串行：在飞期间的新事件合并为一轮补发，内容取最新状态', async () => {
