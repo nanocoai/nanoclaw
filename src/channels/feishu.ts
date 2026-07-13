@@ -356,21 +356,52 @@ function truncateTitle(title: string): string {
   return cps.length > 80 ? cps.slice(0, 80).join('') + '…' : firstLine;
 }
 
+/** 渲染单条 diff 行：转义正文 + 自有红绿 font 标签（detail 动态文本不允许注入，review R4 P1） */
+function renderDetailLine(line: string, escaped: string): string {
+  if (/^\+\s?/u.test(line)) return `<font color="green">${escaped}</font>`;
+  if (/^-\s?/u.test(line)) return `<font color="red">${escaped}</font>`;
+  return escaped;
+}
+
 /**
- * 对 diff 内容着色：+ 行绿色，- 行红色。
- * 先按原始行判加减类型，再对每行正文实体转义，最后包自有 font 标签——
- * detail 是工具产出的动态文本，同样不允许注入 markdown/@all（review R4 P1）
+ * detail 正文按"最终 markdown 产物字节"预算生成（review R6 P1）：
+ * 逐行累加"转义正文 + 自有 font 开闭标签 + 换行"的 UTF-8 字节，达到
+ * 预算即停——着色标签开销不再漏算（1000 行单字符 + 的最坏形态曾把
+ * 6KB 正文膨胀到 33KB）。截断时追加灰色提示（review R6 P2）
  */
-function colorizeDiff(text: string): string {
-  return text
-    .split('\n')
-    .map((line) => {
-      const escaped = escapeCardMarkdownText(line);
-      if (/^\+\s?/u.test(line)) return `<font color="green">${escaped}</font>`;
-      if (/^-\s?/u.test(line)) return `<font color="red">${escaped}</font>`;
-      return escaped;
-    })
-    .join('\n');
+export function buildDetailBody(detail: string, byteBudget: number): string {
+  const rendered: string[] = [];
+  let bytes = 0;
+  let truncated = false;
+  for (const line of detail.split('\n')) {
+    let escaped = escapeCardMarkdownText(line);
+    let finalLine = renderDetailLine(line, escaped);
+    let cost =
+      Buffer.byteLength(finalLine, 'utf8') + (rendered.length > 0 ? 1 : 0);
+    if (bytes + cost > byteBudget) {
+      // 首行就超预算的巨型单行：按剩余预算截行内正文（预留标签开销），不整行丢弃
+      if (rendered.length === 0) {
+        const inner = truncateByEscapedBytes(
+          line,
+          Math.max(0, byteBudget - 64),
+        ).text;
+        if (inner) {
+          escaped = escapeCardMarkdownText(inner);
+          finalLine = renderDetailLine(line, escaped);
+          cost = Buffer.byteLength(finalLine, 'utf8');
+          if (bytes + cost <= byteBudget) rendered.push(finalLine);
+        }
+      }
+      truncated = true;
+      break;
+    }
+    rendered.push(finalLine);
+    bytes += cost;
+  }
+  const body = rendered.join('\n');
+  return truncated
+    ? `${body}\n\n<font color="grey">内容已截断，完整内容见过程记录</font>`
+    : body;
 }
 
 /** 将 step 转为卡片 element 列表（当前 Phase 为标题行 + 动作独立一行） */
@@ -447,9 +478,7 @@ function stepToElements(step: ProgressStep): unknown[] {
         elements: [
           {
             tag: 'markdown',
-            content: colorizeDiff(
-              truncateByEscapedBytes(step.detail, PANEL_BODY_BYTE_BUDGET).text,
-            ),
+            content: buildDetailBody(step.detail, PANEL_BODY_BYTE_BUDGET),
           },
         ],
       },

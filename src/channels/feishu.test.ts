@@ -1369,6 +1369,41 @@ describe('FeishuChannel', () => {
       }
     });
 
+    it('1000 行短 diff（+/-）的最终卡片字节数低于 30KB 且带截断提示', async () => {
+      process.env.NANOCLAW_READABLE_PROGRESS = '0';
+      try {
+        const jid = 'fs:oc_progress_byte_budget_short_lines';
+        const lines: string[] = [];
+        for (let index = 0; index < 1000; index += 1)
+          lines.push(index % 2 === 0 ? '+' : '-');
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '🔧 apply_patch',
+            detail: lines.join('\n'),
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'Bash',
+              toolCallId: 'detail-short-lines',
+              input: { command: 'apply_patch < many.diff' },
+            },
+          }),
+          { isProgress: true },
+        );
+
+        const createArg = mockCreate.mock.calls.at(-1)?.[0];
+        const content: string = createArg?.data?.content ?? '{}';
+        expect(Buffer.byteLength(content, 'utf8')).toBeLessThan(30 * 1024);
+        expect(content).toContain('内容已截断，完整内容见过程记录');
+        // 预算内的行仍保留自有着色标签
+        expect(content).toContain('<font color=\\"green\\">&#43;</font>');
+        expect(content).toContain('<font color=\\"red\\">&#45;</font>');
+      } finally {
+        delete process.env.NANOCLAW_READABLE_PROGRESS;
+      }
+    });
+
     it('清理时将缺少结果的工具收口为结果未知', async () => {
       const jid = 'fs:oc_progress_unknown_result';
       await channel.sendMessage(
