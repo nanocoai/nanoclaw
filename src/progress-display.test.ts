@@ -998,6 +998,143 @@ describe('reduceProgressPresentation', () => {
     expect(state.steps[0].title).toBe('正在搜索“opus-4.8”');
   });
 
+  describe('非零退出码的探测语义（退出码 1 ≠ 执行失败）', () => {
+    function completeWithExit(
+      state: ReturnType<typeof createProgressPresentationState>,
+      toolCallId: string,
+      exitCode: number,
+    ) {
+      return reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: {
+          provider: 'claude',
+          lifecycle: 'completed',
+          toolName: 'tool_result',
+          toolCallId,
+          exitCode,
+        },
+      });
+    }
+
+    it.each([
+      ['Grep 工具', started('Grep', { pattern: 'needle' }, 'probe-1')],
+      [
+        'Bash rg 命令',
+        started('Bash', { command: "rg -n 'needle' src" }, 'probe-1'),
+      ],
+      [
+        'Bash grep 命令',
+        started('Bash', { command: "grep -r 'needle' ." }, 'probe-1'),
+      ],
+    ])('%s 退出码 1 渲染为"无匹配"而非失败', (_label, progress) => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        { kind: 'tool', progress },
+      );
+      state = completeWithExit(state, 'probe-1', 1);
+      expect(state.steps[0].status).toBe('completed');
+      expect(state.steps[0].title).toBe('已搜索，无匹配');
+      expect((state as any).phases[0].status).toBe('completed');
+    });
+
+    it('git diff --check 退出码 1 渲染为"发现差异"', () => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        {
+          kind: 'tool',
+          progress: started(
+            'Bash',
+            { command: 'git diff --check' },
+            'diff-1',
+          ),
+        },
+      );
+      state = completeWithExit(state, 'diff-1', 1);
+      expect(state.steps[0].status).toBe('completed');
+      expect(state.steps[0].title).toBe('已检查，发现差异');
+    });
+
+    it('搜索命令退出码 2（真实错误）仍按失败处理，用中性文案', () => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        {
+          kind: 'tool',
+          progress: started('Grep', { pattern: '[bad' }, 'err-1'),
+        },
+      );
+      state = completeWithExit(state, 'err-1', 2);
+      expect(state.steps[0].status).toBe('failed');
+      expect(state.steps[0].title).toBe('命令返回非零（退出码 2）');
+    });
+
+    it('测试命令退出码非零渲染为"测试未通过"，阶段结果同步', () => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        {
+          kind: 'tool',
+          progress: started('Bash', { command: 'npm test' }, 'red-1'),
+        },
+      );
+      state = completeWithExit(state, 'red-1', 1);
+      expect(state.steps[0].status).toBe('failed');
+      expect(state.steps[0].title).toBe('测试未通过');
+      expect((state as any).phases[0].outcome).toBe('测试未通过');
+    });
+
+    it('curl 等检查命令退出码 1 不误标为发现差异，用中性失败文案', () => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        {
+          kind: 'tool',
+          progress: started(
+            'Bash',
+            { command: 'curl -fsS http://service/health' },
+            'curl-1',
+          ),
+        },
+      );
+      state = completeWithExit(state, 'curl-1', 1);
+      expect(state.steps[0].status).toBe('failed');
+      expect(state.steps[0].title).toBe('命令返回非零（退出码 1）');
+    });
+
+    it('lifecycle=failed（无退出码）维持原失败语义', () => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        {
+          kind: 'tool',
+          progress: started('Bash', { command: 'ls /tmp' }, 'hard-1'),
+        },
+      );
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: {
+          provider: 'claude',
+          lifecycle: 'failed',
+          toolName: 'tool_result',
+          toolCallId: 'hard-1',
+        },
+      });
+      expect(state.steps[0].status).toBe('failed');
+      expect(state.steps[0].title).toBe('执行失败');
+    });
+
+    it('探测无匹配不把 narration Phase 拖成失败', () => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        { kind: 'narration', text: '确认没有残留引用。' },
+      );
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: started('Grep', { pattern: 'legacyFn' }, 'clean-1'),
+      });
+      state = completeWithExit(state, 'clean-1', 1);
+      const narrationPhase = (state as any).phases.at(-1);
+      expect(narrationPhase.status).toBe('completed');
+      expect(narrationPhase.outcome).not.toContain('失败');
+    });
+  });
+
   it('完成事件按 toolCallId 原地更新，不追加结果行', () => {
     let state = createProgressPresentationState();
     state = reduceProgressPresentation(state, {

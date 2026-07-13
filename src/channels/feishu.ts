@@ -874,6 +874,24 @@ export class FeishuChannel implements Channel {
           : next.steps.at(-1);
         const visibleSteps = visiblePresentationSteps(next);
         const toolName = structuredProgress.toolName.toLowerCase();
+        if (
+          structuredProgress.exitCode != null &&
+          structuredProgress.exitCode !== 0
+        ) {
+          // 排查锚点：非零退出码到底被渲染成了什么语义（无匹配/发现差异/测试未通过/中性失败）
+          logger.info(
+            {
+              jid,
+              toolName: structuredProgress.toolName,
+              lifecycle: structuredProgress.lifecycle,
+              exitCode: structuredProgress.exitCode,
+              category: displayStep?.category,
+              nonZeroExitMeaning: displayStep?.nonZeroExitMeaning,
+              shownTitle: displayStep?.title,
+            },
+            '[progress] 非零退出码展示语义',
+          );
+        }
         if (displayStep) {
           title = presentationStepTitle(displayStep);
         }

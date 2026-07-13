@@ -38,6 +38,8 @@ export interface ProgressAction {
   phase?: string;
   category: ProgressCategory;
   confidence: 'exact' | 'inferred' | 'fallback';
+  /** 非零退出码的探测语义：grep/rg 的 1=无匹配、diff 类的 1=发现差异，不按失败渲染 */
+  nonZeroExitMeaning?: 'no-match' | 'diff-found';
 }
 
 export interface PresentationStep extends ProgressAction {
@@ -465,7 +467,34 @@ function sanitizeUserText(text: string): string {
     .trim();
 }
 
+/** 探测型命令识别：这些命令退出码 1 是正常结果（无匹配/有差异），不是故障 */
+function nonZeroExitMeaningOf(
+  progress: StructuredProgress,
+): 'no-match' | 'diff-found' | undefined {
+  const tool = progress.toolName.toLowerCase();
+  const lower = commandOf(progress).toLowerCase();
+  if (tool === 'grep') return 'no-match';
+  if (/\b(?:rg|grep)\b/u.test(lower)) return 'no-match';
+  if (/git\s+diff\s+--check/u.test(lower) || /(^|[;&|]\s*)diff\b/u.test(lower))
+    return 'diff-found';
+  return undefined;
+}
+
 export function classifyProgressAction(
+  progress: StructuredProgress,
+  phase?: string,
+): ProgressAction {
+  const action = classifyProgressActionInner(progress, phase);
+  const meaning = nonZeroExitMeaningOf(progress);
+  // 只在分类结果与命令语义一致时标注，防止管道组合命令误标（如 curl|grep 被分类为检查服务）
+  if (meaning === 'no-match' && action.category === 'search')
+    return { ...action, nonZeroExitMeaning: meaning };
+  if (meaning === 'diff-found' && action.category === 'inspect')
+    return { ...action, nonZeroExitMeaning: meaning };
+  return action;
+}
+
+function classifyProgressActionInner(
   progress: StructuredProgress,
   phase?: string,
 ): ProgressAction {
@@ -898,9 +927,13 @@ function aggregateOutcome(
   status: PresentationStep['status'],
 ): string {
   if (status === 'failed') {
+    if (phase.categories.includes('test')) return '测试未通过';
     if (progress.exitCode != null)
-      return `命令执行失败（退出码 ${progress.exitCode}）`;
-    return phase.categories.includes('test') ? '测试失败' : '执行失败';
+      // lifecycle=failed 是真失败保留原文案；completed 但退出码非零用中性文案
+      return progress.lifecycle === 'failed'
+        ? `命令执行失败（退出码 ${progress.exitCode}）`
+        : `命令返回非零（退出码 ${progress.exitCode}）`;
+    return '执行失败';
   }
   if (status === 'cancelled') return '已取消';
   if (status === 'unknown') return '已执行，结果未知';
@@ -1388,24 +1421,38 @@ export function reduceProgressPresentation(
     );
     return { ...state, steps, phases };
   }
+  const exitCode = progress.exitCode;
+  const nonZeroCompleted =
+    progress.lifecycle === 'completed' && exitCode != null && exitCode !== 0;
+  // 探测型命令退出码 1 是正常结果（grep 无匹配 / diff 有差异），按完成渲染
+  const probe =
+    nonZeroCompleted && exitCode === 1 ? step.nonZeroExitMeaning : undefined;
   const status =
-    progress.lifecycle === 'completed' &&
-    (progress.exitCode == null || progress.exitCode === 0)
+    (progress.lifecycle === 'completed' &&
+      (exitCode == null || exitCode === 0)) ||
+    probe
       ? 'completed'
       : progress.lifecycle === 'cancelled'
         ? 'cancelled'
-        : progress.lifecycle === 'failed' ||
-            (progress.exitCode != null && progress.exitCode !== 0)
+        : progress.lifecycle === 'failed' || nonZeroCompleted
           ? 'failed'
           : 'unknown';
   const title =
-    status === 'completed'
-      ? completedTitle(step)
-      : status === 'failed'
-        ? failedTitle(step.category)
-        : status === 'cancelled'
-          ? '已取消'
-          : unknownTitle(step.category);
+    probe === 'no-match'
+      ? '已搜索，无匹配'
+      : probe === 'diff-found'
+        ? '已检查，发现差异'
+        : status === 'completed'
+          ? completedTitle(step)
+          : status === 'failed'
+            ? nonZeroCompleted
+              ? step.category === 'test'
+                ? '测试未通过'
+                : `命令返回非零（退出码 ${exitCode}）`
+              : failedTitle(step.category)
+            : status === 'cancelled'
+              ? '已取消'
+              : unknownTitle(step.category);
   const steps = [...state.steps];
   steps[index] = { ...step, status, title };
   const phases = state.phases.map((phase) => {
