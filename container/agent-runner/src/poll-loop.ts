@@ -1,7 +1,7 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, markScriptSkipped, type MessageInRow } from './db/messages-in.js';
 import { hasIdenticalSend, writeMessageOut } from './db/messages-out.js';
-import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
+import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks, getContainerToolInFlight } from './db/connection.js';
 import {
   clearContinuation,
   clearCurrentInReplyTo,
@@ -23,6 +23,29 @@ import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from 
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
+
+/**
+ * Stall watchdog. A single tool call that never returns — a hung MCP/network
+ * request, a wedged browse, a script with no timeout — parks the SDK in its
+ * message loop: no `activity` event flows, the heartbeat freezes, and the
+ * container sits dead until the host's 30-min absolute ceiling finally kills
+ * it (then the reset messages re-fire and it re-wedges). The PreToolUse hook
+ * records the in-flight tool + start time in container_state; if a tool stays
+ * in flight past its budget the call is hung, so we abort for fast recovery
+ * (minutes, not 30) and log which tool stalled — the host kill logs never
+ * captured that. Only fires on an over-budget in-flight tool, so an idle open
+ * query between turns is never touched, and non-tool stalls (a rare SDK/model
+ * hang) still fall back to the host ceiling unchanged.
+ */
+const TOOL_STALL_MS = 10 * 60 * 1000;
+const WATCHDOG_TICK_MS = 30 * 1000;
+/**
+ * Grace after a best-effort abort() before hard-exiting for a host respawn.
+ * abort() only unblocks the SDK if it is parked awaiting input; a genuinely
+ * hung tool call never checks the abort flag, so process exit is the only
+ * guaranteed recovery.
+ */
+const STALL_ABORT_GRACE_MS = 30 * 1000;
 
 /**
  * Number of consecutive `database disk image is malformed` errors after which
@@ -358,6 +381,11 @@ export async function processQuery(
   let pollInFlight = false;
   let endedForCommand = false;
   let corruptionStreak = 0;
+  // Set true once the event stream actually winds down (finally block). Guards
+  // the stall watchdog's hard-exit: if abort() successfully unblocks a parked
+  // query, we recover cleanly and must NOT exit the process out from under the
+  // next turn.
+  let windDown = false;
   const pollHandle = setInterval(() => {
     if (done || pollInFlight || endedForCommand) return;
     pollInFlight = true;
@@ -464,6 +492,40 @@ export async function processQuery(
     })();
   }, ACTIVE_POLL_INTERVAL_MS);
 
+  // Stall watchdog: abort a tool call that has been in flight past its budget.
+  // See TOOL_STALL_MS. Only an over-budget in-flight tool trips this — an idle
+  // open query (no tool in flight) is never touched.
+  const stallWatchdog = setInterval(() => {
+    if (done || endedForCommand) return;
+    const inFlight = getContainerToolInFlight();
+    if (!inFlight) return;
+    // Honour a tool's own declared timeout (Bash exposes one) the same way the
+    // host ceiling does — never abort before the tool's own deadline.
+    const budget =
+      inFlight.declaredTimeoutMs != null
+        ? Math.max(TOOL_STALL_MS, inFlight.declaredTimeoutMs + STALL_ABORT_GRACE_MS)
+        : TOOL_STALL_MS;
+    const elapsed = Date.now() - inFlight.startedAtMs;
+    if (elapsed <= budget) return;
+
+    done = true;
+    clearInterval(stallWatchdog);
+    log(
+      `Stall watchdog: tool '${inFlight.tool}' in flight ${Math.round(elapsed / 1000)}s ` +
+        `(budget ${Math.round(budget / 1000)}s) with no completion — aborting for recovery`,
+    );
+    try {
+      query.abort();
+    } catch {
+      /* best effort — the hard-exit below is the guaranteed recovery */
+    }
+    setTimeout(() => {
+      if (windDown) return; // abort unblocked a parked query — recovered cleanly
+      log('Stall watchdog: query did not wind down after abort — exiting for host respawn');
+      process.exit(75);
+    }, STALL_ABORT_GRACE_MS);
+  }, WATCHDOG_TICK_MS);
+
   try {
     for await (const event of query.events) {
       handleEvent(event, routing);
@@ -540,7 +602,9 @@ export async function processQuery(
     throw err;
   } finally {
     done = true;
+    windDown = true;
     clearInterval(pollHandle);
+    clearInterval(stallWatchdog);
   }
 
   return { continuation: queryContinuation };
