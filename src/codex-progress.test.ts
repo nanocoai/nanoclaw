@@ -8,6 +8,10 @@ import {
   mapCodexProgress,
   mapCodexTextProgress,
 } from '../container/agent-runner/src/codex-runner.js';
+import {
+  createProgressPresentationState,
+  reduceProgressPresentation,
+} from './progress-display.js';
 
 function started(item: Record<string, unknown>) {
   return { type: 'item.started', item } as any;
@@ -138,6 +142,71 @@ describe('mapCodexProgress — 回归', () => {
     });
   });
 
+  // runner 保留 codex authoritative status：非零退出一律 failed 并透传 exitCode，
+  // 探测语义的窄覆盖在展示层做（见下方跨层测试）
+  it.each([
+    ['rg 无匹配 exit 1', 1],
+    ['rg 错误 exit 2', 2],
+    ['沙箱启动失败哨兵 -1', -1],
+    ['沙箱哨兵 -65536', -65536],
+    ['信号终止 137', 137],
+  ])('command_execution %s 保持 failed 并透传 exitCode', (_label, code) => {
+    const out = mapCodexProgress(
+      completed({
+        id: `c-exit-${code}`,
+        type: 'command_execution',
+        command: 'rg pattern src/',
+        exit_code: code,
+        status: 'failed',
+      }),
+    );
+    expect(out[0].progress).toMatchObject({
+      lifecycle: 'failed',
+      exitCode: code,
+    });
+    expect(out[0].result).toBe('❌ 执行失败');
+  });
+
+  it('status=failed 且 exit_code=0 仍为 failed（执行前故障不被退出码掩盖）', () => {
+    const out = mapCodexProgress(
+      completed({
+        id: 'c-fail-exit0',
+        type: 'command_execution',
+        command: 'npm test',
+        exit_code: 0,
+        status: 'failed',
+      }),
+    );
+    expect(out[0].progress).toMatchObject({ lifecycle: 'failed', exitCode: 0 });
+    expect(out[0].result).toBe('❌ 执行失败');
+  });
+
+  it('无退出码且 status=failed 的命令项仍标 failed', () => {
+    const out = mapCodexProgress(
+      completed({
+        id: 'c-nofail',
+        type: 'command_execution',
+        command: 'npm test',
+        status: 'failed',
+      }),
+    );
+    expect(out[0].progress).toMatchObject({ lifecycle: 'failed' });
+    expect(out[0].result).toBe('❌ 执行失败');
+  });
+
+  it('带退出码的取消状态仍优先映射为取消', () => {
+    const out = mapCodexProgress(
+      completed({
+        id: 'c-cancel-exit',
+        type: 'command_execution',
+        command: 'sleep 100',
+        exit_code: 130,
+        status: 'interrupted',
+      }),
+    );
+    expect(out[0].progress?.lifecycle).toBe('cancelled');
+  });
+
   it.each(['cancelled', 'canceled', 'interrupted'])('%s 状态映射为取消', (status) => {
     const out = mapCodexProgress(completed({
       id: `c-${status}`, type: 'command_execution', status,
@@ -160,6 +229,105 @@ describe('mapCodexProgress — 回归', () => {
       server: 'gitnexus',
       tool: 'query',
     });
+  });
+
+  it('跨层集成：codex rg 无匹配 exit 1 经映射+展示层渲染为"已搜索，无匹配"', () => {
+    // 单测漏洞教训：展示层测试直接构造 completed+exit1 事件全绿，
+    // 但 runner 映射层按 codex authoritative status 报 failed，
+    // 探测在真机永远不触发。这条测试把两层串起来，任何一层契约变了立刻红。
+    // 现在的契约：runner 报 failed+exit1，展示层对严判探测步窄覆盖为完成
+    const startedOut = mapCodexProgress(
+      started({
+        id: 'probe-1',
+        type: 'command_execution',
+        command: '/bin/zsh -lc "rg missing_symbol_xyz src/"',
+      }),
+    );
+    const completedOut = mapCodexProgress(
+      completed({
+        id: 'probe-1',
+        type: 'command_execution',
+        command: '/bin/zsh -lc "rg missing_symbol_xyz src/"',
+        exit_code: 1,
+        status: 'failed',
+        aggregated_output: '',
+      }),
+    );
+    let state = createProgressPresentationState();
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: startedOut[0].progress!,
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: completedOut[0].progress!,
+    });
+    expect(state.steps[0].status).toBe('completed');
+    expect(state.steps[0].title).toBe('已搜索，无匹配');
+  });
+
+  it.each([
+    ['rg 错误 exit 2', 2],
+    ['沙箱启动失败哨兵 -1', -1],
+    ['信号终止 137', 137],
+  ])(
+    '跨层集成：codex 探测型命令 %s 不触发窄覆盖，仍显示执行失败',
+    (_label, code) => {
+      const completedOut = mapCodexProgress(
+        completed({
+          id: `probe-fail-${code}`,
+          type: 'command_execution',
+          command: '/bin/zsh -lc "rg pattern /tmp"',
+          exit_code: code,
+          status: 'failed',
+        }),
+      );
+      let state = createProgressPresentationState();
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: {
+          provider: 'codex',
+          lifecycle: 'started',
+          toolName: 'command_execution',
+          toolCallId: `probe-fail-${code}`,
+          input: { command: '/bin/zsh -lc "rg pattern /tmp"' },
+        },
+      });
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: completedOut[0].progress!,
+      });
+      expect(state.steps[0].status).toBe('failed');
+      expect(state.steps[0].title).toBe('执行失败');
+    },
+  );
+
+  it('跨层集成：codex 非探测命令 exit 1 不触发窄覆盖，保持失败', () => {
+    const completedOut = mapCodexProgress(
+      completed({
+        id: 'nonprobe-1',
+        type: 'command_execution',
+        command: '/bin/zsh -lc "npm run lint && npm test"',
+        exit_code: 1,
+        status: 'failed',
+      }),
+    );
+    let state = createProgressPresentationState();
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: {
+        provider: 'codex',
+        lifecycle: 'started',
+        toolName: 'command_execution',
+        toolCallId: 'nonprobe-1',
+        input: { command: '/bin/zsh -lc "npm run lint && npm test"' },
+      },
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: completedOut[0].progress!,
+    });
+    expect(state.steps[0].status).toBe('failed');
   });
 
   it('agent_message 返回空', () => {
