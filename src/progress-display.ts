@@ -59,6 +59,10 @@ export interface PresentationPhase {
   goal: string;
   source: 'narration' | 'plan' | 'fallback';
   status: PresentationStep['status'];
+  /** narration 原文全文（仅 source==='narration'），供卡片展开区展示全文 */
+  narrationText?: string;
+  /** 该 narration 之后是否已有工具活动（含 ToolSearch/plan 控制/completion-only 事件），驱动连续 narration 合并判定 */
+  hasToolActivity?: boolean;
   currentAction?: string;
   categories: ProgressCategory[];
   actionSummaries?: string[];
@@ -791,21 +795,39 @@ export function classifyProgressAction(
   };
 }
 
-function firstSentence(text: string): string | undefined {
-  const normalized = sanitizeUserText(text.replace(/^💬\s*/u, '').trim());
-  if (!normalized) return undefined;
-  const sentences = normalized
-    .split(/[。！？!?\n]+/u)
-    .map((part) => part.trim())
-    .filter(Boolean);
-  const sentence =
-    sentences.find(
-      (part) => !/^(?:继续|收到|明白|好的?|可以|没问题)$/u.test(part),
-    ) ?? sentences[0];
-  const core = sentence?.split(/[：:；;]/u)[0]?.trim();
-  if (!core) return undefined;
-  return core.length > 42 ? core.slice(0, 42) + '…' : core;
+/** narrationText 状态层存储上限（code point）；过程记录页另存全文不受此限 */
+const NARRATION_STORE_LIMIT = 4000;
+
+function capNarration(text: string): string {
+  const cps = Array.from(text);
+  // 含省略号严格不超 4000：正文 3999 + '…'
+  return cps.length > NARRATION_STORE_LIMIT
+    ? cps.slice(0, NARRATION_STORE_LIMIT - 1).join('') + '…'
+    : text;
 }
+
+/** narration 展示标题：取 sanitize 后首个非空行（宽度截断交给渲染层的双预算规则） */
+function narrationGoal(sanitizedText: string): string {
+  const line = sanitizedText
+    .split('\n')
+    .map((part) => part.trim())
+    .find(Boolean);
+  return line ?? '正在处理任务';
+}
+
+/** 任意工具事件（含 ToolSearch/plan 控制/completion-only）标记最新 narration Phase 已被工具"消费" */
+function withNarrationToolActivity(
+  state: ProgressPresentationState,
+): ProgressPresentationState {
+  const latest = state.phases.at(-1);
+  if (!latest || latest.source !== 'narration' || latest.hasToolActivity) {
+    return state;
+  }
+  const phases = [...state.phases];
+  phases[phases.length - 1] = { ...latest, hasToolActivity: true };
+  return { ...state, phases };
+}
+
 
 const CATEGORY_LABELS: Partial<Record<ProgressCategory, string>> = {
   read: '读取',
@@ -1004,6 +1026,8 @@ function upsertPhaseForStarted(
     const phase = phases[phaseIndex];
     phases[phaseIndex] = {
       ...phase,
+      // C6 开局纯动作行：fallback 的 goal 跟随最新动作，开局显示的就是当前动作本身
+      goal: phase.source === 'fallback' ? action.title : phase.goal,
       status: 'running',
       currentAction: action.title,
       categories: phase.categories.includes(action.category)
@@ -1067,7 +1091,35 @@ export function reduceProgressPresentation(
   event: ProgressPresentationEvent,
 ): ProgressPresentationState {
   if (event.kind === 'narration') {
-    const goal = firstSentence(event.text) ?? '正在处理任务';
+    const fullText = sanitizeUserText(
+      event.text.replace(/^💬\s*/u, '').trim(),
+    );
+    if (!fullText) return state;
+    const goal = narrationGoal(fullText);
+    const latest = state.phases.at(-1);
+    // 连续 narration 无工具活动：合并进同一 Phase（文本追加，goal 保持首段）
+    if (
+      latest &&
+      latest.source === 'narration' &&
+      !latest.hasToolActivity
+    ) {
+      const phases = [...state.phases];
+      phases[phases.length - 1] = {
+        ...latest,
+        narrationText: capNarration(
+          latest.narrationText
+            ? `${latest.narrationText}\n\n${fullText}`
+            : fullText,
+        ),
+      };
+      return {
+        ...state,
+        activePhaseGoal: latest.goal,
+        activePhaseId: latest.id,
+        phases,
+      };
+    }
+    // 开局裸动作行（fallback）原地升级为首个 narration Phase
     const fallbackIndex =
       state.phases.length > 0 &&
       state.phases.every((phase) => phase.source === 'fallback')
@@ -1079,6 +1131,8 @@ export function reduceProgressPresentation(
         ...phases[fallbackIndex],
         goal,
         source: 'narration',
+        narrationText: capNarration(fullText),
+        hasToolActivity: false,
       };
       return {
         ...state,
@@ -1087,10 +1141,25 @@ export function reduceProgressPresentation(
         phases,
       };
     }
+    // narration 即时建 Phase（空 Phase 合法：行显示纯标题，等工具来了再有行尾动作）
+    const id = `phase-${state.phases.length + 1}`;
     return {
       ...state,
       activePhaseGoal: goal,
-      activePhaseId: undefined,
+      activePhaseId: id,
+      phases: [
+        ...state.phases,
+        {
+          id,
+          goal,
+          source: 'narration',
+          status: 'running',
+          narrationText: capNarration(fullText),
+          hasToolActivity: false,
+          categories: [],
+          toolCallIds: [],
+        },
+      ],
     };
   }
   if (event.kind === 'turn_end') {
@@ -1116,14 +1185,28 @@ export function reduceProgressPresentation(
   }
 
   const progress = event.progress;
+  // 消费标记必须在一切 early return 之前（ToolSearch/plan 控制/completion-only 都算工具活动）
+  state = withNarrationToolActivity(state);
+  // D3：活跃 narration Phase 存在时，plan 控制工具只推进计划状态，不得清掉 active 指针
+  const activeNarration =
+    !!state.activePhaseId &&
+    state.phases.some(
+      (phase) =>
+        phase.id === state.activePhaseId && phase.source === 'narration',
+    );
+  const preservedActive = activeNarration
+    ? {
+        activePhaseGoal: state.activePhaseGoal,
+        activePhaseId: state.activePhaseId,
+      }
+    : { activePhaseGoal: undefined, activePhaseId: undefined };
   if (progress.lifecycle === 'started') {
     const toolName = progress.toolName.toLowerCase();
     if (toolName === 'todowrite') {
       const realPlan = planSteps(progress);
       if (realPlan.length > 0) {
         return {
-          activePhaseGoal: undefined,
-          activePhaseId: undefined,
+          ...preservedActive,
           steps: [
             ...state.steps.filter((step) => step.source !== 'plan'),
             ...realPlan,
@@ -1145,8 +1228,7 @@ export function reduceProgressPresentation(
     if (toolName === 'taskcreate') {
       return {
         ...state,
-        activePhaseGoal: undefined,
-        activePhaseId: undefined,
+        ...preservedActive,
         steps: [
           ...state.steps,
           {
@@ -1194,8 +1276,7 @@ export function reduceProgressPresentation(
         );
         return {
           ...state,
-          activePhaseGoal: undefined,
-          activePhaseId: undefined,
+          ...preservedActive,
           steps,
           phases,
         };
@@ -1219,9 +1300,19 @@ export function reduceProgressPresentation(
     const runningPlan = state.steps.find(
       (step) => step.source === 'plan' && step.status === 'running',
     );
+    // D3 归属反转：存在活跃 narration Phase 时工具归属 narration，runningPlan 只推进计划状态不抢占
+    const narrationActive =
+      !!state.activePhaseId &&
+      state.phases.some(
+        (phase) =>
+          phase.id === state.activePhaseId && phase.source === 'narration',
+      );
+    const attributionPlan = narrationActive ? undefined : runningPlan;
     const action = classifyProgressAction(
       progress,
-      runningPlan?.title ?? state.activePhaseGoal,
+      narrationActive
+        ? state.activePhaseGoal
+        : (runningPlan?.title ?? state.activePhaseGoal),
     );
     const existingIndex = progress.toolCallId
       ? state.steps.findIndex((step) => step.toolCallId === progress.toolCallId)
@@ -1256,7 +1347,7 @@ export function reduceProgressPresentation(
       state,
       action,
       progress.toolCallId,
-      runningPlan,
+      attributionPlan,
       action.category === 'communicate'
         ? inputString(progress.input, 'query')
         : undefined,
