@@ -185,6 +185,16 @@ const PHASE_ACTION_BUDGET = 48;
 /** 卡片展开区 narration 全文上限（超出截断并提示看过程记录） */
 const NARRATION_CARD_LIMIT = 2000;
 
+/**
+ * 中和飞书 markdown 成对语法（~~删除线、__粗体、**加粗、``代码）：
+ * 在成对字符之间插入零宽空格（U+200B），视觉不变但不再被解析为格式标记。
+ * 不依赖飞书未文档化的反斜杠转义，也不靠字符白名单猜"什么是安全的"——
+ * 所有进入 markdown 元素的 title/grayTail 统一过这一层（review R2 P1）
+ */
+export function neutralizeCardMarkdown(text: string): string {
+  return text.replace(/([~_*`])(?=\1)/gu, '$1\u200B');
+}
+
 export function truncateCp(text: string, budget: number): string {
   const cps = Array.from(text);
   return cps.length > budget ? cps.slice(0, budget).join('') + '…' : text;
@@ -298,7 +308,14 @@ function colorizeDiff(text: string): string {
 function stepToElements(step: ProgressStep): unknown[] {
   const isPhaseLine =
     step.narrationFull !== undefined || step.grayTail !== undefined;
-  const title = isPhaseLine ? step.title : truncateTitle(step.title);
+  // 进 markdown 前统一中和成对语法，路径/叙述文本无法注入格式标记
+  const title = neutralizeCardMarkdown(
+    isPhaseLine ? step.title : truncateTitle(step.title),
+  );
+  const grayTail =
+    step.grayTail === undefined
+      ? undefined
+      : neutralizeCardMarkdown(step.grayTail);
   if (step.narrationFull) {
     // Phase 行：可展开查看 narration 全文（展开区只放全文，不放工具历史）。
     // header 为 plain_text（R1：行内灰色待实测支持后升级）；
@@ -319,25 +336,25 @@ function stepToElements(step: ProgressStep): unknown[] {
       padding: '4px 8px 4px 8px',
       elements: [{ tag: 'markdown', content: body }],
     };
-    return step.grayTail
+    return grayTail
       ? [
           panel,
           {
             tag: 'markdown',
-            content: `<font color="grey">${step.grayTail}</font>`,
+            content: `<font color="grey">${grayTail}</font>`,
           },
         ]
       : [panel];
   }
-  if (step.grayTail) {
+  if (grayTail) {
     // 无 narration 全文的 Phase 行（fallback 等）：标题一行 + 灰色动作一行；
     // 无标题（开局裸动作/兜底完成态）时只出灰色动作行
     return [
       {
         tag: 'markdown',
         content: title
-          ? `${title}\n<font color="grey">${step.grayTail}</font>`
-          : `<font color="grey">${step.grayTail}</font>`,
+          ? `${title}\n<font color="grey">${grayTail}</font>`
+          : `<font color="grey">${grayTail}</font>`,
       },
     ];
   }

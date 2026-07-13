@@ -389,6 +389,23 @@ describe('classifyProgressAction', () => {
   });
 
   it.each([
+    ['正斜杠', 'C:/Users/dajay/project/src/file.ts'],
+    ['反斜杠', 'C:\\Users\\dajay\\project\\src\\file.ts'],
+  ])('Windows 盘符路径（%s）保留路径上下文', (_label, filePath) => {
+    const action = classifyProgressAction(
+      started('Read', { file_path: filePath }),
+    );
+    expect(action.title).toBe('正在读取 C:/Users/dajay/project/src/file.ts');
+  });
+
+  it('非首段的冒号仍被白名单拒绝', () => {
+    const action = classifyProgressAction(
+      started('Read', { file_path: '/tmp/a:b/file.ts' }),
+    );
+    expect(action.title).toBe('正在读取 file.ts');
+  });
+
+  it.each([
     [
       'Bash rg',
       "rg -n -C 2 'turn_end' src/progress-display.ts",

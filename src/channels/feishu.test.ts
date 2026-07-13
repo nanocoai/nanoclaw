@@ -1077,6 +1077,36 @@ describe('FeishuChannel', () => {
       expect(serialized).not.toContain(' · 正在读取');
     });
 
+    it.each([
+      ['删除线 ~~', '/tmp/~~hidden~~/file.ts', '~~'],
+      ['粗体 __', '/tmp/__bold__/file.ts', '__'],
+    ])(
+      '路径中的飞书 markdown 成对语法（%s）被零宽空格中和',
+      async (_label, filePath, pair) => {
+        const jid = `fs:oc_progress_md_neutralize_${pair === '~~' ? 'tilde' : 'underscore'}`;
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '🔧 Read',
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'Read',
+              toolCallId: 'read-md',
+              input: { file_path: filePath },
+            },
+          }),
+          { isProgress: true },
+        );
+
+        const patchArg = mockPatch.mock.calls.at(-1)?.[0];
+        const content: string = patchArg?.data?.content ?? '{}';
+        // 成对字符之间插入 U+200B，原始成对序列不再出现
+        expect(content).not.toContain(pair);
+        expect(content).toContain(`${pair[0]}\u200B${pair[1]}`);
+      },
+    );
+
     it('清理时将缺少结果的工具收口为结果未知', async () => {
       const jid = 'fs:oc_progress_unknown_result';
       await channel.sendMessage(

@@ -270,13 +270,15 @@ function displayPath(value: string): string | undefined {
   );
   if (
     sanitized.some(
-      (segment) =>
+      (segment, index) =>
         !segment ||
         segment.includes('[REDACTED') ||
         /内部服务|相关文件/u.test(segment) ||
         // 展示安全白名单（review R1 P1）：目录段含 <>&[]()*` 等字符会注入
-        // 飞书 markdown/标签，整条退回纯 basename（basename 同样受白名单约束）
-        !DISPLAY_SAFE_CHARS.test(segment),
+        // 飞书 markdown/标签，整条退回纯 basename（basename 同样受白名单约束）；
+        // Windows 盘符（C: 等）只在首段放行，冒号在其余段仍被白名单拒绝
+        (!DISPLAY_SAFE_CHARS.test(segment) &&
+          !(index === 0 && /^[A-Za-z]:$/u.test(segment))),
     )
   )
     return safeBasename(name);
