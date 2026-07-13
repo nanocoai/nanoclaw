@@ -195,6 +195,9 @@ describe('agent spawn and timeout', () => {
       expect.objectContaining({
         detached: true,
         cwd: expect.stringContaining('test-group'),
+        env: expect.objectContaining({
+          NANOCLAW_GLOBAL_DIR: expect.stringMatching(/groups\/global$/),
+        }),
       }),
     );
 
