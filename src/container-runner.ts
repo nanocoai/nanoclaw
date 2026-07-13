@@ -637,6 +637,9 @@ async function buildLocalEnv(
     // NanoClaw IPC 路径（agent-runner 传给 MCP server）
     NANOCLAW_IPC_DIR: input.workspacePaths!.ipc,
 
+    // 所有群共享的运行时数据根目录（draftbook、task-ledger 等）
+    NANOCLAW_GLOBAL_DIR: input.workspacePaths!.global,
+
     // 群标识（feishu-docs 等 skill 通过 IPC 请求 token 时需要）
     NANOCLAW_CHAT_JID: input.chatJid || '',
     NANOCLAW_GROUP_FOLDER: input.groupFolder || '',
