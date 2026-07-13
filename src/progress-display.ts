@@ -68,6 +68,8 @@ export interface PresentationPhase {
   currentAction?: string;
   categories: ProgressCategory[];
   actionSummaries?: string[];
+  /** 探测结果事实（如 搜索"x"（无匹配）），独立于 actionSummaries 存储——同类工具并行时 summary 槽位会被后启动者覆盖，文本回查会丢事实 */
+  probeFacts?: string[];
   toolCallIds: string[];
   outcome?: string;
   planTaskId?: string;
@@ -962,6 +964,23 @@ function chineseList(items: string[]): string {
   return `${items.slice(0, -1).join('、')}，并${items.at(-1)}`;
 }
 
+// 把探测事实合入聚合 summaries：原文 summary 还在的直接替换为带结果的版本，
+// 已被同类后续工具覆盖掉原文的追加到末尾，保证"无匹配/发现差异"不丢
+function mergeProbeFacts(
+  summaries: string[],
+  facts: string[] | undefined,
+): string[] {
+  if (!facts?.length) return summaries;
+  const merged = [...summaries];
+  for (const fact of facts) {
+    const base = fact.replace(/（[^）]*）$/u, '');
+    const index = merged.indexOf(base);
+    if (index >= 0) merged[index] = fact;
+    else if (!merged.includes(fact)) merged.push(fact);
+  }
+  return merged;
+}
+
 function aggregateOutcome(
   phase: PresentationPhase,
   progress: StructuredProgress,
@@ -999,7 +1018,10 @@ function aggregateOutcome(
   const testCount = phase.categories.includes('test')
     ? (phase.testPassCount ?? testPassCount(summary))
     : undefined;
-  const summaries = phase.actionSummaries ?? [];
+  const summaries = mergeProbeFacts(
+    phase.actionSummaries ?? [],
+    phase.probeFacts,
+  );
   if (
     summaries.length === 0 &&
     labels.length === 1 &&
@@ -1513,17 +1535,20 @@ export function reduceProgressPresentation(
       ? 'running'
       : status;
     const enrichedPhase = mergeResultFacts(phase, progress);
-    // 并行场景 probe 事实持久化：把该步的 actionSummary 标注结果，
-    // 即使后续还有工具完成、最终聚合走 summaries 路径，"无匹配"也不丢失
-    const probeSummaries =
+    // 并行场景 probe 事实持久化：按事实列表记录并去重，不依赖 actionSummaries
+    // 文本回查（同类工具并行时 mergeActionSummary 只保留最后一个 summary，
+    // 先完成的探测按文本找不到自己的槽位，事实会丢）
+    const probeFact =
       probe && step.actionSummary
-        ? (enrichedPhase.actionSummaries ?? []).map((summary) =>
-            summary === step.actionSummary
-              ? `${summary}（${probe === 'no-match' ? '无匹配' : '发现差异'}）`
-              : summary,
-          )
-        : enrichedPhase.actionSummaries;
-    const probedPhase = { ...enrichedPhase, actionSummaries: probeSummaries };
+        ? `${step.actionSummary}（${probe === 'no-match' ? '无匹配' : '发现差异'}）`
+        : undefined;
+    const probedPhase = {
+      ...enrichedPhase,
+      probeFacts:
+        probeFact && !(enrichedPhase.probeFacts ?? []).includes(probeFact)
+          ? [...(enrichedPhase.probeFacts ?? []), probeFact]
+          : enrichedPhase.probeFacts,
+    };
     return {
       ...probedPhase,
       status: phaseStatus,

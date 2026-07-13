@@ -1260,6 +1260,50 @@ describe('reduceProgressPresentation', () => {
       expect(phase.outcome).toContain('无匹配');
     });
 
+    it('并行两个同类探测：summary 槽位被覆盖，先完成的无匹配事实仍保留', () => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        { kind: 'narration', text: '并行核查两个符号。' },
+      );
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: started('Grep', { pattern: 'aFn' }, 'par-grep-a'),
+      });
+      // 第二个同类 Grep 启动，mergeActionSummary 按 category 覆盖掉 a 的 summary
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: started('Grep', { pattern: 'bFn' }, 'par-grep-b'),
+      });
+      state = completeWithExit(state, 'par-grep-a', 1);
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: {
+          provider: 'claude',
+          lifecycle: 'completed',
+          toolName: 'tool_result',
+          toolCallId: 'par-grep-b',
+        },
+      });
+      const phase = (state as any).phases.at(-1);
+      expect(phase.status).toBe('completed');
+      expect(phase.outcome).toContain('无匹配');
+    });
+
+    it('同一探测步重复完成事件不重复追加 probe 事实', () => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        { kind: 'narration', text: '核查符号。' },
+      );
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: started('Grep', { pattern: 'aFn' }, 'dup-grep'),
+      });
+      state = completeWithExit(state, 'dup-grep', 1);
+      state = completeWithExit(state, 'dup-grep', 1);
+      const phase = (state as any).phases.at(-1);
+      expect(phase.probeFacts).toHaveLength(1);
+    });
+
     it('独立 diff 命令不再声明支持：退出码 1 走中性失败', () => {
       let state = reduceProgressPresentation(
         createProgressPresentationState(),
