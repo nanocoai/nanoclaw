@@ -180,8 +180,8 @@ function planPresentationTitle(step: PresentationStep): string {
 
 /** Phase 行标题预算（Unicode code point）——固定值，不随行尾有无变化，避免冻结时截断点漂移 */
 const PHASE_TITLE_BUDGET = 48;
-/** Phase 行尾动作/结果预算（Unicode code point） */
-const PHASE_TAIL_BUDGET = 18;
+/** Phase 动作行预算（Unicode code point）——动作独占一行后不再与标题抢预算 */
+const PHASE_ACTION_BUDGET = 48;
 /** 卡片展开区 narration 全文上限（超出截断并提示看过程记录） */
 const NARRATION_CARD_LIMIT = 2000;
 
@@ -200,8 +200,11 @@ export function truncateTailCp(text: string, budget: number): string {
 }
 
 /**
- * Phase 行两段式渲染（飞书专用 helper，不动 presentationPhaseTitle 的领域语义）：
- * frozen（存在更新 Phase）→ 纯标题；current → 标题 + 行尾动作/结果。
+ * Phase 行渲染（飞书专用 helper，不动 presentationPhaseTitle 的领域语义）：
+ * frozen（存在更新 Phase）→ 纯标题一行收口；
+ * current → 标题一行 + 灰色动作独立一行（单行原地刷新，时态即完成标记）。
+ * fallback（无 LLM 叙述的开局）→ 只出灰色动作行：跑时"正在读取 …"，
+ * 完成后整行刷成"已读取 …"，不保留进行时标题（避免两个时态同屏重复）。
  */
 function renderPhaseLine(
   phase: PresentationPhase,
@@ -209,22 +212,31 @@ function renderPhaseLine(
 ): { text: string; gray?: string } {
   const title = truncateCp(phase.goal.split('\n')[0], PHASE_TITLE_BUDGET);
   if (!isCurrent) return { text: title };
-  // 开局裸动作行：整行灰色的当前动作（需求 2），无标题前缀
-  if (
-    phase.source === 'fallback' &&
-    phase.status === 'running' &&
-    (!phase.currentAction || phase.currentAction === phase.goal)
-  ) {
-    return { text: '', gray: title };
+  if (phase.source === 'fallback') {
+    const action =
+      phase.status === 'running'
+        ? (phase.currentAction ?? phase.goal)
+        : phase.status === 'pending'
+          ? phase.goal
+          : (phase.outcome ??
+            (phase.status === 'cancelled'
+              ? '已取消'
+              : phase.status === 'failed'
+                ? '执行失败'
+                : (phase.currentAction ?? phase.goal)));
+    return {
+      text: '',
+      gray: truncateTailCp(action.split('\n')[0], PHASE_ACTION_BUDGET),
+    };
   }
-  let tail: string | undefined;
+  let action: string | undefined;
   if (phase.status === 'running') {
-    tail =
+    action =
       phase.currentAction && phase.currentAction !== phase.goal
         ? phase.currentAction
         : undefined;
   } else if (phase.status !== 'pending') {
-    tail =
+    action =
       phase.outcome ??
       (phase.status === 'cancelled'
         ? '已取消'
@@ -234,7 +246,9 @@ function renderPhaseLine(
   }
   return {
     text: title,
-    gray: tail ? truncateTailCp(tail, PHASE_TAIL_BUDGET) : undefined,
+    gray: action
+      ? truncateTailCp(action.split('\n')[0], PHASE_ACTION_BUDGET)
+      : undefined,
   };
 }
 
@@ -280,43 +294,20 @@ function colorizeDiff(text: string): string {
     .replace(/^(-\s?.*)$/gm, '<font color="red">$1</font>');
 }
 
-/** 将 step 转为卡片 element */
-function stepToElement(step: ProgressStep): unknown {
+/** 将 step 转为卡片 element 列表（当前 Phase 为标题行 + 动作独立一行） */
+function stepToElements(step: ProgressStep): unknown[] {
   const isPhaseLine =
     step.narrationFull !== undefined || step.grayTail !== undefined;
   const title = isPhaseLine ? step.title : truncateTitle(step.title);
   if (step.narrationFull) {
     // Phase 行：可展开查看 narration 全文（展开区只放全文，不放工具历史）。
-    // header 为 plain_text（R1：行内灰色待实测支持后升级），行尾动作用 · 拼接。
-    const headerTitle = step.grayTail ? `${title} · ${step.grayTail}` : title;
+    // header 为 plain_text（R1：行内灰色待实测支持后升级）；
+    // 动作不再拼进 header，独立一行灰色跟在面板下方
     const body =
       Array.from(step.narrationFull).length > NARRATION_CARD_LIMIT
         ? `${truncateCp(step.narrationFull, NARRATION_CARD_LIMIT)}\n\n<font color="grey">（全文见过程记录）</font>`
         : step.narrationFull;
-    return {
-      tag: 'collapsible_panel',
-      expanded: false,
-      background_color: 'grey',
-      header: {
-        title: { tag: 'plain_text', content: headerTitle },
-        vertical_align: 'center',
-      },
-      vertical_spacing: '2px',
-      padding: '4px 8px 4px 8px',
-      elements: [{ tag: 'markdown', content: body }],
-    };
-  }
-  if (step.grayTail) {
-    // 无 narration 全文的 Phase 行（fallback 等）：单行 + 灰色行尾；无标题时整行灰色
-    return {
-      tag: 'markdown',
-      content: title
-        ? `${title} <font color="grey">${step.grayTail}</font>`
-        : `<font color="grey">${step.grayTail}</font>`,
-    };
-  }
-  if (step.detail) {
-    return {
+    const panel = {
       tag: 'collapsible_panel',
       expanded: false,
       background_color: 'grey',
@@ -326,10 +317,47 @@ function stepToElement(step: ProgressStep): unknown {
       },
       vertical_spacing: '2px',
       padding: '4px 8px 4px 8px',
-      elements: [{ tag: 'markdown', content: colorizeDiff(step.detail) }],
+      elements: [{ tag: 'markdown', content: body }],
     };
+    return step.grayTail
+      ? [
+          panel,
+          {
+            tag: 'markdown',
+            content: `<font color="grey">${step.grayTail}</font>`,
+          },
+        ]
+      : [panel];
   }
-  return { tag: 'markdown', content: title };
+  if (step.grayTail) {
+    // 无 narration 全文的 Phase 行（fallback 等）：标题一行 + 灰色动作一行；
+    // 无标题（开局裸动作/兜底完成态）时只出灰色动作行
+    return [
+      {
+        tag: 'markdown',
+        content: title
+          ? `${title}\n<font color="grey">${step.grayTail}</font>`
+          : `<font color="grey">${step.grayTail}</font>`,
+      },
+    ];
+  }
+  if (step.detail) {
+    return [
+      {
+        tag: 'collapsible_panel',
+        expanded: false,
+        background_color: 'grey',
+        header: {
+          title: { tag: 'plain_text', content: title },
+          vertical_align: 'center',
+        },
+        vertical_spacing: '2px',
+        padding: '4px 8px 4px 8px',
+        elements: [{ tag: 'markdown', content: colorizeDiff(step.detail) }],
+      },
+    ];
+  }
+  return [{ tag: 'markdown', content: title }];
 }
 
 /** 格式化耗时字符串 */
@@ -401,7 +429,7 @@ function buildProgressCard(
   // 没有步骤时显示占位文字，避免卡片内容区域为空
   const stepElements =
     steps.length > 0
-      ? steps.map(stepToElement)
+      ? steps.flatMap(stepToElements)
       : [
           {
             tag: 'markdown',
@@ -527,7 +555,7 @@ function buildCompletedCard(
 
   const elements: unknown[] = [
     ...buildTitleRow(titleText, progressUrl),
-    ...steps.map(stepToElement),
+    ...steps.flatMap(stepToElements),
   ];
   if (usage) appendUsageFooter(elements, usage, thinking);
 

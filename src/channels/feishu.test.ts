@@ -562,9 +562,11 @@ describe('FeishuChannel', () => {
 
       const entry = (channel as any).progressCards.get(jid);
       expect(entry.steps).toHaveLength(1);
-      // 两段式：标题=narration 原文首行（固定预算截断），行尾=结果（独立预算，截中段保尾）
+      // 标题行 + 动作独立一行：动作行独享 48cp 预算，截中段保尾
       expect(entry.steps[0].title).toBe('核对进度展示链路。');
-      expect(entry.steps[0].grayTail).toBe('已读取 in…t.mjs（1 项通过）');
+      expect(entry.steps[0].grayTail).toBe(
+        '已读取 /tmp/input.t….txt，并测试 fixture.test.mjs（1 项通过）',
+      );
       expect(entry.steps[0].narrationFull).toBe('核对进度展示链路。');
       expect(
         entry.allSteps
@@ -579,8 +581,10 @@ describe('FeishuChannel', () => {
         JSON.parse(patchArg?.data?.content ?? '{}'),
       );
       expect(serialized).toContain('collapsible_panel');
+      // 面板 header 只有标题，动作独立成灰色一行
+      expect(serialized).toContain('"content":"核对进度展示链路。"');
       expect(serialized).toContain(
-        '核对进度展示链路。 · 已读取 in…t.mjs（1 项通过）',
+        '<font color=\\"grey\\">已读取 /tmp/input.t….txt，并测试 fixture.test.mjs（1 项通过）</font>',
       );
       expect(serialized).not.toContain('已完成协作操作');
     });
@@ -993,6 +997,84 @@ describe('FeishuChannel', () => {
       expect(entry.steps[0].grayTail).toBe('正在运行测试');
       expect(entry.allSteps).toHaveLength(1);
       expect(mockPatch).toHaveBeenCalledTimes(1);
+    });
+
+    it('开局兜底阶段完成后整行刷成完成态，不保留进行时标题（单时态去重）', async () => {
+      const jid = 'fs:oc_progress_fallback_done';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Read',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Read',
+            toolCallId: 'read-1',
+            input: { file_path: '/tmp/notes.md' },
+          },
+        }),
+        { isProgress: true },
+      );
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '✅ 完成',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'completed',
+            toolName: 'tool_result',
+            toolCallId: 'read-1',
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const entry = (channel as any).progressCards.get(jid);
+      expect(entry.steps).toHaveLength(1);
+      expect(entry.steps[0].title).toBe('');
+      expect(entry.steps[0].grayTail).toBe('已读取 /tmp/notes.md');
+    });
+
+    it('narration Phase 动作独立成行：面板 header 无动作拼接，动作是灰色独立元素', async () => {
+      const jid = 'fs:oc_progress_action_line';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '💬 分析进度卡渲染。',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'narration',
+          },
+        }),
+        { isProgress: true },
+      );
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Read',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Read',
+            toolCallId: 'read-act',
+            input: { file_path: '/tmp/notes.md' },
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const entry = (channel as any).progressCards.get(jid);
+      const phaseRow = entry.steps.at(-1);
+      expect(phaseRow.grayTail).toBe('正在读取 /tmp/notes.md');
+      const patchArg = mockPatch.mock.calls.at(-1)?.[0];
+      const serialized = JSON.stringify(
+        JSON.parse(patchArg?.data?.content ?? '{}'),
+      );
+      expect(serialized).toContain(
+        '<font color=\\"grey\\">正在读取 /tmp/notes.md</font>',
+      );
+      expect(serialized).not.toContain(' · 正在读取');
     });
 
     it('清理时将缺少结果的工具收口为结果未知', async () => {
