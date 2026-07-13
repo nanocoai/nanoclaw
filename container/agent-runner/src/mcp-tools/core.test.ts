@@ -11,7 +11,10 @@
  * it the same way the poll-loop process does (a direct DB write) rather than
  * via any in-memory helper, so they exercise the real process boundary.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it as bunIt, expect, beforeEach, afterEach } from 'bun:test';
+
+// Test DB connections are process-global; never overlap DB-backed tests.
+const it = bunIt.serial;
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../db/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';

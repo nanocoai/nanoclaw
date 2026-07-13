@@ -103,6 +103,20 @@ export interface RoutingContext {
    *  them as turn-final echoes: zero delivery. Deliberate sends are
    *  in_reply_to-null, same as the out-of-process MCP send_message path. */
   taskFire: boolean;
+  /** Routing target of the newest wake-eligible human chat row in the batch
+   *  (channel_type set, not 'agent', kind chat/chat-sdk, trigger=1). Mixed
+   *  batches (agent/task row first, human row later) read as
+   *  channelType='agent' via messages[0], which must not disable the
+   *  unwrapped-reply fallback for the human. null = no human trigger in the
+   *  batch (pure A2A/task): the fallback stays off — the anti-self-loop
+   *  guard. Can only ever point at a platform_id that actually appears as an
+   *  inbound row of this batch. */
+  humanReply: {
+    platformId: string | null;
+    channelType: string;
+    threadId: string | null;
+    inReplyTo: string | null;
+  } | null;
 }
 
 /**
@@ -111,12 +125,34 @@ export interface RoutingContext {
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
   const first = messages[0];
+  // Newest wake-eligible human chat row — see RoutingContext.humanReply.
+  // trigger=0 rows are accumulated context riding along in the batch; they
+  // never engaged the agent and must never become a delivery target.
+  let humanReply: RoutingContext['humanReply'] = null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (
+      m.channel_type &&
+      m.channel_type !== 'agent' &&
+      (m.kind === 'chat' || m.kind === 'chat-sdk') &&
+      m.trigger === 1
+    ) {
+      humanReply = {
+        platformId: m.platform_id ?? null,
+        channelType: m.channel_type,
+        threadId: m.thread_id ?? null,
+        inReplyTo: m.id ?? null,
+      };
+      break;
+    }
+  }
   return {
     platformId: first?.platform_id ?? null,
     channelType: first?.channel_type ?? null,
     threadId: first?.thread_id ?? null,
     inReplyTo: first?.id ?? null,
     taskFire: messages.length > 0 && messages.every((m) => m.kind === 'task'),
+    humanReply,
   };
 }
 

@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, test } from 'bun:test';
+import { beforeEach, describe, expect, test as bunTest } from 'bun:test';
+
+// Test DB connections are process-global; never overlap DB-backed tests.
+const test = bunTest.serial;
 
 import { getOutboundDb, initTestSessionDb } from './connection.js';
 import {

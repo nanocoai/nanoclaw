@@ -1,6 +1,6 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, markScriptSkipped, type MessageInRow } from './db/messages-in.js';
-import { hasIdenticalSend, writeMessageOut } from './db/messages-out.js';
+import { getMaxSeq, hasIdenticalSend, hasSendToChannelSince, writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
   clearContinuation,
@@ -252,6 +252,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         config.provider.onExchangeComplete?.bind(config.provider),
         prompt,
         continuation,
+        config.signal,
       );
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
@@ -336,10 +337,22 @@ export async function processQuery(
   onExchangeComplete: ((exchange: ProviderExchange) => void) | undefined,
   initialPrompt: string,
   initialContinuation: string | undefined,
+  signal?: AbortSignal,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  // Outbound-seq watermark at the start of the current exchange. If a
+  // content send to the fallback channel was written after this mark — via
+  // wrapped block or MCP send_message — the real answer already went out and
+  // a trailing bare recap must NOT be fallback-delivered on top (#2404's
+  // final-text flavor). The queue mirrors archivePrompts: a follow-up push
+  // enqueues the seq at push time, and each consumed result advances to its
+  // prompt's watermark. Advancing at push time instead would let a follow-up
+  // arriving mid-turn (between an MCP send and its result event) hide that
+  // send and re-deliver the recap.
+  let exchangeStartSeq = getMaxSeq();
+  const watermarkQueue: number[] = [];
   // Prompt queue for the exchange hook — each result event consumes the
   // oldest unanswered prompt, except a wrapping-retry result, which answers
   // the same prompt again. Unused (and unmaintained) when the provider
@@ -360,6 +373,14 @@ export async function processQuery(
   let corruptionStreak = 0;
   const pollHandle = setInterval(() => {
     if (done || pollInFlight || endedForCommand) return;
+    // Shutdown/abort: stop claiming inbound rows and tear the stream down so
+    // the query generator (and with it this interval) actually terminates —
+    // otherwise an aborted loop keeps polling and steals pending messages.
+    if (signal?.aborted) {
+      endedForCommand = true;
+      query.abort();
+      return;
+    }
     pollInFlight = true;
 
     void (async () => {
@@ -423,6 +444,11 @@ export async function processQuery(
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
+        // New exchange boundary — sends from the previous exchange must not
+        // suppress a fallback delivery for the follow-up's answer. Enqueued,
+        // not applied: the in-flight result still belongs to the previous
+        // prompt.
+        watermarkQueue.push(getMaxSeq());
         query.push(prompt);
         archivePrompts.push(prompt);
         markCompleted(keptIds);
@@ -501,13 +527,51 @@ export async function processQuery(
               status: 'error',
             });
             archivePrompts.shift();
+            exchangeStartSeq = watermarkQueue.shift() ?? exchangeStartSeq;
           } else {
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+            // Rescue pass (#2369/#2393): the nudge was already spent and the
+            // reply STILL has no <message> wrapper — the model won't produce
+            // one. Deliver the final text to the batch's human trigger
+            // instead of silently dropping the turn as 'undelivered'.
+            // Guards:
+            //  - fallbackTarget null (pure A2A/task batch): never deliver — a
+            //    bare reply auto-delivered onto the agent channel can bounce
+            //    back as a new inbound and self-loop.
+            //  - alreadySentThisExchange: the answer already reached this
+            //    channel (e.g. via the send_message MCP tool mid-turn) and
+            //    the bare text is a trailing recap — delivering it would
+            //    duplicate the answer (#2404). Sends to OTHER destinations
+            //    don't suppress: only a send to this exact channel counts.
+            let salvaged: string | null = null;
+            const fallbackTarget = salvageDeliveryTarget(routing);
+            const alreadySentThisExchange =
+              fallbackTarget?.platformId != null && fallbackTarget.channelType != null
+                ? hasSendToChannelSince(fallbackTarget.platformId, fallbackTarget.channelType, exchangeStartSeq)
+                : false;
+            if (hasUnwrapped && !willRetryWrapping && alreadySentThisExchange) {
+              log(
+                `Suppressing fallback delivery — ${fallbackTarget!.channelType}:${fallbackTarget!.platformId} ` +
+                  `already received a message this exchange; treating trailing bare text as scratchpad`,
+              );
+            }
+            if (hasUnwrapped && !willRetryWrapping && fallbackTarget != null && !alreadySentThisExchange) {
+              salvaged = stripInternalTags(event.text).trim() || null;
+              if (salvaged) {
+                log(
+                  `[fallback-delivery] no deliverable <message> block after re-wrap nudge — delivering final ` +
+                    `assistant text (${salvaged.length} chars) to ${fallbackTarget.channelType}:${fallbackTarget.platformId}`,
+                );
+                deliverToTriggeringChannel(salvaged, fallbackTarget);
+              }
+            }
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
-              status: hasUnwrapped ? 'undelivered' : 'completed',
+              // A suppressed recap is not an undelivered turn — the real
+              // answer already reached the channel this exchange.
+              status: hasUnwrapped && !salvaged && !alreadySentThisExchange ? 'undelivered' : 'completed',
             });
             if (willRetryWrapping) {
               unwrappedNudged = true;
@@ -522,10 +586,14 @@ export async function processQuery(
             }
             // The wrapping-retry result answers the SAME user prompt — keep it
             // queued so the retry archives against it, not the nudge text.
-            if (!willRetryWrapping) archivePrompts.shift();
+            if (!willRetryWrapping) {
+              archivePrompts.shift();
+              exchangeStartSeq = watermarkQueue.shift() ?? exchangeStartSeq;
+            }
           }
         } else {
           archivePrompts.shift();
+          exchangeStartSeq = watermarkQueue.shift() ?? exchangeStartSeq;
         }
       }
     }
@@ -586,6 +654,24 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  */
 function deliverErrorResult(text: string, routing: RoutingContext): void {
   log('Error result with no <message> envelope — delivering to channel');
+  deliverToTriggeringChannel(text, routing);
+}
+
+/**
+ * Where the unwrapped-reply fallback may deliver. Returns the routing
+ * rewritten to the batch's newest wake-eligible human chat row, or null when
+ * the batch had no human trigger (pure A2A/task) — in that case the
+ * anti-self-loop guard keeps the fallback off entirely.
+ */
+export function salvageDeliveryTarget(routing: RoutingContext): RoutingContext | null {
+  if (routing.humanReply == null) return null;
+  return { ...routing, ...routing.humanReply };
+}
+
+/** Write bare (non-<message>-wrapped) text straight to the channel the batch
+ *  arrived on. Shared by the error-result path and the unwrapped-reply
+ *  fallback delivery. */
+function deliverToTriggeringChannel(text: string, routing: RoutingContext): void {
   writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,

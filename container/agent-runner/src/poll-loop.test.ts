@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it as bunIt, expect, beforeEach, afterEach } from 'bun:test';
+
+// Test DB connections are process-global; never overlap DB-backed tests.
+const it = bunIt.serial;
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
@@ -409,6 +412,7 @@ const ERR_ROUTING = {
   channelType: 'discord',
   threadId: null,
   inReplyTo: 'm1',
+  humanReply: { platformId: 'chan-1', channelType: 'discord', threadId: null, inReplyTo: 'm1' },
 };
 
 describe('error result with no <message> envelope', () => {
@@ -453,4 +457,225 @@ describe('isCorruptionError', () => {
     expect(isCorruptionError('no such table: messages_in')).toBe(false);
     expect(isCorruptionError('')).toBe(false);
   });
+});
+
+describe('unwrapped-reply fallback delivery', () => {
+  function makeEventsQuery(build: (pushes: string[]) => AsyncGenerator<ProviderEvent>): {
+    query: AgentQuery;
+    pushes: string[];
+  } {
+    const pushes: string[] = [];
+    return {
+      pushes,
+      query: {
+        push: (m: string) => {
+          pushes.push(m);
+        },
+        end: () => {},
+        events: build(pushes),
+        abort: () => {},
+      },
+    };
+  }
+
+  function row(
+    id: string,
+    kind: string,
+    channelType: string | null,
+    platformId: string | null,
+    trigger = 1,
+  ) {
+    return {
+      id,
+      seq: null,
+      kind,
+      timestamp: '2026-01-01T00:00:00Z',
+      status: 'pending',
+      process_after: null,
+      recurrence: null,
+      tries: 0,
+      trigger,
+      platform_id: platformId,
+      channel_type: channelType,
+      thread_id: null,
+      content: '{"text":"x"}',
+    };
+  }
+
+  it('delivers the final text after the re-wrap nudge fails (was: silent drop)', async () => {
+    const { query, pushes } = makeEventsQuery(async function* () {
+      yield { type: 'init', continuation: 'sess-1' };
+      yield { type: 'result', text: 'bare answer, first try' };
+      yield { type: 'result', text: 'bare answer, still unwrapped' };
+    });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    expect(pushes).toHaveLength(1); // the one nudge
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('bare answer, still unwrapped');
+    expect(out[0].platform_id).toBe('chan-1');
+    expect(out[0].channel_type).toBe('discord');
+  });
+
+  it('agent-to-agent batch: never fallback-delivered (self-loop guard)', async () => {
+    const a2aRouting = {
+      platformId: 'ag-self-1',
+      channelType: 'agent',
+      threadId: null,
+      inReplyTo: 'm1',
+      humanReply: null,
+    };
+    const { query } = makeEventsQuery(async function* () {
+      yield { type: 'init', continuation: 'sess-1' };
+      yield { type: 'result', text: 'bare reply on the agent channel' };
+      yield { type: 'result', text: 'bare reply on the agent channel' };
+    });
+
+    await processQuery(query, a2aRouting, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('mixed batch (agent row first, human row later): fallback targets the human row', () => {
+    const routing = extractRouting([
+      row('a1', 'chat', 'agent', 'ag-peer'),
+      row('h1', 'chat', 'telegram', 'tg-chat-9'),
+    ]);
+    expect(routing.channelType).toBe('agent'); // messages[0] fields unchanged
+    expect(routing.humanReply).toEqual({
+      platformId: 'tg-chat-9',
+      channelType: 'telegram',
+      threadId: null,
+      inReplyTo: 'h1',
+    });
+  });
+
+  it('trigger=0 accumulated context rows are never fallback targets', () => {
+    const routing = extractRouting([row('t1', 'task', null, null), row('c1', 'chat', 'telegram', 'tg-1', 0)]);
+    expect(routing.humanReply).toBeNull();
+  });
+
+  it('recap suppression (#2404): answer already sent via MCP this exchange → trailing bare recap is NOT delivered', async () => {
+    const { writeMessageOut } = await import('./db/messages-out.js');
+    const { query } = makeEventsQuery(async function* () {
+      yield { type: 'init', continuation: 'sess-1' };
+      // The real answer goes out via the send_message MCP tool mid-turn…
+      writeMessageOut({
+        id: 'mcp-1',
+        in_reply_to: null,
+        kind: 'chat',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        thread_id: null,
+        content: JSON.stringify({ text: 'the real answer, sent via tool' }),
+      });
+      // …and the model ends on a bare recap it forgot to mark <internal>.
+      yield { type: 'result', text: 'Sent — flagged the caveat and asked who it is for.' };
+      yield { type: 'result', text: 'Sent — flagged the caveat and asked who it is for.' };
+    });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const texts = getUndeliveredMessages().map((o) => JSON.parse(o.content).text);
+    expect(texts).toEqual(['the real answer, sent via tool']);
+  });
+
+  it('an edit_message row does NOT count as a delivered answer — bare answer still rescued', async () => {
+    const { writeMessageOut } = await import('./db/messages-out.js');
+    const { query } = makeEventsQuery(async function* () {
+      yield { type: 'init', continuation: 'sess-1' };
+      writeMessageOut({
+        id: 'edit-1',
+        in_reply_to: null,
+        kind: 'chat',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        thread_id: null,
+        content: JSON.stringify({ operation: 'edit', messageId: '42', text: 'corrected' }),
+      });
+      yield { type: 'result', text: 'the actual bare answer' };
+      yield { type: 'result', text: 'the actual bare answer' };
+    });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const texts = getUndeliveredMessages().map((o) => JSON.parse(o.content).text);
+    expect(texts).toContain('the actual bare answer');
+  });
+
+  it('a send to a DIFFERENT destination does not suppress the rescue for the triggering human', async () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('side-channel', 'side-channel', 'channel', 'slack', 'C-OPS', NULL)`,
+      )
+      .run();
+    const { query } = makeEventsQuery(async function* () {
+      yield { type: 'init', continuation: 'sess-1' };
+      yield { type: 'result', text: '<message to="side-channel">status note</message>\nanswer for the human' };
+      // bare turn: first gets the nudge, second gets rescued
+      yield { type: 'result', text: 'answer for the human' };
+      yield { type: 'result', text: 'answer for the human' };
+    });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const out = getUndeliveredMessages();
+    const texts = out.map((o) => JSON.parse(o.content).text).sort();
+    expect(texts).toEqual(['answer for the human', 'status note']);
+  });
+
+  it('follow-up push mid-turn does not hide the current turn MCP send (watermark queue)', async () => {
+    const { writeMessageOut } = await import('./db/messages-out.js');
+    const pushes: string[] = [];
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 'sess-1' };
+      writeMessageOut({
+        id: 'mcp-race',
+        in_reply_to: null,
+        kind: 'chat',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        thread_id: null,
+        content: JSON.stringify({ text: 'real answer via tool' }),
+      });
+      getInboundDb()
+        .prepare(
+          `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
+           VALUES ('fu-1', 'chat', datetime('now'), 'pending', 'chan-1', 'discord', '{"text":"follow-up"}')`,
+        )
+        .run();
+      const deadline = Date.now() + 10_000;
+      while (pushes.length === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      // Recap results for turn 1 (nudge, then rescue attempt) — must be
+      // suppressed even though a follow-up push reset would have hidden the
+      // MCP row.
+      yield { type: 'result', text: 'Sent — recap.' };
+      yield { type: 'result', text: 'Sent — recap.' };
+      // Turn 2 (answers the follow-up): bare, nudge already burned this
+      // query? No — the push resets unwrappedNudged; first bare gets a
+      // nudge, second gets rescued.
+      yield { type: 'result', text: 'answer to the follow-up' };
+      yield { type: 'result', text: 'answer to the follow-up' };
+    }
+    const query: AgentQuery = {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const texts = getUndeliveredMessages().map((o) => JSON.parse(o.content).text);
+    expect(texts).toContain('real answer via tool');
+    expect(texts).toContain('answer to the follow-up');
+    expect(texts).not.toContain('Sent — recap.');
+  }, 15_000);
 });

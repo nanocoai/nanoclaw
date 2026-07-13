@@ -9,7 +9,10 @@
  * is host locale-dependent for decorators (month abbr, "," separator) but
  * stable for the numeric parts we assert on (hour, minute, year).
  */
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it as bunIt, expect, beforeEach, afterEach } from 'bun:test';
+
+// Test DB connections are process-global; never overlap DB-backed tests.
+const it = bunIt.serial;
 
 import { initTestSessionDb, closeSessionDb, getInboundDb } from './db/connection.js';
 import { getPendingMessages } from './db/messages-in.js';
