@@ -584,7 +584,7 @@ describe('FeishuChannel', () => {
       // 面板 header 只有标题，动作独立成灰色一行
       expect(serialized).toContain('"content":"核对进度展示链路。"');
       expect(serialized).toContain(
-        '<font color=\\"grey\\">已读取 /tmp/input.t….txt，并测试 fixture.test.mjs（1 项通过）</font>',
+        '<font color=\\"grey\\">已读取 &#47;tmp&#47;input.t….txt，并测试 fixture.test.mjs（1 项通过）</font>',
       );
       expect(serialized).not.toContain('已完成协作操作');
     });
@@ -1072,7 +1072,7 @@ describe('FeishuChannel', () => {
         JSON.parse(patchArg?.data?.content ?? '{}'),
       );
       expect(serialized).toContain(
-        '<font color=\\"grey\\">正在读取 /tmp/notes.md</font>',
+        '<font color=\\"grey\\">正在读取 &#47;tmp&#47;notes.md</font>',
       );
       expect(serialized).not.toContain(' · 正在读取');
     });
@@ -1179,6 +1179,104 @@ describe('FeishuChannel', () => {
       const content: string = patchArg?.data?.content ?? '{}';
       expect(content).not.toContain('<at id=all>');
       expect(content).toContain('&lt;at id=all&gt;');
+    });
+
+    it('detail 的 diff 正文实体转义且自有红绿 font 标签保留', async () => {
+      process.env.NANOCLAW_READABLE_PROGRESS = '0';
+      try {
+        const jid = 'fs:oc_progress_md_escape_detail';
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '🔧 apply_patch',
+            detail:
+              '+ added <at id=all></at> line\n- removed [x](https://e.com) line\n* context *bold* line',
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'Bash',
+              toolCallId: 'detail-md',
+              input: { command: 'apply_patch < c.diff' },
+            },
+          }),
+          { isProgress: true },
+        );
+
+        const createArg = mockCreate.mock.calls.at(-1)?.[0];
+        const content: string = createArg?.data?.content ?? '{}';
+        expect(content).not.toContain('<at id=all>');
+        expect(content).not.toContain('[x](');
+        expect(content).toContain('&lt;at id=all&gt;');
+        // 自有着色标签保留：+ 行绿、- 行红
+        expect(content).toContain('<font color=\\"green\\">&#43; added');
+        expect(content).toContain('<font color=\\"red\\">&#45; removed');
+      } finally {
+        delete process.env.NANOCLAW_READABLE_PROGRESS;
+      }
+    });
+
+    it('行首 # 标题与 - 列表语法被实体化，不渲染为标题/列表', async () => {
+      const jid = 'fs:oc_progress_md_escape_heading';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '💬 # 大标题\n- 列表项',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'narration',
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const createArg = mockCreate.mock.calls.at(-1)?.[0];
+      const content: string = createArg?.data?.content ?? '{}';
+      const card = JSON.parse(content) as { body: { elements: unknown[] } };
+      const markdownContents: string[] = [];
+      const collect = (node: unknown): void => {
+        if (Array.isArray(node)) return node.forEach(collect);
+        if (node && typeof node === 'object') {
+          const el = node as Record<string, unknown>;
+          if (el.tag === 'markdown' && typeof el.content === 'string')
+            markdownContents.push(el.content);
+          Object.values(el).forEach(collect);
+        }
+      };
+      collect(card);
+      const body = markdownContents.find((text) => text.includes('大标题'));
+      expect(body).toBeDefined();
+      expect(body).toContain('&#35; 大标题');
+      expect(body).toContain('&#45; 列表项');
+    });
+
+    it('detail 面板 plain_text 头部用原文，不显示实体字面量', async () => {
+      process.env.NANOCLAW_READABLE_PROGRESS = '0';
+      try {
+        const jid = 'fs:oc_progress_detail_raw_header';
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '🔧 read progress_display.py',
+            detail: 'some detail',
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'Bash',
+              toolCallId: 'detail-raw',
+              input: { command: 'cat progress_display.py' },
+            },
+          }),
+          { isProgress: true },
+        );
+
+        const createArg = mockCreate.mock.calls.at(-1)?.[0];
+        const content: string = createArg?.data?.content ?? '{}';
+        expect(content).toContain('plain_text');
+        expect(content).not.toContain('&#95;display');
+      } finally {
+        delete process.env.NANOCLAW_READABLE_PROGRESS;
+      }
     });
 
     it('清理时将缺少结果的工具收口为结果未知', async () => {

@@ -185,27 +185,45 @@ const PHASE_ACTION_BUDGET = 48;
 /** 卡片展开区 narration 全文上限（超出截断并提示看过程记录） */
 const NARRATION_CARD_LIMIT = 2000;
 
+/** 飞书 markdown 特殊字符 → HTML 实体映射（官方文档完整清单） */
+const CARD_MD_ENTITY: Record<string, string> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '*': '&#42;',
+  '~': '&#126;',
+  _: '&#95;',
+  '`': '&#96;',
+  '[': '&#91;',
+  ']': '&#93;',
+  '(': '&#40;',
+  ')': '&#41;',
+  '#': '&#35;',
+  '-': '&#45;',
+  '!': '&#33;',
+  '/': '&#47;',
+  '\\': '&#92;',
+  ':': '&#58;',
+  '+': '&#43;',
+  '"': '&#34;',
+  "'": '&#39;',
+  $: '&#36;',
+};
+
 /**
- * 飞书 markdown 动态文本转义（review R3 P1，官方文档要求特殊字符用
- * HTML 实体）：把 markdown 语法字符和 HTML 标签定界符全部实体化，
- * 动态文本（narration/plan/todo 标题、路径动作）只能以纯文本渲染，
- * *斜体*、[链接](url)、<at id=all> 一概失效。代码自身生成的 <font>
- * wrapper 在转义之后拼接，不受影响。plain_text header 不解析 markdown，
- * 不走这层。& 必须最先转义
+ * 飞书 markdown 动态文本转义（review R3/R4 P1，官方文档要求特殊字符用
+ * HTML 实体）：按官方完整清单把 markdown 语法字符和 HTML 标签定界符
+ * 全部实体化，动态文本（narration/plan/todo 标题、路径动作、detail
+ * 正文）只能以纯文本渲染，*斜体*、[链接](url)、<at id=all>、行首
+ * #标题/-列表 一概失效。代码自身生成的 <font> wrapper 在转义之后拼接。
+ * plain_text header 不解析 markdown，不走这层。单遍替换：实体产物
+ * （含 & # ; 字符）不会被二次命中
  */
 export function escapeCardMarkdownText(text: string): string {
-  return text
-    .replace(/&/gu, '&amp;')
-    .replace(/</gu, '&lt;')
-    .replace(/>/gu, '&gt;')
-    .replace(/\*/gu, '&#42;')
-    .replace(/~/gu, '&#126;')
-    .replace(/_/gu, '&#95;')
-    .replace(/`/gu, '&#96;')
-    .replace(/\[/gu, '&#91;')
-    .replace(/\]/gu, '&#93;')
-    .replace(/\(/gu, '&#40;')
-    .replace(/\)/gu, '&#41;');
+  return text.replace(
+    /[&<>*~_`[\]()#!/\\:+"'$-]/gu,
+    (ch) => CARD_MD_ENTITY[ch] ?? ch,
+  );
 }
 
 export function truncateCp(text: string, budget: number): string {
@@ -310,11 +328,21 @@ function truncateTitle(title: string): string {
   return cps.length > 80 ? cps.slice(0, 80).join('') + '…' : firstLine;
 }
 
-/** 对 diff 内容着色：+ 行绿色，- 行红色 */
+/**
+ * 对 diff 内容着色：+ 行绿色，- 行红色。
+ * 先按原始行判加减类型，再对每行正文实体转义，最后包自有 font 标签——
+ * detail 是工具产出的动态文本，同样不允许注入 markdown/@all（review R4 P1）
+ */
 function colorizeDiff(text: string): string {
   return text
-    .replace(/^(\+\s?.*)$/gm, '<font color="green">$1</font>')
-    .replace(/^(-\s?.*)$/gm, '<font color="red">$1</font>');
+    .split('\n')
+    .map((line) => {
+      const escaped = escapeCardMarkdownText(line);
+      if (/^\+\s?/u.test(line)) return `<font color="green">${escaped}</font>`;
+      if (/^-\s?/u.test(line)) return `<font color="red">${escaped}</font>`;
+      return escaped;
+    })
+    .join('\n');
 }
 
 /** 将 step 转为卡片 element 列表（当前 Phase 为标题行 + 动作独立一行） */
@@ -377,7 +405,7 @@ function stepToElements(step: ProgressStep): unknown[] {
         expanded: false,
         background_color: 'grey',
         header: {
-          title: { tag: 'plain_text', content: title },
+          title: { tag: 'plain_text', content: rawTitle },
           vertical_align: 'center',
         },
         vertical_spacing: '2px',
