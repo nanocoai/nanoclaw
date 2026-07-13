@@ -800,8 +800,9 @@ const NARRATION_STORE_LIMIT = 4000;
 
 function capNarration(text: string): string {
   const cps = Array.from(text);
+  // 含省略号严格不超 4000：正文 3999 + '…'
   return cps.length > NARRATION_STORE_LIMIT
-    ? cps.slice(0, NARRATION_STORE_LIMIT).join('') + '…'
+    ? cps.slice(0, NARRATION_STORE_LIMIT - 1).join('') + '…'
     : text;
 }
 

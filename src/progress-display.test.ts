@@ -843,7 +843,22 @@ describe('reduceProgressPresentation', () => {
     _label,
     makePlanControl,
   ) => {
+    // 预置 planTaskId=9 的计划任务，确保 TaskUpdate 命中成功分支（真实覆盖）
     let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'tool',
+      progress: started('TaskCreate', { subject: '既有任务' }, 'tc-seed'),
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: {
+        provider: 'claude',
+        lifecycle: 'completed',
+        toolName: 'tool_result',
+        toolCallId: 'tc-seed',
+        resultSummary: 'Task #9 created',
+      },
+    });
+    state = reduceProgressPresentation(state, {
       kind: 'narration',
       text: '先修复回调重试。',
     });
@@ -873,7 +888,7 @@ describe('reduceProgressPresentation', () => {
       text: '乙'.repeat(3000),
     });
     const stored = (state as any).phases[0].narrationText as string;
-    expect(Array.from(stored)).toHaveLength(4001); // 4000 + '…'
+    expect(Array.from(stored)).toHaveLength(4000); // 3999 正文 + …，硬上限 4000
     expect(stored.endsWith('…')).toBe(true);
   });
 
