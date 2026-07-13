@@ -1525,6 +1525,55 @@ describe('FeishuChannel', () => {
       expect(Array.from(emojiRun)).toHaveLength(48);
     });
 
+    it('探测无匹配贯穿到 Phase 行尾：当前 Phase 行尾显示"已搜索，无匹配"', async () => {
+      const jid = 'fs:oc_progress_probe_tail';
+      (channel as any).opts.registeredGroups = () => ({
+        [jid]: {
+          name: 'probe-tail',
+          folder: 'fs_oc_progress_probe_tail',
+          trigger: '@bot',
+          added_at: new Date().toISOString(),
+          containerConfig: { cliMode: 'codex' },
+        },
+      });
+      await channel.sendMessage(jid, '💬 确认没有残留引用。', {
+        isProgress: true,
+      });
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Grep',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Grep',
+            toolCallId: 'probe-tail-1',
+            input: { pattern: 'legacyFn' },
+          },
+        }),
+        { isProgress: true },
+      );
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '✅ result',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'completed',
+            toolName: 'tool_result',
+            toolCallId: 'probe-tail-1',
+            exitCode: 1,
+          },
+        }),
+        { isProgress: true },
+      );
+      const entry = (channel as any).progressCards.get(jid);
+      const phaseRow = entry.steps.at(-1);
+      expect(phaseRow.title).toBe('确认没有残留引用。');
+      expect(phaseRow.grayTail).toBe('已搜索，无匹配');
+      expect(JSON.stringify(phaseRow)).not.toContain('失败');
+    });
+
     it('💬 quietProgress=false 时独立发送且同时进卡片 Phase（双份）', async () => {
       const jid = 'fs:oc_codex_quiet_off';
       (channel as any).progressDone.delete(jid);

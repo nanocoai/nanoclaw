@@ -467,16 +467,32 @@ function sanitizeUserText(text: string): string {
     .trim();
 }
 
-/** 探测型命令识别：这些命令退出码 1 是正常结果（无匹配/有差异），不是故障 */
+/**
+ * 探测型命令识别：这些命令退出码 1 是正常结果（无匹配/有差异），不是故障。
+ * 只有当命令是"单一、未取反的 simple command"（退出码确定来自该命令本身）才赋语义：
+ * 剥掉引号内内容后仍含控制符/取反/替换（! && || ; | 换行 $() `）的一律拒绝，
+ * 防止 `rg x && false`、`! rg x` 这类复合命令的真实失败被伪装成"无匹配"。
+ */
+function isSimpleProbeCommand(command: string): boolean {
+  const trimmed = command.trim();
+  if (!trimmed || trimmed.startsWith('!')) return false;
+  // 单引号内是字面量，先剥；命令替换在双引号内仍会执行，必须在剥双引号前检查
+  const withoutSingle = trimmed.replace(/'[^']*'/gu, '');
+  if (/\$\(|`/u.test(withoutSingle)) return false;
+  const unquoted = withoutSingle.replace(/"[^"]*"/gu, '');
+  return !/[;&|!\n]/u.test(unquoted);
+}
+
 function nonZeroExitMeaningOf(
   progress: StructuredProgress,
 ): 'no-match' | 'diff-found' | undefined {
   const tool = progress.toolName.toLowerCase();
-  const lower = commandOf(progress).toLowerCase();
   if (tool === 'grep') return 'no-match';
+  const command = commandOf(progress);
+  if (!isSimpleProbeCommand(command)) return undefined;
+  const lower = command.toLowerCase();
   if (/\b(?:rg|grep)\b/u.test(lower)) return 'no-match';
-  if (/git\s+diff\s+--check/u.test(lower) || /(^|[;&|]\s*)diff\b/u.test(lower))
-    return 'diff-found';
+  if (/git\s+diff\s+--check/u.test(lower)) return 'diff-found';
   return undefined;
 }
 
@@ -925,7 +941,11 @@ function aggregateOutcome(
   phase: PresentationPhase,
   progress: StructuredProgress,
   status: PresentationStep['status'],
+  probe?: 'no-match' | 'diff-found',
 ): string {
+  // 探测语义已在单步解析，Phase 聚合直接沿用，不重新猜
+  if (probe === 'no-match') return '已搜索，无匹配';
+  if (probe === 'diff-found') return '已检查，发现差异';
   if (status === 'failed') {
     if (phase.categories.includes('test')) return '测试未通过';
     if (progress.exitCode != null)
@@ -1474,7 +1494,7 @@ export function reduceProgressPresentation(
       currentAction: runningTool?.title ?? title,
       outcome: hasRunningTool
         ? enrichedPhase.outcome
-        : aggregateOutcome(enrichedPhase, progress, phaseStatus),
+        : aggregateOutcome(enrichedPhase, progress, phaseStatus, probe),
     };
   });
   return { ...state, steps, phases };

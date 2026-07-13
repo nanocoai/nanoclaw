@@ -1119,7 +1119,7 @@ describe('reduceProgressPresentation', () => {
       expect(state.steps[0].title).toBe('执行失败');
     });
 
-    it('探测无匹配不把 narration Phase 拖成失败', () => {
+    it('探测无匹配的结果精确保留到 narration Phase 聚合', () => {
       let state = reduceProgressPresentation(
         createProgressPresentationState(),
         { kind: 'narration', text: '确认没有残留引用。' },
@@ -1131,7 +1131,66 @@ describe('reduceProgressPresentation', () => {
       state = completeWithExit(state, 'clean-1', 1);
       const narrationPhase = (state as any).phases.at(-1);
       expect(narrationPhase.status).toBe('completed');
-      expect(narrationPhase.outcome).not.toContain('失败');
+      expect(narrationPhase.outcome).toBe('已搜索，无匹配');
+    });
+
+    it('探测无匹配的结果精确保留到 fallback Phase 聚合', () => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        {
+          kind: 'tool',
+          progress: started('Grep', { pattern: 'legacyFn' }, 'fb-1'),
+        },
+      );
+      state = completeWithExit(state, 'fb-1', 1);
+      const phase = (state as any).phases[0];
+      expect(phase.status).toBe('completed');
+      expect(phase.outcome).toBe('已搜索，无匹配');
+    });
+
+    it.each([
+      ['rg 后接 && false', 'rg -n needle src && false'],
+      ['取反 ! rg', '! rg -n needle src'],
+      ['rg 后接分号 false', 'rg -n needle src; false'],
+      ['管道到 grep', 'curl -s http://x | grep ok'],
+      ['命令替换', 'rg -n "$(cat pattern.txt)" src'],
+    ])('复合命令（%s）退出码 1 不伪装成无匹配', (_label, command) => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        {
+          kind: 'tool',
+          progress: started('Bash', { command }, 'compound-1'),
+        },
+      );
+      state = completeWithExit(state, 'compound-1', 1);
+      expect(state.steps[0].status).toBe('failed');
+      expect(state.steps[0].title).toBe('命令返回非零（退出码 1）');
+    });
+
+    it('引号内的正则控制符不影响探测判定（rg 竖线在引号里）', () => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        {
+          kind: 'tool',
+          progress: started('Bash', { command: "rg -n 'foo|bar' src" }, 'q-1'),
+        },
+      );
+      state = completeWithExit(state, 'q-1', 1);
+      expect(state.steps[0].status).toBe('completed');
+      expect(state.steps[0].title).toBe('已搜索，无匹配');
+    });
+
+    it('独立 diff 命令不再声明支持：退出码 1 走中性失败', () => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        {
+          kind: 'tool',
+          progress: started('Bash', { command: 'diff a.txt b.txt' }, 'd-1'),
+        },
+      );
+      state = completeWithExit(state, 'd-1', 1);
+      expect(state.steps[0].status).toBe('failed');
+      expect(state.steps[0].title).toBe('命令返回非零（退出码 1）');
     });
   });
 
