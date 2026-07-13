@@ -1180,6 +1180,86 @@ describe('reduceProgressPresentation', () => {
       expect(state.steps[0].title).toBe('已搜索，无匹配');
     });
 
+    it.each([
+      ['bash -c 包装复合命令', "bash -c 'rg x src && false'"],
+      ['zsh -c 双引号包装复合命令', 'zsh -c "rg x src && false"'],
+      ['python -c 注释里出现 rg', 'python -c "raise SystemExit(1) # rg x src"'],
+      ['eval 包装', "eval 'rg x src && false'"],
+      ['node -e 包装', "node -e 'process.exit(1) // rg'"],
+    ])('解释器包装（%s）退出码 1 不伪装成无匹配', (_label, command) => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        {
+          kind: 'tool',
+          progress: started('Bash', { command }, 'wrap-1'),
+        },
+      );
+      state = completeWithExit(state, 'wrap-1', 1);
+      expect(state.steps[0].status).toBe('failed');
+      expect(state.steps[0].title).toBe('命令返回非零（退出码 1）');
+    });
+
+    it.each([
+      ['codex 标准外壳', '/bin/zsh -lc "rg -n needle src"'],
+      ['绝对路径 rg', '/usr/bin/rg -n needle src'],
+      ['环境变量前缀', 'LC_ALL=C rg -n needle src'],
+    ])('%s 的单一 rg 探测仍识别无匹配', (_label, command) => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        {
+          kind: 'tool',
+          progress: started('Bash', { command }, 'unwrap-1'),
+        },
+      );
+      state = completeWithExit(state, 'unwrap-1', 1);
+      expect(state.steps[0].status).toBe('completed');
+      expect(state.steps[0].title).toBe('已搜索，无匹配');
+    });
+
+    it('外壳内层复合命令解包后照样拒绝', () => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        {
+          kind: 'tool',
+          progress: started(
+            'Bash',
+            { command: '/bin/zsh -lc "rg x src && false"' },
+            'unwrap-2',
+          ),
+        },
+      );
+      state = completeWithExit(state, 'unwrap-2', 1);
+      expect(state.steps[0].status).toBe('failed');
+    });
+
+    it('并行工具场景 probe 事实不丢失：探测先完成，普通工具后完成', () => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        { kind: 'narration', text: '并行核查。' },
+      );
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: started('Grep', { pattern: 'legacyFn' }, 'par-grep'),
+      });
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: started('Read', { file_path: '/tmp/a.ts' }, 'par-read'),
+      });
+      state = completeWithExit(state, 'par-grep', 1);
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: {
+          provider: 'claude',
+          lifecycle: 'completed',
+          toolName: 'tool_result',
+          toolCallId: 'par-read',
+        },
+      });
+      const phase = (state as any).phases.at(-1);
+      expect(phase.status).toBe('completed');
+      expect(phase.outcome).toContain('无匹配');
+    });
+
     it('独立 diff 命令不再声明支持：退出码 1 走中性失败', () => {
       let state = reduceProgressPresentation(
         createProgressPresentationState(),

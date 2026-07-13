@@ -468,19 +468,46 @@ function sanitizeUserText(text: string): string {
 }
 
 /**
- * 探测型命令识别：这些命令退出码 1 是正常结果（无匹配/有差异），不是故障。
- * 只有当命令是"单一、未取反的 simple command"（退出码确定来自该命令本身）才赋语义：
- * 剥掉引号内内容后仍含控制符/取反/替换（! && || ; | 换行 $() `）的一律拒绝，
- * 防止 `rg x && false`、`! rg x` 这类复合命令的真实失败被伪装成"无匹配"。
+ * 探测归属判定：只有当退出状态**直接由 rg/grep/git diff --check 本体产生**时才赋语义。
+ * 不做"字符串包含 rg"启发式——解释器包装（bash -c/python -c/eval）一律拒绝，
+ * 唯一例外是标准 shell 外壳 `sh|bash|zsh -c/-lc "<单引号串>"`（codex 默认包装），
+ * 解包一层后对内层命令递归同一判定；内层含控制符照样拒绝。
  */
-function isSimpleProbeCommand(command: string): boolean {
+const SHELL_WRAPPER =
+  /^(?:\/bin\/)?(?:ba|z)?sh\s+-l?c\s+(['"])([\s\S]*)\1\s*$/u;
+
+function probeExecutableOf(
+  command: string,
+  depth = 0,
+): 'rg' | 'grep' | 'git-diff-check' | undefined {
+  if (depth > 1) return undefined;
   const trimmed = command.trim();
-  if (!trimmed || trimmed.startsWith('!')) return false;
-  // 单引号内是字面量，先剥；命令替换在双引号内仍会执行，必须在剥双引号前检查
+  if (!trimmed || trimmed.startsWith('!')) return undefined;
+  const wrapper = trimmed.match(SHELL_WRAPPER);
+  if (wrapper) return probeExecutableOf(wrapper[2], depth + 1);
+  // 命令替换在双引号内仍会执行，须在剥双引号前检查；单引号内是字面量先剥
   const withoutSingle = trimmed.replace(/'[^']*'/gu, '');
-  if (/\$\(|`/u.test(withoutSingle)) return false;
+  if (/\$\(|`/u.test(withoutSingle)) return undefined;
   const unquoted = withoutSingle.replace(/"[^"]*"/gu, '');
-  return !/[;&|!\n]/u.test(unquoted);
+  if (/[;&|!\n]/u.test(unquoted)) return undefined;
+  // 解析真实 executable：允许前导环境变量赋值与 command 前缀、绝对路径取 basename
+  const tokens = trimmed.split(/\s+/u);
+  let index = 0;
+  while (
+    index < tokens.length &&
+    /^[A-Za-z_][A-Za-z0-9_]*=/u.test(tokens[index])
+  )
+    index += 1;
+  if (tokens[index] === 'command') index += 1;
+  const exe = tokens[index]?.replace(/^.*\//u, '') ?? '';
+  if (exe === 'rg' || exe === 'grep') return exe;
+  if (
+    exe === 'git' &&
+    /^diff\b/u.test(tokens.slice(index + 1).join(' ')) &&
+    tokens.slice(index + 1).includes('--check')
+  )
+    return 'git-diff-check';
+  return undefined;
 }
 
 function nonZeroExitMeaningOf(
@@ -488,11 +515,9 @@ function nonZeroExitMeaningOf(
 ): 'no-match' | 'diff-found' | undefined {
   const tool = progress.toolName.toLowerCase();
   if (tool === 'grep') return 'no-match';
-  const command = commandOf(progress);
-  if (!isSimpleProbeCommand(command)) return undefined;
-  const lower = command.toLowerCase();
-  if (/\b(?:rg|grep)\b/u.test(lower)) return 'no-match';
-  if (/git\s+diff\s+--check/u.test(lower)) return 'diff-found';
+  const exe = probeExecutableOf(commandOf(progress));
+  if (exe === 'rg' || exe === 'grep') return 'no-match';
+  if (exe === 'git-diff-check') return 'diff-found';
   return undefined;
 }
 
@@ -1488,13 +1513,24 @@ export function reduceProgressPresentation(
       ? 'running'
       : status;
     const enrichedPhase = mergeResultFacts(phase, progress);
+    // 并行场景 probe 事实持久化：把该步的 actionSummary 标注结果，
+    // 即使后续还有工具完成、最终聚合走 summaries 路径，"无匹配"也不丢失
+    const probeSummaries =
+      probe && step.actionSummary
+        ? (enrichedPhase.actionSummaries ?? []).map((summary) =>
+            summary === step.actionSummary
+              ? `${summary}（${probe === 'no-match' ? '无匹配' : '发现差异'}）`
+              : summary,
+          )
+        : enrichedPhase.actionSummaries;
+    const probedPhase = { ...enrichedPhase, actionSummaries: probeSummaries };
     return {
-      ...enrichedPhase,
+      ...probedPhase,
       status: phaseStatus,
       currentAction: runningTool?.title ?? title,
       outcome: hasRunningTool
-        ? enrichedPhase.outcome
-        : aggregateOutcome(enrichedPhase, progress, phaseStatus, probe),
+        ? probedPhase.outcome
+        : aggregateOutcome(probedPhase, progress, phaseStatus, probe),
     };
   });
   return { ...state, steps, phases };
