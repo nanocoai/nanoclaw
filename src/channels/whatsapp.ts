@@ -460,19 +460,21 @@ registerChannelAdapter('whatsapp', {
       const cached = groupMetadataCache.get(jid);
       if (cached && cached.expiresAt > Date.now()) return cached.metadata;
 
+      // Return WhatsApp's native group metadata UNMODIFIED. Baileys uses this to
+      // distribute the group sender-key; it also reads `addressingMode` from it.
+      // For LID-addressed groups the participants must keep their native @lid ids
+      // so they match addressingMode='lid'. Translating them to phone JIDs
+      // (previous behavior) left addressingMode='lid' but pn-shaped participant
+      // ids — an inconsistency that desynced sender-key distribution, so member
+      // devices never received the key and group messages stuck on "waiting for
+      // this message". DMs and phone-addressed (small) groups were unaffected.
+      // The LID→phone translation for inbound sender routing happens separately.
       const metadata = await sock.groupMetadata(jid);
-      const participants = await Promise.all(
-        metadata.participants.map(async (p) => ({
-          ...p,
-          id: await translateJid(p.id),
-        })),
-      );
-      const normalized = { ...metadata, participants };
       groupMetadataCache.set(jid, {
-        metadata: normalized,
+        metadata,
         expiresAt: Date.now() + GROUP_METADATA_CACHE_TTL_MS,
       });
-      return normalized;
+      return metadata;
     }
 
     async function syncGroupMetadata(force = false): Promise<void> {
