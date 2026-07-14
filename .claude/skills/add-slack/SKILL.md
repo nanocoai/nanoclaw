@@ -114,10 +114,10 @@ The Chat SDK bridge automatically starts a shared webhook server on port 3000 (c
 
 **Public server:** point Slack's Request URL directly at `https://your-domain/webhook/slack`.
 
-**Local install:** expose port 3000 with a tunnel proxy. The resulting public URL becomes the base for `https://your-domain/webhook/slack`. Options:
+**Local install:** expose port 3000 with any tunnel proxy that provides a public HTTPS URL — the resulting URL becomes the base for `https://your-domain/webhook/slack`. Whatever tool you use, prefer one that gives a **stable URL** (the same URL across restarts), otherwise you'd need to update the Request URL in the Slack app dashboard every time the tunnel restarts. Some common options:
 
-- **ngrok** — `ngrok http 3000`. A [free ngrok account](https://ngrok.com) includes one static domain that survives restarts (`ngrok http --url=your-slug.ngrok-free.dev 3000`); without an account each restart gives a new URL you'd need to re-enter in Slack.
-- **Cloudflare Tunnel** — `cloudflared tunnel --url http://localhost:3000`. Quick tunnels are ephemeral; a [named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps) gives a stable URL that survives reboots.
+- **ngrok** — `ngrok http 3000`. A [free ngrok account](https://ngrok.com) includes one static domain (`ngrok http --url=your-slug.ngrok-free.dev 3000`); without an account each restart generates a new URL.
+- **Cloudflare Tunnel** — `cloudflared tunnel --url http://localhost:3000`. Quick tunnels are ephemeral; a [named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps) gives a stable URL.
 
 ## Next Steps
 
