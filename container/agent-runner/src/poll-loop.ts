@@ -354,6 +354,11 @@ export async function processQuery(
   // Once-per-turn guard for the task-run "<message> block was not delivered"
   // nudge — mirrors unwrappedNudged for chat turns.
   let taskBlockNudged = false;
+  // Assistant text streamed this turn via `assistant_text` events. Used as the
+  // result text when the terminal `result` carries none — otherwise a
+  // <message> block emitted in a tool-call turn is silently dropped. Reset at
+  // each result (turn boundary).
+  let assistantTurnText = '';
   // Prompt queue for the exchange hook — each result event consumes the
   // oldest unanswered prompt, except a wrapping-retry result, which answers
   // the same prompt again. Unused (and unmaintained) when the provider
@@ -493,6 +498,10 @@ export async function processQuery(
         // effectively orphaned and the next message started a blank
         // Claude session with no prior context.
         setContinuation(providerName, event.continuation);
+      } else if (event.type === 'assistant_text') {
+        // Accumulate assistant text as it streams — the fallback for a result
+        // that arrives with no text of its own (a tool-call-terminated turn).
+        assistantTurnText += event.text;
       } else if (event.type === 'result') {
         // A result — with or without text — means the turn is done. Mark
         // the initial batch completed now so the host sweep doesn't see
@@ -501,24 +510,30 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
-        if (event.text) {
-          const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(event.text, routing);
+        // The SDK's `result` carries only the FINAL turn's text. When the agent
+        // emits a <message> block in an assistant turn that also makes a tool
+        // call, that text arrives via assistant_text events and the result has
+        // none — fall back to it so the block isn't silently dropped.
+        const turnText = event.text ?? (assistantTurnText.trim().length > 0 ? assistantTurnText : null);
+        assistantTurnText = '';
+        if (turnText) {
+          const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(turnText, routing);
           const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
           // while explicit append-log calls remain optional additive notes.
           // Errors included: a failed run's text belongs in its log, not chat.
           // A corrective retry handles delivery only; its result is not a
           // second run summary.
-          if (routing.taskRun && !taskBlockNudged) autoAppendTaskLog(event.text);
+          if (routing.taskRun && !taskBlockNudged) autoAppendTaskLog(turnText);
           if (sent === 0 && event.isError === true && !routing.taskRun) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
             // scratchpad, and skip the re-wrap nudge — it would just re-hammer
             // the failing gateway turn after turn.
-            deliverErrorResult(event.text, routing);
+            deliverErrorResult(turnText, routing);
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
-              result: event.text,
+              result: turnText,
               continuation: queryContinuation ?? initialContinuation,
               status: 'error',
             });
@@ -527,7 +542,7 @@ export async function processQuery(
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
-              result: event.text,
+              result: turnText,
               continuation: queryContinuation ?? initialContinuation,
               status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
             });
