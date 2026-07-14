@@ -112,7 +112,12 @@ launchctl kickstart -k gui/$(id -u)/com.nanoclaw   # macOS
 
 The Chat SDK bridge automatically starts a shared webhook server on port 3000 (configurable via `WEBHOOK_PORT` env var). The server handles `/webhook/slack` for Slack and other webhook-based adapters. This port must be publicly reachable from the internet for Slack to deliver events.
 
-If running locally, discuss options for exposing the server — e.g. ngrok (`ngrok http 3000`), Cloudflare Tunnel, or a reverse proxy on a VPS. The resulting public URL becomes the base for `https://your-domain/webhook/slack`.
+**Public server:** point Slack's Request URL directly at `https://your-domain/webhook/slack`.
+
+**Local install:** expose port 3000 with a tunnel proxy. The resulting public URL becomes the base for `https://your-domain/webhook/slack`. Options:
+
+- **ngrok** — `ngrok http 3000`. A [free ngrok account](https://ngrok.com) includes one static domain that survives restarts (`ngrok http --url=your-slug.ngrok-free.dev 3000`); without an account each restart gives a new URL you'd need to re-enter in Slack.
+- **Cloudflare Tunnel** — `cloudflared tunnel --url http://localhost:3000`. Quick tunnels are ephemeral; a [named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps) gives a stable URL that survives reboots.
 
 ## Next Steps
 
