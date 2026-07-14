@@ -76,6 +76,23 @@ End-to-end message delivery against a real Slack workspace is verified manually 
 6. Go to **App Home** and enable the **Messages Tab**
 7. Check **"Allow users to send Slash commands and messages from the messages tab"**
 
+### Configure environment
+
+Add to `.env`:
+
+```bash
+SLACK_BOT_TOKEN=xoxb-your-bot-token
+SLACK_SIGNING_SECRET=your-signing-secret
+```
+
+Sync to container and restart the service before continuing — the Slack adapter only starts when `SLACK_BOT_TOKEN` is present, so the webhook route won't register until the service is running with credentials loaded. Slack sends a verification challenge the moment you enter the Request URL; if the adapter isn't up, the challenge fails and the URL can't be saved.
+
+```bash
+mkdir -p data/env && cp .env data/env/env
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw   # macOS
+# systemctl --user restart nanoclaw                 # Linux
+```
+
 ### Event Subscriptions
 
 8. Go to **Event Subscriptions** and toggle **Enable Events**
@@ -90,17 +107,6 @@ End-to-end message delivery against a real Slack workspace is verified manually 
 13. Set the **Request URL** to the same `https://your-domain/webhook/slack`
 14. Click **Save Changes**
 15. Slack will show a banner asking you to **reinstall the app** — click it to apply the new settings
-
-### Configure environment
-
-Add to `.env`:
-
-```bash
-SLACK_BOT_TOKEN=xoxb-your-bot-token
-SLACK_SIGNING_SECRET=your-signing-secret
-```
-
-Sync to container: `mkdir -p data/env && cp .env data/env/env`
 
 ### Webhook server
 
