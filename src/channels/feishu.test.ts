@@ -77,6 +77,7 @@ vi.mock('../voice-notify.js', () => ({
 }));
 
 import { ASSISTANT_NAME } from '../config.js';
+import { logger } from '../logger.js';
 import { _getSessionForTest } from '../progress-server.js';
 import { FeishuChannel, truncateCp, truncateTailCp } from './feishu.js';
 import type { ChannelOpts } from './registry.js';
@@ -1168,7 +1169,12 @@ describe('FeishuChannel', () => {
             toolName: 'TodoWrite',
             toolCallId: 'todo-md',
             input: {
-              todos: [{ content: '<at id=all></at> *加急* 任务', status: 'in_progress' }],
+              todos: [
+                {
+                  content: '<at id=all></at> *加急* 任务',
+                  status: 'in_progress',
+                },
+              ],
             },
           },
         }),
@@ -2094,6 +2100,385 @@ describe('FeishuChannel', () => {
       const serialized = JSON.stringify(content);
       // 完整内容（含换行后的部分）应在卡片内
       expect(serialized).toContain('B'.repeat(50));
+    });
+  });
+
+  describe('首请求起手卡生命周期', () => {
+    const jid = 'fs:oc_first_request';
+
+    beforeEach(() => {
+      mockCreate.mockReset().mockResolvedValue({
+        data: { message_id: 'msg_mock' },
+      });
+      mockPatch.mockReset().mockResolvedValue({});
+      mockMessageDelete.mockReset().mockResolvedValue({});
+      (channel as any).opts.registeredGroups = () => ({
+        [jid]: {
+          name: 'first-request',
+          folder: 'fs_oc_first_request',
+          trigger: '@bot',
+          added_at: new Date().toISOString(),
+          containerConfig: { cliMode: 'codex', quietProgress: true },
+        },
+      });
+      (channel as any).lastMessageIds.set(jid, 'msg_user_first');
+    });
+
+    it('setTyping(true) 只创建一张仅标题卡且重复调用幂等', async () => {
+      mockCreate.mockResolvedValueOnce({
+        data: { message_id: 'msg_start_only' },
+      });
+
+      await channel.setTyping!(jid, true);
+      await channel.setTyping!(jid, true);
+
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+      expect(mockReactionCreate).toHaveBeenCalledTimes(1);
+      expect(mockCreate.mock.invocationCallOrder[0]).toBeLessThan(
+        mockReactionCreate.mock.invocationCallOrder[0],
+      );
+      const request = mockCreate.mock.calls[0][0];
+      expect(request.data.msg_type).toBe('interactive');
+      const card = JSON.parse(request.data.content);
+      expect(card.body.elements).toHaveLength(1);
+      expect(JSON.stringify(card)).not.toContain('正在等待响应');
+      expect(JSON.stringify(card)).not.toContain('过程记录');
+      expect(JSON.stringify(card)).not.toContain('"tag":"hr"');
+    });
+
+    it('SDK 正式正文复用起手卡 message_id 原地转正', async () => {
+      mockCreate.mockResolvedValueOnce({
+        data: { message_id: 'msg_start_sdk' },
+      });
+      await channel.setTyping!(jid, true);
+
+      const result = await channel.sendMessage(jid, '这是直接答案');
+
+      expect(result).toBe('msg_start_sdk');
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+      expect(mockPatch).toHaveBeenCalledTimes(1);
+      expect(mockPatch).toHaveBeenCalledWith(
+        expect.objectContaining({ path: { message_id: 'msg_start_sdk' } }),
+      );
+      const finalCard = JSON.parse(mockPatch.mock.calls[0][0].data.content);
+      expect(JSON.stringify(finalCard)).toContain('这是直接答案');
+      expect(JSON.stringify(finalCard)).not.toContain('处理中');
+      expect(mockMessageDelete).not.toHaveBeenCalled();
+      expect(mockNotifyVoice).toHaveBeenCalledTimes(1);
+    });
+
+    it('生命周期日志只记录状态、耗时和正文长度，不记录正文', async () => {
+      const infoSpy = vi.spyOn(logger, 'info');
+      mockCreate.mockResolvedValueOnce({
+        data: { message_id: 'msg_log_safe' },
+      });
+      await channel.setTyping!(jid, true);
+      await channel.sendMessage(jid, '不能进入日志的正文');
+
+      const finalLog = infoSpy.mock.calls.find(
+        (call) => call[1] === '[first-card] 起手卡原地转正成功',
+      );
+      expect(finalLog?.[0]).toEqual(
+        expect.objectContaining({
+          jid,
+          messageId: 'msg_log_safe',
+          fromState: 'start-only',
+          toState: 'direct-final',
+          elapsedMs: expect.any(Number),
+          textLen: 9,
+        }),
+      );
+      expect(JSON.stringify(finalLog?.[0])).not.toContain('不能进入日志的正文');
+      infoSpy.mockRestore();
+    });
+
+    it('Codex text-only 在 turn end 复用起手卡并消费 usage', async () => {
+      mockCreate.mockResolvedValueOnce({
+        data: { message_id: 'msg_start_codex' },
+      });
+      await channel.setTyping!(jid, true);
+      await channel.sendMessage(jid, '💬 第一段答案', { isProgress: true });
+      await channel.sendMessage(jid, '💬 第二段答案', { isProgress: true });
+      channel.setUsage(jid, {
+        inputTokens: 10,
+        outputTokens: 20,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+        numTurns: 1,
+        durationMs: 100,
+        totalCostUsd: 0.01,
+        model: 'gpt-5',
+      });
+
+      const finalized = await (channel as any).tryFinalizeTextOnly(jid);
+
+      expect(finalized).toBe(true);
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+      const finalPatch = mockPatch.mock.calls.at(-1)?.[0];
+      expect(finalPatch.path.message_id).toBe('msg_start_codex');
+      expect(finalPatch.data.content).toContain('第一段答案');
+      expect(finalPatch.data.content).toContain('第二段答案');
+      expect(finalPatch.data.content).toContain('gpt-5');
+      expect((channel as any).pendingUsage.has(jid)).toBe(false);
+      expect(mockNotifyVoice).toHaveBeenCalledTimes(1);
+    });
+
+    it('text-only 后出现工具则永久进入 progress，不再原卡转正', async () => {
+      mockCreate.mockResolvedValueOnce({
+        data: { message_id: 'msg_start_progress' },
+      });
+      await channel.setTyping!(jid, true);
+      await channel.sendMessage(jid, '💬 我先检查', { isProgress: true });
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Bash',
+          progress: {
+            provider: 'codex',
+            lifecycle: 'started',
+            toolName: 'Bash',
+            toolCallId: 'tool-after-text',
+            input: { command: 'pwd' },
+          },
+        }),
+        { isProgress: true },
+      );
+
+      await expect((channel as any).tryFinalizeTextOnly(jid)).resolves.toBe(
+        false,
+      );
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+      expect((channel as any).progressCards.get(jid).contentState).toBe(
+        'progress',
+      );
+    });
+
+    it('起手卡创建失败不阻断正式回复', async () => {
+      mockCreate
+        .mockRejectedValueOnce(new Error('start create failed'))
+        .mockResolvedValueOnce({ data: { message_id: 'msg_fallback_reply' } });
+
+      await expect(channel.setTyping!(jid, true)).resolves.toBeUndefined();
+      await expect(channel.sendMessage(jid, '仍然要送达')).resolves.toBe(
+        'msg_fallback_reply',
+      );
+
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+      expect(mockPatch).not.toHaveBeenCalled();
+      expect((channel as any).progressCards.has(jid)).toBe(false);
+    });
+
+    it('原卡终态 patch 失败时删除起手卡并只降级发送一份正文', async () => {
+      mockCreate
+        .mockResolvedValueOnce({ data: { message_id: 'msg_patch_failed' } })
+        .mockResolvedValueOnce({ data: { message_id: 'msg_reply_fallback' } });
+      mockPatch.mockRejectedValueOnce(new Error('final patch failed'));
+      await channel.setTyping!(jid, true);
+
+      await expect(channel.sendMessage(jid, '降级正文')).resolves.toBe(
+        'msg_reply_fallback',
+      );
+
+      expect(mockPatch).toHaveBeenCalledTimes(1);
+      expect(mockMessageDelete).toHaveBeenCalledTimes(1);
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+      const fallbackCreate = mockCreate.mock.calls[1][0];
+      expect(fallbackCreate.data.content).toContain('降级正文');
+      expect(mockNotifyVoice).toHaveBeenCalledTimes(1);
+    });
+
+    it('媒体首响应先收口起手卡，再走现有媒体正文链路', async () => {
+      mockCreate
+        .mockResolvedValueOnce({ data: { message_id: 'msg_media_start' } })
+        .mockResolvedValueOnce({ data: { message_id: 'msg_media_text' } });
+      await channel.setTyping!(jid, true);
+
+      await expect(
+        channel.sendMessage(jid, '图片如下 [图片: /tmp/not-found-e2e.png]'),
+      ).resolves.toBe('msg_media_text');
+
+      expect(mockMessageDelete).toHaveBeenCalledWith({
+        path: { message_id: 'msg_media_start' },
+      });
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+      expect(mockPatch).not.toHaveBeenCalled();
+    });
+
+    it('non-quiet narration 已独立发送时禁止再次原卡转正', async () => {
+      (channel as any).opts.registeredGroups = () => ({
+        [jid]: {
+          name: 'non-quiet',
+          folder: 'fs_oc_first_request',
+          trigger: '@bot',
+          added_at: new Date().toISOString(),
+          containerConfig: { cliMode: 'sdk', quietProgress: false },
+        },
+      });
+      mockCreate
+        .mockResolvedValueOnce({ data: { message_id: 'msg_non_quiet_start' } })
+        .mockResolvedValueOnce({ data: { message_id: 'msg_narration' } });
+      await channel.setTyping!(jid, true);
+      await channel.sendMessage(jid, '💬 已经独立发出的内容', {
+        isProgress: true,
+      });
+
+      await expect((channel as any).tryFinalizeTextOnly(jid)).resolves.toBe(
+        false,
+      );
+      expect(
+        (channel as any).progressCards.get(jid).narrationSeparatelySent,
+      ).toBe(true);
+    });
+
+    it('text-only 候选按 UTF-8 100KB 封顶并提示查看过程记录', async () => {
+      mockCreate.mockResolvedValueOnce({
+        data: { message_id: 'msg_text_limit' },
+      });
+      await channel.setTyping!(jid, true);
+      await channel.sendMessage(jid, `💬 ${'中'.repeat(40_000)}`, {
+        isProgress: true,
+      });
+      const entry = (channel as any).progressCards.get(jid);
+      expect(entry.textCandidateBytes).toBeLessThanOrEqual(100_000);
+      expect(entry.textCandidateTruncated).toBe(true);
+
+      await expect((channel as any).tryFinalizeTextOnly(jid)).resolves.toBe(
+        true,
+      );
+      const finalContent = mockPatch.mock.calls.at(-1)?.[0].data.content;
+      expect(finalContent).toContain('全文见过程记录');
+      expect(Buffer.byteLength(finalContent, 'utf8')).toBeLessThan(30_000);
+    });
+
+    it('在途进度 patch 排空后终态 patch 最后写入', async () => {
+      let releasePatch!: () => void;
+      const inFlight = new Promise<void>((resolve) => {
+        releasePatch = resolve;
+      });
+      mockCreate.mockResolvedValueOnce({
+        data: { message_id: 'msg_patch_order' },
+      });
+      mockPatch
+        .mockImplementationOnce(() => inFlight)
+        .mockResolvedValueOnce({});
+      await channel.setTyping!(jid, true);
+      await channel.sendMessage(jid, '💬 等待中的正文', { isProgress: true });
+      expect(mockPatch).toHaveBeenCalledTimes(1);
+
+      let settled = false;
+      const finalizing = (channel as any)
+        .tryFinalizeTextOnly(jid)
+        .then((value: boolean) => {
+          settled = true;
+          return value;
+        });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      releasePatch();
+
+      await expect(finalizing).resolves.toBe(true);
+      expect(mockPatch).toHaveBeenCalledTimes(2);
+      expect(mockPatch.mock.calls[1][0].data.content).toContain('等待中的正文');
+      expect((channel as any).progressCards.has(jid)).toBe(false);
+    });
+
+    it('text-only 终态 patch 失败时把累积正文交给现有发送路径', async () => {
+      mockCreate
+        .mockResolvedValueOnce({ data: { message_id: 'msg_text_patch_fail' } })
+        .mockResolvedValueOnce({ data: { message_id: 'msg_text_fallback' } });
+      await channel.setTyping!(jid, true);
+      await channel.sendMessage(jid, '💬 累积后的最终正文', {
+        isProgress: true,
+      });
+      await (channel as any).progressCards
+        .get(jid)
+        .patchLoopPromise?.catch(() => {});
+      mockPatch.mockRejectedValueOnce(new Error('text final patch failed'));
+
+      await expect((channel as any).tryFinalizeTextOnly(jid)).resolves.toBe(
+        true,
+      );
+
+      expect(mockMessageDelete).toHaveBeenCalledWith({
+        path: { message_id: 'msg_text_patch_fail' },
+      });
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+      expect(mockCreate.mock.calls[1][0].data.content).toContain(
+        '累积后的最终正文',
+      );
+      expect(mockNotifyVoice).toHaveBeenCalledTimes(1);
+    });
+
+    it('fire-and-forget 建卡未完成时正文先到，只保留降级正文并删除迟到卡', async () => {
+      let releaseCreate!: (value: { data: { message_id: string } }) => void;
+      const pendingCreate = new Promise<{ data: { message_id: string } }>(
+        (resolve) => {
+          releaseCreate = resolve;
+        },
+      );
+      mockCreate
+        .mockImplementationOnce(() => pendingCreate)
+        .mockResolvedValueOnce({ data: { message_id: 'msg_race_reply' } });
+
+      const typingPromise = channel.setTyping!(jid, true);
+      await Promise.resolve();
+      await expect(channel.sendMessage(jid, '抢先到达的正文')).resolves.toBe(
+        'msg_race_reply',
+      );
+      releaseCreate({ data: { message_id: 'msg_late_start' } });
+      await typingPromise;
+
+      expect(mockCreate).toHaveBeenCalledTimes(2);
+      expect(mockMessageDelete).toHaveBeenCalledWith({
+        path: { message_id: 'msg_late_start' },
+      });
+      expect(mockPatch).not.toHaveBeenCalled();
+      expect((channel as any).progressCards.has(jid)).toBe(false);
+    });
+
+    it('建卡期间先到的 Phase 在 create 完成后立即合并 patch', async () => {
+      let releaseCreate!: (value: { data: { message_id: string } }) => void;
+      const pendingCreate = new Promise<{ data: { message_id: string } }>(
+        (resolve) => {
+          releaseCreate = resolve;
+        },
+      );
+      mockCreate.mockImplementationOnce(() => pendingCreate);
+
+      const typingPromise = channel.setTyping!(jid, true);
+      await Promise.resolve();
+      await channel.sendMessage(jid, '💬 建卡期间到达的 Phase', {
+        isProgress: true,
+      });
+      releaseCreate({ data: { message_id: 'msg_buffered_phase' } });
+      await typingPromise;
+      await (channel as any).progressCards
+        .get(jid)
+        .patchLoopPromise?.catch(() => {});
+
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+      expect(mockPatch).toHaveBeenCalledTimes(1);
+      expect(mockPatch.mock.calls[0][0].path.message_id).toBe(
+        'msg_buffered_phase',
+      );
+      expect(mockPatch.mock.calls[0][0].data.content).toContain(
+        '建卡期间到达的 Phase',
+      );
+    });
+
+    it('原卡转正后迟到进度被拒绝且不再建卡', async () => {
+      mockCreate.mockResolvedValueOnce({
+        data: { message_id: 'msg_final_then_late' },
+      });
+      await channel.setTyping!(jid, true);
+      await channel.sendMessage(jid, '最终正文');
+      await channel.sendMessage(jid, '💬 迟到 narration', {
+        isProgress: true,
+      });
+
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+      expect(mockPatch).toHaveBeenCalledTimes(1);
+      expect((channel as any).progressCards.has(jid)).toBe(false);
     });
   });
 

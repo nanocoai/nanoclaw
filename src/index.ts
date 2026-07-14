@@ -99,6 +99,7 @@ import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import type { CliMode } from './types.js';
 import { logger } from './logger.js';
+import { finalizeInteractiveTurn } from './progress-turn-finalizer.js';
 import { withLogContext } from './log-context.js';
 
 // Re-export for backwards compatibility during refactor
@@ -1039,17 +1040,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       // success 到达时 text 为空，但 pendingUsage 还在 → 单独发 usage-only 卡片。
       // 只有真实文本发出过才补 footer；工具进度卡不能算，否则会产生空消息。
       // 必须在 cleanupProgressCard 之前调用（cleanup 会清理 pendingUsage）
-      if (textSentToUser && 'sendUsageOnly' in channel) {
-        await (
-          channel as { sendUsageOnly: (jid: string) => Promise<void> }
-        ).sendUsageOnly(chatJid);
-      }
-      // 无条件清理进度卡片（cleanupProgressCard 内部会检查卡片是否存在，不存在则 no-op）
-      if ('cleanupProgressCard' in channel) {
-        await (
-          channel as { cleanupProgressCard: (jid: string) => Promise<void> }
-        ).cleanupProgressCard(chatJid);
-      }
+      await finalizeInteractiveTurn(channel, chatJid, textSentToUser);
       // Commander 自动终态兜底（共享函数，main/retry onOutput 统一调用）
       finalizeActiveDelegationForTurn({ ok: true, logPrefix: '[main]' });
 
@@ -1359,18 +1350,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               await channel.setTyping?.(chatJid, false);
             }
             // CLI interactive: usage-only 卡片（同主回调，在 cleanup 之前）
-            if (textSentToUser && 'sendUsageOnly' in channel) {
-              await (
-                channel as { sendUsageOnly: (jid: string) => Promise<void> }
-              ).sendUsageOnly(chatJid);
-            }
-            if ('cleanupProgressCard' in channel) {
-              await (
-                channel as {
-                  cleanupProgressCard: (jid: string) => Promise<void>;
-                }
-              ).cleanupProgressCard(chatJid);
-            }
+            await finalizeInteractiveTurn(channel, chatJid, textSentToUser);
             // Commander 自动终态兜底（共享函数，与 mainOnOutput 统一）
             finalizeActiveDelegationForTurn({ ok: true, logPrefix: '[retry]' });
             outputSentToUser = false;
