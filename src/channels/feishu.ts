@@ -178,8 +178,12 @@ function planPresentationTitle(step: PresentationStep): string {
   return `待处理：${step.title}`;
 }
 
-/** Phase 行标题预算（Unicode code point）——固定值，不随行尾有无变化，避免冻结时截断点漂移 */
-const PHASE_TITLE_BUDGET = 48;
+/**
+ * Phase 行标题预算（Unicode code point）——固定值，不随行尾有无变化，避免
+ * 冻结时截断点漂移。折叠态标题必须单行：飞书桌面卡片一行约容 30 个 CJK
+ * 字符，48 会折成两行把工具动作挤到第三行（大杰 2026-07-15 拍板单行）
+ */
+const PHASE_TITLE_BUDGET = 30;
 /** Phase 动作行预算（Unicode code point）——动作独占一行后不再与标题抢预算 */
 const PHASE_ACTION_BUDGET = 48;
 /** 卡片展开区 narration 全文上限（超出截断并提示看过程记录） */
@@ -416,9 +420,9 @@ function stepToElements(step: ProgressStep): unknown[] {
       ? undefined
       : escapeCardMarkdownText(step.grayTail);
   if (step.narrationFull) {
-    // Phase 行：可展开查看 narration 全文（展开区只放全文，不放工具历史）。
+    // Phase 行：可展开查看 narration 全文 + 最新一条工具执行过程。
     // header 为 plain_text（R1：行内灰色待实测支持后升级）；
-    // 动作不再拼进 header，独立一行灰色跟在面板下方
+    // 动作不再拼进 header，独立一行灰色跟在面板下方（折叠态的第二行）
     const cpLimited = truncateCp(step.narrationFull, NARRATION_CARD_LIMIT);
     const byteLimited = truncateByEscapedBytes(
       cpLimited,
@@ -426,9 +430,13 @@ function stepToElements(step: ProgressStep): unknown[] {
     );
     const bodyTruncated =
       byteLimited.truncated || cpLimited !== step.narrationFull;
-    const body = bodyTruncated
+    const narrationBody = bodyTruncated
       ? `${escapeCardMarkdownText(byteLimited.text)}\n\n<font color="grey">（全文见过程记录）</font>`
       : escapeCardMarkdownText(byteLimited.text);
+    // 展开区 = 完整 narration + 最新一条工具执行过程（与折叠态第二行同步）
+    const body = grayTail
+      ? `${narrationBody}\n<font color="grey">${grayTail}</font>`
+      : narrationBody;
     const panel = {
       tag: 'collapsible_panel',
       expanded: false,

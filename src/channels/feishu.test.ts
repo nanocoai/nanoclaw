@@ -1410,6 +1410,77 @@ describe('FeishuChannel', () => {
       }
     });
 
+    it('展开区显示 narration 全文 + 最新一条工具执行过程（与折叠态第二行同步）', async () => {
+      const jid = 'fs:oc_progress_expand_latest_tool';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '💬 分析选区检测逻辑。',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'narration',
+          },
+        }),
+        { isProgress: true },
+      );
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Read',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Read',
+            toolCallId: 'expand-read',
+            input: { file_path: '/tmp/sel.ts' },
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const patchArg = mockPatch.mock.calls.at(-1)?.[0];
+      const content: string = patchArg?.data?.content ?? '{}';
+      const card = JSON.parse(content) as Record<string, unknown>;
+      const collect = (node: unknown, out: string[]): void => {
+        if (Array.isArray(node)) return node.forEach((n) => collect(n, out));
+        if (node && typeof node === 'object') {
+          const el = node as Record<string, unknown>;
+          if (el.tag === 'collapsible_panel')
+            out.push(JSON.stringify(el.elements));
+          Object.values(el).forEach((v) => collect(v, out));
+        }
+      };
+      const panels: string[] = [];
+      collect(card, panels);
+      const panelBody = panels.join('\n');
+      // 展开区 = narration 全文 + 最新工具行
+      expect(panelBody).toContain('分析选区检测逻辑。');
+      expect(panelBody).toContain('正在读取 &#47;tmp&#47;sel&#46;ts');
+      // 折叠态第二行（面板外灰色动作行）同步存在
+      expect(content).toContain(
+        '<font color=\\"grey\\">正在读取 &#47;tmp&#47;sel&#46;ts</font>',
+      );
+    });
+
+    it('narration 标题超 30cp 截断为单行（不折行挤掉工具行）', async () => {
+      const jid = 'fs:oc_progress_single_row_title';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: `💬 ${'这是一段会超过三十个字符预算的很长的阶段说明文字继续加长再加长'.repeat(2)}`,
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'narration',
+          },
+        }),
+        { isProgress: true },
+      );
+      const entry = (channel as any).progressCards.get(jid);
+      expect(Array.from(entry.steps[0].title as string)).toHaveLength(31); // 30 + '…'
+    });
+
     it('清理时将缺少结果的工具收口为结果未知', async () => {
       const jid = 'fs:oc_progress_unknown_result';
       await channel.sendMessage(
@@ -1966,15 +2037,15 @@ describe('FeishuChannel', () => {
         isProgress: true,
       });
       const entry = (channel as any).progressCards.get(jid);
-      expect(Array.from(entry.steps[0].title as string)).toHaveLength(49); // 48 + '…'
-      // 贯穿到卡片 JSON：header 保持 48 个 emoji + 省略号，未被 80 UTF-16 二次截断
+      expect(Array.from(entry.steps[0].title as string)).toHaveLength(31); // 30 + '…'
+      // 贯穿到卡片 JSON：header 保持 30 个 emoji + 省略号，未被 80 UTF-16 二次截断
       const createArg = mockCreate.mock.calls.find(
         (call: any) => call[0]?.data?.msg_type === 'interactive',
       )?.[0];
       const content = JSON.parse(createArg?.data?.content ?? '{}');
       const serialized = JSON.stringify(content);
       const emojiRun = serialized.match(/🚀+/u)?.[0] ?? '';
-      expect(Array.from(emojiRun)).toHaveLength(48);
+      expect(Array.from(emojiRun)).toHaveLength(30);
     });
 
     it('探测无匹配贯穿到 Phase 行尾：当前 Phase 行尾显示"已搜索，无匹配"', async () => {
