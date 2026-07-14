@@ -79,6 +79,11 @@ async function main(): Promise<void> {
   // Idempotent — skips groups that already have a config row.
   backfillContainerConfigs();
 
+  // MODULE-HOOK:health-monitor:start
+  const { startHealthMonitor } = await import('./modules/health-monitor/index.js');
+  startHealthMonitor();
+  // MODULE-HOOK:health-monitor:end
+
   // 1c. One-time filesystem cutover — idempotent, no-op after first run.
   migrateGroupsToClaudeLocal();
 

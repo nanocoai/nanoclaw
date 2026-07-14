@@ -334,6 +334,46 @@ export function buildMounts(
     mounts.push({ hostPath: claudeDir, containerPath: '/home/node/.claude', readonly: false });
   }
 
+  // .claude.json lives at /home/node/.claude.json (parent of .claude/), not
+  // inside the mount above. Without a persistent bind mount it's lost on every
+  // container restart, causing "Invalid API key" on the next spawn.
+  const claudeJsonHostPath = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, 'claude.json');
+  if (!fs.existsSync(claudeJsonHostPath)) {
+    const backupsDir = path.join(claudeDir, 'backups');
+    if (fs.existsSync(backupsDir)) {
+      const backups = fs.readdirSync(backupsDir)
+        .filter(f => f.startsWith('.claude.json.backup.'))
+        .sort();
+      if (backups.length > 0) {
+        fs.copyFileSync(path.join(backupsDir, backups[backups.length - 1]), claudeJsonHostPath);
+      }
+    }
+  }
+  // Refresh OAuth token from macOS Keychain before every spawn. The token
+  // expires every ~8h and the container can't renew it — stale tokens cause
+  // silent 401s that appear as completed-but-empty processing_ack entries.
+  if (fs.existsSync(claudeJsonHostPath)) {
+    try {
+      const keychainRaw = execSync('security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null', {
+        encoding: 'utf8',
+        timeout: 5000,
+      }).trim();
+      if (keychainRaw) {
+        const keychainData = JSON.parse(keychainRaw);
+        const freshOauth = keychainData?.claudeAiOauth;
+        if (freshOauth?.accessToken && freshOauth?.expiresAt) {
+          const existing = JSON.parse(fs.readFileSync(claudeJsonHostPath, 'utf8'));
+          existing.claudeAiOauth = freshOauth;
+          fs.writeFileSync(claudeJsonHostPath, JSON.stringify(existing, null, 2));
+          log.debug('Refreshed OAuth token from Keychain', { agentGroupId: agentGroup.id, expiresAt: new Date(freshOauth.expiresAt).toISOString() });
+        }
+      }
+    } catch {
+      // Non-macOS or Keychain unavailable — continue with whatever token is on disk
+    }
+    mounts.push({ hostPath: claudeJsonHostPath, containerPath: '/home/node/.claude.json', readonly: false });
+  }
+
   // Shared agent-runner source — read-only, same code for all groups.
   const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
   mounts.push({ hostPath: agentRunnerSrc, containerPath: '/app/src', readonly: true });
