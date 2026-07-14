@@ -553,21 +553,13 @@ function buildProgressCard(
   const titleText = `**✨ ${phrase}...${timeStr}**`;
   const progressUrl = sessionId ? getProgressUrl(sessionId) : undefined;
 
-  // 没有步骤时显示占位文字，避免卡片内容区域为空
-  const stepElements =
-    steps.length > 0
-      ? steps.flatMap(stepToElements)
+  const elements: unknown[] =
+    steps.length === 0
+      ? [{ tag: 'markdown', content: titleText }]
       : [
-          {
-            tag: 'markdown',
-            content: '<font color="grey">正在等待响应...</font>',
-          },
+          ...buildTitleRow(titleText, progressUrl),
+          ...steps.flatMap(stepToElements),
         ];
-
-  const elements: unknown[] = [
-    ...buildTitleRow(titleText, progressUrl),
-    ...stepElements,
-  ];
 
   return JSON.stringify({
     schema: '2.0',
@@ -693,6 +685,78 @@ function buildCompletedCard(
   });
 }
 
+function buildReplyCard(
+  text: string,
+  usage?: ContainerOutput['usage'],
+  thinking?: 'adaptive' | 'disabled',
+): string {
+  const elements: unknown[] = [
+    { tag: 'markdown', content: text, text_size: 'nano_body' },
+  ];
+  if (usage) appendUsageFooter(elements, usage, thinking);
+  return JSON.stringify({
+    schema: '2.0',
+    config: {
+      update_multi: true,
+      style: FeishuChannel.CARD_TEXT_STYLE,
+    },
+    body: { elements },
+  });
+}
+
+function buildBoundedReplyCard(
+  text: string,
+  usage?: ContainerOutput['usage'],
+  thinking?: 'adaptive' | 'disabled',
+): string {
+  const maxBytes = 29_000;
+  const fullCard = buildReplyCard(text, usage, thinking);
+  if (Buffer.byteLength(fullCard, 'utf8') <= maxBytes) return fullCard;
+
+  const suffix = '\n\n（内容已截断，全文见过程记录）';
+  const codePoints = Array.from(
+    text.replace(/\n\n（内容过长，全文见过程记录）$/u, ''),
+  );
+  let low = 0;
+  let high = codePoints.length;
+  let best = buildReplyCard(suffix, usage, thinking);
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    const candidate = buildReplyCard(
+      codePoints.slice(0, mid).join('') + suffix,
+      usage,
+      thinking,
+    );
+    if (Buffer.byteLength(candidate, 'utf8') <= maxBytes) {
+      best = candidate;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return best;
+}
+
+type ProgressContentState = 'start-only' | 'text-only' | 'progress';
+
+interface ProgressCardEntry {
+  messageId: string;
+  sessionId: string;
+  steps: ProgressStep[];
+  allSteps: ProgressStep[];
+  frame: number;
+  startTime: number;
+  contentState?: ProgressContentState;
+  textCandidate?: string;
+  textCandidateBytes?: number;
+  textCandidateTruncated?: boolean;
+  narrationSeparatelySent?: boolean;
+  patchInFlight?: boolean;
+  patchPending?: boolean;
+  finalized?: boolean;
+  patchLoopPromise?: Promise<void>;
+}
+
 // ---- 飞书 Channel 实现 ----
 
 export class FeishuChannel implements Channel {
@@ -715,24 +779,7 @@ export class FeishuChannel implements Channel {
   >();
 
   // 进度卡片状态：每个 chat 一张进度卡片，持续更新
-  private progressCards = new Map<
-    string,
-    {
-      messageId: string;
-      sessionId: string;
-      steps: ProgressStep[];
-      allSteps: ProgressStep[]; // 完整历史（给网页用，不 shift）
-      frame: number;
-      startTime: number;
-      /** C9 patch 串行化：在飞时置位，pending 表示需要再发一轮（内容永远取发送时刻最新状态） */
-      patchInFlight?: boolean;
-      patchPending?: boolean;
-      /** 终态锁：cleanup 置位后拒绝任何后续进度 patch（终态卡拥有最终语义） */
-      finalized?: boolean;
-      /** 当前串行循环的完成句柄，cleanup 等它排空后才发终态卡 */
-      patchLoopPromise?: Promise<void>;
-    }
-  >();
+  private progressCards = new Map<string, ProgressCardEntry>();
 
   // 正式回复已到达标记：防止迟到的进度消息再创建卡片
   private progressDone = new Set<string>();
@@ -934,6 +981,30 @@ export class FeishuChannel implements Channel {
             ? quietProgress
             : cliMode === 'codex';
 
+        const currentEntry = this.progressCards.get(jid);
+        if (currentEntry) {
+          const fromState = currentEntry.contentState ?? 'progress';
+          if (fromState === 'start-only') {
+            currentEntry.contentState = 'text-only';
+            this.ensureProgressSession(currentEntry);
+            await this.removeTypingReaction(jid);
+            logger.info(
+              {
+                jid,
+                messageId: currentEntry.messageId || undefined,
+                fromState,
+                toState: 'text-only',
+                elapsedMs: Date.now() - currentEntry.startTime,
+              },
+              '[first-card] narration 接管起手卡',
+            );
+          }
+          if (currentEntry.contentState === 'text-only') {
+            this.appendTextCandidate(currentEntry, fullText);
+            if (!quiet) currentEntry.narrationSeparatelySent = true;
+          }
+        }
+
         // 统一链路：narration 无论 quiet 与否都进卡片 Phase（v4 拍板）；
         // sendNarrationSeparately = !quiet，非 quiet 额外独立发一条（现有行为保留）
         if (!quiet) {
@@ -961,14 +1032,18 @@ export class FeishuChannel implements Channel {
 
         if (!this.progressCards.has(jid)) {
           // narration 先于一切工具到达：直接以 Phase 视图建卡
-          this.progressCards.set(jid, {
+          const placeholder: ProgressCardEntry = {
             messageId: '',
             sessionId: '',
             steps: [],
             allSteps: [],
             frame: 0,
             startTime: Date.now(),
-          });
+            contentState: 'text-only',
+            narrationSeparatelySent: !quiet,
+          };
+          this.appendTextCandidate(placeholder, fullText);
+          this.progressCards.set(jid, placeholder);
           const chatId = chatIdFromJid(jid);
           await Promise.all([
             this.removeTypingReaction(jid),
@@ -983,6 +1058,7 @@ export class FeishuChannel implements Channel {
         }
         const narrationCard = this.progressCards.get(jid);
         if (!narrationCard) return;
+        this.ensureProgressSession(narrationCard);
         narrationCard.steps = visibleNow;
         narrationCard.allSteps.push(narrationRecord);
         if (narrationCard.allSteps.length > 500) narrationCard.allSteps.shift();
@@ -1010,6 +1086,7 @@ export class FeishuChannel implements Channel {
         structuredProgress &&
         process.env.NANOCLAW_READABLE_PROGRESS !== '0'
       ) {
+        this.transitionToProgress(jid);
         const previous =
           this.progressPresentations.get(jid) ??
           createProgressPresentationState();
@@ -1085,6 +1162,7 @@ export class FeishuChannel implements Channel {
             allSteps: [],
             frame: 0,
             startTime: Date.now(),
+            contentState: 'progress',
           });
           const chatId = chatIdFromJid(jid);
           await Promise.all([
@@ -1100,6 +1178,7 @@ export class FeishuChannel implements Channel {
 
         const existing = this.progressCards.get(jid);
         if (!existing) return;
+        this.ensureProgressSession(existing);
         existing.steps = visibleSteps;
 
         if (isPlanControl) {
@@ -1158,6 +1237,8 @@ export class FeishuChannel implements Channel {
         return;
       }
 
+      this.transitionToProgress(jid);
+
       // 首次工具进度到达：移除 emoji + 创建卡片
       if (!this.progressCards.has(jid)) {
         logger.info(
@@ -1172,6 +1253,7 @@ export class FeishuChannel implements Channel {
           allSteps: [],
           frame: 0,
           startTime: Date.now(),
+          contentState: 'progress',
         } as any);
         const chatId = chatIdFromJid(jid);
         await Promise.all([
@@ -1205,6 +1287,7 @@ export class FeishuChannel implements Channel {
 
       const existing = this.progressCards.get(jid);
       if (existing) {
+        this.ensureProgressSession(existing);
         const stepTs = Date.now();
         existing.steps.push({
           title,
@@ -1260,6 +1343,14 @@ export class FeishuChannel implements Channel {
       return;
     }
 
+    const hasMediaMarkers =
+      new RegExp(IMAGE_SEND_PATTERN.source, 'i').test(text) ||
+      new RegExp(FILE_SEND_PATTERN.source, 'i').test(text);
+    if (!hasMediaMarkers) {
+      const directMessageId = await this.finalizeStartCard(jid, text, options);
+      if (directMessageId) return directMessageId;
+    }
+
     // 正式回复到达：读取 usage/thinking，然后清理进度卡片
     const usage = this.pendingUsage.get(jid);
     const thinking = this.thinkingMode.get(jid);
@@ -1274,32 +1365,7 @@ export class FeishuChannel implements Channel {
     // 统一媒体提取与发送（图片/文件标记提取、文本发送、媒体上传，互不阻塞）
     const groupFolder = this.getGroupFolder(jid);
 
-    // 语音通知（按群 /voice 开关）：剥离媒体标记后送 LLM 摘要 → 语音网关 → iOS 朗读
-    // fire-and-forget，不 await，不影响飞书主流程
-    // skipVoiceNotify：语音回显等消息不推（用户刚说的话不要总结播回去）
-    if (!options?.skipVoiceNotify) {
-      const textForSpeech = text
-        .replace(new RegExp(IMAGE_SEND_PATTERN.source, 'gi'), '')
-        .replace(new RegExp(FILE_SEND_PATTERN.source, 'gi'), '')
-        .replace(/\s{2,}/g, ' ')
-        .trim();
-      const group = this.opts.registeredGroups()[jid];
-      let aliases: Record<string, string> | undefined;
-      try {
-        aliases = getAllGroupAliases();
-      } catch (err) {
-        logger.warn({ err, jid }, '读取群别名失败，语音播报将使用群名或 JID');
-      }
-      notifyVoice({
-        groupFolder,
-        text: textForSpeech,
-        chatJid: jid,
-        groupName: group?.name,
-        containerConfig: group?.containerConfig,
-        aliases,
-        conversationContext: options?.voiceContext,
-      });
-    }
+    this.notifyVoiceForReply(jid, text, options);
 
     return this.extractAndSendMedia(chatId, text, groupFolder, usage, thinking);
   }
@@ -1591,7 +1657,7 @@ export class FeishuChannel implements Channel {
   }
 
   /** 结果卡片正文自定义字号：移动端 large(16px) 正好，PC 端 normal(14px) 避免显大 */
-  private static readonly CARD_TEXT_STYLE = {
+  static readonly CARD_TEXT_STYLE = {
     text_size: {
       nano_body: { default: 'normal', pc: 'normal', mobile: 'large' },
     },
@@ -1609,20 +1675,12 @@ export class FeishuChannel implements Channel {
       '[sendPlainOrCard] 准备发送',
     );
     if (usage || shouldUseCard(text)) {
-      const elements: unknown[] = [
-        { tag: 'markdown', content: text, text_size: 'nano_body' },
-      ];
-      if (usage) appendUsageFooter(elements, usage, thinking);
       try {
         const resp = await this.client.im.message.create({
           data: {
             receive_id: chatId,
             msg_type: 'interactive',
-            content: JSON.stringify({
-              schema: '2.0',
-              config: { style: FeishuChannel.CARD_TEXT_STYLE },
-              body: { elements },
-            }),
+            content: buildReplyCard(text, usage, thinking),
           },
           params: { receive_id_type: 'chat_id' },
         });
@@ -1713,6 +1771,365 @@ export class FeishuChannel implements Channel {
     );
   }
 
+  private ensureProgressSession(entry: ProgressCardEntry): void {
+    if (entry.sessionId) return;
+    entry.sessionId = crypto.randomBytes(8).toString('hex');
+    upsertSession(
+      entry.sessionId,
+      progressRecordSteps(entry.allSteps),
+      entry.startTime,
+    );
+  }
+
+  private appendTextCandidate(entry: ProgressCardEntry, text: string): void {
+    if (entry.textCandidateTruncated) return;
+    const separator = entry.textCandidate ? '\n\n' : '';
+    const addition = separator + text;
+    const currentBytes = entry.textCandidateBytes ?? 0;
+    const maxBytes = 100_000;
+    const remaining = maxBytes - currentBytes;
+    if (remaining <= 0) {
+      entry.textCandidateTruncated = true;
+      return;
+    }
+    if (Buffer.byteLength(addition, 'utf8') <= remaining) {
+      entry.textCandidate = (entry.textCandidate ?? '') + addition;
+      entry.textCandidateBytes =
+        currentBytes + Buffer.byteLength(addition, 'utf8');
+      return;
+    }
+    let kept = '';
+    let keptBytes = 0;
+    for (const char of addition) {
+      const charBytes = Buffer.byteLength(char, 'utf8');
+      if (keptBytes + charBytes > remaining) break;
+      kept += char;
+      keptBytes += charBytes;
+    }
+    entry.textCandidate = (entry.textCandidate ?? '') + kept;
+    entry.textCandidateBytes = currentBytes + keptBytes;
+    entry.textCandidateTruncated = true;
+  }
+
+  private transitionToProgress(jid: string): ProgressCardEntry | undefined {
+    const entry = this.progressCards.get(jid);
+    if (!entry) return undefined;
+    const fromState = entry.contentState ?? 'progress';
+    if (fromState !== 'progress') {
+      entry.contentState = 'progress';
+      this.removeTypingReaction(jid).catch(() => {});
+      logger.info(
+        {
+          jid,
+          messageId: entry.messageId || undefined,
+          fromState,
+          toState: 'progress',
+          elapsedMs: Date.now() - entry.startTime,
+        },
+        '[first-card] 进度事件接管起手卡',
+      );
+    }
+    this.ensureProgressSession(entry);
+    return entry;
+  }
+
+  private startSpinner(jid: string, startTime: number): void {
+    const intervalMs = 1_000;
+    const maxDurationMs = 60 * 60 * 1000;
+    this.clearSpinnerTimer(jid);
+    this.spinnerStopped.delete(jid);
+    const schedule = (): void => {
+      const timer = setTimeout(() => {
+        if (this.spinnerStopped.has(jid)) {
+          this.spinnerTimers.delete(jid);
+          return;
+        }
+        const entry = this.progressCards.get(jid);
+        if (!entry || entry.finalized) {
+          this.spinnerTimers.delete(jid);
+          return;
+        }
+        if (Date.now() - startTime > maxDurationMs) {
+          logger.warn({ jid }, 'Spinner timer 达到硬上限，自动停止');
+          this.spinnerTimers.delete(jid);
+          return;
+        }
+        entry.frame++;
+        this.schedulePatch(jid);
+        if (!this.spinnerStopped.has(jid)) schedule();
+      }, intervalMs);
+      this.spinnerTimers.set(jid, timer);
+    };
+    this.spinnerSchedulers.set(jid, schedule);
+    schedule();
+  }
+
+  private async ensureStartCard(jid: string, chatId: string): Promise<void> {
+    if (this.progressCards.has(jid)) return;
+    const startedAt = Date.now();
+    const placeholder: ProgressCardEntry = {
+      messageId: '',
+      sessionId: '',
+      steps: [],
+      allSteps: [],
+      frame: 0,
+      startTime: startedAt,
+      contentState: 'start-only',
+    };
+    this.progressCards.set(jid, placeholder);
+    logger.info(
+      { jid, fromState: 'idle', toState: 'start-only' },
+      '[first-card] 开始创建起手卡',
+    );
+    try {
+      const resp = await this.client.im.message.create({
+        data: {
+          receive_id: chatId,
+          msg_type: 'interactive',
+          content: buildProgressCard([], 0, startedAt),
+        },
+        params: { receive_id_type: 'chat_id' },
+      });
+      const messageId = resp?.data?.message_id;
+      if (!messageId) throw new Error('起手卡创建未返回 message_id');
+      if (this.progressCards.get(jid) !== placeholder) {
+        await this.client.im.message
+          .delete({ path: { message_id: messageId } })
+          .catch(() => {});
+        logger.info(
+          { jid, messageId, fallbackReason: 'placeholder_replaced' },
+          '[first-card] 删除迟到的起手卡',
+        );
+        return;
+      }
+      placeholder.messageId = messageId;
+      if (placeholder.steps.length > 0) {
+        this.schedulePatch(jid);
+      }
+      this.startSpinner(jid, startedAt);
+      logger.info(
+        {
+          jid,
+          messageId,
+          fromState: 'idle',
+          toState: 'start-only',
+          elapsedMs: Date.now() - startedAt,
+        },
+        '[first-card] 起手卡创建成功',
+      );
+    } catch (err) {
+      if (this.progressCards.get(jid) === placeholder) {
+        this.progressCards.delete(jid);
+      }
+      logger.warn(
+        {
+          err,
+          jid,
+          fromState: 'idle',
+          toState: 'fallback',
+          fallbackReason: 'create_failed',
+          elapsedMs: Date.now() - startedAt,
+        },
+        '[first-card] 起手卡创建失败，继续 Agent 请求',
+      );
+    }
+  }
+
+  private notifyVoiceForReply(
+    jid: string,
+    text: string,
+    options?: SendMessageOptions,
+  ): void {
+    if (options?.skipVoiceNotify) return;
+    const textForSpeech = text
+      .replace(new RegExp(IMAGE_SEND_PATTERN.source, 'gi'), '')
+      .replace(new RegExp(FILE_SEND_PATTERN.source, 'gi'), '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+    const group = this.opts.registeredGroups()[jid];
+    let aliases: Record<string, string> | undefined;
+    try {
+      aliases = getAllGroupAliases();
+    } catch (err) {
+      logger.warn({ err, jid }, '读取群别名失败，语音播报将使用群名或 JID');
+    }
+    notifyVoice({
+      groupFolder: this.getGroupFolder(jid),
+      text: textForSpeech,
+      chatJid: jid,
+      groupName: group?.name,
+      containerConfig: group?.containerConfig,
+      aliases,
+      conversationContext: options?.voiceContext,
+    });
+  }
+
+  private async finalizeStartCard(
+    jid: string,
+    text: string,
+    options?: SendMessageOptions,
+  ): Promise<string | false> {
+    const entry = this.progressCards.get(jid);
+    const contentState = entry?.contentState ?? 'progress';
+    if (
+      !entry ||
+      contentState === 'progress' ||
+      entry.narrationSeparatelySent ||
+      !text.trim()
+    ) {
+      return false;
+    }
+    if (!entry.messageId) {
+      entry.finalized = true;
+      this.progressCards.delete(jid);
+      logger.info(
+        {
+          jid,
+          fromState: contentState,
+          toState: 'fallback',
+          fallbackReason: 'message_id_pending',
+        },
+        '[first-card] 起手卡尚未创建完成，降级现有发送路径',
+      );
+      return false;
+    }
+
+    const usage = this.pendingUsage.get(jid);
+    const thinking = this.thinkingMode.get(jid);
+    const finalText = entry.textCandidateTruncated
+      ? `${text}\n\n（内容过长，全文见过程记录）`
+      : text;
+    const fullCard = buildReplyCard(finalText, usage, thinking);
+    if (
+      contentState === 'start-only' &&
+      Buffer.byteLength(fullCard, 'utf8') >= 30_000
+    ) {
+      logger.info(
+        {
+          jid,
+          messageId: entry.messageId,
+          fromState: contentState,
+          toState: 'fallback',
+          fallbackReason: 'reply_card_too_large',
+          textLen: finalText.length,
+        },
+        '[first-card] 正文卡超过安全预算，降级现有发送路径',
+      );
+      return false;
+    }
+    const finalCard =
+      contentState === 'text-only'
+        ? buildBoundedReplyCard(finalText, usage, thinking)
+        : fullCard;
+    this.progressDone.add(jid);
+    this.clearSpinnerTimer(jid);
+    entry.finalized = true;
+    this.progressCards.delete(jid);
+    await entry.patchLoopPromise?.catch(() => {});
+    await this.removeTypingReaction(jid);
+
+    try {
+      await this.client.im.message.patch({
+        path: { message_id: entry.messageId },
+        data: { content: finalCard },
+      });
+      if (entry.sessionId) deleteSession(entry.sessionId);
+      this.progressPresentations.delete(jid);
+      this.pendingUsage.delete(jid);
+      this.thinkingMode.delete(jid);
+      this.notifyVoiceForReply(jid, finalText, options);
+      logger.info(
+        {
+          jid,
+          messageId: entry.messageId,
+          fromState: contentState,
+          toState: 'direct-final',
+          elapsedMs: Date.now() - entry.startTime,
+          hasUsage: !!usage,
+          textLen: finalText.length,
+        },
+        '[first-card] 起手卡原地转正成功',
+      );
+      return entry.messageId;
+    } catch (err) {
+      if (entry.sessionId) deleteSession(entry.sessionId);
+      this.progressPresentations.delete(jid);
+      await this.client.im.message
+        .delete({ path: { message_id: entry.messageId } })
+        .catch(() => {});
+      logger.warn(
+        {
+          err,
+          jid,
+          messageId: entry.messageId,
+          fromState: contentState,
+          toState: 'fallback',
+          fallbackReason: 'final_patch_failed',
+          elapsedMs: Date.now() - entry.startTime,
+          textLen: finalText.length,
+        },
+        '[first-card] 原地转正失败，降级现有发送路径',
+      );
+      return false;
+    }
+  }
+
+  async tryFinalizeTextOnly(jid: string): Promise<boolean> {
+    const entry = this.progressCards.get(jid);
+    if (
+      entry?.contentState !== 'text-only' ||
+      entry.narrationSeparatelySent ||
+      !entry.textCandidate
+    ) {
+      return false;
+    }
+    const rawCandidate = entry.textCandidate;
+    const candidate = entry.textCandidateTruncated
+      ? `${entry.textCandidate}\n\n（内容过长，全文见过程记录）`
+      : entry.textCandidate;
+    const finalized = await this.finalizeStartCard(jid, rawCandidate);
+    if (finalized) return true;
+
+    const usage = this.pendingUsage.get(jid);
+    const thinking = this.thinkingMode.get(jid);
+    try {
+      await this.sendPlainOrCard(
+        chatIdFromJid(jid),
+        candidate,
+        usage,
+        thinking,
+      );
+      this.pendingUsage.delete(jid);
+      this.thinkingMode.delete(jid);
+      this.notifyVoiceForReply(jid, candidate);
+      logger.info(
+        {
+          jid,
+          fromState: 'text-only',
+          toState: 'fallback-final',
+          fallbackReason: 'final_patch_failed',
+          hasUsage: !!usage,
+          textLen: candidate.length,
+        },
+        '[first-card] text-only 累积正文已通过现有路径送达',
+      );
+      return true;
+    } catch (err) {
+      logger.warn(
+        {
+          err,
+          jid,
+          fromState: 'text-only',
+          toState: 'failed',
+          fallbackReason: 'fallback_send_failed',
+          textLen: candidate.length,
+        },
+        '[first-card] text-only 降级发送失败',
+      );
+      return false;
+    }
+  }
+
   /**
    * C9 patch 串行化：同一卡片任意时刻至多一个 patch 在飞；期间新请求只置 pending，
    * 完成后再补一轮。内容永远在发送时刻从 entry 最新状态构建，天然"旧不覆盖新"。
@@ -1783,6 +2200,7 @@ export class FeishuChannel implements Channel {
         // 新对话开始，清除上一轮的 progressDone 标记
         this.progressDone.delete(jid);
         this.progressPresentations.delete(jid);
+        await this.ensureStartCard(jid, chatId);
         // 添加 emoji reaction 到用户消息，不同执行模式使用不同表情。
         const lastMsgId = this.getLastMessageId(jid);
         const group = this.opts.registeredGroups()[jid];
@@ -1792,7 +2210,9 @@ export class FeishuChannel implements Channel {
           { jid, lastMsgId, cliMode, emoji },
           '[typing] 开始加 emoji reaction',
         );
-        if (lastMsgId) {
+        if (this.typingReactions.has(jid)) {
+          logger.info({ jid }, '[typing] emoji reaction 已存在，跳过重复创建');
+        } else if (lastMsgId) {
           const resp = await this.client.im.messageReaction.create({
             data: { reaction_type: { emoji_type: emoji } },
             path: { message_id: lastMsgId },
@@ -1810,8 +2230,6 @@ export class FeishuChannel implements Channel {
         } else {
           logger.warn({ jid }, '[typing] 找不到 lastMsgId，跳过 emoji');
         }
-
-        // 进度卡片延迟创建：等第一条工具进度到达时再创建（见 onAgentProgress）
       } else {
         logger.info(
           {
@@ -1859,7 +2277,7 @@ export class FeishuChannel implements Channel {
     }
   }
 
-  /** 创建进度卡片 + 启动 spinner 定时器（从 setTyping 延迟到首次进度时调用） */
+  /** 无起手卡的兼容路径：以首个进度步骤创建卡片。 */
   private async createProgressCard(
     jid: string,
     chatId: string,
@@ -1868,9 +2286,6 @@ export class FeishuChannel implements Channel {
   ): Promise<void> {
     // 需求：计时每秒刷新。防跳动依据：Phase 行结构只在离散事件时变化，
     // 秒级 patch 仅计时文字在变；patch 一律走 schedulePatch 串行队列（C9）。
-    const SPINNER_INTERVAL_MS = 1_000;
-    const SPINNER_MAX_DURATION_MS = 60 * 60 * 1000; // 60 分钟硬上限
-
     const now = Date.now();
     this.spinnerStopped.delete(jid);
     const sessionId = crypto.randomBytes(8).toString('hex');
@@ -1934,6 +2349,11 @@ export class FeishuChannel implements Channel {
         allSteps: mergedAllSteps,
         frame: 0,
         startTime: now,
+        contentState: placeholder.contentState ?? 'progress',
+        textCandidate: placeholder.textCandidate,
+        textCandidateBytes: placeholder.textCandidateBytes,
+        textCandidateTruncated: placeholder.textCandidateTruncated,
+        narrationSeparatelySent: placeholder.narrationSeparatelySent,
       });
 
       // 缓冲期间有新步骤，经串行队列 patch 卡片以显示最新状态（C9）
@@ -1942,42 +2362,7 @@ export class FeishuChannel implements Channel {
         this.schedulePatch(jid);
       }
 
-      // 启动 spinner 自动刷新定时器
-      this.clearSpinnerTimer(jid);
-      this.spinnerStopped.delete(jid);
-      const spinnerStartTime = now;
-      const scheduleSpinner = (): void => {
-        const t = setTimeout(async () => {
-          if (this.spinnerStopped.has(jid)) {
-            this.spinnerTimers.delete(jid);
-            return;
-          }
-
-          const entry = this.progressCards.get(jid);
-          if (!entry) {
-            this.spinnerTimers.delete(jid);
-            return;
-          }
-
-          if (Date.now() - spinnerStartTime > SPINNER_MAX_DURATION_MS) {
-            logger.warn({ jid }, 'Spinner timer 达到硬上限，自动停止');
-            this.spinnerTimers.delete(jid);
-            return;
-          }
-
-          entry.frame++;
-          this.schedulePatch(jid);
-
-          if (!this.spinnerStopped.has(jid)) {
-            scheduleSpinner();
-          } else {
-            this.spinnerTimers.delete(jid);
-          }
-        }, SPINNER_INTERVAL_MS);
-        this.spinnerTimers.set(jid, t);
-      };
-      this.spinnerSchedulers.set(jid, scheduleSpinner);
-      scheduleSpinner();
+      this.startSpinner(jid, now);
     } else {
       logger.warn(
         { jid },
