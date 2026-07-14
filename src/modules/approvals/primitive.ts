@@ -26,6 +26,7 @@ import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { createPendingApproval, getSession } from '../../db/sessions.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { wakeContainer } from '../../container-runner.js';
+import { readEnvFile } from '../../env.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { MessagingGroup, Session } from '../../types.js';
@@ -93,17 +94,42 @@ export function pickApprover(agentGroupId: string | null): string[] {
 }
 
 /**
+ * Operator-set channel that always wins over the origin-channel heuristic.
+ * When set, approvals are routed there regardless of where the agent is being
+ * driven from. Empty string = no preference, fall back to origin matching.
+ *
+ * Read once at module load; changes require a host restart (same as every
+ * other env-driven config in nanoclaw).
+ */
+const PREFERRED_CHANNEL = (readEnvFile(['APPROVAL_PREFERRED_CHANNEL']).APPROVAL_PREFERRED_CHANNEL ?? '')
+  .trim()
+  .toLowerCase();
+
+/**
  * Walk the approver list and return the first (approverId, messagingGroup)
  * pair we can actually deliver to. Returns null if nobody is reachable.
  *
- * Tie-break: prefer approvers reachable on the same channel kind as the
- * origin; else first in list. Resolution uses ensureUserDm, which may
- * trigger a platform openDM call on cache miss.
+ * Tie-break order:
+ *   1. Operator-pinned `APPROVAL_PREFERRED_CHANNEL` (if set) — useful when the
+ *      operator drives the agent from one channel but wants approval prompts
+ *      on a quieter one (e.g. WhatsApp for work, Telegram for approvals).
+ *   2. Same channel kind as the inbound origin.
+ *   3. First approver with any reachable DM.
+ *
+ * Resolution uses ensureUserDm, which may trigger a platform openDM call on
+ * cache miss.
  */
 export async function pickApprovalDelivery(
   approvers: string[],
   originChannelType: string,
 ): Promise<{ userId: string; messagingGroup: MessagingGroup } | null> {
+  if (PREFERRED_CHANNEL) {
+    for (const userId of approvers) {
+      if (channelTypeOf(userId) !== PREFERRED_CHANNEL) continue;
+      const mg = await ensureUserDm(userId);
+      if (mg) return { userId, messagingGroup: mg };
+    }
+  }
   if (originChannelType) {
     for (const userId of approvers) {
       if (channelTypeOf(userId) !== originChannelType) continue;

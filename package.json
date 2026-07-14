@@ -28,13 +28,18 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@chat-adapter/telegram": "4.26.0",
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
     "@onecli-sh/sdk": "^0.5.0",
+    "@types/qrcode": "1.5.6",
+    "@whiskeysockets/baileys": "7.0.0-rc.9",
     "better-sqlite3": "11.10.0",
     "chat": "^4.24.0",
     "cron-parser": "5.5.0",
-    "kleur": "^4.1.5"
+    "kleur": "^4.1.5",
+    "pino": "9.6.0",
+    "qrcode": "1.5.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",

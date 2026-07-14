@@ -170,6 +170,14 @@ function matchesBlockedPattern(realPath: string, blockedPatterns: string[]): str
  */
 function findAllowedRoot(realPath: string, allowedRoots: AllowedRoot[]): AllowedRoot | null {
   for (const root of allowedRoots) {
+    if (!root.path) {
+      // Defensive: a malformed allowlist entry without a `path` field would
+      // otherwise crash expandPath() with TypeError, taking down the whole
+      // mount-validation path and any container spawn that depends on it.
+      // Log + skip so a single bad entry can't deny service.
+      log.warn('Allowlist entry missing path field — skipping', { root });
+      continue;
+    }
     const expandedRoot = expandPath(root.path);
     const realRoot = getRealPath(expandedRoot);
 

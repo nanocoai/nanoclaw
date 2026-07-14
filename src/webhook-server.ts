@@ -21,6 +21,15 @@ interface WebhookEntry {
 }
 
 const routes = new Map<string, WebhookEntry>();
+
+/**
+ * Generic HTTP routes (non-webhook), keyed "METHOD /path". Modules register
+ * handlers via registerHttpRoute — e.g. the pilot-activation module's
+ * POST /api/register. Handlers use the Web Request/Response API.
+ */
+type HttpRouteHandler = (req: Request) => Promise<Response>;
+const httpRoutes = new Map<string, HttpRouteHandler>();
+
 let server: http.Server | null = null;
 
 /** Convert Node.js IncomingMessage to a Web API Request. */
@@ -76,6 +85,16 @@ export function registerWebhookAdapter(chat: Chat, adapterName: string): void {
   log.info('Webhook adapter registered', { adapter: adapterName, path: `/webhook/${adapterName}` });
 }
 
+/**
+ * Register a plain HTTP route on the shared server (starts it if needed).
+ * Path must be exact (no params); method is uppercased.
+ */
+export function registerHttpRoute(method: string, path: string, handler: HttpRouteHandler): void {
+  httpRoutes.set(`${method.toUpperCase()} ${path}`, handler);
+  ensureServer();
+  log.info('HTTP route registered', { method: method.toUpperCase(), path });
+}
+
 function ensureServer(): void {
   if (server) return;
 
@@ -83,6 +102,22 @@ function ensureServer(): void {
 
   server = http.createServer(async (req, res) => {
     const url = req.url || '/';
+
+    // Generic registered routes take precedence (exact path, no query).
+    const pathOnly = url.split('?')[0];
+    const httpHandler = httpRoutes.get(`${(req.method || 'GET').toUpperCase()} ${pathOnly}`);
+    if (httpHandler) {
+      try {
+        const webReq = await toWebRequest(req);
+        const webRes = await httpHandler(webReq);
+        await fromWebResponse(webRes, res);
+      } catch (err) {
+        log.error('HTTP route handler error', { url: req.url, err });
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'internal_error' }));
+      }
+      return;
+    }
 
     // Route: /webhook/{adapterName}
     const match = url.match(/^\/webhook\/([^/?]+)/);
