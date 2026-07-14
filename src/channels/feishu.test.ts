@@ -1439,27 +1439,58 @@ describe('FeishuChannel', () => {
         { isProgress: true },
       );
 
-      const patchArg = mockPatch.mock.calls.at(-1)?.[0];
-      const content: string = patchArg?.data?.content ?? '{}';
-      const card = JSON.parse(content) as Record<string, unknown>;
-      const collect = (node: unknown, out: string[]): void => {
-        if (Array.isArray(node)) return node.forEach((n) => collect(n, out));
-        if (node && typeof node === 'object') {
-          const el = node as Record<string, unknown>;
-          if (el.tag === 'collapsible_panel')
-            out.push(JSON.stringify(el.elements));
-          Object.values(el).forEach((v) => collect(v, out));
-        }
+      // 结构化断言（review P2-1）：定位面板与其后的独立动作行，
+      // 断言两处内容相等，字符串 contains 会被面板内同文本假阳性掩盖
+      const readCardStructure = () => {
+        const patchArg = mockPatch.mock.calls.at(-1)?.[0];
+        const content: string = patchArg?.data?.content ?? '{}';
+        const card = JSON.parse(content) as {
+          body: { elements: Array<Record<string, unknown>> };
+        };
+        const elements = card.body.elements;
+        const panelIndex = elements.findIndex(
+          (el) => el.tag === 'collapsible_panel',
+        );
+        expect(panelIndex).toBeGreaterThanOrEqual(0);
+        const panel = elements[panelIndex] as {
+          elements: Array<{ tag: string; content: string }>;
+        };
+        const panelBody = panel.elements[0].content;
+        const sibling = elements[panelIndex + 1] as
+          | { tag: string; content: string }
+          | undefined;
+        return { panelBody, sibling };
       };
-      const panels: string[] = [];
-      collect(card, panels);
-      const panelBody = panels.join('\n');
-      // 展开区 = narration 全文 + 最新工具行
-      expect(panelBody).toContain('分析选区检测逻辑。');
-      expect(panelBody).toContain('正在读取 &#47;tmp&#47;sel&#46;ts');
-      // 折叠态第二行（面板外灰色动作行）同步存在
-      expect(content).toContain(
-        '<font color=\\"grey\\">正在读取 &#47;tmp&#47;sel&#46;ts</font>',
+
+      const first = readCardStructure();
+      expect(first.panelBody).toContain('分析选区检测逻辑。');
+      // 面板后一项必须是独立 markdown 动作行，且与面板内最后一行相等
+      expect(first.sibling?.tag).toBe('markdown');
+      expect(first.sibling?.content).toBe(
+        '<font color="grey">正在读取 &#47;tmp&#47;sel&#46;ts</font>',
+      );
+      expect(first.panelBody.split('\n').at(-1)).toBe(first.sibling?.content);
+
+      // 第二个工具事件到达后，两处同步刷新为最新动作
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Grep',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Grep',
+            toolCallId: 'expand-grep',
+            input: { pattern: 'selected' },
+          },
+        }),
+        { isProgress: true },
+      );
+      const second = readCardStructure();
+      expect(second.sibling?.content).toContain('正在搜索');
+      expect(second.sibling?.content).not.toContain('正在读取');
+      expect(second.panelBody.split('\n').at(-1)).toBe(
+        second.sibling?.content,
       );
     });
 
