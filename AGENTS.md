@@ -3,12 +3,14 @@
 
 This project is indexed by GitNexus as **nanoclaw** (6121 symbols, 8443 relationships, 175 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
-> If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
+> If the index is stale or points at another checkout, treat it as advisory and fall back to current-worktree evidence. Never rebuild an index from a task worktree.
 
 ## Always Do
 
-- **Use GitNexus when the tools are available.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **Run `gitnexus_detect_changes()` before committing when available** to verify your changes only affect expected symbols and execution flows.
+- **Use GitNexus for high-risk changes:** shared entry points, public interfaces, schemas/migrations, auth/security, concurrency/state machines, cross-module behavior, and renames/refactors.
+- **Use judgment for medium-risk changes:** unfamiliar modules or unclear call chains benefit from `query`/`context`/`impact` when the shared index is current.
+- **Skip GitNexus for low-risk changes:** docs, tests, config, generated files, isolated leaf functions, and newly added symbols with no indexed callers. Use `rg`, `git diff`, and targeted tests instead.
+- **Use `gitnexus_detect_changes()` only when it is scoped to the current worktree.** Git diff remains the source of truth.
 - **If GitNexus tools are unavailable**, say that explicitly, do not claim they were run, and fall back to `rg`, `git log`, `git diff`, targeted tests, and manual call-chain review.
 - **Warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
 - When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
@@ -17,10 +19,10 @@ This project is indexed by GitNexus as **nanoclaw** (6121 symbols, 8443 relation
 ## Never Do
 
 - NEVER pretend GitNexus was used when the tools were not available.
-- NEVER edit a function, class, or method without either running `gitnexus_impact` or clearly stating the fallback evidence used.
+- NEVER run `gitnexus analyze` from a task worktree. Shared indexes are refreshed separately from their tracked upstream branches.
 - NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
 - NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
-- NEVER commit changes without checking affected scope via `gitnexus_detect_changes()` or an explicit fallback review.
+- NEVER present stale, wrong-worktree, `UNKNOWN`, or `Target not found` output as a valid risk assessment.
 
 ## Resources
 
