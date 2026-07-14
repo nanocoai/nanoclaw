@@ -540,3 +540,57 @@ describe('task-run turn wiring (real processQuery)', () => {
     expect(logs).not.toContain('second delivery decision handled');
   });
 });
+
+// --- Bug: a <message> body that quotes a literal </message> was truncated ---
+// dispatchResultText used a lazy /…*?/ regex that closed the block at the FIRST
+// </message> in the content, so any agent that quoted the closing tag (e.g. in
+// backticks while explaining message wrapping) had its message silently cut off
+// there and the remainder dropped to scratchpad, never delivered.
+
+const CHAT_ROUTING = {
+  platformId: 'chan-1',
+  channelType: 'discord',
+  threadId: null,
+  inReplyTo: 'm1',
+};
+
+function seedChannelDestination(name: string, channelType: string, platformId: string): void {
+  getInboundDb()
+    .prepare(
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+       VALUES (?, ?, 'channel', ?, ?, NULL)`,
+    )
+    .run(name, name, channelType, platformId);
+}
+
+describe('dispatchResultText — literal </message> inside a body', () => {
+  it('delivers the whole body, including a quoted closing tag and trailing text', async () => {
+    seedChannelDestination('casa', 'discord', 'chan-1');
+    const body = 'To close a block, write `</message>` at the end. That is the whole trick.';
+    const { query } = makeResultQuery({ type: 'result', text: `<message to="casa">${body}</message>` });
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const out = getUndeliveredMessages().filter((m) => m.kind === 'chat');
+    expect(out).toHaveLength(1);
+    const delivered = JSON.parse(out[0].content).text as string;
+    expect(delivered).toBe(body); // full body, not truncated at the quoted tag
+    expect(delivered).toContain('the whole trick'); // trailing text survives
+  });
+
+  it('still splits two real blocks, even when the first quotes a closing tag', async () => {
+    seedChannelDestination('casa', 'discord', 'chan-1');
+    seedChannelDestination('work', 'discord', 'chan-2');
+    const text =
+      '<message to="casa">first — ends a block with `</message>` btw</message>' +
+      '<message to="work">second</message>';
+    const { query } = makeResultQuery({ type: 'result', text });
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const out = getUndeliveredMessages().filter((m) => m.kind === 'chat');
+    const byChan = Object.fromEntries(out.map((m) => [m.platform_id, JSON.parse(m.content).text]));
+    expect(byChan['chan-1']).toBe('first — ends a block with `</message>` btw');
+    expect(byChan['chan-2']).toBe('second');
+  });
+});

@@ -638,13 +638,58 @@ export interface TaskMessageBlock {
   body: string;
 }
 
+interface MessageBlockSpan {
+  to: string;
+  body: string;
+  tagStart: number;
+  blockEnd: number;
+}
+
+const MESSAGE_OPEN_RE = /<message\s+to="([^"]+)"\s*>/g;
+const MESSAGE_CLOSE = '</message>';
+
+/**
+ * Split the agent's text into <message to="name">…</message> blocks, tolerant
+ * of a literal </message> substring inside a body — e.g. an agent quoting the
+ * closing tag in backticks while explaining it. A lazy /…*?/ match closes a
+ * block at the FIRST </message> it sees, so any such quote silently truncated
+ * the message there and dumped the rest to scratchpad (never delivered).
+ *
+ * Instead, scan opening tags and close each block at the LAST </message>
+ * before the next opening tag (or end of text) — the real terminator. An
+ * opening tag with no closing tag before the next block/EOF is left unmatched
+ * (falls through to scratchpad, exactly as the old regex did) rather than
+ * greedily swallowing everything after it.
+ */
+function extractMessageBlocks(text: string): MessageBlockSpan[] {
+  const opens: { to: string; tagStart: number; bodyStart: number }[] = [];
+  let m: RegExpExecArray | null;
+  MESSAGE_OPEN_RE.lastIndex = 0;
+  while ((m = MESSAGE_OPEN_RE.exec(text)) !== null) {
+    opens.push({ to: m[1], tagStart: m.index, bodyStart: MESSAGE_OPEN_RE.lastIndex });
+  }
+
+  const blocks: MessageBlockSpan[] = [];
+  for (let i = 0; i < opens.length; i++) {
+    const cur = opens[i];
+    const nextTagStart = i + 1 < opens.length ? opens[i + 1].tagStart : text.length;
+    const region = text.slice(cur.bodyStart, nextTagStart);
+    const closeIdx = region.lastIndexOf(MESSAGE_CLOSE);
+    if (closeIdx === -1) continue; // unterminated before the next block/EOF — leave as scratchpad
+    blocks.push({
+      to: cur.to,
+      body: region.slice(0, closeIdx),
+      tagStart: cur.tagStart,
+      blockEnd: cur.bodyStart + closeIdx + MESSAGE_CLOSE.length,
+    });
+  }
+  return blocks;
+}
+
 export function dispatchResultText(
   text: string,
   routing: RoutingContext,
 ): { sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[] } {
-  const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
-
-  let match: RegExpExecArray | null;
   let sent = 0;
   // <message to> blocks left inert in a task run — drives the same-turn
   // "use send_message" nudge in processQuery.
@@ -652,13 +697,13 @@ export function dispatchResultText(
   let lastIndex = 0;
   const scratchpadParts: string[] = [];
 
-  while ((match = MESSAGE_RE.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      scratchpadParts.push(text.slice(lastIndex, match.index));
+  for (const block of extractMessageBlocks(text)) {
+    if (block.tagStart > lastIndex) {
+      scratchpadParts.push(text.slice(lastIndex, block.tagStart));
     }
-    const toName = match[1];
-    const body = match[2].trim();
-    lastIndex = MESSAGE_RE.lastIndex;
+    const toName = block.to;
+    const body = block.body.trim();
+    lastIndex = block.blockEnd;
 
     // One-door delivery in task sessions: only the send_message tool delivers.
     // A final-text <message to> block here is either an echo of a tool send the
