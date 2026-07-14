@@ -132,6 +132,16 @@ export type ProviderEvent =
    * dropping it as un-wrapped scratchpad, and to skip the re-wrap nudge.
    */
   | { type: 'result'; text: string | null; isError?: boolean }
+  /**
+   * Text from an assistant message as it streams, including assistant turns
+   * that also make a tool call. The SDK's terminal `result` only carries the
+   * FINAL turn's text, so a `<message>` block emitted in a tool-call turn
+   * never reaches `result.text`. The poll-loop accumulates these and falls
+   * back to them when a `result` arrives with no text, so the block isn't
+   * silently dropped. Providers that can't distinguish assistant text need
+   * not emit this — the `result` path is unchanged when it's absent.
+   */
+  | { type: 'assistant_text'; text: string }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
   /**

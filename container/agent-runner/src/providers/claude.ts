@@ -6,6 +6,7 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
+import { assistantTextFromContent } from './assistant-text.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -448,6 +449,14 @@ export class ClaudeProvider implements AgentProvider {
 
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };
+        } else if (message.type === 'assistant') {
+          // Surface assistant text as it streams. The terminal `result` below
+          // carries only the FINAL turn's text, so a <message> block emitted in
+          // an assistant turn that also makes a tool call would never reach the
+          // delivery layer. The poll-loop falls back to this when `result` has
+          // no text of its own.
+          const text = assistantTextFromContent((message as { message?: { content?: unknown } }).message?.content);
+          if (text) yield { type: 'assistant_text', text };
         } else if (message.type === 'result') {
           // `result` text exists only on subtype:"success"; error subtypes
           // (e.g. a non-retryable 403 billing_error) carry their message in

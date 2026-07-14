@@ -540,3 +540,63 @@ describe('task-run turn wiring (real processQuery)', () => {
     expect(logs).not.toContain('second delivery decision handled');
   });
 });
+
+// --- Bug: a <message> block emitted in a tool-call turn was silently dropped ---
+// The SDK's terminal `result` carries only the final turn's text. When the
+// agent wrapped a message in an assistant turn that also made a tool call, that
+// text arrived via assistant_text events and the result had none — so nothing
+// was delivered and no error surfaced. The loop now falls back to the
+// accumulated assistant text when the result carries none.
+
+const TOOLTURN_ROUTING = {
+  platformId: 'chan-1',
+  channelType: 'discord',
+  threadId: null,
+  inReplyTo: 'm1',
+};
+
+function seedToolTurnDestination(): void {
+  getInboundDb()
+    .prepare(
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+       VALUES ('casa', 'casa', 'channel', 'discord', 'chan-1', NULL)`,
+    )
+    .run();
+}
+
+describe('processQuery — assistant text on a tool-call turn (empty result)', () => {
+  it('delivers a <message> block that arrived via assistant_text when result has no text', async () => {
+    seedToolTurnDestination();
+    const pushes: string[] = [];
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 'sess-1' };
+      yield { type: 'assistant_text', text: '<message to="casa">delivered from a tool-call turn</message>' };
+      yield { type: 'result', text: null };
+    }
+    const query: AgentQuery = { push: (m: string) => pushes.push(m), end: () => {}, events: events(), abort: () => {} };
+
+    await processQuery(query, TOOLTURN_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const out = getUndeliveredMessages().filter((m) => m.kind === 'chat');
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('delivered from a tool-call turn');
+    // The block WAS wrapped — no misleading "not delivered / not wrapped" nudge.
+    expect(pushes).toHaveLength(0);
+  });
+
+  it('ignores accumulated assistant text when the result carries its own (no double-send)', async () => {
+    seedToolTurnDestination();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 'sess-1' };
+      yield { type: 'assistant_text', text: 'intermediate scratch' };
+      yield { type: 'result', text: '<message to="casa">the real reply</message>' };
+    }
+    const query: AgentQuery = { push: () => {}, end: () => {}, events: events(), abort: () => {} };
+
+    await processQuery(query, TOOLTURN_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const out = getUndeliveredMessages().filter((m) => m.kind === 'chat');
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('the real reply');
+  });
+});
