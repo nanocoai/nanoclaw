@@ -190,7 +190,11 @@ export function canSendMessageViaIpc(
   registeredGroups: Record<string, RegisteredGroup>,
 ): boolean {
   const targetGroup = registeredGroups[targetChatJid];
-  return !!targetGroup && targetGroup.folder === sourceGroup;
+  if (!targetGroup) return false;
+  if (targetGroup.folder === sourceGroup) return true;
+  // 主群（定时任务/巡检的宿主）允许向任何已注册群发消息
+  const sourceReg = Object.values(registeredGroups).find(g => g.folder === sourceGroup);
+  return !!sourceReg?.isMain;
 }
 
 export function startIpcWatcher(deps: IpcDeps): void {
