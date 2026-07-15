@@ -13,6 +13,10 @@ Install [rtk](https://github.com/rtk-ai/rtk) — a CLI proxy delivering 60–90%
 - `~/.local/bin/rtk` mounted read-only at `/usr/local/bin/rtk` inside the target agent group's containers
 - `PreToolUse` hook in the agent group's `settings.json` so every Bash call is automatically filtered through rtk — no CLAUDE.md instructions needed
 
+## Integration tests
+
+This skill has **no in-tree integration test** by design. Its only functional reach-ins are runtime operator actions — the host-only `ncl groups config add-mount` (Step 3) and the `settings.json` `PreToolUse` hook write (Step 4) — neither of which leaves a line in the source tree whose deletion a test could catch. There are no package dependencies or Dockerfile edits to guard either. Conformance is idempotent apply + `REMOVE.md`; the mount and hook are verified at runtime (see Verify).
+
 ## Step 1 — Install rtk on the host
 
 ```bash
@@ -43,33 +47,24 @@ Note the group ID (e.g. `ag-1776342942165-ptgddd`). Repeat Steps 3–5 for each 
 
 ## Step 3 — Mount rtk into the container config
 
-`additional_mounts` is a JSON array column on `container_configs`. Read the current value, merge in the rtk entry, and write the merged array back.
-
-Read current mounts first:
+Mount the host rtk binary read-only into the container with the host-only `add-mount` verb. It is idempotent — re-running skips the entry if it is already present:
 
 ```bash
-pnpm exec tsx scripts/q.ts data/v2.db \
-  "SELECT additional_mounts FROM container_configs WHERE agent_group_id = '<group-id>'"
+ncl groups config add-mount --id <group-id> \
+  --host ~/.local/bin/rtk \
+  --container /usr/local/bin/rtk \
+  --ro
 ```
 
-Build the merged array: keep every existing entry, drop any entry whose `containerPath` is `/usr/local/bin/rtk` (so re-running replaces rather than duplicates), then add the rtk entry:
+This verb is operator-only and runs host-side (via `/setup`, `/customize`, or `/manage-mounts`); it is rejected from inside a container.
 
-```json
-{"hostPath":"/home/<user>/.local/bin/rtk","containerPath":"/usr/local/bin/rtk","readonly":true}
-```
-
-Write the merged array back:
-
-```bash
-pnpm exec tsx scripts/q.ts data/v2.db \
-  "UPDATE container_configs SET additional_mounts = '<merged-json>' WHERE agent_group_id = '<group-id>'"
-```
+The host root (`~/.local/bin`) must also be in the external mount allowlist at `~/.config/nanoclaw/mount-allowlist.json` for the mount to take effect at spawn. Add it there if it isn't already.
 
 Verify:
 
 ```bash
-pnpm exec tsx scripts/q.ts data/v2.db \
-  "SELECT additional_mounts FROM container_configs WHERE agent_group_id = '<group-id>'"
+ncl groups config get --id <group-id>
+# Look for the /usr/local/bin/rtk mount
 ```
 
 ## Step 4 — Add the PreToolUse hook to settings.json
@@ -120,9 +115,8 @@ Then ask the agent to run `git status` or any other supported command. rtk inter
 Mount wasn't applied or container wasn't restarted:
 
 ```bash
-pnpm exec tsx scripts/q.ts data/v2.db \
-  "SELECT additional_mounts FROM container_configs WHERE agent_group_id = '<group-id>'"
-# Look for entry with /usr/local/bin/rtk
+ncl groups config get --id <group-id>
+# Look for the /usr/local/bin/rtk mount
 ncl groups restart --id <group-id>
 ```
 

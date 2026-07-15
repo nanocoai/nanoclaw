@@ -4,21 +4,15 @@ Idempotent — safe to run even if some steps were never applied. Run Steps 1–
 
 ## 1. Remove the mount from the container config
 
-Read the current mounts, drop the entry whose `containerPath` is `/usr/local/bin/rtk`, and write the rest back.
+Remove the rtk mount with the host-only `remove-mount` verb. It is idempotent — a no-op if the mount isn't present:
 
 ```bash
-pnpm exec tsx scripts/q.ts data/v2.db \
-  "SELECT additional_mounts FROM container_configs WHERE agent_group_id = '<group-id>'"
+ncl groups config remove-mount --id <group-id> \
+  --host ~/.local/bin/rtk \
+  --container /usr/local/bin/rtk
 ```
 
-Write the filtered array (omit any entry with `"containerPath":"/usr/local/bin/rtk"`):
-
-```bash
-pnpm exec tsx scripts/q.ts data/v2.db \
-  "UPDATE container_configs SET additional_mounts = '<filtered-json>' WHERE agent_group_id = '<group-id>'"
-```
-
-If no rtk entry is present, leave the array as-is.
+This verb is operator-only and runs host-side; it is rejected from inside a container.
 
 ## 2. Remove the PreToolUse hook from settings.json
 

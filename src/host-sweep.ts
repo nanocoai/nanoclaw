@@ -30,7 +30,7 @@ import type Database from 'better-sqlite3';
 import fs from 'fs';
 
 import { ensureEgressNetwork } from './egress-lockdown.js';
-import { getActiveSessions } from './db/sessions.js';
+import { getActiveSessions, isTaskThread, updateSession } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import {
   countDueMessages,
@@ -167,6 +167,15 @@ async function sweep(): Promise<void> {
   setTimeout(sweep, SWEEP_INTERVAL_MS);
 }
 
+/** A per-task session with no live tasks and no running container is spent → close it. */
+export function shouldCloseTaskSession(
+  threadId: string | null,
+  containerRunning: boolean,
+  liveTaskCount: number,
+): boolean {
+  return isTaskThread(threadId) && !containerRunning && liveTaskCount === 0;
+}
+
 async function sweepSession(session: Session): Promise<void> {
   const agentGroup = getAgentGroup(session.agent_group_id);
   if (!agentGroup) return;
@@ -234,6 +243,24 @@ async function sweepSession(session: Session): Promise<void> {
     const { handleRecurrence } = await import('./modules/scheduling/recurrence.js');
     await handleRecurrence(inDb, session);
     // MODULE-HOOK:scheduling-recurrence:end
+
+    // 6. GC spent task sessions. An isolated per-task session with no live task
+    // rows left (one-shot fired, or all cancelled/deleted) and no container
+    // running is dead — close it so it stops being swept and listed. Runs after
+    // recurrence so a just-fired recurring series has already re-armed its next
+    // pending row and is never collected. The per-task log file in the workspace
+    // is the durable history and survives the close.
+    if (isTaskThread(session.thread_id)) {
+      const liveTasks = (
+        inDb
+          .prepare("SELECT COUNT(*) AS c FROM messages_in WHERE kind = 'task' AND status IN ('pending', 'paused')")
+          .get() as { c: number }
+      ).c;
+      if (shouldCloseTaskSession(session.thread_id, isContainerRunning(session.id), liveTasks)) {
+        updateSession(session.id, { status: 'closed' });
+        log.info('Closed spent task session', { sessionId: session.id, threadId: session.thread_id });
+      }
+    }
   } finally {
     inDb.close();
     outDb?.close();

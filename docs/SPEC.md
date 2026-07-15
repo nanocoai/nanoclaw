@@ -579,12 +579,7 @@ NanoClaw has a built-in scheduler that runs tasks as full agents in their group'
 ```
 User: @Andy remind me every Monday at 9am to review the weekly metrics
 
-Claude: [calls mcp__nanoclaw__schedule_task]
-        {
-          "prompt": "Send a reminder to review weekly metrics. Be encouraging!",
-          "schedule_type": "cron",
-          "schedule_value": "0 9 * * 1"
-        }
+Claude: [runs ncl tasks create --prompt "Send a reminder to review weekly metrics. Be encouraging!" --process-after "2024-02-05T09:00:00" --recurrence "0 9 * * 1"]
 
 Claude: Done! I'll remind you every Monday at 9am.
 ```
@@ -594,12 +589,7 @@ Claude: Done! I'll remind you every Monday at 9am.
 ```
 User: @Andy at 5pm today, send me a summary of today's emails
 
-Claude: [calls mcp__nanoclaw__schedule_task]
-        {
-          "prompt": "Search for today's emails, summarize the important ones, and send the summary to the group.",
-          "schedule_type": "once",
-          "schedule_value": "2024-01-31T17:00:00Z"
-        }
+Claude: [runs ncl tasks create --prompt "Search for today's emails, summarize the important ones, and send the summary to the group." --process-after "2024-01-31T17:00:00"]
 ```
 
 ### Managing Tasks
@@ -620,18 +610,11 @@ From main channel:
 
 ### NanoClaw MCP (built-in)
 
-The `nanoclaw` MCP server is created dynamically per agent call with the current group's context.
+The `nanoclaw` MCP server is created dynamically per agent call with the current group's context. Scheduled task management lives in `ncl tasks`, not MCP.
 
 **Available Tools:**
 | Tool | Purpose |
 |------|---------|
-| `schedule_task` | Schedule a recurring or one-time task |
-| `list_tasks` | Show tasks (group's tasks, or all if main) |
-| `get_task` | Get task details and run history |
-| `update_task` | Modify task prompt or schedule |
-| `pause_task` | Pause a task |
-| `resume_task` | Resume a paused task |
-| `cancel_task` | Delete a task |
 | `send_message` | Send a message to the group via its channel |
 
 ---

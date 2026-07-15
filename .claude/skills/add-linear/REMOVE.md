@@ -18,16 +18,7 @@ rm -f src/channels/linear.ts src/channels/linear-registration.test.ts
 
 ## 2. Remove credentials
 
-Remove the Linear env vars from `.env`, then re-sync to the container:
-
-```bash
-LINEAR_CLIENT_ID
-LINEAR_CLIENT_SECRET
-LINEAR_API_KEY
-LINEAR_WEBHOOK_SECRET
-LINEAR_BOT_USERNAME
-LINEAR_TEAM_KEY
-```
+Remove `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET`, `LINEAR_API_KEY`, `LINEAR_WEBHOOK_SECRET`, `LINEAR_BOT_USERNAME`, and `LINEAR_TEAM_KEY` from `.env`, then re-sync to the container:
 
 ```bash
 mkdir -p data/env && cp .env data/env/env

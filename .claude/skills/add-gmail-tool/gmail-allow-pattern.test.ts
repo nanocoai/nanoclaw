@@ -8,10 +8,9 @@
  *     allowedTools: [ ...TOOL_ALLOWLIST, ...Object.keys(this.mcpServers).map(mcpAllowPattern) ]
  *
  * `mcpAllowPattern` is not exported and the call site lives inside the SDK query options,
- * so we assert the derivation structurally. Delete or rename the derivation and this goes
- * red — surfacing that `gmail` tools would silently be filtered out despite being registered.
- *
- * `mcpAllowPattern` itself is exercised directly to prove `gmail` -> `mcp__gmail__*`.
+ * so the derivation is non-invocable from a test — we guard it structurally. Delete or
+ * rename either half (the function or the spread into allowedTools) and this goes red,
+ * surfacing that `gmail` tools would silently be filtered out despite being registered.
  */
 import fs from 'fs';
 import path from 'path';
@@ -23,11 +22,6 @@ function source(): { sf: ts.SourceFile; text: string } {
   const p = path.join(import.meta.dir, 'claude.ts');
   const text = fs.readFileSync(p, 'utf8');
   return { sf: ts.createSourceFile(p, text, ts.ScriptTarget.Latest, true), text };
-}
-
-/** Reimplement the sanitizer the provider applies, to assert the gmail name maps cleanly. */
-function expectedPattern(name: string): string {
-  return `mcp__${name.replace(/[^a-zA-Z0-9_-]/g, '_')}__*`;
 }
 
 describe('claude.ts derives MCP allow-patterns from the registered servers', () => {
@@ -47,9 +41,5 @@ describe('claude.ts derives MCP allow-patterns from the registered servers', () 
     // Normalize whitespace so formatting changes don't break the assertion.
     const flat = text.replace(/\s+/g, ' ');
     expect(flat).toContain('Object.keys(this.mcpServers).map(mcpAllowPattern)');
-  });
-
-  it('maps a gmail server name to mcp__gmail__*', () => {
-    expect(expectedPattern('gmail')).toBe('mcp__gmail__*');
   });
 });

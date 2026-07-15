@@ -454,3 +454,89 @@ describe('isCorruptionError', () => {
     expect(isCorruptionError('')).toBe(false);
   });
 });
+
+// --- Task-run turn wiring: the REAL processQuery path (one-door) ---
+// These drive the actual call sites (autoAppendTaskLog at result-handling,
+// shouldNudgeTaskBlocks gating, and follow-up turn reset). Deleting the wiring
+// — not just the helpers — goes red here.
+
+const TASK_ROUTING = {
+  platformId: null,
+  channelType: null,
+  threadId: 'system:tasks:ser-1',
+  inReplyTo: 't1',
+  taskRun: true,
+};
+
+function taskLogRows(): Array<{ text: string }> {
+  return (
+    getOutboundDb()
+      .prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq")
+      .all() as Array<{ content: string }>
+  ).map((r) => JSON.parse(r.content) as { text: string });
+}
+
+describe('task-run turn wiring (real processQuery)', () => {
+  it('auto-appends the final text as a task_log row', async () => {
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'result', text: 'checked feeds — nothing new' };
+    }
+    const query: AgentQuery = { push: () => {}, end: () => {}, events: events(), abort: () => {} };
+
+    await processQuery(query, TASK_ROUTING, ['t1'], 'claude', undefined, 'prompt', undefined);
+
+    const logs = taskLogRows();
+    expect(logs).toHaveLength(1);
+    expect(logs[0].text).toBe('checked feeds — nothing new');
+    // and nothing was delivered as chat
+    expect(getUndeliveredMessages().filter((m) => m.kind === 'chat')).toHaveLength(0);
+  });
+
+  it('logs and conditionally nudges a second task run in the same open query', async () => {
+    const pushes: string[] = [];
+
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      // Turn 1 uses the legacy wrong door and consumes its one correction.
+      yield { type: 'result', text: '<message to="local-cli">fire one result</message>' };
+      yield { type: 'result', text: 'first delivery decision handled' };
+
+      // A SECOND task run lands while the query is open — the follow-up poller
+      // pushes it and must reset the per-turn correction state.
+      insertMessage('t2', 'task', { prompt: 'fire two' });
+      const deadline = Date.now() + 5000;
+      while (!pushes.some((p) => p.includes('fire two')) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+
+      // Turn 2 repeats the mistake. This receives a second independent nudge
+      // only if the follow-up path reset taskBlockNudged.
+      yield { type: 'result', text: '<message to="local-cli">fire two result</message>' };
+      yield { type: 'result', text: 'second delivery decision handled' };
+    }
+
+    const query: AgentQuery = {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+
+    await processQuery(query, TASK_ROUTING, ['t1'], 'claude', undefined, 'prompt', undefined);
+
+    const nudges = pushes.filter((p) => p.includes('If and only if'));
+    expect(nudges).toHaveLength(2);
+    expect(nudges[0]).toContain('fire one result');
+    expect(nudges[1]).toContain('fire two result');
+
+    const logs = taskLogRows().map((l) => l.text);
+    expect(logs).toHaveLength(2);
+    expect(logs[0]).toContain('[undelivered → local-cli] fire one result');
+    expect(logs[1]).toContain('[undelivered → local-cli] fire two result');
+    expect(logs).not.toContain('first delivery decision handled');
+    expect(logs).not.toContain('second delivery decision handled');
+  });
+});

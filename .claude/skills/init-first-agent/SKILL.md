@@ -82,7 +82,7 @@ npx tsx scripts/init-first-agent.ts \
   --agent-name "${AGENT_NAME}"
 ```
 
-Add `--provider <name>` when the user picked a non-default provider (there is no install-wide default — the choice is explicit per group). Add `--welcome "System instruction: ..."` to override the default welcome prompt.
+The new group is created on the instance default provider (`DEFAULT_AGENT_PROVIDER` in `.env`, or `claude` when unset). To put it on a different provider, switch after creation with `ncl groups config update --id <group-id> --provider <name>`. Add `--welcome "System instruction: ..."` to override the default welcome prompt.
 
 The script:
 1. Upserts the `users` row and grants `owner` role if no owner exists.
@@ -113,7 +113,7 @@ If they say it didn't arrive, then diagnose using the DB directly (no waiting lo
 
 **"Missing required args"** — the script wants `--channel`, `--user-id`, `--platform-id`, `--display-name` at minimum. Re-check the command you assembled.
 
-**No `messaging_groups` row appears after the user DMs (step 3a)** — the router silently drops messages from unknown senders under `strict` policy but still creates the `messaging_groups` row. If the row is missing entirely, the adapter isn't receiving the inbound message. Check `logs/nanoclaw.log` for adapter errors (auth, gateway disconnect, rate limit).
+**No `messaging_groups` row appears after the user DMs (step 3a)** — auto-created rows are stamped with the channel adapter's declared `unknown_sender_policy` (two-level model: adapter declaration → per-row override; `strict` only when the adapter has no declaration). Under `strict` the router silently drops messages from unknown senders but still creates the `messaging_groups` row; under `request_approval` an approval card goes to an admin instead. If the row is missing entirely, the adapter isn't receiving the inbound message. Check `logs/nanoclaw.log` for adapter errors (auth, gateway disconnect, rate limit).
 
 **Owner already exists** — `hasAnyOwner()` returned true, so the grant is skipped silently. That's fine; the script still creates the agent and wiring. Reassigning ownership needs a separate flow (not this skill).
 

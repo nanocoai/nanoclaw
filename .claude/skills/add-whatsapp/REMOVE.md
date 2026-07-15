@@ -10,10 +10,13 @@ Delete the self-registration import from `src/channels/index.ts` (skip if alread
 import './whatsapp.js';
 ```
 
-Then delete the copied adapter, its registration test, and its unit test:
+Then delete the copied adapter, its registration test, its unit test, and the
+`whatsapp-formatting` container skill (part of the channel payload — trunk
+doesn't ship it):
 
 ```bash
 rm -f src/channels/whatsapp.ts src/channels/whatsapp-registration.test.ts src/channels/whatsapp.test.ts
+rm -rf container/skills/whatsapp-formatting
 ```
 
 ## 2. Remove the setup steps
@@ -37,11 +40,7 @@ rm -f setup/whatsapp-auth.ts
 
 ## 3. Remove credentials
 
-Remove `ASSISTANT_HAS_OWN_NUMBER` from `.env` (only present if a dedicated number was configured), then re-sync to the container:
-
-```bash
-mkdir -p data/env && cp .env data/env/env
-```
+Remove `ASSISTANT_HAS_OWN_NUMBER` and `ASSISTANT_NAME` from `.env`.
 
 ## 4. Remove the packages
 

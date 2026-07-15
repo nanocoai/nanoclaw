@@ -13,8 +13,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb } from './db/connection.js';
 import { getPendingMessages } from './db/messages-in.js';
-import { formatMessages, stripInternalTags } from './formatter.js';
-import { TIMEZONE } from './timezone.js';
+import { formatMessages, stripInternalTags, stripLegacyTaskContract } from './formatter.js';
+import { TIMEZONE, formatLocalTime } from './timezone.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -62,6 +62,38 @@ describe('context timezone header', () => {
   });
 });
 
+describe('task prompt compatibility', () => {
+  it('strips the generated #2981 delivery suffix without mutating stored data', () => {
+    const prompt =
+      'Send the daily digest\n\n' +
+      '[A task serves the user two separate ways — legacy generated delivery instructions]';
+
+    expect(stripLegacyTaskContract(prompt)).toBe('Send the daily digest');
+  });
+
+  it('strips the generated #2988 delivery suffix', () => {
+    const prompt = 'Check the feeds\n\n[Task delivery contract:\nlegacy generated instructions]';
+
+    expect(stripLegacyTaskContract(prompt)).toBe('Check the feeds');
+  });
+
+  it('leaves ordinary user prompts unchanged', () => {
+    const prompt = 'Explain [Task delivery contract:] as plain text';
+
+    expect(stripLegacyTaskContract(prompt)).toBe(prompt);
+  });
+
+  it('does not expose a legacy delivery contract in a formatted task run', () => {
+    insertMessage('task-1', 'task', {
+      prompt: 'Check the feeds\n\n[Task delivery contract:\nlegacy generated instructions]',
+    });
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('Instructions:\nCheck the feeds');
+    expect(result).not.toContain('legacy generated instructions');
+  });
+});
+
 describe('multi-message chat batches', () => {
   // Regression guard for #2555: an outer `<messages>` envelope around
   // multiple chat messages caused the Claude Agent SDK to emit a synthetic
@@ -106,6 +138,14 @@ describe('timestamp formatting', () => {
     insertMessage('m1', 'chat', { sender: 'Alice', text: 'hi' }, { timestamp: '2026-06-15T15:30:00.000Z' });
     const result = formatMessages(getPendingMessages());
     expect(result).toMatch(/(AM|PM)/);
+  });
+});
+
+describe('task timestamps', () => {
+  it('renders task time in the user TZ, same as chat rows', () => {
+    insertMessage('t1', 'task', { prompt: 'do the thing' }, { timestamp: '2026-01-05T12:00:00.000Z' });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain(`time="${formatLocalTime('2026-01-05T12:00:00.000Z', TIMEZONE)}"`);
   });
 });
 

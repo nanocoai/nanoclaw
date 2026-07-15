@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
+      issues: write # createLabel — auto-provisions the core-team label
     steps:
       - uses: actions/github-script@v7
         with:
@@ -29,6 +30,24 @@ jobs:
             else if (body.includes('[x] **Documentation**'))   labels.push('PR: Docs');
 
             if (body.includes('contributing-guide: v1')) labels.push('follows-guidelines');
+
+            // Lowercase GitHub logins; keep in sync with the core team roster.
+            const CORE_TEAM = ['gavrielc', 'koshkoshinsk', 'glifocat', 'gabi-simons', 'omri-maya', 'amit-shafnir', 'moshe-nanoco'];
+            const author = context.payload.pull_request.user.login.toLowerCase();
+            if (CORE_TEAM.includes(author)) {
+              labels.push('core-team');
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: 'core-team',
+                  color: '1D76DB',
+                  description: 'PR opened by a core team member',
+                });
+              } catch (e) {
+                if (e.status !== 422) throw e; // 422: label already exists
+              }
+            }
 
             if (labels.length > 0) {
               await github.rest.issues.addLabels({

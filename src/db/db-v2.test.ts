@@ -55,6 +55,22 @@ describe('migrations', () => {
     // Running again should not throw
     runMigrations(db);
   });
+
+  it('adds messaging_group_agents.threads as a nullable, default-free override column (019)', () => {
+    const db = initTestDb();
+    runMigrations(db);
+    const col = db
+      .prepare(
+        `SELECT type, "notnull", dflt_value FROM pragma_table_info('messaging_group_agents') WHERE name = 'threads'`,
+      )
+      .get() as { type: string; notnull: number; dflt_value: unknown } | undefined;
+    expect(col).toBeDefined();
+    // NULL must remain expressible (= inherit the adapter declaration) with
+    // no default — a backfill would freeze today's behavior into rows.
+    expect(col!.type).toBe('INTEGER');
+    expect(col!.notnull).toBe(0);
+    expect(col!.dflt_value).toBeNull();
+  });
 });
 
 // ── Agent Groups ──

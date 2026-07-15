@@ -15,7 +15,7 @@ vi.mock('./log.js', () => ({
 }));
 
 import { composeGroupClaudeMd } from './claude-md-compose.js';
-import { ensureContainerConfig } from './db/container-configs.js';
+import { ensureContainerConfig, updateContainerConfigScalars } from './db/container-configs.js';
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from './db/index.js';
 import { PERSONA_PREPEND_FILE } from './group-persona.js';
 import type { AgentGroup } from './types.js';
@@ -89,5 +89,30 @@ describe('composeGroupClaudeMd persona prepend', () => {
     expect(imports[0]).toBe('@./.claude-shared.md');
     expect(imports).not.toContain('@./.claude-fragments/persona.md');
     expect(fs.existsSync(path.join(GROUPS_DIR, ag.folder, '.claude-fragments', 'persona.md'))).toBe(false);
+  });
+});
+
+describe('composeGroupClaudeMd scheduling instructions (ncl tasks reach-in)', () => {
+  // Red-on-delete guard for the `scheduling`/`cli` exclusion at the
+  // module-fragment loop: the agent is taught `ncl tasks` iff it has ncl.
+  it('imports module-scheduling.md at the default cli_scope', () => {
+    const ag = group('ag-sched', 'sched-group');
+    seed(ag);
+
+    composeGroupClaudeMd(ag);
+
+    expect(importsOf(ag.folder)).toContain('@./.claude-fragments/module-scheduling.md');
+  });
+
+  it('excludes module-scheduling.md (and module-cli.md) when cli_scope is disabled', () => {
+    const ag = group('ag-sched-off', 'sched-group-off');
+    seed(ag);
+    updateContainerConfigScalars(ag.id, { cli_scope: 'disabled' });
+
+    composeGroupClaudeMd(ag);
+
+    const imports = importsOf(ag.folder);
+    expect(imports).not.toContain('@./.claude-fragments/module-scheduling.md');
+    expect(imports).not.toContain('@./.claude-fragments/module-cli.md');
   });
 });

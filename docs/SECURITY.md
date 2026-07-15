@@ -40,7 +40,7 @@ spawn. For the default (Claude) provider these are:
 | Container path | Host source | Mode | Purpose |
 |---|---|---|---|
 | `/workspace` | `data/v2-sessions/<group>/<session>/` | RW | Session folder — `inbound.db`, `outbound.db`, `outbox/`, `.claude/` |
-| `/workspace/agent` | `groups/<folder>/` | RW | Agent group working files + `CLAUDE.local.md` |
+| `/workspace/agent` | `groups/<folder>/` | RW | Agent working files, standing instructions, and shared memory tree |
 | `/workspace/agent/container.json` | group `container.json` | RO | Container config — readable, not writable |
 | `/workspace/agent/CLAUDE.md` | composed `CLAUDE.md` | RO | Regenerated every spawn; agent edits would be clobbered |
 | `/workspace/agent/.claude-fragments` | group `.claude-fragments/` | RO | Composer skill/MCP fragments |
@@ -56,6 +56,12 @@ read its config but cannot modify it. The project root is **never mounted**: the
 container only ever sees the paths above plus any provider-contributed mounts
 (e.g. an OpenCode XDG dir). Host application source (`src/`, `dist/`,
 `package.json`) is not reachable.
+
+Shared memory content is read only by the provider's SessionStart hook inside
+the container. Host-side project-document composers emit pointers but never
+open `memory/index.md` or linked agent-controlled files. A memory symlink can
+therefore reach only paths already visible inside that container, not arbitrary
+host files.
 
 **Additional-mount allowlist** — extra mounts from a group's container config
 are validated against an allowlist at `~/.config/nanoclaw/mount-allowlist.json`,

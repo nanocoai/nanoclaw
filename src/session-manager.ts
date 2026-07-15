@@ -22,9 +22,11 @@ import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import {
   createSession,
+  findSystemSession,
   findSessionByAgentGroup,
   findSessionForAgent,
   getSession,
+  taskThreadId,
   updateSession,
 } from './db/sessions.js';
 import {
@@ -120,6 +122,33 @@ export function resolveSession(
   return { session, created: true };
 }
 
+/** Find or create the per-agent-group session used for scheduled tasks. */
+/** Find or create the isolated session for one task series (thread `system:tasks:<seriesId>`). */
+export function resolveTaskSession(agentGroupId: string, seriesId: string): { session: Session; created: boolean } {
+  const threadId = taskThreadId(seriesId);
+  const existing = findSystemSession(agentGroupId, threadId);
+  if (existing) return { session: existing, created: false };
+
+  const id = generateId();
+  const session: Session = {
+    id,
+    agent_group_id: agentGroupId,
+    messaging_group_id: null,
+    thread_id: threadId,
+    agent_provider: null,
+    status: 'active',
+    container_status: 'stopped',
+    last_active: null,
+    created_at: new Date().toISOString(),
+  };
+
+  createSession(session);
+  initSessionFolder(agentGroupId, id);
+  log.info('Task session created', { id, agentGroupId, seriesId });
+
+  return { session, created: true };
+}
+
 /** Create the session folder and initialize both DBs. */
 export function initSessionFolder(agentGroupId: string, sessionId: string): void {
   const dir = sessionDir(agentGroupId, sessionId);
@@ -131,10 +160,10 @@ export function initSessionFolder(agentGroupId: string, sessionId: string): void
 }
 
 /**
- * Write the default reply routing for a session into its inbound.db.
+ * Write the current chat/thread routing for a session into its inbound.db.
  *
- * The container reads this as the default (channel_type, platform_id, thread_id)
- * for outbound messages when the agent doesn't specify an explicit destination.
+ * The container uses this to preserve thread_id when an explicitly named
+ * destination resolves to the conversation this session is bound to.
  * Derived from session.messaging_group_id → messaging_groups row + session.thread_id.
  *
  * Called on every container wake alongside the agent-to-agent module's
@@ -350,6 +379,16 @@ export function openInboundDb(agentGroupId: string, sessionId: string): Database
   return db;
 }
 
+/** Open a session's inbound DB, run `fn`, and always close it. */
+export function withInboundDb<T>(agentGroupId: string, sessionId: string, fn: (db: Database.Database) => T): T {
+  const db = openInboundDb(agentGroupId, sessionId);
+  try {
+    return fn(db);
+  } finally {
+    db.close();
+  }
+}
+
 /** Open the outbound DB for a session (host reads only). */
 export function openOutboundDb(agentGroupId: string, sessionId: string): Database.Database {
   return openOutboundDbRaw(outboundDbPath(agentGroupId, sessionId));
@@ -387,8 +426,16 @@ export function writeOutboundDirect(
   try {
     db.prepare(
       `INSERT OR IGNORE INTO messages_out (id, seq, timestamp, kind, platform_id, channel_type, thread_id, content)
-       VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 2 FROM messages_out), datetime('now'), ?, ?, ?, ?, ?)`,
-    ).run(message.id, message.kind, message.platformId, message.channelType, message.threadId, message.content);
+       VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 2 FROM messages_out), ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      message.id,
+      new Date().toISOString(),
+      message.kind,
+      message.platformId,
+      message.channelType,
+      message.threadId,
+      message.content,
+    );
   } finally {
     db.close();
   }

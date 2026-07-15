@@ -80,8 +80,10 @@ agent_groups (workspace, memory, CLAUDE.md, personality)
     ↕ many-to-many
 messaging_groups (a specific channel/chat/group on a platform)
     via
-messaging_group_agents (session_mode, trigger_rules, priority)
+messaging_group_agents (session_mode, engage_mode, engage_pattern, sender_scope, ignored_message_policy, priority, threads)
 ```
+
+Wiring-creation defaults for engage mode/pattern, thread policy, and unknown-sender policy come from the channel adapter's declaration (per DM/group context), overridable per wiring at creation — see [setup-wiring.md](setup-wiring.md#channel-defaults-two-level-model) and [api-details.md](api-details.md#channel-defaults).
 
 - **Shared session:** multiple messaging_groups → same agent_group, `session_mode = 'agent-shared'`
 - **Same agent, separate sessions:** multiple messaging_groups → same agent_group, `session_mode = 'shared'`

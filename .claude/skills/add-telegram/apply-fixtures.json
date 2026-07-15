@@ -1,0 +1,15 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. The getMe stub answers the bot_username capture (the operator block after the restart renders it); stepFields feed the pairing step's terminal block (capture:platform_id=PLATFORM_ID,owner_handle=ADMIN_USER_ID).",
+  "scenarios": [
+    {
+      "name": "pairing",
+      "inputs": {
+        "bot_token": "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "exec": [
+        { "match": "getMe", "stdout": "nanoclaw_bot" }
+      ],
+      "stepFields": { "PLATFORM_ID": "telegram:123456789", "ADMIN_USER_ID": "987654321" }
+    }
+  ]
+}

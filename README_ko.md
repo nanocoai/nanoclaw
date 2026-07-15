@@ -45,7 +45,7 @@ cd nanoclaw-v2
 bash migrate-v2.sh
 ```
 
-`migrate-v2.sh`는 v1 설치(형제 디렉터리, 또는 `NANOCLAW_V1_PATH=/path/to/nanoclaw`)를 찾아 상태를 v2 체크아웃으로 마이그레이션한 다음, 판단이 필요한 부분(소유자 시딩, CLAUDE.local.md 정리, 포크 커스터마이징 재적용)을 마무리하기 위해 Claude Code로 `exec`합니다.
+`migrate-v2.sh`는 v1 설치(형제 디렉터리, 또는 `NANOCLAW_V1_PATH=/path/to/nanoclaw`)를 찾아 상태를 v2 체크아웃으로 마이그레이션한 다음, 판단이 필요한 부분(소유자 시딩, 공유 메모리 마이그레이션, 포크 커스터마이징 재적용)을 마무리하기 위해 Claude Code로 `exec`합니다.
 
 이 스크립트는 Claude 세션 내부가 아니라 직접 실행하세요. 결정론적인 부분에서 Node/pnpm 부트스트랩, Docker, OneCLI, 컨테이너 빌드를 위해 대화형 프롬프트와 실제 셸 I/O가 필요합니다.
 
