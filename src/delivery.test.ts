@@ -36,7 +36,7 @@ import {
 } from './db/index.js';
 import { getDeliveredIds } from './db/session-db.js';
 import { resolveSession, resolveTaskSession, outboundDbPath, openInboundDb } from './session-manager.js';
-import { deliverSessionMessages, setDeliveryAdapter } from './delivery.js';
+import { deliverSessionMessages, setDeliveryAdapter, isTransientDeliveryError } from './delivery.js';
 import { createChannelDeliveryAdapter } from './channels/channel-registry.js';
 
 function now(): string {
@@ -157,40 +157,89 @@ describe('deliverSessionMessages — concurrent invocations', () => {
 });
 
 describe('deliverSessionMessages — retry and permanent failure', () => {
-  it('retries on adapter failure and marks failed after MAX_DELIVERY_ATTEMPTS (3)', async () => {
+  it('keeps retrying a transient (network) failure past the old 3-attempt cap', async () => {
+    // Regression for silent drops on flaky links: a brief connectivity gap
+    // used to permanently drop the reply after 3 fast retries. Transient
+    // failures must now keep retrying (with backoff) within the horizon.
+    vi.useFakeTimers();
+    try {
+      seedAgentAndChannel();
+      const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+      insertOutbound('ag-1', session.id, 'out-net');
+
+      let callCount = 0;
+      setDeliveryAdapter({
+        async deliver() {
+          callCount++;
+          throw Object.assign(new Error('Network error calling Telegram sendMessage'), { type: 'NetworkError' });
+        },
+      });
+
+      // Drive several poll cycles, advancing past the (capped) backoff each time.
+      for (let i = 0; i < 6; i++) {
+        await deliverSessionMessages(session);
+        vi.advanceTimersByTime(60_000);
+      }
+
+      expect(callCount).toBeGreaterThan(3);
+      const inDb = openInboundDb('ag-1', session.id);
+      const failed = getDeliveredIds(inDb).has('out-net');
+      inDb.close();
+      expect(failed).toBe(false); // not permanently dropped within the horizon
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('gives up on a transient failure once the retry horizon elapses', async () => {
+    vi.useFakeTimers();
+    try {
+      seedAgentAndChannel();
+      const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+      insertOutbound('ag-1', session.id, 'out-net-long');
+
+      setDeliveryAdapter({
+        async deliver() {
+          throw Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT' });
+        },
+      });
+
+      await deliverSessionMessages(session); // stamps firstFailedAt
+      vi.advanceTimersByTime(31 * 60_000); // past the 30-min horizon
+      await deliverSessionMessages(session); // this cycle gives up
+
+      const inDb = openInboundDb('ag-1', session.id);
+      const failed = getDeliveredIds(inDb).has('out-net-long');
+      inDb.close();
+      expect(failed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('marks a permanent (validation) failure failed after MAX_PERMANENT_ATTEMPTS (3)', async () => {
     seedAgentAndChannel();
     const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
-    insertOutbound('ag-1', session.id, 'out-flaky');
+    insertOutbound('ag-1', session.id, 'out-bad');
 
     let callCount = 0;
     setDeliveryAdapter({
       async deliver() {
         callCount++;
-        throw new Error('network timeout');
+        throw Object.assign(new Error("Bad Request: can't parse entities"), { type: 'ValidationError' });
       },
     });
 
-    // Attempt 1
     await deliverSessionMessages(session);
-    expect(callCount).toBe(1);
+    await deliverSessionMessages(session);
+    await deliverSessionMessages(session); // 3rd attempt → permanent failure
+    await deliverSessionMessages(session); // no-op, already marked failed
 
-    // Attempt 2
-    await deliverSessionMessages(session);
-    expect(callCount).toBe(2);
-
-    // Attempt 3 — should mark as permanently failed
-    await deliverSessionMessages(session);
     expect(callCount).toBe(3);
-
-    // Attempt 4 — message is now in delivered (as failed), adapter not called
-    await deliverSessionMessages(session);
-    expect(callCount).toBe(3);
-
-    // Verify the message is in the delivered table with 'failed' status
     const inDb = openInboundDb('ag-1', session.id);
-    const delivered = getDeliveredIds(inDb);
+    const failed = getDeliveredIds(inDb).has('out-bad');
     inDb.close();
-    expect(delivered.has('out-flaky')).toBe(true);
+    expect(failed).toBe(true);
   });
 
   it('does not acknowledge a message when no channel adapter is registered (#2995)', async () => {
@@ -252,6 +301,34 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     // Attempt 3 — not called, message already delivered
     await deliverSessionMessages(session);
     expect(callCount).toBe(2);
+  });
+});
+
+describe('isTransientDeliveryError', () => {
+  it('classifies network/timeout/5xx/429 failures as transient', () => {
+    expect(isTransientDeliveryError(Object.assign(new Error('x'), { type: 'NetworkError' }))).toBe(true);
+    expect(isTransientDeliveryError(Object.assign(new Error('x'), { code: 'ETIMEDOUT' }))).toBe(true);
+    expect(isTransientDeliveryError(Object.assign(new Error('x'), { code: 'ECONNRESET' }))).toBe(true);
+    expect(isTransientDeliveryError(Object.assign(new Error('x'), { code: 'EAI_AGAIN' }))).toBe(true);
+    expect(isTransientDeliveryError(Object.assign(new Error('x'), { status: 503 }))).toBe(true);
+    expect(isTransientDeliveryError(Object.assign(new Error('x'), { status: 429 }))).toBe(true);
+    expect(isTransientDeliveryError(new Error('socket hang up'))).toBe(true);
+    expect(isTransientDeliveryError(new Error('fetch failed'))).toBe(true);
+  });
+
+  it('classifies validation / permission / unknown failures as permanent', () => {
+    expect(
+      isTransientDeliveryError(
+        Object.assign(new Error("Bad Request: can't parse entities"), { type: 'ValidationError' }),
+      ),
+    ).toBe(false);
+    expect(isTransientDeliveryError(new Error('unauthorized channel destination: ag-1 cannot send to ...'))).toBe(
+      false,
+    );
+    expect(isTransientDeliveryError(new Error('unknown messaging group for telegram/telegram:1'))).toBe(false);
+    expect(isTransientDeliveryError(Object.assign(new Error('x'), { status: 400 }))).toBe(false);
+    expect(isTransientDeliveryError(null)).toBe(false);
+    expect(isTransientDeliveryError('boom')).toBe(false);
   });
 });
 
