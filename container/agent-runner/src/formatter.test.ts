@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb } from './db/connection.js';
 import { getPendingMessages } from './db/messages-in.js';
-import { formatMessages, stripInternalTags } from './formatter.js';
+import { formatMessages, stripInternalTags, stripLegacyTaskContract } from './formatter.js';
 import { TIMEZONE, formatLocalTime } from './timezone.js';
 
 beforeEach(() => {
@@ -59,6 +59,38 @@ describe('context timezone header', () => {
     const firstMsgIdx = result.indexOf('<message ');
     expect(ctxIdx).toBeGreaterThanOrEqual(0);
     expect(firstMsgIdx).toBeGreaterThan(ctxIdx);
+  });
+});
+
+describe('task prompt compatibility', () => {
+  it('strips the generated #2981 delivery suffix without mutating stored data', () => {
+    const prompt =
+      'Send the daily digest\n\n' +
+      '[A task serves the user two separate ways — legacy generated delivery instructions]';
+
+    expect(stripLegacyTaskContract(prompt)).toBe('Send the daily digest');
+  });
+
+  it('strips the generated #2988 delivery suffix', () => {
+    const prompt = 'Check the feeds\n\n[Task delivery contract:\nlegacy generated instructions]';
+
+    expect(stripLegacyTaskContract(prompt)).toBe('Check the feeds');
+  });
+
+  it('leaves ordinary user prompts unchanged', () => {
+    const prompt = 'Explain [Task delivery contract:] as plain text';
+
+    expect(stripLegacyTaskContract(prompt)).toBe(prompt);
+  });
+
+  it('does not expose a legacy delivery contract in a formatted task run', () => {
+    insertMessage('task-1', 'task', {
+      prompt: 'Check the feeds\n\n[Task delivery contract:\nlegacy generated instructions]',
+    });
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('Instructions:\nCheck the feeds');
+    expect(result).not.toContain('legacy generated instructions');
   });
 });
 

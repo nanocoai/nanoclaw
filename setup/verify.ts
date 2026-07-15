@@ -217,15 +217,27 @@ export async function run(_args: string[]): Promise<void> {
     mountAllowlist = 'configured';
   }
 
+  // Deferred-wire channels can't have a group yet: their platform id only
+  // exists after the first inbound DM (see add-teams' "Finish wiring"), so
+  // configured-but-unwired is pending operator action, not a broken install.
+  // Only claim pending when EVERY configured channel is defer-wire — a
+  // wire-during-setup channel (slack, telegram, …) with zero groups is a
+  // genuine failure this must not mask.
+  const wiringPending =
+    registeredGroups === 0 &&
+    configuredChannels.length > 0 &&
+    configuredChannels.every((c) => DEFER_WIRE_CHANNELS.has(c));
+
   // Determine overall status. The cli-agent step earlier in setup already
   // proved the agent round-trip works; verify is a static health check.
   const status = determineVerifyStatus({
     service,
     credentials,
     registeredGroups,
+    wiringPending,
   });
 
-  log.info('Verification complete', { status, channelAuth });
+  log.info('Verification complete', { status, channelAuth, wiringPending });
 
   emitStatus('VERIFY', {
     SERVICE: service,
@@ -235,6 +247,7 @@ export async function run(_args: string[]): Promise<void> {
     CHANNEL_AUTH: JSON.stringify(channelAuth),
     REGISTERED_GROUPS: registeredGroups,
     MOUNT_ALLOWLIST: mountAllowlist,
+    ...(wiringPending ? { WIRING: 'pending_first_dm' } : {}),
     STATUS: status,
     LOG: 'logs/setup.log',
   });
@@ -242,14 +255,25 @@ export async function run(_args: string[]): Promise<void> {
   if (status === 'failed') process.exit(1);
 }
 
+/**
+ * Channels whose wiring only completes after the first inbound message —
+ * the platform id doesn't exist until the bot is DM'd, so setup ends with
+ * the channel configured but no group wired. Kept in lockstep with the
+ * wireIfResolved call site in setup/auto.ts (its unresolved drop-through
+ * leaves the channel configured but unwired).
+ */
+export const DEFER_WIRE_CHANNELS = new Set(['teams']);
+
 export function determineVerifyStatus(input: {
   service: 'not_found' | 'stopped' | 'running' | 'running_other_checkout';
   credentials: string;
   registeredGroups: number;
+  /** Zero groups but every configured channel defers wiring to the first DM. */
+  wiringPending?: boolean;
 }): 'success' | 'failed' {
   return input.service === 'running' &&
     input.credentials !== 'missing' &&
-    input.registeredGroups > 0
+    (input.registeredGroups > 0 || input.wiringPending === true)
     ? 'success'
     : 'failed';
 }

@@ -133,6 +133,8 @@ pnpm exec vitest run src/gcal-dockerfile.test.ts
 
 `cp` overwrites in place, so re-running this skill is safe.
 
+**This is the skill's only in-tree integration test.** The Phase 3 `ncl groups config add-mcp-server` and `add-mount` steps are runtime writes to the central DB — they leave no line in the source tree whose deletion a test could catch, so a registration test is structurally inapplicable. They're verified at runtime instead (Phase 5).
+
 ### Rebuild the container image
 
 ```bash
@@ -160,27 +162,22 @@ Approval behaviour depends on where you run it: from inside an agent's container
 
 ### Add the `.calendar-mcp` mount
 
-There is no `ncl groups config add-mount` verb yet (tracked in [#2395](https://github.com/nanocoai/nanoclaw/issues/2395)). Until that ships, edit the DB directly via the in-tree wrapper (`scripts/q.ts` — `setup/verify.ts:5` codifies that NanoClaw avoids depending on the `sqlite3` CLI binary, so don't shell out to it):
+This is a **host-only / operator** verb — it's rejected from inside a container at any `cli_scope`, so run it host-side when you (the operator) apply this skill via `/setup`, `/customize`, or `/manage-mounts`. It's idempotent (skips if the mount is already present).
 
 ```bash
-GROUP_ID='<group-id>'
-HOST_PATH="$HOME/.calendar-mcp"
-MOUNT=$(jq -cn --arg h "$HOST_PATH" '{hostPath:$h, containerPath:".calendar-mcp", readonly:false}')
-pnpm exec tsx scripts/q.ts data/v2.db "UPDATE container_configs \
-  SET additional_mounts = json_insert(additional_mounts, '\$[#]', json('$MOUNT')), \
-      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') \
-  WHERE agent_group_id = '$GROUP_ID';"
+ncl groups config add-mount \
+  --id <group-id> \
+  --host "$HOME/.calendar-mcp" \
+  --container .calendar-mcp
 ```
 
-Run from your NanoClaw project root (where `data/v2.db` lives). The `$[#]` placeholder is SQLite JSON1's append-to-end notation; it's `\$`-escaped so bash doesn't arithmetic-expand it before sqlite sees it. `updated_at` is an ISO-with-Z string everywhere else in the schema (`new Date().toISOString()`), so stamp the same shape with `strftime` — plain `datetime('now')` would mix naive UTC strings into the column, and `strftime('%s','now')` epoch ints.
+`--container` is relative (mount-security rejects absolute paths — additional mounts land at `/workspace/extra/<relative>`). No `--ro`: the MCP server may rewrite `credentials.json` on token refresh, so the mount must be read-write.
 
-**Switch to `ncl groups config add-mount` once #2395 lands.** Update this skill at that time.
-
-`containerPath` is relative (mount-security rejects absolute paths — additional mounts land at `/workspace/extra/<relative>`).
+The mount also needs to be in the external mount allowlist (`~/.config/nanoclaw/mount-allowlist.json`) to take effect at spawn — see the Phase 1 "Verify mount allowlist covers the path" step. A container restart (`ncl groups restart`) is needed for the mount to apply.
 
 **Why this can't be `groups/<folder>/container.json`:** post-migration `014-container-configs`, `materializeContainerJson` in `src/container-config.ts` rewrites that file from the DB on every spawn. Anything hand-edited there is silently overwritten on next restart.
 
-**Same-group-as-gmail tip:** if this group already has the gmail MCP + `.gmail-mcp` mount, both coexist — `ncl groups config add-mcp-server` only updates the named entry, and `json_insert` appends to `additional_mounts` without disturbing existing entries.
+**Same-group-as-gmail tip:** if this group already has the gmail MCP + `.gmail-mcp` mount, both coexist — `ncl groups config add-mcp-server` only updates the named entry, and `add-mount` appends to `additional_mounts` without disturbing existing entries.
 
 ## Phase 4: Build and Restart
 

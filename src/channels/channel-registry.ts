@@ -62,15 +62,36 @@ export function getChannelAdapter(key: string): ChannelAdapter | undefined {
   return undefined;
 }
 
+/** Thrown by the delivery bridge when the exact adapter for an outbound
+ *  message is not registered (credentials missing so the factory returned
+ *  null, setup failed, or a named instance is offline). Deliberately a throw
+ *  rather than an `undefined` return: `undefined` is also what a successful
+ *  adapter with no platform message id resolves to, and a normal return makes
+ *  `drainSession` mark the row delivered even though nothing was sent (#2995).
+ *  Throwing routes the message into the delivery retry path, where it ends as
+ *  `status='failed'` if the adapter never comes back. */
+export class MissingChannelAdapterError extends Error {
+  constructor(
+    readonly channelType: string,
+    readonly instance?: string,
+  ) {
+    super(
+      `No adapter registered for '${instance ?? channelType}' — message enters the delivery retry path. ` +
+        `Check the startup log for why this channel's adapter did not start.`,
+    );
+    this.name = 'MissingChannelAdapterError';
+  }
+}
+
 /**
  * Build the host's outbound delivery bridge: dispatches delivery-poll and
  * typing traffic into the adapter registry. Resolution is EXACT-key only —
  * `instance ?? channelType`. For default-instance messaging_groups rows the
  * stored instance IS the channelType, which matches default-registered
  * adapters, so single-instance behavior is unchanged. A named instance whose
- * adapter is offline gets the normal offline-adapter handling (warn + drop
- * into the delivery retry path) — never a cross-identity send through a
- * sibling bot of the same platform.
+ * adapter is offline gets the normal offline-adapter handling
+ * (MissingChannelAdapterError → the delivery retry path) — never a
+ * cross-identity send through a sibling bot of the same platform.
  */
 export function createChannelDeliveryAdapter(): ChannelDeliveryAdapter {
   return {
@@ -85,8 +106,7 @@ export function createChannelDeliveryAdapter(): ChannelDeliveryAdapter {
     ): Promise<string | undefined> {
       const adapter = getChannelAdapterExact(instance ?? channelType);
       if (!adapter) {
-        log.warn('No adapter for channel type', { channelType, instance });
-        return;
+        throw new MissingChannelAdapterError(channelType, instance);
       }
       return adapter.deliver(platformId, threadId, { kind, content: JSON.parse(content), files });
     },

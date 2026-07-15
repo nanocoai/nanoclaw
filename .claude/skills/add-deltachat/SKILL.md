@@ -89,7 +89,6 @@ DC_SMTP_SECURITY=2        # 2=STARTTLS (default), 1=SSL/TLS, 3=plain
 
 Security settings are applied on every startup, so changing them in `.env` and restarting takes effect without wiping the account.
 
-Sync to container: `mkdir -p data/env && cp .env data/env/env`
 
 ### Optional settings
 

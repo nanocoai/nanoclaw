@@ -19,8 +19,14 @@ import type { Session } from '../../types.js';
 // Asia/Tokyo is UTC+9 with no DST: "0 9 * * *" must land at 00:00:00Z sharp.
 vi.mock('../../config.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../config.js')>();
-  return { ...actual, TIMEZONE: 'Asia/Tokyo' };
+  return { ...actual, TIMEZONE: 'Asia/Tokyo', GROUPS_DIR: '/tmp/nanoclaw-recurrence-test/groups' };
 });
+
+// The auto-pause note goes through the shared appendRunLog helper, which
+// resolves the group folder from the central DB — mock it to a fixed folder.
+vi.mock('../../db/agent-groups.js', () => ({
+  getAgentGroup: (id: string) => (id === 'ag-test' ? { id, folder: 'g-test' } : undefined),
+}));
 
 const TEST_DIR = '/tmp/nanoclaw-recurrence-test';
 const DB_PATH = path.join(TEST_DIR, 'inbound.db');
@@ -189,5 +195,19 @@ describe('handleRecurrence — script-failure backoff (streak derived from faile
       recurrence: string | null;
     };
     expect(original.recurrence).toBeNull(); // not re-cloned next sweep
+  });
+
+  it('writes the auto-pause note into the series run log via the shared appendRunLog', async () => {
+    const db = freshDb();
+    seedFailedStreak(db, 8);
+    await handleRecurrence(db, fakeSession());
+
+    // Same file + format appendRunLog owns: groups/<folder>/tasks/<series>.md
+    const logFile = path.join(TEST_DIR, 'groups', 'g-test', 'tasks', 'task-s-0.md');
+    expect(fs.existsSync(logFile)).toBe(true);
+    const content = fs.readFileSync(logFile, 'utf8');
+    expect(content).toContain('auto-paused after 8 consecutive script failures');
+    expect(content).toContain('ncl tasks resume task-s-0');
+    expect(content).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2} — /m); // appendRunLog's local-time stamp
   });
 });

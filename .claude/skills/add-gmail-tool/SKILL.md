@@ -181,21 +181,16 @@ Approval behaviour depends on where you run it: from inside an agent's container
 
 ### Add the `.gmail-mcp` mount
 
-There is no `ncl groups config add-mount` verb yet (tracked in [#2395](https://github.com/nanocoai/nanoclaw/issues/2395)). Until that ships, edit the DB directly via the in-tree wrapper (`scripts/q.ts` — `setup/verify.ts:5` codifies that NanoClaw avoids depending on the `sqlite3` CLI binary, so don't shell out to it):
+Register the mount with the host-only `ncl groups config add-mount` verb. For each chosen `<group-id>`:
 
 ```bash
-GROUP_ID='<group-id>'
-HOST_PATH="$HOME/.gmail-mcp"
-MOUNT=$(jq -cn --arg h "$HOST_PATH" '{hostPath:$h, containerPath:".gmail-mcp", readonly:false}')
-pnpm exec tsx scripts/q.ts data/v2.db "UPDATE container_configs \
-  SET additional_mounts = json_insert(additional_mounts, '\$[#]', json('$MOUNT')), \
-      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') \
-  WHERE agent_group_id = '$GROUP_ID';"
+ncl groups config add-mount \
+  --id <group-id> \
+  --host "$HOME/.gmail-mcp" \
+  --container .gmail-mcp
 ```
 
-Run from your NanoClaw project root (where `data/v2.db` lives). The `$[#]` placeholder is SQLite JSON1's append-to-end notation; it's `\$`-escaped so bash doesn't arithmetic-expand it before sqlite sees it. `updated_at` is an ISO-with-Z string everywhere else in the schema (`new Date().toISOString()`), so stamp the same shape with `strftime` — plain `datetime('now')` would mix naive UTC strings into the column, and `strftime('%s','now')` epoch ints.
-
-**Switch to `ncl groups config add-mount` once #2395 lands.** Update this skill at that time.
+`--host` is the host path, `--container` is the in-container path (relative, lands at `/workspace/extra/.gmail-mcp`). No `--ro` — the MCP server writes refreshed token state back into the mount. The verb is idempotent (a re-run skips if the mount is already present) and operator-only (host-side; rejected from inside a container), so run it from a host operator shell when applying this skill.
 
 **Why the container path is relative:** `mount-security` rejects absolute `containerPath` values. Additional mounts are prefixed with `/workspace/extra/`, so `containerPath: ".gmail-mcp"` lands at `/workspace/extra/.gmail-mcp`. The MCP server's `GMAIL_OAUTH_PATH` / `GMAIL_CREDENTIALS_PATH` env vars point at that absolute location inside the container.
 

@@ -1,13 +1,13 @@
 ## Task scheduling (`ncl tasks`)
 
-Use `ncl tasks` for one-shot and recurring tasks. A task runs in this agent group's system session, not in the current chat session, so when it fires you must choose a destination explicitly with `<message to="name">...</message>` or `send_message({ to: "name", ... })`.
+Use `ncl tasks` for one-shot and recurring tasks. Each task runs in its own isolated session. Its runtime prompt supplies the task-only delivery and run-log contract.
 
 Pass `--name "<short label>"` on create to get a readable task id (e.g. `--name "sales briefing"` → `sales-briefing-a25c`); without it ids are `t-<hex>`.
 
 Common commands:
 
 ```bash
-ncl tasks create --name "ping" --prompt "Remind me to call Dana" --process-after "tomorrow 18:00"
+ncl tasks create --name "ping" --prompt "Remind the user to call Dana" --process-after "tomorrow 18:00"
 ncl tasks list
 ncl tasks get ping-a25c        # includes run count, failures, and recent run-log lines
 ncl tasks run ping-a25c         # fire once now without changing the schedule (testing)

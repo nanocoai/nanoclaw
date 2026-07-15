@@ -331,8 +331,10 @@ export function createNewAgentGroup(name: string): AgentGroup {
   });
 
   const ag = getAgentGroup(agId)!;
-  // Channel-approved groups get the built-in default provider (claude); the
-  // operator flips a group with `ncl groups config update --provider`.
+  // Channel-approved groups are created on the instance default provider
+  // (DEFAULT_AGENT_PROVIDER, or claude when unset) — initGroupFilesystem stamps
+  // it onto the fresh config row. The operator flips a group afterward with
+  // `ncl groups config update --provider`.
   initGroupFilesystem(ag);
   return ag;
 }

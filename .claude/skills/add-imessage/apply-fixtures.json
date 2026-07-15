@@ -1,0 +1,27 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. Two scenarios cover both when:mode= legs; the echo stub answers the platform_id capture (the skill echoes the owner handle back).",
+  "scenarios": [
+    {
+      "name": "local",
+      "inputs": {
+        "mode": "local",
+        "owner_handle": "+15551234567"
+      },
+      "exec": [
+        { "match": "echo \"+15551234567\"", "stdout": "+15551234567" }
+      ]
+    },
+    {
+      "name": "remote",
+      "inputs": {
+        "mode": "remote",
+        "server_url": "https://imsg.example.com",
+        "api_key": "fake-photon-api-key",
+        "owner_handle": "owner@example.com"
+      },
+      "exec": [
+        { "match": "echo \"owner@example.com\"", "stdout": "owner@example.com" }
+      ]
+    }
+  ]
+}

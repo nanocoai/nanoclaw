@@ -185,11 +185,12 @@ export async function run(args: string[]): Promise<void> {
   const db = initDb(dbPath);
   runMigrations(db);
 
-  // 1. Create or find agent group. Provider-agnostic: provider is a DB
-  // property set via `ncl groups config update --provider`, not a creation
-  // flag. The workspace is scaffolded at the first spawn (group-init), where
-  // the DB-resolved provider is known; here we only ensure the config row
-  // exists so that update has a row to write.
+  // 1. Create or find agent group. The workspace is scaffolded at the first
+  // spawn (group-init), where the DB-resolved provider is known; here we only
+  // seed the config row — stamped with the instance default so a newly wired
+  // channel group is created on the operator's chosen provider (per-group
+  // `ncl groups config update --provider` still overrides). A reused group
+  // keeps its existing provider (INSERT OR IGNORE).
   let agentGroup = getAgentGroupByFolder(parsed.folder);
   if (!agentGroup) {
     const agId = generateId('ag');

@@ -13,18 +13,19 @@
  * their auth step so there is exactly one auth implementation per provider.
  */
 import { execSync } from 'child_process';
-import fs from 'fs';
-import path from 'path';
 
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
+import { applyProviderSkill } from './providers/install.js';
 // Provider payloads self-register on import.
 import './providers/index.js';
 
-// Hard-wired install scripts — the audited control surface (no branch
-// enumeration). Each setup/add-<name>.sh is idempotent and self-skips when the
-// payload is already wired. Codex is the only manifest-style provider today.
-const INSTALL_SCRIPTS: Record<string, string> = {
-  codex: 'setup/add-codex.sh',
+// Hard-wired install skills — the audited control surface (no branch
+// enumeration). Each `/add-<name>` SKILL.md is idempotent and self-skips when
+// the payload is already wired; it is applied in-process via the directive
+// engine (no shell-out to a drift-prone setup/add-<name>.sh). Codex is the only
+// manifest-style provider today.
+const INSTALL_SKILLS: Record<string, string> = {
+  codex: '.claude/skills/add-codex',
 };
 
 export async function run(args: string[]): Promise<void> {
@@ -40,18 +41,22 @@ export async function run(args: string[]): Promise<void> {
   }
 
   let entry = getSetupProvider(name);
-  const script = INSTALL_SCRIPTS[name];
-  if (script) {
-    // Install OR refresh: the script is idempotent and is also the upgrade
-    // path — payload files resync and a bumped Dockerfile pin replaces the
-    // local one. Rebuild the image only when the Dockerfile actually changed
-    // (payload code is mounted, not baked).
-    const dfPath = path.join(process.cwd(), 'container', 'Dockerfile');
-    const dfBefore = fs.readFileSync(dfPath, 'utf-8');
+  const skillDir = INSTALL_SKILLS[name];
+  if (skillDir) {
+    // Install OR refresh: the skill is idempotent and is also the upgrade path
+    // — payload files resync and a bumped CLI-manifest pin replaces the local
+    // one. Applied in-process via the directive engine; build + auth are this
+    // flow's job (the engine's build/test/auth run directives are skipped), so
+    // we rebuild the image whenever the install mutated anything (the container
+    // CLI manifest is baked into the image, unlike the mounted payload code).
     console.log(`${entry ? 'Refreshing' : 'Installing'} ${name}…`);
-    execSync(`bash ${script}`, { stdio: 'inherit' });
-    if (fs.readFileSync(dfPath, 'utf-8') !== dfBefore) {
-      console.log('Dockerfile pin changed — rebuilding the container image…');
+    const { changed, blockers } = await applyProviderSkill(skillDir, process.cwd());
+    if (blockers.length) {
+      console.error(`Couldn't install ${name}: ${blockers.join('; ')}`);
+      process.exit(1);
+    }
+    if (changed) {
+      console.log('Provider payload installed — rebuilding the container image…');
       execSync('./container/build.sh', { stdio: 'inherit' });
     }
     if (!entry) {

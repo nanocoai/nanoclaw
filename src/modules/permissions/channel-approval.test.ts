@@ -68,7 +68,11 @@ vi.mock('./user-dm.js', () => ({
 
 vi.mock('../../config.js', async () => {
   const actual = await vi.importActual('../../config.js');
-  return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-channel-approval' };
+  return {
+    ...actual,
+    DATA_DIR: '/tmp/nanoclaw-test-channel-approval',
+    GROUPS_DIR: '/tmp/nanoclaw-test-channel-approval/groups',
+  };
 });
 
 const TEST_DIR = '/tmp/nanoclaw-test-channel-approval';
@@ -585,6 +589,108 @@ describe('unknown-channel registration flow', () => {
     const stillPending = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number })
       .c;
     expect(stillPending).toBe(1);
+  });
+
+  it('create new agent: the free-text name reply creates the group and wires the channel', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    const { getDb } = await import('../../db/connection.js');
+
+    await routeInbound(groupMention('chat-create-new'));
+    await new Promise((r) => setTimeout(r, 10));
+    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
+      messaging_group_id: string;
+    };
+
+    // Owner clicks "Connect new agent" → name prompt lands in their DM.
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: pending.messaging_group_id,
+        value: 'new_agent',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+
+    // Owner replies with the agent name in the same DM — the interceptor
+    // captures it and creates.
+    await routeInbound({
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+      message: {
+        id: 'name-reply-1',
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: 'owner', senderName: 'Owner', text: 'Newbie' }),
+        timestamp: now(),
+      },
+    });
+
+    const created = getDb().prepare("SELECT id FROM agent_groups WHERE name = 'Newbie'").get() as
+      | { id: string }
+      | undefined;
+    expect(created).toBeDefined();
+    const mgaCount = (
+      getDb()
+        .prepare('SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ? AND agent_group_id = ?')
+        .get(pending.messaging_group_id, created!.id) as { c: number }
+    ).c;
+    expect(mgaCount).toBe(1);
+    const stillPending = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number })
+      .c;
+    expect(stillPending).toBe(0);
+  });
+
+  it('a name reply after the registration vanished is consumed without creating anything', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    const { getDb } = await import('../../db/connection.js');
+
+    await routeInbound(groupMention('chat-vanished'));
+    await new Promise((r) => setTimeout(r, 10));
+    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
+      messaging_group_id: string;
+    };
+
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: pending.messaging_group_id,
+        value: 'new_agent',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+
+    // The registration disappears between the click and the reply (rejected
+    // from another card, group delete cascade, …) — the interceptor no
+    // longer finds a pending registration, so the reply must not create.
+    getDb()
+      .prepare('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?')
+      .run(pending.messaging_group_id);
+
+    const agentGroupsBefore = (getDb().prepare('SELECT COUNT(*) AS c FROM agent_groups').get() as { c: number }).c;
+    await routeInbound({
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+      message: {
+        id: 'name-reply-2',
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: 'owner', senderName: 'Owner', text: 'Ghost' }),
+        timestamp: now(),
+      },
+    });
+
+    const agentGroupsAfter = (getDb().prepare('SELECT COUNT(*) AS c FROM agent_groups').get() as { c: number }).c;
+    expect(agentGroupsAfter).toBe(agentGroupsBefore);
+    const mgaCount = (getDb().prepare('SELECT COUNT(*) AS c FROM messaging_group_agents').get() as { c: number }).c;
+    expect(mgaCount).toBe(0);
   });
 });
 

@@ -87,7 +87,8 @@ describe('tasks CLI resource', () => {
 
     expect(resp.ok).toBe(true);
     if (!resp.ok) return;
-    const created = resp.data as { series_id: string; session_id: string };
+    const created = resp.data as { series_id: string; session_id: string; status: string };
+    expect(created.status).toBe('pending');
     expect(created.session_id).not.toBe('chat-1');
 
     // The task lands in its own isolated per-series session, not the chat session.
@@ -105,8 +106,8 @@ describe('tasks CLI resource', () => {
     const row = systemDb.prepare("SELECT content FROM messages_in WHERE kind = 'task'").get() as { content: string };
     const content = JSON.parse(row.content);
     expect(content).toMatchObject({ originSessionId: 'chat-1' });
-    expect(content.prompt).toContain('send a briefing');
-    expect(content.prompt).toContain(`tasks/${created.series_id}.md`); // log-path hint injected
+    expect(content.prompt).toBe('send a briefing');
+    expect(content.prompt).not.toContain('Task delivery contract');
     systemDb.close();
   });
 

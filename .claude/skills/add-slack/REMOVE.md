@@ -10,19 +10,17 @@ Delete the self-registration import from `src/channels/index.ts` (skip if alread
 import './slack.js';
 ```
 
-Then delete the copied adapter and its registration test:
+Then delete the copied adapter, its registration test, and the `slack-formatting`
+container skill (part of the channel payload — trunk doesn't ship it):
 
 ```bash
-rm -f src/channels/slack.ts src/channels/slack-registration.test.ts
+rm -f src/channels/slack.ts src/channels/slack-registration.test.ts container/skills/slack-formatting/SKILL.md
 ```
 
 ## 2. Remove credentials
 
-Remove `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` from `.env`, then re-sync to the container:
-
-```bash
-mkdir -p data/env && cp .env data/env/env
-```
+Remove `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, and `SLACK_SIGNING_SECRET` from
+`.env` (each is present only if its delivery mode was configured).
 
 ## 3. Remove the package
 

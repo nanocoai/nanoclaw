@@ -213,11 +213,11 @@ CREATE TABLE IF NOT EXISTS destinations (
   agent_group_id  TEXT             -- for type='agent'
 );
 
--- Default reply routing for this session. Single-row table (id=1).
+-- Current chat/thread routing for this session. Single-row table (id=1).
 -- Host overwrites on every container wake from the session's messaging_group
 -- and thread_id. Container reads it in send_message / ask_user_question to
--- default the channel/thread of outbound messages when the agent doesn't
--- specify an explicit destination.
+-- preserve the thread when an explicitly named destination is the current
+-- conversation, and for interactive-question response matching.
 CREATE TABLE IF NOT EXISTS session_routing (
   id           INTEGER PRIMARY KEY CHECK (id = 1),
   channel_type TEXT,

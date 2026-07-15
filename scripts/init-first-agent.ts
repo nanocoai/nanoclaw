@@ -243,15 +243,13 @@ async function main(): Promise<void> {
   } else {
     console.log(`Reusing agent group: ${ag.id} (${folder})`);
   }
-  // Ensure the config row exists; defer workspace scaffolding to the first
-  // spawn (group-init), where the DB-resolved provider decides the surface
-  // (Claude: CLAUDE.local.md; a surfaces-owning provider: the memory scaffold)
-  // — so a non-Claude group never gets stale CLAUDE.* files written here.
-  ensureContainerConfig(ag.id);
-  // Runtime provider lives on the config row, not the deprecated agent_provider.
-  if (pickedProvider && pickedProvider !== 'claude') {
-    updateContainerConfigScalars(ag.id, { provider: pickedProvider });
-  }
+  // Seed the config row, stamped with the effective provider: the operator's
+  // setup pick (NANOCLAW_PICKED_PROVIDER) when this runs inside a setup run,
+  // otherwise the persisted instance default. Workspace scaffolding is deferred
+  // to the first spawn (group-init), where the DB-resolved provider decides the
+  // surface (Claude: CLAUDE.local.md; a surfaces-owning provider: the memory
+  // scaffold). A reused group keeps its provider (INSERT OR IGNORE).
+  ensureContainerConfig(ag.id, pickedProvider);
   const groupDir = path.resolve(GROUPS_DIR, folder);
   fs.mkdirSync(groupDir, { recursive: true });
   fs.writeFileSync(

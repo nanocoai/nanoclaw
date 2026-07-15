@@ -11,18 +11,14 @@
  * direct dynamic import. When scheduling moves to the modules branch in
  * PR #8, the install skill re-fills the marker on install.
  */
-import fs from 'fs';
-import path from 'path';
-
 import type Database from 'better-sqlite3';
 import { CronExpressionParser } from 'cron-parser';
 
-import { GROUPS_DIR, TIMEZONE } from '../../config.js';
-import { formatLocalStamp } from '../../timezone.js';
-import { getAgentGroup } from '../../db/agent-groups.js';
+import { TIMEZONE } from '../../config.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
 import { clearRecurrence, getCompletedRecurring, insertRecurrence, trailingFailedRuns } from './db.js';
+import { appendRunLog } from './run-log.js';
 
 // Consecutive pre-task-script failures (the series' trailing FAILED runs —
 // derived from occurrence rows, no stored counter) throttle a broken monitor
@@ -39,15 +35,16 @@ export function scriptBackoffMinutes(fails: number): number {
 }
 
 /** Host-written line in the series run log — no agent session exists to call
- *  append-log when a script-gated series is auto-paused. Same format as
- *  appendTaskLog (tasks.ts). */
+ *  append-log when a script-gated series is auto-paused. Uses the shared
+ *  appendRunLog helper (one writer format); appendRunLog throws on a bad
+ *  series charset or a missing agent group, and the sweep must not crash
+ *  over a log line, so failures are logged and swallowed. */
 function appendHostTaskNote(agentGroupId: string, seriesId: string, note: string): void {
-  const ag = getAgentGroup(agentGroupId);
-  if (!ag) return;
-  const dir = path.join(GROUPS_DIR, ag.folder, 'tasks');
-  const timestamp = formatLocalStamp(new Date(), TIMEZONE);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.appendFileSync(path.join(dir, `${seriesId}.md`), `${timestamp} — ${note}\n`);
+  try {
+    appendRunLog(agentGroupId, seriesId, note);
+  } catch (err) {
+    log.warn('Could not append host task note to run log', { agentGroupId, seriesId, err });
+  }
 }
 
 export async function handleRecurrence(inDb: Database.Database, session: Session): Promise<void> {

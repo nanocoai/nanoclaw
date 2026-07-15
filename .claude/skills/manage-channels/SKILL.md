@@ -110,7 +110,7 @@ The `register` step creates the agent group (reusing it if the folder already ex
 
 Omitted engage/policy fields default from the channel adapter's declaration (see "Channel Defaults" above). Optional overrides: `--trigger "<regex>"` (explicit engage pattern), `--engage-mode <pattern|mention|mention-sticky>`, `--is-group <true|false>`, `--unknown-sender-policy <strict|request_approval|public>`. Don't pick a mention mode on a channel whose declaration says `mentions: 'never'` — it can never engage there.
 
-When creating a NEW agent group on a non-default provider, append `--provider <name>` (e.g. `--provider codex`) — there is no install-wide default; existing groups switch via `ncl groups config update --provider` instead.
+New agent groups are created on the instance default provider (`DEFAULT_AGENT_PROVIDER` in `.env`, or `claude` when unset). To run a group on a different provider, switch it after creation with `ncl groups config update --provider <name>` (e.g. `codex`).
 
 For separate agents, also ask for a folder name and optionally a different assistant name.
 

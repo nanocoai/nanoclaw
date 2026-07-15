@@ -10,25 +10,42 @@
  *   "command": "bun /app/src/compact-instructions.ts"
  */
 import { getAllDestinations } from './destinations.js';
+import { getTaskSeriesId } from './db/session-routing.js';
 
-const destinations = getAllDestinations();
-const names = destinations.map((d) => d.name);
+export function buildCompactInstructions(names: string[], taskId: string | null): string {
+  const deliveryReminder = taskId
+    ? [
+        '   "This is an isolated task run. If you need to send the user a message, use send_message with an explicit to destination.',
+        `   Final output is not delivered; it becomes the automatic summary in tasks/${taskId}.md.`,
+        `   Available destinations: ${formatDestinationNames(names)}."`,
+      ]
+    : [
+        '   "You MUST wrap all responses in <message to="name">...</message> blocks.',
+        `   Available destinations: ${formatDestinationNames(names)}."`,
+      ];
 
-const instructions = [
-  'Preserve the following in the compaction summary:',
-  '',
-  '1. For recent messages, keep the full XML structure including all attributes:',
-  '   - <message from="..." sender="..." time="..."> for chat messages',
-  '   - <task from="..." time="..."> for scheduled tasks',
-  '   - <webhook from="..." source="..." event="..."> for webhooks',
-  '   The message content can be summarized if long, but the XML tags and attributes must remain.',
-  '',
-  '2. Preserve the chronological message/reply sequence of recent exchanges.',
-  '   The agent needs to see: who said what, in what order, and from which destination.',
-  '',
-  '3. At the END of the compaction summary, include this verbatim reminder:',
-  '   "You MUST wrap all responses in <message to="name">...</message> blocks.',
-  `   Available destinations: ${names.length > 0 ? names.map((n) => `\`${n}\``).join(', ') : '(none)'}."`,
-];
+  return [
+    'Preserve the following in the compaction summary:',
+    '',
+    '1. For recent messages, keep the full XML structure including all attributes:',
+    '   - <message from="..." sender="..." time="..."> for chat messages',
+    '   - <task from="..." time="..."> for scheduled tasks',
+    '   - <webhook from="..." source="..." event="..."> for webhooks',
+    '   The message content can be summarized if long, but the XML tags and attributes must remain.',
+    '',
+    '2. Preserve the chronological message/reply sequence of recent exchanges.',
+    '   The agent needs to see: who said what, in what order, and from which destination.',
+    '',
+    '3. At the END of the compaction summary, include this verbatim reminder:',
+    ...deliveryReminder,
+  ].join('\n');
+}
 
-console.log(instructions.join('\n'));
+function formatDestinationNames(names: string[]): string {
+  return names.length > 0 ? names.map((name) => `\`${name}\``).join(', ') : '(none)';
+}
+
+if (import.meta.main) {
+  const names = getAllDestinations().map((destination) => destination.name);
+  console.log(buildCompactInstructions(names, getTaskSeriesId()));
+}

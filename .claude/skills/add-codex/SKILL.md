@@ -11,6 +11,8 @@ NanoClaw selects each group's agent backend from `container_configs.provider` (d
 
 The provider runs `codex app-server` as a child process speaking JSON-RPC over stdio: native streaming, MCP tools, server-side conversation history (the continuation is a thread id, no on-disk transcript). Credentials are **vault-only**: OneCLI serves a sentinel `auth.json` stub into the container and swaps the real ChatGPT token or API key on the wire — no key in `.env`, nothing readable in the container.
 
+The mechanical steps under **Install** carry `nc:` directive fences: an agent reads the prose and applies them, and a parser can apply them deterministically from the same document. Every directive is idempotent, so the whole skill is safe to re-run; anything a parser can't apply falls back to the prose beside it.
+
 ## Install
 
 ### Pre-flight
@@ -23,92 +25,69 @@ Check whether the payload is already wired (a prior apply, or a trunk that still
 - `import './codex.js';` in `src/providers/index.ts`, `container/agent-runner/src/providers/index.ts`, and `setup/providers/index.ts`
 - an `@openai/codex` entry in `container/cli-tools.json`
 
-### Fetch and copy
+### 1. Fetch and copy the payload
 
-```bash
-git fetch origin providers
+Fetch the `providers` branch and copy the Codex payload into all three trees (additive — overwrite each file, never merge the branch). The host files are the provider contribution + AGENTS.md compose + their guards; the container files are the provider runtime (turn loop, JSON-RPC wrapper, per-exchange archiver) + their guards; the setup file is the picker entry + vault auth walk-through; `container/AGENTS.md` is the runtime-contract base the composed AGENTS.md embeds.
+
+```nc:copy from-branch:providers
+src/providers/codex.ts
+src/providers/codex-agents-md.ts
+src/providers/codex-registration.test.ts
+src/providers/codex-host-contribution.test.ts
+src/providers/codex-agents-md.test.ts
+container/agent-runner/src/providers/codex.ts
+container/agent-runner/src/providers/codex-app-server.ts
+container/agent-runner/src/providers/exchange-archive.ts
+container/agent-runner/src/providers/exchange-archive.test.ts
+container/agent-runner/src/providers/codex-registration.test.ts
+container/agent-runner/src/providers/codex.factory.test.ts
+container/agent-runner/src/providers/codex.turns.test.ts
+container/agent-runner/src/providers/codex-app-server.test.ts
+container/agent-runner/src/providers/codex-cli-tools.test.ts
+setup/providers/codex.ts
+setup/providers/codex.test.ts
+setup/providers/codex-registration.test.ts
+container/AGENTS.md
 ```
 
-Copy each file with `git show origin/providers:<path> > <path>` (additive — never merge the branch):
+### 2. Wire the barrels
 
-Host (`src/providers/`):
-- `codex.ts` — provider contribution: per-group `.codex-shared` state dir, AGENTS.md compose, skill links
-- `codex-agents-md.ts` — AGENTS.md composition (32KB Codex cap: degrades by dropping the largest instruction sections, never blocks a spawn)
-- `codex-registration.test.ts` — barrel-driven host registration guard
-- `codex-host-contribution.test.ts` — drives the real contribution against a real test DB (the "consumes core" leg)
-- `codex-agents-md.test.ts` — cap-degradation behavior
+Append the self-registration import to each of the three provider barrels (skipped if the line is already present). Each barrel-registration test imports its real barrel and asserts `codex` is registered — they go red the moment a barrel line is missing or drifts.
 
-Container (`container/agent-runner/src/providers/`):
-- `codex.ts` — the provider (turn loop, steering, memory scaffold + `onExchangeComplete` archiving)
-- `codex-app-server.ts` — JSON-RPC child-process wrapper
-- `exchange-archive.ts` — per-exchange markdown writer the `onExchangeComplete` hook uses (provider-owned, not runner code)
-- `exchange-archive.test.ts` — writer behavior
-- `codex-registration.test.ts` — barrel-driven container registration guard
-- `codex.factory.test.ts`, `codex.turns.test.ts`, `codex-app-server.test.ts` — provider behavior
-- `codex-cli-tools.test.ts` — structural guard for the Codex entry in `container/cli-tools.json`
-
-Setup (`setup/providers/`):
-- `codex.ts` — picker entry self-registration + the vault auth walk-through + install check
-- `codex.test.ts` — install-check coverage
-- `codex-registration.test.ts` — barrel-driven setup registration guard
-
-Shared base (skip if present):
-- `container/AGENTS.md` — the runtime-contract base the composed AGENTS.md embeds
-
-### Wire the barrels
-
-Append `import './codex.js';` to each of:
-- `src/providers/index.ts`
-- `container/agent-runner/src/providers/index.ts`
-- `setup/providers/index.ts`
-
-### CLI manifest
-
-The agent's global Node CLIs install from `container/cli-tools.json` (a json-merge seam), not hand-edited Dockerfile layers. Add Codex by appending one entry — `@openai/codex` has no native postinstall, so no `onlyBuilt`:
-
-```bash
-node -e '
-  const fs = require("fs");
-  const file = "container/cli-tools.json";
-  const tools = JSON.parse(fs.readFileSync(file, "utf8"));
-  if (!tools.some((t) => t.name === "@openai/codex")) {
-    tools.push({ name: "@openai/codex", version: "0.138.0" });
-    const fmt = (t) => "  { " + Object.entries(t).map(([k, v]) => JSON.stringify(k) + ": " + JSON.stringify(v)).join(", ") + " }";
-    fs.writeFileSync(file, "[\n" + tools.map(fmt).join(",\n") + "\n]\n");
-  }
-'
+```nc:append to:src/providers/index.ts
+import './codex.js';
+```
+```nc:append to:container/agent-runner/src/providers/index.ts
+import './codex.js';
+```
+```nc:append to:setup/providers/index.ts
+import './codex.js';
 ```
 
-The version (`0.138.0`) is the canonical pin — keep it in sync with `setup/add-codex.sh`. The Dockerfile already installs every manifest entry via pinned `pnpm install -g`; no Dockerfile edit is needed.
+### 3. CLI manifest
 
-### Build
+The agent's global Node CLIs install from `container/cli-tools.json` (a json-merge seam), not hand-edited Dockerfile layers. Add Codex by appending one entry — idempotent on `name`, so a re-run is a no-op. `@openai/codex` has no native postinstall, so no `onlyBuilt`. The Dockerfile already installs every manifest entry via pinned `pnpm install -g`; no Dockerfile edit is needed.
 
-```bash
+```nc:json-merge into:container/cli-tools.json key:name
+{ "name": "@openai/codex", "version": "0.138.0" }
+```
+
+The version (`0.138.0`) is the canonical pin — this SKILL.md is the source of truth.
+
+### 4. Build
+
+```nc:run effect:build
 pnpm run build
 pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
 ./container/build.sh
 ```
 
-### Restart the host
+### 5. Validate
 
-The image rebuild does not reload the **host**. Codex's host contribution
-(`src/providers/codex.ts`) registers the `/home/node/.codex` bind mount + env
-passthrough, and the running host only picks it up on restart. Skip this and the
-first Codex turn fails with `EACCES` writing `/home/node/.codex/config.toml` —
-with no mount, Docker auto-creates the dir root-owned and the non-root container
-user can't write to it.
-
-```bash
-# macOS (launchd)
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw
-# Linux (systemd)
-systemctl --user restart nanoclaw
-```
-
-### Validate
-
-```bash
+```nc:run effect:test
 pnpm vitest run src/providers/codex-registration.test.ts src/providers/codex-host-contribution.test.ts src/providers/codex-agents-md.test.ts setup/providers/
+```
+```nc:run effect:test
 cd container/agent-runner && bun test src/providers/
 ```
 
@@ -116,9 +95,7 @@ The registration tests import only the real barrels — they go red if a barrel 
 
 ## Authenticate
 
-> **Run this in a separate, real terminal — it is interactive.** It prompts for ChatGPT-subscription vs OpenAI-API-key and then drives a browser/device login, so it needs a TTY to answer prompts.
-
-```bash
+```nc:run effect:external
 pnpm exec tsx setup/index.ts --step provider-auth codex
 ```
 
@@ -135,7 +112,22 @@ ncl groups restart --id <group-id>
 
 Switching is an operator action — run it from the host. Memory does NOT carry over automatically — each provider keeps its own store; run `/migrate-memory` to carry it across. See [docs/provider-migration.md](../../docs/provider-migration.md) for the carry-over table and rollback.
 
-There is no install-wide default provider. Setup's provider picker sets codex on the first agent it creates; creation itself is provider-agnostic (no `--provider` flag — provider is a DB property). Any group switches afterward via `ncl groups config update --provider` as above.
+### Default new groups to codex (optional)
+
+New groups are created on the **instance default** (`DEFAULT_AGENT_PROVIDER` in `.env`, or `claude` when unset). Installing this skill wires codex in but does NOT change that default — "installed" is not "authenticated", so the default stays claude until you opt in explicitly.
+
+After install, ask the operator before flipping it:
+
+> "Codex is installed. Default new agent groups to codex? Existing groups keep their current provider."
+
+On yes — set it, then restart the host so it takes effect:
+
+```bash
+pnpm exec tsx setup/index.ts --step set-env -- --key DEFAULT_AGENT_PROVIDER --value codex
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw   # macOS; Linux: systemctl --user restart nanoclaw
+```
+
+This affects only groups created afterward. Per-group `ncl groups config update --provider` still overrides the default in either direction. Creation itself stays provider-agnostic (no `--provider` flag — provider is a DB property stamped from the instance default at creation).
 
 ## Troubleshooting
 
