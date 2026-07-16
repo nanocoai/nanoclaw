@@ -8,9 +8,11 @@ import {
   findTaskSessions,
   getActiveSessions,
   getSession,
+  getSessionsByAgentGroup,
   isTaskThread,
   TASKS_SYSTEM_THREAD_ID,
 } from '../../db/sessions.js';
+import { getMessagingGroup } from '../../db/messaging-groups.js';
 import {
   cancelAllTasks,
   cancelTask,
@@ -122,6 +124,20 @@ function parseContent(raw: string): { prompt: string; script: string | null; ori
 
 function toOutput(session: ScopedSession, row: TaskRow) {
   const content = parseContent(row.content);
+  // Surface the messaging-group name of the session that OWNS the task row.
+  // Task sessions are system sessions (messaging_group_id IS NULL), so we
+  // derive the wiring label from the origin session that created the task.
+  // For host-created tasks (originSessionId null) we leave it null too.
+  let owningMessagingGroupId: string | null = null;
+  let owningMessagingGroupName: string | null = null;
+  if (content.originSessionId) {
+    const origin = getSession(content.originSessionId);
+    if (origin?.messaging_group_id) {
+      owningMessagingGroupId = origin.messaging_group_id;
+      const mg = getMessagingGroup(origin.messaging_group_id);
+      owningMessagingGroupName = mg?.name ?? null;
+    }
+  }
   return {
     agent_group_id: session.agent_group_id,
     session_id: session.id,
@@ -132,7 +148,13 @@ function toOutput(session: ScopedSession, row: TaskRow) {
     recurrence: row.recurrence,
     prompt: content.prompt.length > 120 ? content.prompt.slice(0, 117) + '...' : content.prompt,
     has_script: content.script ? 1 : 0,
-    origin_session_id: content.originSessionId, // which session created the task (null for CLI-created)
+    // Which session *created* the task (null for CLI/host-created tasks).
+    origin_session_id: content.originSessionId,
+    // Which messaging-group wiring the creating session was bound to, if any.
+    // Useful when managing tasks from a sibling session (e.g. operator console
+    // looking at tasks created by the channel session).
+    origin_messaging_group_id: owningMessagingGroupId,
+    origin_messaging_group_name: owningMessagingGroupName,
     created_at: row.timestamp,
     tries: row.tries,
   };
@@ -301,7 +323,6 @@ function getTask(args: Record<string, unknown>, ctx: CallerContext) {
         ...toOutput(session, row),
         prompt: content.prompt,
         script: content.script,
-        origin_session_id: content.originSessionId,
         completed_runs: stats.runs,
         failed_runs: stats.failed_runs,
         recent_log: tailRunLog(session.agent_group_id, seriesKey),
@@ -309,7 +330,46 @@ function getTask(args: Record<string, unknown>, ctx: CallerContext) {
     });
     if (found) return found;
   }
-  throw new Error(`task not found: ${id}`);
+  // Not found in any live task session. Check completed/cancelled history in
+  // all group sessions so the error message is actionable rather than
+  // misleading the agent into thinking the task never existed.
+  const agentGroupId = ctx.caller === 'agent' ? ctx.agentGroupId : str(args.group);
+  const hint = agentGroupId ? siblingSessionHint(id, agentGroupId) : '';
+  throw new Error(`task not found: ${id}${hint}`);
+}
+
+/**
+ * Scan every task session in the calling group for a task by id and return
+ * a human-readable hint for the error message when a mutation misses.
+ * This fires only on the slow path (already-failed mutation), so the extra
+ * DB round-trips don't affect the happy path.
+ */
+function siblingSessionHint(id: string, agentGroupId: string): string {
+  // All sessions for this group, not just the active task ones — the task
+  // may be in a session that was already cleaned up or is idle.
+  for (const session of getSessionsByAgentGroup(agentGroupId)) {
+    if (!isTaskThread(session.thread_id)) continue;
+    const scopedSession = { id: session.id, agent_group_id: session.agent_group_id };
+    const found = withInbound(scopedSession, (db) => selectTask(db, id));
+    if (found) {
+      // Resolve a human-readable messaging-group label from the task content.
+      let mgLabel = '';
+      const content = parseContent(found.content);
+      if (content.originSessionId) {
+        const origin = getSession(content.originSessionId);
+        if (origin?.messaging_group_id) {
+          const mg = getMessagingGroup(origin.messaging_group_id);
+          mgLabel = mg?.name ? ` (messaging group "${mg.name}")` : ` (messaging group ${origin.messaging_group_id})`;
+        }
+      }
+      return (
+        ` — NOTE: this task exists in session ${session.id}${mgLabel} but its status is not pending/paused` +
+        ` (it may be completed or cancelled). Tasks are stored per task-session; use \`ncl tasks get ${id}\`` +
+        ` to inspect its full history.`
+      );
+    }
+  }
+  return '';
 }
 
 function mutateTask(
@@ -322,7 +382,11 @@ function mutateTask(
   for (const session of selectedSessions(args, ctx)) {
     touched += withInbound(session, (db) => fn(db, id)) ?? 0;
   }
-  if (touched === 0) throw new Error(`no live task matched: ${id}`);
+  if (touched === 0) {
+    const agentGroupId = ctx.caller === 'agent' ? ctx.agentGroupId : str(args.group);
+    const hint = agentGroupId ? siblingSessionHint(id, agentGroupId) : '';
+    throw new Error(`no live task matched: ${id}${hint}`);
+  }
   return { series_id: id, touched };
 }
 
@@ -358,7 +422,11 @@ function updateTaskCommand(args: Record<string, unknown>, ctx: CallerContext) {
   for (const session of selectedSessions(args, ctx)) {
     touched += withInbound(session, (db) => updateTask(db, id, update)) ?? 0;
   }
-  if (touched === 0) throw new Error(`no live task matched: ${id}`);
+  if (touched === 0) {
+    const agentGroupId = ctx.caller === 'agent' ? ctx.agentGroupId : str(args.group);
+    const hint = agentGroupId ? siblingSessionHint(id, agentGroupId) : '';
+    throw new Error(`no live task matched: ${id}${hint}`);
+  }
   return { series_id: id, touched, fields };
 }
 

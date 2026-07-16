@@ -18,6 +18,19 @@ ncl tasks cancel ping-a25c      # or --all as a kill switch
 ncl tasks delete ping-a25c
 ```
 
+**Task visibility is group-scoped, not session-scoped.** `ncl tasks list` always
+shows all live tasks across every task session in your agent group — you will see
+tasks created from any session (channel, console, or another wiring). An empty
+`ncl tasks list` means the group has no scheduled tasks at all, not that they
+were lost. The `origin_messaging_group_name` field on each task row identifies
+which session wiring originally created it.
+
+If `ncl tasks update` or `ncl tasks cancel` reports `no live task matched`, the
+task may be completed or cancelled (not pending/paused). Use `ncl tasks get <id>`
+to inspect its full history — completed tasks are never deleted automatically.
+Do **not** recreate a task based solely on an empty list or a mutation miss;
+first confirm with `get` that the task is truly absent.
+
 Use good judgement on whether it's appropriate to check in with the user about the task prompt before task creation, and if so, whether to share verbatim or a description of it.
 
 `--process-after` accepts UTC timestamps or naive local timestamps interpreted in the instance timezone (shown in the `<context timezone="..."/>` header).

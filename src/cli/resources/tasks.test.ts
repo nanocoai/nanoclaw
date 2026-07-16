@@ -23,6 +23,7 @@ const TEST_DIR = '/tmp/nanoclaw-test-cli-tasks';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
 import { createSession, findSessionByAgentGroup, getSessionsByAgentGroup, taskThreadId } from '../../db/sessions.js';
+import { createMessagingGroup } from '../../db/messaging-groups.js';
 import { countDueMessages } from '../../db/session-db.js';
 import { inboundDbPath, initSessionFolder } from '../../session-manager.js';
 import { dispatch } from '../dispatch.js';
@@ -501,6 +502,180 @@ describe('tasks CLI resource', () => {
       );
       expect(resp.ok).toBe(false);
       if (!resp.ok) expect(resp.error.message).toMatch(/--id is required/);
+    });
+  });
+
+  // ── #2992 — cross-session task visibility ──────────────────────────────────
+  // The canonical setup: one agent group wired to a channel session AND a
+  // console session. Tasks created from the channel session must be visible and
+  // manageable from the console session (and vice-versa).
+  describe('cross-session task visibility (#2992)', () => {
+    function createChannelSession(group: string, sessionId: string, mgId: string): void {
+      createMessagingGroup({
+        id: mgId,
+        channel_type: 'test',
+        platform_id: mgId,
+        instance: 'test',
+        name: `mg-${mgId}`,
+        is_group: 1,
+        unknown_sender_policy: 'allow',
+        created_at: now(),
+      });
+      createSession({
+        id: sessionId,
+        agent_group_id: group,
+        messaging_group_id: mgId,
+        thread_id: null,
+        agent_provider: null,
+        status: 'active',
+        container_status: 'stopped',
+        last_active: null,
+        created_at: now(),
+      });
+      initSessionFolder(group, sessionId);
+    }
+
+    it('list_tasks from a console session sees tasks created by the channel session', async () => {
+      // Task created while agent is in its channel session.
+      createChannelSession('ag-1', 'channel-1', 'mg-channel');
+      const created = await dispatch(
+        {
+          id: 'cross-create',
+          command: 'tasks-create',
+          args: { name: 'hourly-check', prompt: 'run the hourly check', process_after: '2999-01-01T00:00:00Z' },
+        },
+        { caller: 'agent', agentGroupId: 'ag-1', sessionId: 'channel-1', messagingGroupId: 'mg-channel' },
+      );
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      const { series_id } = created.data as { series_id: string };
+
+      // From the CONSOLE session (chat-1), list_tasks must see the task.
+      const list = await dispatch({ id: 'cross-list', command: 'tasks-list', args: {} }, agentCtx('ag-1', 'chat-1'));
+      expect(list.ok).toBe(true);
+      if (!list.ok) return;
+      const ids = (list.data as Array<{ series_id: string }>).map((t) => t.series_id);
+      expect(ids).toContain(series_id);
+    });
+
+    it('toOutput includes origin_messaging_group_id and origin_messaging_group_name', async () => {
+      createChannelSession('ag-1', 'channel-1', 'mg-channel');
+      const created = await dispatch(
+        {
+          id: 'cross-mg',
+          command: 'tasks-create',
+          args: { name: 'daily-post', prompt: 'post the update', process_after: '2999-01-01T00:00:00Z' },
+        },
+        { caller: 'agent', agentGroupId: 'ag-1', sessionId: 'channel-1', messagingGroupId: 'mg-channel' },
+      );
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      const task = created.data as {
+        series_id: string;
+        origin_messaging_group_id: string | null;
+        origin_messaging_group_name: string | null;
+      };
+      // The task was created from a session bound to mg-channel.
+      expect(task.origin_messaging_group_id).toBe('mg-channel');
+      expect(task.origin_messaging_group_name).toBe('mg-mg-channel');
+    });
+
+    it('update_task from a sibling console session successfully mutates a channel-created task', async () => {
+      createChannelSession('ag-1', 'channel-1', 'mg-channel');
+      const created = await dispatch(
+        {
+          id: 'cross-create-2',
+          command: 'tasks-create',
+          args: { name: 'update-me', prompt: 'original prompt', process_after: '2999-01-01T00:00:00Z' },
+        },
+        { caller: 'agent', agentGroupId: 'ag-1', sessionId: 'channel-1', messagingGroupId: 'mg-channel' },
+      );
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      const { series_id } = created.data as { series_id: string };
+
+      // Update from the console session — must succeed because selectedSessions
+      // fans out across all task sessions of the group.
+      const upd = await dispatch(
+        { id: 'cross-update', command: 'tasks-update', args: { id: series_id, prompt: 'new prompt from console' } },
+        agentCtx('ag-1', 'chat-1'),
+      );
+      expect(upd.ok).toBe(true);
+      if (!upd.ok) return;
+      expect((upd.data as { touched: number }).touched).toBeGreaterThan(0);
+
+      // Verify the prompt actually changed.
+      const got = await dispatch(
+        { id: 'cross-get', command: 'tasks-get', args: { id: series_id } },
+        agentCtx('ag-1', 'chat-1'),
+      );
+      expect(got.ok).toBe(true);
+      if (!got.ok) return;
+      expect((got.data as { prompt: string }).prompt).toBe('new prompt from console');
+    });
+
+    it('cancel_task from a sibling console session cancels a channel-created task', async () => {
+      createChannelSession('ag-1', 'channel-1', 'mg-channel');
+      const created = await dispatch(
+        {
+          id: 'cross-create-3',
+          command: 'tasks-create',
+          args: { name: 'cancel-me', prompt: 'to be cancelled', process_after: '2999-01-01T00:00:00Z' },
+        },
+        { caller: 'agent', agentGroupId: 'ag-1', sessionId: 'channel-1', messagingGroupId: 'mg-channel' },
+      );
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      const { series_id } = created.data as { series_id: string };
+
+      // Cancel from console session.
+      const cancel = await dispatch(
+        { id: 'cross-cancel', command: 'tasks-cancel', args: { id: series_id } },
+        agentCtx('ag-1', 'chat-1'),
+      );
+      expect(cancel.ok).toBe(true);
+
+      // Task is now gone from the live list.
+      const list = await dispatch({ id: 'cross-list-2', command: 'tasks-list', args: {} }, agentCtx('ag-1', 'chat-1'));
+      expect(list.ok).toBe(true);
+      if (!list.ok) return;
+      const ids = (list.data as Array<{ series_id: string }>).map((t) => t.series_id);
+      expect(ids).not.toContain(series_id);
+    });
+
+    it('update error on a completed task gives a cross-session hint, not a bare "no live task matched"', async () => {
+      // Simulate a task being completed: create it, then cancel it (so status ≠ pending/paused).
+      createChannelSession('ag-1', 'channel-1', 'mg-channel');
+      const created = await dispatch(
+        {
+          id: 'cross-hint-c',
+          command: 'tasks-create',
+          args: { name: 'already-done', prompt: 'was done', process_after: '2999-01-01T00:00:00Z' },
+        },
+        { caller: 'agent', agentGroupId: 'ag-1', sessionId: 'channel-1', messagingGroupId: 'mg-channel' },
+      );
+      expect(created.ok).toBe(true);
+      if (!created.ok) return;
+      const { series_id } = created.data as { series_id: string };
+
+      // Cancel it so it's no longer live.
+      await dispatch(
+        { id: 'cross-hint-cancel', command: 'tasks-cancel', args: { id: series_id } },
+        agentCtx('ag-1', 'chat-1'),
+      );
+
+      // Now try to update it from any session — should give a helpful hint.
+      const upd = await dispatch(
+        { id: 'cross-hint-upd', command: 'tasks-update', args: { id: series_id, prompt: 'new' } },
+        agentCtx('ag-1', 'chat-1'),
+      );
+      expect(upd.ok).toBe(false);
+      if (!upd.ok) {
+        // Error must mention the task exists somewhere (session id or note about status).
+        expect(upd.error.message).toContain(series_id);
+        // Must NOT be the old bare message — it should now contain context.
+        expect(upd.error.message).toMatch(/NOTE|session|completed|cancelled/i);
+      }
     });
   });
 });
