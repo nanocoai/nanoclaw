@@ -57,6 +57,7 @@ import { hasAdminPrivilege } from './db/user-roles.js';
 import { getUser, upsertUser } from './db/users.js';
 import { requestSenderApproval } from './sender-approval.js';
 import { ensureUserDm } from './user-dm.js';
+import { normalizeWhatsAppHandle } from '../../platform-id.js';
 
 // ── Free-text name input state ──
 // Tracks approvers waiting for a text reply with the agent name. Keyed by
@@ -94,7 +95,13 @@ function extractAndUpsertUser(event: InboundEvent): string | null {
   const rawHandle = senderIdField ?? senderField ?? authorUserId;
   if (!rawHandle) return null;
 
-  const userId = rawHandle.includes(':') ? rawHandle : `${event.channelType}:${rawHandle}`;
+  // Normalize WhatsApp JIDs to bare phone digits so both the Baileys path
+  // (emits "15551234567@s.whatsapp.net") and the Cloud path (emits bare
+  // "15551234567") produce the same user id. Must run before the ':' check
+  // that decides whether to prefix with channelType.
+  const normalizedHandle = normalizeWhatsAppHandle(event.channelType, rawHandle);
+
+  const userId = normalizedHandle.includes(':') ? normalizedHandle : `${event.channelType}:${normalizedHandle}`;
   if (!getUser(userId)) {
     upsertUser({
       id: userId,

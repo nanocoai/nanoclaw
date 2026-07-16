@@ -5,6 +5,7 @@
  */
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';
 
+import { normalizeWhatsAppHandle } from '../../platform-id.js';
 import type { ChannelAdapter, OutboundMessage } from '../../channels/adapter.js';
 import {
   initChannelAdapters,
@@ -235,8 +236,50 @@ describe('ensureUserDm', () => {
     };
     createMessagingGroup(existing);
 
-    const mg = await ensureUserDm('telegram:555');
-    expect(mg?.id).toBe('mg-preexisting');
+    const mg = await ensureUserDm('telegram:555');\n    expect(mg?.id).toBe('mg-preexisting');
     expect(getUserDm('telegram:555', 'telegram')?.messaging_group_id).toBe('mg-preexisting');
+  });
+});
+
+// ── #3069 — WhatsApp handle normalization ─────────────────────────────────────
+// Both the Baileys (native) and WhatsApp Business Cloud (Chat SDK bridge) paths
+// stamp channelType = 'whatsapp', but emit different sender handles:
+//   Baileys : "15551234567@s.whatsapp.net" or "15551234567:12@s.whatsapp.net"
+//   Cloud   : "15551234567" (bare wa_id)
+// normalizeWhatsAppHandle must map all three to the canonical bare-digit form.
+describe('normalizeWhatsAppHandle (#3069)', () => {
+  it('strips @s.whatsapp.net suffix from a plain Baileys JID', () => {
+    expect(normalizeWhatsAppHandle('whatsapp', '15551234567@s.whatsapp.net')).toBe('15551234567');
+  });
+
+  it('strips both :device suffix and @s.whatsapp.net from a multi-device JID', () => {
+    expect(normalizeWhatsAppHandle('whatsapp', '15551234567:12@s.whatsapp.net')).toBe('15551234567');
+  });
+
+  it('is a no-op when the handle is already the bare wa_id (Cloud path)', () => {
+    expect(normalizeWhatsAppHandle('whatsapp', '15551234567')).toBe('15551234567');
+  });
+
+  it('does not alter WhatsApp group JIDs (@g.us)', () => {
+    // Group JIDs are platform IDs, not sender handles; they should never reach
+    // this function, but guard against accidental calls.
+    expect(normalizeWhatsAppHandle('whatsapp', '120363012345678901@g.us')).toBe(
+      '120363012345678901@g.us',
+    );
+  });
+
+  it('is a no-op for non-WhatsApp channels', () => {
+    expect(normalizeWhatsAppHandle('telegram', '15551234567@s.whatsapp.net')).toBe(
+      '15551234567@s.whatsapp.net',
+    );
+    expect(normalizeWhatsAppHandle('slack', 'U0ABC12345')).toBe('U0ABC12345');
+  });
+
+  it('produces the same output for all three Baileys/Cloud handle forms for the same number', () => {
+    const plain = normalizeWhatsAppHandle('whatsapp', '15551234567@s.whatsapp.net');
+    const device = normalizeWhatsAppHandle('whatsapp', '15551234567:12@s.whatsapp.net');
+    const bare = normalizeWhatsAppHandle('whatsapp', '15551234567');
+    expect(plain).toBe(bare);
+    expect(device).toBe(bare);
   });
 });
