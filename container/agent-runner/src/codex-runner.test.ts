@@ -455,6 +455,29 @@ describe('buildCodexArgs', () => {
     });
     expect(args).not.toContain('model_reasoning_effort="undefined"');
   });
+
+  it('fast 档位同时启用快速服务层和 fast_mode feature', () => {
+    const args = buildCodexArgs({
+      model: 'gpt-5.6-sol',
+      serviceTier: 'fast',
+    });
+
+    expect(args).toContain('service_tier="fast"');
+    expect(args).toContain('features.fast_mode=true');
+  });
+
+  it.each([undefined, 'standard'] as const)(
+    '%s 档位不注入快速模式参数',
+    (serviceTier) => {
+      const args = buildCodexArgs({
+        model: 'gpt-5.6-sol',
+        serviceTier,
+      });
+
+      expect(args).not.toContain('service_tier="fast"');
+      expect(args).not.toContain('features.fast_mode=true');
+    },
+  );
 });
 
 describe('extractCodexError', () => {

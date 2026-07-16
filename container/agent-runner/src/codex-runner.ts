@@ -19,6 +19,7 @@ import os from 'os';
 import type { ContainerOutput } from './cli-runner.js';
 import { buildSendMessageToolEnv } from './mcp-tool-policy.js';
 import { boundProgressInput, redactProgressText } from './progress-types.js';
+import type { CodexServiceTier } from './model-settings.js';
 
 // ---- 类型定义 ----
 
@@ -65,6 +66,7 @@ export interface CodexRunnerConfig {
   sessionId?: string;
   model?: string;
   effort?: string;
+  serviceTier?: CodexServiceTier;
   mcpServerPath: string;
   chatJid: string;
   groupFolder: string;
@@ -218,6 +220,7 @@ export function buildCodexArgs(config: {
   sessionId?: string;
   model?: string;
   effort?: string;
+  serviceTier?: CodexServiceTier;
 }): string[] {
   const args: string[] = ['exec'];
 
@@ -239,6 +242,10 @@ export function buildCodexArgs(config: {
 
   if (config.effort) {
     args.push('-c', `model_reasoning_effort="${config.effort}"`);
+  }
+
+  if (config.serviceTier === 'fast') {
+    args.push('-c', 'service_tier="fast"', '-c', 'features.fast_mode=true');
   }
 
   return args;
@@ -740,6 +747,7 @@ export async function runCodexQuery(
     sessionId: config.sessionId,
     model: config.model,
     effort: config.effort,
+    serviceTier: config.serviceTier,
   });
   // prompt 作为末位位置参数
   args.push(config.prompt);
