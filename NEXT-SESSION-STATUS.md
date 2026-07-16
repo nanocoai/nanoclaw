@@ -1,3 +1,23 @@
+# Next-session status — updated 2026-07-15 (dashboard-sync session)
+
+## This session (dashboard sync + usability)
+- **Fixed the sync gap** (feed-server.mjs): applied jobs used to vanish from the board
+  when the nightly dropped them (applied.json dedup). Now every send-queue entry gets a
+  `snap` of its job metadata at status-write time, and buildPayload renders applied-history
+  entries (`tracked:true`) whose live job is gone. → sent applications persist forever.
+- **Restored Kaltura** (real Comeet "Thank you" submission) + **reconstructed 33 orphaned
+  LinkedIn applications** from the LinkedIn job-view API (role+company). Board: 36 sent cards.
+- **/track-manual endpoint** added (feed-server) for applications made fully outside the board.
+- **Usability**: desktop-tier cards (Greenhouse/Ashby that Elia submits himself) were hidden
+  from the default "לטיפול" view — fixed (NEEDS_ACTION set → filter + count + sort-to-top).
+  Filter fix is LIVE; sort-to-top deploy was still BUILDING at session end (Vercel-side slow).
+- **Skipped Personio/Recruitee/Workable** (priority 3): zero board volume, per the build-only-
+  if-volume guidance. Don't build until scan data shows those platforms.
+- NOTE: rapid automated curl/headless checks tripped Vercel's bot-challenge on
+  elia-apply-view. Real browsers pass transparently; it auto-subsides. Verify via a real
+  browser or spaced-out requests next time, not tight loops.
+
+---
 # Next-session status — 2026-07-15 (end of quota sprint)
 
 ## Where things stand

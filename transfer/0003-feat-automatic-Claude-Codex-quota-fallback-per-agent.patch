@@ -1,0 +1,852 @@
+From b3056507eddc0b5bc7faa86518f6d157c7801f57 Mon Sep 17 00:00:00 2001
+From: "exe.dev user" <exedev@eliabc.exe.xyz>
+Date: Sun, 5 Jul 2026 18:06:40 +0000
+Subject: [PATCH 3/5] =?UTF-8?q?feat:=20automatic=20Claude=E2=86=92Codex=20?=
+ =?UTF-8?q?quota=20fallback=20per=20agent=20group?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When the primary provider fails a turn with a quota-exhaustion error
+(usage limit reached, hard rate limit, empty credit balance), the
+unanswered prompt is retried once on the configured fallback provider
+and the user is notified of the switch. Every new turn starts on the
+primary again, so recovery is automatic — the first successful primary
+turn after a fallback sends a 'back on Claude' notice.
+
+- container_configs.fallback_provider column (migration 017), exposed
+  via 'ncl groups config update --fallback-provider codex|none'
+- host merges the fallback provider's mounts/env into the spawn args so
+  its auth reaches the container alongside the primary's
+- fallback keeps its own continuation slot, so the overflow
+  conversation has memory across quota episodes
+- claude provider now classifies quota correctly: is_error results
+  matching the quota regex, and rate_limit_event only when rejected
+  (previously any rate_limit_event was marked quota)
+- off by default; no behavior change for groups without the flag
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ container/agent-runner/src/config.ts          |   3 +
+ container/agent-runner/src/index.ts           |  24 ++-
+ container/agent-runner/src/poll-loop.ts       | 200 ++++++++++++++++--
+ .../agent-runner/src/providers/claude.ts      |  22 +-
+ .../agent-runner/src/quota-fallback.test.ts   | 142 +++++++++++++
+ container/agent-runner/src/quota.ts           |  30 +++
+ src/backfill-container-configs.ts             |   1 +
+ src/cli/resources/groups.ts                   |  19 +-
+ src/container-config.ts                       |   3 +
+ src/container-runner.ts                       |  26 ++-
+ src/db/container-configs.ts                   |  14 +-
+ src/db/migrations/017-fallback-provider.ts    |  10 +
+ src/db/migrations/index.ts                    |   2 +
+ src/types.ts                                  |   2 +
+ 14 files changed, 459 insertions(+), 39 deletions(-)
+ create mode 100644 container/agent-runner/src/quota-fallback.test.ts
+ create mode 100644 container/agent-runner/src/quota.ts
+ create mode 100644 src/db/migrations/017-fallback-provider.ts
+
+diff --git a/container/agent-runner/src/config.ts b/container/agent-runner/src/config.ts
+index 1546011..7c51eca 100644
+--- a/container/agent-runner/src/config.ts
++++ b/container/agent-runner/src/config.ts
+@@ -11,6 +11,8 @@ const CONFIG_PATH = '/workspace/agent/container.json';
+ 
+ export interface RunnerConfig {
+   provider: string;
++  /** Overflow provider used when the primary fails a turn on quota (optional). */
++  fallbackProvider?: string;
+   assistantName: string;
+   groupName: string;
+   agentGroupId: string;
+@@ -40,6 +42,7 @@ export function loadConfig(): RunnerConfig {
+ 
+   _config = {
+     provider: (raw.provider as string) || 'claude',
++    fallbackProvider: (raw.fallbackProvider as string) || undefined,
+     assistantName: (raw.assistantName as string) || '',
+     groupName: (raw.groupName as string) || '',
+     agentGroupId: (raw.agentGroupId as string) || '',
+diff --git a/container/agent-runner/src/index.ts b/container/agent-runner/src/index.ts
+index d579592..1a703e7 100644
+--- a/container/agent-runner/src/index.ts
++++ b/container/agent-runner/src/index.ts
+@@ -86,20 +86,40 @@ async function main(): Promise<void> {
+     log(`Additional MCP server: ${name} (${serverConfig.command})`);
+   }
+ 
+-  const provider = createProvider(providerName, {
++  const providerOptions = {
+     assistantName: config.assistantName || undefined,
+     mcpServers,
+     env: { ...process.env },
+     additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
+     model: config.model,
+     effort: config.effort,
+-  });
++  };
++  const provider = createProvider(providerName, providerOptions);
++
++  // Optional quota-overflow provider. Model/effort are primary-provider
++  // settings — the fallback uses its own defaults (e.g. CODEX_MODEL env).
++  let fallback: { provider: ReturnType<typeof createProvider>; providerName: string } | undefined;
++  const fallbackName = config.fallbackProvider?.toLowerCase() as ProviderName | undefined;
++  if (fallbackName && fallbackName !== providerName) {
++    try {
++      fallback = {
++        provider: createProvider(fallbackName, { ...providerOptions, model: undefined, effort: undefined }),
++        providerName: fallbackName,
++      };
++      log(`Fallback provider enabled: ${fallbackName}`);
++    } catch (err) {
++      log(
++        `Fallback provider '${fallbackName}' not available (${err instanceof Error ? err.message : String(err)}) — continuing without fallback`,
++      );
++    }
++  }
+ 
+   await runPollLoop({
+     provider,
+     providerName,
+     cwd: CWD,
+     systemContext: { instructions },
++    fallback,
+   });
+ }
+ 
+diff --git a/container/agent-runner/src/poll-loop.ts b/container/agent-runner/src/poll-loop.ts
+index e688eab..c92e1b9 100644
+--- a/container/agent-runner/src/poll-loop.ts
++++ b/container/agent-runner/src/poll-loop.ts
+@@ -1,8 +1,9 @@
+ import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
+ import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
+-import { writeMessageOut } from './db/messages-out.js';
++import { writeMessageOut, getMaxOutSeq, countChatSendsSince } from './db/messages-out.js';
+ import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
+-import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
++import { clearContinuation, getContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
++import { QuotaExhaustedError, isQuotaErrorMessage } from './quota.js';
+ import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
+ import {
+   formatMessages,
+@@ -38,8 +39,30 @@ export interface PollLoopConfig {
+   systemContext?: {
+     instructions?: string;
+   };
++  /**
++   * Optional overflow provider. When the primary provider fails a turn with
++   * a quota-exhaustion error, the unanswered prompt is retried once on this
++   * provider and the user is notified of the switch. Every new turn starts
++   * on the primary again, so recovery back to the primary is automatic.
++   */
++  fallback?: {
++    provider: AgentProvider;
++    providerName: string;
++  };
+ }
+ 
++// User-facing notices for the fallback flow. Sent to the same destination
++// the failed turn was routed to.
++const FALLBACK_SWITCH_NOTICE =
++  '⚠️ מכסת Claude נגמרה כרגע — ממשיך לענות דרך Codex (OpenAI). אחזור ל-Claude אוטומטית כשהמכסה תתחדש.';
++const FALLBACK_RETURN_NOTICE = '✅ מכסת Claude התחדשה — חזרתי לענות דרך Claude.';
++const FALLBACK_FAILED_NOTICE = '❌ גם מנוע הגיבוי (Codex) לא הצליח לענות כרגע. נסו שוב מאוחר יותר.';
++
++// Set when a turn was served by the fallback provider; the next successful
++// primary result sends FALLBACK_RETURN_NOTICE so the user knows they're
++// back on the primary engine.
++let pendingReturnNotice = false;
++
+ /**
+  * Main poll loop. Runs indefinitely until the process is killed.
+  *
+@@ -181,7 +204,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+     // can stamp it on outbound rows — needed for a2a return-path routing.
+     setCurrentInReplyTo(routing.inReplyTo);
+     try {
+-      const result = await processQuery(query, routing, processingIds, config.providerName);
++      const result = await processQuery(query, routing, processingIds, config.providerName, prompt);
+       if (result.continuation && result.continuation !== continuation) {
+         continuation = result.continuation;
+         setContinuation(config.providerName, continuation);
+@@ -190,24 +213,45 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
+       const errMsg = err instanceof Error ? err.message : String(err);
+       log(`Query error: ${errMsg}`);
+ 
+-      // Stale/corrupt continuation recovery: ask the provider whether
+-      // this error means the stored continuation is unusable, and clear
+-      // it so the next attempt starts fresh.
+-      if (continuation && config.provider.isSessionInvalid(err)) {
+-        log(`Stale session detected (${continuation}) — clearing for next retry`);
+-        continuation = undefined;
+-        clearContinuation(config.providerName);
+-      }
++      // Quota exhaustion on the primary → retry the unanswered prompt on the
++      // fallback provider. QuotaExhaustedError carries the exact prompt
++      // segment that went unanswered; a plain thrown error that reads like
++      // quota (SDK subprocess died on a usage-limit response) retries the
++      // batch's initial prompt.
++      const quotaPrompt =
++        err instanceof QuotaExhaustedError ? err.lastPrompt : isQuotaErrorMessage(errMsg) ? prompt : null;
++
++      if (quotaPrompt !== null && config.fallback) {
++        log(`Primary quota exhausted — retrying on fallback provider '${config.fallback.providerName}'`);
++        writeNotice(routing, FALLBACK_SWITCH_NOTICE);
++        try {
++          await runFallbackTurn(config.fallback, quotaPrompt, routing, config.cwd, config.systemContext);
++          pendingReturnNotice = true;
++        } catch (fbErr) {
++          const fbMsg = fbErr instanceof Error ? fbErr.message : String(fbErr);
++          log(`Fallback turn failed: ${fbMsg}`);
++          writeNotice(routing, FALLBACK_FAILED_NOTICE);
++        }
++      } else {
++        // Stale/corrupt continuation recovery: ask the provider whether
++        // this error means the stored continuation is unusable, and clear
++        // it so the next attempt starts fresh.
++        if (continuation && config.provider.isSessionInvalid(err)) {
++          log(`Stale session detected (${continuation}) — clearing for next retry`);
++          continuation = undefined;
++          clearContinuation(config.providerName);
++        }
+ 
+-      // Write error response so the user knows something went wrong
+-      writeMessageOut({
+-        id: generateId(),
+-        kind: 'chat',
+-        platform_id: routing.platformId,
+-        channel_type: routing.channelType,
+-        thread_id: routing.threadId,
+-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
+-      });
++        // Write error response so the user knows something went wrong
++        writeMessageOut({
++          id: generateId(),
++          kind: 'chat',
++          platform_id: routing.platformId,
++          channel_type: routing.channelType,
++          thread_id: routing.threadId,
++          content: JSON.stringify({ text: `Error: ${errMsg}` }),
++        });
++      }
+     } finally {
+       clearCurrentInReplyTo();
+     }
+@@ -262,10 +306,21 @@ async function processQuery(
+   routing: RoutingContext,
+   initialBatchIds: string[],
+   providerName: string,
++  initialPrompt: string,
+ ): Promise<QueryResult> {
+   let queryContinuation: string | undefined;
+   let done = false;
+   let unwrappedNudged = false;
++  // Most recent user-content prompt segment sent into the query (initial
++  // batch or follow-up push — not system nudges). On quota exhaustion this
++  // is the segment that went unanswered, handed to the fallback provider.
++  let lastPrompt = initialPrompt;
++  // Seq snapshot at the start of the current prompt segment. If the agent
++  // sends anything via MCP tools during the segment (send_message,
++  // send_file, ...), countChatSendsSince(promptSeqMark) > 0 and an
++  // unwrapped final text is just scratchpad — nudging the agent to
++  // "re-send" would produce a duplicate reply, not a missing one.
++  let promptSeqMark = getMaxOutSeq();
+ 
+   // Concurrent polling: push follow-ups into the active query as they arrive.
+   // We do NOT force-end the stream on silence — keeping the query open avoids
+@@ -340,6 +395,8 @@ async function processQuery(
+         const prompt = formatMessages(keep);
+         log(`Pushing ${keep.length} follow-up message(s) into active query`);
+         unwrappedNudged = false;
++        promptSeqMark = getMaxOutSeq();
++        lastPrompt = prompt;
+         query.push(prompt);
+         markCompleted(keptIds);
+       } catch (err) {
+@@ -369,6 +426,12 @@ async function processQuery(
+         // effectively orphaned and the next message started a blank
+         // Claude session with no prior context.
+         setContinuation(providerName, event.continuation);
++      } else if (event.type === 'error' && event.classification === 'quota') {
++        // Provider is out of quota — this query cannot answer the current
++        // segment. Abort and surface to runPollLoop, which retries the
++        // segment on the fallback provider (when one is configured).
++        query.abort();
++        throw new QuotaExhaustedError(event.message, lastPrompt);
+       } else if (event.type === 'result') {
+         // A result — with or without text — means the turn is done. Mark
+         // the initial batch completed now so the host sweep doesn't see
+@@ -377,9 +440,20 @@ async function processQuery(
+         // (send_message) mid-turn, or the message may not need a response
+         // at all — either way the turn is finished.
+         markCompleted(initialBatchIds);
++        // A prior turn ran on the fallback provider; this successful
++        // primary turn means quota recovered — tell the user once.
++        if (pendingReturnNotice) {
++          pendingReturnNotice = false;
++          writeNotice(routing, FALLBACK_RETURN_NOTICE);
++        }
+         if (event.text) {
+           const { hasUnwrapped } = dispatchResultText(event.text, routing);
+-          if (hasUnwrapped && !unwrappedNudged) {
++          // Only nudge when the turn produced NO delivery at all. If the
++          // agent already sent messages via MCP tools this segment, the
++          // bare final text is a summary/scratchpad — nudging would make
++          // the agent re-send and the user would get duplicates.
++          const alreadySentThisTurn = countChatSendsSince(promptSeqMark) > 0;
++          if (hasUnwrapped && !alreadySentThisTurn && !unwrappedNudged) {
+             unwrappedNudged = true;
+             const destinations = getAllDestinations();
+             const names = destinations.map((d) => d.name).join(', ');
+@@ -401,6 +475,82 @@ async function processQuery(
+   return { continuation: queryContinuation };
+ }
+ 
++/** Write a short system notice to the turn's origin destination. */
++function writeNotice(routing: RoutingContext, text: string): void {
++  writeMessageOut({
++    id: generateId(),
++    in_reply_to: routing.inReplyTo,
++    kind: 'chat',
++    platform_id: routing.platformId,
++    channel_type: routing.channelType,
++    thread_id: routing.threadId,
++    content: JSON.stringify({ text }),
++  });
++}
++
++/**
++ * Run a single turn on the fallback provider: retry the unanswered prompt,
++ * dispatch the result, persist the fallback's own continuation (kept in its
++ * own per-provider slot so the fallback conversation also has memory), and
++ * close the query so the outer loop returns to the primary provider on the
++ * next batch.
++ *
++ * Exported for tests.
++ */
++export async function runFallbackTurn(
++  fallback: { provider: AgentProvider; providerName: string },
++  prompt: string,
++  routing: RoutingContext,
++  cwd: string,
++  systemContext?: { instructions?: string },
++): Promise<void> {
++  const continuation = getContinuation(fallback.providerName);
++  const promptSeqMark = getMaxOutSeq();
++  const query = fallback.provider.query({ prompt, continuation, cwd, systemContext });
++
++  let nudged = false;
++  let gotResult = false;
++  try {
++    for await (const event of query.events) {
++      touchHeartbeat();
++      if (event.type === 'init') {
++        setContinuation(fallback.providerName, event.continuation);
++      } else if (event.type === 'error' && event.classification === 'quota') {
++        query.abort();
++        throw new Error(`Fallback provider quota exhausted: ${event.message}`);
++      } else if (event.type === 'result') {
++        gotResult = true;
++        if (event.text) {
++          const { hasUnwrapped } = dispatchResultText(event.text, routing);
++          const alreadySentThisTurn = countChatSendsSince(promptSeqMark) > 0;
++          if (hasUnwrapped && !alreadySentThisTurn && !nudged) {
++            // Same one-shot re-wrap nudge as the primary path — give the
++            // fallback one chance to deliver, then close regardless.
++            nudged = true;
++            gotResult = false;
++            const names = getAllDestinations()
++              .map((d) => d.name)
++              .join(', ');
++            query.push(
++              `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
++                `Your destinations: ${names}. Please re-send your response with the correct wrapping.</system>`,
++            );
++            continue;
++          }
++        }
++        // Turn answered — close the stream so control returns to the
++        // primary provider for the next batch.
++        query.end();
++      }
++    }
++  } finally {
++    if (!gotResult) query.abort();
++  }
++  if (!gotResult) {
++    throw new Error('Fallback provider produced no result');
++  }
++}
++
+ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
+   switch (event.type) {
+     case 'init':
+@@ -473,6 +623,12 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
+ function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
+   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
+   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
++  const content = JSON.stringify({ text: body });
++
++  // Duplicate sends (same text already sent via the send_message MCP tool
++  // this turn) are suppressed centrally in writeMessageOut — see
++  // findRecentDuplicateSeq in db/messages-out.ts.
++
+   // Resolve thread_id per-destination from the most recent inbound message
+   // that came from this same channel+platform. In agent-shared sessions,
+   // different destinations have different thread contexts — using a single
+@@ -485,7 +641,7 @@ function sendToDestination(dest: DestinationEntry, body: string, routing: Routin
+     platform_id: platformId,
+     channel_type: channelType,
+     thread_id: destRouting?.threadId ?? null,
+-    content: JSON.stringify({ text: body }),
++    content,
+   });
+ }
+ 
+diff --git a/container/agent-runner/src/providers/claude.ts b/container/agent-runner/src/providers/claude.ts
+index 31be51a..9096fd1 100644
+--- a/container/agent-runner/src/providers/claude.ts
++++ b/container/agent-runner/src/providers/claude.ts
+@@ -4,6 +4,7 @@ import path from 'path';
+ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+ 
+ import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
++import { QUOTA_ERROR_RE } from '../quota.js';
+ import { registerProvider } from './provider-registry.js';
+ import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+ 
+@@ -328,11 +329,28 @@ export class ClaudeProvider implements AgentProvider {
+           yield { type: 'init', continuation: message.session_id };
+         } else if (message.type === 'result') {
+           const text = 'result' in message ? (message as { result?: string }).result ?? null : null;
+-          yield { type: 'result', text };
++          const isError = (message as { is_error?: boolean }).is_error === true;
++          if (isError && text && QUOTA_ERROR_RE.test(text)) {
++            // Usage-limit / out-of-quota turn ("Claude AI usage limit
++            // reached|<ts>" and friends). Surface as a quota error so the
++            // poll-loop can fall back instead of delivering the error text.
++            yield { type: 'error', message: text, retryable: false, classification: 'quota' };
++          } else {
++            yield { type: 'result', text };
++          }
+         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
+           yield { type: 'error', message: 'API retry', retryable: true };
+         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
+-          yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
++          // rate_limit_event fires with a status field on every check —
++          // only `rejected` means the request was actually blocked. Treating
++          // informational statuses (allowed/allowed_warning) as quota would
++          // trigger the fallback on perfectly healthy turns.
++          const status = (message as { rate_limit?: { status?: string } }).rate_limit?.status;
++          if (status === 'rejected') {
++            yield { type: 'error', message: 'Rate limit exceeded', retryable: false, classification: 'quota' };
++          } else {
++            yield { type: 'progress', message: `Rate limit status: ${status ?? 'unknown'}` };
++          }
+         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
+           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
+           const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';
+diff --git a/container/agent-runner/src/quota-fallback.test.ts b/container/agent-runner/src/quota-fallback.test.ts
+new file mode 100644
+index 0000000..8594e42
+--- /dev/null
++++ b/container/agent-runner/src/quota-fallback.test.ts
+@@ -0,0 +1,142 @@
++/**
++ * Tests for the quota-fallback flow: quota-error detection and the
++ * single-turn fallback runner that retries an unanswered prompt on the
++ * overflow provider.
++ */
++import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
++
++import { initTestSessionDb, closeSessionDb } from './db/connection.js';
++import { getUndeliveredMessages } from './db/messages-out.js';
++import { getContinuation } from './db/session-state.js';
++import { isQuotaErrorMessage, QuotaExhaustedError } from './quota.js';
++import { runFallbackTurn } from './poll-loop.js';
++import type { AgentProvider, AgentQuery, ProviderEvent, QueryInput } from './providers/types.js';
++import type { Database } from 'bun:sqlite';
++
++const ROUTING = {
++  platformId: 'whatsapp:123',
++  channelType: 'whatsapp',
++  threadId: null,
++  inReplyTo: null,
++};
++
++let inbound: Database;
++
++beforeEach(() => {
++  ({ inbound } = initTestSessionDb());
++  inbound
++    .prepare(
++      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id)
++       VALUES ('user', 'User', 'channel', 'whatsapp', 'whatsapp:123')`,
++    )
++    .run();
++});
++
++afterEach(() => {
++  closeSessionDb();
++});
++
++/** Minimal scripted provider: plays a fixed event sequence per query. */
++function scriptedProvider(events: ProviderEvent[], onQuery?: (input: QueryInput) => void): AgentProvider {
++  return {
++    supportsNativeSlashCommands: false,
++    isSessionInvalid: () => false,
++    query(input: QueryInput): AgentQuery {
++      onQuery?.(input);
++      let ended = false;
++      return {
++        push() {},
++        end() {
++          ended = true;
++        },
++        abort() {
++          ended = true;
++        },
++        events: (async function* () {
++          for (const e of events) {
++            if (ended) return;
++            yield e;
++          }
++        })(),
++      };
++    },
++  };
++}
++
++describe('isQuotaErrorMessage', () => {
++  it('matches real quota/limit error shapes', () => {
++    expect(isQuotaErrorMessage('Claude AI usage limit reached|1783240000')).toBe(true);
++    expect(isQuotaErrorMessage('429 {"type":"rate_limit_error"}')).toBe(true);
++    expect(isQuotaErrorMessage('Your credit balance is too low to access the API')).toBe(true);
++    expect(isQuotaErrorMessage('quota exceeded for this billing period')).toBe(true);
++  });
++
++  it('does not match unrelated errors', () => {
++    expect(isQuotaErrorMessage('No conversation found with session ID abc')).toBe(false);
++    expect(isQuotaErrorMessage('fetch failed: ETIMEDOUT')).toBe(false);
++    expect(isQuotaErrorMessage('Claude Code process exited with code 1')).toBe(false);
++  });
++});
++
++describe('QuotaExhaustedError', () => {
++  it('carries the unanswered prompt for the fallback retry', () => {
++    const err = new QuotaExhaustedError('usage limit reached', '<messages>hello</messages>');
++    expect(err.lastPrompt).toBe('<messages>hello</messages>');
++    expect(err.name).toBe('QuotaExhaustedError');
++  });
++});
++
++describe('runFallbackTurn', () => {
++  const fallbackOf = (p: AgentProvider) => ({ provider: p, providerName: 'codex' });
++
++  it('delivers the fallback result and persists the fallback continuation', async () => {
++    const provider = scriptedProvider([
++      { type: 'init', continuation: 'codex-thread-1' },
++      { type: 'result', text: '<message to="user">תשובה ממנוע הגיבוי</message>' },
++    ]);
++
++    await runFallbackTurn(fallbackOf(provider), 'prompt-text', ROUTING, '/workspace/agent');
++
++    const out = getUndeliveredMessages();
++    expect(out).toHaveLength(1);
++    expect(JSON.parse(out[0].content).text).toBe('תשובה ממנוע הגיבוי');
++    expect(getContinuation('codex')).toBe('codex-thread-1');
++  });
++
++  it('resumes the fallback conversation from its own stored continuation', async () => {
++    let seenContinuation: string | undefined;
++    const provider = scriptedProvider(
++      [
++        { type: 'init', continuation: 'codex-thread-2' },
++        { type: 'result', text: '<message to="user">ok</message>' },
++      ],
++      (input) => {
++        seenContinuation = input.continuation;
++      },
++    );
++
++    // First turn stores the continuation; second turn must receive it.
++    await runFallbackTurn(fallbackOf(provider), 'first', ROUTING, '/workspace/agent');
++    await runFallbackTurn(fallbackOf(provider), 'second', ROUTING, '/workspace/agent');
++    expect(seenContinuation).toBe('codex-thread-2');
++  });
++
++  it('throws when the fallback provider is also out of quota', async () => {
++    const provider = scriptedProvider([
++      { type: 'error', message: '429 rate limit', retryable: false, classification: 'quota' },
++    ]);
++
++    await expect(runFallbackTurn(fallbackOf(provider), 'prompt', ROUTING, '/workspace/agent')).rejects.toThrow(
++      /quota exhausted/i,
++    );
++    expect(getUndeliveredMessages()).toHaveLength(0);
++  });
++
++  it('throws when the fallback stream ends without any result', async () => {
++    const provider = scriptedProvider([{ type: 'init', continuation: 'x' }]);
++
++    await expect(runFallbackTurn(fallbackOf(provider), 'prompt', ROUTING, '/workspace/agent')).rejects.toThrow(
++      /no result/i,
++    );
++  });
++});
+diff --git a/container/agent-runner/src/quota.ts b/container/agent-runner/src/quota.ts
+new file mode 100644
+index 0000000..7cf559e
+--- /dev/null
++++ b/container/agent-runner/src/quota.ts
+@@ -0,0 +1,30 @@
++/**
++ * Quota-exhaustion detection, shared by providers and the poll-loop's
++ * fallback path. A "quota" error means the provider cannot serve any more
++ * turns right now (subscription usage limit, hard rate limit, empty credit
++ * balance) — as opposed to transient errors the SDK retries internally.
++ */
++
++// Applied ONLY to error messages / is_error result text — never to normal
++// agent output — so loose terms like "rate limit" are safe here.
++export const QUOTA_ERROR_RE =
++  /usage limit reached|rate.?limit|quota|credit balance|insufficient credits|\b429\b|overloaded/i;
++
++export function isQuotaErrorMessage(message: string): boolean {
++  return QUOTA_ERROR_RE.test(message);
++}
++
++/**
++ * Thrown by the poll-loop's event handling when the active provider reports
++ * quota exhaustion mid-query. Carries the prompt segment that went
++ * unanswered so the fallback provider can retry exactly that input.
++ */
++export class QuotaExhaustedError extends Error {
++  constructor(
++    message: string,
++    readonly lastPrompt: string,
++  ) {
++    super(message);
++    this.name = 'QuotaExhaustedError';
++  }
++}
+diff --git a/src/backfill-container-configs.ts b/src/backfill-container-configs.ts
+index 5551c90..1a5e8c4 100644
+--- a/src/backfill-container-configs.ts
++++ b/src/backfill-container-configs.ts
+@@ -54,6 +54,7 @@ export function backfillContainerConfigs(): void {
+     const row: ContainerConfigRow = {
+       agent_group_id: group.id,
+       provider,
++      fallback_provider: null,
+       model: null,
+       effort: null,
+       image_tag: legacy.imageTag ?? null,
+diff --git a/src/cli/resources/groups.ts b/src/cli/resources/groups.ts
+index 031ccb5..a3d56e7 100644
+--- a/src/cli/resources/groups.ts
++++ b/src/cli/resources/groups.ts
+@@ -16,6 +16,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
+   return {
+     agent_group_id: row.agent_group_id,
+     provider: row.provider,
++    fallback_provider: row.fallback_provider,
+     model: row.model,
+     effort: row.effort,
+     image_tag: row.image_tag,
+@@ -123,7 +124,7 @@ registerResource({
+       access: 'approval',
+       description:
+         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
+-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',
++        'Use --id <group-id> and any of: --provider, --fallback-provider (or "none" to clear), --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',
+       handler: async (args) => {
+         const id = args.id as string;
+         if (!id) throw new Error('--id is required');
+@@ -133,10 +134,22 @@ registerResource({
+         const updates: Partial<
+           Pick<
+             ContainerConfigRow,
+-            'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope'
++            | 'provider'
++            | 'fallback_provider'
++            | 'model'
++            | 'effort'
++            | 'image_tag'
++            | 'assistant_name'
++            | 'max_messages_per_prompt'
++            | 'cli_scope'
+           >
+         > = {};
+         if (args.provider !== undefined) updates.provider = args.provider as string;
++        if (args['fallback-provider'] !== undefined || args.fallback_provider !== undefined) {
++          const fb = (args['fallback-provider'] ?? args.fallback_provider) as string;
++          // "none" clears the fallback (CLI flags can't pass null directly)
++          updates.fallback_provider = fb === 'none' ? null : fb;
++        }
+         if (args.model !== undefined) updates.model = args.model as string;
+         if (args.effort !== undefined) updates.effort = args.effort as string;
+         if (args.image_tag !== undefined) updates.image_tag = args.image_tag as string;
+@@ -153,7 +166,7 @@ registerResource({
+ 
+         if (Object.keys(updates).length === 0) {
+           throw new Error(
+-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope',
++            'Nothing to update — provide at least one of: --provider, --fallback-provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope',
+           );
+         }
+ 
+diff --git a/src/container-config.ts b/src/container-config.ts
+index 597ca92..ddc5fbf 100644
+--- a/src/container-config.ts
++++ b/src/container-config.ts
+@@ -37,6 +37,8 @@ export interface ContainerConfig {
+   additionalMounts: AdditionalMountConfig[];
+   skills: string[] | 'all';
+   provider?: string;
++  /** Overflow provider used when the primary fails a turn on quota. */
++  fallbackProvider?: string;
+   groupName?: string;
+   assistantName?: string;
+   agentGroupId?: string;
+@@ -57,6 +59,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
+     additionalMounts: JSON.parse(row.additional_mounts) as AdditionalMountConfig[],
+     skills: JSON.parse(row.skills) as string[] | 'all',
+     provider: row.provider ?? undefined,
++    fallbackProvider: row.fallback_provider ?? undefined,
+     groupName: group.name,
+     assistantName: row.assistant_name ?? group.name,
+     agentGroupId: group.id,
+diff --git a/src/container-runner.ts b/src/container-runner.ts
+index 7201bfc..9596343 100644
+--- a/src/container-runner.ts
++++ b/src/container-runner.ts
+@@ -228,14 +228,26 @@ function resolveProviderContribution(
+   containerConfig: import('./container-config.js').ContainerConfig,
+ ): { provider: string; contribution: ProviderContainerContribution } {
+   const provider = resolveProviderName(session.agent_provider, containerConfig.provider);
++  const ctx = {
++    sessionDir: sessionDir(agentGroup.id, session.id),
++    agentGroupId: agentGroup.id,
++    hostEnv: process.env,
++  };
+   const fn = getProviderContainerConfig(provider);
+-  const contribution = fn
+-    ? fn({
+-        sessionDir: sessionDir(agentGroup.id, session.id),
+-        agentGroupId: agentGroup.id,
+-        hostEnv: process.env,
+-      })
+-    : {};
++  const contribution = fn ? fn(ctx) : {};
++
++  // The quota-fallback provider needs its host-side contribution (auth
++  // mounts, env passthrough) in the same container, otherwise the runner
++  // can't switch to it mid-session. Merged with primary-wins on env keys.
++  const fallbackName = containerConfig.fallbackProvider?.toLowerCase();
++  if (fallbackName && fallbackName !== provider) {
++    const fbFn = getProviderContainerConfig(fallbackName);
++    if (fbFn) {
++      const fb = fbFn(ctx);
++      contribution.mounts = [...(contribution.mounts ?? []), ...(fb.mounts ?? [])];
++      contribution.env = { ...(fb.env ?? {}), ...(contribution.env ?? {}) };
++    }
++  }
+   return { provider, contribution };
+ }
+ 
+diff --git a/src/db/container-configs.ts b/src/db/container-configs.ts
+index 219c73f..407f3db 100644
+--- a/src/db/container-configs.ts
++++ b/src/db/container-configs.ts
+@@ -3,6 +3,7 @@ import { getDb } from './connection.js';
+ 
+ const SCALAR_COLUMNS = new Set([
+   'provider',
++  'fallback_provider',
+   'model',
+   'effort',
+   'image_tag',
+@@ -27,11 +28,11 @@ export function createContainerConfig(config: ContainerConfigRow): void {
+   getDb()
+     .prepare(
+       `INSERT INTO container_configs (
+-        agent_group_id, provider, model, effort, image_tag, assistant_name,
++        agent_group_id, provider, fallback_provider, model, effort, image_tag, assistant_name,
+         max_messages_per_prompt, skills, mcp_servers, packages_apt, packages_npm,
+         additional_mounts, updated_at
+       ) VALUES (
+-        @agent_group_id, @provider, @model, @effort, @image_tag, @assistant_name,
++        @agent_group_id, @provider, @fallback_provider, @model, @effort, @image_tag, @assistant_name,
+         @max_messages_per_prompt, @skills, @mcp_servers, @packages_apt, @packages_npm,
+         @additional_mounts, @updated_at
+       )`,
+@@ -55,7 +56,14 @@ export function updateContainerConfigScalars(
+   updates: Partial<
+     Pick<
+       ContainerConfigRow,
+-      'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope'
++      | 'provider'
++      | 'fallback_provider'
++      | 'model'
++      | 'effort'
++      | 'image_tag'
++      | 'assistant_name'
++      | 'max_messages_per_prompt'
++      | 'cli_scope'
+     >
+   >,
+ ): void {
+diff --git a/src/db/migrations/017-fallback-provider.ts b/src/db/migrations/017-fallback-provider.ts
+new file mode 100644
+index 0000000..0f057cc
+--- /dev/null
++++ b/src/db/migrations/017-fallback-provider.ts
+@@ -0,0 +1,10 @@
++import type Database from 'better-sqlite3';
++import type { Migration } from './index.js';
++
++export const migration017: Migration = {
++  version: 17,
++  name: 'fallback-provider',
++  up(db: Database.Database) {
++    db.prepare('ALTER TABLE container_configs ADD COLUMN fallback_provider TEXT').run();
++  },
++};
+diff --git a/src/db/migrations/index.ts b/src/db/migrations/index.ts
+index 0cefb37..0f35b6e 100644
+--- a/src/db/migrations/index.ts
++++ b/src/db/migrations/index.ts
+@@ -12,6 +12,7 @@ import { migration012 } from './012-channel-registration.js';
+ import { migration013 } from './013-approval-render-metadata.js';
+ import { migration014 } from './014-container-configs.js';
+ import { migration015 } from './015-cli-scope.js';
++import { migration017 } from './017-fallback-provider.js';
+ import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
+ import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
+ 
+@@ -35,6 +36,7 @@ const migrations: Migration[] = [
+   migration013,
+   migration014,
+   migration015,
++  migration017,
+ ];
+ 
+ export function runMigrations(db: Database.Database): void {
+diff --git a/src/types.ts b/src/types.ts
+index 26a40f9..fc78135 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -14,6 +14,8 @@ export interface AgentGroup {
+ export interface ContainerConfigRow {
+   agent_group_id: string;
+   provider: string | null;
++  /** Overflow provider used when the primary fails a turn on quota. */
++  fallback_provider: string | null;
+   model: string | null;
+   effort: string | null;
+   image_tag: string | null;
+-- 
+2.43.0
+

@@ -1,0 +1,47 @@
+From 7a468e92558e8996ef39017792c0ebc5063e4fee Mon Sep 17 00:00:00 2001
+From: "exe.dev user" <exedev@eliabc.exe.xyz>
+Date: Mon, 6 Jul 2026 04:31:11 +0000
+Subject: [PATCH 4/5] fix(cli): allow clearing a stale image_tag via
+ --image-tag none
+
+Discovered while testing the quota-fallback feature manually: daniela-sim
+had a per-group image_tag pointing at an image that no longer exists on
+this host, so its container failed to spawn on every wake (docker pull
+access denied) regardless of provider. There was no way to clear a
+scalar column to null from the CLI (fallback_provider already had this
+'none' sentinel; image_tag did not). Same pattern applied here.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ src/cli/resources/groups.ts | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/cli/resources/groups.ts b/src/cli/resources/groups.ts
+index a3d56e7..2f1aaa3 100644
+--- a/src/cli/resources/groups.ts
++++ b/src/cli/resources/groups.ts
+@@ -124,7 +124,7 @@ registerResource({
+       access: 'approval',
+       description:
+         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
+-        'Use --id <group-id> and any of: --provider, --fallback-provider (or "none" to clear), --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',
++        'Use --id <group-id> and any of: --provider, --fallback-provider (or "none" to clear), --model, --effort, --image-tag (or "none" to clear), --assistant-name, --max-messages-per-prompt, --cli-scope.',
+       handler: async (args) => {
+         const id = args.id as string;
+         if (!id) throw new Error('--id is required');
+@@ -152,7 +152,11 @@ registerResource({
+         }
+         if (args.model !== undefined) updates.model = args.model as string;
+         if (args.effort !== undefined) updates.effort = args.effort as string;
+-        if (args.image_tag !== undefined) updates.image_tag = args.image_tag as string;
++        if (args['image-tag'] !== undefined || args.image_tag !== undefined) {
++          const tag = (args['image-tag'] ?? args.image_tag) as string;
++          // "none" clears back to the default image (CLI flags can't pass null directly)
++          updates.image_tag = tag === 'none' ? null : tag;
++        }
+         if (args.assistant_name !== undefined) updates.assistant_name = args.assistant_name as string;
+         if (args.max_messages_per_prompt !== undefined)
+           updates.max_messages_per_prompt = Number(args.max_messages_per_prompt);
+-- 
+2.43.0
+

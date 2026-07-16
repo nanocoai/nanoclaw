@@ -1,5 +1,14 @@
 {
   "sandbox": {
     "enabled": false
+  },
+  "permissions": {
+    "allow": [
+      "Bash(onecli agents list)",
+      "Bash(onecli agents list *)",
+      "Bash(onecli secrets list)",
+      "Bash(onecli secrets list *)",
+      "Bash(onecli config get *)"
+    ]
   }
 }
