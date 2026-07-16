@@ -5,11 +5,14 @@ import path from 'path';
 export type SdkEffortLevel = 'low' | 'medium' | 'high';
 /** Codex 模式 effort（5 档，对应 Codex CLI model_reasoning_effort） */
 export type CodexEffortLevel = 'light' | 'medium' | 'high' | 'extra_high' | 'ultra';
+/** Codex 服务档位：standard 为默认，fast 为官方快速模式 */
+export type CodexServiceTier = 'standard' | 'fast';
 export type EffortLevel = SdkEffortLevel | CodexEffortLevel;
 
 export interface GroupModelSettings {
   model?: string;
   effortLevel?: EffortLevel;
+  serviceTier?: CodexServiceTier;
 }
 
 /** settings.json 磁盘结构：claude/codex 各自独立命名空间 */
@@ -20,7 +23,7 @@ interface SettingsFile {
   /** Claude SDK 模式配置 */
   claude?: { model?: unknown; effortLevel?: unknown };
   /** Codex CLI 模式配置 */
-  codex?: { model?: unknown; effortLevel?: unknown };
+  codex?: { model?: unknown; effortLevel?: unknown; serviceTier?: unknown };
 }
 
 export function normalizeClaudeModelName(model: unknown): string | undefined {
@@ -100,6 +103,11 @@ export function readCodexModelSettings(input: {
   const validEfforts: CodexEffortLevel[] = ['light', 'medium', 'high', 'extra_high', 'ultra'];
   if (validEfforts.includes(ns.effortLevel as CodexEffortLevel)) {
     result.effortLevel = ns.effortLevel as CodexEffortLevel;
+  }
+
+  const validServiceTiers: CodexServiceTier[] = ['standard', 'fast'];
+  if (validServiceTiers.includes(ns.serviceTier as CodexServiceTier)) {
+    result.serviceTier = ns.serviceTier as CodexServiceTier;
   }
   return result;
 }

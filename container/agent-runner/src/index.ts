@@ -1793,6 +1793,7 @@ async function main(): Promise<void> {
             effort: override?.thinking
               ? codexEffortForThinking(override.thinking)
               : codexGroupSettings.effortLevel || 'medium',
+            serviceTier: codexGroupSettings.serviceTier,
             mcpServerPath,
             chatJid: containerInput.chatJid,
             groupFolder: containerInput.groupFolder,
