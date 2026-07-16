@@ -2297,6 +2297,56 @@ describe('FeishuChannel', () => {
       expect(JSON.stringify(card)).not.toContain('"tag":"hr"');
     });
 
+    it('账号轮换重试复用活动卡片时保留已有 Phase', async () => {
+      const progressCards = (
+        channel as unknown as {
+          progressCards: Map<
+            string,
+            { steps: Array<{ narrationFull?: string }> }
+          >;
+        }
+      ).progressCards;
+      mockCreate.mockResolvedValueOnce({
+        data: { message_id: 'msg_retry_progress' },
+      });
+      await channel.setTyping!(jid, true);
+
+      const runPhase = async (title: string, toolCallId: string) => {
+        await channel.sendMessage(jid, `💬 ${title}`, { isProgress: true });
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '🔧 Read',
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'Read',
+              toolCallId,
+              input: { file_path: `/tmp/${toolCallId}.txt` },
+            },
+          }),
+          { isProgress: true },
+        );
+      };
+
+      await runPhase('第一阶段。', 'retry-read-1');
+      await runPhase('第二阶段。', 'retry-read-2');
+      expect(progressCards.get(jid)?.steps).toHaveLength(2);
+
+      // 账号轮换会再次调用 setTyping(true)，但仍复用同一张活动卡片。
+      await channel.setTyping!(jid, true);
+      await runPhase('第三阶段。', 'retry-read-3');
+
+      const entry = progressCards.get(jid);
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+      expect(entry?.steps).toHaveLength(3);
+      expect(entry?.steps.map((step) => step.narrationFull)).toEqual([
+        '第一阶段。',
+        '第二阶段。',
+        '第三阶段。',
+      ]);
+    });
+
     it('SDK 正式正文复用起手卡 message_id 原地转正', async () => {
       mockCreate.mockResolvedValueOnce({
         data: { message_id: 'msg_start_sdk' },
