@@ -1036,6 +1036,55 @@ describe('FeishuChannel', () => {
       expect(entry.steps[0].grayTail).toBe('已读取 /tmp/notes.md');
     });
 
+    it('开局兜底阶段失败后显示原动作与对象，不展示错误详情', async () => {
+      const jid = 'fs:oc_progress_fallback_failed_action';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Read',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Read',
+            toolCallId: 'read-failed-1',
+            input: { file_path: '/workspace/src/config.ts' },
+          },
+        }),
+        { isProgress: true },
+      );
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '❌ 执行失败',
+          detail: 'Authorization: Bearer should-not-reach-card-123456',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'failed',
+            toolName: 'tool_result',
+            toolCallId: 'read-failed-1',
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const entry = (
+        channel as unknown as {
+          progressCards: Map<
+            string,
+            { steps: Array<{ title: string; grayTail?: string }> }
+          >;
+        }
+      ).progressCards.get(jid);
+      expect(entry).toBeDefined();
+      if (!entry) throw new Error('progress card missing');
+      expect(entry.steps).toHaveLength(1);
+      expect(entry.steps[0].title).toBe('');
+      expect(entry.steps[0].grayTail).toBe(
+        '读取 /workspace/src/config.ts 失败',
+      );
+      expect(JSON.stringify(entry.steps)).not.toContain('should-not-reach-card');
+    });
+
     it('narration Phase 动作独立成行：面板 header 无动作拼接，动作是灰色独立元素', async () => {
       const jid = 'fs:oc_progress_action_line';
       await channel.sendMessage(
@@ -2246,6 +2295,56 @@ describe('FeishuChannel', () => {
       expect(JSON.stringify(card)).not.toContain('正在等待响应');
       expect(JSON.stringify(card)).not.toContain('过程记录');
       expect(JSON.stringify(card)).not.toContain('"tag":"hr"');
+    });
+
+    it('账号轮换重试复用活动卡片时保留已有 Phase', async () => {
+      const progressCards = (
+        channel as unknown as {
+          progressCards: Map<
+            string,
+            { steps: Array<{ narrationFull?: string }> }
+          >;
+        }
+      ).progressCards;
+      mockCreate.mockResolvedValueOnce({
+        data: { message_id: 'msg_retry_progress' },
+      });
+      await channel.setTyping!(jid, true);
+
+      const runPhase = async (title: string, toolCallId: string) => {
+        await channel.sendMessage(jid, `💬 ${title}`, { isProgress: true });
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: '🔧 Read',
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName: 'Read',
+              toolCallId,
+              input: { file_path: `/tmp/${toolCallId}.txt` },
+            },
+          }),
+          { isProgress: true },
+        );
+      };
+
+      await runPhase('第一阶段。', 'retry-read-1');
+      await runPhase('第二阶段。', 'retry-read-2');
+      expect(progressCards.get(jid)?.steps).toHaveLength(2);
+
+      // 账号轮换会再次调用 setTyping(true)，但仍复用同一张活动卡片。
+      await channel.setTyping!(jid, true);
+      await runPhase('第三阶段。', 'retry-read-3');
+
+      const entry = progressCards.get(jid);
+      expect(mockCreate).toHaveBeenCalledTimes(1);
+      expect(entry?.steps).toHaveLength(3);
+      expect(entry?.steps.map((step) => step.narrationFull)).toEqual([
+        '第一阶段。',
+        '第二阶段。',
+        '第三阶段。',
+      ]);
     });
 
     it('SDK 正式正文复用起手卡 message_id 原地转正', async () => {

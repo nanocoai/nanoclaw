@@ -2207,7 +2207,18 @@ export class FeishuChannel implements Channel {
       if (isTyping) {
         // 新对话开始，清除上一轮的 progressDone 标记
         this.progressDone.delete(jid);
-        this.progressPresentations.delete(jid);
+        if (this.progressCards.has(jid)) {
+          logger.info(
+            {
+              jid,
+              phaseCount:
+                this.progressPresentations.get(jid)?.phases.length ?? 0,
+            },
+            '[progress-state] 重试复用活动卡片，保留 Phase 状态',
+          );
+        } else {
+          this.progressPresentations.delete(jid);
+        }
         await this.ensureStartCard(jid, chatId);
         // 添加 emoji reaction 到用户消息，不同执行模式使用不同表情。
         const lastMsgId = this.getLastMessageId(jid);
