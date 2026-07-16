@@ -755,7 +755,7 @@ describe('reduceProgressPresentation', () => {
     });
   });
 
-  it('失败终态保留阶段目标和退出码', () => {
+  it('失败终态保留阶段目标和原动作', () => {
     let state = reduceProgressPresentation(createProgressPresentationState(), {
       kind: 'narration',
       text: '验证失败状态展示。',
@@ -779,7 +779,7 @@ describe('reduceProgressPresentation', () => {
       expect.objectContaining({
         goal: '验证失败状态展示。',
         status: 'failed',
-        outcome: '命令执行失败（退出码 7）',
+        outcome: '执行系统检查失败',
       }),
     ]);
   });
@@ -1110,7 +1110,7 @@ describe('reduceProgressPresentation', () => {
       });
     }
 
-    it('非 codex provider 的 failed+exit1 探测命令不做窄覆盖，保持失败', () => {
+    it('非 codex provider 的 failed+exit1 探测命令不做窄覆盖，显示原动作失败', () => {
       let state = reduceProgressPresentation(
         createProgressPresentationState(),
         {
@@ -1129,7 +1129,7 @@ describe('reduceProgressPresentation', () => {
         },
       });
       expect(state.steps[0].status).toBe('failed');
-      expect(state.steps[0].title).toBe('执行失败');
+      expect(state.steps[0].title).toBe('src 中搜索“needle”失败');
     });
 
     it.each([
@@ -1170,7 +1170,7 @@ describe('reduceProgressPresentation', () => {
       expect(state.steps[0].title).toBe('已检查，发现差异');
     });
 
-    it('搜索命令退出码 2（真实错误）仍按失败处理，用中性文案', () => {
+    it('搜索命令退出码 2（真实错误）仍按失败处理，显示原动作失败', () => {
       let state = reduceProgressPresentation(
         createProgressPresentationState(),
         {
@@ -1180,10 +1180,10 @@ describe('reduceProgressPresentation', () => {
       );
       state = completeWithExit(state, 'err-1', 2);
       expect(state.steps[0].status).toBe('failed');
-      expect(state.steps[0].title).toBe('命令返回非零（退出码 2）');
+      expect(state.steps[0].title).toBe('搜索“[bad”失败');
     });
 
-    it('测试命令退出码非零渲染为"测试未通过"，阶段结果同步', () => {
+    it('测试命令退出码非零渲染为原动作失败，阶段结果同步', () => {
       let state = reduceProgressPresentation(
         createProgressPresentationState(),
         {
@@ -1193,11 +1193,11 @@ describe('reduceProgressPresentation', () => {
       );
       state = completeWithExit(state, 'red-1', 1);
       expect(state.steps[0].status).toBe('failed');
-      expect(state.steps[0].title).toBe('测试未通过');
-      expect((state as any).phases[0].outcome).toBe('测试未通过');
+      expect(state.steps[0].title).toBe('运行测试失败');
+      expect(state.phases[0].outcome).toBe('运行测试失败');
     });
 
-    it('curl 等检查命令退出码 1 不误标为发现差异，用中性失败文案', () => {
+    it('curl 等检查命令退出码 1 不误标为发现差异，显示原动作失败', () => {
       let state = reduceProgressPresentation(
         createProgressPresentationState(),
         {
@@ -1211,15 +1211,19 @@ describe('reduceProgressPresentation', () => {
       );
       state = completeWithExit(state, 'curl-1', 1);
       expect(state.steps[0].status).toBe('failed');
-      expect(state.steps[0].title).toBe('命令返回非零（退出码 1）');
+      expect(state.steps[0].title).toBe('检查服务响应失败');
     });
 
-    it('lifecycle=failed（无退出码）维持原失败语义', () => {
+    it('lifecycle=failed（无退出码）保留已脱敏的动作与对象', () => {
       let state = reduceProgressPresentation(
         createProgressPresentationState(),
         {
           kind: 'tool',
-          progress: started('Bash', { command: 'ls /tmp' }, 'hard-1'),
+          progress: started(
+            'Read',
+            { file_path: '/workspace/src/config.ts' },
+            'hard-1',
+          ),
         },
       );
       state = reduceProgressPresentation(state, {
@@ -1232,7 +1236,12 @@ describe('reduceProgressPresentation', () => {
         },
       });
       expect(state.steps[0].status).toBe('failed');
-      expect(state.steps[0].title).toBe('执行失败');
+      expect(state.steps[0].title).toBe(
+        '读取 /workspace/src/config.ts 失败',
+      );
+      expect(state.phases[0].outcome).toBe(
+        '读取 /workspace/src/config.ts 失败',
+      );
     });
 
     it('探测无匹配的结果精确保留到 narration Phase 聚合', () => {
@@ -1280,7 +1289,8 @@ describe('reduceProgressPresentation', () => {
       );
       state = completeWithExit(state, 'compound-1', 1);
       expect(state.steps[0].status).toBe('failed');
-      expect(state.steps[0].title).toBe('命令返回非零（退出码 1）');
+      expect(state.steps[0].title).toMatch(/失败$/u);
+      expect(state.steps[0].title).not.toContain('无匹配');
     });
 
     it('引号内的正则控制符不影响探测判定（rg 竖线在引号里）', () => {
@@ -1312,7 +1322,8 @@ describe('reduceProgressPresentation', () => {
       );
       state = completeWithExit(state, 'wrap-1', 1);
       expect(state.steps[0].status).toBe('failed');
-      expect(state.steps[0].title).toBe('命令返回非零（退出码 1）');
+      expect(state.steps[0].title).toMatch(/失败$/u);
+      expect(state.steps[0].title).not.toContain('无匹配');
     });
 
     it.each([
@@ -1420,7 +1431,7 @@ describe('reduceProgressPresentation', () => {
       expect(phase.probeFacts).toHaveLength(1);
     });
 
-    it('独立 diff 命令不再声明支持：退出码 1 走中性失败', () => {
+    it('独立 diff 命令不再声明支持：退出码 1 显示原动作失败', () => {
       let state = reduceProgressPresentation(
         createProgressPresentationState(),
         {
@@ -1430,7 +1441,7 @@ describe('reduceProgressPresentation', () => {
       );
       state = completeWithExit(state, 'd-1', 1);
       expect(state.steps[0].status).toBe('failed');
-      expect(state.steps[0].title).toBe('命令返回非零（退出码 1）');
+      expect(state.steps[0].title).toBe('执行系统检查失败');
     });
   });
 
@@ -1589,7 +1600,7 @@ describe('reduceProgressPresentation', () => {
         exitCode: 1,
       },
     });
-    expect(state.steps[0].title).toBe('测试失败');
+    expect(state.steps[0].title).toBe('运行测试失败');
     expect(state.steps[0].status).toBe('failed');
 
     const unresolved = reduceProgressPresentation(state, { kind: 'turn_end' });

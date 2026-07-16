@@ -1036,6 +1036,55 @@ describe('FeishuChannel', () => {
       expect(entry.steps[0].grayTail).toBe('已读取 /tmp/notes.md');
     });
 
+    it('开局兜底阶段失败后显示原动作与对象，不展示错误详情', async () => {
+      const jid = 'fs:oc_progress_fallback_failed_action';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 Read',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Read',
+            toolCallId: 'read-failed-1',
+            input: { file_path: '/workspace/src/config.ts' },
+          },
+        }),
+        { isProgress: true },
+      );
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '❌ 执行失败',
+          detail: 'Authorization: Bearer should-not-reach-card-123456',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'failed',
+            toolName: 'tool_result',
+            toolCallId: 'read-failed-1',
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const entry = (
+        channel as unknown as {
+          progressCards: Map<
+            string,
+            { steps: Array<{ title: string; grayTail?: string }> }
+          >;
+        }
+      ).progressCards.get(jid);
+      expect(entry).toBeDefined();
+      if (!entry) throw new Error('progress card missing');
+      expect(entry.steps).toHaveLength(1);
+      expect(entry.steps[0].title).toBe('');
+      expect(entry.steps[0].grayTail).toBe(
+        '读取 /workspace/src/config.ts 失败',
+      );
+      expect(JSON.stringify(entry.steps)).not.toContain('should-not-reach-card');
+    });
+
     it('narration Phase 动作独立成行：面板 header 无动作拼接，动作是灰色独立元素', async () => {
       const jid = 'fs:oc_progress_action_line';
       await channel.sendMessage(

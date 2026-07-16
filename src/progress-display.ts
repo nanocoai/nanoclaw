@@ -1047,20 +1047,13 @@ function aggregateOutcome(
   phase: PresentationPhase,
   progress: StructuredProgress,
   status: PresentationStep['status'],
+  actionTitle: string,
   probe?: 'no-match' | 'diff-found',
 ): string {
   // 探测语义已在单步解析，Phase 聚合直接沿用，不重新猜
   if (probe === 'no-match') return '已搜索，无匹配';
   if (probe === 'diff-found') return '已检查，发现差异';
-  if (status === 'failed') {
-    if (phase.categories.includes('test')) return '测试未通过';
-    if (progress.exitCode != null)
-      // lifecycle=failed 是真失败保留原文案；completed 但退出码非零用中性文案
-      return progress.lifecycle === 'failed'
-        ? `命令执行失败（退出码 ${progress.exitCode}）`
-        : `命令返回非零（退出码 ${progress.exitCode}）`;
-    return '执行失败';
-  }
+  if (status === 'failed') return actionTitle;
   if (status === 'cancelled') return '已取消';
   if (status === 'unknown') return '已执行，结果未知';
 
@@ -1218,10 +1211,12 @@ function completedTitle(step: PresentationStep): string {
   return step.title;
 }
 
-function failedTitle(category: ProgressCategory): string {
-  if (category === 'test') return '测试失败';
-  if (category === 'build') return '编译失败';
-  return '执行失败';
+function failedTitle(step: PresentationStep): string {
+  const action = step.title.startsWith('正在')
+    ? step.title.slice('正在'.length).trimStart()
+    : step.title;
+  const separator = /[\x21-\x7e]$/u.test(action) ? ' ' : '';
+  return `${action}${separator}失败`;
 }
 
 function unknownTitle(category: ProgressCategory): string {
@@ -1580,11 +1575,7 @@ export function reduceProgressPresentation(
         : status === 'completed'
           ? completedTitle(step)
           : status === 'failed'
-            ? nonZeroCompleted
-              ? step.category === 'test'
-                ? '测试未通过'
-                : `命令返回非零（退出码 ${exitCode}）`
-              : failedTitle(step.category)
+            ? failedTitle(step)
             : status === 'cancelled'
               ? '已取消'
               : unknownTitle(step.category);
@@ -1623,7 +1614,7 @@ export function reduceProgressPresentation(
       currentAction: runningTool?.title ?? title,
       outcome: hasRunningTool
         ? probedPhase.outcome
-        : aggregateOutcome(probedPhase, progress, phaseStatus, probe),
+        : aggregateOutcome(probedPhase, progress, phaseStatus, title, probe),
     };
   });
   return { ...state, steps, phases };
