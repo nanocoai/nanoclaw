@@ -88,6 +88,20 @@ function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> 
   const model = process.env.OPENCODE_MODEL;
   const smallModel = process.env.OPENCODE_SMALL_MODEL;
   const proxyUrl = process.env.ANTHROPIC_BASE_URL;
+  // For custom providers that aren't OpenCode built-ins (e.g. routing to a
+  // local llama.cpp or any OpenAI-compatible endpoint), OPENCODE_PROVIDER_NPM
+  // names the Vercel AI SDK package OpenCode should use. Common value:
+  // "@ai-sdk/openai-compatible". For built-in ids (anthropic, openai,
+  // openrouter, deepseek, zen) leave unset.
+  const providerNpm = process.env.OPENCODE_PROVIDER_NPM;
+  // Bypass the placeholder-key pattern for endpoints that don't need auth
+  // (bare llama.cpp on a trusted LAN). OneCLI's header injection is then
+  // a no-op for this host and the placeholder is skipped.
+  const noAuth = process.env.OPENCODE_PROVIDER_NO_AUTH === '1';
+  // Env-carried API key for endpoints that aren't routed through OneCLI
+  // (local LiteLLM, self-hosted vLLM, etc.). When set, overrides the
+  // 'placeholder' sentinel that normally signals "OneCLI will inject it."
+  const providerApiKey = process.env.OPENCODE_PROVIDER_API_KEY;
 
   const providerModelId = model ? model.replace(new RegExp(`^${provider}/`), '') : undefined;
   const providerSmallModelId = smallModel ? smallModel.replace(new RegExp(`^${provider}/`), '') : undefined;
@@ -100,7 +114,11 @@ function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> 
       ? {}
       : {
           [provider]: {
-            options: { apiKey: 'placeholder', baseURL: proxyUrl },
+            ...(providerNpm ? { npm: providerNpm } : {}),
+            options: {
+              ...(noAuth ? {} : { apiKey: providerApiKey ?? 'placeholder' }),
+              baseURL: proxyUrl,
+            },
             ...(modelsToRegister.length > 0
               ? {
                   models: Object.fromEntries(
