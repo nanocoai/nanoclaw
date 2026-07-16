@@ -356,3 +356,91 @@ describe('channel + router integration', () => {
     expect((mockAdapter.delivered[0].content as { text: string }).text).toBe('Agent response');
   });
 });
+
+describe('channel registry — startup failure (#3064)', () => {
+  // Fresh module per test: registry + activeAdapters are module-level, and
+  // these arms register adapters whose setup throws.
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    const { teardownChannelAdapters } = await import('./channel-registry.js');
+    await teardownChannelAdapters();
+    vi.resetModules();
+  });
+
+  const mockSetup = () => ({
+    onInbound: () => {},
+    onInboundEvent: () => {},
+    onMetadata: () => {},
+    onAction: () => {},
+  });
+
+  it('throws ChannelAdapterStartupError when a configured adapter fails setup', async () => {
+    const reg = await import('./channel-registry.js');
+    const bad = createMockAdapter('telegram');
+    bad.setup = async () => {
+      throw new Error('bad token');
+    };
+    reg.registerChannelAdapter('telegram', { factory: () => bad });
+
+    await expect(reg.initChannelAdapters(mockSetup)).rejects.toBeInstanceOf(reg.ChannelAdapterStartupError);
+  });
+
+  it('starts healthy adapters and reports only the failed one', async () => {
+    const reg = await import('./channel-registry.js');
+    const healthy = createMockAdapter('slack');
+    const bad = createMockAdapter('telegram');
+    bad.setup = async () => {
+      throw new Error('bad token');
+    };
+    reg.registerChannelAdapter('slack', { factory: () => healthy });
+    reg.registerChannelAdapter('telegram', { factory: () => bad });
+
+    let caught: unknown;
+    try {
+      await reg.initChannelAdapters(mockSetup);
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(reg.ChannelAdapterStartupError);
+    expect((caught as InstanceType<typeof reg.ChannelAdapterStartupError>).channels).toEqual(['telegram']);
+    // The healthy adapter still came up before the aggregate throw.
+    expect(reg.getChannelAdapter('slack')).toBe(healthy);
+  });
+
+  it('does not treat missing credentials (null factory) as a failure', async () => {
+    const reg = await import('./channel-registry.js');
+    reg.registerChannelAdapter('no-creds', { factory: () => null });
+
+    await expect(reg.initChannelAdapters(mockSetup)).resolves.toBeUndefined();
+  });
+
+  it('retries a NetworkError, then throws once the retry budget is spent', async () => {
+    vi.useFakeTimers();
+    const reg = await import('./channel-registry.js');
+    let attempts = 0;
+    const bad = createMockAdapter('telegram');
+    bad.setup = async () => {
+      attempts += 1;
+      const err = new Error('dns hiccup at boot');
+      err.name = 'NetworkError';
+      throw err;
+    };
+    reg.registerChannelAdapter('telegram', { factory: () => bad });
+
+    const settled = reg
+      .initChannelAdapters(mockSetup)
+      .then(() => 'resolved')
+      .catch((err: unknown) => err);
+    await vi.runAllTimersAsync();
+    const result = await settled;
+
+    expect(result).toBeInstanceOf(reg.ChannelAdapterStartupError);
+    // 1 initial attempt + 3 retries (SETUP_RETRY_DELAYS_MS has three entries).
+    expect(attempts).toBe(4);
+  });
+});
