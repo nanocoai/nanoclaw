@@ -164,6 +164,17 @@ async function sweep(): Promise<void> {
   }
   // MODULE-HOOK:approvals-reason-sweep:end
 
+  // Drive the auto-return-to-native probe state machine off the global
+  // fallback_state row. Central-DB scan, once per tick — not per session.
+  // MODULE-HOOK:fallback-return-sweep:start
+  try {
+    const { sweepFallbackReturn } = await import('./modules/fallback/sweep.js');
+    await sweepFallbackReturn();
+  } catch (err) {
+    log.error('Fallback return sweep failed', { err });
+  }
+  // MODULE-HOOK:fallback-return-sweep:end
+
   setTimeout(sweep, SWEEP_INTERVAL_MS);
 }
 
@@ -220,6 +231,19 @@ async function sweepSession(session: Session): Promise<void> {
     }
 
     const alive = isContainerRunning(session.id);
+
+    // 2.5. Response-guarantee check: takes precedence over the generic
+    // retry-with-backoff path below, so an overdue trigger message is
+    // claimed by fallback (provider switch, or double-fault notice) rather
+    // than silently retried past the 10-minute guarantee.
+    // MODULE-HOOK:fallback-session-sweep:start
+    try {
+      const { sweepFallbackSession } = await import('./modules/fallback/sweep.js');
+      await sweepFallbackSession(inDb, outDb, session);
+    } catch (err) {
+      log.error('Fallback session sweep failed', { sessionId: session.id, err });
+    }
+    // MODULE-HOOK:fallback-session-sweep:end
 
     // 3. Running-container SLA: absolute ceiling + per-claim stuck rules.
     // Skip on the same iteration that just woke the container — it hasn't

@@ -386,6 +386,25 @@ async function deliverMessage(
     return;
   }
 
+  // Prepend any pending fallback notice to the first real chat response so
+  // the switch warning arrives alongside the answer, not as a standalone
+  // message before the user has interacted.
+  if (msg.kind === 'chat') {
+    try {
+      const pendingNotice = inDb
+        .prepare('SELECT notice_text FROM fallback_pending_notices WHERE session_id = ?')
+        .get(session.id) as { notice_text: string } | undefined;
+      if (pendingNotice) {
+        content.text = pendingNotice.notice_text + '\n\n' + (content.text || '');
+        msg.content = JSON.stringify(content);
+        inDb.prepare('DELETE FROM fallback_pending_notices WHERE session_id = ?').run(session.id);
+      }
+    } catch {
+      // Table might not exist yet (pre-schema sessions) — ignore, the notice
+      // was already delivered via the immediate fallback path.
+    }
+  }
+
   // Read file attachments from outbox if the content declares files.
   // File I/O lives in session-manager.ts (symmetric with inbound
   // extractAttachmentFiles) — delivery just hands buffers to the adapter.

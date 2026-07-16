@@ -26,6 +26,10 @@ import {
 } from './formatter.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
+import { ProviderLimitError, writeFallbackReport } from './fallback-report.js';
+import { classifyErrorResultText, type LimitClassification } from './limit-detect.js';
+
+const LIMIT_CLASSIFICATIONS = new Set<string>(['quota', 'billing', 'overload'] satisfies LimitClassification[]);
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -249,6 +253,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
+    let limitAbort = false;
     try {
       const result = await processQuery(
         query,
@@ -276,27 +281,59 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuation(config.providerName);
       }
 
-      // Write error response so the user knows something went wrong
-      writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
-      });
+      if (err instanceof ProviderLimitError && (config.providerName === 'claude' || config.providerName === 'mock')) {
+        // Real usage limit on the native provider: no chat "Error:" message
+        // (the switch notice, delivered host-side, replaces it), skip the
+        // final markCompleted below so these rows stay 'processing' — the
+        // host re-presents them to the backup provider without bumping
+        // `tries` — then drain until the host kills this container.
+        limitAbort = true;
+        log(`Provider limit hit (${err.signal.classification}) — reporting to host`);
+        writeFallbackReport({
+          classification: err.signal.classification,
+          resetAt: err.signal.resetAt,
+          message: err.signal.message,
+          provider: config.providerName,
+          messageIds: processingIds,
+        });
+        while (!config.signal?.aborted) {
+          await sleep(1000);
+        }
+      } else {
+        // Write error response so the user knows something went wrong.
+        // Also fire a `provider_error` system action alongside it — the
+        // fallback module uses it to detect a failed return probe or a
+        // double-fault (backup provider also failing) without a second
+        // chat message (this one already closes the turn out).
+        writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        });
+        writeMessageOut({
+          id: generateId(),
+          kind: 'system',
+          content: JSON.stringify({ action: 'provider_error', provider: config.providerName, message: errMsg }),
+        });
 
-      // The batch is still acked completed below (no redelivery). Without
-      // this line the only log trace of the errored turn is "Query error"
-      // followed by a "Completed" line that reads like success.
-      log(`Errored batch will be acked completed — ${processingIds.length} message(s), no redelivery`);
+        // The batch is still acked completed below (no redelivery). Without
+        // this line the only log trace of the errored turn is "Query error"
+        // followed by a "Completed" line that reads like success.
+        log(`Errored batch will be acked completed — ${processingIds.length} message(s), no redelivery`);
+      }
     } finally {
       clearCurrentInReplyTo();
     }
 
     // Ensure completed even if processQuery ended without a result event
-    // (e.g. stream closed unexpectedly).
-    markCompleted(processingIds);
+    // (e.g. stream closed unexpectedly). Skipped on a limit-abort — those
+    // rows must stay 'processing' for the host to re-present them.
+    if (!limitAbort) {
+      markCompleted(processingIds);
+    }
     log(`Completed ${ids.length} message(s)`);
   }
 }
@@ -493,7 +530,31 @@ export async function processQuery(
         // effectively orphaned and the next message started a blank
         // Claude session with no prior context.
         setContinuation(providerName, event.continuation);
+      } else if (
+        event.type === 'error' &&
+        !event.retryable &&
+        event.classification &&
+        LIMIT_CLASSIFICATIONS.has(event.classification)
+      ) {
+        // A real usage limit (quota/billing/overload), not a transient
+        // per-minute rate limit — abort the stream and let the outer catch
+        // report it to the host instead of retrying forever.
+        query.abort();
+        throw new ProviderLimitError(
+          {
+            classification: event.classification as LimitClassification,
+            resetAt: event.resetAt ?? null,
+            message: event.message,
+          },
+          providerName,
+        );
       } else if (event.type === 'result') {
+        if (event.isError === true && event.text) {
+          const billingSignal = classifyErrorResultText(event.text);
+          if (billingSignal) {
+            throw new ProviderLimitError(billingSignal, providerName);
+          }
+        }
         // A result — with or without text — means the turn is done. Mark
         // the initial batch completed now so the host sweep doesn't see
         // stale 'processing' claims while the query stays open for

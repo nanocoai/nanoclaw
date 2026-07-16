@@ -481,6 +481,22 @@ async function deliverToAgent(
     threadId: effectiveThreadId,
   };
 
+  // Owner-only /fallback command — handled entirely host-side (status/force/
+  // return) so it works even when the native provider is dead. Runs before
+  // the command gate below since it isn't an admin-command-gate case, it's a
+  // fully separate command namespace.
+  // MODULE-HOOK:fallback-command:start
+  if (event.message.kind === 'chat' || event.message.kind === 'chat-sdk') {
+    try {
+      const { interceptFallbackCommand } = await import('./modules/fallback/commands.js');
+      const handled = await interceptFallbackCommand(event.message.content, userId, session, deliveryAddr);
+      if (handled) return;
+    } catch (err) {
+      log.error('Fallback command interceptor failed', { agentGroupId: agent.agent_group_id, err });
+    }
+  }
+  // MODULE-HOOK:fallback-command:end
+
   // Command gate: classify slash commands before they reach the container.
   // Filtered commands are dropped silently. Denied admin commands get a
   // permission-denied response written directly to messages_out.

@@ -5,6 +5,7 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
+import { classifyRateLimitEvent, classifyRetryStreak } from '../limit-detect.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { registerProvider } from './provider-registry.js';
@@ -519,12 +520,22 @@ export class ClaudeProvider implements AgentProvider {
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
+      // Tracks consecutive api_retry system events with no intervening
+      // progress — a long streak means the SDK's own retry loop can't get
+      // through (persistent overload), not a transient blip.
+      let retryStreak = 0;
+      let retryStreakFirstAt = 0;
       for await (const message of sdkResult) {
         if (aborted) return;
         messageCount++;
 
         // Yield activity for every SDK event so the poll loop knows the agent is working
         yield { type: 'activity' };
+
+        const subtype = message.type === 'system' ? (message as { subtype?: string }).subtype : undefined;
+        if (subtype !== 'api_retry') {
+          retryStreak = 0;
+        }
 
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };
@@ -536,10 +547,35 @@ export class ClaudeProvider implements AgentProvider {
           const m = message as { result?: string; is_error?: boolean; errors?: string[] };
           const text = m.result ?? (m.errors && m.errors.length > 0 ? m.errors.join('\n') : null);
           yield { type: 'result', text, isError: m.is_error === true };
-        } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
-          yield { type: 'error', message: 'API retry', retryable: true };
+        } else if (subtype === 'api_retry') {
+          if (retryStreak === 0) retryStreakFirstAt = Date.now();
+          retryStreak++;
+          const overload = classifyRetryStreak(retryStreak, retryStreakFirstAt, Date.now());
+          if (overload) {
+            yield {
+              type: 'error',
+              message: overload.message,
+              retryable: false,
+              classification: overload.classification,
+              resetAt: overload.resetAt,
+            };
+          } else {
+            yield { type: 'error', message: 'API retry', retryable: true };
+          }
         } else if (message.type === 'rate_limit_event') {
-          yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
+          const rateInfo = (message as { rate_limit_info?: unknown }).rate_limit_info;
+          if (rateInfo && typeof rateInfo === 'object') {
+            const signal = classifyRateLimitEvent(rateInfo);
+            if (signal) {
+              yield {
+                type: 'error',
+                message: signal.message,
+                retryable: false,
+                classification: signal.classification,
+                resetAt: signal.resetAt,
+              };
+            }
+          }
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
           const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';

@@ -34,6 +34,7 @@ import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
+import { applyProviderOverride } from './provider-override.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
 import './providers/index.js';
@@ -135,7 +136,7 @@ async function spawnContainer(session: Session): Promise<void> {
   // idempotent: it only writes paths that don't already exist, so this call
   // is a no-op for groups that have spawned before. Runs before the provider
   // contribution so a surfaces-providing provider finds the group dir ready.
-  const providerName = resolveProviderName(session.agent_provider, containerConfig.provider);
+  const providerName = applyProviderOverride(resolveProviderName(session.agent_provider, containerConfig.provider));
   initGroupFilesystem(agentGroup, { provider: providerName });
 
   // Resolve the effective provider + any host-side contribution it declares
@@ -250,7 +251,7 @@ function resolveProviderContribution(
   agentGroup: AgentGroup,
   containerConfig: import('./container-config.js').ContainerConfig,
 ): { provider: string; contribution: ProviderContainerContribution } {
-  const provider = resolveProviderName(session.agent_provider, containerConfig.provider);
+  const provider = applyProviderOverride(resolveProviderName(session.agent_provider, containerConfig.provider));
   const fn = getProviderContainerConfig(provider);
   const contribution = fn
     ? fn({
@@ -452,6 +453,15 @@ async function buildContainerArgs(
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Passthrough MOCK_PROVIDER_FAIL / MOCK_RESET_AT from host env so the mock
+  // provider can simulate usage-limit failures in fallback integration tests.
+  // Only forwarded in non-production environments to prevent accidental
+  // test-mode contamination.
+  if (process.env.NODE_ENV !== 'production' && process.env.MOCK_PROVIDER_FAIL)
+    args.push('-e', `MOCK_PROVIDER_FAIL=${process.env.MOCK_PROVIDER_FAIL}`);
+  if (process.env.NODE_ENV !== 'production' && process.env.MOCK_RESET_AT)
+    args.push('-e', `MOCK_RESET_AT=${process.env.MOCK_RESET_AT}`);
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {

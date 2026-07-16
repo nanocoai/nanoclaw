@@ -129,7 +129,7 @@ export type ProviderEvent =
    * dropping it as un-wrapped scratchpad, and to skip the re-wrap nudge.
    */
   | { type: 'result'; text: string | null; isError?: boolean }
-  | { type: 'error'; message: string; retryable: boolean; classification?: string }
+  | { type: 'error'; message: string; retryable: boolean; classification?: string; resetAt?: number | null }
   | { type: 'progress'; message: string }
   /**
    * Liveness signal. Providers MUST yield this on every underlying SDK

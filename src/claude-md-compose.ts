@@ -20,6 +20,7 @@ import { GROUPS_DIR } from './config.js';
 import type { McpServerConfig } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { readGroupPersona } from './group-persona.js';
+import { FALLBACK_FRAGMENT_NAME } from './modules/fallback/fragment.js';
 import type { AgentGroup } from './types.js';
 
 // Fragment holding a template's persona prepend. Imported FIRST (before the
@@ -116,6 +117,18 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
   const persona = readGroupPersona(groupDir);
   if (persona) {
     desired.set(PERSONA_FRAGMENT, { type: 'inline', content: persona });
+  }
+
+  // The fallback module writes its degradation-notice fragment straight to
+  // disk (not through this compose step) because non-Claude providers read
+  // fragments via glob, not the composed CLAUDE.md. Preserve it here the same
+  // way persona.md is preserved, or the prune below would delete it on the
+  // next spawn while fallback is still active. Tier inversion (this file has
+  // no other module dependency) — same precedent as approvals/primitive.ts
+  // importing from the permissions module.
+  const fallbackFragmentPath = path.join(fragmentsDir, FALLBACK_FRAGMENT_NAME);
+  if (fs.existsSync(fallbackFragmentPath)) {
+    desired.set(FALLBACK_FRAGMENT_NAME, { type: 'inline', content: fs.readFileSync(fallbackFragmentPath, 'utf-8') });
   }
 
   // Reconcile: drop stale, write desired.

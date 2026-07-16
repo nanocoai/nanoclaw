@@ -224,6 +224,13 @@ CREATE TABLE IF NOT EXISTS session_routing (
   platform_id  TEXT,
   thread_id    TEXT
 );
+
+-- Pending fallback switch notice. Host writes when entering fallback mode;
+-- delivery poll prepends it to the first real chat response and deletes it.
+CREATE TABLE IF NOT EXISTS fallback_pending_notices (
+  session_id  TEXT PRIMARY KEY,
+  notice_text TEXT NOT NULL
+);
 `;
 
 /** Container-owned: outbound messages + processing acknowledgments. */

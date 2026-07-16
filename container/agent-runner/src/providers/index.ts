@@ -3,3 +3,5 @@
 // level. Skills add a new provider by appending one import line below.
 
 import './claude.js';
+import './mock.js';
+import './ollama.js';

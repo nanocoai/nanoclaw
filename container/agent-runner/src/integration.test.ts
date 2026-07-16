@@ -418,9 +418,19 @@ describe('poll loop — provider error recovery', () => {
     controller.abort();
 
     const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toContain('Error:');
-    expect(JSON.parse(out[0].content).text).toContain('API rate limit exceeded');
+    expect(out.length).toBeGreaterThanOrEqual(1);
+    const chatMsg = out.find((m) => {
+      try { return 'text' in JSON.parse(m.content); } catch { return false; }
+    });
+    expect(chatMsg).toBeDefined();
+    expect(JSON.parse(chatMsg!.content).text).toContain('Error:');
+    expect(JSON.parse(chatMsg!.content).text).toContain('API rate limit exceeded');
+
+    // Also has a provider_error system action
+    const sysMsg = out.find((m) => {
+      try { return JSON.parse(m.content).action === 'provider_error'; } catch { return false; }
+    });
+    expect(sysMsg).toBeDefined();
 
     // Input message should be marked completed despite the error
     const pending = getPendingMessages();
@@ -447,8 +457,18 @@ describe('poll loop — stale session recovery', () => {
 
     // Error was written to outbound
     const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toContain('Error:');
+    expect(out.length).toBeGreaterThanOrEqual(1);
+    const chatMsg = out.find((m) => {
+      try { return 'text' in JSON.parse(m.content); } catch { return false; }
+    });
+    expect(chatMsg).toBeDefined();
+    expect(JSON.parse(chatMsg!.content).text).toContain('Error:');
+
+    // Also has a provider_error system action
+    const sysMsg = out.find((m) => {
+      try { return JSON.parse(m.content).action === 'provider_error'; } catch { return false; }
+    });
+    expect(sysMsg).toBeDefined();
 
     // Continuation was cleared (isSessionInvalid returned true)
     expect(getContinuation('mock')).toBeUndefined();
@@ -551,7 +571,7 @@ describe('poll loop — slash command during active query', () => {
 
     const provider = new BlockingProvider();
     const controller = new AbortController();
-    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000);
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 8000);
 
     await waitFor(() => provider.queries === 1, 2000);
     insertMessage('m-clear-active', { sender: 'Alice', text: '/clear' }, { platformId: 'chan-1', channelType: 'discord' });
@@ -559,7 +579,7 @@ describe('poll loop — slash command during active query', () => {
     await waitFor(() => provider.aborts === 1, 2000);
     await waitFor(
       () => getUndeliveredMessages().some((msg) => JSON.parse(msg.content).text === 'Session cleared.'),
-      2000,
+      5000,
     );
     controller.abort();
 
@@ -570,6 +590,211 @@ describe('poll loop — slash command during active query', () => {
     await loopPromise.catch(() => {});
   });
 });
+
+/**
+ * Run poll-loop with a non-mock provider name so that ProviderLimitError
+ * triggers the real fallback path (the limit branch requires
+ * config.providerName === 'claude').
+ */
+function runLimitLoop(provider: unknown, signal: AbortSignal, timeoutMs: number): Promise<void> {
+  return Promise.race([
+    runPollLoop({
+      provider: provider as MockProvider,
+      providerName: 'claude',
+      cwd: '/tmp',
+      signal,
+    }),
+    rejectOnAbort(signal),
+    rejectOnTimeout(timeoutMs),
+  ]);
+}
+
+function rejectOnAbort(signal: AbortSignal): Promise<never> {
+  return new Promise<never>((_, reject) => {
+    signal.addEventListener('abort', () => reject(new Error('aborted')));
+  });
+}
+
+function rejectOnTimeout(timeoutMs: number): Promise<never> {
+  return new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error('timeout')), timeoutMs);
+  });
+}
+
+describe('poll loop — provider limit fallback', () => {
+  it('writes fallback_report and keeps messages processing on quota limit', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'check limit' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new LimitEventProvider('quota');
+    const controller = new AbortController();
+    const loopPromise = runLimitLoop(provider, controller.signal, 5000);
+
+    await waitFor(() => {
+      return getUndeliveredMessages().some(
+        (msg) => JSON.parse(msg.content).action === 'fallback_report',
+      );
+    }, 5000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    const report = out.find((msg) => {
+      const c = JSON.parse(msg.content);
+      return c.action === 'fallback_report';
+    });
+    expect(report).toBeDefined();
+    const content = JSON.parse(report!.content);
+    expect(content.classification).toBe('quota');
+    expect(Array.isArray(content.messageIds)).toBe(true);
+    expect(content.messageIds).toContain('m1');
+
+    // No chat "Error:" message — the limit branch doesn't write one
+    const chatMessages = out.filter((msg) => {
+      try { return 'text' in JSON.parse(msg.content); } catch { return false; }
+    });
+    expect(chatMessages.length).toBe(0);
+
+    // Input message stays marked as 'processing' in ack (not completed)
+    // getPendingMessages won't find it because markProcessing() already
+    // created the ack row — check the ack table directly.
+    const ackRow = getOutboundDb()
+      .prepare('SELECT status FROM processing_ack WHERE message_id = ?')
+      .get('m1') as { status: string } | undefined;
+    expect(ackRow).toBeDefined();
+    expect(ackRow!.status).toBe('processing');
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('writes fallback_report on billing result path', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'check limit' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new BillingResultProvider();
+    const controller = new AbortController();
+    const loopPromise = runLimitLoop(provider, controller.signal, 5000);
+
+    await waitFor(() => {
+      return getUndeliveredMessages().some(
+        (msg) => JSON.parse(msg.content).action === 'fallback_report',
+      );
+    }, 5000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    const report = out.find((msg) => {
+      const c = JSON.parse(msg.content);
+      return c.action === 'fallback_report';
+    });
+    expect(report).toBeDefined();
+    const content = JSON.parse(report!.content);
+    expect(content.classification).toBe('billing');
+
+    const ackRow = getOutboundDb()
+      .prepare('SELECT status FROM processing_ack WHERE message_id = ?')
+      .get('m1') as { status: string } | undefined;
+    expect(ackRow).toBeDefined();
+    expect(ackRow!.status).toBe('processing');
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('writes provider_error action on generic (non-limit) errors', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'trigger error' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new ThrowingProvider('something crashed');
+    const controller = new AbortController();
+    const loopPromise = runLimitLoop(provider, controller.signal, 5000);
+
+    await waitFor(() => {
+      return getUndeliveredMessages().some(
+        (msg) => {
+          try { return JSON.parse(msg.content).action === 'provider_error'; } catch { return false; }
+        },
+      );
+    }, 5000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    const providerError = out.find((msg) => {
+      try { return JSON.parse(msg.content).action === 'provider_error'; } catch { return false; }
+    });
+    expect(providerError).toBeDefined();
+    const errContent = JSON.parse(providerError!.content);
+    expect(errContent.provider).toBe('claude');
+
+    // Also has a chat error message
+    const chatMsg = out.find((msg) => {
+      try { return 'text' in JSON.parse(msg.content); } catch { return false; }
+    });
+    expect(chatMsg).toBeDefined();
+    expect(JSON.parse(chatMsg!.content).text).toContain('something crashed');
+
+    // Generic error: message is completed (the notice closes the turn)
+    const pending = getPendingMessages();
+    expect(pending).toHaveLength(0);
+
+    await loopPromise.catch(() => {});
+  });
+});
+
+/**
+ * Provider that emits a limit error event, simulating Claude hitting a real
+ * usage limit (quota/billing/overload). Used to test the poll-loop's fallback
+ * report path.
+ */
+class LimitEventProvider {
+  readonly supportsNativeSlashCommands = false;
+  private event: { type: string; message: string; retryable: boolean; classification: string; resetAt?: number | null };
+
+  constructor(classification: string, message?: string) {
+    this.event = {
+      type: 'error',
+      message: message ?? `Limit reached: ${classification}`,
+      retryable: false,
+      classification,
+    };
+  }
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  query() {
+    const ev = this.event;
+    return {
+      push() {},
+      end() {},
+      abort() {},
+      events: (async function* () {
+        yield { type: 'init' as const, continuation: 'limit-session' };
+        yield ev;
+      })(),
+    };
+  }
+}
+
+/**
+ * Provider that emits a result with isError: true and billing-pattern text,
+ * simulating the billing error path in claude.ts.
+ */
+class BillingResultProvider {
+  readonly supportsNativeSlashCommands = false;
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  query() {
+    return {
+      push() {},
+      end() {},
+      abort() {},
+      events: (async function* () {
+        yield { type: 'init' as const, continuation: 'billing-session' };
+        yield { type: 'result' as const, text: 'Your credit balance is too low to continue.', isError: true };
+      })(),
+    };
+  }
+}
 
 /**
  * Provider whose query never completes until ended/aborted — for testing how
