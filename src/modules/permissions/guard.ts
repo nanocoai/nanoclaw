@@ -5,11 +5,10 @@
  * senders.admit — the `unknown_sender_policy` switch moved verbatim out of
  * handleUnknownSender: `public` allows (short-circuited before the gate
  * anyway), `request_approval` holds, `strict` denies. The hold is executed by
- * the caller through the module's own pending_sender_approvals flow (card,
- * in-flight dedup) — not the approvals primitive — so this entry has no
- * grantActionName: the approve continuation adds the member and replays
- * routeInbound, which then passes the gate structurally via membership, no
- * grant needed.
+ * the caller through the approvals primitive's sessionless `sender_admit`
+ * hold. This entry has no grantActionName: the approve continuation adds the
+ * member and replays routeInbound, which then passes the gate structurally
+ * via membership, no grant needed.
  *
  * channels.register — click authorization for the channel-registration flow,
  * verbatim from today's response handler: the delivered approver, or an
@@ -20,8 +19,8 @@
  * completes the flow.
  */
 import { ALLOW, DENY, HOLD, defineGuardedAction } from '../../guard/index.js';
+import { mayResolve } from '../approvals/approver-rule.js';
 import { getPendingChannelApproval } from './db/pending-channel-approvals.js';
-import { hasAdminPrivilege } from './db/user-roles.js';
 
 export const sendersAdmit = defineGuardedAction({
   action: 'senders.admit',
@@ -45,8 +44,14 @@ export const channelsRegister = defineGuardedAction({
     const row = getPendingChannelApproval(questionId);
     if (!row) return DENY(`no pending channel registration for ${questionId || '(missing questionId)'}`);
     if (
-      input.actor.userId &&
-      (input.actor.userId === row.approver_user_id || hasAdminPrivilege(input.actor.userId, row.agent_group_id))
+      mayResolve(
+        {
+          kind: 'admins-of-scope',
+          agentGroupId: row.agent_group_id,
+          deliveredTo: row.approver_user_id,
+        },
+        input.actor.userId,
+      )
     ) {
       return ALLOW('delivered approver or anchor-group admin');
     }

@@ -484,7 +484,21 @@ export function registerDeliveryAction(
  * same line that registers the action.
  */
 export function reenterGuardedDeliveryAction(action: string) {
-  return async (ctx: { session: Session; payload: Record<string, unknown>; approval: PendingApproval }) => {
+  return async (ctx: {
+    session: Session | null;
+    payload: Record<string, unknown>;
+    approval: PendingApproval;
+  }): Promise<void> => {
+    // Guard-wrapped delivery actions originate from an agent session. A
+    // sessionless hold carrying one of their action names is malformed and
+    // must never reach the privileged handler body.
+    if (!ctx.session) {
+      log.warn('Approved replay for a session-bound action had no session — dropping', {
+        action,
+        approvalId: ctx.approval.approval_id,
+      });
+      return;
+    }
     const entry = deliveryActions.get(action);
     if (!entry || isUnguardedEntry(entry)) {
       log.warn('Approved replay for an action that is not guard-wrapped — dropping', { action });

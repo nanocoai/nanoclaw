@@ -110,10 +110,17 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
        VALUES (?, ?, 'req-1', 'cli_command', '{}', ?, ?, 'pending', '', '[]')`,
     ).run('pa-1', SID, now(), GID);
 
+    // Sessionless sender-admission hold anchored to the group. Its one-to-one
+    // detail row must follow the master hold through deletion.
     db.prepare(
-      `INSERT INTO pending_sender_approvals (id, messaging_group_id, agent_group_id, sender_identity, sender_name, original_message, approver_user_id, created_at)
-       VALUES ('psa-1', ?, ?, 'tg:99', 'them', '{}', ?, ?)`,
-    ).run(MGID, GID, UID, now());
+      `INSERT INTO pending_approvals (approval_id, session_id, request_id, action, payload, created_at, agent_group_id, status, title, options_json, dedup_key)
+       VALUES (?, NULL, 'req-2', 'sender_admit', '{}', ?, ?, 'pending', '', '[]', 'sender_admit:mg:tg:99')`,
+    ).run('pa-2', now(), GID);
+    db.prepare(
+      `INSERT INTO pending_sender_approval_details
+         (approval_id, messaging_group_id, sender_identity, sender_name, original_message)
+       VALUES ('pa-2', ?, 'tg:99', 'Sender', '{}')`,
+    ).run(MGID);
 
     db.prepare(
       `INSERT INTO pending_channel_approvals (messaging_group_id, agent_group_id, original_message, approver_user_id, created_at)
@@ -149,10 +156,9 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
     expect(data.removed).toMatchObject({
       sessions: 1,
       pending_questions: 1,
-      pending_approvals: 1,
+      pending_approvals: 2,
       agent_destinations_owned: 1,
       agent_destinations_pointing: 0,
-      pending_sender_approvals: 1,
       pending_channel_approvals: 1,
       messaging_group_agents: 1,
       agent_group_members: 1,
@@ -167,8 +173,8 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
     expect(
       count('SELECT COUNT(*) AS c FROM pending_approvals WHERE agent_group_id = ? OR session_id = ?', GID, SID),
     ).toBe(0);
+    expect(count('SELECT COUNT(*) AS c FROM pending_sender_approval_details WHERE approval_id = ?', 'pa-2')).toBe(0);
     expect(count('SELECT COUNT(*) AS c FROM agent_destinations WHERE agent_group_id = ?', GID)).toBe(0);
-    expect(count('SELECT COUNT(*) AS c FROM pending_sender_approvals WHERE agent_group_id = ?', GID)).toBe(0);
     expect(count('SELECT COUNT(*) AS c FROM pending_channel_approvals WHERE agent_group_id = ?', GID)).toBe(0);
     expect(count('SELECT COUNT(*) AS c FROM messaging_group_agents WHERE agent_group_id = ?', GID)).toBe(0);
     expect(count('SELECT COUNT(*) AS c FROM agent_group_members WHERE agent_group_id = ?', GID)).toBe(0);

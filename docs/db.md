@@ -105,7 +105,10 @@ These rules are enforced by convention in `src/session-manager.ts` and `containe
 | `sessions` | central | `src/db/sessions.ts`, `src/session-manager.ts` | delivery, sweep, container runner |
 | `pending_questions` | central | `src/db/sessions.ts` (via `ask_user_question`) | container response matcher |
 | `agent_destinations` | central | `src/db/agent-destinations.ts`, migration 004 backfill | `writeDestinations()`, delivery ACL |
-| `pending_approvals` | central | `src/db/sessions.ts`, `src/onecli-approvals.ts` | admin-card delivery, sweep |
+| `pending_approvals` | central | `src/db/sessions.ts`, `src/modules/approvals/onecli-approvals.ts` | common approval lifecycle, admin-card delivery, sweep |
+| `pending_sender_approval_details` | central | permissions sender-admission flow | sender continuation and structured pending-hold queries |
+| `pending_channel_approvals` | central | permissions channel-registration flow | multi-step registration continuation |
+| `approval_holds` (view) | central | migrations (read-only union) | `ncl approvals list|get` |
 | `unregistered_senders` | central | `src/db/dropped-messages.ts` | ops tooling |
 | `chat_sdk_*` | central | `src/state-sqlite.ts` | Chat SDK bridge |
 | `schema_version` | central | `src/db/migrations/index.ts` | migration runner |

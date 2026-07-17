@@ -24,7 +24,7 @@ import type { Session } from '../../types.js';
 import { upsertUser } from '../permissions/db/users.js';
 import { upsertUserDm } from '../permissions/db/user-dms.js';
 import { grantRole } from '../permissions/db/user-roles.js';
-import { requestApproval } from './primitive.js';
+import { registerApprovalRequestedHandler, requestApproval } from './primitive.js';
 
 vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
@@ -105,7 +105,37 @@ function lastNotifyText(): string | undefined {
 }
 
 describe('requestApproval delivery failure', () => {
+  it('rolls back the master row when action-specific detail persistence fails', async () => {
+    const deliver = vi.fn().mockResolvedValue('pm-1');
+    const requested: string[] = [];
+    registerApprovalRequestedHandler(({ approval }) => {
+      if (approval.action === 'test_detail_failure') requested.push(approval.approval_id);
+    });
+    setDeliveryAdapter({ deliver });
+
+    await requestApproval({
+      session,
+      agentName: 'Agent',
+      action: 'test_detail_failure',
+      payload: { key: 'value' },
+      title: 'Test Approval',
+      question: 'Approve the thing?',
+      persistDetails: () => {
+        throw new Error('detail insert failed');
+      },
+    });
+
+    expect(getPendingApprovalsByAction('test_detail_failure')).toHaveLength(0);
+    expect(deliver).not.toHaveBeenCalled();
+    expect(requested).toHaveLength(0);
+    expect(lastNotifyText()).toMatch(/test_detail_failure failed: could not persist approval request/);
+  });
+
   it('removes the pending approval row and notifies the agent when delivery throws', async () => {
+    const requested: string[] = [];
+    registerApprovalRequestedHandler(({ approval }) => {
+      if (approval.action === 'test_delivery_failure') requested.push(approval.approval_id);
+    });
     const failingAdapter: ChannelDeliveryAdapter = {
       async deliver() {
         throw new Error('platform down');
@@ -116,15 +146,16 @@ describe('requestApproval delivery failure', () => {
     await requestApproval({
       session,
       agentName: 'Agent',
-      action: 'test_action',
+      action: 'test_delivery_failure',
       payload: { key: 'value' },
       title: 'Test Approval',
       question: 'Approve the thing?',
     });
 
     // No orphan: the row created before the delivery attempt is gone.
-    expect(getPendingApprovalsByAction('test_action')).toHaveLength(0);
-    expect(lastNotifyText()).toMatch(/test_action failed: could not deliver/);
+    expect(getPendingApprovalsByAction('test_delivery_failure')).toHaveLength(0);
+    expect(requested).toHaveLength(0);
+    expect(lastNotifyText()).toMatch(/test_delivery_failure failed: could not deliver/);
   });
 
   it('keeps the pending approval row when delivery succeeds', async () => {

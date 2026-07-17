@@ -204,4 +204,80 @@ describe('approval response authorization', () => {
     expect(handler).toHaveBeenCalledTimes(1);
     expect(getPendingApproval('appr-4')).toBeUndefined();
   });
+
+  it('announces a terminal sweep when a restarted OneCLI hold has no live continuation', async () => {
+    upsertUser({ id: 'telegram:owner', kind: 'telegram', display_name: 'Owner', created_at: now() });
+    grantRole({ user_id: 'telegram:owner', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now() });
+
+    const { ONECLI_ACTION } = await import('./onecli-approvals.js');
+    const { registerApprovalResolvedHandler } = await import('./primitive.js');
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    const outcomes: string[] = [];
+    registerApprovalResolvedHandler(({ approval, outcome }) => {
+      if (approval.approval_id === 'oa-stale') outcomes.push(outcome);
+    });
+    createPendingApproval({
+      approval_id: 'oa-stale',
+      session_id: null,
+      agent_group_id: 'ag-1',
+      request_id: 'onecli-request-1',
+      action: ONECLI_ACTION,
+      payload: JSON.stringify({}),
+      created_at: now(),
+      title: 'Credentials Request',
+      options_json: JSON.stringify([]),
+    });
+
+    const claimed = await handleApprovalsResponse({
+      questionId: 'oa-stale',
+      value: 'approve',
+      userId: 'owner',
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+    });
+
+    expect(claimed).toBe(true);
+    expect(getPendingApproval('oa-stale')).toBeUndefined();
+    expect(outcomes).toEqual(['sweep']);
+  });
+
+  it('does not double-resolve a OneCLI hold already claimed by expiry', async () => {
+    upsertUser({ id: 'telegram:owner', kind: 'telegram', display_name: 'Owner', created_at: now() });
+    grantRole({ user_id: 'telegram:owner', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now() });
+
+    const { ONECLI_ACTION } = await import('./onecli-approvals.js');
+    const { registerApprovalResolvedHandler } = await import('./primitive.js');
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    const outcomes: string[] = [];
+    registerApprovalResolvedHandler(({ approval, outcome }) => {
+      if (approval.approval_id === 'oa-expiring') outcomes.push(outcome);
+    });
+    createPendingApproval({
+      approval_id: 'oa-expiring',
+      session_id: null,
+      agent_group_id: 'ag-1',
+      request_id: 'onecli-request-2',
+      action: ONECLI_ACTION,
+      payload: JSON.stringify({}),
+      created_at: now(),
+      status: 'expired',
+      title: 'Credentials Request',
+      options_json: JSON.stringify([]),
+    });
+
+    const claimed = await handleApprovalsResponse({
+      questionId: 'oa-expiring',
+      value: 'approve',
+      userId: 'owner',
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+    });
+
+    expect(claimed).toBe(true);
+    // The in-flight expiry/sweep path still owns cleanup and notification.
+    expect(getPendingApproval('oa-expiring')).toBeDefined();
+    expect(outcomes).toEqual([]);
+  });
 });

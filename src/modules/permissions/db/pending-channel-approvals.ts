@@ -23,10 +23,10 @@ export interface PendingChannelApproval {
   options_json: string;
 }
 
-export function createPendingChannelApproval(row: PendingChannelApproval): void {
-  getDb()
+export function createPendingChannelApproval(row: PendingChannelApproval): boolean {
+  const result = getDb()
     .prepare(
-      `INSERT INTO pending_channel_approvals (
+      `INSERT OR IGNORE INTO pending_channel_approvals (
          messaging_group_id, agent_group_id, original_message,
          approver_user_id, created_at, title, options_json
        )
@@ -36,6 +36,7 @@ export function createPendingChannelApproval(row: PendingChannelApproval): void 
        )`,
     )
     .run(row);
+  return result.changes > 0;
 }
 
 export function getPendingChannelApproval(messagingGroupId: string): PendingChannelApproval | undefined {

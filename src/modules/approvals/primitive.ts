@@ -23,7 +23,14 @@
  */
 import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
-import { createPendingApproval, deletePendingApproval, getSession } from '../../db/sessions.js';
+import { getDb } from '../../db/connection.js';
+import {
+  createPendingApproval,
+  deletePendingApproval,
+  getPendingApproval,
+  getPendingApprovalByDedupKey,
+  getSession,
+} from '../../db/sessions.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { wakeContainer } from '../../container-runner.js';
 import { log } from '../../log.js';
@@ -57,7 +64,8 @@ const APPROVAL_OPTIONS: RawOption[] = [
 // their `requestApproval()` calls.
 
 export interface ApprovalHandlerContext {
-  session: Session;
+  /** Requesting agent's session. Null for sessionless holds (e.g. sender admission). */
+  session: Session | null;
   payload: Record<string, unknown>;
   /**
    * The verified approval row — the grant an approved continuation carries
@@ -67,7 +75,7 @@ export interface ApprovalHandlerContext {
   approval: PendingApproval;
   /** User ID of the admin who approved. Empty string if unknown. */
   userId: string;
-  /** Send a system chat message to the requesting agent's session. */
+  /** Send a system chat message to the requesting agent's session. No-op when sessionless. */
   notify: (text: string) => void;
 }
 
@@ -94,14 +102,20 @@ export function getApprovalHandler(action: string): ApprovalHandler | undefined 
 // out. Callback errors are logged and isolated; they never block resolution.
 //
 // Only authorized clicks resolve an approval (the response handler's
-// isAuthorizedApprovalClick gate runs first), so callbacks never fire for
-// unauthorized responses.
+// mayResolve gate runs first), so callbacks never fire for unauthorized
+// responses. Non-click resolutions (OneCLI expiry timers, the boot sweep)
+// announce here too, with outcome 'expire' / 'sweep'.
 
 export interface ApprovalResolvedEvent {
+  /**
+   * The resolved hold. For holds that live outside pending_approvals
+   * (channel registration) this is a synthesized view of the same shape.
+   */
   approval: PendingApproval;
-  session: Session;
-  outcome: 'approve' | 'reject';
-  /** Namespaced user ID (`<channel>:<handle>`) of the resolving admin. Empty string if unknown. */
+  /** Requesting agent's session; null for sessionless holds (sender admission, OneCLI, channel registration). */
+  session: Session | null;
+  outcome: 'approve' | 'reject' | 'expire' | 'sweep';
+  /** Namespaced user ID (`<channel>:<handle>`) of the resolving admin. Empty string if unknown (expiry/sweep). */
   userId: string;
 }
 
@@ -124,6 +138,51 @@ export async function notifyApprovalResolved(event: ApprovalResolvedEvent): Prom
         approvalId: event.approval.approval_id,
         action: event.approval.action,
         outcome: event.outcome,
+        err,
+      });
+    }
+  }
+}
+
+// ── Approval-requested callbacks ──
+// The creation-side sibling of the resolved observer: fires once whenever a
+// delivered hold becomes externally actionable, whichever stack created it —
+// requestApproval (cli_command, create_agent, self-mod, a2a, sender
+// admission), the OneCLI credential bridge (its own rows, ids and card), and
+// channel registration (as a synthesized hold view). Together with
+// notifyApprovalResolved this gives observers the full hold lifecycle with
+// zero touch points inside the flows.
+
+export interface ApprovalRequestedEvent {
+  /**
+   * The created hold. For holds that live outside pending_approvals
+   * (channel registration) this is a synthesized view of the same shape.
+   */
+  approval: PendingApproval;
+  /** Requesting agent's session; null for sessionless holds (sender admission, OneCLI, channel registration). */
+  session: Session | null;
+  /** Namespaced user ID (`<channel>:<handle>`) of the approver the card was delivered to. */
+  deliveredTo: string;
+}
+
+export type ApprovalRequestedHandler = (event: ApprovalRequestedEvent) => Promise<void> | void;
+
+const approvalRequestedHandlers: ApprovalRequestedHandler[] = [];
+
+export function registerApprovalRequestedHandler(handler: ApprovalRequestedHandler): void {
+  approvalRequestedHandlers.push(handler);
+}
+
+/** Fire every registered approval-requested callback after a hold's card is delivered. */
+export async function notifyApprovalRequested(event: ApprovalRequestedEvent): Promise<void> {
+  for (const handler of approvalRequestedHandlers) {
+    try {
+      await handler(event);
+      // eslint-disable-next-line no-catch-all/no-catch-all -- isolation is the contract: one bad callback must not block the hold or other callbacks
+    } catch (err) {
+      log.error('Approval-requested handler threw', {
+        approvalId: event.approval.approval_id,
+        action: event.approval.action,
         err,
       });
     }
@@ -206,7 +265,14 @@ export function notifyAgent(session: Session, text: string): void {
 }
 
 export interface RequestApprovalOptions {
-  session: Session;
+  /**
+   * Requesting agent's session. Omit for sessionless holds (e.g. sender
+   * admission) — failure notices are then logged instead of chat-relayed,
+   * and the hold anchors to `agentGroupId`.
+   */
+  session?: Session;
+  /** Approver-rule anchor when there is no session. Ignored when `session` is set (its agent group wins). */
+  agentGroupId?: string;
   agentName: string;
   /** Free-form action identifier. Must match the key the consumer registered via registerApprovalHandler. */
   action: string;
@@ -216,8 +282,34 @@ export interface RequestApprovalOptions {
   title: string;
   /** Card body shown to the admin. */
   question: string;
-  /** Deliver the card to this specific user instead of all of the session group's admins. */
+  /**
+   * Deliver the card to this specific user AND make the hold exclusively
+   * theirs to resolve (approver rule 'exclusive' — an a2a policy's approver).
+   */
   approverUserId?: string;
+  /** Card buttons. Default: Approve / Reject / Reject with reason…. */
+  options?: RawOption[];
+  /**
+   * In-flight dedup: while a pending row carries this key, a repeat request
+   * with the same key is dropped without a second card.
+   */
+  dedupKey?: string;
+  /**
+   * Record the user the card is delivered to on the hold, letting them
+   * resolve it alongside the scope's admins even if their role changes
+   * mid-flight (the sender/channel "named-or-admin" semantic). Off by
+   * default — module holds authorize purely by the admin chain.
+   */
+  recordDeliveredApprover?: boolean;
+  /** Channel preference for the approver-DM walk when there is no session to derive it from. */
+  originChannelType?: string;
+  /**
+   * Persist action-specific detail keyed by the generated approval ID. This
+   * callback runs synchronously in the same central-DB transaction as the
+   * pending_approvals insert; throwing rolls both writes back and no card is
+   * delivered. Keep this to persistence only — no async work or side effects.
+   */
+  persistDetails?: (approvalId: string) => void;
 }
 
 /**
@@ -227,62 +319,103 @@ export interface RequestApprovalOptions {
  * approval handler for this action via the response dispatcher.
  */
 export async function requestApproval(opts: RequestApprovalOptions): Promise<void> {
-  const { session, action, payload, title, question, agentName, approverUserId } = opts;
+  const { session, action, payload, title, question, agentName, approverUserId, dedupKey } = opts;
 
-  const approvers = approverUserId ? [approverUserId] : pickApprover(session.agent_group_id);
-  if (approvers.length === 0) {
-    notifyAgent(session, `${action} failed: no owner or admin configured to approve.`);
+  const agentGroupId = session?.agent_group_id ?? opts.agentGroupId ?? null;
+
+  const fail = (text: string): void => {
+    if (session) notifyAgent(session, `${action} failed: ${text}`);
+    else log.warn('Approval request failed', { action, agentGroupId, reason: text });
+  };
+
+  if (dedupKey && getPendingApprovalByDedupKey(dedupKey)) {
+    log.debug('Approval request already in flight — dropping duplicate', { action, dedupKey });
     return;
   }
 
-  const originChannelType = session.messaging_group_id
-    ? (getMessagingGroup(session.messaging_group_id)?.channel_type ?? '')
-    : '';
+  const approvers = approverUserId ? [approverUserId] : pickApprover(agentGroupId);
+  if (approvers.length === 0) {
+    fail('no owner or admin configured to approve.');
+    return;
+  }
+
+  const originChannelType =
+    opts.originChannelType ??
+    (session?.messaging_group_id ? (getMessagingGroup(session.messaging_group_id)?.channel_type ?? '') : '');
 
   const target = await pickApprovalDelivery(approvers, originChannelType);
   if (!target) {
-    notifyAgent(session, `${action} failed: no DM channel found for any eligible approver.`);
+    fail('no DM channel found for any eligible approver.');
     return;
   }
 
   const approvalId = `appr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const normalizedOptions = normalizeOptions(APPROVAL_OPTIONS);
-  createPendingApproval({
-    approval_id: approvalId,
-    session_id: session.id,
-    request_id: approvalId,
-    action,
-    payload: JSON.stringify(payload),
-    created_at: new Date().toISOString(),
-    title,
-    options_json: JSON.stringify(normalizedOptions),
-    approver_user_id: approverUserId ?? null,
-  });
+  const cardOptions = opts.options ?? APPROVAL_OPTIONS;
+  let inserted: boolean;
+  try {
+    inserted = getDb().transaction(() => {
+      const created = createPendingApproval({
+        approval_id: approvalId,
+        session_id: session?.id ?? null,
+        request_id: approvalId,
+        action,
+        payload: JSON.stringify(payload),
+        created_at: new Date().toISOString(),
+        agent_group_id: agentGroupId,
+        title,
+        options_json: JSON.stringify(normalizeOptions(cardOptions)),
+        approver_user_id: approverUserId ?? (opts.recordDeliveredApprover ? target.userId : null),
+        approver_rule: approverUserId ? 'exclusive' : 'admins-of-scope',
+        dedup_key: dedupKey ?? null,
+      });
+      if (created) opts.persistDetails?.(approvalId);
+      return created;
+    })();
+    // eslint-disable-next-line no-catch-all/no-catch-all -- persistence failure is reported to the requester and must not crash the host
+  } catch (err) {
+    log.error('Failed to persist approval request', { action, approvalId, err });
+    fail('could not persist approval request.');
+    return;
+  }
+  if (!inserted) {
+    // A concurrent request with the same dedup key won the partial UNIQUE —
+    // this insert was dropped, so don't announce or deliver a second card.
+    log.debug('Approval request already in flight — dropping duplicate', { action, dedupKey });
+    return;
+  }
 
   const adapter = getDeliveryAdapter();
-  if (adapter) {
-    try {
-      await adapter.deliver(
-        target.messagingGroup.channel_type,
-        target.messagingGroup.platform_id,
-        null,
-        'chat-sdk',
-        JSON.stringify({
-          type: 'ask_question',
-          questionId: approvalId,
-          title,
-          question,
-          options: APPROVAL_OPTIONS,
-        }),
-      );
-    } catch (err) {
-      log.error('Failed to deliver approval card', { action, approvalId, err });
-      // The single delivery target never saw the card — remove the row so it
-      // can't linger as a pending approval nobody can act on.
-      deletePendingApproval(approvalId);
-      notifyAgent(session, `${action} failed: could not deliver approval request to ${target.userId}.`);
-      return;
-    }
+  if (!adapter) {
+    deletePendingApproval(approvalId);
+    fail('the delivery adapter is unavailable.');
+    return;
+  }
+  try {
+    await adapter.deliver(
+      target.messagingGroup.channel_type,
+      target.messagingGroup.platform_id,
+      null,
+      'chat-sdk',
+      JSON.stringify({
+        type: 'ask_question',
+        questionId: approvalId,
+        title,
+        question,
+        options: cardOptions,
+      }),
+    );
+  } catch (err) {
+    log.error('Failed to deliver approval card', { action, approvalId, err });
+    // The single delivery target never saw the card — remove the row so it
+    // can't linger as a pending approval nobody can act on.
+    deletePendingApproval(approvalId);
+    fail(`could not deliver approval request to ${target.userId}.`);
+    return;
+  }
+
+  const created = getPendingApproval(approvalId);
+  if (created) {
+    await notifyApprovalRequested({ approval: created, session: session ?? null, deliveredTo: target.userId });
   }
 
   log.info('Approval requested', { action, approvalId, agentName, approver: target.userId });

@@ -44,18 +44,17 @@ import {
   NEW_AGENT_VALUE,
   REJECT_VALUE,
   requestChannelApproval,
+  resolveChannelHold,
 } from './channel-approval.js';
 import { addMember } from './db/agent-group-members.js';
 import {
-  deletePendingChannelApproval,
   getPendingChannelApproval,
   updatePendingChannelApprovalCard,
   type PendingChannelApproval,
 } from './db/pending-channel-approvals.js';
-import { deletePendingSenderApproval, getPendingSenderApproval } from './db/pending-sender-approvals.js';
 import { hasAdminPrivilege } from './db/user-roles.js';
 import { getUser, upsertUser } from './db/users.js';
-import { requestSenderApproval } from './sender-approval.js';
+import { registerSenderApprovalContinuation, requestSenderApproval } from './sender-approval.js';
 import { ensureUserDm } from './user-dm.js';
 
 // ── Free-text name input state ──
@@ -106,7 +105,7 @@ function extractAndUpsertUser(event: InboundEvent): string | null {
   return userId;
 }
 
-function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string } {
+function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string; senderName?: string } {
   try {
     return JSON.parse(raw);
   } catch {
@@ -122,7 +121,7 @@ function handleUnknownSender(
   event: InboundEvent,
 ): void {
   const parsed = safeParseContent(event.message.content);
-  const senderName = parsed.sender ?? null;
+  const senderName = parsed.senderName ?? parsed.sender ?? (userId ? getUser(userId)?.display_name : null) ?? null;
   const dropRecord = {
     channel_type: event.channelType,
     platform_id: event.platformId,
@@ -218,84 +217,7 @@ setSenderScopeGate(
   },
 );
 
-/**
- * Response handler for the unknown-sender approval card.
- *
- * Claim rule: questionId matches a row in pending_sender_approvals. If no
- * such row, return false so the next handler (approvals module, OneCLI,
- * interactive) gets a shot.
- *
- * Approve: add the sender to agent_group_members + re-invoke routeInbound
- * with the stored event. The second routing attempt clears the gate because
- * the user is now a member.
- *
- * Deny: delete the row (no "deny list" — a future message re-triggers a
- * fresh card per ACTION-ITEMS item 5 "no denial persistence").
- */
-async function handleSenderApprovalResponse(payload: ResponsePayload): Promise<boolean> {
-  const row = getPendingSenderApproval(payload.questionId);
-  if (!row) return false;
-
-  // payload.userId is the raw platform userId (e.g. "6037840640"); namespace it
-  // with the channel type so it matches users(id) format. Some platforms
-  // (e.g. Teams "29:xxx") already include a colon — mirror resolveOrCreateUser
-  // logic and only prefix when the raw id has no colon.
-  const clickerId = payload.userId
-    ? payload.userId.includes(':')
-      ? payload.userId
-      : `${payload.channelType}:${payload.userId}`
-    : null;
-  const isAuthorized =
-    clickerId !== null && (clickerId === row.approver_user_id || hasAdminPrivilege(clickerId, row.agent_group_id));
-  if (!isAuthorized) {
-    log.warn('Unknown-sender approval click rejected — unauthorized clicker', {
-      approvalId: row.id,
-      clickerId,
-      expectedApprover: row.approver_user_id,
-    });
-    return true; // claim the response so it's not unclaimed-logged, but do nothing
-  }
-  const approverId = clickerId;
-  const approved = payload.value === 'approve';
-
-  if (approved) {
-    addMember({
-      user_id: row.sender_identity,
-      agent_group_id: row.agent_group_id,
-      added_by: approverId,
-      added_at: new Date().toISOString(),
-    });
-    log.info('Unknown sender approved — member added', {
-      approvalId: row.id,
-      senderIdentity: row.sender_identity,
-      agentGroupId: row.agent_group_id,
-      approverId,
-    });
-
-    // Clear the pending row BEFORE re-routing so the gate check on the
-    // second attempt doesn't see the in-flight row and short-circuit.
-    deletePendingSenderApproval(row.id);
-
-    try {
-      const event = JSON.parse(row.original_message) as InboundEvent;
-      await routeInbound(event);
-    } catch (err) {
-      log.error('Failed to replay message after sender approval', { approvalId: row.id, err });
-    }
-    return true;
-  }
-
-  log.info('Unknown sender denied', {
-    approvalId: row.id,
-    senderIdentity: row.sender_identity,
-    agentGroupId: row.agent_group_id,
-    approverId,
-  });
-  deletePendingSenderApproval(row.id);
-  return true;
-}
-
-registerResponseHandler(handleSenderApprovalResponse);
+registerSenderApprovalContinuation(routeInbound);
 
 // ── Unknown-channel registration flow ──
 
@@ -318,6 +240,7 @@ async function wireApprovedChannel(
   row: PendingChannelApproval,
   agentGroupId: string,
   approverId: string,
+  createdAgentGroup = false,
 ): Promise<boolean> {
   let event: InboundEvent;
   try {
@@ -327,7 +250,10 @@ async function wireApprovedChannel(
       messagingGroupId: row.messaging_group_id,
       err,
     });
-    deletePendingChannelApproval(row.messaging_group_id);
+    await resolveChannelHold(row, 'approve', approverId, {
+      targetAgentGroupId: agentGroupId,
+      continuationError: 'invalid_stored_event',
+    });
     return false;
   }
 
@@ -350,7 +276,10 @@ async function wireApprovedChannel(
       messagingGroupId: row.messaging_group_id,
       err,
     });
-    deletePendingChannelApproval(row.messaging_group_id);
+    await resolveChannelHold(row, 'approve', approverId, {
+      targetAgentGroupId: agentGroupId,
+      continuationError: 'unresolvable_channel_defaults',
+    });
     return false;
   }
 
@@ -388,7 +317,10 @@ async function wireApprovedChannel(
     });
   }
 
-  deletePendingChannelApproval(row.messaging_group_id);
+  await resolveChannelHold(row, 'approve', approverId, {
+    targetAgentGroupId: agentGroupId,
+    ...(createdAgentGroup ? { createdAgentGroup: true } : {}),
+  });
 
   try {
     await routeInbound(event);
@@ -420,7 +352,9 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
   if (!row) return false;
 
   // Click authorization is the guard's channels.register decision (./guard.ts):
-  // the delivered approver, or an admin of the pending row's anchor agent group.
+  // the delivered approver, or an admin of the pending row's anchor agent
+  // group. The action delegates that identity check to the shared mayResolve
+  // rule so every hold has one click-authorization implementation.
   const clickerId = payload.userId
     ? payload.userId.includes(':')
       ? payload.userId
@@ -439,12 +373,12 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
     });
     return true;
   }
-  const approverId = clickerId;
+  const approverId = clickerId as string;
 
   // ── Reject / Cancel ──
   if (payload.value === REJECT_VALUE) {
     setMessagingGroupDeniedAt(row.messaging_group_id, new Date().toISOString());
-    deletePendingChannelApproval(row.messaging_group_id);
+    await resolveChannelHold(row, 'reject', approverId);
     log.info('Channel registration denied', {
       messagingGroupId: row.messaging_group_id,
       approverId,
@@ -548,7 +482,10 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         messagingGroupId: row.messaging_group_id,
         targetAgentGroupId,
       });
-      deletePendingChannelApproval(row.messaging_group_id);
+      await resolveChannelHold(row, 'approve', approverId, {
+        targetAgentGroupId,
+        continuationError: 'target_agent_group_missing',
+      });
       return true;
     }
     if (!hasAdminPrivilege(approverId, targetAgentGroupId)) {
@@ -612,7 +549,7 @@ registerMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
     folder: ag.folder,
   });
 
-  const wired = await wireApprovedChannel(row, ag.id, userId);
+  const wired = await wireApprovedChannel(row, ag.id, userId, true);
 
   const adapter = getDeliveryAdapter();
   if (adapter) {

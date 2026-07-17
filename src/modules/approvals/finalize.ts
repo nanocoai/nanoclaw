@@ -25,26 +25,31 @@ import { notifyApprovalResolved } from './primitive.js';
  * attribution — the why, not the who (the rejecting admin may belong to a
  * different owner than the requesting agent). Callers are responsible for
  * clamping the reason length before passing it in.
+ *
+ * `session` is null for sessionless holds (e.g. sender admission) — there is
+ * no agent to notify or wake, so only the row delete + resolved callbacks run.
  */
 export async function finalizeReject(
   approval: PendingApproval,
-  session: Session,
+  session: Session | null,
   userId: string,
   reason?: string,
 ): Promise<void> {
-  const text = reason
-    ? `Your ${approval.action} request was rejected by admin: "${reason}"`
-    : `Your ${approval.action} request was rejected by admin.`;
+  if (session) {
+    const text = reason
+      ? `Your ${approval.action} request was rejected by admin: "${reason}"`
+      : `Your ${approval.action} request was rejected by admin.`;
 
-  writeSessionMessage(session.agent_group_id, session.id, {
-    id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    kind: 'chat',
-    timestamp: new Date().toISOString(),
-    platformId: session.agent_group_id,
-    channelType: 'agent',
-    threadId: null,
-    content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
-  });
+    writeSessionMessage(session.agent_group_id, session.id, {
+      id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'chat',
+      timestamp: new Date().toISOString(),
+      platformId: session.agent_group_id,
+      channelType: 'agent',
+      threadId: null,
+      content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
+    });
+  }
 
   log.info('Approval rejected', {
     approvalId: approval.approval_id,
@@ -55,5 +60,5 @@ export async function finalizeReject(
 
   deletePendingApproval(approval.approval_id);
   await notifyApprovalResolved({ approval, session, outcome: 'reject', userId });
-  await wakeContainer(session);
+  if (session) await wakeContainer(session);
 }

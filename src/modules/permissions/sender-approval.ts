@@ -3,44 +3,48 @@
  *
  * When `messaging_groups.unknown_sender_policy = 'request_approval'` and a
  * non-member writes into a wired chat, the access gate drops the routing
- * attempt and calls `requestSenderApproval` to:
+ * attempt and calls `requestSenderApproval`, which holds through the
+ * approvals primitive (action 'sender_admit'):
  *
- *   1. Pick an eligible approver (owner / admin of the agent group).
- *   2. Open / reuse a DM to that approver on a reachable channel.
- *   3. Deliver an Approve / Deny card.
- *   4. Record a pending_sender_approvals row that holds the original message
- *      so it can be re-routed on approve.
+ *   - approver rule: the agent group's admin chain, plus the specific
+ *     admin the card was delivered to (named-or-admin);
+ *   - in-flight dedup via the hold's dedup key — a retry / rapid second
+ *     message from the same unknown sender is silently dropped (no duplicate
+ *     card), replacing the old sender table's UNIQUE(mg, sender);
+ *   - the hold is sessionless: there is no agent session to notify, so
+ *     failure modes (no approver, no reachable DM, no adapter) log and leave
+ *     no row, letting a future attempt retry.
+ *   - sender-specific query/continuation fields live in a one-to-one detail
+ *     row created atomically with the common lifecycle master.
  *
- * On approve: the handler in index.ts adds an agent_group_members row for
- * the sender and re-invokes routeInbound with the stored event — the second
- * routing attempt passes the gate because the user is now a member.
- *
- * Failure modes (logged + row NOT created, so the dedup gate lets a future
- * attempt try again):
- *   - No eligible approver in user_roles — fresh install, no owner yet.
- *   - Approver has no reachable DM (no user_dms row + channel can't
- *     openDM) — e.g. owner hasn't registered on any channel we're wired to.
- *   - Delivery adapter missing.
- *
- * Dedup: `pending_sender_approvals` has UNIQUE(messaging_group_id,
- * sender_identity). A retry / rapid second message from the same unknown
- * sender is silently dropped (no duplicate card sent).
+ * On approve: `registerSenderApprovalContinuation` adds an agent-group member
+ * row for the sender and replays the stored event through the router callback
+ * supplied by the permissions module — the second routing attempt passes the
+ * gate because the user is now a member. On deny: the shared reject path just
+ * drops the hold (no denial persistence — a future message re-triggers a fresh
+ * card).
  */
-import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
+import type { RawOption } from '../../channels/ask-question.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
-import { getDeliveryAdapter } from '../../delivery.js';
-import { log } from '../../log.js';
+import { deletePendingApproval, getPendingApprovalByDedupKey } from '../../db/sessions.js';
 import type { InboundEvent } from '../../channels/adapter.js';
-import { pickApprovalDelivery, pickApprover } from '../approvals/primitive.js';
-import { createPendingSenderApproval, hasInFlightSenderApproval } from './db/pending-sender-approvals.js';
+import { log } from '../../log.js';
+import { registerApprovalHandler, requestApproval } from '../approvals/primitive.js';
+import { addMember } from './db/agent-group-members.js';
+import {
+  createPendingSenderApprovalDetail,
+  getPendingSenderApprovalDetail,
+} from './db/pending-sender-approval-details.js';
 
 const APPROVAL_OPTIONS: RawOption[] = [
   { label: 'Allow', selectedLabel: '✅ Allowed', value: 'approve', style: 'primary' },
   { label: 'Deny', selectedLabel: '❌ Denied', value: 'reject', style: 'danger' },
 ];
 
-function generateId(): string {
-  return `nsa-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+export const SENDER_ADMIT_ACTION = 'sender_admit';
+
+export function senderAdmitDedupKey(messagingGroupId: string, senderIdentity: string): string {
+  return `${SENDER_ADMIT_ACTION}:${messagingGroupId}:${senderIdentity}`;
 }
 
 export interface RequestSenderApprovalInput {
@@ -54,102 +58,112 @@ export interface RequestSenderApprovalInput {
 export async function requestSenderApproval(input: RequestSenderApprovalInput): Promise<void> {
   const { messagingGroupId, agentGroupId, senderIdentity, senderName, event } = input;
 
-  // In-flight dedup: don't spam the admin if the same unknown sender
-  // retries while a card is already pending.
-  if (hasInFlightSenderApproval(messagingGroupId, senderIdentity)) {
-    log.debug('Unknown-sender approval already in flight — dropping retry', {
-      messagingGroupId,
-      senderIdentity,
-    });
-    return;
-  }
-
-  const approvers = pickApprover(agentGroupId);
-  if (approvers.length === 0) {
-    log.warn('Unknown-sender approval skipped — no owner or admin configured', {
-      messagingGroupId,
-      agentGroupId,
-      senderIdentity,
-    });
-    return;
-  }
-
   const originMg = getMessagingGroup(messagingGroupId);
-  const originChannelType = originMg?.channel_type ?? '';
-  const target = await pickApprovalDelivery(approvers, originChannelType);
-  if (!target) {
-    log.warn('Unknown-sender approval skipped — no DM channel for any approver', {
-      messagingGroupId,
-      agentGroupId,
-      senderIdentity,
-    });
-    return;
-  }
-
-  const approvalId = generateId();
   const senderDisplay = senderName && senderName.length > 0 ? senderName : senderIdentity;
-  const originName = originMg?.name ?? `a ${originChannelType} channel`;
+  const originName = originMg?.name ?? `a ${originMg?.channel_type ?? ''} channel`;
 
-  const title = '👤 New sender';
-  const question = `${senderDisplay} wants to talk to your agent in ${originName}. Allow?`;
-  const options = normalizeOptions(APPROVAL_OPTIONS);
-
-  createPendingSenderApproval({
-    id: approvalId,
-    messaging_group_id: messagingGroupId,
-    agent_group_id: agentGroupId,
-    sender_identity: senderIdentity,
-    sender_name: senderName,
-    original_message: JSON.stringify(event),
-    approver_user_id: target.userId,
-    created_at: new Date().toISOString(),
-    title,
-    options_json: JSON.stringify(options),
-  });
-
-  const adapter = getDeliveryAdapter();
-  if (!adapter) {
-    // Without a delivery adapter, the card can't be sent. Log + leave the
-    // row in place so the admin can see it via DB or manual tooling; the
-    // dedup gate will suppress further cards until it's cleared.
-    log.error('Unknown-sender approval row created but no delivery adapter is wired', {
-      approvalId,
-    });
-    return;
-  }
-
-  try {
-    await adapter.deliver(
-      target.messagingGroup.channel_type,
-      target.messagingGroup.platform_id,
-      null,
-      'chat-sdk',
-      JSON.stringify({
-        type: 'ask_question',
-        questionId: approvalId,
-        title,
-        question,
-        options,
+  await requestApproval({
+    agentGroupId,
+    agentName: senderDisplay,
+    action: SENDER_ADMIT_ACTION,
+    payload: { messagingGroupId, agentGroupId, senderIdentity, senderName, event },
+    title: '👤 New sender',
+    question: `${senderDisplay} wants to talk to your agent in ${originName}. Allow?`,
+    options: APPROVAL_OPTIONS,
+    dedupKey: senderAdmitDedupKey(messagingGroupId, senderIdentity),
+    recordDeliveredApprover: true,
+    originChannelType: originMg?.channel_type ?? '',
+    persistDetails: (approvalId) =>
+      createPendingSenderApprovalDetail({
+        approval_id: approvalId,
+        messaging_group_id: messagingGroupId,
+        sender_identity: senderIdentity,
+        sender_name: senderName,
+        original_message: JSON.stringify(event),
       }),
-    );
-    log.info('Unknown-sender approval card delivered', {
-      approvalId,
-      senderIdentity,
-      approver: target.userId,
-      messagingGroupId,
-      agentGroupId,
-    });
-  } catch (err) {
-    log.error('Unknown-sender approval card delivery failed', {
-      approvalId,
-      err,
-    });
-  }
+  });
 }
 
 /**
- * Option value the admin clicked that means "allow" — shared with the
- * response handler so the two sides can't drift.
+ * Register the approve continuation for sessionless sender-admission holds.
+ * The router callback is injected by permissions/index.ts so this focused
+ * module owns the domain flow without importing the router back through the
+ * permissions module's registration cycle.
  */
-export const APPROVE_VALUE = 'approve';
-export const REJECT_VALUE = 'reject';
+export function registerSenderApprovalContinuation(replayInbound: (event: InboundEvent) => Promise<void>): void {
+  registerApprovalHandler(SENDER_ADMIT_ACTION, async ({ approval, userId }) => {
+    const detail = getPendingSenderApprovalDetail(approval.approval_id);
+    const agentGroupId = approval.agent_group_id ?? '';
+    if (!detail || !agentGroupId) {
+      log.warn('sender_admit approved but its master/detail record was incomplete', {
+        approvalId: approval.approval_id,
+        hasDetail: detail !== undefined,
+        agentGroupId,
+      });
+      return;
+    }
+
+    const { sender_identity: senderIdentity, messaging_group_id: messagingGroupId } = detail;
+    let parsedEvent: unknown;
+    try {
+      parsedEvent = JSON.parse(detail.original_message);
+    } catch (err) {
+      log.warn('sender_admit approved but its stored event was malformed', {
+        approvalId: approval.approval_id,
+        senderIdentity,
+        agentGroupId,
+        err,
+      });
+      return;
+    }
+    if (!isInboundEvent(parsedEvent)) {
+      log.warn('sender_admit approved but its stored event had an invalid shape', {
+        approvalId: approval.approval_id,
+        senderIdentity,
+        agentGroupId,
+      });
+      return;
+    }
+
+    addMember({
+      user_id: senderIdentity,
+      agent_group_id: agentGroupId,
+      added_by: userId,
+      added_at: new Date().toISOString(),
+    });
+    log.info('Unknown sender approved — member added', { senderIdentity, agentGroupId, approverId: userId });
+
+    // Clear the hold before replaying. A messaging group may fan out to other
+    // agent groups, which must be free to create their own sender-admission hold
+    // instead of being suppressed by this resolved hold's dedup key.
+    const hold = getPendingApprovalByDedupKey(senderAdmitDedupKey(messagingGroupId, senderIdentity));
+    if (hold) deletePendingApproval(hold.approval_id);
+
+    try {
+      await replayInbound(parsedEvent);
+    } catch (err) {
+      log.error('Failed to replay message after sender approval', { senderIdentity, agentGroupId, err });
+    }
+  });
+}
+
+function isInboundEvent(value: unknown): value is InboundEvent {
+  if (typeof value !== 'object' || value === null) return false;
+  const event = value as Record<string, unknown>;
+  if (
+    typeof event.channelType !== 'string' ||
+    typeof event.platformId !== 'string' ||
+    (event.threadId !== null && typeof event.threadId !== 'string') ||
+    typeof event.message !== 'object' ||
+    event.message === null
+  ) {
+    return false;
+  }
+  const message = event.message as Record<string, unknown>;
+  return (
+    typeof message.id === 'string' &&
+    (message.kind === 'chat' || message.kind === 'chat-sdk') &&
+    typeof message.content === 'string' &&
+    typeof message.timestamp === 'string'
+  );
+}

@@ -198,6 +198,17 @@ export interface PendingQuestion {
 
 // ── Pending approvals (central DB) ──
 
+/**
+ * Who may resolve a hold. `exclusive`: only the named user (an a2a policy's
+ * approver). `admins-of-scope`: the admin chain of the anchoring agent group
+ * (owners + global admins when the anchor is null), plus the user the card
+ * was delivered to when recorded. Evaluation lives in
+ * src/modules/approvals/approver-rule.ts (`mayResolve`).
+ */
+export type ApproverRule =
+  | { kind: 'exclusive'; approverUserId: string | null }
+  | { kind: 'admins-of-scope'; agentGroupId: string | null; deliveredTo: string | null };
+
 export interface PendingApproval {
   approval_id: string;
   session_id: string | null;
@@ -218,8 +229,16 @@ export interface PendingApproval {
   status: 'pending' | 'approved' | 'rejected' | 'expired' | 'awaiting_reason';
   title: string;
   options_json: string;
-  /** When set, only this exact user may resolve the approval. */
+  /**
+   * Named approver. Under `approver_rule: 'exclusive'` only this exact user
+   * may resolve the approval; under 'admins-of-scope' it records the user the
+   * card was delivered to, who may resolve alongside the scope's admins.
+   */
   approver_user_id: string | null;
+  /** Who may resolve this hold — see modules/approvals/approver-rule.ts. */
+  approver_rule: 'exclusive' | 'admins-of-scope';
+  /** In-flight dedup key: while a row carries this key, a repeat request with the same key is dropped. */
+  dedup_key: string | null;
 }
 
 // ── Agent destinations (central DB) ──

@@ -160,6 +160,33 @@ register({
   },
 });
 
+register({
+  name: 'roles-grant',
+  description: 'approval command on a non-scoped resource (global blast radius)',
+  resource: 'roles',
+  access: 'approval',
+  parseArgs: (raw) => raw,
+  handler: async () => ({}),
+});
+
+register({
+  name: 'members-add-gated',
+  description: 'approval command on a scoped resource',
+  resource: 'members',
+  access: 'approval',
+  parseArgs: (raw) => raw,
+  handler: async () => ({}),
+});
+
+register({
+  name: 'groups-update',
+  description: 'approval command on the groups resource (id = agent group)',
+  resource: 'groups',
+  access: 'approval',
+  parseArgs: (raw) => raw,
+  handler: async () => ({}),
+});
+
 // Commands that return data shaped like real resources (for post-handler filtering tests)
 register({
   name: 'groups-list-data',

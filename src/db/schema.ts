@@ -136,21 +136,6 @@ CREATE TABLE pending_questions (
   created_at     TEXT NOT NULL
 );
 
--- Pending approvals for unknown senders (unknown_sender_policy='request_approval').
--- In-flight dedup via UNIQUE(messaging_group_id, sender_identity): a second
--- message from the same unknown sender while a card is pending is silently
--- dropped instead of spamming the admin.
-CREATE TABLE pending_sender_approvals (
-  id                 TEXT PRIMARY KEY,
-  messaging_group_id TEXT NOT NULL REFERENCES messaging_groups(id),
-  agent_group_id     TEXT NOT NULL REFERENCES agent_groups(id),
-  sender_identity    TEXT NOT NULL,    -- namespaced user id (channel_type:handle)
-  sender_name        TEXT,
-  original_message   TEXT NOT NULL,    -- JSON of the original InboundEvent
-  approver_user_id   TEXT NOT NULL,
-  created_at         TEXT NOT NULL,
-  UNIQUE(messaging_group_id, sender_identity)
-);
 `;
 
 /**

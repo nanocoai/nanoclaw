@@ -1,6 +1,8 @@
 /**
  * Integration tests for the unknown-sender request_approval flow
- * (ACTION-ITEMS item 5).
+ * (ACTION-ITEMS item 5), folded onto the approvals primitive: the hold is a
+ * sessionless pending_approvals row (action 'sender_admit') resolved by the
+ * approvals module's shared response handler.
  *
  * Covers:
  *  - request_approval policy fires `requestSenderApproval` on first unknown
@@ -9,7 +11,9 @@
  *    silently dropped (no second card, no second row)
  *  - Approve path: member added, original message replayed via routeInbound,
  *    container woken
- *  - Deny path: pending row deleted, no member added
+ *  - Deny path: pending hold deleted, no member added
+ *  - Click authorization: named-or-admin (delivered approver or any admin of
+ *    the group's chain); strangers can't self-admit
  */
 import fs from 'fs';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
@@ -28,12 +32,14 @@ vi.mock('../../container-runner.js', () => ({
   killContainer: vi.fn(),
 }));
 
-// Mock delivery adapter — record card deliveries for assertions.
+// Mock delivery adapter — record card deliveries for assertions. The approvals
+// barrel also pulls onDeliveryAdapterReady from this module at import time.
 const deliverMock = vi.fn().mockResolvedValue('plat-msg-id');
 vi.mock('../../delivery.js', () => ({
   getDeliveryAdapter: () => ({
     deliver: deliverMock,
   }),
+  onDeliveryAdapterReady: vi.fn(),
 }));
 
 // Mock ensureUserDm to return the approver's existing messaging group
@@ -69,10 +75,12 @@ beforeEach(async () => {
   const db = initTestDb();
   runMigrations(db);
 
-  // Side-effect imports: register hooks (permissions module) AFTER the
-  // mocks are in place so the access gate / response handler pick up the
-  // mocked delivery + user-dm helpers.
+  // Side-effect imports: register hooks AFTER the mocks are in place so the
+  // access gate / response handler pick up the mocked delivery + user-dm
+  // helpers. The approvals barrel registers the shared response handler that
+  // resolves sender_admit holds.
   await import('./index.js');
+  await import('../approvals/index.js');
 
   // Fixtures: agent group, messaging group with request_approval, wiring,
   // owner + DM messaging group for approver delivery.
@@ -152,6 +160,25 @@ function stranger(text: string) {
   };
 }
 
+async function pendingSenderHold(): Promise<{ approval_id: string } | undefined> {
+  const { getDb } = await import('../../db/connection.js');
+  return getDb().prepare("SELECT approval_id FROM pending_approvals WHERE action = 'sender_admit'").get() as
+    | { approval_id: string }
+    | undefined;
+}
+
+async function senderHoldCount(): Promise<number> {
+  const { getDb } = await import('../../db/connection.js');
+  return (
+    getDb().prepare("SELECT COUNT(*) AS c FROM pending_approvals WHERE action = 'sender_admit'").get() as { c: number }
+  ).c;
+}
+
+async function senderDetailCount(): Promise<number> {
+  const { getDb } = await import('../../db/connection.js');
+  return (getDb().prepare('SELECT COUNT(*) AS c FROM pending_sender_approval_details').get() as { c: number }).c;
+}
+
 describe('unknown-sender request_approval flow', () => {
   it('delivers an approval card on first unknown message', async () => {
     const { routeInbound } = await import('../../router.js');
@@ -168,11 +195,50 @@ describe('unknown-sender request_approval flow', () => {
     expect(kind).toBe('chat-sdk');
     const payload = JSON.parse(content as string);
     expect(payload.type).toBe('ask_question');
-    expect(payload.questionId).toMatch(/^nsa-/);
+    expect(payload.questionId).toMatch(/^appr-/);
+    expect(payload.title).toBe('👤 New sender');
+    expect(payload.options.map((o: { value: string }) => o.value)).toEqual(['approve', 'reject']);
 
     const { getDb } = await import('../../db/connection.js');
-    const rows = getDb().prepare('SELECT * FROM pending_sender_approvals').all();
+    const rows = getDb().prepare("SELECT * FROM pending_approvals WHERE action = 'sender_admit'").all() as Array<{
+      approval_id: string;
+      session_id: string | null;
+      agent_group_id: string;
+      approver_rule: string;
+      approver_user_id: string;
+      dedup_key: string;
+    }>;
     expect(rows).toHaveLength(1);
+    // Hold-record contract: sessionless, anchored to the agent group,
+    // named-or-admin approver rule with the delivered approver recorded.
+    expect(rows[0].session_id).toBeNull();
+    expect(rows[0].agent_group_id).toBe('ag-1');
+    expect(rows[0].approver_rule).toBe('admins-of-scope');
+    expect(rows[0].approver_user_id).toBe('telegram:owner');
+    expect(rows[0].dedup_key).toBe('sender_admit:mg-chat:tg:stranger');
+
+    const detail = getDb()
+      .prepare(
+        `SELECT approval_id, messaging_group_id, sender_identity, sender_name, original_message
+           FROM pending_sender_approval_details`,
+      )
+      .get() as {
+      approval_id: string;
+      messaging_group_id: string;
+      sender_identity: string;
+      sender_name: string | null;
+      original_message: string;
+    };
+    expect(detail).toMatchObject({
+      approval_id: rows[0].approval_id,
+      messaging_group_id: 'mg-chat',
+      sender_identity: 'tg:stranger',
+      sender_name: 'Stranger',
+    });
+    expect(JSON.parse(detail.original_message)).toMatchObject({
+      channelType: 'telegram',
+      platformId: 'chat-123',
+    });
   });
 
   it('dedups a second message from the same stranger while pending', async () => {
@@ -183,9 +249,7 @@ describe('unknown-sender request_approval flow', () => {
     await new Promise((r) => setTimeout(r, 10));
 
     expect(deliverMock).toHaveBeenCalledTimes(1);
-    const { getDb } = await import('../../db/connection.js');
-    const count = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_sender_approvals').get() as { c: number }).c;
-    expect(count).toBe(1);
+    expect(await senderHoldCount()).toBe(1);
   });
 
   it('approve → adds member and replays the original message', async () => {
@@ -197,17 +261,21 @@ describe('unknown-sender request_approval flow', () => {
     await routeInbound(stranger('please let me in'));
     await new Promise((r) => setTimeout(r, 10));
 
-    const { getDb } = await import('../../db/connection.js');
-    const pending = getDb().prepare('SELECT id FROM pending_sender_approvals').get() as { id: string };
+    const pending = await pendingSenderHold();
     expect(pending).toBeDefined();
+
+    // The continuation reads the structured detail row. The master payload
+    // remains an audit snapshot, not the sender flow's query interface.
+    const { getDb } = await import('../../db/connection.js');
+    getDb().prepare("UPDATE pending_approvals SET payload = '{}' WHERE approval_id = ?").run(pending!.approval_id);
 
     // Fire the approve click through the response-handler chain.
     for (const handler of getResponseHandlers()) {
       const claimed = await handler({
-        questionId: pending.id,
+        questionId: pending!.approval_id,
         value: 'approve',
         // Chat SDK's onAction surfaces the raw platform userId (e.g. Telegram
-        // chat id). The permissions handler namespaces it with channelType to
+        // chat id). The response handler namespaces it with channelType to
         // match users(id).
         userId: 'owner',
         channelType: 'telegram',
@@ -223,28 +291,27 @@ describe('unknown-sender request_approval flow', () => {
       .get('tg:stranger', 'ag-1');
     expect(member).toBeDefined();
 
-    // Pending row cleared.
-    const stillPending = getDb().prepare('SELECT COUNT(*) AS c FROM pending_sender_approvals').get() as { c: number };
-    expect(stillPending.c).toBe(0);
+    // Pending hold cleared.
+    expect(await senderHoldCount()).toBe(0);
+    expect(await senderDetailCount()).toBe(0);
 
     // Message replayed + container woken.
     expect(wakeContainer).toHaveBeenCalled();
   });
 
-  it('deny → deletes the pending row without adding a member', async () => {
+  it('deny → deletes the pending hold without adding a member', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
 
     await routeInbound(stranger('hello'));
     await new Promise((r) => setTimeout(r, 10));
 
-    const { getDb } = await import('../../db/connection.js');
-    const pending = getDb().prepare('SELECT id FROM pending_sender_approvals').get() as { id: string };
+    const pending = await pendingSenderHold();
     expect(pending).toBeDefined();
 
     for (const handler of getResponseHandlers()) {
       const claimed = await handler({
-        questionId: pending.id,
+        questionId: pending!.approval_id,
         value: 'reject',
         userId: 'owner', // raw platform id — handler namespaces with channelType
         channelType: 'telegram',
@@ -254,8 +321,9 @@ describe('unknown-sender request_approval flow', () => {
       if (claimed) break;
     }
 
-    const count = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_sender_approvals').get() as { c: number }).c;
-    expect(count).toBe(0);
+    expect(await senderHoldCount()).toBe(0);
+    expect(await senderDetailCount()).toBe(0);
+    const { getDb } = await import('../../db/connection.js');
     const member = getDb()
       .prepare('SELECT 1 AS x FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?')
       .get('tg:stranger', 'ag-1');
@@ -270,8 +338,7 @@ describe('unknown-sender request_approval flow', () => {
     await routeInbound(stranger('can I play'));
     await new Promise((r) => setTimeout(r, 10));
 
-    const { getDb } = await import('../../db/connection.js');
-    const pending = getDb().prepare('SELECT id FROM pending_sender_approvals').get() as { id: string };
+    const pending = await pendingSenderHold();
     expect(pending).toBeDefined();
 
     // A random user (not the stranger, not the owner, not an admin) tries to
@@ -279,7 +346,7 @@ describe('unknown-sender request_approval flow', () => {
     // rejected without admitting them.
     for (const handler of getResponseHandlers()) {
       const claimed = await handler({
-        questionId: pending.id,
+        questionId: pending!.approval_id,
         value: 'approve',
         userId: 'random-bystander', // not owner, not admin
         channelType: 'telegram',
@@ -290,18 +357,17 @@ describe('unknown-sender request_approval flow', () => {
     }
 
     // No member added for the stranger.
+    const { getDb } = await import('../../db/connection.js');
     const member = getDb()
       .prepare('SELECT 1 AS x FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?')
       .get('tg:stranger', 'ag-1');
     expect(member).toBeUndefined();
 
-    // Pending row is still there — a legitimate approver can still act on it.
-    const stillPending = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_sender_approvals').get() as { c: number })
-      .c;
-    expect(stillPending).toBe(1);
+    // Pending hold is still there — a legitimate approver can still act on it.
+    expect(await senderHoldCount()).toBe(1);
   });
 
-  it('accepts a click from a global admin even if they are not the designated approver', async () => {
+  it('accepts a click from a global admin even if they are not the delivered approver', async () => {
     // Pre-seed a separate admin user so we can click as them.
     upsertUser({ id: 'telegram:admin-bob', kind: 'telegram', display_name: 'Bob', created_at: now() });
     grantRole({
@@ -318,14 +384,13 @@ describe('unknown-sender request_approval flow', () => {
     await routeInbound(stranger('knock knock'));
     await new Promise((r) => setTimeout(r, 10));
 
-    const { getDb } = await import('../../db/connection.js');
-    const pending = getDb().prepare('SELECT id FROM pending_sender_approvals').get() as { id: string };
+    const pending = await pendingSenderHold();
     expect(pending).toBeDefined();
 
-    // Admin clicks approve (not the designated approver, which was owner).
+    // Admin clicks approve (not the delivered approver, which was the owner).
     for (const handler of getResponseHandlers()) {
       const claimed = await handler({
-        questionId: pending.id,
+        questionId: pending!.approval_id,
         value: 'approve',
         userId: 'admin-bob',
         channelType: 'telegram',
@@ -336,6 +401,7 @@ describe('unknown-sender request_approval flow', () => {
     }
 
     // Stranger admitted thanks to the admin's authority.
+    const { getDb } = await import('../../db/connection.js');
     const member = getDb()
       .prepare('SELECT 1 AS x FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?')
       .get('tg:stranger', 'ag-1');

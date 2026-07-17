@@ -199,6 +199,103 @@ describe('unknown-channel registration flow', () => {
     expect(count).toBe(1);
   });
 
+  it('announces the hold through the shared approval-requested observer', async () => {
+    const { registerApprovalRequestedHandler } = await import('../approvals/primitive.js');
+    const { routeInbound } = await import('../../router.js');
+
+    const events: Array<{
+      approval: { approval_id: string; action: string; agent_group_id: string | null };
+      deliveredTo: string;
+    }> = [];
+    registerApprovalRequestedHandler((event) => {
+      if (event.approval.action === 'channel_registration') events.push(event);
+    });
+
+    await routeInbound(groupMention('chat-observed'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(events).toHaveLength(1);
+    expect(events[0].deliveredTo).toBe('telegram:owner');
+    expect(events[0].approval.approval_id).toMatch(/^mg-/); // the hold view is keyed by the messaging group
+    expect(events[0].approval.agent_group_id).toBe('ag-1');
+  });
+
+  it('removes an undelivered hold without announcing a phantom request', async () => {
+    const { registerApprovalRequestedHandler } = await import('../approvals/primitive.js');
+    const { routeInbound } = await import('../../router.js');
+    const { getDb } = await import('../../db/connection.js');
+    const events: string[] = [];
+    registerApprovalRequestedHandler(({ approval }) => {
+      if (approval.action === 'channel_registration') events.push(approval.approval_id);
+    });
+    deliverMock.mockRejectedValueOnce(new Error('platform down'));
+
+    await routeInbound(groupMention('chat-delivery-failed'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const count = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number }).c;
+    expect(count).toBe(0);
+    expect(events).toHaveLength(0);
+  });
+
+  it('keeps the primary-key dedup fail-safe under a concurrent insert race', async () => {
+    const { createPendingChannelApproval } = await import('./db/pending-channel-approvals.js');
+    const row = {
+      messaging_group_id: 'mg-dm-owner',
+      agent_group_id: 'ag-1',
+      original_message: JSON.stringify(groupMention('chat-race')),
+      approver_user_id: 'telegram:owner',
+      created_at: now(),
+      title: 'Register channel',
+      options_json: JSON.stringify([]),
+    };
+
+    expect(createPendingChannelApproval(row)).toBe(true);
+    expect(createPendingChannelApproval(row)).toBe(false);
+  });
+
+  it('announces the authorized decision when the stored continuation is malformed', async () => {
+    const { registerApprovalResolvedHandler } = await import('../approvals/primitive.js');
+    const { routeInbound } = await import('../../router.js');
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    const { getDb } = await import('../../db/connection.js');
+
+    await routeInbound(groupMention('chat-malformed-continuation'));
+    await new Promise((r) => setTimeout(r, 10));
+    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
+      messaging_group_id: string;
+    };
+    const outcomes: Array<{ outcome: string; scope: string | null }> = [];
+    registerApprovalResolvedHandler(({ approval, outcome }) => {
+      if (approval.approval_id === pending.messaging_group_id) {
+        outcomes.push({ outcome, scope: approval.agent_group_id });
+      }
+    });
+    getDb()
+      .prepare('UPDATE pending_channel_approvals SET original_message = ? WHERE messaging_group_id = ?')
+      .run('{not-json', pending.messaging_group_id);
+
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: pending.messaging_group_id,
+        value: 'connect:ag-1',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+
+    const remaining = (
+      getDb()
+        .prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals WHERE messaging_group_id = ?')
+        .get(pending.messaging_group_id) as { c: number }
+    ).c;
+    expect(remaining).toBe(0);
+    expect(outcomes).toEqual([{ outcome: 'approve', scope: 'ag-1' }]);
+  });
+
   it('dedups a second mention while the card is pending', async () => {
     const { routeInbound } = await import('../../router.js');
     await routeInbound(groupMention('chat-busy'));

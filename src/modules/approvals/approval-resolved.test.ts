@@ -13,12 +13,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { initTestDb, closeDb, runMigrations } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
-import { createSession, createPendingApproval } from '../../db/sessions.js';
+import { getDb } from '../../db/connection.js';
+import { createMessagingGroup } from '../../db/messaging-groups.js';
+import { createSession, createPendingApproval, getPendingApproval, getSession } from '../../db/sessions.js';
+import { setDeliveryAdapter } from '../../delivery.js';
 import { upsertUser } from '../permissions/db/users.js';
 import { grantRole } from '../permissions/db/user-roles.js';
 import { initSessionFolder } from '../../session-manager.js';
 import { handleApprovalsResponse } from './response-handler.js';
-import { registerApprovalHandler, registerApprovalResolvedHandler, type ApprovalResolvedEvent } from './primitive.js';
+import {
+  registerApprovalHandler,
+  registerApprovalRequestedHandler,
+  registerApprovalResolvedHandler,
+  requestApproval,
+  type ApprovalRequestedEvent,
+  type ApprovalResolvedEvent,
+} from './primitive.js';
 
 vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
@@ -100,7 +110,7 @@ describe('approval-resolved callbacks', () => {
     expect(events[0].outcome).toBe('reject');
     expect(events[0].approval.approval_id).toBe('appr-reject-1');
     expect(events[0].approval.action).toBe('test_reject_action');
-    expect(events[0].session.id).toBe('sess-1');
+    expect(events[0].session?.id).toBe('sess-1');
     expect(events[0].userId).toBe('slack:admin-1');
   });
 
@@ -148,5 +158,46 @@ describe('approval-resolved callbacks', () => {
 
     expect(claimed).toBe(true);
     expect(events).toEqual(['boom', 'after']);
+  });
+});
+
+describe('approval-requested callbacks', () => {
+  it('fires when requestApproval creates a hold, with the row and the delivered approver', async () => {
+    // The approver needs a reachable DM for the delivery walk.
+    createMessagingGroup({
+      id: 'mg-dm-admin',
+      channel_type: 'slack',
+      platform_id: 'dm-admin',
+      name: 'Admin DM',
+      is_group: 0,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    getDb()
+      .prepare(`INSERT INTO user_dms (user_id, channel_type, messaging_group_id, resolved_at) VALUES (?, ?, ?, ?)`)
+      .run('slack:admin-1', 'slack', 'mg-dm-admin', now());
+    setDeliveryAdapter({ deliver: vi.fn().mockResolvedValue('platform-message-1') });
+
+    const events: ApprovalRequestedEvent[] = [];
+    registerApprovalRequestedHandler((event) => {
+      if (event.approval.action === 'test_requested_action') events.push(event);
+    });
+
+    await requestApproval({
+      session: getSession('sess-1')!,
+      agentName: 'Agent',
+      action: 'test_requested_action',
+      payload: { thing: 1 },
+      title: 'Test hold',
+      question: 'Approve the thing?',
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0].deliveredTo).toBe('slack:admin-1');
+    expect(events[0].session?.id).toBe('sess-1');
+    expect(events[0].approval.agent_group_id).toBe('ag-1');
+    expect(events[0].approval.approver_rule).toBe('admins-of-scope');
+    // The event carries the live row.
+    expect(getPendingApproval(events[0].approval.approval_id)).toBeDefined();
   });
 });

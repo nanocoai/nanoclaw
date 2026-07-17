@@ -16,15 +16,21 @@
  *
  * Startup sweep edits any leftover cards from a previous process to
  * "Expired (host restarted)" and drops the rows.
+ *
+ * Hold creation and every resolution (click / expiry / sweep) announce
+ * through the shared approval observers (notifyApprovalRequested /
+ * notifyApprovalResolved) — observers see the full OneCLI lifecycle without
+ * touching this file.
  */
 import { OneCLI, type ApprovalRequest, type ManualApprovalHandle } from '@onecli-sh/sdk';
 
-import { pickApprovalDelivery, pickApprover } from './primitive.js';
+import { notifyApprovalRequested, notifyApprovalResolved, pickApprovalDelivery, pickApprover } from './primitive.js';
 import { ONECLI_API_KEY, ONECLI_URL } from '../../config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import {
   createPendingApproval,
   deletePendingApproval,
+  getPendingApproval,
   getPendingApprovalsByAction,
   updatePendingApprovalStatus,
 } from '../../db/sessions.js';
@@ -64,20 +70,33 @@ function shortApprovalId(): string {
   return `oa-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/** Called from the approvals response handler when a card button is clicked. */
-export function resolveOneCLIApproval(approvalId: string, selectedOption: string): boolean {
+/** Called from the approvals response handler when a card button is clicked. `resolvedBy` = namespaced clicker id. */
+export async function resolveOneCLIApproval(
+  approvalId: string,
+  selectedOption: string,
+  resolvedBy = '',
+): Promise<boolean> {
   const state = pending.get(approvalId);
   if (!state) return false;
   pending.delete(approvalId);
   clearTimeout(state.timer);
 
   const decision: Decision = selectedOption === 'approve' ? 'approve' : 'deny';
+  const row = getPendingApproval(approvalId);
   updatePendingApprovalStatus(approvalId, decision === 'approve' ? 'approved' : 'rejected');
   // Card is auto-edited to "✅ <option>" by chat-sdk-bridge's onAction handler,
   // so we don't need to deliver an edit here.
   deletePendingApproval(approvalId);
 
   state.resolve(decision);
+  if (row) {
+    await notifyApprovalResolved({
+      approval: row,
+      session: null,
+      outcome: decision === 'approve' ? 'approve' : 'reject',
+      userId: resolvedBy,
+    });
+  }
   log.info('OneCLI approval resolved', { approvalId, decision });
   return true;
 }
@@ -200,7 +219,10 @@ async function handleRequest(request: ApprovalRequest): Promise<Decision> {
   const expiresAtMs = new Date(request.expiresAt).getTime();
   const timeoutMs = Math.max(1000, expiresAtMs - Date.now() - 1000);
 
-  return new Promise<Decision>((resolve) => {
+  // Arm the continuation before yielding to lifecycle observers. The card is
+  // already live, so a fast click must never look like a stale post-restart
+  // row merely because an async requested observer is still running.
+  const decision = new Promise<Decision>((resolve) => {
     const timer = setTimeout(() => {
       if (!pending.has(approvalId)) return;
       pending.delete(approvalId);
@@ -212,6 +234,13 @@ async function handleRequest(request: ApprovalRequest): Promise<Decision> {
 
     pending.set(approvalId, { resolve, timer });
   });
+
+  const created = getPendingApproval(approvalId);
+  if (created) {
+    await notifyApprovalRequested({ approval: created, session: null, deliveredTo: target.userId });
+  }
+
+  return decision;
 }
 
 async function expireApproval(approvalId: string, reason: string): Promise<void> {
@@ -222,6 +251,7 @@ async function expireApproval(approvalId: string, reason: string): Promise<void>
   updatePendingApprovalStatus(approvalId, 'expired');
   await editCardExpired(row, reason);
   deletePendingApproval(approvalId);
+  await notifyApprovalResolved({ approval: row, session: null, outcome: 'expire', userId: '' });
   log.info('OneCLI approval expired', { approvalId, reason });
 }
 
@@ -249,8 +279,13 @@ async function sweepStaleApprovals(): Promise<void> {
   if (rows.length === 0) return;
   log.info('Sweeping stale OneCLI approvals from previous process', { count: rows.length });
   for (const row of rows) {
+    // Close the click-vs-sweep race before the network edit yields. The
+    // response handler treats expired rows as already owned by this terminal
+    // path, so exactly one resolved event is emitted.
+    updatePendingApprovalStatus(row.approval_id, 'expired');
     await editCardExpired(row, 'host restarted');
     deletePendingApproval(row.approval_id);
+    await notifyApprovalResolved({ approval: row, session: null, outcome: 'sweep', userId: '' });
   }
 }
 

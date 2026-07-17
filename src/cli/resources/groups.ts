@@ -137,7 +137,6 @@ registerResource({
             pending_approvals: 0,
             agent_destinations_owned: 0,
             agent_destinations_pointing: 0,
-            pending_sender_approvals: 0,
             pending_channel_approvals: 0,
             messaging_group_agents: 0,
             agent_group_members: 0,
@@ -166,9 +165,6 @@ registerResource({
               .run(groupId, groupId).changes;
           }
           counts.sessions = db.prepare('DELETE FROM sessions WHERE agent_group_id = ?').run(groupId).changes;
-          counts.pending_sender_approvals = db
-            .prepare('DELETE FROM pending_sender_approvals WHERE agent_group_id = ?')
-            .run(groupId).changes;
           counts.pending_channel_approvals = db
             .prepare('DELETE FROM pending_channel_approvals WHERE agent_group_id = ?')
             .run(groupId).changes;

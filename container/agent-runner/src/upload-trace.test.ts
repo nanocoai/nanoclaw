@@ -61,18 +61,22 @@ describe('poll loop — /upload-trace command', () => {
     // Command message was completed (not left pending).
     expect(getPendingMessages()).toHaveLength(0);
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 });
 
 async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSignal, timeoutMs: number): Promise<void> {
-  return Promise.race([
-    runPollLoop({ provider, providerName: 'mock', cwd: '/tmp' }),
-    new Promise<void>((_, reject) => {
-      signal.addEventListener('abort', () => reject(new Error('aborted')));
-    }),
-    new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
-  ]);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      runPollLoop({ provider, providerName: 'mock', cwd: '/tmp', signal }),
+      new Promise<void>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('timeout')), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 async function waitFor(condition: () => boolean, timeoutMs: number): Promise<void> {

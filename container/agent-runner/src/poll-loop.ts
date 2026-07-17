@@ -136,7 +136,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     }
 
     if (messages.length === 0) {
-      await sleep(POLL_INTERVAL_MS);
+      await sleep(POLL_INTERVAL_MS, config.signal);
       continue;
     }
 
@@ -149,7 +149,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // the "store as context, don't engage" contract. Host-side countDueMessages
     // gates the same way for wake-from-cold (see src/db/session-db.ts).
     if (!messages.some((m) => m.trigger === 1)) {
-      await sleep(POLL_INTERVAL_MS);
+      await sleep(POLL_INTERVAL_MS, config.signal);
       continue;
     }
 
@@ -242,6 +242,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       cwd: config.cwd,
       systemContext: config.systemContext,
     });
+    let queryAbortedBySignal = false;
+    const abortQuery = () => {
+      if (queryAbortedBySignal) return;
+      queryAbortedBySignal = true;
+      query.abort();
+    };
+    config.signal?.addEventListener('abort', abortQuery, { once: true });
+    if (config.signal?.aborted) abortQuery();
 
     // Process the query while concurrently polling for new messages
     const skippedSet = new Set(skipped.map((s) => s.id));
@@ -291,6 +299,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       // followed by a "Completed" line that reads like success.
       log(`Errored batch will be acked completed — ${processingIds.length} message(s), no redelivery`);
     } finally {
+      config.signal?.removeEventListener('abort', abortQuery);
       clearCurrentInReplyTo();
     }
 
@@ -801,6 +810,21 @@ function resolveDestinationThread(
   return null;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timeout = setTimeout(finish, ms);
+
+    signal?.addEventListener('abort', finish, { once: true });
+    if (signal?.aborted) finish();
+  });
 }

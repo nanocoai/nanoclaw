@@ -55,7 +55,7 @@ describe('poll loop integration', () => {
     const pending = getPendingMessages();
     expect(pending).toHaveLength(0);
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 
   it('should process multiple messages in a batch', async () => {
@@ -73,7 +73,7 @@ describe('poll loop integration', () => {
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].content).text).toBe('Got both messages');
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 
   it('should resolve thread_id per-destination, not from global routing', async () => {
@@ -111,7 +111,7 @@ describe('poll loop integration', () => {
     expect(slackOut!.thread_id).toBe('slack-thread-99');
     expect(slackOut!.in_reply_to).toBe('m-slack');
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 
   it('bare text produces no outbound messages (scratchpad only)', async () => {
@@ -129,7 +129,7 @@ describe('poll loop integration', () => {
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(0);
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 
   it('unknown destination is dropped, valid destination is sent', async () => {
@@ -151,7 +151,7 @@ describe('poll loop integration', () => {
     expect(JSON.parse(out[0].content).text).toBe('delivered');
     expect(out[0].platform_id).toBe('chan-1');
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 
   it('multiple <message> blocks each produce an outbound message', async () => {
@@ -183,7 +183,7 @@ describe('poll loop integration', () => {
     expect(slack).toBeDefined();
     expect(JSON.parse(slack!.content).text).toBe('for slack');
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 
   it('sends null thread_id when no prior inbound from destination', async () => {
@@ -210,7 +210,7 @@ describe('poll loop integration', () => {
     expect(out[0].platform_id).toBe('chan-new');
     expect(out[0].thread_id).toBeNull();
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 
   it('resolves most recent thread_id when destination has multiple inbound messages', async () => {
@@ -230,7 +230,7 @@ describe('poll loop integration', () => {
     expect(out[0].thread_id).toBe('thread-new');
     expect(out[0].in_reply_to).toBe('m-new');
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 
   it('should process messages arriving after loop starts', async () => {
@@ -248,7 +248,7 @@ describe('poll loop integration', () => {
     const out = getUndeliveredMessages();
     expect(out.length).toBeGreaterThanOrEqual(1);
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 
   it('internal tags between message blocks are stripped from scratchpad', async () => {
@@ -268,7 +268,7 @@ describe('poll loop integration', () => {
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].content).text).toBe('answer');
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 
   it('handles mixed task + chat batch with correct origin metadata', async () => {
@@ -293,25 +293,29 @@ describe('poll loop integration', () => {
     expect(out).toHaveLength(1);
     expect(out[0].platform_id).toBe('chan-1');
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 
 });
 
 // Helper: run poll loop until aborted or timeout
 async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSignal, timeoutMs: number): Promise<void> {
-  return Promise.race([
-    runPollLoop({
-      provider,
-      providerName: 'mock',
-      cwd: '/tmp',
-      signal,
-    }),
-    new Promise<void>((_, reject) => {
-      signal.addEventListener('abort', () => reject(new Error('aborted')));
-    }),
-    new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
-  ]);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      runPollLoop({
+        provider,
+        providerName: 'mock',
+        cwd: '/tmp',
+        signal,
+      }),
+      new Promise<void>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('timeout')), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 async function waitFor(condition: () => boolean, timeoutMs: number): Promise<void> {
@@ -355,7 +359,7 @@ describe('poll loop — exchange hook (onExchangeComplete)', () => {
     expect(exchange.continuation).toStartWith('mock-session-');
     expect(exchange.status).toBe('completed');
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 
   it('does not report the internal wrapping-retry nudge as a user prompt', async () => {
@@ -380,7 +384,7 @@ describe('poll loop — exchange hook (onExchangeComplete)', () => {
     }
     expect(provider.exchanges.map((e) => e.status)).toEqual(['undelivered', 'completed']);
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 
   it('a throwing hook never breaks delivery', async () => {
@@ -402,7 +406,7 @@ describe('poll loop — exchange hook (onExchangeComplete)', () => {
     expect(out.length).toBe(1);
     expect(out[0].content).toContain('delivered anyway');
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 });
 
@@ -426,7 +430,7 @@ describe('poll loop — provider error recovery', () => {
     const pending = getPendingMessages();
     expect(pending).toHaveLength(0);
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 });
 
@@ -453,7 +457,7 @@ describe('poll loop — stale session recovery', () => {
     // Continuation was cleared (isSessionInvalid returned true)
     expect(getContinuation('mock')).toBeUndefined();
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 });
 
@@ -489,7 +493,7 @@ describe('poll loop — /clear command', () => {
     const pending = getPendingMessages();
     expect(pending).toHaveLength(0);
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 });
 
@@ -567,7 +571,7 @@ describe('poll loop — slash command during active query', () => {
     expect(getContinuation('mock')).toBeUndefined();
     expect(getPendingMessages()).toHaveLength(0);
 
-    await loopPromise.catch(() => {});
+    await loopPromise;
   });
 });
 

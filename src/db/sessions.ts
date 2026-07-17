@@ -202,11 +202,11 @@ export function createPendingApproval(
       `INSERT OR IGNORE INTO pending_approvals
          (approval_id, session_id, request_id, action, payload, created_at,
           agent_group_id, channel_type, platform_id, platform_message_id, expires_at, status,
-          title, options_json, approver_user_id)
+          title, options_json, approver_user_id, approver_rule, dedup_key)
        VALUES
          (@approval_id, @session_id, @request_id, @action, @payload, @created_at,
           @agent_group_id, @channel_type, @platform_id, @platform_message_id, @expires_at, @status,
-          @title, @options_json, @approver_user_id)`,
+          @title, @options_json, @approver_user_id, @approver_rule, @dedup_key)`,
     )
     .run({
       session_id: null,
@@ -217,9 +217,18 @@ export function createPendingApproval(
       expires_at: null,
       status: 'pending',
       approver_user_id: null,
+      approver_rule: 'admins-of-scope',
+      dedup_key: null,
       ...pa,
     });
   return result.changes > 0;
+}
+
+/** In-flight lookup for `requestApproval`'s dedup: any live row with this key blocks a repeat request. */
+export function getPendingApprovalByDedupKey(dedupKey: string): PendingApproval | undefined {
+  return getDb().prepare('SELECT * FROM pending_approvals WHERE dedup_key = ? LIMIT 1').get(dedupKey) as
+    | PendingApproval
+    | undefined;
 }
 
 export function getPendingApproval(approvalId: string): PendingApproval | undefined {
@@ -277,20 +286,14 @@ export function getAskQuestionRender(
     | undefined;
   if (a?.title) return { title: a.title, options: JSON.parse(a.options_json) };
 
-  // Channel-registration + unknown-sender approvals persist title/options_json
-  // the same way pending_approvals does — just SELECT and return.
+  // Channel-registration approvals persist title/options_json the same way
+  // pending_approvals does — just SELECT and return. (Unknown-sender approvals
+  // are pending_approvals rows since the sender fold.)
   if (hasTable(getDb(), 'pending_channel_approvals')) {
     const c = getDb()
       .prepare('SELECT title, options_json FROM pending_channel_approvals WHERE messaging_group_id = ?')
       .get(id) as { title: string; options_json: string } | undefined;
     if (c?.title) return { title: c.title, options: JSON.parse(c.options_json) };
-  }
-
-  if (hasTable(getDb(), 'pending_sender_approvals')) {
-    const s = getDb().prepare('SELECT title, options_json FROM pending_sender_approvals WHERE id = ?').get(id) as
-      | { title: string; options_json: string }
-      | undefined;
-    if (s?.title) return { title: s.title, options: JSON.parse(s.options_json) };
   }
 
   return undefined;

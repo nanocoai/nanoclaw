@@ -12,6 +12,9 @@
  *   2. OneCLI credential approvals (`action = 'onecli_credential'`). Resolved
  *      via an in-memory Promise — see onecli-approvals.ts.
  *
+ * Click authorization is `mayResolve` over the hold's approver rule
+ * (approver-rule.ts) — the one shared rule for every hold.
+ *
  * The response handler is registered via core's `registerResponseHandler`;
  * core iterates handlers and the first one to return `true` claims the response.
  */
@@ -20,8 +23,8 @@ import { deletePendingApproval, getPendingApproval, getSession } from '../../db/
 import type { ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
-import type { PendingApproval } from '../../types.js';
-import { hasAdminPrivilege, isGlobalAdmin, isOwner } from '../permissions/db/user-roles.js';
+import type { PendingApproval, Session } from '../../types.js';
+import { approverRuleOf, mayResolve } from './approver-rule.js';
 import { finalizeReject } from './finalize.js';
 import { ONECLI_ACTION, resolveOneCLIApproval } from './onecli-approvals.js';
 import { getApprovalHandler, notifyApprovalResolved, REJECT_WITH_REASON_VALUE } from './primitive.js';
@@ -31,7 +34,8 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
   const approval = getPendingApproval(payload.questionId);
   if (!approval) return false;
 
-  if (!isAuthorizedApprovalClick(approval, payload)) {
+  const clickerId = namespacedUserId(payload);
+  if (!mayResolve(approverRuleOf(approval), clickerId)) {
     log.warn('Ignoring unauthorized approval response', {
       approvalId: approval.approval_id,
       action: approval.action,
@@ -42,16 +46,22 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
   }
 
   if (approval.action === ONECLI_ACTION) {
-    if (resolveOneCLIApproval(payload.questionId, payload.value)) {
+    // The expiry/sweep path marks the row before awaiting its card edit. A
+    // click in that window is already too late and must not delete the row or
+    // emit a second terminal event; the owning path will finish both.
+    if (approval.status === 'expired') return true;
+    if (await resolveOneCLIApproval(payload.questionId, payload.value, clickerId ?? '')) {
       return true;
     }
     // Row exists but the in-memory resolver is gone (timer fired or the process
-    // was in a weird state). Nothing to do — just drop the row.
+    // restarted before the click). End the durable lifecycle as a sweep: the
+    // click cannot resume the credentialed request without its live Promise.
     deletePendingApproval(payload.questionId);
+    await notifyApprovalResolved({ approval, session: null, outcome: 'sweep', userId: clickerId ?? '' });
     return true;
   }
 
-  await handleRegisteredApproval(approval, payload.value, namespacedUserId(payload) ?? '');
+  await handleRegisteredApproval(approval, payload.value, clickerId ?? '');
   return true;
 }
 
@@ -60,12 +70,11 @@ async function handleRegisteredApproval(
   selectedOption: string,
   userId: string,
 ): Promise<void> {
-  if (!approval.session_id) {
-    deletePendingApproval(approval.approval_id);
-    return;
-  }
-  const session = getSession(approval.session_id);
-  if (!session) {
+  // Sessionless holds (sender admission) carry session_id null and resolve
+  // without an agent to notify; a session-BOUND hold whose session vanished
+  // is stale — drop it.
+  const session: Session | null = approval.session_id ? (getSession(approval.session_id) ?? null) : null;
+  if (approval.session_id && !session) {
     deletePendingApproval(approval.approval_id);
     return;
   }
@@ -73,8 +82,10 @@ async function handleRegisteredApproval(
   // "Reject with reason…" — hold the row and capture the admin's next DM
   // instead of finalizing now. The agent is notified exactly once: after the
   // reason arrives, or after the sweep's timeout if the admin ghosts.
+  // Sessionless holds have nobody to relay a reason to — plain reject.
   if (selectedOption === REJECT_WITH_REASON_VALUE) {
-    await armReasonCapture(approval, session, userId);
+    if (session) await armReasonCapture(approval, session, userId);
+    else await finalizeReject(approval, null, userId);
     return;
   }
 
@@ -85,17 +96,19 @@ async function handleRegisteredApproval(
   }
 
   // Approved — dispatch to the module that registered for this action.
-  const notify = (text: string): void => {
-    writeSessionMessage(session.agent_group_id, session.id, {
-      id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      kind: 'chat',
-      timestamp: new Date().toISOString(),
-      platformId: session.agent_group_id,
-      channelType: 'agent',
-      threadId: null,
-      content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
-    });
-  };
+  const notify = session
+    ? (text: string): void => {
+        writeSessionMessage(session.agent_group_id, session.id, {
+          id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          kind: 'chat',
+          timestamp: new Date().toISOString(),
+          platformId: session.agent_group_id,
+          channelType: 'agent',
+          threadId: null,
+          content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
+        });
+      }
+    : (): void => {};
 
   const handler = getApprovalHandler(approval.action);
   if (!handler) {
@@ -106,7 +119,7 @@ async function handleRegisteredApproval(
     notify(`Your ${approval.action} was approved, but no handler is installed to apply it.`);
     deletePendingApproval(approval.approval_id);
     await notifyApprovalResolved({ approval, session, outcome: 'approve', userId });
-    await wakeContainer(session);
+    if (session) await wakeContainer(session);
     return;
   }
 
@@ -123,29 +136,10 @@ async function handleRegisteredApproval(
 
   deletePendingApproval(approval.approval_id);
   await notifyApprovalResolved({ approval, session, outcome: 'approve', userId });
-  await wakeContainer(session);
+  if (session) await wakeContainer(session);
 }
 
 function namespacedUserId(payload: ResponsePayload): string | null {
   if (!payload.userId) return null;
   return payload.userId.includes(':') ? payload.userId : `${payload.channelType}:${payload.userId}`;
-}
-
-function isAuthorizedApprovalClick(approval: PendingApproval, payload: ResponsePayload): boolean {
-  const userId = namespacedUserId(payload);
-  if (!userId) return false;
-
-  // An approval may name a specific approver; only that exact user may resolve it.
-  if (approval.approver_user_id) {
-    return userId === approval.approver_user_id;
-  }
-
-  const agentGroupId =
-    approval.agent_group_id ?? (approval.session_id ? getSession(approval.session_id)?.agent_group_id : null);
-
-  if (!agentGroupId) {
-    return isOwner(userId) || isGlobalAdmin(userId);
-  }
-
-  return hasAdminPrivilege(userId, agentGroupId);
 }
