@@ -112,6 +112,14 @@ adapter loads neither backend's SDK at import (hosted `spectrum-ts` only in
 no package. For the Local backend, `pnpm run build` guards the Chat SDK bridge's
 typed core API.
 
+**Hosted:** also run the full adapter suite — it includes an integration block
+that exercises the real installed `spectrum-ts` (version, exports, builders)
+and auto-skips when the package is absent:
+
+```bash
+pnpm exec vitest run src/channels/imessage.test.ts
+```
+
 Now follow the section for your chosen backend.
 
 ## Local backend (macOS)
