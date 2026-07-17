@@ -7,8 +7,9 @@
  *
  *   [1/5] Device login   — open a URL, approve, we store the bearer token
  *   [2/5] Project        — find or create the "NanoClaw" Photon project
- *   [3/5] Secret         — mint the project secret and write PHOTON_PROJECT_ID
- *                          + PHOTON_PROJECT_SECRET to .env
+ *   [3/5] Secret         — reuse the project's current secret (rotating only
+ *                          when the API doesn't return one) and write
+ *                          PHOTON_PROJECT_ID + PHOTON_PROJECT_SECRET to .env
  *   [4/5] User           — register your phone as a Spectrum user (idempotent)
  *   [5/5] iMessage line  — surface the number you text to reach your agent
  *
@@ -272,6 +273,17 @@ export async function listProjects(fetchFn: FetchFn, dashboardHost: string, toke
 export function findProjectByName(projects: Array<Record<string, unknown>>, name: string): Record<string, unknown> | undefined {
   const target = (name || '').trim().toLowerCase();
   return projects.find((proj) => String(proj.name ?? '').trim().toLowerCase() === target);
+}
+
+/**
+ * The project's current secret off an API project payload, if present. The
+ * dashboard returns `projectSecret` on list/create responses; reusing it keeps
+ * re-runs from rotating the secret and breaking every other consumer of the
+ * project. Absent/blank → undefined (caller falls back to regenerating).
+ */
+export function projectSecretOf(project: Record<string, unknown> | undefined): string | undefined {
+  const secret = project?.projectSecret;
+  return typeof secret === 'string' && secret.trim() !== '' ? secret : undefined;
 }
 
 export async function createProject(
@@ -637,14 +649,17 @@ async function runSetup(args: Args, fetchFn: FetchFn = fetch, deps: SetupDeps = 
   // [2/5] Find or create the project.
   p.log.step(`[2/5] Photon project "${args.projectName}"`);
   let projectId: string;
+  let currentSecret: string | undefined;
   try {
     const existing = findProjectByName(await listProjects(fetchFn, args.dashboardHost, token), args.projectName);
     if (existing?.id) {
       projectId = String(existing.id);
+      currentSecret = projectSecretOf(existing);
       p.log.info('Found existing project');
     } else {
       const created = await createProject(fetchFn, args.dashboardHost, token, args.projectName);
       projectId = String(created.id);
+      currentSecret = projectSecretOf(created);
       p.log.info('Created project');
     }
   } catch (err) {
@@ -652,14 +667,21 @@ async function runSetup(args: Args, fetchFn: FetchFn = fetch, deps: SetupDeps = 
     return 1;
   }
 
-  // [3/5] Mint the secret + persist runtime creds.
+  // [3/5] Persist runtime creds. Reuse the project's current secret — rotating
+  // on every run would invalidate the previous secret and break every other
+  // install using this project. Regenerate only when the API returned none.
   p.log.step('[3/5] Provisioning Spectrum credentials');
   let secret: string;
-  try {
-    secret = await regenerateProjectSecret(fetchFn, args.dashboardHost, token, projectId);
-  } catch (err) {
-    p.cancel(`Secret provisioning failed: ${err instanceof Error ? err.message : String(err)}`);
-    return 1;
+  if (currentSecret) {
+    secret = currentSecret;
+    p.log.info('Reusing existing project secret');
+  } else {
+    try {
+      secret = await regenerateProjectSecret(fetchFn, args.dashboardHost, token, projectId);
+    } catch (err) {
+      p.cancel(`Secret provisioning failed: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
   }
   writeEnv(path.join(process.cwd(), '.env'), { PHOTON_PROJECT_ID: projectId, PHOTON_PROJECT_SECRET: secret });
   saveAuth({ project_id: projectId, name: args.projectName });

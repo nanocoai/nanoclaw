@@ -20,6 +20,7 @@ import {
   main,
   normalizePhone,
   parseArgs,
+  projectSecretOf,
   unwrapList,
   upsertEnv,
   userAssignedLine,
@@ -87,6 +88,12 @@ describe('unwrapList / find helpers', () => {
   });
   it('finds a project by case-insensitive name', () => {
     expect(findProjectByName([{ name: 'NanoClaw', id: 'p1' }], 'nanoclaw')).toEqual({ name: 'NanoClaw', id: 'p1' });
+  });
+  it('reads the current secret off a project payload', () => {
+    expect(projectSecretOf({ id: 'p1', projectSecret: 'spk-abc' })).toBe('spk-abc');
+    expect(projectSecretOf({ id: 'p1' })).toBeUndefined();
+    expect(projectSecretOf({ id: 'p1', projectSecret: '  ' })).toBeUndefined();
+    expect(projectSecretOf(undefined)).toBeUndefined();
   });
   it('finds a user by normalized phone and reads the assigned line', () => {
     const users = [{ phoneNumber: '+1 555 123 4567', assignedPhoneNumber: '+15559990000' }];
@@ -177,7 +184,12 @@ function makeMockFetch(opts: { existingProject?: boolean; existingUser?: boolean
       return json({ projects: [] });
     }
     if (pathname === '/api/projects' && method === 'GET') {
-      return json({ projects: opts.existingProject ? [{ id: 'proj-existing', name: 'NanoClaw' }] : [] });
+      // The dashboard returns the project's current secret on list responses.
+      return json({
+        projects: opts.existingProject
+          ? [{ id: 'proj-existing', name: 'NanoClaw', projectSecret: 'existing-secret-value' }]
+          : [],
+      });
     }
     if (pathname === '/api/projects' && method === 'POST') {
       return json({ id: 'proj-created', name: 'NanoClaw' });
@@ -246,6 +258,8 @@ describe('photon setup flow (mocked API)', () => {
     expect(calls.some((c) => c.method === 'POST' && c.pathname === '/api/projects')).toBe(true);
     // A new user was created.
     expect(calls.some((c) => c.method === 'POST' && /\/users\/$/.test(c.pathname))).toBe(true);
+    // The create response carried no projectSecret → minted via regenerate.
+    expect(calls.some((c) => /regenerate-secret$/.test(c.pathname))).toBe(true);
   });
 
   it('reuses an existing project + user and skips creation', async () => {
@@ -255,6 +269,10 @@ describe('photon setup flow (mocked API)', () => {
 
     const env = fs.readFileSync(path.join(tempDir, '.env'), 'utf-8');
     expect(env).toContain('PHOTON_PROJECT_ID=proj-existing');
+    // The listing's current secret is reused — never rotated. Rotating here
+    // would invalidate the secret for every other consumer of the project.
+    expect(env).toContain('PHOTON_PROJECT_SECRET=existing-secret-value');
+    expect(calls.some((c) => /regenerate-secret$/.test(c.pathname))).toBe(false);
     // No create-project or create-user calls.
     expect(calls.some((c) => c.method === 'POST' && c.pathname === '/api/projects')).toBe(false);
     expect(calls.some((c) => c.method === 'POST' && /\/users\/$/.test(c.pathname))).toBe(false);
