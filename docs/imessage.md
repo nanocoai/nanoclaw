@@ -25,7 +25,7 @@ configured.
 | Runs on | macOS only (reads `chat.db`) | any OS |
 | iMessage line | your own Apple ID | Photon-managed number |
 | Setup | grant Full Disk Access | device-login wizard |
-| Package | `chat-adapter-imessage@0.1.1` | `spectrum-ts@8.0.0` |
+| Package | `chat-adapter-imessage@0.1.1` | `spectrum-ts@11.0.0` |
 | Credentials | `IMESSAGE_ENABLED=true` | `PHOTON_PROJECT_ID` / `PHOTON_PROJECT_SECRET` |
 | Attachments out / tapbacks | as `chat-adapter-imessage` supports | yes |
 
@@ -107,7 +107,7 @@ The underlying commands are:
 
 ```bash
 # 1. install the runtime SDK (pinned — spectrum-ts ships breaking majors)
-pnpm install spectrum-ts@8.0.0
+pnpm install spectrum-ts@11.0.0
 
 # 2. run the setup wizard (device login + auto-provision everything)
 pnpm exec tsx scripts/photon-setup.ts --phone +15551234567
@@ -182,7 +182,7 @@ Chat SDK bridge provide.
 ## Upgrading spectrum-ts (hosted)
 
 `spectrum-ts` is pinned to an **exact** version in `package.json` because the
-SDK ships breaking majors (v8 is what the adapter targets). Upgrades are
+SDK ships breaking majors (v11 is what the adapter targets). Upgrades are
 deliberate:
 
 1. Read the [SDK release notes][releases] for every version between the current
@@ -198,7 +198,7 @@ deliberate:
 
 | Symptom                                 | Fix                                                                                                                   |
 | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `spectrum-ts is not installed` at setup | Hosted backend: `pnpm install spectrum-ts@8.0.0`, then restart                                                        |
+| `spectrum-ts is not installed` at setup | Hosted backend: `pnpm install spectrum-ts@11.0.0`, then restart                                                        |
 | Device login times out                  | Re-run the wizard (the code expires in ~30 min; a stored token is reused)                                             |
 | No iMessage line assigned               | Re-run `… photon-setup.ts status` or check the [dashboard][photon]; the shared line can take a moment                 |
 | Inbound stops arriving (hosted)         | The adapter re-subscribes automatically; if it persists it's usually upstream — restart to force a fresh stream       |

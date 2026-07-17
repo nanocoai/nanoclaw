@@ -32,32 +32,42 @@ On non-macOS, only **Hosted** is possible — the local backend reads this Mac's
 ## Install (both backends)
 
 NanoClaw doesn't ship channel adapters in trunk. This skill copies the unified
-`imessage` adapter in from the `channels` branch. (On a fork, the `channels`
-branch lives on your `upstream` remote — substitute that remote name for
-`origin` below.)
+`imessage` adapter in from the `channels` branch — but **only if
+`src/channels/imessage.ts` is not already present**. Never overwrite an
+existing copy: a previously installed or locally updated adapter may be newer
+than the channels-branch version. (On a fork, the `channels` branch lives on
+your `upstream` remote — substitute that remote name for `origin` below.)
 
 ### Pre-flight (idempotent)
 
-Skip to the backend section if all of these are already in place:
+Each step guards itself — skip the ones whose condition already holds:
 
-- `src/channels/imessage.ts` exists
-- `src/channels/index.ts` contains `import './imessage.js';`
+- `src/channels/imessage.ts`, `src/channels/imessage.test.ts`, and
+  `src/channels/imessage-registration.test.ts` all exist → skip steps 1–2
+  (no fetch, no copy)
+- `src/channels/index.ts` contains `import './imessage.js';` → skip step 3
 - the chosen backend's package is in `package.json` deps
-  (`chat-adapter-imessage` for Local, `spectrum-ts` for Hosted)
+  (`chat-adapter-imessage` for Local, `spectrum-ts` for Hosted) → skip step 4
+- if every step above was skipped, skip step 5 too and go straight to the
+  backend section
 
-Otherwise continue. Every step is safe to re-run.
+Every step is safe to re-run.
 
-### 1. Fetch the channels branch
+### 1. Fetch the channels branch (only if adapter files are missing)
 
 ```bash
 git fetch origin channels
 ```
 
-### 2. Copy the adapter and its registration test
+### 2. Copy the adapter and its tests (only the missing files)
 
 ```bash
-git show origin/channels:src/channels/imessage.ts                    > src/channels/imessage.ts
-git show origin/channels:src/channels/imessage-registration.test.ts > src/channels/imessage-registration.test.ts
+[ -f src/channels/imessage.ts ] || \
+  git show origin/channels:src/channels/imessage.ts > src/channels/imessage.ts
+[ -f src/channels/imessage.test.ts ] || \
+  git show origin/channels:src/channels/imessage.test.ts > src/channels/imessage.test.ts
+[ -f src/channels/imessage-registration.test.ts ] || \
+  git show origin/channels:src/channels/imessage-registration.test.ts > src/channels/imessage-registration.test.ts
 ```
 
 ### 3. Append the self-registration import
@@ -79,10 +89,10 @@ pnpm install chat-adapter-imessage@0.1.1
 **Hosted:**
 
 ```bash
-pnpm install spectrum-ts@8.0.0
+pnpm install spectrum-ts@11.0.0
 ```
 
-> Pin exactly. `spectrum-ts` ships breaking majors (v8 is what the adapter
+> Pin exactly. `spectrum-ts` ships breaking majors (v11 is what the adapter
 > targets); don't `@latest`. NanoClaw's pnpm gate (`minimumReleaseAge`) requires
 > a version ≥3 days old — both pins clear it. A fresher pin needs human sign-off
 > before a `minimumReleaseAgeExclude` entry (CLAUDE.md → Supply Chain Security).
@@ -247,7 +257,7 @@ slash replies. Optional `.env`: `PHOTON_MARKDOWN`, `PHOTON_TELEMETRY`,
 
 ## Troubleshooting
 
-- **`spectrum-ts` not installed** (hosted) — run step 4 (`pnpm install spectrum-ts@8.0.0`) and restart.
+- **`spectrum-ts` not installed** (hosted) — run step 4 (`pnpm install spectrum-ts@11.0.0`) and restart.
 - **Bot silent** — confirm the backend connected (hosted: `grep "Photon channel connected" logs/nanoclaw.log`), the channel is wired, and the service is running.
 - **Device login times out** (hosted) — the code expires in ~30 min; re-run the wizard (a stored token is reused).
 - **Local: no inbound** — confirm Full Disk Access is granted to the Node binary, and NanoClaw runs on the signed-in Mac.

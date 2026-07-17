@@ -10,10 +10,10 @@ place.)
 Delete the `import './imessage.js';` line from `src/channels/index.ts` (delete
 the line, don't comment it out).
 
-## 2. Delete the adapter + its registration test
+## 2. Delete the adapter + its tests
 
 ```bash
-rm -f src/channels/imessage.ts src/channels/imessage-registration.test.ts
+rm -f src/channels/imessage.ts src/channels/imessage.test.ts src/channels/imessage-registration.test.ts
 ```
 
 ## 3. Uninstall the backend package(s)

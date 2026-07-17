@@ -65,7 +65,7 @@ import type { Adapter } from 'chat';
 // We intentionally do not `import` from 'spectrum-ts' at type level: the
 // package is installed on demand by /add-imessage, and the barrel must typecheck and
 // the barrel must evaluate without it. These interfaces mirror the shapes the
-// SDK returns (see the Hermes sidecar for the reference usage against v8).
+// SDK returns (see the Hermes sidecar for the reference usage against v11).
 // ---------------------------------------------------------------------------
 
 /** A content node on an inbound message (text / media / group / reaction). */
@@ -126,7 +126,8 @@ export interface SpectrumModule {
   Spectrum: (opts: {
     projectId: string;
     projectSecret: string;
-    providers: unknown[];
+    /** v10 renamed `providers` to `platforms`. */
+    platforms: unknown[];
     options?: Record<string, unknown>;
     telemetry?: boolean;
   }) => Promise<SpectrumApp>;
@@ -599,7 +600,7 @@ export function createPhotonAdapter(
       } catch (err) {
         throw new Error(
           'Photon: the `spectrum-ts` SDK is not installed. Run /add-imessage ' +
-            '(or `pnpm install spectrum-ts@8.0.0`) to enable the channel.',
+            '(or `pnpm install spectrum-ts@11.0.0`) to enable the channel.',
           { cause: err },
         );
       }
@@ -607,7 +608,7 @@ export function createPhotonAdapter(
       app = await sdk.spectrum.Spectrum({
         projectId: config.projectId,
         projectSecret: config.projectSecret,
-        providers: [sdk.imessage.config()],
+        platforms: [sdk.imessage.config()],
         options: { flattenGroups: true },
         telemetry: config.telemetry,
       });

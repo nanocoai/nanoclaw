@@ -21,7 +21,7 @@ cd "$PROJECT_ROOT"
 
 # Keep in sync with .claude/skills/add-imessage/SKILL.md (Local + Hosted).
 LOCAL_ADAPTER_VERSION="chat-adapter-imessage@0.1.1"
-HOSTED_ADAPTER_VERSION="spectrum-ts@8.0.0"
+HOSTED_ADAPTER_VERSION="spectrum-ts@11.0.0"
 
 # Resolve which remote carries the channels branch — handles forks where
 # upstream lives on a different remote than `origin`.
@@ -65,16 +65,18 @@ case "$BACKEND" in
     ;;
 esac
 
-need_install() {
-  [ ! -f src/channels/imessage.ts ] && return 0
-  ! grep -q "^import './imessage.js';" src/channels/index.ts 2>/dev/null && return 0
-  ! grep -q "\"${ADAPTER_PKG}\"" package.json && return 0
-  return 1
-}
+# Each step below guards itself and never overwrites an existing file: some
+# checkouts ship the adapter in trunk, and the channels-branch copy may be
+# older than the working-tree one.
+CHANGED=false
 
-ADAPTER_ALREADY_INSTALLED=true
-if need_install; then
-  ADAPTER_ALREADY_INSTALLED=false
+copy_needed=false
+[ -f src/channels/imessage.ts ] || copy_needed=true
+[ -f src/channels/imessage.test.ts ] || copy_needed=true
+[ -f src/channels/imessage-registration.test.ts ] || copy_needed=true
+
+if [ "$copy_needed" = true ]; then
+  CHANGED=true
   log "Fetching channels branch…"
   git fetch "$CHANNELS_REMOTE" channels >&2 2>/dev/null || {
     emit_status failed "git fetch ${CHANNELS_REMOTE} channels failed"
@@ -82,20 +84,35 @@ if need_install; then
   }
 
   log "Copying adapter from ${CHANNELS_BRANCH}…"
-  git show "${CHANNELS_BRANCH}:src/channels/imessage.ts" > src/channels/imessage.ts
-  git show "${CHANNELS_BRANCH}:src/channels/imessage-registration.test.ts" > src/channels/imessage-registration.test.ts
+  [ -f src/channels/imessage.ts ] || \
+    git show "${CHANNELS_BRANCH}:src/channels/imessage.ts" > src/channels/imessage.ts
+  [ -f src/channels/imessage.test.ts ] || \
+    git show "${CHANNELS_BRANCH}:src/channels/imessage.test.ts" > src/channels/imessage.test.ts
+  [ -f src/channels/imessage-registration.test.ts ] || \
+    git show "${CHANNELS_BRANCH}:src/channels/imessage-registration.test.ts" > src/channels/imessage-registration.test.ts
+else
+  log "Adapter present in working tree — keeping it (no fetch)."
+fi
 
-  # Append self-registration import if missing.
-  if ! grep -q "^import './imessage.js';" src/channels/index.ts; then
-    echo "import './imessage.js';" >> src/channels/index.ts
-  fi
+# Append self-registration import if missing.
+if ! grep -q "^import './imessage.js';" src/channels/index.ts; then
+  CHANGED=true
+  echo "import './imessage.js';" >> src/channels/index.ts
+fi
 
+# Install the backend package if it isn't a dependency yet.
+if ! grep -q "\"${ADAPTER_PKG}\"" package.json; then
+  CHANGED=true
   log "Installing ${ADAPTER_VERSION}…"
   pnpm install "${ADAPTER_VERSION}" >&2 2>/dev/null || {
     emit_status failed "pnpm install ${ADAPTER_VERSION} failed"
     exit 1
   }
+fi
 
+ADAPTER_ALREADY_INSTALLED=true
+if [ "$CHANGED" = true ]; then
+  ADAPTER_ALREADY_INSTALLED=false
   log "Building…"
   pnpm run build >&2 2>/dev/null || {
     emit_status failed "pnpm run build failed"
