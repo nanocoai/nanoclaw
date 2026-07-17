@@ -159,6 +159,12 @@ All optional, set in `.env`:
 
 ## Features (hosted)
 
+- **First contact is user-initiated** (intended Photon behavior) — the line can
+  only message numbers that have already texted it; a cold outbound to an
+  unknown number is rejected with `Target not allowed for this project`. Text
+  your agent's number once before expecting anything back (this is why the
+  wiring steps start with "text the number"). A welcome DM queued before that
+  first inbound text simply fails delivery — it is not a NanoClaw bug.
 - **Markdown** — replies are sent via the SDK's `markdown()` builder; iMessage
   renders bold/italics/lists/code natively. `PHOTON_MARKDOWN=false` reverts to
   plain text.
@@ -200,6 +206,7 @@ deliberate:
 | Symptom                                 | Fix                                                                                                                   |
 | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `spectrum-ts is not installed` at setup | Hosted backend: `pnpm install spectrum-ts@11.0.0`, then restart                                                        |
+| `Target not allowed for this project`   | Intended: the line only messages numbers that have texted it first. Send any message to the agent's number, then retry |
 | Device login times out                  | Re-run the wizard (the code expires in ~30 min; a stored token is reused)                                             |
 | No iMessage line assigned               | Re-run `… photon-setup.ts status` or check the [dashboard][photon]; the shared line can take a moment                 |
 | Inbound stops arriving (hosted)         | The adapter re-subscribes automatically; if it persists it's usually upstream — restart to force a fresh stream       |

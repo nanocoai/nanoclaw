@@ -218,7 +218,10 @@ grep "Photon channel connected" logs/nanoclaw.log | tail -1
 
 ### Wire the channel
 
-Text your agent's iMessage number once. The router auto-creates a
+Text your agent's iMessage number once. This first text is required, not just
+convenient: the hosted line can only message numbers that have already texted
+it (intended Photon behavior — cold outbound is rejected with
+`Target not allowed for this project`). The router auto-creates a
 `messaging_groups` row; the wizard prints a ready-to-run command:
 
 ```bash
@@ -267,6 +270,7 @@ slash replies. Optional `.env`: `PHOTON_MARKDOWN`, `PHOTON_TELEMETRY`,
 
 - **`spectrum-ts` not installed** (hosted) — run step 4 (`pnpm install spectrum-ts@11.0.0`) and restart.
 - **Bot silent** — confirm the backend connected (hosted: `grep "Photon channel connected" logs/nanoclaw.log`), the channel is wired, and the service is running.
+- **`Target not allowed for this project`** (hosted) — intended: the line only messages numbers that have texted it first. Text the agent's number once, then retry (a welcome DM queued before that first text simply fails delivery).
 - **Device login times out** (hosted) — the code expires in ~30 min; re-run the wizard (a stored token is reused).
 - **Local: no inbound** — confirm Full Disk Access is granted to the Node binary, and NanoClaw runs on the signed-in Mac.
 
