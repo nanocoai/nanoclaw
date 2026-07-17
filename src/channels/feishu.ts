@@ -408,11 +408,11 @@ export function buildDetailBody(detail: string, byteBudget: number): string {
     : body;
 }
 
-/** 将 step 转为卡片 element 列表（当前 Phase 为标题行 + 动作独立一行） */
+/** 将 step 转为卡片 element 列表（Phase 标题与动作同处折叠头，各占一行） */
 function stepToElements(step: ProgressStep): unknown[] {
   const isPhaseLine =
     step.narrationFull !== undefined || step.grayTail !== undefined;
-  // markdown 插值一律用实体转义版；plain_text header 用原文（不解析 markdown）
+  // markdown 插值一律使用实体转义版，避免动态文本改变卡片结构。
   const rawTitle = isPhaseLine ? step.title : truncateTitle(step.title);
   const title = escapeCardMarkdownText(rawTitle);
   const grayTail =
@@ -421,8 +421,6 @@ function stepToElements(step: ProgressStep): unknown[] {
       : escapeCardMarkdownText(step.grayTail);
   if (step.narrationFull) {
     // Phase 行：可展开查看 narration 全文 + 最新一条工具执行过程。
-    // header 为 plain_text（R1：行内灰色待实测支持后升级）；
-    // 动作不再拼进 header，独立一行灰色跟在面板下方（折叠态的第二行）
     const cpLimited = truncateCp(step.narrationFull, NARRATION_CARD_LIMIT);
     const byteLimited = truncateByEscapedBytes(
       cpLimited,
@@ -442,22 +440,19 @@ function stepToElements(step: ProgressStep): unknown[] {
       expanded: false,
       background_color: 'grey',
       header: {
-        title: { tag: 'plain_text', content: rawTitle },
+        title: {
+          tag: 'markdown',
+          content: grayTail
+            ? `${title}\n<font color="grey">${grayTail}</font>`
+            : title,
+        },
         vertical_align: 'center',
       },
       vertical_spacing: '2px',
       padding: '4px 8px 4px 8px',
       elements: [{ tag: 'markdown', content: body }],
     };
-    return grayTail
-      ? [
-          panel,
-          {
-            tag: 'markdown',
-            content: `<font color="grey">${grayTail}</font>`,
-          },
-        ]
-      : [panel];
+    return [panel];
   }
   if (grayTail) {
     // 无 narration 全文的 Phase 行（fallback 等）：标题一行 + 灰色动作一行；
