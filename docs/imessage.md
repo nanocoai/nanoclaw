@@ -162,9 +162,10 @@ All optional, set in `.env`:
 - **Markdown** — replies are sent via the SDK's `markdown()` builder; iMessage
   renders bold/italics/lists/code natively. `PHOTON_MARKDOWN=false` reverts to
   plain text.
-- **Inbound attachments & voice notes** — read off the stream and cached to
-  `data/attachments/`, surfaced to the agent as structured `attachments` (with
-  a `[… could not be downloaded]` note on failure). Over-cap media is skipped.
+- **Inbound attachments & voice notes** — read off the stream (with retry on
+  transient stream resets) and staged into the session's inbox by the host,
+  surfaced to the agent as structured `attachments` (with a
+  `[… could not be downloaded]` note on failure). Over-cap media is skipped.
 - **Outbound attachments** — files are written to a temp path and sent via
   `space.send(attachment(...))`.
 - **Reactions (tapbacks)** — `send_reaction` maps to an iMessage tapback;

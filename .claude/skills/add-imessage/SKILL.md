@@ -248,7 +248,7 @@ wires it to an existing agent group.
 ### Hosted features
 
 Markdown (native; `PHOTON_MARKDOWN=false` for plain text), file attachments in
-and out (inbound cached to `data/attachments/`, capped by
+and out (inbound staged into the session inbox, capped by
 `PHOTON_MAX_INLINE_ATTACHMENT_BYTES`, default 20 MB), tapback reactions, read
 receipts, typing indicators, and `ask_user_question` via `/approve` / `/reject`
 slash replies. Optional `.env`: `PHOTON_MARKDOWN`, `PHOTON_TELEMETRY`,
