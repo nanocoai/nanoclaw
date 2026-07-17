@@ -582,8 +582,10 @@ describe('FeishuChannel', () => {
         JSON.parse(patchArg?.data?.content ?? '{}'),
       );
       expect(serialized).toContain('collapsible_panel');
-      // 面板 header 只有标题，动作独立成灰色一行
-      expect(serialized).toContain('"content":"核对进度展示链路。"');
+      // 面板 header 第一行是标题，第二行是灰色动作。
+      expect(serialized).toContain(
+        '"content":"核对进度展示链路。\\n<font color=\\"grey\\">',
+      );
       expect(serialized).toContain(
         '<font color=\\"grey\\">已读取 &#47;tmp&#47;input&#46;t…&#46;txt，并测试 fixture&#46;test&#46;mjs（1 项通过）</font>',
       );
@@ -1085,7 +1087,7 @@ describe('FeishuChannel', () => {
       expect(JSON.stringify(entry.steps)).not.toContain('should-not-reach-card');
     });
 
-    it('narration Phase 动作独立成行：面板 header 无动作拼接，动作是灰色独立元素', async () => {
+    it('narration Phase 标题与动作在同一面板 header 内各占一行', async () => {
       const jid = 'fs:oc_progress_action_line';
       await channel.sendMessage(
         jid,
@@ -1118,13 +1120,22 @@ describe('FeishuChannel', () => {
       const phaseRow = entry.steps.at(-1);
       expect(phaseRow.grayTail).toBe('正在读取 /tmp/notes.md');
       const patchArg = mockPatch.mock.calls.at(-1)?.[0];
-      const serialized = JSON.stringify(
-        JSON.parse(patchArg?.data?.content ?? '{}'),
+      const card = JSON.parse(patchArg?.data?.content ?? '{}') as {
+        body: { elements: Array<Record<string, unknown>> };
+      };
+      const panelIndex = card.body.elements.findIndex(
+        (element) => element.tag === 'collapsible_panel',
       );
-      expect(serialized).toContain(
-        '<font color=\\"grey\\">正在读取 &#47;tmp&#47;notes&#46;md</font>',
-      );
-      expect(serialized).not.toContain(' · 正在读取');
+      expect(panelIndex).toBeGreaterThanOrEqual(0);
+      const panel = card.body.elements[panelIndex] as {
+        header: { title: { tag: string; content: string } };
+      };
+      expect(panel.header.title).toEqual({
+        tag: 'markdown',
+        content:
+          '分析进度卡渲染。\n<font color="grey">正在读取 &#47;tmp&#47;notes&#46;md</font>',
+      });
+      expect(card.body.elements[panelIndex + 1]?.tag).not.toBe('markdown');
     });
 
     it.each([
@@ -1299,7 +1310,9 @@ describe('FeishuChannel', () => {
         }
       };
       collect(card);
-      const body = markdownContents.find((text) => text.includes('大标题'));
+      const body = markdownContents.find(
+        (text) => text.includes('大标题') && text.includes('列表项'),
+      );
       expect(body).toBeDefined();
       expect(body).toContain('&#35; 大标题');
       expect(body).toContain('&#45; 列表项');
@@ -1488,8 +1501,8 @@ describe('FeishuChannel', () => {
         { isProgress: true },
       );
 
-      // 结构化断言（review P2-1）：定位面板与其后的独立动作行，
-      // 断言两处内容相等，字符串 contains 会被面板内同文本假阳性掩盖
+      // 结构化断言：动作同时出现在折叠头第二行和展开区末行，
+      // 面板外不再生成独立动作元素。
       const readCardStructure = () => {
         const patchArg = mockPatch.mock.calls.at(-1)?.[0];
         const content: string = patchArg?.data?.content ?? '{}';
@@ -1502,23 +1515,27 @@ describe('FeishuChannel', () => {
         );
         expect(panelIndex).toBeGreaterThanOrEqual(0);
         const panel = elements[panelIndex] as {
+          header: { title: { tag: string; content: string } };
           elements: Array<{ tag: string; content: string }>;
         };
         const panelBody = panel.elements[0].content;
         const sibling = elements[panelIndex + 1] as
           | { tag: string; content: string }
           | undefined;
-        return { panelBody, sibling };
+        return { header: panel.header.title, panelBody, sibling };
       };
 
       const first = readCardStructure();
       expect(first.panelBody).toContain('分析选区检测逻辑。');
-      // 面板后一项必须是独立 markdown 动作行，且与面板内最后一行相等
-      expect(first.sibling?.tag).toBe('markdown');
-      expect(first.sibling?.content).toBe(
+      expect(first.header).toEqual({
+        tag: 'markdown',
+        content:
+          '分析选区检测逻辑。\n<font color="grey">正在读取 &#47;tmp&#47;sel&#46;ts</font>',
+      });
+      expect(first.sibling?.tag).not.toBe('markdown');
+      expect(first.panelBody.split('\n').at(-1)).toBe(
         '<font color="grey">正在读取 &#47;tmp&#47;sel&#46;ts</font>',
       );
-      expect(first.panelBody.split('\n').at(-1)).toBe(first.sibling?.content);
 
       // 第二个工具事件到达后，两处同步刷新为最新动作
       await channel.sendMessage(
@@ -1536,11 +1553,10 @@ describe('FeishuChannel', () => {
         { isProgress: true },
       );
       const second = readCardStructure();
-      expect(second.sibling?.content).toContain('正在搜索');
-      expect(second.sibling?.content).not.toContain('正在读取');
-      expect(second.panelBody.split('\n').at(-1)).toBe(
-        second.sibling?.content,
-      );
+      expect(second.header.content).toContain('正在搜索');
+      expect(second.header.content).not.toContain('正在读取');
+      expect(second.sibling?.tag).not.toBe('markdown');
+      expect(second.panelBody.split('\n').at(-1)).toContain('正在搜索');
     });
 
     it('narration 标题超 30cp 截断为单行（不折行挤掉工具行）', async () => {
