@@ -407,6 +407,14 @@ export async function processQuery(
         const newMessages = pending.filter((m) => m.kind !== 'system');
         if (newMessages.length === 0) return;
 
+        // Accumulate gate — mirror of the cold-wake gate in the outer loop.
+        // A follow-up batch with only trigger=0 rows is background context
+        // (ignored_message_policy='accumulate'), not a follow-up: pushing it
+        // makes the agent respond to messages that never engaged it. Leave
+        // the rows pending (unclaimed) — they ride along with the next
+        // trigger=1 batch.
+        if (!newMessages.some((m) => m.trigger === 1)) return;
+
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
 
