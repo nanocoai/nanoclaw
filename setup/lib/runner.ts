@@ -299,12 +299,21 @@ export function summariseTerminalFields(block: Block | null): Record<string, str
   return out;
 }
 
-async function runUnderSpinner<
-  T extends { ok: boolean; transcript: string; terminal?: Block | null },
->(
-  labels: SpinnerLabels,
-  work: () => Promise<T>,
-): Promise<T> {
+/**
+ * A live clack spinner with an elapsed-time ticker — the brand-styled,
+ * width-fit rendering primitive behind `runUnderSpinner`, exposed so a caller
+ * that doesn't have a single `work()` promise to await can drive it itself.
+ * The apply engine (scripts/skill-apply.ts) fires stepStart/stepEnd *events*
+ * around each step, so the skill driver's per-step reporter starts the spinner
+ * on stepStart and calls the returned `.stop(...)` on stepEnd.
+ *
+ * `stop({ ok, skipped, transcript })` clears the ticker and renders the
+ * done/skipped/failed headline (bold) with the elapsed time (dim); on a failure
+ * it also dumps the transcript tail when one is supplied.
+ */
+export function startSpinner(labels: SpinnerLabels): {
+  stop: (outcome: { ok: boolean; skipped?: boolean; transcript?: string }) => void;
+} {
   const s = p.spinner();
   const start = Date.now();
   s.start(fitToWidth(labels.running, ' (99m 59s)'));
@@ -312,22 +321,37 @@ async function runUnderSpinner<
     const suffix = ` (${fmtDuration(Date.now() - start)})`;
     s.message(`${fitToWidth(labels.running, suffix)}${k.dim(suffix)}`);
   }, 1000);
+  return {
+    stop({ ok, skipped, transcript }) {
+      clearInterval(tick);
+      const suffix = ` (${fmtDuration(Date.now() - start)})`;
+      if (ok) {
+        const msg = skipped && labels.skipped ? labels.skipped : labels.done;
+        // Bold the outcome so the step's headline reads stronger than the prose
+        // body copy around it. The trailing `(Ns)` timing stays dim.
+        s.stop(`${k.bold(fitToWidth(msg, suffix))}${k.dim(suffix)}`);
+      } else {
+        const failMsg = labels.failed ?? labels.running.replace(/…$/, ' failed');
+        s.stop(`${k.bold(fitToWidth(failMsg, suffix))}${k.dim(suffix)}`, 1);
+        if (transcript) dumpTranscriptOnFailure(transcript);
+      }
+    },
+  };
+}
 
+async function runUnderSpinner<
+  T extends { ok: boolean; transcript: string; terminal?: Block | null },
+>(
+  labels: SpinnerLabels,
+  work: () => Promise<T>,
+): Promise<T> {
+  const spinner = startSpinner(labels);
   const result = await work();
-
-  clearInterval(tick);
-  const suffix = ` (${fmtDuration(Date.now() - start)})`;
-  if (result.ok) {
-    const isSkipped = result.terminal?.fields.STATUS === 'skipped';
-    const msg = isSkipped && labels.skipped ? labels.skipped : labels.done;
-    // Bold the outcome so the step's headline reads stronger than the prose
-    // body copy around it. The trailing `(Ns)` timing stays dim.
-    s.stop(`${k.bold(fitToWidth(msg, suffix))}${k.dim(suffix)}`);
-  } else {
-    const failMsg = labels.failed ?? labels.running.replace(/…$/, ' failed');
-    s.stop(`${k.bold(fitToWidth(failMsg, suffix))}${k.dim(suffix)}`, 1);
-    dumpTranscriptOnFailure(result.transcript);
-  }
+  spinner.stop({
+    ok: result.ok,
+    skipped: result.terminal?.fields.STATUS === 'skipped',
+    transcript: result.transcript,
+  });
   return result;
 }
 

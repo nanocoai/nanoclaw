@@ -15,7 +15,7 @@ Two-part migration:
 
 1. **`migrate-v2.sh`** — deterministic bash script. Handles prerequisites, DB seeding, file copies, channel install, container build, service switchover. Writes `logs/setup-migration/handoff.json` then `exec`s into Claude.
 
-2. **`/migrate-from-v1` skill** — Claude-driven. Reads the handoff, seeds owner/roles, cleans up CLAUDE.local.md, validates container configs, ports fork customizations.
+2. **`/migrate-from-v1` skill** — Claude-driven. Reads the handoff, seeds owner/roles, invokes `/migrate-memory`, validates container configs, and ports fork customizations.
 
 ## File layout
 

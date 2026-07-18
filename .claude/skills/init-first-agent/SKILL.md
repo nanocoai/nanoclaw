@@ -82,7 +82,7 @@ npx tsx scripts/init-first-agent.ts \
   --agent-name "${AGENT_NAME}"
 ```
 
-Add `--provider <name>` when the user picked a non-default provider (there is no install-wide default — the choice is explicit per group). Add `--welcome "System instruction: ..."` to override the default welcome prompt.
+The new group is created on the instance default provider (`DEFAULT_AGENT_PROVIDER` in `.env`, or `claude` when unset). To put it on a different provider, switch after creation with `ncl groups config update --id <group-id> --provider <name>`. Add `--welcome "System instruction: ..."` to override the default welcome prompt.
 
 The script:
 1. Upserts the `users` row and grants `owner` role if no owner exists.

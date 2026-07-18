@@ -12,14 +12,13 @@ ncl groups config remove-mcp-server --id <group-id> --name calendar
 
 ## 2. Remove the `.calendar-mcp` mount from the DB (per group)
 
-There is no `ncl groups config remove-mount` verb yet (tracked in [#2395](https://github.com/nanocoai/nanoclaw/issues/2395)). Until it ships, drop the entry via the in-tree wrapper (`scripts/q.ts`):
+This is a **host-only / operator** verb — run it host-side. It's idempotent (a no-op if the mount is absent):
 
 ```bash
-pnpm exec tsx scripts/q.ts data/v2.db "UPDATE container_configs \
-  SET additional_mounts = (SELECT json_group_array(value) FROM json_each(additional_mounts) \
-                           WHERE json_extract(value, '\$.containerPath') != '.calendar-mcp'), \
-      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') \
-  WHERE agent_group_id = '<group-id>';"
+ncl groups config remove-mount \
+  --id <group-id> \
+  --host "$HOME/.calendar-mcp" \
+  --container .calendar-mcp
 ```
 
 ## 3. Delete the copied test file

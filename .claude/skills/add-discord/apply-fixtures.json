@@ -1,0 +1,15 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. The applications/@me stub answers the multi-field JSON capture (application_id/.id, public_key/.verify_key, owner_handle/.owner.id); the users/@me/channels stub answers the platform_id capture.",
+  "scenarios": [
+    {
+      "name": "bot-token",
+      "inputs": {
+        "bot_token": "MTA0fake.token.fake_fake-fake.fake0123456789abcdefghijklmnopqrstuvwxyz"
+      },
+      "exec": [
+        { "match": "oauth2/applications/@me", "stdout": "{\"id\":\"1234567890\",\"verify_key\":\"abcdef0123456789\",\"owner\":{\"id\":\"111222333444\"}}" },
+        { "match": "users/@me/channels", "stdout": "discord:@me:D0FAKE" }
+      ]
+    }
+  ]
+}

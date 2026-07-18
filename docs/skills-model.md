@@ -36,6 +36,8 @@ A skill carries everything it needs:
 
 Apply must be safe to re-run. Upgrades re-run skills, so a skill that half-applies twice is a bug.
 
+**Two readers, one document.** The trunk channel and provider installs that the setup wizard drives are written so the wizard can apply the same SKILL.md a coding agent would follow — anything the wizard can't do mechanically falls back to the agent. This is core tooling, not part of the model's contract: a plain-prose skill is a first-class skill. (Details: [skill-directives.md](skill-directives.md).)
+
 ## Two kinds of skills
 
 - **Capability skills** add something new: a channel, a provider, a tool, a dashboard.

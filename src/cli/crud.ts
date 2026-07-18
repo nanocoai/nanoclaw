@@ -50,6 +50,8 @@ export interface CustomOperation {
   args?: ColumnDef[];
   /** Ready-to-paste invocations, rendered under EXAMPLES in deep help. */
   examples?: string[];
+  /** Operator-only: never runnable from inside a container (see CommandDef.hostOnly). */
+  hostOnly?: boolean;
   handler: (args: Record<string, unknown>, ctx: CallerContext) => Promise<unknown>;
   /** Presentational renderer for human mode — see CommandDef.formatHuman. */
   formatHuman?: (data: unknown) => string;
@@ -81,6 +83,13 @@ export interface ResourceDef {
     update?: Access;
     delete?: Access;
   };
+  /**
+   * Columns forming a natural unique key. When set, generic `create` is
+   * idempotent: if a row already matches on these columns it is returned
+   * instead of re-inserted (so a skill that wires via `ncl ... create` is
+   * safe to re-apply).
+   */
+  naturalKey?: string[];
   /** Non-standard verbs (grant, revoke, add, remove, restart, etc.). */
   customOperations?: Record<string, CustomOperation>;
   /**
@@ -228,6 +237,20 @@ function genericCreate(def: ResourceDef) {
       } else if (col.defaultFrom !== undefined && values[col.defaultFrom] !== undefined) {
         values[col.name] = values[col.defaultFrom];
       }
+    }
+
+    // Idempotent create: if a row already matches the natural key, return it
+    // rather than hitting a UNIQUE violation. Lets a skill re-run `ncl … create`.
+    // Runs after pass 3 so defaultFrom-filled columns (e.g. messaging-groups'
+    // `instance`) participate in the match. No new row means postCreate /
+    // postCommit are correctly skipped — no new companion rows to create.
+    if (def.naturalKey && def.naturalKey.length > 0) {
+      const where = def.naturalKey.map((c) => `${c} = ?`).join(' AND ');
+      const params = def.naturalKey.map((c) => values[c]);
+      const existing = getDb()
+        .prepare(`SELECT ${visibleColumns(def).join(', ')} FROM ${def.table} WHERE ${where}`)
+        .get(...params);
+      if (existing) return existing;
     }
 
     const colNames = Object.keys(values);
@@ -402,6 +425,7 @@ export function registerResource(def: ResourceDef): void {
   if (def.operations.list) {
     register({
       name: `${def.plural}-list`,
+      action: `${def.plural}.list`,
       description: `List all ${def.plural}.`,
       access: def.operations.list,
       resource: def.plural,
@@ -414,6 +438,7 @@ export function registerResource(def: ResourceDef): void {
   if (def.operations.get) {
     register({
       name: `${def.plural}-get`,
+      action: `${def.plural}.get`,
       description: `Get a ${def.name} by ID.`,
       access: def.operations.get,
       resource: def.plural,
@@ -426,6 +451,7 @@ export function registerResource(def: ResourceDef): void {
   if (def.operations.create) {
     register({
       name: `${def.plural}-create`,
+      action: `${def.plural}.create`,
       description: `Create a new ${def.name}.`,
       access: def.operations.create,
       resource: def.plural,
@@ -437,6 +463,7 @@ export function registerResource(def: ResourceDef): void {
   if (def.operations.update) {
     register({
       name: `${def.plural}-update`,
+      action: `${def.plural}.update`,
       description: `Update a ${def.name}.`,
       access: def.operations.update,
       resource: def.plural,
@@ -448,6 +475,7 @@ export function registerResource(def: ResourceDef): void {
   if (def.operations.delete) {
     register({
       name: `${def.plural}-delete`,
+      action: `${def.plural}.delete`,
       description: `Delete a ${def.name}.`,
       access: def.operations.delete,
       resource: def.plural,
@@ -464,8 +492,10 @@ export function registerResource(def: ResourceDef): void {
       const declared = op.args;
       register({
         name: `${def.plural}-${verb.replace(/ /g, '-')}`,
+        action: `${def.plural}.${verb.replace(/ /g, '.')}`,
         description: op.description,
         access: op.access,
+        hostOnly: op.hostOnly,
         resource: def.plural,
         parseArgs: declared
           ? (raw) => {

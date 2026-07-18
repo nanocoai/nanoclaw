@@ -2,16 +2,17 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 
+import './guard.js'; // register the a2a.send catalog entry (incl. the policy hold)
 import { routeAgentMessage } from './agent-route.js';
 import { createDestination, deleteDestination, deleteAllDestinationsTouching } from './db/agent-destinations.js';
 import { getMessagePolicy, removeMessagePolicy, setMessagePolicy } from './db/agent-message-policies.js';
 import { applyA2aMessageGate } from './message-gate.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
 import { getDb } from '../../db/connection.js';
-import { createSession } from '../../db/sessions.js';
+import { createPendingApproval, createSession, deletePendingApproval, getPendingApproval } from '../../db/sessions.js';
 import { requestApproval } from '../approvals/index.js';
 import { initSessionFolder, inboundDbPath } from '../../session-manager.js';
-import type { Session } from '../../types.js';
+import type { PendingApproval, Session } from '../../types.js';
 
 vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
@@ -65,6 +66,23 @@ function makeSession(id: string, agentGroupId: string): Session {
     last_active: null,
     created_at: now(),
   };
+}
+
+/** Seed a live a2a hold row (what requestApproval writes) and return it as the grant. */
+function seedA2aHold(approvalId: string, payload: Record<string, unknown>): PendingApproval {
+  createPendingApproval({
+    approval_id: approvalId,
+    session_id: 'sess-A',
+    request_id: approvalId,
+    action: 'a2a_message_gate',
+    payload: JSON.stringify(payload),
+    created_at: now(),
+    agent_group_id: A,
+    title: 'Message approval',
+    options_json: '[]',
+    approver_user_id: 'telegram:dana',
+  });
+  return getPendingApproval(approvalId)!;
 }
 
 describe('agent message policies', () => {
@@ -129,7 +147,7 @@ describe('agent message policies', () => {
     expect(requestApproval).not.toHaveBeenCalled();
   });
 
-  it('policy present → holds the message and requests approval from the policy approver scoped to the target', async () => {
+  it('policy present → holds the message and requests approval from the policy approver', async () => {
     setMessagePolicy(A, B, 'telegram:dana', now());
 
     await routeAgentMessage(
@@ -139,7 +157,7 @@ describe('agent message policies', () => {
 
     // Held: nothing routed to B.
     expect(readInbound(B, SB.id)).toHaveLength(0);
-    // One approval requested, to the policy's approver, scoped to the target group.
+    // One approval requested, to the policy's approver.
     expect(requestApproval).toHaveBeenCalledTimes(1);
     const opts = vi.mocked(requestApproval).mock.calls[0][0];
     expect(opts.action).toBe('a2a_message_gate');
@@ -158,21 +176,76 @@ describe('agent message policies', () => {
     expect(readInbound(A, SA.id)).toHaveLength(1);
   });
 
-  // ── approve handler re-routes the held message ──
+  it('ghost policy (policy row, no destination row) still denies — deny beats the policy hold', async () => {
+    deleteDestination(A, 'b'); // removes A→B — the destination ACL now denies
+    setMessagePolicy(A, B, 'telegram:dana', now()); // ...but a stale policy row remains
 
-  it('applyA2aMessageGate delivers the held message to the target', async () => {
+    await expect(
+      routeAgentMessage({ id: 'ghost', platform_id: B, content: JSON.stringify({ text: 'x' }), in_reply_to: null }, SA),
+    ).rejects.toThrow(/unauthorized agent-to-agent/);
+    expect(requestApproval).not.toHaveBeenCalled();
+    expect(readInbound(B, SB.id)).toHaveLength(0);
+  });
+
+  // ── approve handler re-enters the guarded route with the grant ──
+
+  it('applyA2aMessageGate delivers the held message to the target (valid grant)', async () => {
+    setMessagePolicy(A, B, 'telegram:dana', now());
+    const payload = { id: 'held-1', platform_id: B, content: JSON.stringify({ text: 'approved!' }), in_reply_to: null };
+    const approval = seedA2aHold('appr-a2a-1', payload);
+
     const notify = vi.fn();
-    await applyA2aMessageGate({
-      session: SA,
-      userId: 'slack:dana',
-      notify,
-      payload: { id: 'held-1', platform_id: B, content: JSON.stringify({ text: 'approved!' }), in_reply_to: null },
-    });
+    await applyA2aMessageGate({ session: SA, userId: 'telegram:dana', notify, payload, approval });
 
     const bRows = readInbound(B, SB.id);
     expect(bRows).toHaveLength(1);
     expect(JSON.parse(bRows[0].content).text).toBe('approved!');
     expect(notify).not.toHaveBeenCalled();
+    // The hold is satisfied by the grant — no second card.
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+
+  it('destination revoked between hold and approve → refused cleanly, requester told, nothing delivered', async () => {
+    setMessagePolicy(A, B, 'telegram:dana', now());
+    const payload = { id: 'held-2', platform_id: B, content: JSON.stringify({ text: 'stale' }), in_reply_to: null };
+    const approval = seedA2aHold('appr-a2a-2', payload);
+
+    deleteDestination(A, 'b'); // revoke A→B while the card is pending
+
+    const notify = vi.fn();
+    // An expected policy refusal — resolves (no throw), so the response
+    // handler never records it as a handler crash.
+    await applyA2aMessageGate({ session: SA, userId: 'telegram:dana', notify, payload, approval });
+
+    expect(readInbound(B, SB.id)).toHaveLength(0);
+    expect(notify).toHaveBeenCalledWith(expect.stringMatching(/not delivered.*no destination for/));
+  });
+
+  it('mismatched grant (held for another target) refuses the replay cleanly', async () => {
+    setMessagePolicy(A, B, 'telegram:dana', now());
+    // Grant was approved for a message to A (different target than the replay).
+    const approval = seedA2aHold('appr-a2a-3', { id: 'other', platform_id: A, content: '{}', in_reply_to: null });
+    const payload = { id: 'held-3', platform_id: B, content: JSON.stringify({ text: 'swap' }), in_reply_to: null };
+
+    const notify = vi.fn();
+    await applyA2aMessageGate({ session: SA, userId: 'telegram:dana', notify, payload, approval });
+
+    expect(readInbound(B, SB.id)).toHaveLength(0);
+    expect(notify).toHaveBeenCalledWith(expect.stringMatching(/not delivered.*invalid or mismatched grant/));
+  });
+
+  it('a grant only works while its row is live (executes once)', async () => {
+    setMessagePolicy(A, B, 'telegram:dana', now());
+    const payload = { id: 'held-4', platform_id: B, content: JSON.stringify({ text: 'once' }), in_reply_to: null };
+    const approval = seedA2aHold('appr-a2a-4', payload);
+
+    deletePendingApproval(approval.approval_id); // resolution already consumed the row
+
+    const notify = vi.fn();
+    await applyA2aMessageGate({ session: SA, userId: 'telegram:dana', notify, payload, approval });
+
+    expect(readInbound(B, SB.id)).toHaveLength(0);
+    expect(notify).toHaveBeenCalledWith(expect.stringMatching(/not delivered.*invalid or mismatched grant/));
   });
 
   // ── ghost-gate cleanup ──

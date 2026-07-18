@@ -142,22 +142,3 @@ export function getUndeliveredMessages(): MessageOutRow[] {
     )
     .all() as MessageOutRow[];
 }
-
-/**
- * True if a deliberate send with this exact destination + text already exists
- * (an MCP send_message row from the current turn). Used by the task-fire
- * final-text dispatcher to drop the turn-final <message> echo of a send the
- * agent already made — the dedup happens where the duplication originates.
- */
-export function hasIdenticalSend(platformId: string, channelType: string, text: string): boolean {
-  const row = getOutboundDb()
-    .prepare(
-      `SELECT 1 FROM messages_out
-        WHERE platform_id = $platform_id AND channel_type = $channel_type
-          AND (in_reply_to IS NULL OR in_reply_to = '')
-          AND json_extract(content, '$.text') = $text
-        LIMIT 1`,
-    )
-    .get({ $platform_id: platformId, $channel_type: channelType, $text: text });
-  return row != null;
-}

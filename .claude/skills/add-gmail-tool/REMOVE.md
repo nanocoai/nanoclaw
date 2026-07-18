@@ -19,16 +19,16 @@ ncl groups config remove-mcp-server --id <group-id> --name gmail
 
 ## 3. Remove the `.gmail-mcp` mount (per group)
 
-There is no `ncl groups config remove-mount` verb yet ([#2395](https://github.com/nanocoai/nanoclaw/issues/2395)). Edit the central DB via the in-tree wrapper (`scripts/q.ts` — NanoClaw avoids depending on the `sqlite3` CLI, `setup/verify.ts:5`). Run from your NanoClaw project root (where `data/v2.db` lives):
+Remove the mount with the host-only `ncl groups config remove-mount` verb (operator-only; rejected from inside a container). For each group that had Gmail wired:
 
 ```bash
-GROUP_ID='<group-id>'
-pnpm exec tsx scripts/q.ts data/v2.db "UPDATE container_configs \
-  SET additional_mounts = (SELECT json_group_array(value) FROM json_each(additional_mounts) \
-                           WHERE json_extract(value, '\$.containerPath') != '.gmail-mcp'), \
-      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') \
-  WHERE agent_group_id = '$GROUP_ID';"
+ncl groups config remove-mount \
+  --id <group-id> \
+  --host "$HOME/.gmail-mcp" \
+  --container .gmail-mcp
 ```
+
+The verb is idempotent — a no-op if the mount is already absent.
 
 ## 4. Remove the Dockerfile install
 

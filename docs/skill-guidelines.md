@@ -61,6 +61,21 @@ Fetching from a registry branch is **additive, never a merge**. `git fetch origi
 
 ---
 
+## Structured apply (nc: directives)
+
+The trunk channel/provider skills — the ones the setup wizard drives — carry their apply steps in a second, machine-applicable form: `nc:<kind>` directive fences that a deterministic engine (`scripts/skill-apply.ts`) executes. Each change shape above has a directive: add-a-file = `copy`, append = `append`, dependency = `dep`, JSON edit = `json-merge`, plus `run`, `prompt`, `operator`, and `env-set` for commands, inputs, and human steps. Grammar and idempotency semantics: [skill-directives.md](skill-directives.md); the engine's consumer contract: [skill-engine-seam.md](skill-engine-seam.md).
+
+**Scope of the requirement.** For those core skills, the directives are the floor: the conformance suite (`scripts/skill-conformance.test.ts`) applies each fence-carrying skill programmatically and holds it to full application. **A contributed skill is held only to the checklist in this document** — prose apply steps, tests, REMOVE.md. Carrying `nc:` fences is optional; a skill that does opt in takes on the conformance rules below.
+
+For a fence-carrying skill, conformance means:
+
+- **Prose-primary.** With the fences stripped, the SKILL.md reads as a normal skill; an agent following only the prose performs the same install. The prose never mentions the apply engine, the setup wizard, or programmatic application — narrating the tooling breaks the degrade path.
+- **Degrade-to-agent is the failure contract.** Anything the engine can't do bounces to an agent task that applies the surrounding prose — so every directive must sit beside prose that stands on its own.
+- **The lint passes**: `pnpm exec tsx scripts/skill-directives.ts .claude/skills/<name>/SKILL.md`. Retired presentation attrs (`min:`/`error:`/`open:`/`gate`/`label:`/`on-fail:`) are errors; the reference floor — a `## Troubleshooting` section on any skill with a secret prompt or interactive step — is a warning worth honoring regardless of fences.
+- **Directives are idempotent** by construction (`copy` overwrites, `append` skips-if-present, `env-set` sets-if-absent, …) — which is the same re-runnable-apply rule every skill already has.
+
+---
+
 ## Integration points
 
 The integration point is wherever the skill reaches into existing code. Make it **minimal, colocated, and self-contained**:

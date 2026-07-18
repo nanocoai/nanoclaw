@@ -233,18 +233,21 @@ Parse the diff output for lines that contain `[BREAKING]` anywhere in the line. 
 ```
 
 If no `[BREAKING]` lines are found:
-- Skip this step silently. Proceed to Step 7 (skill updates check).
+- Skip this step silently. Proceed to Step 7.
 
 If one or more `[BREAKING]` lines are found:
 - Display a warning header to the user: "This update includes breaking changes that may require action:"
 - For each breaking change, display the full description.
 - Collect all skill names referenced in the breaking change entries (the `/<skill-name>` part).
+- Initialize an unresolved-migrations list with every referenced skill. Remove a
+  skill only after it completes successfully.
 - Use AskUserQuestion to ask the user which migration skills they want to run now. Options:
-  - One option per referenced skill (e.g., "Run /add-whatsapp to re-add WhatsApp channel")
+  - One recommended option per referenced skill (e.g., "Run /add-whatsapp (Recommended)")
   - "Skip — I'll handle these manually"
 - Set `multiSelect: true` so the user can pick multiple skills if there are several breaking changes.
 - For each skill the user selects, invoke it using the Skill tool.
-- After all selected skills complete (or if user chose Skip), proceed to Step 7 (skill updates check).
+- Keep every skipped, failed, or incomplete skill in the unresolved list, then
+  proceed to Step 7.
 
 # Step 7: Skill updates (part of updating NanoClaw)
 
@@ -328,7 +331,21 @@ Show:
 - Upstream HEAD: `git rev-parse --short upstream/$UPSTREAM_BRANCH`
 - Conflicts resolved (list files, if any)
 - Breaking changes applied (list skills run, if any)
+- Unresolved breaking migrations (list skipped, failed, or incomplete skills)
 - Remaining local diff vs upstream: `git diff --name-only upstream/$UPSTREAM_BRANCH..HEAD`
+
+If unresolved migrations remain, explain plainly that the code update succeeded
+but affected features may ignore old state until those migrations run. Use
+AskUserQuestion before showing restart commands:
+
+- **Run unresolved migrations (Recommended):** invoke each unresolved skill,
+  removing it from the list only after successful completion.
+- **Restart anyway:** continue only with explicit confirmation and repeat the
+  unresolved skill names in the final warning.
+
+If a retried migration remains unresolved, ask again. Do not show restart
+commands until the unresolved list is empty or the user explicitly chooses
+Restart anyway.
 
 Tell the user:
 - To rollback: `git reset --hard <backup-tag-from-step-1>`

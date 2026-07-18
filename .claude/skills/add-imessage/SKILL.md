@@ -6,7 +6,7 @@ description: Add iMessage to NanoClaw — one channel, two backends. Local (this
 # Add iMessage
 
 NanoClaw talks to iMessage through a single **`imessage`** channel with two
-pluggable backends. This skill installs one of them:
+pluggable backends:
 
 - **Local (this Mac)** — the Chat SDK bridge over `chat-adapter-imessage`,
   reading this Mac's signed-in iMessage account (`chat.db`). macOS only; the
@@ -14,82 +14,73 @@ pluggable backends. This skill installs one of them:
 - **Hosted iMessage (via photon.codes)** — a native adapter over Photon's
   `spectrum-ts` gRPC stream. The hosted service owns the iMessage line, so
   there's no Mac relay, webhook, or public URL. Works on any OS, and a
-  device-login wizard provisions everything for you.
+  device-login flow provisions everything for you.
 
-Both register the same `imessage` channel type; only one runs per install. Full
-reference: [docs/imessage.md](../../docs/imessage.md).
+Both register the same `imessage` channel type; only one runs per install.
+NanoClaw doesn't ship channels in trunk — this skill copies the unified
+`imessage` adapter in from the `channels` branch. Full reference:
+[docs/imessage.md](../../docs/imessage.md).
 
-## Choose a backend
+The mechanical steps under **Apply** carry `nc:` directive fences: an agent reads
+the prose and applies them, and a parser can apply them deterministically from
+the same document. Every directive is idempotent, so the whole skill is safe to
+re-run; anything a parser can't apply falls back to the prose beside it.
 
-Ask the user which backend to install (use **AskUserQuestion**):
+## Apply
 
-- **Local (this Mac)** — macOS only; uses this machine's iMessage account.
-- **Hosted iMessage (via photon.codes)** — any OS; managed line, no Mac needed.
+### 1. Choose a backend
 
-On non-macOS, only **Hosted** is possible — the local backend reads this Mac's
-`chat.db`. Follow the matching section below.
+Pick the backend first — it decides which package gets installed and which
+walkthrough runs below (the other backend's steps are skipped):
 
-## Install (both backends)
-
-NanoClaw doesn't ship channel adapters in trunk. This skill copies the unified
-`imessage` adapter in from the `channels` branch — but **only if
-`src/channels/imessage.ts` is not already present**. Never overwrite an
-existing copy: a previously installed or locally updated adapter may be newer
-than the channels-branch version. (On a fork, the `channels` branch lives on
-your `upstream` remote — substitute that remote name for `origin` below.)
-
-### Pre-flight (idempotent)
-
-Each step guards itself — skip the ones whose condition already holds:
-
-- `src/channels/imessage.ts`, `src/channels/imessage.test.ts`, and
-  `src/channels/imessage-registration.test.ts` all exist → skip steps 1–2
-  (no fetch, no copy)
-- `src/channels/index.ts` contains `import './imessage.js';` → skip step 3
-- the chosen backend's package is in `package.json` deps
-  (`chat-adapter-imessage` for Local, `spectrum-ts` for Hosted) → skip step 4
-- if every step above was skipped, skip step 5 too and go straight to the
-  backend section
-
-Every step is safe to re-run.
-
-### 1. Fetch the channels branch (only if adapter files are missing)
-
-```bash
-git fetch origin channels
+```nc:prompt backend validate:^(local|hosted)$
+How should iMessage run — `local` (this Mac's signed-in iMessage account; macOS only, needs Full Disk Access) or `hosted` (a managed line via photon.codes; works on any OS)?
 ```
 
-### 2. Copy the adapter and its tests (only the missing files)
+The local backend only works on a Mac — it reads this machine's iMessage
+`chat.db` directly, and there is no such database off macOS. On any other OS,
+stop here and choose `hosted` instead; otherwise you'd write a local config
+that can never receive a message:
 
-```bash
-[ -f src/channels/imessage.ts ] || \
-  git show origin/channels:src/channels/imessage.ts > src/channels/imessage.ts
-[ -f src/channels/imessage.test.ts ] || \
-  git show origin/channels:src/channels/imessage.test.ts > src/channels/imessage.test.ts
-[ -f src/channels/imessage-registration.test.ts ] || \
-  git show origin/channels:src/channels/imessage-registration.test.ts > src/channels/imessage-registration.test.ts
+```nc:run effect:check when:backend=local
+[ "$(uname)" = Darwin ]
 ```
 
-### 3. Append the self-registration import
+### 2. Copy the adapter
 
-Append to `src/channels/index.ts` (skip if already present):
+Fetch the `channels` branch and copy the unified iMessage adapter and its tests
+into `src/channels/`:
 
-```typescript
+```nc:copy from-branch:channels
+src/channels/imessage.ts
+src/channels/imessage.test.ts
+src/channels/imessage-registration.test.ts
+```
+
+### 3. Register the adapter
+
+Append the self-registration import to the channel barrel (skipped if the line
+is already present). This one line is the skill's only reach-in into core:
+
+```nc:append to:src/channels/index.ts
 import './imessage.js';
 ```
 
-### 4. Install the chosen backend's package (pinned)
+### 4. Install the chosen backend's package
 
-**Local:**
+Pinned to an exact version — the supply-chain policy rejects ranges and
+`latest`. Install only the chosen backend's package.
 
-```bash
-pnpm install chat-adapter-imessage@0.1.1
+**Local** — the Chat SDK iMessage adapter:
+
+```nc:dep when:backend=local
+chat-adapter-imessage@0.1.1
 ```
 
-**Hosted:**
+**Hosted** — Photon's Spectrum SDK:
 
-```bash
-pnpm install spectrum-ts@11.0.0
+```nc:dep when:backend=hosted
+spectrum-ts@11.0.0
 ```
 
 > Pin exactly. `spectrum-ts` ships breaking majors (v11 is what the adapter
@@ -99,8 +90,13 @@ pnpm install spectrum-ts@11.0.0
 
 ### 5. Build and validate
 
-```bash
+Build guards the typed `createChatSdkBridge(...)` core call used by the local
+backend, and the registration test proves the channel is wired:
+
+```nc:run effect:build
 pnpm run build
+```
+```nc:run effect:test
 pnpm exec vitest run src/channels/imessage-registration.test.ts
 ```
 
@@ -108,131 +104,133 @@ Both must be clean. `imessage-registration.test.ts` imports the real channel
 barrel and asserts the registry contains `imessage` — it goes red if the
 `import './imessage.js';` line is missing or the barrel fails to evaluate. The
 adapter loads neither backend's SDK at import (hosted `spectrum-ts` only in
-`setup()`, local `chat-adapter-imessage` only in the factory), so the test needs
-no package. For the Local backend, `pnpm run build` guards the Chat SDK bridge's
-typed core API.
+`setup()`, local `chat-adapter-imessage` only in the factory), so the test
+needs no package.
 
-**Hosted:** also run the full adapter suite — it includes an integration block
-that exercises the real installed `spectrum-ts` (version, exports, builders)
-and auto-skips when the package is absent:
+For the hosted backend, also run the full adapter suite — it includes an
+integration block that exercises the real installed `spectrum-ts` (version,
+exports, builders) and auto-skips when the package is absent:
 
-```bash
+```nc:run effect:test when:backend=hosted
 pnpm exec vitest run src/channels/imessage.test.ts
 ```
 
-Now follow the section for your chosen backend.
-
-## Local backend (macOS)
-
-### Full Disk Access
+## Local backend: Full Disk Access (macOS)
 
 The adapter reads this Mac's `chat.db`, which requires Full Disk Access granted
-to the Node binary. The Node path is buried (e.g. `~/.nvm/.../bin/node`), so open
-its folder in Finder:
+to the Node binary the host runs under. The Node path is buried deep (e.g.
+`~/.nvm/versions/node/v22.x.x/bin/node`), so open its folder in Finder to make
+the drag-and-drop target obvious. Harmless off a desktop (SSH/headless) — it
+just no-ops:
 
-```bash
-open "$(dirname "$(which node)")"
+```nc:run effect:external when:backend=local
+open "$(dirname "$(which node)")" 2>/dev/null || true
 ```
 
 Then tell the user:
 
-1. Open **System Settings → Privacy & Security → Full Disk Access**
-2. Click **+**, drag the `node` file from the Finder window that just opened
-3. Toggle it on
-
-Stop and wait for the user to confirm before continuing.
-
-### Configure environment
-
-Add to `.env`:
-
-```bash
-IMESSAGE_BACKEND=local
-IMESSAGE_ENABLED=true
+```nc:operator when:backend=local
+Grant Full Disk Access to Node so iMessage can read your chat history:
+1. Open System Settings > Privacy & Security > Full Disk Access.
+2. Click +, then drag the "node" file from the Finder window that just opened.
+3. Toggle it on, then come back here.
 ```
 
-### Restart
+Stop and wait for the user to confirm Full Disk Access is granted before
+continuing.
 
-```bash
-source setup/lib/install-slug.sh
-launchctl kickstart -k gui/$(id -u)/$(launchd_label)   # macOS
+Now select the local backend in `.env`. The configure script owns this
+upsert-and-remove (a plain set-if-absent env write can neither replace a stale
+value nor delete a key, and a lingering hosted selector would shadow the
+choice):
+
+```nc:run effect:external when:backend=local
+bash setup/channels/imessage-configure.sh local
 ```
 
-### Wire the channel
+## Hosted backend: device login (via photon.codes)
 
-Message the Mac's iMessage account, then wire the DM to an agent:
+The provisioning flow needs the phone number you send iMessages from — it
+registers that number with your project so the hosted line recognises you:
 
-```bash
-npx tsx scripts/init-first-agent.ts \
-  --channel imessage \
-  --user-id imessage:<your-phone-or-email> \
-  --platform-id <your-phone-or-email> \
-  --display-name "You"
+```nc:prompt owner_handle normalize:trim validate:^\+\d{8,15}$ when:backend=hosted
+The phone number you iMessage from, in E.164 format — + followed by country code and number, no spaces or dashes (e.g. +14155551234).
 ```
 
-Or run `/init-first-agent` / `/manage-channels` interactively.
+Tell the user what's about to happen:
 
-## Hosted iMessage backend (via photon.codes)
-
-### Setup wizard
-
-The wizard runs Photon's device-login flow, finds/creates your project, mints
-the project secret, registers your phone, and surfaces the iMessage number
-you'll text — writing `PHOTON_PROJECT_ID` + `PHOTON_PROJECT_SECRET` to `.env`.
-
-```bash
-pnpm exec tsx scripts/photon-setup.ts --phone +15551234567
+```nc:operator when:backend=hosted
+Connect your hosted iMessage line (photon.codes):
+1. A login URL and a short code will print below.
+2. Open the URL in a browser, approve the device, and enter the code.
+3. Setup finishes on its own once you approve — it finds or creates your project, registers your phone, and prints your agent's iMessage number.
 ```
 
-Replace with your own iMessage number in E.164 format. Omit `--phone` to be
-prompted (interactive terminals only). The wizard prints a URL and a code:
+Run the device-login flow. It provisions the project, mints the project secret,
+registers your phone, and surfaces the iMessage number you'll text — writing
+`PHOTON_PROJECT_ID` + `PHOTON_PROJECT_SECRET` to `.env` and the assigned number
+to `data/photon-auth.json`:
 
-1. Open the printed URL (`https://app.photon.codes/...`) in a browser
-2. Approve the device and enter the code shown
-3. The wizard finishes automatically once you approve
+```nc:run effect:step when:backend=hosted
+pnpm exec tsx scripts/photon-setup.ts setup --phone {{owner_handle}} --embedded
+```
 
-When it completes it prints **your agent's iMessage number** — the number to
-text to reach the agent (also saved to `data/photon-auth.json`).
-
-Flags: `--project-name <name>` (default `NanoClaw`), `--no-browser`,
-`--non-interactive`, `--dashboard-host` / `--spectrum-host`. Check state with
+If the login times out, the code expired (~30 min) — re-run the step; a stored
+token is reused. Check state any time with
 `pnpm exec tsx scripts/photon-setup.ts status`.
 
-Optionally set `IMESSAGE_BACKEND=hosted` in `.env` — the Photon credentials
-already imply hosted, but an explicit selector avoids ambiguity if local creds
-linger.
+Then select the hosted backend in `.env` — the Photon credentials already imply
+hosted, but the explicit selector avoids ambiguity if local keys linger:
 
-### Restart
-
-```bash
-source setup/lib/install-slug.sh
-launchctl kickstart -k gui/$(id -u)/$(launchd_label)   # macOS
-systemctl --user restart $(systemd_unit)               # Linux
+```nc:run effect:external when:backend=hosted
+bash setup/channels/imessage-configure.sh hosted
 ```
 
-Confirm it connected:
+## Restart
 
-```bash
-grep "Photon channel connected" logs/nanoclaw.log | tail -1
+Restart the service so it loads the iMessage adapter and the backend config you
+just wrote, and wait for its CLI socket before wiring:
+
+```nc:run effect:restart
+bash setup/lib/restart.sh
 ```
 
-### Wire the channel
+For the hosted backend, confirm the connection came up:
+`grep "Photon channel connected" logs/nanoclaw.log | tail -1`.
 
-Text your agent's iMessage number once. This first text is required, not just
-convenient: the hosted line can only message numbers that have already texted
-it (intended Photon behavior — cold outbound is rejected with
-`Target not allowed for this project`). The router auto-creates a
-`messaging_groups` row; the wizard prints a ready-to-run command:
+## Resolve your iMessage handle
 
-```bash
-npx tsx scripts/init-first-agent.ts \
-  --channel imessage \
-  --user-id imessage:+15551234567 \
-  --platform-id +15551234567 \
-  --display-name "You"
+The agent greets you in the iMessage conversation tied to the handle you
+message from — that handle is both your identity and the conversation address.
+The hosted flow already collected it above; for the local backend, resolve it
+now (email works too — whatever iMessage recognises):
+
+```nc:prompt owner_handle validate:^(\+\d{8,15}|[^\s@]+@[^\s@]+\.[^\s@]+)$ when:backend=local
+The phone number or email you iMessage from — a +E.164 number (e.g. +14155551234) or an email / Apple ID (e.g. you@icloud.com).
 ```
 
-Or run `/init-first-agent` / `/manage-channels` interactively.
+**Hosted first contact:** text your agent's iMessage number once (it was
+printed above; also stored in `data/photon-auth.json`) before expecting any
+message from it. This first text is required, not just convenient — the hosted
+line can only message numbers that have already texted it (cold outbound is
+rejected with `Target not allowed for this project`). Tell the user:
+
+```nc:operator when:backend=hosted
+Send one text — anything — from your phone to your agent's iMessage number (printed above). The hosted line can only reply to numbers that have texted it first, so its welcome message needs yours to arrive first.
+```
+
+iMessage is a native channel: it sends the raw handle as the conversation
+address, with no channel prefix — so the messaging-group platform id is that
+handle as-is:
+
+```nc:run capture:platform_id
+echo "{{owner_handle}}"
+```
+
+`owner_handle` and `platform_id` are what the owner-wiring step needs. The
+welcome iMessage goes out through the adapter once the service is running — on
+the local backend that needs Full Disk Access granted (above); on the hosted
+backend it goes out via your photon.codes line after your first text.
 
 ## Next Steps
 
@@ -252,6 +250,7 @@ wires it to an existing agent group.
   discovered on first message —
   `pnpm exec tsx scripts/q.ts data/v2.db "SELECT platform_id, name FROM messaging_groups WHERE channel_type='imessage'"`
 - **supports-threads**: no
+- **typical-use**: Interactive 1:1 chat — personal messaging
 - **default-isolation**: One agent per install. Multiple DMs with the same
   operator can share an agent group; groups with other people should typically
   use `isolated` session mode.
@@ -268,11 +267,39 @@ slash replies. Optional `.env`: `PHOTON_MARKDOWN`, `PHOTON_TELEMETRY`,
 
 ## Troubleshooting
 
-- **`spectrum-ts` not installed** (hosted) — run step 4 (`pnpm install spectrum-ts@11.0.0`) and restart.
-- **Bot silent** — confirm the backend connected (hosted: `grep "Photon channel connected" logs/nanoclaw.log`), the channel is wired, and the service is running.
-- **`Target not allowed for this project`** (hosted) — intended: the line only messages numbers that have texted it first. Text the agent's number once, then retry (a welcome DM queued before that first text simply fails delivery).
-- **Device login times out** (hosted) — the code expires in ~30 min; re-run the wizard (a stored token is reused).
-- **Local: no inbound** — confirm Full Disk Access is granted to the Node binary, and NanoClaw runs on the signed-in Mac.
+**The backend answer is rejected.** It must be exactly `local` or `hosted`,
+lowercase. Local only exists on macOS — it reads this Mac's `chat.db` directly —
+so on any other OS the platform check stops you and hosted is the only path.
+
+**Local: outgoing works but nothing ever arrives.** Full Disk Access wasn't
+granted to the *actual* Node binary the service runs under — with nvm the path
+changes per Node version (`~/.nvm/versions/node/v22.x.x/bin/node`), so an old
+grant silently stops covering a new binary. Re-open System Settings → Privacy &
+Security → Full Disk Access, add the binary at `$(which node)`, then restart
+the service.
+
+**`spectrum-ts` not installed** (hosted) — re-run step 4
+(`pnpm install spectrum-ts@11.0.0`) and restart.
+
+**Device login times out** (hosted) — the code expires in ~30 min; re-run the
+login step (a stored token is reused).
+
+**`Target not allowed for this project`** (hosted) — intended: the line only
+messages numbers that have texted it first. Text the agent's number once, then
+retry (a welcome DM queued before that first text simply fails delivery).
+
+**Your handle is rejected at the resolve step.** It must be a bare +E.164
+number (`+14155551234` — no spaces, dashes, or parentheses) or, on the local
+backend, an email/Apple ID. Use the exact handle you actually send iMessages
+from — a number-vs-email mismatch means your messages never map to the wired
+conversation.
+
+**Adapter installed but silent.** Run
+`pnpm exec vitest run src/channels/imessage-registration.test.ts` — red means
+the barrel import or the package install drifted, so re-run the Apply steps.
+If green, confirm the backend connected (hosted:
+`grep "Photon channel connected" logs/nanoclaw.log`), restart the service
+(`bash setup/lib/restart.sh`), then check `logs/nanoclaw.error.log`.
 
 More in [docs/imessage.md](../../docs/imessage.md).
 

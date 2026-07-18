@@ -1,6 +1,6 @@
 ---
 name: migrate-from-v1
-description: Finish migrating a NanoClaw v1 install into v2. Run after `bash migrate-v2.sh` completes. Seeds the owner, cleans up CLAUDE.local.md files, reconciles container configs, and helps port custom v1 code. Triggers on "migrate from v1", "finish migration", "v1 migration".
+description: Finish migrating a NanoClaw v1 install into v2. Run after `bash migrate-v2.sh` completes. Seeds the owner, migrates legacy memory, reconciles container configs, and helps port custom v1 code. Triggers on "migrate from v1", "finish migration", "v1 migration".
 ---
 
 # Finish v1 → v2 migration
@@ -17,7 +17,7 @@ description: Finish migrating a NanoClaw v1 install into v2. Run after `bash mig
 - Container skills copied
 - Container image built
 
-Your job is the parts that need human judgment: triage any failed steps, seed the owner, clean up CLAUDE.local.md files, reconcile configs, and port any fork customizations.
+Your job is the parts that need human judgment: triage failed steps, seed the owner, run the shared-memory migration, reconcile configs, and port fork customizations.
 
 Read `logs/setup-migration/handoff.json` first — it has `overall_status`, per-step results in `steps`, and a `followups` list.
 
@@ -133,43 +133,16 @@ UPDATE messaging_groups SET unknown_sender_policy = '<chosen_policy>'
 WHERE id IN (SELECT id FROM messaging_groups WHERE channel_type IN (<migrated_channels>))
 ```
 
-## Phase 2: Clean up CLAUDE.local.md
+## Phase 2: Migrate legacy memory
 
-The migration copied v1's entire CLAUDE.md into CLAUDE.local.md for each group. This file now contains v1 boilerplate that v2 handles through its own composed fragments (`container/CLAUDE.md` + `.claude-fragments/module-*.md`). The user's customizations are buried inside.
+Run `/migrate-memory` for the imported groups. It quiesces each group, moves the
+v1 `CLAUDE.local.md` into the shared `memory/` tree without reading it during
+staging, then has the invoking coding harness distill standing identity into
+`instructions.prepend.md` and durable facts into Core Memory or focused linked
+files before the NanoClaw group runs again.
 
-For each group that has a `CLAUDE.local.md`:
-
-1. Read the file.
-2. Read the v1 template it was based on. Determine which template by checking the v1 install:
-   - If the group had `is_main=1` in v1's `registered_groups`, the template was `groups/main/CLAUDE.md`
-   - Otherwise, the template was `groups/global/CLAUDE.md`
-   - The v1 path is in `handoff.json` → `v1_path`
-3. Diff the file against the template. Identify sections that are:
-   - **Stock boilerplate** (identical to template) — remove. v2's fragments cover this.
-   - **User customizations** (added sections, modified sections) — keep.
-4. The following v1 sections are now handled by v2 fragments and should be removed even if slightly modified:
-   - "What You Can Do" → v2 runtime system prompt
-   - "Communication" / "Internal thoughts" / "Sub-agents" → `container/CLAUDE.md` + `module-core.md`
-   - "Your Workspace" / workspace path references → `container/CLAUDE.md`
-   - "Memory" (the stock version) → `container/CLAUDE.md`
-   - "Message Formatting" → `container/CLAUDE.md`
-   - "Admin Context" → v2 uses `user_roles`, not is_main
-   - "Authentication" → v2 uses OneCLI
-   - "Container Mounts" → v2 mounts are different
-   - "Managing Groups" / "Finding Available Groups" / "Registered Groups Config" → v2 entity model, no IPC
-   - "Global Memory" → v2 has `.claude-shared.md` symlink
-   - "Scheduling for Other Groups" → `module-scheduling.md`
-   - "Task Scripts" → `module-scheduling.md`
-   - "Sender Allowlist" → v2 uses `unknown_sender_policy` + `user_roles`
-5. Fix path references in kept sections:
-   - `/workspace/group/` → `/workspace/agent/`
-   - `/workspace/project/` → these paths don't exist in v2; discuss with the user
-   - `/workspace/ipc/` → gone; remove references
-   - `/workspace/extra/` → v2 uses `container.json` `additionalMounts`; keep but note the path may change
-6. Keep the `# Name` heading and first paragraph (identity) — this is the user's agent personality.
-7. Show the user the proposed new CLAUDE.local.md before writing it. Use `AskUserQuestion`: "Here's what I'd keep — look right?" with options to approve, edit, or keep the original.
-
-If a CLAUDE.local.md has no user customizations (pure template copy), write a minimal file with just the identity heading.
+Do not duplicate that migration logic here. Record each group's result in the
+handoff before continuing.
 
 ## Phase 3: Container config
 
@@ -205,7 +178,7 @@ If there are commits:
 ## Principles
 
 - **v1 checkout is read-only.** Never modify files under `handoff.v1_path`.
-- **Show before writing.** Show diffs/proposed content before modifying CLAUDE.local.md or container.json.
+- **Show before writing.** Show diffs or proposed content before modifying standing instructions, memory, or container.json.
 - **Mask credentials** when displaying (first 4 + `...` + last 4 characters).
 - **`handoff.json` is the recovery point.** If context gets compacted, re-read it and `git status` to recover state.
 

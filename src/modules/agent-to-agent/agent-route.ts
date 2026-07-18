@@ -27,14 +27,15 @@ import { getAgentGroup } from '../../db/agent-groups.js';
 import { getInboundSourceSessionId, getMostRecentPeerSourceSessionId } from '../../db/session-db.js';
 import { getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
+import { GuardDenyError, guard } from '../../guard/index.js';
 import { log } from '../../log.js';
 import { openInboundDb, resolveSession, sessionDir, writeSessionMessage } from '../../session-manager.js';
-import type { Session } from '../../types.js';
+import type { PendingApproval, Session } from '../../types.js';
 import { requestApproval } from '../approvals/index.js';
-import { hasDestination } from './db/agent-destinations.js';
-import { getMessagePolicy } from './db/agent-message-policies.js';
+import { A2A_MESSAGE_GATE_ACTION, a2aSend } from './guard.js';
 
 export { isSafeAttachmentName };
+export { A2A_MESSAGE_GATE_ACTION } from './guard.js';
 
 export interface ForwardedAttachment {
   name: string;
@@ -230,55 +231,63 @@ function resolveTargetSession(msg: RoutableAgentMessage, sourceSession: Session,
   return resolveSession(targetAgentGroupId, null, null, 'agent-shared').session;
 }
 
-export async function routeAgentMessage(msg: RoutableAgentMessage, session: Session): Promise<void> {
+export async function routeAgentMessage(
+  msg: RoutableAgentMessage,
+  session: Session,
+  opts: { grant?: PendingApproval } = {},
+): Promise<void> {
   const sourceAgentGroupId = session.agent_group_id;
   const targetAgentGroupId = msg.platform_id;
   if (!targetAgentGroupId) {
     throw new Error(`agent-to-agent message ${msg.id} is missing a target agent group id`);
   }
-  const isSelf = targetAgentGroupId === sourceAgentGroupId;
-  if (!isSelf && !hasDestination(sourceAgentGroupId, 'agent', targetAgentGroupId)) {
-    throw new Error(`unauthorized agent-to-agent: ${sourceAgentGroupId} has no destination for ${targetAgentGroupId}`);
-  }
-  if (!getAgentGroup(targetAgentGroupId)) {
-    throw new Error(`target agent group ${targetAgentGroupId} not found for message ${msg.id}`);
+
+  // The a2a.send decision (guard.ts) carries the checks verbatim in their
+  // original order: destination ACL deny, target-exists deny, self-send
+  // allow, agent_message_policies hold. An approved replay carries the
+  // grant — the hold is satisfied but the structure is re-checked live, so
+  // revoking a destination between hold and approve blocks delivery.
+  const decision = guard(a2aSend, {
+    actor: { kind: 'agent', agentGroupId: sourceAgentGroupId, sessionId: session.id },
+    resource: { from: sourceAgentGroupId, to: targetAgentGroupId },
+    payload: { id: msg.id, platform_id: targetAgentGroupId, content: msg.content, in_reply_to: msg.in_reply_to },
+    grant: opts.grant ?? null,
+  });
+
+  if (decision.effect === 'deny') {
+    throw new GuardDenyError(decision.reason);
   }
 
   // Gated edge: hold the message and return (not throw) so the delivery loop
-  // consumes the outbound row; `applyA2aMessageGate` re-routes it on approve.
-  if (!isSelf) {
-    const policy = getMessagePolicy(sourceAgentGroupId, targetAgentGroupId);
-    if (policy) {
-      const { approver } = policy;
-      const sourceName = getAgentGroup(sourceAgentGroupId)?.name ?? sourceAgentGroupId;
-      const targetName = getAgentGroup(targetAgentGroupId)?.name ?? targetAgentGroupId;
-      await requestApproval({
-        session,
-        agentName: sourceName,
-        action: A2A_MESSAGE_GATE_ACTION,
-        approverUserId: approver,
-        title: 'Message approval',
-        question: buildGateQuestion(sourceName, targetName, msg.content),
-        payload: {
-          id: msg.id,
-          platform_id: targetAgentGroupId,
-          content: msg.content,
-          in_reply_to: msg.in_reply_to,
-        },
-      });
-      log.info('Agent message held for approval', {
-        from: sourceAgentGroupId,
-        to: targetAgentGroupId,
-        msgId: msg.id,
-      });
-      return;
-    }
+  // consumes the outbound row; `applyA2aMessageGate` re-enters here with the
+  // grant on approve.
+  if (decision.effect === 'hold') {
+    const sourceName = getAgentGroup(sourceAgentGroupId)?.name ?? sourceAgentGroupId;
+    const targetName = getAgentGroup(targetAgentGroupId)?.name ?? targetAgentGroupId;
+    await requestApproval({
+      session,
+      agentName: sourceName,
+      action: A2A_MESSAGE_GATE_ACTION,
+      approverUserId: decision.approverUserId,
+      title: 'Message approval',
+      question: buildGateQuestion(sourceName, targetName, msg.content),
+      payload: {
+        id: msg.id,
+        platform_id: targetAgentGroupId,
+        content: msg.content,
+        in_reply_to: msg.in_reply_to,
+      },
+    });
+    log.info('Agent message held for approval', {
+      from: sourceAgentGroupId,
+      to: targetAgentGroupId,
+      msgId: msg.id,
+    });
+    return;
   }
 
   await performAgentRoute(msg, session, targetAgentGroupId);
 }
-
-export const A2A_MESSAGE_GATE_ACTION = 'a2a_message_gate';
 
 const GATE_CARD_BODY_MAX = 1500;
 
@@ -308,9 +317,11 @@ function buildGateQuestion(sourceName: string, targetName: string, contentStr: s
 
 /**
  * Cross-session route: pick the target session, forward files, write to its
- * inbound DB, wake it. Authorization is the caller's responsibility.
+ * inbound DB, wake it. Module-private — the only door is routeAgentMessage's
+ * guard decision (the approve continuation re-enters with a grant rather
+ * than calling this directly).
  */
-export async function performAgentRoute(
+async function performAgentRoute(
   msg: RoutableAgentMessage,
   session: Session,
   targetAgentGroupId: string,

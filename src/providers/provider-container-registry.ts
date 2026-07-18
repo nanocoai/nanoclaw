@@ -62,8 +62,8 @@ export interface ProviderHostCapabilities {
    * composed project doc, skill-discovery links, and provider state dir —
    * and the host must NOT compose or mount the default ones (composed
    * CLAUDE.md, `.claude-fragments`, `/app/CLAUDE.md`, `/home/node/.claude`,
-   * `CLAUDE.local.md` seeding). The provider's config fn does its own
-   * composing and returns its own mounts. Default off — providers that omit
+   * project document). The provider's config fn does its own composing and
+   * returns its own mounts. Default off — providers that omit
    * this get the default surfaces, which is today's behavior.
    */
   readonly providesAgentSurfaces?: boolean;

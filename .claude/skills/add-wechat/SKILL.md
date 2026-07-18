@@ -85,7 +85,6 @@ Add to `.env`:
 WECHAT_ENABLED=true
 ```
 
-Sync to container: `mkdir -p data/env && cp .env data/env/env`
 
 ### 2. Start the service and scan the QR
 

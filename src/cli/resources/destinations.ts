@@ -47,7 +47,7 @@ registerResource({
       name: 'local_name',
       type: 'string',
       description:
-        'Name the agent uses to address this target (e.g. <message to="local_name">). Unique per agent. Lowercase, dash-separated.',
+        'Name the agent uses to address this target (e.g. send_message({ to: "local_name", ... })). Unique per agent. Lowercase, dash-separated.',
     },
     {
       name: 'target_type',

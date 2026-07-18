@@ -30,8 +30,11 @@
  *
  *   pnpm exec tsx scripts/photon-setup.ts status   # show what's configured
  *
- * `--embedded` is reserved for setup:auto; it suppresses the standalone
- * intro/outro while preserving the provisioning progress and device prompt.
+ * `--embedded` is for machine-driven runs (the setup wizard / the /add-imessage
+ * skill's streaming step): it suppresses the standalone intro/outro while
+ * preserving the provisioning progress and device prompt, and emits a terminal
+ * `=== NANOCLAW SETUP: PHOTON ===` status block (STATUS/PHONE/LINE_NUMBER) on
+ * success so a streaming exec can confirm the step and capture its fields.
  *
  * Reference: https://github.com/photon-hq/cli
  */
@@ -750,6 +753,18 @@ async function runSetup(args: Args, fetchFn: FetchFn = fetch, deps: SetupDeps = 
           : '  3. Run /init-first-agent to wire your DM to an agent.',
       ].join('\n'),
     );
+  } else {
+    // Machine-readable terminal status for embedded (skill/wizard) runs — the
+    // streaming exec parses this block and treats the step as passed only when
+    // it sees STATUS: success (a clean exit code alone is not enough).
+    const fields = [
+      '=== NANOCLAW SETUP: PHOTON ===',
+      'STATUS: success',
+      ...(phone ? [`PHONE: ${phone}`] : []),
+      ...(assigned ? [`LINE_NUMBER: ${assigned}`] : []),
+      '=== END ===',
+    ];
+    process.stdout.write(fields.join('\n') + '\n');
   }
   return 0;
 }

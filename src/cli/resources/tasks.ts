@@ -1,10 +1,8 @@
-import { randomUUID } from 'crypto';
 import fs from 'fs';
 
 import type Database from 'better-sqlite3';
-import { CronExpressionParser } from 'cron-parser';
 
-import { GROUPS_DIR, TIMEZONE } from '../../config.js';
+import { GROUPS_DIR } from '../../config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import {
   findTaskSessions,
@@ -23,25 +21,25 @@ import {
   updateTask,
   type TaskUpdate,
 } from '../../modules/scheduling/db.js';
-import { inboundDbPath, resolveTaskSession, withInboundDb } from '../../session-manager.js';
-import { formatLocalStamp, parseZonedToUtc } from '../../timezone.js';
+import {
+  createScheduledTask,
+  enforceRecurrenceLimit,
+  makeTaskId,
+  MAX_DAILY_FIRES,
+  parseProcessAfter,
+  prepareScheduledTask,
+  type ScheduledTaskRow,
+  validateRecurrence,
+} from '../../modules/scheduling/create.js';
+import { inboundDbPath, withInboundDb } from '../../session-manager.js';
 import { registerResource } from '../crud.js';
+import { appendRunLog } from '../../modules/scheduling/run-log.js';
 import { formatTasksTable } from '../format-tasks.js';
 import type { CallerContext } from '../frame.js';
 
 type TaskStatus = 'pending' | 'paused';
 
-interface TaskRow {
-  row_id: string;
-  series_id: string | null;
-  status: string;
-  process_after: string | null;
-  recurrence: string | null;
-  content: string;
-  timestamp: string;
-  tries: number;
-  seq: number;
-}
+type TaskRow = ScheduledTaskRow;
 
 interface ScopedSession {
   id: string;
@@ -56,50 +54,6 @@ function bool(value: unknown): boolean {
   return value === true || value === 'true' || value === '1';
 }
 
-/**
- * Short, readable, filesystem/thread-safe task id. With a name → `<slug>-<4hex>`
- * (e.g. "Morning joke" → `morning-joke-a25c`); without → `t-<6hex>`. Always
- * matches /^[a-z0-9-]+$/ so it is safe as a thread suffix (`system:tasks:<id>`),
- * a filename (`tasks/<id>.md`), and a copy-pasteable --id.
- */
-function makeTaskId(name: unknown): string {
-  const hex = (n: number): string => randomUUID().replace(/-/g, '').slice(0, n);
-  const slug =
-    typeof name === 'string'
-      ? name
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, '-')
-          .replace(/^-+|-+$/g, '')
-          .slice(0, 24)
-          .replace(/-+$/g, '')
-      : '';
-  return slug ? `${slug}-${hex(4)}` : `t-${hex(6)}`;
-}
-
-function parseProcessAfter(value: unknown): string {
-  const raw = str(value);
-  if (!raw) throw new Error('--process-after is required');
-  const date = parseZonedToUtc(raw, TIMEZONE);
-  if (Number.isNaN(date.getTime())) throw new Error(`invalid --process-after: ${raw}`);
-  return date.toISOString();
-}
-
-/**
- * First-run timestamp for a new task. When a recurrence is given but no
- * --process-after, derive the first fire from the cron grid (in TIMEZONE) so the
- * common recurring case is a single flag — `--recurrence "0 9 * * 1-5"` — with no
- * redundant, easily-stale hand-picked instant. --process-after is still required
- * for one-shots (no recurrence to derive from) and still wins when supplied.
- */
-function firstRunIso(value: unknown, recurrence: string | null): string {
-  if (str(value) === undefined && recurrence) {
-    const next = CronExpressionParser.parse(recurrence, { tz: TIMEZONE }).next().toISOString();
-    if (!next) throw new Error(`--recurrence has no upcoming run: ${recurrence}`);
-    return next;
-  }
-  return parseProcessAfter(value);
-}
-
 function normalizeNullableString(value: unknown): string | null | undefined {
   if (value === undefined) return undefined;
   if (value === null) return null;
@@ -107,57 +61,6 @@ function normalizeNullableString(value: unknown): string | null | undefined {
   const trimmed = value.trim();
   if (trimmed === '' || trimmed === 'null' || trimmed === 'none') return null;
   return value;
-}
-
-function validateRecurrence(value: string | null | undefined): void {
-  if (!value) return;
-  try {
-    CronExpressionParser.parse(value, { tz: TIMEZONE });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`invalid --recurrence: ${msg}`, { cause: err });
-  }
-}
-
-/**
- * Frequency guard: refuse recurrences more frequent than 4 fires/day unless
- * the agent explicitly overrides. Frequent tasks burn the user's quota (or
- * get their account banned) — the sanctioned pattern is a slower cron plus a
- * pre-task gate script that checks an external condition and only wakes the
- * agent when something changed (`ncl tasks create --help`). Counted over the
- * next 24h from now in the instance timezone, so uneven crons are judged by
- * what they would actually do.
- */
-const MAX_DAILY_FIRES = 4;
-
-const RECURRENCE_LIMIT_WARNING =
-  'Warning: this task has not been scheduled. Frequent running tasks consume the ' +
-  "user's subscription quota or unnecessarily use tokens and can cause the user's " +
-  'account to be banned. Instead, use a pre-task run script that you write that can ' +
-  'check some kind of external condition, usually via one or more API calls. The ' +
-  'script returns a decision programmatically whether the task needs to be run now ' +
-  'or not. For example, an API call to GitHub to check if there are open PRs, and ' +
-  'only run when there are new open PRs.\n' +
-  'Run `ncl tasks create --help` to get full directions on how to write a script and test it.\n\n' +
-  'Note: if and only if you explicitly need to schedule a task more frequently and ' +
-  "you've verified with the user that they understand and that this is what they " +
-  'want and based on your judgment you agree that this is the right thing to do in ' +
-  'this situation, you can override this with --dangerously-override-recurrence-limit';
-
-function enforceRecurrenceLimit(recurrence: string | null, override: boolean, hasScript: boolean): void {
-  // A gate script IS the sanctioned mitigation the warning steers toward — a
-  // script-gated fire that finds nothing never wakes the agent, so scripted
-  // tasks may run at any cadence without the override.
-  if (!recurrence || override || hasScript) return;
-  const horizon = Date.now() + 24 * 60 * 60 * 1000;
-  const interval = CronExpressionParser.parse(recurrence, { tz: TIMEZONE });
-  let fires = 0;
-  while (fires <= MAX_DAILY_FIRES) {
-    const next = interval.next();
-    if (next.getTime() > horizon) break;
-    fires++;
-  }
-  if (fires > MAX_DAILY_FIRES) throw new Error(RECURRENCE_LIMIT_WARNING);
 }
 
 function statusFilter(args: Record<string, unknown>): TaskStatus | undefined {
@@ -274,42 +177,26 @@ function createTask(args: Record<string, unknown>, ctx: CallerContext) {
   const prompt = str(args.prompt);
   if (!prompt) throw new Error('--prompt is required');
   const recurrence = normalizeNullableString(args.recurrence) ?? null;
-  validateRecurrence(recurrence);
   const script = normalizeNullableString(args.script) ?? null;
-  enforceRecurrenceLimit(recurrence, bool(args.dangerously_override_recurrence_limit), script != null);
-  const processAfter = firstRunIso(args.process_after, recurrence);
-  const id = makeTaskId(args.name);
-  const originSessionId = ctx.caller === 'agent' ? ctx.sessionId : null;
-  // Each series runs in its own isolated session; point the fire at its own log.
-  const { session } = resolveTaskSession(group, id);
-  const promptWithLog =
-    `${prompt}\n\n` +
-    `[A task serves the user two separate ways — do whichever the task above asks for, and ALWAYS the run log:\n` +
-    `• MESSAGE (only if asked): if the task says to report/notify the user, send your result with an EXPLICIT destination — <message to="name">…</message> or send_message({ to: "name", … }). This run has no chat attached: an unaddressed reply is DISCARDED, so the explicit send is the ONLY thing the user receives.\n` +
-    `• RUN LOG (ALWAYS — even if you sent no message and did nothing else this run): after any sends, end the run with:\n` +
-    `    ncl tasks append-log --msg "<what you did, and why it mattered>"\n` +
-    `  Write it like a work-log entry a human keeps — concrete: what you did and WHY (a no-op run still gets a line saying why nothing was needed). If you wrote or modified files this run, name them in --msg. Not a greeting, not a copy of the message you sent. The host stamps the local time (do NOT add one), do NOT edit tasks/${id}.md by hand, and this NEVER goes to the user.\n` +
-    `Need context from past runs? Read tasks/${id}.md first.]`;
-
-  const created = withInbound(session, (db) => {
-    insertTaskRow(db, {
-      id,
-      seriesId: id,
-      processAfter,
-      recurrence,
-      content: JSON.stringify({ prompt: promptWithLog, script, originSessionId }),
-    });
-    return selectTask(db, id);
+  const prepared = prepareScheduledTask({
+    name: str(args.name),
+    prompt,
+    recurrence,
+    processAfter: str(args.process_after),
+    script,
+    dangerouslyOverrideRecurrenceLimit: bool(args.dangerously_override_recurrence_limit),
   });
-  if (!created) throw new Error('task system session inbound.db not found');
-  return toOutput(session, created);
+  const { session, row } = createScheduledTask(group, prepared, {
+    originSessionId: ctx.caller === 'agent' ? ctx.sessionId : null,
+  });
+  return toOutput(session, row);
 }
 
 /**
  * Append one host-timestamped line to a task's run log
  * (`<GROUPS_DIR>/<folder>/tasks/<series>.md`). This is NOT a delivery — it writes
  * nothing to messages_out; it just records what happened so the agent (and human)
- * can see when and why each fire ran. Inside a task fire the series is derived from
+ * can see when and why each run happened. Inside a task run the series is derived from
  * the caller's own task session, so the agent supplies only --msg.
  */
 function appendTaskLog(
@@ -329,22 +216,12 @@ function appendTaskLog(
     }
   }
   if (!series) throw new Error('--id is required (no task session to derive it from)');
-  // Charset guard is the security boundary here: blocks path traversal and keeps
-  // the id safe as a filename / thread suffix. Group scope is already enforced by
-  // groupArg (a cli_scope=group caller can only ever resolve its own folder), so a
-  // foreign id at worst writes a stray log under the caller's OWN folder — no leak.
-  if (!/^[a-z0-9-]+$/.test(series)) throw new Error(`invalid task id: ${series}`);
   if (!group) throw new Error('could not resolve the agent group');
 
-  const ag = getAgentGroup(group);
-  if (!ag) throw new Error(`agent group not found: ${group}`);
-
-  const timestamp = formatLocalStamp(new Date(), TIMEZONE);
-  const dir = `${GROUPS_DIR}/${ag.folder}/tasks`;
-  const file = `${dir}/${series}.md`;
-  fs.mkdirSync(dir, { recursive: true });
-  fs.appendFileSync(file, `${timestamp} — ${msg}\n`);
-  return { series, timestamp, path: file, ok: true };
+  // Group scope is enforced by groupArg (a cli_scope=group caller can only
+  // ever resolve its own folder), so a foreign id at worst writes a stray log
+  // under the caller's OWN folder — no leak. appendRunLog guards the charset.
+  return { ...appendRunLog(group, series, msg), ok: true };
 }
 
 /**
@@ -659,9 +536,9 @@ registerResource({
     'append-log': {
       access: 'open',
       description:
-        'Append a one-line run summary to a task run log (tasks/<id>.md).\n\nThe host stamps the local timestamp; you supply --msg. This is a LOG ENTRY, not a message — it sends nothing to anyone. Inside a task fire --id is auto-derived from your session. If you wrote or modified files during the run, name them in --msg.',
+        'Append a one-line note to a task run log (tasks/<id>.md).\n\nOptional: every task run auto-logs its final text, so use this only for additive mid-run notes. The host stamps the local timestamp; you supply --msg. This is a LOG ENTRY, not a message — it sends nothing to anyone. Inside a task run --id is auto-derived from your session.',
       examples: [
-        `# Inside a task fire (--id auto-derived) — the run's work-log line:\nncl tasks append-log --msg "posted the daily digest to slack; one feed returned 403, skipped"`,
+        `# Inside a task run (--id auto-derived) — optional progress note:\nncl tasks append-log --msg "one feed returned 403; continuing with the remaining feeds"`,
       ],
       args: [
         {
@@ -674,7 +551,7 @@ registerResource({
         {
           name: 'id',
           type: 'string',
-          description: 'Task series id. Auto-derived when called from inside a task fire; required otherwise.',
+          description: 'Task series id. Auto-derived when called from inside a task run; required otherwise.',
         },
         {
           name: 'group',

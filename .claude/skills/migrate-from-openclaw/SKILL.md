@@ -39,10 +39,10 @@ OpenClaw and NanoClaw v2 differ structurally. Keep these in mind throughout:
   An OpenClaw "agent" maps to a v2 *agent group* (workspace + memory +
   CLAUDE.md); an OpenClaw chat/group maps to a v2 *messaging group*; the wiring
   row connects them.
-- **Shared vs per-group context.** v2 has no `groups/global/`. Shared
-  instructions live in `container/CLAUDE.md` (mounted read-only into every
-  container). Per-group memory is `groups/<folder>/CLAUDE.local.md`; the
-  `CLAUDE.md` in each group is **composed at spawn — do not edit it.**
+- **Standing instructions vs memory.** Per-group role, personality, and
+  behavior live in `groups/<folder>/instructions.prepend.md`. Durable facts
+  live under `groups/<folder>/memory/`. The provider project document is
+  composed at spawn and must not be edited.
 - **Credentials.** Container-facing API credentials (Anthropic, OpenAI, …) are
   held in the OneCLI Agent Vault and injected per request — never in container
   env vars. Host-side channel tokens (Telegram/Discord/Slack bot tokens) stay
@@ -71,7 +71,7 @@ Sections to maintain:
 - **Registered Groups** — table: folder, platform_id, channel, session_mode
 - **Credentials** — table: credential, destination (vault / .env), status
 - **Settings Migrated** — timezone, container timeout
-- **Identity & Memory** — paths of files created, which CLAUDE.local.md edited
+- **Identity & Memory** — prepend and memory paths created for each group
 - **Scheduled Tasks** — table: original_id, name, mapped schedule, status
 - **Deferred / Not Applicable** — unsupported channels, OpenClaw-only features
 
@@ -123,16 +123,15 @@ time."
 (SOUL/MEMORY/IDENTITY) and personality; only the session is per-group.
 
 **v2 model:** each agent group is a separate container with its own filesystem,
-memory, and CLAUDE.local.md. Shared instructions are placed in
-`container/CLAUDE.md` (read-only in every container). There is no
-`groups/global/`.
+standing instructions, and `memory/` tree. Multiple messaging groups wired to
+the same agent group share that state. There is no `groups/global/`.
 
 AskUserQuestion: "In OpenClaw your groups shared one personality and memory. In
 v2 each agent group is separate. How do you want to handle this?"
 
-1. **Shared base (recommended if it was one bot)** — core personality/identity
-   goes in `container/CLAUDE.md` (every container sees it); each group adds its
-   own `CLAUDE.local.md` on top.
+1. **Shared identity (recommended if it was one bot)** — apply the same core
+   identity to each selected group's `instructions.prepend.md`; keep group
+   facts in each group's memory tree.
 2. **Fully separate** — each group gets independent memory and instructions; no
    shared base edit.
 3. **Just the primary agent for now** — set one agent up; add others later.
@@ -253,14 +252,13 @@ before running the commands.
 Fully conversational — read files directly and discuss. **Placement depends on
 the Phase 1 choice:**
 
-- **Shared base:** core identity/personality → `container/CLAUDE.md` (seen by
-  all containers, read-only). Group specifics → that group's
-  `groups/<folder>/CLAUDE.local.md`.
-- **Fully separate / primary only:** everything → the primary agent's
-  `groups/<folder>/CLAUDE.local.md`.
+- **Shared identity:** merge the same core identity/personality into every
+  selected group's `instructions.prepend.md`.
+- **Fully separate / primary only:** merge identity/personality only into the
+  corresponding group's `instructions.prepend.md`.
 
-Never edit a group's composed `CLAUDE.md` — it's regenerated each spawn. Edit
-`CLAUDE.local.md` (or `container/CLAUDE.md` for the shared base).
+Never edit a composed `CLAUDE.md` or `AGENTS.md`; it is regenerated each spawn.
+Put standing behavior in `instructions.prepend.md` and facts in `memory/`.
 
 Find workspace files at `<STATE_DIR>/workspace/`. If `AGENT_COUNT > 1`, also
 check `<STATE_DIR>/agents/*/workspace/` and ask which agent maps to which v2
@@ -269,29 +267,39 @@ agent group.
 ### IDENTITY.md / SOUL.md
 
 Read them. Distinguish always-loaded vs reference:
-- **Always loaded** (core traits, communication style, key rules) → weave into
-  `container/CLAUDE.md` (shared) or the group's `CLAUDE.local.md` (separate).
-- **Reference** (backstory, extended guidelines) → a separate
-  `groups/<folder>/soul.md`, with a one-line pointer in `CLAUDE.local.md`:
-  "Extended personality is in `soul.md`."
+- **Standing behavior** (core traits, communication style, key rules) → weave
+  into the group's `instructions.prepend.md`.
+- **Reference** (backstory, extended guidelines) → a separate durable concept
+  in an appropriate folder under `groups/<folder>/memory/`, linked from that
+  folder's `index.md` and the root Map.
+
+Choose each memory folder based on which related information will be easiest to
+find together; a folder may contain different concept types. Before writing the
+first concept into a new folder, create the folder and its `index.md`. Follow
+`memory/system/definition.md`, including its YAML frontmatter rules, for every
+new concept.
 
 Show proposed edits before applying — this is a thoughtful merge, not a paste.
 
 ### USER.md
 
-Create `groups/<folder>/user-context.md` and add a pointer in `CLAUDE.local.md`.
-Ask whether any critical facts (name, timezone, key prefs) should go directly
-into `CLAUDE.local.md` for always-on awareness.
+Create a focused user-context concept in an appropriate memory folder and link
+it through that folder's index and the root Map. Put only facts relevant in
+nearly every conversation (for example name or timezone) into `## Core Memory`;
+keep all other details in the linked file.
 
 ### MEMORY.md and daily memory files
 
-Show `MEMORY.md`; keep relevant items in `groups/<folder>/memories.md` with a
-pointer. For daily files (`workspace/memory/*.md`, count = DAILY_MEMORY_FILES):
+Show `MEMORY.md`; keep relevant items in focused concepts under the chosen
+memory folders, with links through each folder index and the root Map. For
+daily files (`workspace/memory/*.md`, count = DAILY_MEMORY_FILES):
 
 AskUserQuestion: "You have N daily memory files. How to handle them?"
-1. **Copy as-is** — `cp <workspace>/memory/*.md <group_dir>/daily-memories/`,
-   add a pointer in `CLAUDE.local.md`.
-2. **Consolidate** — read, extract durable facts, append to `memories.md`.
+1. **Copy as-is** — agree on a descriptive folder, create it and its `index.md`,
+   then copy with `cp <workspace>/memory/*.md <group_dir>/memory/<chosen-folder>/`
+   and link the retained files through its index and the root Map.
+2. **Consolidate** — read, extract durable facts, and place them in focused
+   linked memory files.
 3. **Skip.**
 
 ### OpenClaw skills
@@ -492,9 +500,9 @@ Print what was migrated:
 - Additional groups → messaging groups + wiring (folders + session modes)
 - Timezone → `.env TZ`; container timeout → noted
 - Access grants → members/roles for OpenClaw allowlist senders
-- Identity/personality → `container/CLAUDE.md` (shared) or per-group
-  `CLAUDE.local.md` + `soul.md`
-- User context / memories → `user-context.md` / `memories.md` / `daily-memories/`
+- Identity/personality → per-group `instructions.prepend.md` + linked memory concepts
+- User context / memories → Core Memory only for universal facts; otherwise
+  linked concepts in content-based folders under `memory/`
 - OpenClaw skills → `container/skills/`
 - Channel tokens → `.env` (list channels)
 - Container-facing credentials → OneCLI vault (list)

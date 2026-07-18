@@ -34,6 +34,8 @@ NanoClaw uses [Claude Code skills](https://code.claude.com/docs/en/skills) — m
 
 Every user should have clean and minimal code that does exactly what they need. Skills let users selectively add features to their fork without inheriting code for features they don't want.
 
+A skill is a self-contained add-on: a `SKILL.md` with the apply steps written as prose a coding agent can run, plus whatever the skill carries (code files, tests, a `REMOVE.md` that reverses every change apply made — required exactly when apply leaves anything behind). A fork tracks its customizations as a **recipe** of skills, which is what keeps upgrades cheap. [docs/skills-model.md](docs/skills-model.md) explains the whole model — recipes, tests, upgrades; [docs/skill-guidelines.md](docs/skill-guidelines.md) is the authoring checklist.
+
 ### Skill types
 
 #### 1. Channel and provider skills (registry branches)
@@ -53,7 +55,7 @@ Add a messaging channel or an agent provider. The SKILL.md contains the install 
 **Contributing a channel or provider skill:**
 1. Fork `nanocoai/nanoclaw` and branch from `main`
 2. Build the adapter following [docs/skill-guidelines.md](docs/skill-guidelines.md): a self-registering module, one appended barrel import, and a registration test that imports the real barrel
-3. Add a SKILL.md in `.claude/skills/<name>/` with the fetch-and-copy steps, and a REMOVE.md that reverses every change
+3. Add a SKILL.md in `.claude/skills/<name>/` with the fetch-and-copy steps, and a REMOVE.md that reverses every change. Plain prose steps are all that's required. A skill with a credential prompt or an interactive step should include a `## Troubleshooting` section.
 4. Open a PR. We'll land the code on the registry branch from your work
 
 See `/add-slack` for a good example. See [docs/skills-model.md](docs/skills-model.md) for why install is a fetch, never a merge.

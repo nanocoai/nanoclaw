@@ -1,12 +1,12 @@
 # Agent Templates
 
 A **template** is a reusable folder you stamp into a working agent group: it
-carries the agent's standing instructions, its MCP tool servers, and its skills,
-but **no secrets and no provider**. Point `ncl` at one and
+carries the agent's standing instructions, its MCP tool servers, its skills,
+and optional recurring tasks, but **no secrets and no provider**. Point `ncl` at one and
 you get a configured agent in seconds; you choose the runtime/provider
 separately.
 
-Templates are purely additive: no DB migration, no new dependency. **Templates
+Templates are purely additive and require no DB migration. **Templates
 are resolved only from a local directory**: `templates/` at the
 project root by default (committed but shipped empty), or whatever
 `NANOCLAW_TEMPLATES_DIR` points at (a local path only). The public registry
@@ -55,6 +55,7 @@ is optional and defaults sensibly:
 │       └── *.md
 ├── .mcp.json             # optional: MCP servers (command + args), NO secrets
 ├── skills/<name>/        # optional: one folder per skill (SKILL.md + any references/), copied whole
+├── tasks/*.md             # optional: recurring tasks, created paused
 └── README.md             # recommended: per-template docs
 ```
 
@@ -64,6 +65,7 @@ is optional and defaults sensibly:
 | `context/**/*.md` (others) | Extra context, copied into the agent's workspace with the same layout relative to `instructions.md` | No |
 | `.mcp.json` → `mcpServers` | MCP tool servers (written verbatim to container config) | No |
 | `skills/<name>/` | A skill, auto-triggered by its `description` | No |
+| `tasks/*.md` | Recurring scheduled tasks, created paused pending user activation | No |
 
 Notes:
 
@@ -75,6 +77,56 @@ Notes:
   persona gets truncated. Put bulk material in `skills/` or extra context files instead.
 - Skills are copied into the agent's own skills overlay, keyed to that group,
   never shared across groups.
+
+### Recurring tasks
+
+Each immediate Markdown file under `tasks/` defines one recurring task. The
+filename becomes its readable name, the frontmatter supplies its cron schedule,
+an optional script can decide whether to wake the agent, and the Markdown body
+is the prompt:
+
+```markdown
+---
+schedule: "*/15 * * * *"
+script: |
+  if [ -f /workspace/agent/wake-next-task ]; then
+    echo '{"wakeAgent": true}'
+  else
+    echo '{"wakeAgent": false}'
+  fi
+---
+
+Investigate the alerts reported by the script and notify me if they are serious.
+```
+
+`schedule` is required. `script` is optional and may be a single-line or
+multiline YAML string. The frontmatter accepts no other fields, so typos cannot
+silently change behavior. Task files are template input, like `.mcp.json`: they
+are not copied into the agent workspace after stamping.
+
+Template tasks use the same creation path as `ncl tasks create`, including cron
+validation, the install timezone, first-run calculation, isolated task sessions,
+the run-log prompt, script behavior, and frequency limits. Ungated tasks are
+limited to four fires in the next 24 hours; tasks with a script gate may run more
+often. Templates do not expose the dangerous frequency override or one-time
+tasks.
+
+The script is passed unchanged to NanoClaw's normal task creation and execution
+path. See [Scheduled Tasks](scheduled-tasks.md#script-gates) for the script
+contract, testing workflow, frequency limit, and failure behavior. Avoid putting
+secrets directly in scripts; prefer runtime credential injection through OneCLI.
+
+Tasks start **paused**, so stamping a template never starts background work
+without user consent. Until the setup welcome flow offers activation, inspect
+and enable them with the existing task CLI:
+
+```bash
+ncl tasks list --group <agent-group-id> --status paused
+ncl tasks resume <task-id>
+```
+
+Resuming preserves NanoClaw's normal pause/resume semantics: if the stored next
+run passed while paused, the task is eligible immediately.
 
 ### Referencing extra context files
 
@@ -167,5 +219,6 @@ repo, not this one. To add one: fork that repo, drop a folder at
 `<category>/<template>/` with at least `context/instructions.md`, test it end to
 end (copy it under `templates/` and run
 `ncl groups create --template <category>/<template> --name Test`), confirm
-no secrets are committed, and open a PR. The repo's README has the full anatomy,
+any predefined tasks appear under `ncl tasks list --status paused`, confirm no
+secrets are committed, and open a PR. The repo's README has the full anatomy,
 category conventions, and checklist.

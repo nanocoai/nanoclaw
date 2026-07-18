@@ -3,23 +3,37 @@
  * the per-session DB poller (container caller) call dispatch() with the
  * same frame and a transport-supplied CallerContext.
  *
- * Approval gating for risky calls from the container is the only branch
- * that differs by caller. Host callers and `open` commands run inline.
+ * Every command passes the guard before its handler runs — the decision
+ * (allow / hold / deny) comes from the command's catalog entry, derived at
+ * registration (see cli/guard.ts). Dispatch keeps the mechanics: arg
+ * auto-fill, the sessions-get existence oracle, `--help` interception,
+ * parseArgs, and post-handler row filtering. An approved replay re-enters
+ * here carrying the verified approval row as its grant — the guard re-checks
+ * the structural checks live, and the `approved: true` boolean no longer
+ * exists.
  */
 import { getContainerConfig } from '../db/container-configs.js';
 import { getAgentGroup } from '../db/agent-groups.js';
 import { getSession } from '../db/sessions.js';
+import { guard, type GuardActor } from '../guard/index.js';
 import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
+import type { PendingApproval } from '../types.js';
 import type { CallerContext, ErrorCode, RequestFrame, ResponseFrame } from './frame.js';
 import { localizeIsoTimestamps } from './format.js';
 import { getResource } from './crud.js';
 import { listVerbs, renderVerbHelp } from './help-render.js';
-import { GROUP_SCOPE_RESOURCES, listCommands, lookup } from './registry.js';
+import { commandGuard, listCommands, lookup } from './registry.js';
 
 type DispatchOptions = {
-  /** True when a command is being replayed after approval. */
-  approved?: boolean;
+  /** Verified approval row when a command is replayed after approval. */
+  grant?: PendingApproval;
 };
+
+function actorFor(ctx: CallerContext): GuardActor {
+  return ctx.caller === 'host'
+    ? { kind: 'host' }
+    : { kind: 'agent', agentGroupId: ctx.agentGroupId, sessionId: ctx.sessionId };
+}
 
 export async function dispatch(
   req: RequestFrame,
@@ -55,43 +69,13 @@ export async function dispatch(
     return err(req.id, 'unknown-command', unknownCommandMessage(req.command));
   }
 
-  // CLI scope enforcement for agent callers
+  // Group-scope mechanics for agent callers (visibility, not policy — the
+  // allow/hold/deny decisions live in the guard decision, cli/guard.ts).
   if (ctx.caller === 'agent') {
     const configRow = getContainerConfig(ctx.agentGroupId);
     const cliScope = configRow?.cli_scope ?? 'group';
 
-    if (cliScope === 'disabled') {
-      return err(req.id, 'forbidden', 'CLI access is disabled for this agent group.');
-    }
-
     if (cliScope === 'group') {
-      // Only allow whitelisted resources and general commands (no resource, like help)
-      if (cmd.resource && !GROUP_SCOPE_RESOURCES.has(cmd.resource)) {
-        return err(req.id, 'forbidden', `CLI access is scoped to this agent group. Cannot access "${cmd.resource}".`);
-      }
-
-      // Enforce group scope on all agent-group-related args.
-      // Different resources use different arg names for the agent group ID.
-      // Only check --id for resources where it IS the agent group ID.
-      const groupArgs = ['agent_group_id', 'group'] as const;
-      for (const key of groupArgs) {
-        if (req.args[key] && req.args[key] !== ctx.agentGroupId) {
-          return err(req.id, 'forbidden', 'CLI access is scoped to this agent group.');
-        }
-      }
-      if (
-        (cmd.resource === 'groups' || cmd.resource === 'destinations') &&
-        req.args.id &&
-        req.args.id !== ctx.agentGroupId
-      ) {
-        return err(req.id, 'forbidden', 'CLI access is scoped to this agent group.');
-      }
-
-      // Block cli_scope changes from group-scoped agents (privilege escalation)
-      if (req.args.cli_scope !== undefined || req.args['cli-scope'] !== undefined) {
-        return err(req.id, 'forbidden', 'Cannot change cli_scope from a group-scoped agent.');
-      }
-
       // Auto-fill agent-group-related args so the agent doesn't need
       // to pass its own group ID explicitly.
       const fill: Record<string, unknown> = {
@@ -117,9 +101,19 @@ export async function dispatch(
     }
   }
 
+  const decision = guard(commandGuard(cmd.name), {
+    actor: actorFor(ctx),
+    payload: req.args,
+    grant: opts.grant ?? null,
+  });
+
+  if (decision.effect === 'deny') {
+    return err(req.id, 'forbidden', decision.reason);
+  }
+
   // `--help` interception: answer with the command's generated help instead of
-  // executing. Placed after scope enforcement (a group-scoped agent can't probe
-  // forbidden resources) and BEFORE approval gating — asking for help on an
+  // executing. Placed after the guard's deny (a group-scoped agent can't probe
+  // forbidden resources) and BEFORE hold execution — asking for help on an
   // approval-gated verb must never mint an approval card.
   if (req.args.help === true) {
     // Carry the help text in `human` too, so both clients print it verbatim
@@ -128,7 +122,12 @@ export async function dispatch(
     return { id: req.id, ok: true, data: helpText, human: helpText };
   }
 
-  if (ctx.caller !== 'host' && cmd.access === 'approval' && !opts.approved) {
+  if (decision.effect === 'hold') {
+    if (ctx.caller !== 'agent') {
+      // Holds only arise for agent callers; anything else is a guard bug —
+      // fail closed rather than card a ghost.
+      return err(req.id, 'forbidden', decision.reason);
+    }
     const session = getSession(ctx.sessionId);
     if (!session) {
       return err(req.id, 'handler-error', 'Session not found.');
@@ -216,10 +215,10 @@ export async function dispatch(
   }
 }
 
-registerApprovalHandler('cli_command', async ({ payload, notify }) => {
+registerApprovalHandler('cli_command', async ({ payload, approval, notify }) => {
   const frame = payload.frame as RequestFrame;
   const callerContext = parseCallerContext(payload.callerContext) ?? { caller: 'host' };
-  const response = await dispatch(frame, callerContext, { approved: true });
+  const response = await dispatch(frame, callerContext, { grant: approval });
 
   if (response.ok) {
     const localized = localizeIsoTimestamps(response.data);

@@ -23,13 +23,9 @@ import path from 'path';
 // Registration-only: makes the in-tree cli adapter's declared defaults
 // (pattern '.', no threads, 'public') resolvable below.
 import '../src/channels/index.js';
-import {
-  resolveUnknownSenderPolicy,
-  resolveWiringDefaults,
-} from '../src/channels/channel-defaults.js';
+import { resolveUnknownSenderPolicy, resolveWiringDefaults } from '../src/channels/channel-defaults.js';
 import { DATA_DIR } from '../src/config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
-import { updateContainerConfigScalars } from '../src/db/container-configs.js';
 import { initDb } from '../src/db/connection.js';
 import {
   createMessagingGroup,
@@ -132,11 +128,11 @@ async function main(): Promise<void> {
       `# ${args.agentName}\n\n` +
       `You are ${args.agentName}, a personal NanoClaw agent for ${args.displayName}. ` +
       'When the user first reaches out, introduce yourself briefly and invite them to chat. Keep replies concise.',
+    // The operator's setup pick (NANOCLAW_PICKED_PROVIDER) when set; otherwise
+    // undefined, so initGroupFilesystem falls back to the instance default and
+    // stamps it onto the fresh config row.
+    provider: pickedProvider,
   });
-  // Runtime provider lives on the config row, not the deprecated agent_provider.
-  if (pickedProvider && pickedProvider !== 'claude') {
-    updateContainerConfigScalars(ag.id, { provider: pickedProvider });
-  }
 
   // 3. CLI messaging group + wiring.
   let cliMg: MessagingGroup | undefined = getMessagingGroupByPlatform(CLI_CHANNEL, CLI_PLATFORM_ID);
@@ -180,9 +176,7 @@ async function main(): Promise<void> {
 
   console.log('');
   console.log('Init complete.');
-  console.log(
-    `  owner:   ${CLI_SYNTHETIC_USER_ID}${promotedToOwner ? ' (promoted on first owner)' : ''}`,
-  );
+  console.log(`  owner:   ${CLI_SYNTHETIC_USER_ID}${promotedToOwner ? ' (promoted on first owner)' : ''}`);
   console.log(`  agent:   ${ag.name} [${ag.id}] @ groups/${folder}`);
   console.log(`  channel: cli/${CLI_PLATFORM_ID}`);
   console.log('');

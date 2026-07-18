@@ -31,7 +31,6 @@
  * For direct-addressable channels (telegram, whatsapp, etc.), --platform-id
  * is typically the same as the handle in --user-id, with the channel prefix.
  */
-import fs from 'fs';
 import net from 'net';
 import path from 'path';
 
@@ -40,10 +39,7 @@ import path from 'path';
 // adapter connects — no Gateway conflict with the running service), so
 // declared channel defaults resolve here without live adapters.
 import '../src/channels/index.js';
-import {
-  resolveUnknownSenderPolicy,
-  resolveWiringDefaults,
-} from '../src/channels/channel-defaults.js';
+import { resolveUnknownSenderPolicy, resolveWiringDefaults } from '../src/channels/channel-defaults.js';
 import { hasDeclaredChannelDefaults } from '../src/channels/channel-registry.js';
 import { DATA_DIR, GROUPS_DIR } from '../src/config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
@@ -55,6 +51,7 @@ import {
   getMessagingGroupByPlatform,
 } from '../src/db/messaging-groups.js';
 import { runMigrations } from '../src/db/migrations/index.js';
+import { stageGroupPersona } from '../src/group-persona.js';
 import { normalizeName } from '../src/modules/agent-to-agent/db/agent-destinations.js';
 import { addMember } from '../src/modules/permissions/db/agent-group-members.js';
 import { getUserRoles, grantRole } from '../src/modules/permissions/db/user-roles.js';
@@ -77,8 +74,7 @@ interface Args {
   engagePattern?: string;
 }
 
-const DEFAULT_WELCOME =
-  'System instruction: run /welcome to introduce yourself to the user on this new channel.';
+const DEFAULT_WELCOME = 'System instruction: run /welcome to introduce yourself to the user on this new channel.';
 
 const DEFAULT_ROLE: Role = 'owner';
 
@@ -119,9 +115,7 @@ function parseArgs(argv: string[]): Args {
       case '--role': {
         const raw = (val ?? '').toLowerCase();
         if (raw !== 'owner' && raw !== 'admin' && raw !== 'member') {
-          console.error(
-            `Invalid --role: ${raw} (expected 'owner', 'admin', or 'member')`,
-          );
+          console.error(`Invalid --role: ${raw} (expected 'owner', 'admin', or 'member')`);
           process.exit(2);
         }
         out.role = raw;
@@ -161,13 +155,7 @@ function generateId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function wireIfMissing(
-  mg: MessagingGroup,
-  ag: AgentGroup,
-  now: string,
-  label: string,
-  engagePattern?: string,
-): void {
+function wireIfMissing(mg: MessagingGroup, ag: AgentGroup, now: string, label: string, engagePattern?: string): void {
   const existing = getMessagingGroupAgentByPair(mg.id, ag.id);
   if (existing) {
     console.log(`Wiring already exists: ${existing.id} (${label})`);
@@ -243,22 +231,17 @@ async function main(): Promise<void> {
   } else {
     console.log(`Reusing agent group: ${ag.id} (${folder})`);
   }
-  // Ensure the config row exists; defer workspace scaffolding to the first
-  // spawn (group-init), where the DB-resolved provider decides the surface
-  // (Claude: CLAUDE.local.md; a surfaces-owning provider: the memory scaffold)
-  // — so a non-Claude group never gets stale CLAUDE.* files written here.
-  ensureContainerConfig(ag.id);
-  // Runtime provider lives on the config row, not the deprecated agent_provider.
-  if (pickedProvider && pickedProvider !== 'claude') {
-    updateContainerConfigScalars(ag.id, { provider: pickedProvider });
-  }
-  const groupDir = path.resolve(GROUPS_DIR, folder);
-  fs.mkdirSync(groupDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(groupDir, '.seed.md'),
+  // Seed the config row, stamped with the effective provider: the operator's
+  // setup pick (NANOCLAW_PICKED_PROVIDER) when this runs inside a setup run,
+  // otherwise the persisted instance default. Workspace scaffolding is deferred
+  // to the first spawn (group-init). A reused group keeps its provider
+  // (INSERT OR IGNORE).
+  ensureContainerConfig(ag.id, pickedProvider);
+  stageGroupPersona(
+    path.resolve(GROUPS_DIR, folder),
     `# ${args.agentName}\n\n` +
       `You are ${args.agentName}, a personal NanoClaw agent for ${args.displayName}. ` +
-      'When the user first reaches out (or you receive a system welcome prompt), introduce yourself briefly and invite them to chat. Keep replies concise.\n',
+      'When the user first reaches out (or you receive a system welcome prompt), introduce yourself briefly and invite them to chat. Keep replies concise.',
   );
 
   // 2b. Assign the user a role for this agent group. The caller picks via
@@ -270,9 +253,7 @@ async function main(): Promise<void> {
   // getUserRoles prevents duplicates on re-runs.
   const existingRoles = getUserRoles(userId);
   if (args.role === 'owner') {
-    const alreadyOwner = existingRoles.some(
-      (r) => r.role === 'owner' && r.agent_group_id === null,
-    );
+    const alreadyOwner = existingRoles.some((r) => r.role === 'owner' && r.agent_group_id === null);
     if (!alreadyOwner) {
       grantRole({
         user_id: userId,
@@ -285,9 +266,7 @@ async function main(): Promise<void> {
     // Owner's agent group gets global CLI access
     updateContainerConfigScalars(ag.id, { cli_scope: 'global' });
   } else if (args.role === 'admin') {
-    const alreadyAdmin = existingRoles.some(
-      (r) => r.role === 'admin' && r.agent_group_id === ag.id,
-    );
+    const alreadyAdmin = existingRoles.some((r) => r.role === 'admin' && r.agent_group_id === ag.id);
     if (!alreadyAdmin) {
       grantRole({
         user_id: userId,
@@ -348,11 +327,7 @@ async function main(): Promise<void> {
   });
 
   const roleLabel =
-    args.role === 'owner'
-      ? 'owner (global)'
-      : args.role === 'admin'
-        ? `admin (scoped to ${ag.id})`
-        : 'member';
+    args.role === 'owner' ? 'owner (global)' : args.role === 'admin' ? `admin (scoped to ${ag.id})` : 'member';
 
   console.log('');
   console.log('Init complete.');
@@ -397,11 +372,7 @@ async function sendWelcomeViaCliSocket(
     };
 
     socket.once('error', (err) =>
-      settle(
-        new Error(
-          `CLI socket at ${sockPath} not reachable: ${err.message}. Is the NanoClaw service running?`,
-        ),
-      ),
+      settle(new Error(`CLI socket at ${sockPath} not reachable: ${err.message}. Is the NanoClaw service running?`)),
     );
     socket.once('connect', () => {
       const payload =
