@@ -89,3 +89,32 @@ export async function handleAddMcpServer(content: Record<string, unknown>, sessi
     question: `Agent "${agentGroup.name}" is attempting to add a new MCP server:\n${serverName} (${command})`,
   });
 }
+
+export async function handleChangeModel(content: Record<string, unknown>, session: Session): Promise<void> {
+  const agentGroup = getAgentGroup(session.agent_group_id);
+  if (!agentGroup) {
+    notifyAgent(session, 'change_model failed: agent group not found.');
+    return;
+  }
+
+  const model = (content.model as string)?.trim();
+  const reason = (content.reason as string) || '';
+
+  if (!model) {
+    notifyAgent(session, 'change_model failed: model is required.');
+    return;
+  }
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._+-]*(\/[a-zA-Z0-9][a-zA-Z0-9._+-]*)?$/.test(model)) {
+    notifyAgent(session, `change_model failed: invalid model identifier "${model}".`);
+    return;
+  }
+
+  await requestApproval({
+    session,
+    agentName: agentGroup.name,
+    action: 'change_model',
+    payload: { model, reason },
+    title: `Switch model → ${model}`,
+    question: reason ? `Reason: ${reason}` : `Switch AI model to ${model}?`,
+  });
+}

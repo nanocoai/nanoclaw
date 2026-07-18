@@ -16,6 +16,8 @@ export interface RunnerConfig {
   agentGroupId: string;
   maxMessagesPerPrompt: number;
   mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
+  /** Model override from container.json — takes precedence over OPENCODE_MODEL env var. */
+  model?: string;
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -43,6 +45,7 @@ export function loadConfig(): RunnerConfig {
     agentGroupId: (raw.agentGroupId as string) || '',
     maxMessagesPerPrompt: (raw.maxMessagesPerPrompt as number) || DEFAULT_MAX_MESSAGES,
     mcpServers: (raw.mcpServers as RunnerConfig['mcpServers']) || {},
+    model: (raw.model as string) || undefined,
   };
 
   return _config;

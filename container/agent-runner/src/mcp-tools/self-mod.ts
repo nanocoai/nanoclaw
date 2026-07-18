@@ -12,6 +12,7 @@
  * Package names are sanitized here at the tool boundary AND re-validated on
  * the host side (defense in depth).
  */
+import { loadConfig } from '../config.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -117,4 +118,102 @@ export const addMcpServer: McpToolDefinition = {
   },
 };
 
-registerTools([installPackages, addMcpServer]);
+export const changeModel: McpToolDefinition = {
+  tool: {
+    name: 'change_model',
+    description:
+      'Switch YOUR underlying AI model. Always call get_model first to see valid model IDs. Requires admin approval; fire-and-forget.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        model: {
+          type: 'string',
+          description: 'Full model identifier with provider prefix, e.g. "opencode-go/kimi-k2.6". Call get_model first to see the valid list.',
+        },
+        reason: { type: 'string', description: 'Why you want to switch models' },
+      },
+      required: ['model'],
+    },
+  },
+  async handler(args) {
+    const model = (args.model as string)?.trim();
+    if (!model) return err('model is required');
+
+    const provider = process.env.OPENCODE_PROVIDER || '';
+    const apiKey = process.env.OPENCODE_API_KEY;
+
+    // When running on opencode-go, validate against the live model list.
+    if (provider === 'opencode-go' && apiKey) {
+      if (!model.startsWith('opencode-go/')) {
+        return err(`Model must start with "opencode-go/" for this provider. Call get_model to see valid options.`);
+      }
+      const modelId = model.replace('opencode-go/', '');
+      try {
+        const res = await fetch('https://opencode.ai/zen/go/v1/models', {
+          headers: { Authorization: `Bearer ${apiKey}` },
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { data?: { id: string }[] };
+          const valid = (data.data ?? []).map((m) => m.id);
+          if (!valid.includes(modelId)) {
+            return err(
+              `Unknown model "${modelId}". Valid opencode-go models:\n${valid.map((m) => `  opencode-go/${m}`).join('\n')}`,
+            );
+          }
+        }
+      } catch {
+        // Network error — let it through and let the host validate
+      }
+    }
+
+    const requestId = generateId();
+    writeMessageOut({
+      id: requestId,
+      kind: 'system',
+      content: JSON.stringify({
+        action: 'change_model',
+        model,
+        reason: (args.reason as string) || '',
+      }),
+    });
+
+    log(`change_model: ${requestId} → "${model}"`);
+    return ok(`Model change request submitted (→ ${model}). You will be notified when admin approves or rejects.`);
+  },
+};
+
+
+export const getModel: McpToolDefinition = {
+  tool: {
+    name: 'get_model',
+    description:
+      'Returns the AI model you are currently running on, and fetches the list of models available on your current provider.',
+    inputSchema: { type: 'object' as const, properties: {} },
+  },
+  async handler() {
+    const config = loadConfig();
+    const current = config.model || process.env.OPENCODE_MODEL || 'unknown';
+    const provider = process.env.OPENCODE_PROVIDER || 'unknown';
+    const apiKey = process.env.OPENCODE_API_KEY;
+
+    let modelsText = '';
+    if (apiKey && provider === 'opencode-go') {
+      try {
+        const res = await fetch('https://opencode.ai/zen/go/v1/models', {
+          headers: { Authorization: `Bearer ${apiKey}` },
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { data?: { id: string }[] };
+          const ids = (data.data ?? []).map((m) => `- ${m.id}`).join('\n');
+          modelsText = ids ? `\n\nAvailable models on opencode-go:\n${ids}` : '';
+        }
+      } catch {
+        modelsText = '\n\n(Could not fetch model list — network error)';
+      }
+    }
+
+    return ok(`Current model: ${current}\nProvider: ${provider}${modelsText}`);
+  },
+};
+
+registerTools([installPackages, addMcpServer, changeModel, getModel]);

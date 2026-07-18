@@ -120,6 +120,8 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
   for (const name of [...desired.keys()].sort()) {
     imports.push(`@./.claude-fragments/${name}`);
   }
+  // Per-group memory — last so it overrides shared defaults.
+  imports.push('@./CLAUDE.local.md');
   const body = [COMPOSED_HEADER, ...imports, ''].join('\n');
   writeAtomic(path.join(groupDir, 'CLAUDE.md'), body);
 

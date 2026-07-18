@@ -13,6 +13,7 @@ import { runMigrations } from './db/migrations/index.js';
 import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
+import { startSkillWatcher } from './skill-watcher.js';
 import { routeInbound } from './router.js';
 import { log } from './log.js';
 
@@ -158,6 +159,8 @@ async function main(): Promise<void> {
   // 6. Start host sweep
   startHostSweep();
   log.info('Host sweep started');
+
+  startSkillWatcher();
 
   log.info('NanoClaw running');
 }

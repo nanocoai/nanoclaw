@@ -99,6 +99,7 @@ export function forwardAttachedFiles(
 
 export interface RoutableAgentMessage {
   id: string;
+  kind: string;
   platform_id: string | null;
   content: string;
 }
@@ -108,10 +109,15 @@ export async function routeAgentMessage(msg: RoutableAgentMessage, session: Sess
   if (!targetAgentGroupId) {
     throw new Error(`agent-to-agent message ${msg.id} is missing a target agent group id`);
   }
-  if (
-    targetAgentGroupId !== session.agent_group_id &&
-    !hasDestination(session.agent_group_id, 'agent', targetAgentGroupId)
-  ) {
+  const isSelf = targetAgentGroupId === session.agent_group_id;
+  if (isSelf && msg.kind !== 'system') {
+    // Self-routing is only legitimate for system messages (post-approval prompts).
+    // Chat-kind self-routes indicate an echo loop — block them at the host level.
+    throw new Error(
+      `blocked self-routing: agent ${session.agent_group_id} cannot send ${msg.kind} messages to itself`,
+    );
+  }
+  if (!isSelf && !hasDestination(session.agent_group_id, 'agent', targetAgentGroupId)) {
     throw new Error(
       `unauthorized agent-to-agent: ${session.agent_group_id} has no destination for ${targetAgentGroupId}`,
     );

@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'child_process';
 
 import { createOpencodeClient, type OpencodeClient } from '@opencode-ai/sdk';
 
+import { getConfig } from '../config.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import { mcpServersToOpenCodeConfig } from './mcp-to-opencode.js';
@@ -14,7 +15,7 @@ const SESSION_STATUS_RETRY_ERROR_AFTER = 3;
 
 /** Stale / dead OpenCode session heuristics (complement Claude-centric host patterns). */
 const STALE_SESSION_RE =
-  /no conversation found|ENOENT.*\.jsonl|session.*not found|NotFoundError|connection reset|ECONNRESET|404|event timeout/i;
+  /no conversation found|ENOENT.*\.jsonl|session.*not found|NotFoundError|connection reset|ECONNRESET|404|event timeout|stream ended unexpectedly|model not found/i;
 
 function killProcessTree(proc: ChildProcess): void {
   if (!proc.pid) return;
@@ -85,7 +86,9 @@ function wrapPromptWithContext(text: string, systemInstructions?: string): strin
 
 function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> {
   const provider = process.env.OPENCODE_PROVIDER || 'anthropic';
-  const model = process.env.OPENCODE_MODEL;
+  // container.json model field takes precedence over env var so the agent can
+  // request a model switch via the change_model self-mod action.
+  const model = getConfig().model || process.env.OPENCODE_MODEL;
   const smallModel = process.env.OPENCODE_SMALL_MODEL;
   const proxyUrl = process.env.ANTHROPIC_BASE_URL;
 
@@ -95,8 +98,11 @@ function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> 
     .filter(Boolean)
     .filter((mid, i, a) => a.indexOf(mid as string) === i);
 
+  // opencode-go is a native built-in provider — it reads OPENCODE_API_KEY
+  // from the environment directly. Do not set a custom baseURL or apiKey
+  // placeholder (that would route auth calls to the wrong endpoint).
   const providerOptions: Record<string, unknown> =
-    provider === 'anthropic'
+    provider === 'anthropic' || provider === 'opencode-go'
       ? {}
       : {
           [provider]: {
@@ -293,12 +299,17 @@ export class OpenCodeProvider implements AgentProvider {
         const roleByMessageId = new Map<string, string>();
         let lastEventAt = Date.now();
         let eventTimedOut = false;
+        let timeoutReject: ((err: Error) => void) | null = null;
+        const timeoutBarrier = new Promise<never>((_, reject) => { timeoutReject = reject; });
         const timeoutCheck = setInterval(() => {
+          if (eventTimedOut) return;
           if (Date.now() - lastEventAt > IDLE_TIMEOUT_MS) {
             log(`OpenCode event timeout (${IDLE_TIMEOUT_MS}ms) — clearing session ${sessionId}`);
             eventTimedOut = true;
             self.activeSessionId = undefined;
             destroySharedRuntime();
+            clearInterval(timeoutCheck);
+            timeoutReject!(new Error(`OpenCode event timeout (${IDLE_TIMEOUT_MS}ms)`));
             kick();
           }
         }, 5000);
@@ -310,8 +321,9 @@ export class OpenCodeProvider implements AgentProvider {
               throw new Error(`OpenCode event timeout (${IDLE_TIMEOUT_MS}ms)`);
             }
 
-            const { value: ev, done } = await stream.next();
+            const { value: ev, done } = await Promise.race([stream.next(), timeoutBarrier]);
             if (done) {
+              destroySharedRuntime();
               throw new Error('OpenCode SSE stream ended unexpectedly');
             }
 

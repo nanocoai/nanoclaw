@@ -11,11 +11,13 @@
  * add_mcp_server: kill container only — bun runs TS directly, so a pure
  *   MCP wiring change needs nothing more than a process restart.
  */
+import fs from 'fs';
+import path from 'path';
 import { updateContainerConfig } from '../../container-config.js';
 import { buildAgentGroupImage, killContainer } from '../../container-runner.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { log } from '../../log.js';
-import { writeSessionMessage } from '../../session-manager.js';
+import { writeSessionMessage, sessionDir } from '../../session-manager.js';
 import type { ApprovalHandler } from '../approvals/index.js';
 
 export const applyInstallPackages: ApprovalHandler = async ({ session, payload, userId, notify }) => {
@@ -82,4 +84,43 @@ export const applyAddMcpServer: ApprovalHandler = async ({ session, payload, use
   killContainer(session.id, 'mcp server added');
   notify(`MCP server "${payload.name}" added. Your container will restart with it on the next message.`);
   log.info('MCP server add approved', { agentGroupId: session.agent_group_id, userId });
+};
+
+export const applyChangeModel: ApprovalHandler = async ({ session, payload, userId, notify }) => {
+  const agentGroup = getAgentGroup(session.agent_group_id);
+  if (!agentGroup) {
+    notify('change_model approved but agent group missing.');
+    return;
+  }
+
+  const model = payload.model as string;
+  updateContainerConfig(agentGroup.folder, (cfg) => {
+    cfg.model = model;
+  });
+
+  // Clear the OpenCode XDG session DB so the next container starts a fresh
+  // session using the new model instead of resuming the old one.
+  const xdgOpencode = path.join(sessionDir(session.agent_group_id, session.id), 'opencode-xdg', 'opencode');
+  try {
+    fs.rmSync(xdgOpencode, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+
+  // Also clear the stored OpenCode session ID (continuation) in outbound.db
+  // so the next container starts a fresh session, not the now-invalid one.
+  const outboundPath = path.join(sessionDir(session.agent_group_id, session.id), 'outbound.db');
+  if (fs.existsSync(outboundPath)) {
+    try {
+      const Database = (await import('better-sqlite3')).default;
+      const outDb = new Database(outboundPath);
+      outDb.prepare('DELETE FROM session_state').run();
+      outDb.close();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  killContainer(session.id, 'model changed');
+  log.info('Model change approved', { agentGroupId: session.agent_group_id, model, userId });
 };

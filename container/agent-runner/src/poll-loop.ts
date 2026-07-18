@@ -160,44 +160,55 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
-    const query = config.provider.query({
-      prompt,
-      continuation,
-      cwd: config.cwd,
-      systemContext: config.systemContext,
-    });
-
-    // Process the query while concurrently polling for new messages
+    // Process the query, retrying automatically on transient SSE stream-end errors.
+    const MAX_STREAM_RETRIES = 2;
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
-    try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
-      if (result.continuation && result.continuation !== continuation) {
-        continuation = result.continuation;
-        setContinuation(config.providerName, continuation);
-      }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      log(`Query error: ${errMsg}`);
 
-      // Stale/corrupt continuation recovery: ask the provider whether
-      // this error means the stored continuation is unusable, and clear
-      // it so the next attempt starts fresh.
-      if (continuation && config.provider.isSessionInvalid(err)) {
-        log(`Stale session detected (${continuation}) — clearing for next retry`);
-        continuation = undefined;
-        clearContinuation(config.providerName);
-      }
-
-      // Write error response so the user knows something went wrong
-      writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
+    for (let attempt = 0; attempt <= MAX_STREAM_RETRIES; attempt++) {
+      const query = config.provider.query({
+        prompt,
+        continuation,
+        cwd: config.cwd,
+        systemContext: config.systemContext,
       });
+
+      try {
+        const result = await processQuery(query, routing, processingIds, config.providerName);
+        if (result.continuation && result.continuation !== continuation) {
+          continuation = result.continuation;
+          setContinuation(config.providerName, continuation);
+        }
+        break; // success
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+
+        // Stale/corrupt continuation recovery.
+        if (continuation && config.provider.isSessionInvalid(err)) {
+          log(`Stale session detected (${continuation}) — clearing for next retry`);
+          continuation = undefined;
+          clearContinuation(config.providerName);
+        }
+
+        // Retry on transient SSE stream-end (OneCLI/network drop) before
+        // surfacing the error to the user.
+        const isStreamEnded = errMsg.includes('SSE stream ended unexpectedly');
+        if (isStreamEnded && attempt < MAX_STREAM_RETRIES) {
+          log(`Stream ended unexpectedly — retrying (attempt ${attempt + 2}/${MAX_STREAM_RETRIES + 1})`);
+          continue;
+        }
+
+        log(`Query error: ${errMsg}`);
+        writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        });
+        break;
+      }
     }
 
     // Ensure completed even if processQuery ended without a result event
