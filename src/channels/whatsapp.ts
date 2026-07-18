@@ -388,6 +388,10 @@ registerChannelAdapter('whatsapp', {
     // Group metadata cache with TTL
     const groupMetadataCache = new Map<string, { metadata: GroupMetadata; expiresAt: number }>();
 
+    // Verified-recipient cache: phone JID → is registered on WhatsApp.
+    // ponytail: unbounded Map, fine — one entry per distinct contact ever messaged.
+    const jidVerifiedCache = new Map<string, boolean>();
+
     // Pending questions: chatJid → { questionId, options }
     // User replies with /approve, /reject, etc. to answer
     const pendingQuestions = new Map<
@@ -571,12 +575,35 @@ registerChannelAdapter('whatsapp', {
       return { attachments: results, failures };
     }
 
+    // Validate an individual recipient exists on WhatsApp before sending.
+    // Baileys accepts any JID and returns a msg key even for non-existent
+    // numbers, so a typo'd number silently "delivers" into the void.
+    // Groups (@g.us) and broadcasts can't be checked this way — allow them.
+    async function recipientExists(jid: string): Promise<boolean> {
+      if (!jid.endsWith('@s.whatsapp.net')) return true;
+      if (jidVerifiedCache.get(jid)) return true;
+      try {
+        const res = (await sock.onWhatsApp(jid))?.[0];
+        if (res?.exists) {
+          jidVerifiedCache.set(jid, true);
+          return true;
+        }
+        log.error('Recipient not on WhatsApp — skipping send', { jid });
+        return false;
+      } catch (err) {
+        // Lookup failed (e.g. transient) — don't block the send, just proceed.
+        log.warn('onWhatsApp check failed, sending anyway', { jid, err });
+        return true;
+      }
+    }
+
     async function sendRawMessage(jid: string, text: string, mentions?: string[]): Promise<string | undefined> {
       if (!connected) {
         outgoingQueue.push({ jid, text, mentions });
         log.info('WA disconnected, message queued', { jid, queueSize: outgoingQueue.length });
         return;
       }
+      if (!(await recipientExists(jid))) return undefined;
       try {
         const payload: { text: string; mentions?: string[] } = { text };
         if (mentions && mentions.length > 0) payload.mentions = mentions;
@@ -982,6 +1009,7 @@ registerChannelAdapter('whatsapp', {
 
         // Send file attachments (first file gets the caption, rest are captionless)
         if (hasFiles) {
+          if (!(await recipientExists(platformId))) return;
           let captionUsed = false;
           for (const file of message.files!) {
             try {
