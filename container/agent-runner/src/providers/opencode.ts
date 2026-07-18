@@ -38,6 +38,7 @@ function spawnOpencodeServer(config: Record<string, unknown>, timeoutMs = 10_000
         ...process.env,
         OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
       },
+      cwd: '/workspace/agent',
       detached: true,
     });
 
