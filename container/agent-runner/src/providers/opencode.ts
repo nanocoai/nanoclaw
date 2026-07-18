@@ -1,10 +1,13 @@
 import { spawn, type ChildProcess } from 'child_process';
+import fs from 'fs';
+import path from 'path';
 
 import { createOpencodeClient, type OpencodeClient } from '@opencode-ai/sdk';
 
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import { mcpServersToOpenCodeConfig } from './mcp-to-opencode.js';
+import { getContinuationAge } from '../db/session-state.js';
 
 function log(msg: string): void {
   console.error(`[opencode-provider] ${msg}`);
@@ -209,6 +212,18 @@ function sessionErrorMessage(props: { error?: unknown }): string {
   return JSON.stringify(props.error) || 'OpenCode session error';
 }
 
+// Default: 90 minutes. Matches Google AI Studio's context cache TTL — after
+// that window, resuming costs as much as starting fresh, so rotation is free.
+// Override with OPENCODE_SESSION_MAX_AGE_MS (milliseconds).
+const DEFAULT_SESSION_MAX_AGE_MS = 90 * 60 * 1000;
+
+function sessionMaxAgeMs(): number {
+  const v = process.env.OPENCODE_SESSION_MAX_AGE_MS;
+  if (!v) return DEFAULT_SESSION_MAX_AGE_MS;
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_SESSION_MAX_AGE_MS;
+}
+
 export class OpenCodeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
 
@@ -222,6 +237,26 @@ export class OpenCodeProvider implements AgentProvider {
   isSessionInvalid(err: unknown): boolean {
     const msg = err instanceof Error ? err.message : String(err);
     return STALE_SESSION_RE.test(msg);
+  }
+
+  maybeRotateContinuation(_continuation: string, cwd: string): string | null {
+    const signalPath = path.join(cwd, '.clear-provider-session');
+    try {
+      if (fs.existsSync(signalPath)) {
+        fs.rmSync(signalPath, { force: true });
+        return 'host ceiling-kill signal';
+      }
+    } catch {
+      // best effort
+    }
+
+    const ageMs = getContinuationAge('opencode');
+    const maxAge = sessionMaxAgeMs();
+    if (ageMs !== null && ageMs > maxAge) {
+      return `session ${(ageMs / 3_600_000).toFixed(1)}h old > ${(maxAge / 3_600_000).toFixed(1)}h cap`;
+    }
+
+    return null;
   }
 
   query(input: QueryInput): AgentQuery {
