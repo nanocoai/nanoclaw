@@ -1014,7 +1014,7 @@ describe('reduceProgressPresentation', () => {
     expect(planPhase.currentAction).toBeUndefined();
   });
 
-  it('开局 fallback 行的 goal 跟随最新动作（纯动作单行）', () => {
+  it('开局无 narration 时每个工具创建独立 fallback 行', () => {
     let state = reduceProgressPresentation(createProgressPresentationState(), {
       kind: 'tool',
       progress: started('Read', { file_path: '/tmp/a.py' }, 'read-1'),
@@ -1024,10 +1024,17 @@ describe('reduceProgressPresentation', () => {
       kind: 'tool',
       progress: started('Grep', { pattern: 'needle' }, 'grep-1'),
     });
-    const fallback = (state as any).phases[0];
-    expect(fallback.source).toBe('fallback');
-    expect(fallback.goal).toBe('正在搜索“needle”');
-    expect(fallback.currentAction).toBe('正在搜索“needle”');
+    expect((state as any).phases).toHaveLength(2);
+    expect(
+      (state as any).phases.map((phase: any) => [
+        phase.source,
+        phase.currentAction,
+      ]),
+    ).toEqual([
+      ['fallback', '已读取 /tmp/a.py'],
+      ['fallback', '正在搜索“needle”'],
+    ]);
+    expect(state.activePhaseId).toBeUndefined();
   });
 
   it('真实 TodoWrite 计划优先保留原状态，不从命令猜未来步骤', () => {

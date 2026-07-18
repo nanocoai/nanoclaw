@@ -1201,7 +1201,12 @@ function upsertPhaseForStarted(
   return {
     phases,
     phaseId: phases[phaseIndex].id,
-    activePhaseId: planStep ? state.activePhaseId : phases[phaseIndex].id,
+    activePhaseId:
+      source === 'fallback'
+        ? undefined
+        : planStep
+          ? state.activePhaseId
+          : phases[phaseIndex].id,
   };
 }
 
