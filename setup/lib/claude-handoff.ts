@@ -222,8 +222,9 @@ function buildHandoffPrompt(ctx: HandoffContext): string {
     ...(ctx.files ?? []),
     'logs/setup.log',
     'logs/setup-steps/',
+    // The bespoke `setup/channels/<channel>.ts` flows are deleted — point the
+    // agent at the channel's SKILL.md, which now owns the whole procedure.
     `.claude/skills/add-${ctx.channel}/SKILL.md`,
-    `setup/channels/${ctx.channel}.ts`,
   ].filter((v, i, a) => a.indexOf(v) === i);
 
   lines.push('Relevant files (read as needed with the Read tool):');

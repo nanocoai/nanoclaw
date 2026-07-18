@@ -6,8 +6,9 @@ import { DATA_DIR, GROUPS_DIR } from '../config.js';
 import { createAgentGroup } from '../db/agent-groups.js';
 import { ensureContainerConfig, updateContainerConfigJson } from '../db/container-configs.js';
 import { assertValidGroupFolder, resolveGroupFolderPath } from '../group-folder.js';
-import { PERSONA_PREPEND_FILE } from '../group-persona.js';
+import { stageGroupPersona } from '../group-persona.js';
 import { normalizeName } from '../modules/agent-to-agent/db/agent-destinations.js';
+import { createScheduledTask, prepareScheduledTask } from '../modules/scheduling/create.js';
 import type { AgentGroup } from '../types.js';
 import { resolveLocalTemplate } from './local-dir.js';
 import { parseTemplate } from './parse.js';
@@ -19,8 +20,8 @@ export interface CreateAgentOptions {
 /**
  * Stamp a self-contained agent group from a LOCAL template ref under
  * TEMPLATES_DIR. The template carries MCP servers, instructions, optional
- * context extras, and optional skills — nothing else (no policy, no packages,
- * no provider).
+ * context extras, skills, and paused recurring tasks, but nothing else (no policy,
+ * packages, or provider).
  *
  * The template persona is written to the provider-neutral `instructions.prepend.md`
  * (see src/group-persona.ts). Each provider's project-doc composer inlines it at
@@ -34,6 +35,19 @@ export interface CreateAgentOptions {
 export function createAgentFromTemplate(ref: string, opts?: CreateAgentOptions): AgentGroup {
   const dir = resolveLocalTemplate(ref);
   const tpl = parseTemplate(dir);
+  const tasks = tpl.tasks.map((task) => {
+    try {
+      return prepareScheduledTask({
+        name: task.name,
+        prompt: task.prompt,
+        recurrence: task.schedule,
+        script: task.script,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`Invalid template task ${task.source}: ${message}`, { cause: err });
+    }
+  });
 
   const id = randomUUID();
   const name = opts?.name ?? path.basename(dir);
@@ -52,7 +66,7 @@ export function createAgentFromTemplate(ref: string, opts?: CreateAgentOptions):
 
   // Persona → provider-neutral prepend, inlined at the top of the group's
   // CLAUDE.md/AGENTS.md every spawn (system-prompt tier on any provider).
-  fs.writeFileSync(path.join(groupDir, PERSONA_PREPEND_FILE), tpl.instructions + '\n');
+  stageGroupPersona(groupDir, tpl.instructions);
 
   // Context extras keep their template-relative layout, placed next to the doc
   // the persona is inlined into — so a reference written in instructions.md
@@ -73,6 +87,10 @@ export function createAgentFromTemplate(ref: string, opts?: CreateAgentOptions):
   for (const { name: skill, srcDir } of tpl.skills) {
     fs.cpSync(srcDir, path.join(skillsDir, skill), { recursive: true });
   }
+
+  // Template tasks require explicit activation. The later welcome flow can
+  // present these exact paused tasks and resume only the ones the user accepts.
+  for (const task of tasks) createScheduledTask(id, task, { status: 'paused' });
 
   return group;
 }

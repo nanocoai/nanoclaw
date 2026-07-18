@@ -12,9 +12,11 @@ must stay inside this directory — absolute paths, `~`, and `../` escapes are
 rejected. Override the location with `NANOCLAW_TEMPLATES_DIR=/another/local/path`
 (a local path only — never a URL).
 
-The setup wizard's **Template setup → NanoClaw template library** option clones
-the public registry and copies your chosen template *into this folder*, after
-which it stamps from the local copy. **Local templates** lists whatever is here.
+To use a template from the public registry
+([`nanocoai/nanoclaw-templates`](https://github.com/nanocoai/nanoclaw-templates)),
+clone or download it yourself and copy the chosen template *into this folder*,
+then stamp from the local copy. There is no remote fetch — templates are only
+ever resolved from here.
 
 ## Anatomy of a template
 

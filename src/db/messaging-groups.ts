@@ -183,26 +183,37 @@ export function createMessagingGroupAgent(mga: MessagingGroupAgent): void {
     )
     .run(mga);
 
-  // Auto-create an agent_destinations row so delivery's ACL doesn't block
-  // outbound messages that target this chat. Guarded: when the agent-to-agent
-  // module isn't installed the table doesn't exist — skip silently. Without
-  // the module, the ACL check in delivery is also skipped (same guard), so
-  // channel sends still work.
-  //
-  // ⚠️  DESTINATION PROJECTION NOTE: this function only writes the central
-  // `agent_destinations` row. It does NOT project into any running
-  // agent's session inbound.db (see top-of-file invariant in
-  // src/modules/agent-to-agent/db/agent-destinations.ts). In practice this
-  // is fine because the only real callers are one-shot setup scripts
-  // (setup/register.ts, scripts/init-first-agent.ts, /manage-channels
-  // skill) that run in a separate process from the host. Any already-
-  // running container for `mga.agent_group_id` will keep serving the
-  // stale projection until its next wake (idle timeout or next inbound
-  // message) at which point spawnContainer's writeDestinations call
-  // refreshes from central. If you call this from code that runs INSIDE
-  // the host process and need the refresh to happen immediately,
-  // explicitly call the module's `writeDestinations(mga.agent_group_id,
-  // <sessionId>)` afterwards.
+  ensureAgentDestinationForWiring(mga);
+}
+
+/**
+ * Create the `agent_destinations` row that lets the agent address this chat
+ * as a delivery target. Idempotent — no-op when the destination already
+ * exists, the agent-to-agent module isn't installed, or the messaging group
+ * has been deleted out from under the wiring.
+ *
+ * Split out from `createMessagingGroupAgent` so callers that already wrote
+ * the `messaging_group_agents` row directly (e.g. the generic ncl CRUD path)
+ * can still get the companion destination without re-inserting the wiring.
+ *
+ * ⚠️  DESTINATION PROJECTION NOTE: this function only writes the central
+ * `agent_destinations` row. It does NOT project into any running agent's
+ * session inbound.db (see top-of-file invariant in
+ * src/modules/agent-to-agent/db/agent-destinations.ts). In practice this is
+ * fine because the only real callers are one-shot setup paths
+ * (setup/register.ts, scripts/init-first-agent.ts, /manage-channels skill,
+ * ncl wirings create) that run in a separate process from the host. Any
+ * already-running container for `mga.agent_group_id` will keep serving the
+ * stale projection until its next wake (idle timeout or next inbound
+ * message) at which point spawnContainer's writeDestinations call refreshes
+ * from central. If you call this from code that runs INSIDE the host
+ * process and need the refresh to happen immediately, explicitly call the
+ * module's `writeDestinations(mga.agent_group_id, <sessionId>)` afterwards.
+ */
+export function ensureAgentDestinationForWiring(mga: MessagingGroupAgent): void {
+  // Guarded: when the agent-to-agent module isn't installed the table
+  // doesn't exist — skip silently. Without the module, the ACL check in
+  // delivery is also skipped (same guard), so channel sends still work.
   if (!hasTable(getDb(), 'agent_destinations')) return;
 
   const existing = getDestinationByTarget(mga.agent_group_id, 'channel', mga.messaging_group_id);

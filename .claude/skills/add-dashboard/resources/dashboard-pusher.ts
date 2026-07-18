@@ -427,12 +427,20 @@ function collectContextWindows() {
   return results;
 }
 
+// "YYYY-MM-DDTHH" in the host's local time — the chart's hour labels are read
+// by a human, so bucket by local hour, not UTC. sv-SE renders "YYYY-MM-DD HH".
+function localHourKey(d: Date): string {
+  return d
+    .toLocaleString('sv-SE', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hour12: false })
+    .replace(' ', 'T');
+}
+
 function collectActivity() {
   const now = Date.now();
   const buckets: Record<string, { inbound: number; outbound: number }> = {};
 
   for (let i = 0; i < 24; i++) {
-    const key = new Date(now - i * 3600000).toISOString().slice(0, 13);
+    const key = localHourKey(new Date(now - i * 3600000));
     buckets[key] = { inbound: 0, outbound: 0 };
   }
 
@@ -453,7 +461,7 @@ function collectActivity() {
             const table = direction === 'outbound' ? 'messages_out' : 'messages_in';
             const rows = db.prepare(`SELECT timestamp FROM ${table} WHERE timestamp > ?`).all(cutoff) as { timestamp: string }[];
             for (const row of rows) {
-              const key = row.timestamp.slice(0, 13);
+              const key = localHourKey(new Date(row.timestamp));
               if (buckets[key]) buckets[key][direction]++;
             }
             db.close();

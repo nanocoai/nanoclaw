@@ -93,7 +93,7 @@ write_handoff() {
   "step_logs_dir": "logs/migrate-steps",
   "followups": [
     "Seed owner user and access policy",
-    "Review CLAUDE.local.md files for v1-specific patterns",
+    "Run /migrate-memory for staged CLAUDE.local.md files",
     "Verify container.json mount paths are valid"
   ]
 }
@@ -697,7 +697,7 @@ echo
 echo "  $(bold 'What was done:')"
 echo "    $(green '✓')  .env keys merged"
 echo "    $(green '✓')  Database seeded (agent groups, messaging groups, wiring)"
-echo "    $(green '✓')  Group folders copied (CLAUDE.md → CLAUDE.local.md)"
+echo "    $(green '✓')  Group folders copied (CLAUDE.md staged for /migrate-memory)"
 echo "    $(green '✓')  Session data copied"
 echo "    $(green '✓')  Scheduled tasks ported"
 if [ ${#SELECTED_CHANNELS[@]} -gt 0 ]; then

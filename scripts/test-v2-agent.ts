@@ -34,9 +34,10 @@ db.exec(`
 
 // Insert test message
 db.prepare(
-  `INSERT INTO messages_in (id, kind, timestamp, status, content) VALUES (?, 'chat', datetime('now'), 'pending', ?)`,
+  `INSERT INTO messages_in (id, kind, timestamp, status, content) VALUES (?, 'chat', ?, 'pending', ?)`,
 ).run(
   'test-1',
+  new Date().toISOString(),
   JSON.stringify({ sender: 'Gavriel', text: 'Say "Hello from v2!" and nothing else. Do not use any tools.' }),
 );
 console.log('✓ Session DB created with test message');

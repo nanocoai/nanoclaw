@@ -2,7 +2,7 @@
  * migrate-v2 step: groups
  *
  * Copy v1 group folders into v2.
- *   - v1 CLAUDE.md → v2 CLAUDE.local.md (v2 composes CLAUDE.md at spawn)
+ *   - v1 CLAUDE.md → v2 CLAUDE.local.md (legacy staging for /migrate-memory)
  *   - v1 container_config → .v1-container-config.json sidecar
  *   - All other files copied (no overwrite)
  *   - Also copies global/ if it exists
@@ -114,7 +114,7 @@ function main(): void {
 
     fs.mkdirSync(v2Folder, { recursive: true });
 
-    // CLAUDE.md → CLAUDE.local.md
+    // Content-blind staging; /migrate-memory moves and distills it later.
     const v1Claude = path.join(v1Folder, 'CLAUDE.md');
     const v2Local = path.join(v2Folder, 'CLAUDE.local.md');
     if (fs.existsSync(v1Claude) && !fs.existsSync(v2Local)) {

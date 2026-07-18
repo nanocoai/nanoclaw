@@ -1,0 +1,10 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — no prompts in this skill; the fixture exists to feed the effect:step device-link's terminal-block fields (capture:platform_id=ACCOUNT,owner_handle=ACCOUNT).",
+  "scenarios": [
+    {
+      "name": "device-link",
+      "inputs": {},
+      "stepFields": { "ACCOUNT": "+15550001111" }
+    }
+  ]
+}

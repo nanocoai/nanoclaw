@@ -41,9 +41,9 @@ registerResource({
         getDb()
           .prepare(
             `INSERT OR IGNORE INTO agent_group_members (user_id, agent_group_id, added_by, added_at)
-             VALUES (?, ?, ?, datetime('now'))`,
+             VALUES (?, ?, ?, ?)`,
           )
-          .run(userId, groupId, addedBy);
+          .run(userId, groupId, addedBy, new Date().toISOString());
         return { user_id: userId, agent_group_id: groupId };
       },
     },

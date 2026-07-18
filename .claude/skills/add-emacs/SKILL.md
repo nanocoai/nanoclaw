@@ -105,6 +105,14 @@ pnpm exec tsx setup/index.ts --step register -- \
 
 `agent-shared` puts Emacs messages in the same session as any other channel wired to the same agent group — so a conversation you started in Telegram continues in Emacs. Use `shared` to keep an independent Emacs thread with the same workspace, or a new `--folder` for a dedicated Emacs-only agent.
 
+Alternatively create the rows with `ncl` — **the host service must be running** (`ncl` connects to it over a Unix socket). Engage mode/pattern and `unknown_sender_policy` default to the Emacs adapter's declared channel defaults:
+
+```bash
+ncl messaging-groups create --channel-type emacs --platform-id "default" --name "Emacs"
+ncl wirings create --messaging-group-id <mg-id-from-above> --agent-group-id <ag-id> \
+  --session-mode agent-shared
+```
+
 ## Configure Emacs
 
 `nanoclaw.el` needs only Emacs 27.1+ builtins (`url`, `json`, `org`) — no package manager.

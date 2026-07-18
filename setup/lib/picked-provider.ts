@@ -1,16 +1,17 @@
 /**
- * The agent runtime the operator picked in THIS setup run.
+ * The agent runtime the operator picked in THIS setup run, carried to the
+ * group-creation child processes over the process boundary.
  *
- * There is no install-wide default provider and no `--provider` in the
- * creation contract — provider is a DB property of a group. Setup is the one
- * orchestrator that knows the operator's pick, so it stashes it here (set once
- * at the auth step). The group-creation scripts (`init-first-agent`,
- * `init-cli-agent`) run as **child processes**, so the pick is carried over the
- * process boundary via an environment variable they inherit; they apply it to
- * the group at creation, before the welcome wakes the container. This is the
- * only place the value lives — a setup-run-scoped global, NOT a persisted
- * install default. `undefined` / `'claude'` means the built-in default and no
- * provider write at all.
+ * There is no `--provider` flag in the creation contract — provider is a DB
+ * property of a group. Setup persists the pick two ways: as the install-wide
+ * default (`DEFAULT_AGENT_PROVIDER` in `.env`, see src/config.ts), which every
+ * future group inherits at creation via the `ensureContainerConfig` chokepoint;
+ * and here, in a setup-run-scoped env var, so the FIRST agent created in the
+ * same run (by `init-first-agent` / `init-cli-agent`, which run as child
+ * processes) is stamped with the pick before the welcome wakes the container —
+ * without waiting for the host to restart and reload `.env`. `undefined` /
+ * `'claude'` means no run-scoped pick; the creation scripts then fall back to
+ * the install-wide default.
  */
 const ENV_KEY = 'NANOCLAW_PICKED_PROVIDER';
 

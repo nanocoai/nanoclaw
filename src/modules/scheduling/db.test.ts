@@ -10,7 +10,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 
 import { ensureSchema, openInboundDb } from '../../db/session-db.js';
 import {
-  insertTask,
+  insertTaskRow,
   insertRecurrence,
   cancelTask,
   pauseTask,
@@ -31,13 +31,11 @@ function freshDb() {
 }
 
 function insertBasicTask(db: ReturnType<typeof openInboundDb>, id: string, recurrence: string | null) {
-  insertTask(db, {
+  insertTaskRow(db, {
     id,
+    seriesId: id,
     processAfter: new Date().toISOString(),
     recurrence,
-    platformId: null,
-    channelType: null,
-    threadId: null,
     content: JSON.stringify({ prompt: 'noop' }),
   });
 }
@@ -46,7 +44,7 @@ afterEach(() => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
-describe('insertTask', () => {
+describe('insertTaskRow', () => {
   it('stamps series_id = id on insert', () => {
     const db = freshDb();
     insertBasicTask(db, 'task-1', null);
@@ -68,13 +66,8 @@ describe('cancelTask / pauseTask / resumeTask series matching', () => {
 
     const msg: RecurringMessage = {
       id: 'task-orig',
-      kind: 'task',
       content: JSON.stringify({ prompt: 'noop' }),
       recurrence: '0 9 * * *',
-      process_after: null,
-      platform_id: null,
-      channel_type: null,
-      thread_id: null,
       series_id: 'task-orig',
     };
     insertRecurrence(db, msg, 'task-next', new Date(Date.now() + 86400000).toISOString());
@@ -93,7 +86,8 @@ describe('cancelTask / pauseTask / resumeTask series matching', () => {
       status: string;
       recurrence: string | null;
     };
-    expect(followUp.status).toBe('completed');
+    // Cancel marks 'cancelled' (not 'completed') so it never counts as a run.
+    expect(followUp.status).toBe('cancelled');
     // Recurrence cleared so the sweep doesn't spawn another clone.
     expect(followUp.recurrence).toBeNull();
     db.close();
@@ -131,18 +125,37 @@ describe('cancelTask / pauseTask / resumeTask series matching', () => {
     expect(followUp.status).toBe('pending');
     db.close();
   });
+
+  it('pause/resume touch ONLY status — recurrence and process_after survive the cycle', () => {
+    const db = freshDb();
+    seedRecurringChain(db);
+    const before = db.prepare("SELECT recurrence, process_after FROM messages_in WHERE id = 'task-next'").get() as {
+      recurrence: string | null;
+      process_after: string | null;
+    };
+
+    pauseTask(db, 'task-next');
+    resumeTask(db, 'task-next');
+
+    const after = db.prepare("SELECT recurrence, process_after FROM messages_in WHERE id = 'task-next'").get() as {
+      recurrence: string | null;
+      process_after: string | null;
+    };
+    // A cancel-style copy-paste (clearing recurrence) would kill the series here.
+    expect(after.recurrence).toBe(before.recurrence);
+    expect(after.process_after).toBe(before.process_after);
+    db.close();
+  });
 });
 
 describe('updateTask', () => {
   it('merges supplied fields into content JSON without clobbering others', () => {
     const db = freshDb();
-    insertTask(db, {
+    insertTaskRow(db, {
       id: 'task-1',
+      seriesId: 'task-1',
       processAfter: new Date().toISOString(),
       recurrence: null,
-      platformId: null,
-      channelType: null,
-      threadId: null,
       content: JSON.stringify({ prompt: 'old', script: 'echo old', extra: 'keep me' }),
     });
 
@@ -158,13 +171,11 @@ describe('updateTask', () => {
 
   it('updates recurrence and process_after when supplied', () => {
     const db = freshDb();
-    insertTask(db, {
+    insertTaskRow(db, {
       id: 'task-1',
+      seriesId: 'task-1',
       processAfter: '2026-01-01T00:00:00Z',
       recurrence: '0 9 * * *',
-      platformId: null,
-      channelType: null,
-      threadId: null,
       content: JSON.stringify({ prompt: 'p' }),
     });
 
@@ -180,13 +191,11 @@ describe('updateTask', () => {
 
   it('clears recurrence when null is passed', () => {
     const db = freshDb();
-    insertTask(db, {
+    insertTaskRow(db, {
       id: 'task-1',
+      seriesId: 'task-1',
       processAfter: '2026-01-01T00:00:00Z',
       recurrence: '0 9 * * *',
-      platformId: null,
-      channelType: null,
-      threadId: null,
       content: JSON.stringify({ prompt: 'p' }),
     });
 
@@ -200,26 +209,19 @@ describe('updateTask', () => {
 
   it('reaches the live follow-up via series_id when called with the original id', () => {
     const db = freshDb();
-    insertTask(db, {
+    insertTaskRow(db, {
       id: 'task-orig',
+      seriesId: 'task-orig',
       processAfter: new Date().toISOString(),
       recurrence: '0 9 * * *',
-      platformId: null,
-      channelType: null,
-      threadId: null,
       content: JSON.stringify({ prompt: 'old' }),
     });
     db.prepare("UPDATE messages_in SET status = 'completed' WHERE id = 'task-orig'").run();
 
     const msg: RecurringMessage = {
       id: 'task-orig',
-      kind: 'task',
       content: JSON.stringify({ prompt: 'old' }),
       recurrence: '0 9 * * *',
-      process_after: null,
-      platform_id: null,
-      channel_type: null,
-      thread_id: null,
       series_id: 'task-orig',
     };
     insertRecurrence(db, msg, 'task-next', new Date(Date.now() + 86400000).toISOString());
@@ -238,13 +240,11 @@ describe('updateTask', () => {
 
   it('returns 0 when no live task matches', () => {
     const db = freshDb();
-    insertTask(db, {
+    insertTaskRow(db, {
       id: 'task-1',
+      seriesId: 'task-1',
       processAfter: new Date().toISOString(),
       recurrence: null,
-      platformId: null,
-      channelType: null,
-      threadId: null,
       content: JSON.stringify({ prompt: 'p' }),
     });
     db.prepare("UPDATE messages_in SET status = 'completed' WHERE id = 'task-1'").run();
@@ -262,13 +262,8 @@ describe('insertRecurrence', () => {
 
     const msg: RecurringMessage = {
       id: 'task-orig',
-      kind: 'task',
       content: '{}',
       recurrence: '0 9 * * *',
-      process_after: null,
-      platform_id: null,
-      channel_type: null,
-      thread_id: null,
       series_id: 'task-orig',
     };
     insertRecurrence(db, msg, 'task-next', new Date().toISOString());
