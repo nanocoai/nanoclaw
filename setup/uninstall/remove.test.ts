@@ -57,10 +57,7 @@ describe('executePlan', () => {
     fs.mkdirSync(path.join(dir, 'nested'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'nested', 'f.txt'), 'x');
 
-    const { notes } = executePlan(
-      [{ kind: 'delete-path', item: { what: 'Data', where: dir, path: dir } }],
-      deps(),
-    );
+    const { notes } = executePlan([{ kind: 'delete-path', item: { what: 'Data', where: dir, path: dir } }], deps());
 
     expect(fs.existsSync(dir)).toBe(false);
     expect(notes).toEqual([]);
@@ -136,7 +133,10 @@ describe('executePlan', () => {
     expect(notes).toEqual([]);
   });
 
-  it('keeps .env when the backup fails', () => {
+  // root ignores directory permission bits, so the chmod below cannot make
+  // the backup fail — the test's premise doesn't exist when running as root
+  // (e.g. an LXC install whose service and test runs are root).
+  it.skipIf(typeof process.getuid === 'function' && process.getuid() === 0)('keeps .env when the backup fails', () => {
     const envPath = path.join(tempDir, '.env');
     fs.writeFileSync(envPath, 'KEY=secret');
     fs.chmodSync(tempDir, 0o555); // backup destination unwritable
