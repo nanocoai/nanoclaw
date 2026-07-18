@@ -120,6 +120,68 @@ function resolveSelectedOption(
   return candidate;
 }
 
+/**
+ * Download bytes for each inbound attachment and return entries the host's
+ * `extractAttachmentFiles` will stage to `inbox/<messageId>/<filename>`.
+ *
+ * Two paths:
+ *   1. `att.fetchData` — preferred. Adapters that need auth (Slack private
+ *      files, Telegram bot file API) wire this themselves.
+ *   2. `att.url` fallback — for adapters that ship URLs but no fetchData.
+ *      Notably `@chat-adapter/discord` (≤4.27.0): inbound attachments come
+ *      with a signed CDN URL but no fetchData callback, so without this
+ *      fallback Discord media never reaches the agent's inbox. A plain
+ *      `fetch(url)` works because Discord CDN URLs carry their own
+ *      signature query params and don't require an Authorization header.
+ *
+ * Failures are logged and skipped — the attachment entry still ships (with
+ * url/name/mime/size) so the agent at least knows something was attached
+ * and can decide what to do.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function enrichAttachments(attachments: any[]): Promise<any[]> {
+  const enriched: Record<string, unknown>[] = [];
+  for (const att of attachments) {
+    const entry: Record<string, unknown> = {
+      type: att.type,
+      name: att.name,
+      mimeType: att.mimeType,
+      size: att.size,
+      width: att.width,
+      height: att.height,
+    };
+    if (typeof att.fetchData === 'function') {
+      try {
+        const buffer: Buffer = await att.fetchData();
+        entry.data = buffer.toString('base64');
+      } catch (err) {
+        log.warn('Failed to download attachment', { type: att.type, err });
+      }
+    } else if (typeof att.url === 'string' && att.url.length > 0) {
+      try {
+        const res = await fetch(att.url);
+        if (res.ok) {
+          const buf = Buffer.from(await res.arrayBuffer());
+          entry.data = buf.toString('base64');
+        } else {
+          log.warn('Failed to download attachment via URL fallback', {
+            type: att.type,
+            status: res.status,
+            url: att.url,
+          });
+        }
+      } catch (err) {
+        log.warn('Failed to download attachment via URL fallback', {
+          type: att.type,
+          err,
+        });
+      }
+    }
+    enriched.push(entry);
+  }
+  return enriched;
+}
+
 export function splitForLimit(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
@@ -166,28 +228,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
     // Download attachment data before serialization loses fetchData()
     if (message.attachments && message.attachments.length > 0) {
-      const enriched = [];
-      for (const att of message.attachments) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const entry: Record<string, any> = {
-          type: att.type,
-          name: att.name,
-          mimeType: att.mimeType,
-          size: att.size,
-          width: (att as unknown as Record<string, unknown>).width,
-          height: (att as unknown as Record<string, unknown>).height,
-        };
-        if (att.fetchData) {
-          try {
-            const buffer = await att.fetchData();
-            entry.data = buffer.toString('base64');
-          } catch (err) {
-            log.warn('Failed to download attachment', { type: att.type, err });
-          }
-        }
-        enriched.push(entry);
-      }
-      serialized.attachments = enriched;
+      serialized.attachments = await enrichAttachments(message.attachments);
     }
 
     // Extract reply context via platform-specific hook

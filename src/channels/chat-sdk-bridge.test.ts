@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { Adapter } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, enrichAttachments, splitForLimit } from './chat-sdk-bridge.js';
 
 function stubAdapter(partial: Partial<Adapter>): Adapter {
   return { name: 'stub', ...partial } as unknown as Adapter;
@@ -76,5 +76,90 @@ describe('createChatSdkBridge', () => {
       supportsThreads: true,
     });
     expect(typeof bridge.subscribe).toBe('function');
+  });
+});
+
+describe('enrichAttachments', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('uses fetchData when the adapter provides it', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch');
+    const result = await enrichAttachments([
+      {
+        type: 'image',
+        name: 'pic.png',
+        mimeType: 'image/png',
+        size: 3,
+        url: 'https://example.com/pic.png',
+        fetchData: async () => Buffer.from([1, 2, 3]),
+      },
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0].data).toBe(Buffer.from([1, 2, 3]).toString('base64'));
+    // fetchData wins → no URL fallback
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('falls back to fetch(url) when fetchData is missing (Discord case)', async () => {
+    const url = 'https://cdn.discord.com/attachments/1/2/v.mp4?ex=a&is=b&hm=c';
+    const fetchSpy = vi
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(new Response(new Uint8Array([9, 8, 7, 6]), { status: 200 }));
+    const result = await enrichAttachments([
+      { type: 'video', name: 'v.mp4', mimeType: 'video/mp4', size: 4, url },
+    ]);
+    expect(fetchSpy).toHaveBeenCalledWith(url);
+    expect(result[0].data).toBe(Buffer.from([9, 8, 7, 6]).toString('base64'));
+  });
+
+  it('skips data (but keeps the entry) when both fetchData and url are missing', async () => {
+    const result = await enrichAttachments([
+      { type: 'file', name: 'no-source.bin', size: 0 },
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0].data).toBeUndefined();
+    expect(result[0].name).toBe('no-source.bin');
+  });
+
+  it('logs and continues when the URL fallback returns a non-2xx', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(null, { status: 404, statusText: 'Not Found' }),
+    );
+    const result = await enrichAttachments([
+      { type: 'image', name: 'gone.png', size: 0, url: 'https://example.com/gone.png' },
+    ]);
+    expect(result[0].data).toBeUndefined();
+    expect(result[0].name).toBe('gone.png');
+  });
+
+  it('logs and continues when the URL fallback throws (network error)', async () => {
+    vi.spyOn(global, 'fetch').mockRejectedValue(new Error('ECONNREFUSED'));
+    const result = await enrichAttachments([
+      { type: 'image', name: 'down.png', size: 0, url: 'https://example.com/down.png' },
+    ]);
+    expect(result[0].data).toBeUndefined();
+  });
+
+  it('logs and continues when fetchData itself throws (does not fall through to URL)', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch');
+    const result = await enrichAttachments([
+      {
+        type: 'audio',
+        name: 'voice.ogg',
+        size: 0,
+        url: 'https://example.com/voice.ogg',
+        fetchData: async () => {
+          throw new Error('auth expired');
+        },
+      },
+    ]);
+    expect(result[0].data).toBeUndefined();
+    // fetchData was attempted; URL fallback is NOT taken — that branch is
+    // only for adapters that omit fetchData entirely. An adapter that has
+    // fetchData but throws is signaling "I tried and failed", not "I have
+    // no idea how to fetch this."
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
