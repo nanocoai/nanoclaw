@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, enrichInboundAttachment, splitForLimit } from './chat-sdk-bridge.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
@@ -419,5 +419,46 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(calls).toHaveLength(1);
     const msg = calls[0].message as { markdown?: string };
     expect(msg.markdown).toBe('plain hello');
+  });
+});
+
+describe('enrichInboundAttachment', () => {
+  const baseAtt = { type: 'image', name: 'photo.heic', mimeType: 'image/heic', size: 123 };
+
+  it('uses fetchData when present', async () => {
+    const att = { ...baseAtt, fetchData: async () => Buffer.from('hello') };
+    const adapter = stubAdapter({});
+    const entry = await enrichInboundAttachment(att as never, adapter);
+    expect(entry.data).toBe(Buffer.from('hello').toString('base64'));
+    expect(entry.name).toBe('photo.heic');
+  });
+
+  it('recovers bytes via rehydrateAttachment when fetchData is absent (iMessage local file)', async () => {
+    const att = { ...baseAtt }; // no fetchData (stripped on serialize)
+    const adapter = stubAdapter({
+      rehydrateAttachment: (a) =>
+        ({ ...a, name: 'photo.jpg', mimeType: 'image/jpeg', fetchData: async () => Buffer.from('JPEGBYTES') }) as never,
+    });
+    const entry = await enrichInboundAttachment(att as never, adapter);
+    expect(entry.data).toBe(Buffer.from('JPEGBYTES').toString('base64'));
+    // corrected name/mimeType from rehydration win (HEIC→JPEG)
+    expect(entry.name).toBe('photo.jpg');
+    expect(entry.mimeType).toBe('image/jpeg');
+  });
+
+  it('leaves data unset when there is no fetchData and no rehydrator', async () => {
+    const entry = await enrichInboundAttachment({ ...baseAtt } as never, stubAdapter({}));
+    expect(entry.data).toBeUndefined();
+    expect(entry.name).toBe('photo.heic');
+  });
+
+  it('does not throw (and drops no message) when rehydrateAttachment throws', async () => {
+    const adapter = stubAdapter({
+      rehydrateAttachment: () => {
+        throw new Error('boom');
+      },
+    });
+    const entry = await enrichInboundAttachment({ ...baseAtt } as never, adapter);
+    expect(entry.data).toBeUndefined();
   });
 });

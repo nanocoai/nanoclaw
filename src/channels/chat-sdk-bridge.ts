@@ -15,6 +15,7 @@ import {
   LinkButton,
   type CardChild,
   type Adapter,
+  type Attachment,
   type ConcurrencyStrategy,
   type Message as ChatMessage,
 } from 'chat';
@@ -134,6 +135,50 @@ export function splitForLimit(text: string, limit: number): string[] {
   return chunks;
 }
 
+/**
+ * Serialize one inbound attachment for the session inbox, eagerly resolving its
+ * bytes as base64 `data` so `session-manager.extractAttachmentFiles` can stage
+ * it into the container-mounted `inbox/`. The chat-sdk core drops `fetchData`
+ * when it serializes an inbound message, and some adapters never set it because
+ * their bytes live on the host rather than behind a URL. When `fetchData` is
+ * absent, let the adapter rebuild a downloader via `rehydrateAttachment` (e.g.
+ * iMessage resolves the file under ~/Library/Messages/Attachments and converts
+ * HEIC→JPEG). Guarded so a throwing adapter can never drop the whole inbound
+ * message; any corrected name/mimeType from rehydration wins.
+ */
+export async function enrichInboundAttachment(att: Attachment, adapter: Adapter): Promise<Record<string, unknown>> {
+  const entry: Record<string, unknown> = {
+    type: att.type,
+    name: att.name,
+    mimeType: att.mimeType,
+    size: att.size,
+    width: (att as unknown as Record<string, unknown>).width,
+    height: (att as unknown as Record<string, unknown>).height,
+  };
+  let source = att;
+  if (!source.fetchData && adapter.rehydrateAttachment) {
+    try {
+      const rehydrated = adapter.rehydrateAttachment(att);
+      if (rehydrated?.fetchData) {
+        source = rehydrated;
+        if (rehydrated.name) entry.name = rehydrated.name;
+        if (rehydrated.mimeType) entry.mimeType = rehydrated.mimeType;
+      }
+    } catch (err) {
+      log.warn('Failed to rehydrate attachment', { type: att.type, err });
+    }
+  }
+  if (source.fetchData) {
+    try {
+      const buffer = await source.fetchData();
+      entry.data = buffer.toString('base64');
+    } catch (err) {
+      log.warn('Failed to download attachment', { type: att.type, err });
+    }
+  }
+  return entry;
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   // The instance name becomes a webhook route segment (the route regex is
@@ -163,28 +208,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const serialized = message.toJSON() as Record<string, any>;
 
-    // Download attachment data before serialization loses fetchData()
+    // Resolve attachment bytes to base64 before serialization loses fetchData()
     if (message.attachments && message.attachments.length > 0) {
       const enriched = [];
       for (const att of message.attachments) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const entry: Record<string, any> = {
-          type: att.type,
-          name: att.name,
-          mimeType: att.mimeType,
-          size: att.size,
-          width: (att as unknown as Record<string, unknown>).width,
-          height: (att as unknown as Record<string, unknown>).height,
-        };
-        if (att.fetchData) {
-          try {
-            const buffer = await att.fetchData();
-            entry.data = buffer.toString('base64');
-          } catch (err) {
-            log.warn('Failed to download attachment', { type: att.type, err });
-          }
-        }
-        enriched.push(entry);
+        enriched.push(await enrichInboundAttachment(att, adapter));
       }
       serialized.attachments = enriched;
     }
