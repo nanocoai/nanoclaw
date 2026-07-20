@@ -23,6 +23,7 @@ Fetch the `channels` branch and copy the WhatsApp Cloud adapter into
 
 ```nc:copy from-branch:channels
 src/channels/whatsapp-cloud.ts
+src/channels/whatsapp-cloud-adoption.ts
 src/channels/whatsapp-cloud-registration.test.ts
 ```
 
@@ -69,12 +70,23 @@ below.
 
 Older copies of the adapter registered this bridge under the bare `whatsapp` key,
 which collided with the native Baileys adapter. It now registers under a distinct
-`whatsapp-cloud` instance (channelType stays `whatsapp`). Two consequences for an
-install that ran the previous version:
+`whatsapp-cloud` instance (channelType stays `whatsapp`). Three consequences for
+an install that ran the previous version:
 
 - **Webhook route moves** from `/webhook/whatsapp` to `/webhook/whatsapp-cloud`.
   Update the callback URL in your Meta App dashboard (WhatsApp > Configuration)
-  accordingly.
+  accordingly. This step stays manual, and until it is done Meta's posts hit the
+  old path and are rejected with a 404 that writes no log line, so the host log
+  looks idle rather than broken.
+- **Messaging groups re-key.** `messaging_groups` rows created before the change
+  are keyed `instance='whatsapp'`, while the adapter now looks them up as
+  `whatsapp-cloud`. Until they are re-keyed, inbound messages auto-create an
+  unwired duplicate group and the agent never answers. The signature in
+  `logs/nanoclaw.log` is an `Auto-created messaging group` line right after an
+  `Inbound DM received` line for a chat that already had a wired group. Re-key
+  with `ncl messaging-groups update <id> --instance whatsapp-cloud`; if a
+  duplicate already occupies the slot, park it first under any unused instance
+  name, since the uniqueness key is `channel_type + platform_id + instance`.
 - **Chat SDK state namespace moves.** Subscriptions in the `chat_sdk_*` tables
   re-key under the new instance, so previously-subscribed threads may need to
   re-engage the bot.
