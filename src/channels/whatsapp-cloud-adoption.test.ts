@@ -7,7 +7,7 @@
  * core predates 016, so after runMigrations() the test recreates the table with
  * 016's exact DDL to reproduce the installed schema.
  *
- * getChannelRegistration is mocked so the Baileys guard is exercised without
+ * getRegisteredChannelNames is mocked so the Baileys guard is exercised without
  * importing the channel barrel (which pulls uninstalled @chat-adapter packages).
  */
 import Database from 'better-sqlite3';
@@ -18,8 +18,7 @@ import { initTestDb, closeDb, getDb, runMigrations } from '../db/index.js';
 const registryState = vi.hoisted(() => ({ baileysRegistered: false }));
 
 vi.mock('./channel-registry.js', () => ({
-  getChannelRegistration: (name: string) =>
-    name === 'whatsapp' && registryState.baileysRegistered ? { factory: () => null } : undefined,
+  getRegisteredChannelNames: (): string[] => (registryState.baileysRegistered ? ['whatsapp'] : []),
 }));
 
 import { adoptStrandedWhatsAppCloudGroups } from './whatsapp-cloud-adoption.js';

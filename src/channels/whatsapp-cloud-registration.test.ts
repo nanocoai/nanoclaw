@@ -43,7 +43,12 @@ vi.mock('../env.js', () => ({
   }),
 }));
 
-import { getRegisteredChannelNames, getChannelRegistration } from './channel-registry.js';
+// getRegisteredChannelNames only. This file is copied onto installs by
+// /add-whatsapp-cloud and typechecked there by the skill's `pnpm run build`
+// step, so it may only use registry exports that exist on the core installs
+// run (main) as well as on this branch. getChannelRegistration exists here but
+// NOT on main, so importing it fails the install build with TS2305.
+import { getRegisteredChannelNames } from './channel-registry.js';
 import './index.js'; // the real barrel — triggers every channel's self-registration
 
 describe('whatsapp-cloud channel registration', () => {
@@ -51,17 +56,16 @@ describe('whatsapp-cloud channel registration', () => {
     expect(getRegisteredChannelNames()).toContain('whatsapp-cloud');
   });
 
-  it('builds under a distinct instance key while keeping channelType whatsapp', async () => {
-    const registration = getChannelRegistration('whatsapp-cloud');
-    expect(registration).toBeDefined();
-
-    const adapter = await registration!.factory();
-    expect(adapter).not.toBeNull();
-
-    // instance keeps this bridge off the native Baileys adapter's 'whatsapp'
-    // registry key (last-write-wins collision, #2911).
-    expect(adapter!.instance).toBe('whatsapp-cloud');
-    // channelType stays the semantic platform key, shared with native whatsapp.
-    expect(adapter!.channelType).toBe('whatsapp');
-  });
+  // The registry key IS the instance name (registerChannelAdapter is called
+  // with 'whatsapp-cloud'), so the assertion above already proves this bridge
+  // is keyed off the native Baileys adapter's bare 'whatsapp' key (#2911).
+  //
+  // The previous version of this file also asserted adapter.channelType ===
+  // 'whatsapp' by instantiating through getChannelRegistration(...).factory().
+  // That is dropped because no cross-core export exposes the registration:
+  // main has getChannelAdapterExact but not getChannelRegistration, this branch
+  // has the reverse, and both read activeAdapters, which stays empty until
+  // initChannelAdapters() runs setup. Asserting absence of the bare 'whatsapp'
+  // key is not an option either: this branch's barrel registers the native
+  // Baileys adapter, so it is present here and absent on a cloud-only install.
 });

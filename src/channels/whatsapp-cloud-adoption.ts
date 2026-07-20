@@ -12,7 +12,7 @@
  */
 import { getDb } from '../db/connection.js';
 import { log } from '../log.js';
-import { getChannelRegistration } from './channel-registry.js';
+import { getRegisteredChannelNames } from './channel-registry.js';
 
 /**
  * Stranded rows carry channel_type='whatsapp' AND instance='whatsapp'. The
@@ -64,7 +64,10 @@ export function adoptStrandedWhatsAppCloudGroups(): void {
   // A native Baileys 'whatsapp' adapter registered this boot may own rows
   // under the default instance. Never re-key another adapter's rows: warn
   // once if strays exist and leave everything untouched.
-  if (getChannelRegistration('whatsapp')) {
+  // getRegisteredChannelNames (not getChannelRegistration) because this module
+  // is copied onto installs running the core from main, which does not export
+  // getChannelRegistration. This name exists on both cores.
+  if (getRegisteredChannelNames().includes('whatsapp')) {
     if (stranded.length > 0) {
       log.warn(
         'whatsapp-cloud adoption skipped: native whatsapp adapter is registered; stranded default-instance rows left untouched',
