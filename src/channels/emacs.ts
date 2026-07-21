@@ -14,9 +14,20 @@ import http from 'http';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { registerChannelAdapter } from './channel-registry.js';
-import type { ChannelAdapter, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 
 const OUTBOUND_BUFFER_MAX = 200;
+
+/**
+ * Single-operator localhost transport, wired manually: every line is for the
+ * agent, senders are whoever can reach the local port ('strict' keeps
+ * auto-create off), no thread or mention concept.
+ */
+const EMACS_DEFAULTS: ChannelDefaults = {
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'strict' },
+  group: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'strict' },
+  mentions: 'never',
+};
 
 interface BufferedMessage {
   text: string;
@@ -101,6 +112,7 @@ function createEmacsAdapter(opts: EmacsAdapterOptions): ChannelAdapter {
     name: 'emacs',
     channelType: 'emacs',
     supportsThreads: false,
+    defaults: EMACS_DEFAULTS,
 
     async setup(config: ChannelSetup): Promise<void> {
       setupConfig = config;
@@ -181,6 +193,7 @@ registerChannelAdapter('emacs', {
 
     return createEmacsAdapter({ port, authToken, platformId });
   },
+  defaults: EMACS_DEFAULTS,
 });
 
 export { createEmacsAdapter };

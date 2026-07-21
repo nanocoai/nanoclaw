@@ -17,8 +17,21 @@ import { createMatrixAdapter } from '@beeper/chat-adapter-matrix';
 
 import { log } from '../log.js';
 import { readEnvFile } from '../env.js';
+import type { ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
+
+/**
+ * Assumes a dedicated bot account on a homeserver (the common install).
+ * Non-threaded at the bridge level, so group engagement is 'mention', never
+ * sticky. Personal-account installs should edit their copy to dm 'strict' —
+ * install-wide changes live in this declaration by design.
+ */
+const MATRIX_DEFAULTS: ChannelDefaults = {
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'request_approval' },
+  group: { engageMode: 'mention', threads: false, unknownSenderPolicy: 'request_approval' },
+  mentions: 'platform',
+};
 
 const ENV_KEYS = [
   'MATRIX_BASE_URL',
@@ -160,7 +173,12 @@ registerChannelAdapter('matrix', {
     }
 
     const matrixAdapter = wrapWithDmResolution(createMatrixAdapter());
-    const bridge = createChatSdkBridge({ adapter: matrixAdapter, concurrency: 'concurrent', supportsThreads: false });
+    const bridge = createChatSdkBridge({
+      adapter: matrixAdapter,
+      concurrency: 'concurrent',
+      supportsThreads: false,
+      defaults: MATRIX_DEFAULTS,
+    });
 
     // Matrix user IDs contain ":" (e.g. "@user:matrix.org") which the shared
     // permissions module interprets as already-prefixed. Wrap onInbound to
@@ -203,4 +221,5 @@ registerChannelAdapter('matrix', {
 
     return bridge;
   },
+  defaults: MATRIX_DEFAULTS,
 });

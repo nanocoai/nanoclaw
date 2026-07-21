@@ -1,26 +1,28 @@
 /**
  * Regression coverage for #2560 — group @-mentions of the bot must set
- * `InboundMessage.isMention`. Before the fix, the inbound construction
- * site hard-coded `isMention: !isGroup ? true : undefined`, which dropped
- * every group mention on the floor and prevented the router from waking
- * the agent on a mention-only trigger.
+ * `InboundMessage.isMention` — plus the shared-number mode split: when
+ * ASSISTANT_HAS_OWN_NUMBER is not explicitly 'true' the adapter runs on the
+ * operator's personal number, so NOTHING is a bot mention (DMs address the
+ * human; group tags of the owner tag the human) and the bot-LID → assistant
+ * name content rewrite is skipped.
  *
  * The detection logic lives in the exported pure helper `isBotMentionedInGroup`;
- * the inbound site calls it with `normalized`, `botPhoneJid`, `botLidUser`.
- * `isMention` is then computed as:
- *
- *   isMention: !isGroup ? true : botMentionedInGroup ? true : undefined
- *
- * Both the helper and the call-site ternary are covered below so a future
- * refactor that breaks either part fails this suite.
+ * the inbound site feeds it into `computeIsMention(shared, isGroup, mentioned)`.
+ * Both helpers and the mode-resolution truth table are covered below so a
+ * future refactor that breaks any part fails this suite.
  */
 import { describe, it, expect } from 'vitest';
 
 import {
   appendMediaFailureNote,
   computeIsMention,
+  computeWhatsappDefaults,
+  hasMentionPills,
   isBotMentionedInGroup,
+  isBotTypedMention,
   parseWhatsAppMentions,
+  resolveSharedMode,
+  rewriteBotLidMention,
 } from './whatsapp.js';
 
 const BOT_PHONE_JID = '15550009999@s.whatsapp.net';
@@ -89,19 +91,160 @@ describe('isBotMentionedInGroup (#2560)', () => {
   });
 });
 
-describe('InboundMessage.isMention semantics (#2560)', () => {
-  it('is undefined for a group message with no bot mention', () => {
-    expect(computeIsMention(true, false)).toBeUndefined();
+describe('typed @-mention fallback (#3085)', () => {
+  describe('isBotTypedMention', () => {
+    it('matches a typed @-mention of the assistant name, case-insensitively', () => {
+      expect(isBotTypedMention('@sprout are you there?', 'Sprout', BOT_PHONE_JID)).toBe(true);
+      expect(isBotTypedMention('hey @SPROUT look at this', 'Sprout', BOT_PHONE_JID)).toBe(true);
+    });
+
+    it('matches a typed @-mention of the bot phone number', () => {
+      expect(isBotTypedMention('@15550009999 ping', 'Sprout', BOT_PHONE_JID)).toBe(true);
+    });
+
+    it('requires a word boundary after the name', () => {
+      expect(isBotTypedMention('@Sprouted a new plan', 'Sprout', BOT_PHONE_JID)).toBe(false);
+    });
+
+    it('requires the @ prefix', () => {
+      expect(isBotTypedMention('Sprout are you there?', 'Sprout', BOT_PHONE_JID)).toBe(false);
+    });
+
+    it('does not match other @-names', () => {
+      expect(isBotTypedMention('@Maria can you check?', 'Sprout', BOT_PHONE_JID)).toBe(false);
+    });
+
+    it('escapes regex specials in the assistant name', () => {
+      expect(isBotTypedMention('@R2.D2 status?', 'R2.D2', BOT_PHONE_JID)).toBe(true);
+      expect(isBotTypedMention('@R2xD2 status?', 'R2.D2', BOT_PHONE_JID)).toBe(false);
+    });
+
+    it('matches names ending in non-ASCII letters (ASCII \\b never would)', () => {
+      expect(isBotTypedMention('@José hola', 'José', BOT_PHONE_JID)).toBe(true);
+      expect(isBotTypedMention('@小助手 status', '小助手', BOT_PHONE_JID)).toBe(true);
+    });
+
+    it('does not fire on emails or URL paths containing the name', () => {
+      expect(isBotTypedMention('write to ethan@sprout.com please', 'Sprout', BOT_PHONE_JID)).toBe(false);
+      expect(isBotTypedMention('https://x.com/@sprout/status/1', 'Sprout', BOT_PHONE_JID)).toBe(false);
+    });
+
+    it('still matches after punctuation openers', () => {
+      expect(isBotTypedMention('(@Sprout can you look?)', 'Sprout', BOT_PHONE_JID)).toBe(true);
+      expect(isBotTypedMention('¿@Sprout puedes?', 'Sprout', BOT_PHONE_JID)).toBe(true);
+    });
+
+    it('does not match a multi-word name by its first word alone', () => {
+      expect(isBotTypedMention('@Autónomos can you check', 'Autónomos Expert', BOT_PHONE_JID)).toBe(false);
+      expect(isBotTypedMention('@Autónomos Expert can you check', 'Autónomos Expert', BOT_PHONE_JID)).toBe(true);
+    });
+
+    it('matches on the name alone when the bot phone JID is unknown', () => {
+      expect(isBotTypedMention('@Sprout hi', 'Sprout', undefined)).toBe(true);
+    });
   });
 
-  it('is true for a group message where the bot is mentioned', () => {
-    expect(computeIsMention(true, true)).toBe(true);
+  describe('hasMentionPills', () => {
+    it('is false for a message with no contextInfo or an empty mentionedJid', () => {
+      expect(hasMentionPills({})).toBe(false);
+      expect(hasMentionPills({ extendedTextMessage: { contextInfo: { mentionedJid: [] } } })).toBe(false);
+    });
+
+    it('is true when anyone at all is pilled, not just the bot', () => {
+      expect(
+        hasMentionPills({
+          extendedTextMessage: { contextInfo: { mentionedJid: ['15551112222@s.whatsapp.net'] } },
+        }),
+      ).toBe(true);
+    });
+  });
+});
+
+describe('InboundMessage.isMention semantics (#2560 + shared mode)', () => {
+  describe('dedicated mode (bot has its own number)', () => {
+    it('is undefined for a group message with no bot mention', () => {
+      expect(computeIsMention(false, true, false)).toBeUndefined();
+    });
+
+    it('is true for a group message where the bot is mentioned', () => {
+      expect(computeIsMention(false, true, true)).toBe(true);
+    });
+
+    it('is true for a DM regardless of mention state', () => {
+      // DMs are unconditionally mentions — the helper isn't consulted there.
+      expect(computeIsMention(false, false, false)).toBe(true);
+      expect(computeIsMention(false, false, true)).toBe(true);
+    });
   });
 
-  it('is true for a DM regardless of mention state', () => {
-    // DMs are unconditionally mentions — the helper isn't consulted there.
-    expect(computeIsMention(false, false)).toBe(true);
-    expect(computeIsMention(false, true)).toBe(true);
+  describe('shared mode (operator personal number)', () => {
+    it('is undefined for EVERYTHING — DMs address the human, tags tag the human', () => {
+      expect(computeIsMention(true, false, false)).toBeUndefined();
+      expect(computeIsMention(true, false, true)).toBeUndefined();
+      expect(computeIsMention(true, true, false)).toBeUndefined();
+      expect(computeIsMention(true, true, true)).toBeUndefined();
+    });
+  });
+});
+
+describe('resolveSharedMode env truth table', () => {
+  it('explicit "true" → dedicated (not shared)', () => {
+    expect(resolveSharedMode('true')).toBe(false);
+  });
+
+  it('absent or any other value → shared', () => {
+    expect(resolveSharedMode(undefined)).toBe(true);
+    expect(resolveSharedMode('')).toBe(true);
+    expect(resolveSharedMode('false')).toBe(true);
+    expect(resolveSharedMode('TRUE')).toBe(true);
+    expect(resolveSharedMode('1')).toBe(true);
+    expect(resolveSharedMode('yes')).toBe(true);
+  });
+});
+
+describe('rewriteBotLidMention', () => {
+  const ASSISTANT = 'Andy';
+
+  it('dedicated mode rewrites a bot-LID tag into @<assistant name>', () => {
+    expect(rewriteBotLidMention(`hey @${BOT_LID_USER} status?`, false, BOT_LID_USER, ASSISTANT)).toBe(
+      'hey @Andy status?',
+    );
+  });
+
+  it('shared mode skips the rewrite — a tag of the owner must not become name-pattern bait', () => {
+    const content = `hey @${BOT_LID_USER} status?`;
+    expect(rewriteBotLidMention(content, true, BOT_LID_USER, ASSISTANT)).toBe(content);
+  });
+
+  it('passes content through when the bot LID is unknown', () => {
+    expect(rewriteBotLidMention(`hey @${BOT_LID_USER}`, false, undefined, ASSISTANT)).toBe(`hey @${BOT_LID_USER}`);
+  });
+
+  it('passes content through when there is no tag of the bot LID', () => {
+    expect(rewriteBotLidMention('no tags here', false, BOT_LID_USER, ASSISTANT)).toBe('no tags here');
+  });
+});
+
+describe('computeWhatsappDefaults', () => {
+  it('shared mode declares strict name-pattern defaults with no platform mentions', () => {
+    expect(computeWhatsappDefaults(true)).toEqual({
+      dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'strict' },
+      group: {
+        engageMode: 'pattern',
+        engagePattern: '\\b{name}\\b',
+        threads: false,
+        unknownSenderPolicy: 'strict',
+      },
+      mentions: 'never',
+    });
+  });
+
+  it('dedicated mode declares platform mentions with group engage on mention (never sticky)', () => {
+    expect(computeWhatsappDefaults(false)).toEqual({
+      dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'request_approval' },
+      group: { engageMode: 'mention', threads: false, unknownSenderPolicy: 'request_approval' },
+      mentions: 'platform',
+    });
   });
 });
 
@@ -172,9 +315,7 @@ describe('appendMediaFailureNote', () => {
   });
 
   it('appends the note on its own line when a captioned message has a failed download', () => {
-    expect(appendMediaFailureNote('check this out', ['image'])).toBe(
-      'check this out\n[image could not be downloaded]',
-    );
+    expect(appendMediaFailureNote('check this out', ['image'])).toBe('check this out\n[image could not be downloaded]');
   });
 
   it('uses the note as the content when an uncaptioned media message fails (would otherwise be dropped)', () => {

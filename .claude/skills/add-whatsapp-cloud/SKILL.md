@@ -53,6 +53,22 @@ pnpm install @chat-adapter/whatsapp@4.29.0
 pnpm run build
 ```
 
+## Upgrading an existing install
+
+Older installs registered this bridge under the bare `whatsapp` key, which
+collided with the native Baileys adapter. It now registers under a distinct
+`whatsapp-cloud` instance (channelType stays `whatsapp`). Two consequences for
+an install that ran the previous version:
+
+- **Webhook route moves** from `/webhook/whatsapp` to `/webhook/whatsapp-cloud`.
+  Update the callback URL in your Meta App dashboard (WhatsApp > Configuration)
+  accordingly.
+- **Chat SDK state namespace moves.** Subscriptions in the `chat_sdk_*` tables
+  re-key under the new instance, so previously-subscribed threads may need to
+  re-engage the bot.
+
+Fresh installs need none of this.
+
 ## Credentials
 
 1. Go to [Meta for Developers](https://developers.facebook.com/apps/) and create an app (type: Business).
@@ -61,7 +77,7 @@ pnpm run build
    - Note the **Phone Number ID** (not the phone number itself).
    - Generate a **permanent System User access token** with `whatsapp_business_messaging` permission.
 4. Go to **WhatsApp** > **Configuration**:
-   - Set webhook URL: `https://your-domain/webhook/whatsapp`.
+   - Set webhook URL: `https://your-domain/webhook/whatsapp-cloud`.
    - Set a **Verify Token** (any random string you choose).
    - Subscribe to webhook fields: `messages`.
 5. Copy the **App Secret** from **Settings** > **Basic**.

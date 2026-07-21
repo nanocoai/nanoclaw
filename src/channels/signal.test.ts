@@ -61,7 +61,7 @@ vi.mock('node:net', () => ({
 }));
 
 import type { ChannelSetup } from './adapter.js';
-import { createSignalAdapter } from './signal.js';
+import { computeSignalIsMention, createSignalAdapter } from './signal.js';
 
 // --- Test helpers ---
 
@@ -208,6 +208,8 @@ describe('SignalAdapter', () => {
             sender: '+15555550123',
             senderName: 'Alice',
           }),
+          isMention: true,
+          isGroup: false,
         }),
       );
 
@@ -240,7 +242,36 @@ describe('SignalAdapter', () => {
             text: 'Group hello',
             sender: '+15555550999',
           }),
+          isMention: undefined,
+          isGroup: true,
         }),
+      );
+
+      await adapter.teardown();
+    });
+
+    it('marks a group message as a mention when the linked account is tagged', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      pushEvent({
+        sourceNumber: '+15555550999',
+        sourceName: 'Bob',
+        dataMessage: {
+          timestamp: 1700000000000,
+          message: '￼ ping',
+          mentions: [{ start: 0, length: 1, name: 'NanoClaw', number: '+15551234567' }],
+          groupInfo: { groupId: 'abc123', groupName: 'Family' },
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(cfg.onInbound).toHaveBeenCalledWith(
+        'group:abc123',
+        null,
+        expect.objectContaining({ isMention: true, isGroup: true }),
       );
 
       await adapter.teardown();
@@ -957,5 +988,31 @@ describe('SignalAdapter', () => {
       const adapter = createAdapter();
       expect(adapter.supportsThreads).toBe(false);
     });
+  });
+});
+
+describe('computeSignalIsMention', () => {
+  const account = '+15551234567';
+
+  it('is true for every DM', () => {
+    expect(computeSignalIsMention(account, false)).toBe(true);
+    expect(computeSignalIsMention(account, false, [])).toBe(true);
+  });
+
+  it('is true in groups when the account is tagged by number', () => {
+    expect(computeSignalIsMention(account, true, [{ number: account }])).toBe(true);
+  });
+
+  it('is true in groups when the account is tagged by uuid', () => {
+    expect(computeSignalIsMention(account, true, [{ uuid: account }])).toBe(true);
+  });
+
+  it('is undefined (not false) in groups when someone else is tagged', () => {
+    expect(computeSignalIsMention(account, true, [{ number: '+15550000000', uuid: 'bob-uuid' }])).toBeUndefined();
+  });
+
+  it('is undefined in groups without mentions', () => {
+    expect(computeSignalIsMention(account, true)).toBeUndefined();
+    expect(computeSignalIsMention(account, true, [])).toBeUndefined();
   });
 });

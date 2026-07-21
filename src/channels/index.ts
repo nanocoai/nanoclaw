@@ -31,7 +31,7 @@ import './linear.js';
 // import './teams.js';
 
 // whatsapp cloud api
-// import './whatsapp-cloud.js';
+import './whatsapp-cloud.js';
 
 // resend (email)
 // import './resend.js';

@@ -21,7 +21,7 @@ import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { getAskQuestionRender } from '../db/sessions.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
-import type { ChannelAdapter, ChannelSetup, InboundMessage } from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 
 /** Adapter with optional gateway support (e.g., Discord). */
 interface GatewayAdapter extends Adapter {
@@ -45,6 +45,19 @@ export type ReplyContextExtractor = (raw: Record<string, any>) => ReplyContext |
 
 export interface ChatSdkBridgeConfig {
   adapter: Adapter;
+  /**
+   * Adapter-instance name for running multiple bridges of one platform
+   * whose underlying Chat SDK adapters share a hardcoded `name` (e.g. the
+   * WhatsApp Cloud bridge, whose `@chat-adapter/whatsapp` reports
+   * `name = "whatsapp"`, running next to the native Baileys `whatsapp`
+   * adapter). Sets the returned adapter's registry key — `activeAdapters`
+   * is keyed by `instance ?? channelType`, so a named instance no longer
+   * collides with a sibling adapter of the same platform. Defaults to the
+   * platform name. channelType is NOT affected — user identity, formatting,
+   * and container config stay keyed on the platform.
+   * Must be URL-safe: non-empty, only letters, digits, '.', '_' or '-'.
+   */
+  instance?: string;
   concurrency?: ConcurrencyStrategy;
   /** Bot token for authenticating forwarded Gateway events (required for interaction handling). */
   botToken?: string;
@@ -57,6 +70,12 @@ export interface ChatSdkBridgeConfig {
    * way and the default depends on installation style.
    */
   supportsThreads: boolean;
+  /**
+   * Declared wiring-time defaults for this channel. Copied verbatim onto the
+   * returned ChannelAdapter, exactly like supportsThreads. See
+   * `ChannelAdapter.defaults`.
+   */
+  defaults?: ChannelDefaults;
   /**
    * Optional transform applied to outbound text/markdown before it reaches the
    * adapter. Used by channels that need to sanitize for a platform-specific
@@ -119,6 +138,18 @@ export function splitForLimit(text: string, limit: number): string[] {
 
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
+  // The instance name becomes the registry key (and, once the core
+  // instance-routing infra lands, a webhook route segment and the
+  // state-namespace delimiter). Reject anything non-URL-safe at construction
+  // time rather than at first webhook. Positive allow-list (not a deny-list):
+  // also rejects '' and whitespace-only names, which are config bugs that
+  // would silently collapse back onto the default instance's keyspace.
+  if (config.instance !== undefined && !/^[A-Za-z0-9._-]+$/.test(config.instance)) {
+    throw new Error(
+      `chat-sdk bridge instance ${JSON.stringify(config.instance)} must be URL-safe: ` +
+        `non-empty, only letters, digits, '.', '_' or '-'`,
+    );
+  }
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
   let chat: Chat;
   let state: SqliteStateAdapter;
@@ -191,9 +222,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   }
 
   const bridge: ChannelAdapter = {
-    name: adapter.name,
-    channelType: adapter.name,
+    name: config.instance ?? adapter.name,
+    channelType: adapter.name, // unchanged — semantic platform key
+    instance: config.instance, // undefined ⇒ default instance (keyed by channelType)
     supportsThreads: config.supportsThreads,
+    defaults: config.defaults,
 
     async setup(hostConfig: ChannelSetup) {
       setupConfig = hostConfig;
@@ -234,9 +267,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       });
 
       // DMs — by definition addressed to the bot. Thread id flows through
-      // so sub-thread context reaches delivery (Slack users can open threads
-      // inside a DM). Router collapses DM sub-threads to one session via
-      // is_group=0 short-circuit.
+      // unmodified (Slack users can open sub-threads inside a DM); whether it
+      // is honored is policy, not transport: the channel's declared
+      // dm.threads default (ChannelDefaults) or a per-wiring threads override
+      // decides at router fanout whether replies land in-thread or all DM
+      // sub-threads collapse into the one DM session.
       chat.onDirectMessage(async (thread, message) => {
         const channelId = adapter.channelIdFromThreadId(thread.id);
         log.info('Inbound DM received', {

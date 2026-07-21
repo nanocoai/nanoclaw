@@ -39,12 +39,19 @@ import {
 import type { GroupMetadata, WAMessageKey, WAMessage, WASocket } from '@whiskeysockets/baileys';
 
 import { isSafeAttachmentName } from '../attachment-safety.js';
-import { ASSISTANT_HAS_OWN_NUMBER, ASSISTANT_NAME, DATA_DIR } from '../config.js';
+import { DATA_DIR } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
-import type { ChannelAdapter, ChannelSetup, ConversationInfo, InboundMessage, OutboundMessage } from './adapter.js';
+import type {
+  ChannelAdapter,
+  ChannelDefaults,
+  ChannelSetup,
+  ConversationInfo,
+  InboundMessage,
+  OutboundMessage,
+} from './adapter.js';
 
 const baileysLogger = pino({ level: 'silent' });
 
@@ -218,22 +225,79 @@ export function isBotMentionedInGroup(
   botLidUser: string | undefined,
 ): boolean {
   if (!botPhoneJid && !botLidUser) return false;
-  const mentionedJids: string[] = [
-    ...(normalized.extendedTextMessage?.contextInfo?.mentionedJid ?? []),
-    ...(normalized.imageMessage?.contextInfo?.mentionedJid ?? []),
-    ...(normalized.videoMessage?.contextInfo?.mentionedJid ?? []),
-    ...(normalized.documentMessage?.contextInfo?.mentionedJid ?? []),
-  ];
   const botLidJid = botLidUser ? `${botLidUser}@lid` : undefined;
-  return mentionedJids.some((jid) => {
+  return collectMentionedJids(normalized).some((jid) => {
     if (!jid) return false;
     const bare = jid.split(':')[0];
     return bare === botPhoneJid || bare === botLidJid;
   });
 }
 
+function collectMentionedJids(normalized: MentionContextSource): string[] {
+  return [
+    ...(normalized.extendedTextMessage?.contextInfo?.mentionedJid ?? []),
+    ...(normalized.imageMessage?.contextInfo?.mentionedJid ?? []),
+    ...(normalized.videoMessage?.contextInfo?.mentionedJid ?? []),
+    ...(normalized.documentMessage?.contextInfo?.mentionedJid ?? []),
+  ];
+}
+
 /**
- * Compute `InboundMessage.isMention` for a WhatsApp message:
+ * Whether the message carries any mention pill at all, for anyone.
+ * Gates the typed-mention fallback below: when a pill exists, the `@`
+ * text in the body belongs to whoever was pilled, and text-matching it
+ * against the bot's names would false-fire on a group member whose
+ * name matches the assistant's.
+ */
+export function hasMentionPills(normalized: MentionContextSource): boolean {
+  return collectMentionedJids(normalized).length > 0;
+}
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Fallback detection for typed @-mentions of the bot in a group (#3085).
+ * Only the autocomplete pill carries `contextInfo.mentionedJid`, and the
+ * pill can only target the bot's contact name — a user who types
+ * `@<name>` and hits send produces plain text that
+ * `isBotMentionedInGroup` can never match, so mention-mode wirings
+ * silently ignore the message.
+ *
+ * Matches `@<assistant name>` and `@<bot phone number>` in the text,
+ * case-insensitive. The boundaries deliberately diverge from the
+ * chat-sdk `detectMention` shape (`@name\b`): its ASCII `\b` never
+ * matches after a name ending in an accented or CJK letter (`@José`,
+ * `@小助手`), and its missing leading guard false-fires on emails and
+ * URL paths (`ethan@sprout.com`, `x.com/@sprout/...`). Here the
+ * trailing boundary is Unicode-aware, and the char before `@` must not
+ * be a letter, digit, `_`, `@`, `/`, or `.`.
+ *
+ * Known limitation: only the full name matches. Typing the first word
+ * of a multi-word assistant name (`@Autónomos` for "Autónomos Expert")
+ * does not count — matching name prefixes would false-fire too easily.
+ *
+ * Callers must gate this on `!hasMentionPills(...)` (see that helper)
+ * and on dedicated mode: on a shared number the assistant's name in
+ * text can be ordinary human conversation about the assistant.
+ */
+export function isBotTypedMention(text: string, assistantName: string, botPhoneJid: string | undefined): boolean {
+  const botPhoneUser = botPhoneJid?.split('@')[0];
+  return [assistantName, botPhoneUser]
+    .filter((name): name is string => !!name)
+    .some((name) => new RegExp(`(?<![\\p{L}\\p{N}_@/.])@${escapeRegex(name)}(?![\\p{L}\\p{N}_])`, 'iu').test(text));
+}
+
+/**
+ * Compute `InboundMessage.isMention` for a WhatsApp message.
+ *
+ * Shared-number mode (operator's personal number): NOTHING is a mention.
+ * DMs are addressed to the human, and a group tag of the owner's JID/LID
+ * tags the human — treating either as a bot mention would auto-create
+ * messaging groups and fire approval cards for ordinary human traffic.
+ *
+ * Dedicated mode (bot has its own number):
  *   - DMs are always mentions (router auto-engages on the bot's behalf).
  *   - Group messages are mentions only when the bot is explicitly tagged.
  *
@@ -241,9 +305,27 @@ export function isBotMentionedInGroup(
  * `InboundMessage` field is `isMention?: boolean` and downstream code
  * treats `undefined` differently than an explicit `false` (#2560).
  */
-export function computeIsMention(isGroup: boolean, botMentionedInGroup: boolean): true | undefined {
+export function computeIsMention(shared: boolean, isGroup: boolean, botMentionedInGroup: boolean): true | undefined {
+  if (shared) return undefined;
   if (!isGroup) return true;
   return botMentionedInGroup ? true : undefined;
+}
+
+/**
+ * Normalize a tag of the bot's LID into `@<assistant name>` so mention text
+ * matches name-pattern triggers. Dedicated mode only: on a shared number the
+ * LID belongs to the human owner, and rewriting a friend's tag of the owner
+ * into the assistant's name would make name-pattern wirings false-fire on
+ * every such tag.
+ */
+export function rewriteBotLidMention(
+  content: string,
+  shared: boolean,
+  botLidUser: string | undefined,
+  assistantName: string,
+): string {
+  if (shared || !botLidUser || !content.includes(`@${botLidUser}`)) return content;
+  return content.replace(`@${botLidUser}`, `@${assistantName}`);
 }
 
 /**
@@ -277,6 +359,51 @@ function buildMediaMessage(data: Buffer, filename: string, ext: string, caption?
   // Default: send as document
   return { document: data, fileName: filename, caption, mimetype: 'application/octet-stream' };
 }
+
+/**
+ * Shared vs dedicated number mode. Only an explicit ASSISTANT_HAS_OWN_NUMBER=true
+ * means the bot has its own number (dedicated); anything else — absent, empty,
+ * 'false', any other string — means the bot rides the operator's personal
+ * number (shared). Exported for unit testing the truth table.
+ */
+export function resolveSharedMode(assistantHasOwnNumber: string | undefined): boolean {
+  return assistantHasOwnNumber !== 'true';
+}
+
+/**
+ * Shared vs dedicated number changes every default, so the declaration is
+ * computed once at module load from the adapter's own env:
+ *  - shared (ASSISTANT_HAS_OWN_NUMBER unset/false): the operator's personal
+ *    number. DMs and group tags address the human, not the bot ('never');
+ *    groups engage on the agent's name ({name} pattern); auto-create stays
+ *    'strict' so strangers DMing the human can never spawn agent state.
+ *  - dedicated: a real bot number. Groups engage on platform mentions —
+ *    'mention', NEVER 'mention-sticky': WhatsApp is non-threaded and sessions
+ *    are never deleted, so sticky would mean engaged-forever.
+ *
+ * Exported for unit testing both mode literals.
+ */
+export function computeWhatsappDefaults(shared: boolean): ChannelDefaults {
+  return shared
+    ? {
+        dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'strict' },
+        group: { engageMode: 'pattern', engagePattern: '\\b{name}\\b', threads: false, unknownSenderPolicy: 'strict' },
+        mentions: 'never',
+      }
+    : {
+        dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'request_approval' },
+        group: { engageMode: 'mention', threads: false, unknownSenderPolicy: 'request_approval' },
+        mentions: 'platform',
+      };
+}
+
+// Adapter-internal env: same .env keys as always (setup/channels/whatsapp.ts
+// still writes them), but read here instead of imported from core config —
+// shared-number handling is channel-local.
+const waEnv = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER']);
+const ASSISTANT_NAME = waEnv.ASSISTANT_NAME || 'Andy';
+const WHATSAPP_SHARED = resolveSharedMode(waEnv.ASSISTANT_HAS_OWN_NUMBER);
+const WHATSAPP_DEFAULTS: ChannelDefaults = computeWhatsappDefaults(WHATSAPP_SHARED);
 
 registerChannelAdapter('whatsapp', {
   factory: () => {
@@ -324,6 +451,9 @@ registerChannelAdapter('whatsapp', {
     // Group sync tracking
     let lastGroupSync = 0;
     let groupSyncTimerStarted = false;
+
+    // Chats already noted in the shared-mode once-per-chat debug log
+    const sharedModeLoggedChats = new Set<string>();
 
     // First-connect promise
     let resolveFirstOpen: (() => void) | undefined;
@@ -380,19 +510,21 @@ registerChannelAdapter('whatsapp', {
       const cached = groupMetadataCache.get(jid);
       if (cached && cached.expiresAt > Date.now()) return cached.metadata;
 
+      // Return WhatsApp's native group metadata UNMODIFIED. Baileys uses this to
+      // distribute the group sender-key; it also reads `addressingMode` from it.
+      // For LID-addressed groups the participants must keep their native @lid ids
+      // so they match addressingMode='lid'. Translating them to phone JIDs
+      // (previous behavior) left addressingMode='lid' but pn-shaped participant
+      // ids — an inconsistency that desynced sender-key distribution, so member
+      // devices never received the key and group messages stuck on "waiting for
+      // this message". DMs and phone-addressed (small) groups were unaffected.
+      // The LID→phone translation for inbound sender routing happens separately.
       const metadata = await sock.groupMetadata(jid);
-      const participants = await Promise.all(
-        metadata.participants.map(async (p) => ({
-          ...p,
-          id: await translateJid(p.id),
-        })),
-      );
-      const normalized = { ...metadata, participants };
       groupMetadataCache.set(jid, {
-        metadata: normalized,
+        metadata,
         expiresAt: Date.now() + GROUP_METADATA_CACHE_TTL_MS,
       });
-      return normalized;
+      return metadata;
     }
 
     async function syncGroupMetadata(force = false): Promise<void> {
@@ -720,9 +852,8 @@ registerChannelAdapter('whatsapp', {
               '';
 
             // Normalize bot LID mention → assistant name for trigger matching
-            if (botLidUser && content.includes(`@${botLidUser}`)) {
-              content = content.replace(`@${botLidUser}`, `@${ASSISTANT_NAME}`);
-            }
+            // (dedicated mode only — see rewriteBotLidMention)
+            content = rewriteBotLidMention(content, WHATSAPP_SHARED, botLidUser, ASSISTANT_NAME);
 
             // Download media attachments (images, video, audio, documents)
             const { attachments, failures } = await downloadInboundMedia(msg, normalized);
@@ -750,7 +881,7 @@ registerChannelAdapter('whatsapp', {
               if (sentMessageCache.has(msg.key.id || '')) continue;
             }
 
-            const isBotMessage = ASSISTANT_HAS_OWN_NUMBER ? false : content.startsWith(`${ASSISTANT_NAME}:`);
+            const isBotMessage = WHATSAPP_SHARED ? content.startsWith(`${ASSISTANT_NAME}:`) : false;
 
             // Check if this reply answers a pending question via slash command
             const pending = pendingQuestions.get(chatJid);
@@ -774,18 +905,26 @@ registerChannelAdapter('whatsapp', {
             // Detect explicit @-mentions of the bot in groups. Detail in
             // isBotMentionedInGroup(); short version is contextInfo.mentionedJid
             // on text + caption-bearing messages, matched against the bot's
-            // phone JID and LID (#2560).
-            const botMentionedInGroup = isGroup && isBotMentionedInGroup(normalized, botPhoneJid, botLidUser);
+            // phone JID and LID (#2560). Typed `@<name>` text never carries a
+            // pill, so in dedicated mode fall back to text matching when the
+            // message pills nobody (#3085).
+            const botMentionedInGroup =
+              isGroup &&
+              (isBotMentionedInGroup(normalized, botPhoneJid, botLidUser) ||
+                (!WHATSAPP_SHARED &&
+                  !hasMentionPills(normalized) &&
+                  isBotTypedMention(content, ASSISTANT_NAME, botPhoneJid)));
 
             const inbound: InboundMessage = {
               id: msg.key.id || `wa-${Date.now()}`,
               kind: 'chat',
-              // DMs are addressed to the bot by definition. Mark them as
-              // platform-confirmed mentions so the router auto-creates an
-              // approval-required messaging_group when the chat is unknown,
-              // instead of silently dropping. In groups, only an explicit
-              // @-mention counts.
-              isMention: computeIsMention(isGroup, botMentionedInGroup),
+              // Dedicated mode: DMs are addressed to the bot by definition.
+              // Mark them as platform-confirmed mentions so the router
+              // auto-creates an approval-required messaging_group when the
+              // chat is unknown, instead of silently dropping. In groups,
+              // only an explicit @-mention counts. Shared mode: never a
+              // mention — DMs and tags address the human owner.
+              isMention: computeIsMention(WHATSAPP_SHARED, isGroup, botMentionedInGroup),
               isGroup,
               content: {
                 // Apply the media-failure note here, at the boundary, so the
@@ -802,6 +941,17 @@ registerChannelAdapter('whatsapp', {
               },
               timestamp,
             };
+
+            // Discoverability for /debug: in shared mode nothing carries
+            // isMention, so unknown chats never auto-create messaging groups
+            // — traffic can look silently dropped. Note each chat once.
+            if (WHATSAPP_SHARED && chatJid !== botPhoneJid && !sharedModeLoggedChats.has(chatJid)) {
+              sharedModeLoggedChats.add(chatJid);
+              log.debug('Shared-number mode: forwarding chat to router without isMention', {
+                chatJid,
+                isGroup,
+              });
+            }
 
             // WhatsApp doesn't use threads — threadId is null
             setupConfig.onInbound(chatJid, null, inbound);
@@ -821,6 +971,7 @@ registerChannelAdapter('whatsapp', {
       name: 'whatsapp',
       channelType: 'whatsapp',
       supportsThreads: false,
+      defaults: WHATSAPP_DEFAULTS,
 
       async setup(hostConfig: ChannelSetup) {
         setupConfig = hostConfig;
@@ -916,7 +1067,7 @@ registerChannelAdapter('whatsapp', {
 
         if (text) {
           const { text: formatted, mentions } = formatWhatsApp(text);
-          const prefixed = ASSISTANT_HAS_OWN_NUMBER ? formatted : `${ASSISTANT_NAME}: ${formatted}`;
+          const prefixed = WHATSAPP_SHARED ? `${ASSISTANT_NAME}: ${formatted}` : formatted;
           return sendRawMessage(platformId, prefixed, mentions);
         }
       },
@@ -959,4 +1110,5 @@ registerChannelAdapter('whatsapp', {
 
     return adapter;
   },
+  defaults: WHATSAPP_DEFAULTS,
 });

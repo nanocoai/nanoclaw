@@ -9,8 +9,22 @@
 import { createLinearAdapter } from '@chat-adapter/linear';
 
 import { readEnvFile } from '../env.js';
+import type { ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
+
+/**
+ * Linear OAuth apps can't be @-mentioned (see module doc), so mention modes
+ * can never fire — creation surfaces must refuse them ('never'). Group
+ * wirings default to pattern '.' (every comment engages) with per-issue
+ * threads. Auto-create can't fire without isMention, so unknownSenderPolicy
+ * is declared for uniformity only.
+ */
+const LINEAR_DEFAULTS: ChannelDefaults = {
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'request_approval' },
+  group: { engageMode: 'pattern', engagePattern: '.', threads: true, unknownSenderPolicy: 'request_approval' },
+  mentions: 'never',
+};
 
 registerChannelAdapter('linear', {
   factory: () => {
@@ -40,6 +54,12 @@ registerChannelAdapter('linear', {
     const teamKey = env.LINEAR_TEAM_KEY || 'default';
     linearAdapter.channelIdFromThreadId = () => `linear:${teamKey}`;
 
-    return createChatSdkBridge({ adapter: linearAdapter, concurrency: 'queue', supportsThreads: true });
+    return createChatSdkBridge({
+      adapter: linearAdapter,
+      concurrency: 'queue',
+      supportsThreads: true,
+      defaults: LINEAR_DEFAULTS,
+    });
   },
+  defaults: LINEAR_DEFAULTS,
 });

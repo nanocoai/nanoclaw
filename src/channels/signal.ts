@@ -13,7 +13,7 @@ import { createConnection, type Socket } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { ChannelAdapter, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
@@ -33,6 +33,9 @@ function spawnSignalDaemon(cliPath: string, account: string, host: string, port:
   if (account) args.push('-a', account);
   args.push('daemon', '--tcp', `${host}:${port}`, '--no-receive-stdout');
   args.push('--receive-mode', 'on-start');
+  // Send read receipts (in addition to signal-cli's default delivery receipts)
+  // so senders see their messages marked read once the daemon receives them.
+  args.push('--send-read-receipts');
 
   const child = spawn(cliPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
   let exited = false;
@@ -288,7 +291,7 @@ interface SignalQuote {
   text?: string;
 }
 
-interface SignalMention {
+export interface SignalMention {
   start?: number;
   length?: number;
   uuid?: string;
@@ -349,6 +352,23 @@ function resolveMentions(text: string, mentions?: SignalMention[]): string {
   }
   result += text.slice(cursor);
   return result;
+}
+
+/**
+ * Platform mention signal for the router: DMs always engage (isMention=true);
+ * a group message counts as a mention only when the linked account itself is
+ * tagged. Returns undefined (not false) otherwise — the router treats
+ * undefined as "no platform signal" (see InboundMessage.isMention in
+ * adapter.ts). Matches both `number` and `uuid` against the configured
+ * account so either identifier shape works.
+ */
+export function computeSignalIsMention(
+  account: string,
+  isGroup: boolean,
+  mentions?: SignalMention[],
+): true | undefined {
+  if (!isGroup) return true;
+  return mentions?.some((m) => m.number === account || m.uuid === account) ? true : undefined;
 }
 
 /**
@@ -573,6 +593,9 @@ export function createSignalAdapter(config: {
             isFromMe: true,
             ...(syncSent.quote ? quoteToContent(syncSent.quote) : {}),
           },
+          // Note-to-self is a DM with ourselves: same DM→mention rule.
+          isMention: true,
+          isGroup: false,
           timestamp,
         };
         await setup.onInbound(platformId, null, msg);
@@ -670,6 +693,8 @@ export function createSignalAdapter(config: {
         ...(attachmentRefs.length > 0 ? { attachments: attachmentRefs } : {}),
         ...(dataMessage.quote ? quoteToContent(dataMessage.quote) : {}),
       },
+      isMention: computeSignalIsMention(config.account, isGroup, dataMessage.mentions),
+      isGroup,
       timestamp,
     };
     await setup.onInbound(platformId, null, msg);
@@ -809,6 +834,7 @@ export function createSignalAdapter(config: {
     name: 'signal',
     channelType: 'signal',
     supportsThreads: false,
+    defaults: SIGNAL_DEFAULTS,
 
     async setup(cfg: ChannelSetup): Promise<void> {
       setup = cfg;
@@ -934,6 +960,20 @@ export function createSignalAdapter(config: {
 const DEFAULT_TCP_HOST = '127.0.0.1';
 const DEFAULT_TCP_PORT = 7583;
 
+/**
+ * Linked personal account, so auto-create is 'strict'. The adapter emits
+ * top-level isGroup and isMention (DM→true; group→dataMessage.mentions
+ * matched against config.account via computeSignalIsMention), so platform
+ * mention wirings can fire. Group default is 'mention', never 'mention-sticky':
+ * Signal is non-threaded and sessions are never deleted, so sticky in the
+ * single shared session would mean engaged-forever.
+ */
+const SIGNAL_DEFAULTS: ChannelDefaults = {
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'strict' },
+  group: { engageMode: 'mention', threads: false, unknownSenderPolicy: 'strict' },
+  mentions: 'platform',
+};
+
 registerChannelAdapter('signal', {
   factory: () => {
     const envVars = readEnvFile([
@@ -980,4 +1020,5 @@ registerChannelAdapter('signal', {
       signalDataDir,
     });
   },
+  defaults: SIGNAL_DEFAULTS,
 });

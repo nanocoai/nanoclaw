@@ -80,7 +80,8 @@ export interface InboundMessage {
    * display name (e.g. `@Andy`).
    *
    * Adapters that don't set it (native / legacy) leave it undefined — the
-   * router falls back to text-match against agent_group_name.
+   * router treats undefined as "not a mention" (`isMention === true` check,
+   * src/router.ts). There is no text-match fallback.
    */
   isMention?: boolean;
   /** True when the source is a group/channel thread, false for DMs. */
@@ -107,10 +108,71 @@ export interface ConversationInfo {
   isGroup: boolean;
 }
 
+/** Wiring/mg defaults for one conversation context (DM vs group/channel). */
+export interface ChannelContextDefaults {
+  /** Default engage_mode for wirings created in this context. */
+  engageMode: 'pattern' | 'mention' | 'mention-sticky';
+  /**
+   * Default engage_pattern when engageMode === 'pattern'. May contain the
+   * literal token `{name}`: creation helpers replace it with the regex-escaped
+   * agent_group name (for platforms with no group-mention metadata, e.g.
+   * iMessage/DeltaChat groups, WhatsApp shared-number mode). Required iff
+   * engageMode === 'pattern'.
+   */
+  engagePattern?: string;
+  /**
+   * Whether thread ids are honored in this context by default.
+   *  true  — inbound thread ids flow into messages_in and (in groups) force
+   *          per-thread session identity; replies, typing, and cards land
+   *          in-thread.
+   *  false — thread ids are nulled per-wiring at router fanout; sessions
+   *          collapse; replies land top-level.
+   * MUST be false when `supportsThreads` is false (capability bound; the
+   * router treats supportsThreads=false as a hard pre-strip regardless).
+   * Per-wiring override: messaging_group_agents.threads (NULL = inherit).
+   */
+  threads: boolean;
+  /**
+   * unknown_sender_policy stamped on messaging_groups rows auto-created by
+   * the router or created by wizard/CLI paths in this context.
+   */
+  unknownSenderPolicy: 'strict' | 'request_approval' | 'public';
+}
+
+/**
+ * Static per-channel declaration of wiring-time defaults. Exactly two levels
+ * exist: this declaration, and the per-wiring/per-mg values chosen at
+ * creation. Install-wide changes = edit the adapter copy (skill-installed,
+ * user-owned). Never persisted to the central DB.
+ */
+export interface ChannelDefaults {
+  dm: ChannelContextDefaults;
+  group: ChannelContextDefaults;
+  /**
+   * Which mention signal the adapter emits (InboundMessage.isMention):
+   *  'platform' — platform-confirmed mentions in groups; DMs flagged too.
+   *  'dm-only'  — only DMs flagged (no group mention metadata).
+   *  'never'    — isMention never set: auto-create/registration card never
+   *               fires; 'mention'/'mention-sticky' wirings never engage.
+   * Creation surfaces must reject/warn on mention modes that can never fire.
+   */
+  mentions: 'platform' | 'dm-only' | 'never';
+}
+
 /** The v2 channel adapter contract. */
 export interface ChannelAdapter {
   name: string;
   channelType: string;
+
+  /**
+   * Adapter-instance name — distinguishes N adapters of one platform
+   * (e.g. a native WhatsApp bridge alongside the WhatsApp Cloud bridge, or
+   * three Slack apps in one workspace). Defaults to channelType.
+   * channelType stays the SEMANTIC platform key (user ids '<channelType>:<handle>',
+   * formatting, container config); instance is a host-side routing key only.
+   * Must be unique across active adapters and URL-safe (no '/', '?', ':').
+   */
+  instance?: string;
 
   /**
    * Whether this adapter models conversations as threads.
@@ -164,6 +226,15 @@ export interface ChannelAdapter {
    */
   openDM?(userHandle: string): Promise<string>;
   resolveChannelName?: (platformId: string) => Promise<string | null>;
+
+  /**
+   * Declared wiring-time defaults for this channel. Optional for backward
+   * compatibility with stale adapter copies; absent → core fallback
+   * (fallbackChannelDefaults(supportsThreads), see channel-registry.ts).
+   * May be computed from adapter-internal env at module load (e.g. WhatsApp
+   * shared-number mode), but is immutable for the process lifetime.
+   */
+  defaults?: ChannelDefaults;
 }
 
 /** Factory function that creates a channel adapter (returns null if credentials missing). */
@@ -172,6 +243,14 @@ export type ChannelAdapterFactory = () => ChannelAdapter | Promise<ChannelAdapte
 /** Registration entry for a channel adapter. */
 export interface ChannelRegistration {
   factory: ChannelAdapterFactory;
+  /**
+   * Same declaration as ChannelAdapter.defaults, resolvable WITHOUT
+   * instantiating the adapter — offline creation paths (setup/register.ts,
+   * scripts/init-first-agent.ts, ncl against a host where the factory
+   * returned null for missing creds) read it from the registry. Channel
+   * modules pass the same const here and to the adapter/bridge.
+   */
+  defaults?: ChannelDefaults;
   containerConfig?: {
     mounts?: Array<{ hostPath: string; containerPath: string; readonly: boolean }>;
     env?: Record<string, string>;
