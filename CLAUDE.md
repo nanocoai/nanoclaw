@@ -163,6 +163,10 @@ Key files: `src/container-restart.ts`, `src/container-runner.ts` (`killContainer
 
 API keys, OAuth tokens, and auth credentials are managed by the OneCLI gateway. Secrets are injected into per-agent containers at request time — none are passed in env vars or through chat context. The container agent sees this via the `onecli-gateway` container skill (`container/skills/onecli-gateway/SKILL.md`), which teaches it how the proxy works, how to handle auth errors, and to never ask for raw credentials. Host-side wiring: `src/modules/approvals/onecli-approvals.ts`, `ensureAgent()` in `container-runner.ts`. Run `onecli --help`.
 
+### OneCLI setup vs. a host's own PostgreSQL
+
+The `onecli setup` step's installer (`curl -fsSL onecli.sh/install | sh`) writes `~/.onecli/docker-compose.yml`, which publishes OneCLI's own bundled Postgres container to the host on port 5432 by default (bound to the Docker bridge gateway IP, e.g. `172.17.0.1`, so containers can reach it). On a host that already runs its own PostgreSQL on port 5432 (system-level or another Docker Postgres bound to all interfaces), this collides — `docker: ... failed to bind host port ...:5432/tcp: address already in use`, or on a retry that reuses a half-created container, a Postgres container with no network attached and an `onecli is unhealthy` failure instead. Fix: before running setup, write `POSTGRES_PORT=<a-free-port>` to `~/.onecli/.env` (same directory as the compose file) — this only changes the host-published debug port; OneCLI's app↔DB connection always goes over the internal Docker network hostname `postgres:5432`, so it isn't affected.
+
 ### Secret modes
 
 Auto-created agents default to `all` secret mode — every vault secret whose host pattern matches is injected automatically, so the common case needs no per-agent setup. If an agent is in `selective` mode it gets no secrets until you assign them, which shows up as a `401` from an API whose credential *is* in the vault. The SDK can't change this; use the CLI (or the web UI at `http://127.0.0.1:10254`):
