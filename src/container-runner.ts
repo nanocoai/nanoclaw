@@ -245,8 +245,8 @@ export function resolveProviderName(
   return (sessionProvider || containerConfigProvider || 'claude').toLowerCase();
 }
 
-function resolveProviderContribution(
-  session: Session,
+export function resolveProviderContribution(
+  session: Pick<Session, 'id' | 'agent_provider'>,
   agentGroup: AgentGroup,
   containerConfig: import('./container-config.js').ContainerConfig,
 ): { provider: string; contribution: ProviderContainerContribution } {
@@ -266,7 +266,7 @@ function resolveProviderContribution(
 
 export function buildMounts(
   agentGroup: AgentGroup,
-  session: Session,
+  session: Pick<Session, 'id'>,
   containerConfig: import('./container-config.js').ContainerConfig,
   provider: string,
   providerContribution: ProviderContainerContribution,
@@ -431,7 +431,7 @@ function selectedSkillNames(containerConfig: import('./container-config.js').Con
     : [];
 }
 
-async function buildContainerArgs(
+export async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   agentGroup: AgentGroup,
@@ -439,6 +439,7 @@ async function buildContainerArgs(
   _provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
+  command = 'exec bun run /app/src/index.ts',
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
@@ -511,7 +512,7 @@ async function buildContainerArgs(
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
   args.push(imageTag);
 
-  args.push('-c', 'exec bun run /app/src/index.ts');
+  args.push('-c', command);
 
   return args;
 }

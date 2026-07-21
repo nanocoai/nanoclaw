@@ -22,6 +22,14 @@ vi.mock('../../container-runner.js', () => ({
   buildAgentGroupImage: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('../../container-preflight.js', () => ({
+  preflightContainerConfig: vi.fn().mockResolvedValue({ providerOutput: 'PREFLIGHT_OK', exitCode: 0 }),
+}));
+
+vi.mock('../../container-restart.js', () => ({
+  restartAgentGroupContainers: vi.fn(),
+}));
+
 vi.mock('../../config.js', async () => {
   const actual = await vi.importActual('../../config.js');
   return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-cli-groups' };
@@ -31,8 +39,10 @@ const TEST_DIR = '/tmp/nanoclaw-test-cli-groups';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup, getDb } from '../../db/index.js';
 import { createSession } from '../../db/sessions.js';
-import { dispatch } from '../dispatch.js';
 import { ensureContainerConfig, getContainerConfig } from '../../db/container-configs.js';
+import { preflightContainerConfig } from '../../container-preflight.js';
+import { restartAgentGroupContainers } from '../../container-restart.js';
+import { dispatch } from '../dispatch.js';
 // Side-effect import: registers the `groups-*` commands (including delete).
 import './groups.js';
 
@@ -217,6 +227,102 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
     expect(resp.ok).toBe(false);
     expect((resp as { ok: false; error: { code: string; message: string } }).error.code).toBe('handler-error');
     expect((resp as { ok: false; error: { code: string; message: string } }).error.message).toMatch(/not found/i);
+  });
+});
+
+describe('groups config update preflight', () => {
+  const GID = 'ag-config-preflight';
+
+  beforeEach(() => {
+    const db = initTestDb();
+    runMigrations(db);
+    createAgentGroup({
+      id: GID,
+      name: 'preflight override',
+      folder: 'preflight-override',
+      agent_provider: null,
+      created_at: now(),
+    });
+    ensureContainerConfig(GID);
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => closeDb());
+
+  it('preflights before persisting and does not restart', async () => {
+    const response = await dispatch(
+      {
+        id: 'config-preflight-success',
+        command: 'groups-config-update',
+        args: { id: GID, model: 'candidate-model' },
+      },
+      { caller: 'host' },
+    );
+
+    expect(response.ok).toBe(true);
+    expect(preflightContainerConfig).toHaveBeenCalledWith(GID, expect.objectContaining({ model: 'candidate-model' }));
+    expect(getContainerConfig(GID)?.model).toBe('candidate-model');
+    expect(restartAgentGroupContainers).not.toHaveBeenCalled();
+  });
+
+  it('does not preflight unrelated scalar fields', async () => {
+    const response = await dispatch(
+      {
+        id: 'config-preflight-unrelated',
+        command: 'groups-config-update',
+        args: { id: GID, assistant_name: 'new name' },
+      },
+      { caller: 'host' },
+    );
+
+    expect(response.ok).toBe(true);
+    expect(preflightContainerConfig).not.toHaveBeenCalled();
+    expect(getContainerConfig(GID)?.assistant_name).toBe('new name');
+  });
+
+  it('preserves the old config and does not restart when preflight fails', async () => {
+    vi.mocked(preflightContainerConfig).mockRejectedValueOnce(
+      new Error('preflight container exited with code 2: provider returned HTTP 400'),
+    );
+
+    const response = await dispatch(
+      {
+        id: 'config-preflight-failure',
+        command: 'groups-config-update',
+        args: { id: GID, model: 'unsupported-model' },
+      },
+      { caller: 'host' },
+    );
+
+    expect(response.ok).toBe(false);
+    if (response.ok) throw new Error('expected config update to fail');
+    expect(response.error.message).toContain('old configuration was preserved');
+    expect(response.error.message).toContain('HTTP 400');
+    expect(getContainerConfig(GID)?.model).toBeNull();
+    expect(restartAgentGroupContainers).not.toHaveBeenCalled();
+  });
+
+  it('does not save a candidate when the row changes during preflight', async () => {
+    vi.mocked(preflightContainerConfig).mockImplementationOnce(async () => {
+      getDb()
+        .prepare('UPDATE container_configs SET model = ?, updated_at = ? WHERE agent_group_id = ?')
+        .run('changed-concurrently', 'changed-concurrently', GID);
+      return { providerOutput: 'PREFLIGHT_OK', exitCode: 0 };
+    });
+
+    const response = await dispatch(
+      {
+        id: 'config-preflight-race',
+        command: 'groups-config-update',
+        args: { id: GID, model: 'candidate-model' },
+      },
+      { caller: 'host' },
+    );
+
+    expect(response.ok).toBe(false);
+    if (response.ok) throw new Error('expected concurrent config update to fail');
+    expect(response.error.message).toContain('changed while it was being validated');
+    expect(getContainerConfig(GID)?.model).toBe('changed-concurrently');
   });
 });
 

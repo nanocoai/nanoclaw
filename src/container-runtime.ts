@@ -26,11 +26,11 @@ export function readonlyMountArgs(hostPath: string, containerPath: string): stri
 }
 
 /** Stop a container by name. Uses execFileSync to avoid shell injection. */
-export function stopContainer(name: string): void {
+export function stopContainer(name: string, force = false): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
     throw new Error(`Invalid container name: ${name}`);
   }
-  execSync(`${CONTAINER_RUNTIME_BIN} stop -t 1 ${name}`, { stdio: 'pipe' });
+  execSync(`${CONTAINER_RUNTIME_BIN} ${force ? 'rm -f' : 'stop -t 1'} ${name}`, { stdio: 'pipe' });
 }
 
 /** Ensure the container runtime is running, starting it if needed. */

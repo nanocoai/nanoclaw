@@ -81,9 +81,11 @@ export function updateContainerConfigScalars(
       'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope'
     >
   >,
-): void {
+  expectedUpdatedAt?: string,
+): boolean {
   const fields: string[] = [];
   const values: Record<string, unknown> = { agent_group_id: agentGroupId };
+  if (expectedUpdatedAt !== undefined) values.expected_updated_at = expectedUpdatedAt;
 
   for (const [key, value] of Object.entries(updates)) {
     if (value !== undefined) {
@@ -92,14 +94,17 @@ export function updateContainerConfigScalars(
       values[key] = value;
     }
   }
-  if (fields.length === 0) return;
+  if (!fields.length) return true;
 
   fields.push('updated_at = @updated_at');
   values.updated_at = new Date().toISOString();
 
-  getDb()
-    .prepare(`UPDATE container_configs SET ${fields.join(', ')} WHERE agent_group_id = @agent_group_id`)
-    .run(values);
+  const staleGuard = expectedUpdatedAt === undefined ? '' : ' AND updated_at = @expected_updated_at';
+  return (
+    getDb()
+      .prepare(`UPDATE container_configs SET ${fields.join(', ')} WHERE agent_group_id = @agent_group_id${staleGuard}`)
+      .run(values).changes === 1
+  );
 }
 
 /** Overwrite a JSON column wholesale. Used for skills, mcp_servers, packages_*, additional_mounts. */
