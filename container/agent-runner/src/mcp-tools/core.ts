@@ -10,6 +10,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { findByName, getAllDestinations } from '../destinations.js';
+import { getInboundIdBySeq } from '../db/messages-in.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
 import { getCurrentInReplyTo } from '../db/session-state.js';
 import { getSessionRouting } from '../db/session-routing.js';
@@ -67,6 +68,22 @@ function resolveRouting(
   return { channel_type: 'agent', platform_id: dest.agentGroupId!, thread_id: null, resolvedName: to };
 }
 
+/**
+ * Resolve the in_reply_to value for an outbound send.
+ *
+ * `replyTo` is the numeric `<message id="N">` seq of a specific inbound
+ * message in this turn's batch — pass it when replying to one of several
+ * pending requests so agent-to-agent routing lands on the correct
+ * originating session (see getInboundIdBySeq). Falls back to the
+ * batch-wide stamp (correct when there was only one inbound message, or
+ * when the caller omits it for backward compat).
+ */
+function resolveInReplyTo(replyTo: unknown): string | null {
+  const seq = Number(replyTo);
+  if (!replyTo || !seq) return getCurrentInReplyTo();
+  return getInboundIdBySeq(seq) ?? getCurrentInReplyTo();
+}
+
 export const sendMessage: McpToolDefinition = {
   tool: {
     name: 'send_message',
@@ -79,6 +96,11 @@ export const sendMessage: McpToolDefinition = {
           description: 'Destination name (e.g., "family", "worker-1").',
         },
         text: { type: 'string', description: 'Message content' },
+        replyTo: {
+          type: 'integer',
+          description:
+            'Optional: the numeric id of the specific inbound message (the "id" shown on a <message id="N">) you are responding to. Pass this when you have more than one pending request this turn, so your reply routes back to the right sender instead of defaulting to the first one.',
+        },
       },
       required: ['to', 'text'],
     },
@@ -95,7 +117,7 @@ export const sendMessage: McpToolDefinition = {
     const id = generateId();
     const seq = writeMessageOut({
       id,
-      in_reply_to: getCurrentInReplyTo(),
+      in_reply_to: resolveInReplyTo(args.replyTo),
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
@@ -119,6 +141,11 @@ export const sendFile: McpToolDefinition = {
         path: { type: 'string', description: 'File path (relative to /workspace/agent/ or absolute)' },
         text: { type: 'string', description: 'Optional accompanying message' },
         filename: { type: 'string', description: 'Display name (default: basename of path)' },
+        replyTo: {
+          type: 'integer',
+          description:
+            'Optional: the numeric id of the specific inbound message (the "id" shown on a <message id="N">) you are responding to. Pass this when you have more than one pending request this turn, so the file routes back to the right sender instead of defaulting to the first one.',
+        },
       },
       required: ['to', 'path'],
     },
@@ -144,7 +171,7 @@ export const sendFile: McpToolDefinition = {
 
     writeMessageOut({
       id,
-      in_reply_to: getCurrentInReplyTo(),
+      in_reply_to: resolveInReplyTo(args.replyTo),
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,

@@ -147,6 +147,28 @@ export function markFailed(id: string): void {
     .run(id, new Date().toISOString());
 }
 
+/**
+ * Look up an inbound message's internal id by its seq (host-assigned, even
+ * numbers — disjoint from the container's odd outbound seq space).
+ *
+ * Used to resolve which specific inbound message a `send_message`/`send_file`
+ * call is replying to, so agent-to-agent routing (`resolveTargetSession` in
+ * src/modules/agent-to-agent/agent-route.ts) can pick the correct originating
+ * session even when multiple inbound messages from different peer sessions
+ * land in the same processing batch. Without this, in_reply_to falls back to
+ * the batch-wide stamp (see extractRouting in formatter.ts), which only ever
+ * reflects the first message in the batch.
+ */
+export function getInboundIdBySeq(seq: number): string | null {
+  const inbound = openInboundDb();
+  try {
+    const row = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(seq) as { id: string } | undefined;
+    return row?.id ?? null;
+  } finally {
+    inbound.close();
+  }
+}
+
 /** Get a message by ID (read from inbound.db). */
 export function getMessageIn(id: string): MessageInRow | undefined {
   const inbound = openInboundDb();

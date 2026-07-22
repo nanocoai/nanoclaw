@@ -74,3 +74,31 @@ describe('send_message MCP tool — in_reply_to plumbing', () => {
     expect(out[0].in_reply_to).toBeNull();
   });
 });
+
+describe('send_message MCP tool — explicit replyTo overrides the batch stamp', () => {
+  it('resolves replyTo to the referenced inbound message id, ignoring the batch stamp', async () => {
+    publishInReplyTo('inbound-msg-1'); // e.g. the first message in a two-message batch
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, seq, kind, timestamp, platform_id, channel_type, content)
+         VALUES ('inbound-msg-2', 42, 'chat', '2026-07-22T09:55:28.000Z', 'ag-peer', 'agent', '{}')`,
+      )
+      .run();
+
+    await sendMessage.handler({ to: 'peer', text: 'hello', replyTo: 42 });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].in_reply_to).toBe('inbound-msg-2');
+  });
+
+  it('falls back to the batch stamp when replyTo does not resolve to any inbound row', async () => {
+    publishInReplyTo('inbound-msg-1');
+
+    await sendMessage.handler({ to: 'peer', text: 'hello', replyTo: 9999 });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].in_reply_to).toBe('inbound-msg-1');
+  });
+});
