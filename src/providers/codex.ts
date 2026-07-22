@@ -37,7 +37,7 @@ registerProviderContainerConfig('codex', (ctx) => {
   }
 
   const env: Record<string, string> = {};
-  for (const key of ['OPENAI_API_KEY', 'CODEX_MODEL', 'OPENAI_BASE_URL'] as const) {
+  for (const key of ['OPENAI_API_KEY', 'CODEX_MODEL', 'OPENAI_BASE_URL', 'CODEX_TURN_TIMEOUT_MS'] as const) {
     const value = ctx.hostEnv[key];
     if (value) env[key] = value;
   }
