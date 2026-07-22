@@ -1,5 +1,7 @@
 [
   { "name": "vercel", "version": "52.2.1" },
   { "name": "agent-browser", "version": "0.27.1", "onlyBuilt": true },
-  { "name": "@anthropic-ai/claude-code", "version": "2.1.197", "onlyBuilt": true }
+  { "name": "@anthropic-ai/claude-code", "version": "2.1.197", "onlyBuilt": true },
+  { "name": "@gongrzhe/server-gmail-autoauth-mcp", "version": "1.1.11" },
+  { "name": "zod-to-json-schema", "version": "3.22.5" }
 ]
