@@ -54,7 +54,10 @@ const TURN_TIMEOUT_MS = Number(process.env.CODEX_TURN_TIMEOUT_MS) || 120_000;
  * because the app-server has no memory of it (thread transcript was
  * deleted, server was wiped, ID is from a different codex version).
  */
-const STALE_THREAD_RE = /thread\s+not\s+found|unknown\s+thread|thread[_\s]id|no such thread/i;
+// "Turn stalled" (idle-watchdog trip) counts as session-poison: observed
+// live 2026-07-22 on a ~370k-token thread that wedged on every resume —
+// only a fresh thread recovers, so the continuation must be cleared.
+const STALE_THREAD_RE = /thread\s+not\s+found|unknown\s+thread|thread[_\s]id|no such thread|turn\s+stalled/i;
 
 // ── System-prompt assembly ──────────────────────────────────────────────────
 // Codex's app-server doesn't read CLAUDE.md/AGENT.md from cwd the way Claude

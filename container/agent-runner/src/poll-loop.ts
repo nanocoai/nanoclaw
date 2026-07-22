@@ -565,6 +565,17 @@ async function processQuery(
         // segment on the fallback provider (when one is configured).
         query.abort();
         throw new QuotaExhaustedError(event.message, lastPrompt);
+      } else if (event.type === 'error' && !event.retryable) {
+        // Non-retryable, non-quota provider failure — observed live as a
+        // wedged codex thread ("Turn stalled: no app-server events"): the
+        // stream survives the error and later yields an empty result, so
+        // the user's message was silently swallowed and the poisoned
+        // thread resumed (and re-stalled) on every subsequent turn. Abort
+        // and rethrow instead: the batch stays 'processing' (host sweep
+        // re-pends it) and runPollLoop clears the continuation via
+        // isSessionInvalid, so the retry starts on a fresh thread.
+        query.abort();
+        throw new Error(event.message);
       } else if (event.type === 'quota_status') {
         // Informational plan-usage update. Warn the user ONCE per window when
         // they cross the threshold, before the quota actually runs out.
