@@ -18,6 +18,7 @@ import {
 } from './db/sessions.js';
 import { appendRunLog } from './modules/scheduling/run-log.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { getContainerConfig } from './db/container-configs.js';
 import { getDb, hasTable } from './db/connection.js';
 import { getMessagingGroup, getMessagingGroupByPlatform } from './db/messaging-groups.js';
 import {
@@ -69,6 +70,8 @@ export interface ChannelDeliveryAdapter {
     /** Delivering adapter instance (defaults to channelType downstream).
      *  Host-internal only — containers never see instance. */
     instance?: string,
+    /** Display name of the source agent group — see OutboundMessage.senderName. */
+    senderName?: string,
   ): Promise<string | undefined>;
   setTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
 }
@@ -394,6 +397,14 @@ async function deliverMessage(
       ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
       : undefined;
 
+  // Per-source-agent display name for shared-number adapters (e.g. WhatsApp
+  // with ASSISTANT_HAS_OWN_NUMBER=false), which otherwise prefix every
+  // outgoing message with one global assistant name regardless of which
+  // agent group actually produced it. assistant_name (explicit override)
+  // wins; agent_groups.name is the natural fallback since every group has one.
+  const senderName = getContainerConfig(session.agent_group_id)?.assistant_name || undefined;
+  const agentGroupName = senderName || getAgentGroup(session.agent_group_id)?.name;
+
   const platformMsgId = await deliveryAdapter.deliver(
     msg.channel_type,
     msg.platform_id,
@@ -402,6 +413,7 @@ async function deliverMessage(
     msg.content,
     files,
     deliverInstance,
+    agentGroupName,
   );
   log.info('Message delivered', {
     id: msg.id,

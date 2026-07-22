@@ -102,6 +102,14 @@ export interface OutboundMessage {
   kind: string;
   content: unknown; // parsed JSON from messages_out
   files?: OutboundFile[]; // file attachments from the session outbox
+  /**
+   * Display name of the agent group that produced this message (resolved by
+   * delivery.ts from container_configs.assistant_name / agent_groups.name).
+   * Shared-number adapters (e.g. WhatsApp with ASSISTANT_HAS_OWN_NUMBER=false)
+   * use this to prefix outgoing text per-source-agent instead of one global
+   * name, so multiple agent groups sharing one number are distinguishable.
+   */
+  senderName?: string;
 }
 
 /** Discovered conversation info (from syncConversations). */

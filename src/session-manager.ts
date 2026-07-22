@@ -325,7 +325,56 @@ function extractAttachmentFiles(
 
   let changed = false;
   for (const att of attachments) {
-    if (typeof att.data !== 'string') continue;
+    if (typeof att.data !== 'string') {
+      // Some channel adapters (e.g. WhatsApp) download attachments straight
+      // to disk instead of inlining base64 — they set `localPath` relative
+      // to DATA_DIR (e.g. "attachments/foo.xlsx") rather than `data`. That
+      // shared staging dir isn't mounted into any container, so without this
+      // branch the agent is told a path that doesn't exist on its side
+      // (#kannama-file-upload). Copy the file into this session's own inbox,
+      // same as the base64 path below, so every engaging session gets its
+      // own reachable copy.
+      if (typeof att.localPath !== 'string' || !att.localPath.startsWith('attachments/')) continue;
+
+      const rawSrcName = path.basename(att.localPath);
+      if (!isSafeAttachmentName(rawSrcName)) {
+        log.warn('Refused unsafe shared-attachment source name', { messageId, rawSrcName });
+        continue;
+      }
+      const srcPath = path.join(DATA_DIR, 'attachments', rawSrcName);
+      if (!fs.existsSync(srcPath)) {
+        log.warn('Shared attachment source file missing, skipping copy', { messageId, srcPath });
+        continue;
+      }
+
+      if (!inboxResolved) {
+        inboxDir = ensureContainedInboxDir(inboxRoot, messageId, { messageId });
+        inboxResolved = true;
+      }
+      if (!inboxDir) break;
+
+      const destPath = path.join(inboxDir, rawSrcName);
+      try {
+        // COPYFILE_EXCL mirrors the `wx` flag below: refuses to follow a
+        // pre-existing symlink or overwrite any existing file.
+        fs.copyFileSync(srcPath, destPath, fs.constants.COPYFILE_EXCL);
+      } catch (err: unknown) {
+        const e = err as NodeJS.ErrnoException;
+        if (e.code === 'EEXIST') {
+          log.warn('Inbox attachment target already exists, refusing to overwrite', {
+            messageId,
+            filename: rawSrcName,
+          });
+          continue;
+        }
+        throw err;
+      }
+
+      att.localPath = `inbox/${messageId}/${rawSrcName}`;
+      changed = true;
+      log.debug('Copied shared attachment into session inbox', { messageId, filename: rawSrcName });
+      continue;
+    }
 
     const rawName = deriveAttachmentName(att);
     const filename = isSafeAttachmentName(rawName) ? rawName : `attachment-${Date.now()}`;

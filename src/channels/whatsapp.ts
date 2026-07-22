@@ -1033,7 +1033,7 @@ registerChannelAdapter('whatsapp', {
 
         if (text) {
           const { text: formatted, mentions } = formatWhatsApp(text);
-          const prefixed = WHATSAPP_SHARED ? `${ASSISTANT_NAME}: ${formatted}` : formatted;
+          const prefixed = WHATSAPP_SHARED ? `${message.senderName || ASSISTANT_NAME}: ${formatted}` : formatted;
           return sendRawMessage(platformId, prefixed, mentions);
         }
       },
