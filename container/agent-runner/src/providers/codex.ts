@@ -15,6 +15,7 @@
  */
 import fs from 'fs';
 
+import { setThreadTokens } from '../db/session-state.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import {
@@ -194,6 +195,14 @@ export class CodexProvider implements AgentProvider {
               cumulativeInputTokens = tokens;
             },
           );
+
+          // Persist the thread's size so the poll-loop can rotate to a
+          // fresh thread BEFORE the rollout grows into resume-wedge
+          // territory (native compaction does not shrink the on-disk
+          // rollout — a ~370k-token thread stalled on every resume).
+          if (cumulativeInputTokens > 0) {
+            setThreadTokens('codex', cumulativeInputTokens);
+          }
 
           // Trigger native compaction between turns if we've crossed the
           // threshold. Codex's compaction is deterministic enough to do

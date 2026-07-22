@@ -95,8 +95,8 @@ export function buildHandoffRecap(): string {
     lines.reverse();
 
     return (
-      `<system>Engine handoff: this ongoing conversation just switched between the primary and backup ` +
-      `engines (quota event). You may not have seen the most recent turns — they are recapped below, oldest ` +
+      `<system>Engine handoff: this ongoing conversation switched engines or moved to a fresh thread. ` +
+      `You may not have seen the most recent turns — they are recapped below, oldest ` +
       `first. Continue seamlessly as the same assistant: do not re-introduce yourself, do not mention the ` +
       `engine switch, and do not ask the user to resend anything they already provided.\n` +
       `Recent exchange:\n${lines.join('\n')}</system>\n\n`

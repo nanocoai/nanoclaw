@@ -123,6 +123,49 @@ export function setQuotaWarnedWindow(windowKey: string): void {
   setValue(QUOTA_WARNED_KEY, windowKey);
 }
 
+// ── Thread size tracking + last-turn provider ───────────────────────────────
+// Providers whose native compaction does not shrink the on-disk rollout
+// (codex: a thread reached ~370k tokens and wedged on every resume,
+// 2026-07-22) persist their last-known cumulative input-token count here.
+// The poll-loop rotates to a fresh thread before the count reaches
+// wedge territory. `last_turn_provider` records which engine answered the
+// most recent turn, so a manual or quota-driven engine switch (and a
+// post-rotation fresh thread) gets a conversation recap prepended.
+
+function threadTokensKey(providerName: string): string {
+  return `thread_tokens:${providerName.toLowerCase()}`;
+}
+
+/** Last persisted cumulative input-token count for the provider's thread. */
+export function getThreadTokens(providerName: string): number {
+  const v = getValue(threadTokensKey(providerName));
+  const n = v === undefined ? 0 : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+export function setThreadTokens(providerName: string, tokens: number): void {
+  setValue(threadTokensKey(providerName), String(Math.round(tokens)));
+}
+
+export function clearThreadTokens(providerName: string): void {
+  deleteValue(threadTokensKey(providerName));
+}
+
+const LAST_TURN_PROVIDER_KEY = 'last_turn_provider';
+
+/** Provider that answered the most recent successful turn, if known. */
+export function getLastTurnProvider(): string | undefined {
+  return getValue(LAST_TURN_PROVIDER_KEY);
+}
+
+export function setLastTurnProvider(providerName: string): void {
+  setValue(LAST_TURN_PROVIDER_KEY, providerName.toLowerCase());
+}
+
+export function clearLastTurnProvider(): void {
+  deleteValue(LAST_TURN_PROVIDER_KEY);
+}
+
 export function getContinuation(providerName: string): string | undefined {
   return getValue(continuationKey(providerName));
 }

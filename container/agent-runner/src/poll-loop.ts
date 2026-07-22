@@ -10,8 +10,13 @@ import { writeMessageOut, getMaxOutSeq, countChatSendsSince } from './db/message
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
   clearContinuation,
+  clearLastTurnProvider,
+  clearThreadTokens,
   getContinuation,
+  getLastTurnProvider,
   getQuotaWarnedWindow,
+  getThreadTokens,
+  setLastTurnProvider,
   isFallbackFailureNotified,
   isQuotaDegraded,
   migrateLegacyContinuation,
@@ -155,6 +160,12 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // provider thread — a second failure surfaces as an error instead of
   // looping forever.
   const staleRetriedIds = new Set<string>();
+  // Rotate to a fresh provider thread before its rollout grows into
+  // resume-wedge territory (codex reached ~370k tokens and stalled on every
+  // resume, 2026-07-22 — its native compaction doesn't shrink the rollout).
+  // Providers that don't persist thread tokens (claude) report 0 and never
+  // rotate. The fresh thread gets a conversation recap via the handoff path.
+  const threadRotateTokens = Number(process.env.PROVIDER_THREAD_ROTATE_TOKENS) || 150_000;
   while (true) {
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
     const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
@@ -200,6 +211,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         log('Clearing session (resetting continuation)');
         continuation = undefined;
         clearContinuation(config.providerName);
+        clearThreadTokens(config.providerName);
+        // An explicit /clear means "forget the conversation" — suppress the
+        // fresh-thread recap that would otherwise resurrect it.
+        clearLastTurnProvider();
         writeMessageOut({
           id: generateId(),
           kind: 'chat',
@@ -252,13 +267,32 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // provider natively handles slash commands), others get XML.
     let prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
 
-    // Reverse handoff: while quota-degraded, recent turns were answered by
-    // the fallback engine — the primary's own transcript never saw them. If
-    // this attempt succeeds (quota recovered), the recap lets the primary
-    // continue the conversation instead of resuming from a hole; if quota is
-    // still out, the prompt flows to the fallback with the recap attached,
-    // which is equally useful there (the recap wording is direction-neutral).
-    if (isQuotaDegraded()) {
+    // Proactive thread rotation: drop an oversized continuation BEFORE it
+    // wedges. The recap below carries the conversation into the fresh thread.
+    const threadTokens = getThreadTokens(config.providerName);
+    if (continuation && threadTokens >= threadRotateTokens) {
+      log(
+        `Thread at ${threadTokens} tokens (>= ${threadRotateTokens}) — rotating to a fresh thread with recap`,
+      );
+      continuation = undefined;
+      clearContinuation(config.providerName);
+      clearThreadTokens(config.providerName);
+    }
+
+    // Conversation recap (handoff): prepend a recent-exchange recap when the
+    // engine answering this turn may not have seen the latest turns —
+    //   • quota-degraded: recent turns were answered by the fallback engine;
+    //   • engine switch (manual or config-driven): the last turn was answered
+    //     by a different provider whose thread this engine never saw;
+    //   • fresh thread mid-conversation (post-rotation or stale-clear): the
+    //     new thread starts empty even though the conversation didn't.
+    // First-ever runs have no lastTurnProvider and /clear resets it, so
+    // neither gets a recap.
+    const lastTurnProvider = getLastTurnProvider();
+    const needsRecap =
+      isQuotaDegraded() ||
+      (lastTurnProvider !== undefined && (lastTurnProvider !== config.providerName.toLowerCase() || !continuation));
+    if (needsRecap) {
       prompt = buildHandoffRecap() + prompt;
     }
 
@@ -290,6 +324,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
       }
+      // This engine answered — a future turn on a different engine (or a
+      // fresh thread) knows to prepend a recap.
+      setLastTurnProvider(config.providerName);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       log(`Query error: ${errMsg}`);
@@ -336,6 +373,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
           // A fallback turn just answered — end any ❌-notice streak so a
           // future failure is announced again.
           setFallbackFailureNotified(false);
+          setLastTurnProvider(config.fallback.providerName);
         } catch (fbErr) {
           const fbMsg = fbErr instanceof Error ? fbErr.message : String(fbErr);
           log(`Fallback turn failed (after fresh-thread retry): ${fbMsg}`);

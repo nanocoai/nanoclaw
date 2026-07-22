@@ -3,9 +3,15 @@ import { beforeEach, describe, expect, test } from 'bun:test';
 import { getOutboundDb, initTestSessionDb } from './connection.js';
 import {
   clearContinuation,
+  clearLastTurnProvider,
+  clearThreadTokens,
   getContinuation,
+  getLastTurnProvider,
+  getThreadTokens,
   migrateLegacyContinuation,
   setContinuation,
+  setLastTurnProvider,
+  setThreadTokens,
 } from './session-state.js';
 
 beforeEach(() => {
@@ -17,6 +23,27 @@ function seedLegacy(value: string): void {
     .prepare('INSERT INTO session_state (key, value, updated_at) VALUES (?, ?, ?)')
     .run('sdk_session_id', value, new Date().toISOString());
 }
+
+describe('session-state — thread tokens + last-turn provider', () => {
+  test('thread tokens default to 0, round-trip, and clear per provider', () => {
+    expect(getThreadTokens('codex')).toBe(0);
+    setThreadTokens('codex', 154321.7);
+    expect(getThreadTokens('codex')).toBe(154322);
+    expect(getThreadTokens('claude')).toBe(0);
+    clearThreadTokens('codex');
+    expect(getThreadTokens('codex')).toBe(0);
+  });
+
+  test('last-turn provider round-trip, lowercased, clearable', () => {
+    expect(getLastTurnProvider()).toBeUndefined();
+    setLastTurnProvider('Codex');
+    expect(getLastTurnProvider()).toBe('codex');
+    setLastTurnProvider('claude');
+    expect(getLastTurnProvider()).toBe('claude');
+    clearLastTurnProvider();
+    expect(getLastTurnProvider()).toBeUndefined();
+  });
+});
 
 describe('session-state — per-provider continuations', () => {
   test('set/get round-trip, case-insensitive provider key', () => {
