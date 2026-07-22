@@ -204,7 +204,9 @@ registerChannelAdapter('telegram', {
       botToken: token,
       mode: 'polling',
       logger: {
-        child: function(this: unknown, prefix: string) { return this as never; },
+        child: function (this: unknown, prefix: string) {
+          return this as never;
+        },
         debug: (msg: string, data?: unknown) => log.debug(msg, data as Record<string, unknown>),
         info: (msg: string, data?: unknown) => log.info(msg, data as Record<string, unknown>),
         error: (msg: string, data?: unknown) => log.error(msg, data as Record<string, unknown>),
