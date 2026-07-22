@@ -16,6 +16,7 @@
 import fs from 'fs';
 
 import { setThreadTokens } from '../db/session-state.js';
+import { buildHandoffRecap } from '../handoff.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import {
@@ -38,6 +39,23 @@ function log(msg: string): void {
 
 /** Cumulative input tokens before triggering native compaction. */
 const COMPACT_THRESHOLD = 40_000;
+
+/**
+ * Hard ceiling on a single thread's cumulative input tokens, checked after
+ * every turn regardless of whether compaction ran. Live incident
+ * 2026-07-22: native compaction ("thread/compact/start") reported success
+ * while a thread kept growing past 357k tokens on subsequent turns and
+ * eventually wedged on resume — its on-disk rollout does not actually
+ * shrink. Compaction is kept as a cheap first attempt (may reduce cost even
+ * if it doesn't cap growth), but this ceiling is the real safety net: once
+ * crossed, the NEXT turn abandons the thread and starts a brand-new one
+ * with a conversation recap prepended, instead of trusting compaction to
+ * have worked. This happens mid-stream — the poll-loop keeps one query()
+ * open across many turns (see the query() doc comment above), so a rotation
+ * decision made only at query()-open time (outer poll-loop) would never
+ * fire for a long-lived container.
+ */
+const THREAD_ROTATE_TOKENS = Number(process.env.PROVIDER_THREAD_ROTATE_TOKENS) || 150_000;
 
 /**
  * IDLE ceiling for a single turn: trips only after this long with NO
@@ -165,6 +183,11 @@ export class CodexProvider implements AgentProvider {
 
         threadId = await startOrResumeCodexThread(server, threadId, threadParams);
 
+        // Set when a turn crosses THREAD_ROTATE_TOKENS — the NEXT turn
+        // abandons the current thread for a fresh one before picking up its
+        // pending text (see THREAD_ROTATE_TOKENS doc comment).
+        let needsFreshThread = false;
+
         while (!aborted) {
           while (pending.length === 0 && !ended && !aborted) {
             await new Promise<void>((resolve) => {
@@ -175,7 +198,20 @@ export class CodexProvider implements AgentProvider {
           if (aborted) return;
           if (pending.length === 0 && ended) return;
 
-          const text = pending.shift()!;
+          let text = pending.shift()!;
+
+          if (needsFreshThread) {
+            log(`Rotating to a fresh thread (was ${cumulativeInputTokens} tokens) — prepending recap`);
+            text = buildHandoffRecap() + text;
+            threadId = await startOrResumeCodexThread(server, undefined, threadParams);
+            // Reset the init-yielded gate so runOneTurn yields a fresh
+            // `init` event for this new thread id — otherwise the poll-loop
+            // never learns the continuation changed and would keep trying
+            // to resume the old (rotated-away) thread on the next spawn.
+            initYielded = false;
+            cumulativeInputTokens = 0;
+            needsFreshThread = false;
+          }
 
           // One turn = one channel of streaming events. Each notification
           // from the app-server yields an `activity` first (so the
@@ -196,17 +232,16 @@ export class CodexProvider implements AgentProvider {
             },
           );
 
-          // Persist the thread's size so the poll-loop can rotate to a
-          // fresh thread BEFORE the rollout grows into resume-wedge
-          // territory (native compaction does not shrink the on-disk
-          // rollout — a ~370k-token thread stalled on every resume).
+          // Persist the thread's size (informational — the outer poll-loop
+          // also consults this at query()-open time for a fresh container).
           if (cumulativeInputTokens > 0) {
             setThreadTokens('codex', cumulativeInputTokens);
           }
 
           // Trigger native compaction between turns if we've crossed the
           // threshold. Codex's compaction is deterministic enough to do
-          // inline — if it fails, we log and carry on uncompacted.
+          // inline — if it fails, we log and carry on uncompacted. This is
+          // a best-effort cost reduction, NOT the rotation safety net below.
           if (cumulativeInputTokens >= COMPACT_THRESHOLD && threadId) {
             log(`Compacting thread (${cumulativeInputTokens} tokens)`);
             const compactResp = await sendCodexRequest(server, 'thread/compact/start', { threadId });
@@ -215,6 +250,12 @@ export class CodexProvider implements AgentProvider {
             } else {
               log('Native compaction completed');
             }
+          }
+
+          // Hard ceiling, independent of whether compaction ran or claimed
+          // success — see THREAD_ROTATE_TOKENS doc comment.
+          if (cumulativeInputTokens >= THREAD_ROTATE_TOKENS) {
+            needsFreshThread = true;
           }
         }
       } finally {
