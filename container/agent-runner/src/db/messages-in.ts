@@ -120,6 +120,21 @@ export function markCompleted(ids: string[]): void {
   })();
 }
 
+/**
+ * Un-acknowledge messages so the next getPendingMessages() re-delivers them.
+ * Used to retry a batch whose turn died on a poisoned (stale/wedged)
+ * provider thread: the rows are still 'pending' in inbound.db (the host only
+ * syncs acks forward), so deleting the ack makes them visible again.
+ */
+export function requeueMessages(ids: string[]): void {
+  if (ids.length === 0) return;
+  const db = getOutboundDb();
+  const stmt = db.prepare('DELETE FROM processing_ack WHERE message_id = ?');
+  db.transaction(() => {
+    for (const id of ids) stmt.run(id);
+  })();
+}
+
 /** Mark a single message as failed — writes to processing_ack in outbound.db. */
 export function markFailed(id: string): void {
   getOutboundDb()

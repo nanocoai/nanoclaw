@@ -1,5 +1,11 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
-import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
+import {
+  getPendingMessages,
+  markProcessing,
+  markCompleted,
+  requeueMessages,
+  type MessageInRow,
+} from './db/messages-in.js';
 import { writeMessageOut, getMaxOutSeq, countChatSendsSince } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
@@ -145,6 +151,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
   let pollCount = 0;
   let isFirstPoll = true;
+  // Messages already granted one fresh-thread retry after a stale/wedged
+  // provider thread — a second failure surfaces as an error instead of
+  // looping forever.
+  const staleRetriedIds = new Set<string>();
   while (true) {
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
     const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
@@ -349,10 +359,28 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         // Stale/corrupt continuation recovery: ask the provider whether
         // this error means the stored continuation is unusable, and clear
         // it so the next attempt starts fresh.
-        if (continuation && config.provider.isSessionInvalid(err)) {
-          log(`Stale session detected (${continuation}) — clearing for next retry`);
+        let staleRetry = false;
+        // The local `continuation` can lag the persisted one: processQuery
+        // stores the id at `init` time, but a turn that errors never returns
+        // it to this scope. Consult the persisted value too, or a failed
+        // retry would leave its own poisoned id behind.
+        const storedContinuation = continuation ?? getContinuation(config.providerName);
+        if (storedContinuation && config.provider.isSessionInvalid(err)) {
+          log(`Stale session detected (${storedContinuation}) — clearing for next retry`);
           continuation = undefined;
           clearContinuation(config.providerName);
+          // Retry the SAME batch on the fresh thread instead of dropping it
+          // with a raw error dump (observed live 2026-07-22: a wedged codex
+          // thread stalled, the user's message was completed-with-error and
+          // lost). One retry per message — a batch that also fails on a
+          // fresh thread falls through to the error notice below.
+          const retriable = processingIds.filter((id) => !staleRetriedIds.has(id));
+          if (retriable.length > 0) {
+            for (const id of retriable) staleRetriedIds.add(id);
+            requeueMessages(processingIds);
+            staleRetry = true;
+            log(`Requeued ${processingIds.length} message(s) for a fresh-thread retry`);
+          }
         }
 
         // Genuine quota exhaustion but no fallback provider configured
@@ -368,7 +396,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
           } else {
             log('Primary still quota-exhausted, no fallback — notice suppressed');
           }
-        } else {
+        } else if (!staleRetry) {
           // Write error response so the user knows something went wrong. A
           // transient throttle (429/overload the SDK exhausted its retries on)
           // gets a friendly "try again" notice rather than a raw error dump —
@@ -382,6 +410,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
             thread_id: routing.threadId,
             content: JSON.stringify({ text: userText }),
           });
+        }
+        if (staleRetry) {
+          // Batch was requeued — leave it un-acked for the retry.
+          clearCurrentInReplyTo();
+          continue;
         }
       }
     } finally {
