@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+#
+# Waybar `image` module source for a NanoClaw install.
+# Renders the NanoClaw logo (teal when running, greyed when stopped).
+#
+# Usage: nanoclaw-waybar-image <systemd-user-unit>
+#
+# Waybar image modules read exactly two lines from exec:
+#   line 1 = image path
+#   line 2 = tooltip text  (a THIRD line is ignored, so keep it all on line 2)
+#
+# The icon PNGs (nanoclaw-running.png / nanoclaw-stopped.png) live alongside
+# this script. Generic by design — the unit name is the only input; the
+# friendly label comes from the unit's WorkingDirectory basename.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+run_png="$here/nanoclaw-running.png"
+stop_png="$here/nanoclaw-stopped.png"
+
+unit="${1:-}"
+unit="${unit%.service}"
+
+if [[ -z "$unit" ]]; then
+  printf '%s\nNanoClaw: no systemd unit specified\n' "$stop_png"
+  exit 0
+fi
+
+workdir="$(systemctl --user show "$unit.service" -p WorkingDirectory --value 2>/dev/null || true)"
+label="$unit"
+[[ -n "$workdir" && "$workdir" != "/" ]] && label="$(basename "$workdir")"
+
+state="$(systemctl --user is-active "$unit.service" 2>/dev/null || true)"
+
+if [[ "$state" == "active" ]]; then
+  up=""
+  since="$(systemctl --user show "$unit.service" -p ActiveEnterTimestamp --value 2>/dev/null || true)"
+  if [[ -n "$since" ]]; then
+    start_epoch="$(date -d "$since" +%s 2>/dev/null || echo 0)"
+    if [[ "$start_epoch" -gt 0 ]]; then
+      secs=$(( "$(date +%s)" - start_epoch ))
+      d=$(( secs / 86400 )); h=$(( (secs % 86400) / 3600 )); m=$(( (secs % 3600) / 60 ))
+      if   [[ $d -gt 0 ]]; then up="${d}d ${h}h"
+      elif [[ $h -gt 0 ]]; then up="${h}h ${m}m"
+      else up="${m}m"; fi
+    fi
+  fi
+  tip="$label: running"
+  [[ -n "$up" ]] && tip="$tip — up $up"
+  printf '%s\n%s   ·   Left-click: stop · Right-click: restart · Middle-click: logs\n' "$run_png" "$tip"
+else
+  printf '%s\n%s: stopped   ·   Left-click: start · Right-click: restart · Middle-click: logs\n' "$stop_png" "$label"
+fi

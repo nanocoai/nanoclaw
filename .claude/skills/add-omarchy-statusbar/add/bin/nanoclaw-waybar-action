@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#
+# Waybar click handler for a NanoClaw install.
+#
+# Usage: nanoclaw-waybar-action <toggle|restart|logs> <systemd-user-unit>
+#   toggle  : start if stopped, stop if running   (Waybar on-click)
+#   restart : systemctl --user restart            (Waybar on-click-right)
+#   logs    : tail logs in a floating terminal     (Waybar on-click-middle)
+#
+# After a state change it signals Waybar (RTMIN+11) so the icon updates
+# instantly instead of waiting for the poll interval, and fires a low-urgency
+# desktop notification.
+set -euo pipefail
+
+verb="${1:-}"
+unit="${2:-}"
+unit="${unit%.service}"
+[[ -z "$verb" || -z "$unit" ]] && exit 0
+
+refresh() { pkill -RTMIN+11 waybar 2>/dev/null || true; }
+notify()  { command -v notify-send >/dev/null 2>&1 && notify-send -u low "NanoClaw" "$1" || true; }
+
+label="$unit"
+workdir="$(systemctl --user show "$unit.service" -p WorkingDirectory --value 2>/dev/null || true)"
+[[ -n "$workdir" && "$workdir" != "/" ]] && label="$(basename "$workdir")"
+
+case "$verb" in
+  toggle)
+    if systemctl --user is-active --quiet "$unit.service"; then
+      systemctl --user stop "$unit.service" && notify "$label stopped"
+    else
+      systemctl --user start "$unit.service" && notify "$label started"
+    fi
+    refresh
+    ;;
+  restart)
+    systemctl --user restart "$unit.service" && notify "$label restarted"
+    refresh
+    ;;
+  logs)
+    # Prefer the on-disk log (StandardOutput=append:<root>/logs/nanoclaw.log);
+    # fall back to the journal.
+    if [[ -n "$workdir" && -f "$workdir/logs/nanoclaw.log" ]]; then
+      log_cmd="tail -n 200 -f '$workdir/logs/nanoclaw.log'"
+    else
+      log_cmd="journalctl --user -u '$unit.service' -n 200 -f"
+    fi
+    if command -v omarchy-launch-floating-terminal-with-presentation >/dev/null 2>&1; then
+      omarchy-launch-floating-terminal-with-presentation "$log_cmd"
+    else
+      term="${TERMINAL:-$(command -v xdg-terminal-exec || command -v alacritty || command -v foot || command -v kitty || echo xterm)}"
+      setsid "$term" -e bash -c "$log_cmd" >/dev/null 2>&1 &
+    fi
+    ;;
+  *)
+    exit 1
+    ;;
+esac
