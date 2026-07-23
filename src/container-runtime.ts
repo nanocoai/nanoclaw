@@ -33,6 +33,46 @@ export function stopContainer(name: string): void {
   execSync(`${CONTAINER_RUNTIME_BIN} stop -t 1 ${name}`, { stdio: 'pipe' });
 }
 
+/**
+ * Force-remove a container by name (SIGKILL + rm). Stronger than
+ * stopContainer's `docker stop -t 1` — reaps containers dockerd won't stop
+ * gracefully (upstream #2659). Idempotent + best-effort.
+ */
+export function forceRemoveContainer(name: string): void {
+  try {
+    execSync(`${CONTAINER_RUNTIME_BIN} rm -f ${name}`, { stdio: 'pipe' });
+  } catch {
+    /* already gone */
+  }
+}
+
+/**
+ * Reap untracked NanoClaw containers for ONE agent-group folder. Lists running
+ * containers whose name matches `nanoclaw-v2-<folder>-*` and force-removes any
+ * NOT in `tracked` (the live activeContainers name set). Kills perceived-exit
+ * orphans (host lost the child-process handle but dockerd kept the `--rm`
+ * container alive) without touching legitimately-tracked containers.
+ * NOTE: docker's name filter is a substring match — the `tracked` set (exact
+ * names) is what protects live containers, so folder-name prefixing is safe.
+ */
+export function reapUntrackedForFolder(folder: string, tracked: Set<string>): string[] {
+  try {
+    const out = execSync(`${CONTAINER_RUNTIME_BIN} ps --filter name=nanoclaw-v2-${folder}- --format '{{.Names}}'`, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+    });
+    const reaped: string[] = [];
+    for (const name of out.trim().split('\n').filter(Boolean)) {
+      if (tracked.has(name)) continue;
+      forceRemoveContainer(name);
+      reaped.push(name);
+    }
+    return reaped;
+  } catch {
+    return [];
+  }
+}
+
 /** Ensure the container runtime is running, starting it if needed. */
 export function ensureContainerRuntimeRunning(): void {
   try {

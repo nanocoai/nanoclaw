@@ -26,10 +26,17 @@ import {
 import { materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
-import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import {
+  CONTAINER_RUNTIME_BIN,
+  forceRemoveContainer,
+  hostGatewayArgs,
+  readonlyMountArgs,
+  reapUntrackedForFolder,
+  stopContainer,
+} from './container-runtime.js';
 import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from './egress-lockdown.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
-import { getAgentGroup } from './db/agent-groups.js';
+import { getAgentGroup, getAllAgentGroups } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
@@ -74,6 +81,22 @@ export function getActiveContainerCount(): number {
 
 export function isContainerRunning(sessionId: string): boolean {
   return activeContainers.has(sessionId);
+}
+
+/** Reap any live NanoClaw container that this host no longer tracks. */
+export function reapAllUntracked(): string[] {
+  try {
+    const trackedNames = new Set(Array.from(activeContainers.values()).map((entry) => entry.containerName));
+    const folders = new Set(getAllAgentGroups().map((group) => group.folder));
+    const reaped = Array.from(folders).flatMap((folder) => reapUntrackedForFolder(folder, trackedNames));
+    if (reaped.length > 0) {
+      log.warn('Reaped untracked orphan container(s) during host sweep', { reaped });
+    }
+    return reaped;
+  } catch (err) {
+    log.warn('Failed to reconcile untracked containers during host sweep', { err });
+    return [];
+  }
 }
 
 /**
@@ -167,6 +190,19 @@ async function spawnContainer(session: Session): Promise<void> {
   // immediate kill before the new container touches the file itself.
   fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
 
+  // Pre-spawn reconcile: force-remove any orphan container for this group
+  // folder the host is no longer tracking (perceived-exit zombie still polling
+  // the session DB). Guarantees ≤1 live container per folder before we add one.
+  // Upstream #2466 (fix option 1) / #2659.
+  const trackedNames = new Set(Array.from(activeContainers.values()).map((entry) => entry.containerName));
+  const reaped = reapUntrackedForFolder(agentGroup.folder, trackedNames);
+  if (reaped.length > 0) {
+    log.warn('Reaped untracked orphan container(s) before spawn', {
+      folder: agentGroup.folder,
+      reaped,
+    });
+  }
+
   const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
   activeContainers.set(session.id, { process: container, containerName });
@@ -195,6 +231,10 @@ async function spawnContainer(session: Session): Promise<void> {
 
   container.on('close', (code) => {
     activeContainers.delete(session.id);
+    // Don't trust process-close == container-dead: a signaled `docker run`
+    // client (code=null) can leave the `--rm` container alive as an orphan
+    // (upstream #2659). Force-remove by name — idempotent no-op if already gone.
+    forceRemoveContainer(containerName);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
     // code null = killed by signal (normal shutdown path), not a boot failure.
@@ -207,6 +247,10 @@ async function spawnContainer(session: Session): Promise<void> {
 
   container.on('error', (err) => {
     activeContainers.delete(session.id);
+    // Don't trust process-close == container-dead: a signaled `docker run`
+    // client (code=null) can leave the `--rm` container alive as an orphan
+    // (upstream #2659). Force-remove by name — idempotent no-op if already gone.
+    forceRemoveContainer(containerName);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
     log.error('Container spawn error', { sessionId: session.id, err });
