@@ -2,7 +2,7 @@
  * Container runtime abstraction for NanoClaw.
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import os from 'os';
 
 import { CONTAINER_INSTALL_LABEL } from './config.js';
@@ -40,7 +40,7 @@ export function stopContainer(name: string): void {
  */
 export function forceRemoveContainer(name: string): void {
   try {
-    execSync(`${CONTAINER_RUNTIME_BIN} rm -f ${name}`, { stdio: 'pipe' });
+    execFileSync(CONTAINER_RUNTIME_BIN, ['rm', '-f', name], { stdio: 'pipe' });
   } catch {
     /* already gone */
   }
@@ -57,10 +57,11 @@ export function forceRemoveContainer(name: string): void {
  */
 export function reapUntrackedForFolder(folder: string, tracked: Set<string>): string[] {
   try {
-    const out = execSync(`${CONTAINER_RUNTIME_BIN} ps --filter name=nanoclaw-v2-${folder}- --format '{{.Names}}'`, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      encoding: 'utf-8',
-    });
+    const out = execFileSync(
+      CONTAINER_RUNTIME_BIN,
+      ['ps', '--filter', `name=nanoclaw-v2-${folder}-`, '--filter', `label=${CONTAINER_INSTALL_LABEL}`, '--format', '{{.Names}}'],
+      { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
+    );
     const reaped: string[] = [];
     for (const name of out.trim().split('\n').filter(Boolean)) {
       if (tracked.has(name)) continue;
