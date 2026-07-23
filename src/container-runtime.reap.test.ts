@@ -29,8 +29,12 @@ describe('reapUntrackedForFolder', () => {
       expect.arrayContaining(['ps', '--filter', 'name=nanoclaw-v2-dm-with-robby-', '--format', '{{.Names}}']),
     );
     // subsequent calls force-remove each untracked container via argument vector
-    expect(execFileSyncMock).toHaveBeenNthCalledWith(2, 'docker', ['rm', '-f', 'nanoclaw-v2-dm-with-robby-100'], { stdio: 'pipe' });
-    expect(execFileSyncMock).toHaveBeenNthCalledWith(3, 'docker', ['rm', '-f', 'nanoclaw-v2-dm-with-robby-200'], { stdio: 'pipe' });
+    expect(execFileSyncMock).toHaveBeenNthCalledWith(2, 'docker', ['rm', '-f', 'nanoclaw-v2-dm-with-robby-100'], {
+      stdio: 'pipe',
+    });
+    expect(execFileSyncMock).toHaveBeenNthCalledWith(3, 'docker', ['rm', '-f', 'nanoclaw-v2-dm-with-robby-200'], {
+      stdio: 'pipe',
+    });
   });
 
   it('leaves tracked containers running and removes only the untracked one', () => {
@@ -40,7 +44,9 @@ describe('reapUntrackedForFolder', () => {
       'nanoclaw-v2-dm-with-robby-200',
     ]);
     expect(execFileSyncMock).toHaveBeenCalledTimes(2);
-    expect(execFileSyncMock).toHaveBeenLastCalledWith('docker', ['rm', '-f', 'nanoclaw-v2-dm-with-robby-200'], { stdio: 'pipe' });
+    expect(execFileSyncMock).toHaveBeenLastCalledWith('docker', ['rm', '-f', 'nanoclaw-v2-dm-with-robby-200'], {
+      stdio: 'pipe',
+    });
   });
 
   it('returns an empty list when docker ps throws', () => {

@@ -59,7 +59,15 @@ export function reapUntrackedForFolder(folder: string, tracked: Set<string>): st
   try {
     const out = execFileSync(
       CONTAINER_RUNTIME_BIN,
-      ['ps', '--filter', `name=nanoclaw-v2-${folder}-`, '--filter', `label=${CONTAINER_INSTALL_LABEL}`, '--format', '{{.Names}}'],
+      [
+        'ps',
+        '--filter',
+        `name=nanoclaw-v2-${folder}-`,
+        '--filter',
+        `label=${CONTAINER_INSTALL_LABEL}`,
+        '--format',
+        '{{.Names}}',
+      ],
       { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
     );
     const reaped: string[] = [];
