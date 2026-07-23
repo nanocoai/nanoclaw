@@ -5,7 +5,9 @@
  * call on message arrival goes stale long before the agent finishes
  * thinking. This module keeps it alive by re-firing `setTyping` on a
  * short interval — but only while the agent is actually WORKING, gated
- * on the heartbeat file's mtime after an initial grace period.
+ * after an initial grace period on either the heartbeat file's mtime
+ * or (for a single long tool call the heartbeat can't see between SDK
+ * events) container_state showing a tool currently in flight.
  *
  * After delivering a user-facing message, the refresh is paused for
  * POST_DELIVERY_PAUSE_MS so the client-side indicator can visually
@@ -19,7 +21,8 @@
  */
 import fs from 'fs';
 
-import { heartbeatPath } from '../../session-manager.js';
+import { getContainerState } from '../../db/session-db.js';
+import { heartbeatPath, openOutboundDb } from '../../session-manager.js';
 
 const TYPING_REFRESH_MS = 4000;
 /**
@@ -97,6 +100,27 @@ function isHeartbeatFresh(agentGroupId: string, sessionId: string): boolean {
   }
 }
 
+/**
+ * A single long-running tool call (slow Bash, a network fetch, an MCP call)
+ * yields no SDK event — and therefore no heartbeat touch — until it
+ * finishes, which can easily exceed HEARTBEAT_FRESH_MS on a task that runs
+ * for minutes. container_state is written directly on PreToolUse /
+ * PostToolUse, so a non-null current_tool proves the agent is working
+ * regardless of how stale the heartbeat looks. Same source host-sweep uses
+ * to avoid false-killing long Bash calls (see host-sweep.ts).
+ */
+function isToolInFlight(agentGroupId: string, sessionId: string): boolean {
+  let db;
+  try {
+    db = openOutboundDb(agentGroupId, sessionId);
+    return getContainerState(db)?.current_tool != null;
+  } catch {
+    return false;
+  } finally {
+    db?.close();
+  }
+}
+
 export function startTypingRefresh(
   sessionId: string,
   agentGroupId: string,
@@ -141,7 +165,11 @@ export function startTypingRefresh(
     if (entry.pausedUntil > Date.now()) return;
 
     const withinGrace = Date.now() - entry.startedAt < TYPING_GRACE_MS;
-    if (withinGrace || isHeartbeatFresh(entry.agentGroupId, sessionId)) {
+    if (
+      withinGrace ||
+      isHeartbeatFresh(entry.agentGroupId, sessionId) ||
+      isToolInFlight(entry.agentGroupId, sessionId)
+    ) {
       triggerTyping(entry.channelType, entry.platformId, entry.threadId, entry.instance).catch(() => {});
       return;
     }

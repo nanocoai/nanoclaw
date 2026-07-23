@@ -492,7 +492,7 @@ If a result produced text but no valid block, the agent-runner pushes a one-time
 
 Message editing is supported as an explicit operation (agent calls an `edit_message` tool), not as a streaming mechanism.
 
-Typing indicators: host sets typing when a container is active for a session, clears when the container exits or a response appears in messages_out.
+Typing indicators: host sets typing when a container is active for a session, clears when the container exits or a response appears in messages_out. The refresh (`src/modules/typing/index.ts`) re-fires `setTyping` every 4s and keeps going past an initial 15s grace window as long as *either* the container's `.heartbeat` file was touched in the last 6s *or* `container_state` shows a tool currently in flight (`current_tool` non-null) — the latter covers a single long tool call (slow Bash, a network fetch) that yields no SDK event, and therefore no heartbeat touch, until it finishes.
 
 ### Message Batching
 

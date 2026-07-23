@@ -7,13 +7,19 @@
  * must forward the adapter instance, or a named instance's typing indicator
  * fires through the wrong bot.
  */
+import fs from 'fs';
+
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+
+const { TEST_DATA_DIR } = vi.hoisted(() => ({ TEST_DATA_DIR: '/tmp/nanoclaw-test-typing' }));
 
 vi.mock('../../config.js', async () => {
   const actual = await vi.importActual('../../config.js');
-  return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-typing' };
+  return { ...actual, DATA_DIR: TEST_DATA_DIR };
 });
 
+import { ensureSchema } from '../../db/session-db.js';
+import { outboundDbPath, openOutboundDbRw } from '../../session-manager.js';
 import { setTypingAdapter, startTypingRefresh, stopTypingRefresh } from './index.js';
 
 type Call = { channelType: string; platformId: string; threadId: string | null; instance?: string };
@@ -119,5 +125,38 @@ describe('startTypingRefresh — instance forwarding', () => {
         instance: 'telegram',
       });
     }
+  });
+});
+
+describe('startTypingRefresh — tool-in-flight fallback', () => {
+  const agentGroupId = 'ag-tool';
+  const sessionId = 'sess-tool';
+
+  afterEach(() => {
+    fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+  });
+
+  it('keeps refreshing past the grace window when container_state shows a tool running, with no heartbeat file at all', async () => {
+    const dbPath = outboundDbPath(agentGroupId, sessionId);
+    fs.mkdirSync(dbPath.slice(0, dbPath.lastIndexOf('/')), { recursive: true });
+    ensureSchema(dbPath, 'outbound');
+    const db = openOutboundDbRw(agentGroupId, sessionId);
+    db.prepare(
+      `INSERT INTO container_state (id, current_tool, tool_declared_timeout_ms, tool_started_at, updated_at)
+       VALUES (1, 'Bash', 600000, ?, ?)`,
+    ).run(new Date().toISOString(), new Date().toISOString());
+    db.close();
+
+    const calls = captureAdapter();
+    startTypingRefresh(sessionId, agentGroupId, 'telegram', 'tg:1', null);
+    await vi.advanceTimersByTimeAsync(0);
+    calls.length = 0;
+
+    // Past the 15s grace window and no heartbeat file was ever written —
+    // only container_state proves the agent is still working.
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(calls.length).toBeGreaterThan(0);
+
+    stopTypingRefresh(sessionId);
   });
 });
