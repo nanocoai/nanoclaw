@@ -168,10 +168,20 @@ async function spawnContainer(session: Session): Promise<void> {
   const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
   const mounts = buildMounts(agentGroup, session, containerConfig, provider, contribution);
-  const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
+  const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}-${session.id}`;
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
   const agentIdentifier = agentGroup.id;
+  // Pre-spawn reconcile: force-remove any orphan container for this group folder
+  // the host no longer tracks (perceived-exit zombie still polling the session
+  // DB). Done BEFORE the buildContainerArgs await (which can block on OneCLI
+  // setup) so an orphan cannot claim the due message in that window. #2466/#2659.
+  const trackedNames = new Set(Array.from(activeContainers.values()).map((entry) => entry.containerName));
+  const reaped = reapUntrackedForFolder(agentGroup.folder, trackedNames);
+  if (reaped.length > 0) {
+    log.warn('Reaped untracked orphan container(s) before spawn', { folder: agentGroup.folder, reaped });
+  }
+
   const args = await buildContainerArgs(
     mounts,
     containerName,
@@ -189,19 +199,6 @@ async function spawnContainer(session: Session): Promise<void> {
   // (host-sweep.ts line 87). Without this, the stale mtime can trigger an
   // immediate kill before the new container touches the file itself.
   fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
-
-  // Pre-spawn reconcile: force-remove any orphan container for this group
-  // folder the host is no longer tracking (perceived-exit zombie still polling
-  // the session DB). Guarantees ≤1 live container per folder before we add one.
-  // Upstream #2466 (fix option 1) / #2659.
-  const trackedNames = new Set(Array.from(activeContainers.values()).map((entry) => entry.containerName));
-  const reaped = reapUntrackedForFolder(agentGroup.folder, trackedNames);
-  if (reaped.length > 0) {
-    log.warn('Reaped untracked orphan container(s) before spawn', {
-      folder: agentGroup.folder,
-      reaped,
-    });
-  }
 
   const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
@@ -230,11 +227,17 @@ async function spawnContainer(session: Session): Promise<void> {
   // on a wall-clock timer.
 
   container.on('close', (code) => {
-    activeContainers.delete(session.id);
-    // Don't trust process-close == container-dead: a signaled `docker run`
-    // client (code=null) can leave the `--rm` container alive as an orphan
-    // (upstream #2659). Force-remove by name — idempotent no-op if already gone.
-    forceRemoveContainer(containerName);
+    // Only release the slot if we still own it (a concurrent spawn for the same
+    // session must not have its tracking clobbered by our exit).
+    if (activeContainers.get(session.id)?.process === container) {
+      activeContainers.delete(session.id);
+    }
+    // A signaled `docker run` client (code=null) can leave the `--rm` container
+    // alive (upstream #2659). Only force-remove if no live tracked entry still
+    // uses this name (guards the name-collision race).
+    if (!Array.from(activeContainers.values()).some((entry) => entry.containerName === containerName)) {
+      forceRemoveContainer(containerName);
+    }
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
     // code null = killed by signal (normal shutdown path), not a boot failure.
@@ -246,11 +249,13 @@ async function spawnContainer(session: Session): Promise<void> {
   });
 
   container.on('error', (err) => {
-    activeContainers.delete(session.id);
-    // Don't trust process-close == container-dead: a signaled `docker run`
-    // client (code=null) can leave the `--rm` container alive as an orphan
-    // (upstream #2659). Force-remove by name — idempotent no-op if already gone.
-    forceRemoveContainer(containerName);
+    if (activeContainers.get(session.id)?.process === container) {
+      activeContainers.delete(session.id);
+    }
+    // (upstream #2659) Only force-remove if no live tracked entry uses this name.
+    if (!Array.from(activeContainers.values()).some((entry) => entry.containerName === containerName)) {
+      forceRemoveContainer(containerName);
+    }
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
     log.error('Container spawn error', { sessionId: session.id, err });
