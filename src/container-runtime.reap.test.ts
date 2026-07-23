@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -6,53 +6,60 @@ import { forceRemoveContainer, reapUntrackedForFolder } from './container-runtim
 
 vi.mock('child_process', () => ({
   execSync: vi.fn(),
+  execFileSync: vi.fn(),
 }));
 
-const execSyncMock = vi.mocked(execSync);
+const execFileSyncMock = vi.mocked(execFileSync);
 
 describe('reapUntrackedForFolder', () => {
   beforeEach(() => {
-    execSyncMock.mockReset();
+    execFileSyncMock.mockReset();
   });
 
   it('force-removes every untracked container and returns their names', () => {
-    execSyncMock.mockReturnValueOnce('nanoclaw-v2-dm-with-robby-100\nnanoclaw-v2-dm-with-robby-200\n' as never);
+    execFileSyncMock.mockReturnValueOnce('nanoclaw-v2-dm-with-robby-100\nnanoclaw-v2-dm-with-robby-200\n' as never);
 
     expect(reapUntrackedForFolder('dm-with-robby', new Set())).toEqual([
       'nanoclaw-v2-dm-with-robby-100',
       'nanoclaw-v2-dm-with-robby-200',
     ]);
-    expect(execSyncMock).toHaveBeenNthCalledWith(2, 'docker rm -f nanoclaw-v2-dm-with-robby-100', { stdio: 'pipe' });
-    expect(execSyncMock).toHaveBeenNthCalledWith(3, 'docker rm -f nanoclaw-v2-dm-with-robby-200', { stdio: 'pipe' });
+    // first execFileSync call is the `docker ps` query
+    expect(execFileSyncMock.mock.calls[0][0]).toBe('docker');
+    expect(execFileSyncMock.mock.calls[0][1]).toEqual(
+      expect.arrayContaining(['ps', '--filter', 'name=nanoclaw-v2-dm-with-robby-', '--format', '{{.Names}}']),
+    );
+    // subsequent calls force-remove each untracked container via argument vector
+    expect(execFileSyncMock).toHaveBeenNthCalledWith(2, 'docker', ['rm', '-f', 'nanoclaw-v2-dm-with-robby-100'], { stdio: 'pipe' });
+    expect(execFileSyncMock).toHaveBeenNthCalledWith(3, 'docker', ['rm', '-f', 'nanoclaw-v2-dm-with-robby-200'], { stdio: 'pipe' });
   });
 
   it('leaves tracked containers running and removes only the untracked one', () => {
-    execSyncMock.mockReturnValueOnce('nanoclaw-v2-dm-with-robby-100\nnanoclaw-v2-dm-with-robby-200\n' as never);
+    execFileSyncMock.mockReturnValueOnce('nanoclaw-v2-dm-with-robby-100\nnanoclaw-v2-dm-with-robby-200\n' as never);
 
     expect(reapUntrackedForFolder('dm-with-robby', new Set(['nanoclaw-v2-dm-with-robby-100']))).toEqual([
       'nanoclaw-v2-dm-with-robby-200',
     ]);
-    expect(execSyncMock).toHaveBeenCalledTimes(2);
-    expect(execSyncMock).toHaveBeenLastCalledWith('docker rm -f nanoclaw-v2-dm-with-robby-200', { stdio: 'pipe' });
+    expect(execFileSyncMock).toHaveBeenCalledTimes(2);
+    expect(execFileSyncMock).toHaveBeenLastCalledWith('docker', ['rm', '-f', 'nanoclaw-v2-dm-with-robby-200'], { stdio: 'pipe' });
   });
 
   it('returns an empty list when docker ps throws', () => {
-    execSyncMock.mockImplementationOnce(() => {
+    execFileSyncMock.mockImplementationOnce(() => {
       throw new Error('runtime unavailable');
     });
 
     expect(reapUntrackedForFolder('dm-with-robby', new Set())).toEqual([]);
-    expect(execSyncMock).toHaveBeenCalledTimes(1);
+    expect(execFileSyncMock).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('forceRemoveContainer', () => {
   beforeEach(() => {
-    execSyncMock.mockReset();
+    execFileSyncMock.mockReset();
   });
 
   it('swallows a throwing docker rm -f', () => {
-    execSyncMock.mockImplementationOnce(() => {
+    execFileSyncMock.mockImplementationOnce(() => {
       throw new Error('already gone');
     });
 
