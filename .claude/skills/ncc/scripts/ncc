@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 
-__version__ = "0.1.0"
+__version__ = "0.3.1"
 
 # ── Locate the NanoClaw checkout ────────────────────────────────────────────
 # Installed layout mirrors /claw: the real file lives at <repo>/scripts/ncc and
@@ -50,6 +50,13 @@ ERROR_LOG = os.path.join(REPO, "logs", "nanoclaw.error.log")
 
 IS_MAC = platform.system() == "Darwin"
 IS_LINUX = platform.system() == "Linux"
+
+# Heartbeat staleness threshold (seconds). A live poll loop touches the heartbeat
+# every ~0.5-1s and logs a "Poll heartbeat" line every ~30s, so a window this size
+# is guaranteed to span several heartbeats — i.e. real, recent poll activity. Both
+# the heartbeat-freshness check and the LLM log scan use it, so the scan always
+# examines a window that contains at least one heartbeat rather than dead air.
+HEARTBEAT_STALE_S = 180
 
 # ── Output helpers (mirror ncl's format.ts) ─────────────────────────────────
 _TTY = sys.stdout.isatty()
@@ -327,9 +334,98 @@ def _tail(path, max_bytes=200_000):
         return ""
 
 
+def _llm_log_scan(container, since=None):
+    """Provider-general, zero-cost LLM health signal.
+
+    Scans the container's recent runner logs for LLM-layer error lines. It works
+    for every provider because the poll-loop logs query/provider errors uniformly,
+    regardless of which client produced them:
+
+      - `Query error: <msg>`                     — a provider.query() threw
+      - `Error: <msg> (retryable: false, ...)`   — a non-retryable provider event
+                                                    (e.g. `Rate limit ... quota` = 429)
+
+    Retryable events (transient SDK retries) are ignored on purpose. The agent's
+    own replies are echoed to the log under `[scratchpad]`/`Result:` prefixes and
+    may themselves *mention* "429" or "rate limit" — those lines are skipped so the
+    agent talking about rate limits never trips a false positive.
+
+    The window defaults to the heartbeat period (HEARTBEAT_STALE_S), which always
+    spans at least one heartbeat cycle — so the scan never examines dead air.
+
+    Returns (status, detail): "warn" if recent LLM errors were found, else "ok".
+    """
+    window = since or f"{HEARTBEAT_STALE_S}s"
+    rc, out, err = run(["docker", "logs", "--since", window, container], timeout=20)
+    hits = []
+    for ln in (out + "\n" + err).splitlines():
+        if "[scratchpad]" in ln or "] Result:" in ln:
+            continue  # agent's own output, not a runner error line
+        if "] Query error:" in ln:
+            hits.append(ln.split("] Query error:", 1)[1].strip())
+        elif "] Error:" in ln and "(retryable: false" in ln:
+            hits.append(ln.split("] Error:", 1)[1].strip())
+    if hits:
+        return "warn", f"{len(hits)} LLM error(s) in last {window} — latest: {hits[-1][:90]}"
+    return "ok", None
+
+
+def _llm_probe(container, timeout=45):
+    """Test the agent's LLM connection, proxy-agnostically.
+
+    Runs one minimal completion through the agent's OWN client, inside the
+    container, using whatever egress + credential + model the agent is already
+    configured with. ncc stays ignorant of how egress is wired (OneCLI,
+    OneGate, a direct key, or none) — it only asks the question that actually
+    matters: from where the agent lives, can it get a completion right now?
+
+    The probe uses the Claude client (`claude -p`). Agents on another provider
+    (OpenCode, Ollama, ...) run a different client, so this check does not apply
+    to them and is skipped rather than reported as a failure.
+
+    Returns (status, detail) where status is "ok", "fail", or "skip".
+    """
+    # Read the running process table once: used both to decide whether Claude
+    # is the active client and to recover the exact model it was launched with.
+    rc, out, _ = run(["docker", "exec", container, "sh", "-c",
+                      r"cat /proc/*/cmdline 2>/dev/null | tr '\0' '\n'"])
+    toks = out.splitlines() if rc == 0 else []
+
+    # Guard: only probe when a Claude client is actually running. The claude-code
+    # binary is baked into every image, so its mere presence proves nothing — but
+    # a live `claude`/`claude.exe` process means Claude is this agent's provider.
+    running_claude = any(os.path.basename(t) in ("claude", "claude.exe") for t in toks)
+    if not running_claude:
+        return "skip", "skipped — non-Claude provider (probe is Claude-specific)"
+
+    model = ""
+    for i, t in enumerate(toks):
+        if t == "--model" and i + 1 < len(toks):
+            model = toks[i + 1]
+            break
+    probe = ("timeout %d claude -p 'Reply with exactly: OK' %s "
+             "--permission-mode bypassPermissions 2>&1") % (
+                 timeout - 5, ("--model " + model) if model else "")
+    rc, out, err = run(["docker", "exec", container, "sh", "-c", probe], timeout=timeout)
+    blob = (out + "\n" + err).strip()
+    low = blob.lower()
+    # Classify known failure signatures first — some of these still exit 0.
+    if any(k in low for k in ("rate limit", "rate_limit", "429", "usage limit")):
+        return "fail", "rate limited — the LLM is refusing calls (429)"
+    if any(k in low for k in ("401", "403", "unauthor", "authentication",
+                              "invalid api key", "credential", "token expired")):
+        return "fail", "auth error — the credential was rejected by the LLM"
+    if "overloaded" in low or "529" in low:
+        return "fail", "LLM overloaded (529) — transient upstream"
+    if rc == 0 and blob:
+        return "ok", None
+    if rc == 124 or not blob:
+        return "fail", f"no completion within {timeout}s — LLM unreachable or hung"
+    return "fail", blob.splitlines()[-1][:140]
+
+
 def cmd_health(args):
     h = Health()
-    now = time.time()
 
     # 1. service
     try:
@@ -366,18 +462,7 @@ def cmd_health(args):
     except OSError:
         pass
 
-    # 5. OneCLI gateway
-    rc, out, _ = run(["docker", "ps", "--filter", "name=^onecli$", "--format", "{{.Status}}"])
-    if rc != 0:
-        pass  # docker already reported
-    elif not out:
-        h.add("WARN", "OneCLI gateway", "container not running (agents may 401)")
-    elif "healthy" in out.lower():
-        h.add("OK", f"OneCLI gateway ({out})")
-    else:
-        h.add("WARN", "OneCLI gateway", out)
-
-    # 6. agent containers: thrash + zombies + heartbeat
+    # 5. agent containers: liveness (thrash/zombies/heartbeat) + LLM connection
     rc, out, _ = run(["docker", "ps", "--filter", "name=nanoclaw-v2", "--format", "{{.Names}}"])
     containers = out.splitlines() if (rc == 0 and out) else []
     if not containers:
@@ -391,6 +476,23 @@ def cmd_health(args):
             h.add("FAIL", f"container {cn}", "autocompact THRASHING — send /clear")
         else:
             h.add("OK", f"container {cn} ({up})")
+        # LLM health — the agent is useless if it can't reach the model, even
+        # when the container looks perfectly alive.
+        #
+        # Default: a zero-cost, provider-general log scan for recent LLM errors.
+        scan_status, scan_detail = _llm_log_scan(cn)
+        if scan_status == "warn":
+            h.add("WARN", f"container {cn} LLM log scan", scan_detail)
+        else:
+            h.add("OK", f"container {cn} LLM log scan (no recent errors)")
+        # Opt-in (--llm): an active probe that makes one real completion. Deeper
+        # and FAIL-capable, but Claude-provider only (skips others).
+        if getattr(args, "llm", False):
+            status, detail = _llm_probe(cn)
+            if status == "fail":
+                h.add("FAIL", f"container {cn} LLM probe", detail)
+            else:  # "ok" or "skip" — both non-failing; detail carries the skip note
+                h.add("OK", f"container {cn} LLM probe", detail)
         zrc, zout, _ = run(["docker", "exec", cn, "sh", "-c", "ps -eo args 2>/dev/null"])
         if zrc == 0:
             z = sum(1 for l in zout.splitlines() if "defunct" in l)
@@ -405,8 +507,8 @@ def cmd_health(args):
             if r:
                 hbs = glob.glob(os.path.join(REPO, "data", "v2-sessions", r[0][0], "*", ".heartbeat"))
                 if hbs:
-                    age = int(now - os.stat(hbs[0]).st_mtime)
-                    if age > 180:
+                    age = max(0, int(time.time() - os.stat(hbs[0]).st_mtime))
+                    if age > HEARTBEAT_STALE_S:
                         h.add("WARN", f"container {cn} heartbeat", f"stale {age}s (long turn or wedged)")
                     else:
                         h.add("OK", f"container {cn} heartbeat ({age}s fresh)")
@@ -448,6 +550,10 @@ def build_parser():
 
     ph = sub.add_parser("health", help="scan every component; exit 2 on hard FAIL")
     ph.add_argument("--json", action="store_true", help="machine-readable output")
+    ph.add_argument("--llm", action="store_true",
+                    help="add an active LLM probe (one real completion per running "
+                         "container; Claude-provider only). A passive log scan for LLM "
+                         "errors runs by default regardless.")
     ph.set_defaults(func=cmd_health)
 
     pt = sub.add_parser("tasks", help="running containers + pending ad-hoc/one-off tasks")
