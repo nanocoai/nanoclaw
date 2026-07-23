@@ -118,6 +118,12 @@ export function decideStuckAction(args: {
 }
 
 let running = false;
+// Timestamp of the last sweep() completion. Used to detect the sweep loop
+// itself stalling (e.g. a slow synchronous call blocking the event loop, or
+// a session's async work taking far longer than expected) — diagnostic aid
+// for cases where host-side stuck-detection fires much later than its
+// nominal ~SWEEP_INTERVAL_MS + tolerance SLA.
+let lastSweepEndedAt: number | null = null;
 
 export function startHostSweep(): void {
   if (running) return;
@@ -132,15 +138,31 @@ export function stopHostSweep(): void {
 async function sweep(): Promise<void> {
   if (!running) return;
 
+  const tickStart = Date.now();
+  if (lastSweepEndedAt !== null) {
+    const gap = tickStart - lastSweepEndedAt;
+    // Anything past 2x the interval means something delayed scheduling of
+    // this tick — either a slow session sweep or the process was blocked.
+    if (gap > SWEEP_INTERVAL_MS * 2) {
+      log.warn('Host sweep tick delayed', { gapMs: gap, expectedMs: SWEEP_INTERVAL_MS });
+    }
+  }
+
   try {
     const sessions = getActiveSessions();
     for (const session of sessions) {
+      const sessionStart = Date.now();
       await sweepSession(session);
+      const elapsed = Date.now() - sessionStart;
+      if (elapsed > 5000) {
+        log.warn('Slow sweepSession', { sessionId: session.id, elapsedMs: elapsed });
+      }
     }
   } catch (err) {
     log.error('Host sweep error', { err });
   }
 
+  lastSweepEndedAt = Date.now();
   setTimeout(sweep, SWEEP_INTERVAL_MS);
 }
 
@@ -225,17 +247,48 @@ function bashTimeoutMs(state: ContainerState | null): number | null {
   return typeof state.tool_declared_timeout_ms === 'number' ? state.tool_declared_timeout_ms : null;
 }
 
+// Tracks when the host first observed each processing claim, keyed by
+// "sessionId:messageId". Lets us log the moment a claim shows up (independent
+// of the DB's own status_changed timestamp) so a slow/stalled sweep loop is
+// visible in the logs rather than only showing up as a large claimAgeMs on
+// the eventual kill.
+const seenClaimsAt = new Map<string, number>();
+
+function trackClaimSightings(session: Session, claims: { message_id: string }[]): void {
+  const now = Date.now();
+  const currentIds = new Set(claims.map((c) => `${session.id}:${c.message_id}`));
+
+  for (const claim of claims) {
+    const key = `${session.id}:${claim.message_id}`;
+    if (!seenClaimsAt.has(key)) {
+      seenClaimsAt.set(key, now);
+      log.debug('Host first observed processing claim', { sessionId: session.id, messageId: claim.message_id });
+    }
+  }
+
+  // Drop entries for claims that are no longer processing (completed, reset,
+  // or killed) so this map doesn't grow unbounded.
+  for (const key of seenClaimsAt.keys()) {
+    if (key.startsWith(`${session.id}:`) && !currentIds.has(key)) {
+      seenClaimsAt.delete(key);
+    }
+  }
+}
+
 function enforceRunningContainerSla(
   inDb: Database.Database,
   outDb: Database.Database,
   session: Session,
   agentGroupId: string,
 ): void {
+  const claims = getProcessingClaims(outDb);
+  trackClaimSightings(session, claims);
+
   const decision = decideStuckAction({
     now: Date.now(),
     heartbeatMtimeMs: heartbeatMtimeMs(agentGroupId, session.id),
     containerState: getContainerState(outDb),
-    claims: getProcessingClaims(outDb),
+    claims,
   });
 
   if (decision.action === 'ok') return;
@@ -251,11 +304,17 @@ function enforceRunningContainerSla(
     return;
   }
 
+  const firstSeenAt = seenClaimsAt.get(`${session.id}:${decision.messageId}`);
   log.warn('Killing container — message claimed then silent', {
     sessionId: session.id,
     messageId: decision.messageId,
     claimAgeMs: decision.claimAgeMs,
     toleranceMs: decision.toleranceMs,
+    // Time since the host's own sweep loop first observed this claim —
+    // compare against claimAgeMs (DB-reported) to tell apart "the claim was
+    // genuinely stale the whole time" from "the sweep loop itself was slow
+    // to notice/re-check it".
+    hostObservedAgeMs: firstSeenAt !== undefined ? Date.now() - firstSeenAt : null,
   });
   killContainer(session.id, 'claim-stuck');
   resetStuckProcessingRows(inDb, outDb, session, 'claim-stuck');
