@@ -316,6 +316,21 @@ function fileObject(progress: StructuredProgress): string | undefined {
   );
 }
 
+function patchFileObject(command: string): string | undefined {
+  const rawTargets = Array.from(
+    command.matchAll(/^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$/gmu),
+    (match) => match[1].trim(),
+  ).filter((target, index, targets) => targets.indexOf(target) === index);
+  if (rawTargets.length === 1) return displayPath(rawTargets[0]);
+
+  const names = rawTargets
+    .map((target) => safeBasename(target))
+    .filter((target): target is string => Boolean(target));
+  if (names.length === 0) return undefined;
+  const visible = names.slice(0, 2).join('、');
+  return names.length > 2 ? `${visible} 等 ${names.length} 个文件` : visible;
+}
+
 function testObject(command: string): string | undefined {
   const match = command.match(
     /(?:^|[\\/\s'"`])([^\\/\s'"`]+(?:\.test|\.spec)\.[cm]?[jt]sx?|test_[^\\/\s'"`]+\.py|[^\\/\s'"`]+_test\.py)(?=$|\s|['"`])/iu,
@@ -835,13 +850,12 @@ function classifyProgressActionInner(
       category: 'inspect',
       confidence: 'exact',
     };
-  if (/\bapply_patch\b/.test(lower))
-    return {
-      ...base,
-      title: '正在修改文件',
-      category: 'change',
-      confidence: 'exact',
-    };
+  if (/\bapply_patch\b/.test(lower)) {
+    const target = patchFileObject(command);
+    return target
+      ? actionText(`正在修改 ${target}`, `修改 ${target}`, base, 'change')
+      : actionText('正在修改文件', '修改文件', base, 'change');
+  }
   if (/git\s+diff\s+--check/.test(lower))
     return {
       ...base,

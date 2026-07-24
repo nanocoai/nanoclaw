@@ -174,6 +174,33 @@ describe('classifyProgressAction', () => {
       '正在修改文件',
     ],
     [
+      '应用单文件补丁',
+      started('Bash', {
+        command: [
+          "apply_patch <<'PATCH'",
+          '*** Begin Patch',
+          '*** Update File: src/progress-display.ts',
+          '*** End Patch',
+          'PATCH',
+        ].join('\n'),
+      }),
+      '正在修改 src/progress-display.ts',
+    ],
+    [
+      '应用多文件补丁',
+      started('Bash', {
+        command: [
+          "apply_patch <<'PATCH'",
+          '*** Begin Patch',
+          '*** Update File: /workspace/cmd/sandbox-api/capabilities_test.go',
+          '*** Update File: /workspace/internal/sandbox/admission_test.go',
+          '*** End Patch',
+          'PATCH',
+        ].join('\n'),
+      }),
+      '正在修改 capabilities_test.go、admission_test.go',
+    ],
+    [
       '检查流水线状态',
       started('Bash', { command: 'gh run view 123' }),
       '正在检查交付流水线',
