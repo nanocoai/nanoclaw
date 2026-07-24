@@ -54,7 +54,16 @@ export interface ProviderExchange {
   result: string | null;
   /** Continuation/thread id in effect for the exchange, if any. */
   continuation?: string;
-  status: 'completed' | 'undelivered' | 'error';
+  /**
+   * Terminal disposition of the round-trip:
+   * - `completed` — output was wrapped and delivered normally.
+   * - `undelivered` — output had no <message> envelope (nudge pending, or the
+   *   agent already answered out-of-band via an MCP tool).
+   * - `fallback` — a nudged chat turn still ended bare, so the raw text was
+   *   delivered as a never-silent fallback rather than dropped.
+   * - `error` — the turn ended in a provider error.
+   */
+  status: 'completed' | 'undelivered' | 'fallback' | 'error';
 }
 
 /**

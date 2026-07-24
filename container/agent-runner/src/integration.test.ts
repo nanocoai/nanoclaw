@@ -6,7 +6,7 @@ import { getPendingMessages } from './db/messages-in.js';
 import { getContinuation, setContinuation } from './db/session-state.js';
 import { MockProvider } from './providers/mock.js';
 import type { ProviderExchange } from './providers/types.js';
-import { runPollLoop } from './poll-loop.js';
+import { runPollLoop, FALLBACK_PREFIX } from './poll-loop.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -114,20 +114,26 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
-  it('bare text produces no outbound messages (scratchpad only)', async () => {
+  it('bare text is nudged once, then delivered raw (never-silent fallback)', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'hello' }, { platformId: 'chan-1', channelType: 'discord' });
 
-    // Agent responds with bare text — no <message to="..."> wrapping
+    // Agent responds with bare text — no <message to="..."> wrapping — and (via
+    // the mock) repeats it after the corrective nudge. The first bare turn is
+    // scratchpad only (nudge, no delivery); the nudged retry that STILL comes
+    // back bare is delivered raw with a marker rather than dropped silently.
     const provider = new MockProvider({}, () => 'I am thinking about this...');
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
 
-    // Wait long enough for the poll loop to process
-    await sleep(1000);
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
     controller.abort();
 
     const out = getUndeliveredMessages();
-    expect(out).toHaveLength(0);
+    expect(out).toHaveLength(1);
+    const text = JSON.parse(out[0].content).text as string;
+    expect(text).toContain(FALLBACK_PREFIX);
+    expect(text).toContain('I am thinking about this...');
+    expect(out[0].platform_id).toBe('chan-1');
 
     await loopPromise.catch(() => {});
   });

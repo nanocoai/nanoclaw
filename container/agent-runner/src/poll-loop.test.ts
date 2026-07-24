@@ -2,9 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
-import { getUndeliveredMessages } from './db/messages-out.js';
+import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { isCorruptionError, processQuery } from './poll-loop.js';
+import { isCorruptionError, processQuery, FALLBACK_PREFIX } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 import type { AgentQuery, ProviderEvent } from './providers/types.js';
 
@@ -538,5 +538,136 @@ describe('task-run turn wiring (real processQuery)', () => {
     expect(logs[1]).toContain('[undelivered → local-cli] fire two result');
     expect(logs).not.toContain('first delivery decision handled');
     expect(logs).not.toContain('second delivery decision handled');
+  });
+});
+
+// --- Never-silent delivery fallback (chat turns) ---
+// A chat turn whose first result had no <message> envelope gets one corrective
+// nudge. Before this fix, if the nudged retry ALSO came back bare, the text was
+// dropped as scratchpad and the user saw silence. Now the raw text is delivered
+// with a clear marker — unless the agent already answered out-of-band via an
+// MCP tool this turn.
+
+const CHAT_ROUTING = {
+  platformId: 'chan-1',
+  channelType: 'discord',
+  threadId: null,
+  inReplyTo: 'm1',
+};
+
+function fallbackRows(): Array<{ text: string; platform_id: string | null }> {
+  return getUndeliveredMessages()
+    .filter((m) => m.kind === 'chat' && JSON.parse(m.content).text?.startsWith(FALLBACK_PREFIX))
+    .map((m) => ({ text: JSON.parse(m.content).text as string, platform_id: m.platform_id }));
+}
+
+describe('never-silent delivery fallback (chat turns)', () => {
+  it('delivers raw text (marked) when a nudged chat turn STILL ends bare', async () => {
+    const pushes: string[] = [];
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      // First bare result → one corrective nudge, nothing delivered yet.
+      yield { type: 'result', text: 'here is my thinking but I forgot to wrap it' };
+      // Nudged retry STILL bare → never-silent fallback delivers the raw text.
+      yield { type: 'result', text: 'still forgot to wrap, oops' };
+    }
+    const query: AgentQuery = {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    // Exactly one nudge fired (once-per-turn), then the fallback delivered.
+    expect(pushes.filter((p) => p.includes('was not delivered'))).toHaveLength(1);
+    const delivered = fallbackRows();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].text).toContain(FALLBACK_PREFIX);
+    expect(delivered[0].text).toContain('still forgot to wrap, oops');
+    expect(delivered[0].platform_id).toBe('chan-1');
+  });
+
+  it('does NOT fall back when the agent already answered via an MCP tool this turn', async () => {
+    // HAZARD: send_message writes an outbound row directly and never bumps the
+    // in-process `sent` counter. A turn that answered via the tool then trailed
+    // off into bare scratchpad must not be re-delivered as raw text.
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      // Simulate the MCP send_message tool firing mid-turn.
+      writeMessageOut({
+        id: 'mcp-1',
+        in_reply_to: 'm1',
+        kind: 'chat',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        thread_id: null,
+        content: JSON.stringify({ text: 'answered via the send_message tool' }),
+      });
+      yield { type: 'result', text: 'internal note after sending' };
+      yield { type: 'result', text: 'more internal note after the nudge' };
+    }
+    const query: AgentQuery = { push: () => {}, end: () => {}, events: events(), abort: () => {} };
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    // No fallback row — the MCP send is the only outbound message.
+    expect(fallbackRows()).toHaveLength(0);
+    const all = getUndeliveredMessages().filter((m) => m.kind === 'chat');
+    expect(all).toHaveLength(1);
+    expect(JSON.parse(all[0].content).text).toBe('answered via the send_message tool');
+  });
+
+  it('task-mode turns never fall back (bare text is the normal run-log ending)', async () => {
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'result', text: 'nothing new in the feeds' };
+      yield { type: 'result', text: 'still nothing new' };
+    }
+    const query: AgentQuery = { push: () => {}, end: () => {}, events: events(), abort: () => {} };
+
+    await processQuery(query, TASK_ROUTING, ['t1'], 'claude', undefined, 'prompt', undefined);
+
+    expect(fallbackRows()).toHaveLength(0);
+    expect(getUndeliveredMessages().filter((m) => m.kind === 'chat')).toHaveLength(0);
+  });
+
+  it('resets the once-per-turn nudge guard on a follow-up turn (per-turn scope)', async () => {
+    // Pins that unwrappedNudged is per-turn, not session-lifetime: a follow-up
+    // push must earn its OWN nudge. If the guard failed to reset, turn two would
+    // get no nudge AND be force-delivered as a fallback instead.
+    const pushes: string[] = [];
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      // Turn 1: one bare result → nudge 1.
+      yield { type: 'result', text: 'bare turn one' };
+      // A new chat message arrives while the query is open — the follow-up
+      // poller pushes it and must reset the per-turn nudge guard.
+      insertMessage('m2', 'chat', { sender: 'B', text: 'a fresh question' });
+      const deadline = Date.now() + 5000;
+      while (!pushes.some((p) => p.includes('a fresh question')) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      // Turn 2: one bare result → nudge 2 only if the guard reset.
+      yield { type: 'result', text: 'bare turn two' };
+    }
+    const query: AgentQuery = {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+
+    await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    // Two independent nudges — proves the guard reset between turns.
+    expect(pushes.filter((p) => p.includes('was not delivered'))).toHaveLength(2);
+    // Each turn had a single bare result, so no fallback ever fired.
+    expect(fallbackRows()).toHaveLength(0);
   });
 });

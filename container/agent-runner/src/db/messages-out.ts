@@ -132,6 +132,19 @@ export function getRoutingBySeq(
   return outRow ?? null;
 }
 
+/**
+ * Highest seq currently in messages_out. Used by the poll-loop to snapshot a
+ * per-turn baseline: MCP tools (send_message, send_file, …) write outbound rows
+ * directly and never touch the in-process `sent` counter, so a turn that
+ * answered via a tool then ended with bare scratchpad looks identical to a
+ * silent drop. Comparing this against a turn-start baseline reveals whether the
+ * agent actually delivered anything out-of-band before the never-silent
+ * fallback fires. Reads outbound only — inbound activity never moves it.
+ */
+export function getMaxOutboundSeq(): number {
+  return (getOutboundDb().prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number }).m;
+}
+
 /** Get undelivered messages (for host polling — reads from outbound.db). */
 export function getUndeliveredMessages(): MessageOutRow[] {
   return getOutboundDb()

@@ -6,7 +6,7 @@ import {
   markScriptSkipped,
   type MessageInRow,
 } from './db/messages-in.js';
-import { writeMessageOut } from './db/messages-out.js';
+import { writeMessageOut, getMaxOutboundSeq } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
   clearContinuation,
@@ -354,6 +354,14 @@ export async function processQuery(
   // Once-per-turn guard for the task-run "<message> block was not delivered"
   // nudge — mirrors unwrappedNudged for chat turns.
   let taskBlockNudged = false;
+  // Snapshot of the outbound seq at the start of the current turn. MCP tools
+  // (send_message, send_file) write outbound rows directly and never touch the
+  // in-process `sent` counter, so this is the only in-loop signal that the
+  // agent already delivered something out-of-band. Reset per turn alongside the
+  // nudge guards (initial batch here; follow-up pushes below). Gates the
+  // never-silent fallback so a turn that answered via a tool then trailed off
+  // into bare scratchpad is NOT re-delivered as raw text.
+  let outboundBaselineSeq = getMaxOutboundSeq();
   // Prompt queue for the exchange hook — each result event consumes the
   // oldest unanswered prompt, except a wrapping-retry result, which answers
   // the same prompt again. Unused (and unmaintained) when the provider
@@ -438,6 +446,7 @@ export async function processQuery(
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
         taskBlockNudged = false;
+        outboundBaselineSeq = getMaxOutboundSeq();
         query.push(prompt);
         archivePrompts.push(prompt);
         markCompleted(keptIds);
@@ -525,12 +534,31 @@ export async function processQuery(
             archivePrompts.shift();
           } else {
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+            // Never-silent fallback: a chat turn that was already nudged once
+            // and STILL came back with no <message> envelope would otherwise be
+            // dropped as scratchpad, leaving the user staring at silence. Deliver
+            // the raw text instead — UNLESS the agent already answered this turn
+            // out-of-band via an MCP tool (send_message/send_file bump the
+            // outbound seq without touching `sent`), in which case re-delivering
+            // the trailing scratchpad would double-send. hasUnwrapped already
+            // implies !taskRun && sent === 0; the extra guards are spelled out
+            // for intent.
+            const mcpDeliveredThisTurn = getMaxOutboundSeq() > outboundBaselineSeq;
+            const willFallbackDeliver =
+              hasUnwrapped && unwrappedNudged && !routing.taskRun && sent === 0 && !mcpDeliveredThisTurn;
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
-              status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
+              status: willFallbackDeliver
+                ? 'fallback'
+                : hasUnwrapped || willRetryTaskBlocks
+                  ? 'undelivered'
+                  : 'completed',
             });
+            if (willFallbackDeliver) {
+              deliverFallbackResult(event.text, routing);
+            }
             if (willRetryWrapping) {
               unwrappedNudged = true;
               const destinations = getAllDestinations();
@@ -622,6 +650,34 @@ function deliverErrorResult(text: string, routing: RoutingContext): void {
     channel_type: routing.channelType,
     thread_id: routing.threadId,
     content: JSON.stringify({ text }),
+  });
+}
+
+/**
+ * Prefix stamped on raw agent text delivered by the never-silent fallback, so
+ * the recipient can tell this was the agent's unwrapped scratchpad surfaced
+ * after a failed re-wrap nudge — not a normal, deliberately-addressed reply.
+ */
+export const FALLBACK_PREFIX = '⚠ undelivered agent output (sent raw):';
+
+/**
+ * Last-resort delivery for a chat turn that was nudged to re-wrap its output
+ * and STILL produced no <message> envelope. Rather than drop the text as
+ * scratchpad (silent from the user's side), send the raw text — clearly marked
+ * — to the channel the batch arrived on. Mirror of deliverErrorResult; kept
+ * separate so the marker and the log line stay distinct from the provider-error
+ * path (which carries an already-user-facing notice, no marker).
+ */
+function deliverFallbackResult(text: string, routing: RoutingContext): void {
+  log('Nudged chat turn still had no <message> envelope — delivering raw text as never-silent fallback');
+  writeMessageOut({
+    id: generateId(),
+    in_reply_to: routing.inReplyTo,
+    kind: 'chat',
+    platform_id: routing.platformId,
+    channel_type: routing.channelType,
+    thread_id: routing.threadId,
+    content: JSON.stringify({ text: `${FALLBACK_PREFIX}\n${text}` }),
   });
 }
 
