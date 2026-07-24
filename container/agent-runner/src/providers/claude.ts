@@ -64,6 +64,33 @@ export function classifyRateLimitEvent(
   };
 }
 
+interface SdkMcpServerSummary {
+  name: string;
+  status: string;
+}
+
+function sanitizeLogValue(value: string): string {
+  return value.replace(/[\r\n\u2028\u2029]/g, ' ').slice(0, 200);
+}
+
+/**
+ * Return actionable diagnostics for MCP servers that were expected to be
+ * available but were not connected when the SDK finished initialization.
+ *
+ * `disabled` is intentionally quiet: it represents an explicit configuration
+ * choice, not a failed capability. Error details are not present in the init
+ * message, so these diagnostics name only the server and its SDK status.
+ */
+export function mcpInitFailureDiagnostics(servers: SdkMcpServerSummary[] | undefined): string[] {
+  return (servers ?? [])
+    .filter((server) => server.status !== 'connected' && server.status !== 'disabled')
+    .map(
+      (server) =>
+        `ERROR: MCP server "${sanitizeLogValue(server.name)}" is unavailable ` +
+        `(status: ${sanitizeLogValue(server.status)}); its tools will not be available`,
+    );
+}
+
 // Deferred SDK builtins that either sidestep nanoclaw's own scheduling or
 // don't fit our async message-passing model (they're designed for Claude
 // Code's interactive UI and would hang here).
@@ -570,6 +597,9 @@ export class ClaudeProvider implements AgentProvider {
         yield { type: 'activity' };
 
         if (message.type === 'system' && message.subtype === 'init') {
+          for (const diagnostic of mcpInitFailureDiagnostics(message.mcp_servers)) {
+            log(diagnostic);
+          }
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'result') {
           // `result` text exists only on subtype:"success"; error subtypes
