@@ -36,7 +36,9 @@ Leave `PreCompact` and everything else untouched.
 ## 3. Dependencies
 
 None to uninstall — the skill adds no packages; it uses the SDK and DB layer
-the agent-runner already ships.
+the agent-runner already ships (`writeMessageOut`, `getSessionRouting`,
+`getInboundDb`, `getOutboundDb` for task-session classification via
+`processing_ack`).
 
 ## 4. Rebuild and restart
 
