@@ -315,6 +315,26 @@ function extractAttachmentFiles(
     return contentStr;
   }
 
+  // On-disk names for this message's attachments. isSafeAttachmentName (above
+  // and per-file below) already rejects the escape class (path separators,
+  // NUL, non-basenames); what it deliberately allows through is the
+  // consumer-hostile class: colons, whitespace, and other shell-noise that is
+  // legal in a filename but breaks the things that CONSUME these paths.
+  // Agent read tools parse `path:line` and split at a colon, docker CLI mount
+  // specs split on `:`, scp does too. Message ids hit this for real: the
+  // router's fanout scoping names them `<id>:ag-<groupId>`, and the scoped id
+  // was used verbatim as the inbox directory name. Seen live: an uploaded
+  // file at `inbox/web-...-i:ag-.../x.md` existed in the container, but the
+  // agent's read tool split at the colon and reported the file missing.
+  // Sanitize the whole class, not just the colon: any character outside
+  // [A-Za-z0-9._-] becomes a dash, for the directory name AND the stored
+  // filename. Ids and names stay untouched everywhere else (rows, dedup,
+  // logs). Distinct ids that differ only in sanitized characters could map to
+  // one directory; the per-file `wx` write below refuses to overwrite, so the
+  // worst case is a logged skip, never silent corruption.
+  const sanitizeForPath = (name: string): string => name.replace(/[^A-Za-z0-9._-]/g, '-');
+  const inboxDirName = sanitizeForPath(messageId);
+
   const inboxRoot = path.join(sessionDir(agentGroupId, sessionId), 'inbox');
   // Resolved lazily on the first attachment that actually carries bytes, so a
   // message whose attachments have no inline `data` never creates an inbox dir.
@@ -328,7 +348,7 @@ function extractAttachmentFiles(
     if (typeof att.data !== 'string') continue;
 
     const rawName = deriveAttachmentName(att);
-    const filename = isSafeAttachmentName(rawName) ? rawName : `attachment-${Date.now()}`;
+    const filename = isSafeAttachmentName(rawName) ? sanitizeForPath(rawName) : `attachment-${Date.now()}`;
     if (filename !== rawName) {
       log.warn('Refused unsafe attachment filename, would escape inbox', {
         messageId,
@@ -338,7 +358,7 @@ function extractAttachmentFiles(
     }
 
     if (!inboxResolved) {
-      inboxDir = ensureContainedInboxDir(inboxRoot, messageId, { messageId });
+      inboxDir = ensureContainedInboxDir(inboxRoot, inboxDirName, { messageId });
       inboxResolved = true;
     }
     // Unsafe inbox (symlink / escape) — no attachment can be written safely.
@@ -363,7 +383,7 @@ function extractAttachmentFiles(
     }
 
     att.name = filename;
-    att.localPath = `inbox/${messageId}/${filename}`;
+    att.localPath = `inbox/${inboxDirName}/${filename}`;
     delete att.data;
     changed = true;
     log.debug('Saved attachment to inbox', { messageId, filename, size: att.size });
