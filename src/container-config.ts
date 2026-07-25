@@ -12,7 +12,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { GROUPS_DIR } from './config.js';
-import { getContainerConfig } from './db/container-configs.js';
+import { ensureContainerConfig, getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
 
@@ -75,7 +75,15 @@ export function materializeContainerJson(agentGroupId: string): ContainerConfig 
   const group = getAgentGroup(agentGroupId);
   if (!group) throw new Error(`Agent group not found: ${agentGroupId}`);
 
-  const row = getContainerConfig(agentGroupId);
+  let row = getContainerConfig(agentGroupId);
+  if (!row) {
+    // A group created without a template (bare `ncl groups create`) has no
+    // container_configs row yet. initGroupFilesystem would create it, but
+    // that runs after this materialize in the spawn path — so a bare group
+    // could never spawn. Ensure the default row here.
+    ensureContainerConfig(agentGroupId);
+    row = getContainerConfig(agentGroupId);
+  }
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
   const config = configFromDb(row, group);
