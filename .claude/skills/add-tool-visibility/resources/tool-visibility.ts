@@ -5,7 +5,7 @@
  *
  * Strategy:
  *   PreToolUse  → "🔧 label: short description"
- *   PostToolUse → "✅ label: Xs" (only for slow Bash, > 3s)
+ *   PostToolUse → "✓ Xs" (only for slow Bash, > 3s)
  *
  * Rapid file I/O (Read/Write/Edit/WebFetch) is debounced 300ms and coalesced
  * into a single "×N" message to prevent chat spam. Noisy tools (WebSearch,
@@ -14,7 +14,9 @@
  * Messages are written to outbound.db via writeMessageOut() with routing
  * pulled from session_routing (default reply lane). The host's delivery
  * loop picks them up and sends them through the same channel adapter the
- * rest of the chat goes through.
+ * rest of the chat goes through. Content is marked `_toolVis: true` so a
+ * host bridge that supports edit-in-place can accumulate lines into one
+ * bubble (optional; without that support each line is a normal chat send).
  */
 import path from 'path';
 
@@ -22,27 +24,45 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 
 import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
-import { getInboundDb } from '../db/connection.js';
+import { getInboundDb, getOutboundDb } from '../db/connection.js';
 
 // Detect whether this agent turn was triggered by a scheduled-task wake-up
 // (vs. an interactive chat message). Scheduled tasks often run with explicit
 // silent-on-OK behavior — leaking tool-call previews to chat creates orphan-
-// notification noise without context. We cache per-process so the first turn
-// after spawn determines the policy.
-let _isTaskSession: boolean | null = null;
+// notification noise without context.
+//
+// Classify on THIS turn's batch, not the global-latest inbound row. The old
+// `ORDER BY seq DESC LIMIT 1` flipped an in-progress *chat* turn to silent
+// whenever a cron task happened to land in inbound mid-turn — suppressing all
+// tool-vis for that reply. The current turn's messages are recorded in
+// outbound.db's `processing_ack` (status='processing') by markProcessing(); a
+// freshly-inserted cron task is still 'pending' (next poll) and is NOT in this
+// batch. We suppress only when the in-flight batch is non-empty and contains
+// NO interactive chat message — i.e. a genuine task-only wake. Re-queried
+// every call (no cache): a single container handles both chat and task wakes.
 function isTaskSession(): boolean {
-  if (_isTaskSession !== null) return _isTaskSession;
   try {
-    const db = getInboundDb();
-    const row = db.prepare("SELECT kind FROM messages_in ORDER BY seq DESC LIMIT 1").get() as { kind?: string } | undefined;
-    _isTaskSession = row?.kind === 'task';
-  } catch { _isTaskSession = false; }
-  return _isTaskSession;
+    const acks = getOutboundDb()
+      .prepare("SELECT message_id FROM processing_ack WHERE status = 'processing'")
+      .all() as Array<{ message_id: string }>;
+    if (acks.length === 0) return false; // nothing in-flight → treat as interactive
+    const ids = acks.map((a) => a.message_id);
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = getInboundDb()
+      .prepare(`SELECT kind FROM messages_in WHERE id IN (${placeholders})`)
+      .all(...ids) as Array<{ kind?: string }>;
+    if (rows.length === 0) return false;
+    // Any non-task (chat) message in the batch → interactive turn → show tool-vis.
+    const hasChat = rows.some((r) => r.kind && r.kind !== 'task');
+    return !hasChat;
+  } catch {
+    return false;
+  }
 }
 
 const SKIP_TOOLS = new Set(['WebSearch', 'Glob', 'Grep']);
 
-const MAX_INPUT_PREVIEW = 120;
+const MAX_INPUT_PREVIEW = 80;
 const LONG_CALL_THRESHOLD_MS = 3000;
 const PROGRESS_FIRST_DELAY_MS = 30000;  // first progress msg at 30s
 const PROGRESS_INTERVAL_MS = 30000;     // then every 30s
@@ -58,6 +78,7 @@ const TOOL_EMOJI: Record<string, string> = {
   Agent: '🤖',
   Task: '🤖',
   TodoWrite: '📝',
+  Skill: '📚',
 };
 
 const TOOL_LABEL: Record<string, string> = {
@@ -71,6 +92,7 @@ const TOOL_LABEL: Record<string, string> = {
   Agent: 'agent',
   Task: 'task',
   TodoWrite: 'todo',
+  Skill: 'skill',
 };
 
 const BATCH_TOOLS = new Set(['Read', 'Write', 'Edit', 'MultiEdit', 'WebFetch']);
@@ -84,8 +106,18 @@ function log(msg: string): void {
   console.error(`[tool-visibility] ${msg}`);
 }
 
+// Never cut inside a UTF-16 surrogate pair — a preview ending in half an
+// emoji is invalid UTF-8 and makes some chat backends reject the whole
+// tool-vis bubble (and, via a pre-send flush, every later real message on
+// that chat).
+export function safeSlice(s: string, n: number): string {
+  const cut = s.slice(0, n);
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
+
 function truncate(s: string): string {
-  return s.length > MAX_INPUT_PREVIEW ? s.slice(0, MAX_INPUT_PREVIEW) + '…' : s;
+  return s.length > MAX_INPUT_PREVIEW ? safeSlice(s, MAX_INPUT_PREVIEW) + '…' : s;
 }
 
 /** Extract domain from URL — keeps preview compact ("github.com" not full URL). */
@@ -102,6 +134,9 @@ function shortPath(p: string, maxLen = 35): string {
 /** Format a tool message with verb-aligned label for easier scanning. */
 function formatToolLine(emoji: string, label: string, desc: string, count = 0): string {
   const countStr = count > 1 ? ` ×${count}` : '';
+  if (!label) {
+    return desc ? `${emoji}${countStr}  ${desc}` : `${emoji}${countStr}`;
+  }
   // Pad label so descriptions align vertically across tool calls.
   const paddedLabel = label.padEnd(8);
   return desc ? `${emoji} ${paddedLabel}${countStr} ${desc}`.trimEnd()
@@ -143,11 +178,11 @@ function resultShape(toolName: string, toolResponse: unknown): string | null {
     // the command actually produced what was expected. Trim to keep the
     // chat-line compact.
     const firstLine = allLines.find((l) => l.trim()) || '';
-    const peek = firstLine.replace(/\s+/g, ' ').trim().slice(0, 60);
+    const peek = safeSlice(firstLine.replace(/\s+/g, ' ').trim(), 60);
     if (nonEmpty >= 5) {
-      return peek ? `${nonEmpty} lines  → \`${peek}\`` : `${nonEmpty} lines`;
+      return peek ? `${nonEmpty} lines → ${peek}` : `${nonEmpty} lines`;
     }
-    if (peek) return `→ \`${peek}\``;
+    if (peek) return `→ ${peek}`;
     return null;
   }
   if (toolName === 'WebFetch' && text) {
@@ -171,10 +206,10 @@ function detectFailureFromResponse(_toolName: string, toolResponse: unknown): st
       const explicit = typeof r.error === 'string' ? r.error
         : typeof r.message === 'string' ? r.message
         : 'failed';
-      return explicit.replace(/\s+/g, ' ').trim().slice(0, 80);
+      return safeSlice(explicit.replace(/\s+/g, ' ').trim(), 80);
     }
     if (typeof r.error === 'string' && r.error.trim()) {
-      return r.error.replace(/\s+/g, ' ').trim().slice(0, 80);
+      return safeSlice(r.error.replace(/\s+/g, ' ').trim(), 80);
     }
   }
   const text = extractResponseText(toolResponse);
@@ -189,18 +224,35 @@ function detectFailureFromResponse(_toolName: string, toolResponse: unknown): st
   ];
   for (const p of patterns) {
     const m = text.match(p);
-    if (m) return m[0].replace(/\s+/g, ' ').trim().slice(0, 80);
+    if (m) return safeSlice(m[0].replace(/\s+/g, ' ').trim(), 80);
   }
   return null;
 }
 
+/** Collapse a heredoc into its interpreter, marker, and first useful line. */
+export function summarizeHeredoc(cmd: string): string {
+  const match = cmd.match(/((?:[\w./-]+\s+)*)((?:python3?|bash|sh|node|ruby|perl)\S*)\s+<<-?\s*['"]?(\w+)['"]?/i);
+  if (!match) return cmd;
+  const interpreter = path.basename(match[2]);
+  const tag = match[3];
+  const body = cmd.slice(match[0].length);
+  const firstUseful =
+    body
+      .split(/\n|;/)
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith('#') && line !== tag) ?? '';
+  const hint = firstUseful ? safeSlice(firstUseful.replace(/\s+/g, ' '), 40) : tag;
+  return `${interpreter} «${tag}» ${hint}…`;
+}
+
 /** Extract the meaningful part of a bash command for the preview. */
-function summarizeBash(raw: string): string {
-  const cmd = raw.replace(/\s+/g, ' ').trim();
+export function summarizeBash(raw: string): string {
+  const cmd = summarizeHeredoc(raw.trim()).replace(/\s+/g, ' ').trim();
 
   // Split into segments by command connectors and skip ones that are pure
-  // variable-assignment blocks (e.g. `SSHK="ssh -i ..."` before `&& $SSHK ...`).
-  // Without this, long ssh-wrapper assignments at the start eat the whole preview.
+  // variable-assignment blocks (e.g. `SSH_CMD="ssh -i key"` before
+  // `&& $SSH_CMD host "ls"`). Without this, long wrapper assignments at the
+  // start eat the whole preview.
   const segments = cmd.split(/\s*(?:&&|\|\||;|\|)\s*/).map(s => s.trim()).filter(Boolean);
   const isPureAssignment = (s: string) =>
     /^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s*)+$/.test(s);
@@ -248,16 +300,25 @@ function summarizeBash(raw: string): string {
   if (BASH_WITH_SUBCOMMAND.has(bin) && sub && !sub.startsWith('-')) {
     return truncate(`${bin} ${sub}`);
   }
+  if ((bin === 'bash' || bin === 'sh') && sub) {
+    return truncate(path.basename(sub));
+  }
   return truncate(first);
 }
 
 /** Human-readable summary of a tool's input. */
-function describeToolInput(toolName: string, toolInput: unknown): string {
+export function describeToolInput(toolName: string, toolInput: unknown): string {
   if (!toolInput || typeof toolInput !== 'object') return '';
   const input = toolInput as Record<string, unknown>;
 
-  if (toolName === 'Bash' && typeof input.command === 'string') {
-    return `\`${summarizeBash(input.command)}\``;
+  if (toolName === 'Bash') {
+    // Prefer the human description when the SDK/tool supplies one — glances
+    // better than raw launcher syntax. Fall back to command summary.
+    if (typeof input.description === 'string' && input.description.trim()) {
+      return truncate(input.description.replace(/\s+/g, ' ').trim());
+    }
+    if (typeof input.command === 'string') return `\`${summarizeBash(input.command)}\``;
+    return '';
   }
   if ((toolName === 'Read' || toolName === 'Write' || toolName === 'Edit' || toolName === 'MultiEdit') && typeof input.file_path === 'string') {
     return `\`${shortPath(input.file_path)}\``;
@@ -280,6 +341,9 @@ function describeToolInput(toolName: string, toolInput: unknown): string {
   if (toolName === 'TodoWrite' && Array.isArray(input.todos)) {
     const n = input.todos.length;
     return `${n} task${n === 1 ? '' : 's'}`;
+  }
+  if (toolName === 'Skill' && typeof input.skill === 'string') {
+    return `\`${input.skill}\``;
   }
 
   for (const val of Object.values(input)) {
@@ -311,9 +375,10 @@ function emit(text: string): void {
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
       thread_id: routing.thread_id,
-      // Mark as tool-visibility so the chat-sdk-bridge accumulates these
-      // into a single edited message-bubble per thread (Telegram-style),
-      // rather than sending a new notification per tool call.
+      // Mark as tool-visibility so a host bridge can accumulate these into
+      // a single edited message-bubble per thread (Telegram-style), rather
+      // than sending a new notification per tool call. Bridges without
+      // that support ignore the flag and deliver normally.
       content: JSON.stringify({ text, _toolVis: true }),
     });
   } catch (err) {
@@ -381,7 +446,15 @@ export const preToolUseVisibility: HookCallback = async (input, toolUseId) => {
 
   const desc = describeToolInput(toolName, i.tool_input);
   const emoji = TOOL_EMOJI[toolName] ?? '🔧';
-  const label = TOOL_LABEL[toolName] ?? toolName.toLowerCase();
+  // Bash rows omit the redundant "bash" label — description/command carries intent.
+  const label = toolName === 'Bash' ? '' : (TOOL_LABEL[toolName] ?? toolName.toLowerCase());
+
+  // Suppress empty TodoWrite calls (e.g. clearing stale todos).
+  // `📝 todo  0 tasks` is pure noise; conveys no semantic information.
+  if (toolName === 'TodoWrite') {
+    const todos = (i.tool_input as { todos?: unknown[] } | undefined)?.todos;
+    if (Array.isArray(todos) && todos.length === 0) return { continue: true };
+  }
 
   if (BATCH_TOOLS.has(toolName)) {
     sendBatched(toolName, emoji, label, desc);
@@ -442,14 +515,12 @@ export const postToolUseVisibility: HookCallback = async (input, toolUseId) => {
     delete progressTimers[id];
   }
 
-  const label = TOOL_LABEL[toolName] ?? toolName.toLowerCase();
   const desc = describeToolInput(toolName, i.tool_input);
 
   // FAILURE PATH 1 — explicit PostToolUseFailure event with `error` field.
   if (i.hook_event_name === 'PostToolUseFailure') {
-    const reason = (i.error ?? 'failed').replace(/\s+/g, ' ').trim().slice(0, 80);
-    const merged = desc ? `${desc}  ✗ ${reason}` : `✗ ${reason}`;
-    emit(formatToolLine('❌', label, merged));
+    const reason = safeSlice((i.error ?? 'failed').replace(/\s+/g, ' ').trim(), 80);
+    emit(desc ? `❌  ${desc}  · ${reason}` : `❌  ${reason}`);
     return { continue: true };
   }
 
@@ -457,20 +528,17 @@ export const postToolUseVisibility: HookCallback = async (input, toolUseId) => {
   // report errors in their normal response payload).
   const inferred = detectFailureFromResponse(toolName, i.tool_response);
   if (inferred) {
-    const merged = desc ? `${desc}  ✗ ${inferred}` : `✗ ${inferred}`;
-    emit(formatToolLine('❌', label, merged));
+    emit(desc ? `❌  ${desc}  · ${inferred}` : `❌  ${inferred}`);
     return { continue: true };
   }
 
   // SUCCESS PATH — emit done-marker for slow Bash, optionally enriched
-  // with a result-shape hint (line count, response size).
+  // with a result-shape hint (line count, first-line peek).
   if (toolName === 'Bash' && startTime) {
     const elapsed = Date.now() - startTime;
     if (elapsed > LONG_CALL_THRESHOLD_MS) {
       const shape = resultShape(toolName, i.tool_response);
-      const elapsedStr = `done in ${(elapsed / 1000).toFixed(1)}s`;
-      const finalDesc = shape ? `${elapsedStr}  ${shape}` : elapsedStr;
-      emit(formatToolLine('🖥️', 'bash', finalDesc));
+      emit(`✓  ${(elapsed / 1000).toFixed(1)}s` + (shape ? ` · ${shape}` : ''));
     }
   }
 
