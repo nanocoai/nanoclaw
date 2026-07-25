@@ -18,11 +18,13 @@ describe('MCP server init diagnostics', () => {
     ]);
   });
 
-  it('keeps untrusted server names on one bounded log line', () => {
-    const longName = `bad\nserver${'x'.repeat(300)}`;
-    const [diagnostic] = mcpInitFailureDiagnostics([{ name: longName, status: 'failed' }]);
+  it('keeps untrusted server names and statuses on one bounded, control-free log line', () => {
+    const longName = `bad\nserver\u001B[31m\u0000\t${'x'.repeat(300)}`;
+    const [diagnostic] = mcpInitFailureDiagnostics([
+      { name: longName, status: 'failed\u0085\u2028\u2029' },
+    ]);
 
-    expect(diagnostic).not.toContain('\n');
+    expect(diagnostic).not.toMatch(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/);
     expect(diagnostic).toContain('bad server');
     expect(diagnostic!.length).toBeLessThan(300);
   });

@@ -70,7 +70,7 @@ interface SdkMcpServerSummary {
 }
 
 function sanitizeLogValue(value: string): string {
-  return value.replace(/[\r\n\u2028\u2029]/g, ' ').slice(0, 200);
+  return value.replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g, ' ').slice(0, 200);
 }
 
 /**
