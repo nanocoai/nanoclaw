@@ -668,7 +668,15 @@ export const FALLBACK_PREFIX = '⚠ undelivered agent output (sent raw):';
  * separate so the marker and the log line stay distinct from the provider-error
  * path (which carries an already-user-facing notice, no marker).
  */
-function deliverFallbackResult(text: string, routing: RoutingContext): void {
+export function deliverFallbackResult(text: string, routing: RoutingContext): void {
+  // <internal> content stays private even on this last-resort path — the agent
+  // explicitly marked it not-for-delivery, and models routinely narrate the
+  // user in there ("the user is asking about...").
+  const deliverable = stripInternalTags(text);
+  if (!deliverable) {
+    log('Nudged chat turn had only <internal> content — nothing delivered');
+    return;
+  }
   log('Nudged chat turn still had no <message> envelope — delivering raw text as never-silent fallback');
   writeMessageOut({
     id: generateId(),
@@ -677,7 +685,7 @@ function deliverFallbackResult(text: string, routing: RoutingContext): void {
     platform_id: routing.platformId,
     channel_type: routing.channelType,
     thread_id: routing.threadId,
-    content: JSON.stringify({ text: `${FALLBACK_PREFIX}\n${text}` }),
+    content: JSON.stringify({ text: `${FALLBACK_PREFIX}\n${deliverable}` }),
   });
 }
 
@@ -685,6 +693,9 @@ function deliverFallbackResult(text: string, routing: RoutingContext): void {
  * Parse the agent's final text for <message to="name">...</message> blocks
  * and dispatch each one to its resolved destination. Text outside of blocks
  * (including <internal>...</internal>) is scratchpad — logged but not sent.
+ * <internal>...</internal> content is also stripped from INSIDE message
+ * bodies before delivery: the tag marks private thinking regardless of
+ * where the model placed it.
  *
  * The agent must always wrap output in <message to="name">...</message>
  * blocks, even with a single destination. Bare text is scratchpad only.
@@ -734,7 +745,14 @@ export function dispatchResultText(
       scratchpadParts.push(`[dropped: unknown destination "${toName}"] ${body}`);
       continue;
     }
-    sendToDestination(dest, body, routing);
+    // Models steered toward <internal> scratchpad tags sometimes place them
+    // INSIDE the envelope; the tag means not-for-delivery wherever it sits.
+    const deliverable = stripInternalTags(body);
+    if (!deliverable) {
+      log(`<message to="${toName}"> contained only <internal> content — nothing delivered`);
+      continue;
+    }
+    sendToDestination(dest, deliverable, routing);
     sent++;
   }
   if (lastIndex < text.length) {

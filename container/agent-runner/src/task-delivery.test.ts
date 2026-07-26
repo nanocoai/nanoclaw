@@ -10,7 +10,14 @@ import { closeSessionDb, getInboundDb, getOutboundDb, initTestSessionDb } from '
 import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { getTaskSeriesId } from './db/session-routing.js';
 import { sendFile, sendMessage } from './mcp-tools/core.js';
-import { autoAppendTaskLog, buildTaskBlockNudge, dispatchResultText, shouldNudgeTaskBlocks } from './poll-loop.js';
+import {
+  autoAppendTaskLog,
+  buildTaskBlockNudge,
+  deliverFallbackResult,
+  dispatchResultText,
+  FALLBACK_PREFIX,
+  shouldNudgeTaskBlocks,
+} from './poll-loop.js';
 import type { RoutingContext } from './formatter.js';
 
 function seedSessionRouting(channelType: string | null, platformId: string | null, threadId: string | null): void {
@@ -181,6 +188,50 @@ describe('final-output blocks in a task run', () => {
     }[];
     expect(rows).toHaveLength(1);
     expect(JSON.parse(rows[0].content).text).toContain('[undelivered → family] digest');
+  });
+});
+
+describe('<internal> scratchpad privacy', () => {
+  const chatRouting: RoutingContext = { ...taskRouting, taskRun: false };
+
+  it('strips <internal> content from inside a delivered message body', () => {
+    const { sent } = dispatchResultText(
+      '<message to="family"><internal>\nThe user is greeting me. Keep it brief.\n</internal>\nhi!</message>',
+      chatRouting,
+    );
+
+    expect(sent).toBe(1);
+    const rows = getUndeliveredMessages();
+    expect(rows).toHaveLength(1);
+    const { text } = JSON.parse(rows[0].content) as { text: string };
+    expect(text).toBe('hi!');
+  });
+
+  it('delivers nothing for a message block that is only <internal> content', () => {
+    const { sent, hasUnwrapped } = dispatchResultText(
+      '<message to="family"><internal>private thinking</internal></message>',
+      chatRouting,
+    );
+
+    expect(sent).toBe(0);
+    expect(hasUnwrapped).toBe(false);
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('strips <internal> content from never-silent fallback text', () => {
+    deliverFallbackResult('<internal>the user said thanks</internal>\nThanks!', chatRouting);
+
+    const rows = getUndeliveredMessages();
+    expect(rows).toHaveLength(1);
+    const { text } = JSON.parse(rows[0].content) as { text: string };
+    expect(text).toBe(`${FALLBACK_PREFIX}\nThanks!`);
+    expect(text).not.toContain('<internal>');
+  });
+
+  it('delivers nothing when fallback text is entirely <internal> content', () => {
+    deliverFallbackResult('<internal>only private thinking</internal>', chatRouting);
+
+    expect(getUndeliveredMessages()).toHaveLength(0);
   });
 });
 
