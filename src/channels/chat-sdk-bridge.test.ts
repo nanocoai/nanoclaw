@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, enrichAttachment, splitForLimit } from './chat-sdk-bridge.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
@@ -419,5 +419,76 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(calls).toHaveLength(1);
     const msg = calls[0].message as { markdown?: string };
     expect(msg.markdown).toBe('plain hello');
+  });
+});
+
+describe('enrichAttachment', () => {
+  it('uses fetchData when present and returns base64-encoded data', async () => {
+    const buf = Buffer.from('hello attachment');
+    const att = {
+      type: 'image',
+      name: 'photo.jpg',
+      mimeType: 'image/jpeg',
+      size: buf.length,
+      fetchData: vi.fn().mockResolvedValue(buf),
+    };
+    const result = await enrichAttachment(att);
+    expect(att.fetchData).toHaveBeenCalledOnce();
+    expect(result.data).toBe(buf.toString('base64'));
+    expect(result.type).toBe('image');
+    expect(result.name).toBe('photo.jpg');
+  });
+
+  it('falls back to fetch(url) when fetchData is absent and returns base64-encoded data', async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => bytes.buffer,
+    });
+    vi.stubGlobal('fetch', mockFetch);
+    try {
+      const att = { type: 'image', name: 'img.png', mimeType: 'image/png', url: 'https://cdn.example.com/img.png' };
+      const result = await enrichAttachment(att);
+      expect(mockFetch).toHaveBeenCalledWith('https://cdn.example.com/img.png');
+      expect(result.data).toBe(Buffer.from(bytes.buffer).toString('base64'));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('omits data when the URL fetch returns a non-ok status', async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 403 });
+    vi.stubGlobal('fetch', mockFetch);
+    try {
+      const att = {
+        type: 'image',
+        name: 'img.png',
+        mimeType: 'image/png',
+        url: 'https://cdn.example.com/forbidden.png',
+      };
+      const result = await enrichAttachment(att);
+      expect(result.data).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('omits data when the URL fetch throws a network error', async () => {
+    const mockFetch = vi.fn().mockRejectedValue(new Error('network failure'));
+    vi.stubGlobal('fetch', mockFetch);
+    try {
+      const att = { type: 'image', name: 'img.png', mimeType: 'image/png', url: 'https://cdn.example.com/img.png' };
+      const result = await enrichAttachment(att);
+      expect(result.data).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('omits data when neither fetchData nor url is present', async () => {
+    const att = { type: 'image', name: 'img.png', mimeType: 'image/png', size: 42 };
+    const result = await enrichAttachment(att);
+    expect(result.data).toBeUndefined();
+    expect(result.size).toBe(42);
   });
 });
