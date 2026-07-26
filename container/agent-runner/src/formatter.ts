@@ -140,9 +140,15 @@ export function formatMessages(messages: MessageInRow[]): string {
   const taskMessages = messages.filter((m) => m.kind === 'task');
   const webhookMessages = messages.filter((m) => m.kind === 'webhook');
   const systemMessages = messages.filter((m) => m.kind === 'system');
+  const sentMessages = messages.filter((m) => m.kind === 'sent');
 
   const parts: string[] = [];
 
+  // Ahead of the incoming messages: what was already said on this agent's
+  // behalf is prior context for whatever the user is replying to.
+  if (sentMessages.length > 0) {
+    parts.push(...sentMessages.map(formatSentMessage));
+  }
   if (chatMessages.length > 0) {
     parts.push(formatChatMessages(chatMessages));
   }
@@ -239,6 +245,23 @@ function formatWebhookMessage(msg: MessageInRow): string {
   const event = content.event || 'unknown';
   const from = originAttr(msg);
   return `<webhook${from} source="${escapeXml(source)}" event="${escapeXml(event)}">${JSON.stringify(content.payload || content, null, 2)}</webhook>`;
+}
+
+/**
+ * A message the host already delivered to the user *on this agent's behalf* —
+ * an approval prompt, a reason prompt, a registration notice. The agent never
+ * composed it, so it is absent from its own turn history; without this, the
+ * user's reply to it arrives with no referent and the agent has to guess.
+ *
+ * Rendered as context, not as an instruction: it has already been sent and
+ * must not be repeated.
+ */
+function formatSentMessage(msg: MessageInRow): string {
+  const content = parseContent(msg.content);
+  const time = formatLocalTime(msg.timestamp, TIMEZONE);
+  return `<already_sent_to_user at="${escapeXml(time)}" note="sent on your behalf; do not repeat it">${escapeXml(
+    content.text || '',
+  )}</already_sent_to_user>`;
 }
 
 function formatSystemMessage(msg: MessageInRow): string {
