@@ -1,6 +1,73 @@
 import type { UserRole, UserRoleKind } from '../../../types.js';
 import { getDb } from '../../../db/connection.js';
 
+// ---------------------------------------------------------------------------
+// Privilege classification + self-describing capabilities
+// ---------------------------------------------------------------------------
+
+/**
+ * Distinct privilege levels. A raw (role, agent_group_id) row is ambiguous on
+ * its own — `admin` means very different things depending on whether the group
+ * is null (global) or set (scoped). This collapses the pair into one explicit
+ * identity so callers never have to re-derive the blast radius.
+ */
+export type RolePrivilege = 'owner' | 'global-admin' | 'group-admin';
+
+export interface RoleScopeDescription {
+  privilege: RolePrivilege;
+  /**
+   * Article-free label, e.g. "owner", "GLOBAL admin", "admin of group Foo".
+   * Safe to drop into a sentence or an approval card (issue B reuses this).
+   */
+  label: string;
+  /** One-line capability / blast-radius description. */
+  capabilities: string;
+}
+
+/** Collapse a (role, agent_group_id) row into its explicit privilege level. */
+export function classifyRole(role: UserRoleKind, agentGroupId: string | null): RolePrivilege {
+  if (role === 'owner') return 'owner';
+  return agentGroupId === null ? 'global-admin' : 'group-admin';
+}
+
+/**
+ * Describe what a role grant confers in plain language. Kept in the
+ * permissions module (not the CLI layer) so approval-card rendering (issue B)
+ * and any future prompt/doc guidance (issue A4) can reuse the same wording.
+ *
+ * `groupName` is optional cosmetic sugar for group-scoped admins — pass the
+ * resolved agent-group name when it's cheap; otherwise the raw id is used.
+ */
+export function describeRoleScope(
+  role: UserRoleKind,
+  agentGroupId: string | null,
+  groupName?: string | null,
+): RoleScopeDescription {
+  const privilege = classifyRole(role, agentGroupId);
+  switch (privilege) {
+    case 'owner':
+      return {
+        privilege,
+        label: 'owner',
+        capabilities: 'full control over ALL agent groups — can approve any sensitive action and manage every group',
+      };
+    case 'global-admin':
+      return {
+        privilege,
+        label: 'GLOBAL admin',
+        capabilities: 'can approve sensitive actions and manage ALL agent groups',
+      };
+    case 'group-admin': {
+      const where = groupName ?? agentGroupId ?? '(unknown group)';
+      return {
+        privilege,
+        label: `admin of group ${where}`,
+        capabilities: 'can approve sensitive actions and manage this group only',
+      };
+    }
+  }
+}
+
 /**
  * Grant a role. Owner rows must have agent_group_id = null (enforced here,
  * not by schema, so callers get a clean error path).
