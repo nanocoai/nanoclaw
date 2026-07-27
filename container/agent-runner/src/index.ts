@@ -120,6 +120,7 @@ async function main(): Promise<void> {
     cwd: CWD,
     systemContext: { instructions },
     fallback,
+    taskModel: config.taskModel,
   });
 }
 

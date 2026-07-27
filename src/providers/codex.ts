@@ -19,7 +19,26 @@
 import fs from 'fs';
 import path from 'path';
 
+import { readEnvFile } from '../env.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
+
+export const CODEX_ENV_KEYS = ['OPENAI_API_KEY', 'CODEX_MODEL', 'OPENAI_BASE_URL', 'CODEX_TURN_TIMEOUT_MS'] as const;
+
+/**
+ * Merge codex runtime env from the host process env and the parsed .env
+ * file. process.env wins when both define a key.
+ */
+export function resolveCodexEnv(
+  hostEnv: Record<string, string | undefined>,
+  fileEnv: Record<string, string>,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of CODEX_ENV_KEYS) {
+    const value = hostEnv[key] || fileEnv[key];
+    if (value) env[key] = value;
+  }
+  return env;
+}
 
 registerProviderContainerConfig('codex', (ctx) => {
   const codexDir = path.join(ctx.sessionDir, 'codex');
@@ -37,10 +56,11 @@ registerProviderContainerConfig('codex', (ctx) => {
   }
 
   const env: Record<string, string> = {};
-  for (const key of ['OPENAI_API_KEY', 'CODEX_MODEL', 'OPENAI_BASE_URL', 'CODEX_TURN_TIMEOUT_MS'] as const) {
-    const value = ctx.hostEnv[key];
-    if (value) env[key] = value;
-  }
+  // The host deliberately never loads .env into process.env (src/env.ts),
+  // so these keys must also be read from the .env file — otherwise a
+  // service-managed host passes no auth at all and every codex turn fails.
+  const fileEnv = readEnvFile([...CODEX_ENV_KEYS]);
+  Object.assign(env, resolveCodexEnv(ctx.hostEnv, fileEnv));
 
   return {
     mounts: [{ hostPath: codexDir, containerPath: '/home/node/.codex', readonly: false }],

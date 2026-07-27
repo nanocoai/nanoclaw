@@ -57,6 +57,14 @@ export interface QueryInput {
   systemContext?: {
     instructions?: string;
   };
+
+  /**
+   * Per-query model override (alias or full model ID). Wins over the
+   * provider's constructor-time model for this query only. Used to route
+   * scheduled-task-only turns to a cheaper model. Providers that don't
+   * support per-query model selection may ignore it.
+   */
+  model?: string;
 }
 
 export interface McpServerConfig {

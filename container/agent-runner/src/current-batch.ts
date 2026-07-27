@@ -13,7 +13,27 @@
  * before invoking the provider and `clearCurrentInReplyTo` after the batch
  * completes (or errors out).
  */
+export interface CurrentBatchRouting {
+  channelType: string | null;
+  platformId: string | null;
+  threadId: string | null;
+}
+
 let currentInReplyTo: string | null = null;
+let currentRouting: CurrentBatchRouting | null = null;
+
+/**
+ * Publish the routing of the batch's triggering message so `send_message`
+ * (and friends) can default a reply to the exact chat that message came
+ * from, instead of the session's sticky first-channel routing.
+ */
+export function setCurrentRouting(routing: CurrentBatchRouting | null): void {
+  currentRouting = routing;
+}
+
+export function getCurrentRouting(): CurrentBatchRouting | null {
+  return currentRouting;
+}
 
 export function setCurrentInReplyTo(id: string | null): void {
   currentInReplyTo = id;

@@ -24,6 +24,9 @@ import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
+// Side-effect import: registers the 'group_send' approval handler at startup
+// so operator approvals arriving after a host restart still dispatch.
+import { gateGroupSend, shouldGateGroupSend } from './modules/approvals/group-send.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { Session } from './types.js';
 
@@ -307,6 +310,17 @@ async function deliverMessage(
           `unauthorized channel destination: ${session.agent_group_id} cannot send to ${mg.channel_type}/${mg.platform_id}`,
         );
       }
+    }
+
+    // Hard gate: NO send to a group chat without explicit per-message
+    // operator approval — including replies to @-mentions. Enforced here,
+    // at the only path from messages_out to a platform adapter, so nothing
+    // container-side can bypass it. The row is marked delivered by the
+    // caller (consumed by the gate) and the actual delivery happens in the
+    // 'group_send' approval handler on approve.
+    if (shouldGateGroupSend(mg.is_group, msg.channel_type)) {
+      await gateGroupSend(msg, session, mg.name ?? `${mg.channel_type}/${mg.platform_id}`);
+      return;
     }
   }
 

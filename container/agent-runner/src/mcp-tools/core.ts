@@ -9,7 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { getCurrentInReplyTo } from '../current-batch.js';
+import { getCurrentInReplyTo, getCurrentRouting } from '../current-batch.js';
 import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
@@ -53,7 +53,22 @@ function resolveRouting(
   to: string | undefined,
 ): { channel_type: string; platform_id: string; thread_id: string | null; resolvedName: string } | { error: string } {
   if (!to) {
-    // Default: reply to whatever thread/channel this session is bound to.
+    // Default: reply to the exact chat the triggering message of the
+    // current batch came from. In shared sessions (multiple chats, one
+    // session) the session-level routing below is sticky on whichever
+    // messaging group the session was created with — defaulting to it sent
+    // a reply to a Telegram message into WhatsApp. The per-batch routing
+    // published by the poll-loop is authoritative while a turn is running.
+    const batch = getCurrentRouting();
+    if (batch?.channelType && batch.platformId) {
+      return {
+        channel_type: batch.channelType,
+        platform_id: batch.platformId,
+        thread_id: batch.threadId,
+        resolvedName: '(current conversation)',
+      };
+    }
+    // Fall back to whatever thread/channel this session is bound to.
     const session = getSessionRouting();
     if (session.channel_type && session.platform_id) {
       return {

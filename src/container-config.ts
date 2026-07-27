@@ -44,6 +44,8 @@ export interface ContainerConfig {
   agentGroupId?: string;
   maxMessagesPerPrompt?: number;
   model?: string;
+  /** Model override for turns consisting solely of scheduled tasks. */
+  taskModel?: string;
   effort?: string;
 }
 
@@ -65,6 +67,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     agentGroupId: group.id,
     maxMessagesPerPrompt: row.max_messages_per_prompt ?? undefined,
     model: row.model ?? undefined,
+    taskModel: row.task_model ?? undefined,
     effort: row.effort ?? undefined,
   };
 }

@@ -34,6 +34,8 @@ export interface MessageInRow {
   tries: number;
   /** 1 = wake-eligible (default); 0 = accumulated context only */
   trigger: number;
+  /** Shared across all occurrences of a recurring task; null otherwise. */
+  series_id?: string | null;
   platform_id: string | null;
   channel_type: string | null;
   thread_id: string | null;

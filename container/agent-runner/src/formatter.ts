@@ -102,15 +102,23 @@ export interface RoutingContext {
 
 /**
  * Extract routing context from a batch of messages.
- * Uses the first message's routing fields.
+ *
+ * Replies must default to the destination of the TRIGGERING message, not
+ * whatever happened to be first in the batch. Accumulated trigger=0 context
+ * (e.g. un-mentioned WhatsApp group chatter) rides along in the same batch
+ * as the trigger=1 message that woke the agent — anchoring on messages[0]
+ * routed a Telegram-triggered reply to WhatsApp. Anchor on the latest
+ * trigger=1 row; fall back to the first message only when the batch has no
+ * trigger row at all (host-generated batches).
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
-  const first = messages[0];
+  const triggers = messages.filter((m) => m.trigger === 1);
+  const anchor = triggers.length > 0 ? triggers[triggers.length - 1] : messages[0];
   return {
-    platformId: first?.platform_id ?? null,
-    channelType: first?.channel_type ?? null,
-    threadId: first?.thread_id ?? null,
-    inReplyTo: first?.id ?? null,
+    platformId: anchor?.platform_id ?? null,
+    channelType: anchor?.channel_type ?? null,
+    threadId: anchor?.thread_id ?? null,
+    inReplyTo: anchor?.id ?? null,
   };
 }
 

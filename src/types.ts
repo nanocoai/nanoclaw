@@ -17,6 +17,8 @@ export interface ContainerConfigRow {
   /** Overflow provider used when the primary fails a turn on quota. */
   fallback_provider: string | null;
   model: string | null;
+  /** Model override for turns consisting solely of scheduled tasks. */
+  task_model: string | null;
   effort: string | null;
   image_tag: string | null;
   assistant_name: string | null;

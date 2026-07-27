@@ -166,6 +166,22 @@ export function clearLastTurnProvider(): void {
   deleteValue(LAST_TURN_PROVIDER_KEY);
 }
 
+// ── Pre-task script result dedupe ───────────────────────────────────────────
+// Remembers, per task series, the hash of the script data that last woke the
+// agent, so a recurring watcher re-reporting identical data can't wake a full
+// LLM turn again. Keyed per series (falls back to the task id for one-offs).
+function taskResultHashKey(seriesKey: string): string {
+  return `task_result_hash:${seriesKey}`;
+}
+
+export function getTaskResultHash(seriesKey: string): string | undefined {
+  return getValue(taskResultHashKey(seriesKey));
+}
+
+export function setTaskResultHash(seriesKey: string, hash: string): void {
+  setValue(taskResultHashKey(seriesKey), hash);
+}
+
 export function getContinuation(providerName: string): string | undefined {
   return getValue(continuationKey(providerName));
 }

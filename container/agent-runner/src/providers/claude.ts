@@ -298,7 +298,7 @@ export class ClaudeProvider implements AgentProvider {
         ],
         disallowedTools: SDK_DISALLOWED_TOOLS,
         env: this.env,
-        model: this.model,
+        model: input.model ?? this.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.effort as any,
         permissionMode: 'bypassPermissions',

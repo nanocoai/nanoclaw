@@ -19,6 +19,8 @@ export interface RunnerConfig {
   maxMessagesPerPrompt: number;
   mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   model?: string;
+  /** Model override for turns consisting solely of scheduled tasks (optional). */
+  taskModel?: string;
   effort?: string;
 }
 
@@ -49,6 +51,7 @@ export function loadConfig(): RunnerConfig {
     maxMessagesPerPrompt: (raw.maxMessagesPerPrompt as number) || DEFAULT_MAX_MESSAGES,
     mcpServers: (raw.mcpServers as RunnerConfig['mcpServers']) || {},
     model: (raw.model as string) || undefined,
+    taskModel: (raw.taskModel as string) || undefined,
     effort: (raw.effort as string) || undefined,
   };
 

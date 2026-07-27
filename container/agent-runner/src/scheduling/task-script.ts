@@ -1,8 +1,10 @@
 import { execFile } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { MessageInRow } from '../db/messages-in.js';
 import { touchHeartbeat } from '../db/connection.js';
+import { getTaskResultHash, setTaskResultHash } from '../db/session-state.js';
 
 const SCRIPT_TIMEOUT_MS = 30_000;
 const SCRIPT_MAX_BUFFER = 1024 * 1024;
@@ -110,6 +112,23 @@ export async function applyPreTaskScripts(messages: MessageInRow[]): Promise<Tas
       log(`task ${msg.id} skipped: ${reason}`);
       skipped.push(msg.id);
       continue;
+    }
+
+    // Duplicate-result guard: a recurring watcher whose script returns the
+    // SAME data as the occurrence that last woke the agent is re-reporting
+    // an already-handled hit (broad queries firing on unrelated-but-stable
+    // rows were waking a full LLM turn every tick). Suppress the wake and
+    // let the task complete. Only applies when the script reports data —
+    // a bare {wakeAgent:true} (plain reminder semantics) always wakes.
+    if (result.data !== undefined && result.data !== null) {
+      const dedupeKey = msg.series_id ?? msg.id;
+      const hash = crypto.createHash('sha256').update(JSON.stringify(result.data)).digest('hex');
+      if (getTaskResultHash(dedupeKey) === hash) {
+        log(`task ${msg.id} skipped: duplicate script result (already woke for this data)`);
+        skipped.push(msg.id);
+        continue;
+      }
+      setTaskResultHash(dedupeKey, hash);
     }
 
     log(`task ${msg.id} wakeAgent=true, enriching prompt`);
