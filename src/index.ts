@@ -16,6 +16,7 @@ import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runti
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
+import { ensureWhatsAppGroupAutoWired } from './whatsapp-auto-wire.js';
 import { log } from './log.js';
 
 // Response + shutdown registries live in response-registry.ts to break the
@@ -122,6 +123,13 @@ async function main(): Promise<void> {
           name,
           isGroup,
         });
+        if (adapter.channelType === 'whatsapp') {
+          try {
+            ensureWhatsAppGroupAutoWired(platformId, name, isGroup);
+          } catch (err) {
+            log.error('WhatsApp auto-wire failed', { platformId, err });
+          }
+        }
       },
       onAction(questionId, selectedOption, userId) {
         dispatchResponse({

@@ -562,6 +562,23 @@ registerChannelAdapter('whatsapp', {
             // Notify metadata for group discovery
             setupConfig.onMetadata(chatJid, undefined, isGroup);
 
+            // Detect an explicit @mention of the bot in group chats. WhatsApp
+            // carries mentions as JIDs in contextInfo.mentionedJid (present on
+            // extendedTextMessage and on media captions), not as plain text —
+            // there is no other signal the adapter can use for engage_mode
+            // 'mention' / 'mention-sticky' to fire correctly in a group.
+            const mentionedJids: string[] =
+              normalized.extendedTextMessage?.contextInfo?.mentionedJid ??
+              normalized.imageMessage?.contextInfo?.mentionedJid ??
+              normalized.videoMessage?.contextInfo?.mentionedJid ??
+              [];
+            const botLidJid = botLidUser ? `${botLidUser}@lid` : undefined;
+            const isGroupMention =
+              isGroup &&
+              mentionedJids.length > 0 &&
+              (mentionedJids.includes(botPhoneJid ?? '') ||
+                (botLidJid !== undefined && mentionedJids.includes(botLidJid)));
+
             let content =
               normalized.conversation ||
               normalized.extendedTextMessage?.text ||
@@ -626,8 +643,9 @@ registerChannelAdapter('whatsapp', {
               // DMs are addressed to the bot by definition. Mark them as
               // platform-confirmed mentions so the router auto-creates an
               // approval-required messaging_group when the chat is unknown,
-              // instead of silently dropping.
-              isMention: !isGroup ? true : undefined,
+              // instead of silently dropping. In groups, only a real @mention
+              // (contextInfo.mentionedJid, resolved above) counts.
+              isMention: !isGroup ? true : isGroupMention || undefined,
               isGroup,
               content: {
                 text: content,

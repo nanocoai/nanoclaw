@@ -27,7 +27,7 @@ import {
 } from './db/session-state.js';
 import { QuotaExhaustedError, isGenuineQuotaError, isTransientLimit } from './quota.js';
 import { buildHandoffRecap } from './handoff.js';
-import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
+import { clearCurrentInReplyTo, setCurrentInReplyTo, setCurrentRouting } from './current-batch.js';
 import {
   formatMessages,
   extractRouting,
@@ -72,6 +72,14 @@ export interface PollLoopConfig {
     provider: AgentProvider;
     providerName: string;
   };
+  /**
+   * Optional cheap-model override for turns whose batch consists solely of
+   * scheduled tasks (kind='task'). Watcher wakes pay a large fixed context
+   * floor per turn; routing them to a cheaper model caps that cost without
+   * touching user-conversation quality. Ignored when a batch mixes task and
+   * chat rows — the user's message wins the stronger model.
+   */
+  taskModel?: string;
 }
 
 // User-facing notices for the fallback flow. Sent to the same destination
@@ -298,11 +306,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
+    // Task-only turns run on the cheap task model when configured.
+    const taskOnly = keep.every((m) => m.kind === 'task');
     const query = config.provider.query({
       prompt,
       continuation,
       cwd: config.cwd,
       systemContext: config.systemContext,
+      model: taskOnly ? config.taskModel : undefined,
     });
 
     // Process the query while concurrently polling for new messages
@@ -310,7 +321,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
+    // The routing itself is published too, so a destination-less
+    // send_message defaults to the triggering message's chat instead of the
+    // session's sticky first-channel routing.
     setCurrentInReplyTo(routing.inReplyTo);
+    setCurrentRouting({
+      channelType: routing.channelType,
+      platformId: routing.platformId,
+      threadId: routing.threadId,
+    });
     try {
       const result = await processQuery(
         query,
@@ -452,11 +471,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         if (staleRetry) {
           // Batch was requeued — leave it un-acked for the retry.
           clearCurrentInReplyTo();
+          setCurrentRouting(null);
           continue;
         }
       }
     } finally {
       clearCurrentInReplyTo();
+      setCurrentRouting(null);
     }
 
     // Ensure completed even if processQuery ended without a result event
@@ -569,6 +590,18 @@ async function processQuery(
         const newMessages = pending.filter((m) => m.kind !== 'system');
         if (newMessages.length === 0) return;
 
+        // Mirror the outer loop's wake gate (line ~193): a follow-up batch
+        // with no trigger=1 row is accumulate-only context (e.g. a WhatsApp
+        // group message that didn't @mention the agent). The container is
+        // already warm from an earlier trigger=1 turn, but that's a host
+        // wake decision, not agent-side license to reply to everything that
+        // arrives while it happens to be awake — the engage_mode/trigger
+        // contract has to hold regardless of container warmth. Leave them
+        // unacked/pending (same as the outer gate) so they ride along as
+        // context the next time a real trigger=1 message lands, instead of
+        // pushing a turn for them now.
+        if (!newMessages.some((m) => m.trigger === 1)) return;
+
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
 
@@ -597,6 +630,19 @@ async function processQuery(
 
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
+        // Re-anchor reply routing on the follow-up's triggering message —
+        // in a shared session the follow-up may come from a different chat
+        // than the batch that opened this turn, and both the plain-text
+        // reply path (dispatchResultText via `routing`) and the MCP
+        // send_message default must follow it.
+        const followUpRouting = extractRouting(keep);
+        Object.assign(routing, followUpRouting);
+        setCurrentInReplyTo(followUpRouting.inReplyTo);
+        setCurrentRouting({
+          channelType: followUpRouting.channelType,
+          platformId: followUpRouting.platformId,
+          threadId: followUpRouting.threadId,
+        });
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
         promptSeqMark = getMaxOutSeq();
