@@ -15,7 +15,7 @@ vi.mock('./log.js', () => ({
 }));
 
 import { composeGroupClaudeMd } from './claude-md-compose.js';
-import { ensureContainerConfig, updateContainerConfigScalars } from './db/container-configs.js';
+import { ensureContainerConfig, updateContainerConfigJson, updateContainerConfigScalars } from './db/container-configs.js';
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from './db/index.js';
 import { PERSONA_PREPEND_FILE } from './group-persona.js';
 import type { AgentGroup } from './types.js';
@@ -114,5 +114,45 @@ describe('composeGroupClaudeMd scheduling instructions (ncl tasks reach-in)', ()
     const imports = importsOf(ag.folder);
     expect(imports).not.toContain('@./.claude-fragments/module-scheduling.md');
     expect(imports).not.toContain('@./.claude-fragments/module-cli.md');
+  });
+});
+
+describe('composeGroupClaudeMd skill fragments (container.json selection)', () => {
+  // Red-on-delete guard for the enabledSkills filter at the skill-fragment
+  // loop: a group's composed CLAUDE.md carries fragments only for skills the
+  // group actually has. Uses onecli-gateway — the one trunk skill that ships
+  // an instructions.md.
+  it("imports fragment-bearing skills at the default skills:'all'", () => {
+    const ag = group('ag-skills-all', 'skills-all-group');
+    seed(ag);
+
+    composeGroupClaudeMd(ag);
+
+    expect(importsOf(ag.folder)).toContain('@./.claude-fragments/skill-onecli-gateway.md');
+  });
+
+  it('excludes fragments of skills outside an explicit selection', () => {
+    const ag = group('ag-skills-few', 'skills-few-group');
+    seed(ag);
+    updateContainerConfigJson(ag.id, 'skills', ['agent-browser']);
+
+    composeGroupClaudeMd(ag);
+
+    expect(importsOf(ag.folder)).not.toContain('@./.claude-fragments/skill-onecli-gateway.md');
+  });
+
+  it('prunes a previously-composed fragment after the skill is deselected', () => {
+    const ag = group('ag-skills-prune', 'skills-prune-group');
+    seed(ag);
+
+    composeGroupClaudeMd(ag);
+    const fragPath = path.join(GROUPS_DIR, ag.folder, '.claude-fragments', 'skill-onecli-gateway.md');
+    expect(fs.lstatSync(fragPath).isSymbolicLink()).toBe(true);
+
+    updateContainerConfigJson(ag.id, 'skills', []);
+    composeGroupClaudeMd(ag);
+
+    expect(fs.existsSync(fragPath)).toBe(false);
+    expect(importsOf(ag.folder)).not.toContain('@./.claude-fragments/skill-onecli-gateway.md');
   });
 });
