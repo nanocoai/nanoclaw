@@ -120,6 +120,30 @@ describe('createAgentFromTemplate', () => {
     expect(fs.existsSync(path.join(GROUPS_DIR, g.folder, 'tasks', 'weekday-briefing.md'))).toBe(false);
   });
 
+  it('stamps a valid timezone onto the config row and grounds template task first runs in it', () => {
+    writeTask('daily-digest', '0 9 * * *', 'Send the digest.');
+
+    const g = createAgentFromTemplate('sales/sdr', { name: 'SDR TZ', timezone: 'Asia/Tokyo' });
+    expect(getContainerConfig(g.id)?.timezone).toBe('Asia/Tokyo');
+
+    const sessions = findTaskSessions(g.id);
+    const db = new Database(inboundDbPath(g.id, sessions[0].id), { readonly: true });
+    const row = db.prepare("SELECT process_after FROM messages_in WHERE kind = 'task'").get() as {
+      process_after: string;
+    };
+    db.close();
+
+    // 09:00 in Tokyo (no DST) is always 00:00 UTC. A first run computed in the
+    // install-global timezone would only produce this if the test host itself
+    // ran in JST.
+    expect(row.process_after).toMatch(/T00:00:00/);
+  });
+
+  it('ignores an invalid timezone — the group follows the install default', () => {
+    const g = createAgentFromTemplate('sales/sdr', { name: 'SDR Bad TZ', timezone: 'Not/AZone' });
+    expect(getContainerConfig(g.id)?.timezone).toBeNull();
+  });
+
   it('forwards multiline scripts unchanged through the shared task creation path', () => {
     const script = 'count=2\necho \'{"wakeAgent": true, "data": {"count": 2}}\'';
     writeTask('alert-watch', '*/15 * * * *', 'Investigate new alerts.', script);

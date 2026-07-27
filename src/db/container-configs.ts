@@ -10,6 +10,7 @@ const SCALAR_COLUMNS = new Set([
   'assistant_name',
   'max_messages_per_prompt',
   'cli_scope',
+  'timezone',
 ]);
 const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages_npm', 'additional_mounts']);
 
@@ -30,11 +31,11 @@ export function createContainerConfig(config: ContainerConfigRow): void {
       `INSERT INTO container_configs (
         agent_group_id, provider, model, effort, image_tag, assistant_name,
         max_messages_per_prompt, skills, mcp_servers, packages_apt, packages_npm,
-        additional_mounts, updated_at
+        additional_mounts, cli_scope, timezone, updated_at
       ) VALUES (
         @agent_group_id, @provider, @model, @effort, @image_tag, @assistant_name,
         @max_messages_per_prompt, @skills, @mcp_servers, @packages_apt, @packages_npm,
-        @additional_mounts, @updated_at
+        @additional_mounts, @cli_scope, @timezone, @updated_at
       )`,
     )
     .run(config);
@@ -78,7 +79,14 @@ export function updateContainerConfigScalars(
   updates: Partial<
     Pick<
       ContainerConfigRow,
-      'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope'
+      | 'provider'
+      | 'model'
+      | 'effort'
+      | 'image_tag'
+      | 'assistant_name'
+      | 'max_messages_per_prompt'
+      | 'cli_scope'
+      | 'timezone'
     >
   >,
 ): void {

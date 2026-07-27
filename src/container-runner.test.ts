@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { describe, expect, it } from 'vitest';
 
-import { resolveProviderName } from './container-runner.js';
+import { hardeningArgs, resolveProviderName } from './container-runner.js';
 
 describe('resolveProviderName', () => {
   it('prefers session over container config', () => {
@@ -112,5 +112,29 @@ describe('syncSkillSymlinks blocked-entry warning (structural)', () => {
     const tail = src.slice(createLoop);
     expect(tail).toMatch(/else if \(!entry\.isSymbolicLink\(\)\)/);
     expect(tail).toMatch(/log\.warn\(\s*'Shared skill not symlinked/);
+  });
+});
+
+describe('hardeningArgs', () => {
+  it('always emits the three unconditional flags', () => {
+    const args = hardeningArgs('2048');
+    expect(args).toContain('--cap-drop=ALL');
+    expect(args.join(' ')).toContain('--security-opt no-new-privileges');
+    expect(args).toContain('--init');
+  });
+
+  it('emits the pids limit when positive', () => {
+    expect(hardeningArgs('2048').join(' ')).toContain('--pids-limit 2048');
+  });
+
+  // cgroups v2 rejects `--pids-limit 0` with EINVAL, killing the spawn.
+  it('omits the pids limit for 0, negatives, blank and garbage', () => {
+    for (const v of ['0', '-1', '', '   ', 'lots']) {
+      expect(hardeningArgs(v).join(' ')).not.toContain('--pids-limit');
+    }
+  });
+
+  it('floors fractional values', () => {
+    expect(hardeningArgs('2048.7').join(' ')).toContain('--pids-limit 2048');
   });
 });

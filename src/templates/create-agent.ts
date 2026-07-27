@@ -2,9 +2,14 @@ import { randomUUID } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
-import { DATA_DIR, GROUPS_DIR } from '../config.js';
+import { DATA_DIR, GROUPS_DIR, TIMEZONE } from '../config.js';
 import { createAgentGroup } from '../db/agent-groups.js';
-import { ensureContainerConfig, updateContainerConfigJson } from '../db/container-configs.js';
+import {
+  ensureContainerConfig,
+  updateContainerConfigJson,
+  updateContainerConfigScalars,
+} from '../db/container-configs.js';
+import { isValidTimezone } from '../timezone.js';
 import { assertValidGroupFolder, resolveGroupFolderPath } from '../group-folder.js';
 import { stageGroupPersona } from '../group-persona.js';
 import { normalizeName } from '../modules/agent-to-agent/db/agent-destinations.js';
@@ -15,6 +20,8 @@ import { parseTemplate } from './parse.js';
 
 export interface CreateAgentOptions {
   name?: string;
+  /** IANA timezone for the new group; template task schedules fire in it. Omit to follow the install default. */
+  timezone?: string;
 }
 
 /**
@@ -35,6 +42,11 @@ export interface CreateAgentOptions {
 export function createAgentFromTemplate(ref: string, opts?: CreateAgentOptions): AgentGroup {
   const dir = resolveLocalTemplate(ref);
   const tpl = parseTemplate(dir);
+  // The group doesn't exist yet, so resolveGroupTimezone can't apply — the
+  // effective timezone is derived from the option here and stamped onto the
+  // config row below, BEFORE tasks are created, so a template task's first
+  // run and its later re-arms agree on the same zone.
+  const timezone = opts?.timezone && isValidTimezone(opts.timezone) ? opts.timezone : undefined;
   const tasks = tpl.tasks.map((task) => {
     try {
       return prepareScheduledTask({
@@ -42,6 +54,7 @@ export function createAgentFromTemplate(ref: string, opts?: CreateAgentOptions):
         prompt: task.prompt,
         recurrence: task.schedule,
         script: task.script,
+        timezone: timezone ?? TIMEZONE,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -58,6 +71,7 @@ export function createAgentFromTemplate(ref: string, opts?: CreateAgentOptions):
   const group: AgentGroup = { id, name, folder, agent_provider: null, created_at: new Date().toISOString() };
   createAgentGroup(group);
   ensureContainerConfig(id);
+  if (timezone) updateContainerConfigScalars(id, { timezone });
 
   // group-init.ts owns the mkdir at first spawn, but it isn't called here — so we
   // create the dir ourselves to land instructions.prepend.md + context/.

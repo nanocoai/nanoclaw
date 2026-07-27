@@ -120,9 +120,13 @@ RUN mkdir -p /workspace/group /workspace/extra && \
     chown -R node:node /workspace && \
     chmod 777 /home/node
 
+# Drop setuid-root from the binaries Debian ships (mount, su, passwd, ...). The
+# agent runs unprivileged and needs none of them.
+RUN find / -xdev -perm -4000 -type f -exec chmod u-s {} + || true
+
 USER node
 WORKDIR /workspace/group
 
-# tini is PID 1, reaps zombies, forwards signals cleanly. entrypoint.sh does
-# `exec bun ...` so bun runs as tini's direct child.
+# Only applies to a bare `docker run` — the host spawn overrides ENTRYPOINT and
+# passes --init instead (see hardeningArgs in src/container-runner.ts).
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
