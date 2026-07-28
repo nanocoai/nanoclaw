@@ -17,6 +17,7 @@ import type { Chat } from 'chat';
 import { log } from './log.js';
 
 const DEFAULT_PORT = 3000;
+const DEFAULT_HOST = '0.0.0.0';
 
 interface WebhookEntry {
   chat: Chat;
@@ -111,6 +112,7 @@ function ensureServer(): void {
   if (server) return;
 
   const port = parseInt(process.env.WEBHOOK_PORT || String(DEFAULT_PORT), 10);
+  const host = process.env.WEBHOOK_HOST || DEFAULT_HOST;
 
   server = http.createServer(async (req, res) => {
     const url = req.url || '/';
@@ -159,8 +161,8 @@ function ensureServer(): void {
     }
   });
 
-  server.listen(port, '0.0.0.0', () => {
-    log.info('Webhook server started', { port, adapters: [...routes.keys()] });
+  server.listen(port, host, () => {
+    log.info('Webhook server started', { host, port, adapters: [...routes.keys()] });
   });
 }
 
