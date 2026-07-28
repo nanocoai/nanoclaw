@@ -244,11 +244,23 @@ export class CodexProvider implements AgentProvider {
           // a best-effort cost reduction, NOT the rotation safety net below.
           if (cumulativeInputTokens >= COMPACT_THRESHOLD && threadId) {
             log(`Compacting thread (${cumulativeInputTokens} tokens)`);
-            const compactResp = await sendCodexRequest(server, 'thread/compact/start', { threadId });
-            if (compactResp.error) {
-              log(`Compaction failed: ${compactResp.error.message} — continuing uncompacted`);
-            } else {
-              log('Native compaction completed');
+            // sendCodexRequest REJECTS on its 60s timeout — it doesn't come
+            // back as a `.error` payload. Uncaught, that rejection escaped
+            // gen() and failed the whole turn AFTER the answer was already
+            // produced ("Fallback turn failed: Timeout waiting for
+            // thread/compact/start", observed live 2026-07-28). Compaction
+            // is best-effort by contract, so swallow any failure.
+            try {
+              const compactResp = await sendCodexRequest(server, 'thread/compact/start', { threadId });
+              if (compactResp.error) {
+                log(`Compaction failed: ${compactResp.error.message} — continuing uncompacted`);
+              } else {
+                log('Native compaction completed');
+              }
+            } catch (err) {
+              log(
+                `Compaction errored (${err instanceof Error ? err.message : String(err)}) — continuing uncompacted`,
+              );
             }
           }
 

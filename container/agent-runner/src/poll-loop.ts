@@ -343,8 +343,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
       }
-      // This engine answered — a future turn on a different engine (or a
-      // fresh thread) knows to prepend a recap.
+      // Backstop only — processQuery already stamps the provider on every
+      // `result` event. Stamping here alone was a live bug (2026-07-28): the
+      // fallback path stamps 'codex' per turn, but this line only runs when
+      // the primary's long-lived query CLOSES, so after one fallback episode
+      // last_turn_provider stayed 'codex' across healthy Claude turns and
+      // needsRecap prepended an "Engine handoff" recap on every single new
+      // query (46+ recaps in one session's transcript).
       setLastTurnProvider(config.providerName);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -384,6 +389,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         // recent exchange so the switch doesn't read as "a different person
         // who remembers nothing" (reported live 2026-07-08). Mid-outage turns
         // resume the fallback's own thread, which already saw them.
+        // Rotation guard for the FALLBACK thread. The outer-loop rotation
+        // above only watches the primary provider, and codex's own
+        // mid-stream rotation needs a long-lived query — fallback turns are
+        // one-shot. Without this check the fallback thread grew unboundedly
+        // (observed live 2026-07-28: 475k tokens, 3× the ceiling) and every
+        // resume wedged into the 180s idle abort.
+        rotateFallbackThreadIfOversized(config.fallback.providerName, threadRotateTokens);
         const fallbackHasThread = getContinuation(config.fallback.providerName) !== undefined;
         const fbPrompt =
           isFirstFallbackOfOutage || !fallbackHasThread ? buildHandoffRecap() + quotaPrompt : quotaPrompt;
@@ -525,7 +537,8 @@ interface QueryResult {
   continuation?: string;
 }
 
-async function processQuery(
+// Exported for tests (last-turn-provider stamping regression).
+export async function processQuery(
   query: AgentQuery,
   routing: RoutingContext,
   initialBatchIds: string[],
@@ -718,6 +731,12 @@ async function processQuery(
           setFallbackFailureNotified(false);
           writeNotice(routing, hasFallback ? FALLBACK_RETURN_NOTICE : QUOTA_RENEWED_NOTICE);
         }
+        // Stamp the answering engine NOW, per result — not only when the
+        // query eventually closes. The primary's query stays open across
+        // many turns, so waiting for it to close left a stale 'codex' stamp
+        // (from a past fallback turn) in place while Claude answered turn
+        // after turn, and every new query prepended a bogus handoff recap.
+        setLastTurnProvider(providerName);
         if (event.text) {
           const { hasUnwrapped } = dispatchResultText(event.text, routing);
           // Only nudge when the turn produced NO delivery at all. If the
@@ -788,6 +807,24 @@ export function maybeWarnApproachingQuota(
   const pctText = `${Math.round(pct)}%`;
   log(`Approaching quota (${pctText}, five_hour window ${windowKey}) — sending one-time heads-up`);
   writeNotice(routing, nearQuotaNotice(pctText, hasFallback));
+}
+
+/**
+ * Rotation guard for the FALLBACK provider's thread. The outer-loop rotation
+ * only watches the PRIMARY provider, and codex's own mid-stream rotation
+ * needs a long-lived query — fallback turns are one-shot. Without this the
+ * fallback thread grew unboundedly (observed live 2026-07-28: 475k tokens,
+ * 3× the ceiling) and every resume wedged into the 180s idle abort.
+ *
+ * Exported for tests.
+ */
+export function rotateFallbackThreadIfOversized(providerName: string, rotateTokens: number): void {
+  const tokens = getThreadTokens(providerName);
+  if (tokens >= rotateTokens && getContinuation(providerName) !== undefined) {
+    log(`Fallback thread at ${tokens} tokens (>= ${rotateTokens}) — rotating to a fresh thread with recap`);
+    clearContinuation(providerName);
+    clearThreadTokens(providerName);
+  }
 }
 
 /** Write a short system notice to the turn's origin destination. */
@@ -866,6 +903,7 @@ async function fallbackAttempt(
   let lastEventAt = Date.now();
   const idleTimer = setInterval(
     () => {
+      if (timedOut) return; // already aborted — don't re-log every tick
       if (Date.now() - lastEventAt >= idleMs) {
         timedOut = `no events for ${idleMs}ms`;
         log(`Fallback turn stalled (${timedOut}) — aborting`);
@@ -880,38 +918,50 @@ async function fallbackAttempt(
     query.abort();
   }, capMs);
   try {
-    for await (const event of query.events) {
-      lastEventAt = Date.now();
-      touchHeartbeat();
-      if (event.type === 'init') {
-        setContinuation(fallback.providerName, event.continuation);
-      } else if (event.type === 'error' && event.classification === 'quota') {
-        query.abort();
-        throw new Error(`Fallback provider quota exhausted: ${event.message}`);
-      } else if (event.type === 'result') {
-        gotResult = true;
-        if (event.text) {
-          const { hasUnwrapped } = dispatchResultText(event.text, routing);
-          const alreadySentThisTurn = countChatSendsSince(promptSeqMark) > 0;
-          if (hasUnwrapped && !alreadySentThisTurn && !nudged) {
-            // Same one-shot re-wrap nudge as the primary path — give the
-            // fallback one chance to deliver, then close regardless.
-            nudged = true;
-            gotResult = false;
-            const names = getAllDestinations()
-              .map((d) => d.name)
-              .join(', ');
-            query.push(
-              `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
-                `Your destinations: ${names}. Please re-send your response with the correct wrapping.</system>`,
-            );
-            continue;
+    try {
+      for await (const event of query.events) {
+        lastEventAt = Date.now();
+        touchHeartbeat();
+        if (event.type === 'init') {
+          setContinuation(fallback.providerName, event.continuation);
+        } else if (event.type === 'error' && event.classification === 'quota') {
+          query.abort();
+          throw new Error(`Fallback provider quota exhausted: ${event.message}`);
+        } else if (event.type === 'result') {
+          gotResult = true;
+          if (event.text) {
+            const { hasUnwrapped } = dispatchResultText(event.text, routing);
+            const alreadySentThisTurn = countChatSendsSince(promptSeqMark) > 0;
+            if (hasUnwrapped && !alreadySentThisTurn && !nudged) {
+              // Same one-shot re-wrap nudge as the primary path — give the
+              // fallback one chance to deliver, then close regardless.
+              nudged = true;
+              gotResult = false;
+              const names = getAllDestinations()
+                .map((d) => d.name)
+                .join(', ');
+              query.push(
+                `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
+                  `Your destinations: ${names}. Please re-send your response with the correct wrapping.</system>`,
+              );
+              continue;
+            }
           }
+          // Turn answered — close the stream so control returns to the
+          // primary provider for the next batch.
+          query.end();
         }
-        // Turn answered — close the stream so control returns to the
-        // primary provider for the next batch.
-        query.end();
       }
+    } catch (err) {
+      // A stream error AFTER the answer was delivered (e.g. codex's
+      // post-turn housekeeping — a hung thread/compact request — rejecting
+      // out of the generator) must not fail the turn: the user already has
+      // their reply, and failing here sent a bogus ❌ "backup engine failed"
+      // banner right after a successful answer (observed live 2026-07-28).
+      if (!gotResult) throw err;
+      log(
+        `Fallback stream errored after result was delivered (${err instanceof Error ? err.message : String(err)}) — treating turn as answered`,
+      );
     }
   } finally {
     clearInterval(idleTimer);

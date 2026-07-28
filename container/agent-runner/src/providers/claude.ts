@@ -251,6 +251,27 @@ const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WIN
  */
 const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
 
+/**
+ * Map a /usage control-API response to the poll-loop's `quota_status` event.
+ * Returns null when plan limits don't apply or the five-hour window has no
+ * utilization reading. Pure — exported for tests.
+ */
+export function usageToQuotaStatus(usage: {
+  rate_limits_available?: boolean;
+  rate_limits?: { five_hour?: { utilization: number | null; resets_at: string | null } | null } | null;
+} | null): ProviderEvent | null {
+  const fiveHour = usage?.rate_limits_available ? usage.rate_limits?.five_hour : null;
+  if (!fiveHour || fiveHour.utilization == null) return null;
+  const resetsAt = fiveHour.resets_at ? Math.floor(Date.parse(fiveHour.resets_at) / 1000) : null;
+  return {
+    type: 'quota_status',
+    utilization: fiveHour.utilization,
+    warning: false,
+    resetsAt: Number.isFinite(resetsAt) ? resetsAt : null,
+    window: 'five_hour',
+  };
+}
+
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
 
@@ -316,6 +337,37 @@ export class ClaudeProvider implements AgentProvider {
 
     let aborted = false;
 
+    // Fetch plan-window utilization via the SDK's usage control request.
+    // Regression source for the "approaching quota" pre-warning (Objective:
+    // restore it): since ~2026-07-08 the pushed `rate_limit_event`s carry NO
+    // `utilization` (every live event logged "Quota status: n/a"), so the
+    // 90% heads-up silently starved. The /usage control API still reports
+    // per-window utilization (0-100) + reset time; poll it after each result
+    // and synthesize the same `quota_status` event the poll-loop already
+    // consumes. Best-effort: experimental API, raced against a short timeout
+    // so a non-responding CLI can never wedge the event loop.
+    async function fetchQuotaStatus(): Promise<ProviderEvent | null> {
+      try {
+        const usagePromise = (
+          sdkResult as unknown as {
+            usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: () => Promise<{
+              rate_limits_available?: boolean;
+              rate_limits?: { five_hour?: { utilization: number | null; resets_at: string | null } | null } | null;
+            }>;
+          }
+        ).usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?.();
+        if (!usagePromise) return null;
+        const usage = await Promise.race([
+          usagePromise,
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 5_000)),
+        ]);
+        return usageToQuotaStatus(usage);
+      } catch (err) {
+        log(`usage poll failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
+    }
+
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
       for await (const message of sdkResult) {
@@ -343,6 +395,11 @@ export class ClaudeProvider implements AgentProvider {
             yield { type: 'error', message: text, retryable: false, classification: 'quota' };
           } else {
             yield { type: 'result', text };
+            // Pushed rate_limit_events stopped carrying utilization — poll
+            // the usage API once per completed turn so the poll-loop's
+            // approaching-quota warning has real numbers to act on.
+            const quotaStatus = await fetchQuotaStatus();
+            if (quotaStatus) yield quotaStatus;
           }
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
@@ -370,9 +427,15 @@ export class ClaudeProvider implements AgentProvider {
             };
           }
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
+          // Context compaction WITHIN Claude — not an engine switch. Surface
+          // as progress only: yielding it as a `result` fed "Context
+          // compacted." into dispatchResultText, which read it as an
+          // undelivered reply and pushed a "please re-send" nudge into the
+          // stream after every auto-compaction (observed live 2026-07-28) —
+          // a wasted turn and a source of duplicate/odd replies.
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
           const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';
-          yield { type: 'result', text: `Context compacted${detail}.` };
+          yield { type: 'progress', message: `Context compacted within claude${detail} — not an engine switch.` };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
           const tn = message as { summary?: string };
           yield { type: 'progress', message: tn.summary || 'Task notification' };
