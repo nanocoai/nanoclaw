@@ -31,6 +31,8 @@ import {
   createPendingQuestion,
   getPendingQuestion,
   deletePendingQuestion,
+  getContainerConfig,
+  createContainerConfig,
 } from './index.js';
 
 function now() {
@@ -442,5 +444,33 @@ describe('pending questions', () => {
     });
     deletePendingQuestion('q-1');
     expect(getPendingQuestion('q-1')).toBeUndefined();
+  });
+});
+
+// ── Container Configs ──
+
+describe('container configs', () => {
+  it('createContainerConfig persists cli_scope', () => {
+    createAgentGroup({ id: 'ag-full', name: 'Full', folder: 'full', agent_provider: null, created_at: now() });
+    createContainerConfig({
+      agent_group_id: 'ag-full',
+      provider: null,
+      model: null,
+      effort: null,
+      image_tag: null,
+      assistant_name: null,
+      max_messages_per_prompt: null,
+      skills: '["all"]',
+      mcp_servers: '{}',
+      packages_apt: '[]',
+      packages_npm: '[]',
+      additional_mounts: '[]',
+      cli_scope: 'global',
+      timezone: null,
+      updated_at: now(),
+    });
+    const row = getContainerConfig('ag-full');
+    expect(row).toBeDefined();
+    expect(row!.cli_scope).toBe('global');
   });
 });

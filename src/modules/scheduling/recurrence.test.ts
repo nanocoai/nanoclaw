@@ -28,6 +28,14 @@ vi.mock('../../db/agent-groups.js', () => ({
   getAgentGroup: (id: string) => (id === 'ag-test' ? { id, folder: 'g-test' } : undefined),
 }));
 
+// resolveGroupTimezone reads the group's config row from the central DB
+// (not initialized here). Default: no override → falls back to the mocked
+// install TIMEZONE; individual tests set an override to test precedence.
+const containerConfigState = vi.hoisted(() => ({ timezone: null as string | null }));
+vi.mock('../../db/container-configs.js', () => ({
+  getContainerConfig: () => ({ timezone: containerConfigState.timezone }),
+}));
+
 const TEST_DIR = '/tmp/nanoclaw-recurrence-test';
 const DB_PATH = path.join(TEST_DIR, 'inbound.db');
 
@@ -52,6 +60,7 @@ function fakeSession(): Session {
 }
 
 afterEach(() => {
+  containerConfigState.timezone = null;
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
@@ -104,9 +113,31 @@ describe('handleRecurrence', () => {
     const follow = db.prepare(`SELECT process_after FROM messages_in WHERE id != 'task-tz'`).get() as {
       process_after: string;
     };
-    // Drop the `{ tz: TIMEZONE }` option in recurrence.ts and this reads
+    // Drop the `{ tz }` option in recurrence.ts and this reads
     // T09:00:00 (09:00 UTC) instead — red, even on a UTC CI runner.
     expect(follow.process_after).toMatch(/T00:00:00/);
+  });
+
+  it('re-arms in the group timezone override, not the install TIMEZONE', async () => {
+    // Install tz is pinned to Asia/Tokyo above; the group override must win.
+    // Asia/Kolkata is UTC+5:30 with no DST: 09:00 local === 03:30 UTC, exactly.
+    containerConfigState.timezone = 'Asia/Kolkata';
+    const db = freshDb();
+    insertTaskRow(db, {
+      id: 'task-group-tz',
+      seriesId: 'task-group-tz',
+      processAfter: '2020-01-01T00:00:00.000Z',
+      recurrence: '0 9 * * *',
+      content: JSON.stringify({ prompt: 'daily digest' }),
+    });
+    db.prepare(`UPDATE messages_in SET status='completed' WHERE id='task-group-tz'`).run();
+
+    await handleRecurrence(db, fakeSession());
+
+    const follow = db.prepare(`SELECT process_after FROM messages_in WHERE id != 'task-group-tz'`).get() as {
+      process_after: string;
+    };
+    expect(follow.process_after).toMatch(/T03:30:00/);
   });
 
   it('does not clone rows whose recurrence is already cleared', async () => {

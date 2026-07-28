@@ -14,8 +14,27 @@ import {
 } from '../../db/container-configs.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
+import { isValidTimezone } from '../../timezone.js';
 import type { AgentGroup, ContainerConfigRow } from '../../types.js';
 import { registerResource } from '../crud.js';
+
+/**
+ * Parse a --timezone flag: undefined = not passed, null = explicit clear
+ * (empty string → follow the install default), otherwise a validated IANA id.
+ * Invalid ids throw here, in the handler — for agent callers that is after
+ * approval (rare, self-healing: a retry raises a fresh card).
+ */
+function parseTimezoneFlag(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  const tz = String(value);
+  if (tz === '') return null;
+  if (!isValidTimezone(tz)) {
+    throw new Error(
+      `invalid --timezone: "${tz}" is not an IANA timezone id (e.g. "Europe/Lisbon"); pass "" to follow the install default`,
+    );
+  }
+  return tz;
+}
 
 /** Deserialize JSON columns for display. */
 function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
@@ -33,6 +52,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     packages_npm: JSON.parse(row.packages_npm),
     additional_mounts: JSON.parse(row.additional_mounts),
     cli_scope: row.cli_scope,
+    timezone: row.timezone,
     updated_at: row.updated_at,
   };
 }
@@ -74,11 +94,14 @@ registerResource({
       description:
         'Create (or return the existing) agent group with its container config. Idempotent on --folder. ' +
         'With --template <ref>, stamp from a local template under templates/ (MCP servers + instructions ' +
-        '+ skills + paused recurring tasks). Use --folder <slug> and --name <display name>.',
+        '+ skills + paused recurring tasks). Use --folder <slug> and --name <display name>. ' +
+        'Optional --timezone <IANA id> sets the group timezone (template task schedules fire in it); like --name, it is ignored when the folder already exists.',
       handler: async (args) => {
+        const timezone = parseTimezoneFlag(args.timezone) ?? undefined;
         if (args.template) {
           return createAgentFromTemplate(String(args.template), {
             name: args.name ? String(args.name) : undefined,
+            timezone,
           });
         }
         const folder = args.folder as string;
@@ -103,6 +126,7 @@ registerResource({
         // instance default provider (`ensureContainerConfig` inside) — per-group
         // `groups config update --provider` still wins.
         initGroupFilesystem(group);
+        if (timezone) updateContainerConfigScalars(id, { timezone });
         return getAgentGroupByFolder(folder);
       },
     },
@@ -256,7 +280,8 @@ registerResource({
       access: 'approval',
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',
+        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -266,10 +291,19 @@ registerResource({
         const updates: Partial<
           Pick<
             ContainerConfigRow,
-            'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope'
+            | 'provider'
+            | 'model'
+            | 'effort'
+            | 'image_tag'
+            | 'assistant_name'
+            | 'max_messages_per_prompt'
+            | 'cli_scope'
+            | 'timezone'
           >
         > = {};
         if (args.provider !== undefined) updates.provider = args.provider as string;
+        const timezone = parseTimezoneFlag(args.timezone);
+        if (timezone !== undefined) updates.timezone = timezone;
         if (args.model !== undefined) updates.model = args.model as string;
         if (args.effort !== undefined) updates.effort = args.effort as string;
         if (args.image_tag !== undefined) updates.image_tag = args.image_tag as string;
@@ -286,7 +320,7 @@ registerResource({
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
           );
         }
 
