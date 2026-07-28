@@ -209,6 +209,7 @@ describe('poll loop integration', () => {
     expect(out).toHaveLength(1);
     expect(out[0].platform_id).toBe('chan-new');
     expect(out[0].thread_id).toBeNull();
+    expect(out[0].in_reply_to).toBeNull();
 
     await loopPromise.catch(() => {});
   });

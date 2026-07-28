@@ -768,7 +768,7 @@ function sendToDestination(dest: DestinationEntry, body: string, routing: Routin
   const destRouting = resolveDestinationThread(channelType, platformId);
   writeMessageOut({
     id: generateId(),
-    in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
+    in_reply_to: destRouting?.inReplyTo ?? null,
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
