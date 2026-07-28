@@ -14,9 +14,8 @@ import http from 'http';
 
 import type { Chat } from 'chat';
 
+import { getWebhookPort } from './config.js';
 import { log } from './log.js';
-
-const DEFAULT_PORT = 3000;
 
 interface WebhookEntry {
   chat: Chat;
@@ -110,7 +109,7 @@ export function registerWebhookHandler(path: string, handler: RawWebhookHandler)
 function ensureServer(): void {
   if (server) return;
 
-  const port = parseInt(process.env.WEBHOOK_PORT || String(DEFAULT_PORT), 10);
+  const port = getWebhookPort();
 
   server = http.createServer(async (req, res) => {
     const url = req.url || '/';
