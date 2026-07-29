@@ -1,3 +1,5 @@
+import fs from 'fs';
+
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import {
   getPendingMessages,
@@ -113,6 +115,22 @@ function nearQuotaNotice(pctText: string, hasFallback: boolean): string {
 // the SDK gave up retrying. This is NOT quota exhaustion — do not switch
 // providers, just tell the user to retry shortly.
 const TRANSIENT_BUSY_NOTICE = '⚠️ השרת עמוס כרגע (הגבלת קצב זמנית) — נסו שוב עוד רגע.';
+
+// Operator-triggered fallback DRILL. Touch this file in the session dir
+// (host side: data/v2-sessions/<group>/<session>/quota-drill) and the next
+// turn behaves exactly as if the primary reported genuine quota exhaustion —
+// switch notice, recap, fallback turn, quota-degraded flag. Remove the file
+// and the following turn runs the primary and fires the recovery notice.
+// Real quota exhaustion can't be produced on demand, so this is the only way
+// to exercise the full switch→recover path end-to-end in production.
+const QUOTA_DRILL_FLAG = '/workspace/quota-drill';
+function quotaDrillRequested(): boolean {
+  try {
+    return fs.existsSync(QUOTA_DRILL_FLAG);
+  } catch {
+    return false;
+  }
+}
 
 // Timeout model for a fallback turn — two distinct guards, because "hung" and
 // "working hard" must be told apart by ACTIVITY, not wall-clock time:
@@ -331,6 +349,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       threadId: routing.threadId,
     });
     try {
+      if (config.fallback && quotaDrillRequested()) {
+        log('Quota DRILL flag present — simulating primary quota exhaustion for this turn');
+        throw new QuotaExhaustedError('quota drill (operator-triggered)', prompt);
+      }
       const result = await processQuery(
         query,
         routing,
