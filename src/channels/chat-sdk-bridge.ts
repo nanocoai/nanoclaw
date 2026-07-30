@@ -134,6 +134,31 @@ export function splitForLimit(text: string, limit: number): string[] {
   return chunks;
 }
 
+function isInvalidBlocksError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return err.message.includes('invalid_blocks');
+}
+
+async function postWithFallback(
+  adapter: Adapter,
+  tid: string,
+  markdownMsg: { markdown: string; files?: { data: Buffer; filename: string }[] },
+  rawText: string,
+): Promise<{ id?: string } | undefined> {
+  try {
+    return await adapter.postMessage(tid, markdownMsg);
+  } catch (err) {
+    if (isInvalidBlocksError(err)) {
+      log.warn('postMessage got invalid_blocks, retrying as raw text', { tid });
+      return await adapter.postMessage(
+        tid,
+        markdownMsg.files ? { raw: rawText, files: markdownMsg.files } as never : rawText,
+      );
+    }
+    throw err;
+  }
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   // The instance name becomes a webhook route segment (the route regex is
@@ -416,9 +441,17 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       const content = message.content as Record<string, unknown>;
 
       if (content.operation === 'edit' && content.messageId) {
-        await adapter.editMessage(tid, content.messageId as string, {
-          markdown: transformText((content.text as string) || (content.markdown as string) || ''),
-        });
+        const editText = transformText((content.text as string) || (content.markdown as string) || '');
+        try {
+          await adapter.editMessage(tid, content.messageId as string, { markdown: editText });
+        } catch (err) {
+          if (isInvalidBlocksError(err)) {
+            log.warn('editMessage got invalid_blocks, retrying as raw text', { tid });
+            await adapter.editMessage(tid, content.messageId as string, editText);
+          } else {
+            throw err;
+          }
+        }
         return;
       }
 
@@ -532,10 +565,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
-          const result = await adapter.postMessage(
-            tid,
-            attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
-          );
+          const markdownMsg = attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk };
+          const result = await postWithFallback(adapter, tid, markdownMsg, chunk);
           if (i === 0) firstId = result?.id;
         }
         return firstId;

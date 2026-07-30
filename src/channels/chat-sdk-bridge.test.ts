@@ -406,6 +406,40 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('retries as raw text when postMessage throws invalid_blocks', async () => {
+    let attempt = 0;
+    const postMessage = async (_threadId: string, message: AdapterPostableMessage): Promise<RawMessage<unknown>> => {
+      attempt++;
+      if (attempt === 1 && typeof message === 'object' && 'markdown' in message) {
+        throw new Error('An API error occurred: invalid_blocks');
+      }
+      return { id: 'msg-fallback', threadId: _threadId, raw: {} };
+    };
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    const id = await bridge.deliver('slack:chan', null, {
+      kind: 'chat-sdk',
+      content: { text: 'table | content' },
+    });
+    expect(id).toBe('msg-fallback');
+    expect(attempt).toBe(2);
+  });
+
+  it('does not catch non-invalid_blocks errors', async () => {
+    const postMessage = async (): Promise<RawMessage<unknown>> => {
+      throw new Error('An API error occurred: channel_not_found');
+    };
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await expect(
+      bridge.deliver('slack:chan', null, { kind: 'chat-sdk', content: { text: 'hello' } }),
+    ).rejects.toThrow('channel_not_found');
+  });
+
   it('falls through to the text branch for non-card chat-sdk payloads (no regression)', async () => {
     const { calls, postMessage } = makePostCapture();
     const bridge = createChatSdkBridge({
