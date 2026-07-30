@@ -434,6 +434,7 @@ Several early migrations were later renamed/retired and replaced by "module" fil
 | 19 | `wiring-threads-override` | `019-wiring-threads.ts` | `messaging_group_agents.threads` — per-wiring thread-policy override (NULL = adapter default) |
 | 20 | `container-config-timezone` | `020-container-config-timezone.ts` | `container_configs.timezone` — per-agent-group timezone override (NULL = install-global) |
 | 21 | `approval-question-render-metadata` | `021-approval-question.ts` | `question` card-body column on all three approval tables so terminal edits retain the original request |
+| 22 | `backfill-wiring-destinations` | `022-backfill-wiring-destinations.ts` | Missing `agent_destinations` channel rows for wirings created after migration 4 ran; preserves existing destination names |
 
 Numbers 5 and 6 are intentionally absent — migrations were renumbered during early development.
 
