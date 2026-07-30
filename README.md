@@ -123,6 +123,8 @@ Key files:
 - `src/db.ts` - SQLite operations
 - `groups/*/CLAUDE.md` - Per-group memory
 
+See [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for the full architecture decisions and [docs/SECURITY.md](docs/SECURITY.md) for the security model.
+
 ## FAQ
 
 **Why WhatsApp and not Telegram/Signal/etc?**
