@@ -143,7 +143,7 @@ Agents run in containers, not behind application-level permission checks. They c
 
 **Why no configuration files?**
 
-We don't want configuration sprawl. Every user should customize it to so that the code matches exactly what they want rather than configuring a generic system. If you like having config files, tell Claude to add them.
+We don't want configuration sprawl. Every user should customize it so that the code matches exactly what they want rather than configuring a generic system. If you like having config files, tell Claude to add them.
 
 **How do I debug issues?**
 
