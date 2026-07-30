@@ -73,23 +73,48 @@ describe('extractAttachments', () => {
     ]);
   });
 
-  it('prefers filename over name and mimeType over mime when both are present', () => {
+  it('prefers the host-sanitized name over raw filename, and mimeType over mime', () => {
     insertChat('m1', {
       text: 'both',
       attachments: [
-        { filename: 'from-filename.png', name: 'from-name.png', mimeType: 'image/png', mime: 'image/jpeg' },
+        {
+          filename: 'raw-from-channel.png',
+          name: 'host-sanitized.png',
+          mimeType: 'image/png',
+          mime: 'image/jpeg',
+          localPath: 'inbox/m1/host-sanitized.png',
+        },
       ],
     });
     expect(extractAttachments(getPendingMessages())).toEqual([
-      { filename: 'from-filename.png', mime: 'image/png', path: undefined, url: undefined },
+      {
+        filename: 'host-sanitized.png',
+        mime: 'image/png',
+        path: '/workspace/inbox/m1/host-sanitized.png',
+        url: undefined,
+      },
     ]);
   });
 
   it('accepts the alternate name/mime spellings an adapter may use', () => {
-    insertChat('m1', { text: 'alt', attachments: [{ name: 'doc.pdf', mime: 'application/pdf' }] });
+    insertChat('m1', {
+      text: 'alt',
+      attachments: [{ name: 'doc.pdf', mime: 'application/pdf', localPath: 'inbox/m1/doc.pdf' }],
+    });
     expect(extractAttachments(getPendingMessages())).toEqual([
-      { filename: 'doc.pdf', mime: 'application/pdf', path: undefined, url: undefined },
+      { filename: 'doc.pdf', mime: 'application/pdf', path: '/workspace/inbox/m1/doc.pdf', url: undefined },
     ]);
+  });
+
+  it('skips an attachment with neither a staged file nor a url', () => {
+    insertChat('m1', {
+      text: 'unfetchable',
+      attachments: [
+        { name: 'ghost.png', mimeType: 'image/png' },
+        { name: 'real.png', mimeType: 'image/png', localPath: 'inbox/m1/real.png' },
+      ],
+    });
+    expect(extractAttachments(getPendingMessages()).map((a) => a.filename)).toEqual(['real.png']);
   });
 
   it('skips a null or non-object element instead of throwing on the whole batch', () => {

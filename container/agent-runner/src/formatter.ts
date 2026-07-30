@@ -301,8 +301,14 @@ export function extractAttachments(messages: MessageInRow[]): PromptAttachment[]
       // Channel payloads are unvalidated JSON — a null or scalar element would
       // otherwise throw on property access and take the whole batch with it.
       if (!a || typeof a !== 'object') continue;
+      // An entry with neither a staged file nor a URL is unfetchable for every
+      // provider; the prompt text still describes it, so skip it here.
+      if (!a.localPath && !a.url) continue;
       out.push({
-        filename: a.filename || a.name || undefined,
+        // `name` first: the host validates and rewrites it (session-manager
+        // extractAttachmentFiles), while `filename` arrives raw from the
+        // channel — same precedence formatAttachments uses.
+        filename: a.name || a.filename || undefined,
         mime: a.mimeType || a.mime || undefined,
         path: a.localPath ? `/workspace/${a.localPath}` : undefined,
         url: a.url || undefined,
