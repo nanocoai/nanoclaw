@@ -24,6 +24,8 @@ NanoClaw doesn't ship channels in trunk. This skill copies the Emacs adapter and
 Skip to **Enable** if all of these are already in place:
 
 - `src/channels/emacs.ts` exists
+- `src/channels/emacs.test.ts` exists
+- `src/channels/emacs-registration.test.ts` exists
 - `emacs/nanoclaw.el` exists
 - `src/channels/index.ts` contains `import './emacs.js';`
 
@@ -39,9 +41,10 @@ git fetch origin channels
 
 ```bash
 mkdir -p emacs
-git show origin/channels:src/channels/emacs.ts      > src/channels/emacs.ts
-git show origin/channels:src/channels/emacs.test.ts > src/channels/emacs.test.ts
-git show origin/channels:emacs/nanoclaw.el          > emacs/nanoclaw.el
+git show origin/channels:src/channels/emacs.ts                    > src/channels/emacs.ts
+git show origin/channels:src/channels/emacs.test.ts              > src/channels/emacs.test.ts
+git show origin/channels:src/channels/emacs-registration.test.ts > src/channels/emacs-registration.test.ts
+git show origin/channels:emacs/nanoclaw.el                        > emacs/nanoclaw.el
 ```
 
 ### 3. Append the self-registration import
@@ -52,13 +55,16 @@ Append to `src/channels/index.ts` (skip if the line is already present):
 import './emacs.js';
 ```
 
-### 4. Build
+### 4. Build and validate
 
 ```bash
 pnpm run build
+pnpm exec vitest run src/channels/emacs-registration.test.ts
 ```
 
-No npm package to install — the adapter uses only Node builtins (`http`).
+Both must be clean before proceeding. `emacs-registration.test.ts` is the one integration test: it imports the real channel barrel and asserts the registry contains `emacs`. It goes red if the `import './emacs.js';` line is deleted or drifts, or if the barrel fails to evaluate (so the channel genuinely would not register). The adapter uses only Node builtins (`http`), so there is no npm dependency to guard for this channel.
+
+End-to-end message delivery from a real Emacs buffer is verified manually once the service is running — see Verify and Troubleshooting.
 
 ## Enable
 
@@ -98,6 +104,14 @@ pnpm exec tsx setup/index.ts --step register -- \
 ```
 
 `agent-shared` puts Emacs messages in the same session as any other channel wired to the same agent group — so a conversation you started in Telegram continues in Emacs. Use `shared` to keep an independent Emacs thread with the same workspace, or a new `--folder` for a dedicated Emacs-only agent.
+
+Alternatively create the rows with `ncl` — **the host service must be running** (`ncl` connects to it over a Unix socket). Engage mode/pattern and `unknown_sender_policy` default to the Emacs adapter's declared channel defaults:
+
+```bash
+ncl messaging-groups create --channel-type emacs --platform-id "default" --name "Emacs"
+ncl wirings create --messaging-group-id <mg-id-from-above> --agent-group-id <ag-id> \
+  --session-mode agent-shared
+```
 
 ## Configure Emacs
 
@@ -285,18 +299,4 @@ If an agent outputs org-mode directly, markers get double-converted and render i
 
 ## Removal
 
-Run from your NanoClaw project root:
-
-```bash
-rm src/channels/emacs.ts src/channels/emacs.test.ts emacs/nanoclaw.el
-# Remove the `import './emacs.js';` line from src/channels/index.ts
-# Remove EMACS_* lines from .env
-pnpm run build
-source setup/lib/install-slug.sh
-launchctl kickstart -k gui/$(id -u)/$(launchd_label)   # macOS
-# systemctl --user restart $(systemd_unit)             # Linux
-
-# Remove the NanoClaw block from your Emacs config
-# Optionally clean up the messaging group:
-pnpm exec tsx scripts/q.ts data/v2.db "DELETE FROM messaging_group_agents WHERE messaging_group_id IN (SELECT id FROM messaging_groups WHERE channel_type='emacs'); DELETE FROM messaging_groups WHERE channel_type='emacs';"
-```
+See [REMOVE.md](REMOVE.md) to uninstall this channel.

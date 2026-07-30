@@ -120,7 +120,20 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "@cocal/google-calendar-mcp@${CALENDAR_MCP_VERSION}"
 ```
 
-**No `TOOL_ALLOWLIST` edit needed.** `container/agent-runner/src/providers/claude.ts` derives the allow-pattern dynamically from each group's `mcpServers` map (`Object.keys(this.mcpServers).map(mcpAllowPattern)`), so registering `calendar` in Phase 3 automatically allows `mcp__calendar__*`. Earlier versions of this skill instructed a static `TOOL_ALLOWLIST` edit — that's now redundant.
+`container/agent-runner/src/providers/claude.ts` derives the allow-pattern dynamically from each group's `mcpServers` map (`Object.keys(this.mcpServers).map(mcpAllowPattern)`), so registering `calendar` in Phase 3 automatically allows `mcp__calendar__*`.
+
+### Install the dependency-guard test
+
+`@cocal/google-calendar-mcp` is a stdio CLI installed in the image, not an imported module, so `tsc` and the runtime tests never reference it — only the Dockerfile edit above proves it is present. Copy the guard test into the host test tree (vitest) so the Dockerfile `ARG` + install line stay covered:
+
+```bash
+cp .claude/skills/add-gcal-tool/gcal-dockerfile.test.ts src/gcal-dockerfile.test.ts
+pnpm exec vitest run src/gcal-dockerfile.test.ts
+```
+
+`cp` overwrites in place, so re-running this skill is safe.
+
+**This is the skill's only in-tree integration test.** The Phase 3 `ncl groups config add-mcp-server` and `add-mount` steps are runtime writes to the central DB — they leave no line in the source tree whose deletion a test could catch, so a registration test is structurally inapplicable. They're verified at runtime instead (Phase 5).
 
 ### Rebuild the container image
 
@@ -149,27 +162,22 @@ Approval behaviour depends on where you run it: from inside an agent's container
 
 ### Add the `.calendar-mcp` mount
 
-There is no `ncl groups config add-mount` verb yet (tracked in [#2395](https://github.com/nanocoai/nanoclaw/issues/2395)). Until that ships, edit the DB directly via the in-tree wrapper (`scripts/q.ts` — `setup/verify.ts:5` codifies that NanoClaw avoids depending on the `sqlite3` CLI binary, so don't shell out to it):
+This is a **host-only / operator** verb — it's rejected from inside a container at any `cli_scope`, so run it host-side when you (the operator) apply this skill via `/setup`, `/customize`, or `/manage-mounts`. It's idempotent (skips if the mount is already present).
 
 ```bash
-GROUP_ID='<group-id>'
-HOST_PATH="$HOME/.calendar-mcp"
-MOUNT=$(jq -cn --arg h "$HOST_PATH" '{hostPath:$h, containerPath:".calendar-mcp", readonly:false}')
-pnpm exec tsx scripts/q.ts data/v2.db "UPDATE container_configs \
-  SET additional_mounts = json_insert(additional_mounts, '\$[#]', json('$MOUNT')), \
-      updated_at = datetime('now') \
-  WHERE agent_group_id = '$GROUP_ID';"
+ncl groups config add-mount \
+  --id <group-id> \
+  --host "$HOME/.calendar-mcp" \
+  --container .calendar-mcp
 ```
 
-Run from your NanoClaw project root (where `data/v2.db` lives). The `$[#]` placeholder is SQLite JSON1's append-to-end notation; it's `\$`-escaped so bash doesn't arithmetic-expand it before sqlite sees it. `updated_at` is ISO-string everywhere else in the schema, so use `datetime('now')` — not `strftime('%s','now')`, which would silently mix epoch ints into a column of YYYY-MM-DD HH:MM:SS strings.
+`--container` is relative (mount-security rejects absolute paths — additional mounts land at `/workspace/extra/<relative>`). No `--ro`: the MCP server may rewrite `credentials.json` on token refresh, so the mount must be read-write.
 
-**Switch to `ncl groups config add-mount` once #2395 lands.** Update this skill at that time.
-
-`containerPath` is relative (mount-security rejects absolute paths — additional mounts land at `/workspace/extra/<relative>`).
+The mount also needs to be in the external mount allowlist (`~/.config/nanoclaw/mount-allowlist.json`) to take effect at spawn — see the Phase 1 "Verify mount allowlist covers the path" step. A container restart (`ncl groups restart`) is needed for the mount to apply.
 
 **Why this can't be `groups/<folder>/container.json`:** post-migration `014-container-configs`, `materializeContainerJson` in `src/container-config.ts` rewrites that file from the DB on every spawn. Anything hand-edited there is silently overwritten on next restart.
 
-**Same-group-as-gmail tip:** if this group already has the gmail MCP + `.gmail-mcp` mount, both coexist — `ncl groups config add-mcp-server` only updates the named entry, and `json_insert` appends to `additional_mounts` without disturbing existing entries.
+**Same-group-as-gmail tip:** if this group already has the gmail MCP + `.gmail-mcp` mount, both coexist — `ncl groups config add-mcp-server` only updates the named entry, and `add-mount` appends to `additional_mounts` without disturbing existing entries.
 
 ## Phase 4: Build and Restart
 
@@ -213,26 +221,10 @@ Common signals:
 
 ## Removal
 
-1. For each group that had Calendar wired, remove the MCP server from the DB:
-   ```bash
-   ncl groups config remove-mcp-server --id <group-id> --name calendar
-   ```
-2. Remove the `.calendar-mcp` mount from the DB (no `remove-mount` verb yet — same #2395 dependency):
-   ```bash
-   pnpm exec tsx scripts/q.ts data/v2.db "UPDATE container_configs \
-     SET additional_mounts = (SELECT json_group_array(value) FROM json_each(additional_mounts) \
-                              WHERE json_extract(value, '\$.containerPath') != '.calendar-mcp'), \
-         updated_at = datetime('now') \
-     WHERE agent_group_id = '<group-id>';"
-   ```
-3. Remove `CALENDAR_MCP_VERSION` ARG and the calendar package from the Dockerfile install block.
-4. `pnpm run build && ./container/build.sh && systemctl --user restart "$(. setup/lib/install-slug.sh && systemd_unit)"`.
-5. Optional: `rm -rf ~/.calendar-mcp/` and `onecli apps disconnect --provider google-calendar`.
-
-No `TOOL_ALLOWLIST` removal step — Phase 2 no longer edits it.
+See [REMOVE.md](REMOVE.md) — unregisters the MCP server, drops the `.calendar-mcp` mount, deletes the copied test, reverts the Dockerfile edits, and rebuilds.
 
 ## Credits & references
 
 - **MCP server:** [`@cocal/google-calendar-mcp`](https://github.com/cocal-com/google-calendar-mcp) — MIT-licensed, actively maintained, multi-account and multi-calendar.
-- **Why not gongrzhe:** earlier versions of this skill used `@gongrzhe/server-calendar-autoauth-mcp@1.0.2` which only supports the primary calendar with 5 event-level tools. The cocal server supersedes it.
+- **Why not gongrzhe:** `@gongrzhe/server-calendar-autoauth-mcp` only supports the primary calendar with 5 event-level tools. The cocal server supports multi-account and multi-calendar with the full tool surface.
 - **Skill pattern:** direct sibling of [`/add-gmail-tool`](../add-gmail-tool/SKILL.md); same OneCLI stub mechanism.

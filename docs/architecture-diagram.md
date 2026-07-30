@@ -28,18 +28,18 @@ flowchart TB
     Approvals["configureManualApproval<br/>-> pending_approvals"]
   end
 
-  subgraph Session["Per-Session Container (Docker / Apple Container)"]
+  subgraph Session["Per-Session Container (Docker)"]
     direction TB
     PollLoop["Poll Loop<br/>(container/agent-runner)"]
-    Provider["Agent providers<br/>(claude, opencode, mock; todo: codex)"]
-    MCP["MCP Tools<br/>send_message, send_file, edit_message,<br/>add_reaction, send_card, ask_user_question,<br/>schedule_task, create_agent,<br/>install_packages, add_mcp_server"]
+    Provider["Agent providers<br/>(claude — the only one registered in trunk;<br/>opencode ships via the /add-opencode skill)"]
+    MCP["MCP Tools<br/>send_message, send_file, edit_message,<br/>add_reaction, send_card, ask_user_question,<br/>create_agent, install_packages, add_mcp_server<br/>CLI: ncl tasks"]
     Skills["Container Skills<br/>(container/skills/)"]
-    InDB[("inbound.db<br/>host writes<br/>even seq<br/>messages_in<br/>destinations<br/>processing_ack")]
-    OutDB[("outbound.db<br/>container writes<br/>odd seq<br/>messages_out<br/>heartbeat file")]
+    InDB[("inbound.db<br/>host writes<br/>even seq<br/>messages_in<br/>delivered<br/>destinations<br/>session_routing")]
+    OutDB[("outbound.db<br/>container writes<br/>odd seq<br/>messages_out<br/>processing_ack<br/>session_state<br/>container_state<br/>heartbeat file")]
   end
 
   subgraph Groups["Agent Group Filesystem (groups/*)"]
-    Folder["CLAUDE.md<br/>memory<br/>per-group skills<br/>container_config"]
+    Folder["CLAUDE.md<br/>memory<br/>per-group skills<br/>container.json (materialized from container_configs)"]
   end
 
   P1 & P2 & P3 & P4 & P5 --> Bridge
@@ -140,7 +140,6 @@ erDiagram
     string name
     string folder
     string agent_provider
-    json container_config
   }
   messaging_groups {
     int id
@@ -173,14 +172,15 @@ erDiagram
     int messaging_group_id
     int agent_group_id
     string session_mode "agent-shared | shared | per-thread"
-    json trigger_rules
+    string engage_mode "pattern | mention | mention-sticky"
+    string sender_scope "all | known"
     int priority
   }
   sessions {
     int id
     int agent_group_id
     int messaging_group_id
-    string sdk_session_id
+    string thread_id
     string status
   }
 ```
@@ -209,7 +209,7 @@ flowchart LR
   Container -->|"writes only<br/>(odd seq)"| Out
   Container -->|touch every poll| HB
   HostSweep[Host sweep] -->|stat mtime| HB
-  HostSweep -->|reads processing_ack| In
+  HostSweep -->|reads processing_ack| Out
 
   note1["Each file has exactly ONE writer.<br/>Eliminates SQLite cross-process write contention.<br/>Collision-free seq numbering."]
 ```

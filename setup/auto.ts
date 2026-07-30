@@ -12,6 +12,8 @@
  *   NANOCLAW_AGENT_NAME    messaging-channel agent name (consumed by the
  *                          channel flow). The CLI scratch agent is always
  *                          "Terminal Agent".
+ *   NANOCLAW_AGENT_PROVIDER preselect the setup provider and skip the picker
+ *                          (for packaged flows). Example: claude.
  *   NANOCLAW_SKIP          comma-separated step names to skip
  *                          (environment|container|onecli|auth|mounts|
  *                           service|cli-agent|timezone|channel|
@@ -30,16 +32,28 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { BACK_TO_CHANNEL_SELECTION } from './lib/back-nav.js';
-import { runDiscordChannel } from './channels/discord.js';
-import { runIMessageChannel } from './channels/imessage.js';
-import { runSignalChannel } from './channels/signal.js';
-import { runSlackChannel } from './channels/slack.js';
-import { runTeamsChannel } from './channels/teams.js';
-import { runTelegramChannel } from './channels/telegram.js';
-import { runWhatsAppChannel } from './channels/whatsapp.js';
+import { runChannelSkill } from './channels/run-channel-skill.js';
 import { pingCliAgent, type PingResult } from './lib/agent-ping.js';
+import { getSetupProvider, listSetupProviders } from './providers/registry.js';
+import { applyProviderSkill } from './providers/install.js';
+// Provider payloads self-register their picker entry + auth on import.
+import './providers/index.js';
 import { brightSelect } from './lib/bright-select.js';
+import { buildContainerImage } from './lib/container-build.js';
 import { offerClaudeOnFailure } from './lib/claude-handoff.js';
+import { setPickedProvider } from './lib/picked-provider.js';
+import {
+  AGENT_IMAGE_PIN,
+  AGENT_IMAGE_REF_ENV_KEY,
+  REGISTRY_LOGIN_SCRIPT,
+  imageSourceDecided,
+  readAgentImagePin,
+  loginScriptAvailable,
+  readImageSource,
+  writeImageSource,
+  type ImageSource,
+} from './lib/registry-state.js';
+import { upsertEnvVar } from './set-env.js';
 import {
   applyToEnv,
   parseFlags,
@@ -48,6 +62,8 @@ import {
 } from './lib/setup-config-parse.js';
 import { runAdvancedScreen } from './lib/setup-config-screen.js';
 import { runWindowedStep } from './lib/windowed-runner.js';
+import { runUninstallFlow } from './uninstall/flow.js';
+import { detectExistingInstall } from './uninstall/scan.js';
 import { detectRegisteredGroups, detectExistingDisplayName } from './environment.js';
 import { pollHealth } from './onecli.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
@@ -57,9 +73,16 @@ import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './l
 import { emit as phEmit } from './lib/diagnostics.js';
 import { accentGreen, brandBody, brandBold, brandChip, dimWrap, fitToWidth, fmtDuration, note, wrapForGutter } from './lib/theme.js';
 import { isValidTimezone } from '../src/timezone.js';
+import { DEFAULT_AGENT_PROVIDER } from '../src/config.js';
 
 const CLI_AGENT_NAME = 'Terminal Agent';
 const RUN_START = Date.now();
+
+/** How an operator reaches the registry step again once setup has finished. */
+const REGISTRY_STEP = 'pnpm exec tsx setup/index.ts --step registry';
+
+/** `setup/registry-login.sh`'s "nothing was signed in, and that is fine" code. */
+const LOGIN_EXIT_SKIPPED = 2;
 
 type ChannelChoice = 'telegram' | 'discord' | 'whatsapp' | 'signal' | 'teams' | 'slack' | 'imessage' | 'other' | 'skip';
 
@@ -87,6 +110,17 @@ async function main(): Promise<void> {
   }
   let configValues = { ...readFromEnv(), ...flagResult.values };
   applyToEnv(configValues);
+
+  // --uninstall routes to the uninstall flow before any setup side effects —
+  // in particular before initProgressionLog(), so an uninstall never resets
+  // logs/setup.log on its way to (possibly) deleting logs/ entirely.
+  if (configValues.uninstall === true) {
+    await runUninstallFlow({
+      dryRun: configValues.dryRun === true,
+      yes: configValues.yes === true,
+      invokedFrom: 'flag',
+    });
+  }
 
   printIntro();
   initProgressionLog();
@@ -121,6 +155,37 @@ async function main(): Promise<void> {
       .filter(Boolean),
   );
 
+  // Offer removal when setup lands on an existing install. Skipped on every
+  // resume path — both the fail() retry and the sg-docker re-exec pass
+  // NANOCLAW_SKIP (and the latter sets NANOCLAW_REEXEC_SG) — so the prompt
+  // appears at most once per fresh run.
+  const isResume = process.env.NANOCLAW_REEXEC_SG === '1' || skip.size > 0;
+  if (!isResume && detectExistingInstall(process.cwd())) {
+    const action = ensureAnswer(
+      await brightSelect<'keep' | 'uninstall'>({
+        message: 'NanoClaw is already installed in this folder. What would you like to do?',
+        options: [
+          {
+            value: 'keep',
+            label: 'Keep it & continue setup',
+            hint: 'recommended — re-running setup is safe',
+          },
+          {
+            value: 'uninstall',
+            label: 'Uninstall NanoClaw & exit',
+            hint: 'removes service, data, and agent files — asks before each step',
+          },
+        ],
+        initialValue: 'keep',
+      }),
+    ) as 'keep' | 'uninstall';
+    setupLog.userInput('existing_install', action);
+    phEmit('existing_install_detected', { action });
+    if (action === 'uninstall') {
+      await runUninstallFlow({ dryRun: false, yes: false, invokedFrom: 'setup-detection' });
+    }
+  }
+
   if (!skip.has('environment')) {
     const res = await runQuietStep('environment', {
       running: 'Checking your system…',
@@ -137,10 +202,14 @@ async function main(): Promise<void> {
 
   if (!skip.has('container')) {
     p.log.message(brandBody(dimWrap('Your assistant lives in its own sandbox. It can only see what you explicitly share.', 4)));
+    // Asked before the step runs, because the step is what acts on the answer.
+    await chooseImageSource();
     p.log.message(
       brandBody(
         dimWrap(
-          'The first build pulls a base image and installs a few tools. On a fresh machine this usually takes 3–10 minutes.',
+          readImageSource() === 'hardened'
+            ? 'Fetching the hardened image now. This takes around 20 minutes today — slower than we would like, and we are working on making it faster.'
+            : 'The first build pulls a base image and installs a few tools. On a fresh machine this usually takes 3–10 minutes.',
           4,
         ),
       ),
@@ -164,6 +233,22 @@ async function main(): Promise<void> {
           'container',
           "Docker was just installed but your shell doesn't know yet.",
           'Log out and back in (or run `newgrp docker` in a new shell), then retry.',
+        );
+      }
+      // The pull path fails for reasons a build never has, and "prune the build
+      // cache" is useless advice for both of them.
+      if (err === 'image_ref_not_configured') {
+        await fail(
+          'container',
+          'This install is set to fetch a pre-built sandbox image, but nothing says which one.',
+          `Set ${AGENT_IMAGE_REF_ENV_KEY} in .env (or add an "${AGENT_IMAGE_PIN}" pin to versions.json), or run \`${REGISTRY_STEP} -- --opt-out\` to build it here instead.`,
+        );
+      }
+      if (err === 'image_pull_failed') {
+        await fail(
+          'container',
+          "Couldn't fetch the sandbox image.",
+          `Check your connection and that authentication finished, then retry — or run \`${REGISTRY_STEP} -- --opt-out\` to build it here instead.`,
         );
       }
       await fail(
@@ -277,8 +362,105 @@ async function main(): Promise<void> {
     }
   }
 
+  let agentProvider: string | undefined;
   if (!skip.has('auth')) {
-    await runAuthStep();
+    // Agent runtime pick. Claude is the default and a no-op — choosing it
+    // runs the existing Claude auth flow unchanged. A branch provider walks
+    // its own auth (e.g. Codex: ChatGPT subscription or API key, vault-only)
+    // and verifies its payload is wired. The pick installs and authenticates
+    // the runtime; it is NOT an install-wide default — and it is NOT a
+    // creation flag. Provider is a DB property of a group: the creation flows
+    // create provider-agnostic groups, and setup sets the picked provider on
+    // each via `ncl groups config update --provider` right after creating it
+    // (the creation scripts inherit it and apply at create — see picked-provider). Existing groups switch the
+    // same way (docs/provider-migration.md).
+    agentProvider = await askAgentProviderChoice();
+    setPickedProvider(agentProvider);
+
+    // A pulled image bakes /app/node_modules and the CLI manifest, and every
+    // non-claude runtime changes one of them — so it needs an image this
+    // machine builds. Settle it here: buildContainerImage() below refuses on a
+    // pinned install, and reaching that refusal aborts setup with no way out
+    // short of re-running it.
+    if (agentProvider !== 'claude' && readImageSource() === 'hardened') {
+      const leave = ensureAnswer(
+        await p.confirm({
+          message: `${agentProvider} needs a sandbox image built on this machine. Stop using the pre-built one?`,
+          initialValue: true,
+        }),
+      );
+      if (!leave) {
+        await fail(
+          'auth',
+          `${agentProvider} can't run on the pre-built sandbox image.`,
+          'Re-run setup and choose Claude to keep the pre-built image.',
+        );
+      }
+      writeImageSource('local');
+      setupLog.userInput('image_source', 'local');
+      p.log.info(brandBody('Switched back to a locally built sandbox image.'));
+    }
+
+    let providerEntry = getSetupProvider(agentProvider);
+    if (agentProvider !== 'claude' && !providerEntry) {
+      // A non-claude provider picked from the hard-wired list isn't wired in
+      // this install yet — install it by applying its `/add-<name>` SKILL.md
+      // in-process via the directive engine (channel style, idempotent:
+      // self-skips if already installed), rebuild the image (the container step
+      // already ran, the CLI manifest just changed), then load the payload's
+      // setup module so it self-registers.
+      const skillDir = `.claude/skills/add-${agentProvider}`;
+      const s = p.spinner();
+      s.start(`Installing ${agentProvider}…`);
+      let blockers: string[];
+      try {
+        ({ blockers } = await applyProviderSkill(skillDir, process.cwd()));
+      } catch (err) {
+        s.stop(`Couldn't install ${agentProvider}.`, 1);
+        const message = err instanceof Error ? err.message : String(err);
+        await fail(
+          `add-${agentProvider}`,
+          `Couldn't install ${agentProvider}.`,
+          message,
+        );
+        return; // unreachable — fail() exits — but narrows blockers for TS
+      }
+      if (blockers.length) {
+        s.stop(`Couldn't install ${agentProvider}.`, 1);
+        await fail(
+          `add-${agentProvider}`,
+          `Couldn't install ${agentProvider}.`,
+          blockers.join('; '),
+        );
+      }
+      s.stop(`${agentProvider} installed.`);
+      p.log.info(brandBody('Rebuilding the container image with the new provider…'));
+      // The rebuild is not optional here: the provider's CLI manifest is baked
+      // into the image, so continuing past a failed build would authenticate a
+      // runtime the container cannot actually start.
+      const rebuild = buildContainerImage();
+      if (!rebuild.ok) {
+        await fail(
+          `add-${agentProvider}`,
+          `Couldn't rebuild the container image for ${agentProvider}. ${rebuild.message}`,
+          rebuild.hint,
+        );
+      }
+      await import(`./providers/${agentProvider}.js`);
+      providerEntry = getSetupProvider(agentProvider);
+    }
+    if (providerEntry?.runAuth) {
+      await providerEntry.runAuth();
+      await providerEntry.runInstallCheck?.();
+    } else {
+      await runAuthStep();
+    }
+    // Persist the pick as the instance-wide default so every future group
+    // (channel-approved, ncl-created) is created on this provider. Read from
+    // .env at host start; per-group `ncl groups config update --provider` wins.
+    // Only after install + auth succeeded — a failed setup must not leave new
+    // groups defaulting to an unauthenticated runtime.
+    upsertEnvVar('DEFAULT_AGENT_PROVIDER', agentProvider);
   }
 
   if (!skip.has('mounts')) {
@@ -453,20 +635,25 @@ async function main(): Promise<void> {
         await resolveDisplayName();
       }
       let result: void | typeof BACK_TO_CHANNEL_SELECTION;
+      // Every channel now runs through the SKILL.md-driven flow — the whole
+      // connect+wire procedure lives in each add-<channel>/SKILL.md.
       if (channelChoice === 'telegram') {
-        result = await runTelegramChannel(displayName!);
+        result = await runChannelSkill('telegram', displayName!, { offerBack: true });
       } else if (channelChoice === 'discord') {
-        result = await runDiscordChannel(displayName!);
+        result = await runChannelSkill('discord', displayName!, { offerBack: true });
       } else if (channelChoice === 'whatsapp') {
-        result = await runWhatsAppChannel(displayName!);
+        result = await runChannelSkill('whatsapp', displayName!, { offerBack: true });
       } else if (channelChoice === 'signal') {
-        result = await runSignalChannel(displayName!);
+        result = await runChannelSkill('signal', displayName!, { offerBack: true });
       } else if (channelChoice === 'teams') {
-        result = await runTeamsChannel(displayName!);
+        // Fresh create resolves the owner DM proactively and wires inline (the
+        // welcome message reaches the human first); a drop-through re-run
+        // resolves nothing and falls back to the deferred-wire ending.
+        result = await runChannelSkill('teams', displayName!, { wireIfResolved: true, offerBack: true });
       } else if (channelChoice === 'slack') {
-        result = await runSlackChannel(displayName!);
+        result = await runChannelSkill('slack', displayName!, { offerBack: true });
       } else if (channelChoice === 'imessage') {
-        result = await runIMessageChannel(displayName!);
+        result = await runChannelSkill('imessage', displayName!, { offerBack: true });
       } else if (channelChoice === 'other') {
         result = await askOtherChannelName();
       } else {
@@ -482,6 +669,12 @@ async function main(): Promise<void> {
       if (result === BACK_TO_CHANNEL_SELECTION) backed = true;
     }
   }
+
+  // Deferred wire (Teams): verify passes with zero groups because the
+  // platform id only exists after the first DM. Tracked here so the ENDING
+  // changes too — the last box must be the one remaining action, not a
+  // premature "your assistant is saying hi" (no welcome DM exists yet).
+  let wiringPending = false;
 
   if (!skip.has('verify')) {
     const res = await runQuietStep('verify', {
@@ -537,6 +730,7 @@ async function main(): Promise<void> {
       p.outro(k.yellow('Almost there. A few things still need your attention.'));
       return;
     }
+    wiringPending = res.terminal?.fields.WIRING === 'pending_first_dm';
   }
 
   const rows: [string, string][] = [
@@ -562,7 +756,15 @@ async function main(): Promise<void> {
   phEmit('setup_completed', { duration_ms: Date.now() - RUN_START });
 
   const dmTarget = channelDmLabel(channelChoice);
-  if (dmTarget) {
+  if (wiringPending) {
+    // No welcome DM exists yet — the one remaining action is the last thing
+    // on screen, in the same bright framed style as the "go say hi" banner.
+    note(
+      `${brandBold('→')} ${k.bold(`Have the person you want wired DM the bot once in ${dmTarget ?? 'your chat app'} ("hi" works).`)}\nNanoClaw registers their identity and chat from that first message; then run /init-first-agent with your coding agent and pick them.`,
+      "What's left",
+    );
+    p.outro(k.green("You're set — one DM to go."));
+  } else if (dmTarget) {
     // Bright framed banner (not dim) — the whole point of the feedback was
     // that the welcome-message signal was too easy to miss. Use p.note so it
     // renders with a visible box, cyan-bold the directive line, and put it
@@ -703,6 +905,197 @@ function sendChatMessage(message: string): Promise<void> {
 }
 
 // ─── auth step (select → branch) ────────────────────────────────────────
+
+// Providers offered for install are hard-wired in trunk — an audited control
+// surface (no branch enumeration that anyone with write access could extend).
+// Codex is the only one offered here; opencode/ollama install via their own
+// /add-* skills. Each is installed by applying its `/add-<name>` SKILL.md
+// in-process via the directive engine.
+const INSTALLABLE_PROVIDERS = [
+  { value: 'codex', label: 'Codex', hint: 'OpenAI — ChatGPT subscription or API key' },
+] as const;
+
+/**
+ * Where the sandbox image comes from — build it here, or pull a pre-built one.
+ *
+ * Asked once, ahead of the container step, and persisted to `.env` *before* the
+ * sign-in runs. Both resume paths (fail()'s retry re-exec and
+ * maybeReexecUnderSg) rebuild NANOCLAW_SKIP from the steps that completed, and
+ * the sign-in is deliberately not a step — so an answer that lived only in this
+ * process would be gone by the time the resumed run reached here, and the
+ * operator would be asked again after already signing in.
+ *
+ * Returns having done nothing when the question is already settled, which also
+ * covers `NANOCLAW_HARDENED_IMAGE=true` passed in by a packaged flow.
+ */
+async function chooseImageSource(): Promise<void> {
+  if (imageSourceDecided()) return;
+
+  // The runtime pick happens later (the auth step), so this is the best signal
+  // available: an explicit preset, else the persisted install-wide default.
+  // Getting it wrong in the permissive direction is caught at that pick.
+  const plannedProvider = (
+    process.env.NANOCLAW_AGENT_PROVIDER?.trim() ||
+    DEFAULT_AGENT_PROVIDER ||
+    'claude'
+  ).toLowerCase();
+  if (plannedProvider !== 'claude') {
+    p.log.info(
+      brandBody(
+        `Building the sandbox here — the pre-built image is Claude-only, and ${plannedProvider} needs an image of its own.`,
+      ),
+    );
+    return;
+  }
+
+  // Nothing to fetch unless this copy ships a pinned image reference. Offering
+  // the choice anyway would take an account, a sign-in and a token from someone
+  // whose install then has no image to pull — so don't ask a question whose
+  // good answer cannot be honoured.
+  if (!readAgentImagePin()) return;
+
+  p.log.message(
+    brandBody(
+      dimWrap(
+        "Your assistant's sandbox contains a browser and a language runtime — Chromium, Node, Bun and a handful of tools. Isolation keeps a misbehaving agent away from your machine, but it does nothing about known vulnerabilities in that software itself.",
+        4,
+      ),
+    ),
+  );
+  p.log.message(
+    brandBody(
+      dimWrap(
+        'Our partner Echo (echo.ai) rebuilds those components from scratch with only the essentials and patches what remains, which takes the known-vulnerability count from thousands to near zero. Building here instead gives you the same software, straight from its public base image.',
+        4,
+      ),
+    ),
+  );
+  p.log.message(
+    brandBody(
+      dimWrap(
+        'Fetching it means authenticating with NanoClaw: we record your email address and that you fetched an image, nothing else. Building sends nothing at all.',
+        4,
+      ),
+    ),
+  );
+
+  const choice = ensureAnswer(
+    await brightSelect<ImageSource>({
+      message: "Where should your assistant's sandbox image come from?",
+      options: [
+        {
+          value: 'hardened',
+          label: 'Fetch the hardened image, built by Echo',
+          hint: 'recommended — patched components; ~20 min to download, needs authentication',
+        },
+        {
+          value: 'local',
+          label: 'Build it here',
+          hint: 'no account, nothing recorded; takes 3-10 min',
+        },
+      ],
+      initialValue: 'hardened',
+    }),
+  ) as ImageSource;
+  setupLog.userInput('image_source', choice);
+  phEmit('image_source_chosen', { source: choice });
+
+  writeImageSource(choice);
+  if (choice === 'local') return;
+
+  if (!loginScriptAvailable()) {
+    p.log.warn(
+      brandBody(
+        `This copy of NanoClaw has no ${REGISTRY_LOGIN_SCRIPT} — building the sandbox here instead.`,
+      ),
+    );
+    writeImageSource('local');
+    return;
+  }
+
+  p.log.step(brandBody('Authenticating with NanoClaw…'));
+  console.log(k.dim('   (a code appears below; finish in your browser)'));
+  console.log();
+  const start = Date.now();
+  const code = await runInheritScript('bash', [REGISTRY_LOGIN_SCRIPT]);
+  const durationMs = Date.now() - start;
+  console.log();
+
+  if (code !== 0) {
+    // Falling back rather than aborting: a local build is a complete, supported
+    // install, and stranding someone at the first step because a device flow
+    // timed out would be a worse trade than the patch currency they lose.
+    // The script exits 2 for a deliberate skip, which is not a failure and
+    // should not read as one in the log.
+    const skipped = code === LOGIN_EXIT_SKIPPED;
+    setupLog.step('registry-login', skipped ? 'skipped' : 'failed', durationMs, { EXIT_CODE: code });
+    phEmit('registry_login_declined', { exit_code: code, skipped });
+    writeImageSource('local');
+    p.log.warn(
+      brandBody(
+        skipped
+          ? 'Not authenticated — building the sandbox here instead.'
+          : "Authentication didn't finish — building the sandbox here instead.",
+      ),
+    );
+    p.log.message(k.dim(`Re-run setup to try again, or check with \`${REGISTRY_STEP} -- --status\`.`));
+    return;
+  }
+
+  setupLog.step('registry-login', 'interactive', durationMs, {});
+  p.log.success(brandBody("Authenticated. Your assistant's sandbox will be fetched, not built."));
+}
+
+async function askAgentProviderChoice(): Promise<string> {
+  const installed = listSetupProviders();
+  const installedNames = new Set(installed.map((entry) => entry.value));
+  // Offer the hard-wired installable providers this install hasn't wired yet —
+  // selecting one applies its `/add-<name>` SKILL.md in-process.
+  const available = INSTALLABLE_PROVIDERS.filter((prov) => !installedNames.has(prov.value));
+  // On a pinned install every non-Claude runtime forces a local rebuild — the
+  // image bakes /app/node_modules and the CLI manifest, and each changes one.
+  // Say so on the option rather than only at the confirm two steps later, so
+  // the cost is visible while the choice is still being made. Shown only when
+  // this install pulls; on a local-build install it is not a trade-off.
+  const pinned = readImageSource() === 'hardened';
+  const note = (value: string, hint: string): string =>
+    pinned && value !== 'claude' ? `${hint} — ⚠ not in the pre-built image; needs a local build` : hint;
+
+  const options = [
+    ...installed.map(({ value, label, hint }) => ({ value, label, hint: note(value, hint) })),
+    ...available.map((prov) => ({
+      value: prov.value,
+      label: prov.label,
+      hint: note(prov.value, `${prov.hint} — installs now`),
+    })),
+  ];
+  const preset = process.env.NANOCLAW_AGENT_PROVIDER?.trim().toLowerCase();
+  if (preset) {
+    if (!options.some((option) => option.value === preset)) {
+      throw new Error(`NANOCLAW_AGENT_PROVIDER=${preset} is not available in this NanoClaw install`);
+    }
+    setupLog.userInput('agent_provider', preset);
+    phEmit('agent_provider_chosen', { provider: preset, preset: true });
+    return preset;
+  }
+  // The pick is persisted as the instance default (DEFAULT_AGENT_PROVIDER), so
+  // pre-select the current default — a re-run Enter-through then preserves it
+  // instead of silently resetting it to claude. Fall back to claude if the
+  // persisted default isn't an offered option (e.g. its provider was removed).
+  const currentDefault = options.some((o) => o.value === DEFAULT_AGENT_PROVIDER)
+    ? DEFAULT_AGENT_PROVIDER
+    : 'claude';
+  const choice = ensureAnswer(
+    await brightSelect<string>({
+      message: 'Which agent runtime should power your assistant?',
+      options,
+      initialValue: currentDefault,
+    }),
+  ) as string;
+  setupLog.userInput('agent_provider', choice);
+  phEmit('agent_provider_chosen', { provider: choice });
+  return choice;
+}
 
 async function runAuthStep(): Promise<void> {
   if (anthropicSecretExists()) {
@@ -1098,7 +1491,7 @@ async function askChannelChoice(): Promise<ChannelChoice> {
       options: [
         { value: 'telegram', label: 'Yes, connect Telegram', hint: 'recommended' },
         { value: 'discord', label: 'Yes, connect Discord' },
-        { value: 'whatsapp', label: 'Yes, connect WhatsApp' },
+        { value: 'whatsapp', label: 'Yes, connect WhatsApp', hint: 'best with a dedicated number' },
         {
           value: 'signal',
           label: 'Yes, connect Signal',
@@ -1217,7 +1610,7 @@ function detectExistingOnecli(): { version: string; apiHost: string } | null {
     } catch {
       // not JSON — try to extract a URL directly
     }
-    const m = raw.match(/https?:\/\/[\w.\-]+(?::\d+)?/);
+    const m = raw.match(/https?:\/\/[\w.-]+(?::\d+)?/);
     return m ? { version, apiHost: m[0] } : null;
   } catch {
     return null;
@@ -1226,8 +1619,32 @@ function detectExistingOnecli(): { version: string; apiHost: string } | null {
 
 function runInheritScript(cmd: string, args: string[]): Promise<number> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { stdio: 'inherit' });
-    child.on('close', (code) => resolve(code ?? 1));
+    // Hand the terminal over before spawning, or the child's first prompt eats
+    // a keystroke that never reaches it.
+    //
+    // `stdio: 'inherit'` gives the child our own fd 0 — the same file
+    // description, not a copy. clack leaves stdin resumed between prompts and
+    // puts the TTY in raw mode during one, so this process is still reading
+    // that fd when the child starts. Bytes it pulls in are buffered here and
+    // are gone as far as the child is concerned, which is why "Press Enter"
+    // needed pressing twice: the first went to a parent nobody was asking.
+    const tty = Boolean(process.stdin.isTTY);
+    const wasRaw = tty && process.stdin.isRaw;
+    if (wasRaw) process.stdin.setRawMode(false);
+    process.stdin.pause();
+
+    // Tells the child it has a UI in front of it, so it can leave the
+    // reporting to us instead of printing its own alongside ours.
+    const child = spawn(cmd, args, {
+      stdio: 'inherit',
+      env: { ...process.env, NANOCLAW_SETUP_WIZARD: '1' },
+    });
+    child.on('close', (code) => {
+      // Deliberately not restoring raw mode: clack sets it per prompt, and
+      // handing it back a cooked TTY is the state it expects to find.
+      process.stdin.resume();
+      resolve(code ?? 1);
+    });
   });
 }
 

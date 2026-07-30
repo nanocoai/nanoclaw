@@ -19,8 +19,22 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { initTestDb, closeDb, runMigrations } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
 import { createMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
+import { registerChannelAdapter } from '../../channels/channel-registry.js';
+import type { ChannelDefaults } from '../../channels/adapter.js';
 import { upsertUser } from './db/users.js';
 import { grantRole } from './db/user-roles.js';
+
+// Registration-tier declaration for the fixture channel — a threaded platform
+// whose declared defaults match the historical card-flow behavior
+// (mention-sticky groups, pattern '.' DMs). Without it, the no-live-adapter
+// fallback resolves threads=false and coerces sticky → mention.
+// Registry maps are module-global; keep channel names unique per test file.
+const telegramDefaults: ChannelDefaults = {
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: true, unknownSenderPolicy: 'request_approval' },
+  group: { engageMode: 'mention-sticky', threads: true, unknownSenderPolicy: 'request_approval' },
+  mentions: 'platform',
+};
+registerChannelAdapter('telegram', { factory: () => null, defaults: telegramDefaults });
 
 // Mock container runner — prevent actual docker spawn.
 vi.mock('../../container-runner.js', () => ({
@@ -54,7 +68,11 @@ vi.mock('./user-dm.js', () => ({
 
 vi.mock('../../config.js', async () => {
   const actual = await vi.importActual('../../config.js');
-  return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-channel-approval' };
+  return {
+    ...actual,
+    DATA_DIR: '/tmp/nanoclaw-test-channel-approval',
+    GROUPS_DIR: '/tmp/nanoclaw-test-channel-approval/groups',
+  };
 });
 
 const TEST_DIR = '/tmp/nanoclaw-test-channel-approval';
@@ -113,13 +131,14 @@ function groupMention(platformId: string, text = '@bot hello') {
   return {
     channelType: 'telegram',
     platformId,
-    threadId: 'thread-1', // non-null → is_group=true per channel-approval default-picker logic
+    threadId: 'thread-1',
     message: {
       id: `msg-${Math.random().toString(36).slice(2, 8)}`,
       kind: 'chat' as const,
       content: JSON.stringify({ senderId: 'caller', senderName: 'Caller', text }),
       timestamp: now(),
       isMention: true,
+      isGroup: true, // group context comes from the adapter flag, never threadId
     },
   };
 }
@@ -153,6 +172,8 @@ describe('unknown-channel registration flow', () => {
     expect(kind).toBe('chat-sdk');
     const payload = JSON.parse(content as string);
     expect(payload.type).toBe('ask_question');
+    // Card tells the approver the resolved engage rule.
+    expect(payload.question).toContain('will respond to @-mentions in this group');
     // Single-agent card offers a direct "Connect to <name>" button.
     const connectOption = payload.options.find((o: { value: string }) => o.value.startsWith('connect:'));
     expect(connectOption).toBeDefined();
@@ -171,6 +192,8 @@ describe('unknown-channel registration flow', () => {
     await new Promise((r) => setTimeout(r, 10));
 
     expect(deliverMock).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse(deliverMock.mock.calls[0][4] as string) as { question: string };
+    expect(payload.question).toContain('will respond to all messages');
     const { getDb } = await import('../../db/connection.js');
     const count = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number }).c;
     expect(count).toBe(1);
@@ -228,7 +251,7 @@ describe('unknown-channel registration flow', () => {
       agent_group_id: string;
     };
     expect(mga).toBeDefined();
-    expect(mga.engage_mode).toBe('mention-sticky'); // group (threadId != null)
+    expect(mga.engage_mode).toBe('mention-sticky'); // declared group default (threads:true keeps sticky)
     expect(mga.engage_pattern).toBeNull();
     expect(mga.sender_scope).toBe('known');
     expect(mga.ignored_message_policy).toBe('accumulate');
@@ -277,6 +300,135 @@ describe('unknown-channel registration flow', () => {
       .get(pending.messaging_group_id) as { engage_mode: string; engage_pattern: string };
     expect(mga.engage_mode).toBe('pattern');
     expect(mga.engage_pattern).toBe('.');
+  });
+
+  // WhatsApp-like platform: groups exist but thread ids don't (threadId is
+  // always null), and the adapter is undeclared (stale skill-installed copy)
+  // so resolution goes through the behavior-faithful fallback. This is the
+  // one deliberate behavior change of the defaults work: the old
+  // `threadId !== null` heuristic misread these groups as DMs and wired
+  // pattern '.'.
+  function waGroupMention(platformId: string) {
+    return {
+      channelType: 'wamock',
+      platformId,
+      threadId: null,
+      message: {
+        id: `msg-${Math.random().toString(36).slice(2, 8)}`,
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: 'caller', senderName: 'Caller', text: '@bot hi' }),
+        timestamp: now(),
+        isMention: true,
+        isGroup: true,
+      },
+    };
+  }
+
+  async function approvePending(agentGroupId = 'ag-1') {
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    const { getDb } = await import('../../db/connection.js');
+    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
+      messaging_group_id: string;
+    };
+    expect(pending).toBeDefined();
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: pending.messaging_group_id,
+        value: `connect:${agentGroupId}`,
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+    return pending.messaging_group_id;
+  }
+
+  it('non-threaded group (isGroup flag, null threadId) wires the GROUP default, sticky coerced to mention', async () => {
+    const { routeInbound } = await import('../../router.js');
+    await routeInbound(waGroupMention('wa-group-1'));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const mgId = await approvePending();
+
+    const { getDb } = await import('../../db/connection.js');
+    const mga = getDb()
+      .prepare('SELECT engage_mode, engage_pattern FROM messaging_group_agents WHERE messaging_group_id = ?')
+      .get(mgId) as { engage_mode: string; engage_pattern: string | null };
+    // Faithful fallback group default is mention-sticky, but with no live
+    // adapter threads resolve false → coerced to plain mention. NOT the old
+    // pattern '.' DM misclassification.
+    expect(mga.engage_mode).toBe('mention');
+    expect(mga.engage_pattern).toBeNull();
+  });
+
+  it('DM on an undeclared channel stays pattern "." through the faithful fallback', async () => {
+    const { routeInbound } = await import('../../router.js');
+    await routeInbound({
+      ...waGroupMention('wa-dm-1'),
+      message: { ...waGroupMention('wa-dm-1').message, isGroup: false },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const mgId = await approvePending();
+
+    const { getDb } = await import('../../db/connection.js');
+    const mga = getDb()
+      .prepare('SELECT engage_mode, engage_pattern FROM messaging_group_agents WHERE messaging_group_id = ?')
+      .get(mgId) as { engage_mode: string; engage_pattern: string | null };
+    expect(mga.engage_mode).toBe('pattern');
+    expect(mga.engage_pattern).toBe('.');
+  });
+
+  it('connect-existing and new-agent approve paths produce identical wirings', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    const { getDb } = await import('../../db/connection.js');
+
+    // Path 1: connect to existing agent.
+    await routeInbound(groupMention('chat-path-connect'));
+    await new Promise((r) => setTimeout(r, 10));
+    const mgIdConnect = await approvePending();
+
+    // Path 2: new agent via free-text name reply.
+    await routeInbound(groupMention('chat-path-newagent'));
+    await new Promise((r) => setTimeout(r, 10));
+    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
+      messaging_group_id: string;
+    };
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: pending.messaging_group_id,
+        value: 'new_agent',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+    // Owner replies with the agent name in their DM — interceptor wires.
+    await routeInbound({
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+      message: {
+        id: `msg-${Math.random().toString(36).slice(2, 8)}`,
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: 'owner', text: 'Bravo' }),
+        timestamp: now(),
+      },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    const select =
+      'SELECT engage_mode, engage_pattern, sender_scope, ignored_message_policy, session_mode, priority ' +
+      'FROM messaging_group_agents WHERE messaging_group_id = ?';
+    const viaConnect = getDb().prepare(select).get(mgIdConnect);
+    const viaNewAgent = getDb().prepare(select).get(pending.messaging_group_id);
+    expect(viaNewAgent).toBeDefined();
+    expect(viaNewAgent).toEqual(viaConnect);
   });
 
   it('deny → sets denied_at; future mentions drop silently without a second card', async () => {
@@ -437,6 +589,108 @@ describe('unknown-channel registration flow', () => {
     const stillPending = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number })
       .c;
     expect(stillPending).toBe(1);
+  });
+
+  it('create new agent: the free-text name reply creates the group and wires the channel', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    const { getDb } = await import('../../db/connection.js');
+
+    await routeInbound(groupMention('chat-create-new'));
+    await new Promise((r) => setTimeout(r, 10));
+    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
+      messaging_group_id: string;
+    };
+
+    // Owner clicks "Connect new agent" → name prompt lands in their DM.
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: pending.messaging_group_id,
+        value: 'new_agent',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+
+    // Owner replies with the agent name in the same DM — the interceptor
+    // captures it and creates.
+    await routeInbound({
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+      message: {
+        id: 'name-reply-1',
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: 'owner', senderName: 'Owner', text: 'Newbie' }),
+        timestamp: now(),
+      },
+    });
+
+    const created = getDb().prepare("SELECT id FROM agent_groups WHERE name = 'Newbie'").get() as
+      | { id: string }
+      | undefined;
+    expect(created).toBeDefined();
+    const mgaCount = (
+      getDb()
+        .prepare('SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ? AND agent_group_id = ?')
+        .get(pending.messaging_group_id, created!.id) as { c: number }
+    ).c;
+    expect(mgaCount).toBe(1);
+    const stillPending = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number })
+      .c;
+    expect(stillPending).toBe(0);
+  });
+
+  it('a name reply after the registration vanished is consumed without creating anything', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    const { getDb } = await import('../../db/connection.js');
+
+    await routeInbound(groupMention('chat-vanished'));
+    await new Promise((r) => setTimeout(r, 10));
+    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
+      messaging_group_id: string;
+    };
+
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: pending.messaging_group_id,
+        value: 'new_agent',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+
+    // The registration disappears between the click and the reply (rejected
+    // from another card, group delete cascade, …) — the interceptor no
+    // longer finds a pending registration, so the reply must not create.
+    getDb()
+      .prepare('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?')
+      .run(pending.messaging_group_id);
+
+    const agentGroupsBefore = (getDb().prepare('SELECT COUNT(*) AS c FROM agent_groups').get() as { c: number }).c;
+    await routeInbound({
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+      message: {
+        id: 'name-reply-2',
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: 'owner', senderName: 'Owner', text: 'Ghost' }),
+        timestamp: now(),
+      },
+    });
+
+    const agentGroupsAfter = (getDb().prepare('SELECT COUNT(*) AS c FROM agent_groups').get() as { c: number }).c;
+    expect(agentGroupsAfter).toBe(agentGroupsBefore);
+    const mgaCount = (getDb().prepare('SELECT COUNT(*) AS c FROM messaging_group_agents').get() as { c: number }).c;
+    expect(mgaCount).toBe(0);
   });
 });
 

@@ -10,11 +10,17 @@
  * data directory, associated with the phone number of the scanner.
  *
  * Methods:
- *   (no args)                    Spawn signal-cli link, emit SIGNAL_AUTH_QR
- *                                with the URL, wait for completion.
+ *   (no args)                    Spawn signal-cli link, render the linking URL
+ *                                as a terminal QR, wait for completion.
  *
- * Block schema (parent parses these):
- *   SIGNAL_AUTH_QR       { QR: "<sgnl:// or tsdevice:// url>" }   — one-shot
+ * The linking URL + its QR are written as PLAIN stdout lines (not wrapped in a
+ * NANOCLAW SETUP block): a streaming parent (setup/lib/skill-driver's
+ * hostExecStream) consumes the status blocks but tees every other stdout line to
+ * the operator live, so the operator sees the QR/URL directly. Only the terminal
+ * SIGNAL_AUTH block is parsed — the driver's `capture:<var>=ACCOUNT` reads the
+ * phone number from it.
+ *
+ * Block schema (parent parses this one block):
  *   SIGNAL_AUTH          { STATUS: success, ACCOUNT: +<digits> }  — terminal
  *                        { STATUS: skipped, ACCOUNT, REASON: already-authenticated }
  *                        { STATUS: failed, ERROR: <reason> }
@@ -65,6 +71,34 @@ function listAccounts(): string[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Render the signal-cli linking URL as a block-art QR and print it — together
+ * with the raw URL — as PLAIN stdout lines. A streaming parent tees these to the
+ * operator's terminal live; do NOT wrap them in a NANOCLAW SETUP block (those are
+ * consumed by the parser, not displayed). small-mode keeps the code scannable on
+ * 24-row terminals. If qrcode isn't installed (the add-signal skill installs it,
+ * but be defensive) fall back to the URL alone for an external renderer.
+ */
+async function renderQr(url: string): Promise<string[]> {
+  const scanHint =
+    'Signal → Settings → Linked Devices → Link New Device → scan this code.';
+  const urlHint = 'Or open this link on the phone running Signal:';
+  try {
+    const QRCode = await import('qrcode');
+    const qrText = await QRCode.toString(url, { type: 'terminal', small: true });
+    return ['', ...qrText.trimEnd().split('\n'), '', scanHint, '', urlHint, url, ''];
+  } catch {
+    return ['', urlHint, url, '', scanHint, ''];
+  }
+}
+
+/** Print the linking URL + its QR as plain stdout lines (teed to the operator). */
+function printLink(url: string): void {
+  void renderQr(url).then((lines) => {
+    process.stdout.write(lines.join('\n') + '\n');
+  });
 }
 
 export async function run(_args: string[]): Promise<void> {
@@ -131,10 +165,13 @@ export async function run(_args: string[]): Promise<void> {
         const line = stdoutBuf.slice(0, idx).trim();
         stdoutBuf = stdoutBuf.slice(idx + 1);
         if (!line) continue;
-        // Match both modern (sgnl://) and legacy (tsdevice://) schemes.
+        // Match both modern (sgnl://) and legacy (tsdevice://) schemes. Render
+        // the linking URL as a QR and print both as PLAIN stdout lines so a
+        // streaming parent tees them straight to the operator (a wrapping
+        // NANOCLAW SETUP block would be consumed, not shown).
         if (/^(sgnl|tsdevice):\/\/linkdevice\?/.test(line) && !qrEmitted) {
           qrEmitted = true;
-          emitStatus('SIGNAL_AUTH_QR', { QR: line });
+          printLink(line);
         }
       }
     };

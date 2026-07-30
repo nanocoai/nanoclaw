@@ -13,6 +13,10 @@ Install [rtk](https://github.com/rtk-ai/rtk) — a CLI proxy delivering 60–90%
 - `~/.local/bin/rtk` mounted read-only at `/usr/local/bin/rtk` inside the target agent group's containers
 - `PreToolUse` hook in the agent group's `settings.json` so every Bash call is automatically filtered through rtk — no CLAUDE.md instructions needed
 
+## Integration tests
+
+This skill has **no in-tree integration test** by design. Its only functional reach-ins are runtime operator actions — the host-only `ncl groups config add-mount` (Step 3) and the `settings.json` `PreToolUse` hook write (Step 4) — neither of which leaves a line in the source tree whose deletion a test could catch. There are no package dependencies or Dockerfile edits to guard either. Conformance is idempotent apply + `REMOVE.md`; the mount and hook are verified at runtime (see Verify).
+
 ## Step 1 — Install rtk on the host
 
 ```bash
@@ -43,29 +47,24 @@ Note the group ID (e.g. `ag-1776342942165-ptgddd`). Repeat Steps 3–5 for each 
 
 ## Step 3 — Mount rtk into the container config
 
-`additional_mounts` is a JSON column not exposed via `ncl config update`. Update it directly via the DB helper, merging with any existing mounts.
-
-Read current mounts first:
+Mount the host rtk binary read-only into the container with the host-only `add-mount` verb. It is idempotent — re-running skips the entry if it is already present:
 
 ```bash
-pnpm exec tsx scripts/q.ts data/v2.db \
-  "SELECT additional_mounts FROM container_configs WHERE agent_group_id = '<group-id>'"
+ncl groups config add-mount --id <group-id> \
+  --host ~/.local/bin/rtk \
+  --container /usr/local/bin/rtk \
+  --ro
 ```
 
-Then write the merged array (include all existing entries plus the rtk entry):
+This verb is operator-only and runs host-side (via `/setup`, `/customize`, or `/manage-mounts`); it is rejected from inside a container.
 
-```bash
-pnpm exec tsx scripts/q.ts data/v2.db \
-  "UPDATE container_configs SET additional_mounts = '<merged-json>' WHERE agent_group_id = '<group-id>'"
-```
-
-The rtk entry to append: `{"hostPath":"/home/<user>/.local/bin/rtk","containerPath":"/usr/local/bin/rtk","readonly":true}`
+The host root (`~/.local/bin`) must also be in the external mount allowlist at `~/.config/nanoclaw/mount-allowlist.json` for the mount to take effect at spawn. Add it there if it isn't already.
 
 Verify:
 
 ```bash
-pnpm exec tsx scripts/q.ts data/v2.db \
-  "SELECT additional_mounts FROM container_configs WHERE agent_group_id = '<group-id>'"
+ncl groups config get --id <group-id>
+# Look for the /usr/local/bin/rtk mount
 ```
 
 ## Step 4 — Add the PreToolUse hook to settings.json
@@ -78,19 +77,14 @@ data/v2-sessions/<group-id>/.claude-shared/settings.json
 
 This file is mounted at `/home/node/.claude/settings.json` inside the container and is read by Claude Code for hooks, env, and model config.
 
-Add the `PreToolUse` entry using `jq` to merge safely:
+Add the `PreToolUse` entry with `jq`. This drops any existing rtk Bash hook first, then appends a fresh one, so it is safe to re-run without creating duplicates:
 
 ```bash
 SETTINGS="data/v2-sessions/<group-id>/.claude-shared/settings.json"
 
-jq '.hooks.PreToolUse = [{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]' \
-  "$SETTINGS" > /tmp/rtk-settings.json && mv /tmp/rtk-settings.json "$SETTINGS"
-```
-
-If `PreToolUse` already exists, append instead of overwriting:
-
-```bash
-jq '.hooks.PreToolUse += [{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]' \
+jq '.hooks.PreToolUse = ((.hooks.PreToolUse // [])
+      | map(select((.hooks // []) | any(.command == "rtk hook claude") | not)))
+    + [{"matcher":"Bash","hooks":[{"type":"command","command":"rtk hook claude"}]}]' \
   "$SETTINGS" > /tmp/rtk-settings.json && mv /tmp/rtk-settings.json "$SETTINGS"
 ```
 
@@ -100,11 +94,15 @@ jq '.hooks.PreToolUse += [{"matcher":"Bash","hooks":[{"type":"command","command"
 ncl groups restart --id <group-id>
 ```
 
-No `--message` needed — the hook is transparent and requires no agent awareness.
-
 ## Verify
 
-Ask the agent to run `git status` or any other supported command. rtk intercepts it silently. Check savings with:
+Confirm the binary is executable inside the container so a missing or non-executable mount surfaces immediately rather than as a silent hook failure:
+
+```bash
+docker exec "$(docker ps --filter "name=<group-id>" --format '{{.Names}}' | head -1)" rtk --version
+```
+
+Then ask the agent to run `git status` or any other supported command. rtk intercepts it silently. Check savings with:
 
 ```bash
 ~/.local/bin/rtk gain
@@ -117,9 +115,8 @@ Ask the agent to run `git status` or any other supported command. rtk intercepts
 Mount wasn't applied or container wasn't restarted:
 
 ```bash
-pnpm exec tsx scripts/q.ts data/v2.db \
-  "SELECT additional_mounts FROM container_configs WHERE agent_group_id = '<group-id>'"
-# Look for entry with /usr/local/bin/rtk
+ncl groups config get --id <group-id>
+# Look for the /usr/local/bin/rtk mount
 ncl groups restart --id <group-id>
 ```
 

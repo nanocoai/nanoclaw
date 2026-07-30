@@ -90,6 +90,10 @@ export async function ensureUserDm(userId: string): Promise<MessagingGroup | nul
       platform_id: dmPlatformId,
       name: user.display_name,
       is_group: 0,
+      // Deliberately 'strict', NOT the channel's declared DM policy: this row
+      // backs a host-initiated DM to a known privileged user (approver,
+      // admin). Consulting the declaration would let a 'public' DM
+      // declaration open the approval-delivery channel to strangers.
       unknown_sender_policy: 'strict',
       created_at: now,
     };

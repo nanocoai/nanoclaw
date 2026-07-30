@@ -1,3 +1,5 @@
+import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
+
 export interface AgentProvider {
   /**
    * True if the provider's underlying SDK handles slash commands natively and
@@ -5,6 +7,20 @@ export interface AgentProvider {
    * slash commands like any other chat message.
    */
   readonly supportsNativeSlashCommands: boolean;
+
+  /** Register shared memory through the provider's native session-start mechanism. */
+  registerMemorySessionHook(hook: MemorySessionHookRegistration): void;
+
+  /**
+   * Optional. Called by the poll-loop after each completed exchange (a
+   * result, a wrapping retry, or an error). Providers whose harness keeps no
+   * on-disk transcript implement this to persist exchanges themselves (e.g.
+   * markdown into the agent's `conversations/` dir); providers that persist
+   * and archive their own transcript (e.g. the Claude Agent SDK's `.jsonl`)
+   * omit it. Best-effort: the loop catches and logs anything it throws. The
+   * implementation lives with the provider, never in the runner.
+   */
+  onExchangeComplete?(exchange: ProviderExchange): void;
 
   /** Start a new query. Returns a handle for streaming input and output. */
   query(input: QueryInput): AgentQuery;
@@ -29,6 +45,16 @@ export interface AgentProvider {
    * before it ever replies. Providers without an on-disk transcript omit this.
    */
   maybeRotateContinuation?(continuation: string, cwd: string): string | null;
+}
+
+/** One prompt/result round-trip, as reported to `onExchangeComplete`. */
+export interface ProviderExchange {
+  /** The user prompt this exchange answers (never an internal retry nudge). */
+  prompt: string;
+  result: string | null;
+  /** Continuation/thread id in effect for the exchange, if any. */
+  continuation?: string;
+  status: 'completed' | 'undelivered' | 'error';
 }
 
 /**
@@ -96,7 +122,13 @@ export interface AgentQuery {
 
 export type ProviderEvent =
   | { type: 'init'; continuation: string }
-  | { type: 'result'; text: string | null }
+  /**
+   * A completed turn. `isError` is set when the underlying SDK flagged the
+   * turn as an error (e.g. a non-retryable Anthropic 403 billing_error). The
+   * poll-loop uses it to surface the result text to the user instead of
+   * dropping it as un-wrapped scratchpad, and to skip the re-wrap nudge.
+   */
+  | { type: 'result'; text: string | null; isError?: boolean }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
   /**

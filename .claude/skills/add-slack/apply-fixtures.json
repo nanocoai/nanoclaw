@@ -1,0 +1,31 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. Two scenarios cover both when:connection= legs; the auth.test stub answers the connected_as capture and conversations.open answers platform_id.",
+  "scenarios": [
+    {
+      "name": "socket",
+      "inputs": {
+        "connection": "socket",
+        "bot_token": "xoxb-fake-bot-token",
+        "app_token": "xapp-fake-app-token",
+        "owner_handle": "U12345678"
+      },
+      "exec": [
+        { "match": "auth.test", "stdout": "@nano in Acme" },
+        { "match": "conversations.open", "stdout": "slack:D0FAKE" }
+      ]
+    },
+    {
+      "name": "webhook",
+      "inputs": {
+        "connection": "webhook",
+        "bot_token": "xoxb-fake-bot-token",
+        "signing_secret": "0123456789abcdef",
+        "owner_handle": "U12345678"
+      },
+      "exec": [
+        { "match": "auth.test", "stdout": "@nano in Acme" },
+        { "match": "conversations.open", "stdout": "slack:D0FAKE" }
+      ]
+    }
+  ]
+}

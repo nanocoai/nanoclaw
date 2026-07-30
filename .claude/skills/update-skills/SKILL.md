@@ -1,34 +1,35 @@
 ---
 name: update-skills
-description: Check for and apply updates to installed skill branches from upstream.
+description: Re-apply your installed skills to pull their latest code from upstream.
 ---
 
 # About
 
-Skills are distributed as git branches (`skill/*`). When you install a skill, you merge its branch into your repo. This skill checks upstream for newer commits on those skill branches and helps you update.
+Each skill is a self-installing additive unit: its folder under `.claude/skills/<name>/` carries its own apply steps (`SKILL.md`), and channel/provider skills fetch their code files from a long-lived upstream branch (`channels`, `providers`) with `git fetch origin <branch>` + `git show origin/<branch>:path > path`. Every apply is idempotent and safe to re-run.
+
+Updating a skill means **re-running its own apply**. The apply re-fetches the latest files from upstream and overwrites the copied-in code, so newer versions land additively.
 
 Run `/update-skills` in Claude Code.
 
 ## How it works
 
-**Preflight**: checks for clean working tree and upstream remote.
+**Preflight**: checks for a clean working tree and the upstream remote.
 
-**Detection**: fetches upstream, lists all `upstream/skill/*` branches, determines which ones you've previously merged (via merge-base), and checks if any have new commits.
+**Detection**: reads the channel and provider barrels to list which skills have copied code into your tree, and lists the operational/utility skills present under `.claude/skills/`.
 
-**Selection**: presents a list of skills with available updates. You pick which to update.
+**Selection**: presents the installed skills and lets you pick which to re-apply.
 
-**Update**: merges each selected skill branch, resolves conflicts if any, then validates with build + test.
+**Re-apply**: invokes each selected skill's own apply (e.g. `/add-slack`), which fetches its latest files. Then validates with build + test.
 
 ---
 
 # Goal
-Help users update their installed skill branches from upstream without losing local customizations.
+Help users pull the latest skill code from upstream by re-applying their installed skills, without losing local customizations and without merging any branch.
 
 # Operating principles
 - Never proceed with a dirty working tree.
-- Only offer updates for skills the user has already merged (installed).
-- Use git-native operations. Do not manually rewrite files except conflict markers.
-- Keep token usage low: rely on `git` commands, only open files with actual conflicts.
+- Re-apply each skill through its own idempotent apply step — re-applying overwrites only that skill's code files; credentials, wiring, and DB state are untouched.
+- Keep token usage low: detect installed skills with `git` and barrel reads; let each skill's apply do its own fetching.
 
 # Step 0: Preflight
 
@@ -41,90 +42,64 @@ If output is non-empty:
 Check remotes:
 - `git remote -v`
 
-If `upstream` is missing:
-- Ask the user for the upstream repo URL (default: `https://github.com/nanocoai/nanoclaw.git`).
-- `git remote add upstream <url>`
+If `origin` does not point at a NanoClaw upstream (or you want to verify it has the skill branches), confirm with the user before continuing. The default upstream is `https://github.com/nanocoai/nanoclaw.git`.
 
-Fetch:
-- `git fetch upstream --prune`
+Fetch the branches that carry skill code:
+- `git fetch origin channels providers --prune`
 
-# Step 1: Detect installed skills with available updates
+# Step 1: Detect installed skills
 
-List all upstream skill branches:
-- `git branch -r --list 'upstream/skill/*'`
+**Channels** — read `src/channels/index.ts` and collect each `import './<name>.js';` line, excluding `cli`. Each `<name>` maps to the `/add-<name>` skill.
 
-For each `upstream/skill/<name>`:
-1. Check if the user has merged this skill branch before:
-   - `git merge-base --is-ancestor upstream/skill/<name>~1 HEAD` — if this succeeds (exit 0) for any ancestor commit of the skill branch, the user has merged it at some point. A simpler check: `git log --oneline --merges --grep="skill/<name>" HEAD` to see if there's a merge commit referencing this branch.
-   - Alternative: `MERGE_BASE=$(git merge-base HEAD upstream/skill/<name>)` — if the merge base is NOT the initial commit and the merge base includes commits unique to the skill branch, it has been merged.
-   - Simplest reliable check: compare `git merge-base HEAD upstream/skill/<name>` with `git merge-base HEAD upstream/main`. If the skill merge-base is strictly ahead of (or different from) the main merge-base, the user has merged this skill.
-2. Check if there are new commits on the skill branch not yet in HEAD:
-   - `git log --oneline HEAD..upstream/skill/<name>`
-   - If this produces output, there are updates available.
+**Providers** — read `src/providers/index.ts` the same way; each imported provider maps to its `/add-<name>` skill.
 
-Build three lists:
-- **Updates available**: skills that are merged AND have new commits
-- **Up to date**: skills that are merged and have no new commits
-- **Not installed**: skills that have never been merged
+**Operational and utility skills** — list the folders under `.claude/skills/`. These copy no code into the tree, so "re-applying" them just re-reads their instructions; only include them if the user specifically wants to re-run a workflow.
+
+Build the candidate list from the channels and providers actually wired into the barrels — those are the skills whose copied code can be refreshed from upstream.
 
 # Step 2: Present results
 
-If no skills have updates available:
-- Tell the user all installed skills are up to date. List them.
-- If there are uninstalled skills, mention them briefly (e.g., "3 other skills available in upstream that you haven't installed").
+If no channel or provider skills are installed:
+- Tell the user there are no code-carrying skills to update. List any operational skills present for reference.
 - Stop here.
 
-If updates are available:
-- Show the list of skills with updates, including the number of new commits for each:
-  ```
-  skill/<name>: 3 new commits
-  skill/<other>: 1 new commit
-  ```
-- Also show skills that are up to date (for context).
-- Use AskUserQuestion with `multiSelect: true` to let the user pick which skills to update.
-  - One option per skill with updates, labeled with the skill name and commit count.
-  - Add an option: "Skip — don't update any skills now"
-- If user selects Skip, stop here.
+If installed channel/provider skills are found:
+- Show the list (e.g. `slack`, `discord`, `opencode`).
+- Use AskUserQuestion with `multiSelect: true` to let the user pick which skills to re-apply.
+  - One option per installed channel/provider (e.g. "Re-apply Slack (/add-slack)").
+  - Add an option: "Skip — don't update any skills now".
+- If the user selects Skip, stop here.
 
-# Step 3: Apply updates
+# Step 3: Re-apply each selected skill
 
 For each selected skill (process one at a time):
 
-1. Tell the user which skill is being updated.
-2. Run: `git merge upstream/skill/<name> --no-edit`
-3. If the merge is clean, move to the next skill.
-4. If conflicts occur:
-   - Run `git status` to identify conflicted files.
-   - For each conflicted file:
-     - Open the file.
-     - Resolve only conflict markers.
-     - Preserve intentional local customizations.
-     - `git add <file>`
-   - Complete the merge: `git commit --no-edit`
-
-If a merge fails badly (e.g., cannot resolve conflicts):
-- `git merge --abort`
-- Tell the user this skill could not be auto-updated and they should resolve it manually.
-- Continue with the remaining skills.
+1. Tell the user which skill is being re-applied.
+2. Invoke the corresponding `/add-<name>` skill using the Skill tool.
+   - Its apply runs its own pre-flight, fetches the latest files from upstream (`git fetch origin <branch>` + `git show origin/<branch>:path > path`), overwrites the copied-in code, and installs any pinned dependency.
+   - Re-applying is additive: it refreshes only that skill's own files. The barrel import line is left in place if already present, and `.env` credentials and DB wiring are untouched.
+3. If a skill's apply reports a problem (a missing upstream file, a failing dependency install), record it and continue with the remaining skills.
 
 # Step 4: Validation
 
-After all selected skills are merged:
+After all selected skills are re-applied:
 - `pnpm run build`
 - `pnpm test` (do not fail the flow if tests are not configured)
+- If the re-apply changed any files under `container/` (`git diff --name-only -- container/` is non-empty), rebuild the agent image so new sessions pick up the new code: `./container/build.sh`. Skill code that lives in the container (e.g. a provider's runtime) keeps running the old image until this is done — the rebuild is what makes the fix live, not the file copy. If nothing under `container/` changed (e.g. only a channel adapter was re-applied), skip it.
+
+Each channel/provider skill copies in its own registration test; those run as part of `pnpm test` and assert the barrel still registers the adapter against the freshly fetched code.
 
 If build fails:
 - Show the error.
-- Only fix issues clearly caused by the merge (missing imports, type mismatches).
+- Only fix issues clearly caused by the refreshed code (missing imports, type mismatches).
 - Do not refactor unrelated code.
 - If unclear, ask the user.
 
 # Step 5: Summary
 
 Show:
-- Skills updated (list)
-- Skills skipped or failed (if any)
+- Skills re-applied (list)
+- Skills skipped or that reported problems (if any)
 - New HEAD: `git rev-parse --short HEAD`
-- Any conflicts that were resolved (list files)
 
-If the service is running, remind the user to restart it to pick up changes.
+If the service is running, remind the user to restart it to pick up the refreshed code.

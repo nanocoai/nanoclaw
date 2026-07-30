@@ -11,6 +11,14 @@
  *   - launchd: `state != running` AND `runs > UNHEALTHY_RUNS_THRESHOLD`
  *   - systemd: unit is in `failed` state, OR `activating` with many restarts
  *
+ * Separately, a peer registration is "dead" when the program it launches no
+ * longer exists on disk — almost always a deleted test checkout or worktree.
+ * The service manager keeps retrying the missing binary forever, and the
+ * health probes can't see it because an unloaded/inactive job doesn't report
+ * via `launchctl print` / `systemctl show`. Deleting an install's folder
+ * without running the uninstaller leaves these behind, so they accumulate. We
+ * unload and delete the orphaned config file outright.
+ *
  * Healthy peers are left alone — multiple installs can coexist fine now that
  * container-reaper is label-scoped.
  */
@@ -35,6 +43,7 @@ export interface PeerStatus {
 export interface PeerCleanupResult {
   checked: PeerStatus[];
   unloaded: PeerStatus[];
+  removed: Array<{ label: string; configPath: string }>;
   failures: Array<{ label: string; err: string }>;
 }
 
@@ -50,7 +59,39 @@ export function cleanupUnhealthyPeers(projectRoot: string = process.cwd()): Peer
   if (platform === 'linux') {
     return cleanupSystemdPeers(projectRoot);
   }
-  return { checked: [], unloaded: [], failures: [] };
+  return { checked: [], unloaded: [], removed: [], failures: [] };
+}
+
+/**
+ * Unload a dead peer's job (best-effort) and delete its orphaned config file.
+ * `unload` runs first and may throw harmlessly when the job isn't loaded or the
+ * service-manager binary is absent (e.g. exercising launchd cleanup on Linux).
+ */
+function reapDeadPeer(
+  result: PeerCleanupResult,
+  peer: { label: string; configPath: string },
+  unload: () => void,
+  kind: string,
+  missingTarget: string,
+): void {
+  try {
+    unload();
+  } catch {
+    /* job not loaded — nothing to unload */
+  }
+  try {
+    fs.rmSync(peer.configPath, { force: true });
+    log.info(`Removed dead peer ${kind}`, {
+      label: peer.label,
+      configPath: peer.configPath,
+      missingTarget,
+    });
+    result.removed.push(peer);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn(`Failed to remove dead peer ${kind}`, { label: peer.label, err: message });
+    result.failures.push({ label: peer.label, err: message });
+  }
 }
 
 // ---- launchd (macOS) --------------------------------------------------------
@@ -58,7 +99,7 @@ export function cleanupUnhealthyPeers(projectRoot: string = process.cwd()): Peer
 function cleanupLaunchdPeers(projectRoot: string): PeerCleanupResult {
   const ownLabel = getLaunchdLabel(projectRoot);
   const agentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents');
-  const result: PeerCleanupResult = { checked: [], unloaded: [], failures: [] };
+  const result: PeerCleanupResult = { checked: [], unloaded: [], removed: [], failures: [] };
 
   let plists: string[];
   try {
@@ -75,6 +116,20 @@ function cleanupLaunchdPeers(projectRoot: string): PeerCleanupResult {
   for (const plistPath of plists) {
     const label = path.basename(plistPath, '.plist');
     if (label === ownLabel) continue;
+
+    const missingTarget = deadLaunchdTarget(plistPath);
+    if (missingTarget) {
+      reapDeadPeer(
+        result,
+        { label, configPath: plistPath },
+        // Best-effort unload in case launchd still has it registered; throwing
+        // (not loaded, or launchctl absent off-macOS) is expected and ignored.
+        () => execFileSync('launchctl', ['unload', plistPath], { stdio: 'pipe' }),
+        'launchd plist',
+        missingTarget,
+      );
+      continue;
+    }
 
     const status = probeLaunchdPeer(label, plistPath, uid);
     if (!status) continue;
@@ -121,12 +176,32 @@ function probeLaunchdPeer(label: string, plistPath: string, uid: number): PeerSt
   return { label, configPath: plistPath, state, runs, unhealthy };
 }
 
+/**
+ * Returns the program path a launchd plist launches when that program no longer
+ * exists on disk (a dead registration), or undefined when the plist is
+ * unreadable, has an unrecognized shape, or its target still exists — in which
+ * case the plist must not be touched.
+ */
+function deadLaunchdTarget(plistPath: string): string | undefined {
+  let xml: string;
+  try {
+    xml = fs.readFileSync(plistPath, 'utf-8');
+  } catch {
+    return undefined;
+  }
+  // ProgramArguments is [nodePath, "<projectRoot>/dist/index.js"]; the host
+  // entry point is the stable marker to match on.
+  const target = /<string>([^<]*\/dist\/index\.js)<\/string>/.exec(xml)?.[1];
+  if (!target) return undefined;
+  return fs.existsSync(target) ? undefined : target;
+}
+
 // ---- systemd (Linux) --------------------------------------------------------
 
 function cleanupSystemdPeers(projectRoot: string): PeerCleanupResult {
   const ownUnit = getSystemdUnit(projectRoot);
   const unitDir = path.join(os.homedir(), '.config', 'systemd', 'user');
-  const result: PeerCleanupResult = { checked: [], unloaded: [], failures: [] };
+  const result: PeerCleanupResult = { checked: [], unloaded: [], removed: [], failures: [] };
 
   let units: string[];
   try {
@@ -140,6 +215,22 @@ function cleanupSystemdPeers(projectRoot: string): PeerCleanupResult {
 
   for (const unit of units) {
     if (unit === ownUnit) continue;
+
+    const unitPath = path.join(unitDir, `${unit}.service`);
+    const missingTarget = deadSystemdTarget(unitPath);
+    if (missingTarget) {
+      reapDeadPeer(
+        result,
+        { label: unit, configPath: unitPath },
+        () => {
+          execFileSync('systemctl', ['--user', 'disable', '--now', `${unit}.service`], { stdio: 'pipe' });
+          execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'pipe' });
+        },
+        'systemd unit',
+        missingTarget,
+      );
+      continue;
+    }
 
     const status = probeSystemdPeer(unit);
     if (!status) continue;
@@ -183,4 +274,22 @@ function probeSystemdPeer(unit: string): PeerStatus | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Returns the program path a systemd unit launches when that program no longer
+ * exists on disk (a dead registration), or undefined when the unit is
+ * unreadable, has an unrecognized shape, or its target still exists.
+ */
+function deadSystemdTarget(unitPath: string): string | undefined {
+  let unit: string;
+  try {
+    unit = fs.readFileSync(unitPath, 'utf-8');
+  } catch {
+    return undefined;
+  }
+  // ExecStart=<nodePath> <projectRoot>/dist/index.js
+  const target = /^ExecStart=\S+\s+(\S+\/dist\/index\.js)\s*$/m.exec(unit)?.[1];
+  if (!target) return undefined;
+  return fs.existsSync(target) ? undefined : target;
 }

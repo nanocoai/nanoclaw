@@ -179,21 +179,34 @@ So during this step:
   marker.
 
 The level-2 log still gets an entry (`auth [interactive] → success`
-with the method — subscription / oauth-token / api-key). Level-3 captures
+with the method — subscription / oauth / api). Level-3 captures
 are optional here; mirroring `script -q` output is tricky and the risk of
 leaking the token to disk outweighs the debugging value.
+
+## Channel installs are skill-driven
+
+There are no per-channel setup scripts. Each channel's `/add-<channel>`
+SKILL.md is the single source of truth: its `nc:` directive fences carry the
+mechanical steps ([skill-directives.md](skill-directives.md)), and setup
+applies them in-process — `runChannelSkill` in `setup/auto.ts` → the skill
+driver → the directive engine. The bespoke non-interactive installers
+(`setup/add-<channel>.sh` / `setup/install-<channel>.sh`) no longer exist;
+the non-interactive path is the same document, with prompt vars pre-supplied
+programmatically (`applySkill`'s `inputs`, or the `NC_INPUT_<VAR>` env
+convention — [skill-engine-seam.md](skill-engine-seam.md) §6).
 
 ## File reference
 
 | File | Role |
 |---|---|
-| `nanoclaw.sh` | Top-level wrapper. Phase 1 (bootstrap) and phase 2 (setup:auto) orchestration. Writes bootstrap's raw log + progression entry. |
+| `nanoclaw.sh` | Top-level wrapper. Phase 1 (bootstrap) and phase 2 (setup:auto) orchestration. Writes bootstrap's raw log + progression entry. `--uninstall` bypasses bootstrap entirely — it execs setup:auto directly (the flow lives in `setup/uninstall/`), or prints manual-cleanup guidance and exits 1 when the TS toolchain is missing. |
 | `setup.sh` | Phase 1 bootstrap: Node, pnpm, native-module verify. Emits its own `BOOTSTRAP` status block (historically printed to stdout; now goes to the bootstrap raw log). |
 | `setup/auto.ts` | Phase 2 driver. Orchestrates the clack UI, step execution, user prompts, and writes to all three log levels for every step it spawns. |
-| `setup/logs.ts` | The logging primitives (`logStep`, `logUserInput`, `logComplete`, `stepRawLog`, `initSetupLog`). Single source of truth for level 2/3 formatting and file paths. |
+| `setup/logs.ts` | The logging primitives (`step`, `userInput`, `complete`, `stepRawLog`, `reset`). Single source of truth for level 2/3 formatting and file paths. |
 | `setup/<step>.ts` | Individual step implementations. Must emit one terminal status block; must not write directly to the terminal. |
 | `setup/register-claude-token.sh` | The Anthropic exception. Inherits stdio, prints its own UI, returns a status to the driver. |
-| `setup/add-telegram.sh` | Non-interactive adapter installer. Reads `TELEGRAM_BOT_TOKEN` from env; never prompts. User-facing bits live in `auto.ts`. |
+| `setup/lib/skill-driver.ts` | Generic skill runner: applies a SKILL.md's `nc:` directives via the engine (`scripts/skill-apply.ts`) and renders its events through clack — prompts via `resolveInput`, spinners for step events, operator notes with the gate/URL-offer policy from `scripts/skill-policy.ts`. Owns all prompting/gating presentation; the engine only declares and emits. |
+| `setup/channels/run-channel-skill.ts` | The generic channel-install entry: drives the channel's `/add-<channel>` SKILL.md through the skill driver, then owns the shared wire (agent name + operator role → `scripts/init-first-agent.ts`). One flow for every channel — no bespoke per-channel code. |
 | `setup/pair-telegram.ts` | Emits `PAIR_TELEGRAM_CODE` / `PAIR_TELEGRAM_ATTEMPT` / `PAIR_TELEGRAM` status blocks. Never prints UI. The driver renders it via clack notes. |
 
 ## Common pitfalls

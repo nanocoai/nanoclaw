@@ -71,7 +71,7 @@ import { routeInbound } from '../src/router.js';
 import { setDeliveryAdapter, startActiveDeliveryPoll, stopDeliveryPolls } from '../src/delivery.js';
 import { getChannelAdapter, registerChannelAdapter, initChannelAdapters } from '../src/channels/channel-registry.js';
 import { findSession } from '../src/db/sessions.js';
-import { sessionDbPath } from '../src/session-manager.js';
+import { inboundDbPath } from '../src/session-manager.js';
 import type { ChannelAdapter, ChannelSetup, OutboundMessage } from '../src/channels/adapter.js';
 
 // Track delivered messages
@@ -99,7 +99,9 @@ const mockAdapter: ChannelAdapter = {
 
   async setTyping() {},
   async teardown() {},
-  isConnected() { return true; },
+  isConnected() {
+    return true;
+  },
 };
 
 // Register mock adapter
@@ -179,15 +181,19 @@ console.log(`✓ Container status: ${session.container_status}`);
 import { execSync } from 'child_process';
 const checkContainerLogs = () => {
   try {
-    const containers = execSync('docker ps -a --filter name=nanoclaw-v2-test-channel --format "{{.Names}}"').toString().trim();
+    const containers = execSync('docker ps -a --filter name=nanoclaw-v2-test-channel --format "{{.Names}}"')
+      .toString()
+      .trim();
     for (const name of containers.split('\n').filter(Boolean)) {
       console.log(`\nContainer logs (${name}):`);
       console.log(execSync(`docker logs ${name} 2>&1`).toString());
     }
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 };
 
-const sessDbPath = sessionDbPath('ag-chan', session.id);
+const sessDbPath = inboundDbPath('ag-chan', session.id);
 console.log(`✓ Session DB: ${sessDbPath}`);
 
 // --- Step 4: Wait for delivery through mock adapter ---
@@ -210,7 +216,9 @@ await new Promise<void>((resolve) => {
         console.log(`  messages_out rows: ${out.length}`);
         if (out.length > 0) console.log('  (messages exist but delivery failed)');
         db.close();
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
       checkContainerLogs();
       cleanup();
       process.exit(1);

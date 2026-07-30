@@ -1,0 +1,215 @@
+# Gate on the one file that decides what other people's machines execute.
+#
+# A digest bump in versions.json reaches every pinned install on its next
+# refresh, so this job is the last point at which anyone looks. Two tiers, and
+# the distinction is deliberate:
+#
+#   BLOCKING   shape checks — index, platforms, lock label, provenance, size.
+#              These catch a wrong or mismatched image. They are things the
+#              image asserts about itself, so they detect drift, not forgery.
+#
+#   AUTO-MERGE signature verification. The only check here that a registry
+#              write cannot satisfy on its own, so it is the only one allowed
+#              to remove the human. No signature, no auto-merge — never the
+#              other way round.
+#
+# Absent signer configuration, an unverifiable signature, a fork PR with no
+# OIDC, a missing role: every one of those ends with auto-merge off and the PR
+# waiting for a person. There is no path through this file where uncertainty
+# results in a merge.
+name: verify-agent-image
+
+on:
+  pull_request:
+    paths:
+      - versions.json
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC for the pull-only ECR role
+      pull-requests: write # only ever used to enable auto-merge
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the pin change
+        id: pin
+        run: |
+          set -euo pipefail
+          read_pin() {
+            # Single-reference form only. A per-platform object is deliberately
+            # not auto-bumped: the entries must move together, and a bot that
+            # bumps them independently can leave the architectures on bytes
+            # from two different builds.
+            git show "$1:versions.json" 2>/dev/null \
+              | tr -d '\n' \
+              | grep -o '"agent-image"[[:space:]]*:[[:space:]]*"[^"]*"' \
+              | head -n1 | sed 's/.*:[[:space:]]*"//; s/"$//'
+          }
+          NEW="$(read_pin "${{ github.event.pull_request.head.sha }}")"
+          OLD="$(read_pin "${{ github.event.pull_request.base.sha }}")"
+          echo "old=$OLD" >> "$GITHUB_OUTPUT"
+          echo "new=$NEW" >> "$GITHUB_OUTPUT"
+
+          if [ "$NEW" = "$OLD" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "versions.json changed but the agent-image pin did not — nothing to verify."
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+          if [ -z "$NEW" ]; then
+            echo "::error::The agent-image pin was removed or is no longer a single reference."
+            echo "A per-platform pin has to be reviewed and verified by hand." >&2
+            exit 1
+          fi
+          case "$NEW" in
+            *@sha256:*) ;;
+            *)
+              echo "::error::New pin '$NEW' is not digest-pinned."
+              echo "A mutable tag is fetched once and never re-checked, so what installs run" >&2
+              echo "would drift from what was reviewed here." >&2
+              exit 1
+              ;;
+          esac
+          echo "  old: ${OLD:-<none>}"
+          echo "  new: $NEW"
+
+      - name: Assume the pull-only role
+        if: steps.pin.outputs.changed == 'true'
+        id: aws
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AGENT_IMAGE_CI_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Registry login
+        if: steps.pin.outputs.changed == 'true' && steps.aws.outcome == 'success'
+        run: |
+          set -euo pipefail
+          REF='${{ steps.pin.outputs.new }}'
+          HOST="${REF%%/*}"
+          aws ecr get-login-password --region us-east-1 \
+            | docker login --username AWS --password-stdin "$HOST"
+
+      # Everything below is BLOCKING. A red job here cannot merge at all.
+      - name: Manifest is a multi-arch index covering both platforms
+        if: steps.pin.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          REF='${{ steps.pin.outputs.new }}'
+          docker buildx imagetools inspect --raw "$REF" > /tmp/manifest.json
+          python3 - <<'PY'
+          import json, sys
+          m = json.load(open('/tmp/manifest.json'))
+          mt = m.get('mediaType', '')
+          if 'manifests' not in m:
+              print(f"::error::Pinned digest is a single-platform manifest ({mt}).")
+              print("One architecture would be served to every install, and the arch guard")
+              print("in container/pull.sh refuses the rest. Publish a multi-arch index.")
+              sys.exit(1)
+          plats = {
+              f"{e['platform']['os']}/{e['platform']['architecture']}"
+              for e in m['manifests']
+              if e.get('platform', {}).get('architecture') not in (None, 'unknown')
+          }
+          missing = {'linux/amd64', 'linux/arm64'} - plats
+          if missing:
+              print(f"::error::Index is missing {sorted(missing)}; it has {sorted(plats)}.")
+              sys.exit(1)
+          print(f"  index covers {sorted(plats)}")
+          PY
+
+      - name: Pull and check the image's own claims
+        if: steps.pin.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          REF='${{ steps.pin.outputs.new }}'
+          docker pull -q "$REF"
+
+          LOCK_ACTUAL="$(sha256sum container/agent-runner/bun.lock | cut -d' ' -f1)"
+          LOCK_IMAGE="$(docker image inspect --format '{{index .Config.Labels "dev.nanoclaw.agent-runner-lock-sha256"}}' "$REF")"
+          SOURCE="$(docker image inspect --format '{{index .Config.Labels "dev.nanoclaw.image-source"}}' "$REF")"
+
+          # /app/node_modules is baked from bun.lock while /app/src is mounted
+          # from the user's checkout at spawn. A mismatch dies as a missing
+          # module inside a --rm container whose logs are discarded, so it has
+          # to fail here instead.
+          if [ "$LOCK_IMAGE" != "$LOCK_ACTUAL" ]; then
+            echo "::error::Lock label mismatch."
+            echo "  image:    ${LOCK_IMAGE:-<unset>}" >&2
+            echo "  this ref: $LOCK_ACTUAL" >&2
+            echo "This image was built against a different container/agent-runner/bun.lock." >&2
+            exit 1
+          fi
+          if [ "$SOURCE" != "hardened" ]; then
+            echo "::error::image-source label is '${SOURCE:-<unset>}', expected 'hardened'."
+            echo "A published image must be built with --build-arg IMAGE_SOURCE=hardened, or" >&2
+            echo "--status reports every pulled install as a local build." >&2
+            exit 1
+          fi
+          echo "  lock label matches; image declares itself hardened"
+
+      - name: Size delta is plausible
+        if: steps.pin.outputs.changed == 'true' && steps.pin.outputs.old != ''
+        run: |
+          set -euo pipefail
+          total() {
+            docker buildx imagetools inspect --raw "$1" 2>/dev/null \
+              | python3 -c 'import json,sys; m=json.load(sys.stdin); print(sum(e.get("size",0) for e in m.get("manifests",[])) or 1)'
+          }
+          NEW=$(total '${{ steps.pin.outputs.new }}')
+          OLD=$(total '${{ steps.pin.outputs.old }}')
+          echo "  manifest bytes: old=$OLD new=$NEW"
+          # A coarse tripwire, not a measurement: catches a wholly different
+          # image landing on the pin. Real growth between CVE rebuilds is small.
+          python3 - "$OLD" "$NEW" <<'PY'
+          import sys
+          old, new = int(sys.argv[1]), int(sys.argv[2])
+          if old > 0 and (new > old * 3 or new * 3 < old):
+              print("::warning::Manifest size moved by more than 3x — worth a look before merging.")
+          PY
+
+      # AUTO-MERGE GATE. Nothing above can switch this on.
+      - name: Verify publisher signature
+        if: steps.pin.outputs.changed == 'true'
+        id: sig
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          IDENTITY='${{ vars.AGENT_IMAGE_SIGNER_IDENTITY }}'
+          ISSUER='${{ vars.AGENT_IMAGE_SIGNER_ISSUER }}'
+          if [ -z "$IDENTITY" ] || [ -z "$ISSUER" ]; then
+            echo "No signer configured (AGENT_IMAGE_SIGNER_IDENTITY / _ISSUER)."
+            echo "Signature verification skipped, so this PR needs a human."
+            exit 1
+          fi
+          curl -fsSL https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 -o /usr/local/bin/cosign
+          chmod +x /usr/local/bin/cosign
+          cosign verify \
+            --certificate-identity-regexp "$IDENTITY" \
+            --certificate-oidc-issuer "$ISSUER" \
+            '${{ steps.pin.outputs.new }}'
+
+      - name: Enable auto-merge
+        if: steps.pin.outputs.changed == 'true' && steps.sig.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Signature verified against the configured publisher identity."
+          gh pr merge --squash --auto '${{ github.event.pull_request.number }}'
+
+      - name: Explain why a human is still needed
+        if: steps.pin.outputs.changed == 'true' && steps.sig.outcome != 'success'
+        run: |
+          echo "::notice::Shape checks passed, but no verified publisher signature."
+          echo "Auto-merge stays off. Every check above is a claim the image makes about"
+          echo "itself; only a signature is something whoever pushed it could not forge."

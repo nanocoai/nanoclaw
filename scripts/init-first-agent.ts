@@ -25,7 +25,8 @@
  *     --display-name "Gavriel" \
  *     [--agent-name "Andy"] \
  *     [--welcome "System instruction: ..."] \
- *     [--role owner|admin|member]    # default: owner
+ *     [--role owner|admin|member] \  # default: owner
+ *     [--engage-pattern "."]         # explicit DM engage regex override
  *
  * For direct-addressable channels (telegram, whatsapp, etc.), --platform-id
  * is typically the same as the handle in --user-id, with the channel prefix.
@@ -33,7 +34,14 @@
 import net from 'net';
 import path from 'path';
 
-import { DATA_DIR } from '../src/config.js';
+// Registration-only barrel import: channel modules call
+// registerChannelAdapter() at module scope (factories are NOT invoked, no
+// adapter connects — no Gateway conflict with the running service), so
+// declared channel defaults resolve here without live adapters.
+import '../src/channels/index.js';
+import { resolveUnknownSenderPolicy, resolveWiringDefaults } from '../src/channels/channel-defaults.js';
+import { hasDeclaredChannelDefaults } from '../src/channels/channel-registry.js';
+import { DATA_DIR, GROUPS_DIR } from '../src/config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import { initDb } from '../src/db/connection.js';
 import {
@@ -43,12 +51,12 @@ import {
   getMessagingGroupByPlatform,
 } from '../src/db/messaging-groups.js';
 import { runMigrations } from '../src/db/migrations/index.js';
+import { stageGroupPersona } from '../src/group-persona.js';
 import { normalizeName } from '../src/modules/agent-to-agent/db/agent-destinations.js';
 import { addMember } from '../src/modules/permissions/db/agent-group-members.js';
 import { getUserRoles, grantRole } from '../src/modules/permissions/db/user-roles.js';
 import { upsertUser } from '../src/modules/permissions/db/users.js';
-import { updateContainerConfigScalars } from '../src/db/container-configs.js';
-import { initGroupFilesystem } from '../src/group-init.js';
+import { ensureContainerConfig, updateContainerConfigScalars } from '../src/db/container-configs.js';
 import { namespacedPlatformId } from '../src/platform-id.js';
 import type { AgentGroup, MessagingGroup } from '../src/types.js';
 
@@ -62,10 +70,11 @@ interface Args {
   agentName: string;
   welcome: string;
   role: Role;
+  /** Explicit engage regex for the DM wiring; omitted = channel declaration / '.'. */
+  engagePattern?: string;
 }
 
-const DEFAULT_WELCOME =
-  'System instruction: run /welcome to introduce yourself to the user on this new channel.';
+const DEFAULT_WELCOME = 'System instruction: run /welcome to introduce yourself to the user on this new channel.';
 
 const DEFAULT_ROLE: Role = 'owner';
 
@@ -99,12 +108,14 @@ function parseArgs(argv: string[]): Args {
         out.welcome = val;
         i++;
         break;
+      case '--engage-pattern':
+        out.engagePattern = val;
+        i++;
+        break;
       case '--role': {
         const raw = (val ?? '').toLowerCase();
         if (raw !== 'owner' && raw !== 'admin' && raw !== 'member') {
-          console.error(
-            `Invalid --role: ${raw} (expected 'owner', 'admin', or 'member')`,
-          );
+          console.error(`Invalid --role: ${raw} (expected 'owner', 'admin', or 'member')`);
           process.exit(2);
         }
         out.role = raw;
@@ -132,6 +143,7 @@ function parseArgs(argv: string[]): Args {
     agentName: out.agentName?.trim() || out.displayName!,
     welcome: out.welcome?.trim() || DEFAULT_WELCOME,
     role: out.role ?? DEFAULT_ROLE,
+    engagePattern: out.engagePattern?.trim() || undefined,
   };
 }
 
@@ -143,21 +155,35 @@ function generateId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function wireIfMissing(mg: MessagingGroup, ag: AgentGroup, now: string, label: string): void {
+function wireIfMissing(mg: MessagingGroup, ag: AgentGroup, now: string, label: string, engagePattern?: string): void {
   const existing = getMessagingGroupAgentByPair(mg.id, ag.id);
   if (existing) {
     console.log(`Wiring already exists: ${existing.id} (${label})`);
     return;
   }
+  // Engage defaults, first hit wins: explicit --engage-pattern → the
+  // channel's declared defaults → the legacy heuristic for stale
+  // (undeclared) adapters: DMs (is_group=0) respond to everything via a '.'
+  // regex, group chats are mention-only; admins can reconfigure via
+  // /manage-channels once the agent is in use.
+  const isGroup = mg.is_group === 1;
+  const channelKey = mg.instance ?? mg.channel_type;
+  const engage = engagePattern
+    ? { engage_mode: 'pattern' as const, engage_pattern: engagePattern }
+    : hasDeclaredChannelDefaults(channelKey, mg.channel_type)
+      ? resolveWiringDefaults(channelKey, isGroup, ag.name, mg.channel_type)
+      : isGroup
+        ? { engage_mode: 'mention' as const, engage_pattern: null }
+        : { engage_mode: 'pattern' as const, engage_pattern: '.' };
   createMessagingGroupAgent({
     id: generateId('mga'),
     messaging_group_id: mg.id,
     agent_group_id: ag.id,
-    // DM / CLI (is_group=0) default to "respond to everything" via a '.' regex.
-    // Group chats default to mention-only; admins can upgrade to mention-sticky
-    // via /manage-channels once the agent is in use.
-    engage_mode: mg.is_group === 0 ? 'pattern' : 'mention',
-    engage_pattern: mg.is_group === 0 ? '.' : null,
+    engage_mode: engage.engage_mode,
+    engage_pattern: engage.engage_pattern,
+    // Deliberate owner-bootstrap choices, not channel defaults: the operator
+    // wires their own DM, so every sender is trusted ('all') and ignored
+    // messages carry no value ('drop').
     sender_scope: 'all',
     ignored_message_policy: 'drop',
     session_mode: 'shared',
@@ -189,6 +215,7 @@ async function main(): Promise<void> {
 
   // 2. Agent group + filesystem.
   const folder = `dm-with-${normalizeName(args.displayName)}`;
+  const pickedProvider = process.env.NANOCLAW_PICKED_PROVIDER?.trim().toLowerCase();
   let ag: AgentGroup | undefined = getAgentGroupByFolder(folder);
   if (!ag) {
     const agId = generateId('ag');
@@ -204,12 +231,18 @@ async function main(): Promise<void> {
   } else {
     console.log(`Reusing agent group: ${ag.id} (${folder})`);
   }
-  initGroupFilesystem(ag, {
-    instructions:
-      `# ${args.agentName}\n\n` +
+  // Seed the config row, stamped with the effective provider: the operator's
+  // setup pick (NANOCLAW_PICKED_PROVIDER) when this runs inside a setup run,
+  // otherwise the persisted instance default. Workspace scaffolding is deferred
+  // to the first spawn (group-init). A reused group keeps its provider
+  // (INSERT OR IGNORE).
+  ensureContainerConfig(ag.id, pickedProvider);
+  stageGroupPersona(
+    path.resolve(GROUPS_DIR, folder),
+    `# ${args.agentName}\n\n` +
       `You are ${args.agentName}, a personal NanoClaw agent for ${args.displayName}. ` +
       'When the user first reaches out (or you receive a system welcome prompt), introduce yourself briefly and invite them to chat. Keep replies concise.',
-  });
+  );
 
   // 2b. Assign the user a role for this agent group. The caller picks via
   // --role; the channel drivers default to 'owner' for the self-host case.
@@ -220,9 +253,7 @@ async function main(): Promise<void> {
   // getUserRoles prevents duplicates on re-runs.
   const existingRoles = getUserRoles(userId);
   if (args.role === 'owner') {
-    const alreadyOwner = existingRoles.some(
-      (r) => r.role === 'owner' && r.agent_group_id === null,
-    );
+    const alreadyOwner = existingRoles.some((r) => r.role === 'owner' && r.agent_group_id === null);
     if (!alreadyOwner) {
       grantRole({
         user_id: userId,
@@ -235,9 +266,7 @@ async function main(): Promise<void> {
     // Owner's agent group gets global CLI access
     updateContainerConfigScalars(ag.id, { cli_scope: 'global' });
   } else if (args.role === 'admin') {
-    const alreadyAdmin = existingRoles.some(
-      (r) => r.role === 'admin' && r.agent_group_id === ag.id,
-    );
+    const alreadyAdmin = existingRoles.some((r) => r.role === 'admin' && r.agent_group_id === ag.id);
     if (!alreadyAdmin) {
       grantRole({
         user_id: userId,
@@ -265,13 +294,18 @@ async function main(): Promise<void> {
   let dmMg = getMessagingGroupByPlatform(args.channel, platformId);
   if (!dmMg) {
     const mgId = generateId('mg');
+    // Policy from the channel declaration (DM context); legacy 'strict' for
+    // stale (undeclared) adapters so a trunk update alone changes nothing.
+    const unknownSenderPolicy = hasDeclaredChannelDefaults(args.channel)
+      ? resolveUnknownSenderPolicy(args.channel, false)
+      : 'strict';
     createMessagingGroup({
       id: mgId,
       channel_type: args.channel,
       platform_id: platformId,
       name: args.displayName,
       is_group: 0,
-      unknown_sender_policy: 'strict',
+      unknown_sender_policy: unknownSenderPolicy,
       created_at: now,
     });
     dmMg = getMessagingGroupByPlatform(args.channel, platformId)!;
@@ -281,7 +315,7 @@ async function main(): Promise<void> {
   }
 
   // 4. Wire DM messaging group to the agent.
-  wireIfMissing(dmMg, ag, now, 'dm');
+  wireIfMissing(dmMg, ag, now, 'dm', args.engagePattern);
 
   // 5. Welcome delivery over the CLI socket. Router picks up the line,
   // writes the message into the DM session's inbound.db, and wakes the
@@ -293,11 +327,7 @@ async function main(): Promise<void> {
   });
 
   const roleLabel =
-    args.role === 'owner'
-      ? 'owner (global)'
-      : args.role === 'admin'
-        ? `admin (scoped to ${ag.id})`
-        : 'member';
+    args.role === 'owner' ? 'owner (global)' : args.role === 'admin' ? `admin (scoped to ${ag.id})` : 'member';
 
   console.log('');
   console.log('Init complete.');
@@ -342,11 +372,7 @@ async function sendWelcomeViaCliSocket(
     };
 
     socket.once('error', (err) =>
-      settle(
-        new Error(
-          `CLI socket at ${sockPath} not reachable: ${err.message}. Is the NanoClaw service running?`,
-        ),
-      ),
+      settle(new Error(`CLI socket at ${sockPath} not reachable: ${err.message}. Is the NanoClaw service running?`)),
     );
     socket.once('connect', () => {
       const payload =

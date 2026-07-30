@@ -60,6 +60,9 @@ try {
     agent_group_id: AGENT_GROUP_ID,
     // Discord group channel → mention-sticky default. Mention once, stay
     // subscribed to the thread. Admins can tune via /manage-channels.
+    // Kept manually in sync with DISCORD_DEFAULTS.group on the channels
+    // branch (the adapter is skill-installed, so the declaration can't be
+    // imported here) — re-check this hardcode if that declaration changes.
     engage_mode: 'mention-sticky',
     engage_pattern: null,
     sender_scope: 'all',

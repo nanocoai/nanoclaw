@@ -13,40 +13,42 @@ Configure which host directories NanoClaw agent containers can access. The mount
 cat ~/.config/nanoclaw/mount-allowlist.json 2>/dev/null || echo "No mount allowlist configured"
 ```
 
-Show the current config to the user in a readable format: which directories are allowed, whether non-main agents are read-only.
+Show the current config to the user in a readable format: which directories are allowed, and whether each is read-only or read-write.
 
 ## Add Directories
 
 Ask which directories the user wants agents to access. For each path:
 - Validate the path exists
-- Ask if it should be read-only for non-main agents (default: yes)
+- Ask if it should be read-write (`allowReadWrite: true`) or read-only (`allowReadWrite: false`, the safer default)
 
 Build the JSON config and write it:
 
 ```bash
-npx tsx setup/index.ts --step mounts --force -- --json '{"allowedRoots":[{"path":"/path/to/dir","readOnly":false}],"blockedPatterns":[],"nonMainReadOnly":true}'
+pnpm exec tsx setup/index.ts --step mounts --force -- --json '{"allowedRoots":[{"path":"/path/to/dir","allowReadWrite":true}],"blockedPatterns":[]}'
 ```
 
 Use `--force` to overwrite the existing config.
 
 ## Remove Directories
 
-Read the current config, show it, ask which entry to remove, write the updated config.
+Read the current config, show it, ask which entry to remove, then write the updated config through the same write path (build the trimmed JSON and pass it to `--step mounts --force -- --json`):
+
+```bash
+pnpm exec tsx setup/index.ts --step mounts --force -- --json '{"allowedRoots":[],"blockedPatterns":[]}'
+```
 
 ## Reset to Empty
 
 ```bash
-npx tsx setup/index.ts --step mounts --force -- --empty
+pnpm exec tsx setup/index.ts --step mounts --force -- --empty
 ```
 
 ## After Changes
 
-Restart the service so containers pick up the new config (the unit/label names are per-install — see `setup/lib/install-slug.sh`).
+The allowlist is read fresh when a container is spawned, so new mounts apply to newly spawned containers automatically — no service restart needed.
 
-Run from your NanoClaw project root:
+To apply the new config to a group that already has a running container, restart just that group:
 
 ```bash
-source setup/lib/install-slug.sh
-launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
-systemctl --user restart $(systemd_unit)              # Linux
+ncl groups restart --id <group-id>
 ```

@@ -19,6 +19,13 @@
 
 **Not accepted:** Features, capabilities, compatibility, enhancements. These should be skills.
 
+## Breaking Changes
+
+Breaking changes are allowed; **silent** ones are not. NanoClaw does not migrate user installs at runtime — the user's coding agent is the migrator, so every breaking change must ship a migration path that agent can execute without a human reverse-engineering the diff:
+
+1. **Every `[BREAKING]` CHANGELOG entry must reference its migration path** — either a skill to run (`Run /<skill-name> to <action>`) or a `docs/` page covering **detect / why / fix / verify / rollback** (see [docs/onecli-upgrades.md](docs/onecli-upgrades.md) for the shape). `/update-nanoclaw` surfaces these entries after every update and walks the user through them.
+2. **If the change moves an external component's sanctioned version** (gateway, pinned CLI binary, …), update its pin in [`versions.json`](versions.json). The changelog stays human-narrative; `versions.json` is the machine-checkable signal — `/update-nanoclaw` diffs it across the update and routes the user to the linked doc for any pin that moved.
+
 ## Skills
 
 NanoClaw uses [Claude Code skills](https://code.claude.com/docs/en/skills) — markdown files with optional supporting files that teach Claude how to do something. There are four types of skills in NanoClaw, each serving a different purpose.
@@ -27,28 +34,31 @@ NanoClaw uses [Claude Code skills](https://code.claude.com/docs/en/skills) — m
 
 Every user should have clean and minimal code that does exactly what they need. Skills let users selectively add features to their fork without inheriting code for features they don't want.
 
+A skill is a self-contained add-on: a `SKILL.md` with the apply steps written as prose a coding agent can run, plus whatever the skill carries (code files, tests, a `REMOVE.md` that reverses every change apply made — required exactly when apply leaves anything behind). A fork tracks its customizations as a **recipe** of skills, which is what keeps upgrades cheap. [docs/skills-model.md](docs/skills-model.md) explains the whole model — recipes, tests, upgrades; [docs/skill-guidelines.md](docs/skill-guidelines.md) is the authoring checklist.
+
 ### Skill types
 
-#### 1. Feature skills (branch-based)
+#### 1. Channel and provider skills (registry branches)
 
-Add capabilities to NanoClaw by merging a git branch. The SKILL.md contains setup instructions; the actual code lives on a `skill/*` branch.
+Add a messaging channel or an agent provider. The SKILL.md contains the install steps; the actual code lives on a long-lived registry branch (`channels` or `providers`) that we keep in sync with `main`.
 
-**Location:** `.claude/skills/` on `main` (instructions only), code on `skill/*` branch
+**Location:** `.claude/skills/` on `main` (instructions only), code on the `channels` or `providers` branch
 
-**Examples:** `/add-telegram`, `/add-slack`, `/add-discord`, `/add-gmail`
+**Examples:** `/add-telegram`, `/add-slack`, `/add-discord`, `/add-opencode`
 
 **How they work:**
 1. User runs `/add-telegram`
-2. Claude follows the SKILL.md: fetches and merges the `skill/telegram` branch
-3. Claude walks through interactive setup (env vars, bot creation, etc.)
+2. Claude follows the SKILL.md: `git fetch origin channels`, then copies each file in with `git show origin/channels:<path> > <path>`. Install is an additive fetch, never a `git merge`.
+3. The adapter's registration test is fetched the same way and run as verification
+4. Claude walks through interactive setup (tokens, bot creation, etc.)
 
-**Contributing a feature skill:**
+**Contributing a channel or provider skill:**
 1. Fork `nanocoai/nanoclaw` and branch from `main`
-2. Make the code changes (new files, modified source, updated `package.json`, etc.)
-3. Add a SKILL.md in `.claude/skills/<name>/` with setup instructions — step 1 should be merging the branch
-4. Open a PR. We'll create the `skill/<name>` branch from your work
+2. Build the adapter following [docs/skill-guidelines.md](docs/skill-guidelines.md): a self-registering module, one appended barrel import, and a registration test that imports the real barrel
+3. Add a SKILL.md in `.claude/skills/<name>/` with the fetch-and-copy steps, and a REMOVE.md that reverses every change. Plain prose steps are all that's required. A skill with a credential prompt or an interactive step should include a `## Troubleshooting` section.
+4. Open a PR. We'll land the code on the registry branch from your work
 
-See `/add-telegram` for a good example. See [docs/skills-as-branches.md](docs/skills-as-branches.md) for the full system design.
+See `/add-slack` for a good example. See [docs/skills-model.md](docs/skills-model.md) for why install is a fetch, never a merge.
 
 #### 2. Utility skills (with code files)
 
@@ -56,9 +66,9 @@ Standalone tools that ship code files alongside the SKILL.md. The SKILL.md tells
 
 **Location:** `.claude/skills/<name>/` with supporting files
 
-**Examples:** `/claw` (Python CLI in `scripts/claw`)
+**Examples:** a self-contained CLI or helper shipped in a `scripts/` subfolder of the skill.
 
-**Key difference from feature skills:** No branch merge needed. The code is self-contained in the skill directory and gets copied into place during installation.
+**Key difference from channel/provider skills:** the code is self-contained in the skill directory and gets copied into place during installation; nothing is fetched from a registry branch.
 
 **Guidelines:**
 - Put code in separate files, not inline in the SKILL.md
@@ -67,7 +77,7 @@ Standalone tools that ship code files alongside the SKILL.md. The SKILL.md tells
 
 #### 3. Operational skills (instruction-only)
 
-Workflows and guides with no code changes. The SKILL.md is the entire skill — Claude follows the instructions to perform a task.
+Workflows and guides with no code changes. The SKILL.md is the entire skill — the coding agent follows the instructions to perform a task.
 
 **Location:** `.claude/skills/` on `main`
 
@@ -80,18 +90,22 @@ Workflows and guides with no code changes. The SKILL.md is the entire skill — 
 
 #### 4. Container skills (agent runtime)
 
-Skills that run inside the agent container, not on the host. These teach the container agent how to use tools, format output, or perform tasks. They are synced into each group's `.claude/skills/` directory when a container starts.
+Skills that run inside the agent container, not on the host. These teach the NanoClaw agent how to use tools, format output, or perform tasks. They are synced into each group's `.claude/skills/` directory when a container starts.
 
 **Location:** `container/skills/<name>/`
 
-**Examples:** `agent-browser` (web browsing), `capabilities` (/capabilities command), `status` (/status command), `slack-formatting` (Slack mrkdwn syntax)
+**Examples:** `agent-browser` (web browsing), `frontend-engineer`, `onecli-gateway` (OneCLI proxy usage), `self-customize`, `vercel-cli`, `welcome`; channel-specific: `slack-formatting` (Slack mrkdwn syntax) and `whatsapp-formatting` (channels branch; installed by `/add-slack` / `/add-whatsapp`)
 
-**Key difference:** These are NOT invoked by the user on the host. They're loaded by Claude Code inside the container and influence how the agent behaves.
+**Key difference:** You never invoke these from a coding-agent session on the host, the way you run `/setup` or `/update-nanoclaw` in Claude Code/Codex/OpenCode. They're mounted into the sandbox and loaded by the NanoClaw agent itself, shaping how it behaves when you chat with it.
 
 **Guidelines:**
 - Follow the same SKILL.md + frontmatter format
 - Use `allowed-tools` frontmatter to scope tool permissions
 - Keep them focused — the agent's context window is shared across all container skills
+
+### Writing a good skill
+
+The authoring bar is [docs/skill-guidelines.md](docs/skill-guidelines.md): mostly adds, minimal reach-ins into existing code, a test for every functional integration point, and a REMOVE.md whenever apply leaves anything behind. [docs/skills-model.md](docs/skills-model.md) explains the model behind it.
 
 ### SKILL.md format
 
@@ -112,6 +126,10 @@ Instructions here...
 - `description`: required — Claude uses this to decide when to invoke the skill
 - Put code in separate files, not inline in the markdown
 - See the [skills standard](https://code.claude.com/docs/en/skills) for all available frontmatter fields
+
+## Templates
+
+Agent templates (reusable bundles of instructions + MCP servers + skills) ship in the separate [`nanocoai/nanoclaw-templates`](https://github.com/nanocoai/nanoclaw-templates) repo, not this one. Contribute them there via PR (its README has the anatomy and checklist). For how templates load and the OneCLI credential model, see [docs/templates.md](docs/templates.md).
 
 ## Testing
 

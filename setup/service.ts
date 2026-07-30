@@ -11,6 +11,7 @@ import path from 'path';
 
 import { log } from '../src/log.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
+import { writeUpgradeState } from '../src/upgrade-state.js';
 import { cleanupUnhealthyPeers } from './peer-cleanup.js';
 import {
   commandExists,
@@ -54,6 +55,11 @@ export async function run(_args: string[]): Promise<void> {
 
   fs.mkdirSync(path.join(projectRoot, 'logs'), { recursive: true });
 
+  // Stamp the upgrade marker before the host first starts, so the startup
+  // tripwire (enforceUpgradeTripwire) sees this as a sanctioned install.
+  const stamped = writeUpgradeState({ via: 'setup' });
+  log.info('Stamped upgrade marker', { version: stamped.version });
+
   // Peer preflight — a crash-looping peer install (most often the legacy v1
   // `com.nanoclaw` plist) will keep trashing this install's containers on
   // every respawn via its own cleanupOrphans. Detect and unload any peer
@@ -64,6 +70,12 @@ export async function run(_args: string[]): Promise<void> {
     log.warn('Unloaded unhealthy peer NanoClaw services', {
       count: peerReport.unloaded.length,
       labels: peerReport.unloaded.map((p) => p.label),
+    });
+  }
+  if (peerReport.removed.length > 0) {
+    log.warn('Removed dead peer NanoClaw registrations (target binary missing)', {
+      count: peerReport.removed.length,
+      labels: peerReport.removed.map((p) => p.label),
     });
   }
 

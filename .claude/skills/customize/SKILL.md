@@ -9,82 +9,94 @@ This skill helps users add capabilities or modify behavior. Use AskUserQuestion 
 
 ## Workflow
 
-1. **Understand the request** - Ask clarifying questions
-3. **Plan the changes** - Identify files to modify. If a skill exists for the request (e.g., `/add-telegram` for adding Telegram), invoke it instead of implementing manually.
-4. **Implement** - Make changes directly to the code
-5. **Test guidance** - Tell user how to verify
+1. **Understand the request** — Ask clarifying questions.
+2. **Prefer a dedicated skill** — If a skill covers the request, invoke it instead of editing core by hand:
+   - Channels: `/add-telegram`, `/add-slack`, `/add-discord`, `/add-whatsapp`, `/add-signal`, `/add-imessage`, and the rest of the `/add-<channel>` family.
+   - Wiring channels to agents and isolation levels: `/manage-channels`.
+   - Container directory access: `/manage-mounts`.
+   - Agent providers (non-default): `/add-opencode`, `/add-codex`, `/add-ollama-provider`.
+   - Integrations as MCP tools: `/add-gmail-tool`, `/add-gcal-tool`, `/add-ollama-tool`, etc.
+3. **Plan the changes** — Identify the v2 surface the change belongs to (entity model in the central DB, per-agent-group container config, per-group `CLAUDE.md`, or core code).
+4. **Implement** — Make the change on the right surface.
+5. **Test guidance** — Tell the user how to verify.
+
+## Entity Model
+
+Customizations route through the v2 entity model: users → messaging groups → agent groups → sessions. A messaging group is one chat/channel on one platform; an agent group holds the workspace, personality, and container config; a wiring links a messaging group to an agent group with a session mode and trigger rules. Inspect and edit all of this with the `ncl` admin CLI. See `docs/isolation-model.md` for the three isolation levels.
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `src/index.ts` | Orchestrator: state, message loop, agent invocation |
-| `src/channels/whatsapp.ts` | WhatsApp connection, auth, send/receive |
-| `src/ipc.ts` | IPC watcher and task processing |
-| `src/router.ts` | Message formatting and outbound routing |
-| `src/types.ts` | TypeScript interfaces (includes Channel) |
-| `src/config.ts` | Assistant name, trigger pattern, directories |
-| `src/db.ts` | Database initialization and queries |
-| `src/whatsapp-auth.ts` | Standalone WhatsApp authentication script |
-| `groups/CLAUDE.md` | Global memory/persona |
+| `src/index.ts` | Entry point: init DB, migrations, channel adapters, delivery polls, sweep, shutdown |
+| `src/router.ts` | Inbound routing: messaging group → agent group → session → `inbound.db` → wake |
+| `src/delivery.ts` | Polls `outbound.db`, delivers via adapter, handles system actions |
+| `src/session-manager.ts` | Resolves sessions; opens `inbound.db` / `outbound.db`; heartbeat path |
+| `src/container-runner.ts` | Spawns per-agent-group containers with session DB + outbox mounts, OneCLI `ensureAgent` |
+| `src/channels/` | Channel adapter infra (registry, Chat SDK bridge); specific adapters install from the `channels` branch |
+| `src/config.ts` | Process-level config (assistant name, paths, timeouts) read from `.env` |
+| `data/v2.db` | Central DB: users, roles, agent_groups, messaging_groups, wirings, container_configs |
+| `data/v2-sessions/<session>/` | Per-session `inbound.db` (host→container) + `outbound.db` (container→host) |
+| `groups/<folder>/CLAUDE.md` | Per-agent-group memory/persona and instructions |
+
+For ad-hoc DB queries, use `pnpm exec tsx scripts/q.ts <db> "<sql>"`.
 
 ## Common Customization Patterns
 
 ### Adding a New Input Channel (e.g., Telegram, Slack, Email)
 
 Questions to ask:
-- Which channel? (Telegram, Slack, Discord, email, SMS, etc.)
-- Same trigger word or different?
-- Same memory hierarchy or separate?
-- Should messages from this channel go to existing groups or new ones?
+- Which channel? (Telegram, Slack, Discord, WhatsApp, Signal, email, etc.)
+- Should this channel reach an existing agent group or a new one?
+- What isolation level — share an agent group with other channels, or keep it separate?
+- Same trigger rules as other channels on that agent group, or different?
 
-Implementation pattern:
-1. Create `src/channels/{name}.ts` implementing the `Channel` interface from `src/types.ts` (see `src/channels/whatsapp.ts` for reference)
-2. Add the channel instance to `main()` in `src/index.ts` and wire callbacks (`onMessage`, `onChatMetadata`)
-3. Messages are stored via the `onMessage` callback; routing is automatic via `ownsJid()`
+Implementation:
+1. Run the matching install skill (`/add-telegram`, `/add-slack`, …). It fetches the adapter from the `channels` branch, wires the registration import, installs the pinned package, and builds.
+2. Run `/manage-channels` (or use `ncl messaging-groups` + `ncl wirings`) to create the messaging group, choose the isolation level, and wire it to an agent group with a session mode and trigger rules.
 
 ### Adding a New MCP Integration
 
 Questions to ask:
 - What service? (Calendar, Notion, database, etc.)
-- What operations needed? (read, write, both)
-- Which groups should have access?
+- What operations are needed? (read, write, both)
+- Which agent group should have access?
 
 Implementation:
-1. Add MCP server config to the container settings (see `src/container-runner.ts` for how MCP servers are mounted)
-2. Document available tools in `groups/CLAUDE.md`
+- If an `/add-<service>-tool` skill exists (e.g. `/add-gmail-tool`, `/add-gcal-tool`), run it — it wires the MCP server and routes credentials through OneCLI so no raw keys reach the container.
+- Otherwise wire the MCP server into the agent group's container config: `ncl groups config add-mcp-server --id <group-id> --name <name> --command <cmd> [--args <json-array>] [--env <json-object>]`, then `ncl groups restart --id <group-id>` to take effect. From inside a container the agent uses the `add_mcp_server` self-mod tool, which requires one admin approval.
 
 ### Changing Assistant Behavior
 
 Questions to ask:
-- What aspect? (name, trigger, persona, response style)
-- Apply to all groups or specific ones?
+- What aspect? (persona, response style, instructions)
+- Apply to one agent group or several?
 
-Simple changes → edit `src/config.ts`
-Persona changes → edit `groups/CLAUDE.md`
-Per-group behavior → edit specific group's `CLAUDE.md`
+Implementation:
+- Persona, instructions, and personality live per agent group in `groups/<folder>/CLAUDE.md` — edit that file for the target group.
+- Container runtime behavior (provider, model, packages, MCP servers) lives in the `container_configs` table: `ncl groups config get/update --id <group-id>`.
 
 ### Adding New Commands
 
 Questions to ask:
 - What should the command do?
-- Available in all groups or main only?
+- Which agent group(s)?
 - Does it need new MCP tools?
 
 Implementation:
-1. Commands are handled by the agent naturally — add instructions to `groups/CLAUDE.md` or the group's `CLAUDE.md`
-2. For trigger-level routing changes, modify `processGroupMessages()` in `src/index.ts`
+- The agent interprets requests naturally — add instructions to the agent group's `groups/<folder>/CLAUDE.md`.
+- For routing or trigger changes (which messages wake which agent group), update the wiring's trigger rules: `ncl wirings update --id <wiring-id> ...`.
 
 ### Changing Deployment
 
 Questions to ask:
-- Target platform? (Linux server, Docker, different Mac)
-- Service manager? (systemd, Docker, supervisord)
+- Target platform? (Linux server, different Mac)
+- Service manager? (launchd, systemd)
 
 Implementation:
-1. Create appropriate service files
-2. Update paths in config
-3. Provide setup instructions
+1. Create the appropriate service files.
+2. Update paths in `.env` / config.
+3. Provide setup instructions.
 
 ## After Changes
 
@@ -107,8 +119,8 @@ launchctl load ~/Library/LaunchAgents/$(launchd_label).plist
 
 User: "Add Telegram as an input channel"
 
-1. Ask: "Should Telegram use the same @Andy trigger, or a different one?"
-2. Ask: "Should Telegram messages create separate conversation contexts, or share with WhatsApp groups?"
-3. Create `src/channels/telegram.ts` implementing the `Channel` interface (see `src/channels/whatsapp.ts`)
-4. Add the channel to `main()` in `src/index.ts`
-5. Tell user how to authenticate and test
+1. Run `/add-telegram` to install the adapter, wire its registration, and build.
+2. Ask: "Should Telegram reach an existing agent group, or a new one?"
+3. Ask: "Share an agent group with your other channels, or keep Telegram separate?"
+4. Run `/manage-channels` (or `ncl messaging-groups create` + `ncl wirings create`) to create the messaging group and wire it to the chosen agent group with a session mode and trigger rules.
+5. Tell the user how to authenticate and test.

@@ -48,7 +48,11 @@ export function openInboundDb(): Database {
   // so the singleton survives for the rest of the test.
   if (_testMode && _inbound) {
     const db = _inbound;
-    return { prepare: (sql: string) => db.prepare(sql), exec: (sql: string) => db.exec(sql), close: () => {} } as unknown as Database;
+    return {
+      prepare: (sql: string) => db.prepare(sql),
+      exec: (sql: string) => db.exec(sql),
+      close: () => {},
+    } as unknown as Database;
   }
   const db = new Database(DEFAULT_INBOUND_PATH, { readonly: true });
   db.exec('PRAGMA busy_timeout = 5000');
@@ -259,12 +263,4 @@ export function closeSessionDb(): void {
   _testMode = false;
   _outbound?.close();
   _outbound = null;
-}
-
-/**
- * @deprecated Use getInboundDb() / getOutboundDb() instead.
- * Kept for backward compatibility during migration.
- */
-export function getSessionDb(): Database {
-  return getInboundDb();
 }

@@ -1,0 +1,13 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials.",
+  "scenarios": [
+    {
+      "name": "pat",
+      "inputs": {
+        "github_token": "ghp_fake0123456789fake0123456789fake01",
+        "webhook_secret": "fake-webhook-secret",
+        "bot_username": "nanoclaw-bot"
+      }
+    }
+  ]
+}

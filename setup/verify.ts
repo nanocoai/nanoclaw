@@ -15,6 +15,7 @@ import { DATA_DIR } from '../src/config.js';
 import { readEnvFile } from '../src/env.js';
 import { log } from '../src/log.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
+import { inspectAgentImage, readImageSource } from './lib/registry-state.js';
 import {
   getPlatform,
   getServiceManager,
@@ -187,23 +188,45 @@ export async function run(_args: string[]): Promise<void> {
 
   const configuredChannels = Object.keys(channelAuth);
 
-  // 5. Check registered groups in v2 central DB (agent_groups + messaging_group_agents)
+  // 5. Check registered groups in v2 central DB (agent_groups + messaging_group_agents),
+  //    plus how many agent groups pin an image of their own (reported in step 7).
+  //    The two counts get their own try/catch: they read different tables, and a
+  //    partially migrated DB must not hide one behind the other's failure.
   let registeredGroups = 0;
+  let derivedGroups = 0;
   const dbPath = path.join(DATA_DIR, 'v2.db');
   if (fs.existsSync(dbPath)) {
+    let db: Database.Database | null = null;
     try {
-      const db = new Database(dbPath, { readonly: true });
-      // Count agent groups that have at least one messaging group wired
-      const row = db
-        .prepare(
-          `SELECT COUNT(DISTINCT ag.id) as count FROM agent_groups ag
-           JOIN messaging_group_agents mga ON mga.agent_group_id = ag.id`,
-        )
-        .get() as { count: number };
-      registeredGroups = row.count;
-      db.close();
+      db = new Database(dbPath, { readonly: true });
     } catch {
-      // Table might not exist (DB not migrated yet)
+      // Unreadable (permissions, or mid-migration) — leave both counts at 0
+      // rather than failing the health check on a transient condition.
+    }
+    if (db) {
+      try {
+        // Count agent groups that have at least one messaging group wired
+        const row = db
+          .prepare(
+            `SELECT COUNT(DISTINCT ag.id) as count FROM agent_groups ag
+             JOIN messaging_group_agents mga ON mga.agent_group_id = ag.id`,
+          )
+          .get() as { count: number };
+        registeredGroups = row.count;
+      } catch {
+        // Table might not exist (DB not migrated yet)
+      }
+      try {
+        const row = db
+          .prepare(
+            'SELECT COUNT(*) as count FROM container_configs WHERE image_tag IS NOT NULL',
+          )
+          .get() as { count: number };
+        derivedGroups = row.count;
+      } catch {
+        // Same: container_configs arrives with the migrations
+      }
+      db.close();
     }
   }
 
@@ -217,16 +240,57 @@ export async function run(_args: string[]): Promise<void> {
     mountAllowlist = 'configured';
   }
 
+  // 7. Where the agent image came from — intended vs actual.
+  //
+  // These two can disagree, and reporting the disagreement is the whole point.
+  // The hardened path pulls by digest and retags onto the same slug tag a local
+  // build writes, so nothing downstream can tell them apart; a pull that failed
+  // and fell back to `./container/build.sh` would leave `.env` saying "hardened"
+  // over locally built bits. IMAGE_SOURCE is the operator's intent, read from
+  // `.env`; IMAGE_SOURCE_ACTUAL is read off the image itself and cannot be
+  // talked into agreeing. Only inspect once `docker info` has already
+  // succeeded — otherwise a stopped daemon reads as "image missing".
+  const imageSource = readImageSource();
+  const image =
+    containerRuntime === 'docker'
+      ? inspectAgentImage(projectRoot)
+      : { source: 'unknown' as const, registryDigest: undefined };
+
+  // Deferred-wire channels can't have a group yet: their platform id only
+  // exists after the first inbound DM (see add-teams' "Finish wiring"), so
+  // configured-but-unwired is pending operator action, not a broken install.
+  // Only claim pending when EVERY configured channel is defer-wire — a
+  // wire-during-setup channel (slack, telegram, …) with zero groups is a
+  // genuine failure this must not mask.
+  const wiringPending =
+    registeredGroups === 0 &&
+    configuredChannels.length > 0 &&
+    configuredChannels.every((c) => DEFER_WIRE_CHANNELS.has(c));
+
   // Determine overall status. The cli-agent step earlier in setup already
   // proved the agent round-trip works; verify is a static health check.
   const status = determineVerifyStatus({
     service,
     credentials,
     registeredGroups,
+    wiringPending,
   });
 
-  log.info('Verification complete', { status, channelAuth });
+  log.info('Verification complete', {
+    status,
+    channelAuth,
+    wiringPending,
+    imageSource,
+    imageSourceActual: image.source,
+    derivedGroups,
+  });
 
+  // The image fields are reporting only — they are not inputs to
+  // determineVerifyStatus above. A derived-image pin is a real finding on the
+  // hardened path but the normal, supported state of an install_packages user
+  // on the local path, and IMAGE_SOURCE_ACTUAL is 'unknown' whenever Docker
+  // isn't reachable. Failing verify on either would fire offerClaudeOnFailure
+  // (setup/auto.ts) at installs that are working exactly as designed.
   emitStatus('VERIFY', {
     SERVICE: service,
     CONTAINER_RUNTIME: containerRuntime,
@@ -235,6 +299,13 @@ export async function run(_args: string[]): Promise<void> {
     CHANNEL_AUTH: JSON.stringify(channelAuth),
     REGISTERED_GROUPS: registeredGroups,
     MOUNT_ALLOWLIST: mountAllowlist,
+    IMAGE_SOURCE: imageSource,
+    IMAGE_SOURCE_ACTUAL: image.source,
+    // Registry manifest digest, to compare against the `agent-image` pin in
+    // versions.json. Empty for a locally built image — it has never had one.
+    IMAGE_DIGEST: image.registryDigest ?? '',
+    DERIVED_GROUPS: derivedGroups,
+    ...(wiringPending ? { WIRING: 'pending_first_dm' } : {}),
     STATUS: status,
     LOG: 'logs/setup.log',
   });
@@ -242,14 +313,25 @@ export async function run(_args: string[]): Promise<void> {
   if (status === 'failed') process.exit(1);
 }
 
+/**
+ * Channels whose wiring only completes after the first inbound message —
+ * the platform id doesn't exist until the bot is DM'd, so setup ends with
+ * the channel configured but no group wired. Kept in lockstep with the
+ * wireIfResolved call site in setup/auto.ts (its unresolved drop-through
+ * leaves the channel configured but unwired).
+ */
+export const DEFER_WIRE_CHANNELS = new Set(['teams']);
+
 export function determineVerifyStatus(input: {
   service: 'not_found' | 'stopped' | 'running' | 'running_other_checkout';
   credentials: string;
   registeredGroups: number;
+  /** Zero groups but every configured channel defers wiring to the first DM. */
+  wiringPending?: boolean;
 }): 'success' | 'failed' {
   return input.service === 'running' &&
     input.credentials !== 'missing' &&
-    input.registeredGroups > 0
+    (input.registeredGroups > 0 || input.wiringPending === true)
     ? 'success'
     : 'failed';
 }

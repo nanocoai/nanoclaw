@@ -10,7 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, afterEach } from 'vitest';
 
-import { getInboundSourceSessionId, migrateMessagesInTable } from './session-db.js';
+import { ensureSchema, getInboundSourceSessionId, migrateMessagesInTable, syncProcessingAcks } from './session-db.js';
 
 const TEST_DIR = '/tmp/nanoclaw-session-db-test';
 const DB_PATH = path.join(TEST_DIR, 'inbound.db');
@@ -90,5 +90,68 @@ describe('migrateMessagesInTable', () => {
     expect(getInboundSourceSessionId(db, 'legacy-2')).toBeNull();
     expect(getInboundSourceSessionId(db, 'does-not-exist')).toBeNull();
     db.close();
+  });
+});
+
+describe('syncProcessingAcks — script-skip counter', () => {
+  function freshPair() {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    ensureSchema(DB_PATH, 'inbound');
+    const outPath = path.join(TEST_DIR, 'outbound.db');
+    ensureSchema(outPath, 'outbound');
+    return { inDb: new Database(DB_PATH), outDb: new Database(outPath) };
+  }
+
+  function seedTask(inDb: InstanceType<typeof Database>, id: string, content: Record<string, unknown>) {
+    inDb
+      .prepare(
+        `INSERT INTO messages_in (id, seq, timestamp, status, tries, kind, content, series_id)
+         VALUES (?, 2, datetime('now'), 'processing', 0, 'task', ?, ?)`,
+      )
+      .run(id, JSON.stringify(content), id);
+  }
+
+  function ack(outDb: InstanceType<typeof Database>, id: string, status: string) {
+    outDb
+      .prepare(
+        "INSERT OR REPLACE INTO processing_ack (message_id, status, status_changed) VALUES (?, ?, datetime('now'))",
+      )
+      .run(id, status);
+  }
+
+  const status = (inDb: InstanceType<typeof Database>, id: string) =>
+    (inDb.prepare('SELECT status FROM messages_in WHERE id = ?').get(id) as { status: string }).status;
+
+  it('script-skip:error ack lands the row as a FAILED run (streak-derivable history)', () => {
+    const { inDb, outDb } = freshPair();
+    seedTask(inDb, 't1', { prompt: 'p', script: 'x' });
+    ack(outDb, 't1', 'script-skip:error');
+
+    syncProcessingAcks(inDb, outDb);
+
+    expect(status(inDb, 't1')).toBe('failed');
+  });
+
+  it('a settled row is terminal — a lingering ack cannot flip failed back to completed', () => {
+    const { inDb, outDb } = freshPair();
+    seedTask(inDb, 't1', { prompt: 'p', script: 'x' });
+    ack(outDb, 't1', 'script-skip:error');
+    syncProcessingAcks(inDb, outDb);
+
+    ack(outDb, 't1', 'completed');
+    syncProcessingAcks(inDb, outDb);
+
+    expect(status(inDb, 't1')).toBe('failed');
+  });
+
+  it('plain completed ack completes the row as before', () => {
+    const { inDb, outDb } = freshPair();
+    seedTask(inDb, 't1', { prompt: 'p', script: 'x' });
+    ack(outDb, 't1', 'completed');
+
+    syncProcessingAcks(inDb, outDb);
+
+    expect(status(inDb, 't1')).toBe('completed');
   });
 });

@@ -9,13 +9,15 @@ import { registerResource } from '../crud.js';
  * on `hasTable('agent_destinations')` and load `writeDestinations` lazily —
  * same pattern as container-runner.ts on container wake.
  *
- * Called from both `add` and `remove` so the live container picks up the
- * change without waiting for the next spawn. Without this, send_message to
- * the new local_name silently drops with "unknown destination" until restart.
+ * Called from every destination-mutating ncl command — `add` and `remove`
+ * here, plus `wirings create` (which writes a companion destination row in
+ * its postCreate hook) — so the live container picks up the change without
+ * waiting for the next spawn. Without this, send_message to the new
+ * local_name silently drops with "unknown destination" until restart.
  * See the destination-projection invariant in
  * src/modules/agent-to-agent/db/agent-destinations.ts.
  */
-async function projectDestinationsToSessions(agentGroupId: string): Promise<void> {
+export async function projectDestinationsToSessions(agentGroupId: string): Promise<void> {
   if (!hasTable(getDb(), 'agent_destinations')) return;
   const { writeDestinations } = await import('../../modules/agent-to-agent/write-destinations.js');
   for (const session of getSessionsByAgentGroup(agentGroupId)) {
@@ -45,7 +47,7 @@ registerResource({
       name: 'local_name',
       type: 'string',
       description:
-        'Name the agent uses to address this target (e.g. <message to="local_name">). Unique per agent. Lowercase, dash-separated.',
+        'Name the agent uses to address this target (e.g. send_message({ to: "local_name", ... })). Unique per agent. Lowercase, dash-separated.',
     },
     {
       name: 'target_type',
@@ -58,10 +60,39 @@ registerResource({
       type: 'string',
       description: "The target's ID — messaging_groups.id for channels, agent_groups.id for agents.",
     },
+    { name: 'channel_type', type: 'string', description: 'Resolved channel type for channel destinations.' },
+    { name: 'display_name', type: 'string', description: 'Resolved chat title or agent name.' },
     { name: 'created_at', type: 'string', description: 'Auto-set.' },
   ],
-  operations: { list: 'open' },
+  operations: {},
   customOperations: {
+    list: {
+      access: 'open',
+      description: 'List destinations with resolved channel/title labels.',
+      handler: async (args) => {
+        const agentGroupId = (args.agent_group_id as string | undefined) ?? (args.id as string | undefined);
+        const params: unknown[] = [];
+        const where = agentGroupId ? 'WHERE ad.agent_group_id = ?' : '';
+        if (agentGroupId) params.push(agentGroupId);
+        return getDb()
+          .prepare(
+            `SELECT
+               ad.agent_group_id,
+               ad.local_name,
+               ad.target_type,
+               ad.target_id,
+               CASE WHEN ad.target_type = 'channel' THEN mg.channel_type ELSE NULL END AS channel_type,
+               CASE WHEN ad.target_type = 'channel' THEN mg.name ELSE ag.name END AS display_name,
+               ad.created_at
+             FROM agent_destinations ad
+             LEFT JOIN messaging_groups mg ON ad.target_type = 'channel' AND ad.target_id = mg.id
+             LEFT JOIN agent_groups ag ON ad.target_type = 'agent' AND ad.target_id = ag.id
+             ${where}
+             ORDER BY ad.agent_group_id, ad.local_name`,
+          )
+          .all(...params);
+      },
+    },
     add: {
       access: 'approval',
       description: 'Add a destination for an agent. Use --agent-group-id, --local-name, --target-type, --target-id.',
@@ -79,9 +110,9 @@ registerResource({
         getDb()
           .prepare(
             `INSERT INTO agent_destinations (agent_group_id, local_name, target_type, target_id, created_at)
-             VALUES (?, ?, ?, ?, datetime('now'))`,
+             VALUES (?, ?, ?, ?, ?)`,
           )
-          .run(agentGroupId, localName, targetType, targetId);
+          .run(agentGroupId, localName, targetType, targetId, new Date().toISOString());
         await projectDestinationsToSessions(agentGroupId);
         return { agent_group_id: agentGroupId, local_name: localName, target_type: targetType, target_id: targetId };
       },

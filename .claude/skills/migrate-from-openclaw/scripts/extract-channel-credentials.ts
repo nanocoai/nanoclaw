@@ -1,20 +1,26 @@
 /**
- * Extract a channel credential from an OpenClaw configuration and write it
- * directly to the NanoClaw .env file.
+ * Extract a channel credential from an OpenClaw configuration and route it to
+ * its correct NanoClaw v2 destination.
  *
- * Usage: pnpm exec tsx .claude/skills/migrate-from-openclaw/scripts/extract-channel-credentials.ts \
- *          --channel telegram --state-dir ~/.openclaw --write-env .env
+ * Two destinations, decided per credential by transform.ts:
+ *   - Host-side channel tokens (Telegram/Discord/Slack bot tokens) → written
+ *     to NanoClaw's `.env`. The NanoClaw *host* process reads these to connect
+ *     to the messaging platform; they never enter a container.
+ *   - Container-facing API credentials (Anthropic, OpenAI, …) → NOT written
+ *     anywhere by this script. The script prints the `onecli secrets create`
+ *     command the operator runs so the credential lands in the OneCLI Agent
+ *     Vault, which injects it per-request. Raw credentials are never threaded
+ *     into a container env var.
  *
- * Handles OpenClaw SecretRef formats:
- *   - Plain string: "bot-token-value"
- *   - Env template: "${TELEGRAM_BOT_TOKEN}"
- *   - SecretRef object: { source: "env", provider: "default", id: "TELEGRAM_BOT_TOKEN" }
+ * Usage:
+ *   pnpm exec tsx .claude/skills/migrate-from-openclaw/scripts/extract-channel-credentials.ts \
+ *     --channel telegram --state-dir ~/.openclaw [--write-env .env]
  *
- * Also reads <state-dir>/.env for env-based secrets.
- *
- * Credential values are NEVER emitted to stdout — only masked versions.
- * When --write-env is provided, the script writes credentials directly to
- * the target .env file so the agent never sees raw secrets.
+ * Credential VALUES are never emitted to stdout — only masked versions. For
+ * channel tokens, `--write-env` writes the real value directly to `.env` so
+ * the agent never sees it. For vault credentials the script emits the plan
+ * (name/type/host-pattern) but not the value; the operator runs the printed
+ * command, keeping the secret off the chat transcript.
  *
  * Emits a status block on stdout:
  *   === NANOCLAW MIGRATE: CREDENTIAL ===
@@ -26,18 +32,25 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import {
+  channelEnvVars,
+  classifyCredential,
+  maskCredential,
+  resolveSecretInput,
+} from './transform.js';
+
 // ---------------------------------------------------------------------------
-// JSON5-tolerant parser (same as discover script)
+// JSON5-tolerant parser (OpenClaw config may use comments / trailing commas)
 // ---------------------------------------------------------------------------
 
 function parseJson5(text: string): unknown {
   let cleaned = text.replace(
     /("(?:[^"\\]|\\.)*")|\/\/[^\n]*/g,
-    (match, str) => (str ? str : ''),
+    (_match, str) => (str ? str : ''),
   );
   cleaned = cleaned.replace(
     /("(?:[^"\\]|\\.)*")|\/\*[\s\S]*?\*\//g,
-    (match, str) => (str ? str : ''),
+    (_match, str) => (str ? str : ''),
   );
   cleaned = cleaned.replace(/,\s*([}\]])/g, '$1');
   return JSON.parse(cleaned);
@@ -59,7 +72,6 @@ function parseDotenv(filePath: string): Record<string, string> {
     if (eqIdx === -1) continue;
     const key = trimmed.slice(0, eqIdx).trim();
     let value = trimmed.slice(eqIdx + 1).trim();
-    // Strip surrounding quotes
     if (
       (value.startsWith('"') && value.endsWith('"')) ||
       (value.startsWith("'") && value.endsWith("'"))
@@ -85,114 +97,16 @@ function emitStatus(fields: Record<string, string | number | boolean>): void {
 }
 
 // ---------------------------------------------------------------------------
-// Credential masking
+// Channel → OpenClaw config field mapping
 // ---------------------------------------------------------------------------
 
-function maskCredential(value: string): string {
-  if (value.length < 10) return '****';
-  return `${value.slice(0, 4)}...${value.slice(-4)}`;
-}
-
-// ---------------------------------------------------------------------------
-// SecretRef resolution
-// ---------------------------------------------------------------------------
-
-interface SecretRef {
-  source: string;
-  provider?: string;
-  id: string;
-}
-
-function resolveSecretInput(
-  value: unknown,
-  dotenvVars: Record<string, string>,
-): { resolved: string | null; source: string; note?: string } {
-  if (!value) return { resolved: null, source: 'missing' };
-
-  // Plain string
-  if (typeof value === 'string') {
-    // Check for env template: "${VAR_NAME}"
-    const envMatch = value.match(/^\$\{([^}]+)\}$/);
-    if (envMatch) {
-      const envKey = envMatch[1];
-      const envVal =
-        dotenvVars[envKey] ?? process.env[envKey] ?? null;
-      if (envVal) {
-        return { resolved: envVal, source: 'env_template' };
-      }
-      return {
-        resolved: null,
-        source: 'env_template',
-        note: `Environment variable ${envKey} not found`,
-      };
-    }
-
-    // Plain literal value
-    return { resolved: value, source: 'plain' };
-  }
-
-  // SecretRef object
-  if (typeof value === 'object' && value !== null) {
-    const ref = value as SecretRef;
-    if (ref.source === 'env') {
-      const envVal =
-        dotenvVars[ref.id] ?? process.env[ref.id] ?? null;
-      if (envVal) {
-        return { resolved: envVal, source: 'env_ref' };
-      }
-      return {
-        resolved: null,
-        source: 'env_ref',
-        note: `Environment variable ${ref.id} not found`,
-      };
-    }
-    if (ref.source === 'file') {
-      return {
-        resolved: null,
-        source: 'file_ref',
-        note: `File-based secret (${ref.id}) — cannot auto-extract, add manually`,
-      };
-    }
-    if (ref.source === 'exec') {
-      return {
-        resolved: null,
-        source: 'exec_ref',
-        note: `Exec-based secret (${ref.id}) — cannot auto-extract, add manually`,
-      };
-    }
-  }
-
-  return { resolved: null, source: 'unknown' };
-}
-
-// ---------------------------------------------------------------------------
-// Channel credential mapping
-// ---------------------------------------------------------------------------
-
-interface ChannelCredentialSpec {
-  // Fields to look for in the channel config
-  fields: string[];
-  // Corresponding NanoClaw env var names
-  envVars: string[];
-}
-
-const CHANNEL_SPECS: Record<string, ChannelCredentialSpec> = {
-  telegram: {
-    fields: ['botToken'],
-    envVars: ['TELEGRAM_BOT_TOKEN'],
-  },
-  discord: {
-    fields: ['token'],
-    envVars: ['DISCORD_BOT_TOKEN'],
-  },
-  slack: {
-    fields: ['botToken', 'appToken'],
-    envVars: ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'],
-  },
-  whatsapp: {
-    fields: [], // Auth-state based, no token field
-    envVars: [],
-  },
+// The OpenClaw config field(s) that hold each channel's token. The matching
+// NanoClaw .env destination is decided by classifyCredential() in transform.ts.
+const CHANNEL_FIELDS: Record<string, string[]> = {
+  telegram: ['botToken'],
+  discord: ['token'],
+  slack: ['botToken', 'appToken'],
+  whatsapp: [], // QR/pairing-code auth — no token to migrate
 };
 
 // ---------------------------------------------------------------------------
@@ -206,15 +120,9 @@ function parseArgs(): { channel: string; stateDir: string; writeEnv: string } {
   let writeEnv = '';
 
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--channel' && args[i + 1]) {
-      channel = args[++i].toLowerCase();
-    }
-    if (args[i] === '--state-dir' && args[i + 1]) {
-      stateDir = args[++i];
-    }
-    if (args[i] === '--write-env' && args[i + 1]) {
-      writeEnv = args[++i];
-    }
+    if (args[i] === '--channel' && args[i + 1]) channel = args[++i].toLowerCase();
+    if (args[i] === '--state-dir' && args[i + 1]) stateDir = args[++i];
+    if (args[i] === '--write-env' && args[i + 1]) writeEnv = args[++i];
   }
 
   if (!channel) {
@@ -222,12 +130,10 @@ function parseArgs(): { channel: string; stateDir: string; writeEnv: string } {
     process.exit(1);
   }
 
-  // Expand ~ prefix
   if (stateDir.startsWith('~')) {
     stateDir = path.join(os.homedir(), stateDir.slice(1));
   }
 
-  // Default state dir
   if (!stateDir) {
     const home = os.homedir();
     if (fs.existsSync(path.join(home, '.openclaw'))) {
@@ -235,9 +141,7 @@ function parseArgs(): { channel: string; stateDir: string; writeEnv: string } {
     } else if (fs.existsSync(path.join(home, '.clawdbot'))) {
       stateDir = path.join(home, '.clawdbot');
     } else {
-      console.error(
-        'No OpenClaw directory found. Use --state-dir to specify.',
-      );
+      console.error('No OpenClaw directory found. Use --state-dir to specify.');
       process.exit(1);
     }
   }
@@ -246,14 +150,12 @@ function parseArgs(): { channel: string; stateDir: string; writeEnv: string } {
 }
 
 // ---------------------------------------------------------------------------
-// .env writer — appends or replaces a KEY=VALUE line
+// .env writer — appends or replaces a KEY=VALUE line (host-side tokens only)
 // ---------------------------------------------------------------------------
 
 function writeEnvVar(envPath: string, key: string, value: string): void {
   let content = '';
-  if (fs.existsSync(envPath)) {
-    content = fs.readFileSync(envPath, 'utf-8');
-  }
+  if (fs.existsSync(envPath)) content = fs.readFileSync(envPath, 'utf-8');
 
   const pattern = new RegExp(`^${key}=.*$`, 'm');
   const line = `${key}="${value}"`;
@@ -273,204 +175,124 @@ function writeEnvVar(envPath: string, key: string, value: string): void {
 
 function main(): void {
   const { channel, stateDir, writeEnv } = parseArgs();
-  const spec = CHANNEL_SPECS[channel];
 
-  // Load dotenv from state dir
-  const dotenvVars = parseDotenv(path.join(stateDir, '.env'));
-
-  // Also check auth-profiles.json for API keys
-  const authProfilesPath = path.join(stateDir, 'auth-profiles.json');
-  let authProfiles: Record<string, unknown> = {};
-  if (fs.existsSync(authProfilesPath)) {
-    try {
-      authProfiles = JSON.parse(
-        fs.readFileSync(authProfilesPath, 'utf-8'),
-      ) as Record<string, unknown>;
-    } catch {
-      // Ignore parse errors
-    }
-  }
-
-  // WhatsApp special case: no token, auth-state based.
-  // OpenClaw stores Baileys auth at <stateDir>/credentials/whatsapp/<accountId>/
-  // using useMultiFileAuthState (same as NanoClaw). The files are directly compatible.
+  // WhatsApp uses QR / pairing-code auth — there is no token to migrate.
+  // Copying Baileys auth state across installs leaves stale encryption
+  // sessions, so re-authenticate during setup instead.
   if (channel === 'whatsapp') {
-    const authPaths = [
-      path.join(stateDir, 'credentials', 'whatsapp', 'default'),
-      path.join(stateDir, 'credentials', 'whatsapp'),
-      path.join(stateDir, 'wa-auth'),
-    ];
-
-    // Also scan credentials/whatsapp/ for any account subdirectory
-    const waCredsDir = path.join(stateDir, 'credentials', 'whatsapp');
-    if (fs.existsSync(waCredsDir)) {
-      try {
-        for (const entry of fs.readdirSync(waCredsDir)) {
-          const candidate = path.join(waCredsDir, entry);
-          if (fs.statSync(candidate).isDirectory()) {
-            authPaths.push(candidate);
-          }
-        }
-      } catch {
-        // ignore
-      }
-    }
-    let authStatePath = '';
-    for (const p of authPaths) {
-      // Look for creds.json inside the directory — that confirms valid Baileys auth state
-      if (fs.existsSync(path.join(p, 'creds.json'))) {
-        authStatePath = p;
-        break;
-      }
-    }
-
     emitStatus({
       CHANNEL: 'whatsapp',
       HAS_CREDENTIAL: false,
-      CREDENTIAL_SOURCE: 'auth_state',
-      NOTE: authStatePath
-        ? `Baileys auth state found at ${authStatePath}. May not be portable across versions — recommend re-authenticating.`
-        : 'No WhatsApp auth state found. Will need to authenticate during setup.',
-      AUTH_STATE_PATH: authStatePath || 'not_found',
+      DESTINATION: 'none',
+      NOTE: 'WhatsApp authenticates via QR / pairing code — no token to migrate. Authenticate during /setup with /add-whatsapp.',
     });
     return;
   }
 
-  // Unknown channel
-  if (!spec) {
+  const fields = CHANNEL_FIELDS[channel];
+  if (!fields) {
     emitStatus({
       CHANNEL: channel,
       HAS_CREDENTIAL: false,
-      NOTE: `Channel "${channel}" is not supported by NanoClaw. Supported: telegram, discord, slack, whatsapp.`,
+      DESTINATION: 'none',
+      NOTE: `Channel "${channel}" has no direct token mapping. Supported: telegram, discord, slack, whatsapp.`,
     });
     return;
   }
 
-  // Load OpenClaw config
+  const dotenvVars = parseDotenv(path.join(stateDir, '.env'));
+
   let config: Record<string, unknown> | null = null;
   for (const name of ['openclaw.json', 'clawdbot.json']) {
     const configPath = path.join(stateDir, name);
     if (fs.existsSync(configPath)) {
       try {
-        config = parseJson5(
-          fs.readFileSync(configPath, 'utf-8'),
-        ) as Record<string, unknown>;
+        config = parseJson5(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
         break;
       } catch {
-        // Try next
+        // try next
       }
     }
   }
 
   if (!config) {
-    emitStatus({
-      CHANNEL: channel,
-      HAS_CREDENTIAL: false,
-      NOTE: 'Could not load openclaw.json',
-    });
+    emitStatus({ CHANNEL: channel, HAS_CREDENTIAL: false, NOTE: 'Could not load openclaw.json' });
     return;
   }
 
-  const channels =
-    (config.channels as Record<string, unknown> | undefined) ?? {};
-  const channelConfig =
-    (channels[channel] as Record<string, unknown> | undefined) ?? {};
+  const channels = (config.channels as Record<string, unknown> | undefined) ?? {};
+  const channelConfig = (channels[channel] as Record<string, unknown> | undefined) ?? {};
 
-  // Try to resolve each credential field
+  // Resolve every token field for this channel.
   const results: Array<{
-    envVar: string;
     resolved: string | null;
     masked: string;
     source: string;
     note?: string;
+    envVar: string;
   }> = [];
 
-  for (let i = 0; i < spec.fields.length; i++) {
-    const field = spec.fields[i];
-    const envVar = spec.envVars[i];
+  const envVars = channelEnvVars(channel);
 
-    // Check top-level channel config first
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i];
+
     let rawValue = channelConfig[field];
-
-    // If not found, check first account
     if (!rawValue && channelConfig.accounts) {
       const accounts = channelConfig.accounts as Record<string, unknown>;
-      const firstAccount = Object.values(accounts)[0] as
-        | Record<string, unknown>
-        | undefined;
-      if (firstAccount) {
-        rawValue = firstAccount[field];
-      }
+      const firstAccount = Object.values(accounts)[0] as Record<string, unknown> | undefined;
+      if (firstAccount) rawValue = firstAccount[field];
     }
 
-    const { resolved, source, note } = resolveSecretInput(
-      rawValue,
-      dotenvVars,
-    );
+    const { resolved, source, note } = resolveSecretInput(rawValue, dotenvVars, process.env);
+    const dest = classifyCredential(channel, i);
     results.push({
-      envVar,
       resolved,
       masked: resolved ? maskCredential(resolved) : '',
       source,
       note,
+      envVar: dest?.envVar ?? envVars[i] ?? '',
     });
   }
 
-  // Emit results for the primary credential
-  const primary = results[0];
-  if (!primary) {
-    emitStatus({
-      CHANNEL: channel,
-      HAS_CREDENTIAL: false,
-      NOTE: `No credential fields defined for ${channel}`,
-    });
-    return;
-  }
-
-  // If --write-env is set and credentials were resolved, write directly to .env.
-  // Credential values never appear in stdout.
+  // Channel tokens are host-side: write them to .env when --write-env is set.
   let written = 0;
   if (writeEnv) {
     for (const r of results) {
-      if (r.resolved) {
+      if (r.resolved && r.envVar) {
         writeEnvVar(writeEnv, r.envVar, r.resolved);
         written++;
       }
     }
   }
 
-  const fields: Record<string, string | number | boolean> = {
+  const primary = results[0];
+  const out: Record<string, string | number | boolean> = {
     CHANNEL: channel,
+    DESTINATION: 'env',
     HAS_CREDENTIAL: !!primary.resolved,
     CREDENTIAL_SOURCE: primary.source,
     CREDENTIAL_MASKED: primary.masked || 'none',
     NANOCLAW_ENV_VAR: primary.envVar,
   };
-
   if (writeEnv && written > 0) {
-    fields.WRITTEN_TO = writeEnv;
-    fields.WRITTEN_COUNT = written;
+    out.WRITTEN_TO = writeEnv;
+    out.WRITTEN_COUNT = written;
   }
-  if (primary.note) {
-    fields.NOTE = primary.note;
+  if (primary.note) out.NOTE = primary.note;
+
+  // Additional tokens (Slack carries bot + app).
+  for (let i = 1; i < results.length; i++) {
+    const extra = results[i];
+    const suffix = `_${i + 1}`;
+    out[`HAS_CREDENTIAL${suffix}`] = !!extra.resolved;
+    out[`CREDENTIAL_SOURCE${suffix}`] = extra.source;
+    out[`CREDENTIAL_MASKED${suffix}`] = extra.masked || 'none';
+    out[`NANOCLAW_ENV_VAR${suffix}`] = extra.envVar;
+    if (extra.note) out[`NOTE${suffix}`] = extra.note;
   }
 
-  // Additional credentials (e.g. Slack has botToken + appToken)
-  if (results.length > 1) {
-    for (let i = 1; i < results.length; i++) {
-      const extra = results[i];
-      const suffix = `_${i + 1}`;
-      fields[`HAS_CREDENTIAL${suffix}`] = !!extra.resolved;
-      fields[`CREDENTIAL_SOURCE${suffix}`] = extra.source;
-      fields[`CREDENTIAL_MASKED${suffix}`] = extra.masked || 'none';
-      fields[`NANOCLAW_ENV_VAR${suffix}`] = extra.envVar;
-      if (extra.note) {
-        fields[`NOTE${suffix}`] = extra.note;
-      }
-    }
-  }
-
-  emitStatus(fields);
+  emitStatus(out);
 }
 
 main();

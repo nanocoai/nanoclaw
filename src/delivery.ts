@@ -9,10 +9,17 @@
  */
 import type Database from 'better-sqlite3';
 
-import { getRunningSessions, getActiveSessions, createPendingQuestion } from './db/sessions.js';
+import {
+  getRunningSessions,
+  getActiveSessions,
+  createPendingQuestion,
+  isTaskThread,
+  TASKS_SYSTEM_THREAD_ID,
+} from './db/sessions.js';
+import { appendRunLog } from './modules/scheduling/run-log.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
-import { getMessagingGroupByPlatform } from './db/messaging-groups.js';
+import { getMessagingGroup, getMessagingGroupByPlatform } from './db/messaging-groups.js';
 import {
   getDueOutboundMessages,
   getDeliveredIds,
@@ -20,12 +27,14 @@ import {
   markDeliveryFailed,
   migrateDeliveredTable,
 } from './db/session-db.js';
+import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
+import { isUnguarded, type Unguarded } from './guard/index.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
-import type { Session } from './types.js';
+import type { PendingApproval, Session } from './types.js';
 
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
@@ -57,8 +66,11 @@ export interface ChannelDeliveryAdapter {
     kind: string,
     content: string,
     files?: OutboundFile[],
+    /** Delivering adapter instance (defaults to channelType downstream).
+     *  Host-internal only — containers never see instance. */
+    instance?: string,
   ): Promise<string | undefined>;
-  setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
+  setTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
 }
 
 let deliveryAdapter: ChannelDeliveryAdapter | null = null;
@@ -251,9 +263,27 @@ async function deliverMessage(
 
   const content = JSON.parse(msg.content);
 
-  // System actions — handle internally (schedule_task, cancel_task, etc.)
+  // System actions — handle internally (cli_request, etc.)
   if (msg.kind === 'system') {
     await handleSystemAction(content, session, inDb);
+    return;
+  }
+
+  // Task-run log: the runner mirrors a run's final text here (one-door
+  // delivery — final text never reaches a channel; the send_message tool is
+  // the only delivery path from a task session). Append to the series log,
+  // never deliver. The caller marks it delivered so it isn't retried.
+  if (msg.kind === 'task_log') {
+    if (session.messaging_group_id === null && isTaskThread(session.thread_id) && session.thread_id) {
+      const series = session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
+      try {
+        appendRunLog(session.agent_group_id, series, typeof content.text === 'string' ? content.text : '');
+      } catch (err) {
+        log.warn('Failed to append task run log', { id: msg.id, sessionId: session.id, err });
+      }
+    } else {
+      log.warn('task_log row outside a task session — ignoring', { id: msg.id, sessionId: session.id });
+    }
     return;
   }
 
@@ -286,8 +316,18 @@ async function deliverMessage(
   // path in deliverSessionMessages and eventually marks the message as failed
   // (instead of marking it delivered when nothing was actually delivered,
   // which was the pre-refactor bug).
+  let deliverInstance: string | undefined;
   if (msg.channel_type && msg.platform_id) {
-    const mg = getMessagingGroupByPlatform(msg.channel_type, msg.platform_id);
+    // Resolve the messaging group ORIGIN-SESSION-FIRST: when the message
+    // targets the session's own chat address, the origin row wins even if
+    // sibling instances share the same (channel_type, platform_id) — so the
+    // reply goes out through the instance the message came in on. Otherwise
+    // fall back to the by-platform lookup (default-instance-first).
+    const originMg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
+    const mg =
+      originMg && originMg.channel_type === msg.channel_type && originMg.platform_id === msg.platform_id
+        ? originMg
+        : getMessagingGroupByPlatform(msg.channel_type, msg.platform_id);
     if (!mg) {
       throw new Error(`unknown messaging group for ${msg.channel_type}/${msg.platform_id} (message ${msg.id})`);
     }
@@ -308,6 +348,7 @@ async function deliverMessage(
         );
       }
     }
+    deliverInstance = mg.instance;
   }
 
   // Track pending questions for ask_user_question flow.
@@ -360,6 +401,7 @@ async function deliverMessage(
     msg.kind,
     msg.content,
     files,
+    deliverInstance,
   );
   log.info('Message delivered', {
     id: msg.id,
@@ -378,14 +420,19 @@ async function deliverMessage(
  * Delivery action registry.
  *
  * Modules register handlers for system-kind outbound message actions via
- * `registerDeliveryAction`. Core checks the registry first in
- * `handleSystemAction` and falls through to the inline switch when no
- * handler is registered. The switch will shrink as modules are extracted
- * (scheduling, approvals, agent-to-agent) and eventually only its default
- * branch remains.
+ * `registerDeliveryAction`. Unknown actions log "Unknown system action".
  *
- * Default when no handler registered and the switch doesn't match: log
- * "Unknown system action" and return.
+ * Privileged delivery actions (create_agent, install_packages,
+ * add_mcp_server) register with a guard spec: every path to the handler body
+ * — dispatch, approved replay, test lookup — goes through the guard consult
+ * (allow / hold / deny), so there is no unguarded route to it. On approve,
+ * the continuation re-enters the same entry carrying the approval row as its
+ * grant (`reenterGuardedDeliveryAction`), so the structural checks are
+ * re-run live. Plain actions (the cli_request bridge — its inner
+ * commands are guarded at dispatch) register with an
+ * explicit `unguarded(<reason>)` declaration instead of a spec — omission is
+ * not representable, so the decision to run unguarded is visible, and
+ * justified, at the registration site.
  */
 export type DeliveryActionHandler = (
   content: Record<string, unknown>,
@@ -393,13 +440,70 @@ export type DeliveryActionHandler = (
   inDb: Database.Database,
 ) => Promise<void>;
 
-const actionHandlers = new Map<string, DeliveryActionHandler>();
+type DeliveryEntry =
+  | { guard: Unguarded; handler: DeliveryActionHandler }
+  | { guard: DeliveryGuardSpec; handler: GuardedDeliveryHandler };
 
-export function registerDeliveryAction(action: string, handler: DeliveryActionHandler): void {
-  if (actionHandlers.has(action)) {
+const deliveryActions = new Map<string, DeliveryEntry>();
+
+function isUnguardedEntry(entry: DeliveryEntry): entry is Extract<DeliveryEntry, { guard: Unguarded }> {
+  return isUnguarded(entry.guard);
+}
+
+export function registerDeliveryAction(action: string, handler: DeliveryActionHandler, unguardedDecl: Unguarded): void;
+export function registerDeliveryAction(action: string, handler: GuardedDeliveryHandler, spec: DeliveryGuardSpec): void;
+export function registerDeliveryAction(
+  action: string,
+  handler: DeliveryActionHandler | GuardedDeliveryHandler,
+  guardDecl: DeliveryGuardSpec | Unguarded,
+): void {
+  const existing = deliveryActions.get(action);
+  if (existing) {
+    // Replacing a guard-wrapped action with an unguarded handler would
+    // disarm the guard while its catalog entry still exists — refuse. A
+    // skill that wants to extend a guarded action must compose at the
+    // module's exported functions instead, or re-register with a guard spec
+    // of its own.
+    if (isUnguarded(guardDecl) && !isUnguardedEntry(existing)) {
+      throw new Error(
+        `delivery action "${action}" is guard-wrapped; re-registering it without a guard spec would disarm the guard`,
+      );
+    }
     log.warn('Delivery action handler overwritten', { action });
   }
-  actionHandlers.set(action, handler);
+  // The overloads pair each handler shape with its declaration; the merged
+  // implementation signature erases that pairing, hence the one cast.
+  deliveryActions.set(action, { guard: guardDecl, handler } as DeliveryEntry);
+}
+
+/**
+ * Approve continuation for a guard-wrapped delivery action: re-enter the
+ * entry with the approval row as the grant. The guard treats the grant as
+ * hold-satisfied but re-runs the structural checks, so approve-then-revoke
+ * does not execute. Domains register this as their approval handler in the
+ * same line that registers the action.
+ */
+export function reenterGuardedDeliveryAction(action: string) {
+  return async (ctx: { session: Session; payload: Record<string, unknown>; approval: PendingApproval }) => {
+    const entry = deliveryActions.get(action);
+    if (!entry || isUnguardedEntry(entry)) {
+      log.warn('Approved replay for an action that is not guard-wrapped — dropping', { action });
+      return;
+    }
+    await runGuarded(action, entry.guard, entry.handler, ctx.payload, ctx.session, ctx.approval);
+  };
+}
+
+/**
+ * The invocable for a registered action — the raw handler for unguarded
+ * entries, the guard-consulting path for guarded ones. Dispatch and tests
+ * both come through here; there is no route around the guard.
+ */
+export function getDeliveryAction(action: string): DeliveryActionHandler | undefined {
+  const entry = deliveryActions.get(action);
+  if (!entry) return undefined;
+  if (isUnguardedEntry(entry)) return entry.handler;
+  return (content, session) => runGuarded(action, entry.guard, entry.handler, content, session, null);
 }
 
 /**
@@ -415,7 +519,7 @@ async function handleSystemAction(
   const action = content.action as string;
   log.info('System action from agent', { sessionId: session.id, action });
 
-  const registered = actionHandlers.get(action);
+  const registered = getDeliveryAction(action);
   if (registered) {
     await registered(content, session, inDb);
     return;

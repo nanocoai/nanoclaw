@@ -1,6 +1,6 @@
 {
   "name": "nanoclaw",
-  "version": "2.0.71",
+  "version": "2.1.53",
   "description": "Personal Claude assistant. Lightweight, secure, customizable.",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
@@ -21,7 +21,6 @@
     "setup:auto": "tsx setup/auto.ts",
     "ncl": "tsx src/cli/client.ts",
     "chat": "tsx scripts/chat.ts",
-    "auth": "tsx src/whatsapp-auth.ts",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "test": "vitest run",
@@ -30,11 +29,12 @@
   "dependencies": {
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
-    "@onecli-sh/sdk": "^0.5.0",
+    "@onecli-sh/sdk": "2.2.1",
     "better-sqlite3": "11.10.0",
-    "chat": "^4.24.0",
+    "chat": "4.29.0",
     "cron-parser": "5.5.0",
-    "kleur": "^4.1.5"
+    "kleur": "^4.1.5",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
