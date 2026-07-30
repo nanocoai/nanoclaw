@@ -64,6 +64,7 @@ registerResource({
   description:
     'Agent group — a logical agent identity. Each group has its own workspace folder (CLAUDE.md, skills, container config), conversation history, and container image. Multiple messaging groups can be wired to one agent group.',
   idColumn: 'id',
+  idPrefix: 'ag-',
   scopeField: 'id',
   columns: [
     { name: 'id', type: 'string', description: 'UUID.', generated: true },

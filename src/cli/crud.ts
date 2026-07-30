@@ -68,6 +68,8 @@ export interface ResourceDef {
   description: string;
   /** Primary key column name. */
   idColumn: string;
+  /** Prefix prepended to generated primary-key UUIDs (e.g. 'ag-' for OneCLI compatibility). */
+  idPrefix?: string;
   /**
    * Column that carries the agent group ID for group-scope enforcement.
    * Required on every resource in the CLI whitelist (groups, sessions,
@@ -208,7 +210,7 @@ function genericCreate(def: ResourceDef) {
     for (const col of def.columns) {
       if (col.generated) {
         if (col.name === def.idColumn) {
-          values[col.name] = randomUUID();
+          values[col.name] = (def.idPrefix ?? '') + randomUUID();
         } else if (col.name.endsWith('_at')) {
           values[col.name] = new Date().toISOString();
         }
