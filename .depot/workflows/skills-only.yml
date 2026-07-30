@@ -1,0 +1,54 @@
+# Depot CI Migration
+# Source: .github/workflows/skills-only.yml
+#
+# Changes made:
+# - Changed GitHub runs-on labels to their Depot equivalents
+
+name: Skill PR Check
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  check:
+    runs-on: depot-ubuntu-latest # was: ubuntu-latest. Mapped standard GitHub runner to Depot equivalent.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check for mixed skill + source changes
+        run: |
+          # Check if PR adds new skill files (not just modifies existing)
+          ADDED_SKILLS=$(git diff --name-only --diff-filter=A origin/main...HEAD | grep '^\.claude/skills/' || true)
+
+          # Check if PR touches source
+          CHANGED=$(git diff --name-only origin/main...HEAD)
+          SOURCE=$(echo "$CHANGED" | grep -E '^src/|^container/|^package\.json|^package-lock\.json' || true)
+
+          # Block if new skills are added AND source is modified
+          if [ -n "$ADDED_SKILLS" ] && [ -n "$SOURCE" ]; then
+            echo "❌ PRs that add skills should not modify source files."
+            echo ""
+            echo "New skill files:"
+            echo "$ADDED_SKILLS"
+            echo ""
+            echo "Source files:"
+            echo "$SOURCE"
+            echo ""
+            echo "Please read CONTRIBUTING.md"
+            exit 1
+          fi
+      - name: Comment on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `This PR adds a skill while also modifying source code. A skill PR should not change source files—the skill should contain **instructions** for Claude to follow. See \`/convert-to-docker\` for an example.
+
+            If you're fixing a bug or simplifying code, please submit that as a separate PR.
+
+            See [CONTRIBUTING.md](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/main/CONTRIBUTING.md) for details.`
+            })
