@@ -23,6 +23,7 @@ All notable changes to NanoClaw will be documented in this file.
 - **Per-exchange archiving is provider-owned** — the `onExchangeComplete` hook; the markdown writer ships with the codex payload.
 - **Container boot failures now say why** — the last stderr lines are logged at `warn` on a non-zero exit instead of a silent crash loop.
 - **Slash commands now interrupt an in-flight turn.** A runner-handled command (`/clear`, `/compact`, `/cost`, …) arriving mid-turn aborts the active stream and runs immediately instead of waiting out the turn.
+- **A channel adapter that fails to start now restarts the host instead of running deaf.** When a configured channel's setup fails at boot — a non-network error, or a network error that outlives the retry budget — `initChannelAdapters` throws instead of only logging, so the process exits non-zero and the supervisor + circuit breaker retry it. Previously the host reported healthy while silently missing that channel until a manual restart (#3064).
 
 ## [2.1.0] - 2026-06-07
 

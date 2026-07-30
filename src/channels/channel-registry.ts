@@ -228,11 +228,32 @@ export function getChannelContainerConfig(name: string): ChannelRegistration['co
   return registry.get(name)?.containerConfig;
 }
 
+/** Thrown by initChannelAdapters when one or more registered adapters fail to
+ *  finish setup — a non-network error, or a network error that outlived the
+ *  retry budget. Propagated to the startup path (`main().catch` → exit 1) so a
+ *  boot that can't bring a configured channel up restarts under the supervisor
+ *  and circuit breaker, instead of running deaf: healthy on the surface but
+ *  silently missing that channel until someone restarts by hand (#3064).
+ *  Adapters that return null (missing credentials) are skipped, not failures. */
+export class ChannelAdapterStartupError extends Error {
+  constructor(readonly channels: string[]) {
+    super(
+      `Channel adapter(s) failed to start: ${channels.join(', ')}. ` +
+        `Refusing to run without a configured channel — restarting. ` +
+        `See the startup log above for each adapter's error.`,
+    );
+    this.name = 'ChannelAdapterStartupError';
+  }
+}
+
 /**
- * Instantiate and set up all registered channel adapters.
- * Skips adapters that return null (missing credentials).
+ * Instantiate and set up all registered channel adapters. Skips adapters that
+ * return null (missing credentials); throws ChannelAdapterStartupError if any
+ * configured adapter fails to start, so the failure reaches the supervisor
+ * instead of being swallowed (#3064).
  */
 export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => ChannelSetup): Promise<void> {
+  const failed: string[] = [];
   for (const [name, registration] of registry) {
     try {
       const adapter = await registration.factory();
@@ -278,8 +299,16 @@ export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => 
       activeAdapters.set(key, adapter);
       log.info('Channel adapter started', { channel: name, type: adapter.channelType, instance: key });
     } catch (err) {
+      // Log each adapter's own error for diagnostics and record the name, but
+      // keep going so a single boot surfaces every broken channel at once. The
+      // aggregate throw below escalates to the crash-recovery path.
       log.error('Failed to start channel adapter', { channel: name, err });
+      failed.push(name);
     }
+  }
+
+  if (failed.length > 0) {
+    throw new ChannelAdapterStartupError(failed);
   }
 }
 
