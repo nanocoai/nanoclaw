@@ -112,6 +112,10 @@ async function main(): Promise<void> {
     providerName,
     cwd: CWD,
     systemContext: { instructions },
+    agentHooks: config.agentHooks,
+    agentGroupId: config.agentGroupId || undefined,
+    agentName: config.assistantName || undefined,
+    model: config.model,
   });
 }
 

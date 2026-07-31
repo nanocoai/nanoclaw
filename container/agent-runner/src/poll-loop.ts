@@ -26,6 +26,7 @@ import {
 } from './formatter.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
+import { applyAfterAgentCallHooks, applyBeforeAgentCallHooks, type AgentHooksConfig } from './agent-hooks.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -74,6 +75,11 @@ export interface PollLoopConfig {
   systemContext?: {
     instructions?: string;
   };
+  /** Deterministic procedures to run before/after provider calls. */
+  agentHooks?: AgentHooksConfig;
+  agentGroupId?: string;
+  agentName?: string;
+  model?: string;
   /**
    * Optional stop signal. In production the loop runs until the container
    * dies; tests pass a signal so an abandoned loop actually exits instead of
@@ -232,15 +238,46 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
-    const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+    const formattedPrompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
+
+    const preHook = await applyBeforeAgentCallHooks({
+      hooks: config.agentHooks,
+      messages: keep,
+      prompt: formattedPrompt,
+      routing,
+      providerName: config.providerName,
+      cwd: config.cwd,
+      systemContext: config.systemContext,
+      agentGroupId: config.agentGroupId,
+      agentName: config.agentName,
+      model: config.model,
+    });
+    if (preHook.status !== 'continue') {
+      log(`before_agent_call hook ${preHook.status}: ${preHook.reason ?? 'no reason'}`);
+      writeMessageOut({
+        id: generateId(),
+        in_reply_to: routing.inReplyTo,
+        kind: routing.taskRun ? 'task_log' : 'chat',
+        platform_id: routing.platformId,
+        channel_type: routing.channelType,
+        thread_id: routing.threadId,
+        content: JSON.stringify({
+          text: `Agent call ${preHook.status} by deterministic hook: ${preHook.reason ?? 'no reason'}`,
+        }),
+      });
+      markCompleted(ids.filter((id) => !commandIds.includes(id)));
+      continue;
+    }
+
+    const prompt = preHook.prompt;
 
     const query = config.provider.query({
       prompt,
       continuation,
       cwd: config.cwd,
-      systemContext: config.systemContext,
+      systemContext: preHook.systemContext,
     });
 
     // Process the query while concurrently polling for new messages
@@ -258,6 +295,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         config.provider.onExchangeComplete?.bind(config.provider),
         prompt,
         continuation,
+        {
+          hooks: config.agentHooks,
+          cwd: config.cwd,
+          agentGroupId: config.agentGroupId,
+          agentName: config.agentName,
+          model: config.model,
+        },
       );
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
@@ -339,6 +383,14 @@ interface QueryResult {
   continuation?: string;
 }
 
+interface ProcessQueryHookOptions {
+  hooks?: AgentHooksConfig;
+  cwd: string;
+  agentGroupId?: string;
+  agentName?: string;
+  model?: string;
+}
+
 export async function processQuery(
   query: AgentQuery,
   routing: RoutingContext,
@@ -347,6 +399,7 @@ export async function processQuery(
   onExchangeComplete: ((exchange: ProviderExchange) => void) | undefined,
   initialPrompt: string,
   initialContinuation: string | undefined,
+  hookOptions?: ProcessQueryHookOptions,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -354,6 +407,7 @@ export async function processQuery(
   // Once-per-turn guard for the task-run "<message> block was not delivered"
   // nudge — mirrors unwrappedNudged for chat turns.
   let taskBlockNudged = false;
+  let postHookRetryCount = 0;
   // Prompt queue for the exchange hook — each result event consumes the
   // oldest unanswered prompt, except a wrapping-retry result, which answers
   // the same prompt again. Unused (and unmaintained) when the provider
@@ -434,10 +488,39 @@ export async function processQuery(
         if (done) return;
 
         const keptIds = keep.map((m) => m.id);
-        const prompt = formatMessages(keep);
+        const formattedPrompt = formatMessages(keep);
+        const preHook = await applyBeforeAgentCallHooks({
+          hooks: hookOptions?.hooks,
+          messages: keep,
+          prompt: formattedPrompt,
+          routing,
+          providerName,
+          cwd: hookOptions?.cwd ?? '/workspace/agent',
+          agentGroupId: hookOptions?.agentGroupId,
+          agentName: hookOptions?.agentName,
+          model: hookOptions?.model,
+        });
+        if (preHook.status !== 'continue') {
+          log(`before_agent_call follow-up hook ${preHook.status}: ${preHook.reason ?? 'no reason'}`);
+          writeMessageOut({
+            id: generateId(),
+            in_reply_to: routing.inReplyTo,
+            kind: routing.taskRun ? 'task_log' : 'chat',
+            platform_id: routing.platformId,
+            channel_type: routing.channelType,
+            thread_id: routing.threadId,
+            content: JSON.stringify({
+              text: `Agent follow-up ${preHook.status} by deterministic hook: ${preHook.reason ?? 'no reason'}`,
+            }),
+          });
+          markCompleted(keptIds);
+          return;
+        }
+        const prompt = preHook.prompt;
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
         taskBlockNudged = false;
+        postHookRetryCount = 0;
         query.push(prompt);
         archivePrompts.push(prompt);
         markCompleted(keptIds);
@@ -502,23 +585,75 @@ export async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(event.text, routing);
+          const answeredPrompt = archivePrompts[0] ?? initialPrompt;
+          const postHook = await applyAfterAgentCallHooks({
+            hooks: hookOptions?.hooks,
+            text: event.text,
+            routing,
+            providerName,
+            cwd: hookOptions?.cwd ?? '/workspace/agent',
+            prompt: answeredPrompt,
+            continuation: queryContinuation ?? initialContinuation,
+            agentGroupId: hookOptions?.agentGroupId,
+            agentName: hookOptions?.agentName,
+            model: hookOptions?.model,
+          });
+          if (postHook.status === 'block' || postHook.status === 'require_human_review') {
+            log(`after_agent_call hook ${postHook.status}: ${postHook.reason ?? 'no reason'}`);
+            if (routing.taskRun && !taskBlockNudged) {
+              autoAppendTaskLog(
+                `Agent response ${postHook.status} by deterministic hook: ${postHook.reason ?? 'no reason'}`,
+              );
+            } else if (!routing.taskRun) {
+              deliverHookBlockedNotice(postHook.status, postHook.reason, routing);
+            }
+            notifyExchangeComplete(onExchangeComplete, {
+              prompt: answeredPrompt,
+              result: postHook.text,
+              continuation: queryContinuation ?? initialContinuation,
+              status: 'undelivered',
+            });
+            archivePrompts.shift();
+            continue;
+          }
+          if (postHook.status === 'retry') {
+            log(`after_agent_call hook requested retry: ${postHook.reason ?? 'no reason'}`);
+            if (postHookRetryCount >= 1) {
+              log('after_agent_call retry limit reached; treating response as blocked');
+              deliverHookBlockedNotice('block', postHook.reason ?? 'post-call retry limit reached', routing);
+              notifyExchangeComplete(onExchangeComplete, {
+                prompt: answeredPrompt,
+                result: postHook.text,
+                continuation: queryContinuation ?? initialContinuation,
+                status: 'undelivered',
+              });
+              archivePrompts.shift();
+              continue;
+            }
+            postHookRetryCount += 1;
+            query.push(postHook.retryPrompt ?? '<system>Please retry with a corrected final answer.</system>');
+            continue;
+          }
+          postHookRetryCount = 0;
+
+          const resultText = postHook.text;
+          const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(resultText, routing);
           const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
           // while explicit append-log calls remain optional additive notes.
           // Errors included: a failed run's text belongs in its log, not chat.
           // A corrective retry handles delivery only; its result is not a
           // second run summary.
-          if (routing.taskRun && !taskBlockNudged) autoAppendTaskLog(event.text);
+          if (routing.taskRun && !taskBlockNudged) autoAppendTaskLog(resultText);
           if (sent === 0 && event.isError === true && !routing.taskRun) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
             // scratchpad, and skip the re-wrap nudge — it would just re-hammer
             // the failing gateway turn after turn.
-            deliverErrorResult(event.text, routing);
+            deliverErrorResult(resultText, routing);
             notifyExchangeComplete(onExchangeComplete, {
-              prompt: archivePrompts[0] ?? initialPrompt,
-              result: event.text,
+              prompt: answeredPrompt,
+              result: resultText,
               continuation: queryContinuation ?? initialContinuation,
               status: 'error',
             });
@@ -526,8 +661,8 @@ export async function processQuery(
           } else {
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
             notifyExchangeComplete(onExchangeComplete, {
-              prompt: archivePrompts[0] ?? initialPrompt,
-              result: event.text,
+              prompt: answeredPrompt,
+              result: resultText,
               continuation: queryContinuation ?? initialContinuation,
               status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
             });
@@ -602,6 +737,9 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
     case 'progress':
       log(`Progress: ${event.message}`);
       break;
+    case 'file':
+      log(`File event: ${event.path}`);
+      break;
   }
 }
 
@@ -622,6 +760,24 @@ function deliverErrorResult(text: string, routing: RoutingContext): void {
     channel_type: routing.channelType,
     thread_id: routing.threadId,
     content: JSON.stringify({ text }),
+  });
+}
+
+function deliverHookBlockedNotice(
+  status: 'block' | 'require_human_review',
+  reason: string | undefined,
+  routing: RoutingContext,
+): void {
+  writeMessageOut({
+    id: generateId(),
+    in_reply_to: routing.inReplyTo,
+    kind: 'chat',
+    platform_id: routing.platformId,
+    channel_type: routing.channelType,
+    thread_id: routing.threadId,
+    content: JSON.stringify({
+      text: `Agent response ${status} by deterministic hook: ${reason ?? 'no reason'}`,
+    }),
   });
 }
 

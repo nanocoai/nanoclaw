@@ -6,6 +6,7 @@
  * instead of environment variables.
  */
 import fs from 'fs';
+import type { AgentHooksConfig } from './agent-hooks.js';
 
 const CONFIG_PATH = '/workspace/agent/container.json';
 
@@ -18,6 +19,7 @@ export interface RunnerConfig {
   mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   model?: string;
   effort?: string;
+  agentHooks?: AgentHooksConfig;
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -47,9 +49,16 @@ export function loadConfig(): RunnerConfig {
     mcpServers: (raw.mcpServers as RunnerConfig['mcpServers']) || {},
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
+    agentHooks: readAgentHooks(raw),
   };
 
   return _config;
+}
+
+function readAgentHooks(raw: Record<string, unknown>): AgentHooksConfig | undefined {
+  const value = raw.agentHooks ?? raw.agent_hooks;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return value as AgentHooksConfig;
 }
 
 /** Get the loaded config. Throws if loadConfig() hasn't been called. */
