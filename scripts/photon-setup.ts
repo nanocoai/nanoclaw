@@ -367,6 +367,17 @@ export function userOptedIn(user: Record<string, unknown> | undefined): boolean 
   return !!meta && typeof meta === 'object' && (meta as Record<string, unknown>).opt_in === true;
 }
 
+/**
+ * The row that decides routing for `phone`. When duplicates exist (a stale
+ * API-created row can sit next to the dashboard-invited one for the same
+ * number), an opted-in row wins over whichever happens to list first.
+ */
+export function findRoutableUser(users: Array<Record<string, unknown>>, phone: string): Record<string, unknown> | undefined {
+  const target = normalizePhone(phone);
+  const matches = users.filter((u) => normalizePhone(String(u.phoneNumber ?? '')) === target);
+  return matches.find(userOptedIn) ?? matches[0];
+}
+
 export interface OptInWaitOpts {
   sleepFn?: (ms: number) => Promise<void>;
   intervalS?: number;
@@ -394,14 +405,24 @@ export async function waitForOptedInUser(
   const timeoutS = opts.timeoutS ?? DEFAULT_OPTIN_TIMEOUT_S;
   const sleepFn = opts.sleepFn ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   const maxAttempts = Math.max(1, Math.ceil(timeoutS / intervalS));
+  let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const user = findUserByPhone(await listUsers(fetchFn, spectrumHost, projectId, projectSecret), phone);
-    if (userOptedIn(user)) return user as Record<string, unknown>;
+    try {
+      const user = findRoutableUser(await listUsers(fetchFn, spectrumHost, projectId, projectSecret), phone);
+      lastError = undefined;
+      if (userOptedIn(user)) return user as Record<string, unknown>;
+    } catch (err) {
+      // A transient list failure must not abort a wait whose whole point is to
+      // ride out the operator's manual dashboard step — count it as a missed
+      // poll and keep going, like the device-token poll does.
+      lastError = err;
+    }
     opts.onWaiting?.(attempt);
     if (attempt < maxAttempts) await sleepFn(intervalS * 1000);
   }
+  const lastErrorNote = lastError ? ` Last API error: ${lastError instanceof Error ? lastError.message : String(lastError)}.` : '';
   throw new Error(
-    `${phone} was not opted in after ${timeoutS}s. Finish the dashboard step (Add user, then accept the invite on that phone) and re-run setup — it resumes where it left off.`,
+    `${phone} was not opted in after ${timeoutS}s.${lastErrorNote} Finish the dashboard step (Add user, then accept the invite on that phone) and re-run setup — it resumes where it left off.`,
   );
 }
 
@@ -628,7 +649,7 @@ async function runStatus(args: Args, fetchFn: FetchFn = fetch): Promise<number> 
   let routingError = '';
   if (credentialsReady && auth.phone_number) {
     try {
-      const user = findUserByPhone(
+      const user = findRoutableUser(
         await listUsers(fetchFn, args.spectrumHost, String(projectId), String(secret)),
         auth.phone_number,
       );
@@ -665,7 +686,7 @@ async function runStatus(args: Args, fetchFn: FetchFn = fetch): Promise<number> 
     return 1;
   }
   if (routing === 'unverified') {
-    p.outro('Could not reach the API to verify routing. Check connectivity and try again.');
+    p.outro('Could not verify routing. Check connectivity and that the stored project secret is still valid, then try again.');
     return 1;
   }
   if (credentialsReady) {

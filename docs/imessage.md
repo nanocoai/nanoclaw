@@ -121,8 +121,9 @@ pnpm exec tsx scripts/photon-setup.ts --phone +15551234567
    dashboard HTTP API — it does not import `spectrum-ts`, so it works before the
    runtime SDK is installed.
 2. **Find or create** the `NanoClaw` project on the Photon dashboard.
-3. **Mint the project secret** (the dashboard reveals it once) and write
-   `PHOTON_PROJECT_ID` + `PHOTON_PROJECT_SECRET` to `.env`.
+3. **Reuse the project's current secret** (regenerating only when the API
+   returns none) and write `PHOTON_PROJECT_ID` + `PHOTON_PROJECT_SECRET` to
+   `.env`.
 4. **Wait for your phone's dashboard opt-in.** Numbers only enter iMessage
    routing after the dashboard's Add-user invite is accepted (the user row then
    carries `meta.opt_in`; the API cannot set it, so the wizard never creates

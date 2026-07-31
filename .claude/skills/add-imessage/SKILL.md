@@ -167,9 +167,10 @@ Connect your hosted iMessage line (photon.codes):
 4. Once the opt-in lands, setup finishes on its own and prints your agent's iMessage number.
 ```
 
-Run the device-login flow. It provisions the project, mints the project secret,
-walks you through the dashboard Add-user + invite step (waiting until your
-number is opted in), and surfaces the iMessage number you'll text — writing
+Run the device-login flow. It provisions the project, reuses its current secret
+(regenerating only when the API returns none), walks you through the dashboard
+Add-user + invite step (waiting until your number is opted in), and surfaces
+the iMessage number you'll text — writing
 `PHOTON_PROJECT_ID` + `PHOTON_PROJECT_SECRET` to `.env` and the assigned number
 to `data/photon-auth.json`:
 

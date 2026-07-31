@@ -15,6 +15,7 @@ import {
   basicAuth,
   deviceTokenCandidates,
   findProjectByName,
+  findRoutableUser,
   findUserByPhone,
   getImessageLine,
   isE164,
@@ -114,6 +115,47 @@ describe('userOptedIn / waitForOptedInUser', () => {
     expect(userOptedIn({ meta: { opt_in: false } })).toBe(false);
     expect(userOptedIn({ meta: { project_owner: true } })).toBe(false);
     expect(userOptedIn({ meta: { opt_in: true } })).toBe(true);
+  });
+
+  it('rides out transient list failures during the wait instead of aborting', async () => {
+    let calls = 0;
+    const fetchFn = (async () => {
+      calls += 1;
+      if (calls <= 2) throw new Error('ECONNRESET');
+      return new Response(
+        JSON.stringify({ users: [{ id: 'u1', phoneNumber: '+15551234567', assignedPhoneNumber: '+15558887777', meta: { opt_in: true } }] }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    const user = await waitForOptedInUser(fetchFn, 'https://s.example.com', 'proj', 'secret', '+15551234567', {
+      sleepFn: async () => {},
+      intervalS: 1,
+      timeoutS: 10,
+    });
+    expect(user.id).toBe('u1');
+    expect(calls).toBe(3);
+  });
+
+  it('reports the last API error when the wait times out on failures', async () => {
+    const fetchFn = (async () => {
+      throw new Error('ECONNRESET');
+    }) as typeof fetch;
+    await expect(
+      waitForOptedInUser(fetchFn, 'https://s.example.com', 'proj', 'secret', '+15551234567', {
+        sleepFn: async () => {},
+        intervalS: 1,
+        timeoutS: 3,
+      }),
+    ).rejects.toThrow(/not opted in after 3s.*ECONNRESET/);
+  });
+
+  it('prefers an opted-in row when the same phone has duplicates', () => {
+    const stale = { id: 'u-stale', phoneNumber: '+15551234567', meta: {} };
+    const invited = { id: 'u-invited', phoneNumber: '+1 555 123 4567', meta: { opt_in: true } };
+    expect(findRoutableUser([stale, invited], '+15551234567')?.id).toBe('u-invited');
+    expect(findRoutableUser([invited, stale], '+15551234567')?.id).toBe('u-invited');
+    expect(findRoutableUser([stale], '+15551234567')?.id).toBe('u-stale');
+    expect(findRoutableUser([], '+15551234567')).toBeUndefined();
   });
 
   it('times out with a re-run hint when the opt-in never lands', async () => {
