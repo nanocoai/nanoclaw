@@ -2,7 +2,7 @@ blank_issues_enabled: true
 contact_links:
   - name: Report a security vulnerability (private)
     url: https://github.com/nanocoai/nanoclaw/security/advisories/new
-    about: Found an exploitable vulnerability? Report it privately here — please do not open a public issue. See SECURITY.md for what is in scope.
+    about: Found an exploitable vulnerability? Report it privately here. Do not open a public issue. See SECURITY.md for what is in scope.
   - name: Questions & discussion
     url: https://discord.gg/nanoclaw
     about: For usage questions and general discussion, use Discord.
