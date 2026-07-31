@@ -16,6 +16,7 @@ import {
   deviceTokenCandidates,
   findProjectByName,
   findUserByPhone,
+  getImessageLine,
   isE164,
   main,
   normalizePhone,
@@ -125,6 +126,21 @@ describe('userOptedIn / waitForOptedInUser', () => {
         timeoutS: 3,
       }),
     ).rejects.toThrow(/not opted in after 3s.*re-run setup/);
+  });
+});
+
+describe('getImessageLine', () => {
+  it('treats an HTTP 200 error body as no line', async () => {
+    const fetchFn = (async (_input: string | URL | Request, init?: RequestInit) => {
+      const body =
+        init?.method === 'POST' ? { error: 'Line add/remove is only available on the business plan' } : { lines: [] };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    await expect(getImessageLine(fetchFn, 'https://app.example.com', 'token', 'proj')).resolves.toBeNull();
   });
 });
 
@@ -316,6 +332,8 @@ describe('photon setup flow (mocked API)', () => {
     expect(calls.some((c) => c.method === 'POST' && /\/users\/$/.test(c.pathname))).toBe(false);
     // The create response carried no projectSecret → minted via regenerate.
     expect(calls.some((c) => /regenerate-secret$/.test(c.pathname))).toBe(true);
+    // Status only turns green after setup records the successful opt-in.
+    expect(await main(['status'])).toBe(0);
   });
 
   it('a registered-but-not-opted-in row is not success — it keeps polling until opt_in lands', async () => {
@@ -334,6 +352,8 @@ describe('photon setup flow (mocked API)', () => {
     // Creds persist so a re-run resumes where it left off.
     const env = fs.readFileSync(path.join(tempDir, '.env'), 'utf-8');
     expect(env).toContain('PHOTON_PROJECT_ID=proj-created');
+    // Saved credentials are resumable state, not proof that routing is ready.
+    expect(await main(['status'])).toBe(1);
   });
 
   it('reuses an existing project + user and skips creation', async () => {

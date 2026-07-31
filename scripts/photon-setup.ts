@@ -619,6 +619,11 @@ async function runStatus(args: Args): Promise<number> {
   const auth = loadAuth();
   const projectId = envValue('PHOTON_PROJECT_ID') || auth.project_id;
   const secret = envValue('PHOTON_PROJECT_SECRET');
+  const credentialsReady = Boolean(projectId && secret);
+  // setup writes phone_number only after the dashboard-backed user row carries
+  // meta.opt_in. Credentials alone are therefore resumable state, not proof
+  // that the number can route messages.
+  const routingReady = credentialsReady && Boolean(auth.phone_number);
   p.intro('Photon iMessage status');
   p.log.message(
     [
@@ -630,8 +635,18 @@ async function runStatus(args: Args): Promise<number> {
       `  dashboard host   : ${args.dashboardHost}`,
     ].join('\n'),
   );
-  p.outro(projectId && secret ? 'Photon is configured. Start the service and run /init-first-agent.' : 'Run setup to finish onboarding.');
-  return 0;
+  if (routingReady) {
+    p.outro('Photon routing is configured. Start the service and run /init-first-agent.');
+    return 0;
+  }
+  if (credentialsReady) {
+    p.outro(
+      'Photon credentials are saved, but phone routing is not ready. Re-run setup with --phone and finish the dashboard invite.',
+    );
+    return 1;
+  }
+  p.outro('Run setup to finish onboarding.');
+  return 1;
 }
 
 interface SetupDeps {
