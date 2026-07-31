@@ -332,8 +332,9 @@ describe('photon setup flow (mocked API)', () => {
     expect(calls.some((c) => c.method === 'POST' && /\/users\/$/.test(c.pathname))).toBe(false);
     // The create response carried no projectSecret → minted via regenerate.
     expect(calls.some((c) => /regenerate-secret$/.test(c.pathname))).toBe(true);
-    // Status only turns green after setup records the successful opt-in.
-    expect(await main(['status'])).toBe(0);
+    // Status only turns green after setup records the successful opt-in —
+    // and it re-verifies the opt-in live through the same (mocked) API.
+    expect(await main(['status'], fetchFn)).toBe(0);
   });
 
   it('a registered-but-not-opted-in row is not success — it keeps polling until opt_in lands', async () => {
@@ -353,7 +354,7 @@ describe('photon setup flow (mocked API)', () => {
     const env = fs.readFileSync(path.join(tempDir, '.env'), 'utf-8');
     expect(env).toContain('PHOTON_PROJECT_ID=proj-created');
     // Saved credentials are resumable state, not proof that routing is ready.
-    expect(await main(['status'])).toBe(1);
+    expect(await main(['status'], fetchFn)).toBe(1);
   });
 
   it('reuses an existing project + user and skips creation', async () => {
@@ -382,6 +383,37 @@ describe('photon setup flow (mocked API)', () => {
     expect(code).toBe(0);
     expect(calls.some((c) => c.pathname === '/api/auth/device/code')).toBe(false);
     expect(calls.some((c) => c.pathname === '/api/auth/get-session')).toBe(true);
+  });
+
+  it('a no-phone re-run preserves the stored phone_number and routing stays green', async () => {
+    // First run: full success, phone_number + assigned number stored.
+    await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], makeMockFetch({ existingUser: true }).fetchFn, noSleep);
+
+    // Re-run without --phone: step 4 is skipped, and the merge must not erase
+    // what the first run learned.
+    const { fetchFn } = makeMockFetch({ existingUser: true });
+    expect(await main(['setup', '--no-browser', '--non-interactive'], fetchFn, noSleep)).toBe(0);
+
+    const auth = JSON.parse(fs.readFileSync(path.join(tempDir, 'data', 'photon-auth.json'), 'utf-8'));
+    expect(auth.phone_number).toBe('+15551234567');
+    expect(auth.assigned_phone_number).toBe('+15558887777');
+    expect(await main(['status'], fetchFn)).toBe(0);
+  });
+
+  it('status probes the API: a stale phone_number with an un-opted-in row is not ready', async () => {
+    // Simulate an install configured by the old wizard: local state says
+    // "registered", but the live row never got the dashboard opt-in.
+    await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], makeMockFetch({ existingUser: true }).fetchFn, noSleep);
+    const { fetchFn } = makeMockFetch({ optInAfterListPolls: Number.MAX_SAFE_INTEGER, pendingUser: true });
+    expect(await main(['status'], fetchFn)).toBe(1);
+  });
+
+  it('status returns 1 when the routing probe cannot reach the API', async () => {
+    await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], makeMockFetch({ existingUser: true }).fetchFn, noSleep);
+    const failFetch = (async () => {
+      throw new Error('network down');
+    }) as typeof fetch;
+    expect(await main(['status'], failFetch)).toBe(1);
   });
 
   it('completes without a phone (skips user registration) but still writes creds', async () => {

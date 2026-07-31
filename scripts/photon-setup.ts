@@ -615,15 +615,35 @@ function openBrowser(url: string): void {
   }
 }
 
-async function runStatus(args: Args): Promise<number> {
+async function runStatus(args: Args, fetchFn: FetchFn = fetch): Promise<number> {
   const auth = loadAuth();
   const projectId = envValue('PHOTON_PROJECT_ID') || auth.project_id;
   const secret = envValue('PHOTON_PROJECT_SECRET');
   const credentialsReady = Boolean(projectId && secret);
   // setup writes phone_number only after the dashboard-backed user row carries
-  // meta.opt_in. Credentials alone are therefore resumable state, not proof
-  // that the number can route messages.
-  const routingReady = credentialsReady && Boolean(auth.phone_number);
+  // meta.opt_in — but state written by older setups can hold a phone_number
+  // whose row was never opted in (and so never routed). When credentials allow
+  // it, ask the API instead of trusting the local marker.
+  let routing: 'ready' | 'not-opted-in' | 'unverified' | 'unconfigured' = 'unconfigured';
+  let routingError = '';
+  if (credentialsReady && auth.phone_number) {
+    try {
+      const user = findUserByPhone(
+        await listUsers(fetchFn, args.spectrumHost, String(projectId), String(secret)),
+        auth.phone_number,
+      );
+      routing = userOptedIn(user) ? 'ready' : 'not-opted-in';
+    } catch (err) {
+      routing = 'unverified';
+      routingError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  const routingLine = {
+    ready: '✓ opted in (verified live)',
+    'not-opted-in': '✗ not opted in — finish the dashboard Add-user + invite step',
+    unverified: `? could not verify (${routingError})`,
+    unconfigured: '✗ not configured',
+  }[routing];
   p.intro('Photon iMessage status');
   p.log.message(
     [
@@ -631,13 +651,22 @@ async function runStatus(args: Args): Promise<number> {
       `  project id       : ${projectId || '✗ missing'}`,
       `  project secret   : ${secret ? '✓ stored' : '✗ missing'}`,
       `  your number      : ${auth.phone_number || '✗ missing (run setup --phone ...)'}`,
+      `  routing          : ${routingLine}`,
       `  agent's number   : ${auth.assigned_phone_number || '✗ unknown (run setup)'}`,
       `  dashboard host   : ${args.dashboardHost}`,
     ].join('\n'),
   );
-  if (routingReady) {
+  if (routing === 'ready') {
     p.outro('Photon routing is configured. Start the service and run /init-first-agent.');
     return 0;
+  }
+  if (routing === 'not-opted-in') {
+    p.outro('Your number is registered but not opted in. Re-run setup and finish the dashboard invite.');
+    return 1;
+  }
+  if (routing === 'unverified') {
+    p.outro('Could not reach the API to verify routing. Check connectivity and try again.');
+    return 1;
   }
   if (credentialsReady) {
     p.outro(
@@ -791,7 +820,13 @@ async function runSetup(args: Args, fetchFn: FetchFn = fetch, deps: SetupDeps = 
       /* non-fatal */
     }
   }
-  saveAuth({ phone_number: phone, assigned_phone_number: assigned ?? undefined });
+  // Only write the keys we actually learned this run — a merge with explicit
+  // undefined would erase the stored values on a no-phone re-run (and with
+  // them the routing-ready signal `status` reads).
+  saveAuth({
+    ...(phone ? { phone_number: phone } : {}),
+    ...(assigned ? { assigned_phone_number: assigned } : {}),
+  });
 
   if (assigned) {
     p.note(`📱  ${assigned}\n\nText this number from your phone to talk to your agent.`, "Agent's iMessage number");
@@ -830,7 +865,7 @@ async function runSetup(args: Args, fetchFn: FetchFn = fetch, deps: SetupDeps = 
 
 export async function main(argv: string[], fetchFn: FetchFn = fetch, deps: SetupDeps = {}): Promise<number> {
   const args = parseArgs(argv);
-  if (args.command === 'status') return runStatus(args);
+  if (args.command === 'status') return runStatus(args, fetchFn);
   return runSetup(args, fetchFn, deps);
 }
 
