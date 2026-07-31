@@ -27,6 +27,7 @@ import {
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 import { applyAfterAgentCallHooks, applyBeforeAgentCallHooks, type AgentHooksConfig } from './agent-hooks.js';
+import { finishCodexUsageJob, startCodexUsageJob, type CodexUsageJob } from './codex-usage-job.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -273,6 +274,12 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     const prompt = preHook.prompt;
 
+    const usageJob = await startCodexUsageJob({
+      providerName: config.providerName,
+      cwd: config.cwd,
+      routing,
+    });
+
     const query = config.provider.query({
       prompt,
       continuation,
@@ -301,6 +308,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
           agentGroupId: config.agentGroupId,
           agentName: config.agentName,
           model: config.model,
+          initialUsageJob: usageJob,
         },
       );
       if (result.continuation && result.continuation !== continuation) {
@@ -389,6 +397,7 @@ interface ProcessQueryHookOptions {
   agentGroupId?: string;
   agentName?: string;
   model?: string;
+  initialUsageJob?: CodexUsageJob | null;
 }
 
 export async function processQuery(
@@ -413,6 +422,7 @@ export async function processQuery(
   // the same prompt again. Unused (and unmaintained) when the provider
   // doesn't implement `onExchangeComplete`.
   const archivePrompts: string[] = [initialPrompt];
+  const usageJobs: Array<CodexUsageJob | null> = [hookOptions?.initialUsageJob ?? null];
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -517,12 +527,18 @@ export async function processQuery(
           return;
         }
         const prompt = preHook.prompt;
+        const usageJob = await startCodexUsageJob({
+          providerName,
+          cwd: hookOptions?.cwd ?? '/workspace/agent',
+          routing,
+        });
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
         taskBlockNudged = false;
         postHookRetryCount = 0;
         query.push(prompt);
         archivePrompts.push(prompt);
+        usageJobs.push(usageJob);
         markCompleted(keptIds);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
@@ -584,6 +600,7 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        const usageJob = usageJobs.shift() ?? null;
         if (event.text) {
           const answeredPrompt = archivePrompts[0] ?? initialPrompt;
           const postHook = await applyAfterAgentCallHooks({
@@ -613,10 +630,12 @@ export async function processQuery(
               continuation: queryContinuation ?? initialContinuation,
               status: 'undelivered',
             });
+            await finishCodexUsageJobSafely(usageJob);
             archivePrompts.shift();
             continue;
           }
           if (postHook.status === 'retry') {
+            await finishCodexUsageJobSafely(usageJob);
             log(`after_agent_call hook requested retry: ${postHook.reason ?? 'no reason'}`);
             if (postHookRetryCount >= 1) {
               log('after_agent_call retry limit reached; treating response as blocked');
@@ -631,6 +650,13 @@ export async function processQuery(
               continue;
             }
             postHookRetryCount += 1;
+            usageJobs.push(
+              await startCodexUsageJob({
+                providerName,
+                cwd: hookOptions?.cwd ?? '/workspace/agent',
+                routing,
+              }),
+            );
             query.push(postHook.retryPrompt ?? '<system>Please retry with a corrected final answer.</system>');
             continue;
           }
@@ -657,6 +683,7 @@ export async function processQuery(
               continuation: queryContinuation ?? initialContinuation,
               status: 'error',
             });
+            await finishCodexUsageJobSafely(usageJob);
             archivePrompts.shift();
           } else {
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
@@ -687,13 +714,18 @@ export async function processQuery(
             // A retry result (wrapping or task-block nudge) answers the SAME
             // user prompt — keep it queued so the retry archives against it,
             // not the nudge text.
+            await finishCodexUsageJobSafely(usageJob);
             if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
           }
-        } else archivePrompts.shift();
+        } else {
+          await finishCodexUsageJobSafely(usageJob);
+          archivePrompts.shift();
+        }
       }
     }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
+    await finishOutstandingUsageJobs(usageJobs);
     notifyExchangeComplete(onExchangeComplete, {
       prompt: archivePrompts[0] ?? initialPrompt,
       result: `Error: ${errMsg}`,
@@ -707,6 +739,20 @@ export async function processQuery(
   }
 
   return { continuation: queryContinuation };
+}
+
+async function finishOutstandingUsageJobs(usageJobs: Array<CodexUsageJob | null>): Promise<void> {
+  while (usageJobs.length > 0) {
+    await finishCodexUsageJobSafely(usageJobs.shift() ?? null);
+  }
+}
+
+async function finishCodexUsageJobSafely(usageJob: CodexUsageJob | null): Promise<void> {
+  try {
+    await finishCodexUsageJob(usageJob);
+  } catch (err) {
+    log(`Codex usage post-job routine failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 function notifyExchangeComplete(
