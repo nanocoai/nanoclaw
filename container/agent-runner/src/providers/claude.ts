@@ -21,6 +21,49 @@ function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
 }
 
+export interface SdkRateLimitInfo {
+  status?: string;
+  resetsAt?: number;
+  rateLimitType?: string;
+  utilization?: number;
+  errorCode?: string;
+  overageDisabledReason?: string;
+}
+
+/**
+ * Map an SDK `rate_limit_event` to a provider event — or to NOTHING.
+ *
+ * The SDK emits this "when rate limit info changes": it is TELEMETRY, and
+ * `status` is usually 'allowed' (here's your remaining headroom). We used to
+ * treat every one as a terminal quota error: on a stock install that logged a
+ * spurious "Rate limit (retryable: false, quota)" on perfectly healthy turns
+ * (#3016), and any consumer acting on the classification aborted those turns
+ * outright. **Only 'rejected' is an actual block.**
+ *
+ * When it IS rejected the SDK tells us WHY, so we distinguish properly instead
+ * of guessing: `errorCode: 'credits_required'` / `overageDisabledReason:
+ * 'out_of_credits'` means genuinely out of credits (billing); anything else is a
+ * transient window limit that resets (`resetsAt`, `rateLimitType`).
+ *
+ * Returns null when the event is informational (do not disturb the turn).
+ */
+export function classifyRateLimitEvent(
+  info: SdkRateLimitInfo | undefined,
+): { message: string; classification: 'rate_limit' | 'quota' } | null {
+  if (info?.status !== 'rejected') return null;
+  const outOfCredits = info.errorCode === 'credits_required' || info.overageDisabledReason === 'out_of_credits';
+  let detail = '';
+  if (typeof info.resetsAt === 'number' && Number.isFinite(info.resetsAt)) {
+    const ms = info.resetsAt < 1e12 ? info.resetsAt * 1000 : info.resetsAt;
+    detail = ` (resets ${new Date(ms).toISOString()})`;
+  }
+  const window = info.rateLimitType ? ` [${info.rateLimitType}]` : '';
+  return {
+    message: `${outOfCredits ? 'Out of credits' : 'Rate limit'}${window}${detail}`,
+    classification: outOfCredits ? 'quota' : 'rate_limit',
+  };
+}
+
 // Deferred SDK builtins that either sidestep nanoclaw's own scheduling or
 // don't fit our async message-passing model (they're designed for Claude
 // Code's interactive UI and would hang here).
@@ -539,11 +582,42 @@ export class ClaudeProvider implements AgentProvider {
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'rate_limit_event') {
-          yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
+          // The SDK emits this "when rate limit info CHANGES" — it is telemetry,
+          // not necessarily an error. `rate_limit_info.status` is usually
+          // 'allowed' (here's your remaining headroom). Treating every one of
+          // these as a terminal quota error logged a spurious rate-limit line
+          // on healthy turns (#3016) — and aborted them outright wherever the
+          // classification is acted on. ONLY 'rejected' is an actual block.
+          //
+          // When it IS rejected the SDK tells us WHY, so we can finally
+          // distinguish the two cases properly instead of guessing:
+          //   errorCode 'credits_required' / overageDisabledReason
+          //   'out_of_credits'  → genuinely out of credits (billing)
+          //   otherwise         → a transient window limit that resets.
+          const info = (message as { rate_limit_info?: SdkRateLimitInfo }).rate_limit_info;
+          const blocked = classifyRateLimitEvent(info);
+          if (!blocked) {
+            // Informational ('allowed' / 'allowed_warning') — never kill the turn.
+            if (info?.status === 'allowed_warning') {
+              log(
+                `rate-limit warning: ${info.rateLimitType ?? 'window'} at ${
+                  info.utilization != null ? `${Math.round(info.utilization * 100)}%` : 'high'
+                } utilization`,
+              );
+            }
+          } else {
+            yield { type: 'error', message: blocked.message, retryable: false, classification: blocked.classification };
+          }
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
           const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';
-          yield { type: 'result', text: `Context compacted${detail}.` };
+          // Not a `result`: the poll loop treats result text as the agent's turn
+          // output — a synthetic "Context compacted." result has no <message>
+          // block, so it triggers the "response was not delivered — please
+          // re-send" nudge and the agent duplicates its previous message.
+          // Compaction is bookkeeping: log it, count it as activity only.
+          log(`Context compacted${detail}.`);
+          yield { type: 'activity' };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
           const tn = message as { summary?: string };
           yield { type: 'progress', message: tn.summary || 'Task notification' };

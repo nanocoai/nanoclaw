@@ -527,14 +527,25 @@ else
   step_skip "No v1 container skills"
 fi
 
-# 3e. Build agent container image
+# 3e. Acquire the agent container image
 if command -v docker >/dev/null 2>&1; then
-  step_info "Building agent container image…"
+  # Honour an install that pulls rather than builds. The bare form deliberately
+  # exits 3 there rather than replacing pulled bytes with a local build, so
+  # calling it unconditionally would report "build failed" on a working install.
+  IMAGE_SOURCE_SETTING="$(grep '^NANOCLAW_HARDENED_IMAGE=' .env 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  if [ "$IMAGE_SOURCE_SETTING" = "true" ]; then
+    BUILD_ARGS="pull"
+    step_info "Fetching pinned agent container image…"
+  else
+    BUILD_ARGS=""
+    step_info "Building agent container image…"
+  fi
   BUILD_LOG="$STEPS_DIR/3e-container-build.log"
-  if bash container/build.sh > "$BUILD_LOG" 2>&1; then
-    step_ok "Container image built"
+  # shellcheck disable=SC2086 -- BUILD_ARGS is one optional literal word.
+  if bash container/build.sh $BUILD_ARGS > "$BUILD_LOG" 2>&1; then
+    step_ok "Container image ready"
     record_step "3e-build" "success"
-    log "Container build: success"
+    log "Container image: success (${BUILD_ARGS:-build})"
   else
     step_fail "Container build failed"
     record_step "3e-build" "failed"

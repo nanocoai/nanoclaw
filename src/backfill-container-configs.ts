@@ -65,6 +65,7 @@ export function backfillContainerConfigs(): void {
       packages_npm: JSON.stringify(legacy.packages?.npm ?? []),
       additional_mounts: JSON.stringify(legacy.additionalMounts ?? []),
       cli_scope: 'group',
+      timezone: null,
       updated_at: new Date().toISOString(),
     };
 

@@ -2,7 +2,8 @@ import fs from 'fs';
 
 import type Database from 'better-sqlite3';
 
-import { GROUPS_DIR } from '../../config.js';
+import { GROUPS_DIR, TIMEZONE } from '../../config.js';
+import { resolveGroupTimezone } from '../../container-config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import {
   findTaskSessions,
@@ -185,6 +186,7 @@ function createTask(args: Record<string, unknown>, ctx: CallerContext) {
     processAfter: str(args.process_after),
     script,
     dangerouslyOverrideRecurrenceLimit: bool(args.dangerously_override_recurrence_limit),
+    timezone: resolveGroupTimezone(group),
   });
   const { session, row } = createScheduledTask(group, prepared, {
     originSessionId: ctx.caller === 'agent' ? ctx.sessionId : null,
@@ -330,24 +332,34 @@ function updateTaskCommand(args: Record<string, unknown>, ctx: CallerContext) {
   const id = taskId(args);
   const update: TaskUpdate = {};
   if (typeof args.prompt === 'string') update.prompt = args.prompt;
-  if (args.process_after !== undefined) update.processAfter = parseProcessAfter(args.process_after);
   const recurrence = normalizeNullableString(args.recurrence);
   const script = normalizeNullableString(args.script);
-  if (recurrence !== undefined) {
-    validateRecurrence(recurrence);
-    // Effective script AFTER this update: the new value when provided
-    // (including an explicit clear), else whatever the task already has.
-    let scriptAfter: string | null = script !== undefined ? script : null;
-    if (script === undefined) {
-      for (const session of selectedSessions(args, ctx)) {
-        const row = withInbound(session, (db) => selectTask(db, id));
-        if (row) {
-          scriptAfter = parseContent(row.content).script;
-          break;
-        }
+
+  // Wall-clock fields (--process-after, cron grid) are interpreted in the
+  // owning group's timezone, so the task's group must be resolved before
+  // parsing. The same lookup yields the task's current script for the
+  // recurrence-limit check.
+  let ownerGroup: string | undefined;
+  let currentScript: string | null = null;
+  if (args.process_after !== undefined || recurrence !== undefined) {
+    for (const session of selectedSessions(args, ctx)) {
+      const row = withInbound(session, (db) => selectTask(db, id));
+      if (row) {
+        ownerGroup = session.agent_group_id;
+        currentScript = parseContent(row.content).script;
+        break;
       }
     }
-    enforceRecurrenceLimit(recurrence, bool(args.dangerously_override_recurrence_limit), scriptAfter != null);
+  }
+  const tz = ownerGroup ? resolveGroupTimezone(ownerGroup) : TIMEZONE;
+
+  if (args.process_after !== undefined) update.processAfter = parseProcessAfter(args.process_after, tz);
+  if (recurrence !== undefined) {
+    validateRecurrence(recurrence, tz);
+    // Effective script AFTER this update: the new value when provided
+    // (including an explicit clear), else whatever the task already has.
+    const scriptAfter: string | null = script !== undefined ? script : currentScript;
+    enforceRecurrenceLimit(recurrence, bool(args.dangerously_override_recurrence_limit), scriptAfter != null, tz);
     update.recurrence = recurrence;
   }
   if (script !== undefined) update.script = script;

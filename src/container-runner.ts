@@ -16,6 +16,7 @@ import {
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
   CONTAINER_MEMORY_LIMIT,
+  CONTAINER_PIDS_LIMIT,
   DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
@@ -245,6 +246,29 @@ export function resolveProviderName(
   return (sessionProvider || containerConfigProvider || 'claude').toLowerCase();
 }
 
+/**
+ * Container hardening flags. Applied to every agent container; no per-group or
+ * per-install override.
+ *
+ * cap-drop and no-new-privileges are inert while containers run under the
+ * `--user` mapping below (the capability sets are already empty and the image
+ * carries no file capabilities) — they are depth against a root-in-container
+ * path. `--init` is not optional: the `--entrypoint bash` override further down
+ * defeats the image's tini, leaving bun as PID 1 with no signal handler, and
+ * Linux discards default-action signals to PID 1. Without docker-init, SIGTERM
+ * is ignored and every stop ends in SIGKILL after the full grace period.
+ */
+export function hardeningArgs(pidsLimit: string): string[] {
+  const args = ['--cap-drop=ALL', '--security-opt', 'no-new-privileges', '--init'];
+
+  // Test >0, not truthiness: cgroups v2 rejects `--pids-limit 0` with EINVAL and
+  // fails the spawn, and '0' is a truthy string. Blank/unparseable means no cap.
+  const pids = Number(pidsLimit);
+  if (Number.isFinite(pids) && pids > 0) args.push('--pids-limit', String(Math.floor(pids)));
+
+  return args;
+}
+
 function resolveProviderContribution(
   session: Session,
   agentGroup: AgentGroup,
@@ -449,9 +473,16 @@ async function buildContainerArgs(
   if (CONTAINER_CPU_LIMIT) args.push('--cpus', CONTAINER_CPU_LIMIT);
   if (CONTAINER_MEMORY_LIMIT) args.push('--memory', CONTAINER_MEMORY_LIMIT);
 
+  // Docker defaults /dev/shm to 64m, which silently short-writes past that size.
+  // agent-browser passes --disable-dev-shm-usage, but a third-party puppeteer or
+  // Playwright launcher may not.
+  args.push('--shm-size=1g');
+
+  args.push(...hardeningArgs(CONTAINER_PIDS_LIMIT));
+
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
-  args.push('-e', `TZ=${TIMEZONE}`);
+  args.push('-e', `TZ=${containerConfig.timezone ?? TIMEZONE}`);
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
@@ -531,6 +562,18 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
     throw new Error('No packages to install. Use install_packages first.');
   }
 
+  // Which bytes this is built on. Recorded on the derived image so an operator
+  // can tell which base a group's packages were layered onto — the image id
+  // rather than a RepoDigest, because a locally built base has no RepoDigest at
+  // all and an id is unambiguous either way.
+  let baseId = '';
+  try {
+    const { stdout } = await execAsync(`${CONTAINER_RUNTIME_BIN} image inspect --format '{{.Id}}' ${CONTAINER_IMAGE}`);
+    baseId = stdout.trim();
+  } catch {
+    // Non-fatal: the build below fails on its own if the base is really absent.
+  }
+
   let dockerfile = `FROM ${CONTAINER_IMAGE}\nUSER root\n`;
   if (aptPackages.length > 0) {
     dockerfile += `RUN apt-get update && apt-get install -y ${aptPackages.join(' ')} && rm -rf /var/lib/apt/lists/*\n`;
@@ -544,6 +587,17 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
     dockerfile += `RUN ${allowlist} && pnpm install -g ${npmPackages.join(' ')}\n`;
   }
   dockerfile += 'USER node\n';
+
+  // Overwrite the provenance label rather than letting it be inherited.
+  //
+  // `dev.nanoclaw.image-source` is documented as the one claim a retag cannot
+  // forge, and --status treats it as the trustworthy answer. But a derived
+  // build inherits the base's labels, so without this a group that has just
+  // added arbitrary apt/npm packages would keep asserting `hardened` — the
+  // vendor's claim, over bytes the vendor never saw. `derived` is the honest
+  // answer, and `derived-from` says what it was layered onto.
+  dockerfile += 'LABEL dev.nanoclaw.image-source="derived"\n';
+  if (baseId) dockerfile += `LABEL dev.nanoclaw.derived-from="${baseId}"\n`;
 
   const imageTag = `${CONTAINER_IMAGE_BASE}:${agentGroupId}`;
 

@@ -22,10 +22,20 @@ const VERSIONS_FILE = path.resolve(
  * missing — a missing pin is an install-tree defect, not a runtime condition.
  */
 export function readVersionPin(component: string): string {
-  const pins: unknown = JSON.parse(fs.readFileSync(VERSIONS_FILE, 'utf-8'));
-  const value = (pins as Record<string, unknown>)[component];
+  const value = readVersionPinValue(component);
   if (typeof value !== 'string' || value.length === 0) {
     throw new Error(`versions.json has no pin for "${component}"`);
   }
   return value;
+}
+
+/**
+ * The raw pin, whatever shape it is. Only `agent-image` needs this: it may be a
+ * single reference or one per platform, and `readVersionPin` above deliberately
+ * refuses anything but a string so the version pins it serves cannot silently
+ * become structured.
+ */
+export function readVersionPinValue(component: string): unknown {
+  const pins: unknown = JSON.parse(fs.readFileSync(VERSIONS_FILE, 'utf-8'));
+  return (pins as Record<string, unknown>)[component];
 }

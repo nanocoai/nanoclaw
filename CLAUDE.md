@@ -82,7 +82,7 @@ For ad-hoc queries from skills or scripts, use the in-tree wrapper rather than t
 | `src/channels/channel-defaults.ts` | Wiring-creation helpers over adapter-declared channel defaults (`resolveWiringDefaults`, `resolveThreadPolicy`, engage validation) |
 | `src/providers/` | Host-side provider container-config (`claude` baked in; `opencode` etc. installed from the `providers` branch) |
 | `container/agent-runner/src/` | Agent-runner: poll loop, formatter, provider abstraction, MCP tools, destinations |
-| `container/skills/` | Container skills mounted into every agent session (`agent-browser`, `frontend-engineer`, `onecli-gateway`, `self-customize`, `vercel-cli`, `welcome`; channel-specific skills like `slack-formatting` and `whatsapp-formatting` install with their channel) |
+| `container/skills/` | Container skills mounted into every agent session (`agent-browser`, `frontend-engineer`, `onecli-gateway`, `self-customize`, `welcome`; opt-in skills like `vercel-cli`, `slack-formatting` and `whatsapp-formatting` install with the `/add-*` skill that adds their capability) |
 | `groups/<folder>/` | Per-agent-group filesystem (CLAUDE.md, skills) — agent-runner source is a shared read-only mount, not copied per group |
 | `scripts/init-first-agent.ts` | Bootstrap the first DM-wired agent (used by `/init-first-agent` skill) |
 | `scripts/skill-apply.ts` | Deterministic SKILL.md applier — executes `nc:` directive fences; declare/emit core, journaled + idempotent |
@@ -191,7 +191,7 @@ Four types of skills. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxono
 - **Channel/provider install skills** — copy the relevant module(s) in from the `channels` or `providers` branch, wire imports, install pinned deps (e.g. `/add-discord`, `/add-slack`, `/add-whatsapp`, `/add-opencode`).
 - **Utility skills** — ship code files alongside `SKILL.md` (e.g. a `scripts/` CLI or helper).
 - **Operational skills** — instruction-only workflows (`/setup`, `/debug`, `/customize`, `/init-first-agent`, `/manage-channels`, `/init-onecli`, `/update-nanoclaw`).
-- **Container skills** — loaded inside agent containers at runtime (`container/skills/`: `agent-browser`, `frontend-engineer`, `onecli-gateway`, `self-customize`, `vercel-cli`, `welcome`; channel-specific skills like `slack-formatting` and `whatsapp-formatting` are copied in by their `/add-<channel>` skill).
+- **Container skills** — loaded inside agent containers at runtime (`container/skills/`: `agent-browser`, `frontend-engineer`, `onecli-gateway`, `self-customize`, `welcome`; opt-in skills like `vercel-cli` and the channel formatters are copied in by the `/add-*` skill that adds their capability).
 
 | Skill | When to Use |
 |-------|-------------|
@@ -267,6 +267,8 @@ Two rules, no exceptions:
 - **Storage**: every timestamp written from JS is `new Date().toISOString()` (ISO-8601 UTC with `Z`). Never `datetime('now')` — its naive `YYYY-MM-DD HH:MM:SS` shape is misparsed as local time by `new Date()` and breaks string comparisons against ISO values. In pure-SQL contexts (skill snippets) use `strftime('%Y-%m-%dT%H:%M:%fZ','now')`. SQL-side *comparisons* wrap both sides in `datetime()`.
 - **Display**: anything shown to an agent or a user renders in the install timezone — `formatLocalTime` (prose) or `formatLocalStamp` (log lines) from `src/timezone.ts` / `container/agent-runner/src/timezone.ts`. `--json` output, DB values, and operator logs stay ISO.
 
+An agent group can override the install timezone (`ncl groups config update --timezone <IANA>`, `""` clears; approval-gated for agent callers). The override grounds that group's scheduling (cron interpretation, `--process-after`, run-log stamps — effective immediately) and the container's `TZ` env (effective on respawn). Host-side operator display (`ncl` human output) stays in the install timezone. Resolution: `resolveGroupTimezone` in `src/container-config.ts` — group override → install global.
+
 ## Supply Chain Security (pnpm)
 
 This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspace.yaml`. New package versions must exist on the npm registry for 3 days before pnpm will resolve them.
@@ -299,6 +301,7 @@ This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspac
 | [docs/skill-directives.md](docs/skill-directives.md) | `nc:` directive reference: fence grammar, the eight kinds, effects, guards, lint |
 | [docs/skill-engine-seam.md](docs/skill-engine-seam.md) | Skill-engine consumer contract (wizard / pipeline / agent-relay) + boundary-rule rationale |
 | [docs/templates.md](docs/templates.md) | Agent templates: what they are, stamping via `ncl groups create --template` + the setup wizard, the OneCLI/MCP-credential model, supported providers, and how to contribute one |
+| [docs/hardened-image.md](docs/hardened-image.md) | Opt-in: pull the agent image from a registry instead of building it |
 
 ## Container Build Cache
 
