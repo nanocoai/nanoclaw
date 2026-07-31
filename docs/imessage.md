@@ -109,7 +109,8 @@ The underlying commands are:
 # 1. install the runtime SDK (pinned — spectrum-ts ships breaking majors)
 pnpm install spectrum-ts@11.0.0
 
-# 2. run the setup wizard (device login + auto-provision everything)
+# 2. run the setup wizard (device login + guided provisioning; one manual
+#    dashboard opt-in step — the wizard waits for it)
 pnpm exec tsx scripts/photon-setup.ts --phone +15551234567
 ```
 
@@ -122,8 +123,11 @@ pnpm exec tsx scripts/photon-setup.ts --phone +15551234567
 2. **Find or create** the `NanoClaw` project on the Photon dashboard.
 3. **Mint the project secret** (the dashboard reveals it once) and write
    `PHOTON_PROJECT_ID` + `PHOTON_PROJECT_SECRET` to `.env`.
-4. **Register your phone** as a Spectrum user (idempotent — skipped if already
-   present).
+4. **Wait for your phone's dashboard opt-in.** Numbers only enter iMessage
+   routing after the dashboard's Add-user invite is accepted (the user row then
+   carries `meta.opt_in`; the API cannot set it, so the wizard never creates
+   users through the API). The wizard prints the dashboard steps and polls
+   until the opt-in lands — instant if the row is already opted in.
 5. **Surface the assigned iMessage line** — the number you text to reach your
    agent.
 
@@ -206,7 +210,7 @@ deliberate:
 | Symptom                                 | Fix                                                                                                                   |
 | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `spectrum-ts is not installed` at setup | Hosted backend: `pnpm install spectrum-ts@11.0.0`, then restart                                                        |
-| `Target not allowed for this project`   | Intended: the line only messages numbers that have texted it first. Send any message to the agent's number, then retry |
+| `Target not allowed for this project`   | The number's user row is missing its dashboard opt-in (`meta.opt_in`) — finish the Add-user + invite step, then text the line once (it only messages numbers that have texted it first) |
 | Device login times out                  | Re-run the wizard (the code expires in ~30 min; a stored token is reused)                                             |
 | No iMessage line assigned               | Re-run `… photon-setup.ts status` or check the [dashboard][photon]; the shared line can take a moment                 |
 | Inbound stops arriving (hosted)         | The adapter re-subscribes automatically; if it persists it's usually upstream — restart to force a fresh stream       |

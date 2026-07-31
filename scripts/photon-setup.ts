@@ -3,14 +3,20 @@
  * Photon iMessage setup wizard — frictionless first-time onboarding.
  *
  * Runs Photon's OAuth device-login flow, then provisions everything the
- * `photon` channel needs so the operator never has to touch the dashboard:
+ * `photon` channel needs. One step stays manual by necessity: the delivery
+ * plane only routes numbers whose user row carries `meta.opt_in`, which is set
+ * by the dashboard's Add-user invite flow and cannot be triggered through the
+ * API (client-supplied meta is ignored on create). The wizard guides that step
+ * and polls until the opt-in lands, so it never reports success for a number
+ * that cannot receive messages.
  *
  *   [1/5] Device login   — open a URL, approve, we store the bearer token
  *   [2/5] Project        — find or create the "NanoClaw" Photon project
  *   [3/5] Secret         — reuse the project's current secret (rotating only
  *                          when the API doesn't return one) and write
  *                          PHOTON_PROJECT_ID + PHOTON_PROJECT_SECRET to .env
- *   [4/5] User           — register your phone as a Spectrum user (idempotent)
+ *   [4/5] User           — guide the dashboard Add-user + invite step, then
+ *                          wait until your phone's user row is opted in
  *   [5/5] iMessage line  — surface the number you text to reach your agent
  *
  * Everything is idempotent — re-running reuses the stored token/project and
@@ -57,6 +63,8 @@ export const DEFAULT_SCOPE = 'openid profile email';
 export const DEFAULT_PROJECT_NAME = 'NanoClaw';
 const DEFAULT_POLL_INTERVAL_S = 5;
 const DEFAULT_POLL_TIMEOUT_S = 1800;
+const DEFAULT_OPTIN_POLL_INTERVAL_S = 5;
+const DEFAULT_OPTIN_TIMEOUT_S = 600;
 
 const E164_RE = /^\+[1-9]\d{6,14}$/;
 
@@ -348,41 +356,53 @@ export function findUserByPhone(users: Array<Record<string, unknown>>, phone: st
   return users.find((u) => normalizePhone(String(u.phoneNumber ?? '')) === target);
 }
 
-export async function createUser(
-  fetchFn: FetchFn,
-  spectrumHost: string,
-  projectId: string,
-  projectSecret: string,
-  opts: { phoneNumber: string; firstName?: string; lastName?: string; email?: string },
-): Promise<Record<string, unknown>> {
-  if (!isE164(opts.phoneNumber)) throw new Error(`phone must be E.164 (e.g. +15551234567); got ${opts.phoneNumber}`);
-  const body: Record<string, unknown> = { type: 'shared', phoneNumber: opts.phoneNumber };
-  if (opts.firstName) body.firstName = opts.firstName;
-  if (opts.lastName) body.lastName = opts.lastName;
-  if (opts.email) body.email = opts.email;
-  const resp = await fetchFn(`${spectrumHost}/projects/${projectId}/users/`, {
-    method: 'POST',
-    headers: { Authorization: basicAuth(projectId, projectSecret), 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!resp.ok) throw new Error(`Photon create-user failed: ${await errorDetail(resp)}`);
-  const data = await readJson(resp);
-  if (data.error) throw new Error(`Photon create-user failed: ${data.error}`);
-  const user = (data.user as Record<string, unknown>) || (data.data as Record<string, unknown>) || data;
-  return user;
+/**
+ * True when the delivery plane will route messages for this user: the row
+ * carries `meta.opt_in`, which only the dashboard's Add-user invite flow sets.
+ * A row without it (however it was created) looks registered everywhere but
+ * never sends or receives.
+ */
+export function userOptedIn(user: Record<string, unknown> | undefined): boolean {
+  const meta = user?.meta;
+  return !!meta && typeof meta === 'object' && (meta as Record<string, unknown>).opt_in === true;
 }
 
-export async function registerUserIfAbsent(
+export interface OptInWaitOpts {
+  sleepFn?: (ms: number) => Promise<void>;
+  intervalS?: number;
+  timeoutS?: number;
+  /** Progress hook, called once per poll that did not find an opted-in row (1-based). */
+  onWaiting?: (attempt: number) => void;
+}
+
+/**
+ * Poll until `phone`'s user row exists AND is opted in, then return the row.
+ * Creating the row through the API cannot produce the opt-in (client-supplied
+ * meta is ignored), so the wizard doesn't create users at all — it waits for
+ * the dashboard step to land. Throws after `timeoutS` (attempt-count based, so
+ * tests with an instant sleepFn stay deterministic).
+ */
+export async function waitForOptedInUser(
   fetchFn: FetchFn,
   spectrumHost: string,
   projectId: string,
   projectSecret: string,
-  opts: { phoneNumber: string; firstName?: string; lastName?: string; email?: string },
-): Promise<{ user: Record<string, unknown>; created: boolean }> {
-  const existing = findUserByPhone(await listUsers(fetchFn, spectrumHost, projectId, projectSecret), opts.phoneNumber);
-  if (existing) return { user: existing, created: false };
-  const user = await createUser(fetchFn, spectrumHost, projectId, projectSecret, opts);
-  return { user, created: true };
+  phone: string,
+  opts: OptInWaitOpts = {},
+): Promise<Record<string, unknown>> {
+  const intervalS = Math.max(1, opts.intervalS ?? DEFAULT_OPTIN_POLL_INTERVAL_S);
+  const timeoutS = opts.timeoutS ?? DEFAULT_OPTIN_TIMEOUT_S;
+  const sleepFn = opts.sleepFn ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const maxAttempts = Math.max(1, Math.ceil(timeoutS / intervalS));
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const user = findUserByPhone(await listUsers(fetchFn, spectrumHost, projectId, projectSecret), phone);
+    if (userOptedIn(user)) return user as Record<string, unknown>;
+    opts.onWaiting?.(attempt);
+    if (attempt < maxAttempts) await sleepFn(intervalS * 1000);
+  }
+  throw new Error(
+    `${phone} was not opted in after ${timeoutS}s. Finish the dashboard step (Add user, then accept the invite on that phone) and re-run setup — it resumes where it left off.`,
+  );
 }
 
 /** The iMessage number a user texts to reach the agent ("TEXTS ON" column). */
@@ -421,6 +441,9 @@ export async function getImessageLine(
   });
   if (!resp.ok) return null;
   const data = await readJson(resp);
+  // Line add/remove is plan-gated and the API reports that as HTTP 200 with an
+  // {"error": …} body — never treat that as a line.
+  if (data.error) return null;
   return (data.line as Record<string, unknown>) || data;
 }
 
@@ -711,10 +734,31 @@ async function runSetup(args: Args, fetchFn: FetchFn = fetch, deps: SetupDeps = 
     p.cancel(`Invalid phone number: ${phone}`);
     return 1;
   } else {
-    p.log.step('[4/5] Registering your phone as a Spectrum user');
+    p.log.step('[4/5] Registering your phone (dashboard opt-in)');
     try {
-      const { user, created } = await registerUserIfAbsent(fetchFn, args.spectrumHost, projectId, secret, { phoneNumber: phone });
-      p.log.info(created ? 'Phone registered' : 'Phone already registered');
+      const user = await waitForOptedInUser(fetchFn, args.spectrumHost, projectId, secret, phone, {
+        sleepFn: deps.sleepFn,
+        onWaiting: (attempt) => {
+          if (attempt === 1) {
+            p.note(
+              [
+                'Numbers only receive messages after the dashboard invite flow,',
+                'so this one step is manual:',
+                '',
+                `  1. Open ${args.dashboardHost} and select the "${args.projectName}" project.`,
+                `  2. Add ${phone} as a user (Add user).`,
+                '  3. Accept the invite that arrives on that phone.',
+                '',
+                'Setup waits here and continues once the opt-in lands.',
+              ].join('\n'),
+              'One dashboard step needed',
+            );
+          } else if (attempt % 6 === 0) {
+            p.log.message(`Still waiting for the dashboard opt-in for ${phone}…`);
+          }
+        },
+      });
+      p.log.info('Phone registered and opted in');
       assigned = userAssignedLine(user);
     } catch (err) {
       p.cancel(`User registration failed: ${err instanceof Error ? err.message : String(err)}`);

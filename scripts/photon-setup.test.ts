@@ -24,6 +24,8 @@ import {
   unwrapList,
   upsertEnv,
   userAssignedLine,
+  userOptedIn,
+  waitForOptedInUser,
 } from './photon-setup.js';
 
 // ---------------------------------------------------------------------------
@@ -103,6 +105,29 @@ describe('unwrapList / find helpers', () => {
   });
 });
 
+describe('userOptedIn / waitForOptedInUser', () => {
+  it('only a meta.opt_in === true row counts as opted in', () => {
+    expect(userOptedIn(undefined)).toBe(false);
+    expect(userOptedIn({})).toBe(false);
+    expect(userOptedIn({ meta: {} })).toBe(false);
+    expect(userOptedIn({ meta: { opt_in: false } })).toBe(false);
+    expect(userOptedIn({ meta: { project_owner: true } })).toBe(false);
+    expect(userOptedIn({ meta: { opt_in: true } })).toBe(true);
+  });
+
+  it('times out with a re-run hint when the opt-in never lands', async () => {
+    const fetchFn = (async () =>
+      new Response(JSON.stringify({ users: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+    await expect(
+      waitForOptedInUser(fetchFn, 'https://s.example.com', 'proj', 'secret', '+15551234567', {
+        sleepFn: async () => {},
+        intervalS: 1,
+        timeoutS: 3,
+      }),
+    ).rejects.toThrow(/not opted in after 3s.*re-run setup/);
+  });
+});
+
 describe('parseArgs', () => {
   it('defaults to setup with the NanoClaw project name', () => {
     const a = parseArgs([]);
@@ -147,12 +172,24 @@ interface Call {
   pathname: string;
 }
 
-/** Build a fetch that emulates the Photon dashboard + spectrum endpoints. */
-function makeMockFetch(opts: { existingProject?: boolean; existingUser?: boolean } = {}): {
+/**
+ * Build a fetch that emulates the Photon dashboard + spectrum endpoints.
+ *
+ * User-list behavior mirrors the live service: rows only route once they carry
+ * `meta.opt_in` (set by the dashboard invite flow, never by the API).
+ * - `existingUser`: the row exists and is opted in from the first poll.
+ * - `optInAfterListPolls: n`: the first n GET /users/ polls see no opted-in
+ *   row; from poll n+1 the row exists with `meta.opt_in`. With `pendingUser`
+ *   the pre-flip polls return the row WITHOUT opt_in instead of an empty list.
+ */
+function makeMockFetch(
+  opts: { existingProject?: boolean; existingUser?: boolean; optInAfterListPolls?: number; pendingUser?: boolean } = {},
+): {
   fetchFn: typeof fetch;
   calls: Call[];
 } {
   const calls: Call[] = [];
+  let userListPolls = 0;
   const json = (body: unknown, status = 200): Response =>
     new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
@@ -203,14 +240,29 @@ function makeMockFetch(opts: { existingProject?: boolean; existingUser?: boolean
     }
     // Spectrum users
     if (/^\/projects\/[^/]+\/users\/$/.test(pathname) && method === 'GET') {
-      return json({
-        users: opts.existingUser
-          ? [{ id: 'u-existing', phoneNumber: '+15551234567', assignedPhoneNumber: '+15558887777' }]
-          : [],
-      });
+      userListPolls += 1;
+      const optedInRow = {
+        id: 'u-existing',
+        phoneNumber: '+15551234567',
+        assignedPhoneNumber: '+15558887777',
+        meta: { opt_in: true },
+      };
+      if (opts.existingUser) return json({ users: [optedInRow] });
+      if (opts.optInAfterListPolls !== undefined) {
+        if (userListPolls > opts.optInAfterListPolls) return json({ users: [optedInRow] });
+        return json({
+          users: opts.pendingUser
+            ? [{ id: 'u-pending', phoneNumber: '+15551234567', assignedPhoneNumber: '+15558887777', meta: {} }]
+            : [],
+        });
+      }
+      return json({ users: [] });
     }
     if (/^\/projects\/[^/]+\/users\/$/.test(pathname) && method === 'POST') {
-      return json({ user: { id: 'u-created', phoneNumber: '+15551234567', assignedPhoneNumber: '+15558887777' } });
+      // The API accepts creates but strips client-supplied meta, so an
+      // API-created row can never become opted in. The wizard must not call
+      // this at all.
+      return json({ user: { id: 'u-created', phoneNumber: '+15551234567', assignedPhoneNumber: '+15558887777', meta: {} } });
     }
     return json({ error: `unmocked ${method} ${pathname}` }, 404);
   }) as typeof fetch;
@@ -237,8 +289,10 @@ describe('photon setup flow (mocked API)', () => {
 
   const noSleep = { sleepFn: async () => {} };
 
-  it('provisions a brand-new project + user and writes creds to .env', async () => {
-    const { fetchFn, calls } = makeMockFetch();
+  it('provisions a brand-new project, waits for the dashboard opt-in, and writes creds to .env', async () => {
+    // The user row appears opted in on the third list poll, as if the operator
+    // did the dashboard Add-user + invite dance while the wizard waited.
+    const { fetchFn, calls } = makeMockFetch({ optInAfterListPolls: 2 });
     const code = await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep);
     expect(code).toBe(0);
 
@@ -256,10 +310,30 @@ describe('photon setup flow (mocked API)', () => {
     expect(calls.some((c) => c.pathname === '/api/auth/device/code')).toBe(true);
     // The project was created (not found).
     expect(calls.some((c) => c.method === 'POST' && c.pathname === '/api/projects')).toBe(true);
-    // A new user was created.
-    expect(calls.some((c) => c.method === 'POST' && /\/users\/$/.test(c.pathname))).toBe(true);
+    // The user list was polled until the opt-in landed (poll 3).
+    expect(calls.filter((c) => c.method === 'GET' && /\/users\/$/.test(c.pathname)).length).toBe(3);
+    // Users are NEVER created through the API — those rows can't be opted in.
+    expect(calls.some((c) => c.method === 'POST' && /\/users\/$/.test(c.pathname))).toBe(false);
     // The create response carried no projectSecret → minted via regenerate.
     expect(calls.some((c) => /regenerate-secret$/.test(c.pathname))).toBe(true);
+  });
+
+  it('a registered-but-not-opted-in row is not success — it keeps polling until opt_in lands', async () => {
+    const { fetchFn, calls } = makeMockFetch({ optInAfterListPolls: 2, pendingUser: true });
+    const code = await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep);
+    expect(code).toBe(0);
+    expect(calls.filter((c) => c.method === 'GET' && /\/users\/$/.test(c.pathname)).length).toBe(3);
+    expect(calls.some((c) => c.method === 'POST' && /\/users\/$/.test(c.pathname))).toBe(false);
+  });
+
+  it('fails (exit 1) when the opt-in never lands, and never claims success', async () => {
+    const { fetchFn, calls } = makeMockFetch();
+    const code = await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep);
+    expect(code).toBe(1);
+    expect(calls.some((c) => c.method === 'POST' && /\/users\/$/.test(c.pathname))).toBe(false);
+    // Creds persist so a re-run resumes where it left off.
+    const env = fs.readFileSync(path.join(tempDir, '.env'), 'utf-8');
+    expect(env).toContain('PHOTON_PROJECT_ID=proj-created');
   });
 
   it('reuses an existing project + user and skips creation', async () => {
@@ -280,10 +354,10 @@ describe('photon setup flow (mocked API)', () => {
 
   it('reuses a stored device token on a second run (no re-login)', async () => {
     // First run stores the token.
-    await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], makeMockFetch().fetchFn, noSleep);
+    await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], makeMockFetch({ existingUser: true }).fetchFn, noSleep);
 
     // Second run: token is validated + reused, device-code is never requested.
-    const { fetchFn, calls } = makeMockFetch();
+    const { fetchFn, calls } = makeMockFetch({ existingUser: true });
     const code = await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep);
     expect(code).toBe(0);
     expect(calls.some((c) => c.pathname === '/api/auth/device/code')).toBe(false);

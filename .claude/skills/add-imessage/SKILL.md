@@ -163,11 +163,13 @@ Tell the user what's about to happen:
 Connect your hosted iMessage line (photon.codes):
 1. A login URL and a short code will print below.
 2. Open the URL in a browser, approve the device, and enter the code.
-3. Setup finishes on its own once you approve — it finds or creates your project, registers your phone, and prints your agent's iMessage number.
+3. Setup then asks for one dashboard step: add your number as a user in the Photon dashboard and accept the invite that arrives on your phone. Numbers only receive messages after that invite.
+4. Once the opt-in lands, setup finishes on its own and prints your agent's iMessage number.
 ```
 
 Run the device-login flow. It provisions the project, mints the project secret,
-registers your phone, and surfaces the iMessage number you'll text — writing
+walks you through the dashboard Add-user + invite step (waiting until your
+number is opted in), and surfaces the iMessage number you'll text — writing
 `PHOTON_PROJECT_ID` + `PHOTON_PROJECT_SECRET` to `.env` and the assigned number
 to `data/photon-auth.json`:
 
