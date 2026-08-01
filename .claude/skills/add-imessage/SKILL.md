@@ -19,7 +19,7 @@ pluggable backends:
 Both register the same `imessage` channel type; only one runs per install.
 NanoClaw doesn't ship channels in trunk — this skill copies the unified
 `imessage` adapter in from the `channels` branch. Full reference:
-[docs/imessage.md](../../docs/imessage.md).
+[docs/imessage.md](docs.md).
 
 The mechanical steps under **Apply** carry `nc:` directive fences: an agent reads
 the prose and applies them, and a parser can apply them deterministically from
@@ -266,7 +266,7 @@ and out (inbound staged into the session inbox, capped by
 receipts, typing indicators, and `ask_user_question` via `/approve` / `/reject`
 slash replies. Optional `.env`: `PHOTON_MARKDOWN`, `PHOTON_TELEMETRY`,
 `PHOTON_MAX_INLINE_ATTACHMENT_BYTES`, `PHOTON_DASHBOARD_HOST`,
-`PHOTON_SPECTRUM_HOST`. Full table in [docs/imessage.md](../../docs/imessage.md).
+`PHOTON_SPECTRUM_HOST`. Full table in [docs/imessage.md](docs.md).
 
 ## Troubleshooting
 
@@ -304,7 +304,7 @@ If green, confirm the backend connected (hosted:
 `grep "Photon channel connected" logs/nanoclaw.log`), restart the service
 (`bash setup/lib/restart.sh`), then check `logs/nanoclaw.error.log`.
 
-More in [docs/imessage.md](../../docs/imessage.md).
+More in [docs/imessage.md](docs.md).
 
 ## Upgrading spectrum-ts (hosted)
 
@@ -313,4 +313,4 @@ read the [release notes](https://github.com/photon-hq/spectrum-ts/releases) for
 every version between the pins, bump the pin, reconcile
 `src/channels/imessage.ts` against the new typings, then `pnpm run build` and
 `pnpm exec vitest run src/channels/imessage.test.ts`. See
-[docs/imessage.md](../../docs/imessage.md).
+[docs/imessage.md](docs.md).
