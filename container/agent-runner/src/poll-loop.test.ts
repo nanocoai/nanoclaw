@@ -438,6 +438,25 @@ describe('error result with no <message> envelope', () => {
   });
 });
 
+describe('mid-turn accumulate gate', () => {
+  it('trigger=0-only follow-up batch fails the push gate (regression 2026-07-12)', () => {
+    // The follow-up path inside the active-query poll tick uses the same
+    // predicate as the cold-wake gate. Before the fix it pushed
+    // accumulate-only batches into the live turn: the agent answered
+    // background room messages it was never engaged on — observed as a
+    // self-sustaining ack ping-pong between two agents sharing a Matrix
+    // room. Rows must stay pending (unclaimed).
+    insertMessage('m1', 'chat-sdk', { sender: 'peer-bot', text: 'unmentioned answer' }, { trigger: 0 });
+    const messages = getPendingMessages().filter((m) => m.kind !== 'system');
+    expect(messages.some((m) => m.trigger === 1)).toBe(false);
+    // Gate false → follow-up path returns BEFORE markProcessing: still pending.
+    const [row] = getInboundDb().prepare(`SELECT status FROM messages_in WHERE id='m1'`).all() as Array<{
+      status: string;
+    }>;
+    expect(row.status).toBe('pending');
+  });
+});
+
 describe('isCorruptionError', () => {
   it('matches the Docker Desktop macOS torn-read symptom', () => {
     expect(isCorruptionError('database disk image is malformed')).toBe(true);
