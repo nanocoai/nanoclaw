@@ -4,7 +4,7 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { isCorruptionError, processQuery } from './poll-loop.js';
+import { isCorruptionError, isTurnEligible, processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 import type { AgentQuery, ProviderEvent } from './providers/types.js';
 
@@ -108,22 +108,25 @@ describe('accumulate gate (trigger column)', () => {
     expect(byId.m2.trigger).toBe(1);
   });
 
-  it('trigger=0-only batch: gate predicate `some(trigger===1)` is false', () => {
+  it('trigger=0-only batch: isTurnEligible is false', () => {
     insertMessage('m1', 'chat', { sender: 'A', text: 'noise' }, { trigger: 0 });
     insertMessage('m2', 'chat', { sender: 'B', text: 'more noise' }, { trigger: 0 });
     const messages = getPendingMessages();
-    // This is the exact predicate the poll loop uses to skip accumulate-only
-    // batches — gate should be false, so the loop sleeps without waking the agent.
-    expect(messages.some((m) => m.trigger === 1)).toBe(false);
+    // Gate is false, so the loop sleeps without waking the agent.
+    expect(isTurnEligible(messages)).toBe(false);
   });
 
   it('mixed batch: gate is true → loop proceeds, accumulated rows ride along', () => {
     insertMessage('m1', 'chat', { sender: 'A', text: 'earlier chatter' }, { trigger: 0 });
     insertMessage('m2', 'chat', { sender: 'B', text: 'the real mention' }, { trigger: 1 });
     const messages = getPendingMessages();
-    expect(messages.some((m) => m.trigger === 1)).toBe(true);
+    expect(isTurnEligible(messages)).toBe(true);
     // Both messages are present for the formatter → agent sees the prior context.
     expect(messages.map((m) => m.id).sort()).toEqual(['m1', 'm2']);
+  });
+
+  it('empty batch is not turn-eligible', () => {
+    expect(isTurnEligible([])).toBe(false);
   });
 
   it('trigger column defaults to 1 for legacy inserts without explicit value', () => {
@@ -137,6 +140,50 @@ describe('accumulate gate (trigger column)', () => {
       .run();
     const [msg] = getPendingMessages();
     expect(msg.trigger).toBe(1);
+  });
+});
+
+describe('accumulate gate — follow-up poll into an active query', () => {
+  // Regression: the outer batch loop was gated but the follow-up poller (which
+  // pushes new rows into an already-running query) was not, so accumulate rows
+  // arriving mid-turn were handed to the agent as real prompts. With a chatty
+  // counterpart each reply drew another untriggered row, which extended the
+  // same turn, so the turn never ended. Reproduced 2026-07-25 on a Slack
+  // wiring with ignored_message_policy='accumulate'.
+
+  it('does not push an accumulate-only follow-up batch into a live turn', () => {
+    // The turn is already underway: its trigger=1 row was claimed and acked,
+    // so it no longer appears in getPendingMessages.
+    insertMessage('tag', 'chat', { sender: 'Jack', text: '@bot help' }, { trigger: 1 });
+    markCompleted(['tag']);
+
+    // Now untriggered chatter lands while that turn is still open.
+    insertMessage('n1', 'chat', { sender: 'Jack', text: '¿Enviar esta respuesta?' }, { trigger: 0 });
+    insertMessage('n2', 'chat', { sender: 'Jack', text: '¿Enviar esta respuesta?' }, { trigger: 0 });
+
+    const pending = getPendingMessages();
+    const newMessages = pending.filter((m) => m.kind !== 'system');
+    expect(newMessages.map((m) => m.id).sort()).toEqual(['n1', 'n2']);
+
+    // The follow-up poller must refuse this batch.
+    expect(isTurnEligible(newMessages)).toBe(false);
+  });
+
+  it('rows refused mid-turn stay pending and ride along with the next real trigger', () => {
+    insertMessage('n1', 'chat', { sender: 'Jack', text: 'chatter' }, { trigger: 0 });
+    expect(isTurnEligible(getPendingMessages())).toBe(false);
+
+    // Refused, not consumed — still pending for the next pass.
+    insertMessage('tag', 'chat', { sender: 'Jack', text: '@bot now I mean it' }, { trigger: 1 });
+    const next = getPendingMessages();
+    expect(isTurnEligible(next)).toBe(true);
+    expect(next.map((m) => m.id).sort()).toEqual(['n1', 'tag']);
+  });
+
+  it('a follow-up batch containing a real trigger IS pushed', () => {
+    insertMessage('n1', 'chat', { sender: 'Jack', text: 'chatter' }, { trigger: 0 });
+    insertMessage('n2', 'chat', { sender: 'Jack', text: '@bot another question' }, { trigger: 1 });
+    expect(isTurnEligible(getPendingMessages())).toBe(true);
   });
 });
 

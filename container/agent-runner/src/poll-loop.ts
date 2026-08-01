@@ -83,6 +83,30 @@ export interface PollLoopConfig {
 }
 
 /**
+ * Is this batch allowed to drive an agent turn?
+ *
+ * Only if it contains at least one wake-eligible (trigger=1) row. trigger=0
+ * rows are accumulate context — stored by the router under
+ * `ignored_message_policy='accumulate'` so the agent has prior context when it
+ * IS eventually addressed, but never a reason to speak on their own. Callers
+ * leave an ineligible batch `pending`; it rides along with the next trigger=1
+ * message. Host-side `countDueMessages` gates wake-from-cold the same way
+ * (see src/db/session-db.ts).
+ *
+ * BOTH consumption paths must call this — the outer batch loop AND the
+ * follow-up poller that pushes into an already-active query. Gating only the
+ * outer loop is not a partial fix, it is no fix: an accumulate row landing
+ * while a turn is open would be pushed into the live query as if addressed to
+ * us. That produced a real runaway on 2026-07-25 — a Slack wiring set to
+ * 'accumulate' alongside a chatty bot counterpart, where every reply drew
+ * another untriggered prompt which extended the same turn, so the turn could
+ * never end and the two bots answered each other until the host was killed.
+ */
+export function isTurnEligible(messages: Array<{ trigger: number }>): boolean {
+  return messages.some((m) => m.trigger === 1);
+}
+
+/**
  * Main poll loop. Runs indefinitely until the process is killed.
  *
  * 1. Poll messages_in for pending rows
@@ -140,15 +164,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
-    // Accumulate gate: if the batch contains only trigger=0 rows
-    // (context-only, router-stored under ignored_message_policy='accumulate'),
-    // don't wake the agent. Leave them `pending` — they'll ride along the
-    // next time a real trigger=1 message lands via this same getPendingMessages
-    // query. Without this gate, a warm container keeps processing
-    // (and potentially responding to) every accumulate-only batch, defeating
-    // the "store as context, don't engage" contract. Host-side countDueMessages
-    // gates the same way for wake-from-cold (see src/db/session-db.ts).
-    if (!messages.some((m) => m.trigger === 1)) {
+    // Accumulate gate — see isTurnEligible. Leave the rows `pending`; they
+    // ride along the next time a real trigger=1 message lands via this same
+    // getPendingMessages query. Host-side countDueMessages gates the same way
+    // for wake-from-cold (see src/db/session-db.ts).
+    if (!isTurnEligible(messages)) {
       await sleep(POLL_INTERVAL_MS);
       continue;
     }
@@ -406,6 +426,11 @@ export async function processQuery(
         // host-generated welcome trigger with null thread vs a Discord DM reply).
         const newMessages = pending.filter((m) => m.kind !== 'system');
         if (newMessages.length === 0) return;
+
+        // Accumulate gate — see isTurnEligible. Leave the rows pending so they
+        // ride along with the next trigger=1 message instead of extending the
+        // live turn.
+        if (!isTurnEligible(newMessages)) return;
 
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
