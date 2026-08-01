@@ -16,7 +16,13 @@ import { getContainerConfig } from '../db/container-configs.js';
 import { getAgentGroup } from '../db/agent-groups.js';
 import { getSession } from '../db/sessions.js';
 import { guard, type GuardActor } from '../guard/index.js';
-import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
+import {
+  registerApprovalHandler,
+  requestApproval,
+  type ApproverConstraint,
+  type ApproverLevel,
+} from '../modules/approvals/index.js';
+import { isGlobalAdmin, isOwner } from '../modules/permissions/db/user-roles.js';
 import type { PendingApproval } from '../types.js';
 import type { CallerContext, ErrorCode, RequestFrame, ResponseFrame } from './frame.js';
 import { localizeIsoTimestamps } from './format.js';
@@ -139,13 +145,28 @@ export async function dispatch(
       .map(([k, v]) => `--${k} ${v}`)
       .join(' ');
 
+    // Privilege-sensitive commands (role grant/revoke) must be routed to a
+    // sufficiently-privileged approver who is not the target of the change.
+    // Non-role approvals keep the legacy any-eligible-admin routing.
+    const approverConstraint = roleChangeApproverConstraint(cmd.resource, req.command, req.args);
+    // Propagate the caller context on the pending row so the approved replay
+    // re-enters dispatch as the original agent (not bare host).
+    const payload: Record<string, unknown> = {
+      frame: { id: req.id, command: req.command, args: req.args },
+      callerContext: ctx,
+    };
+    // Carried on the pending row so the approver can be re-verified at apply
+    // time (mirrors the channel-approval re-check discipline).
+    if (approverConstraint) payload.approverConstraint = approverConstraint;
+
     await requestApproval({
       session,
       agentName,
       action: 'cli_command',
-      payload: { frame: { id: req.id, command: req.command, args: req.args }, callerContext: ctx },
+      payload,
       title: `CLI: ${req.command}`,
       question: `Agent "${agentName}" wants to run:\n\`ncl ${req.command}${argSummary ? ' ' + argSummary : ''}\``,
+      approverConstraint,
     });
 
     return err(req.id, 'approval-pending', 'Approval request sent to admin. You will be notified of the result.');
@@ -215,8 +236,22 @@ export async function dispatch(
   }
 }
 
-registerApprovalHandler('cli_command', async ({ payload, approval, notify }) => {
+registerApprovalHandler('cli_command', async ({ payload, approval, userId, notify }) => {
   const frame = payload.frame as RequestFrame;
+
+  // Re-verify the approver still qualifies at apply time (they may have been
+  // demoted between card issue and click; or a stale/forged pin). This mirrors
+  // #2566's re-check-at-apply discipline. Only applies to constrained
+  // (privilege-sensitive) requests.
+  const constraint = payload.approverConstraint as ApproverConstraint | undefined;
+  if (constraint) {
+    const disqualification = approverDisqualification(userId, constraint);
+    if (disqualification) {
+      notify(`Your \`ncl ${frame.command}\` request was approved but NOT applied: ${disqualification}`);
+      return;
+    }
+  }
+
   const callerContext = parseCallerContext(payload.callerContext) ?? { caller: 'host' };
   const response = await dispatch(frame, callerContext, { grant: approval });
 
@@ -324,6 +359,62 @@ function editDistance(a: string, b: string, cap: number): number {
     if (rowMin >= cap) return cap;
   }
   return prev[b.length];
+}
+
+/**
+ * Approval-routing metadata for a role grant/revoke, or `undefined` for any
+ * other command. A role change must be authorized by an approver whose
+ * privilege is at least that of the role being changed, and never by the target
+ * of the change (no self-approval):
+ *   - changing an OWNER, or a GLOBAL admin (admin with no --group) → owner only
+ *   - changing a GROUP-scoped admin (admin with --group) → global admin or owner
+ * When the role can't be determined we fail strict (require an owner).
+ *
+ * This is the WHO-approves + fail-safety half of the fix. Card text/rendering
+ * (Issue B) is independent; if Issue B lands a shared role-change action type /
+ * describeRoleChange() helper, this local metadata should fold into it.
+ *
+ * C1/C4 seam (initiator principal / honor-authority): the CallerContext for an
+ * agent caller carries no VERIFIED human principal (there is no caller-context
+ * propagation through the approval replay in this lineage), and an agent must
+ * not be trusted to self-assert one. So we do NOT auto-approve owner-authorized
+ * changes here. If a verified initiating principal is ever plumbed into
+ * CallerContext, add it to `excludeUserIds` (never approve your own change) and
+ * short-circuit when the principal already holds privilege >= the change.
+ */
+function roleChangeApproverConstraint(
+  resource: string | undefined,
+  command: string,
+  args: Record<string, unknown>,
+): ApproverConstraint | undefined {
+  if (resource !== 'roles' || (command !== 'roles-grant' && command !== 'roles-revoke')) {
+    return undefined;
+  }
+  const target = typeof args.user === 'string' ? args.user : undefined;
+  const role = typeof args.role === 'string' ? args.role : undefined;
+  const group = args.group != null ? String(args.group) : null;
+
+  const isGroupScopedAdminChange = role === 'admin' && group !== null;
+  const minLevel: ApproverLevel = isGroupScopedAdminChange ? 'global-admin' : 'owner';
+
+  return { minLevel, excludeUserIds: target ? [target] : [] };
+}
+
+/**
+ * Returns a human-readable reason the given user may NOT authorize a
+ * constrained change, or `null` if they qualify. Used to re-verify the approver
+ * at apply time.
+ */
+function approverDisqualification(userId: string, constraint: ApproverConstraint): string | null {
+  if (!userId) return 'the approver could not be identified.';
+  if (constraint.excludeUserIds?.includes(userId)) {
+    return 'the approver is the target of the change (self-approval is not allowed).';
+  }
+  const qualified = constraint.minLevel === 'owner' ? isOwner(userId) : isOwner(userId) || isGlobalAdmin(userId);
+  if (!qualified) {
+    return `the approver no longer holds the required ${constraint.minLevel} privilege.`;
+  }
+  return null;
 }
 
 function err(id: string, code: ErrorCode, message: string): ResponseFrame {

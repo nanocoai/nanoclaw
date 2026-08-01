@@ -135,6 +135,13 @@ export async function notifyApprovalResolved(event: ApprovalResolvedEvent): Prom
 /**
  * Ordered list of user IDs eligible to approve an action for the given agent
  * group. Preference: admins @ that group → global admins → owners.
+ *
+ * Note: this orders LOWEST privilege first — intentional for the common
+ * non-privileged approvals (create_agent, install_packages, add_mcp_server,
+ * OneCLI), where any eligible admin may approve and the same-channel tie-break
+ * matters more than rank. Privilege-sensitive actions (role changes) must NOT
+ * use this — they use `pickPrivilegedApprover`, which orders highest-first and
+ * fails closed.
  */
 export function pickApprover(agentGroupId: string | null): string[] {
   const approvers: string[] = [];
@@ -151,6 +158,50 @@ export function pickApprover(agentGroupId: string | null): string[] {
   }
   for (const r of getGlobalAdmins()) add(r.user_id);
   for (const r of getOwners()) add(r.user_id);
+
+  return approvers;
+}
+
+/** Privilege floor an approver must clear to authorize a privilege-sensitive action. */
+export type ApproverLevel = 'owner' | 'global-admin';
+
+/**
+ * Constrains approver selection for privilege-sensitive actions — today, role
+ * grant/revoke. When a caller passes this to `requestApproval`, the default
+ * group-admins-first ordering is bypassed: the pool is built only from users at
+ * or above `minLevel`, ordered HIGHEST privilege first, with `excludeUserIds`
+ * (the target of the change, and the initiator when known) removed. Delivery
+ * fails closed — if no qualified, non-conflicted, reachable approver exists the
+ * request is held and the agent is told why, never routed to a junior admin or
+ * to the target of the change (no self-approval).
+ */
+export interface ApproverConstraint {
+  minLevel: ApproverLevel;
+  excludeUserIds?: string[];
+}
+
+/**
+ * Ordered list of user IDs qualified to approve a privilege-sensitive action,
+ * HIGHEST privilege first: owners, then — only when `minLevel` is
+ * 'global-admin' — global admins. Group-scoped admins are never eligible.
+ * `excludeUserIds` drops conflicted users (the change's target, the initiator).
+ * Unlike `pickApprover` this never routes downward and never returns a scoped
+ * admin, so an empty result is the fail-safe signal for the caller to HOLD.
+ */
+export function pickPrivilegedApprover(constraint: ApproverConstraint): string[] {
+  const exclude = new Set(constraint.excludeUserIds ?? []);
+  const approvers: string[] = [];
+  const seen = new Set<string>();
+  const add = (id: string): void => {
+    if (exclude.has(id) || seen.has(id)) return;
+    seen.add(id);
+    approvers.push(id);
+  };
+
+  for (const r of getOwners()) add(r.user_id);
+  if (constraint.minLevel === 'global-admin') {
+    for (const r of getGlobalAdmins()) add(r.user_id);
+  }
 
   return approvers;
 }
@@ -218,6 +269,14 @@ export interface RequestApprovalOptions {
   question: string;
   /** Deliver the card to this specific user instead of all of the session group's admins. */
   approverUserId?: string;
+  /**
+   * Constrain approver selection for a privilege-sensitive action (role change).
+   * When set, the approver pool is built by `pickPrivilegedApprover` (qualified
+   * users only, highest privilege first, target/initiator excluded) and the
+   * chosen approver is pinned on `approver_user_id` so only they can resolve it.
+   * Ignored when `approverUserId` is given (the caller already pinned a user).
+   */
+  approverConstraint?: ApproverConstraint;
 }
 
 /**
@@ -227,11 +286,25 @@ export interface RequestApprovalOptions {
  * approval handler for this action via the response dispatcher.
  */
 export async function requestApproval(opts: RequestApprovalOptions): Promise<void> {
-  const { session, action, payload, title, question, agentName, approverUserId } = opts;
+  const { session, action, payload, title, question, agentName, approverUserId, approverConstraint } = opts;
 
-  const approvers = approverUserId ? [approverUserId] : pickApprover(session.agent_group_id);
+  let approvers: string[];
+  if (approverUserId) {
+    approvers = [approverUserId];
+  } else if (approverConstraint) {
+    approvers = pickPrivilegedApprover(approverConstraint);
+  } else {
+    approvers = pickApprover(session.agent_group_id);
+  }
   if (approvers.length === 0) {
-    notifyAgent(session, `${action} failed: no owner or admin configured to approve.`);
+    // Fail closed. For a constrained (privilege-sensitive) request there is no
+    // junior/target fallback — HOLD and tell the agent why.
+    notifyAgent(
+      session,
+      approverConstraint
+        ? `${action} failed: no sufficiently-privileged approver is available to authorize this change (self-approval by the target is not allowed).`
+        : `${action} failed: no owner or admin configured to approve.`,
+    );
     return;
   }
 
@@ -241,9 +314,20 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
 
   const target = await pickApprovalDelivery(approvers, originChannelType);
   if (!target) {
-    notifyAgent(session, `${action} failed: no DM channel found for any eligible approver.`);
+    notifyAgent(
+      session,
+      approverConstraint
+        ? `${action} failed: no sufficiently-privileged approver is reachable on any channel to authorize this change.`
+        : `${action} failed: no DM channel found for any eligible approver.`,
+    );
     return;
   }
+
+  // Pin the chosen approver for constrained requests so only they can resolve
+  // the card (enforced by the response handler's authorized-click gate). For
+  // unconstrained requests keep the legacy behavior: any eligible admin may act
+  // unless the caller explicitly named one via approverUserId.
+  const pinnedApproverUserId = approverUserId ?? (approverConstraint ? target.userId : null);
 
   const approvalId = `appr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const normalizedOptions = normalizeOptions(APPROVAL_OPTIONS);
@@ -256,7 +340,7 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     created_at: new Date().toISOString(),
     title,
     options_json: JSON.stringify(normalizedOptions),
-    approver_user_id: approverUserId ?? null,
+    approver_user_id: pinnedApproverUserId,
   });
 
   const adapter = getDeliveryAdapter();

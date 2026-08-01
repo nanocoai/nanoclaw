@@ -13,8 +13,8 @@ import {
 } from '../../channels/channel-registry.js';
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from '../../db/index.js';
 import { createUser } from '../permissions/db/users.js';
-import { grantRole } from '../permissions/db/user-roles.js';
-import { pickApprovalDelivery, pickApprover } from './primitive.js';
+import { grantRole, revokeRole } from '../permissions/db/user-roles.js';
+import { pickApprovalDelivery, pickApprover, pickPrivilegedApprover } from './primitive.js';
 
 function now(): string {
   return new Date().toISOString();
@@ -82,6 +82,12 @@ function seedUser(id: string, kind: string): void {
   createUser({ id, kind, display_name: null, created_at: now() });
 }
 
+/** Drop this user's global owner + global admin rows (test convenience). */
+function revokeAll(userId: string): void {
+  revokeRole(userId, 'owner', null);
+  revokeRole(userId, 'admin', null);
+}
+
 describe('pickApprover', () => {
   beforeEach(() => {
     seedAgentGroup('ag-1');
@@ -103,6 +109,51 @@ describe('pickApprover', () => {
 
   it('returns empty list when nobody is privileged', () => {
     expect(pickApprover('ag-1')).toEqual([]);
+  });
+});
+
+describe('pickPrivilegedApprover', () => {
+  beforeEach(() => {
+    seedAgentGroup('ag-1');
+    seedUser('u-owner', 'telegram');
+    seedUser('u-owner2', 'telegram');
+    seedUser('u-ga', 'telegram');
+    seedUser('u-sa', 'telegram');
+    grantRole({ user_id: 'u-owner', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now() });
+    grantRole({ user_id: 'u-owner2', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now() });
+    grantRole({ user_id: 'u-ga', role: 'admin', agent_group_id: null, granted_by: null, granted_at: now() });
+    grantRole({ user_id: 'u-sa', role: 'admin', agent_group_id: 'ag-1', granted_by: null, granted_at: now() });
+  });
+
+  it('owner level: returns only owners (never a global or scoped admin), highest first', () => {
+    expect(pickPrivilegedApprover({ minLevel: 'owner' })).toEqual(['u-owner', 'u-owner2']);
+  });
+
+  it('global-admin level: returns owners then global admins, never a scoped admin', () => {
+    expect(pickPrivilegedApprover({ minLevel: 'global-admin' })).toEqual(['u-owner', 'u-owner2', 'u-ga']);
+  });
+
+  it('excludes the target of the change from the pool (no self-approval)', () => {
+    // Revoking u-owner's owner role must not route the card to u-owner.
+    expect(pickPrivilegedApprover({ minLevel: 'owner', excludeUserIds: ['u-owner'] })).toEqual(['u-owner2']);
+    // A scoped admin can never appear even if named as an exclude no-op.
+    expect(pickPrivilegedApprover({ minLevel: 'global-admin', excludeUserIds: ['u-ga'] })).toEqual([
+      'u-owner',
+      'u-owner2',
+    ]);
+  });
+
+  it('fails closed (empty) when the only eligible approver is the target', () => {
+    // Sole owner revoking their own owner role → nobody left to approve.
+    revokeAll('u-owner2');
+    expect(pickPrivilegedApprover({ minLevel: 'owner', excludeUserIds: ['u-owner'] })).toEqual([]);
+  });
+
+  it('fails closed (empty) when only juniors exist for an owner-level change', () => {
+    revokeAll('u-owner');
+    revokeAll('u-owner2');
+    // Only a global admin + scoped admin remain — neither qualifies for owner level.
+    expect(pickPrivilegedApprover({ minLevel: 'owner' })).toEqual([]);
   });
 });
 
