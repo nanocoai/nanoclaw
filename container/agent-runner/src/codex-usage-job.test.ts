@@ -19,6 +19,8 @@ beforeEach(() => {
 
 afterEach(() => {
   setCodexUsageCommandRunnerForTest(null);
+  delete process.env.NANOCLAW_CODEX_USAGE_COMMAND_JSON;
+  delete process.env.FAKE_CODEX_USAGE_COUNTER;
   closeSessionDb();
 });
 
@@ -36,7 +38,7 @@ function snapshot(jobId: string, numeric_values: Record<string, number>): CodexU
     phase: 'pre',
     job_id: jobId,
     captured_at: '2026-07-31T00:00:00Z',
-    command: ['codex', 'usage', '--json'],
+    command: ['nanoclaw-codex-app-server'],
     exit_code: 0,
     stdout: '{}',
     stderr: '',
@@ -89,14 +91,63 @@ describe('Codex usage job routines', () => {
     expect(JSON.parse(rows[0].content).text).toContain('tokens.input: 25');
   });
 
-  it('formats unavailable usage when CLI output has no comparable numeric JSON', () => {
+  it('reads usage through the Codex app-server JSONL protocol', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-usage-app-server-'));
+    const counterPath = path.join(tmp, 'counter.txt');
+    const fakeAppServerPath = path.join(tmp, 'fake-codex-app-server.mjs');
+    fs.writeFileSync(
+      fakeAppServerPath,
+      `
+import fs from 'node:fs';
+import { createInterface } from 'node:readline';
+
+const counterPath = process.env.FAKE_CODEX_USAGE_COUNTER;
+const rl = createInterface({ input: process.stdin });
+
+function send(message) {
+  process.stdout.write(JSON.stringify(message) + '\\n');
+}
+
+rl.on('line', (line) => {
+  const message = JSON.parse(line);
+  if (message.id === 1) {
+    send({ id: 1, result: { userAgent: 'fake', codexHome: '/tmp', platformFamily: 'unix', platformOs: 'linux' } });
+  }
+  if (message.id === 2) {
+    const count = counterPath && fs.existsSync(counterPath) ? Number(fs.readFileSync(counterPath, 'utf8')) : 0;
+    const next = count + 1;
+    if (counterPath) fs.writeFileSync(counterPath, String(next));
+    send({
+      id: 2,
+      result: {
+        summary: { lifetimeTokens: next === 1 ? 1000 : 1125 },
+        dailyUsageBuckets: [{ startDate: '2026-08-01', tokens: next === 1 ? 400 : 425 }],
+      },
+    });
+  }
+});
+`,
+    );
+    process.env.FAKE_CODEX_USAGE_COUNTER = counterPath;
+    process.env.NANOCLAW_CODEX_USAGE_COMMAND_JSON = JSON.stringify([process.execPath, fakeAppServerPath]);
+
+    const job = await startCodexUsageJob({ providerName: 'codex', cwd: tmp, routing: DISCORD_ROUTING });
+    const delta = await finishCodexUsageJob(job);
+
+    expect(delta?.command).toEqual([process.execPath, fakeAppServerPath]);
+    expect(delta?.deltas['summary.lifetimeTokens']).toBe(125);
+    expect(delta?.deltas['dailyUsageBuckets[0].tokens']).toBe(25);
+    delete process.env.FAKE_CODEX_USAGE_COUNTER;
+  });
+
+  it('formats unavailable usage when app-server output has no comparable numeric JSON', () => {
     const text = formatUsageDelta({
       job_id: 'job-1',
       pre_path: '/pre.json',
       post_path: '/post.json',
-      command: ['codex', 'usage', '--json'],
+      command: ['nanoclaw-codex-app-server'],
       deltas: {},
-      unavailable_reason: 'Codex CLI usage output did not contain comparable numeric JSON fields',
+      unavailable_reason: 'Codex app-server usage output did not contain comparable numeric JSON fields',
     });
 
     expect(text).toContain('Usage delta unavailable');

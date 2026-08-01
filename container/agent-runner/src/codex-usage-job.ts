@@ -1,6 +1,7 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 
 import { writeMessageOut } from './db/messages-out.js';
 import { touchHeartbeat } from './db/connection.js';
@@ -8,7 +9,8 @@ import type { RoutingContext } from './formatter.js';
 
 const SNAPSHOT_TIMEOUT_MS = 10_000;
 const SNAPSHOT_MAX_BUFFER = 1024 * 1024;
-const DEFAULT_USAGE_COMMAND = ['codex', 'usage', '--json'] as const;
+const DEFAULT_USAGE_COMMAND = ['nanoclaw-codex-app-server'] as const;
+const APP_SERVER_USAGE_REQUEST_ID = 2;
 const USAGE_DIR = '.nanoclaw/codex-usage';
 
 export interface CodexUsageSnapshot {
@@ -57,7 +59,7 @@ function generateId(): string {
   return `codex-usage-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** Test seam only. Production uses the Codex CLI command runner. */
+/** Test seam only. Production uses the Codex app-server command runner. */
 export function setCodexUsageCommandRunnerForTest(runner: UsageCommandRunner | null): void {
   commandRunner = runner ?? runCodexUsageCommand;
 }
@@ -164,29 +166,114 @@ function runCodexUsageCommand(
   cwd: string,
 ): Promise<Pick<CodexUsageSnapshot, 'exit_code' | 'stdout' | 'stderr' | 'error'>> {
   const [bin, ...args] = command;
+  let stderr = '';
+  let settled = false;
+  let child: ReturnType<typeof spawn> | null = null;
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+
   touchHeartbeat();
   return new Promise((resolve) => {
-    execFile(
-      bin,
-      args,
-      {
+    const settle = (result: Pick<CodexUsageSnapshot, 'exit_code' | 'stdout' | 'stderr' | 'error'>): void => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      touchHeartbeat();
+      if (child && !child.killed) child.kill('SIGTERM');
+      resolve(result);
+    };
+
+    const send = (message: unknown): void => {
+      child?.stdin?.write(`${JSON.stringify(message)}\n`);
+    };
+
+    try {
+      child = spawn(bin, args, {
         cwd,
-        timeout: SNAPSHOT_TIMEOUT_MS,
-        maxBuffer: SNAPSHOT_MAX_BUFFER,
+        stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env, TERM: process.env.TERM === 'dumb' ? 'xterm-256color' : process.env.TERM },
-      },
-      (error, stdout, stderr) => {
-        touchHeartbeat();
-        const maybeCode =
-          error && typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : null;
-        resolve({
-          exit_code: maybeCode ?? (error ? null : 0),
-          stdout,
+      });
+    } catch (err) {
+      settle({
+        exit_code: null,
+        stdout: '',
+        stderr,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
+    timeout = setTimeout(() => {
+      settle({
+        exit_code: null,
+        stdout: '',
+        stderr,
+        error: `Codex app-server usage request timed out after ${SNAPSHOT_TIMEOUT_MS}ms`,
+      });
+    }, SNAPSHOT_TIMEOUT_MS);
+
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+      if (stderr.length > SNAPSHOT_MAX_BUFFER) stderr = stderr.slice(-SNAPSHOT_MAX_BUFFER);
+    });
+
+    child.on('error', (err) => {
+      settle({ exit_code: null, stdout: '', stderr, error: err.message });
+    });
+
+    child.on('close', (code) => {
+      if (!settled) {
+        settle({
+          exit_code: code,
+          stdout: '',
           stderr,
-          error: error ? error.message : undefined,
+          error: `Codex app-server exited before returning usage${code === null ? '' : ` (code ${code})`}`,
         });
+      }
+    });
+
+    if (!child.stdin || !child.stdout) {
+      settle({ exit_code: null, stdout: '', stderr, error: 'Codex app-server stdio pipes were unavailable' });
+      return;
+    }
+
+    const rl = createInterface({ input: child.stdout });
+    rl.on('line', (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+
+      let message: unknown;
+      try {
+        message = JSON.parse(trimmed);
+      } catch {
+        stderr += `${trimmed}\n`;
+        return;
+      }
+
+      if (!message || typeof message !== 'object') return;
+      const rpc = message as { id?: unknown; result?: unknown; error?: unknown };
+      if (rpc.id === 1) {
+        send({ method: 'initialized' });
+        send({ id: APP_SERVER_USAGE_REQUEST_ID, method: 'account/usage/read', params: null });
+        return;
+      }
+
+      if (rpc.id === APP_SERVER_USAGE_REQUEST_ID) {
+        if (rpc.error) {
+          settle({ exit_code: null, stdout: '', stderr, error: JSON.stringify(rpc.error) });
+          return;
+        }
+        settle({ exit_code: 0, stdout: JSON.stringify(rpc.result), stderr });
+      }
+    });
+
+    send({
+      id: 1,
+      method: 'initialize',
+      params: {
+        clientInfo: { name: 'nanoclaw-usage-check', version: '0.0.0' },
+        capabilities: null,
       },
-    );
+    });
   });
 }
 
@@ -250,9 +337,9 @@ function buildUnavailableReason(
     return [pre.error && `pre: ${pre.error}`, post.error && `post: ${post.error}`].filter(Boolean).join('; ');
   }
   if (Object.keys(pre.numeric_values).length === 0 || Object.keys(post.numeric_values).length === 0) {
-    return 'Codex CLI usage output did not contain comparable numeric JSON fields';
+    return 'Codex app-server usage output did not contain comparable numeric JSON fields';
   }
-  return 'Codex CLI usage output had no overlapping numeric fields';
+  return 'Codex app-server usage output had no overlapping numeric fields';
 }
 
 function reportUsageDelta(routing: RoutingContext, delta: CodexUsageDelta): void {
