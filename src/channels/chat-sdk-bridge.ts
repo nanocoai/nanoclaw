@@ -118,6 +118,23 @@ function resolveSelectedOption(
   return candidate;
 }
 
+/**
+ * Strip the per-agent namespace suffix (`:ag-...`) from a stored `messages_in.id`
+ * before handing it to a Chat SDK adapter as a platform message ID.
+ *
+ * `router.ts:messageIdForAgent` appends `:<agent_group_id>` to the inbound
+ * platform id so the same message landing in N fanned-out session DBs gets N
+ * distinct primary keys. The agent later passes that 3-part id through
+ * `add_reaction` / `edit_message`, but adapters expect the raw 2-part platform
+ * id (e.g. Telegram's `chatId:messageId` regex `^([^:]+):(\d+)$`). Without
+ * stripping, Telegram's `setMessageReaction` falls back to misparsing the
+ * second segment as the message id and the API rejects with
+ * "Bad Request: message to react not found".
+ */
+export function stripAgentSuffix(messageId: string): string {
+  return messageId.replace(/:ag-[^:]+$/, '');
+}
+
 export function splitForLimit(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
@@ -416,14 +433,18 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       const content = message.content as Record<string, unknown>;
 
       if (content.operation === 'edit' && content.messageId) {
-        await adapter.editMessage(tid, content.messageId as string, {
+        await adapter.editMessage(tid, stripAgentSuffix(content.messageId as string), {
           markdown: transformText((content.text as string) || (content.markdown as string) || ''),
         });
         return;
       }
 
       if (content.operation === 'reaction' && content.messageId && content.emoji) {
-        await adapter.addReaction(tid, content.messageId as string, content.emoji as string);
+        await adapter.addReaction(
+          tid,
+          stripAgentSuffix(content.messageId as string),
+          content.emoji as string,
+        );
         return;
       }
 

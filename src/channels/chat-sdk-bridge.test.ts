@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, splitForLimit, stripAgentSuffix } from './chat-sdk-bridge.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
@@ -51,6 +51,30 @@ describe('splitForLimit', () => {
     expect(chunks.length).toBe(Math.ceil(100 / 30));
     for (const c of chunks) expect(c.length).toBeLessThanOrEqual(30);
     expect(chunks.join('')).toBe(text);
+  });
+});
+
+describe('stripAgentSuffix', () => {
+  it('removes a trailing :ag-<id> namespace from a 3-part platform id', () => {
+    expect(stripAgentSuffix('74404502:233:ag-1700000000000-abc123')).toBe('74404502:233');
+  });
+
+  it('leaves a 2-part platform id untouched (Telegram chatId:messageId)', () => {
+    expect(stripAgentSuffix('74404502:233')).toBe('74404502:233');
+  });
+
+  it('leaves Discord 3-part guild:channel:message ids untouched (no ag- prefix on the tail)', () => {
+    expect(stripAgentSuffix('123456789:987654321:111222333')).toBe(
+      '123456789:987654321:111222333',
+    );
+  });
+
+  it('only strips the agent suffix, never an embedded ag- segment in the middle', () => {
+    expect(stripAgentSuffix('ag-foo:42:ag-bar')).toBe('ag-foo:42');
+  });
+
+  it('returns the input unchanged when there is no suffix at all', () => {
+    expect(stripAgentSuffix('plain-id')).toBe('plain-id');
   });
 });
 
