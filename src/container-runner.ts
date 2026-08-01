@@ -247,13 +247,64 @@ export function resolveProviderName(
 }
 
 /**
+ * Is this a rootless Docker daemon? Rootless puts its socket under the user's
+ * XDG runtime dir (`/run/user/<uid>/docker.sock`), which is the only signal we
+ * get from the host side without shelling out to `docker info`.
+ *
+ * Pure so the detection can be unit-tested without a daemon.
+ */
+export function isRootlessDocker(dockerHost: string | undefined): boolean {
+  return !!dockerHost && dockerHost.includes('/run/user/');
+}
+
+/**
+ * `--user` mapping for the agent container.
+ *
+ * Rootful: the host uid owns the bind-mounted session DBs and workspace, so the
+ * container has to run as that uid. uid 0 and 1000 are skipped — root needs no
+ * mapping, and 1000 already matches the image's `node` user.
+ *
+ * Rootless: the daemon runs inside a user namespace where the host user is
+ * *already* container uid 0. Passing `--user 1003:1003` there resolves against
+ * the subuid range, not the host user, producing an id that owns none of the
+ * mounts — every container dies with EACCES on `mkdir /workspace/agent/memory`.
+ * `--user 0:0` is the identity mapping back to the host user, not host root.
+ *
+ * `HOME=/home/node` rides along on both paths: neither uid has a passwd entry
+ * matching the image's home, and tools that fall back to `getpwuid()` write to
+ * `/` otherwise.
+ *
+ * Pure so the mapping can be unit-tested without a daemon.
+ */
+export function userMappingArgs(
+  hostUid: number | undefined,
+  hostGid: number | undefined,
+  dockerHost: string | undefined,
+): string[] {
+  if (hostUid == null) return [];
+
+  if (isRootlessDocker(dockerHost)) {
+    return ['--user', '0:0', '-e', 'HOME=/home/node', '-e', 'IS_SANDBOX=1'];
+  }
+
+  if (hostUid !== 0 && hostUid !== 1000) {
+    return ['--user', `${hostUid}:${hostGid}`, '-e', 'HOME=/home/node'];
+  }
+
+  return [];
+}
+
+/**
  * Container hardening flags. Applied to every agent container; no per-group or
  * per-install override.
  *
- * cap-drop and no-new-privileges are inert while containers run under the
- * `--user` mapping below (the capability sets are already empty and the image
- * carries no file capabilities) — they are depth against a root-in-container
- * path. `--init` is not optional: the `--entrypoint bash` override further down
+ * cap-drop and no-new-privileges are inert while containers run under a
+ * non-root `--user` mapping (the capability sets are already empty and the
+ * image carries no file capabilities) — they are depth against a
+ * root-in-container path. On rootless Docker, where `userMappingArgs` returns
+ * `--user 0:0`, that path is live and these stop being inert: the uid is root
+ * inside the namespace even though it is the unprivileged host user outside it.
+ * `--init` is not optional: the `--entrypoint bash` override further down
  * defeats the image's tini, leaving bun as PID 1 with no signal handler, and
  * Linux discards default-action signals to PID 1. Without docker-init, SIGTERM
  * is ignored and every stop ends in SIGKILL after the full grace period.
@@ -501,12 +552,7 @@ async function buildContainerArgs(
   }
 
   // User mapping
-  const hostUid = process.getuid?.();
-  const hostGid = process.getgid?.();
-  if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
-    args.push('--user', `${hostUid}:${hostGid}`);
-    args.push('-e', 'HOME=/home/node');
-  }
+  args.push(...userMappingArgs(process.getuid?.(), process.getgid?.(), process.env.DOCKER_HOST));
 
   // Volume mounts
   for (const mount of mounts) {

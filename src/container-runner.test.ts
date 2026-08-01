@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { describe, expect, it } from 'vitest';
 
-import { hardeningArgs, resolveProviderName } from './container-runner.js';
+import { hardeningArgs, isRootlessDocker, resolveProviderName, userMappingArgs } from './container-runner.js';
 
 describe('resolveProviderName', () => {
   it('prefers session over container config', () => {
@@ -136,5 +136,52 @@ describe('hardeningArgs', () => {
 
   it('floors fractional values', () => {
     expect(hardeningArgs('2048.7').join(' ')).toContain('--pids-limit 2048');
+  });
+});
+
+describe('isRootlessDocker', () => {
+  it('detects the XDG runtime socket', () => {
+    expect(isRootlessDocker('unix:///run/user/1003/docker.sock')).toBe(true);
+  });
+
+  it('treats the system socket and an unset DOCKER_HOST as rootful', () => {
+    expect(isRootlessDocker('unix:///var/run/docker.sock')).toBe(false);
+    expect(isRootlessDocker(undefined)).toBe(false);
+    expect(isRootlessDocker('')).toBe(false);
+  });
+});
+
+describe('userMappingArgs', () => {
+  const ROOTFUL = 'unix:///var/run/docker.sock';
+  const ROOTLESS = 'unix:///run/user/1003/docker.sock';
+
+  // Under rootless the host user IS container uid 0; mapping to the host uid
+  // resolves against the subuid range and loses access to every bind mount.
+  it('maps to 0:0 under rootless regardless of host uid', () => {
+    for (const uid of [0, 500, 1000, 1003]) {
+      expect(userMappingArgs(uid, uid, ROOTLESS)).toEqual([
+        '--user',
+        '0:0',
+        '-e',
+        'HOME=/home/node',
+        '-e',
+        'IS_SANDBOX=1',
+      ]);
+    }
+  });
+
+  it('maps to the host uid under rootful when it is neither 0 nor 1000', () => {
+    expect(userMappingArgs(1003, 1003, ROOTFUL)).toEqual(['--user', '1003:1003', '-e', 'HOME=/home/node']);
+  });
+
+  it('emits nothing under rootful for uid 0 and 1000', () => {
+    expect(userMappingArgs(0, 0, ROOTFUL)).toEqual([]);
+    expect(userMappingArgs(1000, 1000, ROOTFUL)).toEqual([]);
+  });
+
+  // Non-Linux hosts (macOS Docker Desktop) have no getuid; the VM handles it.
+  it('emits nothing when the host has no uid', () => {
+    expect(userMappingArgs(undefined, undefined, ROOTFUL)).toEqual([]);
+    expect(userMappingArgs(undefined, undefined, ROOTLESS)).toEqual([]);
   });
 });
