@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -75,5 +75,20 @@ describe('PlayboxServer', () => {
     expect(response.status).toBe(403);
     expect(response.headers.get('x-frame-options')).toBe('DENY');
     expect(response.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  it('serves the browser assets without CORS or caching', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'playbox-static-'));
+    roots.push(root);
+    await writeFile(join(root, 'index.html'), '<!doctype html><title>Playbox</title>');
+    const attachmentRoot = await mkdtemp(join(tmpdir(), 'playbox-files-'));
+    roots.push(attachmentRoot);
+    const server = new PlayboxServer({ port: 0, staticRoot: root, attachmentRoot });
+    servers.push(server);
+    const port = await server.start();
+    const response = await fetch(`http://127.0.0.1:${port}/`);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('Playbox');
+    expect(response.headers.get('cache-control')).toBe('no-store');
   });
 });

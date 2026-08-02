@@ -22,6 +22,7 @@ interface PlayboxServerOptions {
   port?: number;
   attachmentRoot?: string;
   staticRoot?: string;
+  fixtureRoot?: string;
   onInbound?: (message: MaterializedPlayboxInbound) => void | Promise<void>;
 }
 
@@ -51,6 +52,7 @@ export class PlayboxServer {
   private readonly port: number;
   private readonly attachmentRoot: string;
   private readonly staticRoot: string;
+  private readonly fixtureRoot: string;
   private readonly onInbound?: PlayboxServerOptions['onInbound'];
   private readonly history: PlayboxEvent[] = [];
   private readonly seenIds = new Set<string>();
@@ -62,6 +64,7 @@ export class PlayboxServer {
     this.port = options.port ?? 3210;
     this.attachmentRoot = resolve(options.attachmentRoot ?? join(DATA_DIR, 'attachments'));
     this.staticRoot = resolve(options.staticRoot ?? join(process.cwd(), 'playbox'));
+    this.fixtureRoot = resolve(options.fixtureRoot ?? join(process.cwd(), 'test', 'fixtures', 'playbox'));
     this.onInbound = options.onInbound;
   }
 
@@ -172,6 +175,17 @@ export class PlayboxServer {
           : asset.endsWith('.js')
             ? 'text/javascript; charset=utf-8'
             : 'text/css; charset=utf-8';
+        response.writeHead(200, { 'Content-Type': contentType }).end(data);
+        return;
+      }
+      const fixture = url.pathname.replace(/^\/fixtures\//, '');
+      if (
+        request.method === 'GET' &&
+        url.pathname.startsWith('/fixtures/') &&
+        ['receipt-coffee.png', 'receipt-grocery.pdf'].includes(fixture)
+      ) {
+        const data = await readFile(join(this.fixtureRoot, fixture));
+        const contentType = fixture.endsWith('.png') ? 'image/png' : 'application/pdf';
         response.writeHead(200, { 'Content-Type': contentType }).end(data);
         return;
       }

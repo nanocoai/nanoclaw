@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="960" viewBox="0 0 720 960">
+  <rect width="720" height="960" fill="#ede9dd"/>
+  <rect x="105" y="45" width="510" height="870" rx="5" fill="#fffef9" stroke="#cbc6b7" stroke-width="2"/>
+  <g fill="#242722" font-family="monospace" text-anchor="middle">
+    <text x="360" y="130" font-size="30" font-weight="700">HARBOUR BEAN TEST KITCHEN</text>
+    <text x="360" y="170" font-size="18">SYNTHETIC RECEIPT — NOT A PURCHASE</text>
+    <text x="360" y="230" font-size="20">2026-07-31 08:42</text>
+  </g>
+  <g fill="#242722" font-family="monospace" font-size="23">
+    <text x="145" y="330">Flat white</text><text x="570" y="330" text-anchor="end">32.00</text>
+    <text x="145" y="380">Oat milk</text><text x="570" y="380" text-anchor="end">3.00</text>
+    <path d="M145 430H570" stroke="#797c74" stroke-dasharray="8 8"/>
+    <text x="145" y="490" font-weight="700">TOTAL HKD</text><text x="570" y="490" text-anchor="end" font-weight="700">35.00</text>
+    <text x="145" y="560">Card</text><text x="570" y="560" text-anchor="end">35.00</text>
+  </g>
+  <g fill="#62665e" font-family="monospace" text-anchor="middle" font-size="17">
+    <text x="360" y="700">Fixture ID PB-COFFEE-20260802</text>
+    <text x="360" y="740">All names and values are invented.</text>
+  </g>
+</svg>

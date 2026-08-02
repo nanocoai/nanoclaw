@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>Household receipt playbox</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Local development channel</p>
+          <h1>Household receipts</h1>
+        </div>
+        <div class="connection" aria-live="polite">
+          <span id="connection-dot" class="status-dot"></span>
+          <span id="connection-label">Connecting</span>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <section class="chat-panel" aria-label="Synthetic household chat">
+          <div id="messages" class="messages" aria-live="polite">
+            <div id="empty-state" class="empty-state">
+              <p class="eyebrow">Synthetic data only</p>
+              <h2>Send a fixture or type an expense.</h2>
+              <p>Message IDs and delivery state stay visible for deterministic debugging.</p>
+            </div>
+          </div>
+          <div id="typing" class="typing" hidden>Expense agent is typing</div>
+          <div id="reply-banner" class="reply-banner" hidden>
+            <span>Replying to <code id="reply-id"></code></span>
+            <button id="clear-reply" type="button">Clear</button>
+          </div>
+          <form id="composer" class="composer">
+            <div class="field participant-field">
+              <label for="participant">Participant</label>
+              <select id="participant">
+                <option value="playbox:alice">Alice</option>
+                <option value="playbox:bob">Bob</option>
+                <option value="playbox:guest">Guest</option>
+              </select>
+            </div>
+            <div class="field message-field">
+              <label for="message">Message</label>
+              <textarea id="message" rows="2" placeholder="expense: ferry 28 today"></textarea>
+            </div>
+            <div class="field file-field">
+              <label for="attachments">Receipt files</label>
+              <input id="attachments" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" multiple />
+            </div>
+            <div class="composer-actions">
+              <button id="resend" class="secondary" type="button" disabled>Resend last ID</button>
+              <button class="primary" type="submit">Send message</button>
+            </div>
+          </form>
+        </section>
+
+        <aside class="control-panel">
+          <section>
+            <p class="eyebrow">Deterministic scenarios</p>
+            <div id="scenarios" class="scenario-list">
+              <button data-scenario="clear-image">Clear image receipt</button>
+              <button data-scenario="incomplete-text">Incomplete text expense</button>
+              <button data-scenario="two-receipt-batch">Two-receipt batch</button>
+              <button data-scenario="duplicate">Duplicate resend</button>
+              <button data-scenario="out-of-order">Replies out of order</button>
+              <button data-scenario="simultaneous">Two simultaneous senders</button>
+              <button data-scenario="reconnect">Reconnect during reply</button>
+            </div>
+          </section>
+          <section class="faults">
+            <p class="eyebrow">Fault injection</p>
+            <div class="fault-grid">
+              <button data-fault="parser_timeout">Parser timeout</button>
+              <button data-fault="api_429">API 429</button>
+              <button data-fault="api_500">API 500</button>
+              <button data-fault="disconnect">Disconnect</button>
+            </div>
+          </section>
+          <section class="diagnostics">
+            <div><span>Last inbound</span><code id="last-inbound">none</code></div>
+            <div><span>Last outbound</span><code id="last-outbound">none</code></div>
+            <button id="reset" class="danger" type="button">Reset playbox</button>
+          </section>
+        </aside>
+      </div>
+    </main>
+    <script src="/app.js" defer></script>
+  </body>
+</html>
