@@ -56,10 +56,7 @@ export function resolveStateRoot(projectRoot: string, configured: string | undef
   return configured ? path.resolve(configured) : projectRoot;
 }
 
-const STATE_ROOT = resolveStateRoot(
-  PROJECT_ROOT,
-  process.env.NANOCLAW_STATE_DIR || envConfig.NANOCLAW_STATE_DIR,
-);
+const STATE_ROOT = resolveStateRoot(PROJECT_ROOT, process.env.NANOCLAW_STATE_DIR || envConfig.NANOCLAW_STATE_DIR);
 
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
 export const MOUNT_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'mount-allowlist.json');
