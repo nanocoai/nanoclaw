@@ -22,6 +22,7 @@ ARG INSTALL_CJK_FONTS=false
 # pinned in cli-tools.json so a skill can add one with a json-merge; Bun (the
 # runtime) is pinned here because it installs from a different source.
 ARG BUN_VERSION=1.3.12
+ARG OPENCODE_VERSION=1.4.17
 
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
@@ -105,6 +106,9 @@ RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 COPY cli-tools.json install-cli-tools.sh /tmp/
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     sh /tmp/install-cli-tools.sh /tmp/cli-tools.json
+
+RUN --mount=type=cache,target=/root/.cache/pnpm \
+    pnpm install -g "opencode-ai@${OPENCODE_VERSION}"
 
 # ---- ncl CLI wrapper ----------------------------------------------------------
 # Actual script lives in the mounted source at /app/src/cli/ncl.ts.

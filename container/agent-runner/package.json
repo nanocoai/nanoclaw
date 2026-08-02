@@ -12,6 +12,7 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.197",
     "@anthropic-ai/sdk": "^0.108.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@opencode-ai/sdk": "1.4.17",
     "cron-parser": "^5.0.0",
     "zod": "^4.0.0"
   },
