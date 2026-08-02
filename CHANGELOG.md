@@ -4,6 +4,8 @@ All notable changes to NanoClaw will be documented in this file.
 
 ## [Unreleased]
 
+- **Release publication tolerates GitHub API propagation.** The Release workflow now retries bounded post-publication read-backs when the new Release is not listed yet or its immutable state is not visible yet. Exact title, body, tag, or SHA mismatches still fail immediately.
+
 ## [2.1.54] - 2026-08-01
 
 Rollup release covering v2.1.18 through v2.1.54 — everything merged since the v2.1.17 tag.

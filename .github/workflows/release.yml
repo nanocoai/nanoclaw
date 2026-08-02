@@ -291,13 +291,33 @@ jobs:
             echo "::notice::GitHub Release $TAG already matches the requested publication; nothing to change."
           fi
 
-          git fetch --force origin --tags
-          write_tag_state
-          write_release_state
-          FINAL_STATE=$(node scripts/release.mjs plan "$RELEASE_VERSION" "$TARGET_SHA" \
-            "$RUNNER_TEMP/tag-state.json" "$RUNNER_TEMP/release-state.json" \
-            "$RUNNER_TEMP/release-notes.md")
-          test "$FINAL_STATE" = "already-published"
+          READBACK_ATTEMPTS=6
+          READBACK_DELAY_SECONDS=2
+          FINAL_STATE="pending"
+
+          for ((attempt = 1; attempt <= READBACK_ATTEMPTS; attempt++)); do
+            git fetch --force origin --tags
+            write_tag_state
+            write_release_state
+            FINAL_STATE=$(node scripts/release.mjs readback "$RELEASE_VERSION" "$TARGET_SHA" \
+              "$RUNNER_TEMP/tag-state.json" "$RUNNER_TEMP/release-state.json" \
+              "$RUNNER_TEMP/release-notes.md")
+
+            if [ "$FINAL_STATE" = "already-published" ]; then
+              break
+            fi
+            if [ "$attempt" -eq "$READBACK_ATTEMPTS" ]; then
+              echo "::error::Timed out waiting for GitHub to return the exact immutable release after $READBACK_ATTEMPTS attempts."
+              node scripts/release.mjs plan "$RELEASE_VERSION" "$TARGET_SHA" \
+                "$RUNNER_TEMP/tag-state.json" "$RUNNER_TEMP/release-state.json" \
+                "$RUNNER_TEMP/release-notes.md"
+              exit 1
+            fi
+
+            echo "::notice::Release read-back is still propagating (attempt $attempt/$READBACK_ATTEMPTS); retrying in ${READBACK_DELAY_SECONDS}s."
+            sleep "$READBACK_DELAY_SECONDS"
+            READBACK_DELAY_SECONDS=$((READBACK_DELAY_SECONDS * 2))
+          done
 
           RELEASE_URL=$(jq -r .html_url "$RUNNER_TEMP/release-state.json")
           {

@@ -128,6 +128,21 @@ export function publicationPlan({ expectedBody, release, tagState, targetSha, ve
   return tagState.exists ? 'create-release' : 'create-tag-and-release';
 }
 
+export function publicationReadbackStatus(inputs) {
+  const immutablePending = inputs.release !== null && inputs.release.immutable !== true;
+  const release = immutablePending ? { ...inputs.release, immutable: true } : inputs.release;
+  const plan = publicationPlan({ ...inputs, release });
+
+  if (plan === 'already-published') {
+    return immutablePending ? 'pending' : 'already-published';
+  }
+  if (plan === 'create-release') {
+    return 'pending';
+  }
+
+  throw new Error(`post-publication read-back returned unsafe plan ${plan}`);
+}
+
 function repositoryInputs() {
   return {
     changelog: readFileSync('CHANGELOG.md', 'utf8'),
@@ -138,7 +153,9 @@ function repositoryInputs() {
 export function main(argv) {
   const [command, version, ...args] = argv;
   if (!command || !version) {
-    throw new Error('usage: node scripts/release.mjs <verify|extract|assemble|plan> <x.y.z> [command arguments]');
+    throw new Error(
+      'usage: node scripts/release.mjs <verify|extract|assemble|plan|readback> <x.y.z> [command arguments]',
+    );
   }
 
   const inputs = repositoryInputs();
@@ -166,19 +183,20 @@ export function main(argv) {
     );
     return;
   }
-  if (command === 'plan') {
+  if (command === 'plan' || command === 'readback') {
     const [targetSha, tagStatePath, releasePath, expectedBodyPath] = args;
     if (!targetSha || !tagStatePath || !releasePath || !expectedBodyPath) {
-      throw new Error('plan requires target SHA, tag-state JSON, release JSON, and expected release notes paths');
+      throw new Error(`${command} requires target SHA, tag-state JSON, release JSON, and expected release notes paths`);
     }
+    const publicationInputs = {
+      expectedBody: readFileSync(expectedBodyPath, 'utf8'),
+      release: JSON.parse(readFileSync(releasePath, 'utf8')),
+      tagState: JSON.parse(readFileSync(tagStatePath, 'utf8')),
+      targetSha,
+      version,
+    };
     process.stdout.write(
-      `${publicationPlan({
-        expectedBody: readFileSync(expectedBodyPath, 'utf8'),
-        release: JSON.parse(readFileSync(releasePath, 'utf8')),
-        tagState: JSON.parse(readFileSync(tagStatePath, 'utf8')),
-        targetSha,
-        version,
-      })}\n`,
+      `${command === 'plan' ? publicationPlan(publicationInputs) : publicationReadbackStatus(publicationInputs)}\n`,
     );
     return;
   }

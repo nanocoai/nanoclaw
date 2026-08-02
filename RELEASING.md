@@ -57,7 +57,9 @@ The Release workflow independently checks the protected `release` environment in
 5. Run the same workflow again with the same version, the same full SHA, and `publish`. The publish job re-verifies the immutable inputs, creates an annotated `vX.Y.Z` tag on that exact commit, assembles the curated notes plus contributor sections, and publishes the GitHub Release.
 6. Read back the tag target and release body from GitHub. Confirm `package.json`, the tag, the release title, and the changelog all name the same version.
 
-The workflow never commits or pushes to `main`. If publication fails after the tag push, rerun `publish`: it accepts an existing annotated tag only when that tag resolves to the exact workflow SHA, then resumes release creation. If the release was already published, the rerun succeeds without writing only after the tag target, release tag, title, published state, non-prerelease state, immutable state, and body all exactly match the requested publication. A mutable release never becomes a successful retry; any mismatch fails closed.
+The workflow never commits or pushes to `main`. After creating the Release, it retries the read-back six times with bounded exponential backoff while GitHub propagates either the new Release listing or its immutable state. Exact title, body, tag, and SHA mismatches still fail immediately, and the workflow fails closed after the retry deadline.
+
+If publication fails after the tag push, rerun `publish`: it accepts an existing annotated tag only when that tag resolves to the exact workflow SHA, then resumes release creation. If the release was already published, the rerun succeeds without writing only after the tag target, release tag, title, published state, non-prerelease state, immutable state, and body all exactly match the requested publication. A release that remains mutable never becomes a successful retry; any mismatch fails closed.
 
 ## Rollup releases
 

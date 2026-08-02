@@ -151,6 +151,15 @@ function isClaudeAuthenticated(): boolean {
   }
 }
 
+/**
+ * True when the Claude CLI is already installed AND signed in — the only
+ * state in which a non-claude install may be offered a Claude debugger.
+ * Unlike `ensureClaudeReady`, this never prompts and has no side effects.
+ */
+export function isClaudeReady(): boolean {
+  return isClaudeInstalled() && isClaudeAuthenticated();
+}
+
 export async function ensureClaudeReady(projectRoot: string): Promise<boolean> {
   if (!isClaudeInstalled()) {
     const install = ensureAnswer(
