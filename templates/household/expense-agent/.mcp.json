@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "ndexpense": {
+      "command": "bun",
+      "args": ["/app/src/ndexpense-mcp/server.ts"],
+      "env": {
+        "NDEXPENSE_API_BASE_URL": "https://ndexpense-api-staging.smartecom.workers.dev"
+      }
+    }
+  }
+}
