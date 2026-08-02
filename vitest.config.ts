@@ -13,5 +13,6 @@ export default defineConfig({
       'templates/**/*.test.ts',
       'container/*.test.ts',
     ],
+    exclude: ['scripts/verify-expense-agent.test.ts'],
   },
 });

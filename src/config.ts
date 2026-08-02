@@ -19,6 +19,7 @@ const envConfig = readEnvFile([
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'ONECLI_GATEWAY_CONTAINER',
+  'NANOCLAW_STATE_DIR',
 ]);
 
 /**
@@ -51,12 +52,21 @@ export const ASSISTANT_HAS_OWN_NUMBER =
 const PROJECT_ROOT = process.cwd();
 const HOME_DIR = process.env.HOME || os.homedir();
 
+export function resolveStateRoot(projectRoot: string, configured: string | undefined): string {
+  return configured ? path.resolve(configured) : projectRoot;
+}
+
+const STATE_ROOT = resolveStateRoot(
+  PROJECT_ROOT,
+  process.env.NANOCLAW_STATE_DIR || envConfig.NANOCLAW_STATE_DIR,
+);
+
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
 export const MOUNT_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'mount-allowlist.json');
 export const SENDER_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'sender-allowlist.json');
-export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
-export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
-export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
+export const STORE_DIR = path.resolve(STATE_ROOT, 'store');
+export const GROUPS_DIR = path.resolve(STATE_ROOT, 'groups');
+export const DATA_DIR = path.resolve(STATE_ROOT, 'data');
 // Local agent-template library. Committed but ships empty (+ README). Resolved
 // once at load. Override to another LOCAL path via NANOCLAW_TEMPLATES_DIR; never
 // a remote URL, never an ncl flag, never runtime-mutable.
