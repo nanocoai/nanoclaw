@@ -5,6 +5,15 @@ import { log } from './log.js';
 const PRE_COMPACT_COMMAND = 'bun /app/src/compact-instructions.ts';
 const LEGACY_MEMORY_SESSION_START_COMMAND = 'bun /app/src/memory-hook.ts';
 
+/**
+ * Claude Code reaps transcripts older than this (its default is 30 days) on a
+ * timer inside any session sharing the config dir. A group's sessions share
+ * one .claude-shared, so a warm session's cleanup reaps a cold sibling's
+ * transcript before that sibling ever wakes to rotate and archive it. 3650 is
+ * the value Claude Code's own validation message suggests for long retention.
+ */
+export const CLEANUP_PERIOD_DAYS = 3650;
+
 /** Reconcile existing Claude settings with NanoClaw's shared memory system. */
 export function migrateClaudeMemorySettings(settingsFile: string): boolean {
   try {
@@ -17,6 +26,14 @@ export function migrateClaudeMemorySettings(settingsFile: string): boolean {
     let changed = false;
     if (parsed.autoMemoryEnabled !== false) {
       parsed.autoMemoryEnabled = false;
+      changed = true;
+    }
+
+    // Fill the gap only — an operator who picked their own retention keeps it.
+    // Anything non-numeric is not a choice we can honour: Claude Code rejects
+    // it, which would disable the retention setting entirely.
+    if (typeof parsed.cleanupPeriodDays !== 'number') {
+      parsed.cleanupPeriodDays = CLEANUP_PERIOD_DAYS;
       changed = true;
     }
 
