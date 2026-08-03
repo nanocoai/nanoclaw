@@ -4,19 +4,21 @@
  *
  * Runs Photon's OAuth device-login flow, then provisions everything the
  * `photon` channel needs. One step stays manual by necessity: the delivery
- * plane only routes numbers whose user row carries `meta.opt_in`, which is set
- * by the dashboard's Add-user invite flow and cannot be triggered through the
- * API (client-supplied meta is ignored on create). The wizard guides that step
- * and polls until the opt-in lands, so it never reports success for a number
- * that cannot receive messages.
+ * plane only routes numbers whose user row carries `meta.opt_in`, and that flag
+ * is set when the human sends one message from their phone to the line Photon
+ * assigned to that user row. A freshly created row always starts without it.
+ * The wizard prints the assigned line, waits for that message, and polls until
+ * the opt-in lands, so it never reports success for a number that cannot
+ * receive messages.
  *
  *   [1/5] Device login   — open a URL, approve, we store the bearer token
  *   [2/5] Project        — find or create the "NanoClaw" Photon project
  *   [3/5] Secret         — reuse the project's current secret (rotating only
  *                          when the API doesn't return one) and write
  *                          PHOTON_PROJECT_ID + PHOTON_PROJECT_SECRET to .env
- *   [4/5] User           — guide the dashboard Add-user + invite step, then
- *                          wait until your phone's user row is opted in
+ *   [4/5] User           — find or create your Spectrum user row, print the
+ *                          line it was assigned, and wait until your first
+ *                          message to that line flips the row to opted in
  *   [5/5] iMessage line  — surface the number you text to reach your agent
  *
  * Everything is idempotent — re-running reuses the stored token/project and
@@ -357,10 +359,56 @@ export function findUserByPhone(users: Array<Record<string, unknown>>, phone: st
 }
 
 /**
+ * Create a Spectrum user row for `phone`. The row comes back carrying the
+ * `assignedPhoneNumber` the human must text, and an empty `meta` — the opt-in
+ * flag is server-owned, so client-supplied meta is never sent.
+ */
+export async function createUser(
+  fetchFn: FetchFn,
+  spectrumHost: string,
+  projectId: string,
+  projectSecret: string,
+  phone: string,
+  firstName?: string,
+): Promise<Record<string, unknown>> {
+  if (!isE164(phone)) throw new Error(`phone must be E.164 (e.g. +15551234567); got ${phone}`);
+  const body: Record<string, unknown> = { type: 'shared', phoneNumber: phone };
+  if (firstName) body.firstName = firstName;
+  const resp = await fetchFn(`${spectrumHost}/projects/${projectId}/users/`, {
+    method: 'POST',
+    headers: { Authorization: basicAuth(projectId, projectSecret), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) throw new Error(`Photon create-user failed: ${await errorDetail(resp)}`);
+  const data = await readJson(resp);
+  // The service reports failures as HTTP 200 with an {"error": …} body.
+  if (data.error) throw new Error(`Photon create-user failed: ${data.error}`);
+  return (data.user as Record<string, unknown>) || (data.data as Record<string, unknown>) || data;
+}
+
+/**
+ * The routing row for `phone`, created if it does not exist yet. A re-run must
+ * reuse the row it already made — a second create would hand out a fresh row
+ * and drop an opt-in that already landed.
+ */
+export async function ensureUser(
+  fetchFn: FetchFn,
+  spectrumHost: string,
+  projectId: string,
+  projectSecret: string,
+  phone: string,
+  firstName?: string,
+): Promise<{ user: Record<string, unknown>; created: boolean }> {
+  const existing = findRoutableUser(await listUsers(fetchFn, spectrumHost, projectId, projectSecret), phone);
+  if (existing) return { user: existing, created: false };
+  return { user: await createUser(fetchFn, spectrumHost, projectId, projectSecret, phone, firstName), created: true };
+}
+
+/**
  * True when the delivery plane will route messages for this user: the row
- * carries `meta.opt_in`, which only the dashboard's Add-user invite flow sets.
- * A row without it (however it was created) looks registered everywhere but
- * never sends or receives.
+ * carries `meta.opt_in`, which the service sets once the human has sent a
+ * message from `phoneNumber` to the row's `assignedPhoneNumber`. A row without
+ * it looks registered everywhere but never sends or receives.
  */
 export function userOptedIn(user: Record<string, unknown> | undefined): boolean {
   const meta = user?.meta;
@@ -368,9 +416,9 @@ export function userOptedIn(user: Record<string, unknown> | undefined): boolean 
 }
 
 /**
- * The row that decides routing for `phone`. When duplicates exist (a stale
- * API-created row can sit next to the dashboard-invited one for the same
- * number), an opted-in row wins over whichever happens to list first.
+ * The row that decides routing for `phone`. When duplicates exist for the same
+ * number, an opted-in row wins over whichever happens to list first — opt-in is
+ * scoped to one user-number/assigned-line pair, so only that row routes.
  */
 export function findRoutableUser(users: Array<Record<string, unknown>>, phone: string): Record<string, unknown> | undefined {
   const target = normalizePhone(phone);
@@ -384,14 +432,41 @@ export interface OptInWaitOpts {
   timeoutS?: number;
   /** Progress hook, called once per poll that did not find an opted-in row (1-based). */
   onWaiting?: (attempt: number) => void;
+  /** The line the human has to text, named in the timeout message when known. */
+  assignedLine?: string | null;
+}
+
+/**
+ * The manual step, as printed to the operator: the opt-in is performed by one
+ * message from `phone` to `assignedLine`, and nothing else can stand in for it.
+ */
+export function optInInstructions(phone: string, assignedLine: string | null): string[] {
+  if (!assignedLine) {
+    return [
+      'Photon has not assigned an iMessage line to your number yet.',
+      '',
+      `Once it does, send one message from ${phone} to that line to opt in.`,
+      '',
+      'Setup waits here and continues once the opt-in lands.',
+    ];
+  }
+  return [
+    'Your number only enters iMessage routing after it has messaged',
+    'the line Photon assigned to it, so this one step is manual:',
+    '',
+    `  1. Open Messages on ${phone}.`,
+    `  2. Text ${assignedLine} — one message of any content is enough.`,
+    '',
+    'Setup waits here and continues once the opt-in lands.',
+  ];
 }
 
 /**
  * Poll until `phone`'s user row exists AND is opted in, then return the row.
- * Creating the row through the API cannot produce the opt-in (client-supplied
- * meta is ignored), so the wizard doesn't create users at all — it waits for
- * the dashboard step to land. Throws after `timeoutS` (attempt-count based, so
- * tests with an instant sleepFn stay deterministic).
+ * A row starts un-opted-in whatever created it; the flag lands only after the
+ * human sends a message from `phone` to the row's assigned line. Throws after
+ * `timeoutS` (attempt-count based, so tests with an instant sleepFn stay
+ * deterministic).
  */
 export async function waitForOptedInUser(
   fetchFn: FetchFn,
@@ -413,16 +488,17 @@ export async function waitForOptedInUser(
       if (userOptedIn(user)) return user as Record<string, unknown>;
     } catch (err) {
       // A transient list failure must not abort a wait whose whole point is to
-      // ride out the operator's manual dashboard step — count it as a missed
-      // poll and keep going, like the device-token poll does.
+      // ride out the operator's manual step — count it as a missed poll and
+      // keep going, like the device-token poll does.
       lastError = err;
     }
     opts.onWaiting?.(attempt);
     if (attempt < maxAttempts) await sleepFn(intervalS * 1000);
   }
   const lastErrorNote = lastError ? ` Last API error: ${lastError instanceof Error ? lastError.message : String(lastError)}.` : '';
+  const target = opts.assignedLine ? `to ${opts.assignedLine}` : 'to the line Photon assigned to it';
   throw new Error(
-    `${phone} was not opted in after ${timeoutS}s.${lastErrorNote} Finish the dashboard step (Add user, then accept the invite on that phone) and re-run setup — it resumes where it left off.`,
+    `${phone} was not opted in after ${timeoutS}s.${lastErrorNote} Send one message from ${phone} ${target}, then re-run setup — it resumes where it left off.`,
   );
 }
 
@@ -641,27 +717,30 @@ async function runStatus(args: Args, fetchFn: FetchFn = fetch): Promise<number> 
   const projectId = envValue('PHOTON_PROJECT_ID') || auth.project_id;
   const secret = envValue('PHOTON_PROJECT_SECRET');
   const credentialsReady = Boolean(projectId && secret);
-  // setup writes phone_number only after the dashboard-backed user row carries
-  // meta.opt_in — but state written by older setups can hold a phone_number
-  // whose row was never opted in (and so never routed). When credentials allow
-  // it, ask the API instead of trusting the local marker.
+  // setup writes phone_number only after the user row carries meta.opt_in — but
+  // state written by older setups can hold a phone_number whose row was never
+  // opted in (and so never routed). When credentials allow it, ask the API
+  // instead of trusting the local marker.
   let routing: 'ready' | 'not-opted-in' | 'unverified' | 'unconfigured' = 'unconfigured';
   let routingError = '';
+  let liveAssigned: string | null = null;
   if (credentialsReady && auth.phone_number) {
     try {
       const user = findRoutableUser(
         await listUsers(fetchFn, args.spectrumHost, String(projectId), String(secret)),
         auth.phone_number,
       );
+      liveAssigned = userAssignedLine(user);
       routing = userOptedIn(user) ? 'ready' : 'not-opted-in';
     } catch (err) {
       routing = 'unverified';
       routingError = err instanceof Error ? err.message : String(err);
     }
   }
+  const optInTarget = liveAssigned || auth.assigned_phone_number;
   const routingLine = {
     ready: '✓ opted in (verified live)',
-    'not-opted-in': '✗ not opted in — finish the dashboard Add-user + invite step',
+    'not-opted-in': `✗ not opted in — text ${optInTarget || 'your assigned line'} once from ${auth.phone_number}`,
     unverified: `? could not verify (${routingError})`,
     unconfigured: '✗ not configured',
   }[routing];
@@ -682,7 +761,9 @@ async function runStatus(args: Args, fetchFn: FetchFn = fetch): Promise<number> 
     return 0;
   }
   if (routing === 'not-opted-in') {
-    p.outro('Your number is registered but not opted in. Re-run setup and finish the dashboard invite.');
+    p.outro(
+      `Your number is registered but not opted in. Text ${optInTarget || 'the assigned line'} once from ${auth.phone_number}, then re-run setup.`,
+    );
     return 1;
   }
   if (routing === 'unverified') {
@@ -690,9 +771,7 @@ async function runStatus(args: Args, fetchFn: FetchFn = fetch): Promise<number> 
     return 1;
   }
   if (credentialsReady) {
-    p.outro(
-      'Photon credentials are saved, but phone routing is not ready. Re-run setup with --phone and finish the dashboard invite.',
-    );
+    p.outro('Photon credentials are saved, but phone routing is not ready. Re-run setup with --phone to register and opt in your number.');
     return 1;
   }
   p.outro('Run setup to finish onboarding.');
@@ -799,39 +878,35 @@ async function runSetup(args: Args, fetchFn: FetchFn = fetch, deps: SetupDeps = 
     p.cancel(`Invalid phone number: ${phone}`);
     return 1;
   } else {
-    p.log.step('[4/5] Registering your phone (dashboard opt-in)');
+    p.log.step('[4/5] Registering your phone');
     try {
-      const user = await waitForOptedInUser(fetchFn, args.spectrumHost, projectId, secret, phone, {
-        sleepFn: deps.sleepFn,
-        onWaiting: (attempt) => {
-          if (attempt === 1) {
-            p.note(
-              [
-                'Numbers only receive messages after the dashboard invite flow,',
-                'so this one step is manual:',
-                '',
-                `  1. Open ${args.dashboardHost} and select the "${args.projectName}" project.`,
-                `  2. Add ${phone} as a user (Add user).`,
-                '  3. Accept the invite that arrives on that phone.',
-                '',
-                'Setup waits here and continues once the opt-in lands.',
-              ].join('\n'),
-              'One dashboard step needed',
-            );
-          } else if (attempt % 6 === 0) {
-            p.log.message(`Still waiting for the dashboard opt-in for ${phone}…`);
-          }
-        },
-      });
-      p.log.info('Phone registered and opted in');
-      assigned = userAssignedLine(user);
+      const { user, created } = await ensureUser(fetchFn, args.spectrumHost, projectId, secret, phone);
+      const line = userAssignedLine(user);
+      p.log.info(created ? `Created your Photon user (assigned line ${line ?? 'pending'})` : 'Found your existing Photon user');
+      if (userOptedIn(user)) {
+        p.log.info('Phone already opted in');
+        assigned = line;
+      } else {
+        p.note(optInInstructions(phone, line).join('\n'), 'One step needed on your phone');
+        const opted = await waitForOptedInUser(fetchFn, args.spectrumHost, projectId, secret, phone, {
+          sleepFn: deps.sleepFn,
+          assignedLine: line,
+          onWaiting: (attempt) => {
+            if (attempt % 6 === 0) p.log.message(`Still waiting for the opt-in for ${phone}…`);
+          },
+        });
+        p.log.info('Phone registered and opted in');
+        assigned = userAssignedLine(opted) ?? line;
+      }
     } catch (err) {
       p.cancel(`User registration failed: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
     }
   }
 
-  // [5/5] Surface the number the operator texts to reach the agent.
+  // [5/5] Surface the number the operator texts to reach the agent. With a
+  // phone this is the user row's assigned line (already learned in [4/5]); the
+  // project-line lookup only covers the no-phone run, which has no row to read.
   p.log.step("[5/5] Your agent's iMessage number");
   if (!assigned) {
     try {
@@ -850,9 +925,9 @@ async function runSetup(args: Args, fetchFn: FetchFn = fetch, deps: SetupDeps = 
   });
 
   if (assigned) {
-    p.note(`📱  ${assigned}\n\nText this number from your phone to talk to your agent.`, "Agent's iMessage number");
+    p.note(`📱  ${assigned}\n\nThis is the number you text to talk to your agent.`, "Agent's iMessage number");
   } else {
-    p.log.warn('No iMessage line assigned yet — check the Photon dashboard (https://app.photon.codes).');
+    p.log.warn('No iMessage line assigned yet — re-run setup with --phone to register your number and get one.');
   }
 
   if (!args.embedded) {
