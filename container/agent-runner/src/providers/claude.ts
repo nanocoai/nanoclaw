@@ -489,13 +489,20 @@ export class ClaudeProvider implements AgentProvider {
 
   maybeRotateContinuation(continuation: string): string | null {
     const transcriptPath = findTranscriptPath(continuation);
-    if (!transcriptPath) return null;
+    // Gone, not absent-by-design: the caller only asks about a continuation
+    // it actually stored. Resuming into a missing transcript fails as a
+    // result event — after the batch is acked — so the message is lost, not
+    // retried. Report a reason so the rotation path starts fresh instead.
+    if (!transcriptPath) return 'transcript missing — reaped by retention cleanup or never written';
 
     let size: number;
     try {
       size = fs.statSync(transcriptPath).size;
     } catch {
-      return null;
+      // The same loss as above, caught a moment later: the reaper can delete
+      // between the lookup and the stat. Anything we can't read, we can't
+      // resume from either.
+      return 'transcript unreadable — deleted mid-check, or not readable';
     }
 
     const maxBytes = transcriptRotateBytes();
