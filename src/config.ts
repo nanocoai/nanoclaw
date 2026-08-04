@@ -32,6 +32,7 @@ const envConfig = readEnvFile([
   'CHAT_INDEX_ENABLED',
   'QDRANT_URL',
   'CHAT_INDEX_DEBOUNCE_MS',
+  'NANOCLAW_PERSONAL_DIR',
 ]);
 
 export const ASSISTANT_NAME =
@@ -73,6 +74,9 @@ export const MAX_MESSAGES_PER_PROMPT = Math.max(
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,
 );
 export const IPC_POLL_INTERVAL = 1000;
+// 个人资产目录（平台无关个人资产），加进 agent 目录白名单；空串=未配置
+export const PERSONAL_DIR =
+  process.env.NANOCLAW_PERSONAL_DIR || envConfig.NANOCLAW_PERSONAL_DIR || '';
 
 // --- Chat Index ---
 export const CHAT_INDEX_ENABLED =

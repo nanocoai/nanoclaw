@@ -12,6 +12,7 @@ import {
   GROUPS_DIR,
   IDLE_TIMEOUT,
   ONECLI_URL,
+  PERSONAL_DIR,
   TIMEZONE,
 } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -641,10 +642,9 @@ async function buildLocalEnv(
     NANOCLAW_GLOBAL_DIR: input.workspacePaths!.global,
 
     // 个人资产目录（协作协议母版、want-to-do 等平台无关资产），
-    // agent-runner 会把它加进 additionalDirectories 让所有群可读写
-    ...(process.env.NANOCLAW_PERSONAL_DIR
-      ? { NANOCLAW_PERSONAL_DIR: process.env.NANOCLAW_PERSONAL_DIR }
-      : {}),
+    // agent-runner 会把它加进 additionalDirectories 让所有群可读写。
+    // 注意：主进程不整体加载 .env 进 process.env，必须走 config 的 envConfig 白名单读取
+    ...(PERSONAL_DIR ? { NANOCLAW_PERSONAL_DIR: PERSONAL_DIR } : {}),
 
     // 群标识（feishu-docs 等 skill 通过 IPC 请求 token 时需要）
     NANOCLAW_CHAT_JID: input.chatJid || '',
