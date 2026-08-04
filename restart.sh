@@ -42,3 +42,13 @@ if [ -z "$NEWPID" ] || [ "$NEWPID" = "$OLDPID" ] || [ "$NEWPID" = "-" ]; then
 fi
 
 echo "[restart] 完成。实时日志: tail -f $LOG"
+
+# 重启结果通知到飞书主群（REBOOT_NOTIFY_CHAT 可覆盖）
+NOTIFY_CHAT="${REBOOT_NOTIFY_CHAT:-oc_0a34db4c63283dc7f75589cbb4a02bda}"
+if [ -n "$NEWPID" ] && [ "$NEWPID" != "$OLDPID" ]; then
+  LARK_CLI_NO_PROXY=1 node /Users/dajay/AI_Workspace/nanoclaw/container/skills/lark-im/lark-im.mjs \
+    +chat-send --chat-id "$NOTIFY_CHAT" --text "[reboot] ✅ 重启成功，新 PID: $NEWPID" 2>/dev/null || true
+else
+  LARK_CLI_NO_PROXY=1 node /Users/dajay/AI_Workspace/nanoclaw/container/skills/lark-im/lark-im.mjs \
+    +chat-send --chat-id "$NOTIFY_CHAT" --text "[reboot] ❌ 重启可能失败，PID 未变化，请检查日志" 2>/dev/null || true
+fi
