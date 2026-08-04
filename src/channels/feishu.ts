@@ -284,7 +284,6 @@ function renderPhaseLine(
   isCurrent: boolean,
 ): { text: string; gray?: string } {
   const title = truncateCp(phase.goal.split('\n')[0], PHASE_TITLE_BUDGET);
-  if (!isCurrent) return { text: title };
   if (phase.source === 'fallback') {
     const action =
       phase.status === 'running'
@@ -302,6 +301,7 @@ function renderPhaseLine(
       gray: truncateTailCp(action.split('\n')[0], PHASE_ACTION_BUDGET),
     };
   }
+  if (!isCurrent) return { text: title };
   let action: string | undefined;
   if (phase.status === 'running') {
     action =

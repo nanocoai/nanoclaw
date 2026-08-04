@@ -1038,6 +1038,43 @@ describe('FeishuChannel', () => {
       expect(entry.steps[0].grayTail).toBe('已读取 /tmp/notes.md');
     });
 
+    it('无 narration 时工具动作独立成行并滚动保留最近三条', async () => {
+      const jid = 'fs:oc_progress_fallback_scroll';
+      const tools = [
+        ['Read', 'fallback-read', { file_path: '/tmp/a.ts' }],
+        ['Grep', 'fallback-grep', { pattern: 'needle' }],
+        ['Write', 'fallback-write', { file_path: '/tmp/b.ts' }],
+        ['Bash', 'fallback-bash', { command: 'npm test' }],
+      ] as const;
+
+      for (const [toolName, toolCallId, input] of tools) {
+        await channel.sendMessage(
+          jid,
+          JSON.stringify({
+            title: `🔧 ${toolName}`,
+            progress: {
+              provider: 'claude',
+              lifecycle: 'started',
+              toolName,
+              toolCallId,
+              input,
+            },
+          }),
+          { isProgress: true },
+        );
+      }
+
+      const entry = (channel as any).progressCards.get(jid);
+      expect(entry.steps).toHaveLength(3);
+      expect(entry.steps.map((step: any) => step.presentationId)).toEqual([
+        'phase-2',
+        'phase-3',
+        'phase-4',
+      ]);
+      expect(entry.steps.every((step: any) => step.title === '')).toBe(true);
+      expect(entry.steps.every((step: any) => step.grayTail)).toBe(true);
+    });
+
     it('开局兜底阶段失败后显示原动作与对象，不展示错误详情', async () => {
       const jid = 'fs:oc_progress_fallback_failed_action';
       await channel.sendMessage(

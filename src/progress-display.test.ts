@@ -174,6 +174,61 @@ describe('classifyProgressAction', () => {
       '正在修改文件',
     ],
     [
+      '应用单文件补丁',
+      started('Bash', {
+        command: [
+          "apply_patch <<'PATCH'",
+          '*** Begin Patch',
+          '*** Update File: src/progress-display.ts',
+          '*** End Patch',
+          'PATCH',
+        ].join('\n'),
+      }),
+      '正在修改 src/progress-display.ts',
+    ],
+    [
+      '应用多文件补丁',
+      started('Bash', {
+        command: [
+          "apply_patch <<'PATCH'",
+          '*** Begin Patch',
+          '*** Update File: /workspace/cmd/sandbox-api/capabilities_test.go',
+          '*** Update File: /workspace/internal/sandbox/admission_test.go',
+          '*** End Patch',
+          'PATCH',
+        ].join('\n'),
+      }),
+      '正在修改 capabilities_test.go、admission_test.go',
+    ],
+    [
+      'Codex 原生单文件变更',
+      started('file_change', {
+        changes: [
+          {
+            path: '/workspace/src/progress-display.ts',
+            kind: 'update',
+          },
+        ],
+      }),
+      '正在修改 /workspace/src/progress-display.ts',
+    ],
+    [
+      'Codex 原生多文件变更',
+      started('file_change', {
+        changes: [
+          {
+            path: '/workspace/cmd/sandbox-api/capabilities_test.go',
+            kind: 'update',
+          },
+          {
+            path: '/workspace/internal/sandbox/admission_test.go',
+            kind: 'update',
+          },
+        ],
+      }),
+      '正在修改 capabilities_test.go、admission_test.go',
+    ],
+    [
       '检查流水线状态',
       started('Bash', { command: 'gh run view 123' }),
       '正在检查交付流水线',
@@ -198,6 +253,57 @@ describe('classifyProgressAction', () => {
       started('mcp__nanoclaw__delegate', { query: 'review' }),
       '正在派发协作任务',
     ],
+    ['Claude 子代理', started('Agent', {}), '正在派发协作任务'],
+    [
+      '查找可用工具',
+      started('ToolSearch', { query: 'select:mcp__nanoclaw__delegate' }),
+      '正在查找可用工具',
+    ],
+    ['更新任务计划', started('todo_list', {}), '正在更新任务计划'],
+    ['准备任务工作区', started('EnterWorktree', {}), '正在准备任务工作区'],
+    ['等待后台任务', started('Monitor', {}), '正在等待后台任务'],
+    ['加载任务能力', started('Skill', {}), '正在加载任务能力'],
+    ['停止协作任务', started('TaskStop', {}), '正在停止协作任务'],
+    ['协调协作任务', started('collab_tool_call', {}), '正在协调协作任务'],
+    [
+      '更新群聊名称',
+      started('mcp__nanoclaw__rename_chat', {}),
+      '正在更新群聊名称',
+    ],
+    [
+      '回忆相关信息',
+      started('mcp_tool_call', {
+        server: 'nanoclaw',
+        tool: 'memory_recall',
+      }),
+      '正在回忆相关信息',
+    ],
+    [
+      '查看任务进展',
+      started('mcp_tool_call', {
+        server: 'nanoclaw',
+        tool: 'task_list',
+      }),
+      '正在查看任务进展',
+    ],
+    [
+      '读取聊天上下文',
+      started('mcp_tool_call', {
+        server: 'nanoclaw',
+        tool: 'get_message_range',
+      }),
+      '正在读取聊天记录',
+    ],
+    [
+      '读取单条聊天消息',
+      started('mcp__nanoclaw__get_message_by_id', {}),
+      '正在读取聊天记录',
+    ],
+    [
+      '更新任务进展',
+      started('mcp__nanoclaw__task_update_checklist', { status: 'done' }),
+      '正在更新任务进展',
+    ],
     [
       '搜索过程卡片',
       started('Bash', { command: "rg -n 'progress card' src" }),
@@ -217,6 +323,24 @@ describe('classifyProgressAction', () => {
 
   it.each(cases)('%s', (_name, progress, expected) => {
     expect(classifyProgressAction(progress).title).toBe(expected);
+  });
+
+  it('Codex 原生文件变更的完成态同步展示文件名', () => {
+    const action = classifyProgressAction(
+      started('file_change', {
+        changes: [
+          {
+            path: '/workspace/src/progress-display.ts',
+            kind: 'update',
+          },
+        ],
+      }),
+    );
+
+    expect(action).toMatchObject({
+      completedTitle: '已修改 /workspace/src/progress-display.ts',
+      actionSummary: '修改 /workspace/src/progress-display.ts',
+    });
   });
 
   it.each([
@@ -241,6 +365,11 @@ describe('classifyProgressAction', () => {
       '正在检查 src/index.ts 的代码历史',
     ],
     ['sed 不把 shell 引号当文件名', `sed -n '1,260p' "`, '正在读取相关内容'],
+    [
+      'cat 不把 stderr 重定向目标当文件名',
+      `cat openspec/README.md 2>/dev/null | head -20`,
+      '正在读取 openspec/README.md',
+    ],
   ])('%s', (_name, command, expected) => {
     expect(classifyProgressAction(started('Bash', { command })).title).toBe(
       expected,
@@ -1014,7 +1143,7 @@ describe('reduceProgressPresentation', () => {
     expect(planPhase.currentAction).toBeUndefined();
   });
 
-  it('开局 fallback 行的 goal 跟随最新动作（纯动作单行）', () => {
+  it('开局无 narration 时每个工具创建独立 fallback 行', () => {
     let state = reduceProgressPresentation(createProgressPresentationState(), {
       kind: 'tool',
       progress: started('Read', { file_path: '/tmp/a.py' }, 'read-1'),
@@ -1024,10 +1153,17 @@ describe('reduceProgressPresentation', () => {
       kind: 'tool',
       progress: started('Grep', { pattern: 'needle' }, 'grep-1'),
     });
-    const fallback = (state as any).phases[0];
-    expect(fallback.source).toBe('fallback');
-    expect(fallback.goal).toBe('正在搜索“needle”');
-    expect(fallback.currentAction).toBe('正在搜索“needle”');
+    expect((state as any).phases).toHaveLength(2);
+    expect(
+      (state as any).phases.map((phase: any) => [
+        phase.source,
+        phase.currentAction,
+      ]),
+    ).toEqual([
+      ['fallback', '已读取 /tmp/a.py'],
+      ['fallback', '正在搜索“needle”'],
+    ]);
+    expect(state.activePhaseId).toBeUndefined();
   });
 
   it('真实 TodoWrite 计划优先保留原状态，不从命令猜未来步骤', () => {

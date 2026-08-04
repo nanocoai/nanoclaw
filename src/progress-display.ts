@@ -316,6 +316,44 @@ function fileObject(progress: StructuredProgress): string | undefined {
   );
 }
 
+function fileTargetsObject(rawValues: string[]): string | undefined {
+  const rawTargets = rawValues.filter(
+    (target, index, targets) => targets.indexOf(target) === index,
+  );
+  if (rawTargets.length === 1) return displayPath(rawTargets[0]);
+
+  const names = rawTargets
+    .map((target) => safeBasename(target))
+    .filter((target): target is string => Boolean(target));
+  if (names.length === 0) return undefined;
+  const visible = names.slice(0, 2).join('、');
+  return names.length > 2 ? `${visible} 等 ${names.length} 个文件` : visible;
+}
+
+function patchFileObject(command: string): string | undefined {
+  return fileTargetsObject(
+    Array.from(
+      command.matchAll(/^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$/gmu),
+      (match) => match[1].trim(),
+    ),
+  );
+}
+
+function nativeFileChangeObject(
+  progress: StructuredProgress,
+): string | undefined {
+  const changes = progress.input?.changes;
+  if (!Array.isArray(changes)) return undefined;
+  return fileTargetsObject(
+    changes.flatMap((change) => {
+      if (!change || typeof change !== 'object' || Array.isArray(change))
+        return [];
+      const path = (change as Record<string, unknown>).path;
+      return typeof path === 'string' && path.trim() ? [path.trim()] : [];
+    }),
+  );
+}
+
 function testObject(command: string): string | undefined {
   const match = command.match(
     /(?:^|[\\/\s'"`])([^\\/\s'"`]+(?:\.test|\.spec)\.[cm]?[jt]sx?|test_[^\\/\s'"`]+\.py|[^\\/\s'"`]+_test\.py)(?=$|\s|['"`])/iu,
@@ -406,10 +444,22 @@ function shellReadObject(command: string): string | undefined {
   const commandMatch = command.match(/\b(?:cat|sed)\b/iu);
   if (commandMatch?.index == null) return undefined;
   const tokens = shellTokens(command, commandMatch.index).slice(1);
-  const candidate = [...tokens]
-    .reverse()
-    .map(cleanShellToken)
-    .find((token) => !token.startsWith('-') && !/^\d+(?:,\d+)?p$/u.test(token));
+  const operands: string[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = cleanShellToken(tokens[index]);
+    if (/^\d*(?:>>?|<<?)/u.test(token)) {
+      if (/^\d*(?:>>?|<<?)$/u.test(token)) index += 1;
+      continue;
+    }
+    if (
+      !token ||
+      token.startsWith('-') ||
+      /^\d+(?:,\d+)?p$/u.test(token)
+    )
+      continue;
+    operands.push(token);
+  }
+  const candidate = operands.at(-1);
   return candidate ? displayPath(candidate) : undefined;
 }
 
@@ -653,7 +703,10 @@ function classifyProgressActionInner(
     );
   }
   if (tool === 'write' || tool === 'edit' || tool === 'file_change') {
-    const target = fileObject(progress);
+    const target =
+      tool === 'file_change'
+        ? nativeFileChangeObject(progress) ?? fileObject(progress)
+        : fileObject(progress);
     return target
       ? actionText(`正在修改 ${target}`, `修改 ${target}`, base, 'change')
       : actionText('正在修改文件', '修改文件', base, 'change');
@@ -707,13 +760,13 @@ function classifyProgressActionInner(
           'communicate',
         );
   }
-  if (tool.includes('delegate'))
-    return {
-      ...base,
-      title: '正在派发协作任务',
-      category: 'communicate',
-      confidence: 'exact',
-    };
+  if (tool === 'agent' || tool.includes('delegate'))
+    return actionText(
+      '正在派发协作任务',
+      '派发协作任务',
+      base,
+      'communicate',
+    );
   if (tool.includes('report'))
     return {
       ...base,
@@ -721,6 +774,76 @@ function classifyProgressActionInner(
       category: 'communicate',
       confidence: 'exact',
     };
+  if (tool === 'toolsearch')
+    return actionText(
+      '正在查找可用工具',
+      '查找可用工具',
+      base,
+      'system',
+    );
+  if (tool === 'todo_list')
+    return actionText(
+      '正在更新任务计划',
+      '更新任务计划',
+      base,
+      'system',
+    );
+  if (tool === 'enterworktree')
+    return actionText(
+      '正在准备任务工作区',
+      '准备任务工作区',
+      base,
+      'system',
+    );
+  if (tool === 'monitor')
+    return actionText(
+      '正在等待后台任务',
+      '等待后台任务',
+      base,
+      'system',
+    );
+  if (tool === 'skill')
+    return actionText(
+      '正在加载任务能力',
+      '加载任务能力',
+      base,
+      'system',
+    );
+  if (tool === 'taskstop')
+    return actionText(
+      '正在停止协作任务',
+      '停止协作任务',
+      base,
+      'communicate',
+    );
+  if (tool === 'collab_tool_call')
+    return actionText(
+      '正在协调协作任务',
+      '协调协作任务',
+      base,
+      'communicate',
+    );
+  if (tool.includes('rename_chat'))
+    return actionText(
+      '正在更新群聊名称',
+      '更新群聊名称',
+      base,
+      'communicate',
+    );
+  if (tool.includes('get_message'))
+    return actionText(
+      '正在读取聊天记录',
+      '读取聊天记录',
+      base,
+      'communicate',
+    );
+  if (tool.includes('task_'))
+    return actionText(
+      '正在更新任务进展',
+      '更新任务进展',
+      base,
+      'system',
+    );
 
   if (tool === 'mcp_tool_call') {
     const mcpTool = mcpToolOf(progress);
@@ -745,6 +868,34 @@ function classifyProgressActionInner(
         category: 'communicate',
         confidence: 'exact',
       };
+    if (mcpTool === 'memory_recall')
+      return actionText(
+        '正在回忆相关信息',
+        '回忆相关信息',
+        base,
+        'system',
+      );
+    if (mcpTool === 'get_chat_context' || mcpTool === 'get_message_range')
+      return actionText(
+        '正在读取聊天记录',
+        '读取聊天记录',
+        base,
+        'communicate',
+      );
+    if (mcpTool === 'task_list' || mcpTool === 'list_tasks')
+      return actionText(
+        '正在查看任务进展',
+        '查看任务进展',
+        base,
+        'system',
+      );
+    if (mcpTool.startsWith('task_'))
+      return actionText(
+        '正在更新任务进展',
+        '更新任务进展',
+        base,
+        'system',
+      );
     return {
       ...base,
       title: '正在调用协作工具',
@@ -835,13 +986,12 @@ function classifyProgressActionInner(
       category: 'inspect',
       confidence: 'exact',
     };
-  if (/\bapply_patch\b/.test(lower))
-    return {
-      ...base,
-      title: '正在修改文件',
-      category: 'change',
-      confidence: 'exact',
-    };
+  if (/\bapply_patch\b/.test(lower)) {
+    const target = patchFileObject(command);
+    return target
+      ? actionText(`正在修改 ${target}`, `修改 ${target}`, base, 'change')
+      : actionText('正在修改文件', '修改文件', base, 'change');
+  }
   if (/git\s+diff\s+--check/.test(lower))
     return {
       ...base,
@@ -1201,7 +1351,12 @@ function upsertPhaseForStarted(
   return {
     phases,
     phaseId: phases[phaseIndex].id,
-    activePhaseId: planStep ? state.activePhaseId : phases[phaseIndex].id,
+    activePhaseId:
+      source === 'fallback'
+        ? undefined
+        : planStep
+          ? state.activePhaseId
+          : phases[phaseIndex].id,
   };
 }
 
