@@ -755,6 +755,12 @@ function computeExtraDirs(paths: {
   pushDir(paths.group);
   pushDir(groupsDir);
   pushDir(nanoclawRoot);
+
+  // 个人资产目录（NANOCLAW_PERSONAL_DIR，宿主 .env 配置）：
+  // 平台无关的个人资产（协作协议母版、want-to-do、原子块、品味样例）所在，
+  // 加进白名单让所有群可读写；目录自己没有 CLAUDE.md 时仅授予文件访问，无注入成本。
+  pushDir(process.env.NANOCLAW_PERSONAL_DIR);
+
   return extraDirs;
 }
 
