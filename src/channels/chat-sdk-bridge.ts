@@ -711,6 +711,11 @@ async function handleForwardedEvent(
         if (colonIdx !== -1) {
           questionId = customId.slice(4, colonIdx);
           tail = customId.slice(colonIdx + 1);
+          // custom_id from @chat-adapter/discord is `${actionId}\n${value}`
+          // (encodeDiscordCustomId). Splitting on ':' leaves the trailing
+          // `\n<value>`; strip it so the index resolves like the Gateway path.
+          const nlIdx = tail.indexOf('\n');
+          if (nlIdx !== -1) tail = tail.slice(0, nlIdx);
         }
       }
 
