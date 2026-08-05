@@ -471,35 +471,10 @@ async function buildContainerArgs(
   // The caller (router or host-sweep) catches the throw, leaves the inbound
   // message pending, and the next sweep tick retries.
   if (agentIdentifier) {
-    try {
-      await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
-    } catch (err: unknown) {
-      // OneCLI returns 403 when the plan agent limit is reached, even if the
-      // agent already exists (the limit check fires before the conflict check).
-      // Verify the agent actually exists before surfacing the error.
-      if (
-        err instanceof Error &&
-        err.constructor.name === 'OneCLIRequestError' &&
-        (err as { statusCode?: number }).statusCode === 403
-      ) {
-        const headers: Record<string, string> = {};
-        if (ONECLI_API_KEY) headers['Authorization'] = `Bearer ${ONECLI_API_KEY}`;
-        const res = await fetch(`${ONECLI_URL}/api/agents`, { headers });
-        if (res.ok) {
-          const data = (await res.json()) as { identifier: string }[];
-          const exists = Array.isArray(data) && data.some((a) => a.identifier === agentIdentifier);
-          if (exists) {
-            log.debug('OneCLI agent already exists (plan limit reached but agent found)', { agentIdentifier });
-          } else {
-            throw err;
-          }
-        } else {
-          throw err;
-        }
-      } else {
-        throw err;
-      }
-    }
+    // ensureAgent treats both a 409 conflict and a 403 plan-limit-reached (when
+    // the agent already exists — the limit check fires before the conflict
+    // check) as success internally; it only throws for a genuine failure.
+    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
   }
   const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
   if (!onecliApplied) {
