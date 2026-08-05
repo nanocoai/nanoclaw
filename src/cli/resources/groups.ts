@@ -452,7 +452,9 @@ registerResource({
       description:
         "Mount a host directory into a group's containers. OPERATOR-ONLY — never runnable from " +
         'inside a container (mounting host paths is a filesystem-access boundary). Requires ' +
-        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <container-path> [--ro].',
+        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <container-path> [--ro]. ' +
+        'Without --ro the mount is read-write, which mount-security still grants only if the allowlist ' +
+        'root covering --host permits write. Re-running updates the mode of an existing entry.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -463,16 +465,25 @@ registerResource({
         const row = getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
 
-        const mount: AdditionalMountConfig = {
-          hostPath,
-          containerPath,
-          ...(args.ro || args.readonly ? { readonly: true } : {}),
-        };
+        // `readonly` is written explicitly, never omitted. mount-security reads
+        // it by identity — `readonly === false` is what requests write — so an
+        // absent key is not a neutral default, it is a silent read-only mount.
+        // That made read-write unreachable through this verb even though the
+        // skills that need it (add-gmail-tool, add-gcal-tool) document exactly
+        // this "no --ro" invocation.
+        const roFlag = args.ro ?? args.readonly;
+        const readonly = roFlag !== undefined && roFlag !== false && roFlag !== 'false' && roFlag !== '0';
+
+        const mount: AdditionalMountConfig = { hostPath, containerPath, readonly };
         const existing = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
-        if (!existing.some((m) => m.hostPath === hostPath && m.containerPath === containerPath)) {
-          existing.push(mount);
-          updateContainerConfigJson(id, 'additional_mounts', existing);
-        }
+        // The dedupe key is host+container, so a re-run is how an operator
+        // corrects a mode. Replace rather than skip, or that correction is a
+        // silent no-op.
+        const at = existing.findIndex((m) => m.hostPath === hostPath && m.containerPath === containerPath);
+        if (at === -1) existing.push(mount);
+        else existing[at] = mount;
+        updateContainerConfigJson(id, 'additional_mounts', existing);
+
         return { added: mount, note: `Run \`ncl groups restart --id ${id}\` for the mount to take effect.` };
       },
     },

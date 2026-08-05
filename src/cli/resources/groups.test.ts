@@ -12,6 +12,8 @@
  * with the host caller — same code path a real approval would take.
  */
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 
 vi.mock('../../container-runner.js', () => ({
@@ -22,9 +24,21 @@ vi.mock('../../container-runner.js', () => ({
   buildAgentGroupImage: vi.fn().mockResolvedValue(undefined),
 }));
 
+// The add-mount tests below drive the stored mount through the real
+// mount-security validator, which reads a module-level const for the allowlist
+// path. Expose it as a getter over hoisted state so each test can point it at
+// its own temp file.
+const mountState = vi.hoisted(() => ({ allowlistPath: '' }));
+
 vi.mock('../../config.js', async () => {
   const actual = await vi.importActual('../../config.js');
-  return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-cli-groups' };
+  return {
+    ...actual,
+    DATA_DIR: '/tmp/nanoclaw-test-cli-groups',
+    get MOUNT_ALLOWLIST_PATH() {
+      return mountState.allowlistPath;
+    },
+  };
 });
 
 const TEST_DIR = '/tmp/nanoclaw-test-cli-groups';
@@ -33,6 +47,7 @@ import { initTestDb, closeDb, runMigrations, createAgentGroup, getDb } from '../
 import { createSession } from '../../db/sessions.js';
 import { dispatch } from '../dispatch.js';
 import { ensureContainerConfig, getContainerConfig } from '../../db/container-configs.js';
+import { validateMount } from '../../modules/mount-security/index.js';
 // Side-effect import: registers the `groups-*` commands (including delete).
 import './groups.js';
 
@@ -257,5 +272,130 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
     );
     expect(rm.ok).toBe(true);
     expect(JSON.parse(getContainerConfig(GID)!.additional_mounts)).toEqual([]);
+  });
+});
+
+/**
+ * The mount mode `add-mount` records, checked through to what the container
+ * actually gets.
+ *
+ * These assertions cross into mount-security on purpose: the bug they cover
+ * lived in the seam, not in either module. `add-mount` wrote `readonly` only
+ * when `--ro` was passed, and the validator grants read-write only for
+ * `readonly === false` — so an omitted `--ro`, which is how every skill that
+ * needs a writable mount documents it (add-gmail-tool, add-gcal-tool), left the
+ * key undefined and was silently forced read-only at spawn. Each module was
+ * self-consistent; only the pair was wrong, so only a test spanning the pair
+ * catches it.
+ */
+describe('groups config add-mount: the mount mode the operator asked for', () => {
+  const GID = 'ag-mount-mode';
+  let tmpDir: string;
+  let rootDir: string;
+  let repoDir: string;
+
+  /** An allowlist whose single root permits read-write, so the mount's own
+   *  request is the only thing that can decide the outcome. */
+  function writeAllowlist(allowReadWrite: boolean): void {
+    fs.writeFileSync(
+      mountState.allowlistPath,
+      JSON.stringify({ allowedRoots: [{ path: rootDir, allowReadWrite }], blockedPatterns: [] }),
+    );
+  }
+
+  /** The mount as stored by the CLI — the exact shape the runner hands the validator. */
+  function stored(): Array<{ hostPath: string; containerPath: string; readonly?: boolean }> {
+    return JSON.parse(getContainerConfig(GID)!.additional_mounts);
+  }
+
+  async function addMount(extra: Record<string, unknown> = {}) {
+    return dispatch(
+      {
+        id: `r-${Math.random()}`,
+        command: 'groups-config-add-mount',
+        args: { id: GID, host: repoDir, container: 'repo', ...extra },
+      },
+      { caller: 'host' },
+    );
+  }
+
+  beforeEach(() => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    runMigrations(initTestDb());
+    createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
+    ensureContainerConfig(GID);
+
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'add-mount-'));
+    mountState.allowlistPath = path.join(tmpDir, 'mount-allowlist.json');
+    rootDir = path.join(tmpDir, 'projects');
+    repoDir = path.join(rootDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('records an explicit read-write request when --ro is absent', async () => {
+    await addMount();
+    // Not `undefined`. The validator reads this key by identity, so "absent"
+    // and "false" are different answers to "did the operator ask for write?".
+    expect(stored()).toEqual([{ hostPath: repoDir, containerPath: 'repo', readonly: false }]);
+  });
+
+  it('a mount added without --ro is mounted read-write', async () => {
+    writeAllowlist(true);
+    await addMount();
+    expect(validateMount(stored()[0])).toMatchObject({ allowed: true, effectiveReadonly: false });
+  });
+
+  it('still forces read-only when the allowlist root refuses write, whatever the mount asked for', async () => {
+    // The allowlist stays the authority — this fix makes read-write reachable,
+    // not automatic.
+    writeAllowlist(false);
+    await addMount();
+    expect(validateMount(stored()[0])).toMatchObject({ allowed: true, effectiveReadonly: true });
+  });
+
+  it('honours --ro against a root that would have permitted write', async () => {
+    writeAllowlist(true);
+    await addMount({ ro: true });
+    expect(stored()[0].readonly).toBe(true);
+    expect(validateMount(stored()[0])).toMatchObject({ allowed: true, effectiveReadonly: true });
+  });
+
+  it('reads an explicit --ro false as read-write, not as the truthy string "false"', async () => {
+    // `--ro` alone parses to boolean true, but `--ro false` parses to the
+    // string "false" (src/cli/client.ts), which a bare truthiness check would
+    // read as read-only — the opposite of what was typed. Same convention as
+    // src/cli/crud.ts.
+    writeAllowlist(true);
+    await addMount({ ro: 'false' });
+    expect(stored()[0].readonly).toBe(false);
+    expect(validateMount(stored()[0])).toMatchObject({ allowed: true, effectiveReadonly: false });
+  });
+
+  it('re-adding the same mount with a different mode updates it instead of keeping the stale one', async () => {
+    // The dedupe key is host+container, so without this the operator's second
+    // command is a silent no-op — and correcting a wrong mode is exactly why
+    // anyone re-runs add-mount.
+    await addMount();
+    await addMount({ ro: true });
+    expect(stored()).toEqual([{ hostPath: repoDir, containerPath: 'repo', readonly: true }]);
+
+    await addMount();
+    expect(stored()).toEqual([{ hostPath: repoDir, containerPath: 'repo', readonly: false }]);
+  });
+
+  it('reports the mode it stored, so the operator does not have to re-read the config', async () => {
+    const resp = await addMount();
+    expect((resp as { ok: true; data: { added: unknown } }).data.added).toEqual({
+      hostPath: repoDir,
+      containerPath: 'repo',
+      readonly: false,
+    });
   });
 });
