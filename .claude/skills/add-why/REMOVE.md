@@ -5,18 +5,19 @@ description: Removes the `why` diagnostic added by /add-why.
 
 # Remove `why`
 
-Apply copied two files and changed nothing else — no barrel imports, no registry
+Apply copied three files and changed nothing else — no barrel imports, no registry
 entries, no dependencies, no Dockerfile or env changes. Removing it is deleting them.
 
 ```bash
 rm -f scripts/why.ts
+rm -f scripts/why-format.test.ts
 rm -f src/why-schema.test.ts
 ```
 
 Confirm nothing is left behind:
 
 ```bash
-grep -rn "why.ts\|why-schema" --include=*.ts --include=*.json . 2>/dev/null | grep -v node_modules
+grep -rn "why.ts\|why-schema\|why-format" --include=*.ts --include=*.json . 2>/dev/null | grep -v node_modules
 ```
 
 That should print nothing. If it matches something, `why` was wired into a caller

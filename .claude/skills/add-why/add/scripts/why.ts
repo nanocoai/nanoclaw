@@ -68,6 +68,81 @@ function age(iso: string | null | undefined): string {
   return h < 24 ? `${h}h ${m % 60}m` : `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
+/** Render the destination an operator can grep for.
+ *
+ *  Chat SDK adapters (Telegram, Discord, Slack, …) namespace their own ids and
+ *  send the prefixed form as platform_id — see src/platform-id.ts. Native
+ *  adapters (WhatsApp, Signal, iMessage, DeltaChat) send bare JIDs, phone
+ *  numbers or numeric ids. So the prefix has to be conditional: joining
+ *  unconditionally printed `telegram:telegram:7061036646`, and dropping it
+ *  unconditionally would lose the channel on every native adapter. */
+export function formatDestination(channelType: string | null, platformId: string | null): string {
+  if (!platformId) return channelType ?? '';
+  if (!channelType) return platformId;
+  return platformId.startsWith(`${channelType}:`) ? platformId : `${channelType}:${platformId}`;
+}
+
+/** One-line, operator-readable rendering of a stored message body.
+ *
+ *  Every body is JSON, and several are envelopes rather than text:
+ *  ask_user_question and send_card write `type`, edit_message and add_reaction
+ *  write `operation`, the self-mod tools write `action`. Dumping the raw JSON
+ *  spent the whole 120-char budget on field names — an operator reading an
+ *  ask_question row learned nothing about what was asked. Dispatch is on the
+ *  envelope shape rather than on `kind`, because `kind` does not separate
+ *  them: edit and reaction envelopes ride on kind 'chat'. */
+export function previewContent(content: string): string {
+  let body: unknown;
+  try {
+    body = JSON.parse(content);
+    // eslint-disable-next-line no-catch-all/no-catch-all -- JSON.parse throws only SyntaxError, and a body that is not JSON is a legitimate input here
+  } catch {
+    return truncate(content); // not JSON — nothing to decode
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return truncate(content);
+  const c = body as Record<string, unknown>;
+
+  if (c.operation === 'edit') return truncate(`edit of ${str(c.messageId)} → "${str(c.text) || str(c.markdown)}"`);
+  if (c.operation === 'reaction') return truncate(`reaction ${str(c.emoji)} on ${str(c.messageId)}`);
+
+  if (c.type === 'ask_question') {
+    const labels = (Array.isArray(c.options) ? c.options.map(optionLabel) : []).filter(Boolean);
+    return truncate(`ask_question "${str(c.question) || str(c.title)}"${labels.length ? ` [${labels.join(', ')}]` : ''}`);
+  }
+
+  if (c.type === 'card') {
+    const card = (c.card && typeof c.card === 'object' ? c.card : {}) as Record<string, unknown>;
+    const blurb = str(card.description) || str(c.fallbackText);
+    return truncate(`card "${str(card.title)}"${blurb ? ` — ${blurb}` : ''}`);
+  }
+
+  if (typeof c.action === 'string') return truncate(`action ${c.action}`);
+
+  if (typeof c.text === 'string' || typeof c.markdown === 'string' || Array.isArray(c.files)) {
+    const n = Array.isArray(c.files) ? c.files.length : 0;
+    const files = n > 0 ? `(+${n} file${n === 1 ? '' : 's'})` : '';
+    return truncate([str(c.markdown) || str(c.text), files].filter(Boolean).join(' '));
+  }
+
+  // A shape this predates. Show the JSON rather than an empty line, which an
+  // operator would read as "no content".
+  return truncate(content);
+}
+
+function str(v: unknown): string {
+  return typeof v === 'string' ? v : '';
+}
+
+function optionLabel(o: unknown): string {
+  if (typeof o === 'string') return o;
+  return o && typeof o === 'object' ? str((o as Record<string, unknown>).label) : '';
+}
+
+function truncate(s: string): string {
+  const flat = s.replace(/\s*\n\s*/g, ' ').trim();
+  return flat.length > 120 ? `${flat.slice(0, 120)}…` : flat;
+}
+
 interface MessageOut {
   id: string; seq: number; timestamp: string; deliver_after: string | null;
   kind: string; channel_type: string | null; platform_id: string | null;
@@ -126,12 +201,12 @@ function explain(id: string): number {
 }
 
 function reportOutbound(s: SessionDir, m: MessageOut, receipt: Delivered | undefined): void {
-  const to = [m.channel_type, m.platform_id].filter(Boolean).join(':') || '(no destination)';
+  const to = formatDestination(m.channel_type, m.platform_id) || '(no destination)';
   console.log(`message ${m.id}`);
   console.log(`  session   ${s.label}`);
   console.log(`  produced  ${m.timestamp}  (${age(m.timestamp)} ago), seq ${m.seq}, kind ${m.kind}`);
   console.log(`  to        ${to}${m.thread_id ? ` thread ${m.thread_id}` : ''}`);
-  console.log(`  content   ${m.content.slice(0, 120).replace(/\n/g, ' ')}${m.content.length > 120 ? '…' : ''}`);
+  console.log(`  content   ${previewContent(m.content)}`);
   console.log();
 
   if (receipt?.status === 'delivered') {
@@ -179,7 +254,7 @@ function reportInbound(
   console.log(`message ${m.id}  (inbound)`);
   console.log(`  session   ${s.label}`);
   console.log(`  received  ${m.timestamp} (${age(m.timestamp)} ago), status ${m.status}, tries ${m.tries}`);
-  console.log(`  content   ${m.content.slice(0, 120).replace(/\n/g, ' ')}${m.content.length > 120 ? '…' : ''}`);
+  console.log(`  content   ${previewContent(m.content)}`);
   console.log();
 
   if (!ack) {
@@ -236,7 +311,7 @@ function stuck(limit: number): number {
       if (m.deliver_after && new Date(m.deliver_after).getTime() > Date.now()) continue;
       rows.push({
         session: s.label, id: m.id, ts: m.timestamp,
-        to: [m.channel_type, m.platform_id].filter(Boolean).join(':') || '(none)',
+        to: formatDestination(m.channel_type, m.platform_id) || '(none)',
       });
     }
     outbound.close(); inbound.close();
@@ -256,17 +331,20 @@ function stuck(limit: number): number {
   return 1;
 }
 
-const args = process.argv.slice(2);
-if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
-  console.log(`why — explain what happened to one message
+// CLI — guarded so the formatting helpers above stay importable from tests.
+if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+  const args = process.argv.slice(2);
+  if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
+    console.log(`why — explain what happened to one message
 
   tsx scripts/why.ts <message-id>      explain one message (outbound or inbound)
   tsx scripts/why.ts --stuck [--limit N]  list produced-but-undelivered messages
 
 Read-only. Run from the NanoClaw install root.`);
-  process.exit(0);
-}
+    process.exit(0);
+  }
 
-const limitFlag = args.indexOf('--limit');
-const limit = limitFlag >= 0 ? Number(args[limitFlag + 1]) || 20 : 20;
-process.exit(args[0] === '--stuck' ? stuck(limit) : explain(args[0]));
+  const limitFlag = args.indexOf('--limit');
+  const limit = limitFlag >= 0 ? Number(args[limitFlag + 1]) || 20 : 20;
+  process.exit(args[0] === '--stuck' ? stuck(limit) : explain(args[0]));
+}

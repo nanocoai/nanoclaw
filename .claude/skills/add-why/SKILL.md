@@ -28,6 +28,9 @@ The third is the one that costs you an evening, because nothing anywhere says so
 
 - `scripts/why.ts` — the diagnostic. Read-only; opens both session DBs with
   `readonly: true` and never writes.
+- `scripts/why-format.test.ts` — output tests for the two lines an operator reads
+  first: the destination address and the content preview. Both are rendered, not
+  stored, so the schema guard below cannot see them.
 - `src/why-schema.test.ts` — a drift guard. `why` reads the session schemas
   directly, so a column rename would silently change its verdicts. The test builds
   real tables from `INBOUND_SCHEMA` / `OUTBOUND_SCHEMA` and fails if a field it
@@ -38,18 +41,19 @@ it uses `better-sqlite3`, which the host already installs and verifies.
 
 ## Install
 
-1. Copy the two files into place from the skill directory:
+1. Copy the three files into place from the skill directory:
 
    ```bash
    mkdir -p scripts src
    cp "${CLAUDE_SKILL_DIR}/add/scripts/why.ts" scripts/why.ts
+   cp "${CLAUDE_SKILL_DIR}/add/scripts/why-format.test.ts" scripts/why-format.test.ts
    cp "${CLAUDE_SKILL_DIR}/add/src/why-schema.test.ts" src/why-schema.test.ts
    ```
 
-2. Verify the drift guard passes against the current schema:
+2. Verify the tests pass against the current schema:
 
    ```bash
-   pnpm exec vitest run src/why-schema.test.ts
+   pnpm exec vitest run scripts/why-format.test.ts src/why-schema.test.ts
    ```
 
 3. Check it runs:
