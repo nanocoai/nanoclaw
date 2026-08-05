@@ -269,8 +269,7 @@ async function trackWakeOutcome(session: Session, agentGroup: AgentGroup, woke: 
   wakeFailureStreaks.set(session.id, streak);
 
   const pastThreshold = streak - WAKE_FAILURE_ALERT_THRESHOLD;
-  const shouldAlert =
-    pastThreshold === 0 || (pastThreshold > 0 && pastThreshold % WAKE_FAILURE_REALERT_EVERY === 0);
+  const shouldAlert = pastThreshold === 0 || (pastThreshold > 0 && pastThreshold % WAKE_FAILURE_REALERT_EVERY === 0);
 
   if (shouldAlert) {
     wakeFailureAlerted.add(session.id);

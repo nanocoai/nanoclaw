@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, resetToRetryable, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
@@ -24,6 +25,37 @@ const AUTH_ERROR_RE = /Failed to authenticate|authentication_error|Invalid authe
 class CredentialError extends Error {
   constructor() {
     super('Credential error — container will exit for respawn with fresh token');
+  }
+}
+
+// Same mount destination as CONTAINER_CLAUDE_DIR in src/container-runner.ts.
+const OAUTH_CREDENTIALS_PATH = '/home/node/.claude/.credentials.json';
+// Buffer so we don't race the SDK's own refresh — only pre-empt a query when
+// the token is already stale by more than this margin.
+const OAUTH_EXPIRY_BUFFER_MS = 30_000;
+
+/**
+ * Check the mounted host OAuth credentials for an already-expired access
+ * token before starting a new query. Without this, a stale token only
+ * surfaces after the Claude Agent SDK exhausts its own internal retry loop
+ * against the expired token — several minutes of silent, doomed work — and
+ * only then returns a result whose text matches AUTH_ERROR_RE. Catching it
+ * up front turns that into an immediate respawn instead.
+ *
+ * Doesn't help a token that expires mid-query (the SDK is already running by
+ * then) — only a query that's about to start against a token that's already
+ * expired. Returns false (not our concern) when using an API key instead of
+ * Pro OAuth, since no credentials file is mounted in that mode.
+ */
+function isOAuthTokenExpired(): boolean {
+  try {
+    const raw = readFileSync(OAUTH_CREDENTIALS_PATH, 'utf8');
+    const parsed = JSON.parse(raw) as { claudeAiOauth?: { expiresAt?: number } };
+    const expiresAt = parsed.claudeAiOauth?.expiresAt;
+    if (typeof expiresAt !== 'number') return false;
+    return Date.now() >= expiresAt - OAUTH_EXPIRY_BUFFER_MS;
+  } catch {
+    return false;
   }
 }
 
@@ -174,6 +206,23 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
+    const skippedSet = new Set(skipped);
+    const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
+
+    if (isOAuthTokenExpired()) {
+      log('OAuth token already expired — resetting messages and exiting for respawn instead of starting a doomed query');
+      resetToRetryable(processingIds);
+      writeMessageOut({
+        id: generateId(),
+        kind: 'system',
+        platform_id: null,
+        channel_type: null,
+        thread_id: null,
+        content: JSON.stringify({ action: 'credential_error' }),
+      });
+      process.exit(1);
+    }
+
     const query = config.provider.query({
       prompt,
       continuation,
@@ -182,8 +231,6 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     });
 
     // Process the query while concurrently polling for new messages
-    const skippedSet = new Set(skipped);
-    const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
