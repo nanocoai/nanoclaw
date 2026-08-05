@@ -19,6 +19,9 @@ import { getContainerConfig } from '../db/container-configs.js';
 import { ALLOW, DENY, HOLD, type GuardedActionSpec, type GuardInput } from '../guard/index.js';
 import { GROUP_SCOPE_RESOURCES, type CommandDef } from './registry.js';
 
+const GROUP_WIRING_COMMANDS = new Set(['wirings-get', 'wirings-update']);
+const GROUP_WIRING_UPDATE_ARGS = new Set(['id', 'agent_group_id', 'group', 'help', 'engage_mode', 'engage_pattern']);
+
 /** Dotted catalog action name for a command. */
 export function commandGuardAction(cmd: Pick<CommandDef, 'name' | 'action'>): string {
   return cmd.action ?? `cli.${cmd.name}`;
@@ -63,8 +66,10 @@ function commandDecide(cmd: CommandDef, input: GuardInput) {
   }
 
   if (cliScope === 'group') {
+    const groupWiringCommand = cmd.resource === 'wirings' && GROUP_WIRING_COMMANDS.has(cmd.name);
+
     // Only allow whitelisted resources and general commands (no resource, like help)
-    if (cmd.resource && !GROUP_SCOPE_RESOURCES.has(cmd.resource)) {
+    if (cmd.resource && !GROUP_SCOPE_RESOURCES.has(cmd.resource) && !groupWiringCommand) {
       return DENY(`CLI access is scoped to this agent group. Cannot access "${cmd.resource}".`);
     }
 
@@ -78,6 +83,14 @@ function commandDecide(cmd: CommandDef, input: GuardInput) {
     }
     if ((cmd.resource === 'groups' || cmd.resource === 'destinations') && args.id && args.id !== actor.agentGroupId) {
       return DENY('CLI access is scoped to this agent group.');
+    }
+
+    if (
+      groupWiringCommand &&
+      cmd.name === 'wirings-update' &&
+      Object.keys(args).some((key) => !GROUP_WIRING_UPDATE_ARGS.has(key.replace(/-/g, '_')))
+    ) {
+      return DENY('Group-scoped wiring updates may only change engage_mode or engage_pattern.');
     }
 
     // Block cli_scope changes from group-scoped agents (privilege escalation)

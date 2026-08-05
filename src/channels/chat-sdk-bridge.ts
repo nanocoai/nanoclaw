@@ -118,6 +118,31 @@ function resolveSelectedOption(
   return candidate;
 }
 
+interface TerminalApprovalCard {
+  title: string;
+  question: string;
+  resolution: string;
+}
+
+/**
+ * Keep an approval's full context after it resolves. The muted resolution
+ * replaces the actions row, making the card visibly inactive without
+ * discarding the request an admin decided on.
+ */
+export function buildTerminalApprovalCard({ title, question, resolution }: TerminalApprovalCard) {
+  const children: CardChild[] = [];
+  if (question) children.push(CardText(question));
+  children.push(CardText(resolution, { style: 'muted' }));
+  return Card({ title, children });
+}
+
+function terminalApprovalMessage(spec: TerminalApprovalCard) {
+  return {
+    card: buildTerminalApprovalCard(spec),
+    fallbackText: [spec.title, spec.question, spec.resolution].filter(Boolean).join('\n\n'),
+  };
+}
+
 export function splitForLimit(text: string, limit: number): string[] {
   if (text.length <= limit) return [text];
   const chunks: string[] = [];
@@ -324,12 +349,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
         // Update the card to show the selected answer, who acted, and remove buttons
         const actorName = event.user?.userName || event.user?.fullName || '';
-        const byLine = actorName ? ` — ${actorName}` : '';
+        const resolution = actorName ? `${selectedLabel} by ${actorName}` : selectedLabel;
         try {
           const tid = event.threadId;
-          await adapter.editMessage(tid, event.messageId, {
-            markdown: `${title}\n\n${selectedLabel}${byLine}`,
-          });
+          await adapter.editMessage(
+            tid,
+            event.messageId,
+            render?.question
+              ? terminalApprovalMessage({ title, question: render.question, resolution })
+              : { markdown: `${title}\n\n${resolution}` },
+          );
         } catch (err) {
           log.warn('Failed to update card after action', { err });
         }
@@ -416,9 +445,23 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       const content = message.content as Record<string, unknown>;
 
       if (content.operation === 'edit' && content.messageId) {
-        await adapter.editMessage(tid, content.messageId as string, {
-          markdown: transformText((content.text as string) || (content.markdown as string) || ''),
-        });
+        const terminalCard = content.terminalCard as Partial<TerminalApprovalCard> | undefined;
+        if (
+          terminalCard &&
+          typeof terminalCard.title === 'string' &&
+          typeof terminalCard.question === 'string' &&
+          typeof terminalCard.resolution === 'string'
+        ) {
+          await adapter.editMessage(
+            tid,
+            content.messageId as string,
+            terminalApprovalMessage(terminalCard as TerminalApprovalCard),
+          );
+        } else {
+          await adapter.editMessage(tid, content.messageId as string, {
+            markdown: transformText((content.text as string) || (content.markdown as string) || ''),
+          });
+        }
         return;
       }
 
@@ -682,6 +725,8 @@ async function handleForwardedEvent(
       const cardTitle = render?.title ?? ((originalEmbeds[0]?.title as string) || '❓ Question');
       const matchedOpt = render?.options.find((o) => o.value === selectedOption);
       const selectedLabel = matchedOpt?.selectedLabel ?? selectedOption ?? customId;
+      const actorName = user?.global_name || user?.username || '';
+      const resolution = actorName ? `${selectedLabel} by ${actorName}` : selectedLabel;
       try {
         await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
           method: 'POST',
@@ -692,7 +737,8 @@ async function handleForwardedEvent(
               embeds: [
                 {
                   title: cardTitle,
-                  description: `${originalDescription}\n\n${selectedLabel}`,
+                  description: originalDescription || render?.question || '',
+                  footer: { text: resolution },
                 },
               ],
               components: [], // remove buttons

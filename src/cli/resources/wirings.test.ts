@@ -21,6 +21,7 @@ import type { ChannelDefaults } from '../../channels/adapter.js';
 import { registerChannelAdapter } from '../../channels/channel-registry.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from '../../db/index.js';
 import { createMessagingGroupAgent, getMessagingGroupAgent } from '../../db/messaging-groups.js';
+import { getResource } from '../crud.js';
 import { lookup } from '../registry.js';
 // Side-effect import: registers wirings-create / wirings-update.
 import './wirings.js';
@@ -81,6 +82,10 @@ beforeEach(() => {
 
 afterEach(() => {
   closeDb();
+});
+
+it('declares its agent-group scope field', () => {
+  expect(getResource('wirings')?.scopeField).toBe('agent_group_id');
 });
 
 describe('wirings-create — declaration-derived defaults', () => {

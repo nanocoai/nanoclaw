@@ -109,8 +109,8 @@ The underlying commands are:
 # 1. install the runtime SDK (pinned — spectrum-ts ships breaking majors)
 pnpm install spectrum-ts@11.0.0
 
-# 2. run the setup wizard (device login + guided provisioning; one manual
-#    dashboard opt-in step — the wizard waits for it)
+# 2. run the setup wizard (device login + guided provisioning; one manual step
+#    — you text the assigned line once, and the wizard waits for it)
 pnpm exec tsx scripts/photon-setup.ts --phone +15551234567
 ```
 
@@ -124,21 +124,23 @@ pnpm exec tsx scripts/photon-setup.ts --phone +15551234567
 3. **Reuse the project's current secret** (regenerating only when the API
    returns none) and write `PHOTON_PROJECT_ID` + `PHOTON_PROJECT_SECRET` to
    `.env`.
-4. **Wait for your phone's dashboard opt-in.** Numbers only enter iMessage
-   routing after the dashboard's Add-user invite is accepted (the user row then
-   carries `meta.opt_in`; the API cannot set it, so the wizard never creates
-   users through the API). The wizard prints the dashboard steps and polls
-   until the opt-in lands — instant if the row is already opted in.
+4. **Register your phone and wait for its opt-in.** The wizard finds your
+   Spectrum user row or creates one (`type: shared`), and prints the
+   `assignedPhoneNumber` the row came back with. A new row never routes: the
+   number only enters iMessage routing once it has sent one message to that
+   assigned line, which is what flips the row's `meta.opt_in` server-side. The
+   wizard polls the user list until it does — instant if the row is already
+   opted in, and it never reports success before then.
 5. **Surface the assigned iMessage line** — the number you text to reach your
-   agent.
+   agent (the same one you texted to opt in).
 
-Everything is idempotent: re-running reuses the stored token/project and only
-fills gaps, so it's safe to finish a partial setup. `pnpm exec tsx
-scripts/photon-setup.ts status` shows what's configured.
+Everything is idempotent: re-running reuses the stored token/project and the
+existing user row, so it's safe to finish a partial setup. `pnpm exec tsx
+scripts/photon-setup.ts status` shows what's configured, re-checking the opt-in
+live.
 
-After setup, restart the service so the adapter connects, then text the
-surfaced number once and wire the DM to an agent with `/init-first-agent`
-(the wizard prints a ready-to-run command).
+After setup, restart the service so the adapter connects, then wire the DM to
+an agent with `/init-first-agent` (the wizard prints a ready-to-run command).
 
 ### Configuration (hosted)
 
@@ -151,7 +153,7 @@ All optional, set in `.env`:
 | `PHOTON_MARKDOWN`                    | `true`                          | Send agent replies as markdown (iMessage renders it natively). `false` sends plain text. |
 | `PHOTON_TELEMETRY`                   | `false`                         | Enable Spectrum SDK telemetry                                                            |
 | `PHOTON_MAX_INLINE_ATTACHMENT_BYTES` | `20971520` (20 MB)              | Max inbound attachment size the adapter reads + caches                                   |
-| `PHOTON_DASHBOARD_HOST`              | `https://app.photon.codes`      | Dashboard API host (setup wizard)                                                        |
+| `PHOTON_DASHBOARD_HOST`              | `https://app.photon.codes`      | Management API host — device login and project provisioning (setup wizard)               |
 | `PHOTON_SPECTRUM_HOST`               | `https://spectrum.photon.codes` | Spectrum API host (setup wizard)                                                         |
 
 ## Platform ids
@@ -211,9 +213,9 @@ deliberate:
 | Symptom                                 | Fix                                                                                                                   |
 | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `spectrum-ts is not installed` at setup | Hosted backend: `pnpm install spectrum-ts@11.0.0`, then restart                                                        |
-| `Target not allowed for this project`   | The number's user row is missing its dashboard opt-in (`meta.opt_in`) — finish the Add-user + invite step, then text the line once (it only messages numbers that have texted it first) |
+| `Target not allowed for this project`   | The number's user row is not opted in yet (`meta.opt_in` absent) — send one message from that phone to the line assigned to the row, then re-run setup (the line only messages numbers that have texted it first) |
 | Device login times out                  | Re-run the wizard (the code expires in ~30 min; a stored token is reused)                                             |
-| No iMessage line assigned               | Re-run `… photon-setup.ts status` or check the [dashboard][photon]; the shared line can take a moment                 |
+| No iMessage line assigned               | The line comes back on your user row — re-run the wizard with `--phone` so the row is created, then `… photon-setup.ts status` |
 | Inbound stops arriving (hosted)         | The adapter re-subscribes automatically; if it persists it's usually upstream — restart to force a fresh stream       |
 | Local: no inbound                       | Confirm Full Disk Access is granted to the Node binary NanoClaw runs under, and that it runs on the signed-in Mac     |
 | Bot silent (hosted)                     | Check `grep "Photon channel connected" logs/nanoclaw.log`, that the channel is wired, and that the service is running |

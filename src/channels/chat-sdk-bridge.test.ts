@@ -307,6 +307,44 @@ describe('createChatSdkBridge.deliver — ask_question cards (button styles)', (
     expect(buttons).toHaveLength(1);
     expect(buttons[0].style).toBeUndefined();
   });
+
+  it('retains the approval body and replaces buttons with a muted timeout resolution', async () => {
+    const edits: PostCall[] = [];
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({
+        editMessage: async (threadId, _messageId, message) => {
+          edits.push({ threadId, message });
+          return { id: 'msg-1', threadId, raw: {} };
+        },
+      }),
+      supportsThreads: false,
+    });
+
+    await bridge.deliver('slack:C1', null, {
+      kind: 'chat-sdk',
+      content: {
+        operation: 'edit',
+        messageId: 'msg-1',
+        text: 'Credentials Request\n\n*Agent:* Andy\n*Action:* Send email\n\n⏱️ Timed out — no response',
+        terminalCard: {
+          title: 'Credentials Request',
+          question: '*Agent:* Andy\n*Action:* Send email',
+          resolution: '⏱️ Timed out — no response',
+        },
+      },
+    });
+
+    expect(edits).toHaveLength(1);
+    const edited = edits[0].message as {
+      card: { title: string; children: Array<{ type: string; content?: string; style?: string }> };
+    };
+    expect(edited.card.title).toBe('Credentials Request');
+    expect(edited.card.children).toEqual([
+      { type: 'text', content: '*Agent:* Andy\n*Action:* Send email' },
+      { type: 'text', content: '⏱️ Timed out — no response', style: 'muted' },
+    ]);
+    expect(edited.card.children.some((child) => child.type === 'actions')).toBe(false);
+  });
 });
 
 describe('createChatSdkBridge.deliver — display cards (send_card)', () => {

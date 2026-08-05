@@ -13,7 +13,9 @@ import path from 'path';
 
 import {
   basicAuth,
+  createUser,
   deviceTokenCandidates,
+  ensureUser,
   findProjectByName,
   findRoutableUser,
   findUserByPhone,
@@ -21,6 +23,7 @@ import {
   isE164,
   main,
   normalizePhone,
+  optInInstructions,
   parseArgs,
   projectSecretOf,
   unwrapList,
@@ -169,6 +172,86 @@ describe('userOptedIn / waitForOptedInUser', () => {
       }),
     ).rejects.toThrow(/not opted in after 3s.*re-run setup/);
   });
+
+  it('names the assigned line in the timeout message when it is known', async () => {
+    const fetchFn = (async () =>
+      new Response(JSON.stringify({ users: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+    await expect(
+      waitForOptedInUser(fetchFn, 'https://s.example.com', 'proj', 'secret', '+15551234567', {
+        sleepFn: async () => {},
+        intervalS: 1,
+        timeoutS: 3,
+        assignedLine: '+15558887777',
+      }),
+    ).rejects.toThrow(/from \+15551234567 to \+15558887777/);
+  });
+});
+
+describe('optInInstructions', () => {
+  it('tells the operator to text the exact assigned line from their own number', () => {
+    const text = optInInstructions('+15551234567', '+15558887777').join('\n');
+    expect(text).toContain('Text +15558887777');
+    expect(text).toContain('+15551234567');
+  });
+  it('degrades gracefully when no line has been assigned yet', () => {
+    const text = optInInstructions('+15551234567', null).join('\n');
+    expect(text).toContain('has not assigned');
+    expect(text).toContain('+15551234567');
+  });
+});
+
+describe('createUser / ensureUser', () => {
+  it('posts a shared user without client-supplied meta', async () => {
+    let body: Record<string, unknown> = {};
+    const fetchFn = (async (_input: string | URL | Request, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({ user: { id: 'u-new', phoneNumber: '+15551234567', assignedPhoneNumber: '+15558887777', meta: {} } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    const user = await createUser(fetchFn, 'https://s.example.com', 'proj', 'secret', '+15551234567');
+    expect(body).toEqual({ type: 'shared', phoneNumber: '+15551234567' });
+    expect('meta' in body).toBe(false);
+    expect(userAssignedLine(user)).toBe('+15558887777');
+    expect(userOptedIn(user)).toBe(false);
+  });
+
+  it('treats an HTTP 200 error body as a create failure', async () => {
+    const fetchFn = (async () =>
+      new Response(JSON.stringify({ error: 'User limit reached for this project' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    await expect(createUser(fetchFn, 'https://s.example.com', 'proj', 'secret', '+15551234567')).rejects.toThrow(
+      /User limit reached/,
+    );
+  });
+
+  it('rejects a non-E.164 number before calling the API', async () => {
+    let called = false;
+    const fetchFn = (async () => {
+      called = true;
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+    await expect(createUser(fetchFn, 'https://s.example.com', 'proj', 'secret', '5551234567')).rejects.toThrow(/E\.164/);
+    expect(called).toBe(false);
+  });
+
+  it('reuses an existing row instead of creating a second one', async () => {
+    let posts = 0;
+    const fetchFn = (async (_input: string | URL | Request, init?: RequestInit) => {
+      if ((init?.method || 'GET').toUpperCase() === 'POST') posts += 1;
+      return new Response(
+        JSON.stringify({ users: [{ id: 'u-existing', phoneNumber: '+15551234567', assignedPhoneNumber: '+15558887777', meta: {} }] }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }) as typeof fetch;
+    const { user, created } = await ensureUser(fetchFn, 'https://s.example.com', 'proj', 'secret', '+15551234567');
+    expect(created).toBe(false);
+    expect(user.id).toBe('u-existing');
+    expect(posts).toBe(0);
+  });
 });
 
 describe('getImessageLine', () => {
@@ -228,17 +311,22 @@ describe('parseArgs', () => {
 interface Call {
   method: string;
   pathname: string;
+  body?: string;
 }
+
+const POOL_LINE = '+15558887777';
 
 /**
  * Build a fetch that emulates the Photon dashboard + spectrum endpoints.
  *
- * User-list behavior mirrors the live service: rows only route once they carry
- * `meta.opt_in` (set by the dashboard invite flow, never by the API).
+ * User-list behavior mirrors the live service: a POST creates the row with an
+ * assigned line and an empty `meta`, and the row only routes once `meta.opt_in`
+ * flips — which happens out of band, when the human texts the assigned line.
  * - `existingUser`: the row exists and is opted in from the first poll.
  * - `optInAfterListPolls: n`: the first n GET /users/ polls see no opted-in
- *   row; from poll n+1 the row exists with `meta.opt_in`. With `pendingUser`
- *   the pre-flip polls return the row WITHOUT opt_in instead of an empty list.
+ *   row; from poll n+1 whatever rows exist carry `meta.opt_in`. With
+ *   `pendingUser` a row is present from the start, standing in for one an
+ *   earlier run created.
  */
 function makeMockFetch(
   opts: { existingProject?: boolean; existingUser?: boolean; optInAfterListPolls?: number; pendingUser?: boolean } = {},
@@ -248,6 +336,7 @@ function makeMockFetch(
 } {
   const calls: Call[] = [];
   let userListPolls = 0;
+  const createdUsers: Array<Record<string, unknown>> = [];
   const json = (body: unknown, status = 200): Response =>
     new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 
@@ -255,7 +344,7 @@ function makeMockFetch(
     const url = new URL(typeof input === 'string' ? input : input.toString());
     const method = (init?.method || 'GET').toUpperCase();
     const pathname = url.pathname;
-    calls.push({ method, pathname });
+    calls.push({ method, pathname, body: init?.body ? String(init.body) : undefined });
 
     // Device login
     if (pathname === '/api/auth/device/code' && method === 'POST') {
@@ -302,25 +391,31 @@ function makeMockFetch(
       const optedInRow = {
         id: 'u-existing',
         phoneNumber: '+15551234567',
-        assignedPhoneNumber: '+15558887777',
+        assignedPhoneNumber: POOL_LINE,
         meta: { opt_in: true },
       };
       if (opts.existingUser) return json({ users: [optedInRow] });
-      if (opts.optInAfterListPolls !== undefined) {
-        if (userListPolls > opts.optInAfterListPolls) return json({ users: [optedInRow] });
-        return json({
-          users: opts.pendingUser
-            ? [{ id: 'u-pending', phoneNumber: '+15551234567', assignedPhoneNumber: '+15558887777', meta: {} }]
-            : [],
-        });
-      }
-      return json({ users: [] });
+      const pending = opts.pendingUser
+        ? [{ id: 'u-pending', phoneNumber: '+15551234567', assignedPhoneNumber: POOL_LINE, meta: {} }]
+        : [];
+      const rows = [...pending, ...createdUsers];
+      const flipped = opts.optInAfterListPolls !== undefined && userListPolls > opts.optInAfterListPolls;
+      if (!flipped) return json({ users: rows });
+      // The opt-in flips server-side, standing in for the human's first message.
+      return json({ users: rows.length ? rows.map((r) => ({ ...r, meta: { opt_in: true } })) : [optedInRow] });
     }
     if (/^\/projects\/[^/]+\/users\/$/.test(pathname) && method === 'POST') {
-      // The API accepts creates but strips client-supplied meta, so an
-      // API-created row can never become opted in. The wizard must not call
-      // this at all.
-      return json({ user: { id: 'u-created', phoneNumber: '+15551234567', assignedPhoneNumber: '+15558887777', meta: {} } });
+      // Creates always come back un-opted-in: client-supplied meta is ignored,
+      // and only the human's message to the assigned line sets the flag.
+      const payload = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      const row = {
+        id: `u-created-${createdUsers.length + 1}`,
+        phoneNumber: String(payload.phoneNumber ?? ''),
+        assignedPhoneNumber: POOL_LINE,
+        meta: {},
+      };
+      createdUsers.push(row);
+      return json({ user: row });
     }
     return json({ error: `unmocked ${method} ${pathname}` }, 404);
   }) as typeof fetch;
@@ -347,9 +442,9 @@ describe('photon setup flow (mocked API)', () => {
 
   const noSleep = { sleepFn: async () => {} };
 
-  it('provisions a brand-new project, waits for the dashboard opt-in, and writes creds to .env', async () => {
-    // The user row appears opted in on the third list poll, as if the operator
-    // did the dashboard Add-user + invite dance while the wizard waited.
+  it('provisions a brand-new project, creates the user, waits for the opt-in, and writes creds to .env', async () => {
+    // The row flips to opted in on the third list poll, as if the operator
+    // texted the assigned line while the wizard waited.
     const { fetchFn, calls } = makeMockFetch({ optInAfterListPolls: 2 });
     const code = await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep);
     expect(code).toBe(0);
@@ -368,10 +463,12 @@ describe('photon setup flow (mocked API)', () => {
     expect(calls.some((c) => c.pathname === '/api/auth/device/code')).toBe(true);
     // The project was created (not found).
     expect(calls.some((c) => c.method === 'POST' && c.pathname === '/api/projects')).toBe(true);
-    // The user list was polled until the opt-in landed (poll 3).
+    // Lookup poll, then the wait polls until the opt-in landed (poll 3).
     expect(calls.filter((c) => c.method === 'GET' && /\/users\/$/.test(c.pathname)).length).toBe(3);
-    // Users are NEVER created through the API — those rows can't be opted in.
-    expect(calls.some((c) => c.method === 'POST' && /\/users\/$/.test(c.pathname))).toBe(false);
+    // The absent row was created exactly once, with no client-supplied meta.
+    const creates = calls.filter((c) => c.method === 'POST' && /\/users\/$/.test(c.pathname));
+    expect(creates.length).toBe(1);
+    expect(JSON.parse(creates[0].body ?? '{}')).toEqual({ type: 'shared', phoneNumber: '+15551234567' });
     // The create response carried no projectSecret → minted via regenerate.
     expect(calls.some((c) => /regenerate-secret$/.test(c.pathname))).toBe(true);
     // Status only turns green after setup records the successful opt-in —
@@ -384,14 +481,47 @@ describe('photon setup flow (mocked API)', () => {
     const code = await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep);
     expect(code).toBe(0);
     expect(calls.filter((c) => c.method === 'GET' && /\/users\/$/.test(c.pathname)).length).toBe(3);
+    // An existing row is reused, never duplicated by a second create.
     expect(calls.some((c) => c.method === 'POST' && /\/users\/$/.test(c.pathname))).toBe(false);
+  });
+
+  it('prints the assigned line and tells the operator to text it', async () => {
+    const { fetchFn } = makeMockFetch({ optInAfterListPolls: 2 });
+    const written: string[] = [];
+    const realWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      expect(await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep)).toBe(0);
+    } finally {
+      process.stdout.write = realWrite;
+    }
+    // The instruction names the exact line the row was assigned.
+    expect(written.join('')).toContain('Text +15558887777');
+  });
+
+  it('does not create a second row when a completed setup is re-run', async () => {
+    const { fetchFn, calls } = makeMockFetch({ optInAfterListPolls: 1 });
+    expect(await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep)).toBe(0);
+    expect(await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep)).toBe(0);
+    expect(calls.filter((c) => c.method === 'POST' && /\/users\/$/.test(c.pathname)).length).toBe(1);
+  });
+
+  it('short-circuits an already-opted-in row without waiting', async () => {
+    const { fetchFn, calls } = makeMockFetch({ existingUser: true });
+    expect(await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep)).toBe(0);
+    // One lookup, no poll loop.
+    expect(calls.filter((c) => c.method === 'GET' && /\/users\/$/.test(c.pathname)).length).toBe(1);
   });
 
   it('fails (exit 1) when the opt-in never lands, and never claims success', async () => {
     const { fetchFn, calls } = makeMockFetch();
     const code = await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep);
     expect(code).toBe(1);
-    expect(calls.some((c) => c.method === 'POST' && /\/users\/$/.test(c.pathname))).toBe(false);
+    // The row is created once; a never-opted-in row is still not success.
+    expect(calls.filter((c) => c.method === 'POST' && /\/users\/$/.test(c.pathname)).length).toBe(1);
     // Creds persist so a re-run resumes where it left off.
     const env = fs.readFileSync(path.join(tempDir, '.env'), 'utf-8');
     expect(env).toContain('PHOTON_PROJECT_ID=proj-created');

@@ -469,7 +469,8 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
     const agentGroups = getAllAgentGroups();
     const options = buildAgentSelectionOptions(agentGroups, approverId);
     const title = '📋 Choose an agent';
-    updatePendingChannelApprovalCard(row.messaging_group_id, title, JSON.stringify(options));
+    const question = 'Which agent should handle this channel?';
+    updatePendingChannelApprovalCard(row.messaging_group_id, title, question, JSON.stringify(options));
 
     try {
       await adapter.deliver(
@@ -481,7 +482,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
           type: 'ask_question',
           questionId: row.messaging_group_id,
           title,
-          question: 'Which agent should handle this channel?',
+          question,
           options,
         }),
       );

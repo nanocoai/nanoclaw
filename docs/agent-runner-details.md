@@ -425,12 +425,18 @@ themselves are never shown.
 
 - **`task`** — a `<task>` element, script output first when present:
   ```xml
-  <task from="scheduler" time="Jan 1, 9:00 AM">Script output:
+  <task from="scheduler" time="Jan 1, 9:00 AM" current_time="Thursday, January 1, 2026 at 9:01 AM">Script output:
   {"data": …}
 
   Instructions:
   Review open PRs</task>
   ```
+
+  `time` is the occurrence's effective scheduled time (`process_after`, falling
+  back to its creation timestamp for legacy rows). `current_time` is generated
+  when the task reaches the agent so relative instructions such as "today" stay
+  correct after pauses or delayed execution. Both render in the agent group's
+  timezone.
 
 - **`webhook`** — a `<webhook>` element wrapping the JSON payload:
   ```xml
