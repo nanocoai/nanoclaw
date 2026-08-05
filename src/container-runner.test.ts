@@ -36,14 +36,22 @@ describe('buildContainerArgs ordering invariant (structural)', () => {
   // agent silently degrades to loginless auth. Driving the real
   // buildContainerArgs needs a live gateway + container runtime, so this
   // guards the invariant structurally: the gateway apply must appear after
-  // the volume-mounts loop in the source.
+  // the volume-mount args in the source.
+  //
+  // Anchored on the volumeMountArgs CALL, not on the loop that builds the
+  // args — the loop moved into volumeMountArgs (above buildContainerArgs in
+  // the file), and an anchor on it would keep passing while pointing at a
+  // definition rather than the ordered call site. Asserted to appear exactly
+  // once so a second call site can't satisfy the ordering by accident.
   it('applies the OneCLI gateway after the volume mounts', () => {
     const src = fs.readFileSync(path.join(process.cwd(), 'src', 'container-runner.ts'), 'utf-8');
-    const mountsLoop = src.indexOf('for (const mount of mounts)');
+    const callSite = 'args.push(...volumeMountArgs(';
+    const mountArgs = src.indexOf(callSite);
     const gatewayApply = src.indexOf('onecli.applyContainerConfig');
-    expect(mountsLoop).toBeGreaterThan(-1);
+    expect(mountArgs).toBeGreaterThan(-1);
+    expect(src.indexOf(callSite, mountArgs + 1)).toBe(-1);
     expect(gatewayApply).toBeGreaterThan(-1);
-    expect(gatewayApply).toBeGreaterThan(mountsLoop);
+    expect(gatewayApply).toBeGreaterThan(mountArgs);
   });
 });
 

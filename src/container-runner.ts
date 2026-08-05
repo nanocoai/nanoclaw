@@ -383,6 +383,27 @@ export function buildMounts(
 }
 
 /**
+ * Translate a mount list into `docker run` volume arguments.
+ *
+ * Extracted from buildContainerArgs so the read-only decision is reachable by a
+ * unit test. This is the last mile of the chain that starts at `add-mount --ro`
+ * and ends at a bind the kernel enforces: `readonly` is a boolean on a config
+ * row everywhere upstream of here, and `:ro` is the single character that makes
+ * it real. Nothing else in the pipeline can catch getting this branch wrong.
+ */
+export function volumeMountArgs(mounts: VolumeMount[]): string[] {
+  const args: string[] = [];
+  for (const mount of mounts) {
+    if (mount.readonly) {
+      args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
+    } else {
+      args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
+    }
+  }
+  return args;
+}
+
+/**
  * Sync skill symlinks in .claude-shared/skills/ to match the container.json
  * selection. Each symlink points to a container path (/app/skills/<name>)
  * so it's dangling on the host but valid inside the container.
@@ -509,13 +530,7 @@ async function buildContainerArgs(
   }
 
   // Volume mounts
-  for (const mount of mounts) {
-    if (mount.readonly) {
-      args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
-    } else {
-      args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
-    }
-  }
+  args.push(...volumeMountArgs(mounts));
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
   // are routed through the agent vault for credential injection, and mounts
