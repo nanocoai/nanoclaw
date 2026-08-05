@@ -118,7 +118,15 @@ Every message (in or out) gets a monotonic integer `seq`, unique *within the ses
 
 Why disjoint? `seq` is the agent-facing message ID. When the agent calls `edit_message(seq=5)` or `add_reaction(seq=6)`, `getMessageIdBySeq()` uses the parity to route the lookup: odd → `messages_out`, even → `messages_in`. The parity alone disambiguates without a join. Collisions would break editing.
 
-If you add a code path that writes to either table, preserve parity — the invariant isn't enforced by a constraint, only by the two helper functions.
+The host never writes `messages_out` — the container owns that table.
+Host-generated user notices (e.g. command-gate denials) go through the live
+`ChannelDeliveryAdapter` instead of the DB. (Host-sweep still opens
+`outbound.db` read-write for its post-container `processing_ack` cleanup,
+under its own container-is-dead contract — that touches bookkeeping tables,
+never `messages_out`.) A former `writeOutboundDirect()` wrote denial rows
+into `messages_out` and was removed.
+
+If you add a code path that writes to either table, preserve this scheme — the invariant isn't enforced by a constraint, only by the helper functions.
 
 ---
 

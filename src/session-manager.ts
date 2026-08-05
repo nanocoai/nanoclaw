@@ -399,47 +399,13 @@ export function openOutboundDbRw(agentGroupId: string, sessionId: string): Datab
   return openOutboundDbRwRaw(outboundDbPath(agentGroupId, sessionId));
 }
 
-/**
- * Write a message directly to a session's outbound DB so the host delivery
- * loop picks it up. Used by the command gate to send denial responses
- * without waking a container.
- *
- * Needs the read-write open — the readonly handle the delivery poll uses
- * can't INSERT. This is a host-side write to the container-owned outbound.db,
- * but it's safe even with a container running: both sides open with DELETE
- * journal + busy_timeout, and the even host seq stays out of the container's
- * odd-seq space.
- */
-export function writeOutboundDirect(
-  agentGroupId: string,
-  sessionId: string,
-  message: {
-    id: string;
-    kind: string;
-    platformId: string | null;
-    channelType: string | null;
-    threadId: string | null;
-    content: string;
-  },
-): void {
-  const db = openOutboundDbRw(agentGroupId, sessionId);
-  try {
-    db.prepare(
-      `INSERT OR IGNORE INTO messages_out (id, seq, timestamp, kind, platform_id, channel_type, thread_id, content)
-       VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 2 FROM messages_out), ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      message.id,
-      new Date().toISOString(),
-      message.kind,
-      message.platformId,
-      message.channelType,
-      message.threadId,
-      message.content,
-    );
-  } finally {
-    db.close();
-  }
-}
+// NOTE: there is deliberately no host-side writer for a session's
+// outbound.db while a container may be running — that DB is container-owned
+// and single-writer (see the invariant at the top of this file). Host-
+// generated notices (e.g. command-gate denials) go
+// through the live ChannelDeliveryAdapter instead — the same path normal
+// outbound delivery takes. A previous `writeOutboundDirect` here wrote
+// denial rows into messages_out and was removed for exactly that reason.
 
 /**
  * Load outbox attachments for a delivered message.
