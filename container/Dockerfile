@@ -25,6 +25,7 @@ ARG VERCEL_VERSION=52.2.1
 ARG BUN_VERSION=1.3.12
 ARG CALENDAR_MCP_VERSION=2.6.1
 ARG NOTION_MCP_VERSION=2.4.1
+ARG GMAIL_MCP_VERSION=1.1.11
 
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
@@ -117,6 +118,15 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "@notionhq/notion-mcp-server@${NOTION_MCP_VERSION}"
+
+# zod-to-json-schema pinned below 3.25 — gmail-mcp's loose deps
+# (zod-to-json-schema ^3.22.1, zod ^3.22.4) otherwise resolve zod-to-json-schema
+# to a version that imports the zod/v3 subpath, which only exists in zod>=3.25,
+# while zod itself resolves to 3.24.x — ERR_PACKAGE_PATH_NOT_EXPORTED at import.
+RUN --mount=type=cache,target=/root/.cache/pnpm \
+    pnpm install -g \
+        "@gongrzhe/server-gmail-autoauth-mcp@${GMAIL_MCP_VERSION}" \
+        "zod-to-json-schema@3.22.5"
 
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh
