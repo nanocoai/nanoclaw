@@ -44,9 +44,20 @@ describe('cli-tools manifest', () => {
 
   it('keeps the baseline CLIs the agent depends on', () => {
     const names = manifest.map((t) => t.name);
-    for (const required of ['vercel', 'agent-browser', '@anthropic-ai/claude-code']) {
+    // Only what the agent cannot function without: a browser it drives, and the
+    // provider CLI it runs. Everything else is opt-in — a tool nobody asked for
+    // is bytes in every image, on every machine, for everyone.
+    for (const required of ['agent-browser', '@anthropic-ai/claude-code']) {
       expect(names).toContain(required);
     }
+  });
+
+  it('bakes in nothing that a skill is meant to add on request', () => {
+    // Regression guard for the opt-in boundary. `vercel` was baked in and is
+    // now added by /add-vercel; anything reintroducing it here silently puts a
+    // deployment CLI, and its credential surface, into every agent again.
+    const names = manifest.map((t) => t.name);
+    expect(names).not.toContain('vercel');
   });
 
   it('is wired into the Dockerfile build (COPY manifest + run installer)', () => {

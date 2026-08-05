@@ -255,6 +255,7 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     payload: JSON.stringify(payload),
     created_at: new Date().toISOString(),
     title,
+    question,
     options_json: JSON.stringify(normalizedOptions),
     approver_user_id: approverUserId ?? null,
   });

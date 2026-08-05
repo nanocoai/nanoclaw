@@ -1,6 +1,6 @@
 ---
 name: frontend-engineer
-description: Pro frontend engineering discipline. Enforces build-test-verify workflow for every web project. Never declare done until the site is built, tested, responsive, accessible, and visually verified in a real browser. Use alongside vercel-cli for production-quality deployments.
+description: Pro frontend engineering discipline. Enforces build-test-verify workflow for every web project. Never declare done until the site is built, tested, responsive, accessible, and visually verified in a real browser. Pairs with a deployment skill such as vercel-cli, where one is installed.
 ---
 
 # Frontend Engineer

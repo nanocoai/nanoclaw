@@ -52,6 +52,7 @@ registerResource({
   description:
     'Wiring — connects a messaging group to an agent group. Determines which agent handles messages from which chat. The same messaging group can be wired to multiple agents; the same agent can be wired to multiple messaging groups.',
   idColumn: 'id',
+  scopeField: 'agent_group_id',
   columns: [
     { name: 'id', type: 'string', description: 'UUID.', generated: true },
     {

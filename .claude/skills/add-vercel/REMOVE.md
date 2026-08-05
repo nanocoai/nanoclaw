@@ -16,7 +16,7 @@ done
 ## 2. Remove the dependency guard test
 
 ```bash
-rm -f src/vercel-dockerfile.test.ts
+rm -f src/vercel-manifest.test.ts
 ```
 
 ## 3. Remove the OneCLI credential
@@ -36,7 +36,8 @@ fi
 
 ## 4. The Vercel CLI in the container image
 
-The Vercel CLI ships with the agent image on the NanoClaw trunk (`ARG VERCEL_VERSION` and `pnpm install -g "vercel@${VERCEL_VERSION}"` in `container/Dockerfile`). Leave those lines — they are part of the base image, not added by this skill. No rebuild is needed.
+Remove the `vercel` entry from `container/cli-tools.json` — this skill added it, and it is
+not part of the base image. Then `./container/build.sh` so the image matches the manifest.
 
 ## 5. Restart running containers
 

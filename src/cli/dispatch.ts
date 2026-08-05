@@ -14,6 +14,7 @@
  */
 import { getContainerConfig } from '../db/container-configs.js';
 import { getAgentGroup } from '../db/agent-groups.js';
+import { getMessagingGroupAgentByPair } from '../db/messaging-groups.js';
 import { getSession } from '../db/sessions.js';
 import { guard, type GuardActor } from '../guard/index.js';
 import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
@@ -86,6 +87,14 @@ export async function dispatch(
       // (groups, destinations). For sessions/members --id is a different key.
       if (cmd.resource === 'groups' || cmd.resource === 'destinations') {
         fill.id = req.args.id ?? ctx.agentGroupId;
+      }
+
+      // Group-scoped agents may only inspect or update the wiring for the
+      // conversation they are currently serving. Never trust a caller ID.
+      if (req.args.help !== true && (req.command === 'wirings-get' || req.command === 'wirings-update')) {
+        const wiring = getMessagingGroupAgentByPair(ctx.messagingGroupId, ctx.agentGroupId);
+        if (!wiring) return err(req.id, 'forbidden', 'Wiring not found for this conversation.');
+        fill.id = wiring.id;
       }
       req = { ...req, args: { ...req.args, ...fill } };
 

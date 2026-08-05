@@ -73,6 +73,17 @@ describe('migrations', () => {
     expect(col!.notnull).toBe(0);
     expect(col!.dflt_value).toBeNull();
   });
+
+  it('persists approval card bodies for terminal rendering (021)', () => {
+    const db = initTestDb();
+    runMigrations(db);
+    for (const table of ['pending_approvals', 'pending_channel_approvals', 'pending_sender_approvals']) {
+      const col = db
+        .prepare(`SELECT type, "notnull", dflt_value FROM pragma_table_info(?) WHERE name = 'question'`)
+        .get(table) as { type: string; notnull: number; dflt_value: string } | undefined;
+      expect(col, table).toEqual({ type: 'TEXT', notnull: 1, dflt_value: "''" });
+    }
+  });
 });
 
 // ── Agent Groups ──

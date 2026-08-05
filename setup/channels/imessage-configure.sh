@@ -1,24 +1,26 @@
 #!/usr/bin/env bash
-# Write the mode-exclusive iMessage `.env` keys, and strip the opposite mode's
-# keys so a stale value can't confuse the adapter's factory.
+# Write the backend-selecting iMessage `.env` keys, and strip a stale key from
+# the opposite backend so it can't confuse the adapter's backend resolution.
 #
-# The two iMessage modes use different keys:
-#   local  — IMESSAGE_LOCAL=true, IMESSAGE_ENABLED=true   (no server/key)
-#   remote — IMESSAGE_LOCAL=false, IMESSAGE_SERVER_URL, IMESSAGE_API_KEY
+# One `imessage` channel, two backends, selected by env:
+#   local  — IMESSAGE_BACKEND=local, IMESSAGE_ENABLED=true (reads this Mac's chat.db)
+#   hosted — IMESSAGE_BACKEND=hosted; the credentials (PHOTON_PROJECT_ID /
+#            PHOTON_PROJECT_SECRET) are written by the device-login wizard
+#            (scripts/photon-setup.ts), not here
 #
-# This is an upsert-and-remove: it replaces a key in place if present (else
-# appends it) and deletes the other mode's keys. The skill engine's plain
-# env write is set-if-absent only — it can neither replace a stale value nor
-# delete a key — so that logic lives here, in one script the skill invokes
-# once per mode.
+# The explicit IMESSAGE_BACKEND selector wins in the adapter even when both
+# backends' keys are present, but keeping .env unambiguous costs nothing. This
+# is an upsert-and-remove: it replaces a key in place if present (else appends
+# it) and deletes the other backend's stale key. The skill engine's plain env
+# write is set-if-absent only — it can neither replace a stale value nor delete
+# a key — so that logic lives here, in one script the skill invokes once per
+# backend.
 #
 #   bash setup/channels/imessage-configure.sh local
-#   bash setup/channels/imessage-configure.sh remote "<server-url>" "<api-key>"
+#   bash setup/channels/imessage-configure.sh hosted
 set -u
 
-mode="${1:-}"
-server_url="${2:-}"
-api_key="${3:-}"
+backend="${1:-}"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
@@ -55,21 +57,17 @@ remove_key() {
   mv "$tmp" "$env_file"
 }
 
-case "$mode" in
+case "$backend" in
   local)
-    set_key IMESSAGE_LOCAL true
+    set_key IMESSAGE_BACKEND local
     set_key IMESSAGE_ENABLED true
-    remove_key IMESSAGE_SERVER_URL
-    remove_key IMESSAGE_API_KEY
     ;;
-  remote)
-    set_key IMESSAGE_LOCAL false
-    set_key IMESSAGE_SERVER_URL "$server_url"
-    set_key IMESSAGE_API_KEY "$api_key"
+  hosted)
+    set_key IMESSAGE_BACKEND hosted
     remove_key IMESSAGE_ENABLED
     ;;
   *)
-    echo "imessage-configure: unknown mode '${mode}' (expected local|remote)" >&2
+    echo "imessage-configure: unknown backend '${backend}' (expected local|hosted)" >&2
     exit 1
     ;;
 esac

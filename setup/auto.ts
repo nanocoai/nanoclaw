@@ -208,7 +208,7 @@ async function main(): Promise<void> {
       brandBody(
         dimWrap(
           readImageSource() === 'hardened'
-            ? 'Fetching the hardened image now. This takes around 20 minutes today — slower than we would like, and we are working on making it faster.'
+            ? 'Fetching the hardened image now. It is a large download, so this step takes a few minutes.'
             : 'The first build pulls a base image and installs a few tools. On a fresh machine this usually takes 3–10 minutes.',
           4,
         ),
@@ -986,7 +986,7 @@ async function chooseImageSource(): Promise<void> {
         {
           value: 'hardened',
           label: 'Fetch the hardened image, built by Echo',
-          hint: 'recommended — patched components; ~20 min to download, needs authentication',
+          hint: 'recommended — patched components; needs authentication',
         },
         {
           value: 'local',
@@ -1484,7 +1484,6 @@ async function askDisplayName(fallback: string): Promise<string> {
 }
 
 async function askChannelChoice(): Promise<ChannelChoice> {
-  const isMac = process.platform === 'darwin';
   const choice = ensureAnswer(
     await brightSelect<ChannelChoice>({
       message: 'Want to chat with your assistant from your phone?',
@@ -1499,8 +1498,8 @@ async function askChannelChoice(): Promise<ChannelChoice> {
         },
         {
           value: 'imessage',
-          label: 'Yes, connect iMessage (experimental)',
-          hint: isMac ? 'local macOS mode' : 'remote Photon only',
+          label: 'Yes, connect iMessage',
+          hint: 'local Mac or hosted iMessage (via photon.codes)',
         },
         {
           value: 'slack',

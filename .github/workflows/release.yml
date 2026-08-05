@@ -1,0 +1,327 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact package version to release (without a v prefix)
+        required: true
+        type: string
+      target_sha:
+        description: Full 40-character SHA of the merged release commit
+        required: true
+        type: string
+      mode:
+        description: Verify first; publish only after reviewing the verification summary
+        required: true
+        default: verify
+        type: choice
+        options:
+          - verify
+          - publish
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Verify dispatch source
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+          DISPATCH_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$DISPATCH_REPOSITORY" != "nanocoai/nanoclaw" ]; then
+            echo "::error::Release runs only in nanocoai/nanoclaw; got $DISPATCH_REPOSITORY."
+            exit 1
+          fi
+          if [ "$DISPATCH_REF" != "refs/heads/main" ]; then
+            echo "::error::Select the main branch when dispatching Release; got $DISPATCH_REF."
+            exit 1
+          fi
+
+  verify:
+    needs: dispatch
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.target_sha }}
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+          cache: pnpm
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.12
+
+      - name: Verify protected release environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh api "repos/${GITHUB_REPOSITORY}/environments/release" > "$RUNNER_TEMP/release-environment.json"; then
+            echo "::error::Create and protect the release environment before publishing."
+            exit 1
+          fi
+
+          if ! jq -e '
+            .can_admins_bypass == false and
+            .deployment_branch_policy.protected_branches == false and
+            .deployment_branch_policy.custom_branch_policies == true and
+            ([.protection_rules[] | select(.type == "required_reviewers")] | length) == 1 and
+            ([.protection_rules[] | select(.type == "required_reviewers")][0].prevent_self_review == true) and
+            all(
+              [.protection_rules[] | select(.type == "required_reviewers")][0].reviewers[];
+              .type == "User"
+            )
+          ' "$RUNNER_TEMP/release-environment.json" >/dev/null; then
+            echo "::error::The release environment must have one user-reviewer rule, prevent self-review and admin bypass, and use custom branch policies."
+            exit 1
+          fi
+
+          ACTUAL_REVIEWERS=$(jq -c '
+            [.protection_rules[] | select(.type == "required_reviewers") | .reviewers[].reviewer.login]
+            | sort
+          ' "$RUNNER_TEMP/release-environment.json")
+          EXPECTED_REVIEWERS='["gavrielc","omri-maya"]'
+          if [ "$ACTUAL_REVIEWERS" != "$EXPECTED_REVIEWERS" ]; then
+            echo "::error::Release reviewer roster drift: expected $EXPECTED_REVIEWERS, got $ACTUAL_REVIEWERS. Update the workflow and RELEASING.md together in a reviewed pull request."
+            exit 1
+          fi
+
+          gh api "repos/${GITHUB_REPOSITORY}/environments/release/deployment-branch-policies" \
+            > "$RUNNER_TEMP/release-branch-policies.json"
+          if ! jq -e '
+            .total_count == 1 and
+            any(.branch_policies[]; .name == "main" and (.type // "branch") == "branch")
+          ' "$RUNNER_TEMP/release-branch-policies.json" >/dev/null; then
+            echo "::error::The release environment must allow exactly the main branch."
+            exit 1
+          fi
+
+      - name: Verify release metadata and target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::target_sha must be a full lowercase 40-character commit SHA"
+            exit 1
+          fi
+          node scripts/release.mjs verify "$RELEASE_VERSION"
+          git fetch --force origin main:refs/remotes/origin/main --tags
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git merge-base --is-ancestor "$TARGET_SHA" origin/main
+
+          TAG="v${RELEASE_VERSION}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::GitHub Release $TAG already exists; publish mode will verify its exact state."
+          fi
+          if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+            if [ "$(git cat-file -t "$TAG")" != "tag" ]; then
+              echo "::error::$TAG exists but is not an annotated tag"
+              exit 1
+            fi
+            TAG_SHA=$(git rev-list -n 1 "$TAG")
+            if [ "$TAG_SHA" != "$TARGET_SHA" ]; then
+              echo "::error::$TAG already resolves to $TAG_SHA, not workflow target $TARGET_SHA"
+              exit 1
+            fi
+            echo "::notice::$TAG already targets $TARGET_SHA; publish can resume safely."
+          fi
+
+          {
+            echo "### Release verification"
+            echo "- Version: \`$TAG\`"
+            echo "- Target: \`$TARGET_SHA\`"
+            echo "- Previous tag: \`$(git describe --tags --abbrev=0 "$TARGET_SHA^")\`"
+            echo "- Mode: \`${{ inputs.mode }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          node scripts/release.mjs extract "$RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install host dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install agent-runner dependencies
+        working-directory: container/agent-runner
+        run: bun install --frozen-lockfile
+      - name: Format check
+        run: pnpm run format:check
+      - name: Typecheck host
+        run: pnpm exec tsc --noEmit
+      - name: Typecheck container
+        run: pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
+      - name: Host tests
+        run: pnpm exec vitest run
+      - name: Container tests
+        working-directory: container/agent-runner
+        run: bun test
+
+  publish:
+    if: inputs.mode == 'publish'
+    needs: verify
+    runs-on: ubuntu-latest
+    # This environment must be created and protected before the workflow lands.
+    # GitHub otherwise auto-creates an unprotected environment on first use.
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.target_sha }}
+
+      - name: Re-verify immutable release inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::target_sha must be a full lowercase 40-character commit SHA"
+            exit 1
+          fi
+          node scripts/release.mjs verify "$RELEASE_VERSION"
+          git fetch --force origin main:refs/remotes/origin/main --tags
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          git merge-base --is-ancestor "$TARGET_SHA" origin/main
+
+          TAG="v${RELEASE_VERSION}"
+          if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+            if [ "$(git cat-file -t "$TAG")" != "tag" ]; then
+              echo "::error::$TAG exists but is not an annotated tag"
+              exit 1
+            fi
+            TAG_SHA=$(git rev-list -n 1 "$TAG")
+            if [ "$TAG_SHA" != "$TARGET_SHA" ]; then
+              echo "::error::$TAG already resolves to $TAG_SHA, not workflow target $TARGET_SHA"
+              exit 1
+            fi
+          fi
+
+      - name: Assemble release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          TAG="v${RELEASE_VERSION}"
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 "$TARGET_SHA^")
+
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="$TAG" \
+            -f target_commitish="$TARGET_SHA" \
+            -f previous_tag_name="$PREVIOUS_TAG" \
+            --jq .body > "$RUNNER_TEMP/generated-notes.md"
+
+          node scripts/release.mjs assemble "$RELEASE_VERSION" \
+            "$RUNNER_TEMP/generated-notes.md" > "$RUNNER_TEMP/release-notes.md"
+
+      - name: Create annotated tag and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          set -euo pipefail
+          TAG="v${RELEASE_VERSION}"
+
+          write_tag_state() {
+            if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+              jq -n \
+                --arg type "$(git cat-file -t "$TAG")" \
+                --arg sha "$(git rev-list -n 1 "$TAG")" \
+                '{exists: true, type: $type, sha: $sha}' > "$RUNNER_TEMP/tag-state.json"
+            else
+              jq -n '{exists: false}' > "$RUNNER_TEMP/tag-state.json"
+            fi
+          }
+
+          write_release_state() {
+            gh api --paginate \
+              --jq ".[] | select(.tag_name == \"$TAG\")" \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              | jq -s '.' > "$RUNNER_TEMP/release-matches.json"
+            MATCH_COUNT=$(jq 'length' "$RUNNER_TEMP/release-matches.json")
+            if [ "$MATCH_COUNT" -gt 1 ]; then
+              echo "::error::Found multiple GitHub Releases for $TAG"
+              exit 1
+            fi
+            jq '.[0] // null' "$RUNNER_TEMP/release-matches.json" > "$RUNNER_TEMP/release-state.json"
+          }
+
+          write_tag_state
+          write_release_state
+          PLAN=$(node scripts/release.mjs plan "$RELEASE_VERSION" "$TARGET_SHA" \
+            "$RUNNER_TEMP/tag-state.json" "$RUNNER_TEMP/release-state.json" \
+            "$RUNNER_TEMP/release-notes.md")
+
+          if [ "$PLAN" = "create-tag-and-release" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" "$TARGET_SHA" -m "Release $TAG"
+            git push origin "refs/tags/$TAG"
+          fi
+
+          if [ "$PLAN" != "already-published" ]; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --verify-tag \
+              --latest
+          else
+            echo "::notice::GitHub Release $TAG already matches the requested publication; nothing to change."
+          fi
+
+          READBACK_ATTEMPTS=6
+          READBACK_DELAY_SECONDS=2
+          FINAL_STATE="pending"
+
+          for ((attempt = 1; attempt <= READBACK_ATTEMPTS; attempt++)); do
+            git fetch --force origin --tags
+            write_tag_state
+            write_release_state
+            FINAL_STATE=$(node scripts/release.mjs readback "$RELEASE_VERSION" "$TARGET_SHA" \
+              "$RUNNER_TEMP/tag-state.json" "$RUNNER_TEMP/release-state.json" \
+              "$RUNNER_TEMP/release-notes.md")
+
+            if [ "$FINAL_STATE" = "already-published" ]; then
+              break
+            fi
+            if [ "$attempt" -eq "$READBACK_ATTEMPTS" ]; then
+              echo "::error::Timed out waiting for GitHub to return the exact immutable release after $READBACK_ATTEMPTS attempts."
+              node scripts/release.mjs plan "$RELEASE_VERSION" "$TARGET_SHA" \
+                "$RUNNER_TEMP/tag-state.json" "$RUNNER_TEMP/release-state.json" \
+                "$RUNNER_TEMP/release-notes.md"
+              exit 1
+            fi
+
+            echo "::notice::Release read-back is still propagating (attempt $attempt/$READBACK_ATTEMPTS); retrying in ${READBACK_DELAY_SECONDS}s."
+            sleep "$READBACK_DELAY_SECONDS"
+            READBACK_DELAY_SECONDS=$((READBACK_DELAY_SECONDS * 2))
+          done
+
+          RELEASE_URL=$(jq -r .html_url "$RUNNER_TEMP/release-state.json")
+          {
+            echo "### Release publication"
+            echo "- State: \`$FINAL_STATE\`"
+            echo "- URL: $RELEASE_URL"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -252,6 +252,7 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
     approver_user_id: delivery.userId,
     created_at: new Date().toISOString(),
     title,
+    question,
     options_json: JSON.stringify(options),
   });
 

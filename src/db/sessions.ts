@@ -202,11 +202,11 @@ export function createPendingApproval(
       `INSERT OR IGNORE INTO pending_approvals
          (approval_id, session_id, request_id, action, payload, created_at,
           agent_group_id, channel_type, platform_id, platform_message_id, expires_at, status,
-          title, options_json, approver_user_id)
+          title, question, options_json, approver_user_id)
        VALUES
          (@approval_id, @session_id, @request_id, @action, @payload, @created_at,
           @agent_group_id, @channel_type, @platform_id, @platform_message_id, @expires_at, @status,
-          @title, @options_json, @approver_user_id)`,
+          @title, @question, @options_json, @approver_user_id)`,
     )
     .run({
       session_id: null,
@@ -216,6 +216,7 @@ export function createPendingApproval(
       platform_message_id: null,
       expires_at: null,
       status: 'pending',
+      question: '',
       approver_user_id: null,
       ...pa,
     });
@@ -263,34 +264,39 @@ export function getPendingApprovalsByAction(action: string): PendingApproval[] {
 }
 
 /**
- * Resolve ask_question render metadata (title + normalized options) for any
- * card, regardless of whether it was persisted as a pending_question (generic
- * ask_user_question) or a pending_approval (self-mod / OneCLI credential).
+ * Resolve ask_question render metadata for any card. Approval-backed rows
+ * include the original question body so the bridge can retain it when the
+ * card resolves; generic pending_questions intentionally keep their existing
+ * title + options shape.
  */
-export function getAskQuestionRender(
-  id: string,
-): { title: string; options: import('../channels/ask-question.js').NormalizedOption[] } | undefined {
+export function getAskQuestionRender(id: string):
+  | {
+      title: string;
+      question?: string;
+      options: import('../channels/ask-question.js').NormalizedOption[];
+    }
+  | undefined {
   const q = getPendingQuestion(id);
   if (q) return { title: q.title, options: q.options };
-  const a = getDb().prepare('SELECT title, options_json FROM pending_approvals WHERE approval_id = ?').get(id) as
-    | { title: string; options_json: string }
-    | undefined;
-  if (a?.title) return { title: a.title, options: JSON.parse(a.options_json) };
+  const a = getDb()
+    .prepare('SELECT title, question, options_json FROM pending_approvals WHERE approval_id = ?')
+    .get(id) as { title: string; question: string; options_json: string } | undefined;
+  if (a?.title) return { title: a.title, question: a.question, options: JSON.parse(a.options_json) };
 
-  // Channel-registration + unknown-sender approvals persist title/options_json
-  // the same way pending_approvals does — just SELECT and return.
+  // Channel-registration + unknown-sender approvals persist the same render
+  // metadata as pending_approvals — just SELECT and return.
   if (hasTable(getDb(), 'pending_channel_approvals')) {
     const c = getDb()
-      .prepare('SELECT title, options_json FROM pending_channel_approvals WHERE messaging_group_id = ?')
-      .get(id) as { title: string; options_json: string } | undefined;
-    if (c?.title) return { title: c.title, options: JSON.parse(c.options_json) };
+      .prepare('SELECT title, question, options_json FROM pending_channel_approvals WHERE messaging_group_id = ?')
+      .get(id) as { title: string; question: string; options_json: string } | undefined;
+    if (c?.title) return { title: c.title, question: c.question, options: JSON.parse(c.options_json) };
   }
 
   if (hasTable(getDb(), 'pending_sender_approvals')) {
-    const s = getDb().prepare('SELECT title, options_json FROM pending_sender_approvals WHERE id = ?').get(id) as
-      | { title: string; options_json: string }
-      | undefined;
-    if (s?.title) return { title: s.title, options: JSON.parse(s.options_json) };
+    const s = getDb()
+      .prepare('SELECT title, question, options_json FROM pending_sender_approvals WHERE id = ?')
+      .get(id) as { title: string; question: string; options_json: string } | undefined;
+    if (s?.title) return { title: s.title, question: s.question, options: JSON.parse(s.options_json) };
   }
 
   return undefined;
