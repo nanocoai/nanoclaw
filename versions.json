@@ -1,5 +1,5 @@
 {
   "onecli-gateway": "1.36.0",
   "onecli-cli": "2.2.5",
-  "agent-image": "797273591697.dkr.ecr.us-east-1.amazonaws.com/nanoclaw/agent@sha256:4e441375454fe3d90b4392069c84ac4478a21e9fb7cad5a183628bebe2e773e3"
+  "agent-image": "797273591697.dkr.ecr.us-east-1.amazonaws.com/nanoclaw/agent@sha256:af60e54fc0c8139157244c2b2f23d3d365fd2446210f816ce013e5282d64fd60"
 }
