@@ -60,8 +60,15 @@ const activeContainers = new Map<string, { process: ChildProcess; containerName:
  */
 const wakePromises = new Map<string, Promise<boolean>>();
 
+/** Message of the most recent wakeContainer failure per session, for alerting. Cleared on success. */
+const lastWakeError = new Map<string, string>();
+
 export function getActiveContainerCount(): number {
   return activeContainers.size;
+}
+
+export function getLastWakeError(sessionId: string): string | undefined {
+  return lastWakeError.get(sessionId);
 }
 
 export function isContainerRunning(sessionId: string): boolean {
@@ -91,9 +98,13 @@ export function wakeContainer(session: Session): Promise<boolean> {
     return existing;
   }
   const promise = spawnContainer(session)
-    .then(() => true)
+    .then(() => {
+      lastWakeError.delete(session.id);
+      return true;
+    })
     .catch((err) => {
       log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
+      lastWakeError.set(session.id, err instanceof Error ? err.message : String(err));
       return false;
     })
     .finally(() => {
