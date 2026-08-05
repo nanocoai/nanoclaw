@@ -187,10 +187,11 @@ Register the mount with the host-only `ncl groups config add-mount` verb. For ea
 ncl groups config add-mount \
   --id <group-id> \
   --host "$HOME/.gmail-mcp" \
-  --container .gmail-mcp
+  --container .gmail-mcp \
+  --rw
 ```
 
-`--host` is the host path, `--container` is the in-container path (relative, lands at `/workspace/extra/.gmail-mcp`). No `--ro` — the MCP server writes refreshed token state back into the mount. The verb is idempotent (a re-run skips if the mount is already present) and operator-only (host-side; rejected from inside a container), so run it from a host operator shell when applying this skill.
+`--host` is the host path, `--container` is the in-container path (relative, lands at `/workspace/extra/.gmail-mcp`). `--rw` is required — the MCP server writes refreshed token state back into the mount, and mounts default to read-only unless a mount explicitly asks for `--rw` (and the mount-allowlist root permits it). The verb is idempotent (a re-run skips if the mount is already present) and operator-only (host-side; rejected from inside a container), so run it from a host operator shell when applying this skill.
 
 **Why the container path is relative:** `mount-security` rejects absolute `containerPath` values. Additional mounts are prefixed with `/workspace/extra/`, so `containerPath: ".gmail-mcp"` lands at `/workspace/extra/.gmail-mcp`. The MCP server's `GMAIL_OAUTH_PATH` / `GMAIL_CREDENTIALS_PATH` env vars point at that absolute location inside the container.
 

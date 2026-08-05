@@ -258,4 +258,41 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
     expect(rm.ok).toBe(true);
     expect(JSON.parse(getContainerConfig(GID)!.additional_mounts)).toEqual([]);
   });
+
+  it('adds a read-write mount when --rw is passed', async () => {
+    const GID = 'ag-mount-rw';
+    createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
+    ensureContainerConfig(GID);
+    const args = { id: GID, host: '/data/.calendar-mcp', container: '.calendar-mcp', rw: true };
+
+    const add = await dispatch({ id: 'r1', command: 'groups-config-add-mount', args }, { caller: 'host' });
+    expect(add.ok).toBe(true);
+    expect(JSON.parse(getContainerConfig(GID)!.additional_mounts)).toEqual([
+      { hostPath: '/data/.calendar-mcp', containerPath: '.calendar-mcp', readonly: false },
+    ]);
+  });
+
+  it('omits readonly entirely when neither --ro nor --rw is passed', async () => {
+    const GID = 'ag-mount-default';
+    createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
+    ensureContainerConfig(GID);
+    const args = { id: GID, host: '/data/.thing', container: '.thing' };
+
+    const add = await dispatch({ id: 'r1', command: 'groups-config-add-mount', args }, { caller: 'host' });
+    expect(add.ok).toBe(true);
+    expect(JSON.parse(getContainerConfig(GID)!.additional_mounts)).toEqual([
+      { hostPath: '/data/.thing', containerPath: '.thing' },
+    ]);
+  });
+
+  it('rejects passing both --ro and --rw', async () => {
+    const GID = 'ag-mount-conflict';
+    createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
+    ensureContainerConfig(GID);
+    const args = { id: GID, host: '/data/.thing', container: '.thing', ro: true, rw: true };
+
+    const add = await dispatch({ id: 'r1', command: 'groups-config-add-mount', args }, { caller: 'host' });
+    expect(add.ok).toBe(false);
+    expect((add as { ok: false; error: { message: string } }).error.message).toMatch(/only one of --ro or --rw/i);
+  });
 });

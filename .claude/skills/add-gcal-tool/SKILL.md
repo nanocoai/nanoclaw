@@ -168,10 +168,11 @@ This is a **host-only / operator** verb — it's rejected from inside a containe
 ncl groups config add-mount \
   --id <group-id> \
   --host "$HOME/.calendar-mcp" \
-  --container .calendar-mcp
+  --container .calendar-mcp \
+  --rw
 ```
 
-`--container` is relative (mount-security rejects absolute paths — additional mounts land at `/workspace/extra/<relative>`). No `--ro`: the MCP server may rewrite `credentials.json` on token refresh, so the mount must be read-write.
+`--container` is relative (mount-security rejects absolute paths — additional mounts land at `/workspace/extra/<relative>`). `--rw` is required: the MCP server may rewrite `credentials.json` on token refresh, so the mount must be read-write, and mounts default to read-only unless a mount explicitly asks for `--rw` (and the mount-allowlist root permits it).
 
 The mount also needs to be in the external mount allowlist (`~/.config/nanoclaw/mount-allowlist.json`) to take effect at spawn — see the Phase 1 "Verify mount allowlist covers the path" step. A container restart (`ncl groups restart`) is needed for the mount to apply.
 
