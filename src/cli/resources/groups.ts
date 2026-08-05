@@ -478,11 +478,18 @@ registerResource({
         const existing = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
         // The dedupe key is host+container, so a re-run is how an operator
         // corrects a mode. Replace rather than skip, or that correction is a
-        // silent no-op.
+        // silent no-op. Only write when something actually changed, though —
+        // every write stamps `updated_at`, and a re-run that asked for nothing
+        // new should not read back as a config edit. A stored entry with no
+        // `readonly` key is not the same as an explicit `false`, so a legacy
+        // entry is corrected on re-run rather than mistaken for a no-op.
         const at = existing.findIndex((m) => m.hostPath === hostPath && m.containerPath === containerPath);
-        if (at === -1) existing.push(mount);
-        else existing[at] = mount;
-        updateContainerConfigJson(id, 'additional_mounts', existing);
+        const current = at === -1 ? undefined : existing[at];
+        if (!current || current.readonly !== mount.readonly) {
+          if (at === -1) existing.push(mount);
+          else existing[at] = mount;
+          updateContainerConfigJson(id, 'additional_mounts', existing);
+        }
 
         return { added: mount, note: `Run \`ncl groups restart --id ${id}\` for the mount to take effect.` };
       },

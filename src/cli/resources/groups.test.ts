@@ -290,6 +290,8 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
  */
 describe('groups config add-mount: the mount mode the operator asked for', () => {
   const GID = 'ag-mount-mode';
+  /** A timestamp no write can produce, so "unchanged" is unambiguous. */
+  const SENTINEL = '2020-01-01T00:00:00.000Z';
   let tmpDir: string;
   let rootDir: string;
   let repoDir: string;
@@ -388,6 +390,32 @@ describe('groups config add-mount: the mount mode the operator asked for', () =>
 
     await addMount();
     expect(stored()).toEqual([{ hostPath: repoDir, containerPath: 'repo', readonly: false }]);
+  });
+
+  it('leaves the row untouched when the re-run asks for nothing new', async () => {
+    // `updateContainerConfigJson` stamps `updated_at` on every call, so writing
+    // unconditionally makes an idempotent re-run look like a config edit that
+    // never happened. Stamped with a sentinel rather than compared against the
+    // first write's timestamp: two writes can land in the same millisecond, and
+    // that would pass while the write still happened.
+    await addMount();
+    getDb().prepare('UPDATE container_configs SET updated_at = ? WHERE agent_group_id = ?').run(SENTINEL, GID);
+
+    await addMount();
+
+    expect(getContainerConfig(GID)!.updated_at).toBe(SENTINEL);
+    expect(stored()).toEqual([{ hostPath: repoDir, containerPath: 'repo', readonly: false }]);
+  });
+
+  it('records the edit when the re-run does change the mode', async () => {
+    // The other half of the same rule: skipping the no-op must not turn into
+    // skipping every re-run of an entry that already exists.
+    await addMount();
+    getDb().prepare('UPDATE container_configs SET updated_at = ? WHERE agent_group_id = ?').run(SENTINEL, GID);
+
+    await addMount({ ro: true });
+
+    expect(getContainerConfig(GID)!.updated_at).not.toBe(SENTINEL);
   });
 
   it('reports the mode it stored, so the operator does not have to re-read the config', async () => {
