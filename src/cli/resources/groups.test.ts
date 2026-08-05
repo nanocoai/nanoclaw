@@ -250,12 +250,14 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
     const GID = 'ag-mount';
     createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
     ensureContainerConfig(GID);
-    const args = { id: GID, host: '/data/.gmail-mcp', container: '/home/node/.gmail-mcp', ro: true };
+    // Relative, as mount-security requires — an absolute container path is
+    // rejected at add time now, and was silently dropped at spawn before that.
+    const args = { id: GID, host: '/data/.gmail-mcp', container: '.gmail-mcp', ro: true };
 
     const add = await dispatch({ id: 'r1', command: 'groups-config-add-mount', args }, { caller: 'host' });
     expect(add.ok).toBe(true);
     expect(JSON.parse(getContainerConfig(GID)!.additional_mounts)).toEqual([
-      { hostPath: '/data/.gmail-mcp', containerPath: '/home/node/.gmail-mcp', readonly: true },
+      { hostPath: '/data/.gmail-mcp', containerPath: '.gmail-mcp', readonly: true },
     ]);
 
     // idempotent: a second add does not duplicate
@@ -266,7 +268,7 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
       {
         id: 'r3',
         command: 'groups-config-remove-mount',
-        args: { id: GID, host: '/data/.gmail-mcp', container: '/home/node/.gmail-mcp' },
+        args: { id: GID, host: '/data/.gmail-mcp', container: '.gmail-mcp' },
       },
       { caller: 'host' },
     );
@@ -425,5 +427,86 @@ describe('groups config add-mount: the mount mode the operator asked for', () =>
       containerPath: 'repo',
       readonly: false,
     });
+  });
+});
+
+/**
+ * What `add-mount` promises the operator versus what the mount will do.
+ *
+ * `add-mount` does not validate. It stores the entry, answers `ok`, and returns
+ * a note telling the operator to restart "for the mount to take effect". The
+ * decision about whether the mount can take effect at all happens later, at
+ * spawn, inside `validateAdditionalMounts` — where a rejection is a `log.warn`
+ * on the host and nothing else. Nothing is written back to the config, nothing
+ * reaches the operator, and the container comes up looking healthy with the
+ * directory simply absent.
+ *
+ * Most rejection reasons are deployment facts that can legitimately be fixed
+ * after the fact — the host path may not exist yet, the allowlist may not cover
+ * it yet — so refusing them at add time would be wrong. But an absolute
+ * `--container` path is not one of those. `isValidContainerPath` rejects it
+ * unconditionally, on every host, forever; no later edit to the allowlist or
+ * the filesystem can make that mount work. Accepting it and reporting success
+ * is the verb telling the operator something that is not true.
+ *
+ * This is not hypothetical on either side. `.claude/skills/add-rtk/SKILL.md:53`
+ * documents exactly this invocation, and the "adds a mount idempotently"
+ * test above uses `--container /home/node/.gmail-mcp` as its fixture — so the
+ * suite's own canonical example of "a mount" is one that can never mount.
+ */
+describe('groups config add-mount: mounts that can never take effect', () => {
+  const GID = 'ag-mount-unmountable';
+
+  beforeEach(() => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    runMigrations(initTestDb());
+    createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
+    ensureContainerConfig(GID);
+  });
+
+  afterEach(() => {
+    closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+  });
+
+  async function addMount(container: string) {
+    return dispatch(
+      {
+        id: `r-${container}`,
+        command: 'groups-config-add-mount',
+        args: { id: GID, host: '/data/.gmail-mcp', container },
+      },
+      { caller: 'host' },
+    );
+  }
+
+  it('refuses an absolute --container path instead of confirming it', async () => {
+    // Independently of this verb: the validator will never accept this shape.
+    expect(validateMount({ hostPath: '/data/.gmail-mcp', containerPath: '/home/node/.gmail-mcp' })).toMatchObject({
+      allowed: false,
+    });
+
+    const resp = await addMount('/home/node/.gmail-mcp');
+
+    expect(resp.ok).toBe(false);
+    expect((resp as { ok: false; error: { message: string } }).error.message).toMatch(/relative|absolute/i);
+  });
+
+  it('does not store an absolute --container path it cannot honour', async () => {
+    await addMount('/home/node/.gmail-mcp');
+    // Otherwise the config carries a permanently dead entry that every future
+    // spawn re-rejects, and `ncl groups config get` shows it as configured.
+    expect(JSON.parse(getContainerConfig(GID)!.additional_mounts)).toEqual([]);
+  });
+
+  it('still accepts the relative form the working skills document', async () => {
+    // The guard must reject the unfixable shape only — this is the invocation
+    // add-gmail-tool and add-gcal-tool document, and it has to keep working.
+    const resp = await addMount('.gmail-mcp');
+    expect(resp.ok).toBe(true);
+    expect(JSON.parse(getContainerConfig(GID)!.additional_mounts)).toEqual([
+      { hostPath: '/data/.gmail-mcp', containerPath: '.gmail-mcp', readonly: false },
+    ]);
   });
 });

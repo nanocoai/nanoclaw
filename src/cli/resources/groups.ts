@@ -13,6 +13,7 @@ import {
   updateContainerConfigJson,
 } from '../../db/container-configs.js';
 import { initGroupFilesystem } from '../../group-init.js';
+import { isValidContainerPath } from '../../modules/mount-security/index.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
 import { isValidTimezone } from '../../timezone.js';
 import type { AgentGroup, ContainerConfigRow } from '../../types.js';
@@ -461,6 +462,20 @@ registerResource({
         const hostPath = (args.host ?? args['host-path']) as string | undefined;
         const containerPath = (args.container ?? args['container-path']) as string | undefined;
         if (!hostPath || !containerPath) throw new Error('Provide --host <host-path> and --container <container-path>');
+
+        // Refuse the one rejection reason no later change can fix. A missing
+        // host path, or an allowlist that does not cover it yet, are deployment
+        // facts the operator may legitimately fix after adding the mount, so
+        // those stay deferred to spawn. A container path mount-security will
+        // never accept is not: storing it buys a permanently dead entry that
+        // `config get` shows as configured while every spawn drops it with only
+        // a log.warn on the host.
+        if (!isValidContainerPath(containerPath)) {
+          throw new Error(
+            `--container must be a relative path with no ".." or ":" — it is mounted under /workspace/extra/. ` +
+              `"${containerPath}" is rejected by mount-security on every host, so the mount could never take effect.`,
+          );
+        }
 
         const row = getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
