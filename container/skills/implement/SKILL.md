@@ -5,7 +5,7 @@ description: 编码实现工作流。写代码 → 写测试 → 审代码 → �
 
 # 编码实现工作流
 
-kickoff 管"想清楚"，implement 管"动手做"，wrapup 管"收尾沉淀"。三段共用一条任务账本（task-ledger）的 `task_id`：kickoff 建账本推到 `implementing`，implement 销清单 + 记验证推到 `verifying`，wrapup 收尾 `mark_done`。全程进度可在 3457 看板实时查看。
+kickoff 管"想清楚"，implement 管"动手做"，wrapup 管"收尾沉淀"。三段共用一个**驾驶舱文件**（`/Users/dajay/个人资产/驾驶舱/YYYY-MM-DD-任务名.md`）：kickoff 建，implement 过程中随写（拍板/推翻/里程碑三类时刻当场记），wrapup 归档。task-ledger 账本已废弃（2026-08-06），禁止调 task_* 工具。
 
 ## 核心纪律
 
@@ -40,16 +40,13 @@ kickoff 管"想清楚"，implement 管"动手做"，wrapup 管"收尾沉淀"。�
    - 不是 → 用 `EnterWorktree` 开一个（分支名 `feat/<name>` 或 `fix/<name>`）
 4. **列出实现清单**：把要做的事拆成具体的文件级改动列表
 5. **确认验收标准**：什么状态算"做完了"
-6. **对齐任务账本**：用 `task_list`（按项目 + 标题）找 kickoff 阶段建的账本，记下 `task_id`，后续每步都带它。然后按当前状态处理：
-   - 已是 `implementing` → 直接继续
-   - 还在 `tests_planned`（kickoff 走完但没进实现）→ 调 `task_start_implementation` 推进到 `implementing`
-   - **没有账本**（implement 单独触发、没走 kickoff）→ 闸门要求必须先把效果/E2E/测试都锁了才能进实现，依次补：`task_create` → `task_lock_effect` → `task_define_e2e` → `task_plan_tests` → `task_start_implementation`。别跳，跳了 `start_implementation` 会被拒。
+6. **对齐驾驶舱**：找到 kickoff 建的驾驶舱文件（`/Users/dajay/个人资产/驾驶舱/`）继续追加。**没有驾驶舱**（implement 单独触发、没走 kickoff）→ 先按该目录 README 模板补建，头部三项（Why / 上下文 / 交付物与验收标准）写清楚才准动代码。
 
-**Gate**: 有明确的实现清单 + 验收标准 + 在 worktree 中 + 账本已进 `implementing`
+**Gate**: 有明确的实现清单 + 验收标准（驾驶舱头部）+ 在 worktree 中
 
 ```
 📋 [加载上下文] 状态=✅
-  - task_id: tl_xxx → implementing
+  - 驾驶舱: 已对齐
   - 实现清单: N 项 / OpenSpec design 蓝图已读
 ```
 
@@ -78,13 +75,13 @@ kickoff 管"想清楚"，implement 管"动手做"，wrapup 管"收尾沉淀"。�
 
 **Gate**: 所有清单项已实现 + 编译通过 + 无 lint error
 
-**🗂️ 账本**：编码类清单项做完一个，就用 `task_update_checklist`（带 `task_id` + `item_id`，状态 `done`）勾掉，看板进度实时走。kickoff `task_plan_tests` 建的清单项在这里逐个销账。
+**🛩️ 驾驶舱**：完成一个里程碑级清单项，驾驶舱事件流水当场追加一条（干了什么/动了哪些文件/状态）。
 
 ```
 📋 [写代码] 状态=✅
   - 改了: file1.py (新增 200 行), file2.py (修改 50 行), ...
   - 编译: ✅ 通过
-  - 账本: 清单项 N/M 已勾
+  - 驾驶舱: 清单项 N/M 已记
   - 决策记录: 1) xxx 2) yyy
 ```
 
@@ -113,7 +110,7 @@ kickoff 管"想清楚"，implement 管"动手做"，wrapup 管"收尾沉淀"。�
 
 **Gate**: 测试文件已创建 + 覆盖 P0 全部 + P1 大部分 + 编译通过
 
-**🗂️ 账本**：测试相关清单项同样用 `task_update_checklist` 勾掉。
+**🛩️ 驾驶舱**：测试完成同样当场记进驾驶舱。
 
 ```
 📋 [写测试] 状态=✅
@@ -311,13 +308,13 @@ cd <项目目录> && env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_pro
 
 **Gate**: 全量测试通过（0 failures）
 
-**🗂️ 账本**：全量测试通过后，调 `task_record_verification`（带 `task_id`、对应 `test_case_id`、状态 `passed`、`evidence` 填测试命令输出摘要）→ 账本进 `verifying`。kickoff `task_define_e2e` 建的用例在这里逐条记结果。
+**🛩️ 驾驶舱**：全量测试通过后，验证证据（测试命令输出摘要）追加进驾驶舱事件流水。
 
 ```
 📋 [跑测试] 状态=✅
   - 命令: pytest / npm test / ...
   - 结果: X passed, 0 failed
-  - 账本: → verifying（已记单测验证证据）
+  - 驾驶舱: 单测验证证据已记
   - 循环次数: N（首次通过 = 1）
 ```
 
@@ -347,14 +344,14 @@ cd <项目目录> && env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_pro
 
 **Gate**: 用例表已发给大杰 + 大杰确认 + 逐条执行通过
 
-**🗂️ 账本**：E2E 用例逐条 `task_record_verification`（`evidence` 填飞书消息 ID / 截图路径 / trace 链接）。账本停在 `verifying`，**最终 `task_mark_done` 留给 wrapup**，别在这里标完成。
+**🛩️ 驾驶舱**：E2E 结果逐条记进驾驶舱（evidence 填飞书消息 ID / 截图路径 / trace 链接）。
 
 ```
 📋 [E2E 测试] 状态=✅
   - 用例数: N 个
   - 通过: N 个
   - 失败: 0 个
-  - 账本: E2E 证据已记（仍 verifying，待 wrapup 收尾）
+  - 驾驶舱: E2E 证据已记
 ```
 
 ---
@@ -394,7 +391,7 @@ cd <项目目录> && env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_pro
 - ⛔ 禁止不等确认就 merge
 - ⛔ 禁止在汇报中隐瞒已知问题
 
-**🗂️ 账本**：PR 创建后，用 `task_record_verification`（`title` 如「PR 已提交」、`evidence` 填 PR 链接）把 PR 链接落账，方便看板溯源。账本仍 `verifying`。
+**🛩️ 驾驶舱**：PR 创建后，PR 链接当场记进驾驶舱。
 
 **Gate**: PR 已创建 + 汇报已发送 + 等待用户指令
 
