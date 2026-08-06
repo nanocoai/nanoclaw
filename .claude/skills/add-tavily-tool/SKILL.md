@@ -14,6 +14,11 @@ The registered server exposes:
 - `mcp__tavily__tavily_search`
 - `mcp__tavily__tavily_extract`
 
+Groups on the Claude provider already have the built-in `WebSearch` and
+`WebFetch` tools (`container/agent-runner/src/providers/claude.ts`). Reach for
+this skill when a group runs another provider, or when you want Tavily's
+structured extraction.
+
 ## Phase 1: Pre-flight
 
 Check whether the bridge is already in the image manifest, then list the groups:
@@ -23,9 +28,9 @@ grep -n '"mcp-remote"' container/cli-tools.json || true
 ncl groups list
 ```
 
-Ask which agent groups should receive Tavily. If `mcp-remote` is already pinned
-to a version other than `0.1.38`, stop and report the conflict instead of adding
-a second entry.
+Ask which agent groups should receive Tavily. If `mcp-remote` is already
+present at a pinned version, reuse the existing entry instead of adding a
+second one.
 
 ## Phase 2: Install the MCP bridge
 
@@ -60,6 +65,11 @@ registration is runtime state stored through `ncl`, so it has no in-tree line
 for a registration test to guard.
 
 ## Phase 3: Register Tavily
+
+`config add-mcp-server` and `groups restart` are approval-gated. Run from
+inside a container they return `approval-pending` immediately; that is not an
+error. Wait for the admin's approval and the follow-up system message before
+moving on to Phase 4.
 
 For each selected `<group-id>`, register one server named `tavily`:
 
@@ -99,10 +109,13 @@ the Tavily namespace.
 
 ## Keyless limit
 
-If Tavily returns HTTP `429` or `monthly_cap_reached_bonus_eligible`, stop and
-tell the user that the keyless allowance is exhausted. Keep credentials under
-OneCLI management. This skill supports keyless access only because NanoClaw
-does not currently provide a OneCLI-managed Tavily OAuth path.
+If Tavily returns HTTP `429` or `monthly_cap_reached_bonus_eligible`, the
+keyless allowance is exhausted. Tell the user. The upgrade path keeps
+credentials under OneCLI management: an operator creates a Tavily API key and
+stores it in the OneCLI vault as a generic secret matched to `mcp.tavily.com`
+with header name `Authorization`, then re-registers the `tavily` server without
+the `X-Tavily-Access-Mode:keyless` header and restarts the group. The gateway
+injects the key into the bridge's requests; the agent never sees it.
 
 ## Troubleshooting
 
@@ -110,8 +123,8 @@ does not currently provide a OneCLI-managed Tavily OAuth path.
 - Tavily tools are absent: verify the group has a `tavily` MCP entry, then
   restart it.
 - Crawl, Map, or Research appears: restore all three `--ignore-tool` pairs.
-- `429` or `monthly_cap_reached_bonus_eligible`: report the exhausted keyless
-  allowance and keep the keyless configuration unchanged.
+- `429` or `monthly_cap_reached_bonus_eligible`: the keyless allowance is
+  exhausted; see [Keyless limit](#keyless-limit) for the OneCLI upgrade path.
 
 ## Removal
 
