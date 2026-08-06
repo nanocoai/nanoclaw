@@ -107,15 +107,50 @@ Then check the selected agent's test response. The call must use
 `mcp__tavily__tavily_search`. Tavily Crawl, Map, and Research must not appear in
 the Tavily namespace.
 
+## Phase 5: Install the upgrade path
+
+The keyless allowance is shared by every group on the host, so it can run out.
+Install standing instructions so the agent offers the paid-key upgrade at that
+moment instead of dead-ending. For each selected group:
+
+1. Resolve the OneCLI dashboard URL the user's browser can reach:
+
+   ```bash
+   docker inspect onecli --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^APP_URL='
+   ```
+
+   If the value is a loopback or container-bridge address (`127.0.0.1`,
+   `172.17.0.1`, `host.docker.internal`), ask the operator which URL they open
+   the OneCLI dashboard at, suggesting `http://127.0.0.1:10254` as the default.
+   A public or tailnet `APP_URL` needs no question.
+2. Gate the deeplink: `curl -fs <dashboard-url>/connections/custom` must return
+   HTTP 200. If it does not (older OneCLI without the prefill route), replace
+   step 2 of the template with: "Ask an operator to run, on the host:
+   `onecli secrets create --name tavily --type generic --host-pattern
+   mcp.tavily.com --header-name Authorization --value-format 'Bearer {value}'
+   --file <key-file>`".
+3. Substitute `{{ONECLI_DASHBOARD_URL}}` in
+   [upgrade-instructions.md](upgrade-instructions.md) with the resolved URL and
+   write the block into `groups/<group-folder>/instructions.prepend.md`:
+   replace an existing `<!-- tavily-upgrade:start -->` to
+   `<!-- tavily-upgrade:end -->` block in place, append otherwise. Do not write
+   into `groups/<group-folder>/CLAUDE.md`; it is regenerated at spawn and
+   appended blocks are lost.
+4. Have the operator open the composed deeplink once and confirm the create
+   dialog loads with host `mcp.tavily.com` prefilled. If they supplied a public
+   URL while `APP_URL` was a loopback address, suggest setting the public URL in
+   the OneCLI dashboard (Settings, Instance) so future links stay stable.
+5. Restart each selected group: `ncl groups restart --id <group-id>`.
+
 ## Keyless limit
 
 If Tavily returns HTTP `429` or `monthly_cap_reached_bonus_eligible`, the
-keyless allowance is exhausted. Tell the user. The upgrade path keeps
-credentials under OneCLI management: an operator creates a Tavily API key and
-stores it in the OneCLI vault as a generic secret matched to `mcp.tavily.com`
-with header name `Authorization`, then re-registers the `tavily` server without
-the `X-Tavily-Access-Mode:keyless` header and restarts the group. The gateway
-injects the key into the bridge's requests; the agent never sees it.
+keyless allowance is exhausted. With Phase 5 installed the agent offers the
+upgrade on its own: the user creates a free API key and stores it through the
+prefilled dashboard link; the key lands in the OneCLI vault and the gateway
+injects it into the bridge's requests. The agent then re-registers the server
+without the `X-Tavily-Access-Mode:keyless` header and restarts the group. The
+agent never sees the key.
 
 ## Troubleshooting
 
@@ -125,6 +160,11 @@ injects the key into the bridge's requests; the agent never sees it.
 - Crawl, Map, or Research appears: restore all three `--ignore-tool` pairs.
 - `429` or `monthly_cap_reached_bonus_eligible`: the keyless allowance is
   exhausted; see [Keyless limit](#keyless-limit) for the OneCLI upgrade path.
+- The agent reports exhaustion but never offers the upgrade: check that
+  `groups/<group-folder>/instructions.prepend.md` contains the
+  `tavily-upgrade` block (Phase 5) and restart the group. A session that
+  already discussed the limit keeps reasoning from that history; `/clear`
+  starts a clean one.
 
 ## Removal
 
