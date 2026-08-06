@@ -1,5 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+vi.mock('./container-runner.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./container-runner.js')>();
+  return {
+    ...actual,
+    runContainerAgent: vi.fn(),
+    rotateAccount: vi.fn(),
+    getSecretCount: vi.fn(() => 2),
+  };
+});
+
+import {
+  getSecretCount as _mockedGetSecretCount,
+  rotateAccount as mockedRotateAccount,
+  runContainerAgent as mockedRunContainerAgent,
+} from './container-runner.js';
+
 import { _initTestDatabase, createTask, getTaskById } from './db.js';
 import {
   _resetSchedulerLoopForTests,
@@ -50,6 +66,75 @@ describe('task scheduler', () => {
 
     const task = getTaskById('task-invalid-folder');
     expect(task?.status).toBe('paused');
+  });
+
+
+  it('rotates account and retries when scheduled task hits rate limit', async () => {
+    createTask({
+      id: 'task-rate-limited',
+      group_folder: 'fs_test_group',
+      chat_jid: 'fs:test@g.us',
+      prompt: 'night shift',
+      schedule_type: 'once',
+      schedule_value: '2026-02-22T00:00:00.000Z',
+      context_mode: 'isolated',
+      next_run: new Date(Date.now() - 60_000).toISOString(),
+      status: 'active',
+      created_at: '2026-02-22T00:00:00.000Z',
+    });
+
+    const sent: string[] = [];
+    const killGroup = vi.fn();
+
+    vi.mocked(mockedRunContainerAgent)
+      .mockImplementationOnce(async (_g, _i, _p, onOutput) => {
+        await onOutput?.({
+          status: 'success',
+          result: "You've hit your limit · resets 4am (Asia/Shanghai)",
+        } as any);
+        return { status: 'success', result: null } as any;
+      })
+      .mockImplementationOnce(async (_g, _i, _p, onOutput) => {
+        await onOutput?.({ status: 'success', result: '夜班完成' } as any);
+        return { status: 'success', result: '夜班完成' } as any;
+      });
+    vi.mocked(mockedRotateAccount).mockReturnValue({
+      success: true,
+      oldSecretName: 'acct-a',
+      newSecretName: 'acct-b',
+    } as any);
+
+    startSchedulerLoop({
+      registeredGroups: () => ({
+        'fs:test@g.us': {
+          name: 'test',
+          folder: 'fs_test_group',
+          chatJid: 'fs:test@g.us',
+        } as any,
+      }),
+      getSessions: () => ({}),
+      queue: {
+        enqueueTask: vi.fn(
+          (_j: string, _t: string, fn: () => Promise<void>) => void fn(),
+        ),
+        killGroup,
+        closeStdin: vi.fn(),
+        notifyIdle: vi.fn(),
+      } as any,
+      onProcess: () => {},
+      sendMessage: async (_jid: string, text: string) => {
+        sent.push(text);
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    // 限流文本被抑制，未发给用户；换号后重试的结果正常送达
+    expect(sent.some((t) => t.includes('hit your limit'))).toBe(false);
+    expect(sent).toContain('夜班完成');
+    expect(mockedRotateAccount).toHaveBeenCalledTimes(1);
+    expect(killGroup).toHaveBeenCalled();
+    expect(vi.mocked(mockedRunContainerAgent)).toHaveBeenCalledTimes(2);
   });
 
   it('computeNextRun anchors interval tasks to scheduled time to prevent drift', () => {
