@@ -5,8 +5,13 @@ import fs from 'fs';
 import { ASSISTANT_NAME, SCHEDULER_POLL_INTERVAL, TIMEZONE } from './config.js';
 import {
   ContainerOutput,
+  detectRateLimit,
+  detectRateLimitResult,
+  getSecretCount,
   resolveCliMode,
+  rotateAccount,
   runContainerAgent,
+  shouldAutoRotateAnthropicAccount,
   writeTasksSnapshot,
 } from './container-runner.js';
 import {
@@ -170,7 +175,19 @@ async function runTask(
     }, TASK_CLOSE_DELAY_MS);
   };
 
+  // 限流自动轮换（与消息路径 src/index.ts 的 streaming 限流逻辑对齐）：
+  // 检测到 "hit your limit" 等文本 → 抑制发送 + kill 子进程 → rotateAccount 换号重跑，
+  // 直到成功或试完所有备用账号。夜班等定时任务不再因单账号限额直接躺平（2026-08-06 首班阵亡复盘）。
+  const taskCliMode = resolveCliMode(group.containerConfig);
+  const canRotateOnLimit = shouldAutoRotateAnthropicAccount(taskCliMode);
+  const maxRotations = canRotateOnLimit ? Math.max(0, getSecretCount() - 1) : 0;
+  let rateLimitDetected = false;
+
   try {
+    for (let attempt = 0; ; attempt++) {
+    rateLimitDetected = false;
+    result = null;
+    error = null;
     const output = await runContainerAgent(
       group,
       {
@@ -182,7 +199,7 @@ async function runTask(
         isScheduledTask: true,
         assistantName: ASSISTANT_NAME,
         script: task.script || undefined,
-        cliMode: resolveCliMode(group.containerConfig),
+        cliMode: taskCliMode,
       },
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
@@ -206,6 +223,16 @@ async function runTask(
             typeof streamedOutput.result === 'string'
               ? streamedOutput.result
               : JSON.stringify(streamedOutput.result);
+          // 限流假成功：抑制发送 + kill，交给外层循环换号重试
+          if (canRotateOnLimit && detectRateLimitResult(raw)) {
+            rateLimitDetected = true;
+            logger.warn(
+              { taskId: task.id, text: raw.slice(0, 120) },
+              '[task][rate-limit] 输出含限流文本，抑制发送并 kill，准备轮换账号',
+            );
+            deps.queue.killGroup(task.chat_jid);
+            return;
+          }
           // 剥掉 <internal> 标签
           const text = raw
             .replace(/<internal>[\s\S]*?<\/internal>/g, '')
@@ -223,23 +250,55 @@ async function runTask(
         }
         if (streamedOutput.status === 'error') {
           error = streamedOutput.error || 'Unknown error';
+          if (canRotateOnLimit && detectRateLimit(error)) {
+            rateLimitDetected = true;
+          }
         }
       },
     );
 
-    if (closeTimer) clearTimeout(closeTimer);
-
-    if (output.status === 'error') {
-      error = output.error || 'Unknown error';
-    } else if (output.result) {
-      // Result was already forwarded to the user via the streaming callback above
-      result = output.result;
+    if (closeTimer) {
+      clearTimeout(closeTimer);
+      closeTimer = null;
     }
 
+    if (!rateLimitDetected) {
+      if (output.status === 'error') {
+        error = output.error || 'Unknown error';
+      } else if (output.result) {
+        // Result was already forwarded to the user via the streaming callback above
+        result = output.result;
+      }
+      logger.info(
+        { taskId: task.id, attempt, durationMs: Date.now() - startTime },
+        'Task completed',
+      );
+      break;
+    }
+
+    // 限流：换号重试或认输
+    if (attempt >= maxRotations) {
+      error = `rate limited; account rotation exhausted after ${attempt} rotation(s)`;
+      logger.warn({ taskId: task.id, attempt }, '[task][rate-limit] 备用账号用尽，放弃');
+      break;
+    }
+    const agentId = task.group_folder.toLowerCase().replace(/_/g, '-');
+    const rotated = rotateAccount(agentId, task.group_folder);
+    if (!rotated?.success) {
+      error = 'rate limited; account rotation failed';
+      logger.warn({ taskId: task.id }, '[task][rate-limit] 轮换账号失败，放弃');
+      break;
+    }
     logger.info(
-      { taskId: task.id, durationMs: Date.now() - startTime },
-      'Task completed',
+      {
+        taskId: task.id,
+        from: rotated.oldSecretName,
+        to: rotated.newSecretName,
+        attempt: attempt + 1,
+      },
+      '[task][rate-limit] 已轮换账号，重试任务',
     );
+    }
   } catch (err) {
     if (closeTimer) clearTimeout(closeTimer);
     error = err instanceof Error ? err.message : String(err);
