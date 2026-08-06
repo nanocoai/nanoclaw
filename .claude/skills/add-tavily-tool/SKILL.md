@@ -14,10 +14,12 @@ The registered server exposes:
 - `mcp__tavily__tavily_search`
 - `mcp__tavily__tavily_extract`
 
-Groups on the Claude provider already have the built-in `WebSearch` and
-`WebFetch` tools (`container/agent-runner/src/providers/claude.ts`). Reach for
-this skill when a group runs another provider, or when you want Tavily's
-structured extraction.
+The registration is provider-agnostic: any provider with MCP support picks it
+up (Claude, OpenCode, and Codex all do). Groups on the Claude provider already
+have the built-in `WebSearch` and `WebFetch` tools
+(`container/agent-runner/src/providers/claude.ts`), so the skill adds the most
+for groups on other providers, and for Tavily's structured extraction
+anywhere.
 
 ## Phase 1: Pre-flight
 
@@ -172,5 +174,5 @@ See [REMOVE.md](REMOVE.md) for the idempotent removal procedure.
 
 ## References
 
-- [Tavily Remote MCP](https://github.com/tavily-ai/tavily-remote-mcp)
+- [Tavily Remote MCP](https://docs.tavily.com/documentation/mcp)
 - [`mcp-remote`](https://github.com/geelen/mcp-remote)
