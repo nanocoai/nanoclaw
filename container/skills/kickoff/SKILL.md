@@ -70,26 +70,21 @@ description: 任务启动工作流。提取需求 → 分类（定位问题 / �
 
 **拿不准时默认走轨道 A**（先定位再动手，比反过来安全）。
 
-## Step 3: 建立任务账本
+## Step 3: 建立驾驶舱
 
-分类完成后，**立即创建一条任务账本**，让整个 kickoff 全程在账本上留痕，进度可在 3457 看板（`http://<局域网IP>:3457/board`）实时查看。
+> ⚠️ task-ledger 账本机制已废弃（2026-08-06，状态机过重），禁止再调 `task_create` 等 task_* 工具。过程记录一律走驾驶舱。
 
-调用 `mcp__nanoclaw__task_create`：
+分类完成后，**立即建驾驶舱文件** `/Users/dajay/个人资产/驾驶舱/YYYY-MM-DD-任务名.md`（模板见该目录 README.md）：
 
-- `title` = Step 1 总结出的任务名
-- `project` = Step 1 确认的目标项目（`nine` / `nanoclaw` / 其他）
-- `task_type` = Step 2 判定的类型
-- `description` = 用户需求的一句话背景
-- `status` 默认 `draft`，不用手动传
+- 头部写死"开工三项"：Why / 上下文 / 交付物与验收标准（就是发给用户的开工三项确认，原样落档）
+- 之后全程**当场追加**事件流水，三类时刻必记：用户拍板、方向被推翻、里程碑完成
+- 用户说过两遍以上的要求，拎进"反复强调"栏
 
-**记住返回的 `task_id`，后续每个阶段转换都要带上它推进状态。** 这条 task_id 贯穿整个 kickoff（以及后续 wrapup）。
-
-> ⚠️ **幂等**：如果账本里已有本任务（同名 + 同项目，用 `task_list` 检查），复用已有 task_id，不要重复创建。
+> ⚠️ **幂等**：同任务已有驾驶舱文件就复用追加，不要重复建。
 
 **📋 日志**：
 ```
-📋 [建账本] task_id=tl_xxx
-  - title / project / task_type
+📋 [建驾驶舱] 驾驶舱/YYYY-MM-DD-任务名.md
 ```
 
 ---
@@ -168,7 +163,7 @@ description: 任务启动工作流。提取需求 → 分类（定位问题 / �
 - 修复方向只给方向，不给实现细节
 - 不超过 20 行
 
-**🗂️ 账本**：把根因和修复方向写回账本（`task_update`：`description` 补根因结论，`desired_outcome` 写修复目标）。纯调查/答疑类任务（不打算改代码）到这里就停，账本保持 `draft`，不再往下推。
+**🛩️ 驾驶舱**：根因结论和修复方向当场追加进驾驶舱事件流水。纯调查/答疑类任务（不打算改代码）到这里就停。
 
 ### A3: 等待确认
 
@@ -178,12 +173,7 @@ description: 任务启动工作流。提取需求 → 分类（定位问题 / �
 - 简单修复 → 在 worktree 里直接改（走 systematic-debugging Phase 4）
 - 需要设计 → 转入轨道 B 写 OpenSpec
 
-**🗂️ 账本**：用户确认开始修复后，账本要走完后续闸门才能进实现阶段——
-1. `task_lock_effect`（修复后达到什么效果 + 验收标准）→ `effect_locked`
-2. `task_define_e2e`（怎么验证这个 bug 真修好了）→ `e2e_defined`
-3. `task_plan_tests`（要补哪些测试、改哪几个文件）→ `tests_planned`
-4. `task_start_implementation` → `implementing`，然后才动代码
-> 极简单的一行修复也至少走 `task_lock_effect` + `task_start_implementation`，别跳闸门。
+**🛩️ 驾驶舱**：用户确认开始修复后，把"修复后达到什么效果 + 怎么验证真修好了"补进驾驶舱的验收标准（开工三项若已有则细化），然后才动代码。这两条不写清楚就动手 = 裸奔。
 
 > ⚠️ **唯一例外**：纯调查/答疑、或只改运行时数据（memory、wiki 这类非版本控制的文件）不需要 worktree。只要动到任何项目的版本控制源码，就必须先开 worktree。
 
@@ -223,22 +213,14 @@ description: 任务启动工作流。提取需求 → 分类（定位问题 / �
 
 **不要在每个阶段停下来等确认，一路写完到 design（含测试计划）。**
 
-**🗂️ 账本同步**：OpenSpec 写到哪一步，账本就推进到对应状态（带上 Step 3 拿到的 `task_id`）：
-
-| OpenSpec 产出 | 账本工具 | 推进到 |
-|---------------|----------|--------|
-| proposal.md 写完（目标+验收清晰） | `task_lock_effect`（desired_outcome + acceptance_criteria 从 proposal 提取） | `effect_locked` |
-| specs/ 写完（场景明确） | `task_define_e2e`（每个 spec 场景转成一条 E2E 用例） | `e2e_defined` |
-| design.md 测试计划写完 | `task_plan_tests`（测试分层 + 改哪些文件转成 checklist） | `tests_planned` |
-
-账本工具有闸门：必须按 `lock_effect → define_e2e → plan_tests` 顺序调，跳步会被拒。把 `spec_path` 用 `task_update` 关联上 change 目录方便溯源。
+**🛩️ 驾驶舱同步**：OpenSpec 每写完一个 artifact（proposal / specs / design），驾驶舱事件流水追加一条（产出+一句话结论+change 目录路径）；proposal 的目标与验收提炼进驾驶舱头部验收标准。
 
 **📋 日志**：每步执行后记录结果：
 ```
 📋 [OpenSpec] change=xxx
-  - proposal.md: ✅ 新建 / ⏭️ 已存在跳过 → 账本 effect_locked
-  - specs/: ✅ 新建 3 个 spec / ⏭️ 已存在跳过 → 账本 e2e_defined
-  - design.md: ✅ 新建（含测试计划）/ ⏭️ 已存在跳过 → 账本 tests_planned
+  - proposal.md: ✅ 新建 / ⏭️ 已存在跳过 → 驾驶舱已记
+  - specs/: ✅ 新建 3 个 spec / ⏭️ 已存在跳过 → 驾驶舱已记
+  - design.md: ✅ 新建（含测试计划）/ ⏭️ 已存在跳过 → 驾驶舱已记
 ```
 
 ### B3: 子 Agent 评审
@@ -295,13 +277,13 @@ description: 任务启动工作流。提取需求 → 分类（定位问题 / �
 
 ### B6: 进入实现（用户确认后）
 
-用户确认方案后，调用 `task_start_implementation`（带 `task_id` + 一句 summary）→ 账本进 `implementing`，然后才开始写代码 + 单测。
+用户确认方案后，驾驶舱追加一条"方案确认，进入实现"，然后才开始写代码 + 单测。
 
-实现完成、测试跑通后，调用 `task_record_verification`（带证据：命令输出 / 截图路径 / trace 链接）→ 账本进 `verifying`。**最终的 `task_mark_done` 留给 wrapup 收尾时调**（见 wrapup skill），别在这里直接标完成。
+实现完成、测试跑通后，驾驶舱追加验证证据（命令输出 / 截图路径 / trace 链接）。
 
 **📋 日志**：
 ```
-📋 [实现] task_id=tl_xxx → implementing
+📋 [实现] 驾驶舱已记：进入实现
   - 改了: file1.py / file2.ts
   - 测试: 单测 X 个通过 / E2E 验证通过 → verifying（已记证据）
 ```
