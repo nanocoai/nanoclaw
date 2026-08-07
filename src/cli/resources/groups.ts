@@ -485,9 +485,11 @@ registerResource({
         // absent key is not a neutral default, it is a silent read-only mount.
         // That made read-write unreachable through this verb even though the
         // skills that need it (add-gmail-tool, add-gcal-tool) document exactly
-        // this "no --ro" invocation.
+        // this "no --ro" invocation. Recognise true rather than rule out false,
+        // as every other boolean flag here does (crud.ts, tasks.ts, wirings.ts):
+        // `--ro` alone arrives as boolean true, `--ro false` as the string.
         const roFlag = args.ro ?? args.readonly;
-        const readonly = roFlag !== undefined && roFlag !== false && roFlag !== 'false' && roFlag !== '0';
+        const readonly = roFlag === true || roFlag === 'true' || roFlag === '1';
 
         const mount: AdditionalMountConfig = { hostPath, containerPath, readonly };
         const existing = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];

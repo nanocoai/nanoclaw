@@ -382,6 +382,17 @@ describe('groups config add-mount: the mount mode the operator asked for', () =>
     expect(validateMount(stored()[0])).toMatchObject({ allowed: true, effectiveReadonly: false });
   });
 
+  it('reads a value it does not recognise as read-write, the same as every other boolean flag', async () => {
+    // The rest of the CLI decides a boolean flag by what it recognises as true
+    // (`true` / `'true'` / `'1'` — src/cli/crud.ts, src/cli/resources/tasks.ts,
+    // src/cli/resources/wirings.ts), not by ruling out the spellings of false.
+    // Inverting that here would make this one flag read `--ro banana` as
+    // read-only while the same input is false everywhere else.
+    writeAllowlist(true);
+    await addMount({ ro: 'banana' });
+    expect(stored()[0].readonly).toBe(false);
+  });
+
   it('re-adding the same mount with a different mode updates it instead of keeping the stale one', async () => {
     // The dedupe key is host+container, so without this the operator's second
     // command is a silent no-op — and correcting a wrong mode is exactly why
