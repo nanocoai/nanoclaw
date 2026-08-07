@@ -899,6 +899,52 @@ describe('FeishuChannel', () => {
       expect(detail.length).toBeLessThanOrEqual(2000);
     });
 
+    it('失败结果的具体原因进入飞书卡片动作行', async () => {
+      const jid = 'fs:oc_progress_failure_reason';
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '🔧 query',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'started',
+            toolName: 'Bash',
+            toolCallId: 'failure-reason-1',
+            input: { command: './query' },
+          },
+        }),
+        { isProgress: true },
+      );
+      await channel.sendMessage(
+        jid,
+        JSON.stringify({
+          title: '❌ 执行失败',
+          progress: {
+            provider: 'claude',
+            lifecycle: 'failed',
+            toolName: 'tool_result',
+            toolCallId: 'failure-reason-1',
+            exitCode: 2,
+            resultSummary:
+              'Exit code 2\nODPS column project_name cannot be resolved',
+          },
+        }),
+        { isProgress: true },
+      );
+
+      const entry = (channel as any).progressCards.get(jid);
+      expect(entry.steps[0].grayTail).toBe(
+        '执行系统检查失败：ODPS column project_name cannot be res…',
+      );
+      const patchArg = mockPatch.mock.calls.at(-1)?.[0];
+      const serialized = JSON.stringify(
+        JSON.parse(patchArg?.data?.content ?? '{}'),
+      );
+      expect(serialized).toContain(
+        '执行系统检查失败：ODPS column project&#95;name cannot be res…',
+      );
+    });
+
     it('短结果摘要也写入过程记录', async () => {
       const jid = 'fs:oc_progress_short_summary';
       await channel.sendMessage(
@@ -1121,7 +1167,9 @@ describe('FeishuChannel', () => {
       expect(entry.steps[0].grayTail).toBe(
         '读取 /workspace/src/config.ts 失败',
       );
-      expect(JSON.stringify(entry.steps)).not.toContain('should-not-reach-card');
+      expect(JSON.stringify(entry.steps)).not.toContain(
+        'should-not-reach-card',
+      );
     });
 
     it('narration Phase 标题与动作在同一面板 header 内各占一行', async () => {

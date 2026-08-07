@@ -551,9 +551,9 @@ describe('classifyProgressAction', () => {
       '正在读取 /workspace/package.json',
     ],
   ])('%s 从命令提取安全对象', (_name, command, expected) => {
-    expect(
-      classifyProgressAction(started('Bash', { command })).title,
-    ).toBe(expected);
+    expect(classifyProgressAction(started('Bash', { command })).title).toBe(
+      expected,
+    );
   });
 
   it.each([
@@ -859,7 +859,9 @@ describe('reduceProgressPresentation', () => {
       state = complete(state, id);
     }
 
-    expect((state as any).phases[0].actionSummaries).toEqual(['读取 /tmp/c.ts']);
+    expect((state as any).phases[0].actionSummaries).toEqual([
+      '读取 /tmp/c.ts',
+    ]);
     expect((state as any).phases[0].outcome).toBe('已读取 /tmp/c.ts');
   });
 
@@ -913,6 +915,64 @@ describe('reduceProgressPresentation', () => {
     ]);
   });
 
+  it('失败终态在动作后展示首条有效错误原因', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'narration',
+      text: '验证归档命令。',
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: started(
+        'Bash',
+        { command: 'unzip archive.zip' },
+        'fail-detail',
+      ),
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: {
+        provider: 'claude',
+        lifecycle: 'failed',
+        toolName: 'tool_result',
+        toolCallId: 'fail-detail',
+        exitCode: 2,
+        resultSummary:
+          'Exit code 2\n\u001b[31mcheckdir error: cannot create archive\u001b[0m\nmore detail',
+      },
+    });
+
+    expect(state.steps[0].title).toBe(
+      '执行系统检查失败：checkdir error: cannot create archive',
+    );
+    expect((state as any).phases[0].outcome).toBe(
+      '执行系统检查失败：checkdir error: cannot create archive',
+    );
+  });
+
+  it('失败原因跳过凭证行并限制为单行', () => {
+    let state = reduceProgressPresentation(createProgressPresentationState(), {
+      kind: 'tool',
+      progress: started('Bash', { command: './deploy.sh' }, 'fail-secret'),
+    });
+    state = reduceProgressPresentation(state, {
+      kind: 'tool',
+      progress: {
+        provider: 'codex',
+        lifecycle: 'failed',
+        toolName: 'command_execution',
+        toolCallId: 'fail-secret',
+        exitCode: 1,
+        resultSummary:
+          'Authorization: Basic secret-canary-123456\nrequest rejected by gateway\nthird line',
+      },
+    });
+
+    expect(state.steps[0].title).toContain('request rejected by gateway');
+    expect(state.steps[0].title).not.toContain('secret-canary');
+    expect(state.steps[0].title).not.toContain('Authorization');
+    expect(state.steps[0].title).not.toContain('\n');
+  });
+
   it('阶段上下文持续生效且不会被四十个工具步骤挤掉', () => {
     let state = createProgressPresentationState();
     for (let phaseIndex = 1; phaseIndex <= 4; phaseIndex++) {
@@ -960,21 +1020,27 @@ describe('reduceProgressPresentation', () => {
       '继续。构建物已经完整复制并逐文件一致；我现在只核验重启是否生效。',
     ],
     ['先看第一行。\n第二行不进标题。', '先看第一行。'],
-  ])('标题保留 narration 原文首行不做智能摘要：%s', (narration, expectedGoal) => {
-    let state = reduceProgressPresentation(createProgressPresentationState(), {
-      kind: 'narration',
-      text: narration,
-    });
-    state = reduceProgressPresentation(state, {
-      kind: 'tool',
-      progress: started(
-        'Bash',
-        { command: 'git status' },
-        `goal-${expectedGoal}`,
-      ),
-    });
-    expect((state as any).phases[0].goal).toBe(expectedGoal);
-  });
+  ])(
+    '标题保留 narration 原文首行不做智能摘要：%s',
+    (narration, expectedGoal) => {
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        {
+          kind: 'narration',
+          text: narration,
+        },
+      );
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: started(
+          'Bash',
+          { command: 'git status' },
+          `goal-${expectedGoal}`,
+        ),
+      });
+      expect((state as any).phases[0].goal).toBe(expectedGoal);
+    },
+  );
 
   it('narration 即时建 Phase，无需等待首个工具', () => {
     const state = reduceProgressPresentation(
@@ -1057,49 +1123,60 @@ describe('reduceProgressPresentation', () => {
           'plan-mid',
         ),
     ],
-    ['TaskCreate', () => started('TaskCreate', { subject: '新任务' }, 'plan-mid')],
+    [
+      'TaskCreate',
+      () => started('TaskCreate', { subject: '新任务' }, 'plan-mid'),
+    ],
     [
       'TaskUpdate',
-      () => started('TaskUpdate', { taskId: '9', status: 'in_progress' }, 'plan-mid'),
+      () =>
+        started(
+          'TaskUpdate',
+          { taskId: '9', status: 'in_progress' },
+          'plan-mid',
+        ),
     ],
-  ])('narration 之后的 %s 不清掉活跃 narration，后续工具仍归属 narration', (
-    _label,
-    makePlanControl,
-  ) => {
-    // 预置 planTaskId=9 的计划任务，确保 TaskUpdate 命中成功分支（真实覆盖）
-    let state = reduceProgressPresentation(createProgressPresentationState(), {
-      kind: 'tool',
-      progress: started('TaskCreate', { subject: '既有任务' }, 'tc-seed'),
-    });
-    state = reduceProgressPresentation(state, {
-      kind: 'tool',
-      progress: {
-        provider: 'claude',
-        lifecycle: 'completed',
-        toolName: 'tool_result',
-        toolCallId: 'tc-seed',
-        resultSummary: 'Task #9 created',
-      },
-    });
-    state = reduceProgressPresentation(state, {
-      kind: 'narration',
-      text: '先修复回调重试。',
-    });
-    const narrationId = (state as any).phases.at(-1).id;
-    state = reduceProgressPresentation(state, {
-      kind: 'tool',
-      progress: makePlanControl(),
-    });
-    state = reduceProgressPresentation(state, {
-      kind: 'tool',
-      progress: started('Read', { file_path: '/tmp/a.txt' }, 'after-plan'),
-    });
-    expect(state.steps.at(-1)?.phaseId).toBe(narrationId);
-    const narrationPhase = (state as any).phases.find(
-      (phase: any) => phase.id === narrationId,
-    );
-    expect(narrationPhase.currentAction).toBe('正在读取 /tmp/a.txt');
-  });
+  ])(
+    'narration 之后的 %s 不清掉活跃 narration，后续工具仍归属 narration',
+    (_label, makePlanControl) => {
+      // 预置 planTaskId=9 的计划任务，确保 TaskUpdate 命中成功分支（真实覆盖）
+      let state = reduceProgressPresentation(
+        createProgressPresentationState(),
+        {
+          kind: 'tool',
+          progress: started('TaskCreate', { subject: '既有任务' }, 'tc-seed'),
+        },
+      );
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: {
+          provider: 'claude',
+          lifecycle: 'completed',
+          toolName: 'tool_result',
+          toolCallId: 'tc-seed',
+          resultSummary: 'Task #9 created',
+        },
+      });
+      state = reduceProgressPresentation(state, {
+        kind: 'narration',
+        text: '先修复回调重试。',
+      });
+      const narrationId = (state as any).phases.at(-1).id;
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: makePlanControl(),
+      });
+      state = reduceProgressPresentation(state, {
+        kind: 'tool',
+        progress: started('Read', { file_path: '/tmp/a.txt' }, 'after-plan'),
+      });
+      expect(state.steps.at(-1)?.phaseId).toBe(narrationId);
+      const narrationPhase = (state as any).phases.find(
+        (phase: any) => phase.id === narrationId,
+      );
+      expect(narrationPhase.currentAction).toBe('正在读取 /tmp/a.txt');
+    },
+  );
 
   it('连续 narration 累加超过 4000 code point 时状态层截断存储', () => {
     let state = reduceProgressPresentation(createProgressPresentationState(), {
@@ -1294,11 +1371,7 @@ describe('reduceProgressPresentation', () => {
         createProgressPresentationState(),
         {
           kind: 'tool',
-          progress: started(
-            'Bash',
-            { command: 'git diff --check' },
-            'diff-1',
-          ),
+          progress: started('Bash', { command: 'git diff --check' }, 'diff-1'),
         },
       );
       state = completeWithExit(state, 'diff-1', 1);
@@ -1372,9 +1445,7 @@ describe('reduceProgressPresentation', () => {
         },
       });
       expect(state.steps[0].status).toBe('failed');
-      expect(state.steps[0].title).toBe(
-        '读取 /workspace/src/config.ts 失败',
-      );
+      expect(state.steps[0].title).toBe('读取 /workspace/src/config.ts 失败');
       expect(state.phases[0].outcome).toBe(
         '读取 /workspace/src/config.ts 失败',
       );
@@ -1701,9 +1772,7 @@ describe('reduceProgressPresentation', () => {
     });
 
     expect(state.steps.at(-1)?.phase).toBe('运行长测试');
-    expect(state.steps.at(-1)?.title).toBe(
-      '正在运行 fixture.test.mjs 测试',
-    );
+    expect(state.steps.at(-1)?.title).toBe('正在运行 fixture.test.mjs 测试');
   });
 
   it('同一 toolCallId 的 started 更新原步骤，不重复追加', () => {

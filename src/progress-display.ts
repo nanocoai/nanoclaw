@@ -451,11 +451,7 @@ function shellReadObject(command: string): string | undefined {
       if (/^\d*(?:>>?|<<?)$/u.test(token)) index += 1;
       continue;
     }
-    if (
-      !token ||
-      token.startsWith('-') ||
-      /^\d+(?:,\d+)?p$/u.test(token)
-    )
+    if (!token || token.startsWith('-') || /^\d+(?:,\d+)?p$/u.test(token))
       continue;
     operands.push(token);
   }
@@ -689,12 +685,7 @@ function classifyProgressActionInner(
         'search',
       );
     if (query)
-      return actionText(
-        `正在搜索“${query}”`,
-        `搜索“${query}”`,
-        base,
-        'search',
-      );
+      return actionText(`正在搜索“${query}”`, `搜索“${query}”`, base, 'search');
     return actionText(
       searchTitle(progress),
       searchObject(progress) ? `搜索${searchObject(progress)}` : '搜索相关内容',
@@ -705,7 +696,7 @@ function classifyProgressActionInner(
   if (tool === 'write' || tool === 'edit' || tool === 'file_change') {
     const target =
       tool === 'file_change'
-        ? nativeFileChangeObject(progress) ?? fileObject(progress)
+        ? (nativeFileChangeObject(progress) ?? fileObject(progress))
         : fileObject(progress);
     return target
       ? actionText(`正在修改 ${target}`, `修改 ${target}`, base, 'change')
@@ -720,12 +711,7 @@ function classifyProgressActionInner(
           base,
           'web',
         )
-      : actionText(
-          '正在搜索公开资料',
-          '搜索公开资料',
-          base,
-          'web',
-        );
+      : actionText('正在搜索公开资料', '搜索公开资料', base, 'web');
   }
 
   if (tool.includes('gitnexus')) {
@@ -737,12 +723,7 @@ function classifyProgressActionInner(
           base,
           'inspect',
         )
-      : actionText(
-          '正在分析代码调用关系',
-          '分析代码调用关系',
-          base,
-          'inspect',
-        );
+      : actionText('正在分析代码调用关系', '分析代码调用关系', base, 'inspect');
   }
   if (tool.includes('search_chat')) {
     const query = safeQuery(inputString(progress.input, 'query'));
@@ -753,20 +734,10 @@ function classifyProgressActionInner(
           base,
           'communicate',
         )
-      : actionText(
-          '正在搜索聊天记录',
-          '搜索聊天记录',
-          base,
-          'communicate',
-        );
+      : actionText('正在搜索聊天记录', '搜索聊天记录', base, 'communicate');
   }
   if (tool === 'agent' || tool.includes('delegate'))
-    return actionText(
-      '正在派发协作任务',
-      '派发协作任务',
-      base,
-      'communicate',
-    );
+    return actionText('正在派发协作任务', '派发协作任务', base, 'communicate');
   if (tool.includes('report'))
     return {
       ...base,
@@ -775,75 +746,25 @@ function classifyProgressActionInner(
       confidence: 'exact',
     };
   if (tool === 'toolsearch')
-    return actionText(
-      '正在查找可用工具',
-      '查找可用工具',
-      base,
-      'system',
-    );
+    return actionText('正在查找可用工具', '查找可用工具', base, 'system');
   if (tool === 'todo_list')
-    return actionText(
-      '正在更新任务计划',
-      '更新任务计划',
-      base,
-      'system',
-    );
+    return actionText('正在更新任务计划', '更新任务计划', base, 'system');
   if (tool === 'enterworktree')
-    return actionText(
-      '正在准备任务工作区',
-      '准备任务工作区',
-      base,
-      'system',
-    );
+    return actionText('正在准备任务工作区', '准备任务工作区', base, 'system');
   if (tool === 'monitor')
-    return actionText(
-      '正在等待后台任务',
-      '等待后台任务',
-      base,
-      'system',
-    );
+    return actionText('正在等待后台任务', '等待后台任务', base, 'system');
   if (tool === 'skill')
-    return actionText(
-      '正在加载任务能力',
-      '加载任务能力',
-      base,
-      'system',
-    );
+    return actionText('正在加载任务能力', '加载任务能力', base, 'system');
   if (tool === 'taskstop')
-    return actionText(
-      '正在停止协作任务',
-      '停止协作任务',
-      base,
-      'communicate',
-    );
+    return actionText('正在停止协作任务', '停止协作任务', base, 'communicate');
   if (tool === 'collab_tool_call')
-    return actionText(
-      '正在协调协作任务',
-      '协调协作任务',
-      base,
-      'communicate',
-    );
+    return actionText('正在协调协作任务', '协调协作任务', base, 'communicate');
   if (tool.includes('rename_chat'))
-    return actionText(
-      '正在更新群聊名称',
-      '更新群聊名称',
-      base,
-      'communicate',
-    );
+    return actionText('正在更新群聊名称', '更新群聊名称', base, 'communicate');
   if (tool.includes('get_message'))
-    return actionText(
-      '正在读取聊天记录',
-      '读取聊天记录',
-      base,
-      'communicate',
-    );
+    return actionText('正在读取聊天记录', '读取聊天记录', base, 'communicate');
   if (tool.includes('task_'))
-    return actionText(
-      '正在更新任务进展',
-      '更新任务进展',
-      base,
-      'system',
-    );
+    return actionText('正在更新任务进展', '更新任务进展', base, 'system');
 
   if (tool === 'mcp_tool_call') {
     const mcpTool = mcpToolOf(progress);
@@ -869,12 +790,7 @@ function classifyProgressActionInner(
         confidence: 'exact',
       };
     if (mcpTool === 'memory_recall')
-      return actionText(
-        '正在回忆相关信息',
-        '回忆相关信息',
-        base,
-        'system',
-      );
+      return actionText('正在回忆相关信息', '回忆相关信息', base, 'system');
     if (mcpTool === 'get_chat_context' || mcpTool === 'get_message_range')
       return actionText(
         '正在读取聊天记录',
@@ -883,19 +799,9 @@ function classifyProgressActionInner(
         'communicate',
       );
     if (mcpTool === 'task_list' || mcpTool === 'list_tasks')
-      return actionText(
-        '正在查看任务进展',
-        '查看任务进展',
-        base,
-        'system',
-      );
+      return actionText('正在查看任务进展', '查看任务进展', base, 'system');
     if (mcpTool.startsWith('task_'))
-      return actionText(
-        '正在更新任务进展',
-        '更新任务进展',
-        base,
-        'system',
-      );
+      return actionText('正在更新任务进展', '更新任务进展', base, 'system');
     return {
       ...base,
       title: '正在调用协作工具',
@@ -923,12 +829,7 @@ function classifyProgressActionInner(
   ) {
     const target = testObject(command);
     return target
-      ? actionText(
-          `正在运行 ${target} 测试`,
-          `测试 ${target}`,
-          base,
-          'test',
-        )
+      ? actionText(`正在运行 ${target} 测试`, `测试 ${target}`, base, 'test')
       : actionText('正在运行测试', '运行测试', base, 'test');
   }
   if (/gh\s+run\s+view\b[^\n]*--log-failed/.test(lower)) {
@@ -1111,7 +1012,6 @@ function withNarrationToolActivity(
   phases[phases.length - 1] = { ...latest, hasToolActivity: true };
   return { ...state, phases };
 }
-
 
 const CATEGORY_LABELS: Partial<Record<ProgressCategory, string>> = {
   read: '读取',
@@ -1366,12 +1266,45 @@ function completedTitle(step: PresentationStep): string {
   return step.title;
 }
 
-function failedTitle(step: PresentationStep): string {
+// 与飞书 Phase 动作行 48cp 总预算对齐：最长动作前缀
+// “执行系统检查失败：”占 9cp，原因 38cp + 省略号后刚好不触发二次截断。
+const FAILURE_REASON_BUDGET = 38;
+const CREDENTIAL_ASSIGNMENT_LINE =
+  /(?:^|[\s"'`])(?:authorization|cookie|set-cookie|[A-Z0-9_]*(?:api[_-]?key|token|secret|password|passwd))\s*[:=]/iu;
+const ANSI_ESCAPE_PATTERN = new RegExp(String.raw`\u001b\[[0-9;]*m`, 'gu');
+
+function failureReason(summary: string | undefined): string | undefined {
+  if (!summary) return undefined;
+  const reason = summary
+    .replace(ANSI_ESCAPE_PATTERN, '')
+    .split(/\r?\n/gu)
+    .map((line) => line.trim())
+    .find(
+      (line) =>
+        line.length > 0 &&
+        !CREDENTIAL_ASSIGNMENT_LINE.test(line) &&
+        !/^(?:❌\s*)?(?:结果\s*:\s*)?(?:exit code|(?:command|process) exited with code)\s*[:=]?\s*-?\d+\.?$/iu.test(
+          line,
+        ) &&
+        !/^(?:❌\s*)?(?:执行失败|failed)$/iu.test(line),
+    );
+  if (!reason) return undefined;
+  const safe = sanitizeUserText(reason).replace(/\s+/gu, ' ').trim();
+  if (!safe) return undefined;
+  const codePoints = Array.from(safe);
+  return codePoints.length > FAILURE_REASON_BUDGET
+    ? `${codePoints.slice(0, FAILURE_REASON_BUDGET).join('')}…`
+    : safe;
+}
+
+function failedTitle(step: PresentationStep, resultSummary?: string): string {
   const action = step.title.startsWith('正在')
     ? step.title.slice('正在'.length).trimStart()
     : step.title;
   const separator = /[\x21-\x7e]$/u.test(action) ? ' ' : '';
-  return `${action}${separator}失败`;
+  const base = `${action}${separator}失败`;
+  const reason = failureReason(resultSummary);
+  return reason ? `${base}：${reason}` : base;
 }
 
 function unknownTitle(category: ProgressCategory): string {
@@ -1403,18 +1336,12 @@ export function reduceProgressPresentation(
   event: ProgressPresentationEvent,
 ): ProgressPresentationState {
   if (event.kind === 'narration') {
-    const fullText = sanitizeUserText(
-      event.text.replace(/^💬\s*/u, '').trim(),
-    );
+    const fullText = sanitizeUserText(event.text.replace(/^💬\s*/u, '').trim());
     if (!fullText) return state;
     const goal = narrationGoal(fullText);
     const latest = state.phases.at(-1);
     // 连续 narration 无工具活动：合并进同一 Phase（文本追加，goal 保持首段）
-    if (
-      latest &&
-      latest.source === 'narration' &&
-      !latest.hasToolActivity
-    ) {
+    if (latest && latest.source === 'narration' && !latest.hasToolActivity) {
       const phases = [...state.phases];
       phases[phases.length - 1] = {
         ...latest,
@@ -1490,7 +1417,11 @@ export function reduceProgressPresentation(
         phase.status === 'running'
           ? phase.source === 'plan'
             ? phase
-            : { ...phase, status: 'unknown', outcome: unknownPhaseOutcome(phase) }
+            : {
+                ...phase,
+                status: 'unknown',
+                outcome: unknownPhaseOutcome(phase),
+              }
           : phase,
       ),
     };
@@ -1730,7 +1661,7 @@ export function reduceProgressPresentation(
         : status === 'completed'
           ? completedTitle(step)
           : status === 'failed'
-            ? failedTitle(step)
+            ? failedTitle(step, progress.resultSummary)
             : status === 'cancelled'
               ? '已取消'
               : unknownTitle(step.category);
