@@ -27,7 +27,7 @@ vi.mock('./config.js', async () => {
 const TEST_DIR = '/tmp/nanoclaw-test-delivery';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
-import { resolveSession, outboundDbPath } from './session-manager.js';
+import { resolveSession, outboundDbPath, inboundDbPath } from './session-manager.js';
 import { deliverSessionMessages, setDeliveryAdapter } from './delivery.js';
 
 function now(): string {
@@ -144,5 +144,81 @@ describe('deliverSessionMessages — concurrent invocations', () => {
     await deliverSessionMessages(session);
 
     expect(callCount).toBe(1);
+  });
+});
+
+function deliveredStatus(agentGroupId: string, sessionId: string, msgId: string): string | undefined {
+  const db = new Database(inboundDbPath(agentGroupId, sessionId));
+  const row = db.prepare('SELECT status FROM delivered WHERE message_out_id = ?').get(msgId) as
+    | { status: string }
+    | undefined;
+  db.close();
+  return row?.status;
+}
+
+describe('deliverSessionMessages — retry/backoff', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('does not retry a failed message until its backoff delay has elapsed', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-flaky');
+
+    let callCount = 0;
+    setDeliveryAdapter({
+      async deliver() {
+        callCount++;
+        if (callCount === 1) throw new Error('network blip');
+        return 'plat-msg-id';
+      },
+    });
+
+    await deliverSessionMessages(session);
+    expect(callCount).toBe(1); // first attempt, fails
+
+    // Immediate re-poll — backoff hasn't elapsed, must not retry yet.
+    await deliverSessionMessages(session);
+    expect(callCount).toBe(1);
+
+    // Advance past the first backoff window (2s base delay).
+    vi.setSystemTime(Date.now() + 3000);
+    await deliverSessionMessages(session);
+    expect(callCount).toBe(2);
+    expect(deliveredStatus('ag-1', session.id, 'out-flaky')).toBe('delivered');
+  });
+
+  it('gives up after exhausting retries, marks the message failed, and stops retrying it', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-broken');
+
+    let callCount = 0;
+    setDeliveryAdapter({
+      async deliver() {
+        callCount++;
+        throw new Error('permanently down');
+      },
+    });
+
+    // Drive enough poll cycles (advancing past each backoff window) to
+    // exhaust MAX_DELIVERY_ATTEMPTS. Backoff caps at 5 minutes, so jumping
+    // 6 minutes between polls always clears it regardless of attempt count.
+    for (let i = 0; i < 10; i++) {
+      await deliverSessionMessages(session);
+      vi.setSystemTime(Date.now() + 6 * 60_000);
+    }
+
+    expect(deliveredStatus('ag-1', session.id, 'out-broken')).toBe('failed');
+    const callsAtGiveUp = callCount;
+
+    // Further polls must not retry a permanently-failed message.
+    await deliverSessionMessages(session);
+    expect(callCount).toBe(callsAtGiveUp);
   });
 });

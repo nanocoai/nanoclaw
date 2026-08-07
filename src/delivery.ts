@@ -12,13 +12,14 @@ import type Database from 'better-sqlite3';
 import { getRunningSessions, getActiveSessions, createPendingQuestion } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
-import { getMessagingGroupByPlatform } from './db/messaging-groups.js';
+import { getMessagingGroupByPlatform, getMessagingGroup } from './db/messaging-groups.js';
 import {
   getDueOutboundMessages,
   getDeliveredIds,
   markDelivered,
   markDeliveryFailed,
   migrateDeliveredTable,
+  type OutboundMessage,
 } from './db/session-db.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
@@ -29,10 +30,19 @@ import type { Session } from './types.js';
 
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
-const MAX_DELIVERY_ATTEMPTS = 3;
+const MAX_DELIVERY_ATTEMPTS = 8;
+const RETRY_BASE_DELAY_MS = 2000;
+const RETRY_MAX_DELAY_MS = 5 * 60_000;
 
-/** Track delivery attempt counts. Resets on process restart (gives failed messages a fresh chance). */
-const deliveryAttempts = new Map<string, number>();
+/** attempts * exponential backoff between them (2s, 4s, 8s, ... capped at 5min), so a
+ *  transient outage (bad wifi, upstream API blip) gets several minutes of retries
+ *  spread out instead of MAX_DELIVERY_ATTEMPTS burning through in as many poll ticks. */
+function backoffDelayMs(attempts: number): number {
+  return Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempts - 1), RETRY_MAX_DELAY_MS);
+}
+
+/** Track delivery attempt counts + next-retry time. Resets on process restart (gives failed messages a fresh chance). */
+const deliveryAttempts = new Map<string, { attempts: number; nextAttemptAt: number }>();
 
 /**
  * Sessions whose outbound queue is currently being drained.
@@ -181,7 +191,12 @@ async function drainSession(session: Session): Promise<void> {
 
     // Filter out already-delivered messages using inbound.db's delivered table
     const delivered = getDeliveredIds(inDb);
-    const undelivered = allDue.filter((m) => !delivered.has(m.id));
+    const now = Date.now();
+    const undelivered = allDue.filter((m) => {
+      if (delivered.has(m.id)) return false;
+      const retry = deliveryAttempts.get(m.id);
+      return !retry || retry.nextAttemptAt <= now;
+    });
     if (undelivered.length === 0) return;
 
     // Ensure platform_message_id column exists (migration for existing sessions)
@@ -203,8 +218,7 @@ async function drainSession(session: Session): Promise<void> {
           pauseTypingRefreshAfterDelivery(session.id);
         }
       } catch (err) {
-        const attempts = (deliveryAttempts.get(msg.id) ?? 0) + 1;
-        deliveryAttempts.set(msg.id, attempts);
+        const attempts = (deliveryAttempts.get(msg.id)?.attempts ?? 0) + 1;
         if (attempts >= MAX_DELIVERY_ATTEMPTS) {
           log.error('Message delivery failed permanently, giving up', {
             messageId: msg.id,
@@ -214,12 +228,16 @@ async function drainSession(session: Session): Promise<void> {
           });
           markDeliveryFailed(inDb, msg.id);
           deliveryAttempts.delete(msg.id);
+          void sendDeliveryFailureAlert(msg, session, attempts, err);
         } else {
+          const delayMs = backoffDelayMs(attempts);
+          deliveryAttempts.set(msg.id, { attempts, nextAttemptAt: Date.now() + delayMs });
           log.warn('Message delivery failed, will retry', {
             messageId: msg.id,
             sessionId: session.id,
             attempt: attempts,
             maxAttempts: MAX_DELIVERY_ATTEMPTS,
+            retryInMs: delayMs,
             err,
           });
         }
@@ -228,6 +246,51 @@ async function drainSession(session: Session): Promise<void> {
   } finally {
     outDb.close();
     inDb.close();
+  }
+}
+
+/**
+ * DM the reachable admin/owner that a message was dropped after exhausting
+ * retries, so a failed delivery is visible instead of silently vanishing into
+ * the `delivered` table's 'failed' rows. Best-effort — never throws, and not
+ * itself retried (a stuck alert channel just logs and moves on).
+ *
+ * Dynamic import of the approvals module avoids a load-time cycle: it
+ * imports getDeliveryAdapter from this file.
+ */
+async function sendDeliveryFailureAlert(
+  msg: OutboundMessage,
+  session: Session,
+  attempts: number,
+  err: unknown,
+): Promise<void> {
+  try {
+    const agentGroup = getAgentGroup(session.agent_group_id);
+    if (!agentGroup || !deliveryAdapter) return;
+
+    const { pickApprover, pickApprovalDelivery } = await import('./modules/approvals/primitive.js');
+    const approvers = pickApprover(session.agent_group_id);
+    if (approvers.length === 0) return;
+
+    const originChannelType = session.messaging_group_id
+      ? (getMessagingGroup(session.messaging_group_id)?.channel_type ?? '')
+      : '';
+    const target = await pickApprovalDelivery(approvers, originChannelType);
+    if (!target) return;
+
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const text = `⚠️ NanoClaw: a reply from "${agentGroup.name}" failed to deliver after ${attempts} attempts and was dropped.\nLast error: ${errMsg}`;
+
+    await deliveryAdapter.deliver(
+      target.messagingGroup.channel_type,
+      target.messagingGroup.platform_id,
+      null,
+      'chat-sdk',
+      JSON.stringify({ text }),
+    );
+    log.info('Sent delivery-failure admin alert', { messageId: msg.id, sessionId: session.id, to: target.userId });
+  } catch (alertErr) {
+    log.error('Failed to send delivery-failure alert', { messageId: msg.id, sessionId: session.id, err: alertErr });
   }
 }
 
