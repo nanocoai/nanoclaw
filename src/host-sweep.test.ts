@@ -13,6 +13,7 @@ import {
   _resetStuckProcessingRowsForTesting,
   decideStuckAction,
   parseSqliteUtc,
+  shouldCloseTaskSession,
 } from './host-sweep.js';
 import type { Session } from './types.js';
 
@@ -332,5 +333,24 @@ describe('parseSqliteUtc', () => {
     // bare string returns different values depending on the host TZ.)
     const bare = '2026-04-20T12:00:00';
     expect(parseSqliteUtc(bare)).toBe(Date.parse(bare + 'Z'));
+  });
+});
+
+describe('shouldCloseTaskSession', () => {
+  it('closes a spent per-task session (no live tasks, no container)', () => {
+    expect(shouldCloseTaskSession('system:tasks:task-1', false, 0)).toBe(true);
+  });
+
+  it('keeps it while a task is still live (recurring re-armed, or pending/paused)', () => {
+    expect(shouldCloseTaskSession('system:tasks:task-1', false, 1)).toBe(false);
+  });
+
+  it('keeps it while its container is running (mid-fire)', () => {
+    expect(shouldCloseTaskSession('system:tasks:task-1', true, 0)).toBe(false);
+  });
+
+  it('never touches non-task sessions', () => {
+    expect(shouldCloseTaskSession('telegram:12345', false, 0)).toBe(false);
+    expect(shouldCloseTaskSession(null, false, 0)).toBe(false);
   });
 });

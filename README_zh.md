@@ -11,6 +11,7 @@
   <a href="https://docs.nanoclaw.dev">文档</a>&nbsp; • &nbsp;
   <a href="README.md">English</a>&nbsp; • &nbsp;
   <a href="README_ja.md">日本語</a>&nbsp; • &nbsp;
+  <a href="README_ko.md">한국어</a>&nbsp; • &nbsp;
   <a href="https://discord.gg/VDdww8qS42"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord&v=2" alt="Discord" valign="middle"></a>&nbsp; • &nbsp;
   <a href="repo-tokens"><img src="repo-tokens/badge.svg" alt="repo tokens" valign="middle"></a>
 </p>
@@ -26,7 +27,7 @@ NanoClaw 用一个您能轻松理解的代码库提供了同样的核心功能�
 ## 快速开始
 
 ```bash
-git clone https://github.com/qwibitai/nanoclaw.git nanoclaw-v2
+git clone https://github.com/nanocoai/nanoclaw.git nanoclaw-v2
 cd nanoclaw-v2
 bash nanoclaw.sh
 ```

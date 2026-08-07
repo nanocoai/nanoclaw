@@ -12,7 +12,7 @@ inputs:
   context-window:
     description: 'Context window size for percentage calculation'
     required: false
-    default: '200000'
+    default: '1000000'
   readme:
     description: 'Path to README file'
     required: false
@@ -114,7 +114,7 @@ runs:
         with open(readme_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        repo_tokens_url = "https://github.com/qwibitai/nanoclaw/tree/main/repo-tokens"
+        repo_tokens_url = "https://github.com/nanocoai/nanoclaw/tree/main/repo-tokens"
         linked_badge = f'<a href="{repo_tokens_url}">{badge}</a>'
         new_content = marker_re.sub(rf"\1{linked_badge}\2", content)
 
@@ -148,7 +148,7 @@ runs:
             lx = label_w // 2
             vx = label_w + value_w // 2
 
-            repo_tokens_url = "https://github.com/qwibitai/nanoclaw/tree/main/repo-tokens"
+            repo_tokens_url = "https://github.com/nanocoai/nanoclaw/tree/main/repo-tokens"
 
             svg = f'''<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{total_w}" height="20" role="img" aria-label="{full_desc}">
           <title>{full_desc}</title>

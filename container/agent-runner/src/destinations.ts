@@ -23,6 +23,8 @@ export interface DestinationEntry {
   threadIdOverride?: string | null;
 }
 
+export type SessionMode = { kind: 'chat' } | { kind: 'task'; taskId: string };
+
 interface DestRow {
   name: string;
   display_name: string | null;
@@ -83,53 +85,67 @@ export function findByRouting(
  * per-agent-group and changes when the operator renames an agent, while
  * the shared base is identical across all agents.
  */
-export function buildSystemPromptAddendum(assistantName?: string): string {
+export function buildSystemPromptAddendum(assistantName?: string, mode: SessionMode = { kind: 'chat' }): string {
   const sections: string[] = [];
 
   if (assistantName) {
     sections.push(['# You are ' + assistantName, '', `Your name is **${assistantName}**. Use it when the channel asks who you are, when introducing yourself, and when signing any message that explicitly calls for a signature.`].join('\n'));
   }
 
-  sections.push(buildDestinationsSection());
+  sections.push(buildDestinationsSection(mode));
 
   return sections.join('\n\n');
 }
 
-function buildDestinationsSection(): string {
+function buildDestinationsSection(mode: SessionMode): string {
   const all = getAllDestinations();
+  const lines = ['## Sending messages', ''];
 
   if (all.length === 0) {
-    return [
-      '## Sending messages',
-      '',
-      'You currently have no configured destinations. You cannot send messages until an admin wires one up.',
-    ].join('\n');
-  }
-
-  const lines = ['## Sending messages', ''];
-  if (all.length === 1) {
+    lines.push('You currently have no configured destinations. You cannot send messages until an admin wires one up.');
+    if (mode.kind === 'chat') return lines.join('\n');
+  } else if (all.length === 1) {
     const d = all[0];
-    const label = d.displayName && d.displayName !== d.name ? ` (${d.displayName})` : '';
-    lines.push(`Your destination is \`${d.name}\`${label}.`);
+    lines.push(`Your destination is \`${d.name}\`${destinationLabel(d)}.`);
   } else {
     lines.push('You can send messages to the following destinations:', '');
     for (const d of all) {
-      const label = d.displayName && d.displayName !== d.name ? ` (${d.displayName})` : '';
-      lines.push(`- \`${d.name}\`${label}`);
+      lines.push(`- \`${d.name}\`${destinationLabel(d)}`);
     }
   }
+
   lines.push('');
-  lines.push('**Every response must be wrapped** in a `<message to="name">...</message>` block.');
-  lines.push('You can include multiple `<message>` blocks in one response to send to multiple destinations.');
-  lines.push('Text outside of `<message>` blocks is scratchpad — logged but not sent anywhere.');
-  lines.push('Use `<internal>...</internal>` to make scratchpad intent explicit.');
-  lines.push('');
+
+  if (mode.kind === 'task') {
+    lines.push(
+      'This is an isolated task run with no attached chat. Only notify someone when the task asks you to. For a user-visible message, call `send_message({ to: "name", text: "..." })`; for a file, call `send_file` with `to`. Always pass the explicit named destination.',
+      '',
+      `Your final output is not sent to the user. End with a concise work-log summary. It is recorded automatically in \`tasks/${mode.taskId}.md\`. Read that file when you need context from earlier runs. Use \`ncl tasks append-log --msg "…"\` only for optional mid-run notes.`,
+    );
+    return lines.join('\n');
+  }
+
   lines.push(
-    '**Default routing**: when replying to an incoming message, address the same destination the message came `from` — every inbound `<message>` tag carries a `from="name"` attribute that names the origin destination. Only address a different destination when the request itself asks you to (e.g., "tell Laura that…").',
+    'Wrap each delivered message in a `<message to="name">…</message>` block; include several blocks in one response to address several destinations. `<internal>…</internal>` marks thinking you don\'t want sent.',
   );
   lines.push('');
   lines.push(
-    'To send a message mid-response (e.g., an acknowledgment before a long task), call the `send_message` MCP tool with the `to` parameter set to a destination name.',
+    'When replying to an incoming message, default to addressing the destination it came `from` (every inbound `<message>` tag carries a `from="name"` attribute). Pick a different destination when the request asks for it (e.g., "tell Laura that…").',
+  );
+  lines.push('');
+  lines.push(
+    'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. Always pass its explicit `to` destination. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
+  );
+  lines.push('');
+  lines.push(
+    'For a short turn, do not narrate. For longer work, send one acknowledgment and then updates only at meaningful milestones, especially before slow operations. Never narrate micro-steps; finish with the outcome, not a play-by-play.',
   );
   return lines.join('\n');
+}
+
+function destinationLabel(d: DestinationEntry): string {
+  const parts: string[] = [];
+  if (d.channelType) parts.push(d.channelType);
+  if (d.displayName && d.displayName !== d.name) parts.push(d.displayName);
+  return parts.length > 0 ? ` (${parts.join(' · ')})` : '';
 }

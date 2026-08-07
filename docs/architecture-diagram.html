@@ -311,7 +311,6 @@ erDiagram
     string name
     string folder
     string agent_provider
-    json container_config
   }
   messaging_groups {
     int id
@@ -344,14 +343,15 @@ erDiagram
     int messaging_group_id
     int agent_group_id
     string session_mode
-    json trigger_rules
+    string engage_mode "pattern | mention | mention-sticky"
+    string sender_scope "all | known"
     int priority
   }
   sessions {
     int id
     int agent_group_id
     int messaging_group_id
-    string sdk_session_id
+    string thread_id
     string status
   }
 </pre>
@@ -391,7 +391,7 @@ flowchart LR
   Container -->|writes · odd seq| Out
   Container -->|touch every poll| HB
   HostSweep[Host sweep] -->|stat mtime| HB
-  HostSweep -->|reads processing_ack| In
+  HostSweep -->|reads processing_ack| Out
 </pre>
         </div>
       </section>

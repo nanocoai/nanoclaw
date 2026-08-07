@@ -31,9 +31,12 @@
  * Affected call sites today (keep this list honest if you add more):
  *   - src/delivery.ts::handleSystemAction case 'create_agent'
  *   - src/db/messaging-groups.ts::createMessagingGroupAgent
+ *   - src/cli/resources/destinations.ts::add / remove (admin-time `ncl destinations`
+ *     — iterates over `getSessionsByAgentGroup(agentGroupId)`)
  */
 import type { AgentDestination } from '../../../types.js';
 import { getDb } from '../../../db/connection.js';
+import { deletePoliciesTouching, removeMessagePolicy } from './agent-message-policies.js';
 
 /**
  * ⚠️  Caller responsibility: after this returns, call
@@ -87,9 +90,16 @@ export function hasDestination(agentGroupId: string, targetType: 'channel' | 'ag
  * so the deletion propagates to the running container's inbound.db.
  */
 export function deleteDestination(agentGroupId: string, localName: string): void {
+  // Resolve the target first so we can drop a matching policy for this edge (no ghost gate on re-wire).
+  const row = getDb()
+    .prepare('SELECT target_type, target_id FROM agent_destinations WHERE agent_group_id = ? AND local_name = ?')
+    .get(agentGroupId, localName) as { target_type: string; target_id: string } | undefined;
   getDb()
     .prepare('DELETE FROM agent_destinations WHERE agent_group_id = ? AND local_name = ?')
     .run(agentGroupId, localName);
+  if (row?.target_type === 'agent') {
+    removeMessagePolicy(agentGroupId, row.target_id);
+  }
 }
 
 /**
@@ -106,6 +116,7 @@ export function deleteAllDestinationsTouching(agentGroupId: string): void {
   getDb()
     .prepare('DELETE FROM agent_destinations WHERE agent_group_id = ? OR (target_type = ? AND target_id = ?)')
     .run(agentGroupId, 'agent', agentGroupId);
+  deletePoliciesTouching(agentGroupId);
 }
 
 /**

@@ -3,6 +3,8 @@ import { getDb, hasTable } from './connection.js';
 
 // ── Sessions ──
 
+export const TASKS_SYSTEM_THREAD_ID = 'system:tasks';
+
 export function createSession(session: Session): void {
   getDb()
     .prepare(
@@ -55,12 +57,57 @@ export function findSessionForAgent(
 /** Find an active session scoped to an agent group (ignoring messaging group). */
 export function findSessionByAgentGroup(agentGroupId: string): Session | undefined {
   return getDb()
-    .prepare("SELECT * FROM sessions WHERE agent_group_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1")
+    .prepare(
+      `SELECT * FROM sessions
+       WHERE agent_group_id = ?
+         AND status = 'active'
+         AND NOT (messaging_group_id IS NULL AND thread_id IS NOT NULL AND thread_id LIKE 'system:%')
+       ORDER BY created_at DESC
+       LIMIT 1`,
+    )
     .get(agentGroupId) as Session | undefined;
 }
 
 export function getSessionsByAgentGroup(agentGroupId: string): Session[] {
   return getDb().prepare('SELECT * FROM sessions WHERE agent_group_id = ?').all(agentGroupId) as Session[];
+}
+
+export function findSystemSession(agentGroupId: string, threadId: string): Session | undefined {
+  return getDb()
+    .prepare(
+      `SELECT * FROM sessions
+       WHERE agent_group_id = ?
+         AND messaging_group_id IS NULL
+         AND thread_id = ?
+         AND status = 'active'
+       ORDER BY created_at DESC
+       LIMIT 1`,
+    )
+    .get(agentGroupId, threadId) as Session | undefined;
+}
+
+/** Per-task session thread id for a scheduled task series. */
+export function taskThreadId(seriesId: string): string {
+  return `${TASKS_SYSTEM_THREAD_ID}:${seriesId}`;
+}
+
+/** True for any task session thread — a per-series one or the legacy shared one. */
+export function isTaskThread(threadId: string | null): boolean {
+  return threadId === TASKS_SYSTEM_THREAD_ID || (threadId?.startsWith(`${TASKS_SYSTEM_THREAD_ID}:`) ?? false);
+}
+
+/** All active task sessions for a group — one per live series, plus any legacy shared one. */
+export function findTaskSessions(agentGroupId: string): Session[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM sessions
+       WHERE agent_group_id = ?
+         AND messaging_group_id IS NULL
+         AND status = 'active'
+         AND (thread_id = ? OR thread_id LIKE ?)
+       ORDER BY created_at DESC`,
+    )
+    .all(agentGroupId, TASKS_SYSTEM_THREAD_ID, `${TASKS_SYSTEM_THREAD_ID}:%`) as Session[];
 }
 
 export function getActiveSessions(): Session[] {
@@ -155,11 +202,11 @@ export function createPendingApproval(
       `INSERT OR IGNORE INTO pending_approvals
          (approval_id, session_id, request_id, action, payload, created_at,
           agent_group_id, channel_type, platform_id, platform_message_id, expires_at, status,
-          title, options_json)
+          title, question, options_json, approver_user_id)
        VALUES
          (@approval_id, @session_id, @request_id, @action, @payload, @created_at,
           @agent_group_id, @channel_type, @platform_id, @platform_message_id, @expires_at, @status,
-          @title, @options_json)`,
+          @title, @question, @options_json, @approver_user_id)`,
     )
     .run({
       session_id: null,
@@ -169,6 +216,8 @@ export function createPendingApproval(
       platform_message_id: null,
       expires_at: null,
       status: 'pending',
+      question: '',
+      approver_user_id: null,
       ...pa,
     });
   return result.changes > 0;
@@ -184,6 +233,28 @@ export function updatePendingApprovalStatus(approvalId: string, status: PendingA
   getDb().prepare('UPDATE pending_approvals SET status = ? WHERE approval_id = ?').run(status, approvalId);
 }
 
+/**
+ * Park an approval in the "rejected, awaiting reason" hold: the admin clicked
+ * "Reject with reason…" and we're waiting for their one-line reply. `expiresAt`
+ * is the deadline after which the host sweep finalizes a plain reject (so a
+ * ghosted hold never strands the requesting agent). Reuses the otherwise-unused
+ * `expires_at` column on module-initiated rows.
+ */
+export function markApprovalAwaitingReason(approvalId: string, expiresAt: string): void {
+  getDb()
+    .prepare("UPDATE pending_approvals SET status = 'awaiting_reason', expires_at = ? WHERE approval_id = ?")
+    .run(expiresAt, approvalId);
+}
+
+/** Awaiting-reason approvals whose reply window has elapsed — the sweep's ghost set. */
+export function getExpiredAwaitingReasonApprovals(nowIso: string): PendingApproval[] {
+  return getDb()
+    .prepare(
+      "SELECT * FROM pending_approvals WHERE status = 'awaiting_reason' AND expires_at IS NOT NULL AND expires_at <= ?",
+    )
+    .all(nowIso) as PendingApproval[];
+}
+
 export function deletePendingApproval(approvalId: string): void {
   getDb().prepare('DELETE FROM pending_approvals WHERE approval_id = ?').run(approvalId);
 }
@@ -193,34 +264,39 @@ export function getPendingApprovalsByAction(action: string): PendingApproval[] {
 }
 
 /**
- * Resolve ask_question render metadata (title + normalized options) for any
- * card, regardless of whether it was persisted as a pending_question (generic
- * ask_user_question) or a pending_approval (self-mod / OneCLI credential).
+ * Resolve ask_question render metadata for any card. Approval-backed rows
+ * include the original question body so the bridge can retain it when the
+ * card resolves; generic pending_questions intentionally keep their existing
+ * title + options shape.
  */
-export function getAskQuestionRender(
-  id: string,
-): { title: string; options: import('../channels/ask-question.js').NormalizedOption[] } | undefined {
+export function getAskQuestionRender(id: string):
+  | {
+      title: string;
+      question?: string;
+      options: import('../channels/ask-question.js').NormalizedOption[];
+    }
+  | undefined {
   const q = getPendingQuestion(id);
   if (q) return { title: q.title, options: q.options };
-  const a = getDb().prepare('SELECT title, options_json FROM pending_approvals WHERE approval_id = ?').get(id) as
-    | { title: string; options_json: string }
-    | undefined;
-  if (a?.title) return { title: a.title, options: JSON.parse(a.options_json) };
+  const a = getDb()
+    .prepare('SELECT title, question, options_json FROM pending_approvals WHERE approval_id = ?')
+    .get(id) as { title: string; question: string; options_json: string } | undefined;
+  if (a?.title) return { title: a.title, question: a.question, options: JSON.parse(a.options_json) };
 
-  // Channel-registration + unknown-sender approvals persist title/options_json
-  // the same way pending_approvals does — just SELECT and return.
+  // Channel-registration + unknown-sender approvals persist the same render
+  // metadata as pending_approvals — just SELECT and return.
   if (hasTable(getDb(), 'pending_channel_approvals')) {
     const c = getDb()
-      .prepare('SELECT title, options_json FROM pending_channel_approvals WHERE messaging_group_id = ?')
-      .get(id) as { title: string; options_json: string } | undefined;
-    if (c?.title) return { title: c.title, options: JSON.parse(c.options_json) };
+      .prepare('SELECT title, question, options_json FROM pending_channel_approvals WHERE messaging_group_id = ?')
+      .get(id) as { title: string; question: string; options_json: string } | undefined;
+    if (c?.title) return { title: c.title, question: c.question, options: JSON.parse(c.options_json) };
   }
 
   if (hasTable(getDb(), 'pending_sender_approvals')) {
-    const s = getDb().prepare('SELECT title, options_json FROM pending_sender_approvals WHERE id = ?').get(id) as
-      | { title: string; options_json: string }
-      | undefined;
-    if (s?.title) return { title: s.title, options: JSON.parse(s.options_json) };
+    const s = getDb()
+      .prepare('SELECT title, question, options_json FROM pending_sender_approvals WHERE id = ?')
+      .get(id) as { title: string; question: string; options_json: string } | undefined;
+    if (s?.title) return { title: s.title, question: s.question, options: JSON.parse(s.options_json) };
   }
 
   return undefined;

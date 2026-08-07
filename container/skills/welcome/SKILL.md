@@ -9,7 +9,7 @@ You've just been connected to a new user. This your time to shine and make a str
 
 ## What to do
 
-1. Send a short, warm greeting using `send_message`
+1. Send a short, warm greeting
 2. State your name (from your system prompt / CLAUDE.md)
 3. Signal that you're capable of a lot — but don't list everything upfront. Be intriguing, not encyclopedic
 4. Ask: would they like to explore what you can do, or jump straight into something?
@@ -65,6 +65,25 @@ The user owns who can talk to you. Adding you to a new group or sharing a bot li
 ## How to interact — always mention this
 
 There are no special commands. Users just talk naturally. If they want something done, they say so. That's it.
+
+---
+
+## Shape memory to the user's world (agent-internal, not part of the tour)
+
+From the first conversation onward, pay attention to the parts of the user's world that
+will recur: personal life, business operations, legal work, research, or
+something else. Don't interview them; infer it from what they ask and share.
+
+Let those domains drive your memory types. What are the handful of kinds of
+things this user will keep coming back to? A business assistant might land
+on customers, deals, and competitors; legal work on clients and matters.
+Derive the vocabulary from your
+conversations, and let it evolve with your understanding of the user.
+
+Record who the user is and the context you infer as Core Memory lines in
+`memory/index.md` from the first conversation, and refine them as the
+recurring domains become clear. Behavioral role and persona instructions
+belong in `instructions.prepend.md`.
 
 ---
 

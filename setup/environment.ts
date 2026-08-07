@@ -35,6 +35,29 @@ export function readEnvKey(key: string, projectRoot?: string): string | null {
   return null;
 }
 
+/**
+ * Set (or replace) a single `KEY=value` line in `.env`, creating the file if
+ * needed. Non-secret config only — secrets belong in the OneCLI vault.
+ */
+export function upsertEnvKey(key: string, value: string, projectRoot?: string): void {
+  const envPath = path.join(projectRoot ?? process.cwd(), '.env');
+  let content = '';
+  try {
+    content = fs.readFileSync(envPath, 'utf-8');
+  } catch {
+    /* no .env yet */
+  }
+  const line = `${key}=${value}`;
+  const lines = content.split('\n');
+  const idx = lines.findIndex((l) => l.trim().startsWith(`${key}=`));
+  if (idx >= 0) lines[idx] = line;
+  else {
+    while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
+    lines.push(line);
+  }
+  fs.writeFileSync(envPath, lines.join('\n') + '\n');
+}
+
 export function detectExistingDisplayName(projectRoot: string): string | null {
   const dbPath = path.join(projectRoot, 'data', 'v2.db');
   if (!fs.existsSync(dbPath)) return null;

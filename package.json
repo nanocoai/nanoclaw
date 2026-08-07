@@ -1,10 +1,13 @@
 {
   "name": "nanoclaw",
-  "version": "2.0.44",
+  "version": "2.1.54",
   "description": "Personal Claude assistant. Lightweight, secure, customizable.",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "main": "dist/index.js",
+  "bin": {
+    "ncl": "bin/ncl"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
@@ -16,27 +19,28 @@
     "prepare": "husky",
     "setup": "tsx setup/index.ts",
     "setup:auto": "tsx setup/auto.ts",
+    "ncl": "tsx src/cli/client.ts",
     "chat": "tsx scripts/chat.ts",
-    "auth": "tsx src/whatsapp-auth.ts",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@chat-adapter/discord": "4.27.0",
-    "@chat-adapter/telegram": "4.27.0",
+    "@chat-adapter/discord": "4.29.0",
+    "@chat-adapter/telegram": "4.29.0",
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
     "@onecli-sh/sdk": "^3.1.0",
     "@types/qrcode": "1.5.6",
     "@whiskeysockets/baileys": "7.0.0-rc.9",
     "better-sqlite3": "11.10.0",
-    "chat": "^4.27.0",
+    "chat": "4.29.0",
     "cron-parser": "5.5.0",
     "kleur": "^4.1.5",
     "pino": "9.6.0",
-    "qrcode": "1.5.4"
+    "qrcode": "1.5.4",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",

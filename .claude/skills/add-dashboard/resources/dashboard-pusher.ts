@@ -10,15 +10,17 @@ import Database from 'better-sqlite3';
 import { getAllAgentGroups, getAgentGroup } from './db/agent-groups.js';
 import { getSessionsByAgentGroup } from './db/sessions.js';
 import { getAllMessagingGroups, getMessagingGroupAgents } from './db/messaging-groups.js';
-import { getDestinations } from './db/agent-destinations.js';
-import { getMembers } from './db/agent-group-members.js';
-import { getAllUsers, getUser } from './db/users.js';
-import { getUserRoles, getAdminsOfAgentGroup } from './db/user-roles.js';
-import { getUserDmsForUser } from './db/user-dms.js';
+import { getDestinations } from './modules/agent-to-agent/db/agent-destinations.js';
+import { getMembers } from './modules/permissions/db/agent-group-members.js';
+import { getAllUsers, getUser } from './modules/permissions/db/users.js';
+import { getUserRoles, getAdminsOfAgentGroup } from './modules/permissions/db/user-roles.js';
+import { getUserDmsForUser } from './modules/permissions/db/user-dms.js';
 import { getActiveAdapters, getRegisteredChannelNames } from './channels/channel-registry.js';
 import { DATA_DIR, ASSISTANT_NAME } from './config.js';
 import { getDb } from './db/connection.js';
+import { getContainerConfig } from './db/container-configs.js';
 import { log } from './log.js';
+import { readEnvFile } from './env.js';
 
 interface PusherConfig {
   port: number;
@@ -54,6 +56,26 @@ export function stopDashboardPusher(): void {
     clearInterval(logTimer);
     logTimer = null;
   }
+}
+
+/**
+ * Skill entry point — the single call wired into the host boot sequence.
+ *
+ * All of the dashboard's startup logic lives here, in the skill's own file,
+ * so the integration point in src/index.ts is just `await startDashboard()`.
+ * No-ops (and says so) when DASHBOARD_SECRET is unset.
+ */
+export async function startDashboard(): Promise<void> {
+  const env = readEnvFile(['DASHBOARD_SECRET', 'DASHBOARD_PORT']);
+  const secret = process.env.DASHBOARD_SECRET || env.DASHBOARD_SECRET;
+  const port = parseInt(process.env.DASHBOARD_PORT || env.DASHBOARD_PORT || '3100', 10);
+  if (!secret) {
+    log.info('Dashboard disabled (no DASHBOARD_SECRET)');
+    return;
+  }
+  const { startDashboard: startServer } = await import('@nanoco/nanoclaw-dashboard');
+  startServer({ port, secret });
+  startDashboardPusher({ port, secret, intervalMs: 60000 });
 }
 
 /** Fire-and-forget POST to the dashboard. */
@@ -157,7 +179,7 @@ function collectAgentGroups() {
       name: g.name,
       folder: g.folder,
       agent_provider: g.agent_provider,
-      container_config: g.container_config ? JSON.parse(g.container_config) : null,
+      container_config: getContainerConfig(g.id) ?? null,
       sessionCount: sessions.length,
       runningSessions: running.length,
       wirings,
@@ -405,12 +427,20 @@ function collectContextWindows() {
   return results;
 }
 
+// "YYYY-MM-DDTHH" in the host's local time — the chart's hour labels are read
+// by a human, so bucket by local hour, not UTC. sv-SE renders "YYYY-MM-DD HH".
+function localHourKey(d: Date): string {
+  return d
+    .toLocaleString('sv-SE', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hour12: false })
+    .replace(' ', 'T');
+}
+
 function collectActivity() {
   const now = Date.now();
   const buckets: Record<string, { inbound: number; outbound: number }> = {};
 
   for (let i = 0; i < 24; i++) {
-    const key = new Date(now - i * 3600000).toISOString().slice(0, 13);
+    const key = localHourKey(new Date(now - i * 3600000));
     buckets[key] = { inbound: 0, outbound: 0 };
   }
 
@@ -431,7 +461,7 @@ function collectActivity() {
             const table = direction === 'outbound' ? 'messages_out' : 'messages_in';
             const rows = db.prepare(`SELECT timestamp FROM ${table} WHERE timestamp > ?`).all(cutoff) as { timestamp: string }[];
             for (const row of rows) {
-              const key = row.timestamp.slice(0, 13);
+              const key = localHourKey(new Date(row.timestamp));
               if (buckets[key]) buckets[key][direction]++;
             }
             db.close();

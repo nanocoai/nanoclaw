@@ -64,21 +64,26 @@ export async function runScript(script: string, taskId: string): Promise<ScriptR
   });
 }
 
+/** Why a script gated its task: deliberate wakeAgent=false vs a broken script. */
+export type ScriptSkipReason = 'gated' | 'error';
+
 export interface TaskScriptOutcome {
   keep: MessageInRow[];
-  skipped: string[];
+  skipped: Array<{ id: string; reason: ScriptSkipReason }>;
 }
 
 /**
  * Run pre-task scripts for any task messages that carry one, serially.
- * - Errors / missing output / wakeAgent=false → task id added to `skipped`.
+ * - Errors / missing output / wakeAgent=false → task id added to `skipped`,
+ *   with the reason. The caller acks these as script-skips (not plain
+ *   completions) so the host can count consecutive failures and back off.
  * - wakeAgent=true → content JSON is mutated to carry `scriptOutput`, so the
  *   formatter renders it into the prompt.
  * Non-task messages and tasks without scripts pass through unchanged.
  */
 export async function applyPreTaskScripts(messages: MessageInRow[]): Promise<TaskScriptOutcome> {
   const keep: MessageInRow[] = [];
-  const skipped: string[] = [];
+  const skipped: Array<{ id: string; reason: ScriptSkipReason }> = [];
 
   for (const msg of messages) {
     if (msg.kind !== 'task') {
@@ -106,9 +111,9 @@ export async function applyPreTaskScripts(messages: MessageInRow[]): Promise<Tas
     touchHeartbeat();
 
     if (!result || !result.wakeAgent) {
-      const reason = result ? 'wakeAgent=false' : 'script error/no output';
-      log(`task ${msg.id} skipped: ${reason}`);
-      skipped.push(msg.id);
+      const reason: ScriptSkipReason = result ? 'gated' : 'error';
+      log(`task ${msg.id} skipped: ${reason === 'gated' ? 'wakeAgent=false' : 'script error/no output'}`);
+      skipped.push({ id: msg.id, reason });
       continue;
     }
 

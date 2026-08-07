@@ -27,6 +27,7 @@ import path from 'path';
 import * as p from '@clack/prompts';
 import k from 'kleur';
 
+import { extractClaudeOAuthToken } from './captured-token.js';
 import { ensureAnswer } from './runner.js';
 import { brandBody, fitToWidth, fmtDuration, note } from './theme.js';
 
@@ -43,7 +44,7 @@ export interface AssistContext {
  * rather than us stuffing contents into the prompt. Keys are step names as
  * they appear in fail() calls; values are repo-relative paths.
  */
-const STEP_FILES: Record<string, string[]> = {
+export const STEP_FILES: Record<string, string[]> = {
   bootstrap: ['setup.sh', 'setup/install-node.sh', 'nanoclaw.sh'],
   environment: ['setup/environment.ts'],
   container: [
@@ -64,16 +65,16 @@ const STEP_FILES: Record<string, string[]> = {
   channel: ['setup/auto.ts'],
   verify: ['setup/verify.ts'],
   // Channel-specific sub-steps:
-  'telegram-install': ['setup/add-telegram.sh', 'setup/channels/telegram.ts'],
+  'telegram-install': ['.claude/skills/add-telegram/SKILL.md', 'scripts/skill-apply.ts', 'setup/channels/telegram.ts'],
   'telegram-validate': ['setup/channels/telegram.ts'],
   'pair-telegram': ['setup/pair-telegram.ts', 'setup/channels/telegram.ts'],
-  'discord-install': ['setup/add-discord.sh', 'setup/channels/discord.ts'],
-  'slack-install': ['setup/add-slack.sh', 'setup/channels/slack.ts'],
+  'discord-install': ['.claude/skills/add-discord/SKILL.md', 'scripts/skill-apply.ts', 'setup/channels/discord.ts'],
+  'slack-install': ['.claude/skills/add-slack/SKILL.md', 'scripts/skill-apply.ts', 'setup/channels/slack.ts'],
   'slack-validate': ['setup/channels/slack.ts'],
-  'imessage-install': ['setup/add-imessage.sh', 'setup/channels/imessage.ts'],
-  'imessage': ['setup/channels/imessage.ts'],
-  'teams-install': ['setup/add-teams.sh', 'setup/channels/teams.ts'],
-  'teams-manifest': ['setup/lib/teams-manifest.ts', 'setup/channels/teams.ts'],
+  'imessage-install': ['.claude/skills/add-imessage/SKILL.md', 'scripts/skill-apply.ts', 'scripts/photon-setup.ts'],
+  'imessage': ['setup/channels/run-channel-skill.ts', 'scripts/photon-setup.ts'],
+  'teams-install': ['.claude/skills/add-teams/SKILL.md', 'scripts/skill-apply.ts', 'setup/channels/run-channel-skill.ts'],
+  'teams-manifest': ['setup/lib/teams-manifest.ts', 'setup/channels/teams-manifest-build.ts'],
   'init-first-agent': [
     'scripts/init-first-agent.ts',
     'setup/channels/telegram.ts',
@@ -81,7 +82,7 @@ const STEP_FILES: Record<string, string[]> = {
   ],
 };
 
-const BIG_PICTURE_FILES = ['README.md', 'setup/auto.ts'];
+export const BIG_PICTURE_FILES = ['README.md', 'setup/auto.ts'];
 
 /**
  * Returns `true` if the user ran a Claude-suggested fix command; callers
@@ -150,7 +151,16 @@ function isClaudeAuthenticated(): boolean {
   }
 }
 
-async function ensureClaudeReady(projectRoot: string): Promise<boolean> {
+/**
+ * True when the Claude CLI is already installed AND signed in — the only
+ * state in which a non-claude install may be offered a Claude debugger.
+ * Unlike `ensureClaudeReady`, this never prompts and has no side effects.
+ */
+export function isClaudeReady(): boolean {
+  return isClaudeInstalled() && isClaudeAuthenticated();
+}
+
+export async function ensureClaudeReady(projectRoot: string): Promise<boolean> {
   if (!isClaudeInstalled()) {
     const install = ensureAnswer(
       await p.confirm({
@@ -207,16 +217,11 @@ async function ensureClaudeReady(projectRoot: string): Promise<boolean> {
       });
 
       if (!isClaudeAuthenticated() && fs.existsSync(tmpfile)) {
-        const raw = fs.readFileSync(tmpfile, 'utf-8');
-        const stripped = raw
-          .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-          .replace(/[\n\r]/g, '');
-        const matches = stripped.match(/(sk-ant-oat[A-Za-z0-9_-]{80,500}AA)/g);
-        if (matches) {
-          process.env.CLAUDE_CODE_OAUTH_TOKEN = matches[matches.length - 1];
-        }
+        const token = extractClaudeOAuthToken(fs.readFileSync(tmpfile, 'utf-8'));
+        if (token) process.env.CLAUDE_CODE_OAUTH_TOKEN = token;
       }
     } finally {
+      // eslint-disable-next-line no-empty -- best-effort temp cleanup
       try { fs.unlinkSync(tmpfile); } catch {}
     }
 

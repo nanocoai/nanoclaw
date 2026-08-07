@@ -11,7 +11,7 @@ import { TIMEZONE, formatLocalTime } from './timezone.js';
  */
 export type CommandCategory = 'admin' | 'filtered' | 'passthrough' | 'none';
 
-const ADMIN_COMMANDS = new Set(['/remote-control', '/clear', '/compact', '/context', '/cost', '/files']);
+const ADMIN_COMMANDS = new Set(['/remote-control', '/clear', '/compact', '/context', '/cost', '/files', '/upload-trace']);
 const FILTERED_COMMANDS = new Set(['/help', '/login', '/logout', '/doctor', '/config', '/start']);
 
 export interface CommandInfo {
@@ -102,6 +102,10 @@ export interface RoutingContext {
   channelType: string | null;
   threadId: string | null;
   inReplyTo: string | null;
+  /** Batch is a task run. One-door delivery: only an explicitly addressed tool
+   *  delivers from a task session; final-text `<message to>` blocks are inert
+   *  and the final text auto-appends to the series run log. */
+  taskRun: boolean;
 }
 
 /**
@@ -115,6 +119,7 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     channelType: first?.channel_type ?? null,
     threadId: first?.thread_id ?? null,
     inReplyTo: first?.id ?? null,
+    taskRun: messages.length > 0 && messages.every((m) => m.kind === 'task'),
   };
 }
 
@@ -159,16 +164,15 @@ export function formatMessages(messages: MessageInRow[]): string {
 }
 
 function formatChatMessages(messages: MessageInRow[]): string {
-  if (messages.length === 1) {
-    return formatSingleChat(messages[0]);
-  }
-
-  const lines = ['<messages>'];
-  for (const msg of messages) {
-    lines.push(formatSingleChat(msg));
-  }
-  lines.push('</messages>');
-  return lines.join('\n');
+  // Each `<message id="..." from="...">...</message>` block is self-contained;
+  // concatenating them reads to the agent as a sequence of distinct messages.
+  // Earlier revisions wrapped multi-message batches in an outer `<messages>`
+  // envelope, but the Claude Agent SDK responded to that shape with a
+  // synthetic stub (`model: "<synthetic>"`, `content: "No response
+  // requested."`) instead of calling the API — see #2555 for the full trace.
+  // The fix is simply to drop the wrapper; the single-message path (which
+  // already worked) is now just the N=1 case of the same code.
+  return messages.map(formatSingleChat).join('\n');
 }
 
 function formatSingleChat(msg: MessageInRow): string {
@@ -209,12 +213,38 @@ function formatTaskMessage(msg: MessageInRow): string {
   // into thinking the occurrence already happened or belongs to the wrong day.
   const displayTime = msg.process_after ?? msg.timestamp;
   const time = formatLocalTime(displayTime, TIMEZONE);
+  const currentTime = new Date().toLocaleString('en-US', {
+    timeZone: TIMEZONE,
+    dateStyle: 'full',
+    timeStyle: 'short',
+  });
   const parts: string[] = [];
   if (content.scriptOutput) {
     parts.push('Script output:', JSON.stringify(content.scriptOutput, null, 2), '');
   }
-  parts.push('Instructions:', content.prompt || '');
-  return `<task${from} time="${escapeXml(time)}">${parts.join('\n')}</task>`;
+  parts.push('Instructions:', stripLegacyTaskContract(content.prompt || ''));
+  return `<task${from} time="${escapeXml(time)}" current_time="${escapeXml(currentTime)}">${parts.join('\n')}</task>`;
+}
+
+const LEGACY_TASK_CONTRACT_MARKERS = [
+  '\n\n[A task serves the user two separate ways —',
+  '\n\n[Task delivery contract:',
+];
+
+/**
+ * PR #2981 persisted its generated delivery contract inside each task prompt.
+ * New sessions receive the contract from their runtime system prompt instead.
+ * Strip only a known generated suffix, at read time, so existing task rows stay
+ * compatible without a session-DB migration or contradictory model guidance.
+ */
+export function stripLegacyTaskContract(prompt: string): string {
+  if (!prompt.trimEnd().endsWith(']')) return prompt;
+
+  let contractStart = -1;
+  for (const marker of LEGACY_TASK_CONTRACT_MARKERS) {
+    contractStart = Math.max(contractStart, prompt.lastIndexOf(marker));
+  }
+  return contractStart >= 0 ? prompt.slice(0, contractStart).trimEnd() : prompt;
 }
 
 function formatWebhookMessage(msg: MessageInRow): string {

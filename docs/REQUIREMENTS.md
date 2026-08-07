@@ -20,7 +20,7 @@ The entire codebase should be something you can read and understand. One Node.js
 
 ### Security Through True Isolation
 
-Instead of application-level permission systems trying to prevent agents from accessing things, agents run in actual Linux containers. The isolation is at the OS level. Agents can only see what's explicitly mounted. Bash access is safe because commands run inside the container, not on your Mac.
+Instead of application-level permission systems trying to prevent agents from accessing things, agents run in actual Linux containers. The isolation is at the OS level. Agents can only see what's explicitly mounted. Bash access is safe because commands run inside the container, not on your host.
 
 ### Built for the Individual User
 
@@ -47,23 +47,23 @@ When people contribute, they shouldn't add "Telegram support alongside WhatsApp.
 Skills we'd like to see contributed:
 
 ### Communication Channels
-- `/add-signal` - Add Signal as a channel
-- `/add-matrix` - Add Matrix integration
 
-> **Note:** Telegram, Slack, Discord, Gmail, and Apple Container skills already exist. See the [skills documentation](https://docs.nanoclaw.dev/integrations/skills-system) for the full list.
+None currently — Signal and Matrix have since shipped as skills.
+
+> **Note:** Telegram, Slack, Discord, Gmail, Signal, and Matrix skills already exist. See the [skills documentation](https://docs.nanoclaw.dev/integrations/skills-system) for the full list.
 
 ---
 
 ## Vision
 
-A personal Claude assistant accessible via messaging, with minimal custom code.
+A personal AI assistant accessible via messaging, with minimal custom code.
 
 **Core components:**
 - **Claude Agent SDK** as the core agent
-- **Containers** for isolated agent execution (Linux VMs)
+- **Containers** for isolated agent execution (Docker)
 - **Multi-channel messaging** (WhatsApp, Telegram, Discord, Slack, Gmail) — add exactly the channels you need
 - **Persistent memory** per conversation and globally
-- **Scheduled tasks** that run Claude and can message back
+- **Scheduled tasks** executed by the agent, which can message back
 - **Web access** for search and browsing
 - **Browser automation** via agent-browser
 
@@ -93,14 +93,14 @@ A personal Claude assistant accessible via messaging, with minimal custom code.
 - Sessions auto-compact when context gets too long, preserving critical information
 
 ### Container Isolation
-- All agents run inside containers (lightweight Linux VMs)
+- All agents run inside Docker containers
 - Each agent invocation spawns a container with mounted directories
 - Containers provide filesystem isolation - agents can only see mounted paths
 - Bash access is safe because commands run inside the container, not on the host
 - Browser automation via agent-browser with Chromium in the container
 
 ### Scheduled Tasks
-- Users can ask Claude to schedule recurring or one-time tasks from any group
+- Users can ask the agent to schedule recurring or one-time tasks from any group
 - Tasks run as full agents in the context of the group that created them
 - Tasks have access to all tools including Bash (safe in container)
 - Tasks can optionally send messages to their group via `send_message` tool, or complete silently
@@ -134,11 +134,11 @@ A personal Claude assistant accessible via messaging, with minimal custom code.
 
 ### Scheduler
 - Built-in scheduler runs on the host, spawns containers for task execution
-- Custom `nanoclaw` MCP server (inside container) provides scheduling tools
-- Tools: `schedule_task`, `list_tasks`, `pause_task`, `resume_task`, `cancel_task`, `send_message`
+- `ncl tasks` provides scheduling commands
+- Commands: `list`, `get`, `create`, `update`, `cancel`, `pause`, `resume`, `delete`, `run`, `append-log`
 - Tasks stored in SQLite with run history
 - Scheduler loop checks for due tasks every minute
-- Tasks execute Claude Agent SDK in containerized group context
+- Tasks execute in the agent group's system session
 
 ### Web Access
 - Built-in WebSearch and WebFetch tools

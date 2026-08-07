@@ -1,6 +1,6 @@
 ---
 name: migrate-from-v1
-description: Finish migrating a NanoClaw v1 install into v2. Run after `bash migrate-v2.sh` completes. Seeds the owner, cleans up CLAUDE.local.md files, reconciles container configs, and helps port custom v1 code. Triggers on "migrate from v1", "finish migration", "v1 migration".
+description: Finish migrating a NanoClaw v1 install into v2. Run after `bash migrate-v2.sh` completes. Seeds the owner, migrates legacy memory, reconciles container configs, and helps port custom v1 code. Triggers on "migrate from v1", "finish migration", "v1 migration".
 ---
 
 # Finish v1 → v2 migration
@@ -17,7 +17,7 @@ description: Finish migrating a NanoClaw v1 install into v2. Run after `bash mig
 - Container skills copied
 - Container image built
 
-Your job is the parts that need human judgment: triage any failed steps, seed the owner, clean up CLAUDE.local.md files, reconcile configs, and port any fork customizations.
+Your job is the parts that need human judgment: triage failed steps, seed the owner, run the shared-memory migration, reconcile configs, and port fork customizations.
 
 Read `logs/setup-migration/handoff.json` first — it has `overall_status`, per-step results in `steps`, and a `followups` list.
 
@@ -72,21 +72,30 @@ v2 auto-creates a `users` row for every sender it sees (via `extractAndUpsertUse
 2. If exactly one user exists, confirm: `AskUserQuestion`: "Is `<display_name>` (`<id>`) you?" — Yes / No, let me type it.
 3. If multiple users exist, present them as options in `AskUserQuestion`.
 4. If no users exist yet (service hasn't received a message), ask the user to send a test message first, then re-query.
-5. Once confirmed, check `user_roles` — if the owner role already exists, skip. Otherwise insert:
-   ```sql
-   INSERT INTO user_roles (user_id, role, agent_group_id, granted_by, granted_at)
-   VALUES ('<user_id>', 'owner', NULL, NULL, datetime('now'))
-   ```
+5. Once confirmed, check `user_roles` via `getUserRoles(userId)`. If an `owner` row already exists, skip. Otherwise grant it with `grantRole`. `grantRole` inserts a new row per call, so the `getUserRoles` check keeps this re-runnable.
 
-Use the DB helpers in `src/db/user-roles.ts` — they keep indexes correct. Init the DB first:
+Use the DB helpers in `src/modules/permissions/db/user-roles.ts` (`getUserRoles`, `grantRole`). Init the DB first, then call the helpers:
 
 ```ts
+import path from 'path';
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import { DATA_DIR } from '../src/config.js';
-import path from 'path';
+import { getUserRoles, grantRole } from '../src/modules/permissions/db/user-roles.js';
+
 const db = initDb(path.join(DATA_DIR, 'v2.db'));
-runMigrations(db);
+runMigrations(db); // idempotent
+
+const userId = '<user_id>';
+if (!getUserRoles(userId).some((r) => r.role === 'owner')) {
+  grantRole({
+    user_id: userId,
+    role: 'owner',
+    agent_group_id: null, // owner role must be global
+    granted_by: null,
+    granted_at: new Date().toISOString(),
+  });
+}
 ```
 
 ### Access policy
@@ -95,9 +104,11 @@ After seeding the owner, discuss the access policy. v2's `messaging_groups.unkno
 
 Present the options via `AskUserQuestion`:
 
-1. **Public** (current) — anyone can message the bot. Good for personal DM bots.
-2. **Known users only** — only users in `agent_group_members` can trigger the bot. Others are silently dropped.
-3. **Approval required** — unknown senders trigger an approval request to the owner. Good for group chats where you want to vet new members.
+1. **Public** (`public`, current) — anyone can message the bot. Good for personal DM bots.
+2. **Known users only** (`strict`) — only users the access gate accepts (owner, admin, or `agent_group_members`) can trigger the bot. Others are silently dropped.
+3. **Approval required** (`request_approval`) — unknown senders trigger an approval request to the owner. Good for group chats where you want to vet new members.
+
+The `unknown_sender_policy` column accepts exactly these three values; use the parenthesized value for `<chosen_policy>` below.
 
 If the user picks option 2 or 3, seed the known users from v1's message history. The v1 database is at `<handoff.v1_path>/store/messages.db`. It has a `messages` table with `sender` and `sender_name` columns. For each group:
 
@@ -122,43 +133,16 @@ UPDATE messaging_groups SET unknown_sender_policy = '<chosen_policy>'
 WHERE id IN (SELECT id FROM messaging_groups WHERE channel_type IN (<migrated_channels>))
 ```
 
-## Phase 2: Clean up CLAUDE.local.md
+## Phase 2: Migrate legacy memory
 
-The migration copied v1's entire CLAUDE.md into CLAUDE.local.md for each group. This file now contains v1 boilerplate that v2 handles through its own composed fragments (`container/CLAUDE.md` + `.claude-fragments/module-*.md`). The user's customizations are buried inside.
+Run `/migrate-memory` for the imported groups. It quiesces each group, moves the
+v1 `CLAUDE.local.md` into the shared `memory/` tree without reading it during
+staging, then has the invoking coding harness distill standing identity into
+`instructions.prepend.md` and durable facts into Core Memory or focused linked
+files before the NanoClaw group runs again.
 
-For each group that has a `CLAUDE.local.md`:
-
-1. Read the file.
-2. Read the v1 template it was based on. Determine which template by checking the v1 install:
-   - If the group had `is_main=1` in v1's `registered_groups`, the template was `groups/main/CLAUDE.md`
-   - Otherwise, the template was `groups/global/CLAUDE.md`
-   - The v1 path is in `handoff.json` → `v1_path`
-3. Diff the file against the template. Identify sections that are:
-   - **Stock boilerplate** (identical to template) — remove. v2's fragments cover this.
-   - **User customizations** (added sections, modified sections) — keep.
-4. The following v1 sections are now handled by v2 fragments and should be removed even if slightly modified:
-   - "What You Can Do" → v2 runtime system prompt
-   - "Communication" / "Internal thoughts" / "Sub-agents" → `container/CLAUDE.md` + `module-core.md`
-   - "Your Workspace" / workspace path references → `container/CLAUDE.md`
-   - "Memory" (the stock version) → `container/CLAUDE.md`
-   - "Message Formatting" → `container/CLAUDE.md`
-   - "Admin Context" → v2 uses `user_roles`, not is_main
-   - "Authentication" → v2 uses OneCLI
-   - "Container Mounts" → v2 mounts are different
-   - "Managing Groups" / "Finding Available Groups" / "Registered Groups Config" → v2 entity model, no IPC
-   - "Global Memory" → v2 has `.claude-shared.md` symlink
-   - "Scheduling for Other Groups" → `module-scheduling.md`
-   - "Task Scripts" → `module-scheduling.md`
-   - "Sender Allowlist" → v2 uses `unknown_sender_policy` + `user_roles`
-5. Fix path references in kept sections:
-   - `/workspace/group/` → `/workspace/agent/`
-   - `/workspace/project/` → these paths don't exist in v2; discuss with the user
-   - `/workspace/ipc/` → gone; remove references
-   - `/workspace/extra/` → v2 uses `container.json` `additionalMounts`; keep but note the path may change
-6. Keep the `# Name` heading and first paragraph (identity) — this is the user's agent personality.
-7. Show the user the proposed new CLAUDE.local.md before writing it. Use `AskUserQuestion`: "Here's what I'd keep — look right?" with options to approve, edit, or keep the original.
-
-If a CLAUDE.local.md has no user customizations (pure template copy), write a minimal file with just the identity heading.
+Do not duplicate that migration logic here. Record each group's result in the
+handoff before continuing.
 
 ## Phase 3: Container config
 
@@ -186,7 +170,7 @@ If there are commits:
 
 1. Show the commit list to the user.
 2. `AskUserQuestion`: "How do you want to handle your v1 customizations?"
-   - **Copy portable items** (recommended) — copy `container/skills/*`, `.claude/skills/*`, `docs/*`. Scan each with `scanForV1Patterns` from `setup/migrate-v2/shared.ts`.
+   - **Copy portable items** (recommended) — copy `container/skills/*`, `.claude/skills/*`, `docs/*`. Grep each copied file for v1-only references that won't resolve in v2 and flag them to the user: workspace paths (`/workspace/group/`, `/workspace/project/`, `/workspace/ipc/`, `/workspace/extra/`), the v1 IPC mechanism, `registered_groups` / `is_main`, the v1 sender allowlist, and `store/messages.db`.
    - **Full walkthrough** — go commit by commit, decide together.
    - **Reference only** — stash to `docs/v1-fork-reference/` for later.
 3. Source code (`src/*`, `container/agent-runner/src/*`) is NOT portable — v2's architecture is fundamentally different. Stash to `docs/v1-fork-reference/` with a README explaining what each file did. Don't translate.
@@ -194,7 +178,7 @@ If there are commits:
 ## Principles
 
 - **v1 checkout is read-only.** Never modify files under `handoff.v1_path`.
-- **Show before writing.** Show diffs/proposed content before modifying CLAUDE.local.md or container.json.
+- **Show before writing.** Show diffs or proposed content before modifying standing instructions, memory, or container.json.
 - **Mask credentials** when displaying (first 4 + `...` + last 4 characters).
 - **`handoff.json` is the recovery point.** If context gets compacted, re-read it and `git status` to recover state.
 
@@ -223,10 +207,12 @@ pnpm exec tsx setup/index.ts --step <name>
    pnpm exec tsx setup/index.ts --step verify
    ```
 2. Delete `logs/setup-migration/handoff.json` — offer to save as `docs/migration-<date>.md` first.
-3. Restart the service if running so changes take effect:
+3. Restart the service if running so changes take effect. The v2 service label is install-specific (`nanoclaw-v2-<slug>` / `com.nanoclaw-v2-<slug>`), so derive it from `src/install-slug.ts` rather than guessing:
    ```bash
    # Linux
-   systemctl --user restart nanoclaw-v2-*
+   UNIT=$(pnpm exec tsx -e "import{getSystemdUnit}from'./src/install-slug.js';console.log(getSystemdUnit())")
+   systemctl --user restart "$UNIT"
    # macOS
-   launchctl kickstart -k gui/$(id -u)/com.nanoclaw-v2-*
+   LABEL=$(pnpm exec tsx -e "import{getLaunchdLabel}from'./src/install-slug.js';console.log(getLaunchdLabel())")
+   launchctl kickstart -k "gui/$(id -u)/$LABEL"
    ```

@@ -10,7 +10,8 @@
  * CLAUDE.md.
  *
  * Runs alongside the service (WAL-mode sqlite) — does NOT initialize
- * channel adapters, so there's no Gateway conflict.
+ * channel adapters, so there's no Gateway conflict. (The channels barrel
+ * import below only registers factories + declarations; nothing connects.)
  *
  * Usage:
  *   pnpm exec tsx scripts/init-cli-agent.ts \
@@ -19,6 +20,10 @@
  */
 import path from 'path';
 
+// Registration-only: makes the in-tree cli adapter's declared defaults
+// (pattern '.', no threads, 'public') resolvable below.
+import '../src/channels/index.js';
+import { resolveUnknownSenderPolicy, resolveWiringDefaults } from '../src/channels/channel-defaults.js';
 import { DATA_DIR } from '../src/config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import { initDb } from '../src/db/connection.js';
@@ -102,6 +107,7 @@ async function main(): Promise<void> {
 
   // 2. Agent group + filesystem.
   const folder = args.folder || `cli-with-${normalizeName(args.displayName)}`;
+  const pickedProvider = process.env.NANOCLAW_PICKED_PROVIDER?.trim().toLowerCase();
   let ag: AgentGroup | undefined = getAgentGroupByFolder(folder);
   if (!ag) {
     const agId = generateId('ag');
@@ -122,6 +128,10 @@ async function main(): Promise<void> {
       `# ${args.agentName}\n\n` +
       `You are ${args.agentName}, a personal NanoClaw agent for ${args.displayName}. ` +
       'When the user first reaches out, introduce yourself briefly and invite them to chat. Keep replies concise.',
+    // The operator's setup pick (NANOCLAW_PICKED_PROVIDER) when set; otherwise
+    // undefined, so initGroupFilesystem falls back to the instance default and
+    // stamps it onto the fresh config row.
+    provider: pickedProvider,
   });
 
   // 3. CLI messaging group + wiring.
@@ -133,7 +143,9 @@ async function main(): Promise<void> {
       platform_id: CLI_PLATFORM_ID,
       name: 'Local CLI',
       is_group: 0,
-      unknown_sender_policy: 'public',
+      // cli declares 'public' for DMs: the socket is chmod 0600, so
+      // "connected" ≈ "is the owner".
+      unknown_sender_policy: resolveUnknownSenderPolicy(CLI_CHANNEL, false),
       created_at: now,
     };
     createMessagingGroup(cliMg);
@@ -142,12 +154,15 @@ async function main(): Promise<void> {
 
   const existing = getMessagingGroupAgentByPair(cliMg.id, ag.id);
   if (!existing) {
+    // cli declares pattern '.' for DMs — every line the operator types is
+    // for the agent. Identical to the pre-declaration hardcodes.
+    const engage = resolveWiringDefaults(CLI_CHANNEL, false, ag.name);
     createMessagingGroupAgent({
       id: generateId('mga'),
       messaging_group_id: cliMg.id,
       agent_group_id: ag.id,
-      engage_mode: 'pattern',
-      engage_pattern: '.',
+      engage_mode: engage.engage_mode,
+      engage_pattern: engage.engage_pattern,
       sender_scope: 'all',
       ignored_message_policy: 'drop',
       session_mode: 'shared',
@@ -161,9 +176,7 @@ async function main(): Promise<void> {
 
   console.log('');
   console.log('Init complete.');
-  console.log(
-    `  owner:   ${CLI_SYNTHETIC_USER_ID}${promotedToOwner ? ' (promoted on first owner)' : ''}`,
-  );
+  console.log(`  owner:   ${CLI_SYNTHETIC_USER_ID}${promotedToOwner ? ' (promoted on first owner)' : ''}`);
   console.log(`  agent:   ${ag.name} [${ag.id}] @ groups/${folder}`);
   console.log(`  channel: cli/${CLI_PLATFORM_ID}`);
   console.log('');

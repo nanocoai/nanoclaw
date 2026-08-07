@@ -42,3 +42,12 @@ export {
   deletePendingApproval,
   getPendingApprovalsByAction,
 } from './sessions.js';
+export {
+  getContainerConfig,
+  getAllContainerConfigs,
+  createContainerConfig,
+  ensureContainerConfig,
+  updateContainerConfigScalars,
+  updateContainerConfigJson,
+  deleteContainerConfig,
+} from './container-configs.js';

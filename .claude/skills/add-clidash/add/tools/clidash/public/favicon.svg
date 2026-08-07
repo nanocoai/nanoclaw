@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#141a24"/>
+      <stop offset="1" stop-color="#0b0e14"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="7.5" fill="url(#bg)"/>
+  <rect x="0.5" y="0.5" width="31" height="31" rx="7" fill="none" stroke="#2b3342" stroke-width="1"/>
+  <text x="16.2" y="20.8" font-family="monospace" font-size="15" font-weight="700" letter-spacing="-0.5" text-anchor="middle" fill="#5b9dff">ncl</text>
+</svg>

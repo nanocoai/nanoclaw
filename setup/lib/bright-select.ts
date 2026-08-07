@@ -67,16 +67,42 @@ export interface BrightSelectOptions<T> {
 }
 
 /**
+ * Discard any stdin buffered while no prompt was reading — keypresses made
+ * during spinners and installs otherwise get consumed by the next select the
+ * instant it opens, submitting it before it ever renders for the user (a
+ * stray `↓`+`Enter` silently picks option 2). Raw-mode reads only see kernel
+ * tty data via the event loop, so the drain needs a real (short) window.
+ */
+export function flushStdin(windowMs = 50): Promise<void> {
+  return new Promise((resolve) => {
+    const stdin = process.stdin;
+    if (!stdin.isTTY) return resolve();
+    const wasRaw = stdin.isRaw === true;
+    stdin.setRawMode?.(true);
+    const discard = (): void => {};
+    stdin.on('data', discard);
+    stdin.resume();
+    setTimeout(() => {
+      stdin.off('data', discard);
+      stdin.pause();
+      if (!wasRaw) stdin.setRawMode?.(false);
+      resolve();
+    }, windowMs);
+  });
+}
+
+/**
  * Matches the return shape of `p.select` — resolves to the selected value
  * on submit, or to clack's cancel symbol on Ctrl-C / Esc. Callers pass
  * the result through `ensureAnswer(...)` the same way they do for
  * `p.select`.
  */
-export function brightSelect<T>(
+export async function brightSelect<T>(
   opts: BrightSelectOptions<T>,
 ): Promise<T | symbol> {
   const { message, options, initialValue } = opts;
 
+  await flushStdin();
   return new SelectPrompt({
     options: options as Array<{ value: T; label?: string; hint?: string }>,
     initialValue,

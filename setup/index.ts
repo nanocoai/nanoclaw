@@ -23,7 +23,12 @@ const STEPS: Record<
   verify: () => import('./verify.js'),
   onecli: () => import('./onecli.js'),
   auth: () => import('./auth.js'),
+  'provider-auth': () => import('./provider-auth.js'),
   'cli-agent': () => import('./cli-agent.js'),
+  registry: () => import('./registry.js'),
+  'registry-reconcile': () => import('./registry-reconcile.js'),
+  // >>> nanoclaw:setup-steps
+  // <<< nanoclaw:setup-steps
 };
 
 async function main(): Promise<void> {

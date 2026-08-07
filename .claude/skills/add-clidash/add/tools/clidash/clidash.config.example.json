@@ -1,0 +1,106 @@
+{
+  "port": 4690,
+  "bind": "127.0.0.1",
+  "refreshSeconds": 60,
+  "clis": {
+    "ncl": {
+      "bin": "bin/ncl",
+      "cwd": "../..",
+      "discover": { "args": ["help"], "parser": "ncl-help" },
+      "list": ["{resource}", "list", "--json"],
+      "output": "json",
+      "unwrap": "data",
+      "commands": {
+        "get": ["{resource}", "get", "--id", "{id}", "--json"],
+        "config-get": ["groups", "config", "get", "--id", "{id}", "--json"]
+      },
+      "help": ["{resource}", "help"],
+      "enrich": {
+        "sessions": {
+          "agent_group_id": { "ref": "groups", "label": "name" },
+          "messaging_group_id": { "ref": "messaging-groups", "label": "name" }
+        },
+        "wirings": {
+          "agent_group_id": { "ref": "groups", "label": "name" },
+          "messaging_group_id": { "ref": "messaging-groups", "label": "name" }
+        },
+        "roles": {
+          "agent_group_id": { "ref": "groups", "label": "name" },
+          "user_id": { "ref": "users", "label": "display_name" },
+          "granted_by": { "ref": "users", "label": "display_name" }
+        },
+        "members": {
+          "agent_group_id": { "ref": "groups", "label": "name" },
+          "user_id": { "ref": "users", "label": "display_name" }
+        },
+        "destinations": {
+          "agent_group_id": { "ref": "groups", "label": "name" }
+        },
+        "user-dms": {
+          "user_id": { "ref": "users", "label": "display_name" },
+          "messaging_group_id": { "ref": "messaging-groups", "label": "name" }
+        }
+      },
+      "badges": {
+        "container_status": { "running": "green", "idle": "green", "starting": "amber", "stopped": "gray", "error": "red" },
+        "status": { "active": "green", "stopped": "gray", "error": "red", "pending": "amber" }
+      },
+      "summary": {
+        "sessions": "container_status",
+        "messaging-groups": "channel_type",
+        "roles": "role",
+        "users": "kind",
+        "destinations": "target_type",
+        "dropped-messages": "reason"
+      }
+    },
+    "docker": {
+      "bin": "docker",
+      "resources": ["ps", "images"],
+      "list": ["{resource}", "--format", "{{json .}}"],
+      "output": "jsonlines"
+    }
+  },
+  "activity": {
+    "sessionsRoot": "../../data/v2-sessions",
+    "days": 14
+  },
+  "logs": {
+    "dir": "../../logs",
+    "tailLines": 500,
+    "files": [
+      { "name": "nanoclaw.log", "label": "host log" },
+      { "name": "nanoclaw.error.log", "label": "errors" }
+    ]
+  },
+  "docs": {
+    "root": "../..",
+    "deny": ["node_modules", ".env", "*token*", "*secret*", "*.pem", "*.key", "*.lock", "pnpm-lock.yaml"],
+    "collections": [
+      {
+        "name": "skills",
+        "label": "Skills",
+        "lang": "markdown",
+        "patterns": ["groups/*/skills/*/SKILL.md", "container/skills/*/SKILL.md"]
+      },
+      {
+        "name": "claude-md",
+        "label": "CLAUDE.md",
+        "lang": "markdown",
+        "patterns": ["groups/*/CLAUDE.md", "groups/*/CLAUDE.local.md"]
+      },
+      {
+        "name": "profiles",
+        "label": "Profiles",
+        "lang": "json",
+        "patterns": ["groups/*/profile.json"]
+      },
+      {
+        "name": "conversations",
+        "label": "Conversations",
+        "lang": "markdown",
+        "patterns": ["groups/*/conversations/*.md"]
+      }
+    ]
+  }
+}

@@ -11,7 +11,7 @@ Run `/update-nanoclaw` in Claude Code.
 
 ## How it works
 
-**Preflight**: checks for clean working tree (`git status --porcelain`). If `upstream` remote is missing, asks you for the URL (defaults to `https://github.com/qwibitai/nanoclaw.git`) and adds it. Detects the upstream branch name (`main` or `master`).
+**Preflight**: checks for clean working tree (`git status --porcelain`). If `upstream` remote is missing, asks you for the URL (defaults to `https://github.com/nanocoai/nanoclaw.git`) and adds it. Detects the upstream branch name (`main` or `master`).
 
 **Backup**: creates a timestamped backup branch and tag (`backup/pre-update-<hash>-<timestamp>`, `pre-update-<hash>-<timestamp>`) before touching anything. Safe to run multiple times.
 
@@ -33,7 +33,7 @@ Run `/update-nanoclaw` in Claude Code.
 
 **Validation**: runs `pnpm run build` and `pnpm test`. If container files changed, also runs the container typecheck and `./container/build.sh`.
 
-**Breaking changes check**: after validation, reads CHANGELOG.md for any `[BREAKING]` entries introduced by the update. If found, shows each breaking change and offers to run the recommended skill to migrate.
+**Breaking changes check**: after validation, reads CHANGELOG.md for any `[BREAKING]` entries introduced by the update. If found, shows each breaking change, reads its migration skill or guide, and offers the recommended migration.
 
 ## Rollback
 
@@ -60,6 +60,14 @@ Help a user with a customized NanoClaw install safely incorporate upstream chang
 - Default to MERGE (one-pass conflict resolution). Offer REBASE as an explicit option.
 - Keep token usage low: rely on `git status`, `git log`, `git diff`, and open only conflicted files.
 
+# Step 0a: Refresh this skill first
+The update process itself evolves, so run its newest version before doing anything else:
+- Ensure the `upstream` remote exists (default `https://github.com/nanocoai/nanoclaw.git`) and fetch: `git fetch upstream --prune`. Detect the upstream branch (`main` or `master`).
+- Read the upstream skill without changing the working tree:
+  `git show upstream/<branch>:.claude/skills/update-nanoclaw/SKILL.md`.
+- If it differs from the local copy, **follow the upstream version from the top**
+  instead of this one. The merge will bring that version into the checkout.
+
 # Step 0: Preflight (stop early if unsafe)
 Run:
 - `git status --porcelain`
@@ -69,7 +77,7 @@ If output is non-empty:
 Confirm remotes:
 - `git remote -v`
 If `upstream` is missing:
-- Ask the user for the upstream repo URL (default: `https://github.com/qwibitai/nanoclaw.git`).
+- Ask the user for the upstream repo URL (default: `https://github.com/nanocoai/nanoclaw.git`).
 - Add it: `git remote add upstream <user-provided-url>`
 - Then: `git fetch upstream --prune`
 
@@ -112,6 +120,7 @@ Bucket the upstream changed files:
 - **Host source** (`src/`): may conflict if user modified the same files
 - **Container** (`container/`): triggers container rebuild (+ typecheck if `agent-runner/src/` changed)
 - **Build/config** (`package.json`, `pnpm-lock.yaml`, `tsconfig*.json`): lockfile changes trigger dep install
+- **Version pins** (`versions.json`): a changed `onecli-gateway` / `onecli-cli` value requires upgrading the OneCLI gateway/CLI to match — see Step 5.5
 - **Other**: docs, tests, setup scripts, misc
 
 **Large drift check:** If the upstream commit count and age suggest the user has a lot of catching up to do, mention that `/migrate-nanoclaw` might be a better fit — it extracts customizations and reapplies them on clean upstream instead of merging. Offer it as an option but don't push.
@@ -197,8 +206,18 @@ Check which areas changed to determine what to validate:
 - Check: `pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit`
 - If this fails because bun types are missing (`Cannot find type definition file for 'bun'`), skip with a note — type errors will surface at container runtime instead
 
-**Container image rebuild** (only if any `container/` files are in CHANGED_FILES):
-- `./container/build.sh`
+**Container image** (only if any `container/` files are in CHANGED_FILES, or the `agent-image` pin moved):
+
+Which command depends on where this install gets its image — check `.env` for `NANOCLAW_HARDENED_IMAGE=true`.
+
+- **Builds locally** (the default; flag absent or not `true`): `./container/build.sh`
+- **Pulls a pinned image** (flag is `true`): `./container/build.sh pull`. Never the bare form — it exits `3` on a pinned install rather than silently replacing the pulled bytes with a local build.
+
+A pinned install needs `pull` in either of two cases, so run it if either holds:
+- `git diff <backup-tag-from-step-1>..HEAD -- versions.json` shows the `agent-image` value changed. A new image was published; nothing re-pulls on its own.
+- Any `container/` file changed, `container/agent-runner/bun.lock` included.
+
+If `pull` refuses with a lockfile mismatch, that is the guard working, not a bug: the update moved `container/agent-runner/bun.lock` and no image has been published for the new lockfile yet. `/app/src` is bind-mounted from this checkout at spawn, so pairing the old image with the new source dies as a missing module inside a `--rm` container whose logs are discarded. Tell the user and offer the two real options — wait for a published image matching this checkout, or switch this install to local builds with `./container/build.sh build`.
 
 If build fails:
 - Show the error.
@@ -206,55 +225,120 @@ If build fails:
 - Do not refactor unrelated code.
 - If unclear, ask the user before making changes.
 
+# Step 5.5: OneCLI upgrade (if pins moved)
+The OneCLI gateway and CLI are external components pinned in `versions.json`; when a pin moves, the running version must be upgraded to match or the new code may fail against it.
+
+If `git diff <backup-tag-from-step-1>..HEAD -- versions.json` shows the `onecli-gateway` or `onecli-cli` value changed, follow `docs/onecli-upgrades.md` before the service restart (Step 8). Otherwise skip.
+
 # Step 6: Breaking changes check
 After validation succeeds, check if the update introduced any breaking changes.
 
 Determine which CHANGELOG entries are new by diffing against the backup tag:
 - `git diff <backup-tag-from-step-1>..HEAD -- CHANGELOG.md`
 
-Parse the diff output for lines that contain `[BREAKING]` anywhere in the line. Each such line is one breaking change entry. The format is:
+Parse the diff output for lines that contain `[BREAKING]` anywhere in the line.
+Each such line is one breaking change entry and references either a migration
+skill or a local guide:
 ```
 [BREAKING] <description>. Run `/<skill-name>` to <action>.
+[BREAKING] <description>. Follow [the migration guide](docs/<guide>.md).
 ```
 
 If no `[BREAKING]` lines are found:
-- Skip this step silently. Proceed to Step 7 (skill updates check).
+- Skip this step silently. Proceed to Step 7.
 
 If one or more `[BREAKING]` lines are found:
 - Display a warning header to the user: "This update includes breaking changes that may require action:"
 - For each breaking change, display the full description.
-- Collect all skill names referenced in the breaking change entries (the `/<skill-name>` part).
-- Use AskUserQuestion to ask the user which migration skills they want to run now. Options:
-  - One option per referenced skill (e.g., "Run /add-whatsapp to re-add WhatsApp channel")
+- Collect every referenced skill (the `/<skill-name>` part) and local
+  `docs/*.md` migration guide.
+- Read every referenced guide before presenting its migration. Summarize its
+  detect, why, fix, verify, and rollback sections.
+- Initialize an unresolved-migrations list with every referenced skill and
+  guide. Remove an item only after its migration and verification complete
+  successfully.
+- Use AskUserQuestion to ask which migrations the user wants to run now. Options:
+  - One recommended option per referenced skill (e.g., "Run /add-whatsapp (Recommended)")
+  - One recommended option per guide, named for its documented fix
   - "Skip — I'll handle these manually"
-- Set `multiSelect: true` so the user can pick multiple skills if there are several breaking changes.
-- For each skill the user selects, invoke it using the Skill tool.
-- After all selected skills complete (or if user chose Skip), proceed to Step 7 (skill updates check).
+- Set `multiSelect: true` so the user can pick multiple migrations if there are several.
+- Invoke selected skills with the Skill tool. For a selected guide, follow its
+  fix steps and then its verification steps.
+- Keep every skipped, failed, or incomplete migration in the unresolved list, then
+  proceed to Step 7.
 
-# Step 7: Check for skill and channel/provider updates
+# Step 7: Skill updates (part of updating NanoClaw)
 
-## 7a: Skill branches
-Check if skills are distributed as branches in this repo:
-- `git branch -r --list 'upstream/skill/*'`
+Updating your installed skills is **part of** updating NanoClaw, not an optional
+extra. Channel and provider code ships on long-lived branches (`channels`,
+`providers`) that the host merge above doesn't touch — so stopping here leaves
+that code on whatever version you installed, which is how an important upstream
+fix gets silently left behind. The default is to continue into `/update-skills`,
+which re-applies your installed channels/providers to pull their latest code.
 
-If any `upstream/skill/*` branches exist:
-- Use AskUserQuestion to ask: "Upstream has skill branches. Would you like to check for skill updates?"
-  - Option 1: "Yes, check for updates" (description: "Runs /update-skills to check for and apply skill branch updates")
-  - Option 2: "No, skip" (description: "You can run /update-skills later any time")
-- If user selects yes, invoke `/update-skills` using the Skill tool.
+Detect whether anything is installed: read `src/channels/index.ts` and
+`src/providers/index.ts`, collecting `import './<name>.js';` lines (excluding
+`cli`).
 
-## 7b: Channel and provider updates
-Detect installed channels by reading `src/channels/index.ts` and collecting all `import './<name>.js';` lines (excluding `cli`). For providers, check `src/providers/index.ts` the same way.
+- If nothing is installed: skip silently and proceed to Step 7.9.
+- If one or more are installed: continue into skill updates.
 
-If any channels/providers are installed AND `upstream/channels` or `upstream/providers` branches exist:
-- List the installed channels/providers.
-- Use AskUserQuestion to ask: "Would you like to update your installed channels/providers? Re-running `/add-<name>` is safe — it only updates code files, credentials and wiring are untouched."
-  - One option per installed channel/provider (e.g., "Update Slack (/add-slack)")
-  - "Skip — I'll update them later"
-  - Set `multiSelect: true`
-- For each selected option, invoke the corresponding `/add-<channel>` or `/add-<provider>` skill.
+**Hand-off — default in, minimal opt-out.** Use AskUserQuestion (single-select).
+Name the installed skills in the question so the choice is concrete:
+- Question: "Skill updates are part of this NanoClaw update — your installed
+  channels/providers (<list the detected ones>) ride separate branches the host
+  update didn't touch. Continue into `/update-skills` to bring them up to date?"
+- Option 1 (Recommended): "Continue into skill updates" — description: "Runs
+  `/update-skills`, which re-applies your installed channels/providers to pull
+  their latest upstream code. You pick which ones there."
+- Option 2: "Skip — I'll run `/update-skills` myself later" — description: "Your
+  installed skill code stays as-is and may be behind upstream."
 
-If no channels/providers are installed, skip silently.
+Keep it to these two options — the per-skill selection lives inside
+`/update-skills`, not here.
+
+- On "Continue": invoke `/update-skills` using the Skill tool. (If the re-apply
+  touches container code, `/update-skills` rebuilds the agent image itself — see
+  its Step 4 — so nothing container-related is owed back here.)
+- On "Skip": note that `/update-skills` can be run anytime, then proceed.
+
+## Known behavior changes when channel adapters update
+
+Channel adapters now declare per-channel wiring defaults (engage mode, threading,
+sender policy). Updating trunk alone changes nothing for existing rows, but once
+`/update-skills` pulls current adapter copies, two deliberate behavior changes
+land. If the user's install has Slack, Discord, or WhatsApp, tell them:
+
+1. **Slack/Discord DM replies move top-level.** Both adapters now declare
+   `threads: false` for DMs, so DM replies stop chasing per-message sub-threads
+   and land in the main DM view, matching the DM session (which was already
+   flat). Group/channel threading is unchanged. To keep the old in-thread DM
+   behavior for a specific wiring, override it per wiring:
+   `ncl wirings update <wiring-id> --threads true`.
+2. **Shared-identity channels stop raising stranger approval cards.** On
+   channels where the linked account is the operator's personal identity, the
+   mechanics differ by channel: WhatsApp personal-number mode suppresses the
+   mention signal entirely (no auto-created messaging groups, no cards);
+   iMessage and WeChat still emit DM mention signals — stranger DMs still
+   auto-create `messaging_groups` rows — but their declared `strict` policy
+   makes those rows drop unknown senders silently instead of raising
+   channel-registration cards to the admin.
+
+**WhatsApp installs on a shared/personal number should re-run `/add-whatsapp`**
+after the skill update: it now asks the dedicated-vs-personal question
+explicitly (writing `ASSISTANT_HAS_OWN_NUMBER` to `.env`), audits for legacy
+mis-wired group rows from spam-era approval cards, and shows how to clear
+stale pending approvals.
+
+Proceed to Step 7.9.
+
+# Step 7.9: Stamp the upgrade marker (required)
+After validation has **succeeded**, record that this install reached the new version through the supported path. Without this, the startup tripwire stops the host on its next start.
+
+- `pnpm exec tsx scripts/upgrade-state.ts set "" update-nanoclaw`
+  - The empty version argument stamps the current `package.json` version.
+
+If validation did NOT succeed, do not stamp — leave the tripwire to catch the broken state.
 
 Proceed to Step 8.
 
@@ -264,15 +348,30 @@ Show:
 - New HEAD: `git rev-parse --short HEAD`
 - Upstream HEAD: `git rev-parse --short upstream/$UPSTREAM_BRANCH`
 - Conflicts resolved (list files, if any)
-- Breaking changes applied (list skills run, if any)
+- Breaking changes applied (list migrations completed, if any)
+- Unresolved breaking migrations (list skipped, failed, or incomplete migrations)
 - Remaining local diff vs upstream: `git diff --name-only upstream/$UPSTREAM_BRANCH..HEAD`
+
+If unresolved migrations remain, explain plainly that the code update succeeded
+but affected features may ignore old state until those migrations run. Use
+AskUserQuestion before showing restart commands:
+
+- **Run unresolved migrations (Recommended):** invoke each unresolved skill or
+  follow each unresolved guide, removing it from the list only after successful
+  completion and verification.
+- **Restart anyway:** continue only with explicit confirmation and repeat the
+  unresolved migration names in the final warning.
+
+If a retried migration remains unresolved, ask again. Do not show restart
+commands until the unresolved list is empty or the user explicitly chooses
+Restart anyway.
 
 Tell the user:
 - To rollback: `git reset --hard <backup-tag-from-step-1>`
 - Backup branch also exists: `backup/pre-update-<HASH>-<TIMESTAMP>`
-- Restart the service to apply changes. Detect platform with `uname -s`:
-  - **macOS (Darwin)**: `launchctl kickstart -k gui/$(id -u)/com.nanoclaw`
-  - **Linux**: detect the service name with `systemctl --user list-units --type=service | grep nanoclaw | awk '{print $1}'`, then `systemctl --user restart <detected-name>`
+- Restart the service to apply changes. The unit/label names are per-install — derive them with `setup/lib/install-slug.sh`. Run from your NanoClaw project root:
+  - **macOS (Darwin)**: `source setup/lib/install-slug.sh && launchctl kickstart -k gui/$(id -u)/$(launchd_label)`
+  - **Linux**: `source setup/lib/install-slug.sh && systemctl --user restart $(systemd_unit)` (or, if you want to confirm the unit name first: `systemctl --user list-units --type=service | grep "$(. setup/lib/install-slug.sh && systemd_unit)"`)
   - **Manual** (no service found): restart `pnpm run dev`
 
 

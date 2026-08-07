@@ -9,9 +9,9 @@
 import fs from 'fs';
 import path from 'path';
 
-import { getCurrentInReplyTo } from '../current-batch.js';
 import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
+import { getCurrentInReplyTo } from '../db/session-state.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -41,39 +41,14 @@ function destinationList(): string {
 /**
  * Resolve a destination name to routing fields.
  *
- * If `to` is omitted, use the session's default reply routing (channel +
- * thread the conversation is in) — the agent replies in place.
- *
- * If `to` is specified, look up the named destination. If it resolves to
+ * Look up the explicitly named destination. If it resolves to
  * the same channel the session is bound to, the session's thread_id is
  * preserved so replies land in the correct thread. Otherwise thread_id
  * is null (a cross-destination send starts a new conversation).
  */
 function resolveRouting(
-  to: string | undefined,
+  to: string,
 ): { channel_type: string; platform_id: string; thread_id: string | null; resolvedName: string } | { error: string } {
-  if (!to) {
-    // Default: reply to whatever thread/channel this session is bound to.
-    const session = getSessionRouting();
-    if (session.channel_type && session.platform_id) {
-      return {
-        channel_type: session.channel_type,
-        platform_id: session.platform_id,
-        thread_id: session.thread_id,
-        resolvedName: '(current conversation)',
-      };
-    }
-    // No session routing (e.g., agent-shared or internal-only agent) —
-    // fall back to the legacy single-destination shortcut.
-    const all = getAllDestinations();
-    if (all.length === 0) return { error: 'No destinations configured.' };
-    if (all.length > 1) {
-      return {
-        error: `You have multiple destinations — specify "to". Options: ${all.map((d) => d.name).join(', ')}`,
-      };
-    }
-    to = all[0].name;
-  }
   const dest = findByName(to);
   if (!dest) return { error: `Unknown destination "${to}". Known: ${destinationList()}` };
   if (dest.type === 'channel') {
@@ -95,24 +70,26 @@ function resolveRouting(
 export const sendMessage: McpToolDefinition = {
   tool: {
     name: 'send_message',
-    description: 'Send a message to a named destination. If you have only one destination, you can omit `to`.',
+    description: 'Send a message to a named destination.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         to: {
           type: 'string',
-          description: 'Destination name (e.g., "family", "worker-1"). Optional if you have only one destination.',
+          description: 'Destination name (e.g., "family", "worker-1").',
         },
         text: { type: 'string', description: 'Message content' },
       },
-      required: ['text'],
+      required: ['to', 'text'],
     },
   },
   async handler(args) {
+    const to = args.to as string;
     const text = args.text as string;
+    if (!to) return err(`to is required. Options: ${destinationList()}`);
     if (!text) return err('text is required');
 
-    const routing = resolveRouting(args.to as string | undefined);
+    const routing = resolveRouting(to);
     if ('error' in routing) return err(routing.error);
 
     const id = generateId();
@@ -134,23 +111,25 @@ export const sendMessage: McpToolDefinition = {
 export const sendFile: McpToolDefinition = {
   tool: {
     name: 'send_file',
-    description: 'Send a file to a named destination. If you have only one destination, you can omit `to`.',
+    description: 'Send a file to a named destination.',
     inputSchema: {
       type: 'object' as const,
       properties: {
-        to: { type: 'string', description: 'Destination name. Optional if you have only one destination.' },
+        to: { type: 'string', description: 'Destination name.' },
         path: { type: 'string', description: 'File path (relative to /workspace/agent/ or absolute)' },
         text: { type: 'string', description: 'Optional accompanying message' },
         filename: { type: 'string', description: 'Display name (default: basename of path)' },
       },
-      required: ['path'],
+      required: ['to', 'path'],
     },
   },
   async handler(args) {
+    const to = args.to as string;
     const filePath = args.path as string;
+    if (!to) return err(`to is required. Options: ${destinationList()}`);
     if (!filePath) return err('path is required');
 
-    const routing = resolveRouting(args.to as string | undefined);
+    const routing = resolveRouting(to);
     if ('error' in routing) return err(routing.error);
 
     const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve('/workspace/agent', filePath);

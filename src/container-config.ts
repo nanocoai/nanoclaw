@@ -1,26 +1,26 @@
 /**
- * Per-group container config, stored as a plain JSON file at
- * `groups/<folder>/container.json`. Mounted read-only inside the container
- * at `/workspace/agent/container.json` — the runner reads it at startup but
- * cannot modify it. Config changes go through the self-mod approval flow.
+ * Container config types and materialization.
  *
- * All fields are optional — a missing file or a partial file both resolve
- * to sensible defaults. Writes are atomic-enough (write-then-rename is not
- * worth the ceremony here since there's only one writer in practice: the
- * host, from the delivery thread that processes approved system actions).
+ * Source of truth is the `container_configs` table in the central DB.
+ * This module provides:
+ *   - Type definitions for the file shape (read by the container runner)
+ *   - `materializeContainerJson()` — writes `groups/<folder>/container.json`
+ *     from the DB at spawn time
+ *   - `configFromDb()` — builds a `ContainerConfig` from a DB row + agent group
  */
 import fs from 'fs';
 import path from 'path';
 
-import { GROUPS_DIR } from './config.js';
+import { GROUPS_DIR, TIMEZONE } from './config.js';
+import { getContainerConfig } from './db/container-configs.js';
+import { getAgentGroup } from './db/agent-groups.js';
+import { isValidTimezone } from './timezone.js';
+import type { AgentGroup, ContainerConfigRow } from './types.js';
 
 export interface McpServerConfig {
   command: string;
   args?: string[];
   env?: Record<string, string>;
-  // Optional always-in-context guidance. When set, the host writes the
-  // content to `.claude-fragments/mcp-<name>.md` at spawn and imports it
-  // into the composed CLAUDE.md.
   instructions?: string;
 }
 
@@ -30,101 +30,74 @@ export interface AdditionalMountConfig {
   readonly?: boolean;
 }
 
+/** Shape of the materialized `container.json` file read by the container runner. */
 export interface ContainerConfig {
   mcpServers: Record<string, McpServerConfig>;
   packages: { apt: string[]; npm: string[] };
   imageTag?: string;
   additionalMounts: AdditionalMountConfig[];
-  /** Which skills to enable — array of skill names or "all" (default). */
   skills: string[] | 'all';
-  /** Agent provider name (e.g. "claude", "opencode"). Default: "claude". */
   provider?: string;
-  /** Agent group display name (used in transcript archiving). */
   groupName?: string;
-  /** Assistant display name (used in system prompt / responses). */
   assistantName?: string;
-  /** Agent group ID — set by the host, read by the runner. */
   agentGroupId?: string;
-  /** Max messages per prompt. Falls back to code default if unset. */
   maxMessagesPerPrompt?: number;
+  model?: string;
+  effort?: string;
+  timezone?: string;
 }
 
-function emptyConfig(): ContainerConfig {
+/**
+ * Effective timezone for an agent group: per-group override → install global.
+ * The ncl write path validates, but a hand-edited DB value must not silently
+ * flip scheduling to UTC — an invalid override falls back to the global tz,
+ * same as no override.
+ */
+export function resolveGroupTimezone(agentGroupId: string): string {
+  const tz = getContainerConfig(agentGroupId)?.timezone;
+  return tz && isValidTimezone(tz) ? tz : TIMEZONE;
+}
+
+/** Build a `ContainerConfig` from a DB row + agent group identity. */
+export function configFromDb(row: ContainerConfigRow, group: AgentGroup): ContainerConfig {
   return {
-    mcpServers: {},
-    packages: { apt: [], npm: [] },
-    additionalMounts: [],
-    skills: 'all',
+    mcpServers: JSON.parse(row.mcp_servers) as Record<string, McpServerConfig>,
+    packages: {
+      apt: JSON.parse(row.packages_apt) as string[],
+      npm: JSON.parse(row.packages_npm) as string[],
+    },
+    imageTag: row.image_tag ?? undefined,
+    additionalMounts: JSON.parse(row.additional_mounts) as AdditionalMountConfig[],
+    skills: JSON.parse(row.skills) as string[] | 'all',
+    provider: row.provider ?? undefined,
+    groupName: group.name,
+    assistantName: row.assistant_name ?? group.name,
+    agentGroupId: group.id,
+    maxMessagesPerPrompt: row.max_messages_per_prompt ?? undefined,
+    model: row.model ?? undefined,
+    effort: row.effort ?? undefined,
+    timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
   };
 }
 
-function configPath(folder: string): string {
-  return path.join(GROUPS_DIR, folder, 'container.json');
-}
-
 /**
- * Read the container config for a group, returning sensible defaults for
- * any missing fields (or an entirely empty config if the file is absent).
- * Never throws for missing / malformed files — corruption logs a warning
- * via console.error and falls back to empty.
+ * Materialize `container.json` from the DB. Called at spawn time so the
+ * container always sees fresh config. Returns the `ContainerConfig` for
+ * use by the caller (buildMounts, buildContainerArgs, etc.).
  */
-export function readContainerConfig(folder: string): ContainerConfig {
-  const p = configPath(folder);
-  if (!fs.existsSync(p)) return emptyConfig();
-  try {
-    const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as Partial<ContainerConfig>;
-    return {
-      mcpServers: raw.mcpServers ?? {},
-      packages: {
-        apt: raw.packages?.apt ?? [],
-        npm: raw.packages?.npm ?? [],
-      },
-      imageTag: raw.imageTag,
-      additionalMounts: raw.additionalMounts ?? [],
-      skills: raw.skills ?? 'all',
-      provider: raw.provider,
-      groupName: raw.groupName,
-      assistantName: raw.assistantName,
-      agentGroupId: raw.agentGroupId,
-      maxMessagesPerPrompt: raw.maxMessagesPerPrompt,
-    };
-  } catch (err) {
-    console.error(`[container-config] failed to parse ${p}: ${String(err)}`);
-    return emptyConfig();
-  }
-}
+export function materializeContainerJson(agentGroupId: string): ContainerConfig {
+  const group = getAgentGroup(agentGroupId);
+  if (!group) throw new Error(`Agent group not found: ${agentGroupId}`);
 
-/**
- * Write the container config for a group, creating the groups/<folder>/
- * directory if necessary. Pretty-printed JSON so diffs in the activation
- * flow are reviewable.
- */
-export function writeContainerConfig(folder: string, config: ContainerConfig): void {
-  const p = configPath(folder);
+  const row = getContainerConfig(agentGroupId);
+  if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
+
+  const config = configFromDb(row, group);
+
+  const p = path.join(GROUPS_DIR, group.folder, 'container.json');
   const dir = path.dirname(p);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(p, JSON.stringify(config, null, 2) + '\n');
-}
 
-/**
- * Apply a mutator function to a group's container config and persist the
- * result. Convenient for append-style changes like `install_packages` and
- * `add_mcp_server` handlers.
- */
-export function updateContainerConfig(folder: string, mutate: (config: ContainerConfig) => void): ContainerConfig {
-  const config = readContainerConfig(folder);
-  mutate(config);
-  writeContainerConfig(folder, config);
   return config;
-}
-
-/**
- * Initialize an empty container.json for a group if one doesn't already
- * exist. Idempotent — used from `group-init.ts`.
- */
-export function initContainerConfig(folder: string): boolean {
-  const p = configPath(folder);
-  if (fs.existsSync(p)) return false;
-  writeContainerConfig(folder, emptyConfig());
-  return true;
 }

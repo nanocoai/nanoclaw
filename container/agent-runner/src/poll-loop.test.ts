@@ -4,7 +4,9 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
+import { isCorruptionError, processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
+import type { AgentQuery, ProviderEvent } from './providers/types.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -14,13 +16,18 @@ afterEach(() => {
   closeSessionDb();
 });
 
-function insertMessage(id: string, kind: string, content: object, opts?: { processAfter?: string; trigger?: 0 | 1 }) {
+function insertMessage(
+  id: string,
+  kind: string,
+  content: object,
+  opts?: { processAfter?: string; trigger?: 0 | 1; onWake?: 0 | 1 },
+) {
   getInboundDb()
     .prepare(
-      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, trigger, content)
-     VALUES (?, ?, datetime('now'), 'pending', ?, ?, ?)`,
+      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, trigger, on_wake, content)
+     VALUES (?, ?, datetime('now'), 'pending', ?, ?, ?, ?)`,
     )
-    .run(id, kind, opts?.processAfter ?? null, opts?.trigger ?? 1, JSON.stringify(content));
+    .run(id, kind, opts?.processAfter ?? null, opts?.trigger ?? 1, opts?.onWake ?? 0, JSON.stringify(content));
 }
 
 describe('formatter', () => {
@@ -32,13 +39,15 @@ describe('formatter', () => {
     expect(prompt).toContain('Hello world');
   });
 
-  it('should format multiple chat messages as XML block', () => {
+  it('should format multiple chat messages as distinct <message> blocks', () => {
     insertMessage('m1', 'chat', { sender: 'John', text: 'Hello' });
     insertMessage('m2', 'chat', { sender: 'Jane', text: 'Hi there' });
     const messages = getPendingMessages();
     const prompt = formatMessages(messages);
-    expect(prompt).toContain('<messages>');
-    expect(prompt).toContain('</messages>');
+    // The <messages> envelope was dropped in fe2e881b (#2556) so the SDK calls
+    // the API; each message is now its own self-contained <message> block.
+    expect(prompt).not.toContain('<messages>');
+    expect(prompt.match(/<message /g) ?? []).toHaveLength(2);
     expect(prompt).toContain('sender="John"');
     expect(prompt).toContain('sender="Jane"');
   });
@@ -128,6 +137,58 @@ describe('accumulate gate (trigger column)', () => {
       .run();
     const [msg] = getPendingMessages();
     expect(msg.trigger).toBe(1);
+  });
+});
+
+describe('on_wake filtering', () => {
+  it('first poll returns on_wake=1 messages', () => {
+    insertMessage('m1', 'chat', { sender: 'system', text: 'Resuming.' }, { onWake: 1 });
+    const messages = getPendingMessages(true);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].id).toBe('m1');
+  });
+
+  it('subsequent polls skip on_wake=1 messages', () => {
+    insertMessage('m1', 'chat', { sender: 'system', text: 'Resuming.' }, { onWake: 1 });
+    const messages = getPendingMessages(false);
+    expect(messages).toHaveLength(0);
+  });
+
+  it('normal messages returned regardless of isFirstPoll', () => {
+    insertMessage('m1', 'chat', { sender: 'A', text: 'hello' });
+    expect(getPendingMessages(true)).toHaveLength(1);
+
+    // Reset: mark completed so we can re-test with a fresh message
+    markCompleted(['m1']);
+    insertMessage('m2', 'chat', { sender: 'A', text: 'hello again' });
+    expect(getPendingMessages(false)).toHaveLength(1);
+  });
+
+  it('mixed batch: first poll returns both normal and on_wake messages', () => {
+    insertMessage('m1', 'chat', { sender: 'A', text: 'user msg' });
+    insertMessage('m2', 'chat', { sender: 'system', text: 'Resuming.' }, { onWake: 1 });
+    const messages = getPendingMessages(true);
+    expect(messages).toHaveLength(2);
+    expect(messages.map((m) => m.id).sort()).toEqual(['m1', 'm2']);
+  });
+
+  it('mixed batch: subsequent poll returns only normal messages', () => {
+    insertMessage('m1', 'chat', { sender: 'A', text: 'user msg' });
+    insertMessage('m2', 'chat', { sender: 'system', text: 'Resuming.' }, { onWake: 1 });
+    const messages = getPendingMessages(false);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].id).toBe('m1');
+  });
+
+  it('on_wake defaults to 0 for inserts without explicit value', () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, content)
+         VALUES ('m1', 'chat', datetime('now'), 'pending', '{"text":"hi"}')`,
+      )
+      .run();
+    // Should be returned even on non-first poll (on_wake=0)
+    expect(getPendingMessages(false)).toHaveLength(1);
   });
 });
 
@@ -316,5 +377,194 @@ describe('end-to-end with mock provider', () => {
     expect(outMessages).toHaveLength(1);
     expect(JSON.parse(outMessages[0].content).text).toBe('The answer is 4');
     expect(outMessages[0].in_reply_to).toBe('m1');
+  });
+});
+
+/**
+ * Build a one-shot stub query that yields init + a single result event, then
+ * ends. `pushes` records any follow-ups the loop tried to inject (e.g. the
+ * re-wrap nudge), so a test can assert the loop did NOT re-hammer.
+ */
+function makeResultQuery(result: ProviderEvent): { query: AgentQuery; pushes: string[] } {
+  const pushes: string[] = [];
+  async function* events(): AsyncGenerator<ProviderEvent> {
+    yield { type: 'init', continuation: 'sess-1' };
+    yield result;
+  }
+  return {
+    pushes,
+    query: {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    },
+  };
+}
+
+const ERR_ROUTING = {
+  platformId: 'chan-1',
+  channelType: 'discord',
+  threadId: null,
+  inReplyTo: 'm1',
+};
+
+it('does not push accumulated-only follow-ups into an active query', async () => {
+  const pushes: string[] = [];
+
+  async function* events(): AsyncGenerator<ProviderEvent> {
+    yield { type: 'init', continuation: 'sess-1' };
+    insertMessage('m1', 'chat', { sender: 'A', text: 'context only' }, { trigger: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 750));
+  }
+
+  await processQuery(
+    {
+      push: (message) => pushes.push(message),
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    },
+    ERR_ROUTING,
+    [],
+    'claude',
+    undefined,
+    'prompt',
+    undefined,
+  );
+
+  expect(pushes).toHaveLength(0);
+  expect(getPendingMessages().map((m) => m.id)).toEqual(['m1']);
+});
+
+describe('error result with no <message> envelope', () => {
+  it('delivers a budget/billing error to the triggering channel and does not nudge', async () => {
+    const budgetText = 'Spending limit reached. Add your own key at https://example.com/keys';
+    const { query, pushes } = makeResultQuery({ type: 'result', text: budgetText, isError: true });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe(budgetText);
+    expect(out[0].platform_id).toBe('chan-1');
+    expect(out[0].channel_type).toBe('discord');
+    // No re-wrap nudge — an error result must not re-hammer the gateway.
+    expect(pushes).toHaveLength(0);
+  });
+
+  it('still nudges (and does not deliver) a normal unwrapped result', async () => {
+    const { query, pushes } = makeResultQuery({ type: 'result', text: 'bare text, no envelope' });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    expect(getUndeliveredMessages()).toHaveLength(0);
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]).toContain('was not delivered');
+  });
+});
+
+describe('isCorruptionError', () => {
+  it('matches the Docker Desktop macOS torn-read symptom', () => {
+    expect(isCorruptionError('database disk image is malformed')).toBe(true);
+  });
+
+  it('matches wrapped SQLite corruption codes', () => {
+    expect(isCorruptionError('SqliteError: SQLITE_CORRUPT_VTAB: ...')).toBe(true);
+    expect(isCorruptionError('file is not a database')).toBe(true);
+  });
+
+  it('returns false for unrelated errors', () => {
+    expect(isCorruptionError('database is locked')).toBe(false);
+    expect(isCorruptionError('no such table: messages_in')).toBe(false);
+    expect(isCorruptionError('')).toBe(false);
+  });
+});
+
+// --- Task-run turn wiring: the REAL processQuery path (one-door) ---
+// These drive the actual call sites (autoAppendTaskLog at result-handling,
+// shouldNudgeTaskBlocks gating, and follow-up turn reset). Deleting the wiring
+// — not just the helpers — goes red here.
+
+const TASK_ROUTING = {
+  platformId: null,
+  channelType: null,
+  threadId: 'system:tasks:ser-1',
+  inReplyTo: 't1',
+  taskRun: true,
+};
+
+function taskLogRows(): Array<{ text: string }> {
+  return (
+    getOutboundDb()
+      .prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq")
+      .all() as Array<{ content: string }>
+  ).map((r) => JSON.parse(r.content) as { text: string });
+}
+
+describe('task-run turn wiring (real processQuery)', () => {
+  it('auto-appends the final text as a task_log row', async () => {
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'result', text: 'checked feeds — nothing new' };
+    }
+    const query: AgentQuery = { push: () => {}, end: () => {}, events: events(), abort: () => {} };
+
+    await processQuery(query, TASK_ROUTING, ['t1'], 'claude', undefined, 'prompt', undefined);
+
+    const logs = taskLogRows();
+    expect(logs).toHaveLength(1);
+    expect(logs[0].text).toBe('checked feeds — nothing new');
+    // and nothing was delivered as chat
+    expect(getUndeliveredMessages().filter((m) => m.kind === 'chat')).toHaveLength(0);
+  });
+
+  it('logs and conditionally nudges a second task run in the same open query', async () => {
+    const pushes: string[] = [];
+
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      // Turn 1 uses the legacy wrong door and consumes its one correction.
+      yield { type: 'result', text: '<message to="local-cli">fire one result</message>' };
+      yield { type: 'result', text: 'first delivery decision handled' };
+
+      // A SECOND task run lands while the query is open — the follow-up poller
+      // pushes it and must reset the per-turn correction state.
+      insertMessage('t2', 'task', { prompt: 'fire two' });
+      const deadline = Date.now() + 5000;
+      while (!pushes.some((p) => p.includes('fire two')) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+
+      // Turn 2 repeats the mistake. This receives a second independent nudge
+      // only if the follow-up path reset taskBlockNudged.
+      yield { type: 'result', text: '<message to="local-cli">fire two result</message>' };
+      yield { type: 'result', text: 'second delivery decision handled' };
+    }
+
+    const query: AgentQuery = {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+
+    await processQuery(query, TASK_ROUTING, ['t1'], 'claude', undefined, 'prompt', undefined);
+
+    const nudges = pushes.filter((p) => p.includes('If and only if'));
+    expect(nudges).toHaveLength(2);
+    expect(nudges[0]).toContain('fire one result');
+    expect(nudges[1]).toContain('fire two result');
+
+    const logs = taskLogRows().map((l) => l.text);
+    expect(logs).toHaveLength(2);
+    expect(logs[0]).toContain('[undelivered → local-cli] fire one result');
+    expect(logs[1]).toContain('[undelivered → local-cli] fire two result');
+    expect(logs).not.toContain('first delivery decision handled');
+    expect(logs).not.toContain('second delivery decision handled');
   });
 });

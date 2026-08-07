@@ -1,10 +1,22 @@
 import { readFileSync } from 'node:fs';
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
-import { getPendingMessages, markProcessing, markCompleted, resetToRetryable, type MessageInRow } from './db/messages-in.js';
+import {
+  getPendingMessages,
+  markProcessing,
+  markCompleted,
+  markScriptSkipped,
+  resetToRetryable,
+  type MessageInRow,
+} from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
-import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
-import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
+import {
+  clearContinuation,
+  clearCurrentInReplyTo,
+  migrateLegacyContinuation,
+  setContinuation,
+  setCurrentInReplyTo,
+} from './db/session-state.js';
 import {
   formatMessages,
   extractRouting,
@@ -14,7 +26,8 @@ import {
   stripInternalTags,
   type RoutingContext,
 } from './formatter.js';
-import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
+import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
+import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -59,6 +72,30 @@ function isOAuthTokenExpired(): boolean {
   }
 }
 
+/**
+ * Number of consecutive `database disk image is malformed` errors after which
+ * the follow-up poll gives up and exits the process. At ACTIVE_POLL_INTERVAL_MS
+ * = 500ms this is roughly 5 seconds — long enough to dodge a transient torn
+ * read during a host write, short enough to recover quickly from a poisoned
+ * page cache (host-sweep then respawns with a fresh mount).
+ */
+const CORRUPTION_STREAK_EXIT = 10;
+
+/**
+ * True for SQLite errors that indicate a corrupt READ view — almost always a
+ * cross-mount page-cache coherency issue on Docker Desktop macOS rather than
+ * actual file damage (host-side integrity_check passes). Reopening the DB
+ * handle inside this process does NOT recover; only a fresh container mount
+ * does. Caller's job is to exit so host-sweep respawns the container.
+ */
+export function isCorruptionError(msg: string): boolean {
+  return (
+    msg.includes('database disk image is malformed') ||
+    msg.includes('SQLITE_CORRUPT') ||
+    msg.includes('file is not a database')
+  );
+}
+
 function log(msg: string): void {
   console.error(`[poll-loop] ${msg}`);
 }
@@ -79,6 +116,12 @@ export interface PollLoopConfig {
   systemContext?: {
     instructions?: string;
   };
+  /**
+   * Optional stop signal. In production the loop runs until the container
+   * dies; tests pass a signal so an abandoned loop actually exits instead of
+   * polling forever and stealing messages from the next test's DB.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -99,6 +142,19 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // a Codex thread id never gets handed to Claude or vice versa.
   let continuation: string | undefined = migrateLegacyContinuation(config.providerName);
 
+  // Before resuming, drop a session whose on-disk transcript has grown too
+  // large/old to cold-resume within the host's idle ceiling. Without this a
+  // long-lived hub keeps trying to reload an ever-growing .jsonl, hangs the
+  // first turn, and gets killed before it can reply (then repeats forever).
+  if (continuation) {
+    const rotateReason = config.provider.maybeRotateContinuation?.(continuation, config.cwd);
+    if (rotateReason) {
+      log(`Rotating session — ${rotateReason}; starting fresh`);
+      clearContinuation(config.providerName);
+      continuation = undefined;
+    }
+  }
+
   if (continuation) {
     log(`Resuming agent session ${continuation}`);
   }
@@ -108,9 +164,12 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   clearStaleProcessingAcks();
 
   let pollCount = 0;
+  let isFirstPoll = true;
   while (true) {
+    if (config.signal?.aborted) return;
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
-    const messages = getPendingMessages().filter((m) => m.kind !== 'system');
+    const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
+    isFirstPoll = false;
     pollCount++;
 
     // Periodic heartbeat so we know the loop is alive
@@ -163,6 +222,19 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         commandIds.push(msg.id);
         continue;
       }
+      if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isUploadTraceCommand(msg)) {
+        log('Uploading session trace to Hugging Face');
+        writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: uploadTrace() }),
+        });
+        commandIds.push(msg.id);
+        continue;
+      }
       normalMessages.push(msg);
     }
 
@@ -183,15 +255,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Without the scheduling module, the marker block is empty, `keep`
     // falls back to `normalMessages`, and no gating happens.
     let keep: MessageInRow[] = normalMessages;
-    let skipped: string[] = [];
+    let skipped: Array<{ id: string; reason: string }> = [];
     // MODULE-HOOK:scheduling-pre-task:start
     const { applyPreTaskScripts } = await import('./scheduling/task-script.js');
     const preTask = await applyPreTaskScripts(normalMessages);
     keep = preTask.keep;
     skipped = preTask.skipped;
     if (skipped.length > 0) {
-      markCompleted(skipped);
-      log(`Pre-task script skipped ${skipped.length} task(s): ${skipped.join(', ')}`);
+      markScriptSkipped(skipped);
+      log(`Pre-task script skipped ${skipped.length} task(s): ${skipped.map((s) => s.id).join(', ')}`);
     }
     // MODULE-HOOK:scheduling-pre-task:end
 
@@ -206,7 +278,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
-    const skippedSet = new Set(skipped);
+    const skippedSet = new Set(skipped.map((s) => s.id));
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
 
     if (isOAuthTokenExpired()) {
@@ -231,11 +303,21 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     });
 
     // Process the query while concurrently polling for new messages
+    // (skippedSet / processingIds computed above, before the OAuth-expiry
+    // pre-empt check, since that check needs processingIds too)
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
+      const result = await processQuery(
+        query,
+        routing,
+        processingIds,
+        config.providerName,
+        config.provider.onExchangeComplete?.bind(config.provider),
+        prompt,
+        continuation,
+      );
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -278,6 +360,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         thread_id: routing.threadId,
         content: JSON.stringify({ text: `Error: ${errMsg}` }),
       });
+
+      // The batch is still acked completed below (no redelivery). Without
+      // this line the only log trace of the errored turn is "Query error"
+      // followed by a "Completed" line that reads like success.
+      log(`Errored batch will be acked completed — ${processingIds.length} message(s), no redelivery`);
     } finally {
       clearCurrentInReplyTo();
     }
@@ -327,14 +414,26 @@ interface QueryResult {
   continuation?: string;
 }
 
-async function processQuery(
+export async function processQuery(
   query: AgentQuery,
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
+  onExchangeComplete: ((exchange: ProviderExchange) => void) | undefined,
+  initialPrompt: string,
+  initialContinuation: string | undefined,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
+  let unwrappedNudged = false;
+  // Once-per-turn guard for the task-run "<message> block was not delivered"
+  // nudge — mirrors unwrappedNudged for chat turns.
+  let taskBlockNudged = false;
+  // Prompt queue for the exchange hook — each result event consumes the
+  // oldest unanswered prompt, except a wrapping-retry result, which answers
+  // the same prompt again. Unused (and unmaintained) when the provider
+  // doesn't implement `onExchangeComplete`.
+  const archivePrompts: string[] = [initialPrompt];
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -347,6 +446,7 @@ async function processQuery(
   // will kill the container and messages get reset to pending.
   let pollInFlight = false;
   let endedForCommand = false;
+  let corruptionStreak = 0;
   const pollHandle = setInterval(() => {
     if (done || pollInFlight || endedForCommand) return;
     pollInFlight = true;
@@ -359,13 +459,16 @@ async function processQuery(
         // resume id (fixed at sdkQuery() time); admin/passthrough commands
         // (/compact, /cost, …) only dispatch when they're the first input
         // of a query — pushed mid-stream they arrive as plain text and
-        // the SDK never runs them. End the stream and leave the rows
-        // pending; the outer loop handles them on next iteration via the
-        // canonical command path + formatMessagesWithCommands.
+        // the SDK never runs them. Abort the active stream and leave the
+        // rows pending; the outer loop handles them on next iteration via
+        // the canonical command path + formatMessagesWithCommands. Abort,
+        // not end: end() lets an in-flight turn run to completion, which
+        // can block the command (e.g. /clear during a long task) for as
+        // long as the turn takes.
         if (pending.some((m) => isRunnerCommand(m))) {
-          log('Pending slash command — ending stream so outer loop can process');
+          log('Pending slash command — aborting active stream so outer loop can process');
           endedForCommand = true;
-          query.end();
+          query.abort();
           return;
         }
 
@@ -379,6 +482,9 @@ async function processQuery(
         const newMessages = pending.filter((m) => m.kind !== 'system');
         if (newMessages.length === 0) return;
 
+        // Accumulated context must not engage a warm query by itself.
+        if (!newMessages.some((m) => m.trigger === 1)) return;
+
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
 
@@ -387,15 +493,15 @@ async function processQuery(
         // its script gate and always wakes the agent, defeating the gate.
         // Mirrors the initial-batch hook above.
         let keep = newMessages;
-        let skipped: string[] = [];
+        let skipped: Array<{ id: string; reason: string }> = [];
         // MODULE-HOOK:scheduling-pre-task-followup:start
         const { applyPreTaskScripts } = await import('./scheduling/task-script.js');
         const preTask = await applyPreTaskScripts(newMessages);
         keep = preTask.keep;
         skipped = preTask.skipped;
         if (skipped.length > 0) {
-          markCompleted(skipped);
-          log(`Pre-task script skipped ${skipped.length} follow-up task(s): ${skipped.join(', ')}`);
+          markScriptSkipped(skipped);
+          log(`Pre-task script skipped ${skipped.length} follow-up task(s): ${skipped.map((s) => s.id).join(', ')}`);
         }
         // MODULE-HOOK:scheduling-pre-task-followup:end
 
@@ -408,7 +514,10 @@ async function processQuery(
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
+        unwrappedNudged = false;
+        taskBlockNudged = false;
         query.push(prompt);
+        archivePrompts.push(prompt);
         markCompleted(keptIds);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
@@ -417,6 +526,31 @@ async function processQuery(
         // path is not, so it needs its own.
         const errMsg = err instanceof Error ? err.message : String(err);
         log(`Follow-up poll error: ${errMsg}`);
+
+        // Detect SQLite cross-mount corruption (Docker Desktop macOS virtiofs /
+        // gRPC-FUSE coherency bug — the kernel page cache for the inbound.db
+        // bind mount can latch a torn snapshot mid-host-write, after which
+        // every fresh openInboundDb() in this process sees the same broken
+        // view. Reopening inside the container does NOT recover; only a fresh
+        // container mount does. Exit so the host sweep respawns us.
+        if (isCorruptionError(errMsg)) {
+          corruptionStreak += 1;
+          if (corruptionStreak >= CORRUPTION_STREAK_EXIT) {
+            log(
+              `Follow-up poll: ${corruptionStreak} consecutive '${errMsg}' errors — ` +
+                `inbound.db page cache is poisoned. Exiting so host respawns with a fresh mount.`,
+            );
+            // Stop touching the heartbeat so host-sweep stale detection fires
+            // promptly even if exit() races with in-flight async work.
+            done = true;
+            clearInterval(pollHandle);
+            // Defer exit one tick so this log line flushes through Docker's
+            // log driver before the process dies.
+            setTimeout(() => process.exit(75), 100);
+          }
+        } else {
+          corruptionStreak = 0;
+        }
       } finally {
         pollInFlight = false;
       }
@@ -451,33 +585,88 @@ async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          dispatchResultText(event.text, routing);
-        }
-      } else if (event.type === 'compacted') {
-        // The SDK auto-compacted the conversation. After compaction the
-        // model often drops the learned `<message to="…">` wrapping
-        // discipline (the destinations are still in the system prompt,
-        // but the behavioral pattern is summarized away). Inject a
-        // reminder back into the live query so the next turn re-anchors
-        // on the destination model. Only do this when there's >1
-        // destination — single-destination groups have a fallback that
-        // works without wrapping. See qwibitai/nanoclaw#2325.
-        const destinations = getAllDestinations();
-        if (destinations.length > 1) {
-          const names = destinations.map((d) => d.name).join(', ');
-          query.push(
-            `[system] Context was just compacted. Reminder: you have ${destinations.length} destinations (${names}). ` +
-              `Use <message to="name"> blocks to address them. Bare text goes to the scratchpad fallback only.`,
-          );
-        }
+          const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(event.text, routing);
+          const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
+          // One-door task delivery: the final text becomes the run log entry
+          // while explicit append-log calls remain optional additive notes.
+          // Errors included: a failed run's text belongs in its log, not chat.
+          // A corrective retry handles delivery only; its result is not a
+          // second run summary.
+          if (routing.taskRun && !taskBlockNudged) autoAppendTaskLog(event.text);
+          if (sent === 0 && event.isError === true && !routing.taskRun) {
+            // Non-retryable error turn (e.g. a 403 billing_error) with no
+            // <message> envelope: deliver the notice instead of dropping it as
+            // scratchpad, and skip the re-wrap nudge — it would just re-hammer
+            // the failing gateway turn after turn.
+            deliverErrorResult(event.text, routing);
+            notifyExchangeComplete(onExchangeComplete, {
+              prompt: archivePrompts[0] ?? initialPrompt,
+              result: event.text,
+              continuation: queryContinuation ?? initialContinuation,
+              status: 'error',
+            });
+            archivePrompts.shift();
+          } else {
+            const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+            notifyExchangeComplete(onExchangeComplete, {
+              prompt: archivePrompts[0] ?? initialPrompt,
+              result: event.text,
+              continuation: queryContinuation ?? initialContinuation,
+              status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
+            });
+            if (willRetryWrapping) {
+              unwrappedNudged = true;
+              const destinations = getAllDestinations();
+              const names = destinations.map((d) => d.name).join(', ');
+              query.push(
+                `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
+                  `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
+                  `Your destinations: ${names}. ` +
+                  `Please re-send your response with the correct wrapping.</system>`,
+              );
+            }
+            if (willRetryTaskBlocks) {
+              taskBlockNudged = true;
+              const names = getAllDestinations()
+                .map((d) => d.name)
+                .join(', ');
+              query.push(buildTaskBlockNudge(taskBlocks, names));
+            }
+            // A retry result (wrapping or task-block nudge) answers the SAME
+            // user prompt — keep it queued so the retry archives against it,
+            // not the nudge text.
+            if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
+          }
+        } else archivePrompts.shift();
       }
     }
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    notifyExchangeComplete(onExchangeComplete, {
+      prompt: archivePrompts[0] ?? initialPrompt,
+      result: `Error: ${errMsg}`,
+      continuation: queryContinuation ?? initialContinuation,
+      status: 'error',
+    });
+    throw err;
   } finally {
     done = true;
     clearInterval(pollHandle);
   }
 
   return { continuation: queryContinuation };
+}
+
+function notifyExchangeComplete(
+  hook: ((exchange: ProviderExchange) => void) | undefined,
+  exchange: ProviderExchange,
+): void {
+  if (!hook) return;
+  try {
+    hook(exchange);
+  } catch (err) {
+    log(`onExchangeComplete failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
@@ -496,10 +685,27 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
     case 'progress':
       log(`Progress: ${event.message}`);
       break;
-    case 'compacted':
-      log(`Compacted: ${event.text}`);
-      break;
   }
+}
+
+/**
+ * Deliver a turn's text straight to the channel the batch arrived on. Used when
+ * a turn ends in a provider error (e.g. a non-retryable 403 billing_error) with
+ * no <message> envelope: the notice would otherwise be dropped as scratchpad.
+ * This is the same user-facing write the outer catch block does, minus the
+ * `Error:` prefix — the provider's text is already a user-facing message.
+ */
+function deliverErrorResult(text: string, routing: RoutingContext): void {
+  log('Error result with no <message> envelope — delivering to channel');
+  writeMessageOut({
+    id: generateId(),
+    in_reply_to: routing.inReplyTo,
+    kind: 'chat',
+    platform_id: routing.platformId,
+    channel_type: routing.channelType,
+    thread_id: routing.threadId,
+    content: JSON.stringify({ text }),
+  });
 }
 
 /**
@@ -510,11 +716,22 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * The agent must always wrap output in <message to="name">...</message>
  * blocks, even with a single destination. Bare text is scratchpad only.
  */
-function dispatchResultText(text: string, routing: RoutingContext): void {
+export interface TaskMessageBlock {
+  to: string;
+  body: string;
+}
+
+export function dispatchResultText(
+  text: string,
+  routing: RoutingContext,
+): { sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[] } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
   let match: RegExpExecArray | null;
   let sent = 0;
+  // <message to> blocks left inert in a task run — drives the same-turn
+  // "use send_message" nudge in processQuery.
+  const taskBlocks: TaskMessageBlock[] = [];
   let lastIndex = 0;
   const scratchpadParts: string[] = [];
 
@@ -526,6 +743,18 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
     const body = match[2].trim();
     lastIndex = MESSAGE_RE.lastIndex;
 
+    // One-door delivery in task sessions: only the send_message tool delivers.
+    // A final-text <message to> block here is either an echo of a tool send the
+    // agent already made (the double-delivery class) or a send down the wrong
+    // path — never deliver it, keep it visible in the scratchpad/run log.
+    if (routing.taskRun) {
+      log(`Task run: <message to="${toName}"> block not delivered — task sessions send only via explicit tools`);
+      scratchpadParts.push(
+        `[not delivered — task sessions send only via the send_message tool; to="${toName}"] ${body}`,
+      );
+      taskBlocks.push({ to: toName, body });
+      continue;
+    }
     const dest = findByName(toName);
     if (!dest) {
       log(`Unknown destination in <message to="${toName}">, dropping block`);
@@ -545,9 +774,71 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
     log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
   }
 
-  if (sent === 0 && text.trim()) {
+  // In a task run, plain final text is the NORMAL ending (it becomes the run
+  // log) — never treat it as an undelivered reply or nudge the agent to wrap it.
+  const hasUnwrapped = !routing.taskRun && sent === 0 && !!scratchpad;
+  if (hasUnwrapped) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
   }
+  return { sent, hasUnwrapped, taskBlocks };
+}
+
+/**
+ * Should this task-run result get the same-turn "your <message> block was
+ * not delivered — use send_message" nudge? True at most once per turn
+ * (mirrors the unwrappedNudged flag for chat turns).
+ */
+export function shouldNudgeTaskBlocks(
+  taskRun: boolean,
+  taskBlocks: TaskMessageBlock[],
+  alreadyNudged: boolean,
+): boolean {
+  return taskRun && taskBlocks.length > 0 && !alreadyNudged;
+}
+
+export function buildTaskBlockNudge(taskBlocks: TaskMessageBlock[], destinationNames: string): string {
+  const blocks = taskBlocks
+    .map(
+      ({ to, body }) =>
+        `<undelivered_message to="${escapePromptXml(to)}">${escapePromptXml(body)}</undelivered_message>`,
+    )
+    .join('\n');
+  return (
+    '<system>The final-output content below was not delivered from this task run:\n' +
+    `${blocks}\n` +
+    'If and only if any of it still needs to be sent, call send_message with an explicit to destination. ' +
+    'If it was already sent or no notification is required, do not send it again. ' +
+    `Your destinations: ${escapePromptXml(destinationNames)}. ` +
+    'The original task result is already recorded in the run log; do not repeat it.</system>'
+  );
+}
+
+function escapePromptXml(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/**
+ * Task runs: the final text is the automatic run summary. Explicit
+ * `ncl tasks append-log` calls are additive mid-run notes. Written as a
+ * `task_log` outbound row; the host appends it to the series' tasks/<id>.md
+ * with its usual timestamp stamp. Never delivered to anyone.
+ */
+export function autoAppendTaskLog(text: string): void {
+  // Run-log hygiene: an inert <message to> block never belongs in the log as
+  // raw XML — replace each with its inner text, marked undelivered, so the
+  // log stays readable prose.
+  const prose = text.replace(
+    /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g,
+    (_m, to: string, body: string) => `[undelivered → ${to}] ${body.trim()}`,
+  );
+  const line = stripInternalTags(prose).replace(/\s+/g, ' ').trim().slice(0, 500);
+  if (!line) return;
+  writeMessageOut({
+    id: generateId(),
+    kind: 'task_log',
+    content: JSON.stringify({ text: line }),
+  });
+  log('Task run log auto-appended from final text');
 }
 
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {

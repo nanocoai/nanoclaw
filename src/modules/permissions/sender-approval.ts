@@ -35,8 +35,8 @@ import { pickApprovalDelivery, pickApprover } from '../approvals/primitive.js';
 import { createPendingSenderApproval, hasInFlightSenderApproval } from './db/pending-sender-approvals.js';
 
 const APPROVAL_OPTIONS: RawOption[] = [
-  { label: 'Allow', selectedLabel: '✅ Allowed', value: 'approve' },
-  { label: 'Deny', selectedLabel: '❌ Denied', value: 'reject' },
+  { label: 'Allow', selectedLabel: '✅ Allowed', value: 'approve', style: 'primary' },
+  { label: 'Deny', selectedLabel: '❌ Denied', value: 'reject', style: 'danger' },
 ];
 
 function generateId(): string {
@@ -104,6 +104,7 @@ export async function requestSenderApproval(input: RequestSenderApprovalInput): 
     approver_user_id: target.userId,
     created_at: new Date().toISOString(),
     title,
+    question,
     options_json: JSON.stringify(options),
   });
 

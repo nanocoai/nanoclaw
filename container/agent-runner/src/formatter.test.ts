@@ -13,8 +13,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb } from './db/connection.js';
 import { getPendingMessages } from './db/messages-in.js';
-import { formatMessages, stripInternalTags } from './formatter.js';
-import { TIMEZONE } from './timezone.js';
+import { formatMessages, stripInternalTags, stripLegacyTaskContract } from './formatter.js';
+import { TIMEZONE, formatLocalTime } from './timezone.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -28,15 +28,15 @@ function insertMessage(
   id: string,
   kind: string,
   content: object,
-  opts?: { timestamp?: string },
+  opts?: { timestamp?: string; processAfter?: string },
 ) {
   const timestamp = opts?.timestamp ?? new Date().toISOString();
   getInboundDb()
     .prepare(
-      `INSERT INTO messages_in (id, kind, timestamp, status, content)
-       VALUES (?, ?, ?, 'pending', ?)`,
+      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, content)
+       VALUES (?, ?, ?, 'pending', ?, ?)`,
     )
-    .run(id, kind, timestamp, JSON.stringify(content));
+    .run(id, kind, timestamp, opts?.processAfter ?? null, JSON.stringify(content));
 }
 
 describe('context timezone header', () => {
@@ -44,6 +44,7 @@ describe('context timezone header', () => {
     insertMessage('m1', 'chat', { sender: 'Alice', text: 'hello' });
     const result = formatMessages(getPendingMessages());
     expect(result).toContain(`<context timezone="${TIMEZONE}"`);
+    expect(result).not.toContain('current_time=');
   });
 
   it('includes the header even when the message list is empty', () => {
@@ -51,14 +52,75 @@ describe('context timezone header', () => {
     expect(result).toContain(`<context timezone="${TIMEZONE}"`);
   });
 
-  it('header comes before the <messages> block', () => {
+  it('header comes before the first <message> block when multiple are present', () => {
     insertMessage('m1', 'chat', { sender: 'Alice', text: 'one' });
     insertMessage('m2', 'chat', { sender: 'Bob', text: 'two' });
     const result = formatMessages(getPendingMessages());
     const ctxIdx = result.indexOf('<context');
-    const msgsIdx = result.indexOf('<messages>');
+    const firstMsgIdx = result.indexOf('<message ');
     expect(ctxIdx).toBeGreaterThanOrEqual(0);
-    expect(msgsIdx).toBeGreaterThan(ctxIdx);
+    expect(firstMsgIdx).toBeGreaterThan(ctxIdx);
+  });
+});
+
+describe('task prompt compatibility', () => {
+  it('strips the generated #2981 delivery suffix without mutating stored data', () => {
+    const prompt =
+      'Send the daily digest\n\n' +
+      '[A task serves the user two separate ways — legacy generated delivery instructions]';
+
+    expect(stripLegacyTaskContract(prompt)).toBe('Send the daily digest');
+  });
+
+  it('strips the generated #2988 delivery suffix', () => {
+    const prompt = 'Check the feeds\n\n[Task delivery contract:\nlegacy generated instructions]';
+
+    expect(stripLegacyTaskContract(prompt)).toBe('Check the feeds');
+  });
+
+  it('leaves ordinary user prompts unchanged', () => {
+    const prompt = 'Explain [Task delivery contract:] as plain text';
+
+    expect(stripLegacyTaskContract(prompt)).toBe(prompt);
+  });
+
+  it('does not expose a legacy delivery contract in a formatted task run', () => {
+    insertMessage('task-1', 'task', {
+      prompt: 'Check the feeds\n\n[Task delivery contract:\nlegacy generated instructions]',
+    });
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('Instructions:\nCheck the feeds');
+    expect(result).not.toContain('legacy generated instructions');
+  });
+});
+
+describe('multi-message chat batches', () => {
+  // Regression guard for #2555: an outer `<messages>` envelope around
+  // multiple chat messages caused the Claude Agent SDK to emit a synthetic
+  // `No response requested.` stub instead of calling the API. Each
+  // `<message>` block is self-contained; concatenating them is enough.
+  it('does NOT wrap multiple chat messages in an outer <messages> envelope', () => {
+    insertMessage('m1', 'chat', { sender: 'Alice', text: 'one' });
+    insertMessage('m2', 'chat', { sender: 'Bob', text: 'two' });
+    const result = formatMessages(getPendingMessages());
+    expect(result).not.toContain('<messages>');
+    expect(result).not.toContain('</messages>');
+  });
+
+  it('emits one <message> block per inbound row, in order', () => {
+    insertMessage('m1', 'chat', { sender: 'Alice', text: 'first' });
+    insertMessage('m2', 'chat', { sender: 'Bob', text: 'second' });
+    insertMessage('m3', 'chat', { sender: 'Carol', text: 'third' });
+    const result = formatMessages(getPendingMessages());
+    const matches = result.match(/<message [^>]*>/g) ?? [];
+    expect(matches.length).toBe(3);
+    const firstIdx = result.indexOf('first');
+    const secondIdx = result.indexOf('second');
+    const thirdIdx = result.indexOf('third');
+    expect(firstIdx).toBeGreaterThan(0);
+    expect(secondIdx).toBeGreaterThan(firstIdx);
+    expect(thirdIdx).toBeGreaterThan(secondIdx);
   });
 });
 
@@ -77,6 +139,26 @@ describe('timestamp formatting', () => {
     insertMessage('m1', 'chat', { sender: 'Alice', text: 'hi' }, { timestamp: '2026-06-15T15:30:00.000Z' });
     const result = formatMessages(getPendingMessages());
     expect(result).toMatch(/(AM|PM)/);
+  });
+});
+
+describe('task timestamps', () => {
+  it('falls back to creation time for legacy rows without process_after', () => {
+    insertMessage('t1', 'task', { prompt: 'do the thing' }, { timestamp: '2026-01-05T12:00:00.000Z' });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain(`time="${formatLocalTime('2026-01-05T12:00:00.000Z', TIMEZONE)}"`);
+  });
+
+  it('renders the scheduled time plus the current run time', () => {
+    const created = '2026-01-04T12:00:00.000Z';
+    const scheduled = '2026-01-05T12:00:00.000Z';
+    insertMessage('t1', 'task', { prompt: "prepare today's brief" }, { timestamp: created, processAfter: scheduled });
+
+    const result = formatMessages(getPendingMessages());
+
+    expect(result).toContain(`time="${formatLocalTime(scheduled, TIMEZONE)}"`);
+    expect(result).not.toContain(`time="${formatLocalTime(created, TIMEZONE)}"`);
+    expect(result).toMatch(/current_time="(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday), [^"]+"/);
   });
 });
 
