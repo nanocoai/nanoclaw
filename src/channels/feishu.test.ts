@@ -1167,9 +1167,7 @@ describe('FeishuChannel', () => {
       expect(entry.steps[0].grayTail).toBe(
         '读取 /workspace/src/config.ts 失败',
       );
-      expect(JSON.stringify(entry.steps)).not.toContain(
-        'should-not-reach-card',
-      );
+      expect(JSON.stringify(entry.steps)).not.toContain('should-not-reach-card');
     });
 
     it('narration Phase 标题与动作在同一面板 header 内各占一行', async () => {
