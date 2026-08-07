@@ -1,14 +1,25 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-const TEST_ROOT = '/tmp/nanoclaw-runner-mounts-test';
+// These are module-level consts in production; point them at a per-run temp
+// tree via getters, so nothing here collides with a parallel test worker or
+// with leftovers from an earlier run. Same shape as
+// src/modules/mount-security/index.test.ts.
+const mockState = vi.hoisted(() => ({ root: '' }));
 
 vi.mock('./config.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./config.js')>()),
-  DATA_DIR: '/tmp/nanoclaw-runner-mounts-test/data',
-  GROUPS_DIR: '/tmp/nanoclaw-runner-mounts-test/groups',
-  MOUNT_ALLOWLIST_PATH: '/tmp/nanoclaw-runner-mounts-test/mount-allowlist.json',
+  get DATA_DIR() {
+    return path.join(mockState.root, 'data');
+  },
+  get GROUPS_DIR() {
+    return path.join(mockState.root, 'groups');
+  },
+  get MOUNT_ALLOWLIST_PATH() {
+    return path.join(mockState.root, 'mount-allowlist.json');
+  },
 }));
 
 vi.mock('./log.js', () => ({
@@ -25,7 +36,7 @@ import type { VolumeMount } from './providers/provider-container-registry.js';
 
 // A host directory that really exists: validateMount resolves the realPath, so
 // a fictional path fails for a reason unrelated to what these tests are about.
-const MOUNTED_DIR = path.join(TEST_ROOT, 'host', 'creds');
+let MOUNTED_DIR: string;
 
 function group(id: string, folder: string): AgentGroup {
   return { id, name: folder, folder, agent_provider: null, created_at: new Date().toISOString() } as AgentGroup;
@@ -40,24 +51,28 @@ function containerConfig(overrides: Partial<ContainerConfig> = {}): ContainerCon
 }
 
 beforeAll(() => {
-  fs.rmSync(TEST_ROOT, { recursive: true, force: true });
+  mockState.root = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-mounts-'));
+  MOUNTED_DIR = path.join(mockState.root, 'host', 'creds');
   fs.mkdirSync(MOUNTED_DIR, { recursive: true });
-  fs.mkdirSync(path.join(TEST_ROOT, 'data'), { recursive: true });
-  fs.mkdirSync(path.join(TEST_ROOT, 'groups'), { recursive: true });
+  fs.mkdirSync(path.join(mockState.root, 'data'), { recursive: true });
+  fs.mkdirSync(path.join(mockState.root, 'groups'), { recursive: true });
   // Permissive on purpose. These tests are about what buildMounts does with a
   // mount the allowlist permits; the allowlist's own rules are covered in
   // src/modules/mount-security/. realpath because the root is compared against
   // the resolved host path.
   fs.writeFileSync(
-    path.join(TEST_ROOT, 'mount-allowlist.json'),
-    JSON.stringify({ allowedRoots: [{ path: fs.realpathSync(TEST_ROOT), allowReadWrite: true }], blockedPatterns: [] }),
+    path.join(mockState.root, 'mount-allowlist.json'),
+    JSON.stringify({
+      allowedRoots: [{ path: fs.realpathSync(mockState.root), allowReadWrite: true }],
+      blockedPatterns: [],
+    }),
   );
   runMigrations(initTestDb());
 });
 
 afterAll(() => {
   closeDb();
-  fs.rmSync(TEST_ROOT, { recursive: true, force: true });
+  fs.rmSync(mockState.root, { recursive: true, force: true });
 });
 
 describe('volumeMountArgs', () => {
