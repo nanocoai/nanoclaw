@@ -64,6 +64,15 @@ export interface ChatSdkBridgeConfig {
   /** Platform-specific reply context extraction. */
   extractReplyContext?: ReplyContextExtractor;
   /**
+   * Platform-specific rescue of text content that the Chat SDK adapter does
+   * not surface on the parsed message (e.g. Slack pasted tables live in
+   * `raw.attachments[].blocks`, which @chat-adapter/slack ignores). Called
+   * with `message.raw` before it is dropped; a non-null result is appended
+   * to the message text.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  extractRawText?: (raw: Record<string, any>) => string | null;
+  /**
    * Whether this platform uses threads as the primary conversation unit.
    * See `ChannelAdapter.supportsThreads`. Declared by the calling channel
    * skill, not inferred, because some platforms (Discord) can be used either
@@ -136,6 +145,21 @@ export function splitForLimit(text: string, limit: number): string[] {
   return chunks;
 }
 
+/** Append platform-rescued raw text (see `extractRawText`) to serialized.text. */
+export function appendRawText(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  serialized: Record<string, any>,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  raw: Record<string, any>,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  extract?: (raw: Record<string, any>) => string | null,
+): void {
+  if (!extract) return;
+  const extra = extract(raw);
+  if (!extra) return;
+  serialized.text = serialized.text ? `${serialized.text}\n\n${extra}` : extra;
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   // The instance name becomes the registry key (and, once the core
@@ -188,6 +212,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         enriched.push(entry);
       }
       serialized.attachments = enriched;
+    }
+
+    // Rescue platform-specific text the adapter doesn't parse (e.g. Slack
+    // pasted tables) while message.raw still exists.
+    if (message.raw) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      appendRawText(serialized, message.raw as Record<string, any>, config.extractRawText);
     }
 
     // Extract reply context via platform-specific hook
