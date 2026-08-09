@@ -87,7 +87,7 @@ Linear OAuth apps can't be @-mentioned, so the bridge's `onNewMention` handler n
 ### 5. Install the adapter package (pinned)
 
 ```bash
-pnpm install @chat-adapter/linear@4.26.0
+pnpm install @chat-adapter/linear@4.29.0
 ```
 
 ### 6. Build

@@ -21,7 +21,7 @@ import { basename, join, resolve } from 'path';
 import { getDb, hasTable } from '../db/connection.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
-import type { ChannelAdapter, ChannelSetup, OutboundMessage } from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults, ChannelSetup, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
 import { DeltaChatOverJsonRpc } from '@deltachat/stdio-rpc-server';
@@ -85,6 +85,7 @@ function createAdapter(env: DcEnv): ChannelAdapter {
     name: 'deltachat',
     channelType: 'deltachat',
     supportsThreads: false,
+    defaults: DELTACHAT_DEFAULTS,
 
     async setup(config: ChannelSetup): Promise<void> {
       const accountDir = process.env.DC_ACCOUNT_DIR ?? 'dc-account';
@@ -329,10 +330,27 @@ function createAdapter(env: DcEnv): ChannelAdapter {
   return adapter;
 }
 
+/**
+ * Dedicated email identity (DC_EMAIL), so request_approval is sound. Email
+ * carries no mention metadata ('dm-only'; the adapter flags DMs only), so
+ * group wirings default to a name-pattern trigger.
+ */
+const DELTACHAT_DEFAULTS: ChannelDefaults = {
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'request_approval' },
+  group: {
+    engageMode: 'pattern',
+    engagePattern: '\\b{name}\\b',
+    threads: false,
+    unknownSenderPolicy: 'request_approval',
+  },
+  mentions: 'dm-only',
+};
+
 registerChannelAdapter('deltachat', {
   factory: () => {
     const env = readEnvFile([...REQUIRED_ENV, ...OPTIONAL_ENV]);
     if (!env.DC_EMAIL || !env.DC_PASSWORD) return null;
     return createAdapter(env as DcEnv);
   },
+  defaults: DELTACHAT_DEFAULTS,
 });

@@ -4,21 +4,23 @@
  * `runSlackChannel(displayName)` walks the operator from a bare Slack
  * workspace through a running bot, then stops before wiring an agent:
  *
- *   1. Walk through creating a Slack app (api.slack.com/apps) — scopes,
- *      event subscriptions, and signing secret
- *   2. Paste the bot token + signing secret (clack password prompts)
- *   3. Validate via auth.test → resolves workspace + bot identity
- *   4. Install the adapter (setup/add-slack.sh, non-interactive)
- *   5. Print the post-install checklist: set the public webhook URL in
- *      Slack's Event Subscriptions, DM the bot to bootstrap the channel,
- *      then `/manage-channels` to wire an agent.
+ *   1. Ask the delivery mode: Socket Mode (outbound WebSocket, no public
+ *      URL) or a public webhook
+ *   2. Walk through creating a Slack app (api.slack.com/apps) — scopes,
+ *      events, and the mode-specific credential (app-level token for
+ *      Socket Mode, signing secret for webhook)
+ *   3. Paste the bot token + that credential (clack password prompts)
+ *   4. Validate via auth.test → resolves workspace + bot identity
+ *   5. Install the adapter (setup/add-slack.sh, non-interactive)
+ *   6. Print the post-install checklist (Socket Mode: just DM the bot;
+ *      webhook: set the public Request URL in Event Subscriptions), then
+ *      `/manage-channels` to wire an agent.
  *
- * Why no welcome DM here: unlike Discord/Telegram (gateway / long-poll),
- * Slack needs a public Event Subscriptions URL for inbound events, and
- * opening an unsolicited DM would need `im:write` scope we don't force
- * the SKILL.md to require. Shipping a honest "here's what's left" note
- * is better than a welcome DM the user won't receive until they
- * configure the webhook anyway.
+ * Why no welcome DM here: opening an unsolicited DM would need `im:write`
+ * scope we don't force the SKILL.md to require — and in webhook mode inbound
+ * events don't flow until the public Event Subscriptions URL is configured.
+ * Shipping an honest "here's what's left" note is better than a welcome DM
+ * the user won't receive until they finish wiring Slack up.
  *
  * All output obeys the three-level contract. See docs/setup-flow.md.
  */
@@ -26,6 +28,7 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import * as setupLog from '../logs.js';
+import { brightSelect } from '../lib/bright-select.js';
 import { confirmThenOpen } from '../lib/browser.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
 import { wrapForGutter } from '../lib/theme.js';
@@ -40,15 +43,27 @@ interface WorkspaceInfo {
   botUserId: string;
 }
 
+// Socket Mode (SLACK_APP_TOKEN, xapp-…) needs no public URL; webhook mode
+// (SLACK_SIGNING_SECRET) needs a public Request URL. The adapter picks the mode
+// purely from SLACK_APP_TOKEN's presence — this choice just decides which
+// credential to collect and which post-install guidance to show.
+type SlackMode = 'socket' | 'webhook';
+
 // displayName is reserved for when we start wiring the first agent here.
 // Kept to match the `run<X>Channel(displayName)` signature every other
 // channel driver uses, so auto.ts can dispatch without a branch.
 export async function runSlackChannel(_displayName: string): Promise<void> {
-  await walkThroughAppCreation();
+  const mode = await askSlackMode();
+  await walkThroughAppCreation(mode);
 
   const token = await collectBotToken();
-  const signingSecret = await collectSigningSecret();
+  const appToken = mode === 'socket' ? await collectAppToken() : undefined;
+  const signingSecret = mode === 'webhook' ? await collectSigningSecret() : undefined;
   const info = await validateSlackToken(token);
+
+  const env: Record<string, string> = { SLACK_BOT_TOKEN: token };
+  if (appToken) env.SLACK_APP_TOKEN = appToken;
+  if (signingSecret) env.SLACK_SIGNING_SECRET = signingSecret;
 
   const install = await runQuietChild(
     'slack-install',
@@ -59,11 +74,9 @@ export async function runSlackChannel(_displayName: string): Promise<void> {
       done: 'Slack adapter installed.',
     },
     {
-      env: {
-        SLACK_BOT_TOKEN: token,
-        SLACK_SIGNING_SECRET: signingSecret,
-      },
+      env,
       extraFields: {
+        MODE: mode,
         BOT_NAME: info.botName,
         TEAM_NAME: info.teamName,
         TEAM_ID: info.teamId,
@@ -71,21 +84,52 @@ export async function runSlackChannel(_displayName: string): Promise<void> {
     },
   );
   if (!install.ok) {
-    await fail(
-      'slack-install',
-      "Couldn't connect Slack.",
-      'See logs/setup-steps/ for details, then retry setup.',
-    );
+    await fail('slack-install', "Couldn't connect Slack.", 'See logs/setup-steps/ for details, then retry setup.');
   }
 
-  showPostInstallChecklist(info);
+  showPostInstallChecklist(info, mode);
 }
 
-async function walkThroughAppCreation(): Promise<void> {
+async function askSlackMode(): Promise<SlackMode> {
+  const choice = ensureAnswer(
+    await brightSelect<SlackMode>({
+      message: 'How should Slack deliver events to NanoClaw?',
+      initialValue: 'socket',
+      options: [
+        {
+          value: 'socket',
+          label: 'Socket Mode',
+          hint: 'no public URL — recommended for local or behind NAT',
+        },
+        {
+          value: 'webhook',
+          label: 'Public webhook',
+          hint: 'needs a public HTTPS Request URL',
+        },
+      ],
+    }),
+  );
+  setupLog.userInput('slack_mode', String(choice));
+  return choice;
+}
+
+async function walkThroughAppCreation(mode: SlackMode): Promise<void> {
+  const credSteps =
+    mode === 'socket'
+      ? [
+          '  4. Basic Information → App-Level Tokens → "Generate Token and',
+          '     Scopes" → add the connections:write scope → copy it (xapp-…)',
+          '  5. Socket Mode → toggle "Enable Socket Mode" on',
+          '  6. Install to Workspace → copy the "Bot User OAuth Token" (xoxb-…)',
+        ]
+      : [
+          '  4. Basic Information → copy the "Signing Secret"',
+          '  5. Install to Workspace → copy the "Bot User OAuth Token" (xoxb-…)',
+        ];
   p.note(
     [
       "You'll create a Slack app that the assistant talks through.",
-      "Free and stays inside the workspaces you pick.",
+      'Free and stays inside the workspaces you pick.',
       '',
       '  1. Create a new app "From scratch", name it, pick a workspace',
       '  2. OAuth & Permissions → add Bot Token Scopes:',
@@ -93,8 +137,7 @@ async function walkThroughAppCreation(): Promise<void> {
       '     channels:read, groups:read, users:read, reactions:write',
       '  3. App Home → enable "Messages Tab" and "Allow users to send',
       '     slash commands and messages from the messages tab"',
-      '  4. Basic Information → copy the "Signing Secret"',
-      '  5. Install to Workspace → copy the "Bot User OAuth Token" (xoxb-…)',
+      ...credSteps,
       '',
       k.dim(SLACK_APPS_URL),
     ].join('\n'),
@@ -104,7 +147,7 @@ async function walkThroughAppCreation(): Promise<void> {
 
   ensureAnswer(
     await p.confirm({
-      message: 'Got your bot token and signing secret?',
+      message: mode === 'socket' ? 'Got your bot token and app-level token?' : 'Got your bot token and signing secret?',
       initialValue: true,
     }),
   );
@@ -124,10 +167,7 @@ async function collectBotToken(): Promise<string> {
     }),
   );
   const token = (answer as string).trim();
-  setupLog.userInput(
-    'slack_bot_token',
-    `${token.slice(0, 10)}…${token.slice(-4)}`,
-  );
+  setupLog.userInput('slack_bot_token', `${token.slice(0, 10)}…${token.slice(-4)}`);
   return token;
 }
 
@@ -148,11 +188,26 @@ async function collectSigningSecret(): Promise<string> {
     }),
   );
   const secret = (answer as string).trim();
-  setupLog.userInput(
-    'slack_signing_secret',
-    `${secret.slice(0, 4)}…${secret.slice(-4)}`,
-  );
+  setupLog.userInput('slack_signing_secret', `${secret.slice(0, 4)}…${secret.slice(-4)}`);
   return secret;
+}
+
+async function collectAppToken(): Promise<string> {
+  const answer = ensureAnswer(
+    await p.password({
+      message: 'Paste your Slack app-level token (Socket Mode)',
+      validate: (v) => {
+        const t = (v ?? '').trim();
+        if (!t) return 'App-level token is required for Socket Mode';
+        if (!t.startsWith('xapp-')) return 'App-level tokens start with xapp-';
+        if (t.length < 24) return "That's shorter than a real Slack app-level token";
+        return undefined;
+      },
+    }),
+  );
+  const token = (answer as string).trim();
+  setupLog.userInput('slack_app_token', `${token.slice(0, 10)}…${token.slice(-4)}`);
+  return token;
 }
 
 async function validateSlackToken(token: string): Promise<WorkspaceInfo> {
@@ -177,9 +232,7 @@ async function validateSlackToken(token: string): Promise<WorkspaceInfo> {
     };
     const elapsedS = Math.round((Date.now() - start) / 1000);
     if (data.ok && data.team && data.user) {
-      s.stop(
-        `Connected to ${data.team} as @${data.user}. ${k.dim(`(${elapsedS}s)`)}`,
-      );
+      s.stop(`Connected to ${data.team} as @${data.user}. ${k.dim(`(${elapsedS}s)`)}`);
       const info: WorkspaceInfo = {
         teamName: data.team,
         teamId: data.team_id ?? '',
@@ -213,15 +266,30 @@ async function validateSlackToken(token: string): Promise<WorkspaceInfo> {
     setupLog.step('slack-validate', 'failed', Date.now() - start, {
       ERROR: message,
     });
-    await fail(
-      'slack-validate',
-      "Couldn't reach Slack.",
-      'Check your internet connection and retry setup.',
-    );
+    await fail('slack-validate', "Couldn't reach Slack.", 'Check your internet connection and retry setup.');
   }
 }
 
-function showPostInstallChecklist(info: WorkspaceInfo): void {
+function showPostInstallChecklist(info: WorkspaceInfo, mode: SlackMode): void {
+  if (mode === 'socket') {
+    p.note(
+      wrapForGutter(
+        [
+          `The Slack adapter is installed in Socket Mode and your creds are saved. No public URL needed — ${info.teamName} reaches NanoClaw over an outbound WebSocket.`,
+          '',
+          `  1. DM @${info.botName} from Slack once — that bootstraps the`,
+          '     messaging group. Then run `/manage-channels` in `claude` to',
+          '     wire an agent to it.',
+          '',
+          '  Note: keep the NanoClaw host running to hold the socket open —',
+          '  Slack does not retry delivery while it is down.',
+        ].join('\n'),
+        6,
+      ),
+      'Finish setting up Slack',
+    );
+    return;
+  }
   p.note(
     wrapForGutter(
       [

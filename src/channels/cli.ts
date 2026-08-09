@@ -39,10 +39,29 @@ import path from 'path';
 
 import { DATA_DIR } from '../config.js';
 import { log } from '../log.js';
-import type { ChannelAdapter, ChannelSetup, DeliveryAddress, InboundEvent, OutboundMessage } from './adapter.js';
+import type {
+  ChannelAdapter,
+  ChannelDefaults,
+  ChannelSetup,
+  DeliveryAddress,
+  InboundEvent,
+  OutboundMessage,
+} from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
 const PLATFORM_ID = 'local';
+
+/**
+ * Terminal transport: every line the operator types is for the agent
+ * (pattern '.'), the socket is owner-only so senders are trusted ('public'),
+ * there is no thread or mention concept. Matches what
+ * scripts/init-cli-agent.ts has always created.
+ */
+const CLI_DEFAULTS: ChannelDefaults = {
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'public' },
+  group: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'public' },
+  mentions: 'never',
+};
 
 function socketPath(): string {
   return path.join(DATA_DIR, 'cli.sock');
@@ -56,6 +75,7 @@ function createAdapter(): ChannelAdapter {
     name: 'cli',
     channelType: 'cli',
     supportsThreads: false,
+    defaults: CLI_DEFAULTS,
 
     async setup(config: ChannelSetup): Promise<void> {
       const sock = socketPath();
@@ -273,4 +293,4 @@ function extractText(message: OutboundMessage): string | null {
   return null;
 }
 
-registerChannelAdapter('cli', { factory: createAdapter });
+registerChannelAdapter('cli', { factory: createAdapter, defaults: CLI_DEFAULTS });

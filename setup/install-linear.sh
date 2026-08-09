@@ -86,7 +86,7 @@ if ! grep -q 'if (config.catchAll) {' src/channels/chat-sdk-bridge.ts; then
 fi
 
 echo "STEP: pnpm-install"
-pnpm install @chat-adapter/linear@4.26.0
+pnpm install @chat-adapter/linear@4.29.0
 
 echo "STEP: pnpm-build"
 pnpm run build

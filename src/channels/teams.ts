@@ -5,8 +5,19 @@
 import { createTeamsAdapter } from '@chat-adapter/teams';
 
 import { readEnvFile } from '../env.js';
+import type { ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
+
+/**
+ * Dedicated bot app on a threaded platform. 'mention' (not sticky) is the
+ * conservative group default; operators upgrade per wiring.
+ */
+const TEAMS_DEFAULTS: ChannelDefaults = {
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'request_approval' },
+  group: { engageMode: 'mention', threads: true, unknownSenderPolicy: 'request_approval' },
+  mentions: 'platform',
+};
 
 registerChannelAdapter('teams', {
   factory: () => {
@@ -18,6 +29,12 @@ registerChannelAdapter('teams', {
       appType: (env.TEAMS_APP_TYPE as 'SingleTenant' | 'MultiTenant') || undefined,
       appTenantId: env.TEAMS_APP_TENANT_ID || undefined,
     });
-    return createChatSdkBridge({ adapter: teamsAdapter, concurrency: 'concurrent', supportsThreads: true });
+    return createChatSdkBridge({
+      adapter: teamsAdapter,
+      concurrency: 'concurrent',
+      supportsThreads: true,
+      defaults: TEAMS_DEFAULTS,
+    });
   },
+  defaults: TEAMS_DEFAULTS,
 });

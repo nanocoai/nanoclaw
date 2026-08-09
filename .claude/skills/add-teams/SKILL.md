@@ -44,7 +44,7 @@ import './teams.js';
 ### 4. Install the adapter package (pinned)
 
 ```bash
-pnpm install @chat-adapter/teams@4.26.0
+pnpm install @chat-adapter/teams@4.29.0
 ```
 
 ### 5. Build

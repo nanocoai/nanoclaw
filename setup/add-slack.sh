@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 #
-# Install the Slack adapter, persist SLACK_BOT_TOKEN + SLACK_SIGNING_SECRET to
+# Install the Slack adapter, persist SLACK_BOT_TOKEN plus the mode-specific
+# secret (SLACK_APP_TOKEN for Socket Mode, SLACK_SIGNING_SECRET for webhook) to
 # .env + data/env/env, and restart the service. Non-interactive — the
 # operator-facing app creation walkthrough + credential paste live in
 # setup/channels/slack.ts. Credentials come in via env vars:
-# SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET.
+# SLACK_BOT_TOKEN, and SLACK_APP_TOKEN and/or SLACK_SIGNING_SECRET.
 #
 # Emits exactly one status block on stdout (ADD_SLACK) at the end. All chatty
 # progress messages go to stderr so setup:auto's raw-log capture sees the full
@@ -15,7 +16,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 # Keep in sync with .claude/skills/add-slack/SKILL.md.
-ADAPTER_VERSION="@chat-adapter/slack@4.26.0"
+ADAPTER_VERSION="@chat-adapter/slack@4.29.0"
 
 # Resolve which remote carries the channels branch — handles forks where
 # upstream lives on a different remote than `origin`.
@@ -41,8 +42,10 @@ if [ -z "${SLACK_BOT_TOKEN:-}" ]; then
   emit_status failed "SLACK_BOT_TOKEN env var not set"
   exit 1
 fi
-if [ -z "${SLACK_SIGNING_SECRET:-}" ]; then
-  emit_status failed "SLACK_SIGNING_SECRET env var not set"
+# Socket Mode authenticates with SLACK_APP_TOKEN; webhook mode with
+# SLACK_SIGNING_SECRET. Require at least one.
+if [ -z "${SLACK_APP_TOKEN:-}" ] && [ -z "${SLACK_SIGNING_SECRET:-}" ]; then
+  emit_status failed "Set SLACK_APP_TOKEN (Socket Mode) or SLACK_SIGNING_SECRET (webhook)"
   exit 1
 fi
 
@@ -98,7 +101,12 @@ upsert_env() {
   fi
 }
 upsert_env SLACK_BOT_TOKEN "$SLACK_BOT_TOKEN"
-upsert_env SLACK_SIGNING_SECRET "$SLACK_SIGNING_SECRET"
+if [ -n "${SLACK_APP_TOKEN:-}" ]; then
+  upsert_env SLACK_APP_TOKEN "$SLACK_APP_TOKEN"
+fi
+if [ -n "${SLACK_SIGNING_SECRET:-}" ]; then
+  upsert_env SLACK_SIGNING_SECRET "$SLACK_SIGNING_SECRET"
+fi
 
 # Container reads from data/env/env (the host mounts it).
 mkdir -p data/env
