@@ -231,6 +231,47 @@ async function signalTcpCheck(host: string, port: number): Promise<boolean> {
 
 const ECHO_TTL_MS = 10_000;
 
+// ---------------------------------------------------------------------------
+// Inbound document attachments
+// ---------------------------------------------------------------------------
+
+/**
+ * Non-image attachment types we accept and hand to the agent.
+ *
+ * Signal reports a useful `contentType` for most files, but routinely falls
+ * back to `application/octet-stream` for anything it doesn't recognise — which
+ * includes `.md`. So membership is decided by content type OR filename
+ * extension; either is enough.
+ */
+const DOC_CONTENT_TYPES = new Set([
+  'application/pdf',
+  'application/json',
+  'application/xml',
+  'application/zip',
+  'application/x-zip-compressed',
+  'application/gzip',
+  'application/x-gzip',
+  'application/x-tar',
+  'application/x-gtar',
+  'application/x-compressed-tar',
+]);
+
+const DOC_EXTENSIONS = /\.(md|markdown|txt|csv|tsv|json|ya?ml|xml|log|ics|vcf|pdf|zip|tar|tgz|gz)$/i;
+
+/**
+ * Base64 inlining round-trips the whole file through the session DB, so cap it.
+ * Archives make this reachable in a way images never did. Oversized files are
+ * dropped with a warning rather than silently, so the cause is visible.
+ */
+const MAX_INLINE_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+function isDocumentAttachment(att: { contentType?: string; filename?: string }): boolean {
+  const ct = (att.contentType ?? '').toLowerCase();
+  if (ct.startsWith('text/')) return true;
+  if (DOC_CONTENT_TYPES.has(ct)) return true;
+  return DOC_EXTENSIONS.test(att.filename ?? '');
+}
+
 /**
  * Per-recipient dedup for messages we sent ourselves.
  *
@@ -613,10 +654,36 @@ export function createSignalAdapter(config: {
 
     const audioAttachment = dataMessage.attachments?.find((a) => a.contentType?.startsWith('audio/') && a.id);
     const imageAttachments = dataMessage.attachments?.filter((a) => a.contentType?.startsWith('image/') && a.id) ?? [];
-    const pdfAttachments = dataMessage.attachments?.filter((a) => a.contentType === 'application/pdf' && a.id) ?? [];
+    // Everything that isn't an image or the voice note: .md, .txt, .csv, .ics,
+    // .pdf, archives. Previously only application/pdf was accepted here, so a
+    // markdown file attached to a message was discarded with no warning and no
+    // log line — the message arrived looking like plain text.
+    const docAttachments =
+      dataMessage.attachments?.filter(
+        (a) =>
+          a.id &&
+          a !== audioAttachment &&
+          !a.contentType?.startsWith('image/') &&
+          !a.contentType?.startsWith('audio/') &&
+          isDocumentAttachment(a),
+      ) ?? [];
     const hasVoice = !text && !!audioAttachment;
 
-    if (!text && !hasVoice && imageAttachments.length === 0 && pdfAttachments.length === 0) return;
+    // Anything Signal delivered that we are about to ignore entirely. Logged so
+    // an unsupported type is diagnosable instead of looking like a lost message.
+    const droppedAttachments =
+      dataMessage.attachments?.filter(
+        (a) => a !== audioAttachment && !imageAttachments.includes(a) && !docAttachments.includes(a),
+      ) ?? [];
+    if (droppedAttachments.length > 0) {
+      log.warn('Signal: unsupported attachment type(s) dropped', {
+        count: droppedAttachments.length,
+        types: droppedAttachments.map((a) => a.contentType ?? 'unknown'),
+        names: droppedAttachments.map((a) => a.filename ?? a.id ?? '?'),
+      });
+    }
+
+    if (!text && !hasVoice && imageAttachments.length === 0 && docAttachments.length === 0) return;
 
     const sender = (envelope.sourceNumber ?? envelope.sourceUuid ?? envelope.source ?? '').trim();
     if (!sender) return;
@@ -701,6 +768,15 @@ export function createSignalAdapter(config: {
       }
       try {
         const buf = readFileSync(attachPath);
+        if (buf.length > MAX_INLINE_ATTACHMENT_BYTES) {
+          log.warn(`Signal: ${kind} attachment too large to inline`, {
+            id: att.id,
+            name: att.filename,
+            size: buf.length,
+            max: MAX_INLINE_ATTACHMENT_BYTES,
+          });
+          return;
+        }
         const ct = att.contentType || defaultContentType;
         // Prefer the original filename when signal-cli supplies one (common
         // for documents); otherwise synthesize <id>.<ext-from-contentType>.
@@ -718,7 +794,7 @@ export function createSignalAdapter(config: {
       }
     };
     for (const img of imageAttachments) inlineAttachment(img, 'image', 'image/jpeg');
-    for (const pdf of pdfAttachments) inlineAttachment(pdf, 'document', 'application/pdf');
+    for (const doc of docAttachments) inlineAttachment(doc, 'document', 'application/octet-stream');
 
     const msg: InboundMessage = {
       id: String(dataMessage.timestamp ?? Date.now()),

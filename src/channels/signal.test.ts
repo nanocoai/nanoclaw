@@ -478,6 +478,85 @@ describe('SignalAdapter', () => {
 
       await adapter.teardown();
     });
+
+    // Regression: a markdown file attached to a message used to be discarded
+    // silently — only image/* and application/pdf were accepted — so the
+    // message arrived looking like ordinary text with the file simply gone.
+    it.each([
+      ['notes.md', 'application/octet-stream', 'mdid1'],
+      ['data.csv', 'text/csv', 'csvid1'],
+      ['bundle.tar.gz', 'application/gzip', 'gzid1'],
+      ['archive.zip', 'application/zip', 'zipid1'],
+    ])('forwards %s as a document attachment', async (filename, contentType, attId) => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const attachDir = path.join('/tmp/signal-cli-test-data', 'attachments');
+      fs.mkdirSync(attachDir, { recursive: true });
+      const fakeBytes = Buffer.from(`fake bytes for ${filename}`);
+      const attachFile = path.join(attachDir, attId);
+      fs.writeFileSync(attachFile, fakeBytes);
+
+      try {
+        pushEvent({
+          sourceNumber: '+15555550123',
+          sourceName: 'Alice',
+          dataMessage: {
+            timestamp: 1700000000000,
+            message: 'here you go',
+            attachments: [{ id: attId, contentType, filename, size: fakeBytes.length }],
+          },
+        });
+
+        await new Promise((r) => setTimeout(r, 50));
+        expect(cfg.onInbound).toHaveBeenCalledWith(
+          '+15555550123',
+          null,
+          expect.objectContaining({
+            content: expect.objectContaining({
+              attachments: [
+                expect.objectContaining({
+                  data: fakeBytes.toString('base64'),
+                  name: filename,
+                  type: 'document',
+                  size: fakeBytes.length,
+                }),
+              ],
+            }),
+          }),
+        );
+      } finally {
+        fs.unlinkSync(attachFile);
+      }
+
+      await adapter.teardown();
+    });
+
+    it('ignores an unsupported attachment type but still delivers the text', async () => {
+      const adapter = createAdapter();
+      const cfg = createMockSetup();
+      await adapter.setup(cfg);
+
+      pushEvent({
+        sourceNumber: '+15555550123',
+        sourceName: 'Alice',
+        dataMessage: {
+          timestamp: 1700000000000,
+          message: 'see attached',
+          attachments: [{ id: 'exeid1', contentType: 'application/x-msdownload', filename: 'tool.exe' }],
+        },
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      const call = cfg.onInbound.mock.calls[0];
+      expect(call[2].content.text).toBe('see attached');
+      expect(call[2].content.attachments).toBeUndefined();
+
+      await adapter.teardown();
+    });
   });
 
   // --- groupV2 ---
