@@ -111,7 +111,7 @@ describe('insertMessage — platform id-space wraparound', () => {
     id,
     kind: 'chat-sdk',
     timestamp: '2026-08-08T23:28:08.000Z',
-    platformId: 'telegram:1295462156',
+    platformId: 'telegram:test-chat',
     channelType: 'telegram',
     threadId: null,
     content: '{"text":"1"}',
