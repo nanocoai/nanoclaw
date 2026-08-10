@@ -49,6 +49,13 @@ export interface ProviderContainerContribution {
   mounts?: VolumeMount[];
   /** Extra env vars to pass to the container (`-e KEY=VALUE`). */
   env?: Record<string, string>;
+  /**
+   * Hosts to make unreachable from inside the container, via
+   * `--add-host <host>:0.0.0.0`. For providers that redirect the SDK
+   * elsewhere and want the original endpoint hard-blocked rather than
+   * merely unused.
+   */
+  blockedHosts?: string[];
 }
 
 /**

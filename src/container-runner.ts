@@ -491,6 +491,22 @@ async function buildContainerArgs(
     }
   }
 
+  // Per-agent-group env overrides — after the provider block so a group that
+  // points at its own model endpoint wins over the install-wide provider value.
+  if (containerConfig.env) {
+    for (const [key, value] of Object.entries(containerConfig.env)) {
+      args.push('-e', `${key}=${value}`);
+    }
+  }
+
+  // Blocked hosts — resolve to 0.0.0.0 so they are unreachable from inside the
+  // container. Used when the SDK is redirected elsewhere and the original
+  // endpoint must fail fast rather than be silently billable. Provider-level
+  // first, then per-group; duplicates are harmless to Docker.
+  for (const host of [...(providerContribution.blockedHosts ?? []), ...(containerConfig.blockedHosts ?? [])]) {
+    args.push('--add-host', `${host}:0.0.0.0`);
+  }
+
   // Egress lockdown when enabled — throws if it can't be established, aborting
   // the spawn rather than running with open egress. Otherwise the host gateway.
   if (ensureEgressNetwork()) {

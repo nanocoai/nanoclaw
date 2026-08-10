@@ -13,6 +13,7 @@ import { initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
 import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
+import { registerHealthEndpoint } from './health-endpoint.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
 import { log } from './log.js';
@@ -157,6 +158,10 @@ async function main(): Promise<void> {
 
   // 7. Start the `ncl` CLI socket server (data/ncl.sock).
   await startCliServer();
+
+  // 8. Liveness route on the shared webhook server (GET /webhook/health), for
+  // external dashboards. Last, so a 200 means the whole startup path finished.
+  registerHealthEndpoint();
 
   log.info('NanoClaw running');
 }

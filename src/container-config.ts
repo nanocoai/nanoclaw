@@ -45,6 +45,10 @@ export interface ContainerConfig {
   model?: string;
   effort?: string;
   timezone?: string;
+  /** Per-group container env overrides (`-e KEY=VALUE`), applied after provider env so they win. */
+  env?: Record<string, string>;
+  /** Hosts made unreachable inside the container via `--add-host <host>:0.0.0.0`. */
+  blockedHosts?: string[];
 }
 
 /**
@@ -77,6 +81,8 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     model: row.model ?? undefined,
     effort: row.effort ?? undefined,
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
+    env: row.env ? (JSON.parse(row.env) as Record<string, string>) : undefined,
+    blockedHosts: row.blocked_hosts ? (JSON.parse(row.blocked_hosts) as string[]) : undefined,
   };
 }
 

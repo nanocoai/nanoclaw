@@ -18,11 +18,30 @@ import { readEnvFile } from '../env.js';
 import { registerProviderContainerConfig } from './provider-container-registry.js';
 
 registerProviderContainerConfig('claude', () => {
-  const dotenv = readEnvFile(['ANTHROPIC_BASE_URL']);
+  const dotenv = readEnvFile(['ANTHROPIC_BASE_URL', 'ANTHROPIC_BASE_URL_NO_PROXY']);
   const env: Record<string, string> = {};
+  const blockedHosts: string[] = [];
+
   if (dotenv.ANTHROPIC_BASE_URL) {
     env.ANTHROPIC_BASE_URL = dotenv.ANTHROPIC_BASE_URL;
     env.ANTHROPIC_AUTH_TOKEN = 'placeholder';
+
+    // Local-model case (e.g. Ollama): the endpoint needs no credentials, so
+    // routing it through OneCLI buys nothing and its HTTPS proxy can't reach a
+    // plain-http host on the LAN anyway. Opt-in, because the default above is
+    // the opposite contract — a cloud endpoint whose Authorization header
+    // OneCLI rewrites on the wire. Bypassing the proxy there would send the
+    // placeholder token instead of the real one.
+    if (dotenv.ANTHROPIC_BASE_URL_NO_PROXY === 'true') {
+      const { hostname } = new URL(dotenv.ANTHROPIC_BASE_URL);
+      env.NO_PROXY = hostname;
+      env.no_proxy = hostname; // lowercase variant — some clients only read this one
+      // With the proxy bypassed for the model host, a model name that drifts
+      // back to a Claude one would still reach api.anthropic.com *through*
+      // OneCLI, which injects the real key and bills it. Make it unreachable.
+      blockedHosts.push('api.anthropic.com');
+    }
   }
-  return { env };
+
+  return { env, blockedHosts };
 });

@@ -209,53 +209,98 @@ function createPairingInterceptor(
   };
 }
 
+/**
+ * Build a Telegram adapter for one bot token.
+ *
+ * `instance` is undefined for the default bot (registry key `telegram`, legacy
+ * unprefixed state namespace, `/webhook/telegram`) and set for every additional
+ * bot, which gets its own key, state namespace and webhook route. `channelType`
+ * stays `telegram` either way — these are separate bot identities, not separate
+ * platforms.
+ */
+function buildTelegramAdapter(token: string, instance?: string): ChannelAdapter {
+  const telegramAdapter = createTelegramAdapter({
+    botToken: token,
+    mode: 'polling',
+  });
+  const bridge = createChatSdkBridge({
+    adapter: telegramAdapter,
+    concurrency: 'concurrent',
+    extractReplyContext,
+    supportsThreads: false,
+    defaults: TELEGRAM_DEFAULTS,
+    transformOutboundText: sanitizeTelegramLegacyMarkdown,
+    maxTextLength: 4000,
+    instance,
+  });
+
+  const botUsernamePromise = fetchBotUsername(token);
+
+  return {
+    ...bridge,
+    resolveChannelName: async (platformId: string) => {
+      const chatId = platformId.split(':').slice(1).join(':');
+      if (!chatId) return null;
+      try {
+        const res = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId }),
+        });
+        const data = (await res.json()) as { ok?: boolean; result?: { title?: string } };
+        return data.ok ? (data.result?.title ?? null) : null;
+      } catch {
+        return null;
+      }
+    },
+    async setup(hostConfig: ChannelSetup) {
+      const intercepted: ChannelSetup = {
+        ...hostConfig,
+        onInbound: createPairingInterceptor(botUsernamePromise, hostConfig.onInbound, token),
+      };
+      return withRetry(() => bridge.setup(intercepted), 'bridge.setup');
+    },
+  };
+}
+
 registerChannelAdapter('telegram', {
   factory: () => {
     const env = readEnvFile(['TELEGRAM_BOT_TOKEN']);
     if (!env.TELEGRAM_BOT_TOKEN) return null;
-    const token = env.TELEGRAM_BOT_TOKEN;
-    const telegramAdapter = createTelegramAdapter({
-      botToken: token,
-      mode: 'polling',
-    });
-    const bridge = createChatSdkBridge({
-      adapter: telegramAdapter,
-      concurrency: 'concurrent',
-      extractReplyContext,
-      supportsThreads: false,
-      defaults: TELEGRAM_DEFAULTS,
-      transformOutboundText: sanitizeTelegramLegacyMarkdown,
-      maxTextLength: 4000,
-    });
-
-    const botUsernamePromise = fetchBotUsername(token);
-
-    const wrapped: ChannelAdapter = {
-      ...bridge,
-      resolveChannelName: async (platformId: string) => {
-        const chatId = platformId.split(':').slice(1).join(':');
-        if (!chatId) return null;
-        try {
-          const res = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ chat_id: chatId }),
-          });
-          const data = (await res.json()) as { ok?: boolean; result?: { title?: string } };
-          return data.ok ? (data.result?.title ?? null) : null;
-        } catch {
-          return null;
-        }
-      },
-      async setup(hostConfig: ChannelSetup) {
-        const intercepted: ChannelSetup = {
-          ...hostConfig,
-          onInbound: createPairingInterceptor(botUsernamePromise, hostConfig.onInbound, token),
-        };
-        return withRetry(() => bridge.setup(intercepted), 'bridge.setup');
-      },
-    };
-    return wrapped;
+    return buildTelegramAdapter(env.TELEGRAM_BOT_TOKEN);
   },
   defaults: TELEGRAM_DEFAULTS,
 });
+
+/**
+ * Additional bots. `TELEGRAM_INSTANCES=local,work` declares them; each needs
+ * its own `TELEGRAM_BOT_TOKEN_<NAME>` (uppercased, non-alphanumerics to `_`).
+ * Registered as `telegram-<name>` so a wiring can address one bot identity
+ * specifically — the point being that two bots can front agent groups with
+ * different models, without the token ever being shared between them.
+ *
+ * Declared at import time because the registry is populated before the host
+ * instantiates adapters; a name with no matching token registers a factory
+ * that returns null, which the host treats as "adapter offline" rather than
+ * a crash.
+ */
+const declaredInstances = (readEnvFile(['TELEGRAM_INSTANCES']).TELEGRAM_INSTANCES ?? '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+for (const name of declaredInstances) {
+  const key = `telegram-${name}`;
+  const tokenVar = `TELEGRAM_BOT_TOKEN_${name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
+  registerChannelAdapter(key, {
+    factory: () => {
+      const env = readEnvFile([tokenVar]);
+      if (!env[tokenVar]) {
+        log.warn('Telegram instance declared but has no token — skipping', { instance: key, expected: tokenVar });
+        return null;
+      }
+      return buildTelegramAdapter(env[tokenVar], key);
+    },
+    defaults: TELEGRAM_DEFAULTS,
+  });
+}

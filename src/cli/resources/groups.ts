@@ -53,8 +53,40 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     additional_mounts: JSON.parse(row.additional_mounts),
     cli_scope: row.cli_scope,
     timezone: row.timezone,
+    env: row.env ? JSON.parse(row.env) : null,
+    blocked_hosts: row.blocked_hosts ? JSON.parse(row.blocked_hosts) : null,
     updated_at: row.updated_at,
   };
+}
+
+/**
+ * Parse a JSON-column flag. `""` clears the column back to NULL (no overrides),
+ * matching the --timezone convention. Returns undefined when the flag is absent.
+ */
+function parseJsonFlag(raw: unknown, label: string, expect: 'object' | 'array'): unknown | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === '') return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw as string);
+  } catch {
+    throw new Error(`--${label} must be valid JSON (got: ${String(raw)})`);
+  }
+  const ok =
+    expect === 'array'
+      ? Array.isArray(parsed)
+      : parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed);
+  if (!ok) throw new Error(`--${label} must be a JSON ${expect}`);
+  if (expect === 'object') {
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v !== 'string') throw new Error(`--${label}: value for "${k}" must be a string`);
+    }
+  } else {
+    for (const v of parsed as unknown[]) {
+      if (typeof v !== 'string') throw new Error(`--${label}: every entry must be a string`);
+    }
+  }
+  return parsed;
 }
 
 registerResource({
@@ -281,7 +313,9 @@ registerResource({
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
         'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
-        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
+        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart), ' +
+        '--env <json-object> (per-group container env, e.g. routing this group to its own model endpoint; "" clears), ' +
+        '--blocked-hosts <json-array> (hostnames made unreachable inside the container via 0.0.0.0; "" clears).',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -318,13 +352,19 @@ registerResource({
           updates.cli_scope = scope;
         }
 
-        if (Object.keys(updates).length === 0) {
+        // JSON columns — separate write path from the scalars above.
+        const envFlag = parseJsonFlag(args.env, 'env', 'object');
+        const blockedFlag = parseJsonFlag(args['blocked-hosts'] ?? args.blocked_hosts, 'blocked-hosts', 'array');
+
+        if (Object.keys(updates).length === 0 && envFlag === undefined && blockedFlag === undefined) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone, --env, --blocked-hosts',
           );
         }
 
-        updateContainerConfigScalars(id, updates);
+        if (Object.keys(updates).length > 0) updateContainerConfigScalars(id, updates);
+        if (envFlag !== undefined) updateContainerConfigJson(id, 'env', envFlag);
+        if (blockedFlag !== undefined) updateContainerConfigJson(id, 'blocked_hosts', blockedFlag);
 
         const updated = getContainerConfig(id)!;
         return presentConfig(updated);

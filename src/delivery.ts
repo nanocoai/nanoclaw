@@ -34,7 +34,7 @@ import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
-import type { PendingApproval, Session } from './types.js';
+import type { MessagingGroup, PendingApproval, Session } from './types.js';
 
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
@@ -243,6 +243,42 @@ async function drainSession(session: Session): Promise<void> {
   }
 }
 
+/**
+ * Resolve a channel address to a messaging group via the sending agent's own
+ * `agent_destinations` rows.
+ *
+ * Exists because `instance` never crosses the container boundary (it is absent
+ * from both the projected `destinations` table and `messages_out`), so a session
+ * with no origin chat has no other way to tell sibling instances apart. A
+ * destination row names an exact messaging group, which pins the instance.
+ *
+ * Guarded: without the agent-to-agent module the `agent_destinations` table
+ * doesn't exist, and we return undefined so the caller falls back to the
+ * by-platform lookup. Inlined SQL rather than importing the module's helper,
+ * matching the permission check below — core must not depend on the module.
+ *
+ * Ordering mirrors getMessagingGroupByPlatform (default instance first, then
+ * lexical) so a group holding several destinations to one address stays
+ * deterministic.
+ */
+function resolveViaAgentDestination(
+  agentGroupId: string,
+  channelType: string,
+  platformId: string,
+): MessagingGroup | undefined {
+  if (!hasTable(getDb(), 'agent_destinations')) return undefined;
+  return getDb()
+    .prepare(
+      `SELECT mg.* FROM messaging_groups mg
+         JOIN agent_destinations d ON d.target_id = mg.id
+        WHERE d.agent_group_id = ? AND d.target_type = 'channel'
+          AND mg.channel_type = ? AND mg.platform_id = ?
+     ORDER BY (mg.instance = mg.channel_type) DESC, mg.instance ASC
+        LIMIT 1`,
+    )
+    .get(agentGroupId, channelType, platformId) as MessagingGroup | undefined;
+}
+
 async function deliverMessage(
   msg: {
     id: string;
@@ -321,13 +357,30 @@ async function deliverMessage(
     // Resolve the messaging group ORIGIN-SESSION-FIRST: when the message
     // targets the session's own chat address, the origin row wins even if
     // sibling instances share the same (channel_type, platform_id) — so the
-    // reply goes out through the instance the message came in on. Otherwise
-    // fall back to the by-platform lookup (default-instance-first).
+    // reply goes out through the instance the message came in on.
+    //
+    // Sessions with no origin chat (task/system sessions, where
+    // messaging_group_id is NULL) can't recover the instance that way. Since
+    // `instance` is host-internal, the container never writes it: messages_out
+    // carries only (channel_type, platform_id), which is ambiguous whenever
+    // sibling instances share one address — e.g. three Telegram bots DMing the
+    // same human. The by-platform lookup would then silently pick the DEFAULT
+    // instance, which usually belongs to a different agent group, and the
+    // permission check below would reject a send the agent was entitled to make.
+    //
+    // So disambiguate through the sending agent's own destination rows first:
+    // a destination names an exact messaging group, which pins the instance.
+    // That is also ACL-consistent by construction — it can only ever resolve to
+    // a chat this agent is already authorized for, so it widens routing without
+    // widening permission. Falls through to the by-platform lookup when the
+    // agent holds no matching destination, preserving the previous behaviour
+    // (and the rejection that follows for genuinely unauthorized targets).
     const originMg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
     const mg =
       originMg && originMg.channel_type === msg.channel_type && originMg.platform_id === msg.platform_id
         ? originMg
-        : getMessagingGroupByPlatform(msg.channel_type, msg.platform_id);
+        : (resolveViaAgentDestination(session.agent_group_id, msg.channel_type, msg.platform_id) ??
+          getMessagingGroupByPlatform(msg.channel_type, msg.platform_id));
     if (!mg) {
       throw new Error(`unknown messaging group for ${msg.channel_type}/${msg.platform_id} (message ${msg.id})`);
     }
