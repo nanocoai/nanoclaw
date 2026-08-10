@@ -70,13 +70,49 @@ describe('createPairing', () => {
     expect(r.status).toBe('pending');
   });
 
+  it.skipIf(process.platform === 'win32')('writes the store with owner-only permissions', async () => {
+    await createPairing('main');
+    const storeFile = path.join(tmpDir, 'pairings.json');
+    expect(fs.statSync(storeFile).mode & 0o777).toBe(0o600);
+    fs.chmodSync(tmpDir, 0o755);
+
+    // A stale tmp file with loose perms must not survive into the store.
+    fs.writeFileSync(`${storeFile}.tmp`, 'stale', { mode: 0o644 });
+    await createPairing('main');
+    expect(fs.statSync(tmpDir).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(storeFile).mode & 0o777).toBe(0o600);
+
+    // Reads also repair permissions when an existing store was created with
+    // loose modes and no write has happened yet.
+    const existingCode = (await createPairing('main')).code;
+    fs.chmodSync(tmpDir, 0o755);
+    fs.chmodSync(storeFile, 0o644);
+    expect(getStatus(existingCode)).toBe('pending');
+    expect(fs.statSync(tmpDir).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(storeFile).mode & 0o777).toBe(0o600);
+  });
+
   it('does not collide with active codes', async () => {
+    // Distinct intents on purpose: createPairing invalidates any pending
+    // record for the SAME intent, so looping on 'main' leaves at most one
+    // record pending and `active` is always empty — every draw is then
+    // independent over the 10k space and the assertion below fails ~2% of
+    // runs on nothing but bad luck. Distinct intents keep all 20 pending, so
+    // this exercises the uniqueness generateCode actually guarantees.
     const codes = new Set<string>();
     for (let i = 0; i < 20; i++) {
-      const r = await createPairing('main');
+      const r = await createPairing({ kind: 'wire-to', folder: `group-${i}` });
       expect(codes.has(r.code)).toBe(false);
       codes.add(r.code);
     }
+  });
+
+  it('reuses a code once its holder is no longer pending', async () => {
+    // The contract is uniqueness among ACTIVE codes, not for all time — a
+    // consumed or invalidated record must not permanently burn its code.
+    const first = await createPairing('main');
+    await createPairing('main'); // supersedes -> first becomes 'invalidated'
+    expect(getStatus(first.code)).toBe('invalidated');
   });
 });
 

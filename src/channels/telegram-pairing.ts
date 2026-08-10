@@ -14,6 +14,7 @@
  * Storage is a JSON file at data/telegram-pairings.json — single-process,
  * read-modify-write under an in-process mutex.
  */
+import { randomInt } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -78,9 +79,26 @@ function withLock<T>(fn: () => Promise<T> | T): Promise<T> {
   return next;
 }
 
+function secureStorePermissions(p: string): void {
+  const dir = path.dirname(p);
+  // mkdir's mode is ignored when the directory already exists, so chmod is
+  // required to repair permissions on directories created by older versions.
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(dir, 0o700);
+  if (fs.existsSync(p)) fs.chmodSync(p, 0o600);
+}
+
 function readStore(): Store {
+  const p = storePath();
+  let raw: string;
   try {
-    const raw = fs.readFileSync(storePath(), 'utf8');
+    raw = fs.readFileSync(p, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { pairings: [] };
+    throw error;
+  }
+  secureStorePermissions(p);
+  try {
     const parsed = JSON.parse(raw) as Store;
     if (!Array.isArray(parsed.pairings)) return { pairings: [] };
     return parsed;
@@ -91,10 +109,15 @@ function readStore(): Store {
 
 function writeStore(store: Store): void {
   const p = storePath();
-  fs.mkdirSync(path.dirname(p), { recursive: true });
+  // Codes are auth material: dir 0700, file 0600. Modes only apply at
+  // creation, so drop any stale tmp that would carry old perms through rename.
+  secureStorePermissions(p);
   const tmp = `${p}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(store, null, 2));
+  fs.rmSync(tmp, { force: true });
+  fs.writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 });
+  fs.chmodSync(tmp, 0o600);
   fs.renameSync(tmp, p);
+  fs.chmodSync(p, 0o600);
 }
 
 /** Clean up old consumed/invalidated records (keep last 50). */
@@ -106,10 +129,10 @@ function sweep(store: Store): boolean {
 
 function generateCode(active: Set<string>): string {
   // 4-digit numeric, zero-padded. 10k space, fine for one-at-a-time intents.
+  // randomInt, not Math.random: the first pairer can be promoted to owner,
+  // and Math.random is predictable from its prior outputs.
   for (let i = 0; i < 50; i++) {
-    const code = Math.floor(Math.random() * 10000)
-      .toString()
-      .padStart(4, '0');
+    const code = randomInt(0, 10000).toString().padStart(4, '0');
     if (!active.has(code)) return code;
   }
   throw new Error('Could not allocate a free pairing code (too many active).');
@@ -317,7 +340,8 @@ export async function waitForPairing(code: string, opts: WaitForPairingOptions =
 
     try {
       const dir = path.dirname(storePath());
-      fs.mkdirSync(dir, { recursive: true });
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      fs.chmodSync(dir, 0o700);
       watcher = fs.watch(dir, (_event, fname) => {
         if (!fname || fname.toString().startsWith(path.basename(storePath()))) check();
       });
