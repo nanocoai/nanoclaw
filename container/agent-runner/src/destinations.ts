@@ -65,9 +65,9 @@ export function findByRouting(
   const db = getInboundDb();
   const row =
     channelType === 'agent'
-      ? (db
-          .prepare("SELECT * FROM destinations WHERE type = 'agent' AND agent_group_id = ?")
-          .get(platformId) as DestRow | undefined)
+      ? (db.prepare("SELECT * FROM destinations WHERE type = 'agent' AND agent_group_id = ?").get(platformId) as
+          | DestRow
+          | undefined)
       : (db
           .prepare("SELECT * FROM destinations WHERE type = 'channel' AND channel_type = ? AND platform_id = ?")
           .get(channelType, platformId) as DestRow | undefined);
@@ -85,7 +85,13 @@ export function buildSystemPromptAddendum(assistantName?: string, mode: SessionM
   const sections: string[] = [];
 
   if (assistantName) {
-    sections.push(['# You are ' + assistantName, '', `Your name is **${assistantName}**. Use it when the channel asks who you are, when introducing yourself, and when signing any message that explicitly calls for a signature.`].join('\n'));
+    sections.push(
+      [
+        '# You are ' + assistantName,
+        '',
+        `Your name is **${assistantName}**. Use it when the channel asks who you are, when introducing yourself, and when signing any message that explicitly calls for a signature.`,
+      ].join('\n'),
+    );
   }
 
   sections.push(buildDestinationsSection(mode));
@@ -130,7 +136,7 @@ function buildDestinationsSection(mode: SessionMode): string {
   );
   lines.push('');
   lines.push(
-    'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. Always pass its explicit `to` destination. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
+    'Use the `send_message` MCP tool only for a distinct interim update, such as a quick acknowledgment ("on it") before a slow tool call. Always pass its explicit `to` destination. Deliver the terminal outcome once in the final `<message>` block. If you already sent that outcome with `send_message`, do not repeat it in the final response; use `<internal>` for any non-delivered closing note.',
   );
   lines.push('');
   lines.push(

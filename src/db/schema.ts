@@ -242,6 +242,20 @@ CREATE TABLE IF NOT EXISTS messages_out (
   content        TEXT NOT NULL
 );
 
+-- Exactly-once claims for plain chat delivery within one inbound turn.
+-- Both explicit send_message calls and final <message> blocks claim through
+-- this table before writing messages_out, so a provider cannot deliver the
+-- same user-visible message through both doors. The claim and outbound row
+-- are committed in one container-owned transaction.
+CREATE TABLE IF NOT EXISTS message_delivery_claims (
+  turn_id        TEXT NOT NULL,
+  fingerprint    TEXT NOT NULL,
+  message_out_id TEXT NOT NULL UNIQUE,
+  source         TEXT NOT NULL,
+  created_at     TEXT NOT NULL,
+  PRIMARY KEY (turn_id, fingerprint)
+);
+
 -- Container tracks processing status here instead of updating messages_in.
 -- Host reads this to know which messages have been processed.
 -- On container startup, stale 'processing' entries are cleared (crash recovery).

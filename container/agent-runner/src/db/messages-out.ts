@@ -4,6 +4,8 @@
  * Writes to outbound.db (container-owned).
  * The host polls this DB (read-only) for undelivered messages.
  */
+import { createHash } from 'node:crypto';
+
 import { getInboundDb, getOutboundDb } from './connection.js';
 
 export interface MessageOutRow {
@@ -32,6 +34,88 @@ export interface WriteMessageOut {
   content: string;
 }
 
+export interface WriteChatMessageOnce {
+  id: string;
+  in_reply_to?: string | null;
+  platform_id?: string | null;
+  channel_type?: string | null;
+  thread_id?: string | null;
+  text: string;
+}
+
+export interface WriteMessageOnceResult {
+  id: string;
+  seq: number;
+  inserted: boolean;
+}
+
+export type ChatDeliverySource = 'mcp' | 'final' | 'error';
+
+function nextOutboundSeq(): number {
+  const outbound = getOutboundDb();
+  const inbound = getInboundDb();
+  const maxOut = (outbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number }).m;
+  const maxIn = (inbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_in').get() as { m: number }).m;
+  const max = Math.max(maxOut, maxIn);
+  return max % 2 === 0 ? max + 1 : max + 2;
+}
+
+function insertMessageOut(msg: WriteMessageOut, seq: number): void {
+  getOutboundDb()
+    .prepare(
+      `INSERT INTO messages_out (id, seq, in_reply_to, timestamp, deliver_after, recurrence, kind, platform_id, channel_type, thread_id, content)
+       VALUES ($id, $seq, $in_reply_to, $timestamp, $deliver_after, $recurrence, $kind, $platform_id, $channel_type, $thread_id, $content)`,
+    )
+    .run({
+      $id: msg.id,
+      $seq: seq,
+      $timestamp: new Date().toISOString(),
+      $in_reply_to: msg.in_reply_to ?? null,
+      $deliver_after: msg.deliver_after ?? null,
+      $recurrence: msg.recurrence ?? null,
+      $kind: msg.kind,
+      $platform_id: msg.platform_id ?? null,
+      $channel_type: msg.channel_type ?? null,
+      $thread_id: msg.thread_id ?? null,
+      $content: msg.content,
+    });
+}
+
+function inImmediateTransaction<T>(fn: () => T): T {
+  const outbound = getOutboundDb();
+  outbound.exec('BEGIN IMMEDIATE');
+  try {
+    const result = fn();
+    outbound.exec('COMMIT');
+    return result;
+  } catch (err) {
+    try {
+      outbound.exec('ROLLBACK');
+    } catch {
+      // Preserve the original write failure if SQLite already rolled back.
+    }
+    throw err;
+  }
+}
+
+function normalizeChatText(text: string): string {
+  return text.replace(/\r\n?/g, '\n').trim();
+}
+
+function chatFingerprint(msg: WriteChatMessageOnce): string {
+  // Thread routing can be resolved through different snapshots by the MCP and
+  // final-result processes. The logical destination is the channel/platform;
+  // keying on it catches the double-door delivery without content-window
+  // heuristics or suppressing the same reply on a later inbound turn.
+  const canonical = JSON.stringify({
+    kind: 'chat',
+    channelType: msg.channel_type ?? null,
+    platformId: msg.platform_id ?? null,
+    text: normalizeChatText(msg.text),
+  });
+  return createHash('sha256').update(canonical).digest('hex');
+}
+
 /**
  * Write a new outbound message, auto-assigning an odd seq number.
  * Container uses odd seq (1, 3, 5...), host uses even (2, 4, 6...).
@@ -43,38 +127,72 @@ export interface WriteMessageOut {
  * the agent's "edit message #5" could resolve to the wrong row.
  */
 export function writeMessageOut(msg: WriteMessageOut): number {
-  const outbound = getOutboundDb();
-  const inbound = getInboundDb();
+  return inImmediateTransaction(() => {
+    const seq = nextOutboundSeq();
+    insertMessageOut(msg, seq);
+    return seq;
+  });
+}
 
-  // Read max seq from both DBs to maintain global ordering.
-  // Safe: each side only reads the other DB, never writes to it.
-  const maxOut = (outbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number }).m;
-  const maxIn = (inbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_in').get() as { m: number }).m;
-  const max = Math.max(maxOut, maxIn);
-  const nextSeq = max % 2 === 0 ? max + 1 : max + 2; // next odd
+/**
+ * Write one plain chat message per (inbound turn, logical destination, text).
+ * The durable claim and messages_out row share a SQLite transaction, making
+ * retries and the separate MCP subprocess safe without relying on timing.
+ */
+export function writeChatMessageOnce(
+  msg: WriteChatMessageOnce,
+  turnId: string,
+  source: ChatDeliverySource,
+): WriteMessageOnceResult {
+  return inImmediateTransaction(() => {
+    const outbound = getOutboundDb();
+    const fingerprint = chatFingerprint(msg);
+    const claim = outbound
+      .prepare(
+        `INSERT OR IGNORE INTO message_delivery_claims
+           (turn_id, fingerprint, message_out_id, source, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(turnId, fingerprint, msg.id, source, new Date().toISOString());
 
-  // bun:sqlite requires named parameters to be passed with the prefix character
-  // in the JS object keys (better-sqlite3 auto-stripped it, bun:sqlite does not).
-  outbound
-    .prepare(
-      `INSERT INTO messages_out (id, seq, in_reply_to, timestamp, deliver_after, recurrence, kind, platform_id, channel_type, thread_id, content)
-     VALUES ($id, $seq, $in_reply_to, $timestamp, $deliver_after, $recurrence, $kind, $platform_id, $channel_type, $thread_id, $content)`,
-    )
-    .run({
-      $id: msg.id,
-      $seq: nextSeq,
-      $timestamp: new Date().toISOString(),
-      $in_reply_to: msg.in_reply_to ?? null,
-      $deliver_after: msg.deliver_after ?? null,
-      $recurrence: msg.recurrence ?? null,
-      $kind: msg.kind,
-      $platform_id: msg.platform_id ?? null,
-      $channel_type: msg.channel_type ?? null,
-      $thread_id: msg.thread_id ?? null,
-      $content: msg.content,
-    });
+    if (claim.changes === 0) {
+      const existing = outbound
+        .prepare(
+          `SELECT c.message_out_id AS id, m.seq AS seq
+           FROM message_delivery_claims c
+           JOIN messages_out m ON m.id = c.message_out_id
+           WHERE c.turn_id = ? AND c.fingerprint = ?`,
+        )
+        .get(turnId, fingerprint) as { id: string; seq: number } | undefined;
+      if (!existing) {
+        throw new Error(`delivery claim invariant violated for turn ${turnId}`);
+      }
+      return { ...existing, inserted: false };
+    }
 
-  return nextSeq;
+    const seq = nextOutboundSeq();
+    insertMessageOut(
+      {
+        id: msg.id,
+        in_reply_to: msg.in_reply_to,
+        kind: 'chat',
+        platform_id: msg.platform_id,
+        channel_type: msg.channel_type,
+        thread_id: msg.thread_id,
+        content: JSON.stringify({ text: msg.text }),
+      },
+      seq,
+    );
+    return { id: msg.id, seq, inserted: true };
+  });
+}
+
+/** True when any plain chat content has already been delivered for a turn. */
+export function hasChatDeliveryForTurn(turnId: string): boolean {
+  const row = getOutboundDb()
+    .prepare('SELECT 1 AS found FROM message_delivery_claims WHERE turn_id = ? LIMIT 1')
+    .get(turnId) as { found: number } | null | undefined;
+  return Boolean(row);
 }
 
 /**
@@ -92,9 +210,7 @@ export function getMessageIdBySeq(seq: number): string | null {
   const inbound = getInboundDb();
 
   // Inbound messages: ID is already the platform message ID
-  const inRow = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(seq) as
-    | { id: string }
-    | undefined;
+  const inRow = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(seq) as { id: string } | undefined;
   if (inRow) return inRow.id;
 
   // Outbound messages: look up platform message ID from delivered table

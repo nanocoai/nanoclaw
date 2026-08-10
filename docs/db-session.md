@@ -17,7 +17,7 @@ data/v2-sessions/<agent_group_id>/<session_id>/
   outbox/<message_id>/    ← attachments the agent produced
 ```
 
-The session directory itself is mounted read-write into the container (`src/container-runner.ts`) — read-only is *not* a mount property. The container opens `inbound.db` with `{ readonly: true }` at the SQLite connection layer (`container/agent-runner/src/db/connection.ts`), so the container could technically write to the underlying file via another path, but every code path that touches `inbound.db` from inside the container goes through that read-only handle.
+The session directory itself is mounted read-write into the container (`src/container-runner.ts`) — read-only is _not_ a mount property. The container opens `inbound.db` with `{ readonly: true }` at the SQLite connection layer (`container/agent-runner/src/db/connection.ts`), so the container could technically write to the underlying file via another path, but every code path that touches `inbound.db` from inside the container goes through that read-only handle.
 
 One session = one folder = one pair of DBs. The `agent_group_id` parent directory also holds per-group state (`.claude-shared/`) that is shared across every session of that agent group. (The agent-runner source is not copied per group — it's a shared read-only mount from `container/agent-runner/src` into every container; see `src/container-runner.ts`.)
 
@@ -111,10 +111,10 @@ Written by `writeSessionRouting()` on every container wake, derived from `sessio
 
 ## 3. Sequence numbering invariant
 
-Every message (in or out) gets a monotonic integer `seq`, unique *within the session* across both tables.
+Every message (in or out) gets a monotonic integer `seq`, unique _within the session_ across both tables.
 
 - **Host writes even seq** (2, 4, 6, …) to `messages_in` — `nextEvenSeq()` at `src/db/session-db.ts:75`.
-- **Container writes odd seq** (1, 3, 5, …) to `messages_out` — logic at `container/agent-runner/src/db/messages-out.ts:54` (`max % 2 === 0 ? max + 1 : max + 2`), reading `MAX(seq)` across *both* tables to preserve global ordering.
+- **Container writes odd seq** (1, 3, 5, …) to `messages_out` — `nextOutboundSeq()` in `container/agent-runner/src/db/messages-out.ts` reads `MAX(seq)` across _both_ tables to preserve global ordering.
 
 Why disjoint? `seq` is the agent-facing message ID. When the agent calls `edit_message(seq=5)` or `add_reaction(seq=6)`, `getMessageIdBySeq()` uses the parity to route the lookup: odd → `messages_out`, even → `messages_in`. The parity alone disambiguates without a join. Collisions would break editing.
 
@@ -151,7 +151,38 @@ Content shapes: see [api-details.md §Session DB Schema Details](api-details.md#
 **Writer (container):** `writeMessageOut()` in `container/agent-runner/src/db/messages-out.ts`.
 **Readers (host):** `src/delivery.ts` (polling delivery), `getMessageIdBySeq()` / `getRoutingBySeq()` for edit/reaction targeting.
 
-### 4.2 `processing_ack`
+Plain chat writes from `send_message` and final `<message>` blocks use
+`writeChatMessageOnce()` instead. It atomically claims the delivery and inserts
+the outbound row, while `writeMessageOut()` remains the general path for files,
+edits, reactions, task logs, and system actions.
+
+### 4.2 `message_delivery_claims`
+
+Durable exactly-once claims for user-visible plain chat messages:
+
+```sql
+CREATE TABLE message_delivery_claims (
+  turn_id        TEXT NOT NULL,
+  fingerprint    TEXT NOT NULL,
+  message_out_id TEXT NOT NULL UNIQUE,
+  source         TEXT NOT NULL,  -- mcp|final|error
+  created_at     TEXT NOT NULL,
+  PRIMARY KEY (turn_id, fingerprint)
+);
+```
+
+`turn_id` is the first inbound message ID in one prompt batch. The fingerprint
+covers normalized text plus the logical channel/platform destination. The MCP
+server and poll loop are separate processes, but both write the container-owned
+`outbound.db`; `BEGIN IMMEDIATE` serializes their claim and sequence allocation.
+A duplicate returns the original outbound ID/sequence as a successful no-op.
+
+Claims are intentionally scoped to one inbound turn. The same answer can be
+sent again after a later user message, and different interim/final text in one
+turn remains distinct. No time-window or content-only dedupe exists at the host
+or adapter boundary.
+
+### 4.3 `processing_ack`
 
 Container-side status for each `messages_in.id` it has touched. The host polls this and syncs status back into `messages_in` — this avoids the container ever writing to `inbound.db`.
 
@@ -165,7 +196,7 @@ CREATE TABLE processing_ack (
 
 Crash recovery: on container startup, stale `processing` entries get cleared. Host-side sync: `syncProcessingAcks()` in `src/host-sweep.ts`.
 
-### 4.3 `session_state`
+### 4.4 `session_state`
 
 Persistent container-owned KV store. Main consumer is the Chat SDK session ID — storing it here lets the agent's conversation resume across container restarts. Cleared by `/clear`.
 
@@ -179,7 +210,14 @@ CREATE TABLE session_state (
 
 Access: `container/agent-runner/src/db/session-state.ts`.
 
-### 4.4 `container_state`
+The poll loop also publishes `current_turn_context` here while a provider turn
+is active. Its JSON value contains the stable `turnId` and `inReplyTo` stamp.
+This DB-backed row is required because MCP tools run in a separate stdio
+process. Warm-query follow-ups rotate the row before their tool calls can run;
+the row is cleared when no turn is active and ignored if older than 24 hours,
+which covers long tool runs without periodic DB heartbeat writes.
+
+### 4.5 `container_state`
 
 Single-row (`id=1`) tool-in-flight tracker. The container records the currently-running tool on `PreToolUse` and clears it on `PostToolUse`/`PostToolUseFailure`; the host reads it during the stale-container sweep to widen its stuck-tolerance window when `Bash` is running with a user-declared `timeout` over the normal threshold, so long-running scripts aren't killed as "stuck".
 

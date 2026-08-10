@@ -18,9 +18,9 @@ function continuationKey(providerName: string): string {
 }
 
 function getValue(key: string): string | undefined {
-  const row = getOutboundDb()
-    .prepare('SELECT value FROM session_state WHERE key = ?')
-    .get(key) as { value: string } | undefined;
+  const row = getOutboundDb().prepare('SELECT value FROM session_state WHERE key = ?').get(key) as
+    | { value: string }
+    | undefined;
   return row?.value;
 }
 
@@ -91,6 +91,7 @@ export function clearContinuation(providerName: string): void {
  * (journal_mode=DELETE + busy_timeout make intra-container access safe).
  */
 const IN_REPLY_TO_KEY = 'current_in_reply_to';
+const TURN_CONTEXT_KEY = 'current_turn_context';
 
 /**
  * Ignore a stamp older than this. The poll loop clears the stamp in a
@@ -99,6 +100,10 @@ const IN_REPLY_TO_KEY = 'current_in_reply_to';
  * Generous so a long-running batch's late sends still stamp correctly.
  */
 const IN_REPLY_TO_MAX_AGE_MS = 30 * 60 * 1000;
+// Turn-scoped dedupe must survive legitimately long tool runs. A fresh query
+// overwrites this row before provider work starts, and normal completion clears
+// it, so a one-day crash guard is safe without periodic DB heartbeat writes.
+const TURN_CONTEXT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 export function setCurrentInReplyTo(id: string | null): void {
   if (id === null) {
@@ -113,6 +118,9 @@ export function clearCurrentInReplyTo(): void {
 }
 
 export function getCurrentInReplyTo(): string | null {
+  const context = getCurrentTurnContext();
+  if (context) return context.inReplyTo;
+
   const row = getOutboundDb()
     .prepare('SELECT value, updated_at FROM session_state WHERE key = ?')
     .get(IN_REPLY_TO_KEY) as { value: string; updated_at: string } | undefined;
@@ -120,4 +128,43 @@ export function getCurrentInReplyTo(): string | null {
   const age = Date.now() - new Date(row.updated_at).getTime();
   if (!Number.isFinite(age) || age > IN_REPLY_TO_MAX_AGE_MS) return null;
   return row.value;
+}
+
+export interface CurrentTurnContext {
+  turnId: string;
+  inReplyTo: string | null;
+}
+
+/**
+ * Publish one atomic turn context for both the poll-loop and MCP subprocess.
+ * A single JSON row avoids observing a new turn id with the previous turn's
+ * reply stamp while a warm provider query rotates between user prompts.
+ */
+export function setCurrentTurnContext(turnId: string, inReplyTo: string | null): void {
+  setValue(TURN_CONTEXT_KEY, JSON.stringify({ turnId, inReplyTo } satisfies CurrentTurnContext));
+}
+
+export function clearCurrentTurnContext(): void {
+  deleteValue(TURN_CONTEXT_KEY);
+  // Remove the legacy standalone stamp too. Older images may have left it
+  // behind, and getCurrentInReplyTo() intentionally retains a fallback read.
+  clearCurrentInReplyTo();
+}
+
+export function getCurrentTurnContext(): CurrentTurnContext | null {
+  const row = getOutboundDb()
+    .prepare('SELECT value, updated_at FROM session_state WHERE key = ?')
+    .get(TURN_CONTEXT_KEY) as { value: string; updated_at: string } | undefined;
+  if (!row) return null;
+  const age = Date.now() - new Date(row.updated_at).getTime();
+  if (!Number.isFinite(age) || age > TURN_CONTEXT_MAX_AGE_MS) return null;
+
+  try {
+    const parsed = JSON.parse(row.value) as Partial<CurrentTurnContext>;
+    if (typeof parsed.turnId !== 'string' || parsed.turnId.length === 0) return null;
+    if (parsed.inReplyTo !== null && typeof parsed.inReplyTo !== 'string') return null;
+    return { turnId: parsed.turnId, inReplyTo: parsed.inReplyTo ?? null };
+  } catch {
+    return null;
+  }
 }

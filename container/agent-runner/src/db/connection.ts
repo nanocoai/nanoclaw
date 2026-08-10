@@ -20,8 +20,10 @@
 import { Database } from 'bun:sqlite';
 import fs from 'fs';
 
-const DEFAULT_INBOUND_PATH = '/workspace/inbound.db';
-const DEFAULT_OUTBOUND_PATH = '/workspace/outbound.db';
+// Path overrides are a test seam for exercising the real two-process DB
+// contract on temporary files. Production containers use /workspace.
+const DEFAULT_INBOUND_PATH = process.env.NANOCLAW_INBOUND_DB_PATH ?? '/workspace/inbound.db';
+const DEFAULT_OUTBOUND_PATH = process.env.NANOCLAW_OUTBOUND_DB_PATH ?? '/workspace/outbound.db';
 const DEFAULT_HEARTBEAT_PATH = '/workspace/.heartbeat';
 
 let _inbound: Database | null = null;
@@ -100,6 +102,18 @@ export function getOutboundDb(): Database {
     if (!cols.has('updated_at')) {
       _outbound.exec(`ALTER TABLE session_state ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''`);
     }
+    // Exactly-once plain-chat delivery claims. This is forward-compatible for
+    // existing session DBs and is shared by the poll loop and MCP subprocess.
+    _outbound.exec(`
+      CREATE TABLE IF NOT EXISTS message_delivery_claims (
+        turn_id        TEXT NOT NULL,
+        fingerprint    TEXT NOT NULL,
+        message_out_id TEXT NOT NULL UNIQUE,
+        source         TEXT NOT NULL,
+        created_at     TEXT NOT NULL,
+        PRIMARY KEY (turn_id, fingerprint)
+      );
+    `);
     // container_state: tracks the current tool in flight (if any) so the host
     // sweep can widen its stuck tolerance when Bash is running with a user-
     // declared long timeout. Forward-compat for older outbound.db files.
@@ -239,6 +253,14 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
       message_id     TEXT PRIMARY KEY,
       status         TEXT NOT NULL,
       status_changed TEXT NOT NULL
+    );
+    CREATE TABLE message_delivery_claims (
+      turn_id        TEXT NOT NULL,
+      fingerprint    TEXT NOT NULL,
+      message_out_id TEXT NOT NULL UNIQUE,
+      source         TEXT NOT NULL,
+      created_at     TEXT NOT NULL,
+      PRIMARY KEY (turn_id, fingerprint)
     );
     CREATE TABLE session_state (
       key        TEXT PRIMARY KEY,

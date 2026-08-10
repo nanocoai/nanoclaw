@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
-import { getUndeliveredMessages } from './db/messages-out.js';
+import { getUndeliveredMessages, writeChatMessageOnce } from './db/messages-out.js';
+import { getCurrentTurnContext } from './db/session-state.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { isCorruptionError, processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
@@ -220,7 +221,13 @@ describe('origin metadata (from= attribute)', () => {
       .run(name, name, channelType, platformId);
   }
 
-  function insertWithRouting(id: string, kind: string, content: object, channelType: string | null, platformId: string | null): void {
+  function insertWithRouting(
+    id: string,
+    kind: string,
+    content: object,
+    channelType: string | null,
+    platformId: string | null,
+  ): void {
     getInboundDb()
       .prepare(
         `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
@@ -464,6 +471,92 @@ describe('error result with no <message> envelope', () => {
     expect(pushes).toHaveLength(1);
     expect(pushes[0]).toContain('was not delivered');
   });
+
+  it('does not re-run a turn that already delivered via send_message', async () => {
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 'sess-1' };
+      writeChatMessageOnce(
+        {
+          id: 'mcp-send',
+          in_reply_to: 'm1',
+          channel_type: 'discord',
+          platform_id: 'chan-1',
+          thread_id: null,
+          text: 'Already delivered.',
+        },
+        'm1',
+        'mcp',
+      );
+      yield { type: 'result', text: 'Finished sending the update.' };
+    }
+    const pushes: string[] = [];
+    const query: AgentQuery = {
+      push: (message) => pushes.push(message),
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    expect(pushes).toHaveLength(0);
+    expect(getUndeliveredMessages()).toHaveLength(1);
+  });
+});
+
+describe('warm-query turn identity', () => {
+  it('rotates delivery claims for a follow-up and allows the same later reply', async () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('mouse-chat', 'Mouse Chat', 'channel', 'mouse', 'mouse-chat', NULL)`,
+      )
+      .run();
+    const pushes: string[] = [];
+
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 'sess-1' };
+      yield { type: 'result', text: '<message to="mouse-chat">Same answer.</message>' };
+
+      insertMessage('m2', 'chat', { sender: 'John', text: 'Ask again' });
+      const deadline = Date.now() + 5000;
+      while (!pushes.some((prompt) => prompt.includes('Ask again')) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(getCurrentTurnContext()?.turnId).toBe('m2');
+      yield { type: 'result', text: '<message to="mouse-chat">Same answer.</message>' };
+    }
+
+    const query: AgentQuery = {
+      push: (message) => pushes.push(message),
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+    await processQuery(
+      query,
+      {
+        platformId: 'mouse-chat',
+        channelType: 'mouse',
+        threadId: null,
+        inReplyTo: 'm1',
+        taskRun: false,
+      },
+      ['m1'],
+      'claude',
+      undefined,
+      'first prompt',
+      undefined,
+    );
+
+    expect(getUndeliveredMessages()).toHaveLength(2);
+    expect(
+      getOutboundDb()
+        .prepare('SELECT turn_id FROM message_delivery_claims ORDER BY created_at, turn_id')
+        .all() as Array<{ turn_id: string }>,
+    ).toEqual([{ turn_id: 'm1' }, { turn_id: 'm2' }]);
+    expect(getCurrentTurnContext()).toBeNull();
+  });
 });
 
 describe('isCorruptionError', () => {
@@ -498,9 +591,9 @@ const TASK_ROUTING = {
 
 function taskLogRows(): Array<{ text: string }> {
   return (
-    getOutboundDb()
-      .prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq")
-      .all() as Array<{ content: string }>
+    getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq").all() as Array<{
+      content: string;
+    }>
   ).map((r) => JSON.parse(r.content) as { text: string });
 }
 

@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../db/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
+import { dispatchResultText } from '../poll-loop.js';
 import { sendMessage } from './core.js';
 
 /**
@@ -27,6 +28,12 @@ function publishInReplyTo(id: string, ageMs = 0): void {
   getOutboundDb()
     .prepare('INSERT OR REPLACE INTO session_state (key, value, updated_at) VALUES (?, ?, ?)')
     .run('current_in_reply_to', id, updatedAt);
+}
+
+function publishTurn(turnId: string, inReplyTo: string): void {
+  getOutboundDb()
+    .prepare('INSERT OR REPLACE INTO session_state (key, value, updated_at) VALUES (?, ?, ?)')
+    .run('current_turn_context', JSON.stringify({ turnId, inReplyTo }), new Date().toISOString());
 }
 
 beforeEach(() => {
@@ -72,5 +79,49 @@ describe('send_message MCP tool — in_reply_to plumbing', () => {
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
     expect(out[0].in_reply_to).toBeNull();
+  });
+});
+
+describe('send_message MCP tool — final-response dedupe', () => {
+  it('shares the durable claim with a final <message> block', async () => {
+    publishTurn('turn-1', 'inbound-msg-1');
+
+    const toolResult = (await sendMessage.handler({ to: 'peer', text: 'Done.' })) as {
+      content: Array<{ text: string }>;
+    };
+    const finalResult = dispatchResultText(
+      '<message to="peer">Done.</message>',
+      {
+        platformId: 'ag-peer',
+        channelType: 'agent',
+        threadId: null,
+        inReplyTo: 'inbound-msg-1',
+        taskRun: false,
+      },
+      'turn-1',
+    );
+
+    expect(toolResult.content[0].text).toContain('Message sent');
+    expect(finalResult.sent).toBe(1);
+    expect(getUndeliveredMessages()).toHaveLength(1);
+  });
+
+  it('keeps a distinct interim update and final outcome', async () => {
+    publishTurn('turn-1', 'inbound-msg-1');
+
+    await sendMessage.handler({ to: 'peer', text: 'On it.' });
+    dispatchResultText(
+      '<message to="peer">Done.</message>',
+      {
+        platformId: 'ag-peer',
+        channelType: 'agent',
+        threadId: null,
+        inReplyTo: 'inbound-msg-1',
+        taskRun: false,
+      },
+      'turn-1',
+    );
+
+    expect(getUndeliveredMessages()).toHaveLength(2);
   });
 });

@@ -2,10 +2,13 @@ import { beforeEach, describe, expect, test } from 'bun:test';
 
 import { getOutboundDb, initTestSessionDb } from './connection.js';
 import {
+  clearCurrentTurnContext,
   clearContinuation,
   getContinuation,
+  getCurrentTurnContext,
   migrateLegacyContinuation,
   setContinuation,
+  setCurrentTurnContext,
 } from './session-state.js';
 
 beforeEach(() => {
@@ -96,5 +99,33 @@ describe('session-state — legacy migration', () => {
 
     const second = migrateLegacyContinuation('claude');
     expect(second).toBe('once');
+  });
+});
+
+describe('session-state — active turn context', () => {
+  test('round-trips and clears turn identity with its reply stamp', () => {
+    setCurrentTurnContext('turn-1', 'inbound-1');
+    expect(getCurrentTurnContext()).toEqual({ turnId: 'turn-1', inReplyTo: 'inbound-1' });
+
+    clearCurrentTurnContext();
+    expect(getCurrentTurnContext()).toBeNull();
+  });
+
+  test('supports turns without an a2a reply stamp', () => {
+    setCurrentTurnContext('turn-1', null);
+    expect(getCurrentTurnContext()).toEqual({ turnId: 'turn-1', inReplyTo: null });
+  });
+
+  test('covers long tool runs but ignores crash-stale context', () => {
+    setCurrentTurnContext('turn-1', 'inbound-1');
+    getOutboundDb()
+      .prepare("UPDATE session_state SET updated_at = ? WHERE key = 'current_turn_context'")
+      .run(new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString());
+    expect(getCurrentTurnContext()?.turnId).toBe('turn-1');
+
+    getOutboundDb()
+      .prepare("UPDATE session_state SET updated_at = ? WHERE key = 'current_turn_context'")
+      .run(new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString());
+    expect(getCurrentTurnContext()).toBeNull();
   });
 });

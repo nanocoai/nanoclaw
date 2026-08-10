@@ -6,14 +6,14 @@ import {
   markScriptSkipped,
   type MessageInRow,
 } from './db/messages-in.js';
-import { writeMessageOut } from './db/messages-out.js';
+import { hasChatDeliveryForTurn, writeChatMessageOnce, writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
   clearContinuation,
-  clearCurrentInReplyTo,
+  clearCurrentTurnContext,
   migrateLegacyContinuation,
   setContinuation,
-  setCurrentInReplyTo,
+  setCurrentTurnContext,
 } from './db/session-state.js';
 import {
   formatMessages,
@@ -236,20 +236,23 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
-    const query = config.provider.query({
-      prompt,
-      continuation,
-      cwd: config.cwd,
-      systemContext: config.systemContext,
-    });
-
-    // Process the query while concurrently polling for new messages
+    // Publish the turn before constructing the provider query. Some providers
+    // start work eagerly, so the separate MCP process must be able to observe
+    // the turn identity before its first possible tool call.
     const skippedSet = new Set(skipped.map((s) => s.id));
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
-    // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
-    // can stamp it on outbound rows — needed for a2a return-path routing.
-    setCurrentInReplyTo(routing.inReplyTo);
+    const turnId = processingIds[0] ?? routing.inReplyTo;
+    if (turnId) setCurrentTurnContext(turnId, routing.inReplyTo);
+
     try {
+      const query = config.provider.query({
+        prompt,
+        continuation,
+        cwd: config.cwd,
+        systemContext: config.systemContext,
+      });
+
+      // Process the query while concurrently polling for new messages.
       const result = await processQuery(
         query,
         routing,
@@ -276,22 +279,40 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuation(config.providerName);
       }
 
-      // Write error response so the user knows something went wrong
-      writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
-      });
+      // Write error response so the user knows something went wrong. Keep it
+      // under the same durable turn claim if processQuery failed after a tool
+      // had already sent identical user-visible content.
+      const errorTurnId = processingIds[0];
+      if (errorTurnId) {
+        writeChatMessageOnce(
+          {
+            id: generateId(),
+            in_reply_to: routing.inReplyTo,
+            platform_id: routing.platformId,
+            channel_type: routing.channelType,
+            thread_id: routing.threadId,
+            text: `Error: ${errMsg}`,
+          },
+          errorTurnId,
+          'error',
+        );
+      } else {
+        writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        });
+      }
 
       // The batch is still acked completed below (no redelivery). Without
       // this line the only log trace of the errored turn is "Query error"
       // followed by a "Completed" line that reads like success.
       log(`Errored batch will be acked completed — ${processingIds.length} message(s), no redelivery`);
     } finally {
-      clearCurrentInReplyTo();
+      clearCurrentTurnContext();
     }
 
     // Ensure completed even if processQuery ended without a result event
@@ -339,6 +360,12 @@ interface QueryResult {
   continuation?: string;
 }
 
+interface PendingTurn {
+  turnId: string;
+  inReplyTo: string | null;
+  prompt: string;
+}
+
 export async function processQuery(
   query: AgentQuery,
   routing: RoutingContext,
@@ -354,11 +381,26 @@ export async function processQuery(
   // Once-per-turn guard for the task-run "<message> block was not delivered"
   // nudge — mirrors unwrappedNudged for chat turns.
   let taskBlockNudged = false;
-  // Prompt queue for the exchange hook — each result event consumes the
-  // oldest unanswered prompt, except a wrapping-retry result, which answers
-  // the same prompt again. Unused (and unmaintained) when the provider
-  // doesn't implement `onExchangeComplete`.
-  const archivePrompts: string[] = [initialPrompt];
+  // A provider query can stay open across many inbound turns. Keep the
+  // per-turn delivery identity in the same FIFO as its prompt, and publish
+  // only the active head through outbound.db for the MCP subprocess.
+  const firstTurnId = initialBatchIds[0] ?? routing.inReplyTo;
+  const pendingTurns: PendingTurn[] = firstTurnId
+    ? [{ turnId: firstTurnId, inReplyTo: routing.inReplyTo, prompt: initialPrompt }]
+    : [];
+
+  const publishActiveTurn = (): void => {
+    const active = pendingTurns[0];
+    if (active) setCurrentTurnContext(active.turnId, active.inReplyTo);
+    else clearCurrentTurnContext();
+  };
+  const completeActiveTurn = (): void => {
+    pendingTurns.shift();
+    unwrappedNudged = false;
+    taskBlockNudged = false;
+    publishActiveTurn();
+  };
+  publishActiveTurn();
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -439,10 +481,10 @@ export async function processQuery(
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
-        unwrappedNudged = false;
-        taskBlockNudged = false;
+        const wasIdle = pendingTurns.length === 0;
+        pendingTurns.push({ turnId: keptIds[0], inReplyTo: keptIds[0], prompt });
+        if (wasIdle) publishActiveTurn();
         query.push(prompt);
-        archivePrompts.push(prompt);
         markCompleted(keptIds);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
@@ -505,7 +547,8 @@ export async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(event.text, routing);
+          const activeTurn = pendingTurns[0];
+          const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(event.text, routing, activeTurn?.turnId);
           const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
           // while explicit append-log calls remain optional additive notes.
@@ -518,18 +561,18 @@ export async function processQuery(
             // <message> envelope: deliver the notice instead of dropping it as
             // scratchpad, and skip the re-wrap nudge — it would just re-hammer
             // the failing gateway turn after turn.
-            deliverErrorResult(event.text, routing);
+            deliverErrorResult(event.text, routing, activeTurn?.turnId);
             notifyExchangeComplete(onExchangeComplete, {
-              prompt: archivePrompts[0] ?? initialPrompt,
+              prompt: activeTurn?.prompt ?? initialPrompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
               status: 'error',
             });
-            archivePrompts.shift();
+            completeActiveTurn();
           } else {
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
             notifyExchangeComplete(onExchangeComplete, {
-              prompt: archivePrompts[0] ?? initialPrompt,
+              prompt: activeTurn?.prompt ?? initialPrompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
               status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
@@ -555,15 +598,15 @@ export async function processQuery(
             // A retry result (wrapping or task-block nudge) answers the SAME
             // user prompt — keep it queued so the retry archives against it,
             // not the nudge text.
-            if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
+            if (!willRetryWrapping && !willRetryTaskBlocks) completeActiveTurn();
           }
-        } else archivePrompts.shift();
+        } else completeActiveTurn();
       }
     }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     notifyExchangeComplete(onExchangeComplete, {
-      prompt: archivePrompts[0] ?? initialPrompt,
+      prompt: pendingTurns[0]?.prompt ?? initialPrompt,
       result: `Error: ${errMsg}`,
       continuation: queryContinuation ?? initialContinuation,
       status: 'error',
@@ -572,6 +615,7 @@ export async function processQuery(
   } finally {
     done = true;
     clearInterval(pollHandle);
+    clearCurrentTurnContext();
   }
 
   return { continuation: queryContinuation };
@@ -615,8 +659,23 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * This is the same user-facing write the outer catch block does, minus the
  * `Error:` prefix — the provider's text is already a user-facing message.
  */
-function deliverErrorResult(text: string, routing: RoutingContext): void {
+function deliverErrorResult(text: string, routing: RoutingContext, turnId?: string): void {
   log('Error result with no <message> envelope — delivering to channel');
+  if (turnId) {
+    writeChatMessageOnce(
+      {
+        id: generateId(),
+        in_reply_to: routing.inReplyTo,
+        platform_id: routing.platformId,
+        channel_type: routing.channelType,
+        thread_id: routing.threadId,
+        text,
+      },
+      turnId,
+      'error',
+    );
+    return;
+  }
   writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,
@@ -644,6 +703,7 @@ export interface TaskMessageBlock {
 export function dispatchResultText(
   text: string,
   routing: RoutingContext,
+  turnId?: string,
 ): { sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[] } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
@@ -681,7 +741,7 @@ export function dispatchResultText(
       scratchpadParts.push(`[dropped: unknown destination "${toName}"] ${body}`);
       continue;
     }
-    sendToDestination(dest, body, routing);
+    sendToDestination(dest, body, routing, turnId);
     sent++;
   }
   if (lastIndex < text.length) {
@@ -696,9 +756,16 @@ export function dispatchResultText(
 
   // In a task run, plain final text is the NORMAL ending (it becomes the run
   // log) — never treat it as an undelivered reply or nudge the agent to wrap it.
-  const hasUnwrapped = !routing.taskRun && sent === 0 && !!scratchpad;
+  // A turn that already delivered through send_message may legitimately end
+  // with a bare work summary. Re-running the model just to wrap that scratchpad
+  // can make it send again. The durable turn claim is visible across the MCP
+  // process boundary and is narrower than any time/destination heuristic.
+  const alreadyDelivered = turnId ? hasChatDeliveryForTurn(turnId) : false;
+  const hasUnwrapped = !routing.taskRun && sent === 0 && !alreadyDelivered && !!scratchpad;
   if (hasUnwrapped) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
+  } else if (!routing.taskRun && sent === 0 && alreadyDelivered && scratchpad) {
+    log('Bare final text kept as scratchpad because this turn already delivered via send_message');
   }
   return { sent, hasUnwrapped, taskBlocks };
 }
@@ -761,7 +828,7 @@ export function autoAppendTaskLog(text: string): void {
   log('Task run log auto-appended from final text');
 }
 
-function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
+function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext, turnId?: string): void {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
   // Resolve thread_id per-destination from the most recent inbound message
@@ -769,13 +836,24 @@ function sendToDestination(dest: DestinationEntry, body: string, routing: Routin
   // different destinations have different thread contexts — using a single
   // routing.threadId would stamp one channel's thread onto another.
   const destRouting = resolveDestinationThread(channelType, platformId);
-  writeMessageOut({
+  const message = {
     id: generateId(),
     in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
-    kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
     thread_id: destRouting?.threadId ?? null,
+    text: body,
+  };
+  if (turnId) {
+    const delivery = writeChatMessageOnce(message, turnId, 'final');
+    if (!delivery.inserted) {
+      log(`Final-response duplicate suppressed for turn ${turnId} → existing #${delivery.seq}`);
+    }
+    return;
+  }
+  writeMessageOut({
+    ...message,
+    kind: 'chat',
     content: JSON.stringify({ text: body }),
   });
 }

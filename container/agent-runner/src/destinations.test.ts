@@ -58,6 +58,8 @@ describe('buildSystemPromptAddendum — multi-destination routing guidance', () 
     expect(prompt).toContain('Wrap each delivered message');
     expect(prompt).toContain('<message to="name">');
     expect(prompt).toContain('default to addressing the destination it came `from`');
+    expect(prompt).toContain('Deliver the terminal outcome once');
+    expect(prompt).toContain('do not repeat it in the final response');
     expect(prompt).toContain('`casa`');
   });
 

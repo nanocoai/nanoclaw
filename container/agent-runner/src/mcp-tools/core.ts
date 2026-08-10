@@ -10,8 +10,8 @@ import fs from 'fs';
 import path from 'path';
 
 import { findByName, getAllDestinations } from '../destinations.js';
-import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
-import { getCurrentInReplyTo } from '../db/session-state.js';
+import { getMessageIdBySeq, getRoutingBySeq, writeChatMessageOnce, writeMessageOut } from '../db/messages-out.js';
+import { getCurrentInReplyTo, getCurrentTurnContext } from '../db/session-state.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -93,18 +93,40 @@ export const sendMessage: McpToolDefinition = {
     if ('error' in routing) return err(routing.error);
 
     const id = generateId();
-    const seq = writeMessageOut({
-      id,
-      in_reply_to: getCurrentInReplyTo(),
-      kind: 'chat',
-      platform_id: routing.platform_id,
-      channel_type: routing.channel_type,
-      thread_id: routing.thread_id,
-      content: JSON.stringify({ text }),
-    });
+    const turn = getCurrentTurnContext();
+    const delivery = turn
+      ? writeChatMessageOnce(
+          {
+            id,
+            in_reply_to: turn.inReplyTo,
+            platform_id: routing.platform_id,
+            channel_type: routing.channel_type,
+            thread_id: routing.thread_id,
+            text,
+          },
+          turn.turnId,
+          'mcp',
+        )
+      : {
+          id,
+          seq: writeMessageOut({
+            id,
+            in_reply_to: getCurrentInReplyTo(),
+            kind: 'chat',
+            platform_id: routing.platform_id,
+            channel_type: routing.channel_type,
+            thread_id: routing.thread_id,
+            content: JSON.stringify({ text }),
+          }),
+          inserted: true,
+        };
 
-    log(`send_message: #${seq} → ${routing.resolvedName}`);
-    return ok(`Message sent to ${routing.resolvedName} (id: ${seq})`);
+    if (delivery.inserted) {
+      log(`send_message: #${delivery.seq} → ${routing.resolvedName}`);
+      return ok(`Message sent to ${routing.resolvedName} (id: ${delivery.seq})`);
+    }
+    log(`send_message: duplicate suppressed for active turn → existing #${delivery.seq}`);
+    return ok(`Message already sent to ${routing.resolvedName} (id: ${delivery.seq})`);
   },
 };
 
