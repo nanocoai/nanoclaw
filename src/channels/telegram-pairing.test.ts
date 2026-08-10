@@ -74,10 +74,21 @@ describe('createPairing', () => {
     await createPairing('main');
     const storeFile = path.join(tmpDir, 'pairings.json');
     expect(fs.statSync(storeFile).mode & 0o777).toBe(0o600);
+    fs.chmodSync(tmpDir, 0o755);
 
     // A stale tmp file with loose perms must not survive into the store.
     fs.writeFileSync(`${storeFile}.tmp`, 'stale', { mode: 0o644 });
     await createPairing('main');
+    expect(fs.statSync(tmpDir).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(storeFile).mode & 0o777).toBe(0o600);
+
+    // Reads also repair permissions when an existing store was created with
+    // loose modes and no write has happened yet.
+    const existingCode = (await createPairing('main')).code;
+    fs.chmodSync(tmpDir, 0o755);
+    fs.chmodSync(storeFile, 0o644);
+    expect(getStatus(existingCode)).toBe('pending');
+    expect(fs.statSync(tmpDir).mode & 0o777).toBe(0o700);
     expect(fs.statSync(storeFile).mode & 0o777).toBe(0o600);
   });
 
