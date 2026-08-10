@@ -101,6 +101,145 @@ function readInboundFields(message: InboundMessage): InboundFields {
  * are logged but never propagated, so a Telegram outage can't undo a successful
  * pairing or trigger the interceptor's fail-open path.
  */
+/**
+ * Telegram bot reactions are constrained to a fixed allow-list (Bot API 7.0+).
+ * Source: https://core.telegram.org/bots/api#reactiontypeemoji
+ * Custom emoji require a premium account + custom_emoji_id and aren't worth
+ * the wiring cost here.
+ */
+const TG_BOT_REACTIONS_ALLOWED = new Set([
+  '👍',
+  '👎',
+  '❤',
+  '🔥',
+  '🥰',
+  '👏',
+  '😁',
+  '🤔',
+  '🤯',
+  '😱',
+  '🤬',
+  '😢',
+  '🎉',
+  '🤩',
+  '🤮',
+  '💩',
+  '🙏',
+  '👌',
+  '🕊',
+  '🤡',
+  '🥱',
+  '🥴',
+  '😍',
+  '🐳',
+  '❤‍🔥',
+  '🌚',
+  '🌭',
+  '💯',
+  '🤣',
+  '⚡',
+  '🍌',
+  '🏆',
+  '💔',
+  '🤨',
+  '😐',
+  '🍓',
+  '🍾',
+  '💋',
+  '🖕',
+  '😈',
+  '😴',
+  '😭',
+  '🤓',
+  '👻',
+  '👨‍💻',
+  '👀',
+  '🎃',
+  '🙈',
+  '😇',
+  '😨',
+  '🤝',
+  '✍',
+  '🤗',
+  '🫡',
+  '🎅',
+  '🎄',
+  '☃',
+  '💅',
+  '🤪',
+  '🗿',
+  '🆒',
+  '💘',
+  '🙉',
+  '🦄',
+  '😘',
+  '💊',
+  '🙊',
+  '😎',
+  '👾',
+  '🤷‍♂',
+  '🤷',
+  '🤷‍♀',
+  '😡',
+]);
+
+/**
+ * Map the status-tracker's intent emoji to a Telegram-allowed bot reaction
+ * when the canonical one isn't on the allow-list. 👀 and 🤔 pass through
+ * (both are in Telegram's allowed set); ⚙️/✅ get substituted to the
+ * closest semantically appropriate allowed emoji. Unknown emoji return
+ * null → reaction cleared instead of API error.
+ */
+const TG_REACTION_FALLBACK: Record<string, string> = {
+  '⚙️': '👨‍💻', // gear → technologist
+  '✅': '👌', // check mark → OK hand
+};
+
+function mapToTelegramReaction(emoji: string | null): string | null {
+  if (emoji === null) return null;
+  if (TG_BOT_REACTIONS_ALLOWED.has(emoji)) return emoji;
+  const fallback = TG_REACTION_FALLBACK[emoji];
+  if (fallback && TG_BOT_REACTIONS_ALLOWED.has(fallback)) return fallback;
+  return null;
+}
+
+async function setTelegramReaction(
+  token: string,
+  platformId: string,
+  platformMsgId: string,
+  emoji: string | null,
+): Promise<void> {
+  const chatId = platformId.split(':').slice(1).join(':');
+  if (!chatId) return;
+  // Chat SDK encodes Telegram message ids as `<chatId>:<msgId>` composite
+  // (e.g. "-5206721973:217"). A bare parseInt on the composite would yield
+  // the chat id, not the message id. Extract just the trailing msg portion;
+  // fall back to parsing the whole string for a bare integer id.
+  const colonIdx = platformMsgId.lastIndexOf(':');
+  const rawMsgId = colonIdx >= 0 ? platformMsgId.slice(colonIdx + 1) : platformMsgId;
+  const messageId = Number.parseInt(rawMsgId, 10);
+  if (!Number.isFinite(messageId)) return;
+  const mapped = mapToTelegramReaction(emoji);
+  const body = {
+    chat_id: chatId,
+    message_id: messageId,
+    reaction: mapped !== null ? [{ type: 'emoji', emoji: mapped }] : [],
+  };
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/setMessageReaction`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      log.warn('Telegram setMessageReaction non-OK', { status: res.status, body: text });
+    }
+  } catch (err) {
+    log.warn('Telegram setMessageReaction failed', { err });
+  }
+}
+
 async function sendPairingConfirmation(token: string, platformId: string): Promise<void> {
   const chatId = platformId.split(':').slice(1).join(':');
   if (!chatId) return;
@@ -246,6 +385,9 @@ registerChannelAdapter('telegram', {
         } catch {
           return null;
         }
+      },
+      async setReaction(platformId: string, _threadId: string | null, platformMsgId: string, emoji: string) {
+        await setTelegramReaction(token, platformId, platformMsgId, emoji);
       },
       async setup(hostConfig: ChannelSetup) {
         const intercepted: ChannelSetup = {
