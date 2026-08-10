@@ -10,7 +10,13 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, afterEach } from 'vitest';
 
-import { ensureSchema, getInboundSourceSessionId, migrateMessagesInTable, syncProcessingAcks } from './session-db.js';
+import {
+  ensureSchema,
+  getInboundSourceSessionId,
+  insertMessage,
+  migrateMessagesInTable,
+  syncProcessingAcks,
+} from './session-db.js';
 
 const TEST_DIR = '/tmp/nanoclaw-session-db-test';
 const DB_PATH = path.join(TEST_DIR, 'inbound.db');
@@ -89,6 +95,67 @@ describe('migrateMessagesInTable', () => {
 
     expect(getInboundSourceSessionId(db, 'legacy-2')).toBeNull();
     expect(getInboundSourceSessionId(db, 'does-not-exist')).toBeNull();
+    db.close();
+  });
+});
+
+describe('insertMessage — platform id-space wraparound', () => {
+  function freshInbound() {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    ensureSchema(DB_PATH, 'inbound');
+    return new Database(DB_PATH);
+  }
+
+  const row = (id: string) => ({
+    id,
+    kind: 'chat-sdk',
+    timestamp: '2026-08-08T23:28:08.000Z',
+    platformId: 'telegram:1295462156',
+    channelType: 'telegram',
+    threadId: null,
+    content: '{"text":"1"}',
+    processAfter: null,
+    recurrence: null,
+  });
+
+  it('stores a colliding id under a disambiguated id instead of throwing', () => {
+    const db = freshInbound();
+    // A months-old row from before the chat's message_id counter restarted.
+    insertMessage(db, { ...row('tg:688'), timestamp: '2026-06-16T15:13:20.000Z', content: '{"text":"old"}' });
+
+    expect(() => insertMessage(db, row('tg:688'))).not.toThrow();
+
+    const stored = db.prepare('SELECT id, series_id, content FROM messages_in ORDER BY seq').all() as Array<{
+      id: string;
+      series_id: string;
+      content: string;
+    }>;
+    expect(stored.map((r) => r.id)).toEqual(['tg:688', 'tg:688#2']);
+    expect(stored[1].content).toBe('{"text":"1"}');
+    // series_id tracks the stored id, not the requested one.
+    expect(stored[1].series_id).toBe('tg:688#2');
+    db.close();
+  });
+
+  it('is a no-op when the same message is re-delivered (idempotent replay)', () => {
+    const db = freshInbound();
+    insertMessage(db, row('tg:688'));
+    insertMessage(db, row('tg:688'));
+
+    expect((db.prepare('SELECT COUNT(*) AS n FROM messages_in').get() as { n: number }).n).toBe(1);
+    db.close();
+  });
+
+  it('keeps seq even and monotonic across a disambiguated insert', () => {
+    const db = freshInbound();
+    insertMessage(db, { ...row('tg:688'), timestamp: '2026-06-16T15:13:20.000Z' });
+    insertMessage(db, row('tg:688'));
+
+    const seqs = (db.prepare('SELECT seq FROM messages_in ORDER BY seq').all() as Array<{ seq: number }>).map(
+      (r) => r.seq,
+    );
+    expect(seqs).toEqual([2, 4]);
     db.close();
   });
 });
