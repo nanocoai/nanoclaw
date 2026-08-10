@@ -12,6 +12,7 @@
  * with the host caller — same code path a real approval would take.
  */
 import fs from 'fs';
+import path from 'path';
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 
 vi.mock('../../container-runner.js', () => ({
@@ -24,7 +25,11 @@ vi.mock('../../container-runner.js', () => ({
 
 vi.mock('../../config.js', async () => {
   const actual = await vi.importActual('../../config.js');
-  return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-cli-groups' };
+  return {
+    ...actual,
+    DATA_DIR: '/tmp/nanoclaw-test-cli-groups',
+    GROUPS_DIR: '/tmp/nanoclaw-test-cli-groups/groups',
+  };
 });
 
 const TEST_DIR = '/tmp/nanoclaw-test-cli-groups';
@@ -257,5 +262,46 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
     );
     expect(rm.ok).toBe(true);
     expect(JSON.parse(getContainerConfig(GID)!.additional_mounts)).toEqual([]);
+  });
+});
+
+describe('groups CLI create validates and provisions folders', () => {
+  beforeEach(() => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    runMigrations(initTestDb());
+  });
+
+  afterEach(() => {
+    closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+  });
+
+  it('rejects traversal before creating database or filesystem state', async () => {
+    const resp = await dispatch(
+      { id: 'req-traversal', command: 'groups-create', args: { folder: '../escaped', name: 'escaped' } },
+      { caller: 'host' },
+    );
+
+    expect(resp.ok).toBe(false);
+    expect(count('SELECT COUNT(*) AS c FROM agent_groups')).toBe(0);
+    expect(count('SELECT COUNT(*) AS c FROM container_configs')).toBe(0);
+    expect(fs.existsSync(path.join(TEST_DIR, 'escaped'))).toBe(false);
+  });
+
+  it('still provisions a valid group and its container config', async () => {
+    const resp = await dispatch(
+      { id: 'req-valid', command: 'groups-create', args: { folder: 'valid-agent', name: 'Valid Agent' } },
+      { caller: 'host' },
+    );
+
+    expect(resp.ok).toBe(true);
+    const group = getDb().prepare('SELECT id, folder FROM agent_groups WHERE folder = ?').get('valid-agent') as {
+      id: string;
+      folder: string;
+    };
+    expect(group.folder).toBe('valid-agent');
+    expect(getContainerConfig(group.id)).not.toBeNull();
+    expect(fs.existsSync(path.join(TEST_DIR, 'groups', 'valid-agent'))).toBe(true);
   });
 });

@@ -47,6 +47,16 @@ describe('buildContainerArgs ordering invariant (structural)', () => {
   });
 });
 
+describe('container image pull policy (structural)', () => {
+  it('forbids implicit registry pulls before the configured image argument', () => {
+    const src = fs.readFileSync(path.join(process.cwd(), 'src', 'container-runner.ts'), 'utf-8');
+    const pullPolicy = src.indexOf("'--pull=never'");
+    const imageArgument = src.indexOf('args.push(imageTag)');
+    expect(pullPolicy).toBeGreaterThan(-1);
+    expect(imageArgument).toBeGreaterThan(pullPolicy);
+  });
+});
+
 describe('per-container resource limits (structural)', () => {
   // CONTAINER_CPU_LIMIT / CONTAINER_MEMORY_LIMIT pass through to `docker run` as
   // --cpus / --memory, but only when set. The default is empty string → no flag →

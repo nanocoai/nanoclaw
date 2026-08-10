@@ -464,7 +464,10 @@ async function buildContainerArgs(
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
 ): Promise<string[]> {
-  const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
+  // Configured image tags may name registry images. Never let container spawn
+  // turn a configuration change into an implicit network pull; operators must
+  // make the image available locally through the explicit build/pull path.
+  const args: string[] = ['run', '--rm', '--pull=never', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
   // Per-container resource caps (opt-in; empty = unbounded, today's behavior).
   // Only --memory is set. Whether that's a hard cap depends on the host having no

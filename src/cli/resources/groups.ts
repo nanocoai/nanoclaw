@@ -13,6 +13,7 @@ import {
   updateContainerConfigJson,
 } from '../../db/container-configs.js';
 import { initGroupFilesystem } from '../../group-init.js';
+import { assertValidGroupFolder } from '../../group-folder.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
 import { isValidTimezone } from '../../timezone.js';
 import type { AgentGroup, ContainerConfigRow } from '../../types.js';
@@ -106,6 +107,7 @@ registerResource({
         }
         const folder = args.folder as string;
         if (!folder) throw new Error('--folder is required');
+        assertValidGroupFolder(folder);
         const name = (args.name as string) ?? folder;
         const existing = getAgentGroupByFolder(folder);
         if (existing) {
