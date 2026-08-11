@@ -22,8 +22,8 @@ import { getContainerConfig } from './db/container-configs.js';
 import { readGroupPersona } from './group-persona.js';
 import type { AgentGroup } from './types.js';
 
-// Fragment holding a template's persona prepend. Imported FIRST (before the
-// shared base) so the persona is the top of the composed system prompt.
+// Fragment holding a group's standing-instruction prepends. Imported FIRST
+// (before the shared base) so they lead the composed system prompt.
 const PERSONA_FRAGMENT = 'persona.md';
 
 // Symlink targets are container paths — dangling on host (hence the readlink
@@ -37,7 +37,7 @@ const SHARED_MCP_TOOLS_CONTAINER_BASE = '/app/src/mcp-tools';
 const MCP_TOOLS_HOST_SUBPATH = path.join('container', 'agent-runner', 'src', 'mcp-tools');
 
 const COMPOSED_HEADER =
-  '<!-- Composed at spawn - do not edit. Standing instructions: instructions.prepend.md. Memory: memory/. -->';
+  '<!-- Composed at spawn - do not edit. Standing instructions: *.prepend.md. Memory: memory/. -->';
 
 /**
  * Regenerate `groups/<folder>/CLAUDE.md` from the shared base, enabled skill
@@ -111,8 +111,8 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     }
   }
 
-  // Template persona (if any) — inline so it survives the prune below; imported
-  // first (see the imports assembly) so it prepends the composed system prompt.
+  // Group prepends (if any) — inline so they survive the prune below; imported
+  // first (see the imports assembly) so they lead the composed system prompt.
   const persona = readGroupPersona(groupDir);
   if (persona) {
     desired.set(PERSONA_FRAGMENT, { type: 'inline', content: persona });

@@ -11,7 +11,7 @@ import {
 } from '../db/container-configs.js';
 import { isValidTimezone } from '../timezone.js';
 import { assertValidGroupFolder, resolveGroupFolderPath } from '../group-folder.js';
-import { stageGroupPersona } from '../group-persona.js';
+import { GROUP_PREPEND_SUFFIX, stageGroupPersona } from '../group-persona.js';
 import { normalizeName } from '../modules/agent-to-agent/db/agent-destinations.js';
 import { createScheduledTask, prepareScheduledTask } from '../modules/scheduling/create.js';
 import type { AgentGroup } from '../types.js';
@@ -30,12 +30,12 @@ export interface CreateAgentOptions {
  * context extras, skills, and paused recurring tasks, but nothing else (no policy,
  * packages, or provider).
  *
- * The template persona is written to the provider-neutral `instructions.prepend.md`
- * (see src/group-persona.ts). Each provider's project-doc composer inlines it at
- * the TOP of the doc it generates every spawn, so the persona is system-prompt
- * tier regardless of which provider the group ends up running. Because the file
- * is provider-agnostic, placement needs no provider knowledge at stamp time (the
- * provider is DB-resolved later, at first spawn).
+ * Top-level template context files are written to provider-neutral `*.prepend.md`
+ * files (see src/group-persona.ts). Each provider's project-doc composer
+ * inlines them at the TOP of the doc it generates every spawn, so they are
+ * system-prompt tier regardless of which provider the group ends up running.
+ * Because the files are provider-agnostic, placement needs no provider
+ * knowledge at stamp time (the provider is DB-resolved later, at first spawn).
  *
  * Returns the created group; the caller wires it to a channel as usual.
  */
@@ -74,7 +74,7 @@ export function createAgentFromTemplate(ref: string, opts?: CreateAgentOptions):
   if (timezone) updateContainerConfigScalars(id, { timezone });
 
   // group-init.ts owns the mkdir at first spawn, but it isn't called here — so we
-  // create the dir ourselves to land instructions.prepend.md + context/.
+  // create the dir ourselves to land prepend files + additional context.
   const groupDir = path.resolve(GROUPS_DIR, folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
@@ -82,13 +82,11 @@ export function createAgentFromTemplate(ref: string, opts?: CreateAgentOptions):
   // CLAUDE.md/AGENTS.md every spawn (system-prompt tier on any provider).
   stageGroupPersona(groupDir, tpl.instructions);
 
-  // Context extras keep their template-relative layout, placed next to the doc
-  // the persona is inlined into — so a reference written in instructions.md
-  // (e.g. `additional_context/faq.md`) resolves unchanged in the agent's
-  // workspace. Nothing is injected into the persona; referencing each file from
-  // instructions.md is the template author's job (docs/templates.md).
+  // Top-level context files are standing instructions; nested context keeps its
+  // template-relative layout for explicit references from the prepended files.
   for (const { name: file, content } of tpl.contextExtras) {
-    const dest = path.join(groupDir, file);
+    const destination = path.dirname(file) === '.' ? `${path.basename(file, '.md')}${GROUP_PREPEND_SUFFIX}` : file;
+    const dest = path.join(groupDir, destination);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, content);
   }

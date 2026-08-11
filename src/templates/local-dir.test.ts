@@ -28,6 +28,18 @@ describe('resolveLocalTemplate', () => {
     expect(() => resolveLocalTemplate('sales/../../etc', base)).toThrow(/escapes/);
   });
 
+  it('rejects a ref that escapes the base through an intermediate symlink', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'tpl-local-outside-'));
+    fs.mkdirSync(path.join(outside, 'sdr'));
+    fs.symlinkSync(outside, path.join(base, 'linked'));
+
+    try {
+      expect(() => resolveLocalTemplate('linked/sdr', base)).toThrow(/escapes/);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it('rejects an absolute ref', () => {
     expect(() => resolveLocalTemplate('/etc', base)).toThrow(/relative/);
   });

@@ -51,7 +51,8 @@ is optional and defaults sensibly:
 <template>/
 ├── context/
 │   ├── instructions.md        # REQUIRED: the agent's standing persona; marks the folder as a template
-│   └── additional_context/    # optional: extra .md files, referenced from instructions.md by relative path
+│   ├── *.md                   # optional: any other immediate Markdown file is also prepended
+│   └── additional_context/    # optional: extra .md files, referenced by relative path
 │       └── *.md
 ├── .mcp.json             # optional: MCP servers (command + args), NO secrets
 ├── skills/<name>/        # optional: one folder per skill (SKILL.md + any references/), copied whole
@@ -61,20 +62,27 @@ is optional and defaults sensibly:
 
 | Path | Loaded as | Required |
 |------|-----------|----------|
-| `context/instructions.md` | The agent's persona, prepended to its `CLAUDE.md`/`AGENTS.md` every spawn (system-prompt tier, any provider) | **Yes** |
-| `context/**/*.md` (others) | Extra context, copied into the agent's workspace with the same layout relative to `instructions.md` | No |
+| `context/instructions.md` | `instructions.prepend.md`, prepended first to `CLAUDE.md`/`AGENTS.md` every spawn (system-prompt tier, any provider) | **Yes** |
+| Other immediate `context/*.md` files | `<name>.prepend.md`, prepended alphabetically after `instructions.md` | No |
+| `context/additional_context/**/*.md` | Extra context copied into the agent's workspace with the same layout relative to `instructions.md` | No |
 | `.mcp.json` → `mcpServers` | MCP tool servers (written verbatim to container config) | No |
 | `skills/<name>/` | A skill, auto-triggered by its `description` | No |
 | `tasks/*.md` | Recurring scheduled tasks, created paused pending user activation | No |
 
 Notes:
 
+- **Install only templates you trust.** A template supplies standing
+  instructions, MCP launch commands, skills, and scheduled-task prompts that
+  become part of the agent's behavior.
 - **No provider, model, effort, or packages in a template.** Those are set on
   the agent later via `ncl groups config update`. The runtime defaults to the
   install's configured provider.
-- **Keep `instructions.md` focused (under ~200 lines).** It's always in the
-  agent's prompt, and some providers cap that doc (Codex ~32 KB), so an over-long
-  persona gets truncated. Put bulk material in `skills/` or extra context files instead.
+- **Template trees may contain only regular files and real directories.**
+  Symlinks and special files are rejected before any template content is read.
+- **Keep all top-level context files focused (under ~200 lines combined).** They're
+  always in the agent's prompt, and some providers cap that doc (Codex ~32 KB),
+  so over-long instructions get truncated. Put bulk material in `skills/` or
+  `additional_context/` instead.
 - Skills are copied into the agent's own skills overlay, keyed to that group,
   never shared across groups.
 
@@ -130,21 +138,23 @@ run passed while paused, the task is eligible immediately.
 
 ### Referencing extra context files
 
-Extra `.md` files under `context/` (by convention in an `additional_context/`
-subfolder) are copied into the agent's workspace preserving their position
-relative to `instructions.md` — a template file at
-`context/additional_context/pricing.md` is readable by the agent as
+Markdown files directly beside `instructions.md` are standing instructions and
+are automatically prepended. Extra files that should be read only when relevant
+belong under `context/additional_context/`; they are copied into the agent's
+workspace preserving their position relative to `instructions.md`. A template
+file at `context/additional_context/pricing.md` is readable by the agent as
 `additional_context/pricing.md`, the same relative path you'd use from
 `instructions.md` itself. Nothing is injected automatically: the agent only
-reads an extra file if `instructions.md` points to it, so reference every file
-you ship.
+reads an extra file if one of the prepended files points to it, so reference
+every file you ship.
 
 ```markdown
 Pricing rules live in `additional_context/pricing.md`. Read it before quoting a price.
 ```
 
-Context files are copied when you stamp, so files added to the template later
-won't reach an already-created agent. Re-stamp the same name to update it.
+Context and prepend files are copied when you stamp, so files added to the
+template later won't reach an already-created agent. Create a new agent to use
+the updated template.
 
 ## MCP servers and credentials
 

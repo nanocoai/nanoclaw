@@ -56,6 +56,7 @@ describe('composeGroupClaudeMd persona prepend', () => {
     const ag = group('ag-persona', 'persona-group');
     seed(ag);
     writePersona(ag.folder, 'You are an SDR agent.\n');
+    fs.writeFileSync(path.join(GROUPS_DIR, ag.folder, 'tools.prepend.md'), 'Use the sales tools.\n');
 
     composeGroupClaudeMd(ag);
 
@@ -63,7 +64,7 @@ describe('composeGroupClaudeMd persona prepend', () => {
     expect(imports[0]).toBe('@./.claude-fragments/persona.md');
     expect(imports[1]).toBe('@./.claude-shared.md');
     expect(fs.readFileSync(path.join(GROUPS_DIR, ag.folder, '.claude-fragments', 'persona.md'), 'utf-8')).toBe(
-      'You are an SDR agent.',
+      'You are an SDR agent.\n\nUse the sales tools.',
     );
   });
 

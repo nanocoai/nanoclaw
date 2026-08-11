@@ -30,7 +30,7 @@ function writeTemplate(): void {
   const t = path.join(TEMPLATES_DIR, 'sales', 'sdr');
   fs.mkdirSync(path.join(t, 'context', 'additional_context'), { recursive: true });
   fs.writeFileSync(path.join(t, 'context', 'instructions.md'), 'You are an SDR agent.\n');
-  fs.writeFileSync(path.join(t, 'context', 'playbook.md'), '# Playbook\n');
+  fs.writeFileSync(path.join(t, 'context', 'tools.md'), '# Tools\n');
   fs.writeFileSync(path.join(t, 'context', 'additional_context', 'faq.md'), '# FAQ\n');
   fs.writeFileSync(
     path.join(t, '.mcp.json'),
@@ -82,16 +82,20 @@ describe('createAgentFromTemplate', () => {
     expect(fs.existsSync(skill)).toBe(true);
   });
 
-  it('writes MCP servers to the container config and context extras at their template-relative paths', () => {
+  it('writes MCP servers to the container config', () => {
     const g = createAgentFromTemplate('sales/sdr', { name: 'SDR Mcp' });
 
     const cfg = getContainerConfig(g.id);
     expect(cfg).toBeTruthy();
     expect(JSON.parse(cfg!.mcp_servers)).toHaveProperty('hubspot');
-    // Extras land relative to the group root, exactly as they sit relative to
-    // instructions.md in the template — no context/ prefix in between.
+  });
+
+  it('writes top-level context as prepends and preserves nested additional context', () => {
+    const g = createAgentFromTemplate('sales/sdr', { name: 'SDR Context' });
+
     const groupDir = path.join(GROUPS_DIR, g.folder);
-    expect(fs.existsSync(path.join(groupDir, 'playbook.md'))).toBe(true);
+    expect(fs.readFileSync(path.join(groupDir, 'tools.prepend.md'), 'utf-8')).toBe('# Tools\n');
+    expect(fs.existsSync(path.join(groupDir, 'tools.md'))).toBe(false);
     expect(fs.existsSync(path.join(groupDir, 'additional_context', 'faq.md'))).toBe(true);
     expect(fs.existsSync(path.join(groupDir, 'context'))).toBe(false);
   });

@@ -28,6 +28,7 @@ standing brief and marks the folder as a template.
 ├── context/
 │   ├── instructions.md        # REQUIRED: the agent's standing persona, prepended to its
 │   │                          #           CLAUDE.md/AGENTS.md every spawn
+│   ├── *.md                   # optional: any other immediate Markdown file is also prepended
 │   └── additional_context/    # optional: extra .md files
 │       └── *.md
 ├── .mcp.json             # optional: { "mcpServers": { ... } } — command + args, NO secrets
@@ -36,10 +37,19 @@ standing brief and marks the folder as a template.
 ```
 
 Notes:
+
+- **Install only templates you trust.** Standing instructions, MCP launch
+  commands, skills, and scheduled-task prompts become part of the agent's
+  behavior.
+- **Every Markdown file directly beside `instructions.md` is prepended.**
+  `<name>.md` becomes `<name>.prepend.md` in the agent. `instructions.md` is
+  composed first; additional prepend files follow alphabetically.
+- **Use only regular files and real directories.** Symlinks and special files
+  are rejected before any template content is read.
 - **Extra context is copied preserving its layout relative to `instructions.md`**
   (`context/additional_context/faq.md` → `additional_context/faq.md` in the
-  agent's workspace). Nothing is referenced automatically — `instructions.md`
-  must point to each file (e.g. "Pricing rules live in
+  agent's workspace). Nothing is referenced automatically — a prepended file
+  must point to each extra file (e.g. "Pricing rules live in
   `additional_context/pricing.md`").
 - **No provider, no model, no packages.** A template is instructions + MCP
   servers + skills. The agent's runtime/provider is chosen separately

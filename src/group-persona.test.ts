@@ -32,20 +32,36 @@ describe('readGroupPersona', () => {
     expect(readGroupPersona(TMP)).toBeNull();
   });
 
-  it('returns the trimmed content when present', () => {
+  it('combines instructions first and remaining prepend files alphabetically', () => {
+    fs.writeFileSync(path.join(TMP, 'tools.prepend.md'), '\nTools instructions.\n');
     fs.writeFileSync(path.join(TMP, PERSONA_PREPEND_FILE), '\nYou are an SDR agent.\n\n');
-    expect(readGroupPersona(TMP)).toBe('You are an SDR agent.');
+    fs.writeFileSync(path.join(TMP, 'behavior.prepend.md'), 'Behavior instructions.\n');
+    fs.writeFileSync(path.join(TMP, 'ignored.md'), 'Not prepended.\n');
+
+    expect(readGroupPersona(TMP)).toBe('You are an SDR agent.\n\nBehavior instructions.\n\nTools instructions.');
   });
 
-  it('does not follow a symlink', () => {
+  it('skips a symlink without dropping valid prepend files', () => {
     const target = path.join(TMP, 'outside.md');
     fs.writeFileSync(target, 'host-only content\n');
     fs.symlinkSync(target, path.join(TMP, PERSONA_PREPEND_FILE));
+    fs.writeFileSync(path.join(TMP, 'tools.prepend.md'), 'Safe tools.\n');
+
+    expect(readGroupPersona(TMP)).toBe('Safe tools.');
+    expect(log.warn).toHaveBeenCalledWith(
+      'Could not read group standing instructions; omitting prepend file',
+      expect.objectContaining({ file: path.join(TMP, PERSONA_PREPEND_FILE) }),
+    );
+  });
+
+  it('omits prepends when the group directory cannot be read', () => {
+    fs.rmSync(TMP, { recursive: true });
+    fs.writeFileSync(TMP, 'not a directory');
 
     expect(readGroupPersona(TMP)).toBeNull();
     expect(log.warn).toHaveBeenCalledWith(
-      'Could not read group standing instructions; omitting persona',
-      expect.objectContaining({ file: path.join(TMP, PERSONA_PREPEND_FILE) }),
+      'Could not enumerate group standing instructions; omitting prepend files',
+      expect.objectContaining({ groupDir: TMP }),
     );
   });
 });

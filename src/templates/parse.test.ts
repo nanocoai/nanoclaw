@@ -75,6 +75,14 @@ describe('parseTemplate', () => {
     expect(tpl.tasks).toEqual([]);
   });
 
+  it('rejects symlinks before reading template content', () => {
+    write('context/instructions.md', 'Be helpful.');
+    write('secret.txt', 'host-only content');
+    fs.symlinkSync(path.join(dir, 'secret.txt'), path.join(dir, 'context', 'tools.md'));
+
+    expect(() => parseTemplate(dir)).toThrow(/unsafe template path.*context\/tools\.md/i);
+  });
+
   it.each([
     ['missing frontmatter', 'Run it.', /must start with ---/],
     ['unknown field', '---\ncron: 0 9 * * *\n---\nRun it.', /only schedule and script/],

@@ -27,6 +27,23 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+function assertSafeTemplateTree(dir: string): void {
+  if (!fs.lstatSync(dir).isDirectory()) throw new Error('Unsafe template path: .');
+
+  const directories = [{ absolute: dir, relative: '' }];
+  while (directories.length > 0) {
+    const current = directories.pop()!;
+    for (const entry of fs.readdirSync(current.absolute, { withFileTypes: true })) {
+      const relative = path.join(current.relative, entry.name);
+      if (entry.isDirectory()) {
+        directories.push({ absolute: path.join(current.absolute, entry.name), relative });
+      } else if (!entry.isFile()) {
+        throw new Error(`Unsafe template path: ${relative}; only regular files and directories are allowed`);
+      }
+    }
+  }
+}
+
 /**
  * Read and validate a template folder into a typed object. The folder and
  * context/instructions.md are required; optional task files are strict so a
@@ -34,6 +51,7 @@ function asRecord(value: unknown): Record<string, unknown> {
  */
 export function parseTemplate(dir: string): Template {
   if (!fs.existsSync(dir)) throw new Error(`Template folder not found: ${dir}`);
+  assertSafeTemplateTree(dir);
 
   const mcpServers = asRecord(asRecord(readJson(path.join(dir, '.mcp.json'))).mcpServers);
 
