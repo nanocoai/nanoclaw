@@ -70,6 +70,17 @@ describe('createPairing', () => {
     expect(r.status).toBe('pending');
   });
 
+  it.skipIf(process.platform === 'win32')('writes the store with owner-only permissions', async () => {
+    await createPairing('main');
+    const storeFile = path.join(tmpDir, 'pairings.json');
+    expect(fs.statSync(storeFile).mode & 0o777).toBe(0o600);
+
+    // A stale tmp file with loose perms must not survive into the store.
+    fs.writeFileSync(`${storeFile}.tmp`, 'stale', { mode: 0o644 });
+    await createPairing('main');
+    expect(fs.statSync(storeFile).mode & 0o777).toBe(0o600);
+  });
+
   it('does not collide with active codes', async () => {
     const codes = new Set<string>();
     for (let i = 0; i < 20; i++) {
