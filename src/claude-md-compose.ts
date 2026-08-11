@@ -103,10 +103,11 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
   // MCP server fragments — inline instructions from container.json for
   // user-added external MCP servers.
   for (const [name, mcp] of Object.entries(mcpServers)) {
-    if (mcp.instructions) {
+    const instructions = 'instructions' in mcp ? mcp.instructions : undefined;
+    if (instructions) {
       desired.set(`mcp-${name}.md`, {
         type: 'inline',
-        content: mcp.instructions,
+        content: instructions,
       });
     }
   }

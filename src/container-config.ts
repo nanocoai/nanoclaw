@@ -17,12 +17,9 @@ import { getAgentGroup } from './db/agent-groups.js';
 import { isValidTimezone } from './timezone.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
 
-export interface McpServerConfig {
-  command: string;
-  args?: string[];
-  env?: Record<string, string>;
-  instructions?: string;
-}
+export type McpServerConfig =
+  | { command: string; args?: string[]; env?: Record<string, string>; instructions?: string }
+  | { type: 'http' | 'sse'; url: string; headers?: Record<string, string> };
 
 export interface AdditionalMountConfig {
   hostPath: string;
