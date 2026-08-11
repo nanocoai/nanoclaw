@@ -10,7 +10,7 @@
  *   PAIR_TELEGRAM_CODE       { CODE, REASON=initial|regenerated }
  *   PAIR_TELEGRAM_ATTEMPT    { CANDIDATE }
  *   PAIR_TELEGRAM (final)    { STATUS=success, CODE, INTENT, PLATFORM_ID,
- *                              IS_GROUP, PAIRED_USER_ID }
+ *                              IS_GROUP, ADMIN_USER_ID, PAIRED_USER_ID }
  *                         or { STATUS=failed, CODE, ERROR }
  *
  * Depends on src/channels/telegram-pairing.js, which the /add-telegram skill

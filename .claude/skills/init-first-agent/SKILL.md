@@ -67,7 +67,7 @@ For Telegram only, there's an existing pair-code primitive. When you run this to
 npx tsx setup/index.ts --step pair-telegram -- --intent new-agent:dm-with-<folder>
 ```
 
-Parse the `PAIR_TELEGRAM_ISSUED` status block for `CODE` and follow the `REMINDER_TO_ASSISTANT` line in that block. Then wait for the `PAIR_TELEGRAM` block — read `PLATFORM_ID` and `PAIRED_USER_ID` from it. telegram.ts's interceptor has already upserted the user and granted owner if none existed yet. Use `PLATFORM_ID` and `PAIRED_USER_ID` directly in step 4.
+Read `CODE` from the initial `PAIR_TELEGRAM_CODE` status block (`REASON=initial`); the step also renders the same code in a user-facing card. If a wrong code invalidates it, use the replacement from the next `PAIR_TELEGRAM_CODE` block (`REASON=regenerated`). Then wait for the final `PAIR_TELEGRAM` block and read `PLATFORM_ID` and `PAIRED_USER_ID` from it. telegram.ts's interceptor has already upserted the user and granted owner if none existed yet. Use `PLATFORM_ID` and `PAIRED_USER_ID` directly in step 4.
 
 ## 4. Run the init script
 
