@@ -100,10 +100,36 @@ export interface QueryInput {
   };
 }
 
-export interface McpServerConfig {
+/**
+ * MCP server configuration.
+ *
+ * Mirrors the transports the Claude Agent SDK supports:
+ *   - stdio: spawn an in-container subprocess and pipe stdio (default).
+ *   - http:  connect to an external Streamable-HTTP MCP server by URL.
+ *   - sse:   connect to an external Server-Sent-Events MCP server by URL.
+ *
+ * `type` is optional only for stdio for back-compat with existing
+ * container.json files that omit it.
+ */
+export type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig | McpSseServerConfig;
+
+export interface McpStdioServerConfig {
+  type?: 'stdio';
   command: string;
-  args: string[];
-  env: Record<string, string>;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+export interface McpHttpServerConfig {
+  type: 'http';
+  url: string;
+  headers?: Record<string, string>;
+}
+
+export interface McpSseServerConfig {
+  type: 'sse';
+  url: string;
+  headers?: Record<string, string>;
 }
 
 export interface AgentQuery {
