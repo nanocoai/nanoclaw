@@ -4,6 +4,7 @@ import type Database from 'better-sqlite3';
 
 import { GROUPS_DIR, TIMEZONE } from '../../config.js';
 import { resolveGroupTimezone } from '../../container-config.js';
+import { readTextNoFollow } from '../../fs-hygiene.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import {
   findTaskSessions,
@@ -253,8 +254,9 @@ function tailRunLog(agentGroupId: string, seriesKey: string, lines = 10): string
   const ag = getAgentGroup(agentGroupId);
   if (!ag) return [];
   const file = `${GROUPS_DIR}/${ag.folder}/tasks/${seriesKey}.md`;
-  if (!fs.existsSync(file)) return [];
-  return fs.readFileSync(file, 'utf8').trimEnd().split('\n').filter(Boolean).slice(-lines);
+  const body = readTextNoFollow(file);
+  if (body === null) return [];
+  return body.trimEnd().split('\n').filter(Boolean).slice(-lines);
 }
 
 /**

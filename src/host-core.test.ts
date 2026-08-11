@@ -164,6 +164,31 @@ describe('session manager', () => {
     expect(fs.existsSync(msgOutbox)).toBe(false);
   });
 
+  it('should clear a message outbox holding several files', () => {
+    initSessionFolder('ag-1', 'sess-test');
+    const msgOutbox = path.join(sessionDir('ag-1', 'sess-test'), 'outbox', 'msg-many');
+    fs.mkdirSync(msgOutbox, { recursive: true });
+    for (const name of ['a.txt', 'b.png', 'c.pdf']) fs.writeFileSync(path.join(msgOutbox, name), name);
+
+    clearOutbox('ag-1', 'sess-test', 'msg-many');
+    expect(fs.existsSync(msgOutbox)).toBe(false);
+  });
+
+  it('should leave an unexpected nested directory in place rather than walking it', () => {
+    // Cleanup is shaped like what it cleans up: a message outbox holds
+    // delivered attachments, so it removes those and the directory. Anything
+    // else in there is left alone and reported.
+    initSessionFolder('ag-1', 'sess-test');
+    const msgOutbox = path.join(sessionDir('ag-1', 'sess-test'), 'outbox', 'msg-nested');
+    const nested = path.join(msgOutbox, 'subdir');
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(nested, 'deep.txt'), 'DEEP');
+
+    clearOutbox('ag-1', 'sess-test', 'msg-nested');
+
+    expect(fs.readFileSync(path.join(nested, 'deep.txt'), 'utf-8')).toBe('DEEP');
+  });
+
   it('should reject inbound attachment writes through a pre-placed symlinked inbox dir', () => {
     initSessionFolder('ag-1', 'sess-test');
     const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');

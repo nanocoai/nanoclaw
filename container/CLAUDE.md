@@ -8,6 +8,8 @@ Be concise — every message costs the reader's attention. Prefer outcomes over 
 
 Files you create are saved in `/workspace/agent/`. Use this for notes, research, or anything that should persist across turns in this group.
 
+A few paths are read-only because the host writes them: `/workspace/inbox/` (inbound attachments) and `/workspace/agent/tasks/` (task run logs — append to those with `ncl tasks append-log`, not with an editor). Copy anything you need to change into `/workspace/agent/` first.
+
 ## Memory
 
 Your persistent memory lives under `/workspace/agent/memory/`. The session-start memory context contains the live top-level index and system definition. Follow that definition when deciding what to store and keep the index accurate so you can retrieve details later.

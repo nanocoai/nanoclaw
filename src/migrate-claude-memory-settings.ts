@@ -1,5 +1,4 @@
-import fs from 'fs';
-
+import { readTextNoFollow, writeTextAtomic } from './fs-hygiene.js';
 import { log } from './log.js';
 
 const PRE_COMPACT_COMMAND = 'bun /app/src/compact-instructions.ts';
@@ -8,7 +7,13 @@ const LEGACY_MEMORY_SESSION_START_COMMAND = 'bun /app/src/memory-hook.ts';
 /** Reconcile existing Claude settings with NanoClaw's shared memory system. */
 export function migrateClaudeMemorySettings(settingsFile: string): boolean {
   try {
-    const parsed: unknown = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
+    // Claude's own settings file, in a directory Claude also writes. Read the
+    // name we were handed; anything that is not a readable regular file there
+    // is simply nothing to reconcile.
+    const raw = readTextNoFollow(settingsFile);
+    if (raw === null) return false;
+
+    const parsed: unknown = JSON.parse(raw);
     if (!isRecord(parsed)) {
       log.warn('Claude settings root is not an object; leaving it unchanged', { settingsFile });
       return false;
@@ -53,7 +58,7 @@ export function migrateClaudeMemorySettings(settingsFile: string): boolean {
     }
 
     if (!changed) return false;
-    writeAtomic(settingsFile, JSON.stringify(parsed, null, 2) + '\n');
+    writeTextAtomic(settingsFile, JSON.stringify(parsed, null, 2) + '\n');
     return true;
   } catch (err) {
     log.warn('Failed to reconcile Claude settings; leaving them unchanged', {
@@ -71,20 +76,6 @@ function removeLegacyNanoClawMemoryHook(value: unknown): unknown {
     return hook.command !== LEGACY_MEMORY_SESSION_START_COMMAND;
   });
   return remaining.length > 0 ? { ...value, hooks: remaining } : undefined;
-}
-
-function writeAtomic(filePath: string, content: string): void {
-  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
-  try {
-    fs.writeFileSync(tmp, content, { flag: 'wx' });
-    fs.renameSync(tmp, filePath);
-  } finally {
-    try {
-      fs.unlinkSync(tmp);
-    } catch {
-      // The rename consumed the temp file, or creation failed before it existed.
-    }
-  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -19,6 +19,7 @@ import path from 'path';
 import { GROUPS_DIR } from './config.js';
 import type { McpServerConfig } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
+import { writeTextAtomic } from './fs-hygiene.js';
 import { readGroupPersona } from './group-persona.js';
 import type { AgentGroup } from './types.js';
 
@@ -164,7 +165,8 @@ function syncSymlink(linkPath: string, target: string): void {
 }
 
 function writeAtomic(filePath: string, content: string): void {
-  const tmp = `${filePath}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, content);
-  fs.renameSync(tmp, filePath);
+  // Composed on every spawn into the group folder, which the agent also
+  // writes — so the staging sibling shares a directory with agent-authored
+  // files. See `writeTextAtomic`.
+  writeTextAtomic(filePath, content);
 }

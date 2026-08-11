@@ -279,7 +279,10 @@ function formatAttachments(attachments: any[] | undefined): string {
     const localPath = a.localPath ? `/workspace/${a.localPath}` : '';
     const url = a.url || '';
     if (localPath) {
-      return `[${type}: ${escapeXml(name)} — saved to ${escapeXml(localPath)}]`;
+      // The inbox is a read-only view: the host writes it, we read it. Say so
+      // here so a turn that wants to modify an attachment copies it out first
+      // instead of discovering the mode from an EROFS.
+      return `[${type}: ${escapeXml(name)} — saved to ${escapeXml(localPath)} (read-only; copy it to /workspace/agent/ to edit)]`;
     }
     return url ? `[${type}: ${escapeXml(name)} (${escapeXml(url)})]` : `[${type}: ${escapeXml(name)}]`;
   });

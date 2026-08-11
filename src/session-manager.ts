@@ -153,10 +153,37 @@ export function resolveTaskSession(agentGroupId: string, seriesId: string): { se
 export function initSessionFolder(agentGroupId: string, sessionId: string): void {
   const dir = sessionDir(agentGroupId, sessionId);
   fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(path.join(dir, 'inbox'), { recursive: true });
   fs.mkdirSync(path.join(dir, 'outbox'), { recursive: true });
 
   ensureSchema(inboundDbPath(agentGroupId, sessionId), 'inbound');
   ensureSchema(outboundDbPath(agentGroupId, sessionId), 'outbound');
+}
+
+/**
+ * Guarantee every path the container runner declares as a bind source exists
+ * before spawn.
+ *
+ * The runtime creates a missing bind source rather than failing, and it
+ * creates it as a *directory* — which for a file mount is wrong, and which on
+ * Linux (where the daemon runs as root) is created root-owned, locking this
+ * process out of its own session folder. Sessions created before `inbox/`
+ * joined the layout also reach here without one.
+ *
+ * Idempotent and cheap: three `mkdir`s, plus a schema pass only when a DB file
+ * is actually absent.
+ */
+export function ensureSessionMountSources(agentGroupId: string, sessionId: string): void {
+  const dir = sessionDir(agentGroupId, sessionId);
+  fs.mkdirSync(path.join(dir, 'inbox'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'outbox'), { recursive: true });
+
+  if (!fs.existsSync(inboundDbPath(agentGroupId, sessionId))) {
+    ensureSchema(inboundDbPath(agentGroupId, sessionId), 'inbound');
+  }
+  if (!fs.existsSync(outboundDbPath(agentGroupId, sessionId))) {
+    ensureSchema(outboundDbPath(agentGroupId, sessionId), 'outbound');
+  }
 }
 
 /**
@@ -532,7 +559,21 @@ export function clearOutbox(agentGroupId: string, sessionId: string, messageId: 
       log.warn('Rejecting outbox cleanup outside session outbox', { messageId, outboxDir });
       return;
     }
-    fs.rmSync(realOutboxDir, { recursive: true, force: true });
+
+    // Remove the message's own entries and then the directory, rather than
+    // recursing. A message outbox holds delivered attachments and nothing
+    // else, so one level is the whole job, and keeping the cleanup shaped
+    // like what it cleans up means it can only ever remove that. Anything
+    // unexpected in there surfaces as ENOTEMPTY below instead of being
+    // walked, which is the outcome we want to hear about.
+    for (const entry of fs.readdirSync(realOutboxDir)) {
+      try {
+        fs.unlinkSync(path.join(realOutboxDir, entry));
+      } catch (err) {
+        log.warn('Outbox entry not removed', { messageId, entry, err });
+      }
+    }
+    fs.rmdirSync(realOutboxDir);
   } catch (err) {
     log.warn('Outbox cleanup failed (message already delivered)', { messageId, err });
   }

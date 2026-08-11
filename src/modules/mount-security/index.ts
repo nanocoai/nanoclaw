@@ -9,7 +9,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { MOUNT_ALLOWLIST_PATH } from '../../config.js';
+import { DATA_DIR, GROUPS_DIR, MOUNT_ALLOWLIST_PATH } from '../../config.js';
 import { log } from '../../log.js';
 
 export interface AdditionalMount {
@@ -271,6 +271,41 @@ function findAllowedRoot(realPath: string, allowedRoots: AllowedRoot[]): Allowed
 }
 
 /**
+ * Name the NanoClaw-owned root a resolved path falls inside, or null.
+ *
+ * Compares resolved paths on both sides so a symlinked allowlist entry cannot
+ * arrive at one of these trees under another name.
+ */
+function selfOwnedRoot(realPath: string): string | null {
+  const roots: Array<[string, string]> = [
+    ['session data directory', DATA_DIR],
+    ['agent group directory', GROUPS_DIR],
+    ['install directory', process.cwd()],
+  ];
+  for (const [label, root] of roots) {
+    const realRoot = getRealPath(root);
+    if (realRoot === null) continue;
+    // Overlap in EITHER direction. Rejecting only "candidate is inside a
+    // protected root" leaves the inverse open, and the inverse is the more
+    // permissive one: an allowlisted ancestor — a home directory, the install
+    // parent, `/` — carries every protected tree beneath it, and re-exposes
+    // them at a second container path with whatever mode the extra requested.
+    // Containment is not directional here; two names for one subtree is the
+    // thing being refused.
+    if (contains(realRoot, realPath) || contains(realPath, realRoot)) {
+      return label;
+    }
+  }
+  return null;
+}
+
+/** True if `parent` is `child` itself or an ancestor of it. */
+function contains(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+/**
  * Validate the container path to prevent escaping /workspace/extra/
  */
 function isValidContainerPath(containerPath: string): boolean {
@@ -348,6 +383,23 @@ export function validateMount(mount: AdditionalMount): MountValidationResult {
     return {
       allowed: false,
       reason: `Path matches blocked pattern "${blockedMatch}": "${realPath}"`,
+    };
+  }
+
+  // NanoClaw's own trees are not additional-mount material. `buildMounts`
+  // already composes the session folder, the group folder and the install
+  // surfaces into every container, each with the mode that path is supposed
+  // to have. Naming one of them here would layer a second view over the same
+  // bytes at a different path and a different mode — including one group's
+  // tree inside another group's container — and whichever entry the runtime
+  // applied last would decide. Not operator-configurable, unlike
+  // `blockedPatterns`: there is no deployment in which two disagreeing views
+  // of the same tree is the intent.
+  const selfOwned = selfOwnedRoot(realPath);
+  if (selfOwned !== null) {
+    return {
+      allowed: false,
+      reason: `Path "${realPath}" is inside NanoClaw's own ${selfOwned}; it is already mounted with the modes buildMounts assigns`,
     };
   }
 

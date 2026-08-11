@@ -45,9 +45,12 @@ import {
   type VolumeMount,
 } from './providers/provider-container-registry.js';
 import {
+  ensureSessionMountSources,
   heartbeatPath,
+  inboundDbPath,
   markContainerRunning,
   markContainerStopped,
+  outboundDbPath,
   sessionDir,
   writeSessionRouting,
 } from './session-manager.js';
@@ -316,11 +319,47 @@ export function buildMounts(
   const sessDir = sessionDir(agentGroup.id, session.id);
   const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
 
+  ensureSessionMountSources(agentGroup.id, session.id);
+
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
 
+  // Single-writer surfaces inside the session folder, declared explicitly
+  // rather than left to inherit the parent's mode.
+  //
+  // Ownership in here has always been one-directional: the host writes
+  // `inbox/` and `inbound.db`, the container writes `outbox/` and
+  // `outbound.db`, and each side reads the other's. Until now that was a
+  // convention the mount table said nothing about, so every accessor
+  // re-established it for itself. Declaring it here makes it a property of
+  // the runtime instead — the container's view matches what it actually owns,
+  // and a nested entry over a single file keeps its contents writable while
+  // pinning the entry itself.
+  //
+  // Sources must exist before spawn — see `initSessionFolder`. A missing bind
+  // source is created by the runtime as a directory, which on Linux is
+  // root-owned and locks this process out of its own session folder.
+  mounts.push({ hostPath: path.join(sessDir, 'inbox'), containerPath: '/workspace/inbox', readonly: true });
+  mounts.push({ hostPath: path.join(sessDir, 'outbox'), containerPath: '/workspace/outbox', readonly: false });
+  mounts.push({
+    hostPath: inboundDbPath(agentGroup.id, session.id),
+    containerPath: '/workspace/inbound.db',
+    readonly: true,
+  });
+  mounts.push({
+    hostPath: outboundDbPath(agentGroup.id, session.id),
+    containerPath: '/workspace/outbound.db',
+    readonly: false,
+  });
+
   // Agent group folder at /workspace/agent (RW for working files + shared memory)
   mounts.push({ hostPath: groupDir, containerPath: '/workspace/agent', readonly: false });
+
+  // Run logs are appended host-side by `ncl tasks append-log` and by the
+  // `task_log` delivery action; nothing in the container writes them directly.
+  const tasksDir = path.join(groupDir, 'tasks');
+  fs.mkdirSync(tasksDir, { recursive: true });
+  mounts.push({ hostPath: tasksDir, containerPath: '/workspace/agent/tasks', readonly: true });
 
   // container.json — nested RO mount on top of RW group dir so the agent
   // can read its config but cannot modify it.
@@ -368,6 +407,11 @@ export function buildMounts(
     mounts.push({ hostPath: skillsSrc, containerPath: '/app/skills', readonly: true });
   }
 
+  // Every entry composed above is one we materialize; verify each is still the
+  // entry we made before it becomes a bind source. Operator extras and
+  // provider contributions are appended after this and are not ours to judge.
+  for (const m of mounts) assertOwnedSource(m.hostPath, m.containerPath);
+
   // Additional mounts from container config
   if (containerConfig.additionalMounts && containerConfig.additionalMounts.length > 0) {
     const validated = validateAdditionalMounts(containerConfig.additionalMounts, agentGroup.name);
@@ -379,7 +423,42 @@ export function buildMounts(
     mounts.push(...providerContribution.mounts);
   }
 
-  return mounts;
+  return orderMounts(mounts);
+}
+
+/**
+ * Emit mounts parent-before-child, ordered by container-path depth.
+ *
+ * Several entries here are nested inside another entry's target
+ * (`/workspace/inbox` under `/workspace`, `/workspace/agent/tasks` under
+ * `/workspace/agent`). A nested entry only lands on top of its parent if the
+ * parent is mounted first. Docker's daemon happens to sort binds by
+ * destination today, but that ordering is not part of any documented
+ * contract, and runtimes that realize the mount list verbatim — the OCI spec
+ * is applied in order — do not sort at all. Sorting here makes the result
+ * independent of which runtime consumes it.
+ *
+ * A stable sort keeps same-depth entries in declaration order, which is what
+ * the OneCLI gateway's last-wins argument tail relies on.
+ */
+export function orderMounts(mounts: VolumeMount[]): VolumeMount[] {
+  const depth = (p: string): number => p.split('/').filter(Boolean).length;
+  return [...mounts].sort((a, b) => depth(a.containerPath) - depth(b.containerPath));
+}
+
+/**
+ * Sources this function composes and owns. Each is created here or by
+ * `initSessionFolder` / `initGroupFilesystem`, so each should be exactly the
+ * entry we put there — the runtime resolves a bind source at spawn, and a
+ * source that has become a link projects something other than what this table
+ * describes. Checked for the entries we materialize, not for
+ * operator-provided extras, which are the mount allowlist's business.
+ */
+function assertOwnedSource(hostPath: string, containerPath: string): void {
+  const entry = fs.lstatSync(hostPath);
+  if (entry.isSymbolicLink()) {
+    throw new Error(`refusing to mount ${containerPath}: source ${hostPath} is not the entry we created`);
+  }
 }
 
 /**

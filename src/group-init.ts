@@ -3,6 +3,7 @@ import path from 'path';
 
 import { DATA_DIR, DEFAULT_AGENT_PROVIDER, GROUPS_DIR } from './config.js';
 import { ensureContainerConfig } from './db/container-configs.js';
+import { writeTextIfAbsent } from './fs-hygiene.js';
 import { stageGroupPersona } from './group-persona.js';
 import { log } from './log.js';
 import { migrateClaudeMemorySettings } from './migrate-claude-memory-settings.js';
@@ -74,6 +75,10 @@ export function initGroupFilesystem(
     initialized.push('groupDir');
   }
 
+  // Run-log directory. Created here rather than lazily on first append so it
+  // exists as a bind source at spawn time — see `buildMounts`.
+  fs.mkdirSync(path.join(groupDir, 'tasks'), { recursive: true });
+
   if (opts?.instructions && stageGroupPersona(groupDir, opts.instructions)) {
     initialized.push('instructions.prepend.md');
   }
@@ -93,9 +98,14 @@ export function initGroupFilesystem(
       initialized.push('.claude-shared');
     }
 
+    // `.claude-shared` is mounted at /home/node/.claude and Claude keeps its
+    // own state there, so both entries below can already exist — and can
+    // exist as something other than what we expect. Claim the name and
+    // reconcile on EEXIST, rather than asking whether it is free and then
+    // acting on an answer that describes the resolved target rather than the
+    // name, and that is stale by the time we use it.
     const settingsFile = path.join(claudeDir, 'settings.json');
-    if (!fs.existsSync(settingsFile)) {
-      fs.writeFileSync(settingsFile, DEFAULT_SETTINGS_JSON);
+    if (writeTextIfAbsent(settingsFile, DEFAULT_SETTINGS_JSON)) {
       initialized.push('settings.json');
     } else if (migrateClaudeMemorySettings(settingsFile)) {
       initialized.push('settings.json (reconciled Claude settings)');
@@ -103,10 +113,18 @@ export function initGroupFilesystem(
 
     // Skills directory — created empty here; symlinks are synced at spawn
     // time by container-runner.ts based on container.json skills selection.
+    // Non-recursive, so that "already there" is reported rather than assumed:
+    // `{ recursive: true }` is silent about what it found.
     const skillsDst = path.join(claudeDir, 'skills');
-    if (!fs.existsSync(skillsDst)) {
-      fs.mkdirSync(skillsDst, { recursive: true });
+    try {
+      fs.mkdirSync(skillsDst);
       initialized.push('skills/');
+    } catch (err) {
+      if (!isErrno(err, 'EEXIST')) throw err;
+      const entry = fs.lstatSync(skillsDst);
+      if (entry.isSymbolicLink() || !entry.isDirectory()) {
+        log.warn('Per-group skills path is not a directory; leaving it alone', { skillsDst });
+      }
     }
   }
 
@@ -118,4 +136,8 @@ export function initGroupFilesystem(
       steps: initialized,
     });
   }
+}
+
+function isErrno(err: unknown, code: string): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && err.code === code;
 }
