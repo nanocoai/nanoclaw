@@ -44,7 +44,17 @@ export function materializeTemplateSkills(agentGroupId: string, destSkillsDir: s
 
   fs.mkdirSync(destSkillsDir, { recursive: true });
   for (const name of fs.readdirSync(src)) {
-    if (!fs.statSync(path.join(src, name)).isDirectory()) continue;
+    // lstat, never stat: the source store also holds shared-skill symlinks
+    // whose targets are container paths (`/app/skills/<name>`, written by
+    // container-runner's syncSkillSymlinks), so they dangle on the host.
+    // Following one throws ENOENT out of the caller's container contribution
+    // and aborts the spawn. Template skills are real directories, so skipping
+    // every symlink is also the correct filter, not just the safe one.
+    // `throwIfNoEntry: false` covers only the entry-vanished-since-readdir
+    // race; a real fault (EACCES, EIO) still throws rather than silently
+    // dropping a skill.
+    const entry = fs.lstatSync(path.join(src, name), { throwIfNoEntry: false });
+    if (!entry?.isDirectory()) continue;
     const dest = path.join(destSkillsDir, name);
     fs.rmSync(dest, { recursive: true, force: true });
     fs.cpSync(path.join(src, name), dest, { recursive: true });

@@ -60,6 +60,40 @@ describe('materializeTemplateSkills', () => {
     expect(fs.lstatSync(path.join(dest, 'shared')).isSymbolicLink()).toBe(true);
   });
 
+  it('skips dangling shared-skill symlinks in the SOURCE store instead of throwing', () => {
+    // container-runner's syncSkillSymlinks fills this same store with links to
+    // container paths, which never resolve on the host. Following one used to
+    // throw ENOENT out of the caller's container contribution and abort every
+    // spawn for the group — a total outage, not a missing skill.
+    const srcDir = path.join(DATA_DIR, 'v2-sessions', 'g5', '.claude-shared', 'skills');
+    templateSkill('g5', 'widget', 'SKILL.md', 'body');
+    fs.symlinkSync('/app/skills/agent-browser', path.join(srcDir, 'agent-browser'));
+    const dest = path.join(TEST_ROOT, 'grp5', '.agents', 'skills');
+
+    expect(() => materializeTemplateSkills('g5', dest)).not.toThrow();
+
+    // The real template skill still crosses over; the dangling link does not.
+    expect(fs.readFileSync(path.join(dest, 'widget', 'SKILL.md'), 'utf-8')).toBe('body');
+    expect(fs.existsSync(path.join(dest, 'agent-browser'))).toBe(false);
+  });
+
+  it('skips a symlinked directory in the source (template skills are real dirs)', () => {
+    // Resolvable, but still not a template skill — mirroring it would copy
+    // content the provider is expected to get from its own shared-skill links.
+    const realElsewhere = path.join(TEST_ROOT, 'elsewhere', 'linked');
+    fs.mkdirSync(realElsewhere, { recursive: true });
+    fs.writeFileSync(path.join(realElsewhere, 'SKILL.md'), 'linked');
+    templateSkill('g6', 'widget', 'SKILL.md', 'body');
+    const srcDir = path.join(DATA_DIR, 'v2-sessions', 'g6', '.claude-shared', 'skills');
+    fs.symlinkSync(realElsewhere, path.join(srcDir, 'linked'));
+    const dest = path.join(TEST_ROOT, 'grp6', '.agents', 'skills');
+
+    materializeTemplateSkills('g6', dest);
+
+    expect(fs.existsSync(path.join(dest, 'widget'))).toBe(true);
+    expect(fs.existsSync(path.join(dest, 'linked'))).toBe(false);
+  });
+
   it('does not destroy skills when dest equals the source (Claude reads source directly)', () => {
     templateSkill('g4', 'widget', 'SKILL.md', 'body');
     const src = path.join(DATA_DIR, 'v2-sessions', 'g4', '.claude-shared', 'skills');
