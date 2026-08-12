@@ -18,6 +18,7 @@ import path from 'path';
 
 import { GROUPS_DIR } from './config.js';
 import type { McpServerConfig } from './container-config.js';
+import { selectedSkillNames } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { readGroupPersona } from './group-persona.js';
 import type { AgentGroup } from './types.js';
@@ -64,11 +65,19 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     : {};
   const desired = new Map<string, { type: 'symlink' | 'inline'; content: string }>();
 
-  // Skill fragments — every skill that ships an `instructions.md`.
-  // TODO (shared-source refactor): respect `container.json` skill selection.
+  // Skill fragments — only for skills selected in `container.json` ('all' or
+  // an explicit list; resolved by selectedSkillNames, the same helper the
+  // runner uses for `.claude/skills/` symlinks, so both surfaces honor one
+  // selection). A selected skill only contributes a fragment if it ships an
+  // `instructions.md`. The DB default is 'all', so groups without an explicit
+  // list keep today's behavior.
   const skillsHostDir = path.join(process.cwd(), 'container', 'skills');
+  const enabledSkills = new Set(
+    selectedSkillNames({ skills: configRow ? (JSON.parse(configRow.skills) as string[] | 'all') : 'all' }),
+  );
   if (fs.existsSync(skillsHostDir)) {
     for (const skillName of fs.readdirSync(skillsHostDir)) {
+      if (!enabledSkills.has(skillName)) continue;
       const hostFragment = path.join(skillsHostDir, skillName, 'instructions.md');
       if (fs.existsSync(hostFragment)) {
         desired.set(`skill-${skillName}.md`, {

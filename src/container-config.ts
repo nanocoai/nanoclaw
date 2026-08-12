@@ -165,6 +165,26 @@ export function resolveGroupTimezone(agentGroupId: string): string {
   return tz && isValidTimezone(tz) ? tz : TIMEZONE;
 }
 
+/**
+ * Resolve a group's skill selection to concrete names — `'all'` recomputes
+ * from `container/skills/` so newly-added upstream skills appear automatically.
+ * Shared by container-runner.ts (skill symlinks) and claude-md-compose.ts
+ * (skill instructions.md fragments) so both surfaces honor one selection.
+ */
+export function selectedSkillNames(containerConfig: Pick<ContainerConfig, 'skills'>): string[] {
+  if (containerConfig.skills !== 'all') return containerConfig.skills;
+  const sharedSkillsDir = path.join(process.cwd(), 'container', 'skills');
+  return fs.existsSync(sharedSkillsDir)
+    ? fs.readdirSync(sharedSkillsDir).filter((e) => {
+        try {
+          return fs.statSync(path.join(sharedSkillsDir, e)).isDirectory();
+        } catch {
+          return false;
+        }
+      })
+    : [];
+}
+
 /** Build a `ContainerConfig` from a DB row + agent group identity. */
 export function configFromDb(row: ContainerConfigRow, group: AgentGroup): ContainerConfig {
   return {
