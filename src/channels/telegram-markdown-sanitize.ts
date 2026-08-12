@@ -12,6 +12,14 @@
  *   equivalent and create ambiguous delimiter runs in the adapter's parser.
  * - Unbalanced links: orphaned `[` or `]` confuse the CommonMark link parser;
  *   strip both when counts diverge.
+ * - Underscores in link URLs: Telegram's real MarkdownV2 parser (not just the
+ *   adapter's local one) throws "Can't find end of a URL" on some links whose
+ *   URL contains an underscore — e.g. Wikipedia article slugs like
+ *   `2026_Philippine_energy_crisis`. Escaping per the documented spec (only
+ *   `)` and `\` need escaping inside a link URL) does not avoid this; the bug
+ *   is server-side. Percent-encoding `_` to `%5F` sidesteps it — the URL
+ *   still resolves identically since `%5F` and `_` are equivalent once
+ *   decoded.
  * - Code spans/blocks: preserved verbatim via placeholder swap so none of the
  *   above rules touch their contents.
  *
@@ -49,6 +57,9 @@ export function sanitizeTelegramLegacyMarkdown(input: string): string {
   if (openBrackets !== closeBrackets) {
     text = text.replace(/[[\]]/g, '');
   }
+
+  // Percent-encode underscores inside link/image URLs — see header comment.
+  text = text.replace(/\]\(([^()\s]+)\)/g, (m, url: string) => `](${url.replace(/_/g, '%5F')})`);
 
   return text.replace(
     new RegExp(`${PLACEHOLDER_PREFIX}(\\d+)${PLACEHOLDER_SUFFIX}`, 'g'),

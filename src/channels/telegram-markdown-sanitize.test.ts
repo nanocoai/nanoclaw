@@ -63,6 +63,18 @@ describe('sanitizeTelegramLegacyMarkdown', () => {
     expect(out).toContain('**Christopher Olah**');
   });
 
+  it('percent-encodes underscores inside link URLs (Telegram "Can\'t find end of a URL" bug)', () => {
+    const input = 'still developing. [Wikipedia](https://en.wikipedia.org/wiki/2026_Philippine_energy_crisis)';
+    expect(sanitizeTelegramLegacyMarkdown(input)).toBe(
+      'still developing. [Wikipedia](https://en.wikipedia.org/wiki/2026%5FPhilippine%5Fenergy%5Fcrisis)',
+    );
+  });
+
+  it('does not touch underscores in visible link text, only the URL', () => {
+    const input = '[file_name.py](https://example.com/a_b)';
+    expect(sanitizeTelegramLegacyMarkdown(input)).toBe('[file_name.py](https://example.com/a%5Fb)');
+  });
+
   it('is a no-op on empty string', () => {
     expect(sanitizeTelegramLegacyMarkdown('')).toBe('');
   });
