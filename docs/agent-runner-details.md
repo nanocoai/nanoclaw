@@ -71,11 +71,9 @@ interface QueryInput {
   systemContext?: { instructions?: string };
 }
 
-interface McpServerConfig {
-  command: string;
-  args: string[];
-  env: Record<string, string>;
-}
+type McpServerConfig =
+  | { type?: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
+  | { type: 'http'; url: string };
 
 interface AgentQuery {
   /** Push a follow-up message into the active query. */
@@ -787,7 +785,7 @@ The provider name comes from the `provider` key in `/workspace/agent/container.j
 
 ## Agent-Runner Properties
 
-- MCP server is a separate Node process spawned by the provider (via `mcpServers` config)
+- MCP servers are local processes or remote Streamable HTTP endpoints managed by the provider via `mcpServers`
 - The MCP server binary is shared across providers — same tools, same DB access
 - CLAUDE.md loading (global + per-group) — agent-runner reads and passes as `systemPrompt`
 - Additional directories discovery (`/workspace/extra/*`)

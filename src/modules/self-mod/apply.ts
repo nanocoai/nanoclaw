@@ -11,11 +11,11 @@
  * install_packages: update DB + rebuild image + kill container + on_wake.
  * add_mcp_server: update DB + kill container + on_wake.
  */
+import { parseMcpServerConfig, validateMcpServerName, type McpServerConfig } from '../../container-config.js';
 import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getContainerConfig, updateContainerConfigJson } from '../../db/container-configs.js';
 import { getSession } from '../../db/sessions.js';
-import type { McpServerConfig } from '../../container-config.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
@@ -99,12 +99,25 @@ export async function applyAddMcpServer(payload: Record<string, unknown>, sessio
   }
 
   // Add the new MCP server to the existing map in the DB
+  const name = typeof payload.name === 'string' ? payload.name : '';
+  if (!name) {
+    notifyAgent(session, 'add_mcp_server approved but server name is missing.');
+    return;
+  }
+  let serverConfig: McpServerConfig;
+  try {
+    validateMcpServerName(name);
+    serverConfig = parseMcpServerConfig(payload);
+    // eslint-disable-next-line no-catch-all/no-catch-all -- approval payload validation must fail closed
+  } catch (err) {
+    notifyAgent(
+      session,
+      `add_mcp_server approved but config is invalid: ${err instanceof Error ? err.message : String(err)}.`,
+    );
+    return;
+  }
   const servers = JSON.parse(configRow.mcp_servers) as Record<string, McpServerConfig>;
-  servers[payload.name as string] = {
-    command: payload.command as string,
-    args: (payload.args as string[]) || [],
-    env: (payload.env as Record<string, string>) || {},
-  };
+  servers[name] = serverConfig;
   updateContainerConfigJson(agentGroup.id, 'mcp_servers', servers);
 
   writeSessionMessage(session.agent_group_id, session.id, {
@@ -115,7 +128,7 @@ export async function applyAddMcpServer(payload: Record<string, unknown>, sessio
     channelType: 'agent',
     threadId: null,
     content: JSON.stringify({
-      text: `MCP server "${payload.name}" added. Verify it's available (e.g. list your tools) and report the result to the user.`,
+      text: `MCP server "${name}" added. Verify it's available (e.g. list your tools) and report the result to the user.`,
       sender: 'system',
       senderId: 'system',
     }),

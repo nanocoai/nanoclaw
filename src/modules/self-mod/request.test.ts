@@ -186,6 +186,20 @@ describe('add_mcp_server approval card', () => {
     expect(question).toContain('env: {}');
   });
 
+  it('shows an HTTPS server URL and preserves its normalized payload', async () => {
+    await submitAddMcpServer({ name: 'docs', url: 'https://mcp.example.com/mcp' }, session);
+
+    const question = lastQuestion();
+    expect(question).toContain('type: "http"');
+    expect(question).toContain('url: "https://mcp.example.com/mcp"');
+    const rows = getPendingApprovalsByAction('add_mcp_server');
+    expect(JSON.parse(rows[0].payload)).toEqual({
+      name: 'docs',
+      type: 'http',
+      url: 'https://mcp.example.com/mcp',
+    });
+  });
+
   it('cannot be spoofed by newlines embedded in payload values', async () => {
     await submitAddMcpServer(
       {
@@ -251,6 +265,30 @@ describe('add_mcp_server approval card', () => {
 });
 
 describe('add_mcp_server validation', () => {
+  it('rejects a server name carrying config syntax before creating an approval', async () => {
+    await submitAddMcpServer({ name: 'docs]\n[mcp_servers.evil]', url: 'https://mcp.example.com/mcp' }, session);
+
+    expect(expectRejected()).toMatch(/1-64 characters/);
+  });
+
+  it('rejects an env key that is not a valid environment variable name', async () => {
+    await submitAddMcpServer({ name: 'ok', command: 'node', env: { 'BAD KEY': 'v' } }, session);
+
+    expect(expectRejected()).toMatch(/valid environment variable name/);
+  });
+
+  it('rejects a credential-bearing URL before creating an approval', async () => {
+    await submitAddMcpServer({ name: 'bad', url: 'https://mcp.example.com/mcp?api_key=secret' }, session);
+
+    expect(expectRejected()).toMatch(/looks like a credential/);
+  });
+
+  it('rejects args and env for an HTTPS server before creating an approval', async () => {
+    await submitAddMcpServer({ name: 'bad', url: 'https://mcp.example.com/mcp', env: { TOKEN: 'secret' } }, session);
+
+    expect(expectRejected()).toMatch(/only valid with command/);
+  });
+
   it('rejects a non-string element in args before creating an approval', async () => {
     await submitAddMcpServer({ name: 'bad', command: 'node', args: ['ok', 123] }, session);
     expectRejected();
@@ -368,6 +406,40 @@ describe('add_mcp_server secret redaction', () => {
     expect(payload.args).toEqual(['--token', argSecret]);
     expect(payload.env.GITHUB_TOKEN).toBe(keyMatched);
     expect(payload.env.HARMLESS).toBe(valueMatched);
+  });
+
+  it('redacts secret-shaped URL path segments on the card but keeps the URL verbatim in the payload', async () => {
+    const token = 'sk-abc123def456';
+    const url = `https://mcp.example.com/s/${token}/mcp`;
+    await submitAddMcpServer({ name: 'zap', url }, session);
+
+    const question = lastQuestion();
+    expect(question).not.toContain(token);
+    expect(question).toContain(redactedForm(token));
+
+    const rows = getPendingApprovalsByAction('add_mcp_server');
+    expect(JSON.parse(rows[0].payload)).toEqual({ name: 'zap', type: 'http', url });
+  });
+
+  it('never redacts the origin and redacts secret-shaped query values', async () => {
+    const token = 'sk-live-abc123';
+    const url = `https://sk-lookalike.example.com/mcp?config=${token}&plain=ok`;
+    await submitAddMcpServer({ name: 'zap', url }, session);
+
+    const question = lastQuestion();
+    // A secret-prefixed hostname must stay visible — the card is the admin's
+    // only view of the destination they are approving.
+    expect(question).toContain('sk-lookalike.example.com');
+    expect(question).toContain('plain=ok');
+    expect(question).not.toContain(token);
+    expect(question).toContain(redactedForm(token));
+  });
+
+  it('keeps a non-secret query byte-faithful on the card', async () => {
+    const url = 'https://mcp.example.com/mcp?a=b%26c&debug';
+    await submitAddMcpServer({ name: 'zap', url }, session);
+
+    expect(lastQuestion()).toContain('?a=b%26c&debug');
   });
 });
 

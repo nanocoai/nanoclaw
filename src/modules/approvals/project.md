@@ -13,7 +13,7 @@ Admin-gated approval flow for agent self-modification and OneCLI credential acce
 - **Delivery actions:** `install_packages`, `add_mcp_server` via `registerDeliveryAction`.
 - **Response handler:** single handler claims both agent-initiated and OneCLI approvals. OneCLI is tried first (in-memory Promise); falls through to `pending_approvals` lookup.
 - **Adapter-ready hook (`onDeliveryAdapterReady`):** starts the OneCLI manual-approval handler once the delivery adapter is set.
-- **Shutdown hook (`onShutdown`):** stops the OneCLI handler.
+- **Host shutdown hook (`onHostShutdown`):** stops the OneCLI handler.
 
 ### Tables
 
