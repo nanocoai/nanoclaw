@@ -22,7 +22,15 @@ function write(rel: string, content: string): void {
 
 describe('parseTemplate', () => {
   it('parses mcpServers, instructions, context extras, skills, and tasks', () => {
-    write('.mcp.json', JSON.stringify({ mcpServers: { fs: { command: 'mcp-fs', args: ['/data'] } } }));
+    write(
+      '.mcp.json',
+      JSON.stringify({
+        mcpServers: {
+          fs: { command: 'mcp-fs', args: ['/data'] },
+          docs: { type: 'http', url: 'https://mcp.example.com/mcp' },
+        },
+      }),
+    );
     write('context/instructions.md', 'Be helpful.\n\n');
     write('context/playbook.md', '# Playbook');
     write('context/additional_context/faq.md', '# FAQ');
@@ -36,7 +44,10 @@ describe('parseTemplate', () => {
 
     const tpl = parseTemplate(dir);
 
-    expect(tpl.mcpServers).toEqual({ fs: { command: 'mcp-fs', args: ['/data'] } });
+    expect(tpl.mcpServers).toEqual({
+      fs: { command: 'mcp-fs', args: ['/data'], env: {} },
+      docs: { type: 'http', url: 'https://mcp.example.com/mcp' },
+    });
     expect(tpl.instructions).toBe('Be helpful.'); // trimEnd, instructions.md excluded from extras
     // Nested extras keep their context/-relative path as the name.
     expect(tpl.contextExtras.map((c) => c.name).sort()).toEqual(['additional_context/faq.md', 'playbook.md']);
@@ -73,6 +84,60 @@ describe('parseTemplate', () => {
     expect(tpl.contextExtras).toEqual([]);
     expect(tpl.skills).toEqual([]);
     expect(tpl.tasks).toEqual([]);
+  });
+
+  it('rejects an MCP server that fails the shared container-config validation', () => {
+    write('.mcp.json', JSON.stringify({ mcpServers: { docs: { type: 'http', url: 'http://mcp.example.com' } } }));
+    write('context/instructions.md', 'Be helpful.');
+
+    expect(() => parseTemplate(dir)).toThrow(/Template MCP server "docs" is invalid:.*HTTPS/);
+  });
+
+  it('rejects an MCP server name that fails the shared name validation', () => {
+    write(
+      '.mcp.json',
+      JSON.stringify({ mcpServers: { 'my.server': { type: 'http', url: 'https://mcp.example.com/mcp' } } }),
+    );
+    write('context/instructions.md', 'Be helpful.');
+
+    expect(() => parseTemplate(dir)).toThrow(/Template MCP server "my\.server" is invalid:.*1-64 characters/);
+  });
+
+  it('accepts "streamable-http" (the MCP Registry spelling) as an alias for "http"', () => {
+    write(
+      '.mcp.json',
+      JSON.stringify({ mcpServers: { docs: { type: 'streamable-http', url: 'https://mcp.example.com/mcp' } } }),
+    );
+    write('context/instructions.md', 'Be helpful.');
+
+    expect(parseTemplate(dir).mcpServers).toEqual({
+      docs: { type: 'http', url: 'https://mcp.example.com/mcp' },
+    });
+  });
+
+  it.each([
+    ['missing type for url', { url: 'https://mcp.example.com/mcp' }],
+    ['unsupported type', { type: 'sse', url: 'https://mcp.example.com/mcp' }],
+    ['http type for command', { type: 'http', command: 'mcp-server' }],
+  ])('rejects an MCP server with %s', (_case, config) => {
+    write('.mcp.json', JSON.stringify({ mcpServers: { docs: config } }));
+    write('context/instructions.md', 'Be helpful.');
+
+    expect(() => parseTemplate(dir)).toThrow(
+      'type must be "http" (or "streamable-http") for url or "stdio" for command',
+    );
+  });
+
+  it('rejects an MCP server with an unknown field instead of silently dropping it', () => {
+    write(
+      '.mcp.json',
+      JSON.stringify({
+        mcpServers: { docs: { type: 'http', url: 'https://mcp.example.com/mcp', headers: { 'X-Api-Key': 'stub' } } },
+      }),
+    );
+    write('context/instructions.md', 'Be helpful.');
+
+    expect(() => parseTemplate(dir)).toThrow(/unknown field "headers"/);
   });
 
   it.each([

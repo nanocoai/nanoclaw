@@ -23,7 +23,8 @@
  * + approval handlers via this module's public API.
  */
 import { onDeliveryAdapterReady } from '../../delivery.js';
-import { registerResponseHandler, onShutdown } from '../../response-registry.js';
+import { onHostShutdown } from '../../host-lifecycle.js';
+import { registerResponseHandler } from '../../response-registry.js';
 import { handleApprovalsResponse } from './response-handler.js';
 import { startOneCLIApprovalHandler, stopOneCLIApprovalHandler } from './onecli-approvals.js';
 
@@ -40,6 +41,6 @@ onDeliveryAdapterReady((adapter) => {
   startOneCLIApprovalHandler(adapter);
 });
 
-onShutdown(() => {
+onHostShutdown(() => {
   stopOneCLIApprovalHandler();
 });

@@ -64,6 +64,8 @@ The one risky move is when a skill has to *reach into* existing code and wire so
 
 Rule of thumb: aim for skills that are almost all "adds." Not 100%; some reach-ins are fine. But a skill full of reach-ins is a smell, and a sign that spot in the core should become a proper hook.
 
+The skill's name and description declare the capability. Runtime registration uses the registry that owns the behavior, with one explicit import where required.
+
 ## Where a skill's files live
 
 The files a skill adds live in the skill's own folder, and the skill copies them into the project when it runs. The skill is self-contained.

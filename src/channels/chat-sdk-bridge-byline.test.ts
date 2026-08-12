@@ -24,6 +24,7 @@ import { closeDb, initTestDb, runMigrations } from '../db/index.js';
 import { createPendingApproval } from '../db/sessions.js';
 import type { ChannelSetup } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
+import { registerQuestionRenderResolver } from './question-render-registry.js';
 
 interface CapturedEdit {
   threadId: string;
@@ -52,6 +53,7 @@ function terminalText(edit: CapturedEdit): Array<{ type: string; content?: strin
 async function fireAction(
   user: Record<string, unknown>,
   selectedOption = 'approve',
+  actionId = `ncq:q-1:${selectedOption}`,
 ): Promise<{ edits: CapturedEdit[]; actions: string[] }> {
   const edits: CapturedEdit[] = [];
   const actions: string[] = [];
@@ -71,7 +73,7 @@ async function fireAction(
   expect(chat).toBeTruthy();
   await chat.processAction(
     {
-      actionId: `ncq:q-1:${selectedOption}`,
+      actionId,
       adapter,
       messageId: 'msg-1',
       raw: {},
@@ -149,5 +151,26 @@ describe('chat-sdk-bridge approval-card terminal state', () => {
       content: '✅ Approved',
       style: 'muted',
     });
+  });
+
+  it('resolves compact option indexes through a module resolver', async () => {
+    registerQuestionRenderResolver((questionId) => {
+      if (questionId !== 'module-compact-question') return undefined;
+      return {
+        title: 'Custom approval',
+        options: [{ label: 'Approve', selectedLabel: 'Approved safely', value: 'approve-real-value' }],
+      };
+    });
+
+    const { edits, actions } = await fireAction(
+      { userId: 'U4', userName: 'reviewer' },
+      '0',
+      'ncq:module-compact-question:0',
+    );
+
+    const message = edits[0].message as { markdown: string };
+    expect(message.markdown).toContain('Custom approval');
+    expect(message.markdown).toContain('Approved safely by reviewer');
+    expect(actions).toEqual(['module-compact-question:approve-real-value:U4']);
   });
 });

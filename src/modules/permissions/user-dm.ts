@@ -48,17 +48,22 @@ import { getUserDm, upsertUserDm } from './db/user-dms.js';
  *   - openDM throws (platform error, user blocked bot, etc.)
  *
  * Callers should treat null as "this user is unreachable on this channel".
+ * Set privacySafeLogs for security-sensitive flows to omit user, handle,
+ * messaging-group, and raw platform-error details from log data.
  */
-export async function ensureUserDm(userId: string): Promise<MessagingGroup | null> {
+export async function ensureUserDm(
+  userId: string,
+  { privacySafeLogs = false }: { privacySafeLogs?: boolean } = {},
+): Promise<MessagingGroup | null> {
   const user = getUser(userId);
   if (!user) {
-    log.warn('ensureUserDm: user not found', { userId });
+    log.warn('ensureUserDm: user not found', privacySafeLogs ? undefined : { userId });
     return null;
   }
 
   const { channelType, handle } = parseUserId(user);
   if (!channelType || !handle) {
-    log.warn('ensureUserDm: user id not namespaced', { userId });
+    log.warn('ensureUserDm: user id not namespaced', privacySafeLogs ? undefined : { userId });
     return null;
   }
 
@@ -68,14 +73,14 @@ export async function ensureUserDm(userId: string): Promise<MessagingGroup | nul
     const mg = getMessagingGroup(cached.messaging_group_id);
     if (mg) return mg;
     // Row points to a deleted messaging_group — fall through and re-resolve.
-    log.warn('ensureUserDm: cached row references missing messaging_group, re-resolving', {
-      userId,
-      messagingGroupId: cached.messaging_group_id,
-    });
+    log.warn(
+      'ensureUserDm: cached row references missing messaging_group, re-resolving',
+      privacySafeLogs ? { channelType } : { userId, messagingGroupId: cached.messaging_group_id },
+    );
   }
 
   // Cache miss: resolve the DM platform_id either via openDM or directly.
-  const dmPlatformId = await resolveDmPlatformId(channelType, handle);
+  const dmPlatformId = await resolveDmPlatformId(channelType, handle, privacySafeLogs);
   if (!dmPlatformId) return null;
 
   // Find-or-create the underlying messaging_group. A DM we received
@@ -98,11 +103,10 @@ export async function ensureUserDm(userId: string): Promise<MessagingGroup | nul
       created_at: now,
     };
     createMessagingGroup(mg);
-    log.info('ensureUserDm: created DM messaging_group', {
-      userId,
-      channelType,
-      messagingGroupId: mgId,
-    });
+    log.info(
+      'ensureUserDm: created DM messaging_group',
+      privacySafeLogs ? { channelType } : { userId, channelType, messagingGroupId: mgId },
+    );
   }
 
   upsertUserDm({
@@ -119,7 +123,11 @@ export async function ensureUserDm(userId: string): Promise<MessagingGroup | nul
  * Call the adapter's openDM if it has one; otherwise fall through to using
  * the handle directly. Returns null if the adapter is missing entirely.
  */
-async function resolveDmPlatformId(channelType: string, handle: string): Promise<string | null> {
+async function resolveDmPlatformId(
+  channelType: string,
+  handle: string,
+  privacySafeLogs: boolean,
+): Promise<string | null> {
   const adapter = getChannelAdapter(channelType);
   if (!adapter) {
     log.warn('ensureUserDm: no adapter for channel', { channelType });
@@ -129,12 +137,14 @@ async function resolveDmPlatformId(channelType: string, handle: string): Promise
     // Direct-addressable channel — handle doubles as the DM chat id.
     return handle;
   }
+  /* eslint-disable no-catch-all/no-catch-all -- platform DM resolution failure makes this user unreachable */
   try {
     return await adapter.openDM(handle);
   } catch (err) {
-    log.error('ensureUserDm: adapter.openDM failed', { channelType, handle, err });
+    log.error('ensureUserDm: adapter.openDM failed', privacySafeLogs ? { channelType } : { channelType, handle, err });
     return null;
   }
+  /* eslint-enable no-catch-all/no-catch-all */
 }
 
 function parseUserId(user: User): { channelType: string; handle: string } | { channelType: null; handle: null } {

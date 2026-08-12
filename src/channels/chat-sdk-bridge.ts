@@ -21,9 +21,9 @@ import {
 import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
-import { getAskQuestionRender } from '../db/sessions.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
+import { resolveQuestionRender } from './question-render-registry.js';
 
 /** Adapter with optional gateway support (e.g., Discord). */
 interface GatewayAdapter extends Adapter {
@@ -101,7 +101,7 @@ export interface ChatSdkBridgeConfig {
 /**
  * Decode the actual option value from a button callback. Buttons are encoded
  * with an integer index (to keep under Telegram's 64-byte callback_data cap),
- * and the real value is looked up via `getAskQuestionRender(questionId)`.
+ * and the real value is looked up via `resolveQuestionRender(questionId)`.
  * Falls back to treating the tail as a literal value so old in-flight cards
  * (encoded before this shortening landed) still resolve.
  */
@@ -338,7 +338,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const userId = event.user?.userId || '';
 
         // Resolve render metadata BEFORE dispatching onAction (which deletes the row).
-        const render = getAskQuestionRender(questionId);
+        const render = resolveQuestionRender(questionId);
         // New format: button id/value is an integer index into options (kept
         // short to fit Telegram's 64-byte callback_data cap). Old format:
         // the full value is embedded in actionId/value directly.
@@ -489,7 +489,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
               // full value. Telegram caps callback_data at 64 bytes, and
               // long values (e.g. ISO datetimes, URLs) push the JSON payload
               // well past that. The onAction handlers resolve the index back
-              // to the real value via getAskQuestionRender(questionId).
+              // to the real value via resolveQuestionRender(questionId).
               options.map((opt, idx) =>
                 Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx), style: opt.style }),
               ),
@@ -718,7 +718,7 @@ async function handleForwardedEvent(
       const originalEmbeds =
         ((interaction.message as Record<string, unknown>)?.embeds as Array<Record<string, unknown>>) || [];
       const originalDescription = (originalEmbeds[0]?.description as string) || '';
-      const render = questionId ? getAskQuestionRender(questionId) : undefined;
+      const render = questionId ? resolveQuestionRender(questionId) : undefined;
       // Discord custom_id mirrors the new index-based encoding (see Button
       // construction). Decode back to the real option value for downstream.
       const selectedOption = resolveSelectedOption(render, tail, tail);

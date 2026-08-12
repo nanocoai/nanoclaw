@@ -81,6 +81,7 @@ ncl groups restart
 ncl groups restart --rebuild --message "Config updated."
 ncl groups config update --model claude-sonnet-4-5-20250514
 ncl groups config add-mcp-server --name rss --command npx --args '["some-rss-mcp"]'
+ncl groups config add-mcp-server --name remote --url https://example.com/mcp
 ncl groups config add-package --npm some-package
 ncl members add --user telegram:jane
 ncl wirings update --engage-mode pattern --engage-pattern "."

@@ -1,6 +1,11 @@
 import { randomUUID } from 'crypto';
 
-import type { AdditionalMountConfig, McpServerConfig } from '../../container-config.js';
+import {
+  parseMcpServerConfig,
+  validateMcpServerName,
+  type AdditionalMountConfig,
+  type McpServerConfig,
+} from '../../container-config.js';
 import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
@@ -335,24 +340,24 @@ registerResource({
       access: 'approval',
       description:
         'Add an MCP server to a group. Requires `ncl groups restart` to take effect. ' +
-        'Use --id <group-id> --name <server-name> --command <cmd> [--args <json-array>] [--env <json-object>].',
+        'Use --id <group-id> --name <server-name> with either --command <cmd> [--args <json-array>] [--env <json-object>] or --url <url> (HTTPS, or plain HTTP for localhost / host.docker.internal).',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
         const name = args.name as string;
         if (!name) throw new Error('--name is required');
-        const command = args.command as string;
-        if (!command) throw new Error('--command is required');
+        validateMcpServerName(name);
 
         const row = getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
 
         const servers = JSON.parse(row.mcp_servers) as Record<string, McpServerConfig>;
-        servers[name] = {
-          command,
-          args: args.args ? (JSON.parse(args.args as string) as string[]) : [],
-          env: args.env ? (JSON.parse(args.env as string) as Record<string, string>) : {},
-        };
+        servers[name] = parseMcpServerConfig({
+          command: args.command,
+          url: args.url,
+          args: args.args === undefined ? undefined : JSON.parse(String(args.args)),
+          env: args.env === undefined ? undefined : JSON.parse(String(args.env)),
+        });
         updateContainerConfigJson(id, 'mcp_servers', servers);
 
         return { added: name, servers };

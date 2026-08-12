@@ -59,7 +59,7 @@ allowlist, and per-group resource limits all do more here than any image can.
 
 | | Pull | Build |
 |---|---|---|
-| `install_packages` | Works, as a derived image | Works |
+| `install_packages` (apt and npm only) | Works, as a derived image | Works |
 | Non-Claude providers | Only if the publisher baked the CLI, or you add it | Work |
 | Custom `Dockerfile` edits | Replaced on the next refresh | Yours |
 | `INSTALL_CJK_FONTS` | Whatever the publisher baked — or `fonts-noto-cjk` via `install_packages` | Your choice |
@@ -70,6 +70,12 @@ prints what to run instead, so a skill that rebuilds can't silently replace the 
 `install_packages` is the exception, and it works because it never rebuilds the base — it builds
 a small image `FROM` the one you pulled and adds your layers, then pins that group to it. The
 vendor's bytes are still underneath, unmodified.
+
+It reaches apt and npm packages only (`packages_apt` and `packages_npm`). A `Dockerfile` that
+installs by any other means — `pip`, a `curl | sh` vendor installer, a language toolchain fetched
+in a `RUN` — has no equivalent here, so those additions are lost on the switch and cannot be put
+back through the derived image. Check what your `Dockerfile` adds before opting in; if anything
+it installs falls outside apt and npm, local builds are the path that keeps it.
 
 What that costs is the vendor's claim over that one group. Their scan covered the base, not
 whatever you added on top, so a derived image labels itself `derived` rather than inheriting
