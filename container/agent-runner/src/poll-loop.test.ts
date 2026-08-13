@@ -568,3 +568,168 @@ describe('task-run turn wiring (real processQuery)', () => {
     expect(logs).not.toContain('second delivery decision handled');
   });
 });
+
+
+describe('turn-generation routing (regression)', () => {
+  // Incident shape: several batches pushed into a single long turn get
+  // answered by ONE result. A flat one-shift-per-result queue (or routing
+  // frozen at processQuery entry) leaves stale entries that mis-route later
+  // results — observed in production as replies delivered to a disconnected
+  // channel hours after its batches were answered. The observable door here
+  // is the error-result delivery (deliverErrorResult), which routes by the
+  // current turn generation.
+
+  function insertRouted(id: string, channelType: string, platformId: string, text: string) {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, trigger, on_wake, platform_id, channel_type, thread_id, content)
+         VALUES (?, 'chat', datetime('now'), 'pending', 1, 0, ?, ?, NULL, ?)`,
+      )
+      .run(id, platformId, channelType, JSON.stringify({ sender: 'S', text }));
+  }
+
+  /**
+   * Query stub with manual result control: pushes are recorded (and NOT
+   * auto-answered), results emit only when the test calls emitResult —
+   * mirroring an SDK turn that consumes every queued push at once.
+   */
+  function makeSteppedQuery(): {
+    query: AgentQuery;
+    pushes: string[];
+    emitResult: (text: string, isError?: boolean) => void;
+    finish: () => void;
+  } {
+    const pushes: string[] = [];
+    const queued: ProviderEvent[] = [];
+    let waiting: (() => void) | null = null;
+    let finished = false;
+    const wake = (): void => {
+      waiting?.();
+      waiting = null;
+    };
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 'sess-1' };
+      for (;;) {
+        while (queued.length > 0) yield queued.shift()!;
+        if (finished) return;
+        await new Promise<void>((res) => {
+          waiting = res;
+        });
+      }
+    }
+    return {
+      pushes,
+      emitResult: (text: string, isError?: boolean) => {
+        queued.push(isError ? { type: 'result', text, isError: true } : { type: 'result', text });
+        wake();
+      },
+      finish: () => {
+        finished = true;
+        wake();
+      },
+      query: {
+        push: (m: string) => {
+          pushes.push(m);
+        },
+        end: () => {
+          finished = true;
+          wake();
+        },
+        events: events(),
+        abort: () => {
+          finished = true;
+          wake();
+        },
+      },
+    };
+  }
+
+  async function waitFor(cond: () => boolean, timeoutMs = 4000): Promise<void> {
+    const start = Date.now();
+    while (!cond()) {
+      if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out');
+      await new Promise((res) => setTimeout(res, 50));
+    }
+  }
+
+  const textOuts = () =>
+    getUndeliveredMessages()
+      .map((m) => ({ row: m, body: JSON.parse(m.content) as { text?: string } }))
+      .filter((m) => typeof m.body.text === 'string' && m.body.text.length > 0);
+
+  it('a coalesced multi-push turn leaves no stale entries to hijack a later error notice', async () => {
+    const cliRouting = { platformId: 'local', channelType: 'cli', threadId: null, inReplyTo: 'm0' };
+    const { query, pushes, emitResult, finish } = makeSteppedQuery();
+    const run = processQuery(query, cliRouting, ['m0'], 'claude', undefined, 'prompt', undefined);
+
+    // Two Telegram batches ride into the active turn (separate poll ticks) —
+    // the SDK will answer BOTH with the next single result.
+    insertRouted('t1', 'telegram', 'tg-dm', 'question one');
+    await waitFor(() => pushes.length >= 1);
+    insertRouted('t2', 'telegram', 'tg-dm', 'question two');
+    await waitFor(() => pushes.length >= 2);
+
+    // Turn 1 ends answering the ORIGINAL cli batch; nothing user-visible.
+    emitResult('<internal>opener handled</internal>');
+    // Turn 2 answers BOTH telegram batches at once.
+    emitResult('<internal>both questions handled via send_message</internal>');
+    // Turn 3: a non-retryable provider error with no <message> envelope. The
+    // notice must reach the channel of the CURRENT generation lineage
+    // (telegram, via latest-batch fallback) — not the cli channel that
+    // opened the query (frozen routing) or a stale FIFO leftover.
+    insertRouted('t3', 'telegram', 'tg-dm', 'still there?');
+    await waitFor(() => pushes.length >= 3);
+    emitResult('Credit balance too low to continue.', true);
+    await waitFor(() => textOuts().length >= 1);
+
+    const notice = textOuts()[0];
+    expect(notice.row.channel_type).toBe('telegram');
+    expect(notice.row.platform_id).toBe('tg-dm');
+    expect(notice.row.in_reply_to).toBe('t3');
+
+    finish();
+    await run;
+  });
+
+  it('spurious extra result falls back to the latest batch, not the query-opening channel', async () => {
+    const discordRouting = { platformId: 'chan-old', channelType: 'discord', threadId: null, inReplyTo: 'm0' };
+    const { query, pushes, emitResult, finish } = makeSteppedQuery();
+    const run = processQuery(query, discordRouting, ['m0'], 'claude', undefined, 'prompt', undefined);
+
+    emitResult('<internal>opener handled</internal>');
+    insertRouted('t1', 'telegram', 'tg-dm', 'ping');
+    await waitFor(() => pushes.length >= 1);
+    emitResult('<internal>answered</internal>');
+    // Generation is now empty; an extra error result must use latest-batch
+    // routing, not revive the channel that opened the query.
+    emitResult('Gateway unreachable.', true);
+    await waitFor(() => textOuts().length >= 1);
+
+    const notice = textOuts()[0];
+    expect(notice.row.channel_type).toBe('telegram');
+
+    finish();
+    await run;
+  });
+
+  it('negative control: one-result-per-push does not over-rotate into misdelivery', async () => {
+    const tgRouting = { platformId: 'tg-dm', channelType: 'telegram', threadId: null, inReplyTo: 'm0' };
+    const { query, pushes, emitResult, finish } = makeSteppedQuery();
+    const run = processQuery(query, tgRouting, ['m0'], 'claude', undefined, 'prompt', undefined);
+
+    insertRouted('c1', 'cli', 'local', 'question one');
+    await waitFor(() => pushes.length >= 1);
+    emitResult('<internal>opener handled</internal>');
+    insertRouted('c2', 'cli', 'local', 'question two');
+    await waitFor(() => pushes.length >= 2);
+    emitResult('<internal>answer one</internal>');
+    // Current generation is [c2]; an error now belongs to the cli channel.
+    emitResult('Provider quota exhausted.', true);
+    await waitFor(() => textOuts().length >= 1);
+
+    expect(textOuts()[0].row.channel_type).toBe('cli');
+
+    finish();
+    await run;
+  });
+});

@@ -354,11 +354,41 @@ export async function processQuery(
   // Once-per-turn guard for the task-run "<message> block was not delivered"
   // nudge — mirrors unwrappedNudged for chat turns.
   let taskBlockNudged = false;
-  // Prompt queue for the exchange hook — each result event consumes the
-  // oldest unanswered prompt, except a wrapping-retry result, which answers
-  // the same prompt again. Unused (and unmaintained) when the provider
-  // doesn't implement `onExchangeComplete`.
-  const archivePrompts: string[] = [initialPrompt];
+  // Per-turn prompt/routing bookkeeping for result delivery and the
+  // exchange hook.
+  //
+  // `routing` is fixed at processQuery entry to the batch that opened the
+  // query — but the query stays open across many turns (see pollHandle
+  // below), and a later turn can be started by a follow-up from a completely
+  // different sender/channel (or a different session kind entirely). Without
+  // per-turn tracking, everything a result needs routing for — the taskRun
+  // gate, error-notice delivery, the exchange archive — falls back to the
+  // batch that opened the query, which may be days stale.
+  //
+  // Turn GENERATIONS, not a flat FIFO: prompts pushed while a turn is in
+  // flight are queued by the SDK and all consumed together by the NEXT turn,
+  // which answers them with ONE result. A flat queue shifts exactly one
+  // entry per result, so every coalesced batch leaves stale entries behind
+  // that then mis-route later results. So: `currentTurn*` holds the batches
+  // the in-flight (or next-starting) turn is answering; `pendingTurn*`
+  // accumulates pushes that arrive while it runs. A result routes to the
+  // LATEST batch of its generation and rotates the whole generation at once.
+  let currentTurnPrompts: string[] = [initialPrompt];
+  let currentTurnRouting: RoutingContext[] = [routing];
+  let pendingTurnPrompts: string[] = [];
+  let pendingTurnRouting: RoutingContext[] = [];
+  // Fallback when the current generation is empty at result time (a
+  // spurious extra result): the routing of the most recent batch — right or
+  // nearly right in every such scenario, and it self-corrects on the next
+  // inbound. Falling back to `routing` (frozen at entry) would revive
+  // whatever channel opened the query.
+  let lastBatchRouting: RoutingContext = routing;
+  const rotateGeneration = (): void => {
+    currentTurnPrompts = pendingTurnPrompts;
+    currentTurnRouting = pendingTurnRouting;
+    pendingTurnPrompts = [];
+    pendingTurnRouting = [];
+  };
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -442,7 +472,18 @@ export async function processQuery(
         unwrappedNudged = false;
         taskBlockNudged = false;
         query.push(prompt);
-        archivePrompts.push(prompt);
+        const followUpRouting = extractRouting(keep);
+        if (currentTurnRouting.length === 0) {
+          // No unanswered prompts in flight — this push starts the next turn.
+          currentTurnPrompts = [prompt];
+          currentTurnRouting = [followUpRouting];
+        } else {
+          // A turn is already answering `currentTurn*` — this push queues
+          // behind it and will be consumed by the turn after.
+          pendingTurnPrompts.push(prompt);
+          pendingTurnRouting.push(followUpRouting);
+        }
+        lastBatchRouting = followUpRouting;
         markCompleted(keptIds);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
@@ -504,32 +545,38 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        // Routing for THIS turn — the latest batch of the generation this
+        // result answers, not the routing frozen at processQuery entry. When
+        // the turn answered several batches, the most recent sender is the
+        // best target (same rationale as lastBatchRouting).
+        const currentRouting =
+          currentTurnRouting[currentTurnRouting.length - 1] ?? lastBatchRouting;
         if (event.text) {
-          const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(event.text, routing);
-          const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
+          const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(event.text, currentRouting);
+          const willRetryTaskBlocks = shouldNudgeTaskBlocks(currentRouting.taskRun, taskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
           // while explicit append-log calls remain optional additive notes.
           // Errors included: a failed run's text belongs in its log, not chat.
           // A corrective retry handles delivery only; its result is not a
           // second run summary.
-          if (routing.taskRun && !taskBlockNudged) autoAppendTaskLog(event.text);
-          if (sent === 0 && event.isError === true && !routing.taskRun) {
+          if (currentRouting.taskRun && !taskBlockNudged) autoAppendTaskLog(event.text);
+          if (sent === 0 && event.isError === true && !currentRouting.taskRun) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
             // scratchpad, and skip the re-wrap nudge — it would just re-hammer
             // the failing gateway turn after turn.
-            deliverErrorResult(event.text, routing);
+            deliverErrorResult(event.text, currentRouting);
             notifyExchangeComplete(onExchangeComplete, {
-              prompt: archivePrompts[0] ?? initialPrompt,
+              prompt: currentTurnPrompts.join('\n\n') || initialPrompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
               status: 'error',
             });
-            archivePrompts.shift();
+            rotateGeneration();
           } else {
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
             notifyExchangeComplete(onExchangeComplete, {
-              prompt: archivePrompts[0] ?? initialPrompt,
+              prompt: currentTurnPrompts.join('\n\n') || initialPrompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
               status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
@@ -553,17 +600,17 @@ export async function processQuery(
               query.push(buildTaskBlockNudge(taskBlocks, names));
             }
             // A retry result (wrapping or task-block nudge) answers the SAME
-            // user prompt — keep it queued so the retry archives against it,
-            // not the nudge text.
-            if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
+            // generation — hold it so the retried result routes and archives
+            // against the same batches, not the nudge text.
+            if (!willRetryWrapping && !willRetryTaskBlocks) rotateGeneration();
           }
-        } else archivePrompts.shift();
+        } else rotateGeneration();
       }
     }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     notifyExchangeComplete(onExchangeComplete, {
-      prompt: archivePrompts[0] ?? initialPrompt,
+      prompt: currentTurnPrompts.join('\n\n') || initialPrompt,
       result: `Error: ${errMsg}`,
       continuation: queryContinuation ?? initialContinuation,
       status: 'error',
