@@ -3,7 +3,6 @@
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
 import { execSync } from 'child_process';
-import os from 'os';
 
 import { CONTAINER_INSTALL_LABEL } from './config.js';
 import { log } from './log.js';
@@ -13,11 +12,14 @@ export const CONTAINER_RUNTIME_BIN = 'docker';
 
 /** CLI args needed for the container to resolve the host gateway. */
 export function hostGatewayArgs(): string[] {
-  // On Linux, host.docker.internal isn't built-in — add it explicitly
-  if (os.platform() === 'linux') {
-    return ['--add-host=host.docker.internal:host-gateway'];
-  }
-  return [];
+  // Only Docker Desktop builds host.docker.internal into the container's
+  // DNS. Linux Docker needs this flag (the old platform gate), but so do
+  // the VM-based macOS runtimes without Desktop — Colima, Lima, Rancher
+  // Desktop — where the old `platform() === 'linux'` check skipped it and
+  // containers couldn't resolve the host at all. Docker treats the flag as
+  // a no-op duplicate where the mapping is already built in, so add it
+  // unconditionally.
+  return ['--add-host=host.docker.internal:host-gateway'];
 }
 
 /** Returns CLI args for a readonly bind mount. */
