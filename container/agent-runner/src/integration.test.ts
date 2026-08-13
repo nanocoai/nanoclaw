@@ -299,18 +299,60 @@ describe('poll loop integration', () => {
 });
 
 // Helper: run poll loop until aborted or timeout
+describe('poll loop — test helper loop isolation', () => {
+  // Guards the property the PollLoopConfig.signal comment promises: an abandoned loop
+  // must stop, not "poll forever and steal messages from the next test's DB". MockProvider's
+  // stream stays open, so a loop whose caller relied on the helper TIMEOUT (never called
+  // controller.abort()) keeps an active follow-up poll. Before the fix it grabbed the next
+  // message a later test inserted — a cross-test flake that only surfaced under slow CI.
+  it('a loop the caller let time out does not steal a later message', async () => {
+    insertMessage('m-keepalive', { sender: 'Alice', text: 'hello' }, { platformId: 'chan-1', channelType: 'discord' });
+    const orphan = new MockProvider({}, () => 'thinking, no reply');
+    const orphanController = new AbortController();
+    // Caller never aborts — it lets the helper's timeout end the await (a real pattern).
+    await runPollLoopWithTimeout(orphan, orphanController.signal, 600).catch(() => {});
+
+    // A fresh /clear must remain pending for a real loop to handle. A still-polling abandoned
+    // loop would grab it: abort its own stream, write "Session cleared.", and ack the row.
+    insertMessage('m-clear-orphan', { sender: 'Alice', text: '/clear' }, { platformId: 'chan-1', channelType: 'discord' });
+    await sleep(1200); // > 2 follow-up poll intervals — ample time for a leftover loop to steal
+
+    const stillPending = getPendingMessages().some((m) => m.id === 'm-clear-orphan');
+    const sessionCleared = getUndeliveredMessages().some((msg) => JSON.parse(msg.content).text === 'Session cleared.');
+    orphanController.abort(); // clean up regardless of outcome
+    await sleep(50);
+
+    expect(sessionCleared).toBe(false); // the abandoned loop must not have processed /clear
+    expect(stillPending).toBe(true); // /clear stays pending for a real loop
+  });
+});
+
 async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSignal, timeoutMs: number): Promise<void> {
+  // Own an internal stop signal so an abandoned loop ALWAYS exits — on caller abort AND on
+  // timeout. MockProvider's stream stays open, so a loop left running with a non-aborted
+  // signal keeps an active follow-up poll and steals the next test's messages (see the
+  // PollLoopConfig.signal note). The original helper only aborted on caller abort, so a test
+  // that relied on the timeout leaked a message-stealing poller — a cross-test flake that
+  // only surfaced under slow CI scheduling.
+  const stop = new AbortController();
+  if (signal.aborted) stop.abort();
+  else signal.addEventListener('abort', () => stop.abort());
   return Promise.race([
     runPollLoop({
       provider,
       providerName: 'mock',
       cwd: '/tmp',
-      signal,
+      signal: stop.signal,
     }),
     new Promise<void>((_, reject) => {
       signal.addEventListener('abort', () => reject(new Error('aborted')));
     }),
-    new Promise<void>((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs)),
+    new Promise<void>((_, reject) =>
+      setTimeout(() => {
+        stop.abort();
+        reject(new Error('timeout'));
+      }, timeoutMs),
+    ),
   ]);
 }
 
