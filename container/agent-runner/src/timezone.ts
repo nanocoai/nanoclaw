@@ -39,6 +39,7 @@ export function formatLocalTime(utcIso: string, timezone: string): string {
   const date = new Date(utcIso);
   return date.toLocaleString('en-US', {
     timeZone: resolveTimezone(timezone),
+    weekday: 'long',
     year: 'numeric',
     month: 'short',
     day: 'numeric',
@@ -61,6 +62,30 @@ export function formatLocalStamp(date: Date, timezone: string): string {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
+  });
+}
+
+/**
+ * Current wall-clock time in the given zone, including weekday. Injected fresh
+ * into the per-turn context header so the agent always knows the current day AND
+ * hour — not just the timezone name.
+ *
+ * The existing per-message `time="..."` timestamps only anchor the agent on
+ * *chat* turns (turns triggered by an incoming message). Scheduled-task turns
+ * have no incoming message to stamp, so without this the agent runs them with no
+ * notion of the current day/time and confuses days and hours. This header covers
+ * every turn type.
+ */
+export function nowInZone(timezone: string): string {
+  return new Date().toLocaleString('en-US', {
+    timeZone: resolveTimezone(timezone),
+    weekday: 'long',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
   });
 }
 

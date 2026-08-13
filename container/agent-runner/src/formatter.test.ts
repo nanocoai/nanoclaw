@@ -52,6 +52,11 @@ describe('context timezone header', () => {
     expect(result).toContain(`<context timezone="${TIMEZONE}"`);
   });
 
+  it('includes a current_time attribute so task turns (no message timestamp) still know the day/hour', () => {
+    const result = formatMessages([]);
+    expect(result).toMatch(/<context timezone="[^"]*" current_time="[^"]+" \/>/);
+  });
+
   it('header comes before the first <message> block when multiple are present', () => {
     insertMessage('m1', 'chat', { sender: 'Alice', text: 'one' });
     insertMessage('m2', 'chat', { sender: 'Bob', text: 'two' });
