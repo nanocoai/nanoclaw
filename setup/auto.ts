@@ -1786,7 +1786,7 @@ async function askChannelChoice(): Promise<ChannelChoice> {
         {
           value: 'slack',
           label: 'Yes, connect Slack (experimental)',
-          hint: 'needs public URL',
+          hint: 'advanced setup with public URL needed',
         },
         { value: 'teams', label: 'Yes, connect Microsoft Teams', hint: 'complex setup' },
         { value: 'other', label: 'Other…', hint: 'install via /add-<name> after setup' },
