@@ -374,6 +374,35 @@ export function buildMounts(
     mounts.push({ hostPath: skillsSrc, containerPath: '/app/skills', readonly: true });
   }
 
+  // External symlink mounts — per-group skills may be symlinks pointing outside
+  // the group directory (e.g., to a personal marketplace). Inside the container
+  // only /workspace/agent/ is mounted, so the symlink targets are unreachable.
+  // Fix: resolve each external symlink and mount its real path at the same
+  // absolute path so the container symlink resolves correctly.
+  const groupSkillsDir = path.join(groupDir, 'skills');
+  if (fs.existsSync(groupSkillsDir)) {
+    const seenRealPaths = new Set<string>();
+    for (const entry of fs.readdirSync(groupSkillsDir)) {
+      const entryPath = path.join(groupSkillsDir, entry);
+      try {
+        if (!fs.lstatSync(entryPath).isSymbolicLink()) continue;
+        const realPath = fs.realpathSync(entryPath);
+        // Only mount if it points outside the group dir (i.e., it's an external dep)
+        if (realPath.startsWith(groupDir + path.sep) || realPath === groupDir) continue;
+        if (seenRealPaths.has(realPath)) continue;
+        seenRealPaths.add(realPath);
+        mounts.push({ hostPath: realPath, containerPath: realPath, readonly: true });
+        log.debug('Mounting external skill symlink target', {
+          group: agentGroup.name,
+          skill: entry,
+          realPath,
+        });
+      } catch {
+        /* skip unreadable entries */
+      }
+    }
+  }
+
   // Additional mounts from container config
   if (containerConfig.additionalMounts && containerConfig.additionalMounts.length > 0) {
     const validated = validateAdditionalMounts(containerConfig.additionalMounts, agentGroup.name);
