@@ -20,7 +20,11 @@ function inventory(overrides: Partial<Inventory> = {}): Inventory {
     service: {
       launchdPlist: '/home/u/Library/LaunchAgents/com.nanoclaw-v2-abcd1234.plist',
       containerIds: ['c1', 'c2'],
-      image: 'nanoclaw-agent-v2-abcd1234:latest',
+      // As scan orders them: per-agent-group images, base tag last.
+      images: [
+        'nanoclaw-agent-v2-abcd1234:ag-1783009453197-319n7n',
+        'nanoclaw-agent-v2-abcd1234:latest',
+      ],
       nclSymlink: '/home/u/.local/bin/ncl',
     },
     data: [
@@ -138,8 +142,18 @@ describe('buildRemovalPlan conditional actions', () => {
     expect(kinds(buildRemovalPlan(inv, allYes()))).not.toContain('backup-env');
   });
 
+  it('removes every image tag, per-agent-group ones before the base', () => {
+    const actions = buildRemovalPlan(inventory(), allYes());
+    expect(
+      actions.filter((a) => a.kind === 'rmi').map((a) => (a.kind === 'rmi' ? a.image : '')),
+    ).toEqual([
+      'nanoclaw-agent-v2-abcd1234:ag-1783009453197-319n7n',
+      'nanoclaw-agent-v2-abcd1234:latest',
+    ]);
+  });
+
   it('always re-sweeps containers and processes with a confirmed service group', () => {
-    const inv = inventory({ service: { containerIds: [] } });
+    const inv = inventory({ service: { containerIds: [], images: [] } });
     const actions = buildRemovalPlan(inv, allYes());
     const actionKinds = kinds(actions);
     expect(actionKinds).not.toContain('rmi');

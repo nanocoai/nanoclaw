@@ -125,6 +125,33 @@ describe('executePlan', () => {
     expect(notes.some((n) => n.includes('docker rmi img:latest'))).toBe(true);
   });
 
+  it('removes every image tag independently, one rmi per action', () => {
+    // The planner emits one rmi per tag (per-agent-group images, then the
+    // base). A tag that won't delete must not strand the ones after it.
+    const calls: string[][] = [];
+    const runCommand: RunCommand = (cmd, args) => {
+      calls.push([cmd, ...args]);
+      return { status: args[1] === 'base:ag-stuck' ? 1 : 0, stdout: '' };
+    };
+
+    const { notes } = executePlan(
+      [
+        { kind: 'rmi', runtime: 'docker', image: 'base:ag-stuck' },
+        { kind: 'rmi', runtime: 'docker', image: 'base:ag-ok' },
+        { kind: 'rmi', runtime: 'docker', image: 'base:latest' },
+      ],
+      deps({ runCommand }),
+    );
+
+    expect(calls).toEqual([
+      ['docker', 'rmi', 'base:ag-stuck'],
+      ['docker', 'rmi', 'base:ag-ok'],
+      ['docker', 'rmi', 'base:latest'],
+    ]);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain('docker rmi base:ag-stuck');
+  });
+
   it('removes .env only after a successful backup', () => {
     const envPath = path.join(tempDir, '.env');
     fs.writeFileSync(envPath, 'KEY=secret');

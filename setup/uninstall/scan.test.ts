@@ -5,7 +5,11 @@ import path from 'path';
 
 import Database from 'better-sqlite3';
 
-import { getLaunchdLabel, getSystemdUnit } from '../../src/install-slug.js';
+import {
+  getContainerImageBase,
+  getLaunchdLabel,
+  getSystemdUnit,
+} from '../../src/install-slug.js';
 import type { RunCommand } from './onecli-agents.js';
 import { detectExistingInstall, scanInstall, type ScanDeps } from './scan.js';
 
@@ -39,11 +43,12 @@ function deps(overrides: Partial<ScanDeps> = {}): ScanDeps {
   };
 }
 
-const dockerUp = (containerIds: string[], hasImage: boolean) =>
+/** Docker up: `ps` yields container ids, `images` yields repo:tag lines. */
+const dockerUp = (containerIds: string[], imageTags: string[]) =>
   fakeRun({
     docker: (args) => {
       if (args[0] === 'ps') return { status: 0, stdout: containerIds.join('\n') + '\n' };
-      if (args[0] === 'image') return { status: hasImage ? 0 : 1, stdout: '' };
+      if (args[0] === 'images') return { status: 0, stdout: imageTags.join('\n') + '\n' };
       return { status: 1, stdout: '' };
     },
   });
@@ -77,7 +82,7 @@ describe('scanInstall path groups', () => {
     expect(inv.runtime).toEqual([]);
     expect(inv.user).toEqual([]);
     expect(inv.service.containerIds).toEqual([]);
-    expect(inv.service.image).toBeUndefined();
+    expect(inv.service.images).toEqual([]);
   });
 });
 
@@ -116,17 +121,80 @@ describe('scanInstall service artifacts', () => {
   });
 
   it('captures container ids and image when docker is up', () => {
-    const inv = scanInstall(deps({ runCommand: dockerUp(['abc123', 'def456'], true) }));
+    const base = getContainerImageBase(root);
+    expect(base).toMatch(/^nanoclaw-agent-v2-[0-9a-f]{8}$/);
+
+    const inv = scanInstall(
+      deps({ runCommand: dockerUp(['abc123', 'def456'], [`${base}:latest`]) }),
+    );
     expect(inv.service.containerIds).toEqual(['abc123', 'def456']);
-    expect(inv.service.image).toMatch(/^nanoclaw-agent-v2-[0-9a-f]{8}:latest$/);
+    expect(inv.service.images).toEqual([`${base}:latest`]);
     expect(inv.notes).toEqual([]);
+  });
+
+  it('inventories per-agent-group images, ordered before the base tag', () => {
+    const base = getContainerImageBase(root);
+    const inv = scanInstall(
+      deps({
+        runCommand: dockerUp(
+          [],
+          // Fed base-first: docker's own order (created-desc) is not something
+          // the scan may rely on, so the re-order has to be real.
+          [`${base}:latest`, `${base}:ag-1783009453197-319n7n`, `${base}:ag-other`],
+        ),
+      }),
+    );
+    // Children first: the base is the FROM of every derived image.
+    expect(inv.service.images).toEqual([
+      `${base}:ag-1783009453197-319n7n`,
+      `${base}:ag-other`,
+      `${base}:latest`,
+    ]);
+  });
+
+  it('scopes the image query to this checkout so a peer install is untouched', () => {
+    const calls: string[][] = [];
+    const inv = scanInstall(
+      deps({
+        runCommand: (cmd, args) => {
+          calls.push([cmd, ...args]);
+          return cmd === 'docker' ? { status: 0, stdout: '' } : { status: 1, stdout: '' };
+        },
+      }),
+    );
+    // Repository is the slug-bearing base; only the TAG is wildcarded, so a
+    // sibling checkout's `nanoclaw-agent-v2-<otherSlug>` can never match.
+    expect(calls).toContainEqual([
+      'docker',
+      'images',
+      '--filter',
+      `reference=${getContainerImageBase(root)}:*`,
+      '--format',
+      '{{.Repository}}:{{.Tag}}',
+    ]);
+    expect(inv.service.images).toEqual([]);
   });
 
   it('degrades with a manual-cleanup note when docker is unavailable', () => {
     const inv = scanInstall(deps());
     expect(inv.service.containerIds).toEqual([]);
-    expect(inv.service.image).toBeUndefined();
+    expect(inv.service.images).toEqual([]);
     expect(inv.notes.some((n) => n.includes("'docker' unavailable"))).toBe(true);
+  });
+
+  it('notes the wildcard rmi command when only the image query fails', () => {
+    const inv = scanInstall(
+      deps({
+        runCommand: fakeRun({
+          docker: (args) =>
+            args[0] === 'ps' ? { status: 0, stdout: '' } : { status: 1, stdout: '' },
+        }),
+      }),
+    );
+    expect(inv.service.images).toEqual([]);
+    expect(
+      inv.notes.some((n) => n.includes(`reference='${getContainerImageBase(root)}:*'`)),
+    ).toBe(true);
   });
 });
 

@@ -47,7 +47,13 @@ export interface ServiceInventory {
   systemdSystemUnit?: string;
   pidFile?: string;
   containerIds: string[];
-  image?: string;
+  /**
+   * Every tag under this checkout's image base: the `<base>:latest` image
+   * plus the per-agent-group images `install_packages` builds as
+   * `<base>:<agentGroupId>` (container-runner.ts `buildAgentGroupImage`).
+   * Ordered per-agent-group first, `<base>:latest` last — see `imageTags`.
+   */
+  images: string[];
   nclSymlink?: string;
 }
 
@@ -157,7 +163,7 @@ function scanService(
   notes: string[],
 ): ServiceInventory {
   const { projectRoot, home, platform, runCommand } = deps;
-  const service: ServiceInventory = { containerIds: [] };
+  const service: ServiceInventory = { containerIds: [], images: [] };
 
   if (platform === 'darwin') {
     const plist = path.join(
@@ -179,7 +185,12 @@ function scanService(
 
   // Container label matches what container-runner.ts stamps at spawn time.
   const installLabel = `nanoclaw-install=${slug}`;
-  const image = `${getContainerImageBase(projectRoot)}:latest`;
+  // A *repository* name, not a full reference. The slug is in the repository
+  // itself, so every tag under it is ours and the wildcard cannot reach a
+  // peer install — docker's reference filter matches the repository exactly
+  // (verified: `reference=nanoclaw-agent:*` does not match
+  // `nanoclaw-agent-v2-<slug>`).
+  const imageBase = getContainerImageBase(projectRoot);
   let runtimeOk = true;
   try {
     const ps = runCommand(containerRuntime, [
@@ -201,8 +212,22 @@ function scanService(
   }
   if (runtimeOk) {
     try {
-      const inspect = runCommand(containerRuntime, ['image', 'inspect', image]);
-      if (inspect.status === 0) service.image = image;
+      // Enumerate, don't inspect one tag: an agent group that ever ran
+      // install_packages has its own `<base>:<agentGroupId>` image, and
+      // inspecting only `<base>:latest` left every one of those behind
+      // (multi-GB each) after an uninstall reported success.
+      const images = runCommand(containerRuntime, [
+        'images',
+        '--filter',
+        `reference=${imageBase}:*`,
+        '--format',
+        '{{.Repository}}:{{.Tag}}',
+      ]);
+      if (images.status === 0) {
+        service.images = imageTags(images.stdout, `${imageBase}:latest`);
+      } else {
+        runtimeOk = false;
+      }
     } catch {
       runtimeOk = false;
     }
@@ -211,7 +236,8 @@ function scanService(
     notes.push(
       `Containers/image: '${containerRuntime}' unavailable; remove later with: ` +
         `${containerRuntime} ps -aq --filter label=${installLabel} | xargs -r ${containerRuntime} rm -f; ` +
-        `${containerRuntime} rmi ${image}`,
+        `${containerRuntime} images --filter reference='${imageBase}:*' ` +
+        `--format '{{.Repository}}:{{.Tag}}' | xargs -r ${containerRuntime} rmi`,
     );
   }
 
@@ -237,6 +263,23 @@ function scanService(
   }
 
   return service;
+}
+
+/**
+ * Parse `<runtime> images --format` output into removal order: per-agent-group
+ * tags first, `<base>:latest` last.
+ *
+ * Derived images are built `FROM <base>:latest`, so a runtime tracking parent
+ * links refuses to delete the base while a child references it. Docker 29
+ * refcounts layers and doesn't care — child-first is free insurance that also
+ * keeps the confirmation table ordered.
+ */
+function imageTags(stdout: string, baseTag: string): string[] {
+  const tags = stdout
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return [...tags.filter((t) => t !== baseTag), ...tags.filter((t) => t === baseTag)];
 }
 
 function scanOnecli(

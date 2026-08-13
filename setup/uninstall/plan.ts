@@ -92,8 +92,12 @@ export function buildRemovalPlan(inv: Inventory, d: Decisions): RemovalAction[] 
       runtime: inv.containerRuntime,
       labelFilter: `nanoclaw-install=${inv.slug}`,
     });
-    if (s.image) {
-      actions.push({ kind: 'rmi', runtime: inv.containerRuntime, image: s.image });
+    // One action per tag, in scan order (per-agent-group images before the
+    // base they were built FROM). Keeping them separate means a tag that
+    // won't delete — still in use by a container we couldn't remove — is its
+    // own note and never blocks the remaining images.
+    for (const image of s.images) {
+      actions.push({ kind: 'rmi', runtime: inv.containerRuntime, image });
     }
     if (s.nclSymlink) {
       actions.push({ kind: 'rm-ncl-symlink', linkPath: s.nclSymlink });

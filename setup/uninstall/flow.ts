@@ -325,7 +325,15 @@ function serviceRows(inv: Inventory, home: string): { what: string; where: strin
   if (s.containerIds.length > 0) {
     rows.push({ what: 'Running containers', where: `${s.containerIds.length} container(s)` });
   }
-  if (s.image) rows.push({ what: 'Container image', where: s.image });
+  for (const image of s.images) {
+    // Anything but `:latest` is a per-agent-group image built by
+    // install_packages. Label it — the tag is a bare agent-group id, which
+    // tells the user nothing about what they're being asked to delete.
+    rows.push({
+      what: image.endsWith(':latest') ? 'Container image' : 'Container image (agent group)',
+      where: image,
+    });
+  }
   if (s.nclSymlink) rows.push({ what: 'Command-line tool (ncl)', where: tilde(s.nclSymlink, home) });
   return rows;
 }
