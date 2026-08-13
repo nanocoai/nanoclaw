@@ -22,6 +22,7 @@ console.log('\n=== Step 1: Init central DB ===');
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import { createAgentGroup } from '../src/db/agent-groups.js';
+import { ensureContainerConfig } from '../src/db/container-configs.js';
 import { createMessagingGroup, createMessagingGroupAgent } from '../src/db/messaging-groups.js';
 
 const centralDb = initDb(path.join(TEST_DIR, 'v2.db'));
@@ -40,6 +41,14 @@ createAgentGroup({
   agent_provider: 'claude',
   created_at: new Date().toISOString(),
 });
+
+// Container runtime config lives in its own table, and the spawn path requires
+// a row: `materializeContainerJson` throws rather than inventing defaults. Every
+// real creation path pairs these two calls — `group-init.ts`, `ncl groups
+// create`, `init-first-agent.ts`, `setup/register.ts` — and this script has to
+// as well now that it no longer goes through any of them. INSERT OR IGNORE, so
+// re-running is safe.
+ensureContainerConfig('ag-e2e', 'claude');
 
 createMessagingGroup({
   id: 'mg-e2e',

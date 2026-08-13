@@ -22,13 +22,28 @@
  * Keep this around. It ran for ~20 minutes once to map the failure modes
  * and it takes about 60s to run — cheap insurance.
  *
- * Requires: Docker Desktop running, nanoclaw-agent:latest image built.
+ * Requires: Docker Desktop running, and this install's agent image built
+ * (`./container/build.sh`).
+ *
+ * Two runtimes on purpose. The host half uses better-sqlite3 because the host
+ * is Node; the container half uses `bun:sqlite` because the agent-runner is
+ * Bun and the image carries no better-sqlite3 at all. Reaching for one library
+ * on both sides is what made this script stop running.
  */
 
 import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { mkdirSync, rmSync } from "node:fs";
 import Database from "better-sqlite3";
+
+import { getDefaultContainerImage } from "../src/install-slug.js";
+
+// Never hardcode the tag. Images are per-install (`nanoclaw-agent-v2-<slug>`),
+// so a literal `nanoclaw-agent:latest` is absent on a clean machine — and on a
+// machine that once ran an older NanoClaw it silently resolves to that stale
+// image, which is worse: a cross-mount regression test passing against bytes
+// nobody runs.
+const IMAGE = getDefaultContainerImage();
 
 const dbDir = join("/tmp", `nanoclaw-live-${Date.now()}`);
 mkdirSync(dbDir, { recursive: true });
@@ -48,17 +63,25 @@ for (const journalMode of ["DELETE", "WAL"]) {
   db.exec("CREATE TABLE msgs (seq INTEGER PRIMARY KEY, content TEXT)");
   db.close();
 
-  // Start container poller in background
+  // Start container poller in background. `bun`, not `node`: this has to be the
+  // same sqlite the agent-runner actually uses, or the script stops testing the
+  // thing it exists to test.
   const contProc = spawn("docker", [
     "run", "--rm", "-w", "/app",
     "-v", `${dbDir}:/workspace`,
-    "--entrypoint", "node",
-    "nanoclaw-agent:latest",
+    "--entrypoint", "bun",
+    IMAGE,
     "-e",
-    `const Database = require('better-sqlite3');
+    // bun:sqlite rather than better-sqlite3, and `db.run` for the pragma since
+    // bun:sqlite has no `.pragma()`. The statement is prepared once and reused
+    // across polls, exactly as before: a reused bun:sqlite statement re-executes
+    // and sees writes committed after it was prepared (verified — if it cached,
+    // this script would report a visibility failure that was really an artifact
+    // of its own probe).
+    `const { Database } = require('bun:sqlite');
      const db = new Database('/workspace/live.db', { readonly: true });
-     db.pragma('busy_timeout = 2000');
-     const stmt = db.prepare('SELECT COUNT(*) as n, MAX(seq) as hi FROM msgs');
+     db.run('PRAGMA busy_timeout = 2000');
+     const stmt = db.query('SELECT COUNT(*) as n, MAX(seq) as hi FROM msgs');
      let count = 0;
      const timer = setInterval(() => {
        const r = stmt.get();
