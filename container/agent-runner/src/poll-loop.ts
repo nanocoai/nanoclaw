@@ -2,6 +2,7 @@ import { findByName, getAllDestinations, type DestinationEntry } from './destina
 import {
   getPendingMessages,
   markProcessing,
+  releaseProcessing,
   markCompleted,
   markScriptSkipped,
   type MessageInRow,
@@ -354,11 +355,16 @@ export async function processQuery(
   // Once-per-turn guard for the task-run "<message> block was not delivered"
   // nudge — mirrors unwrappedNudged for chat turns.
   let taskBlockNudged = false;
-  // Prompt queue for the exchange hook — each result event consumes the
-  // oldest unanswered prompt, except a wrapping-retry result, which answers
-  // the same prompt again. Unused (and unmaintained) when the provider
-  // doesn't implement `onExchangeComplete`.
-  const archivePrompts: string[] = [initialPrompt];
+  // Each result consumes the oldest prompt and its claimed messages, except a
+  // wrapping retry, which continues the same turn.
+  const pendingTurns: Array<{ prompt: string; messageIds: string[] }> = [
+    { prompt: initialPrompt, messageIds: initialBatchIds },
+  ];
+
+  function completeCurrentPrompt(): void {
+    const turn = pendingTurns.shift();
+    if (turn) markCompleted(turn.messageIds);
+  }
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -377,6 +383,8 @@ export async function processQuery(
     pollInFlight = true;
 
     void (async () => {
+      let claimedIds: string[] = [];
+      let handedToQuery = false;
       try {
         const pending = getPendingMessages();
 
@@ -412,6 +420,7 @@ export async function processQuery(
 
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
+        claimedIds = newIds;
 
         // Run pre-task scripts on follow-ups too — without this, a task that
         // arrives during an active query (e.g. a */10 monitoring cron) bypasses
@@ -432,8 +441,8 @@ export async function processQuery(
 
         if (keep.length === 0) return;
         // Re-check done — the outer query may have finished while the script
-        // was awaited. Pushing into a closed stream is wasted work; the
-        // claimed messages get released by the host's processing-claim sweep.
+        // was awaited. Pushing into a closed stream is wasted work; the finally
+        // below releases the claims so the next query can pick them up.
         if (done) return;
 
         const keptIds = keep.map((m) => m.id);
@@ -442,8 +451,8 @@ export async function processQuery(
         unwrappedNudged = false;
         taskBlockNudged = false;
         query.push(prompt);
-        archivePrompts.push(prompt);
-        markCompleted(keptIds);
+        pendingTurns.push({ prompt, messageIds: keptIds });
+        handedToQuery = true;
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
         // terminates the container on unhandled-rejection. The initial-batch
@@ -477,9 +486,18 @@ export async function processQuery(
           corruptionStreak = 0;
         }
       } finally {
-        pollInFlight = false;
+        try {
+          if (!handedToQuery) releaseProcessing(claimedIds);
+        } finally {
+          pollInFlight = false;
+        }
       }
-    })();
+    })().catch((err) => {
+      log(`Follow-up cleanup failed: ${err instanceof Error ? err.message : String(err)}. Exiting for retry.`);
+      done = true;
+      clearInterval(pollHandle);
+      setTimeout(() => process.exit(75), 100);
+    });
   }, ACTIVE_POLL_INTERVAL_MS);
 
   try {
@@ -497,13 +515,9 @@ export async function processQuery(
         // Claude session with no prior context.
         setContinuation(providerName, event.continuation);
       } else if (event.type === 'result') {
-        // A result — with or without text — means the turn is done. Mark
-        // the initial batch completed now so the host sweep doesn't see
-        // stale 'processing' claims while the query stays open for
-        // follow-up pushes. The agent may have responded via MCP
-        // (send_message) mid-turn, or the message may not need a response
-        // at all — either way the turn is finished.
-        markCompleted(initialBatchIds);
+        // A result — with or without text — completes the oldest queued turn.
+        // The agent may have responded via MCP (send_message) mid-turn, or the
+        // message may not need a response at all.
         if (event.text) {
           const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(event.text, routing);
           const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
@@ -520,16 +534,16 @@ export async function processQuery(
             // the failing gateway turn after turn.
             deliverErrorResult(event.text, routing);
             notifyExchangeComplete(onExchangeComplete, {
-              prompt: archivePrompts[0] ?? initialPrompt,
+              prompt: pendingTurns[0]?.prompt ?? initialPrompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
               status: 'error',
             });
-            archivePrompts.shift();
+            completeCurrentPrompt();
           } else {
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
             notifyExchangeComplete(onExchangeComplete, {
-              prompt: archivePrompts[0] ?? initialPrompt,
+              prompt: pendingTurns[0]?.prompt ?? initialPrompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
               status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
@@ -555,15 +569,15 @@ export async function processQuery(
             // A retry result (wrapping or task-block nudge) answers the SAME
             // user prompt — keep it queued so the retry archives against it,
             // not the nudge text.
-            if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
+            if (!willRetryWrapping && !willRetryTaskBlocks) completeCurrentPrompt();
           }
-        } else archivePrompts.shift();
+        } else completeCurrentPrompt();
       }
     }
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     notifyExchangeComplete(onExchangeComplete, {
-      prompt: archivePrompts[0] ?? initialPrompt,
+      prompt: pendingTurns[0]?.prompt ?? initialPrompt,
       result: `Error: ${errMsg}`,
       continuation: queryContinuation ?? initialContinuation,
       status: 'error',
@@ -572,6 +586,7 @@ export async function processQuery(
   } finally {
     done = true;
     clearInterval(pollHandle);
+    markCompleted(pendingTurns.flatMap((turn) => turn.messageIds));
   }
 
   return { continuation: queryContinuation };

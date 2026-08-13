@@ -4,12 +4,8 @@
  * Most platforms expire a typing indicator after 5–10s, so a one-shot
  * call on message arrival goes stale long before the agent finishes
  * thinking. This module keeps it alive by re-firing `setTyping` on a
- * short interval — but only while the agent is actually WORKING, gated
- * on the heartbeat file's mtime after an initial grace period.
- *
- * After delivering a user-facing message, the refresh is paused for
- * POST_DELIVERY_PAUSE_MS so the client-side indicator can visually
- * clear.
+ * short interval — but only while the agent has a turn in progress,
+ * after an initial grace period for cold container startup.
  *
  * Default module status:
  *   - Lives in src/modules/ for signaling (not really core), but ships
@@ -17,32 +13,16 @@
  *   - Removing requires editing src/router.ts, src/delivery.ts, and
  *     src/container-runner.ts to drop the calls.
  */
-import fs from 'fs';
-
-import { heartbeatPath } from '../../session-manager.js';
+import { getProcessingClaims, hasProcessingAck } from '../../db/session-db.js';
+import { openOutboundDb } from '../../session-manager.js';
 
 const TYPING_REFRESH_MS = 4000;
 /**
  * Grace window from startTypingRefresh: fire typing unconditionally
- * for this long regardless of heartbeat state. Covers container
- * spawn/wake latency (5–12s on cold start before first heartbeat).
+ * for this long regardless of processing state. Covers container
+ * spawn/wake latency before the runner claims the message.
  */
 const TYPING_GRACE_MS = 15000;
-/**
- * After the grace window, a heartbeat must be mtimed within this
- * many ms of now to count as "agent is working." Heartbeats land
- * every few hundred ms during active work, so 6s is well above
- * the working floor and small enough to stop typing quickly when
- * the agent goes idle.
- */
-const HEARTBEAT_FRESH_MS = 6000;
-/**
- * After we deliver a user-facing message, pause typing for this
- * long so the client-side indicator has time to visually clear.
- * Tuned for the longest common expiry (Discord ~10s). The interval
- * stays running; ticks inside the pause just skip the setTyping call.
- */
-const POST_DELIVERY_PAUSE_MS = 10000;
 
 interface TypingAdapter {
   setTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
@@ -50,6 +30,7 @@ interface TypingAdapter {
 
 interface TypingTarget {
   agentGroupId: string;
+  messageId: string;
   channelType: string;
   platformId: string;
   threadId: string | null;
@@ -57,7 +38,6 @@ interface TypingTarget {
   instance?: string;
   interval: NodeJS.Timeout;
   startedAt: number;
-  pausedUntil: number; // epoch ms; 0 = not paused
 }
 
 let adapter: TypingAdapter | null = null;
@@ -87,19 +67,32 @@ async function triggerTyping(
   }
 }
 
-function isHeartbeatFresh(agentGroupId: string, sessionId: string): boolean {
-  const hbPath = heartbeatPath(agentGroupId, sessionId);
+function shouldRefreshTyping(
+  agentGroupId: string,
+  sessionId: string,
+  messageId: string,
+  withinGrace: boolean,
+): boolean {
   try {
-    const stat = fs.statSync(hbPath);
-    return Date.now() - stat.mtimeMs < HEARTBEAT_FRESH_MS;
+    const db = openOutboundDb(agentGroupId, sessionId);
+    try {
+      return (
+        getProcessingClaims(db).some((claim) => claim.message_id === messageId) ||
+        (withinGrace && !hasProcessingAck(db, messageId))
+      );
+    } finally {
+      db.close();
+    }
   } catch {
-    return false;
+    // A transient read failure is not evidence that the turn ended.
+    return true;
   }
 }
 
 export function startTypingRefresh(
   sessionId: string,
   agentGroupId: string,
+  messageId: string,
   channelType: string,
   platformId: string,
   threadId: string | null,
@@ -109,12 +102,10 @@ export function startTypingRefresh(
   if (existing) {
     // Already refreshing. Fire an immediate tick for the new inbound
     // event and reset the grace window — the new message restarts
-    // the container-wake latency budget. Also clear any lingering
-    // post-delivery pause: a new inbound means the user expects
-    // typing to show immediately.
+    // the container-wake latency budget.
     triggerTyping(channelType, platformId, threadId, instance).catch(() => {});
     existing.startedAt = Date.now();
-    existing.pausedUntil = 0;
+    existing.messageId = messageId;
     // Keep the stored entry self-consistent: a re-trigger can arrive from
     // a different chat address (agent-shared sessions span messaging
     // groups, possibly on different platforms/instances), so the address
@@ -135,18 +126,13 @@ export function startTypingRefresh(
     const entry = typingRefreshers.get(sessionId);
     if (!entry) return; // stopped externally since this tick was scheduled
 
-    // Inside a post-delivery pause: skip setTyping but keep the
-    // interval running so we resume automatically once the pause
-    // expires.
-    if (entry.pausedUntil > Date.now()) return;
-
     const withinGrace = Date.now() - entry.startedAt < TYPING_GRACE_MS;
-    if (withinGrace || isHeartbeatFresh(entry.agentGroupId, sessionId)) {
+    if (shouldRefreshTyping(entry.agentGroupId, sessionId, entry.messageId, withinGrace)) {
       triggerTyping(entry.channelType, entry.platformId, entry.threadId, entry.instance).catch(() => {});
       return;
     }
 
-    // Out of grace AND heartbeat stale — agent is idle, stop refreshing.
+    // Out of grace and no active turn — the agent is idle.
     clearInterval(entry.interval);
     typingRefreshers.delete(sessionId);
   }, TYPING_REFRESH_MS);
@@ -154,26 +140,14 @@ export function startTypingRefresh(
   interval.unref();
   typingRefreshers.set(sessionId, {
     agentGroupId,
+    messageId,
     channelType,
     platformId,
     threadId,
     instance,
     interval,
     startedAt,
-    pausedUntil: 0,
   });
-}
-
-/**
- * Pause the typing refresh for POST_DELIVERY_PAUSE_MS. Called after
- * a user-facing message is delivered so the client-side indicator
- * has a chance to visually clear before the agent's next SDK event
- * pushes it back on. No-op if no refresh is active for this session.
- */
-export function pauseTypingRefreshAfterDelivery(sessionId: string): void {
-  const entry = typingRefreshers.get(sessionId);
-  if (!entry) return;
-  entry.pausedUntil = Date.now() + POST_DELIVERY_PAUSE_MS;
 }
 
 export function stopTypingRefresh(sessionId: string): void {

@@ -466,6 +466,44 @@ describe('error result with no <message> envelope', () => {
   });
 });
 
+describe('follow-up claim ownership', () => {
+  it('releases a follow-up claim when the query ends during its pre-task script', async () => {
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 'sess-1' };
+      insertMessage('t2', 'task', {
+        prompt: 'check later',
+        script: 'sleep 1; echo \'{"wakeAgent": true}\'',
+      });
+
+      const deadline = Date.now() + 5_000;
+      while (
+        !getOutboundDb().prepare("SELECT 1 FROM processing_ack WHERE message_id = 't2'").get() &&
+        Date.now() < deadline
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 't2'").get()).toEqual({
+        status: 'processing',
+      });
+      yield { type: 'result', text: '' };
+    }
+
+    const query: AgentQuery = { push: () => {}, end: () => {}, events: events(), abort: () => {} };
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const deadline = Date.now() + 5_000;
+    while (
+      getOutboundDb().prepare("SELECT 1 FROM processing_ack WHERE message_id = 't2'").get() &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    expect(getOutboundDb().prepare("SELECT 1 FROM processing_ack WHERE message_id = 't2'").get()).toBeNull();
+    expect(getPendingMessages().map((message) => message.id)).toContain('t2');
+  });
+});
+
 describe('isCorruptionError', () => {
   it('matches the Docker Desktop macOS torn-read symptom', () => {
     expect(isCorruptionError('database disk image is malformed')).toBe(true);
@@ -538,6 +576,11 @@ describe('task-run turn wiring (real processQuery)', () => {
         await new Promise((r) => setTimeout(r, 50));
       }
 
+      const claim = getOutboundDb().prepare('SELECT status FROM processing_ack WHERE message_id = ?').get('t2') as
+        | { status: string }
+        | undefined;
+      expect(claim?.status).toBe('processing');
+
       // Turn 2 repeats the mistake. This receives a second independent nudge
       // only if the follow-up path reset taskBlockNudged.
       yield { type: 'result', text: '<message to="local-cli">fire two result</message>' };
@@ -566,5 +609,10 @@ describe('task-run turn wiring (real processQuery)', () => {
     expect(logs[1]).toContain('[undelivered → local-cli] fire two result');
     expect(logs).not.toContain('first delivery decision handled');
     expect(logs).not.toContain('second delivery decision handled');
+
+    const completed = getOutboundDb().prepare('SELECT status FROM processing_ack WHERE message_id = ?').get('t2') as
+      | { status: string }
+      | undefined;
+    expect(completed?.status).toBe('completed');
   });
 });

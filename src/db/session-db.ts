@@ -202,6 +202,11 @@ export function getProcessingClaims(outDb: Database.Database): ProcessingClaim[]
     .all() as ProcessingClaim[];
 }
 
+/** True once the runner has claimed this message, regardless of its final status. */
+export function hasProcessingAck(outDb: Database.Database, messageId: string): boolean {
+  return outDb.prepare('SELECT 1 FROM processing_ack WHERE message_id = ?').get(messageId) !== undefined;
+}
+
 /**
  * Delete orphan 'processing' rows. Called by the host after killing a
  * container so the leftover claim doesn't trip claim-stuck on the next sweep

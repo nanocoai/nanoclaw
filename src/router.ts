@@ -504,8 +504,9 @@ async function deliverToAgent(
     }
   }
 
+  const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
   writeSessionMessage(session.agent_group_id, session.id, {
-    id: messageIdForAgent(event.message.id, agent.agent_group_id),
+    id: messageId,
     kind: event.message.kind,
     timestamp: event.message.timestamp,
     platformId: deliveryAddr.platformId,
@@ -533,6 +534,7 @@ async function deliverToAgent(
     startTypingRefresh(
       session.id,
       session.agent_group_id,
+      messageId,
       event.channelType,
       event.platformId,
       effectiveThreadId,

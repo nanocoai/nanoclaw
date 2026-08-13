@@ -492,7 +492,7 @@ If a result produced text but no valid block, the agent-runner pushes a one-time
 
 Message editing is supported as an explicit operation (agent calls an `edit_message` tool), not as a streaming mechanism.
 
-Typing indicators: host sets typing when a container is active for a session, clears when the container exits or a response appears in messages_out.
+Typing indicators: the host starts typing for an engaged inbound message and refreshes it while the session has an active `processing_ack` claim, with a short grace period while a cold container starts. It stops when the turn completes or the container exits.
 
 ### Message Batching
 
