@@ -93,6 +93,15 @@ export interface ResourceDef {
   /** Non-standard verbs (grant, revoke, add, remove, restart, etc.). */
   customOperations?: Record<string, CustomOperation>;
   /**
+   * Extra rows to fold into `list` output beyond the backing `table` — for a
+   * resource whose logical collection spans more than one physical table. Runs
+   * after the table query and receives the same parsed `args` (so it can honor
+   * filters like `--status`); returned rows must already match the resource's
+   * column shape. Used by `approvals` to surface the separate
+   * `pending_sender_approvals` holds through one `ncl approvals list`.
+   */
+  extraListRows?: (args: Record<string, unknown>) => Record<string, unknown>[];
+  /**
    * Runs on `create` between explicit-arg collection and static column
    * defaults (two-pass create): fills omitted columns with context-aware
    * values (e.g. channel adapter declarations) and cross-validates the
@@ -180,9 +189,14 @@ function genericList(def: ResourceDef) {
     // Newest first: without an ORDER BY the LIMIT silently hides the most
     // recently inserted rows once a table outgrows it (bit `sessions list`
     // past 200 sessions — a just-created session was invisible).
-    return getDb()
+    const rows = getDb()
       .prepare(`SELECT ${cols} FROM ${def.table}${where} ORDER BY rowid DESC LIMIT ?`)
-      .all(...params);
+      .all(...params) as Record<string, unknown>[];
+    if (!def.extraListRows) return rows;
+    // Fold in rows from sibling tables (e.g. sender-approval holds) first so
+    // they stay visible even when the backing table already fills the limit,
+    // then cap the merged surface at the same limit.
+    return [...def.extraListRows(args), ...rows].slice(0, limit);
   };
 }
 

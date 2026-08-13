@@ -50,6 +50,10 @@ export function getPendingSenderApproval(id: string): PendingSenderApproval | un
     | undefined;
 }
 
+export function listPendingSenderApprovals(): PendingSenderApproval[] {
+  return getDb().prepare('SELECT * FROM pending_sender_approvals ORDER BY rowid DESC').all() as PendingSenderApproval[];
+}
+
 export function hasInFlightSenderApproval(messagingGroupId: string, senderIdentity: string): boolean {
   const row = getDb()
     .prepare('SELECT 1 AS x FROM pending_sender_approvals WHERE messaging_group_id = ? AND sender_identity = ?')
