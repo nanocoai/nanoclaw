@@ -6,6 +6,7 @@ import {
   runMigrations,
   createAgentGroup,
   getAgentGroup,
+  getContainerConfig,
   getAgentGroupByFolder,
   getAllAgentGroups,
   updateAgentGroup,
@@ -133,6 +134,13 @@ describe('agent groups', () => {
   it('should enforce unique folder', () => {
     createAgentGroup(ag());
     expect(() => createAgentGroup({ ...ag(), id: 'ag-dup' })).toThrow();
+  });
+
+  it('should create a default container_configs row', () => {
+    createAgentGroup(ag());
+    const config = getContainerConfig('ag-1');
+    expect(config).toBeDefined();
+    expect(config!.agent_group_id).toBe('ag-1');
   });
 });
 

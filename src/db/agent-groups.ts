@@ -1,5 +1,6 @@
 import type { AgentGroup } from '../types.js';
 import { getDb } from './connection.js';
+import { ensureContainerConfig } from './container-configs.js';
 
 export function createAgentGroup(group: AgentGroup): void {
   getDb()
@@ -8,6 +9,7 @@ export function createAgentGroup(group: AgentGroup): void {
        VALUES (@id, @name, @folder, @agent_provider, @created_at)`,
     )
     .run(group);
+  ensureContainerConfig(group.id);
 }
 
 export function getAgentGroup(id: string): AgentGroup | undefined {
