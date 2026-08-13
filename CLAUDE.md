@@ -237,16 +237,21 @@ cd container/agent-runner && bun test      # Container tests (bun:test)
 
 Container typecheck is a separate tsconfig — if you edit `container/agent-runner/src/`, run `pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit` from root (or `bun run typecheck` from `container/agent-runner/`).
 
-Service management:
-```bash
-# macOS (launchd)
-launchctl load   ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # restart
+Service management: the launchd label / systemd unit name is **slug-scoped per install** (`com.nanoclaw-v2-<slug>` / `nanoclaw-v2-<slug>`, slug = `sha1(project root)[:8]` — see `src/install-slug.ts` / `setup/lib/install-slug.sh`), so multiple checkouts on one machine don't collide. Don't assume the plain `nanoclaw` name — look up this checkout's actual unit first:
 
-# Linux (systemd)
-systemctl --user start|stop|restart nanoclaw
+```bash
+# macOS (launchd) — find this install's label, then use it
+launchctl list | grep com.nanoclaw-v2-
+launchctl load   ~/Library/LaunchAgents/<label>.plist
+launchctl unload ~/Library/LaunchAgents/<label>.plist
+launchctl kickstart -k gui/$(id -u)/<label>  # restart
+
+# Linux (systemd) — find this install's unit, then use it
+systemctl --user list-units 'nanoclaw-v2-*' --all
+systemctl --user start|stop|restart <unit>
 ```
+
+If a plain `nanoclaw.service` (no slug) also shows up as `loaded active`, it's a leftover duplicate from before slug-scoping — stop and disable it; running two units against the same install races over the same port and looks like a random credential/respawn loop.
 
 ## Troubleshooting
 
@@ -331,8 +336,8 @@ grep -q '^INSTALL_CJK_FONTS=' .env && sed -i.bak 's/^INSTALL_CJK_FONTS=.*/INSTAL
 
 # Rebuild and restart so new sessions pick up the new image
 ./container/build.sh
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw   # macOS
-# systemctl --user restart nanoclaw                # Linux
+launchctl kickstart -k gui/$(id -u)/$(launchctl list | grep -o 'com.nanoclaw-v2-[a-f0-9]*')   # macOS
+# systemctl --user restart $(systemctl --user list-units 'nanoclaw-v2-*' --no-legend | awk '{print $1}')  # Linux
 ```
 
 `container/build.sh` reads `INSTALL_CJK_FONTS` from `.env` and passes it through as a Docker build-arg. Without CJK fonts, Chromium-rendered screenshots and PDFs containing CJK text show tofu (empty rectangles) instead of characters.
