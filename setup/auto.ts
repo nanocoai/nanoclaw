@@ -23,6 +23,8 @@
  * confirmed with the user, and free-text replies fall through to a
  * headless `claude -p` call for IANA-zone resolution.
  */
+import '../src/net-init.js';
+
 import { spawn, spawnSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import fs from 'fs';

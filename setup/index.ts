@@ -2,6 +2,8 @@
  * Setup CLI entry point.
  * Usage: pnpm exec tsx setup/index.ts --step <name> [args...]
  */
+import '../src/net-init.js';
+
 import { log } from '../src/log.js';
 import { emitStatus } from './status.js';
 
