@@ -29,6 +29,15 @@ import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from 
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
+// Stand down (exit cleanly, code 0) after this long with no actionable work.
+// The host sweep re-spawns a fresh container the moment the next due message
+// arrives, so a clean idle-exit is cheaper than lingering until the host's
+// 30-min absolute-ceiling SIGTERM (see src/host-sweep.ts), which exits 143
+// and logs a scary "Killing container past absolute ceiling". Kept at a few
+// minutes so back-and-forth chat reuses the warm SDK subprocess instead of
+// cold-starting every turn. Override via NANOCLAW_IDLE_EXIT_MS (ms) for
+// tests/tuning.
+const IDLE_EXIT_MS = Number(process.env.NANOCLAW_IDLE_EXIT_MS) || 5 * 60 * 1000;
 
 /**
  * Number of consecutive `database disk image is malformed` errors after which
@@ -123,6 +132,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
   let pollCount = 0;
   let isFirstPoll = true;
+  // Wall-clock of the last time we had real work to do. Drives the idle
+  // stand-down below.
+  let lastActivityTs = Date.now();
   while (true) {
     if (config.signal?.aborted) return;
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
@@ -135,26 +147,37 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       log(`Poll heartbeat (${pollCount} iterations, ${messages.length} pending)`);
     }
 
-    if (messages.length === 0) {
-      await sleep(POLL_INTERVAL_MS);
-      continue;
-    }
-
-    // Accumulate gate: if the batch contains only trigger=0 rows
-    // (context-only, router-stored under ignored_message_policy='accumulate'),
-    // don't wake the agent. Leave them `pending` — they'll ride along the
-    // next time a real trigger=1 message lands via this same getPendingMessages
-    // query. Without this gate, a warm container keeps processing
+    // No actionable work this tick: either nothing pending, or only
+    // accumulate-only (trigger=0) context rows. The accumulate gate matters
+    // because those rows (router-stored under ignored_message_policy=
+    // 'accumulate') must NOT wake the agent — they're left `pending` to ride
+    // along the next time a real trigger=1 message lands via this same
+    // getPendingMessages query. Without it, a warm container keeps processing
     // (and potentially responding to) every accumulate-only batch, defeating
     // the "store as context, don't engage" contract. Host-side countDueMessages
     // gates the same way for wake-from-cold (see src/db/session-db.ts).
-    if (!messages.some((m) => m.trigger === 1)) {
+    //
+    // Either way we're idle. After IDLE_EXIT_MS of continuous idle, stand down
+    // cleanly (code 0) instead of looping until the host's 30-min ceiling
+    // SIGTERMs us. Any pending accumulate-only rows stay `pending` and are
+    // picked up on the next wake (host re-spawns when a trigger=1 row is due).
+    if (messages.length === 0 || !messages.some((m) => m.trigger === 1)) {
+      if (Date.now() - lastActivityTs > IDLE_EXIT_MS) {
+        log(
+          `Idle ${Math.round((Date.now() - lastActivityTs) / 1000)}s with no actionable messages — standing down (clean exit)`,
+        );
+        return;
+      }
       await sleep(POLL_INTERVAL_MS);
       continue;
     }
 
     const ids = messages.map((m) => m.id);
     markProcessing(ids);
+    // Dequeuing a batch counts as activity — resets the idle stand-down timer
+    // so we don't exit while (or right after) handling work, including the
+    // command-only and script-gated paths below that `continue` early.
+    lastActivityTs = Date.now();
 
     const routing = extractRouting(messages);
 
@@ -249,6 +272,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
+    let endedIdle = false;
     try {
       const result = await processQuery(
         query,
@@ -259,6 +283,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         prompt,
         continuation,
       );
+      endedIdle = result.endedIdle;
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -298,6 +323,20 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // (e.g. stream closed unexpectedly).
     markCompleted(processingIds);
     log(`Completed ${ids.length} message(s)`);
+
+    // processQuery keeps the SDK stream open after a turn to catch warm
+    // follow-ups; it returns endedIdle=true when no follow-up arrived within
+    // the warm window and it closed the stream itself. That's our cue to stand
+    // down cleanly (index.ts then process.exit(0)s) rather than loop back and
+    // re-open, letting the host re-spawn on the next due message. Without this
+    // the container would idle until the host's 30-min absolute-ceiling kill.
+    if (endedIdle) {
+      log('No follow-up within warm window — standing down (clean exit)');
+      return;
+    }
+    // Otherwise the turn ended for another reason (a pending command to
+    // reprocess, an error, a stream close) — treat it as activity and loop.
+    lastActivityTs = Date.now();
   }
 }
 
@@ -337,6 +376,9 @@ function formatMessagesWithCommands(messages: MessageInRow[], nativeSlashCommand
 
 interface QueryResult {
   continuation?: string;
+  // True when processQuery closed the stream itself after the warm window
+  // elapsed with no follow-up — signals the caller to stand down.
+  endedIdle: boolean;
 }
 
 export async function processQuery(
@@ -351,6 +393,14 @@ export async function processQuery(
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  // Idle stand-down: the stream is kept open after a turn to catch warm
+  // follow-ups, but not forever. `lastActivityTs` tracks the last SDK event or
+  // pushed follow-up; once we've seen a result and stayed quiet past
+  // IDLE_EXIT_MS, we end the stream ourselves so the container can exit cleanly
+  // (code 0) instead of being SIGTERMed at the host's 30-min ceiling (code 143).
+  let sawResult = false;
+  let endedIdle = false;
+  let lastActivityTs = Date.now();
   // Once-per-turn guard for the task-run "<message> block was not delivered"
   // nudge — mirrors unwrappedNudged for chat turns.
   let taskBlockNudged = false;
@@ -373,7 +423,7 @@ export async function processQuery(
   let endedForCommand = false;
   let corruptionStreak = 0;
   const pollHandle = setInterval(() => {
-    if (done || pollInFlight || endedForCommand) return;
+    if (done || pollInFlight || endedForCommand || endedIdle) return;
     pollInFlight = true;
 
     void (async () => {
@@ -405,7 +455,17 @@ export async function processQuery(
         // initial batch and follow-ups had mismatched thread_ids (e.g. a
         // host-generated welcome trigger with null thread vs a Discord DM reply).
         const newMessages = pending.filter((m) => m.kind !== 'system');
-        if (newMessages.length === 0) return;
+        if (newMessages.length === 0) {
+          // No follow-up waiting. Once the turn has produced a result and we've
+          // stayed idle past the warm window, end the stream so the container
+          // stands down cleanly. The host re-spawns on the next due message.
+          if (sawResult && Date.now() - lastActivityTs > IDLE_EXIT_MS) {
+            log(`Idle ${Math.round((Date.now() - lastActivityTs) / 1000)}s after turn — ending stream to stand down`);
+            endedIdle = true;
+            query.end();
+          }
+          return;
+        }
 
         // Accumulated context must not engage a warm query by itself.
         if (!newMessages.some((m) => m.trigger === 1)) return;
@@ -444,6 +504,7 @@ export async function processQuery(
         query.push(prompt);
         archivePrompts.push(prompt);
         markCompleted(keptIds);
+        lastActivityTs = Date.now();
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
         // terminates the container on unhandled-rejection. The initial-batch
@@ -486,6 +547,9 @@ export async function processQuery(
     for await (const event of query.events) {
       handleEvent(event, routing);
       touchHeartbeat();
+      // Any SDK event = the agent is alive and working; reset the idle clock so
+      // we only stand down after a genuine quiet spell post-result.
+      lastActivityTs = Date.now();
 
       if (event.type === 'init') {
         queryContinuation = event.continuation;
@@ -503,6 +567,7 @@ export async function processQuery(
         // follow-up pushes. The agent may have responded via MCP
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
+        sawResult = true;
         markCompleted(initialBatchIds);
         if (event.text) {
           const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(event.text, routing);
@@ -574,7 +639,7 @@ export async function processQuery(
     clearInterval(pollHandle);
   }
 
-  return { continuation: queryContinuation };
+  return { continuation: queryContinuation, endedIdle };
 }
 
 function notifyExchangeComplete(

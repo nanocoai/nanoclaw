@@ -121,6 +121,14 @@ async function main(): Promise<void> {
     cwd: CWD,
     systemContext: { instructions },
   });
+
+  // runPollLoop only returns when the container has been idle long enough to
+  // stand down (see IDLE_EXIT_MS in poll-loop.ts). Exit explicitly so the
+  // runtime records a clean code 0 — and so any warm SDK/MCP subprocesses are
+  // torn down — instead of lingering until the host's 30-min absolute-ceiling
+  // SIGTERM (code 143). The host sweep re-spawns on the next due message.
+  log('Poll loop stood down (idle) — exiting cleanly');
+  process.exit(0);
 }
 
 main().catch((err) => {
