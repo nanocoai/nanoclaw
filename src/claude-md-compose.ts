@@ -64,11 +64,18 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     : {};
   const desired = new Map<string, { type: 'symlink' | 'inline'; content: string }>();
 
-  // Skill fragments — every skill that ships an `instructions.md`.
-  // TODO (shared-source refactor): respect `container.json` skill selection.
+  // Skill fragments — every *selected* skill that ships an `instructions.md`.
+  // The selection lives in `container_configs.skills` (`string[] | 'all'`), the
+  // same value `syncSkillSymlinks` uses to gate the lazy skill mounts. Without
+  // this gate, every instruction-shipping skill would be eagerly loaded into
+  // every group regardless of its `container.json` selection. Default to 'all'
+  // when there's no config row, matching `syncSkillSymlinks`'s fallback.
+  const selectedSkills: string[] | 'all' = configRow ? (JSON.parse(configRow.skills) as string[] | 'all') : 'all';
+  const skillSelected = (name: string): boolean => selectedSkills === 'all' || selectedSkills.includes(name);
   const skillsHostDir = path.join(process.cwd(), 'container', 'skills');
   if (fs.existsSync(skillsHostDir)) {
     for (const skillName of fs.readdirSync(skillsHostDir)) {
+      if (!skillSelected(skillName)) continue;
       const hostFragment = path.join(skillsHostDir, skillName, 'instructions.md');
       if (fs.existsSync(hostFragment)) {
         desired.set(`skill-${skillName}.md`, {
