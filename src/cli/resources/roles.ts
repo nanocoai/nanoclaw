@@ -1,4 +1,5 @@
 import { getDb } from '../../db/connection.js';
+import { isLastOwner } from '../../modules/permissions/db/user-roles.js';
 import { registerResource } from '../crud.js';
 
 registerResource({
@@ -56,6 +57,12 @@ registerResource({
         const groupId = (args.group as string) ?? null;
         if (!userId) throw new Error('--user is required');
         if (!role) throw new Error('--role is required');
+        // Last-owner hard stop: the global owner is the root of trust and
+        // reaching zero owners is unrecoverable, so refuse to delete the sole
+        // remaining owner outright — before any DB change, on every path.
+        if (role === 'owner' && groupId === null && isLastOwner(userId)) {
+          throw new Error('cannot revoke the last remaining owner — grant another owner first');
+        }
         const result = getDb()
           .prepare('DELETE FROM user_roles WHERE user_id = ? AND role = ? AND agent_group_id IS ?')
           .run(userId, role, groupId);

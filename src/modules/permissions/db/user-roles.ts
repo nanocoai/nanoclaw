@@ -72,6 +72,16 @@ export function hasAnyOwner(): boolean {
   return !!row;
 }
 
+/**
+ * True when `userId` is the sole remaining global owner — revoking their owner
+ * role would leave zero owners, an unrecoverable state (no one could ever
+ * approve an owner-level action again).
+ */
+export function isLastOwner(userId: string): boolean {
+  const owners = getOwners();
+  return owners.length === 1 && owners[0].user_id === userId;
+}
+
 export function getGlobalAdmins(): UserRole[] {
   return getDb()
     .prepare('SELECT * FROM user_roles WHERE role = ? AND agent_group_id IS NULL ORDER BY granted_at')
