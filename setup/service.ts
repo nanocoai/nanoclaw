@@ -23,6 +23,7 @@ import {
   isWSL,
 } from './platform.js';
 import { emitStatus } from './status.js';
+import { computeUserSystemdEnv } from './systemd-user-env.js';
 
 export async function run(_args: string[]): Promise<void> {
   const projectRoot = process.cwd();
@@ -313,12 +314,34 @@ function setupSystemd(
     systemctlPrefix = 'systemctl';
     log.info('Running as root — installing system-level systemd unit');
   } else {
+    // pam_systemd normally exports XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS
+    // on login, but invocations via `su -`, `pct enter`, and other non-pam
+    // entry points skip that step. The user systemd manager is still running
+    // (linger keeps it alive across sessions), but the daemon-reload probe
+    // below can't reach it without the env vars. Re-derive them from on-disk
+    // state before probing so we don't false-negative into the nohup path
+    // when a real systemd user session is available. See #2482.
+    const envResult = computeUserSystemdEnv({
+      uid: process.getuid?.(),
+      user: process.env.USER || process.env.LOGNAME,
+      env: { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR },
+      exists: fs.existsSync,
+    });
+    if (envResult.reason === 'populated') {
+      process.env.XDG_RUNTIME_DIR = envResult.XDG_RUNTIME_DIR;
+      process.env.DBUS_SESSION_BUS_ADDRESS = envResult.DBUS_SESSION_BUS_ADDRESS;
+      log.info('Populated systemd user env from linger state', {
+        XDG_RUNTIME_DIR: envResult.XDG_RUNTIME_DIR,
+      });
+    }
+
     // Check if user-level systemd session is available
     try {
       execSync('systemctl --user daemon-reload', { stdio: 'pipe' });
     } catch {
       log.warn(
         'systemd user session not available — falling back to nohup wrapper',
+        { envProbeReason: envResult.reason },
       );
       setupNohupFallback(projectRoot, nodePath, homeDir);
       return;
