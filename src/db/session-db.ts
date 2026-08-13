@@ -7,6 +7,7 @@
  */
 import Database from 'better-sqlite3';
 
+import { log } from '../log.js';
 import { INBOUND_SCHEMA, OUTBOUND_SCHEMA } from './schema.js';
 
 /** Apply the inbound or outbound schema to a DB file. Idempotent. */
@@ -121,16 +122,48 @@ export function insertMessage(
     onWake?: 0 | 1;
   },
 ): void {
-  db.prepare(
+  // ON CONFLICT(id) — targeted, not bare: a `seq` UNIQUE violation is a real
+  // invariant break (host/container seq parity) and must still throw.
+  const stmt = db.prepare(
     `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger, source_session_id, on_wake)
-     VALUES (@id, @seq, @kind, @timestamp, 'pending', @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @id, @trigger, @sourceSessionId, @onWake)`,
-  ).run({
+     VALUES (@id, @seq, @kind, @timestamp, 'pending', @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @id, @trigger, @sourceSessionId, @onWake)
+     ON CONFLICT(id) DO NOTHING`,
+  );
+  const existing = db.prepare('SELECT timestamp, content FROM messages_in WHERE id = ?');
+
+  const base = {
     ...message,
     trigger: message.trigger ?? 1,
     onWake: message.onWake ?? 0,
     sourceSessionId: message.sourceSessionId ?? null,
-    seq: nextEvenSeq(db),
-  });
+  };
+
+  // Row ids are derived from platform message ids, and platform id spaces are
+  // NOT globally unique over the life of a session. A Telegram chat that gets
+  // a new bot (or is cleared) restarts message_id at 1, so today's id collides
+  // with a months-old row in the same long-lived inbound.db. That INSERT used
+  // to throw straight out of routeInbound, and the caller in src/index.ts
+  // logged-and-dropped: the message vanished with no messages_in row at all
+  // and no user-visible sign. Disambiguate instead of dying.
+  for (let attempt = 0; attempt < 64; attempt++) {
+    const id = attempt === 0 ? message.id : `${message.id}#${attempt + 1}`;
+    if (stmt.run({ ...base, id, seq: nextEvenSeq(db) }).changes > 0) {
+      if (attempt > 0) {
+        log.warn('messages_in id collided with an older row — stored under a disambiguated id', {
+          requestedId: message.id,
+          storedId: id,
+          kind: message.kind,
+        });
+      }
+      return;
+    }
+
+    const prior = existing.get(id) as { timestamp: string; content: string } | undefined;
+    // Same message re-delivered (approval replay, adapter redelivery) — the
+    // PK is the idempotency guard, so a no-op is the correct outcome.
+    if (prior && prior.timestamp === message.timestamp && prior.content === message.content) return;
+  }
+  throw new Error(`Could not allocate a free messages_in id for ${message.id} (64 collisions)`);
 }
 
 export function countDueMessages(db: Database.Database): number {
