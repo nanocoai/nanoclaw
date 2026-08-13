@@ -220,7 +220,19 @@ function createAdapter(): ChannelAdapter {
     if (to) {
       // Routed message — admin transport. Build a full InboundEvent targeting
       // `to`'s channel/platform, and let `reply_to` (if any) redirect replies.
-      // Does NOT claim the chat slot, so an active terminal chat isn't evicted.
+      // Does NOT claim the chat slot by default, so an active terminal chat
+      // isn't evicted (the reply_to=cli/local exception below is the only
+      // case where this branch claims).
+
+      // If the routed sender wants the response back on this same connection
+      // (reply_to points at cli/local), claim the chat slot so deliver() can
+      // reach this socket. Multiple concurrent claws (including any active
+      // interactive chat user) will supersede each other; single-client
+      // semantics, by design.
+      if (replyTo && replyTo.channelType === 'cli' && replyTo.platformId === PLATFORM_ID) {
+        claimChatSlot();
+      }
+
       const event: InboundEvent = {
         channelType: to.channelType,
         platformId: to.platformId,
