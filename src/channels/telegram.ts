@@ -12,6 +12,14 @@ import { grantRole, hasAnyOwner } from '../modules/permissions/db/user-roles.js'
 import { upsertUser } from '../modules/permissions/db/users.js';
 import { createChatSdkBridge, type ReplyContext } from './chat-sdk-bridge.js';
 import { sanitizeTelegramLegacyMarkdown } from './telegram-markdown-sanitize.js';
+import {
+  wrapTelegramRichSend,
+  richTablesEnabled,
+  richConstructsEnabled,
+  richRoutable,
+  RICH_MESSAGE_MAX_CHARS,
+  TELEGRAM_PLAIN_MAX_CHARS,
+} from './telegram-rich-message.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 import { tryConsume } from './telegram-pairing.js';
@@ -211,21 +219,37 @@ function createPairingInterceptor(
 
 registerChannelAdapter('telegram', {
   factory: () => {
-    const env = readEnvFile(['TELEGRAM_BOT_TOKEN']);
+    const env = readEnvFile(['TELEGRAM_BOT_TOKEN', 'TELEGRAM_RICH_TABLES', 'TELEGRAM_RICH_CONSTRUCTS']);
     if (!env.TELEGRAM_BOT_TOKEN) return null;
     const token = env.TELEGRAM_BOT_TOKEN;
-    const telegramAdapter = createTelegramAdapter({
-      botToken: token,
-      mode: 'polling',
-    });
+    // Route messages carrying MarkdownV2-impossible constructs (tables, headings,
+    // <details>, dividers, math, task lists) to Bot API 10.1 sendRichMessage,
+    // with transparent fallback to the normal path. No-op when both toggles off.
+    const richOpts = { richTables: richTablesEnabled(env), richConstructs: richConstructsEnabled(env) };
+    const telegramAdapter = wrapTelegramRichSend(
+      createTelegramAdapter({
+        botToken: token,
+        mode: 'polling',
+      }),
+      { token, ...richOpts, sanitizeForPlain: sanitizeTelegramLegacyMarkdown },
+    );
     const bridge = createChatSdkBridge({
       adapter: telegramAdapter,
       concurrency: 'concurrent',
       extractReplyContext,
       supportsThreads: false,
       defaults: TELEGRAM_DEFAULTS,
-      transformOutboundText: sanitizeTelegramLegacyMarkdown,
-      maxTextLength: 4000,
+      // No transformOutboundText here: legacy-Markdown sanitization is applied
+      // inside wrapTelegramRichSend on the plain path only. Sanitizing at the
+      // bridge would mangle the raw markdown the rich path must receive
+      // (`- item` → `• item` turns lists into soft-wrapped prose that
+      // sendRichMessage collapses onto one line).
+      // Rich-routable messages (tables/headings/etc.) go out via
+      // sendRichMessage, which accepts 32k — chunking those at the plain-path
+      // 4k limit would split one coherent rich message into several. Messages
+      // with file uploads always take the plain path, so they keep the 4k cap.
+      maxTextLength: (text, hasFiles) =>
+        !hasFiles && richRoutable(text, richOpts) ? RICH_MESSAGE_MAX_CHARS : TELEGRAM_PLAIN_MAX_CHARS,
     });
 
     const botUsernamePromise = fetchBotUsername(token);

@@ -89,8 +89,13 @@ export interface ChatSdkBridgeConfig {
    * adapters like Discord (2000) and Telegram (4096) silently truncate
    * mid-response. The returned id is the first chunk's id so subsequent edits
    * and reactions still target the head of the reply.
+   *
+   * A function form resolves the limit per message — for adapters whose cap
+   * depends on the send path (e.g. Telegram rich messages accept 32k while
+   * the plain path caps at ~4k). `hasFiles` is true when file uploads ride
+   * on this message, which typically forces the conservative path.
    */
-  maxTextLength?: number;
+  maxTextLength?: number | ((text: string, hasFiles: boolean) => number);
 }
 
 /**
@@ -445,10 +450,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         }));
         // Split if over the adapter's max length. Files ride on the first
         // chunk so the head of the reply still carries them.
-        const chunks =
-          config.maxTextLength && text.length > config.maxTextLength
-            ? splitForLimit(text, config.maxTextLength)
-            : [text];
+        const limit =
+          typeof config.maxTextLength === 'function'
+            ? config.maxTextLength(text, !!(fileUploads && fileUploads.length > 0))
+            : config.maxTextLength;
+        const chunks = limit && text.length > limit ? splitForLimit(text, limit) : [text];
         let firstId: string | undefined;
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
