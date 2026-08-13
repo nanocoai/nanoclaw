@@ -131,6 +131,67 @@ function installCliSymlink(projectRoot: string, homeDir: string): void {
   }
 }
 
+/**
+ * Build the launchd `EnvironmentVariables` block for the host service plist.
+ *
+ * launchd-spawned processes do NOT inherit the user's shell environment, so
+ * any env vars the host process needs at runtime must be set explicitly here.
+ *
+ * Three platform-specific gaps were silently breaking macOS Apple Silicon +
+ * Colima installs out of the box, all surfaced here:
+ *
+ *   1. PATH — Apple Silicon Homebrew installs to /opt/homebrew/bin, which
+ *      isn't on the launchd default PATH. Without it, the host can't exec
+ *      `docker` and crash-loops with `docker: command not found`.
+ *
+ *   2. DOCKER_HOST — Colima writes its socket at
+ *      ~/.colima/default/docker.sock and relies on the user's shell to
+ *      DOCKER_HOST it. The launchd-spawned host doesn't see that, so
+ *      `docker info` falls through to the default socket and errors.
+ *
+ *   3. TMPDIR — the OneCLI SDK writes its self-signed gateway CA to
+ *      `os.tmpdir()` and bind-mounts it into agent containers. macOS's
+ *      default tmpdir (/var/folders/<salt>/T/) is outside Colima's
+ *      shared paths, so the bind mount silently degrades to an empty
+ *      directory inside the container and the agent can't complete TLS
+ *      to the OneCLI proxy. Pointing TMPDIR at a directory under /Users
+ *      (which Colima shares by default) routes the CA somewhere visible.
+ *
+ * The Colima entries are emitted only when ~/.colima/default/docker.sock
+ * exists, so users on Docker Desktop or Apple Container don't get a stale
+ * DOCKER_HOST that points at a missing socket.
+ */
+function buildLaunchdEnvironment(homeDir: string): string {
+  const entries: Array<[string, string]> = [];
+
+  // PATH — prepend /opt/homebrew/bin on Apple Silicon so Homebrew binaries
+  // (docker, onecli, etc.) are discoverable.
+  const pathDirs = ['/usr/local/bin', '/usr/bin', '/bin', `${homeDir}/.local/bin`];
+  if (os.arch() === 'arm64') {
+    pathDirs.unshift('/opt/homebrew/bin');
+  }
+  entries.push(['PATH', pathDirs.join(':')]);
+  entries.push(['HOME', homeDir]);
+
+  // Colima — detect via socket existence, then set the env vars launchd
+  // would otherwise miss.
+  const colimaSocket = path.join(homeDir, '.colima', 'default', 'docker.sock');
+  if (fs.existsSync(colimaSocket)) {
+    entries.push(['DOCKER_HOST', `unix://${colimaSocket}`]);
+
+    // Override TMPDIR to a Colima-shared path. Create the directory now so
+    // the OneCLI SDK's first writeFileSync doesn't fail on the nonexistent
+    // parent.
+    const tmpDir = path.join(homeDir, '.cache', 'nanoclaw-tmp');
+    fs.mkdirSync(tmpDir, { recursive: true });
+    entries.push(['TMPDIR', `${tmpDir}/`]);
+  }
+
+  return entries
+    .map(([k, v]) => `        <key>${k}</key>\n        <string>${v}</string>`)
+    .join('\n');
+}
+
 function setupLaunchd(
   projectRoot: string,
   nodePath: string,
@@ -146,6 +207,8 @@ function setupLaunchd(
     `${label}.plist`,
   );
   fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+
+  const envBlock = buildLaunchdEnvironment(homeDir);
 
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -166,10 +229,7 @@ function setupLaunchd(
     <true/>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
-        <key>HOME</key>
-        <string>${homeDir}</string>
+${envBlock}
     </dict>
     <key>StandardOutPath</key>
     <string>${projectRoot}/logs/nanoclaw.log</string>
