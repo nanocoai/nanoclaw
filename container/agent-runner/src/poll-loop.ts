@@ -48,25 +48,38 @@ const OAUTH_CREDENTIALS_PATH = '/home/node/.claude/.credentials.json';
 const OAUTH_EXPIRY_BUFFER_MS = 30_000;
 
 /**
- * Check the mounted host OAuth credentials for an already-expired access
- * token before starting a new query. Without this, a stale token only
- * surfaces after the Claude Agent SDK exhausts its own internal retry loop
- * against the expired token — several minutes of silent, doomed work — and
- * only then returns a result whose text matches AUTH_ERROR_RE. Catching it
- * up front turns that into an immediate respawn instead.
+ * Check the mounted host OAuth credentials for a genuinely unrecoverable
+ * state before starting a new query: the *refresh* token has also expired,
+ * so no amount of retrying can produce a valid access token without the
+ * user re-authenticating on the host.
  *
- * Doesn't help a token that expires mid-query (the SDK is already running by
- * then) — only a query that's about to start against a token that's already
- * expired. Returns false (not our concern) when using an API key instead of
- * Pro OAuth, since no credentials file is mounted in that mode.
+ * A merely-stale *access* token (refresh token still valid) is NOT treated
+ * as unrecoverable here — the Claude Agent SDK refreshes it transparently
+ * as part of starting a new query (verified empirically: ~2-3s end-to-end,
+ * including a fresh access+refresh token pair written back to the mounted
+ * credentials file). An earlier version of this check pre-empted every
+ * query against an expired access token and exited for an external respawn
+ * instead, which seemed safe but actually removed the only place that ever
+ * triggered the SDK's refresh — no container could refresh the shared
+ * token, so the fleet spun in a respawn loop (each cycle churning Docker
+ * networking) until something unrelated (e.g. an interactive `claude`
+ * session on the host) happened to refresh the file from outside. See the
+ * 2026-08-13 "tg choking" incident.
+ *
+ * Returns false (not our concern) when using an API key instead of Pro
+ * OAuth, since no credentials file is mounted in that mode.
  */
-function isOAuthTokenExpired(): boolean {
+function isOAuthUnrecoverable(): boolean {
   try {
     const raw = readFileSync(OAUTH_CREDENTIALS_PATH, 'utf8');
-    const parsed = JSON.parse(raw) as { claudeAiOauth?: { expiresAt?: number } };
-    const expiresAt = parsed.claudeAiOauth?.expiresAt;
+    const parsed = JSON.parse(raw) as {
+      claudeAiOauth?: { expiresAt?: number; refreshTokenExpiresAt?: number };
+    };
+    const { expiresAt, refreshTokenExpiresAt } = parsed.claudeAiOauth ?? {};
     if (typeof expiresAt !== 'number') return false;
-    return Date.now() >= expiresAt - OAUTH_EXPIRY_BUFFER_MS;
+    if (Date.now() < expiresAt - OAUTH_EXPIRY_BUFFER_MS) return false; // access token still fresh
+    if (typeof refreshTokenExpiresAt !== 'number') return false; // unknown — let the SDK try
+    return Date.now() >= refreshTokenExpiresAt;
   } catch {
     return false;
   }
@@ -281,8 +294,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const skippedSet = new Set(skipped.map((s) => s.id));
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
 
-    if (isOAuthTokenExpired()) {
-      log('OAuth token already expired — resetting messages and exiting for respawn instead of starting a doomed query');
+    if (isOAuthUnrecoverable()) {
+      log('OAuth refresh token has also expired — re-authentication required, exiting for respawn instead of a doomed query');
       resetToRetryable(processingIds);
       writeMessageOut({
         id: generateId(),
