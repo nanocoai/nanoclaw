@@ -10,6 +10,7 @@
  *   3. One writer per file — DELETE-mode journal-unlink isn't atomic across
  *      the mount; concurrent writers corrupt the DB.
  */
+import { execFileSync } from 'child_process';
 import type Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
@@ -157,6 +158,25 @@ export function initSessionFolder(agentGroupId: string, sessionId: string): void
 
   ensureSchema(inboundDbPath(agentGroupId, sessionId), 'inbound');
   ensureSchema(outboundDbPath(agentGroupId, sessionId), 'outbound');
+
+  // When the host runs as root, files are written with uid=0. The agent image
+  // ships with `USER node` (uid 1000) and Claude Code refuses to run as root
+  // (`--dangerously-skip-permissions cannot be used with root/sudo privileges`),
+  // so we cannot work around the ownership mismatch by passing `--user 0:0`.
+  // Chown the session tree to 1000:1000 so the container's `node` user can
+  // write outbound.db and touch the heartbeat file. No-op when the host
+  // already runs as the container UID (1000) or any non-root UID — those
+  // paths fall through to the existing `--user $hostUid:$hostGid` mapping
+  // in container-runner.ts.
+  if (process.getuid?.() === 0) {
+    try {
+      execFileSync('chown', ['-R', '1000:1000', dir], { stdio: 'ignore' });
+    } catch {
+      // best-effort; if chown fails the agent will fail later with a clearer
+      // SQLite "attempt to write a readonly database" error and the host
+      // sweep retries the message until the operator notices.
+    }
+  }
 }
 
 /**
