@@ -5,7 +5,7 @@ import { DATA_DIR, DEFAULT_AGENT_PROVIDER, GROUPS_DIR } from './config.js';
 import { ensureContainerConfig } from './db/container-configs.js';
 import { stageGroupPersona } from './group-persona.js';
 import { log } from './log.js';
-import { migrateClaudeMemorySettings } from './migrate-claude-memory-settings.js';
+import { CLEANUP_PERIOD_DAYS, migrateClaudeMemorySettings } from './migrate-claude-memory-settings.js';
 import { providerProvidesAgentSurfaces } from './providers/provider-container-registry.js';
 import type { AgentGroup } from './types.js';
 
@@ -13,6 +13,7 @@ const DEFAULT_SETTINGS_JSON =
   JSON.stringify(
     {
       autoMemoryEnabled: false,
+      cleanupPeriodDays: CLEANUP_PERIOD_DAYS,
       env: {
         CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
         CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
