@@ -16,11 +16,18 @@
  * skill — simple `.env`-based credentials without OneCLI — so the env-var
  * threading is intentional here, not an accident.
  *
- * Lives in its own file so the reach-in in `container-runner.ts` is a single
- * call (`args.push(...nativeCredentialEnvArgs())`) and this logic is
- * behavior-testable in isolation, without invoking the OneCLI-entangled
- * `buildContainerArgs`. All gating lives here too: when the opt-out flag is
- * not set, the function returns no args and the gateway path is untouched.
+ * Lives in its own file so the reach-in in `container-runner.ts` is small —
+ * an `args.push(...nativeCredentialEnvArgs())` to thread the credential plus a
+ * `nativeCredentialsEnabled()` guard that skips the OneCLI gateway — and this
+ * logic is behavior-testable in isolation, without invoking the OneCLI-entangled
+ * `buildContainerArgs`. All gating lives here too: when the opt-out flag is not
+ * set, `nativeCredentialEnvArgs()` returns no args and the guard is false, so
+ * the OneCLI gateway path is exactly as it was.
+ *
+ * The gateway MUST be skipped when this opt-out is on: it injects an HTTPS_PROXY
+ * that MITMs api.anthropic.com and overrides the `.env` credential with the
+ * vault's (yielding "Invalid API key"). Threading the credential without
+ * skipping the gateway is a no-op at best and a breakage at worst.
  */
 import { readEnvFile } from './env.js';
 
@@ -39,9 +46,17 @@ export const NATIVE_CREDENTIAL_VARS = [
   'ANTHROPIC_BASE_URL',
 ] as const;
 
-/** Is the native `.env` credential opt-out enabled? */
+/**
+ * Is the native `.env` credential opt-out enabled?
+ *
+ * Honors both `process.env` and `.env` (matching the `process.env.X ||
+ * envConfig.X` convention in `config.ts`). The host is launched by launchd /
+ * systemd without `.env` loaded into its environment, so checking only
+ * `process.env` would leave the flag perpetually off even when set in `.env`.
+ */
 export function nativeCredentialsEnabled(): boolean {
-  return process.env[NATIVE_CREDENTIALS_FLAG] === 'true';
+  if (process.env[NATIVE_CREDENTIALS_FLAG] === 'true') return true;
+  return readEnvFile([NATIVE_CREDENTIALS_FLAG])[NATIVE_CREDENTIALS_FLAG] === 'true';
 }
 
 /**
