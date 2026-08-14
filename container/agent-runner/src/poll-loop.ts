@@ -267,24 +267,56 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       const errMsg = err instanceof Error ? err.message : String(err);
       log(`Query error: ${errMsg}`);
 
-      // Stale/corrupt continuation recovery: ask the provider whether
-      // this error means the stored continuation is unusable, and clear
-      // it so the next attempt starts fresh.
+      // Stale/corrupt continuation recovery: clear the bad session ID and
+      // retry immediately with a fresh session so the user never sees the error.
       if (continuation && config.provider.isSessionInvalid(err)) {
-        log(`Stale session detected (${continuation}) — clearing for next retry`);
+        log(`Stale session detected (${continuation}) — retrying fresh`);
         continuation = undefined;
         clearContinuation(config.providerName);
+        try {
+          const retryQuery = config.provider.query({ prompt, continuation: undefined, cwd: config.cwd, systemContext: config.systemContext });
+          const retryResult = await processQuery(
+            retryQuery,
+            routing,
+            processingIds,
+            config.providerName,
+            config.provider.onExchangeComplete?.bind(config.provider),
+            prompt,
+            undefined,
+          );
+          if (retryResult.continuation) {
+            continuation = retryResult.continuation;
+            setContinuation(config.providerName, continuation);
+          }
+        } catch (retryErr) {
+          const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          log(`Retry also failed: ${retryMsg}`);
+          // processQuery persists continuation on the first `init` event
+          // (see line ~389) — so a retry that init's then throws leaves a
+          // continuation in the DB pointing at a stream we never finished.
+          // Clear it again so the next wake starts fresh.
+          continuation = undefined;
+          clearContinuation(config.providerName);
+          writeMessageOut({
+            id: generateId(),
+            kind: 'chat',
+            platform_id: routing.platformId,
+            channel_type: routing.channelType,
+            thread_id: routing.threadId,
+            content: JSON.stringify({ text: `Error: ${retryMsg}` }),
+          });
+        }
+      } else {
+        // Write error response so the user knows something went wrong
+        writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        });
       }
-
-      // Write error response so the user knows something went wrong
-      writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
-      });
 
       // The batch is still acked completed below (no redelivery). Without
       // this line the only log trace of the errored turn is "Query error"
