@@ -58,7 +58,7 @@ check_node() {
     NODE_PATH_FOUND=$(command -v node)
     local major
     major=$(echo "$NODE_VERSION" | cut -d. -f1)
-    if [ "$major" -ge 22 ] 2>/dev/null; then
+    if [ "$major" -ge 20 ] 2>/dev/null; then
       NODE_OK="true"
     fi
     log "Node $NODE_VERSION at $NODE_PATH_FOUND (major=$major, ok=$NODE_OK)"
@@ -184,20 +184,20 @@ detect_platform
 
 check_node
 if [ "$NODE_OK" = "false" ]; then
-  log "Node missing or too old — running setup/install-node.sh"
-  echo "Node 22+ not found — installing via setup/install-node.sh"
-  if bash "$PROJECT_ROOT/setup/install-node.sh" 2>&1 | tee -a "$LOG_FILE"; then
-    if [ -x "$HOME/.local/bin/node" ]; then
-      export PATH="$HOME/.local/bin:$PATH"
-    elif [ "$PLATFORM" = "macos" ] && command -v brew >/dev/null 2>&1; then
-      if NODE22_PREFIX="$(brew --prefix node@22 2>/dev/null)"; then
-        export PATH="$NODE22_PREFIX/bin:$PATH"
-      fi
+  if [ "$NODE_VERSION" = "not_found" ]; then
+    log "Node missing — running setup/install-node.sh"
+    echo "Node not found — installing via setup/install-node.sh"
+    if bash "$PROJECT_ROOT/setup/install-node.sh" 2>&1 | tee -a "$LOG_FILE"; then
+      hash -r 2>/dev/null || true
+      check_node
+    else
+      log "install-node.sh failed"
     fi
-    hash -r 2>/dev/null || true
-    check_node
   else
-    log "install-node.sh failed"
+    # install-node.sh never replaces an existing Node, so don't run it just
+    # to watch it refuse — tell the user the actual fix instead.
+    log "Node $NODE_VERSION too old (need >= 20) — leaving the existing install alone"
+    echo "Node $NODE_VERSION is too old — NanoClaw needs Node 20 or newer. Upgrade your existing Node, then re-run."
   fi
 fi
 install_deps
@@ -206,7 +206,11 @@ check_build_tools
 # Emit status block
 STATUS="success"
 if [ "$NODE_OK" = "false" ]; then
-  STATUS="node_missing"
+  if [ "$NODE_VERSION" = "not_found" ]; then
+    STATUS="node_missing"
+  else
+    STATUS="node_too_old"
+  fi
 elif [ "$DEPS_OK" = "false" ]; then
   STATUS="deps_failed"
 elif [ "$NATIVE_OK" = "false" ]; then

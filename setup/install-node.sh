@@ -8,28 +8,37 @@
 # it. Pure bash by design — runs before Node exists on the host.
 set -euo pipefail
 
+REQUIRED_NODE_MAJOR=20
+
 echo "=== NANOCLAW SETUP: INSTALL_NODE ==="
 
 if command -v node >/dev/null 2>&1; then
-  NODE_MAJOR="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  if [ "$NODE_MAJOR" -ge 22 ] 2>/dev/null; then
+  NODE_VERSION="$(node --version 2>/dev/null || echo unknown)"
+  major="${NODE_VERSION#v}"
+  major="${major%%.*}"
+  if [ "$major" -ge "$REQUIRED_NODE_MAJOR" ] 2>/dev/null; then
     echo "STATUS: already-installed"
-    echo "NODE_VERSION: $(node --version)"
+    echo "NODE_VERSION: $NODE_VERSION"
     echo "=== END ==="
     exit 0
   fi
-  echo "STEP: upgrade-node"
+  # An existing Node is never replaced in place, whatever its version — the
+  # honest outcome for a too-old Node is a clear failure naming the fix.
+  echo "STATUS: node-too-old"
+  echo "NODE_VERSION: $NODE_VERSION"
+  echo "ERROR: Node $NODE_VERSION is older than the required Node ${REQUIRED_NODE_MAJOR}+. This script never replaces an existing Node install; upgrade (or remove) it and re-run."
+  echo "=== END ==="
+  exit 1
 fi
 
 if command -v uvx >/dev/null 2>&1; then
   echo "STEP: uvx-nodeenv"
-  uvx nodeenv --force -n lts ~/node
+  uvx nodeenv -n lts ~/node
   mkdir -p ~/.local/bin
   ln -sf ~/node/bin/node ~/.local/bin/node
   ln -sf ~/node/bin/npm ~/.local/bin/npm
   ln -sf ~/node/bin/npx ~/.local/bin/npx
   ln -sf ~/node/bin/pnpm ~/.local/bin/pnpm
-  export PATH="$HOME/.local/bin:$PATH"
 else
   case "$(uname -s)" in
     Darwin)
@@ -41,7 +50,6 @@ else
         exit 1
       fi
       brew install node@22
-      export PATH="$(brew --prefix node@22)/bin:$PATH"
       ;;
     Linux)
       echo "STEP: nodesource-setup"
