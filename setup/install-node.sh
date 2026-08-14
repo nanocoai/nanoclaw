@@ -55,6 +55,14 @@ else
         exit 1
       fi
       brew install node@22
+      # node@22 is keg-only (versioned formula): brew installs it without
+      # linking anything onto PATH. Mirror the uvx branch and expose it
+      # via ~/.local/bin so PATH-prepending callers resolve the new node.
+      BREW_NODE_PREFIX="$(brew --prefix node@22)"
+      mkdir -p ~/.local/bin
+      ln -sf "$BREW_NODE_PREFIX/bin/node" ~/.local/bin/node
+      ln -sf "$BREW_NODE_PREFIX/bin/npm" ~/.local/bin/npm
+      ln -sf "$BREW_NODE_PREFIX/bin/npx" ~/.local/bin/npx
       ;;
     Linux)
       echo "STEP: nodesource-setup"
