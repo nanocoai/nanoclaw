@@ -197,7 +197,7 @@ if [ "$NODE_OK" = "false" ]; then
     # install-node.sh refuses to replace an existing Node without consent,
     # so don't run it just to watch it refuse — name the actual fix.
     log "Node $NODE_VERSION too old (need >= 20) — leaving the existing install alone"
-    echo "Node $NODE_VERSION is too old — NanoClaw needs Node 20 or newer. Upgrade your existing Node (or run bash nanoclaw.sh interactively and accept the offered Node upgrade), then re-run."
+    echo "Node $NODE_VERSION is too old. NanoClaw needs Node 20 or higher. Do one of these: (1) Update your Node. (2) Run bash nanoclaw.sh and accept the Node installation. Then do the setup again."
   fi
 fi
 install_deps

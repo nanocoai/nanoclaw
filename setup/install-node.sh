@@ -28,7 +28,7 @@ if command -v node >/dev/null 2>&1; then
     # the fix. nanoclaw.sh gathers that consent interactively.
     echo "STATUS: node-too-old"
     echo "NODE_VERSION: $NODE_VERSION"
-    echo "ERROR: Node $NODE_VERSION is older than the required Node ${REQUIRED_NODE_MAJOR}+. This script never replaces an existing Node install without consent; upgrade (or remove) it and re-run, or run bash nanoclaw.sh interactively to accept the offered Node upgrade."
+    echo "ERROR: Node $NODE_VERSION is too old. NanoClaw needs Node ${REQUIRED_NODE_MAJOR} or higher. This script does not replace an installed Node without consent. Do one of these: (1) Update or remove your Node, then run the setup again. (2) Run bash nanoclaw.sh and accept the Node installation."
     echo "=== END ==="
     exit 1
   fi
@@ -91,7 +91,7 @@ major="${NODE_VERSION#v}"
 major="${major%%.*}"
 if ! [ "$major" -ge "$REQUIRED_NODE_MAJOR" ] 2>/dev/null; then
   echo "STATUS: failed"
-  echo "ERROR: PATH still resolves node to $NODE_VERSION after the install. Put the new Node (e.g. ~/.local/bin) ahead of it on PATH and re-run."
+  echo "ERROR: The PATH still finds Node $NODE_VERSION after the installation. Put the new Node first in the PATH (for example ~/.local/bin). Then run the setup again."
   echo "=== END ==="
   exit 1
 fi

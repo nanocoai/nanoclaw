@@ -375,10 +375,12 @@ if command -v node >/dev/null 2>&1; then
   NODE_FOUND_MAJOR="${NODE_FOUND_MAJOR%%.*}"
   if ! [ "$NODE_FOUND_MAJOR" -ge "$NODE_MAJOR_REQUIRED" ] 2>/dev/null && [ -t 1 ] && [ -e /dev/tty ]; then
     printf '  %s\n' \
-      "$(dim "Node $NODE_FOUND_VERSION is installed, but NanoClaw needs Node ${NODE_MAJOR_REQUIRED}+.")"
+      "$(dim "Node $NODE_FOUND_VERSION is installed. NanoClaw needs Node ${NODE_MAJOR_REQUIRED} or higher.")"
+    printf '  %s\n' \
+      "$(dim "NanoClaw can install a new Node now. If uv is available, NanoClaw keeps your Node and installs the new Node next to it.")"
     printf '  %s\n\n' \
-      "$(dim "NanoClaw can install a newer Node now: kept alongside your Node when uv is available, otherwise via the platform installer (which may upgrade it).")"
-    read -r -p "  $(bold 'Install a newer Node now?') [Y/n] " NODE_ANS </dev/tty
+      "$(dim "If uv is not available, NanoClaw uses the platform installer. The platform installer can replace your Node.")"
+    read -r -p "  $(bold 'Install a new Node now?') [Y/n] " NODE_ANS </dev/tty
 
     case "${NODE_ANS:-Y}" in
       [Yy]*|'')
@@ -391,7 +393,7 @@ if command -v node >/dev/null 2>&1; then
         ;;
       *)
         printf '\n  %s\n\n' \
-          "$(dim "NanoClaw needs Node ${NODE_MAJOR_REQUIRED}+. Upgrade Node and re-run: bash nanoclaw.sh")"
+          "$(dim "NanoClaw needs Node ${NODE_MAJOR_REQUIRED} or higher. Update your Node. Then run bash nanoclaw.sh again.")"
         exit 1
         ;;
     esac
