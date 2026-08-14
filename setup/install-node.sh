@@ -22,13 +22,18 @@ if command -v node >/dev/null 2>&1; then
     echo "=== END ==="
     exit 0
   fi
-  # An existing Node is never replaced in place, whatever its version — the
-  # honest outcome for a too-old Node is a clear failure naming the fix.
-  echo "STATUS: node-too-old"
-  echo "NODE_VERSION: $NODE_VERSION"
-  echo "ERROR: Node $NODE_VERSION is older than the required Node ${REQUIRED_NODE_MAJOR}+. This script never replaces an existing Node install; upgrade (or remove) it and re-run."
-  echo "=== END ==="
-  exit 1
+  if [ "${NANOCLAW_NODE_UPGRADE_OK:-0}" != "1" ]; then
+    # An existing Node is never replaced without consent — the honest
+    # non-consented outcome for a too-old Node is a clear failure naming
+    # the fix. nanoclaw.sh gathers that consent interactively.
+    echo "STATUS: node-too-old"
+    echo "NODE_VERSION: $NODE_VERSION"
+    echo "ERROR: Node $NODE_VERSION is older than the required Node ${REQUIRED_NODE_MAJOR}+. This script never replaces an existing Node install without consent; upgrade (or remove) it and re-run, or run bash nanoclaw.sh interactively to accept the offered Node upgrade."
+    echo "=== END ==="
+    exit 1
+  fi
+  echo "STEP: node-upgrade-consented"
+  echo "NODE_OLD_VERSION: $NODE_VERSION"
 fi
 
 if command -v uvx >/dev/null 2>&1; then
@@ -73,6 +78,16 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
+NODE_VERSION="$(node --version 2>/dev/null || echo unknown)"
+major="${NODE_VERSION#v}"
+major="${major%%.*}"
+if ! [ "$major" -ge "$REQUIRED_NODE_MAJOR" ] 2>/dev/null; then
+  echo "STATUS: failed"
+  echo "ERROR: PATH still resolves node to $NODE_VERSION after the install. Put the new Node (e.g. ~/.local/bin) ahead of it on PATH and re-run."
+  echo "=== END ==="
+  exit 1
+fi
+
 echo "STATUS: installed"
-echo "NODE_VERSION: $(node --version)"
+echo "NODE_VERSION: $NODE_VERSION"
 echo "=== END ==="

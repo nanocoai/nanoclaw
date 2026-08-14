@@ -184,9 +184,9 @@ detect_platform
 
 check_node
 if [ "$NODE_OK" = "false" ]; then
-  if [ "$NODE_VERSION" = "not_found" ]; then
-    log "Node missing — running setup/install-node.sh"
-    echo "Node not found — installing via setup/install-node.sh"
+  if [ "$NODE_VERSION" = "not_found" ] || [ "${NANOCLAW_NODE_UPGRADE_OK:-0}" = "1" ]; then
+    log "Node missing or upgrade consented — running setup/install-node.sh"
+    echo "Installing Node via setup/install-node.sh"
     if bash "$PROJECT_ROOT/setup/install-node.sh" 2>&1 | tee -a "$LOG_FILE"; then
       hash -r 2>/dev/null || true
       check_node
@@ -194,10 +194,10 @@ if [ "$NODE_OK" = "false" ]; then
       log "install-node.sh failed"
     fi
   else
-    # install-node.sh never replaces an existing Node, so don't run it just
-    # to watch it refuse — tell the user the actual fix instead.
+    # install-node.sh refuses to replace an existing Node without consent,
+    # so don't run it just to watch it refuse — name the actual fix.
     log "Node $NODE_VERSION too old (need >= 20) — leaving the existing install alone"
-    echo "Node $NODE_VERSION is too old — NanoClaw needs Node 20 or newer. Upgrade your existing Node, then re-run."
+    echo "Node $NODE_VERSION is too old — NanoClaw needs Node 20 or newer. Upgrade your existing Node (or run bash nanoclaw.sh interactively and accept the offered Node upgrade), then re-run."
   fi
 fi
 install_deps

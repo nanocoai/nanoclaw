@@ -363,6 +363,41 @@ if [ "$(uname -s)" = "Darwin" ] && ! command -v brew >/dev/null 2>&1; then
   esac
 fi
 
+# ─── pre-flight: existing Node too old ─────────────────────────────────
+# setup/install-node.sh never replaces a Node the user already owns, and
+# the bootstrap below runs under a spinner with its output captured, so
+# this is the last spot where a consent prompt is possible. Headless runs
+# skip the prompt and get the bootstrap's clear failure instead.
+NODE_MAJOR_REQUIRED=20
+if command -v node >/dev/null 2>&1; then
+  NODE_FOUND_VERSION="$(node --version 2>/dev/null || echo unknown)"
+  NODE_FOUND_MAJOR="${NODE_FOUND_VERSION#v}"
+  NODE_FOUND_MAJOR="${NODE_FOUND_MAJOR%%.*}"
+  if ! [ "$NODE_FOUND_MAJOR" -ge "$NODE_MAJOR_REQUIRED" ] 2>/dev/null && [ -t 1 ] && [ -e /dev/tty ]; then
+    printf '  %s\n' \
+      "$(dim "Node $NODE_FOUND_VERSION is installed, but NanoClaw needs Node ${NODE_MAJOR_REQUIRED}+.")"
+    printf '  %s\n\n' \
+      "$(dim "NanoClaw can install a newer Node now: kept alongside your Node when uv is available, otherwise via the platform installer (which may upgrade it).")"
+    read -r -p "  $(bold 'Install a newer Node now?') [Y/n] " NODE_ANS </dev/tty
+
+    case "${NODE_ANS:-Y}" in
+      [Yy]*|'')
+        printf '\n'
+        # Consent travels to setup.sh and setup/install-node.sh; the PATH
+        # prepend lets a nodeenv install win over the old Node for this
+        # whole flow, including the service unit the wizard writes.
+        export NANOCLAW_NODE_UPGRADE_OK=1
+        export PATH="$HOME/.local/bin:$PATH"
+        ;;
+      *)
+        printf '\n  %s\n\n' \
+          "$(dim "NanoClaw needs Node ${NODE_MAJOR_REQUIRED}+. Upgrade Node and re-run: bash nanoclaw.sh")"
+        exit 1
+        ;;
+    esac
+  fi
+fi
+
 # ─── first step: install the basics (Node + pnpm + native modules) ─────
 
 BOOTSTRAP_RAW="${STEPS_DIR}/01-bootstrap.log"
