@@ -469,9 +469,7 @@ describe('enrichAttachments', () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async () => new Response('nope', { status: 404 })) as typeof fetch;
     try {
-      const [entry] = await enrichAttachments([
-        makeAttachment({ name: 'message.txt', url: 'https://cdn/gone.txt' }),
-      ]);
+      const [entry] = await enrichAttachments([makeAttachment({ name: 'message.txt', url: 'https://cdn/gone.txt' })]);
       expect(entry.data).toBeUndefined();
       expect(entry.url).toBe('https://cdn/gone.txt');
     } finally {
@@ -484,5 +482,56 @@ describe('enrichAttachments', () => {
     expect(entry.data).toBeUndefined();
     expect(entry.url).toBeUndefined();
     expect(entry.name).toBe('mystery');
+  });
+
+  it('skips the url download entirely when the declared size exceeds the cap (keeps url, no bytes)', async () => {
+    const realFetch = globalThis.fetch;
+    let fetchCalled = false;
+    globalThis.fetch = (async () => {
+      fetchCalled = true;
+      return new Response(Buffer.from('should not be read'), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const [entry] = await enrichAttachments(
+        [makeAttachment({ name: 'big.png', size: 100, url: 'https://cdn/big.png' })],
+        8,
+      );
+      expect(fetchCalled).toBe(false);
+      expect(entry.data).toBeUndefined();
+      expect(entry.url).toBe('https://cdn/big.png');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('omits data when the downloaded url body exceeds the cap, even if size metadata is absent (keeps url)', async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(Buffer.from('far more than eight bytes'), { status: 200 })) as typeof fetch;
+    try {
+      const [entry] = await enrichAttachments(
+        [makeAttachment({ name: 'nosize.bin', url: 'https://cdn/nosize.bin' })],
+        8,
+      );
+      expect(entry.data).toBeUndefined();
+      expect(entry.url).toBe('https://cdn/nosize.bin');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('still stages url bytes that are within the cap', async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(Buffer.from('ok'), { status: 200 })) as typeof fetch;
+    try {
+      const [entry] = await enrichAttachments(
+        [makeAttachment({ name: 'small.txt', url: 'https://cdn/small.txt' })],
+        1024,
+      );
+      expect(entry.data).toBe(Buffer.from('ok').toString('base64'));
+      expect(entry.url).toBe('https://cdn/small.txt');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });

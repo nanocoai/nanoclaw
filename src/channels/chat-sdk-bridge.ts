@@ -148,8 +148,23 @@ export function splitForLimit(text: string, limit: number): string[] {
  * `url` is always preserved on the entry as a last-resort fallback when neither
  * download path yields bytes.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function enrichAttachments(attachments: Attachment[]): Promise<Record<string, any>[]> {
+/**
+ * Cap on inbound attachment bytes we download and inline (base64) into a
+ * prompt. Overridable via MAX_INBOUND_ATTACHMENT_BYTES; defaults to 10 MB.
+ * Anything larger is left as a url-only reference, so a large or repeated
+ * upload from anyone who can message the bot can't blow up the POST body or
+ * the prompt context.
+ */
+function defaultMaxInboundAttachmentBytes(): number {
+  const v = Number(process.env.MAX_INBOUND_ATTACHMENT_BYTES);
+  return Number.isFinite(v) && v > 0 ? v : 10 * 1024 * 1024;
+}
+
+export async function enrichAttachments(
+  attachments: Attachment[],
+  maxBytes: number = defaultMaxInboundAttachmentBytes(),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<Record<string, any>[]> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const enriched: Record<string, any>[] = [];
   for (const att of attachments) {
@@ -171,13 +186,45 @@ export async function enrichAttachments(attachments: Attachment[]): Promise<Reco
         log.warn('Failed to download attachment', { type: att.type, err });
       }
     } else if (att.url) {
-      try {
-        const res = await fetch(att.url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const buffer = Buffer.from(await res.arrayBuffer());
-        entry.data = buffer.toString('base64');
-      } catch (err) {
-        log.warn('Failed to download attachment from url', { type: att.type, url: att.url, err });
+      // Discord (and other url-only adapters) let anyone who can message the
+      // bot attach files. Bound what we download + inline so a large or
+      // repeated upload can't blow up the POST body / prompt context. When we
+      // decline to stage the bytes, the url stays on the entry as a reference.
+      if (typeof att.size === 'number' && att.size > maxBytes) {
+        log.warn('Skipping oversized url attachment (declared size)', {
+          type: att.type,
+          url: att.url,
+          size: att.size,
+          maxBytes,
+        });
+      } else {
+        try {
+          const res = await fetch(att.url);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const declared = Number(res.headers.get('content-length'));
+          if (Number.isFinite(declared) && declared > maxBytes) {
+            log.warn('Skipping oversized url attachment (content-length)', {
+              type: att.type,
+              url: att.url,
+              contentLength: declared,
+              maxBytes,
+            });
+          } else {
+            const buffer = Buffer.from(await res.arrayBuffer());
+            if (buffer.length > maxBytes) {
+              log.warn('Skipping oversized url attachment (downloaded bytes)', {
+                type: att.type,
+                url: att.url,
+                bytes: buffer.length,
+                maxBytes,
+              });
+            } else {
+              entry.data = buffer.toString('base64');
+            }
+          }
+        } catch (err) {
+          log.warn('Failed to download attachment from url', { type: att.type, url: att.url, err });
+        }
       }
     }
     enriched.push(entry);
