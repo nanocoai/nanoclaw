@@ -1,0 +1,165 @@
+# Publishes the agent image to Docker Hub. Each run pushes one multi-arch
+# index under two tags, same digest:
+#   agent-<version>-<sha12>   immutable candidate (version from package.json)
+#   agent-alpha               moving alias downstream image builds track
+#                             (the alias name is a contract; do not rename)
+#
+# These tags are NOT an install path — installs build locally
+# (container/build.sh) or pull the hardened pin (container/pull.sh).
+#
+# Nothing is pushed until a grype scan of the built image passes: a critical
+# vulnerability WITH a fix available fails the run. Unfixed criticals don't
+# block — no rebuild can remove them. Exceptions live in a reviewable
+# .grype.yaml.
+#
+# Rollback — point agent-alpha back at an earlier candidate, no rebuild
+# (add --dry-run to preview):
+#   docker buildx imagetools create \
+#     --tag docker.io/nanoco/nanoclaw:agent-alpha \
+#     docker.io/nanoco/nanoclaw:agent-<version>-<sha12>
+name: Publish agent image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-agent-image
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      # This file flows into downstream mirrors that hold their own Docker Hub
+      # credentials (nanoclaw-sbx syncs upstream nightly), so the repo check is
+      # load-bearing, not ceremony.
+      - name: Verify dispatch source
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+          DISPATCH_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$DISPATCH_REPOSITORY" != "nanocoai/nanoclaw" ]; then
+            echo "::error::Publishes run only in nanocoai/nanoclaw; got $DISPATCH_REPOSITORY."
+            exit 1
+          fi
+          if [ "$DISPATCH_REF" != "refs/heads/main" ]; then
+            echo "::error::Select the main branch when dispatching; got $DISPATCH_REF."
+            exit 1
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Derive image metadata
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::package.json version '${VERSION}' is not a release version."
+            exit 1
+          fi
+          {
+            echo "IMAGE=docker.io/nanoco/nanoclaw"
+            echo "CANDIDATE_TAG=agent-${VERSION}-${GITHUB_SHA:0:12}"
+            echo "LOCK_SHA256=$(sha256sum container/agent-runner/bun.lock | cut -d' ' -f1)"
+          } >> "$GITHUB_ENV"
+
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Scan BEFORE anything is pushed: an amd64 build is loaded locally and
+      # scanned; a failing image never gets a public tag — not even the
+      # candidate. The multi-arch push below replays every amd64 layer from
+      # cache, so the scan detour costs roughly one grype run. arm64 is not
+      # separately scanned: package versions are identical across
+      # architectures, so the amd64 result is representative.
+      - name: Build image for scanning (amd64, local only)
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file container/Dockerfile \
+            --platform linux/amd64 \
+            --pull \
+            --build-arg "AGENT_RUNNER_LOCK_SHA256=${LOCK_SHA256}" \
+            --build-arg IMAGE_SOURCE=ci \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=https://github.com/nanocoai/nanoclaw" \
+            --cache-from "type=registry,ref=${IMAGE}:buildcache-agent" \
+            --cache-to "type=registry,ref=${IMAGE}:buildcache-agent,mode=max" \
+            --tag nanoclaw-agent-scan-candidate \
+            --load \
+            container
+
+      - name: Gate on fixable critical vulnerabilities
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: nanoclaw-agent-scan-candidate
+          fail-build: true
+          severity-cutoff: critical
+          only-fixed: true
+          output-format: table
+
+      - name: Build and push multi-arch image
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file container/Dockerfile \
+            --platform linux/amd64,linux/arm64 \
+            --pull \
+            --build-arg "AGENT_RUNNER_LOCK_SHA256=${LOCK_SHA256}" \
+            --build-arg IMAGE_SOURCE=ci \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=https://github.com/nanocoai/nanoclaw" \
+            --cache-from "type=registry,ref=${IMAGE}:buildcache-agent" \
+            --cache-to "type=registry,ref=${IMAGE}:buildcache-agent,mode=max" \
+            --tag "${IMAGE}:${CANDIDATE_TAG}" \
+            --tag "${IMAGE}:agent-alpha" \
+            --push \
+            container
+
+      - name: Verify the pushed index
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect --raw "${IMAGE}:${CANDIDATE_TAG}" > "$RUNNER_TEMP/index.json"
+          python3 - "$RUNNER_TEMP/index.json" <<'PY'
+          import json, sys
+          m = json.load(open(sys.argv[1]))
+          if 'manifests' not in m:
+              print(f"::error::Pushed reference is a single-platform manifest ({m.get('mediaType', '')}).")
+              sys.exit(1)
+          plats = {
+              f"{e['platform']['os']}/{e['platform']['architecture']}"
+              for e in m['manifests']
+              if e.get('platform', {}).get('architecture') not in (None, 'unknown')
+          }
+          missing = {'linux/amd64', 'linux/arm64'} - plats
+          if missing:
+              print(f"::error::Index is missing {sorted(missing)}; it has {sorted(plats)}.")
+              sys.exit(1)
+          print(f"  index covers {sorted(plats)}")
+          PY
+
+          DIGEST="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${IMAGE}:${CANDIDATE_TAG}")"
+          ALPHA_DIGEST="$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${IMAGE}:agent-alpha")"
+          if [ "$DIGEST" != "$ALPHA_DIGEST" ]; then
+            echo "::error::agent-alpha (${ALPHA_DIGEST}) does not match this run's candidate (${DIGEST}); re-run the workflow."
+            exit 1
+          fi
+
+          {
+            echo "### Published agent image"
+            echo "- Candidate: \`${IMAGE}:${CANDIDATE_TAG}\`"
+            echo "- Alias: \`${IMAGE}:agent-alpha\` (moving)"
+            echo "- Digest: \`${DIGEST}\`"
+            echo "- Pinnable: \`${IMAGE}@${DIGEST}\`"
+            echo "- Revision: \`${GITHUB_SHA}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

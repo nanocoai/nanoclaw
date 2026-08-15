@@ -4,9 +4,11 @@
 # refresh, so this job is the last point at which anyone looks. Two tiers, and
 # the distinction is deliberate:
 #
-#   BLOCKING   shape checks — index, platforms, lock label, provenance, size.
-#              These catch a wrong or mismatched image. They are things the
-#              image asserts about itself, so they detect drift, not forgery.
+#   BLOCKING   shape checks — index, platforms, lock label, provenance, size —
+#              plus a CVE gate (no critical vulnerability with a fix available).
+#              These catch a wrong, mismatched, or stale image. The shape checks
+#              are things the image asserts about itself, so they detect drift,
+#              not forgery; the CVE gate judges the contents.
 #
 #   AUTO-MERGE signature verification. The only check here that a registry
 #              write cannot satisfy on its own, so it is the only one allowed
@@ -184,6 +186,21 @@ jobs:
           if old > 0 and (new > old * 3 or new * 3 < old):
               print("::warning::Manifest size moved by more than 3x — worth a look before merging.")
           PY
+
+      # Users who opt into the pinned image run these bytes; a critical CVE
+      # with a fix available must not reach the pin. Unfixed criticals don't
+      # block — no rebuild can remove them. A red job here means the image
+      # needs a rebuild before it can be pinned. Exceptions live in a
+      # reviewable .grype.yaml.
+      - name: Scan pinned image for fixable critical vulnerabilities
+        if: steps.pin.outputs.changed == 'true'
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
+        with:
+          image: ${{ steps.pin.outputs.new }}
+          fail-build: true
+          severity-cutoff: critical
+          only-fixed: true
+          output-format: table
 
       # AUTO-MERGE GATE. Nothing above can switch this on.
       #

@@ -67,6 +67,8 @@ Both paths end with Bun running the same source file from `/app/src/index.ts`.
 
 Any failure fails the PR.
 
+`.github/workflows/publish-agent-image.yml` (manual dispatch, main only) builds `container/Dockerfile` for linux/amd64 + linux/arm64 and pushes `docker.io/nanoco/nanoclaw:agent-<version>-<sha12>` plus the moving `agent-alpha` alias, stamped with the agent-runner lock sha and `image-source=ci`. Nothing is pushed until a grype scan passes: a critical vulnerability with a fix available fails the run (`verify-agent-image.yml` applies the same gate to the hardened pin). The published tags are not an install path: installs build locally or pull the hardened pin.
+
 ## Key invariants
 
 - **Session DBs must use `journal_mode=DELETE`.** WAL's `-shm` memory-map doesn't cross VirtioFS between host and guest. See the doc comment at the top of `container/agent-runner/src/db/connection.ts` and `src/session-manager.ts`.
