@@ -2,7 +2,7 @@
  * Container runtime abstraction for NanoClaw.
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import os from 'os';
 
 import { CONTAINER_INSTALL_LABEL } from './config.js';
@@ -31,6 +31,55 @@ export function stopContainer(name: string): void {
     throw new Error(`Invalid container name: ${name}`);
   }
   execSync(`${CONTAINER_RUNTIME_BIN} stop -t 1 ${name}`, { stdio: 'pipe' });
+}
+
+/**
+ * Force-remove a container by name (SIGKILL + rm). Stronger than
+ * stopContainer's `docker stop -t 1` — reaps containers dockerd won't stop
+ * gracefully (upstream #2659). Idempotent + best-effort.
+ */
+export function forceRemoveContainer(name: string): void {
+  try {
+    execFileSync(CONTAINER_RUNTIME_BIN, ['rm', '-f', name], { stdio: 'pipe' });
+  } catch {
+    /* already gone */
+  }
+}
+
+/**
+ * Reap untracked NanoClaw containers for ONE agent-group folder. Lists running
+ * containers whose name matches `nanoclaw-v2-<folder>-*` and force-removes any
+ * NOT in `tracked` (the live activeContainers name set). Kills perceived-exit
+ * orphans (host lost the child-process handle but dockerd kept the `--rm`
+ * container alive) without touching legitimately-tracked containers.
+ * NOTE: docker's name filter is a substring match — the `tracked` set (exact
+ * names) is what protects live containers, so folder-name prefixing is safe.
+ */
+export function reapUntrackedForFolder(folder: string, tracked: Set<string>): string[] {
+  try {
+    const out = execFileSync(
+      CONTAINER_RUNTIME_BIN,
+      [
+        'ps',
+        '--filter',
+        `name=nanoclaw-v2-${folder}-`,
+        '--filter',
+        `label=${CONTAINER_INSTALL_LABEL}`,
+        '--format',
+        '{{.Names}}',
+      ],
+      { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8' },
+    );
+    const reaped: string[] = [];
+    for (const name of out.trim().split('\n').filter(Boolean)) {
+      if (tracked.has(name)) continue;
+      forceRemoveContainer(name);
+      reaped.push(name);
+    }
+    return reaped;
+  } catch {
+    return [];
+  }
 }
 
 /** Ensure the container runtime is running, starting it if needed. */

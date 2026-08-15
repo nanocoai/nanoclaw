@@ -45,7 +45,7 @@ import {
 } from './db/session-db.js';
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
-import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
+import { isContainerRunning, killContainer, reapAllUntracked, wakeContainer } from './container-runner.js';
 import type { Session } from './types.js';
 
 /**
@@ -142,6 +142,10 @@ async function sweep(): Promise<void> {
   } catch (err) {
     log.error('Egress lockdown re-heal failed', { err });
   }
+
+  // Reconcile the runtime against the host's authoritative in-memory set on
+  // every tick, including idle periods where no pre-spawn guard would run.
+  reapAllUntracked();
 
   try {
     const sessions = getActiveSessions();
