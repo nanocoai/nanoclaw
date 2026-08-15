@@ -66,6 +66,112 @@ export function migrateLegacyContinuation(providerName: string): string | undefi
   return legacy;
 }
 
+/**
+ * Running token/cost total for the session, accumulated one provider turn at
+ * a time. Kept here rather than in `messages_out` because usage belongs to
+ * the turn, not to any one delivered message: a turn can produce several
+ * messages, or none at all, and still have cost real tokens.
+ *
+ * Written by the poll loop, read by the host (`ncl usage`) straight off
+ * outbound.db — no extra transport, and it survives container restarts
+ * because the row does.
+ */
+const USAGE_KEY = 'token_usage';
+
+/**
+ * One turn's usage, as reported by the provider. Every field is optional
+ * because providers differ in what they report; an unreported field counts as
+ * zero here, which is safe only because a turn with no usage at all never
+ * reaches this function.
+ */
+export interface TokenUsageDelta {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  costUsd?: number;
+}
+
+export interface TokenUsageTotals {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  cost_usd: number;
+  turns: number;
+  updated_at: string;
+}
+
+/**
+ * Anything not a finite, non-negative number counts as zero. A provider
+ * reporting NaN for one field must not turn the whole running total into
+ * NaN — the other fields, and every later turn, stay readable.
+ */
+function count(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+/** Float addition otherwise leaves 0.30000000000000004 in the CLI output. */
+function roundCost(value: number): number {
+  return Math.round(value * 1e6) / 1e6;
+}
+
+/**
+ * A row that won't parse is treated as absent rather than fatal: losing an
+ * earlier total is bad, but failing the turn over an accounting row would be
+ * worse. Anything other than malformed JSON still throws.
+ */
+function parseTotals(raw: string): Partial<TokenUsageTotals> | null {
+  try {
+    return JSON.parse(raw) as Partial<TokenUsageTotals> | null;
+  } catch (err) {
+    if (err instanceof SyntaxError) return null;
+    throw err;
+  }
+}
+
+export function getTokenUsage(): TokenUsageTotals | null {
+  const raw = getValue(USAGE_KEY);
+  if (raw === undefined) return null;
+  const parsed = parseTotals(raw);
+  if (!parsed || typeof parsed !== 'object') return null;
+  return {
+    input_tokens: count(parsed.input_tokens),
+    output_tokens: count(parsed.output_tokens),
+    cache_read_tokens: count(parsed.cache_read_tokens),
+    cache_creation_tokens: count(parsed.cache_creation_tokens),
+    cost_usd: count(parsed.cost_usd),
+    turns: count(parsed.turns),
+    updated_at: typeof parsed.updated_at === 'string' ? parsed.updated_at : '',
+  };
+}
+
+export function addTokenUsage(delta: TokenUsageDelta): void {
+  const prior = getTokenUsage() ?? EMPTY_TOTALS;
+  const totals: TokenUsageTotals = {
+    input_tokens: prior.input_tokens + count(delta.inputTokens),
+    output_tokens: prior.output_tokens + count(delta.outputTokens),
+    cache_read_tokens: prior.cache_read_tokens + count(delta.cacheReadTokens),
+    cache_creation_tokens: prior.cache_creation_tokens + count(delta.cacheCreationTokens),
+    cost_usd: roundCost(prior.cost_usd + count(delta.costUsd)),
+    // The turn counts even when its numbers were unusable — otherwise a
+    // provider that reports nothing looks like a session that never ran.
+    turns: prior.turns + 1,
+    updated_at: new Date().toISOString(),
+  };
+  setValue(USAGE_KEY, JSON.stringify(totals));
+}
+
+const EMPTY_TOTALS: TokenUsageTotals = {
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_read_tokens: 0,
+  cache_creation_tokens: 0,
+  cost_usd: 0,
+  turns: 0,
+  updated_at: '',
+};
+
 export function getContinuation(providerName: string): string | undefined {
   return getValue(continuationKey(providerName));
 }

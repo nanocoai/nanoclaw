@@ -47,6 +47,19 @@ export interface AgentProvider {
   maybeRotateContinuation?(continuation: string, cwd: string): string | null;
 }
 
+/**
+ * What one turn cost, as the provider reported it. Every field is optional:
+ * providers differ in what they report, and an absent field means "not
+ * reported", which is a different claim from zero.
+ */
+export interface ProviderUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  costUsd?: number;
+}
+
 /** One prompt/result round-trip, as reported to `onExchangeComplete`. */
 export interface ProviderExchange {
   /** The user prompt this exchange answers (never an internal retry nudge). */
@@ -126,7 +139,7 @@ export type ProviderEvent =
    * poll-loop uses it to surface the result text to the user instead of
    * dropping it as un-wrapped scratchpad, and to skip the re-wrap nudge.
    */
-  | { type: 'result'; text: string | null; isError?: boolean }
+  | { type: 'result'; text: string | null; isError?: boolean; usage?: ProviderUsage }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
   /**

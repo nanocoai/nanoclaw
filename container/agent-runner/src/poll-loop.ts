@@ -9,6 +9,7 @@ import {
 import { writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
+  addTokenUsage,
   clearContinuation,
   clearCurrentInReplyTo,
   migrateLegacyContinuation,
@@ -504,6 +505,11 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        // Bank the turn's usage before anything can branch away: a turn with
+        // no text still burned tokens, so this sits above the text guard. A
+        // provider that reports nothing banks nothing — a zeroed row would
+        // claim the turn was free rather than unreported.
+        if (event.usage) addTokenUsage(event.usage);
         if (event.text) {
           const { sent, hasUnwrapped, taskBlocks } = dispatchResultText(event.text, routing);
           const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);

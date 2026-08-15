@@ -394,6 +394,16 @@ export function openOutboundDb(agentGroupId: string, sessionId: string): Databas
   return openOutboundDbRaw(outboundDbPath(agentGroupId, sessionId));
 }
 
+/** Open a session's outbound DB read-only, run `fn`, and always close it. */
+export function withOutboundDb<T>(agentGroupId: string, sessionId: string, fn: (db: Database.Database) => T): T {
+  const db = openOutboundDb(agentGroupId, sessionId);
+  try {
+    return fn(db);
+  } finally {
+    db.close();
+  }
+}
+
 /** Open the outbound DB for a session with write access. Only safe to call when no container is running. */
 export function openOutboundDbRw(agentGroupId: string, sessionId: string): Database.Database {
   return openOutboundDbRwRaw(outboundDbPath(agentGroupId, sessionId));

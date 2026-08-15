@@ -110,6 +110,14 @@ export function findTaskSessions(agentGroupId: string): Session[] {
     .all(agentGroupId, TASKS_SYSTEM_THREAD_ID, `${TASKS_SYSTEM_THREAD_ID}:%`) as Session[];
 }
 
+/**
+ * Every session on record, closed ones included. Closed sessions still hold
+ * the tokens they spent, so anything accounting for cost must see them.
+ */
+export function getAllSessions(): Session[] {
+  return getDb().prepare('SELECT * FROM sessions').all() as Session[];
+}
+
 export function getActiveSessions(): Session[] {
   return getDb().prepare("SELECT * FROM sessions WHERE status = 'active'").all() as Session[];
 }
