@@ -8,15 +8,25 @@
  * (vercel/chat PR #367 adds the knob; a follow-up is needed for the converter).
  */
 
-const CODE_PATTERN = /```[\s\S]*?```|`[^`\n]*`/g;
+const CODE_PATTERN = /```[\s\S]*?```|`[^`\n]+`/g;
 const PLACEHOLDER_PREFIX = '\x00CODE';
 const PLACEHOLDER_SUFFIX = '\x00';
+
+// Bare URLs that the chat-adapter would otherwise CommonMark-autolink into
+// `[url](url)` form. Underscores inside the resulting label become unbalanced
+// italic delimiters that Telegram's legacy Markdown parser rejects with
+// "can't parse entities: Can't find end of the entity starting at byte offset N".
+// Percent-encoding `_` to `%5F` keeps the URL clickable (clients decode it)
+// while removing the parser-confusing character.
+const URL_PATTERN = /https?:\/\/\S+/g;
 
 export function sanitizeTelegramLegacyMarkdown(input: string): string {
   if (!input) return input;
 
+  let text = input.replace(URL_PATTERN, (url) => url.replace(/_/g, '%5F'));
+
   const codeSegments: string[] = [];
-  let text = input.replace(CODE_PATTERN, (m) => {
+  text = text.replace(CODE_PATTERN, (m) => {
     codeSegments.push(m);
     return `${PLACEHOLDER_PREFIX}${codeSegments.length - 1}${PLACEHOLDER_SUFFIX}`;
   });
@@ -36,10 +46,13 @@ export function sanitizeTelegramLegacyMarkdown(input: string): string {
   text = text.replace(/\*\*([^*\n]+?)\*\*/g, '*$1*');
   text = text.replace(/__([^_\n]+?)__/g, '_$1_');
 
-  const starCount = (text.match(/\*/g) ?? []).length;
-  const underCount = (text.match(/_/g) ?? []).length;
-  if (starCount % 2 !== 0 || underCount % 2 !== 0) {
-    text = text.replace(/[*_]/g, '');
+  // Strip independently so an unbalanced count of one delimiter doesn't also
+  // wipe out the (balanced) formatting of the other.
+  if ((text.match(/\*/g) ?? []).length % 2 !== 0) {
+    text = text.replace(/\*/g, '');
+  }
+  if ((text.match(/_/g) ?? []).length % 2 !== 0) {
+    text = text.replace(/_/g, '');
   }
 
   const openBrackets = (text.match(/\[/g) ?? []).length;
@@ -47,6 +60,11 @@ export function sanitizeTelegramLegacyMarkdown(input: string): string {
   if (openBrackets !== closeBrackets) {
     text = text.replace(/[[\]]/g, '');
   }
+
+  // Any backtick remaining after code extraction is stray — it was never part of
+  // a valid code span. Telegram's legacy Markdown parser would open a code entity
+  // at that position and never find the closing backtick, causing a parse error.
+  text = text.replace(/`/g, '');
 
   return text.replace(
     new RegExp(`${PLACEHOLDER_PREFIX}(\\d+)${PLACEHOLDER_SUFFIX}`, 'g'),

@@ -58,6 +58,30 @@ describe('sanitizeTelegramLegacyMarkdown', () => {
     expect(sanitizeTelegramLegacyMarkdown('')).toBe('');
   });
 
+  it('percent-encodes underscores inside bare URLs so chat-adapter autolinks do not break', () => {
+    const input = 'see https://github.com/regent-vcs/re_gent for the code';
+    const out = sanitizeTelegramLegacyMarkdown(input);
+    expect(out).toBe('see https://github.com/regent-vcs/re%5Fgent for the code');
+  });
+
+  it('keeps a paired in-text _italic_ even when a URL underscore is encoded', () => {
+    const input = '_label_ with link https://github.com/regent-vcs/re_gent';
+    const out = sanitizeTelegramLegacyMarkdown(input);
+    expect(out).toBe('_label_ with link https://github.com/regent-vcs/re%5Fgent');
+  });
+
+  it('strips stray backtick that would open an unclosed Telegram code entity', () => {
+    const input = 'run the `db:migrate command';
+    const out = sanitizeTelegramLegacyMarkdown(input);
+    expect(out).not.toContain('`');
+  });
+
+  it('strips stray backticks from unclosed fenced code blocks', () => {
+    const input = 'see below:\n```\nsome code without closing fence';
+    const out = sanitizeTelegramLegacyMarkdown(input);
+    expect(out).not.toContain('`');
+  });
+
   it('replaces dash list bullets with • so the adapter does not re-emit `*` markers', () => {
     expect(sanitizeTelegramLegacyMarkdown('- one\n- two')).toBe('• one\n• two');
   });
