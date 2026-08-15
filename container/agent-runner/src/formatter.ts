@@ -102,6 +102,9 @@ export interface RoutingContext {
    *  delivers from a task session; final-text `<message to>` blocks are inert
    *  and the final text auto-appends to the series run log. */
   taskRun: boolean;
+  /** Task series this batch belongs to, for per-task cost accounting. Null for
+   *  chat turns, and for a task row written before series ids existed. */
+  taskSeriesId: string | null;
 }
 
 /**
@@ -116,6 +119,7 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     threadId: first?.thread_id ?? null,
     inReplyTo: first?.id ?? null,
     taskRun: messages.length > 0 && messages.every((m) => m.kind === 'task'),
+    taskSeriesId: first?.series_id ?? null,
   };
 }
 

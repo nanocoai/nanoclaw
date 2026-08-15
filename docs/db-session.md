@@ -197,6 +197,32 @@ CREATE TABLE container_state (
 - **Reader (host):** `getContainerState()` in `src/db/session-db.ts`; consumed by the sweep's `bashTimeoutMs()` helper in `src/host-sweep.ts`.
 - `CREATE TABLE IF NOT EXISTS` — forward-compatible with `outbound.db` files created before this table existed; `getContainerState()` returns `null` if the table or row is absent.
 
+### 4.5 `token_usage_log`
+
+Per-turn usage ledger — one row per provider turn: the prompt it answered (clipped to a preview), the tokens and cost that turn reported, and the task series it belonged to if it was a task run. The lifetime totals live in `session_state` under the `token_usage` key; this table is the recent detail behind them, and backs `ncl sessions usage --by task` / `--by prompt`.
+
+```sql
+CREATE TABLE token_usage_log (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  timestamp             TEXT NOT NULL,
+  task_series_id        TEXT,
+  prompt_preview        TEXT NOT NULL,
+  prompt_chars          INTEGER NOT NULL,
+  input_tokens          INTEGER,
+  output_tokens         INTEGER,
+  cache_read_tokens     INTEGER,
+  cache_creation_tokens INTEGER,
+  cost_usd              REAL
+);
+```
+
+- **Writer (container):** `recordTurn()` in `container/agent-runner/src/db/usage-log.ts`, called from the poll loop's `result` branch.
+- **Reader (host):** `readSessionTurns()` in `src/cli/resources/sessions.ts`.
+- Numeric columns are **nullable on purpose**: null means the provider reported nothing for that field, which is not the same as zero. Unlike the running totals — where an unreported field folds into a sum and has to become zero — a ledger row can say "not reported" outright, and does.
+- The prompt is a whitespace-collapsed preview (`PROMPT_PREVIEW_CHARS`), plus the true character count. This is an accounting record, not a second copy of the conversation.
+- Trimmed to the most recent `TURN_LOG_LIMIT` rows per session on insert. The agent group is deliberately absent: the host already knows which group owns the session this file belongs to, and duplicating it here would let the two disagree.
+- `CREATE TABLE IF NOT EXISTS` — forward-compatible with `outbound.db` files created before this table existed; the host reader treats a missing table as "no detail on file" rather than an error.
+
 ---
 
 ## 5. Schema evolution

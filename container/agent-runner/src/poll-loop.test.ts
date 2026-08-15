@@ -4,6 +4,7 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { getTokenUsage } from './db/session-state.js';
+import { getTurnLog } from './db/usage-log.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { isCorruptionError, processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
@@ -525,6 +526,61 @@ describe('token usage accounting (real processQuery)', () => {
     await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
 
     expect(getTokenUsage()).toBeNull();
+  });
+
+  it('logs the prompt the turn answered, with what that turn cost', async () => {
+    const { query } = makeResultQuery({
+      type: 'result',
+      text: '<message to="a">hi</message>',
+      usage: { inputTokens: 100, outputTokens: 20, costUsd: 0.02 },
+    });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'how much have we spent', undefined);
+
+    const log = getTurnLog();
+    expect(log).toHaveLength(1);
+    expect(log[0]).toMatchObject({
+      prompt_preview: 'how much have we spent',
+      input_tokens: 100,
+      output_tokens: 20,
+      cost_usd: 0.02,
+      task_series_id: null,
+    });
+  });
+
+  it('logs the prompt of an unmeasured turn as well — it still ran', async () => {
+    const { query } = makeResultQuery({ type: 'result', text: '<message to="a">hi</message>' });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'unmeasured', undefined);
+
+    const log = getTurnLog();
+    expect(log).toHaveLength(1);
+    expect(log[0].prompt_preview).toBe('unmeasured');
+    expect(log[0].input_tokens).toBeNull();
+  });
+
+  it('attributes a task run to its series', async () => {
+    const { query } = makeResultQuery({
+      type: 'result',
+      text: 'run complete',
+      usage: { inputTokens: 5, costUsd: 0.001 },
+    });
+
+    await processQuery(
+      query,
+      { ...TASK_ROUTING, taskSeriesId: 'daily-briefing-a25c' },
+      ['t1'],
+      'claude',
+      undefined,
+      'Send the daily briefing',
+      undefined,
+    );
+
+    expect(getTurnLog()[0]).toMatchObject({
+      task_series_id: 'daily-briefing-a25c',
+      prompt_preview: 'Send the daily briefing',
+      cost_usd: 0.001,
+    });
   });
 });
 
