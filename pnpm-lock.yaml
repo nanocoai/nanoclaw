@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@chat-adapter/telegram':
+        specifier: 4.29.0
+        version: 4.29.0
       '@clack/core':
         specifier: ^1.2.0
         version: 1.2.0
@@ -71,6 +74,14 @@ importers:
         version: 4.1.4(@types/node@22.19.17)(vite@8.0.8(@types/node@22.19.17)(esbuild@0.27.7)(tsx@4.21.0)(yaml@2.9.0))
 
 packages:
+
+  '@chat-adapter/shared@4.29.0':
+    resolution: {integrity: sha512-ARqTDoHJHKN9rpytbFPJbNmqqx3fOg5xwsTZdlingQPAssOSeHDBdqrFJkgDhyCRGbmDtG09cuS0FkVzeoh2qg==}
+    engines: {node: '>=20'}
+
+  '@chat-adapter/telegram@4.29.0':
+    resolution: {integrity: sha512-015tU3HEjFQWw7DgebXWkDeQA6lTdTVEO4btAV3f6U1kEnOfjLVJq98latcsM1WkEvv+3LIFKpsz9pG53aamBw==}
+    engines: {node: '>=20'}
 
   '@clack/core@1.2.0':
     resolution: {integrity: sha512-qfxof/3T3t9DPU/Rj3OmcFyZInceqj/NVtO9rwIuJqCUgh32gwPjpFQQp/ben07qKlhpwq7GzfWpST4qdJ5Drg==}
@@ -1509,6 +1520,23 @@ packages:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
 
 snapshots:
+
+  '@chat-adapter/shared@4.29.0':
+    dependencies:
+      chat: 4.29.0
+    transitivePeerDependencies:
+      - ai
+      - supports-color
+      - zod
+
+  '@chat-adapter/telegram@4.29.0':
+    dependencies:
+      '@chat-adapter/shared': 4.29.0
+      chat: 4.29.0
+    transitivePeerDependencies:
+      - ai
+      - supports-color
+      - zod
 
   '@clack/core@1.2.0':
     dependencies:
