@@ -71,6 +71,7 @@ import type { AgentGroup } from '../src/types.js';
 import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-claude.js';
 import * as setupLog from './logs.js';
 import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
+import { withSecretFile } from './lib/secret-file.js';
 import { emit as phEmit } from './lib/diagnostics.js';
 import {
   accentGreen,
@@ -1626,28 +1627,30 @@ async function runPasteAuth(method: 'oauth' | 'api'): Promise<void> {
   );
   const token = (answer as string).replace(/\s+/g, '');
 
-  const res = await runQuietChild(
-    'auth',
-    'onecli',
-    [
-      'secrets',
-      'create',
-      '--name',
-      'Anthropic',
-      '--type',
-      'anthropic',
-      '--value',
-      token,
-      '--host-pattern',
-      'api.anthropic.com',
-    ],
-    {
-      running: `Saving your ${label} to your OneCLI vault…`,
-      done: 'Claude account connected.',
-    },
-    {
-      extraFields: { METHOD: method },
-    },
+  const res = await withSecretFile(token, (filePath) =>
+    runQuietChild(
+      'auth',
+      'onecli',
+      [
+        'secrets',
+        'create',
+        '--name',
+        'Anthropic',
+        '--type',
+        'anthropic',
+        '--file',
+        filePath,
+        '--host-pattern',
+        'api.anthropic.com',
+      ],
+      {
+        running: `Saving your ${label} to your OneCLI vault…`,
+        done: 'Claude account connected.',
+      },
+      {
+        extraFields: { METHOD: method },
+      },
+    ),
   );
   if (!res.ok) {
     await fail(
@@ -1673,30 +1676,34 @@ async function runCustomEndpointAuth(baseUrl: string, token: string): Promise<vo
     return;
   }
 
-  const res = await runQuietChild(
-    'auth',
-    'onecli',
-    [
-      'secrets',
-      'create',
-      '--name',
-      'Anthropic',
-      '--type',
-      'generic',
-      '--value',
-      token,
-      '--host-pattern',
-      host,
-      '--header-name',
-      'Authorization',
-      '--value-format',
-      'Bearer {value}',
-    ],
-    {
-      running: `Saving your Anthropic auth token to your OneCLI vault…`,
-      done: 'Claude account connected.',
-    },
-    { extraFields: { METHOD: 'custom-endpoint', HOST: host } },
+  const res = await withSecretFile(token, (filePath) =>
+    runQuietChild(
+      'auth',
+      'onecli',
+      [
+        'secrets',
+        'create',
+        '--name',
+        'Anthropic',
+        '--type',
+        'generic',
+        '--file',
+        filePath,
+        '--host-pattern',
+        host,
+        '--header-name',
+        'Authorization',
+        '--value-format',
+        'Bearer {value}',
+      ],
+      {
+        running: `Saving your Anthropic auth token to your OneCLI vault…`,
+        done: 'Claude account connected.',
+      },
+      {
+        extraFields: { METHOD: 'custom-endpoint', HOST: host },
+      },
+    ),
   );
   if (!res.ok) {
     await fail(
