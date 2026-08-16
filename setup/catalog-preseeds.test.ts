@@ -14,12 +14,12 @@ describe('--catalog-preseeds', () => {
         'nanoclaw.sh',
         'setup/catalog-preseeds.ts',
         'setup/lib/setup-config.ts',
-        'setup/providers/index.ts',
         'setup/providers/registry.ts',
       ]) {
         fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
         fs.copyFileSync(path.join(process.cwd(), file), path.join(root, file));
       }
+      fs.writeFileSync(path.join(root, 'setup', 'providers', 'index.ts'), '');
       fs.symlinkSync(path.join(process.cwd(), 'node_modules'), path.join(root, 'node_modules'));
 
       const result = spawnSync('bash', ['nanoclaw.sh', '--catalog-preseeds'], {
