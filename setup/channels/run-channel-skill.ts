@@ -8,9 +8,9 @@
  *     `platform_id` (e.g. Slack `conversations.open`). The engine surfaces those
  *     resolved values in `ApplyResult.vars`.
  *   - This flow owns the shared part: the operator's agent name + role (the
- *     polish), and the wire itself — `scripts/init-first-agent.ts`, which creates
- *     the agent group, grants the owner role (+ cli_scope=global), creates the
- *     messaging group + wiring, and sends the `/welcome` system instruction.
+ *     polish), and the wire itself — `scripts/init-first-agent.ts`, which resolves
+ *     or creates the agent group, grants the owner role (+ cli_scope=global),
+ *     creates the messaging group + wiring, and sends the `/welcome` system instruction.
  *
  * So the wire lives in exactly one place (init-first-agent) and is never
  * duplicated across channel skills.
@@ -25,6 +25,7 @@ import { BACK_TO_CHANNEL_SELECTION, backGate, type ChannelFlowResult } from '../
 import { askOperatorRole, type OperatorRole } from '../lib/role-prompt.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
 import { runSkill, type RunSkillOptions } from '../lib/skill-driver.js';
+import { clearTemplatePick } from '../templates.js';
 
 const DEFAULT_AGENT_NAME = 'Nano';
 
@@ -35,6 +36,7 @@ interface WireArgs {
   displayName: string;
   agentName: string;
   role: OperatorRole;
+  agentGroupId?: string;
   /** Explicit DM engage regex (e.g. WhatsApp shared-mode "@<name> only" self-chat). */
   engagePattern?: string;
 }
@@ -65,6 +67,7 @@ async function initFirstAgent(args: WireArgs): Promise<boolean> {
       '--display-name', args.displayName,
       '--agent-name', args.agentName,
       '--role', args.role,
+      ...(args.agentGroupId ? ['--agent-group-id', args.agentGroupId] : []),
       ...(args.engagePattern ? ['--engage-pattern', args.engagePattern] : []),
     ],
     { running: `Wiring ${args.agentName} to your ${args.channel} DMs…`, done: 'Agent wired.' },
@@ -78,6 +81,12 @@ export interface ChannelSkillOverrides extends Partial<RunSkillOptions> {
   role?: OperatorRole;
   /** The shared wire; defaults to init-first-agent. Injectable for tests. */
   wire?: (args: WireArgs) => Promise<boolean> | boolean;
+  /**
+   * Clears the persisted template pick once the wire consumed the stamped
+   * agent; defaults to the real .env writer (setup/templates.ts). Injectable
+   * so tests never touch the repo's .env.
+   */
+  clearTemplatePick?: () => void;
   /**
    * Wire only when the skill resolved owner_handle + platform_id this run
    * (Teams: the guarded DM-open steps only run on a fresh create). Resolved →
@@ -209,6 +218,7 @@ export async function runChannelSkill(
   // A skill-resolved engage pattern (WhatsApp shared-mode "@<name> only"
   // self-chat) rides along to init-first-agent's --engage-pattern; unset means
   // the wiring's own DM default applies.
+  const templateAgentGroupId = process.env.NANOCLAW_TEMPLATE_AGENT_ID?.trim() || undefined;
   const ok = await wire({
     channel,
     userId: `${channel}:${ownerHandle}`,
@@ -216,9 +226,16 @@ export async function runChannelSkill(
     displayName,
     agentName,
     role: role!,
+    agentGroupId: templateAgentGroupId,
     engagePattern: res.vars.engage_pattern || undefined,
   });
   if (!ok) {
     await failWith('init-first-agent', `Couldn't finish connecting ${agentName}.`, 'You can retry later with `/init-first-agent`.');
   }
+  // This wire is the seam that consumes the template pick: only now has the
+  // pick done its job. Clearing earlier (at stamp time) orphans the agent on
+  // a rerun after a failed channel step; never clearing makes every future
+  // setup run re-enter template setup. Pinned by run-channel-skill.test.ts
+  // ("clears the template pick…").
+  if (templateAgentGroupId) (overrides.clearTemplatePick ?? clearTemplatePick)();
 }

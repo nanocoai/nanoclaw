@@ -24,6 +24,7 @@
  * headless `claude -p` call for IANA-zone resolution.
  */
 import { spawn, spawnSync } from 'child_process';
+import { randomUUID } from 'crypto';
 import fs from 'fs';
 import * as os from 'os';
 import path from 'path';
@@ -64,7 +65,7 @@ import { runAdvancedScreen } from './lib/setup-config-screen.js';
 import { runWindowedStep } from './lib/windowed-runner.js';
 import { runUninstallFlow } from './uninstall/flow.js';
 import { detectExistingInstall } from './uninstall/scan.js';
-import { detectRegisteredGroups, detectExistingDisplayName } from './environment.js';
+import { detectRegisteredGroups, detectExistingDisplayName, readEnvKey } from './environment.js';
 import { pollHealth } from './onecli.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-claude.js';
@@ -73,7 +74,18 @@ import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './l
 import { emit as phEmit } from './lib/diagnostics.js';
 import { accentGreen, brandBody, brandBold, brandChip, dimWrap, fitToWidth, fmtDuration, note, wrapForGutter } from './lib/theme.js';
 import { isValidTimezone } from '../src/timezone.js';
-import { DEFAULT_AGENT_PROVIDER } from '../src/config.js';
+import { DEFAULT_AGENT_PROVIDER, TEMPLATES_DIR } from '../src/config.js';
+import { SocketTransport } from '../src/cli/socket-client.js';
+import {
+  applyTemplatePick,
+  clearTemplatePick,
+  cloneRegistry,
+  copyTemplate,
+  installTemplateAgent,
+  listTemplatesFromDir,
+  type ClonedRegistry,
+  type TemplateEntry,
+} from './templates.js';
 
 const CLI_AGENT_NAME = 'Terminal Agent';
 const RUN_START = Date.now();
@@ -198,6 +210,28 @@ async function main(): Promise<void> {
         'See logs/setup-steps/ for details, then retry.',
       );
     }
+  }
+
+  // Nothing loads .env into the wizard process — bridge the persisted pick so
+  // it survives not just self re-execs (`sg docker`, fail-retry) but full
+  // process restarts. Without this, a run that aborted after the pick leaves a
+  // partial install whose registered groups silently gate the picker off on
+  // rerun, and the pick is lost.
+  let savedPickBridged = false;
+  if (!process.env.NANOCLAW_TEMPLATE_PATH?.trim()) {
+    const savedPick = readEnvKey('NANOCLAW_TEMPLATE_PATH')?.trim();
+    if (savedPick) {
+      process.env.NANOCLAW_TEMPLATE_PATH = savedPick;
+      savedPickBridged = true;
+    }
+  }
+  // Existing installs do not get an unsolicited first-agent picker, but an
+  // explicit --template-path is always honoured.
+  if (
+    !isResume &&
+    (process.env.NANOCLAW_TEMPLATE_PATH?.trim() || !detectRegisteredGroups(process.cwd()))
+  ) {
+    await runTemplateSetup(savedPickBridged);
   }
 
   if (!skip.has('container')) {
@@ -617,6 +651,8 @@ async function main(): Promise<void> {
     await runTimezoneStep();
   }
 
+  await installSelectedTemplateAgent(agentProvider);
+
   // v1 → v2 migration is handled by `bash migrate-v2.sh`, not the setup flow.
   // Users migrating from v1 run that script before (or instead of) setup.
 
@@ -914,6 +950,252 @@ function sendChatMessage(message: string): Promise<void> {
 const INSTALLABLE_PROVIDERS = [
   { value: 'codex', label: 'Codex', hint: 'OpenAI — ChatGPT subscription or API key' },
 ] as const;
+
+// `pickSavedByPreviousRun`: the .env bridge promoted a pick persisted by a
+// PREVIOUS run. That pick is a default to confirm, not a decision to replay:
+// the operator may be rerunning precisely to change it. In-process presets
+// (--template-path, the Advanced screen, self re-execs, an exported env var)
+// keep the silent skip.
+async function runTemplateSetup(pickSavedByPreviousRun: boolean): Promise<void> {
+  const preset = process.env.NANOCLAW_TEMPLATE_PATH?.trim();
+  if (preset) {
+    if (listLocalTemplates().some((template) => template.ref === preset)) {
+      if (!pickSavedByPreviousRun) {
+        applyTemplatePick(preset);
+        p.log.success(`Using template "${preset}".`);
+        return;
+      }
+      const resume = ensureAnswer(
+        await p.confirm({
+          message: `Continue with template "${preset}" from the previous run?`,
+          initialValue: true,
+        }),
+      );
+      setupLog.userInput('template_resume', String(resume));
+      if (resume) {
+        applyTemplatePick(preset);
+        p.log.success(`Using template "${preset}".`);
+        return;
+      }
+      clearTemplatePick();
+      p.log.info(
+        `If that run already stamped an agent from "${preset}", it is kept — pick it again anytime, or wire it later with /init-first-agent.`,
+      );
+    } else {
+      clearTemplatePick();
+      p.log.warn(`Template "${preset}" not found under ${TEMPLATES_DIR} — pick one below.`);
+      p.log.info(
+        `If a previous run already stamped an agent from "${preset}", it is kept — wire it later with /init-first-agent.`,
+      );
+    }
+  }
+
+  for (;;) {
+    const source = ensureAnswer(
+      await brightSelect<'none' | 'library' | 'local'>({
+        message: 'How should we create your first agent?',
+        options: [
+          { value: 'none', label: 'Fresh agent', hint: 'recommended — shape it by chatting' },
+          { value: 'library', label: 'From the NanoClaw template library', hint: 'prebuilt agents' },
+          { value: 'local', label: 'From local templates', hint: 'templates/ in this install' },
+        ],
+        initialValue: 'none',
+      }),
+    ) as 'none' | 'library' | 'local';
+    setupLog.userInput('template_source', source);
+    if (source === 'none') return;
+
+    const ref = source === 'library' ? await pickLibraryTemplate() : await pickLocalTemplate();
+    if (!ref) continue;
+    applyTemplatePick(ref);
+    setupLog.userInput('template_ref', ref);
+    p.log.success(`Template "${ref}" selected.`);
+    return;
+  }
+}
+
+// listTemplatesFromDir throws the migration error for a pre-plugin layout.
+// A stale local templates/ must not abort an otherwise-working install:
+// surface the message as a warning and treat the dir as empty.
+function listLocalTemplates(): TemplateEntry[] {
+  try {
+    return listTemplatesFromDir(TEMPLATES_DIR);
+  } catch (err) {
+    p.log.warn(err instanceof Error ? err.message : String(err));
+    return [];
+  }
+}
+
+async function pickLibraryTemplate(): Promise<string | undefined> {
+  const spinner = p.spinner();
+  spinner.start('Fetching the template library…');
+  let registry: ClonedRegistry;
+  try {
+    registry = cloneRegistry();
+  } catch (err) {
+    spinner.stop('Could not reach the template library.');
+    const message = err instanceof Error ? err.message : String(err);
+    setupLog.step('template-source', 'interactive', 0, { source: 'library', error: message });
+    p.log.warn(message);
+    return undefined;
+  }
+
+  try {
+    const templates = listTemplatesFromDir(registry.dir).filter((template) => template.ref !== '.');
+    if (templates.length === 0) {
+      spinner.stop('The template library is empty.');
+      return undefined;
+    }
+    spinner.stop(`Found ${templates.length} template${templates.length === 1 ? '' : 's'}.`);
+    const ref = await chooseTemplate(templates);
+    if (!ref) return undefined;
+
+    const destination = path.join(TEMPLATES_DIR, ref);
+    if (fs.existsSync(destination)) {
+      if (!listLocalTemplates().some((template) => template.ref === ref)) {
+        p.log.warn(`Can't install "${ref}": that path already exists but isn't a valid template.`);
+        return undefined;
+      }
+      p.log.info(`Keeping your existing local copy of "${ref}".`);
+    } else {
+      try {
+        copyTemplate(registry.dir, ref, TEMPLATES_DIR);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setupLog.step('template-copy', 'interactive', 0, { ref, error: message });
+        p.log.warn(`Couldn't copy "${ref}" into templates/: ${message}`);
+        return undefined;
+      }
+    }
+    return ref;
+  } finally {
+    registry.cleanup();
+  }
+}
+
+async function pickLocalTemplate(): Promise<string | undefined> {
+  const templates = listLocalTemplates().filter((template) => template.ref !== '.');
+  if (templates.length === 0) {
+    p.log.info(`No local templates in ${TEMPLATES_DIR}.`);
+    return undefined;
+  }
+  return chooseTemplate(templates);
+}
+
+const BACK_TO_TEMPLATE_SOURCE = '\0back';
+
+async function chooseTemplate(templates: TemplateEntry[]): Promise<string | undefined> {
+  const ref = ensureAnswer(
+    await p.autocomplete<string>({
+      message: 'Choose a template',
+      options: [
+        ...templates.map((template) => ({
+          value: template.ref,
+          label: template.name,
+          hint: template.ref.includes('/') ? template.ref : undefined,
+        })),
+        { value: BACK_TO_TEMPLATE_SOURCE, label: '← Back' },
+      ],
+      maxItems: 5,
+      placeholder: 'type to search',
+    }),
+  ) as string;
+  return ref === BACK_TO_TEMPLATE_SOURCE ? undefined : ref;
+}
+
+async function installSelectedTemplateAgent(provider?: string): Promise<void> {
+  const ref = process.env.NANOCLAW_TEMPLATE_PATH?.trim();
+  if (!ref || process.env.NANOCLAW_TEMPLATE_AGENT_ID?.trim()) return;
+
+  // Only an explicit operator name overrides the template: the CLI's own
+  // fallback chain (--name → the manifest's agentName → the folder leaf) must
+  // stay reachable through the wizard, or a template's agentName is dead.
+  const name = process.env.NANOCLAW_AGENT_NAME?.trim() || undefined;
+  const transport = new SocketTransport();
+  const runNcl = async (command: string, args: Record<string, unknown>): Promise<unknown> => {
+    const response = await transport.sendFrame({ id: randomUUID(), command, args });
+    if (!response.ok) throw new Error(response.error.message);
+    return response.data;
+  };
+
+  const start = Date.now();
+  phEmit('step_started', { step: 'template-agent' });
+  p.log.step(brandBody(`Installing the "${ref}" template…`));
+  try {
+    const result = await installTemplateAgent({
+      ref,
+      name,
+      timezone: readEnvKey('TZ') ?? undefined,
+      provider,
+      runNcl,
+      confirmReplace: async (plan) => {
+        const resets = plan.changes.filter((c) => c.action !== 'unchanged' && c.action !== 'skip');
+        const customized = resets.filter((c) => c.customized).length;
+        const replace = ensureAnswer(
+          await p.confirm({
+            message:
+              `Agent "${plan.group.name}" is already stamped from this template. Update it in place? ` +
+              `${resets.length} plugin-owned surface${resets.length === 1 ? '' : 's'} will be reset` +
+              (customized > 0 ? ` (${customized} with local edits that will be lost)` : '') +
+              '. Memory, chats, and wiring are kept.',
+            initialValue: customized === 0,
+          }),
+        );
+        setupLog.userInput('template_replace', String(replace));
+        return replace;
+      },
+    });
+
+    if (result.status === 'kept') {
+      process.env.NANOCLAW_TEMPLATE_AGENT_ID = result.group.id;
+      process.env.NANOCLAW_AGENT_NAME = result.group.name;
+      setupLog.step('template-agent', 'success', Date.now() - start, {
+        ref,
+        agent_group_id: result.group.id,
+        kept: true,
+      });
+      phEmit('step_completed', { step: 'template-agent', status: 'success' });
+      p.log.success(`Keeping agent "${result.group.name}" as-is — local edits preserved. Wiring it unchanged.`);
+      return;
+    }
+
+    // The pick is NOT cleared here: it must survive until the wire that
+    // consumes the stamped agent succeeds (run-channel-skill), or a rerun
+    // after a failed channel step silently wires a fresh vanilla agent while
+    // this one sits orphaned. Contract comment: setup/templates.ts.
+    process.env.NANOCLAW_TEMPLATE_AGENT_ID = result.group.id;
+    process.env.NANOCLAW_AGENT_NAME = result.group.name;
+    setupLog.step('template-agent', 'success', Date.now() - start, {
+      ref,
+      agent_group_id: result.group.id,
+    });
+    phEmit('step_completed', { step: 'template-agent', status: 'success' });
+    p.log.success(
+      result.status === 'updated'
+        ? `Template agent "${result.group.name}" updated in place.`
+        : `Template agent "${result.group.name}" created.`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setupLog.step('template-agent', 'failed', Date.now() - start, { ref, error: message });
+    phEmit('step_completed', { step: 'template-agent', status: 'failed' });
+    // Warn-and-continue (the ping-skip pattern): a template failure must not
+    // abort an otherwise-working install. The pick stays in .env so a rerun
+    // retries this template.
+    p.log.warn(`Couldn't install the "${ref}" template: ${message}`);
+    note(
+      [
+        wrapForGutter('Setup continues without it; you still get a fresh default agent. To retry the template:', 6),
+        '',
+        "  1. If the service isn't running:",
+        `     macOS:  launchctl kickstart -k gui/$(id -u)/${getLaunchdLabel()}`,
+        `     Linux:  systemctl --user restart ${getSystemdUnit()}`,
+        '  2. Rerun: bash nanoclaw.sh',
+      ].join('\n'),
+      'Skipping the template',
+    );
+  }
+}
 
 /**
  * Where the sandbox image comes from — build it here, or pull a pre-built one.

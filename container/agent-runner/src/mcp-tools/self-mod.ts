@@ -114,6 +114,9 @@ const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * Mirrors the host's parseMcpServerConfig (src/container-config.ts) — the
  * host re-validates on receipt, but this copy answers the agent instantly.
  * No shared modules across the host/container boundary; keep the two in sync.
+ * One deliberate gap: the host parses a cwd field, but no self-mod tool param
+ * exposes it (plugin stamping and raw approval payloads are its only
+ * carriers), so this copy has none.
  */
 function parseMcpServerInput(args: Record<string, unknown>): { config: ParsedMcpServer } | { error: string } {
   const command = typeof args.command === 'string' && args.command.trim() ? args.command : undefined;

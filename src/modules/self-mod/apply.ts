@@ -11,7 +11,12 @@
  * install_packages: update DB + rebuild image + kill container + on_wake.
  * add_mcp_server: update DB + kill container + on_wake.
  */
-import { parseMcpServerConfig, validateMcpServerName, type McpServerConfig } from '../../container-config.js';
+import {
+  mcpServerPluginOwner,
+  parseMcpServerConfig,
+  validateMcpServerName,
+  type McpServerConfig,
+} from '../../container-config.js';
 import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getContainerConfig, updateContainerConfigJson } from '../../db/container-configs.js';
@@ -117,6 +122,17 @@ export async function applyAddMcpServer(payload: Record<string, unknown>, sessio
     return;
   }
   const servers = JSON.parse(configRow.mcp_servers) as Record<string, McpServerConfig>;
+  // Re-checked here (not only at request time): an approval can race a restamp
+  // that stamped a plugin server under this name after the card went out.
+  const owner = mcpServerPluginOwner(servers[name]);
+  if (owner) {
+    notifyAgent(
+      session,
+      `add_mcp_server approved but server "${name}" is owned by plugin "${owner}" — ` +
+        'plugin servers can only be changed by updating the plugin and re-stamping.',
+    );
+    return;
+  }
   servers[name] = serverConfig;
   updateContainerConfigJson(agentGroup.id, 'mcp_servers', servers);
 

@@ -105,6 +105,15 @@ export const CONFIG: Entry[] = [
     secret: true,
     validate: (v) => (v.trim() ? undefined : 'Required'),
   },
+  {
+    key: 'templatePath',
+    label: 'First-agent template',
+    help: 'Create the first agent from a local template ref under templates/ (for example, sales/sdr).',
+    surface: 'flag+ui',
+    group: 'Agent',
+    type: 'string',
+    placeholder: 'sales/sdr',
+  },
 
   // Existing env-var knobs — flag-only so they don't clutter the UI screen.
   {
