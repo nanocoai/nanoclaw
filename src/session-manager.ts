@@ -15,7 +15,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { deriveAttachmentName } from './attachment-naming.js';
-import { isSafeAttachmentName } from './attachment-safety.js';
+import { isSafeAttachmentName, safeAttachmentDirName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
 import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
@@ -287,8 +287,15 @@ export function writeSessionMessage(
  * pre-place a symlink at `inbox/<future msgId>/` and wait for a chat message
  * with a matching id to redirect the host's write.
  *
+ * `messageId` is an opaque identifier, not necessarily a filename — some
+ * channels (Google Chat) pass resource paths like `spaces/<s>/messages/<id>`
+ * containing `/`. `safeAttachmentDirName` derives a single safe path
+ * component from it (passing already-safe ids through unchanged) so those
+ * channels stage attachments instead of silently dropping them (#3206); it
+ * does not weaken containment, which still comes from the defenses below.
+ *
  * Defenses, mirrored from the outbound side:
- *   1. basename check on `messageId` and `filename`.
+ *   1. basename check on `filename` (and on `messageId` before sanitizing).
  *   2. lstat of the inbox dir to refuse pre-placed symlinks.
  *   3. realpath-based containment under the session inbox root.
  *   4. `wx` flag on writeFileSync to refuse following a pre-existing symlink
@@ -310,9 +317,15 @@ function extractAttachmentFiles(
   const attachments = parsed.attachments as Array<Record<string, unknown>> | undefined;
   if (!Array.isArray(attachments)) return contentStr;
 
-  if (!isSafeAttachmentName(messageId)) {
-    log.warn('Rejecting unsafe inbound message id', { messageId });
-    return contentStr;
+  // messageId is an opaque identifier, not necessarily a filename — some
+  // channels (Google Chat) hand us resource paths like
+  // `spaces/<space>/messages/<id>` that contain `/`. Sanitize into a single
+  // safe path component rather than dropping the attachment outright (#3206).
+  // Containment still comes from ensureContainedInboxDir + the `wx` flag
+  // below, not from this value being "safe" on its own.
+  const inboxMessageId = safeAttachmentDirName(messageId);
+  if (inboxMessageId !== messageId) {
+    log.debug('Sanitized inbound message id for inbox path', { messageId, inboxMessageId });
   }
 
   const inboxRoot = path.join(sessionDir(agentGroupId, sessionId), 'inbox');
@@ -338,7 +351,7 @@ function extractAttachmentFiles(
     }
 
     if (!inboxResolved) {
-      inboxDir = ensureContainedInboxDir(inboxRoot, messageId, { messageId });
+      inboxDir = ensureContainedInboxDir(inboxRoot, inboxMessageId, { messageId, inboxMessageId });
       inboxResolved = true;
     }
     // Unsafe inbox (symlink / escape) — no attachment can be written safely.
@@ -363,10 +376,10 @@ function extractAttachmentFiles(
     }
 
     att.name = filename;
-    att.localPath = `inbox/${messageId}/${filename}`;
+    att.localPath = `inbox/${inboxMessageId}/${filename}`;
     delete att.data;
     changed = true;
-    log.debug('Saved attachment to inbox', { messageId, filename, size: att.size });
+    log.debug('Saved attachment to inbox', { messageId, inboxMessageId, filename, size: att.size });
   }
 
   return changed ? JSON.stringify(parsed) : contentStr;

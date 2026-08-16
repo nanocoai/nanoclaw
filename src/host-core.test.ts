@@ -214,7 +214,7 @@ describe('session manager', () => {
     expect(fs.readFileSync(outside, 'utf-8')).toBe('ORIGINAL');
   });
 
-  it('should reject inbound attachments when messageId is unsafe', () => {
+  it('should sanitize a traversal-shaped messageId into a contained subdir rather than escaping the inbox', () => {
     initSessionFolder('ag-1', 'sess-test');
     const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
 
@@ -228,10 +228,53 @@ describe('session manager', () => {
       }),
     });
 
+    // The unsafe id no longer causes the attachment to be silently dropped —
+    // it must land in exactly one sanitized subdir of the inbox, and nothing
+    // may be written outside the session's inbox root (the containment
+    // property, not the id being rejected, is what actually matters).
     const inboxRoot = path.join(sessionDir('ag-1', session.id), 'inbox');
-    if (fs.existsSync(inboxRoot)) {
-      expect(fs.readdirSync(inboxRoot)).toEqual([]);
-    }
+    expect(fs.existsSync(inboxRoot)).toBe(true);
+    const realInboxRoot = fs.realpathSync(inboxRoot);
+    const entries = fs.readdirSync(inboxRoot);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).not.toContain('/');
+    expect(entries[0]).not.toContain('..');
+
+    const subdir = path.join(inboxRoot, entries[0]);
+    const realSubdir = fs.realpathSync(subdir);
+    expect(realSubdir === realInboxRoot || realSubdir.startsWith(realInboxRoot + path.sep)).toBe(true);
+    expect(fs.existsSync(path.join(subdir, 'photo.png'))).toBe(true);
+
+    // The evil target one level above the session dir never received anything.
+    const outsideDir = path.join(sessionDir('ag-1', session.id), '..', 'escape');
+    expect(fs.existsSync(outsideDir)).toBe(false);
+  });
+
+  it('should stage attachments for a Google Chat-style resource-path messageId', () => {
+    initSessionFolder('ag-1', 'sess-test');
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    writeSessionMessage('ag-1', session.id, {
+      id: 'spaces/AAAABBBBCCC/messages/AbCdEfGhIjk.AbCdEfGhIjk',
+      kind: 'chat',
+      timestamp: now(),
+      content: JSON.stringify({
+        text: 'gchat',
+        attachments: [{ name: 'photo.png', data: Buffer.from('PNGBYTES').toString('base64'), size: 8 }],
+      }),
+    });
+
+    const inboxRoot = path.join(sessionDir('ag-1', session.id), 'inbox');
+    const realInboxRoot = fs.realpathSync(inboxRoot);
+    const entries = fs.readdirSync(inboxRoot);
+    expect(entries).toHaveLength(1);
+
+    const subdir = path.join(inboxRoot, entries[0]);
+    const realSubdir = fs.realpathSync(subdir);
+    expect(realSubdir === realInboxRoot || realSubdir.startsWith(realInboxRoot + path.sep)).toBe(true);
+
+    const staged = fs.readFileSync(path.join(subdir, 'photo.png'), 'utf-8');
+    expect(staged).toBe('PNGBYTES');
   });
 
   it('should still save inbound attachments with safe basenames', () => {
