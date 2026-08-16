@@ -14,6 +14,7 @@ import {
   getDestinationByTarget,
   normalizeName,
 } from '../modules/agent-to-agent/db/agent-destinations.js';
+import { getAgentGroup } from './agent-groups.js';
 import { getDb, hasTable } from './connection.js';
 
 // ── Messaging Groups ──
@@ -222,11 +223,23 @@ export function ensureAgentDestinationForWiring(mga: MessagingGroupAgent): void 
   const mg = getMessagingGroup(mga.messaging_group_id);
   if (!mg) return;
 
-  const base = normalizeName(mg.name || `${mg.channel_type}-${mga.messaging_group_id.slice(0, 8)}`);
-  let localName = base;
+  // Compute a default `local_name` for the destination. The mg's `name` is
+  // the natural starting point — operators usually pick something memorable.
+  // But it can collide with the agent's own identity (e.g., a Signal group
+  // called "homie" wired to the Homie agent produced a destination named
+  // "homie", and the agent treated `from="homie"` as a self-reference and
+  // failed to address its own chat). Detect that specific clash and fall
+  // back to a neutral `chat` (or `chat-2`, `chat-3` if multiple) name. The
+  // operator can still rename via the agent-network skill later.
+  const ag = getAgentGroup(mga.agent_group_id);
+  const agentNameSlug = ag ? normalizeName(ag.name) : '';
+  const mgNameSlug = normalizeName(mg.name || '');
+  const candidateBase = mgNameSlug && mgNameSlug !== agentNameSlug ? mgNameSlug : 'chat';
+  const fallbackBase = candidateBase || `${mg.channel_type}-${mga.messaging_group_id.slice(0, 8)}`;
+  let localName = fallbackBase;
   let suffix = 2;
   while (getDestinationByName(mga.agent_group_id, localName)) {
-    localName = `${base}-${suffix}`;
+    localName = `${fallbackBase}-${suffix}`;
     suffix++;
   }
 
