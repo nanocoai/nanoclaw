@@ -17,6 +17,7 @@ import {
   cancelTask,
   deleteTask,
   insertTaskRow,
+  parseTaskContent,
   pauseTask,
   resumeTask,
   updateTask,
@@ -106,23 +107,8 @@ function withInbound<T>(session: ScopedSession, fn: (db: Database.Database) => T
   return withInboundDb(session.agent_group_id, session.id, fn);
 }
 
-function parseContent(raw: string): { prompt: string; script: string | null; originSessionId: string | null } {
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return {
-      prompt: typeof parsed.prompt === 'string' ? parsed.prompt : '',
-      script: typeof parsed.script === 'string' ? parsed.script : null,
-      originSessionId: typeof parsed.originSessionId === 'string' ? parsed.originSessionId : null,
-    };
-  } catch {
-    // LEGACY-COMPAT(v1-tasks): plain-string content from rows that predate the
-    // JSON envelope. Removable once no pre-v2 session DBs remain in the wild.
-    return { prompt: raw, script: null, originSessionId: null };
-  }
-}
-
 function toOutput(session: ScopedSession, row: TaskRow) {
-  const content = parseContent(row.content);
+  const content = parseTaskContent(row.content);
   return {
     agent_group_id: session.agent_group_id,
     session_id: session.id,
@@ -298,7 +284,7 @@ function getTask(args: Record<string, unknown>, ctx: CallerContext) {
       if (!row) return undefined;
       const seriesKey = row.series_id ?? row.row_id;
       const stats = seriesStats(db, seriesKey);
-      const content = parseContent(row.content);
+      const content = parseTaskContent(row.content);
       return {
         ...toOutput(session, row),
         prompt: content.prompt,
@@ -346,7 +332,7 @@ function updateTaskCommand(args: Record<string, unknown>, ctx: CallerContext) {
       const row = withInbound(session, (db) => selectTask(db, id));
       if (row) {
         ownerGroup = session.agent_group_id;
-        currentScript = parseContent(row.content).script;
+        currentScript = parseTaskContent(row.content).script;
         break;
       }
     }

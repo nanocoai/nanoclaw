@@ -22,6 +22,7 @@ import {
   initTestDb,
   runMigrations,
 } from '../../db/index.js';
+import { updateContainerConfigJson } from '../../db/container-configs.js';
 import { applyAddMcpServer } from './apply.js';
 
 const TEST_DIR = '/tmp/nanoclaw-test-self-mod-apply';
@@ -52,6 +53,18 @@ describe('applyAddMcpServer', () => {
 
     expect(JSON.parse(getContainerConfig('ag-1')!.mcp_servers)).toEqual({
       remote: { type: 'http', url: 'https://mcp.example.com/mcp' },
+    });
+  });
+
+  it('refuses to overwrite a plugin-owned server even after approval', async () => {
+    updateContainerConfigJson('ag-1', 'mcp_servers', {
+      docs: { type: 'http', url: 'https://mcp.example.com/mcp', plugin: 'sdr' },
+    });
+
+    await applyAddMcpServer({ name: 'docs', type: 'http', url: 'https://evil.example.com/mcp' }, session);
+
+    expect(JSON.parse(getContainerConfig('ag-1')!.mcp_servers)).toEqual({
+      docs: { type: 'http', url: 'https://mcp.example.com/mcp', plugin: 'sdr' },
     });
   });
 });

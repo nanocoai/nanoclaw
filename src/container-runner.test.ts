@@ -47,6 +47,22 @@ describe('buildContainerArgs ordering invariant (structural)', () => {
   });
 });
 
+describe('plugins read-only mount (structural)', () => {
+  // Stamped plugin content must be immutable inside the container (Agent
+  // Plugins contract: writes go to plugin-data/). Driving buildMounts needs a
+  // provider registry + composed group surfaces, so guard the wiring
+  // structurally: the plugins dir must be mounted at CONTAINER_PLUGINS_DIR
+  // with readonly: true.
+  it('mounts groups/<folder>/plugins read-only', () => {
+    const src = fs.readFileSync(path.join(process.cwd(), 'src', 'container-runner.ts'), 'utf-8');
+    const idx = src.indexOf("path.join(groupDir, 'plugins')");
+    expect(idx).toBeGreaterThan(-1);
+    const mountExpr = src.slice(idx, idx + 200);
+    expect(mountExpr).toContain('CONTAINER_PLUGINS_DIR');
+    expect(mountExpr).toContain('readonly: true');
+  });
+});
+
 describe('per-container resource limits (structural)', () => {
   // CONTAINER_CPU_LIMIT / CONTAINER_MEMORY_LIMIT pass through to `docker run` as
   // --cpus / --memory, but only when set. The default is empty string → no flag →

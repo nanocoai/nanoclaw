@@ -74,6 +74,14 @@ export function initGroupFilesystem(
     initialized.push('groupDir');
   }
 
+  // plugins/ always exists (even for plugin-less groups) so the read-only
+  // plugins mount in container-runner.ts is unconditional.
+  const pluginsDir = path.join(groupDir, 'plugins');
+  if (!fs.existsSync(pluginsDir)) {
+    fs.mkdirSync(pluginsDir, { recursive: true });
+    initialized.push('plugins/');
+  }
+
   if (opts?.instructions && stageGroupPersona(groupDir, opts.instructions)) {
     initialized.push('instructions.prepend.md');
   }

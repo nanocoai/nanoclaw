@@ -24,6 +24,7 @@
  *     --platform-id discord:@me:1491573333382523708 \
  *     --display-name "Gavriel" \
  *     [--agent-name "Andy"] \
+ *     [--agent-group-id <id>] \       # wire an agent setup already created
  *     [--welcome "System instruction: ..."] \
  *     [--role owner|admin|member] \  # default: owner
  *     [--engage-pattern "."]         # explicit DM engage regex override
@@ -42,7 +43,7 @@ import '../src/channels/index.js';
 import { resolveUnknownSenderPolicy, resolveWiringDefaults } from '../src/channels/channel-defaults.js';
 import { hasDeclaredChannelDefaults } from '../src/channels/channel-registry.js';
 import { DATA_DIR, GROUPS_DIR } from '../src/config.js';
-import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
+import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import { initDb } from '../src/db/connection.js';
 import {
   createMessagingGroup,
@@ -68,6 +69,7 @@ interface Args {
   platformId: string;
   displayName: string;
   agentName: string;
+  agentGroupId?: string;
   welcome: string;
   role: Role;
   /** Explicit engage regex for the DM wiring; omitted = channel declaration / '.'. */
@@ -102,6 +104,10 @@ function parseArgs(argv: string[]): Args {
         break;
       case '--agent-name':
         out.agentName = val;
+        i++;
+        break;
+      case '--agent-group-id':
+        out.agentGroupId = val;
         i++;
         break;
       case '--welcome':
@@ -141,6 +147,7 @@ function parseArgs(argv: string[]): Args {
     platformId: out.platformId!,
     displayName: out.displayName!,
     agentName: out.agentName?.trim() || out.displayName!,
+    agentGroupId: out.agentGroupId?.trim() || undefined,
     welcome: out.welcome?.trim() || DEFAULT_WELCOME,
     role: out.role ?? DEFAULT_ROLE,
     engagePattern: out.engagePattern?.trim() || undefined,
@@ -213,36 +220,44 @@ async function main(): Promise<void> {
   // Owner grant is deferred until after the agent group is resolved, since
   // an admin grant is scoped to that group. See step 2b.
 
-  // 2. Agent group + filesystem.
-  const folder = `dm-with-${normalizeName(args.displayName)}`;
+  // 2. Agent group + filesystem. Setup-created template groups arrive by id;
+  // this script owns only role, membership, channel wiring, and welcome.
   const pickedProvider = process.env.NANOCLAW_PICKED_PROVIDER?.trim().toLowerCase();
-  let ag: AgentGroup | undefined = getAgentGroupByFolder(folder);
-  if (!ag) {
-    const agId = generateId('ag');
-    createAgentGroup({
-      id: agId,
-      name: args.agentName,
-      folder,
-      agent_provider: null,
-      created_at: now,
-    });
-    ag = getAgentGroupByFolder(folder)!;
-    console.log(`Created agent group: ${ag.id} (${folder})`);
+  let ag: AgentGroup;
+  let folder: string;
+  if (args.agentGroupId) {
+    const existing = getAgentGroup(args.agentGroupId);
+    if (!existing) throw new Error(`Agent group not found: ${args.agentGroupId}`);
+    ag = existing;
+    folder = existing.folder;
+    console.log(`Using agent group: ${ag.id} (${folder})`);
   } else {
-    console.log(`Reusing agent group: ${ag.id} (${folder})`);
+    folder = `dm-with-${normalizeName(args.displayName)}`;
+    const existing = getAgentGroupByFolder(folder);
+    if (existing) {
+      ag = existing;
+      console.log(`Reusing agent group: ${ag.id} (${folder})`);
+    } else {
+      const agId = generateId('ag');
+      createAgentGroup({
+        id: agId,
+        name: args.agentName,
+        folder,
+        agent_provider: null,
+        created_at: now,
+      });
+      ag = getAgentGroupByFolder(folder)!;
+      console.log(`Created agent group: ${ag.id} (${folder})`);
+    }
+    // A reused group keeps its provider because this insert is idempotent.
+    ensureContainerConfig(ag.id, pickedProvider);
+    stageGroupPersona(
+      path.resolve(GROUPS_DIR, folder),
+      `# ${args.agentName}\n\n` +
+        `You are ${args.agentName}, a personal NanoClaw agent for ${args.displayName}. ` +
+        'When the user first reaches out (or you receive a system welcome prompt), introduce yourself briefly and invite them to chat. Keep replies concise.',
+    );
   }
-  // Seed the config row, stamped with the effective provider: the operator's
-  // setup pick (NANOCLAW_PICKED_PROVIDER) when this runs inside a setup run,
-  // otherwise the persisted instance default. Workspace scaffolding is deferred
-  // to the first spawn (group-init). A reused group keeps its provider
-  // (INSERT OR IGNORE).
-  ensureContainerConfig(ag.id, pickedProvider);
-  stageGroupPersona(
-    path.resolve(GROUPS_DIR, folder),
-    `# ${args.agentName}\n\n` +
-      `You are ${args.agentName}, a personal NanoClaw agent for ${args.displayName}. ` +
-      'When the user first reaches out (or you receive a system welcome prompt), introduce yourself briefly and invite them to chat. Keep replies concise.',
-  );
 
   // 2b. Assign the user a role for this agent group. The caller picks via
   // --role; the channel drivers default to 'owner' for the self-host case.
