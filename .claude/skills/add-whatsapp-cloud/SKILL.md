@@ -57,15 +57,22 @@ pnpm run build
 
 Older installs registered this bridge under the bare `whatsapp` key, which
 collided with the native Baileys adapter. It now registers under a distinct
-`whatsapp-cloud` instance (channelType stays `whatsapp`). Two consequences for
+`whatsapp-cloud` instance (channelType stays `whatsapp`). Three consequences for
 an install that ran the previous version:
 
 - **Webhook route moves** from `/webhook/whatsapp` to `/webhook/whatsapp-cloud`.
   Update the callback URL in your Meta App dashboard (WhatsApp > Configuration)
-  accordingly.
+  accordingly. This step stays manual: until the URL is updated, Meta's posts
+  hit the old path and are rejected with a 404 that writes no log line.
 - **Chat SDK state namespace moves.** Subscriptions in the `chat_sdk_*` tables
   re-key under the new instance, so previously-subscribed threads may need to
   re-engage the bot.
+- **Messaging groups re-key automatically.** Rows in `messaging_groups` still
+  keyed under the old `whatsapp` instance are adopted into `whatsapp-cloud` at
+  the next startup, so existing chats keep their wiring, sessions, and history.
+  Adoption backs off and logs the manual recovery steps instead when a native
+  Baileys `whatsapp` adapter is also installed, or when a conflicting
+  `whatsapp-cloud` row for the same chat already carries state.
 
 Fresh installs need none of this.
 

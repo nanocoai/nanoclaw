@@ -6,9 +6,10 @@
 import { createWhatsAppAdapter } from '@chat-adapter/whatsapp';
 
 import { readEnvFile } from '../env.js';
-import type { ChannelDefaults } from './adapter.js';
+import type { ChannelDefaults, ChannelSetup } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
+import { adoptStrandedWhatsAppCloudGroups } from './whatsapp-cloud-adoption.js';
 
 /**
  * Dedicated business number on the official Cloud API — non-threaded, so
@@ -42,13 +43,26 @@ registerChannelAdapter('whatsapp-cloud', {
     // (src/channels/whatsapp.ts, also channelType 'whatsapp') — last-write-wins
     // silently kills one channel. The instance key keeps them apart while
     // channelType stays 'whatsapp' (the semantic platform key). See #2911.
-    return createChatSdkBridge({
+    const bridge = createChatSdkBridge({
       adapter: whatsappAdapter,
       instance: 'whatsapp-cloud',
       concurrency: 'concurrent',
       supportsThreads: false,
       defaults: WHATSAPP_CLOUD_DEFAULTS,
     });
+    // Adoption must run before the bridge registers webhooks, so the first
+    // inbound already resolves the re-keyed rows instead of racing an
+    // auto-created duplicate. The re-key targets the instance dimension
+    // migration 016 added on installs; adoption checks for the instance column
+    // first and no-ops on a pre-016 core.
+    const bridgeSetup = bridge.setup.bind(bridge);
+    return {
+      ...bridge,
+      async setup(hostConfig: ChannelSetup) {
+        adoptStrandedWhatsAppCloudGroups();
+        await bridgeSetup(hostConfig);
+      },
+    };
   },
   defaults: WHATSAPP_CLOUD_DEFAULTS,
 });
