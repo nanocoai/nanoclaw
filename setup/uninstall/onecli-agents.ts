@@ -19,7 +19,7 @@ export interface VaultAgent {
   name: string;
 }
 
-export type RunCommand = (cmd: string, args: string[]) => { status: number | null; stdout: string };
+export type RunCommand = (cmd: string, args: string[]) => { status: number | null; stdout: string; stderr?: string };
 
 /**
  * List non-default vault agents via `onecli agents list`. `available: false`
