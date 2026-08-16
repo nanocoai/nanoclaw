@@ -78,9 +78,31 @@ export interface ProviderOptions {
   effort?: string;
 }
 
+/**
+ * One channel attachment, in structured form.
+ *
+ * Every attachment is ALSO described inline in the formatted prompt (see
+ * formatter.ts formatAttachments) — that text rendering stays the contract for
+ * every provider. This is an additive view for providers whose SDK can take a
+ * real file part, so a provider that ignores it loses nothing.
+ */
+export interface PromptAttachment {
+  /** Display name, when the channel gave one. */
+  filename?: string;
+  /** MIME type as reported by the channel. Absent for adapters that omit it. */
+  mime?: string;
+  /** Absolute path inside the container, when the file was staged to the inbox. */
+  path?: string;
+  /** Remote URL, when the channel only supplied a link. */
+  url?: string;
+}
+
 export interface QueryInput {
   /** Initial prompt (already formatted by agent-runner). */
   prompt: string;
+
+  /** Attachments on the messages the prompt was built from, structured. */
+  attachments?: PromptAttachment[];
 
   /**
    * Opaque continuation token from a previous query. The provider decides
@@ -124,8 +146,16 @@ export type McpServerConfig =
   | { type: 'http'; url: string; headers?: Record<string, string> };
 
 export interface AgentQuery {
-  /** Push a follow-up message into the active query. */
-  push(message: string): void;
+  /**
+   * Push a follow-up message into the active query.
+   *
+   * Attachments are optional and structured exactly like QueryInput's: a
+   * provider that keeps one long-lived query per session sees most real
+   * traffic here rather than through query(), so media has to travel on this
+   * path too. Providers that ignore the argument behave as before — the
+   * formatter still describes every attachment inside `message`.
+   */
+  push(message: string, attachments?: PromptAttachment[]): void;
 
   /** Signal that no more input will be sent. */
   end(): void;

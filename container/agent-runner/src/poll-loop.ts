@@ -18,6 +18,7 @@ import {
 import {
   formatMessages,
   extractRouting,
+  extractAttachments,
   categorizeMessage,
   isClearCommand,
   isRunnerCommand,
@@ -238,6 +239,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     const query = config.provider.query({
       prompt,
+      attachments: extractAttachments(keep),
       continuation,
       cwd: config.cwd,
       systemContext: config.systemContext,
@@ -452,7 +454,7 @@ export async function processQuery(
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
         taskBlockNudged = false;
-        query.push(prompt);
+        query.push(prompt, extractAttachments(keep));
         archivePrompts.push(prompt);
         markCompleted(keptIds);
       } catch (err) {
