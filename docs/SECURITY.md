@@ -119,6 +119,8 @@ Real API credentials **never enter containers**. NanoClaw uses [OneCLI's Agent V
 **Per-agent policies:**
 Each NanoClaw group gets its own OneCLI agent identity. This allows different credential policies per group (e.g. your sales agent vs. support agent). OneCLI supports rate limits, and time-bound access and approval flows are on the roadmap.
 
+This per-agent scoping applies to generic secrets (`secretMode`, `agents set-secrets`). On a self-hosted OneCLI gateway, OAuth app connections are account-level and shared by every agent — per-agent connection assignment (`PUT /v1/agents/{id}/connections`) is project-scoped and only available on OneCLI Cloud. An agent with no explicit OAuth connection assignment can still reach any OAuth-connected app on a self-hosted gateway.
+
 **Never on the container filesystem:**
 - The project root and `.env` — never mounted; the container only receives the paths in the mount table above.
 - The mount allowlist — external (`~/.config/nanoclaw/…`), never mounted.
