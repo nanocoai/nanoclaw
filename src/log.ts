@@ -54,7 +54,23 @@ export const log = {
   fatal: (msg: string, data?: Record<string, unknown>) => emit('fatal', msg, data),
 };
 
+// WebSocket handshake timeouts from vendored channel adapters (e.g. discord.js's
+// `ws` dependency) can emit 'error' on a socket with no listener attached deep
+// inside a Node timer callback — Node's EventEmitter contract turns that into a
+// synchronous throw with no promise to catch, bypassing the adapter's own
+// reconnect/backoff logic entirely. Treat this known, isolated, transient class
+// as recoverable instead of taking down the whole host over one dropped socket.
+const RECOVERABLE_MESSAGES = ['Opening handshake has timed out'];
+
+function isRecoverable(err: unknown): boolean {
+  return err instanceof Error && RECOVERABLE_MESSAGES.includes(err.message);
+}
+
 process.on('uncaughtException', (err) => {
+  if (isRecoverable(err)) {
+    log.warn('Uncaught exception (recoverable, continuing)', { err });
+    return;
+  }
   log.fatal('Uncaught exception', { err });
   process.exit(1);
 });

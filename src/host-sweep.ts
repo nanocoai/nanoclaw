@@ -45,8 +45,11 @@ import {
 } from './db/session-db.js';
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
-import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
-import type { Session } from './types.js';
+import { getLastWakeError, isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
+import { getDeliveryAdapter } from './delivery.js';
+import { getMessagingGroup } from './db/messaging-groups.js';
+import { pickApprovalDelivery, pickApprover } from './modules/approvals/primitive.js';
+import type { AgentGroup, Session } from './types.js';
 
 /**
  * SQLite TIMESTAMP columns store UTC without a timezone marker. Date.parse
@@ -69,6 +72,15 @@ export const ABSOLUTE_CEILING_MS = 30 * 60 * 1000;
 export const CLAIM_STUCK_MS = 60 * 1000;
 const MAX_TRIES = 5;
 const BACKOFF_BASE_MS = 5000;
+
+// Consecutive wakeContainer failures (one sweep tick ~= SWEEP_INTERVAL_MS
+// apart) before we DM an admin. 3 ticks ~= 3 min — long enough to ride out a
+// single transient blip without paging anyone, short enough that an actual
+// outage (e.g. OneCLI cloud down) doesn't burn an hour silently.
+const WAKE_FAILURE_ALERT_THRESHOLD = 3;
+// Once alerted, re-alert every this-many further failures (~10 min) so a
+// long outage isn't silent, without pinging every single tick.
+const WAKE_FAILURE_REALERT_EVERY = 10;
 
 export type StuckDecision =
   | { action: 'ok' }
@@ -119,6 +131,12 @@ export function decideStuckAction(args: {
 }
 
 let running = false;
+// Timestamp of the last sweep() completion. Used to detect the sweep loop
+// itself stalling (e.g. a slow synchronous call blocking the event loop, or
+// a session's async work taking far longer than expected) — diagnostic aid
+// for cases where host-side stuck-detection fires much later than its
+// nominal ~SWEEP_INTERVAL_MS + tolerance SLA.
+let lastSweepEndedAt: number | null = null;
 
 export function startHostSweep(): void {
   if (running) return;
@@ -133,6 +151,16 @@ export function stopHostSweep(): void {
 async function sweep(): Promise<void> {
   if (!running) return;
 
+  const tickStart = Date.now();
+  if (lastSweepEndedAt !== null) {
+    const gap = tickStart - lastSweepEndedAt;
+    // Anything past 2x the interval means something delayed scheduling of
+    // this tick — either a slow session sweep or the process was blocked.
+    if (gap > SWEEP_INTERVAL_MS * 2) {
+      log.warn('Host sweep tick delayed', { gapMs: gap, expectedMs: SWEEP_INTERVAL_MS });
+    }
+  }
+
   // Re-heal the egress network so already-running agents keep their gateway hop
   // if it was detached out-of-band. Best-effort here: a heal failure isn't a
   // leak (agents stay on the internal net), so log and continue. No-op when
@@ -146,7 +174,12 @@ async function sweep(): Promise<void> {
   try {
     const sessions = getActiveSessions();
     for (const session of sessions) {
+      const sessionStart = Date.now();
       await sweepSession(session);
+      const elapsed = Date.now() - sessionStart;
+      if (elapsed > 5000) {
+        log.warn('Slow sweepSession', { sessionId: session.id, elapsedMs: elapsed });
+      }
     }
   } catch (err) {
     log.error('Host sweep error', { err });
@@ -164,6 +197,7 @@ async function sweep(): Promise<void> {
   }
   // MODULE-HOOK:approvals-reason-sweep:end
 
+  lastSweepEndedAt = Date.now();
   setTimeout(sweep, SWEEP_INTERVAL_MS);
 }
 
@@ -215,8 +249,13 @@ async function sweepSession(session: Session): Promise<void> {
       log.info('Waking container for due messages', { sessionId: session.id, count: dueCount });
       // wakeContainer never throws — transient spawn failures (OneCLI down,
       // etc.) return false and leave messages pending for the next tick.
-      await wakeContainer(session);
+      const woke = await wakeContainer(session);
+      await trackWakeOutcome(session, agentGroup, woke);
       justWoke = true;
+    } else if (isContainerRunning(session.id)) {
+      // Container is up via some other path (e.g. router woke it directly on
+      // inbound) — treat as recovery for streak/alert purposes.
+      await trackWakeOutcome(session, agentGroup, true);
     }
 
     const alive = isContainerRunning(session.id);
@@ -267,6 +306,70 @@ async function sweepSession(session: Session): Promise<void> {
   }
 }
 
+// Consecutive wakeContainer failure count per session, and whether we've
+// already sent an admin alert for the current outage (cleared on recovery).
+const wakeFailureStreaks = new Map<string, number>();
+const wakeFailureAlerted = new Set<string>();
+
+async function trackWakeOutcome(session: Session, agentGroup: AgentGroup, woke: boolean): Promise<void> {
+  if (woke) {
+    if (wakeFailureAlerted.has(session.id)) {
+      wakeFailureAlerted.delete(session.id);
+      await sendWakeAlert(session, agentGroup, 0, true);
+    }
+    wakeFailureStreaks.delete(session.id);
+    return;
+  }
+
+  const streak = (wakeFailureStreaks.get(session.id) ?? 0) + 1;
+  wakeFailureStreaks.set(session.id, streak);
+
+  const pastThreshold = streak - WAKE_FAILURE_ALERT_THRESHOLD;
+  const shouldAlert = pastThreshold === 0 || (pastThreshold > 0 && pastThreshold % WAKE_FAILURE_REALERT_EVERY === 0);
+
+  if (shouldAlert) {
+    wakeFailureAlerted.add(session.id);
+    await sendWakeAlert(session, agentGroup, streak, false);
+  }
+}
+
+/** DM the reachable admin/owner about a stuck container wake. Best-effort — never throws. */
+async function sendWakeAlert(
+  session: Session,
+  agentGroup: AgentGroup,
+  streak: number,
+  recovered: boolean,
+): Promise<void> {
+  try {
+    const approvers = pickApprover(session.agent_group_id);
+    if (approvers.length === 0) return;
+
+    const originChannelType = session.messaging_group_id
+      ? (getMessagingGroup(session.messaging_group_id)?.channel_type ?? '')
+      : '';
+    const target = await pickApprovalDelivery(approvers, originChannelType);
+    if (!target) return;
+
+    const adapter = getDeliveryAdapter();
+    if (!adapter) return;
+
+    const text = recovered
+      ? `✅ NanoClaw: container wake recovered for "${agentGroup.name}" — it was stuck retrying for a while, replies should be flowing again now.`
+      : `⚠️ NanoClaw: container for "${agentGroup.name}" has failed to start ${streak} times in a row (~${streak} min). Messages are queued and will keep retrying automatically, but nothing will get a reply until this clears.\nLast error: ${getLastWakeError(session.id) ?? 'unknown'}`;
+
+    await adapter.deliver(
+      target.messagingGroup.channel_type,
+      target.messagingGroup.platform_id,
+      null,
+      'chat-sdk',
+      JSON.stringify({ text }),
+    );
+    log.info('Sent wake-failure admin alert', { sessionId: session.id, streak, recovered, to: target.userId });
+  } catch (err) {
+    log.error('Failed to send wake-failure alert', { sessionId: session.id, err });
+  }
+}
+
 function heartbeatMtimeMs(agentGroupId: string, sessionId: string): number {
   const hbPath = heartbeatPath(agentGroupId, sessionId);
   try {
@@ -281,17 +384,48 @@ function bashTimeoutMs(state: ContainerState | null): number | null {
   return typeof state.tool_declared_timeout_ms === 'number' ? state.tool_declared_timeout_ms : null;
 }
 
+// Tracks when the host first observed each processing claim, keyed by
+// "sessionId:messageId". Lets us log the moment a claim shows up (independent
+// of the DB's own status_changed timestamp) so a slow/stalled sweep loop is
+// visible in the logs rather than only showing up as a large claimAgeMs on
+// the eventual kill.
+const seenClaimsAt = new Map<string, number>();
+
+function trackClaimSightings(session: Session, claims: { message_id: string }[]): void {
+  const now = Date.now();
+  const currentIds = new Set(claims.map((c) => `${session.id}:${c.message_id}`));
+
+  for (const claim of claims) {
+    const key = `${session.id}:${claim.message_id}`;
+    if (!seenClaimsAt.has(key)) {
+      seenClaimsAt.set(key, now);
+      log.debug('Host first observed processing claim', { sessionId: session.id, messageId: claim.message_id });
+    }
+  }
+
+  // Drop entries for claims that are no longer processing (completed, reset,
+  // or killed) so this map doesn't grow unbounded.
+  for (const key of seenClaimsAt.keys()) {
+    if (key.startsWith(`${session.id}:`) && !currentIds.has(key)) {
+      seenClaimsAt.delete(key);
+    }
+  }
+}
+
 function enforceRunningContainerSla(
   inDb: Database.Database,
   outDb: Database.Database,
   session: Session,
   agentGroupId: string,
 ): void {
+  const claims = getProcessingClaims(outDb);
+  trackClaimSightings(session, claims);
+
   const decision = decideStuckAction({
     now: Date.now(),
     heartbeatMtimeMs: heartbeatMtimeMs(agentGroupId, session.id),
     containerState: getContainerState(outDb),
-    claims: getProcessingClaims(outDb),
+    claims,
   });
 
   if (decision.action === 'ok') return;
@@ -307,11 +441,17 @@ function enforceRunningContainerSla(
     return;
   }
 
+  const firstSeenAt = seenClaimsAt.get(`${session.id}:${decision.messageId}`);
   log.warn('Killing container — message claimed then silent', {
     sessionId: session.id,
     messageId: decision.messageId,
     claimAgeMs: decision.claimAgeMs,
     toleranceMs: decision.toleranceMs,
+    // Time since the host's own sweep loop first observed this claim —
+    // compare against claimAgeMs (DB-reported) to tell apart "the claim was
+    // genuinely stale the whole time" from "the sweep loop itself was slow
+    // to notice/re-check it".
+    hostObservedAgeMs: firstSeenAt !== undefined ? Date.now() - firstSeenAt : null,
   });
   killContainer(session.id, 'claim-stuck');
   resetStuckProcessingRows(inDb, outDb, session, 'claim-stuck');

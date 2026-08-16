@@ -233,6 +233,7 @@ export interface AgentDestination {
   target_type: 'channel' | 'agent';
   target_id: string;
   created_at: string;
+  thread_id_override?: string | null;
 }
 
 export interface AgentMessagePolicy {

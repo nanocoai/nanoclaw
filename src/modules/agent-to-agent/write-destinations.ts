@@ -34,6 +34,7 @@ export function writeDestinations(agentGroupId: string, sessionId: string): void
         channel_type: mg.channel_type,
         platform_id: mg.platform_id,
         agent_group_id: null,
+        thread_id_override: row.thread_id_override ?? null,
       });
     } else if (row.target_type === 'agent') {
       const ag = getAgentGroup(row.target_id);

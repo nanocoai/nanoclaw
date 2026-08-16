@@ -138,6 +138,20 @@ export function markScriptSkipped(skips: Array<{ id: string; reason: string }>):
   })();
 }
 
+/**
+ * Delete processing_ack entries for the given IDs, making them retryable.
+ * Used when the container needs to exit and have the host respawn it (e.g.
+ * on a credential error), so the next container picks up the same messages.
+ */
+export function resetToRetryable(ids: string[]): void {
+  if (ids.length === 0) return;
+  const db = getOutboundDb();
+  const stmt = db.prepare('DELETE FROM processing_ack WHERE message_id = ?');
+  db.transaction(() => {
+    for (const id of ids) stmt.run(id);
+  })();
+}
+
 /** Mark a single message as failed — writes to processing_ack in outbound.db. */
 export function markFailed(id: string): void {
   getOutboundDb()

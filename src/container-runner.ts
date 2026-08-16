@@ -68,8 +68,15 @@ const activeContainers = new Map<string, { process: ChildProcess; containerName:
  */
 const wakePromises = new Map<string, Promise<boolean>>();
 
+/** Message of the most recent wakeContainer failure per session, for alerting. Cleared on success. */
+const lastWakeError = new Map<string, string>();
+
 export function getActiveContainerCount(): number {
   return activeContainers.size;
+}
+
+export function getLastWakeError(sessionId: string): string | undefined {
+  return lastWakeError.get(sessionId);
 }
 
 export function isContainerRunning(sessionId: string): boolean {
@@ -99,9 +106,13 @@ export function wakeContainer(session: Session): Promise<boolean> {
     return existing;
   }
   const promise = spawnContainer(session)
-    .then(() => true)
+    .then(() => {
+      lastWakeError.delete(session.id);
+      return true;
+    })
     .catch((err) => {
       log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
+      lastWakeError.set(session.id, err instanceof Error ? err.message : String(err));
       return false;
     })
     .finally(() => {
@@ -364,6 +375,14 @@ export function buildMounts(
     mounts.push({ hostPath: claudeDir, containerPath: '/home/node/.claude', readonly: false });
   }
 
+  // Host OAuth credentials — gives the SDK access to the Pro subscription
+  // token and refresh token. Mounted read-write so the SDK can persist
+  // refreshed tokens back to disk and avoid mid-session auth failures.
+  const hostCredentials = path.join(process.env.HOME ?? '/root', '.claude', '.credentials.json');
+  if (fs.existsSync(hostCredentials)) {
+    mounts.push({ hostPath: hostCredentials, containerPath: '/home/node/.claude/.credentials.json', readonly: false });
+  }
+
   // Shared agent-runner source — read-only, same code for all groups.
   const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
   mounts.push({ hostPath: agentRunnerSrc, containerPath: '/app/src', readonly: true });
@@ -540,6 +559,34 @@ async function buildContainerArgs(
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
   log.info('OneCLI gateway applied', { containerName });
+
+  // OneCLI injects ANTHROPIC_API_KEY as part of its proxy setup regardless
+  // of whether an Anthropic vault secret exists. When using Pro OAuth
+  // (credentials file mounted), strip the injected key so the SDK reads
+  // from the credentials file instead of treating the placeholder as a real key.
+  const usingProOAuth = fs.existsSync(path.join(process.env.HOME ?? '/root', '.claude', '.credentials.json'));
+  if (usingProOAuth) {
+    for (let i = args.length - 2; i >= 0; i--) {
+      if (args[i] === '-e' && args[i + 1].startsWith('ANTHROPIC_API_KEY=')) {
+        args.splice(i, 2);
+      }
+    }
+    log.debug('Stripped ANTHROPIC_API_KEY injected by OneCLI (using Pro OAuth)');
+
+    // OneCLI proxies all HTTPS via MITM and injects the managed Anthropic API
+    // key as an HTTP header. Bypass the proxy for Anthropic endpoints so the
+    // OAuth Bearer token from the credentials file reaches the API unmodified.
+    const ANTHROPIC_NO_PROXY = 'api.anthropic.com,anthropic.com';
+    for (const varName of ['NO_PROXY', 'no_proxy']) {
+      const existing = args.findIndex((a, i) => args[i - 1] === '-e' && a.startsWith(`${varName}=`));
+      if (existing !== -1) {
+        args[existing] = `${varName}=${args[existing].split('=').slice(1).join('=')},${ANTHROPIC_NO_PROXY}`;
+      } else {
+        args.push('-e', `${varName}=${ANTHROPIC_NO_PROXY}`);
+      }
+    }
+    log.debug('Added api.anthropic.com to NO_PROXY (OAuth bypass for OneCLI MITM)');
+  }
 
   // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
   args.push('--entrypoint', 'bash');

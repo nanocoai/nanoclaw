@@ -205,12 +205,13 @@ CREATE TABLE IF NOT EXISTS delivered (
 -- agents, etc.). Container queries this live on every lookup, so changes
 -- take effect mid-session without requiring a container restart.
 CREATE TABLE IF NOT EXISTS destinations (
-  name            TEXT PRIMARY KEY,
-  display_name    TEXT,
-  type            TEXT NOT NULL,   -- 'channel' | 'agent'
-  channel_type    TEXT,            -- for type='channel'
-  platform_id     TEXT,            -- for type='channel'
-  agent_group_id  TEXT             -- for type='agent'
+  name               TEXT PRIMARY KEY,
+  display_name       TEXT,
+  type               TEXT NOT NULL,   -- 'channel' | 'agent'
+  channel_type       TEXT,            -- for type='channel'
+  platform_id        TEXT,            -- for type='channel'
+  agent_group_id     TEXT,            -- for type='agent'
+  thread_id_override TEXT             -- NULL=auto, ''=channel (no thread), else fixed thread id
 );
 
 -- Current chat/thread routing for this session. Single-row table (id=1).

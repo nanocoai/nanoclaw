@@ -1,9 +1,11 @@
+import { readFileSync } from 'node:fs';
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import {
   getPendingMessages,
   markProcessing,
   markCompleted,
   markScriptSkipped,
+  resetToRetryable,
   type MessageInRow,
 } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
@@ -29,6 +31,59 @@ import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from 
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
+
+// The Claude Code SDK surfaces auth errors as result text rather than error events.
+const AUTH_ERROR_RE = /Failed to authenticate|authentication_error|Invalid authentication credentials/i;
+
+class CredentialError extends Error {
+  constructor() {
+    super('Credential error — container will exit for respawn with fresh token');
+  }
+}
+
+// Same mount destination as CONTAINER_CLAUDE_DIR in src/container-runner.ts.
+const OAUTH_CREDENTIALS_PATH = '/home/node/.claude/.credentials.json';
+// Buffer so we don't race the SDK's own refresh — only pre-empt a query when
+// the token is already stale by more than this margin.
+const OAUTH_EXPIRY_BUFFER_MS = 30_000;
+
+/**
+ * Check the mounted host OAuth credentials for a genuinely unrecoverable
+ * state before starting a new query: the *refresh* token has also expired,
+ * so no amount of retrying can produce a valid access token without the
+ * user re-authenticating on the host.
+ *
+ * A merely-stale *access* token (refresh token still valid) is NOT treated
+ * as unrecoverable here — the Claude Agent SDK refreshes it transparently
+ * as part of starting a new query (verified empirically: ~2-3s end-to-end,
+ * including a fresh access+refresh token pair written back to the mounted
+ * credentials file). An earlier version of this check pre-empted every
+ * query against an expired access token and exited for an external respawn
+ * instead, which seemed safe but actually removed the only place that ever
+ * triggered the SDK's refresh — no container could refresh the shared
+ * token, so the fleet spun in a respawn loop (each cycle churning Docker
+ * networking) until something unrelated (e.g. an interactive `claude`
+ * session on the host) happened to refresh the file from outside. See the
+ * 2026-08-13 "tg choking" incident.
+ *
+ * Returns false (not our concern) when using an API key instead of Pro
+ * OAuth, since no credentials file is mounted in that mode.
+ */
+function isOAuthUnrecoverable(): boolean {
+  try {
+    const raw = readFileSync(OAUTH_CREDENTIALS_PATH, 'utf8');
+    const parsed = JSON.parse(raw) as {
+      claudeAiOauth?: { expiresAt?: number; refreshTokenExpiresAt?: number };
+    };
+    const { expiresAt, refreshTokenExpiresAt } = parsed.claudeAiOauth ?? {};
+    if (typeof expiresAt !== 'number') return false;
+    if (Date.now() < expiresAt - OAUTH_EXPIRY_BUFFER_MS) return false; // access token still fresh
+    if (typeof refreshTokenExpiresAt !== 'number') return false; // unknown — let the SDK try
+    return Date.now() >= refreshTokenExpiresAt;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Number of consecutive `database disk image is malformed` errors after which
@@ -236,6 +291,23 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
+    const skippedSet = new Set(skipped.map((s) => s.id));
+    const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
+
+    if (isOAuthUnrecoverable()) {
+      log('OAuth refresh token has also expired — re-authentication required, exiting for respawn instead of a doomed query');
+      resetToRetryable(processingIds);
+      writeMessageOut({
+        id: generateId(),
+        kind: 'system',
+        platform_id: null,
+        channel_type: null,
+        thread_id: null,
+        content: JSON.stringify({ action: 'credential_error' }),
+      });
+      process.exit(1);
+    }
+
     const query = config.provider.query({
       prompt,
       continuation,
@@ -244,8 +316,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     });
 
     // Process the query while concurrently polling for new messages
-    const skippedSet = new Set(skipped.map((s) => s.id));
-    const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
+    // (skippedSet / processingIds computed above, before the OAuth-expiry
+    // pre-empt check, since that check needs processingIds too)
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
@@ -274,6 +346,22 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         setContinuation(config.providerName, continuation);
       }
     } catch (err) {
+      if (err instanceof CredentialError) {
+        // Auth failure: reset messages so the next container picks them up,
+        // signal the host to respawn immediately, then exit.
+        log('Credential error — resetting messages to retryable and exiting for respawn');
+        resetToRetryable(processingIds);
+        writeMessageOut({
+          id: generateId(),
+          kind: 'system',
+          platform_id: null,
+          channel_type: null,
+          thread_id: null,
+          content: JSON.stringify({ action: 'credential_error' }),
+        });
+        process.exit(1);
+      }
+
       const errMsg = err instanceof Error ? err.message : String(err);
       log(`Query error: ${errMsg}`);
 
@@ -508,6 +596,11 @@ export async function processQuery(
         // Claude session with no prior context.
         setContinuation(providerName, event.continuation);
       } else if (event.type === 'result') {
+        // Auth errors surface as result text (not error events). Throw so
+        // the outer catch can reset acks and trigger a respawn.
+        if (event.text && AUTH_ERROR_RE.test(event.text)) {
+          throw new CredentialError();
+        }
         // A result — with or without text — means the turn is done. Mark
         // the initial batch completed now so the host sweep doesn't see
         // stale 'processing' claims while the query stays open for
@@ -775,18 +868,31 @@ export function autoAppendTaskLog(text: string): void {
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-  // Resolve thread_id per-destination from the most recent inbound message
-  // that came from this same channel+platform. In agent-shared sessions,
-  // different destinations have different thread contexts — using a single
-  // routing.threadId would stamp one channel's thread onto another.
-  const destRouting = resolveDestinationThread(channelType, platformId);
+
+  let threadId: string | null;
+  let inReplyTo: string | null;
+
+  if (dest.threadIdOverride !== undefined && dest.threadIdOverride !== null) {
+    // Fixed thread: empty string = post to channel directly (no thread).
+    threadId = dest.threadIdOverride || null;
+    inReplyTo = routing.inReplyTo;
+  } else {
+    // Resolve thread_id per-destination from the most recent inbound message
+    // that came from this same channel+platform. In agent-shared sessions,
+    // different destinations have different thread contexts — using a single
+    // routing.threadId would stamp one channel's thread onto another.
+    const destRouting = resolveDestinationThread(channelType, platformId);
+    threadId = destRouting?.threadId ?? null;
+    inReplyTo = destRouting?.inReplyTo ?? routing.inReplyTo;
+  }
+
   writeMessageOut({
     id: generateId(),
-    in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
+    in_reply_to: inReplyTo,
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
-    thread_id: destRouting?.threadId ?? null,
+    thread_id: threadId,
     content: JSON.stringify({ text: body }),
   });
 }

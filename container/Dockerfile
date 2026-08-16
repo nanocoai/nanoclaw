@@ -22,6 +22,9 @@ ARG INSTALL_CJK_FONTS=false
 # pinned in cli-tools.json so a skill can add one with a json-merge; Bun (the
 # runtime) is pinned here because it installs from a different source.
 ARG BUN_VERSION=1.3.12
+ARG CALENDAR_MCP_VERSION=2.6.1
+ARG NOTION_MCP_VERSION=2.4.1
+ARG GMAIL_MCP_VERSION=1.1.11
 
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
@@ -110,6 +113,21 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 # Actual script lives in the mounted source at /app/src/cli/ncl.ts.
 RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \
     chmod +x /usr/local/bin/ncl
+
+RUN --mount=type=cache,target=/root/.cache/pnpm \
+    pnpm install -g "@cocal/google-calendar-mcp@${CALENDAR_MCP_VERSION}"
+
+RUN --mount=type=cache,target=/root/.cache/pnpm \
+    pnpm install -g "@notionhq/notion-mcp-server@${NOTION_MCP_VERSION}"
+
+# zod-to-json-schema pinned below 3.25 — gmail-mcp's loose deps
+# (zod-to-json-schema ^3.22.1, zod ^3.22.4) otherwise resolve zod-to-json-schema
+# to a version that imports the zod/v3 subpath, which only exists in zod>=3.25,
+# while zod itself resolves to 3.24.x — ERR_PACKAGE_PATH_NOT_EXPORTED at import.
+RUN --mount=type=cache,target=/root/.cache/pnpm \
+    pnpm install -g \
+        "@gongrzhe/server-gmail-autoauth-mcp@${GMAIL_MCP_VERSION}" \
+        "zod-to-json-schema@3.22.5"
 
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh

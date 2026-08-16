@@ -19,6 +19,8 @@ export interface DestinationEntry {
   channelType?: string;
   platformId?: string;
   agentGroupId?: string;
+  /** NULL = auto-resolve from inbound; '' = post to channel (no thread); else fixed thread id. */
+  threadIdOverride?: string | null;
 }
 
 export type SessionMode = { kind: 'chat' } | { kind: 'task'; taskId: string };
@@ -30,6 +32,7 @@ interface DestRow {
   channel_type: string | null;
   platform_id: string | null;
   agent_group_id: string | null;
+  thread_id_override: string | null;
 }
 
 function rowToEntry(row: DestRow): DestinationEntry {
@@ -40,6 +43,7 @@ function rowToEntry(row: DestRow): DestinationEntry {
     channelType: row.channel_type ?? undefined,
     platformId: row.platform_id ?? undefined,
     agentGroupId: row.agent_group_id ?? undefined,
+    threadIdOverride: row.thread_id_override,
   };
 }
 
