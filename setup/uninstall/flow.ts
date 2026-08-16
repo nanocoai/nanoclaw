@@ -13,6 +13,7 @@
  * Ctrl-C anywhere in the confirm phase leaves the install untouched.
  */
 import { spawnSync } from 'child_process';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -24,9 +25,19 @@ import { emit as phEmit } from '../lib/diagnostics.js';
 import { note } from '../lib/theme.js';
 import * as setupLog from '../logs.js';
 import { resolveOnecliDeletions, type RunCommand, type VaultAgent } from './onecli-agents.js';
-import { buildRemovalPlan, validateDecisions, type Decisions } from './plan.js';
-import { executePlan, type ExecDeps, type UninstallActionResult } from './remove.js';
+import { buildRemovalPlan, validateDecisions, type Decisions, type RemovalAction } from './plan.js';
+import { actionId, artifactId, executePlan, type ExecDeps, type UninstallActionResult } from './remove.js';
 import { scanInstall, tilde, type Inventory } from './scan.js';
+import {
+  DriverCancelled,
+  DriverTerminalError,
+  type Artifact,
+  type SetupDriver,
+  type UninstallChoice,
+  type UninstallGroup,
+  type UninstallPlan,
+  type UninstallReceipt,
+} from '../lib/setup-driver.js';
 
 const GROUPS = {
   service: {
@@ -59,12 +70,17 @@ const runCommand: RunCommand = (cmd, args) => {
   };
 };
 
-export async function runUninstallFlow(opts: {
-  dryRun: boolean;
-  yes: boolean;
-  invokedFrom: 'flag' | 'setup-detection';
-}): Promise<never> {
+export async function runUninstallFlow(
+  opts: {
+    dryRun: boolean;
+    yes: boolean;
+    invokedFrom: 'flag' | 'setup-detection';
+  },
+  driver?: SetupDriver,
+): Promise<never> {
   const { dryRun, yes } = opts;
+
+  if (driver?.mode === 'ndjson') return runMachineUninstall(opts, driver);
 
   if (!process.stdin.isTTY && !yes && !dryRun) {
     console.error(
@@ -300,6 +316,304 @@ export async function runUninstallFlow(opts: {
   process.exit(0);
 }
 
+async function runMachineUninstall(
+  opts: { dryRun: boolean; yes: boolean; invokedFrom: 'flag' | 'setup-detection' },
+  driver: SetupDriver,
+): Promise<never> {
+  if (opts.dryRun || opts.yes) {
+    driver.error(
+      'unsupported_machine_option',
+      'Machine uninstall is already plan-first; --dry-run and --yes are terminal-only options.',
+      [{ kind: 'rerun', args: ['--uninstall', '--protocol', 'nanoclaw.driver.v1'] }],
+    );
+  }
+
+  const projectRoot = process.cwd();
+  const home = os.homedir();
+  const scan = (): Inventory => scanInstall({ projectRoot, home, platform: process.platform, runCommand });
+
+  driver.progress('uninstall-scan', 'running', 'Checking this NanoClaw copy');
+  const approved = scan();
+  driver.progress('uninstall-scan', 'succeeded');
+  const plan = protocolPlan(approved);
+  const choices = await driver.waitForUninstall(plan, (candidate) =>
+    uninstallSelectionError(approved, decisionsFromChoices(approved, candidate)),
+  );
+  driver.throwIfCancelled();
+
+  const actions = buildRemovalPlan(approved, decisionsFromChoices(approved, choices));
+  const selectedIds = new Set(actions.map(artifactId));
+  const results: UninstallActionResult[] = [];
+  const emit = (result: UninstallActionResult): void => {
+    results.push(result);
+    driver.uninstallAction(result);
+  };
+
+  for (const artifact of plan.artifacts) {
+    if (!selectedIds.has(artifact.id)) {
+      emit({
+        actionId: `preserve-${artifact.id}`,
+        artifactId: artifact.id,
+        outcome: artifact.disposition === 'alreadyAbsent' ? 'alreadyAbsent' : 'preserved',
+      });
+    }
+  }
+
+  const current = scan();
+  if (!sameOwnershipSelectors(approved, current)) {
+    for (const action of actions) {
+      emit({
+        actionId: actionId(action),
+        artifactId: artifactId(action),
+        outcome: 'untouched',
+        error: { code: 'checkout_identity_changed', message: 'The checkout identity changed after approval.' },
+      });
+    }
+    driver.completeUninstall(receiptFor('incomplete', results, current));
+    throw new DriverTerminalError(1);
+  }
+
+  let prerequisiteFailed = false;
+  let lastStepId: string | undefined;
+  for (const action of actions) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (driverCancelled(driver)) break;
+    lastStepId = actionId(action);
+    prerequisiteFailed = executePlan([action], {
+      runCommand,
+      log: () => {},
+      isRoot: process.getuid?.() === 0,
+      prerequisiteFailed,
+      onResult: emit,
+    }).prerequisiteFailed;
+  }
+
+  if (driverCancelled(driver)) {
+    driver.cancelled({ lastStepId, results, remaining: remainingArtifacts(scan()) });
+    throw new DriverTerminalError(2);
+  }
+
+  const after = scan();
+  const remaining = remainingArtifacts(after);
+  const residueIds = new Set(remaining.map((artifact) => artifact.id));
+  const incomplete =
+    results.some((result) => result.outcome === 'failed' || result.outcome === 'untouched') ||
+    [...selectedIds].some((id) => residueIds.has(id));
+  driver.completeUninstall(receiptFor(incomplete ? 'incomplete' : 'success', results, after));
+  throw new DriverTerminalError(incomplete ? 1 : 0);
+}
+
+function driverCancelled(driver: SetupDriver): boolean {
+  try {
+    driver.throwIfCancelled();
+    return false;
+  } catch (error) {
+    if (error instanceof DriverCancelled) return true;
+    throw error;
+  }
+}
+
+function decisionsFromChoices(inventory: Inventory, choices: Map<UninstallGroup, UninstallChoice>): Decisions {
+  return {
+    service: choices.get('service') === 'remove',
+    data: choices.get('data') === 'remove',
+    user: choices.get('user') === 'remove',
+    onecliDelete: choices.get('onecli') === 'remove' ? inventory.onecli.mine : [],
+  };
+}
+
+function protocolPlan(inventory: Inventory): UninstallPlan {
+  const actions = buildRemovalPlan(inventory, {
+    service: true,
+    data: true,
+    user: true,
+    onecliDelete: inventory.onecli.mine,
+  });
+  const artifacts = actions.map((action) => artifactForAction(inventory, action));
+  artifacts.push(
+    sharedArtifact('checkout-root', 'checkout', 'NanoClaw source checkout', inventory.projectRoot),
+    sharedArtifact(
+      'onecli-shared-vault',
+      'shared-vault',
+      'OneCLI app, vault, and credentials',
+      '~/.local/share/onecli',
+    ),
+    sharedArtifact('host-shared-config', 'shared-config', 'Host-wide NanoClaw configuration', '~/.config/nanoclaw'),
+  );
+  for (const backup of inventory.envBackups) {
+    artifacts.push({
+      id: `credential-backup-${shortHash(backup.path)}`,
+      kind: 'credential-backup',
+      label: backup.what,
+      location: backup.path,
+      disposition: 'external',
+    });
+  }
+  for (const backup of inventory.legacyEnvBackups ?? []) {
+    artifacts.push({
+      id: `legacy-credential-backup-${shortHash(backup.path)}`,
+      kind: 'credential-backup-inside-checkout',
+      label: 'Legacy credential backup inside checkout',
+      location: backup.path,
+      disposition: 'uninspectable',
+    });
+  }
+  for (const agent of inventory.onecli.orphans) {
+    artifacts.push({
+      id: `onecli-orphan-${agent.uuid}`,
+      kind: 'onecli-agent',
+      label: agent.name || agent.identifier,
+      location: `onecli-agent:${agent.uuid}`,
+      disposition: 'uninspectable',
+    });
+  }
+  for (const [index, message] of inventory.notes.entries()) {
+    artifacts.push({
+      id: `uninspectable-${index + 1}`,
+      kind: 'uninspectable',
+      label: message,
+      location: inventory.projectRoot,
+      disposition: 'uninspectable',
+    });
+  }
+
+  return {
+    id: randomUUID(),
+    groups: [
+      protocolGroup('service', GROUPS.service.title, GROUPS.service.desc),
+      protocolGroup('data', GROUPS.data.title, GROUPS.data.desc),
+      protocolGroup('user', GROUPS.user.title, GROUPS.user.desc),
+      protocolGroup('onecli', GROUPS.onecli.title, GROUPS.onecli.desc),
+    ],
+    artifacts,
+  };
+}
+
+function protocolGroup(id: UninstallGroup, label: string, description: string): UninstallPlan['groups'][number] {
+  return { id, label, description, default: 'preserve', choices: ['preserve', 'remove'] };
+}
+
+function sharedArtifact(id: string, kind: string, label: string, location: string): Artifact {
+  return { id, kind, label, location, disposition: 'shared' };
+}
+
+function shortHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 16);
+}
+
+function artifactForAction(inventory: Inventory, action: RemovalAction): Artifact {
+  const identityMissing = 'identityRequired' in action && action.identityRequired === true && !action.expectedIdentity;
+  const processListMissing = action.kind === 'pkill-host' && inventory.service.hostProcessIds === undefined;
+  const containerListMissing = action.kind === 'rm-containers' && inventory.service.containerRuntimeAvailable === false;
+  const absent =
+    (action.kind === 'rm-containers' && !containerListMissing && inventory.service.containerIds.length === 0) ||
+    (action.kind === 'pkill-host' && inventory.service.hostProcessIds?.length === 0);
+  return {
+    id: artifactId(action),
+    kind: action.kind,
+    label: actionLabel(action),
+    location: actionLocation(action),
+    disposition:
+      identityMissing || processListMissing || containerListMissing
+        ? 'uninspectable'
+        : absent
+          ? 'alreadyAbsent'
+          : 'owned',
+    decisionGroup: groupForAction(inventory, action),
+  };
+}
+
+function groupForAction(inventory: Inventory, action: RemovalAction): UninstallGroup {
+  if (action.kind === 'delete-onecli-agent') return 'onecli';
+  if (['unload-service', 'kill-pid', 'pkill-host', 'rm-containers', 'rmi', 'rm-ncl-symlink'].includes(action.kind)) {
+    return 'service';
+  }
+  if (
+    (action.kind === 'delete-path' || action.kind === 'delete-runtime-path') &&
+    inventory.user.some((item) => item.path === action.item.path)
+  )
+    return 'user';
+  return 'data';
+}
+
+function actionLocation(action: RemovalAction): string {
+  switch (action.kind) {
+    case 'unload-service':
+      return action.unitPath;
+    case 'kill-pid':
+      return action.pidFile;
+    case 'pkill-host':
+      return action.pattern;
+    case 'rm-containers':
+      return `${action.runtime}:${action.labelFilter}`;
+    case 'rmi':
+      return action.image;
+    case 'rm-ncl-symlink':
+      return action.linkPath;
+    case 'delete-onecli-agent':
+      return `onecli-agent:${action.agent.uuid}`;
+    case 'backup-env':
+      return action.envPath;
+    case 'delete-path':
+    case 'delete-runtime-path':
+      return action.item.path;
+  }
+}
+
+function actionLabel(action: RemovalAction): string {
+  if (action.kind === 'delete-onecli-agent') return `OneCLI agent ${action.agent.name || action.agent.identifier}`;
+  if (action.kind === 'delete-path' || action.kind === 'delete-runtime-path') return action.item.what;
+  if (action.kind === 'backup-env') return 'Secrets and API keys (.env, backed up first)';
+  return action.kind.replaceAll('-', ' ');
+}
+
+function remainingArtifacts(inventory: Inventory): Artifact[] {
+  return protocolPlan(inventory).artifacts.filter((artifact) => artifact.disposition !== 'alreadyAbsent');
+}
+
+function receiptFor(
+  outcome: 'success' | 'incomplete',
+  results: UninstallActionResult[],
+  inventory: Inventory,
+): UninstallReceipt {
+  return {
+    version: 1,
+    outcome,
+    results,
+    remaining: remainingArtifacts(inventory),
+    checkoutRemoval: checkoutRemovalFor(inventory),
+    completedAt: new Date().toISOString(),
+  };
+}
+
+function checkoutRemovalFor(inventory: Inventory): { safe: boolean; blockers: string[] } {
+  const blockers: string[] = [];
+  const service = inventory.service;
+  if (service.launchdPlist) blockers.push(`background service remains: ${service.launchdPlist}`);
+  if (service.systemdUserUnit) blockers.push(`background service remains: ${service.systemdUserUnit}`);
+  if (service.systemdSystemUnit) blockers.push(`system service remains: ${service.systemdSystemUnit}`);
+  if (service.pidFile) blockers.push(`pidfile remains: ${service.pidFile}`);
+  if (service.hostProcessIds === undefined) blockers.push('host process identity could not be inspected');
+  else if (service.hostProcessIds.length > 0) blockers.push('checkout-owned host process remains');
+  if (service.containerIds.length > 0) blockers.push('checkout-owned container remains');
+  if (service.nclSymlink) blockers.push(`ncl symlink remains: ${service.nclSymlink}`);
+  if (service.containerRuntimeAvailable === false) blockers.push('container runtime state could not be inspected');
+
+  for (const item of [...inventory.data, ...inventory.runtime, ...inventory.user]) {
+    try {
+      fs.lstatSync(item.path);
+      blockers.push(`checkout artifact remains: ${item.path}`);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') blockers.push(`checkout artifact could not be inspected: ${item.path}`);
+    }
+  }
+  for (const item of inventory.legacyEnvBackups ?? []) {
+    blockers.push(`credential backup remains inside checkout: ${item.path}`);
+  }
+  return { safe: blockers.length === 0, blockers };
+}
+
 /** Unwrap a confirm result; Ctrl-C / Esc cancels the whole uninstall — nothing deleted. */
 function answered<T>(value: T | symbol): T {
   if (p.isCancel(value)) {
@@ -447,9 +761,6 @@ export function sameOwnershipSelectors(before: Inventory, after: Inventory): boo
     Boolean(beforeIdentity?.root) &&
     Boolean(afterIdentity?.root) &&
     beforeIdentity?.root === afterIdentity?.root &&
-    Object.values(beforeIdentity?.exactPaths ?? {}).every(Boolean) &&
-    beforeIdentity?.containerSelector === afterIdentity?.containerSelector &&
-    Object.values(beforeIdentity?.scopedRoots ?? {}).every(Boolean) &&
-    JSON.stringify(beforeIdentity?.scopedRoots) === JSON.stringify(afterIdentity?.scopedRoots)
+    beforeIdentity?.containerSelector === afterIdentity?.containerSelector
   );
 }

@@ -10,6 +10,8 @@ import { randomUUID } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
+import { redactSensitiveValues } from './redaction.js';
+
 const POSTHOG_KEY = 'phc_fx1Hhx9ucz8GuaJC8LVZWO8u03yXZZJJ6ObS4yplnaP';
 const POSTHOG_URL = 'https://us.i.posthog.com/capture/';
 const INSTALL_ID_PATH = path.join('data', 'install-id');
@@ -56,7 +58,8 @@ export function emit(
   const cleaned: Record<string, unknown> = { platform: process.platform };
   for (const [k, v] of Object.entries(props)) {
     if (v === undefined) continue;
-    cleaned[k] = v;
+    cleaned[k] =
+      typeof v === 'string' && process.env.NANOCLAW_PROTOCOL === 'nanoclaw.driver.v1' ? redactSensitiveValues(v) : v;
   }
 
   const body = JSON.stringify({

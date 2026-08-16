@@ -20,7 +20,12 @@ import k from 'kleur';
 import * as setupLog from '../logs.js';
 import { offerClaudeOnFailure } from './claude-handoff.js';
 import { emit as phEmit } from './diagnostics.js';
+import { createSensitiveRedactor, redactSensitiveValues } from './redaction.js';
+import { childEnvWithoutSetupSecrets } from './secret-file.js';
+import type { SetupDriver } from './setup-driver.js';
 import { brandBody, fitToWidth, fmtDuration } from './theme.js';
+
+const MAX_MACHINE_CHILD_OUTPUT_BYTES = 4 * 1024 * 1024;
 
 export type Fields = Record<string, string>;
 export type Block = { type: string; fields: Fields };
@@ -28,6 +33,7 @@ export type Block = { type: string; fields: Fields };
 export type StepResult = {
   ok: boolean;
   exitCode: number;
+  failure?: 'output_limit';
   blocks: Block[];
   transcript: string;
   /** The last block with a STATUS field (the terminal/result block). */
@@ -37,6 +43,7 @@ export type StepResult = {
 export type QuietChildResult = {
   ok: boolean;
   exitCode: number;
+  failure?: 'output_limit';
   transcript: string;
   terminal: Block | null;
   blocks: Block[];
@@ -115,15 +122,51 @@ export function spawnStep(
   onBlock: (block: Block) => void,
   rawLogPath: string,
   onLine?: (line: string) => void,
+  driver?: SetupDriver,
 ): Promise<StepResult> {
   return new Promise((resolve) => {
     const args = ['exec', 'tsx', 'setup/index.ts', '--step', stepName];
     if (extra.length > 0) args.push('--', ...extra);
 
-    const child = spawn('pnpm', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const machine = driver?.mode === 'ndjson';
+    const child = spawn('pnpm', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(machine ? { detached: true, env: childEnvWithoutSetupSecrets() } : {}),
+    });
+    const stopGroup = (): void => {
+      if (!machine || !child.pid) return;
+      const processGroupId = child.pid;
+      try {
+        process.kill(-processGroupId, 'SIGTERM');
+      } catch {
+        /* already gone */
+      }
+      setTimeout(() => {
+        try {
+          process.kill(-processGroupId, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }, 250);
+    };
+    driver?.cancellationSignal?.addEventListener('abort', stopGroup, { once: true });
+    if (driver?.cancellationSignal?.aborted) stopGroup();
     const stream = new StatusStream(onBlock);
+    const stdoutRedactor = machine ? createSensitiveRedactor() : undefined;
+    const stderrRedactor = machine ? createSensitiveRedactor() : undefined;
     const raw = fs.createWriteStream(rawLogPath, { flags: 'w' });
     raw.write(`# ${stepName} — ${new Date().toISOString()}\n\n`);
+    let outputBytes = 0;
+    let outputLimitExceeded = false;
+    const accepts = (chunk: Buffer): boolean => {
+      if (!machine) return true;
+      if (outputLimitExceeded) return false;
+      outputBytes += chunk.byteLength;
+      if (outputBytes <= MAX_MACHINE_CHILD_OUTPUT_BYTES) return true;
+      outputLimitExceeded = true;
+      stopGroup();
+      return false;
+    };
 
     // Per-line forwarder for the optional onLine callback. We keep our own
     // buffer (separate from StatusStream's) so the parser still gets raw
@@ -143,31 +186,54 @@ export function spawnStep(
     };
 
     child.stdout.on('data', (chunk: Buffer) => {
+      if (!accepts(chunk)) return;
       const s = chunk.toString('utf-8');
-      stream.write(s);
-      raw.write(chunk);
-      pushLines(s);
+      const safe = stdoutRedactor?.write(s) ?? s;
+      stream.write(safe);
+      raw.write(safe);
+      pushLines(safe);
     });
     child.stderr.on('data', (chunk: Buffer) => {
-      const s = chunk.toString('utf-8');
-      stream.transcript += s;
-      raw.write(chunk);
-      pushLines(s);
+      if (!accepts(chunk)) return;
+      const safe = stderrRedactor?.write(chunk.toString('utf-8')) ?? chunk.toString('utf-8');
+      stream.transcript += safe;
+      raw.write(safe);
+      pushLines(safe);
     });
 
-    child.on('close', (code) => {
+    let finished = false;
+    const finish = (code: number | null): void => {
+      if (finished) return;
+      finished = true;
+      driver?.cancellationSignal?.removeEventListener('abort', stopGroup);
+      const stdoutTail = stdoutRedactor?.end() ?? '';
+      const stderrTail = stderrRedactor?.end() ?? '';
+      stream.write(stdoutTail);
+      stream.transcript += stderrTail;
+      raw.write(stdoutTail);
+      raw.write(stderrTail);
+      pushLines(stdoutTail);
+      pushLines(stderrTail);
       raw.end();
       const terminal = [...stream.blocks].reverse().find((b) => b.fields.STATUS) ?? null;
       const status = terminal?.fields.STATUS;
-      const ok = code === 0 && (status === 'success' || status === 'skipped');
+      const ok = !outputLimitExceeded && code === 0 && (status === 'success' || status === 'skipped');
       resolve({
         ok,
         exitCode: code ?? 1,
+        ...(outputLimitExceeded ? { failure: 'output_limit' as const } : {}),
         blocks: stream.blocks,
         transcript: stream.transcript,
         terminal,
       });
+    };
+    child.on('error', (error) => {
+      const safe = machine ? redactSensitiveValues(error.message) : error.message;
+      stream.transcript += safe;
+      raw.write(safe);
+      finish(1);
     });
+    child.on('close', finish);
   });
 }
 
@@ -176,32 +242,103 @@ export function spawnQuiet(
   args: string[],
   rawLogPath: string,
   envOverride?: NodeJS.ProcessEnv,
+  driver?: SetupDriver,
 ): Promise<QuietChildResult> {
   return new Promise((resolve) => {
+    const machine = driver?.mode === 'ndjson';
     const child = spawn(cmd, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: envOverride ? { ...process.env, ...envOverride } : process.env,
+      // Machine callers pass a complete sanitized environment. Merging it
+      // with the parent environment would reintroduce setup secrets; terminal
+      // callers retain the existing partial-override behavior.
+      env: machine
+        ? childEnvWithoutSetupSecrets(envOverride ?? process.env)
+        : envOverride
+          ? { ...process.env, ...envOverride }
+          : process.env,
+      ...(machine ? { detached: true } : {}),
     });
+    const stopGroup = (): void => {
+      if (!machine || !child.pid) return;
+      const processGroupId = child.pid;
+      try {
+        process.kill(-processGroupId, 'SIGTERM');
+      } catch {
+        /* already gone */
+      }
+      setTimeout(() => {
+        try {
+          process.kill(-processGroupId, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }, 250);
+    };
+    driver?.cancellationSignal?.addEventListener('abort', stopGroup, { once: true });
+    if (driver?.cancellationSignal?.aborted) stopGroup();
     let transcript = '';
     const raw = fs.createWriteStream(rawLogPath, { flags: 'w' });
-    raw.write(`# ${[cmd, ...args].join(' ')} — ${new Date().toISOString()}\n\n`);
+    raw.write(
+      `# ${machine ? redactSensitiveValues([cmd, ...args].join(' ')) : [cmd, ...args].join(' ')} - ${new Date().toISOString()}\n\n`,
+    );
     const blocks: Block[] = [];
     const stream = new StatusStream((b) => blocks.push(b));
+    const stdoutRedactor = machine ? createSensitiveRedactor() : undefined;
+    const stderrRedactor = machine ? createSensitiveRedactor() : undefined;
+    let outputBytes = 0;
+    let outputLimitExceeded = false;
+    const accepts = (chunk: Buffer): boolean => {
+      if (!machine) return true;
+      if (outputLimitExceeded) return false;
+      outputBytes += chunk.byteLength;
+      if (outputBytes <= MAX_MACHINE_CHILD_OUTPUT_BYTES) return true;
+      outputLimitExceeded = true;
+      stopGroup();
+      return false;
+    };
     child.stdout.on('data', (c: Buffer) => {
+      if (!accepts(c)) return;
       const s = c.toString('utf-8');
-      transcript += s;
-      stream.write(s);
-      raw.write(c);
+      const safe = stdoutRedactor?.write(s) ?? s;
+      transcript += safe;
+      stream.write(safe);
+      raw.write(safe);
     });
     child.stderr.on('data', (c: Buffer) => {
-      transcript += c.toString('utf-8');
-      raw.write(c);
+      if (!accepts(c)) return;
+      const safe = stderrRedactor?.write(c.toString('utf-8')) ?? c.toString('utf-8');
+      transcript += safe;
+      raw.write(safe);
     });
-    child.on('close', (code) => {
+    let finished = false;
+    const finish = (code: number | null): void => {
+      if (finished) return;
+      finished = true;
+      driver?.cancellationSignal?.removeEventListener('abort', stopGroup);
+      const stdoutTail = stdoutRedactor?.end() ?? '';
+      const stderrTail = stderrRedactor?.end() ?? '';
+      transcript += stdoutTail + stderrTail;
+      stream.write(stdoutTail);
+      raw.write(stdoutTail);
+      raw.write(stderrTail);
       raw.end();
       const terminal = [...blocks].reverse().find((b) => b.fields.STATUS) ?? null;
-      resolve({ ok: code === 0, exitCode: code ?? 1, transcript, terminal, blocks });
+      resolve({
+        ok: !outputLimitExceeded && code === 0,
+        exitCode: code ?? 1,
+        ...(outputLimitExceeded ? { failure: 'output_limit' as const } : {}),
+        transcript,
+        terminal,
+        blocks,
+      });
+    };
+    child.on('error', (error) => {
+      const safe = machine ? redactSensitiveValues(error.message) : error.message;
+      transcript += safe;
+      raw.write(safe);
+      finish(1);
     });
+    child.on('close', finish);
   });
 }
 
@@ -210,18 +347,27 @@ export async function runQuietStep(
   stepName: string,
   labels: SpinnerLabels,
   extra: string[] = [],
+  driver?: SetupDriver,
 ): Promise<StepResult & { rawLog: string; durationMs: number }> {
   const rawLog = setupLog.stepRawLog(stepName);
   const start = Date.now();
+  driver?.throwIfCancelled();
+  driver?.progress(stepName, 'pending', labels.running.replace(/…$/, ''));
   phEmit('step_started', { step: stepName });
-  const result = await runUnderSpinner(labels, () => spawnStep(stepName, extra, () => {}, rawLog));
+  const result = await runUnderSpinner(
+    labels,
+    () => spawnStep(stepName, extra, () => {}, rawLog, undefined, driver),
+    driver,
+    stepName,
+  );
   const durationMs = Date.now() - start;
-  writeStepEntry(stepName, result, durationMs, rawLog);
+  writeStepEntry(stepName, result, durationMs, rawLog, driver?.mode === 'ndjson');
   phEmit('step_completed', {
     step: stepName,
     status: outcomeStatus(result),
     duration_ms: durationMs,
   });
+  driver?.throwIfCancelled();
   return { ...result, rawLog, durationMs };
 }
 
@@ -237,14 +383,17 @@ export async function runQuietChild(
     /** Environment overrides to pass to the child process. */
     env?: NodeJS.ProcessEnv;
   },
+  driver?: SetupDriver,
 ): Promise<QuietChildResult & { rawLog: string; durationMs: number }> {
   const rawLog = setupLog.stepRawLog(logName);
   const start = Date.now();
+  driver?.throwIfCancelled();
+  driver?.progress(logName, 'pending', labels.running.replace(/…$/, ''));
   phEmit('step_started', { step: logName });
-  const result = await runUnderSpinner(labels, () => spawnQuiet(cmd, args, rawLog, opts?.env));
+  const result = await runUnderSpinner(labels, () => spawnQuiet(cmd, args, rawLog, opts?.env, driver), driver, logName);
   const durationMs = Date.now() - start;
 
-  const blockFields = summariseTerminalFields(result.terminal);
+  const blockFields = summariseTerminalFields(result.terminal, driver?.mode === 'ndjson');
   const fields = { ...blockFields, ...(opts?.extraFields ?? {}) };
   const rawStatus = result.terminal?.fields.STATUS;
   const status: 'success' | 'skipped' | 'failed' = !result.ok
@@ -254,6 +403,7 @@ export async function runQuietChild(
       : 'success';
   setupLog.step(logName, status, durationMs, fields, rawLog);
   phEmit('step_completed', { step: logName, status, duration_ms: durationMs });
+  driver?.throwIfCancelled();
   return { ...result, rawLog, durationMs };
 }
 
@@ -265,25 +415,31 @@ function outcomeStatus(result: StepResult): 'success' | 'skipped' | 'failed' {
 }
 
 /** Turn a step's terminal-block fields into a concise progression-log entry. */
-export function writeStepEntry(stepName: string, result: StepResult, durationMs: number, rawLog: string): void {
+export function writeStepEntry(
+  stepName: string,
+  result: StepResult,
+  durationMs: number,
+  rawLog: string,
+  redact = false,
+): void {
   const rawStatus = result.terminal?.fields.STATUS;
   const logStatus: 'success' | 'skipped' | 'failed' = !result.ok
     ? 'failed'
     : rawStatus === 'skipped'
       ? 'skipped'
       : 'success';
-  const fields = summariseTerminalFields(result.terminal);
+  const fields = summariseTerminalFields(result.terminal, redact);
   setupLog.step(stepName, logStatus, durationMs, fields, rawLog);
 }
 
 /** Strip STATUS + LOG (redundant) and any oversize values from the terminal block's fields. */
-export function summariseTerminalFields(block: Block | null): Record<string, string> {
+export function summariseTerminalFields(block: Block | null, redact = false): Record<string, string> {
   if (!block) return {};
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(block.fields)) {
     if (k === 'STATUS' || k === 'LOG') continue;
     if (v.length > 120) continue; // keep it skimmable; full value lives in the raw log
-    out[k] = v;
+    out[k] = redact ? redactSensitiveValues(v) : v;
   }
   return out;
 }
@@ -300,9 +456,24 @@ export function summariseTerminalFields(block: Block | null): Record<string, str
  * done/skipped/failed headline (bold) with the elapsed time (dim); on a failure
  * it also dumps the transcript tail when one is supplied.
  */
-export function startSpinner(labels: SpinnerLabels): {
+export function startSpinner(
+  labels: SpinnerLabels,
+  driver?: SetupDriver,
+  stepId = labels.running
+    .replace(/[^a-z0-9]+/gi, '-')
+    .replace(/^-|-$/g, '')
+    .toLowerCase(),
+): {
   stop: (outcome: { ok: boolean; skipped?: boolean; transcript?: string }) => void;
 } {
+  if (driver?.mode === 'ndjson') {
+    driver.progress(stepId, 'running', labels.running.replace(/…$/, ''));
+    return {
+      stop({ ok, skipped }) {
+        driver.progress(stepId, ok ? 'succeeded' : 'failed');
+      },
+    };
+  }
   const s = p.spinner();
   const start = Date.now();
   s.start(fitToWidth(labels.running, ' (99m 59s)'));
@@ -321,7 +492,7 @@ export function startSpinner(labels: SpinnerLabels): {
         s.stop(`${k.bold(fitToWidth(msg, suffix))}${k.dim(suffix)}`);
       } else {
         const failMsg = labels.failed ?? labels.running.replace(/…$/, ' failed');
-        s.stop(`${k.bold(fitToWidth(failMsg, suffix))}${k.dim(suffix)}`, 1);
+        s.error(`${k.bold(fitToWidth(failMsg, suffix))}${k.dim(suffix)}`);
         if (transcript) dumpTranscriptOnFailure(transcript);
       }
     },
@@ -331,8 +502,10 @@ export function startSpinner(labels: SpinnerLabels): {
 async function runUnderSpinner<T extends { ok: boolean; transcript: string; terminal?: Block | null }>(
   labels: SpinnerLabels,
   work: () => Promise<T>,
+  driver?: SetupDriver,
+  stepId?: string,
 ): Promise<T> {
-  const spinner = startSpinner(labels);
+  const spinner = startSpinner(labels, driver, stepId);
   const result = await work();
   spinner.stop({
     ok: result.ok,
@@ -366,9 +539,33 @@ export function dumpTranscriptOnFailure(transcript: string): void {
  * process.exit. The return type is `Promise<never>`; control-flow
  * narrowing still works after `await`.
  */
-export async function fail(stepName: string, msg: string, hint?: string, rawLogPath?: string): Promise<never> {
+export async function fail(
+  stepName: string,
+  msg: string,
+  hint?: string,
+  rawLogPath?: string,
+  driver?: SetupDriver,
+): Promise<never> {
+  // A signal received during an atomic child/health operation wins over that
+  // operation's failure result: machine cancellation is terminal exit 2.
+  driver?.throwIfCancelled();
   setupLog.abort(stepName, msg);
   phEmit('setup_aborted', { step: stepName, reason: msg });
+  if (driver?.mode === 'ndjson') {
+    driver.progress(stepName, 'failed');
+    driver.error(
+      'step_failed',
+      msg,
+      [
+        {
+          kind: 'manual',
+          title: 'Fix the failed prerequisite and rerun',
+          instructions: [hint ?? 'Inspect logs/setup.log and the matching raw step log.'],
+        },
+      ],
+      stepName,
+    );
+  }
   p.log.error(msg);
   if (hint) p.log.message(k.dim(hint));
   p.log.message(k.dim('Logs: logs/setup.log · Raw: logs/setup-steps/'));

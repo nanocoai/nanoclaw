@@ -95,6 +95,11 @@ All optional, all read from `.env` or the environment.
 | `NANOCLAW_REGISTRY_TOKEN` | Adopt an existing account token directly. |
 | `NANOCLAW_ALLOW_UNLABELED_IMAGE` | Accept an image with no agent-runner lock label — needed for a `docker save`/`load` or third-party image. |
 
+`NANOCLAW_REGISTRY_API` is a trust boundary, not just a routing override. When
+you point it at a self-hosted account service, that service may declare the
+HTTPS identity-provider endpoints used for browser sign-in. Set it only to a
+service you trust; the setup driver rejects non-HTTPS sign-in URLs.
+
 If you point this at your own registry you need none of these beyond
 `NANOCLAW_HARDENED_IMAGE` and a reference: authentication is whatever
 `docker login` already holds, and there is no account involved.

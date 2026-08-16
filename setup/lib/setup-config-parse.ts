@@ -40,6 +40,7 @@ export function readFromEnv(env: NodeJS.ProcessEnv = process.env): ConfigValues 
     const raw = env[envVarFor(e)];
     if (raw === undefined || raw === '') continue;
     const v = coerce(e, raw);
+    if ((e.type === 'string' || e.type === 'url') && e.validate?.(raw)) continue;
     if (v !== undefined) out[e.key] = v;
   }
   return out;

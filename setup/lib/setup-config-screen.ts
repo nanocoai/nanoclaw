@@ -16,12 +16,13 @@ import { brightSelect } from './bright-select.js';
 import { ensureAnswer } from './runner.js';
 import { CONFIG, type Entry } from './setup-config.js';
 import type { ConfigValues } from './setup-config-parse.js';
+import type { SetupDriver } from './setup-driver.js';
 
 const SKIP_SENTINEL = '__leave_unchanged__';
 const DONE_SENTINEL = '__done__';
 const MASK = '••••••••';
 
-export async function runAdvancedScreen(initial: ConfigValues): Promise<ConfigValues> {
+export async function runAdvancedScreen(initial: ConfigValues, driver?: SetupDriver): Promise<ConfigValues> {
   const result: ConfigValues = { ...initial };
   const visible = CONFIG.filter((e) => e.surface === 'flag+ui');
 
@@ -32,20 +33,36 @@ export async function runAdvancedScreen(initial: ConfigValues): Promise<ConfigVa
         label: e.label,
         hint: hintFor(e, result),
       })),
-      { value: DONE_SENTINEL, label: 'Done — continue with setup' },
+      { value: DONE_SENTINEL, label: 'Done - continue with setup', hint: undefined },
     ];
 
-    const choice = ensureAnswer(
-      await brightSelect<string>({
-        message: 'Pick a setting to override',
-        options,
-        initialValue: DONE_SENTINEL,
-      }),
-    ) as string;
+    const choice = driver
+      ? String(
+          await driver.prompt({
+            id: 'advanced-setting',
+            kind: 'singleChoice',
+            message: 'Pick a setting to override',
+            choices: options.map(({ value, label, hint }) => ({ id: value, label, hint })),
+            default: DONE_SENTINEL,
+          }),
+        )
+      : (ensureAnswer(
+          await brightSelect<string>({
+            message: 'Pick a setting to override',
+            options,
+            initialValue: DONE_SENTINEL,
+          }),
+        ) as string);
 
     if (choice === DONE_SENTINEL) return result;
     const entry = visible.find((e) => e.key === choice);
-    if (entry) await promptOne(entry, result);
+    if (entry?.secret && driver?.mode === 'ndjson') {
+      driver.error(
+        'secret_transport_forbidden',
+        'Machine setup does not accept secrets through advanced configuration. Use the structured authentication prompts instead.',
+      );
+    }
+    if (entry) await promptOne(entry, result, driver);
   }
 }
 
@@ -56,42 +73,62 @@ function hintFor(e: Entry, values: ConfigValues): string {
   return String(v);
 }
 
-async function promptOne(e: Entry, values: ConfigValues): Promise<void> {
+async function promptOne(e: Entry, values: ConfigValues, driver?: SetupDriver): Promise<void> {
   if (e.type === 'boolean') {
     const init = typeof values[e.key] === 'boolean' ? (values[e.key] as boolean) : (e.default ?? false);
-    const ans = ensureAnswer(await p.confirm({ message: e.label, initialValue: init }));
+    const ans = driver
+      ? await driver.prompt({ id: `advanced-${e.key}`, kind: 'confirm', message: e.label, default: init })
+      : ensureAnswer(await p.confirm({ message: e.label, initialValue: init }));
     values[e.key] = ans as boolean;
     return;
   }
 
   if (e.type === 'enum') {
-    const ans = ensureAnswer(
-      await brightSelect<string>({
-        message: e.label,
-        options: [{ value: SKIP_SENTINEL, label: 'Leave unchanged' }, ...e.options],
-        initialValue: SKIP_SENTINEL,
-      }),
-    );
+    const options = [{ value: SKIP_SENTINEL, label: 'Leave unchanged' }, ...e.options];
+    const ans = driver
+      ? await driver.prompt({
+          id: `advanced-${e.key}`,
+          kind: 'singleChoice',
+          message: e.label,
+          choices: options.map(({ value, label }) => ({ id: value, label })),
+          default: SKIP_SENTINEL,
+        })
+      : ensureAnswer(
+          await brightSelect<string>({
+            message: e.label,
+            options,
+            initialValue: SKIP_SENTINEL,
+          }),
+        );
     if (ans !== SKIP_SENTINEL) values[e.key] = ans as string;
     return;
   }
 
   if (e.type === 'integer') {
-    const ans = ensureAnswer(
-      await p.text({
-        message: e.label,
-        placeholder: e.default !== undefined ? String(e.default) : undefined,
-        validate: (v) => {
-          const s = (v ?? '').trim();
-          if (!s) return undefined;
-          const n = Number(s);
-          if (!Number.isFinite(n)) return 'Must be a number';
-          if (e.min !== undefined && n < e.min) return `Must be ≥ ${e.min}`;
-          if (e.max !== undefined && n > e.max) return `Must be ≤ ${e.max}`;
-          return undefined;
-        },
-      }),
-    );
+    const validate = (value: boolean | string): string | undefined => {
+      const s = String(value).trim();
+      if (!s) return undefined;
+      const n = Number(s);
+      if (!Number.isFinite(n)) return 'Must be a number';
+      if (e.min !== undefined && n < e.min) return `Must be ≥ ${e.min}`;
+      if (e.max !== undefined && n > e.max) return `Must be ≤ ${e.max}`;
+      return undefined;
+    };
+    const ans = driver
+      ? await driver.prompt({
+          id: `advanced-${e.key}`,
+          kind: 'text',
+          message: e.label,
+          placeholder: e.default !== undefined ? String(e.default) : undefined,
+          validateValue: validate,
+        })
+      : ensureAnswer(
+          await p.text({
+            message: e.label,
+            placeholder: e.default !== undefined ? String(e.default) : undefined,
+            validate: (v) => validate(v ?? ''),
+          }),
+        );
     const trimmed = ((ans as string) ?? '').trim();
     if (trimmed) values[e.key] = Number(trimmed);
     return;
@@ -103,15 +140,24 @@ async function promptOne(e: Entry, values: ConfigValues): Promise<void> {
     if (!s) return undefined;
     return e.validate?.(s);
   };
-  const ans = ensureAnswer(
-    e.secret
-      ? await p.password({ message: e.label, clearOnError: true, validate })
-      : await p.text({
-          message: e.label,
-          placeholder: e.placeholder ?? e.default,
-          validate,
-        }),
-  );
+  const ans = driver
+    ? await driver.prompt({
+        id: `advanced-${e.key}`,
+        kind: e.secret ? 'secret' : 'text',
+        message: e.label,
+        sensitive: e.secret,
+        placeholder: e.placeholder ?? e.default,
+        validateValue: (value) => validate(String(value)),
+      })
+    : ensureAnswer(
+        e.secret
+          ? await p.password({ message: e.label, clearOnError: true, validate })
+          : await p.text({
+              message: e.label,
+              placeholder: e.placeholder ?? e.default,
+              validate,
+            }),
+      );
   const trimmed = ((ans as string) ?? '').trim();
   if (trimmed) values[e.key] = trimmed;
 }

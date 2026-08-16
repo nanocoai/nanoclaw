@@ -11,6 +11,7 @@
  * provider registries, guarded the same way (a barrel-driven registration test).
  */
 import type { AssistContext } from '../lib/claude-assist.js'; // type-only — registry stays runtime-dependency-free
+import type { SetupDriver } from '../lib/setup-driver.js';
 
 /**
  * Outcome of a provider-owned failure-assist hook:
@@ -26,9 +27,11 @@ export interface SetupProviderEntry {
   label: string;
   hint: string;
   /** Provider-owned auth walk-through (vault-only). Absent → standard auth step. */
-  runAuth?: () => Promise<void>;
+  runAuth?: (driver: SetupDriver) => Promise<void>;
+  /** The provider-owned auth walk-through emits only SetupDriver semantics in machine mode. */
+  supportsStructuredAuth?: true;
   /** Verifies the provider's payload is wired (files, barrels, Dockerfile pin). */
-  runInstallCheck?: () => Promise<void>;
+  runInstallCheck?: (driver: SetupDriver) => Promise<void>;
   /** Provider-owned interactive failure debugger. 'unavailable' → dispatcher
    *  falls back to the guarded Claude offer (never install/sign-in). */
   offerFailureAssist?: (ctx: AssistContext, projectRoot: string) => Promise<FailureAssistResult>;
@@ -51,6 +54,27 @@ export function registerSetupProvider(entry: SetupProviderEntry): void {
 
 export function getSetupProvider(name: string): SetupProviderEntry | undefined {
   return registry.get(name.toLowerCase());
+}
+
+/** Run one provider-owned auth flow without letting an old terminal-only adapter corrupt NDJSON. */
+export async function runSetupProviderAuth(entry: SetupProviderEntry, driver: SetupDriver): Promise<void> {
+  if (!entry.runAuth) throw new Error(`Setup provider has no auth flow: ${entry.value}`);
+  if (driver.mode === 'ndjson' && entry.supportsStructuredAuth !== true) {
+    driver.error(
+      'provider_auth_update_required',
+      `${entry.label} setup does not support structured authentication yet.`,
+      [
+        {
+          kind: 'manual',
+          title: `Update the ${entry.label} provider`,
+          instructions: ['Install the matching provider update, then rerun setup.'],
+        },
+      ],
+      'auth',
+    );
+  }
+  await entry.runAuth(driver);
+  await entry.runInstallCheck?.(driver);
 }
 
 /** Claude (the default) first, then the rest in registration order. */

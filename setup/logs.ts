@@ -23,9 +23,13 @@
 import fs from 'fs';
 import path from 'path';
 
+import { redactSensitiveValues } from './lib/redaction.js';
+
 const LOGS_DIR = 'logs';
 const STEPS_DIR = path.join(LOGS_DIR, 'setup-steps');
 const PROGRESS_LOG = path.join(LOGS_DIR, 'setup.log');
+const logValue = (value: string): string =>
+  process.env.NANOCLAW_PROTOCOL === 'nanoclaw.driver.v1' ? redactSensitiveValues(value) : value;
 
 export const progressLogPath = PROGRESS_LOG;
 export const stepsDir = STEPS_DIR;
@@ -56,7 +60,7 @@ export function header(meta: Record<string, string>): void {
   const ts = new Date().toISOString();
   const lines = [`## ${ts} · setup:auto started`];
   for (const [k, v] of Object.entries(meta)) {
-    lines.push(`  ${k}: ${v}`);
+    lines.push(`  ${k}: ${logValue(v)}`);
   }
   lines.push('');
   fs.appendFileSync(PROGRESS_LOG, lines.join('\n') + '\n');
@@ -76,7 +80,7 @@ export function step(
   const lines = [`=== [${ts}] ${name} [${dur}] → ${status} ===`];
   for (const [k, v] of Object.entries(fields)) {
     if (v === undefined || v === null || v === '') continue;
-    lines.push(`  ${k.toLowerCase()}: ${String(v)}`);
+    lines.push(`  ${k.toLowerCase()}: ${logValue(String(v))}`);
   }
   if (rawRel) lines.push(`  raw: ${rawRel}`);
   lines.push('');
@@ -91,7 +95,7 @@ export function step(
 export function userInput(key: string, value: string): void {
   fs.mkdirSync(LOGS_DIR, { recursive: true });
   const ts = new Date().toISOString();
-  fs.appendFileSync(PROGRESS_LOG, `=== [${ts}] user-input → ${key} ===\n  value: ${value}\n\n`);
+  fs.appendFileSync(PROGRESS_LOG, `=== [${ts}] user-input → ${key} ===\n  value: ${logValue(value)}\n\n`);
 }
 
 /** Append the success footer. */
@@ -103,7 +107,7 @@ export function complete(totalMs: number): void {
 /** Append the failure footer. Keep error short — full context lives in the failing step's raw log. */
 export function abort(stepName: string, error: string): void {
   const ts = new Date().toISOString();
-  fs.appendFileSync(PROGRESS_LOG, `## ${ts} · aborted at ${stepName} (${error})\n`);
+  fs.appendFileSync(PROGRESS_LOG, `## ${ts} · aborted at ${stepName} (${logValue(error)})\n`);
 }
 
 /**

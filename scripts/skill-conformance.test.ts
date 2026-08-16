@@ -131,6 +131,9 @@ interface RunOutcome {
   events: ApplyEvent[];
 }
 
+const renderedCommand = (command: string, args: string[] = []): string =>
+  command.replace(/\$\{(\d+)\}/g, (_match, index: string) => args[Number(index) - 1] ?? '');
+
 async function runScenario(skillDir: string, sc: Scenario): Promise<RunOutcome> {
   const root = scratchRoot();
   const cmds: string[] = [];
@@ -141,7 +144,8 @@ async function runScenario(skillDir: string, sc: Scenario): Promise<RunOutcome> 
     // resolveRemote MUST be injected: the default shells out to real
     // `git remote` + `git ls-remote` — network in CI, nondeterministic on forks.
     resolveRemote: () => 'origin',
-    exec: (c) => {
+    exec: (command, args) => {
+      const c = renderedCommand(command, args);
       cmds.push(c);
       return sc.exec?.find((e) => c.includes(e.match))?.stdout;
     },
@@ -339,7 +343,8 @@ describe.each(SKILLS)('%s', (name) => {
           current = byLine.get(e.line);
           if (sabotagedLine >= 0 && isSideEffectRun(current)) sideEffectStartsAfterSabotage.push(e.line);
         },
-        exec: (c) => {
+        exec: (command, args) => {
+          const c = renderedCommand(command, args);
           if (
             sabotagedLine < 0 &&
             current?.kind === 'run' &&

@@ -12,8 +12,12 @@
  * provider rewrite, no service changes. Provider install skills call this as
  * their auth step so there is exactly one auth implementation per provider.
  */
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { buildContainerImage } from './lib/container-build.js';
-import { getSetupProvider, listSetupProviders } from './providers/registry.js';
+import { TerminalSetupDriver } from './lib/setup-driver.js';
+import { getSetupProvider, listSetupProviders, runSetupProviderAuth } from './providers/registry.js';
 import { applyProviderSkill } from './providers/install.js';
 // Provider payloads self-register on import.
 import './providers/index.js';
@@ -26,8 +30,10 @@ import './providers/index.js';
 const INSTALL_SKILLS: Record<string, string> = {
   codex: '.claude/skills/add-codex',
 };
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 export async function run(args: string[]): Promise<void> {
+  process.chdir(PROJECT_ROOT);
   const name = args[0]?.trim().toLowerCase();
   const withAuth = listSetupProviders().filter((entry) => entry.runAuth);
 
@@ -49,14 +55,14 @@ export async function run(args: string[]): Promise<void> {
     // we rebuild the image whenever the install mutated anything (the container
     // CLI manifest is baked into the image, unlike the mounted payload code).
     console.log(`${entry ? 'Refreshing' : 'Installing'} ${name}…`);
-    const { changed, blockers } = await applyProviderSkill(skillDir, process.cwd());
+    const { changed, blockers } = await applyProviderSkill(skillDir, PROJECT_ROOT);
     if (blockers.length) {
       console.error(`Couldn't install ${name}: ${blockers.join('; ')}`);
       process.exit(1);
     }
     if (changed) {
       console.log('Provider payload installed — rebuilding the container image…');
-      const rebuild = buildContainerImage();
+      const rebuild = buildContainerImage(PROJECT_ROOT);
       if (!rebuild.ok) {
         // Stop here rather than authenticating a runtime the image can't start:
         // the payload files are mounted, but the CLI manifest is baked in.
@@ -86,6 +92,6 @@ export async function run(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  await entry.runAuth();
-  await entry.runInstallCheck?.();
+  const driver = new TerminalSetupDriver('setup');
+  await runSetupProviderAuth(entry, driver);
 }

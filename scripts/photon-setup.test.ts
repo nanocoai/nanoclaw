@@ -528,6 +528,30 @@ describe('photon setup flow (mocked API)', () => {
     expect(written.join('')).toContain('Text +15558887777');
   });
 
+  it('emits replaceable opt-in instructions in embedded mode', async () => {
+    const { fetchFn } = makeMockFetch({ optInAfterListPolls: 2 });
+    const written: string[] = [];
+    const realWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      expect(
+        await main(
+          ['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive', '--embedded'],
+          fetchFn,
+          noSleep,
+        ),
+      ).toBe(0);
+    } finally {
+      process.stdout.write = realWrite;
+    }
+    const output = written.join('');
+    expect(output).toContain('=== NANOCLAW SETUP: PHOTON_OPT_IN ===\nPHONE: +15551234567\nLINE: +15558887777');
+    expect(output).toContain('=== NANOCLAW SETUP: PHOTON_OPT_IN_CLEAR ===');
+  });
+
   it('does not create a second row when a completed setup is re-run', async () => {
     const { fetchFn, calls } = makeMockFetch({ optInAfterListPolls: 1 });
     expect(

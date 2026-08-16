@@ -26,3 +26,19 @@ export async function withSecretFile<T>(secret: string, operation: (filePath: st
     fs.rmdirSync(directory);
   }
 }
+
+export function childEnvWithoutSetupSecrets(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const safe = { ...env };
+  for (const key of [
+    'NANOCLAW_ANTHROPIC_AUTH_TOKEN',
+    'NANOCLAW_ONECLI_API_TOKEN',
+    'NANOCLAW_REGISTRY_ENROLL_CODE',
+    'NANOCLAW_REGISTRY_TOKEN',
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_AUTH_TOKEN',
+    'ONECLI_API_KEY',
+  ])
+    delete safe[key];
+  return safe;
+}

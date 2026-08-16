@@ -10,10 +10,25 @@
  */
 import { brightSelect } from './bright-select.js';
 import { ensureAnswer } from './runner.js';
+import type { SetupDriver } from './setup-driver.js';
 
 export type OperatorRole = 'owner' | 'admin' | 'member';
 
-export async function askOperatorRole(channelLabel: string): Promise<OperatorRole> {
+export async function askOperatorRole(channelLabel: string, driver?: SetupDriver): Promise<OperatorRole> {
+  if (driver) {
+    return String(
+      await driver.prompt({
+        kind: 'singleChoice',
+        message: `How should this ${channelLabel} account be registered?`,
+        default: 'owner',
+        choices: [
+          { id: 'owner', label: 'Owner', hint: 'full access - recommended for your own account' },
+          { id: 'admin', label: 'Admin', hint: 'can manage the agent for this channel' },
+          { id: 'member', label: 'Member', hint: 'can chat with the agent but nothing more' },
+        ],
+      }),
+    ) as OperatorRole;
+  }
   const choice = ensureAnswer(
     await brightSelect<OperatorRole>({
       message: `How should this ${channelLabel} account be registered?`,

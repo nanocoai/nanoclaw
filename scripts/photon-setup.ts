@@ -831,6 +831,7 @@ async function runSetup(args: Args, fetchFn: FetchFn = fetch, deps: SetupDeps = 
     p.log.step('[1/5] Photon device login');
     const code = await requestDeviceCode(fetchFn, args.dashboardHost);
     const target = code.verification_uri_complete || code.verification_uri;
+    if (args.embedded) emitEmbeddedBlock('PHOTON_DEVICE', { URL: target, CODE: code.user_code });
     p.note(`Open:  ${target}\nCode:  ${code.user_code}`, 'Approve this device');
     if (!args.noBrowser) openBrowser(target);
     const spin = p.spinner();
@@ -844,6 +845,7 @@ async function runSetup(args: Args, fetchFn: FetchFn = fetch, deps: SetupDeps = 
       return 1;
     }
     spin.stop('Logged in');
+    if (args.embedded) emitEmbeddedBlock('PHOTON_DEVICE_CLEAR');
     saveAuth({ access_token: token });
   }
 
@@ -920,6 +922,12 @@ async function runSetup(args: Args, fetchFn: FetchFn = fetch, deps: SetupDeps = 
         p.log.info('Phone already opted in');
         assigned = line;
       } else {
+        if (args.embedded) {
+          emitEmbeddedBlock('PHOTON_OPT_IN', {
+            PHONE: phone,
+            ...(line ? { LINE: line } : {}),
+          });
+        }
         p.note(optInInstructions(phone, line).join('\n'), 'One step needed on your phone');
         const opted = await waitForOptedInUser(fetchFn, args.spectrumHost, projectId, secret, phone, {
           sleepFn: deps.sleepFn,
@@ -928,6 +936,7 @@ async function runSetup(args: Args, fetchFn: FetchFn = fetch, deps: SetupDeps = 
             if (attempt % 6 === 0) p.log.message(`Still waiting for the opt-in for ${phone}…`);
           },
         });
+        if (args.embedded) emitEmbeddedBlock('PHOTON_OPT_IN_CLEAR');
         p.log.info('Phone registered and opted in');
         assigned = userAssignedLine(opted) ?? line;
       }
@@ -990,6 +999,17 @@ async function runSetup(args: Args, fetchFn: FetchFn = fetch, deps: SetupDeps = 
     process.stdout.write(fields.join('\n') + '\n');
   }
   return 0;
+}
+
+function emitEmbeddedBlock(type: string, fields: Record<string, string> = {}): void {
+  process.stdout.write(
+    [
+      `=== NANOCLAW SETUP: ${type} ===`,
+      ...Object.entries(fields).map(([key, value]) => `${key}: ${value}`),
+      '=== END ===',
+      '',
+    ].join('\n'),
+  );
 }
 
 export async function main(argv: string[], fetchFn: FetchFn = fetch, deps: SetupDeps = {}): Promise<number> {

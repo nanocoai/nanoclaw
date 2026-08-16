@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import * as p from '@clack/prompts';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -17,6 +17,8 @@ import {
   type RunSkillOptions,
 } from './skill-driver.js';
 import { fullyApplied, type ApplyEvent, type ApplyResult } from '../../scripts/skill-apply.js';
+import { clearSensitiveValuesForTest, registerSensitiveValue } from './redaction.js';
+import type { SetupDriver } from './setup-driver.js';
 
 // Shared test state for the clack + claude-handoff mocks (hoisted so the vi.mock
 // factories — which run before imports — can close over it). `answers` is the
@@ -86,7 +88,7 @@ describe('thin skill driver', () => {
     const { root, skill } = scratch();
     const asked: Array<{ name: string; secret: boolean }> = [];
     const told: string[] = [];
-    const ran: string[] = [];
+    const ran: Array<{ command: string; args: string[] }> = [];
     const opts: RunSkillOptions = {
       projectRoot: root,
       resolveInput: async (name, meta) => {
@@ -97,26 +99,26 @@ describe('thin skill driver', () => {
       onEvent: (e: ApplyEvent) => {
         if (e.type === 'operator') told.push(e.text);
       },
-      exec: (c) => void ran.push(c),
+      exec: (command, args = []) => void ran.push({ command, args }),
     };
     const res = await runSkill(skill, opts);
 
     expect(asked).toEqual([{ name: 'token', secret: true }]); // the prompt was driven through resolveInput, meta intact
     expect(told).toEqual(['Go create the app and copy the token.']); // operator relayed through the event
-    expect(ran).toContain('ncl wire --token T0KEN'); // wiring executed with the answer substituted in
+    expect(ran).toContainEqual({ command: 'ncl wire --token "${1}"', args: ['T0KEN'] });
     expect(res.operatorMessages).toEqual(['Go create the app and copy the token.']);
   });
 
   it('runs fully from inputs — resolveInput never touched', async () => {
     const { root, skill } = scratch();
-    const ran: string[] = [];
+    const ran: Array<{ command: string; args: string[] }> = [];
     const res = await runSkill(skill, {
       projectRoot: root,
       inputs: { token: 'FROM-INPUTS' },
-      exec: (c) => void ran.push(c),
+      exec: (command, args = []) => void ran.push({ command, args }),
     });
     expect(fullyApplied(res)).toBe(true);
-    expect(ran).toContain('ncl wire --token FROM-INPUTS');
+    expect(ran).toContainEqual({ command: 'ncl wire --token "${1}"', args: ['FROM-INPUTS'] });
   });
 
   it('emits step events through an injected onEvent — the wire run under its heading', async () => {
@@ -169,6 +171,206 @@ describe('thin skill driver', () => {
     expect(log).toContain('dying-gasp'); // the failing command's output survives too
   });
 
+  it('leaves terminal command logs unchanged by protocol redaction', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'driver-secret-'));
+    const rawLog = join(root, 'raw.log');
+    const secret = 'token-value';
+    registerSensitiveValue(secret);
+    try {
+      const out = await hostExec(root, rawLog)(`printf '%s' 'prefix ${secret} suffix'`);
+      expect(out).toBe(`prefix ${secret} suffix`);
+      expect(readFileSync(rawLog, 'utf8')).toContain(secret);
+      expect(readFileSync(rawLog, 'utf8')).not.toContain('[REDACTED]');
+    } finally {
+      clearSensitiveValuesForTest();
+    }
+  });
+
+  it('keeps machine-mode captured output in memory and out of raw logs', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'driver-machine-capture-'));
+    const rawLog = join(root, 'raw.log');
+    const previous = process.env.NANOCLAW_PROTOCOL;
+    process.env.NANOCLAW_PROTOCOL = 'nanoclaw.driver.v1';
+    try {
+      const out = await hostExec(root, rawLog)("printf 'minted-credenti%s' al");
+      expect(out).toBe('minted-credential');
+      expect(readFileSync(rawLog, 'utf8')).not.toContain('minted-credential');
+    } finally {
+      if (previous === undefined) delete process.env.NANOCLAW_PROTOCOL;
+      else process.env.NANOCLAW_PROTOCOL = previous;
+    }
+  });
+
+  it('keeps machine-mode secret runs out of child argv, env, and raw logs', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'driver-machine-secret-'));
+    const bin = join(root, 'bin');
+    const probe = join(root, 'probe.json');
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'onecli'),
+      `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const file = args[args.indexOf('--file') + 1];
+fs.writeFileSync(${JSON.stringify(probe)}, JSON.stringify({ args, env: process.env, file, value: fs.readFileSync(file, 'utf8') }));
+`,
+    );
+    chmodSync(join(bin, 'onecli'), 0o755);
+    const secret = 'machine-secret-value';
+    const rawLog = join(root, 'raw.log');
+    const previous = process.env.DRIVER_SECRET_PROBE;
+    process.env.DRIVER_SECRET_PROBE = secret;
+    try {
+      const driver = { mode: 'ndjson' } as SetupDriver;
+      await hostExec(root, rawLog, driver, new Set([secret]))('onecli secrets create --value "${1}"', [secret]);
+      const observed = JSON.parse(readFileSync(probe, 'utf8')) as {
+        args: string[];
+        env: NodeJS.ProcessEnv;
+        file: string;
+        value: string;
+      };
+      expect(observed.args).toContain('--file');
+      expect(observed.args).not.toContain('--value');
+      expect(observed.args).not.toContain(secret);
+      expect(observed.env.DRIVER_SECRET_PROBE).toBeUndefined();
+      expect(observed.value).toBe(secret);
+      expect(existsSync(observed.file)).toBe(false);
+      expect(readFileSync(rawLog, 'utf8')).not.toContain(secret);
+    } finally {
+      if (previous === undefined) delete process.env.DRIVER_SECRET_PROBE;
+      else process.env.DRIVER_SECRET_PROBE = previous;
+    }
+  });
+
+  it('keeps curl secrets in a private config and out of child argv, env, and raw logs', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'driver-machine-curl-secret-'));
+    const bin = join(root, 'bin');
+    const probe = join(root, 'curl.json');
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'curl'),
+      `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const file = args[args.indexOf('--config') + 1];
+fs.writeFileSync(${JSON.stringify(probe)}, JSON.stringify({ args, env: process.env, file, config: fs.readFileSync(file, 'utf8') }));
+process.stdout.write('ok');
+`,
+    );
+    chmodSync(join(bin, 'curl'), 0o755);
+    const telegram = 'telegram-machine-secret';
+    const slack = 'slack-machine-secret';
+    const rawLog = join(root, 'raw.log');
+    process.env.DRIVER_TELEGRAM_SECRET = telegram;
+    process.env.DRIVER_SLACK_SECRET = slack;
+    try {
+      const driver = { mode: 'ndjson' } as SetupDriver;
+      await hostExec(
+        root,
+        rawLog,
+        driver,
+        new Set([telegram, slack]),
+      )('curl -sf -X POST https://example.com/channel -H "Authorization: Bot ${1}" --data-urlencode "token=${2}"', [
+        telegram,
+        slack,
+      ]);
+      const observed = JSON.parse(readFileSync(probe, 'utf8')) as {
+        args: string[];
+        env: NodeJS.ProcessEnv;
+        file: string;
+        config: string;
+      };
+      expect(observed.args).toEqual(['--config', observed.file]);
+      expect(JSON.stringify(observed.env)).not.toContain(telegram);
+      expect(JSON.stringify(observed.env)).not.toContain(slack);
+      expect(observed.config).toContain(`Authorization: Bot ${telegram}`);
+      expect(observed.config).toContain(`token=${slack}`);
+      expect(existsSync(observed.file)).toBe(false);
+      expect(readFileSync(rawLog, 'utf8')).not.toContain(telegram);
+      expect(readFileSync(rawLog, 'utf8')).not.toContain(slack);
+    } finally {
+      delete process.env.DRIVER_TELEGRAM_SECRET;
+      delete process.env.DRIVER_SLACK_SECRET;
+    }
+  });
+
+  it('rejects unsupported machine secret interpolation before spawning', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'driver-machine-secret-reject-'));
+    const errors: string[] = [];
+    const driver = {
+      mode: 'ndjson',
+      error: (code: string): never => {
+        errors.push(code);
+        throw new Error(code);
+      },
+    } as unknown as SetupDriver;
+    await expect(
+      hostExec(root, undefined, driver, new Set(['machine-secret']))('printf "%s" "${1}"', ['machine-secret']),
+    ).rejects.toThrow('secret_transport_unsupported');
+    expect(errors).toEqual(['secret_transport_unsupported']);
+  });
+
+  it('stops a machine capture when combined child output exceeds its byte limit', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'driver-machine-output-limit-'));
+    const errors: string[] = [];
+    const driver = {
+      mode: 'ndjson',
+      error: (code: string): never => {
+        errors.push(code);
+        throw new Error(code);
+      },
+    } as unknown as SetupDriver;
+
+    await expect(
+      hostExec(root, undefined, driver)(`node -e 'process.stdout.write("x".repeat(300000))'`),
+    ).rejects.toThrow('skill_output_limit');
+    expect(errors).toEqual(['skill_output_limit']);
+  });
+
+  it('keeps machine-mode streaming secret runs out of child argv and env', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'driver-machine-stream-secret-'));
+    const bin = join(root, 'bin');
+    const probe = join(root, 'probe.json');
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'onecli'),
+      `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+const file = args[args.indexOf('--file') + 1];
+fs.writeFileSync(${JSON.stringify(probe)}, JSON.stringify({ args, env: process.env, file, value: fs.readFileSync(file, 'utf8') }));
+process.stdout.write('=== NANOCLAW SETUP: TEST ===\\nSTATUS: success\\n=== END ===\\n');
+`,
+    );
+    chmodSync(join(bin, 'onecli'), 0o755);
+    const secret = 'machine-stream-secret';
+    const previous = process.env.DRIVER_STREAM_SECRET;
+    process.env.DRIVER_STREAM_SECRET = secret;
+    try {
+      const driver = { mode: 'ndjson' } as SetupDriver;
+      const result = await hostExecStream(
+        root,
+        driver,
+        new Set([secret]),
+      )('onecli secrets create --value "${1}"', [secret]);
+      const observed = JSON.parse(readFileSync(probe, 'utf8')) as {
+        args: string[];
+        env: NodeJS.ProcessEnv;
+        file: string;
+        value: string;
+      };
+      expect(result.ok).toBe(true);
+      expect(observed.args).toContain('--file');
+      expect(observed.args).not.toContain(secret);
+      expect(observed.env.DRIVER_STREAM_SECRET).toBeUndefined();
+      expect(observed.value).toBe(secret);
+      expect(existsSync(observed.file)).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.DRIVER_STREAM_SECRET;
+      else process.env.DRIVER_STREAM_SECRET = previous;
+    }
+  });
+
   it('hostExecStream runs a step and captures the terminal status block fields (for effect:step)', async () => {
     const root = mkdtempSync(join(tmpdir(), 'driver-step-'));
     const out = await hostExecStream(root)(
@@ -176,6 +378,23 @@ describe('thin skill driver', () => {
     );
     expect(out.ok).toBe(true);
     expect(out.fields.PLATFORM_ID).toBe('telegram:42');
+  });
+
+  it('stops a machine streaming step before an unterminated line can grow without bound', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'driver-machine-stream-limit-'));
+    const errors: string[] = [];
+    const driver = {
+      mode: 'ndjson',
+      error: (code: string): never => {
+        errors.push(code);
+        throw new Error(code);
+      },
+    } as unknown as SetupDriver;
+
+    await expect(hostExecStream(root, driver)(`node -e 'process.stdout.write("x".repeat(300000))'`)).rejects.toThrow(
+      'skill_output_limit',
+    );
+    expect(errors).toEqual(['skill_output_limit']);
   });
 
   it('hostExecStream children run with LOG_LEVEL=warn — host logger info noise stays off the wizard', async () => {
@@ -190,6 +409,81 @@ describe('thin skill driver', () => {
     } finally {
       if (prev !== undefined) process.env.LOG_LEVEL = prev;
     }
+  });
+
+  it('maps Photon embedded blocks to replaceable sensitive displays', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'driver-photon-'));
+    const seen: string[] = [];
+    const driver = {
+      mode: 'ndjson',
+      display: (display: { id: string; sensitive: boolean }) => seen.push(`display:${display.id}:${display.sensitive}`),
+      clearDisplay: (id: string) => seen.push(`clear:${id}`),
+    } as unknown as SetupDriver;
+    const out = await hostExecStream(
+      root,
+      driver,
+    )(
+      [
+        "printf '%s\\n' '=== NANOCLAW SETUP: PHOTON_DEVICE ===' 'URL: https://example.com/device' 'CODE: ABCD-1234' '=== END ==='",
+        "printf '%s\\n' '=== NANOCLAW SETUP: PHOTON_DEVICE_CLEAR ===' '=== END ==='",
+        "printf '%s\\n' '=== NANOCLAW SETUP: PHOTON_OPT_IN ===' 'PHONE: +15551234567' 'LINE: +15558887777' '=== END ==='",
+        "printf '%s\\n' '=== NANOCLAW SETUP: PHOTON_OPT_IN_CLEAR ===' '=== END ==='",
+        "printf '%s\\n' '=== NANOCLAW SETUP: PHOTON ===' 'STATUS: success' 'PHONE: +15551234567' '=== END ==='",
+      ].join('; '),
+    );
+    expect(out.ok).toBe(true);
+    expect(seen).toEqual([
+      'display:photon-device:true',
+      'clear:photon-device',
+      'display:photon-opt-in:true',
+      'clear:photon-opt-in',
+    ]);
+  });
+
+  it('renders Teams device login as an external action in machine mode', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'driver-teams-'));
+    const prefix = join(root, 'global');
+    const bin = join(root, 'bin');
+    mkdirSync(join(prefix, 'bin'), { recursive: true });
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'npm'), `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(prefix)}\n`);
+    writeFileSync(
+      join(prefix, 'bin', 'teams'),
+      "#!/bin/sh\nprintf 'Open https://microsoft.com/devicelogin\\nEnter code ABCD-EFGH\\n=== NANOCLAW SETUP: TEAMS-LOGIN ===\\nSTATUS: success\\n=== END ===\\n'\n",
+    );
+    chmodSync(join(bin, 'npm'), 0o755);
+    chmodSync(join(prefix, 'bin', 'teams'), 0o755);
+    const actions: Array<{ kind: string; url?: string }> = [];
+    const displays: Array<{ id: string; kind: string; sensitive: boolean; content?: string }> = [];
+    const cleared: string[] = [];
+    const driver = {
+      mode: 'ndjson',
+      externalAction: async (action: { kind: string; url?: string }, verify: () => boolean | Promise<boolean>) => {
+        actions.push(action);
+        expect(await verify()).toBe(true);
+        return 'attempted' as const;
+      },
+      display: (display: { id: string; kind: string; sensitive: boolean; content?: string }) => displays.push(display),
+      clearDisplay: (id: string) => cleared.push(id),
+    } as unknown as SetupDriver;
+    const result = await hostExecStream(
+      root,
+      driver,
+    )('"$(npm prefix -g 2>/dev/null)/bin/teams" login && echo \'"loggedIn": true\'');
+    expect(result.ok).toBe(true);
+    expect(actions).toEqual([
+      {
+        id: 'teams-login-open-url',
+        kind: 'openURL',
+        title: 'Open Microsoft device login',
+        url: 'https://microsoft.com/devicelogin',
+      },
+    ]);
+    expect(displays).toEqual([
+      expect.objectContaining({ id: 'teams-login-url', kind: 'url', sensitive: true }),
+      expect.objectContaining({ id: 'teams-login-code', kind: 'code', content: 'ABCD-EFGH', sensitive: true }),
+    ]);
+    expect(cleared).toEqual(['teams-login-url', 'teams-login-code']);
   });
 
   function reuseScratch(): { root: string; skill: string } {
@@ -208,7 +502,7 @@ describe('thin skill driver', () => {
   it('reuse:true offers an existing .env credential via the confirm seam and skips the prompt when accepted', async () => {
     const { root, skill } = reuseScratch();
     const asked: string[] = [];
-    const cmds: string[] = [];
+    const calls: Array<{ command: string; args: string[] }> = [];
     await runSkill(skill, {
       projectRoot: root,
       reuse: true,
@@ -217,16 +511,39 @@ describe('thin skill driver', () => {
         asked.push(n);
         return 'NEWLY-PASTED';
       },
-      exec: (c) => void cmds.push(c),
+      exec: (command, args = []) => void calls.push({ command, args }),
     });
     expect(asked).not.toContain('bot_token'); // reused from .env → never prompted
-    expect(cmds).toContain('use xoxb-existing-token'); // the reused value flowed downstream
+    expect(calls).toContainEqual({ command: 'use "${1}"', args: ['xoxb-existing-token'] });
+  });
+
+  it('does not expose credential fragments in a machine reuse prompt', async () => {
+    const { root, skill } = reuseScratch();
+    const prompts: string[] = [];
+    const driver = {
+      mode: 'ndjson',
+      prompt: async (spec: { message: string }) => {
+        prompts.push(spec.message);
+        return true;
+      },
+    } as unknown as SetupDriver;
+
+    await runSkill(skill, {
+      projectRoot: root,
+      reuse: true,
+      driver,
+      exec: () => {},
+    });
+
+    expect(prompts).toContain('Found an existing SLACK_BOT_TOKEN. Use it?');
+    expect(prompts.join('\n')).not.toContain('xoxb-e');
+    expect(prompts.join('\n')).not.toContain('oken');
   });
 
   it('reuse: declining keeps the prompt', async () => {
     const { root, skill } = reuseScratch();
     const asked: string[] = [];
-    const cmds: string[] = [];
+    const calls: Array<{ command: string; args: string[] }> = [];
     await runSkill(skill, {
       projectRoot: root,
       reuse: true,
@@ -235,10 +552,10 @@ describe('thin skill driver', () => {
         asked.push(n);
         return 'NEWLY-PASTED';
       },
-      exec: (c) => void cmds.push(c),
+      exec: (command, args = []) => void calls.push({ command, args }),
     });
     expect(asked).toContain('bot_token'); // declined → prompted
-    expect(cmds).toContain('use NEWLY-PASTED');
+    expect(calls).toContainEqual({ command: 'use "${1}"', args: ['NEWLY-PASTED'] });
   });
 
   // A cred a HELPER SCRIPT owns (written by effect:external, not nc:env-set) has no
@@ -260,7 +577,7 @@ describe('thin skill driver', () => {
   it('reuse: offers an existing .env value for a HELPER-owned cred (no env-set linkage)', async () => {
     const { root, skill } = helperReuseScratch();
     const asked: string[] = [];
-    const cmds: string[] = [];
+    const calls: Array<{ command: string; args: string[] }> = [];
     const confirmed: string[] = [];
     await runSkill(skill, {
       projectRoot: root,
@@ -273,11 +590,14 @@ describe('thin skill driver', () => {
         asked.push(n);
         return 'https://typed.example';
       },
-      exec: (c) => void cmds.push(c),
+      exec: (command, args = []) => void calls.push({ command, args }),
     });
     expect(confirmed.some((m) => /IMESSAGE_SERVER_URL/.test(m))).toBe(true); // the reuse: link surfaced the offer
     expect(asked).not.toContain('server_url'); // accepted → never re-prompted
-    expect(cmds).toContain('bash configure.sh "https://photon.example.com"'); // reused value flowed downstream
+    expect(calls).toContainEqual({
+      command: 'bash configure.sh "${1}"',
+      args: ['https://photon.example.com'],
+    });
   });
 
   // §5.4 pre-filter: a stale .env value that would fail the prompt's declared
@@ -364,6 +684,87 @@ describe('thin skill driver', () => {
       "Done with the steps above? Continue when you're ready.", // run barrier, completed flavor
     ]);
     expect(fullyApplied(res)).toBe(true);
+  });
+
+  it('machine driver preserves URL-offer and natural-barrier policy before the side effect', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'machine-policy-'));
+    const skill = mkdtempSync(join(tmpdir(), 'machine-policy-skill-'));
+    writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
+    writeFileSync(
+      join(skill, 'SKILL.md'),
+      '# machine policy\n\n```nc:operator\nOpen https://example.com/setup and finish.\n```\n```nc:run effect:build\necho build\n```\n',
+    );
+    const calls: string[] = [];
+    const driver = {
+      mode: 'ndjson',
+      operation: 'setup',
+      prompt: async (spec: { message: string }) => {
+        calls.push(`prompt:${spec.message}`);
+        return true;
+      },
+      display: (display: { kind: string }) => {
+        calls.push(`display:${display.kind}`);
+      },
+      note: () => {
+        calls.push('note');
+      },
+      progress: (_id: string, state: string) => {
+        calls.push(`progress:${state}`);
+      },
+      throwIfCancelled: () => {},
+    } as unknown as SetupDriver;
+
+    await runSkill(skill, {
+      projectRoot: root,
+      driver,
+      exec: () => {
+        calls.push('exec');
+      },
+    });
+
+    expect(calls).toEqual([
+      'note',
+      'prompt:Open https://example.com/setup in your browser?',
+      'display:url',
+      "prompt:Done with the steps above? Continue when you're ready.",
+      'progress:pending',
+      'progress:running',
+      'exec',
+      'progress:succeeded',
+    ]);
+  });
+
+  it('stops before a later skill side effect when the driver is cancelled', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'machine-cancel-'));
+    const skill = mkdtempSync(join(tmpdir(), 'machine-cancel-skill-'));
+    writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
+    writeFileSync(
+      join(skill, 'SKILL.md'),
+      '# cancel\n\n```nc:run effect:build\nfirst\n```\n```nc:run effect:wire\nsecond\n```\n',
+    );
+    let cancelled = false;
+    const commands: string[] = [];
+    const driver = {
+      mode: 'ndjson',
+      operation: 'setup',
+      progress: () => {},
+      throwIfCancelled: () => {
+        if (cancelled) throw new Error('driver cancelled');
+      },
+    } as unknown as SetupDriver;
+
+    await expect(
+      runSkill(skill, {
+        projectRoot: root,
+        driver,
+        exec: (command) => {
+          commands.push(command);
+          cancelled = true;
+        },
+      }),
+    ).rejects.toThrow('driver cancelled');
+
+    expect(commands).toEqual(['first']);
   });
 
   it('default handler: readiness flavor before an effect:step; decline = proceed (never an abort)', async () => {

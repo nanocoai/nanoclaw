@@ -3,7 +3,7 @@ import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { withSecretFile } from './secret-file.js';
+import { childEnvWithoutSetupSecrets, withSecretFile } from './secret-file.js';
 
 describe('withSecretFile', () => {
   it('provides a private file and removes it after the operation', async () => {
@@ -33,5 +33,17 @@ describe('withSecretFile', () => {
 
     expect(fs.existsSync(secretPath)).toBe(false);
     expect(fs.existsSync(path.dirname(secretPath))).toBe(false);
+  });
+
+  it('removes setup credentials from machine child environments', () => {
+    expect(
+      childEnvWithoutSetupSecrets({
+        NANOCLAW_ANTHROPIC_AUTH_TOKEN: 'secret',
+        NANOCLAW_REGISTRY_ENROLL_CODE: 'secret',
+        NANOCLAW_REGISTRY_TOKEN: 'secret',
+        ONECLI_API_KEY: 'secret',
+        PATH: '/bin',
+      }),
+    ).toEqual({ PATH: '/bin' });
   });
 });

@@ -24,6 +24,7 @@ import type { StepResult, SpinnerLabels } from './runner.js';
 import { dumpTranscriptOnFailure, spawnStep, writeStepEntry } from './runner.js';
 import * as setupLog from '../logs.js';
 import { brandBody, fitToWidth, fmtDuration } from './theme.js';
+import type { SetupDriver } from './setup-driver.js';
 
 const WINDOW_SIZE = 3;
 const SPINNER_FRAMES = ['◒', '◐', '◓', '◑'];
@@ -40,20 +41,31 @@ export async function runWindowedStep(
   stepName: string,
   labels: SpinnerLabels,
   extra: string[] = [],
+  driver?: SetupDriver,
 ): Promise<StepResult & { rawLog: string; durationMs: number }> {
   const rawLog = setupLog.stepRawLog(stepName);
   const start = Date.now();
+  driver?.throwIfCancelled();
   phEmit('step_started', { step: stepName });
 
-  const result = await runUnderWindow(stepName, labels, extra, rawLog);
+  let result: StepResult;
+  if (driver?.mode === 'ndjson') {
+    driver.progress(stepName, 'pending', labels.running.replace(/…$/, ''));
+    driver.progress(stepName, 'running', labels.running.replace(/…$/, ''));
+    result = await spawnStep(stepName, extra, () => {}, rawLog, undefined, driver);
+    driver.progress(stepName, result.ok ? 'succeeded' : 'failed');
+  } else {
+    result = await runUnderWindow(stepName, labels, extra, rawLog, driver);
+  }
 
   const durationMs = Date.now() - start;
-  writeStepEntry(stepName, result, durationMs, rawLog);
+  writeStepEntry(stepName, result, durationMs, rawLog, driver?.mode === 'ndjson');
   phEmit('step_completed', {
     step: stepName,
     status: outcomeStatus(result),
     duration_ms: durationMs,
   });
+  driver?.throwIfCancelled();
   return { ...result, rawLog, durationMs };
 }
 
@@ -73,6 +85,7 @@ async function runUnderWindow(
   labels: SpinnerLabels,
   extra: string[],
   rawLog: string,
+  driver?: SetupDriver,
 ): Promise<StepResult> {
   const out = process.stdout;
   const start = Date.now();
@@ -155,7 +168,7 @@ async function runUnderWindow(
     redraw();
   };
 
-  const result = await spawnStep(stepName, extra, () => {}, rawLog, onLine);
+  const result = await spawnStep(stepName, extra, () => {}, rawLog, onLine, driver);
 
   clearInterval(frameTick);
   clearInterval(stallCheck);
