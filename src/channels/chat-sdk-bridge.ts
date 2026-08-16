@@ -146,7 +146,8 @@ export function splitForLimit(text: string, limit: number): string[] {
  *     `data`), so the agent is told a file exists but can never read it.
  *
  * `url` is always preserved on the entry as a last-resort fallback when neither
- * download path yields bytes.
+ * download path yields bytes. Both paths cap the bytes they inline (see
+ * `maxBytes`); oversized attachments stay metadata/url-only.
  */
 /**
  * Cap on inbound attachment bytes we download and inline (base64) into a
@@ -179,11 +180,31 @@ export async function enrichAttachments(
       height: (att as unknown as Record<string, unknown>).height,
     };
     if (att.fetchData) {
-      try {
-        const buffer = await att.fetchData();
-        entry.data = buffer.toString('base64');
-      } catch (err) {
-        log.warn('Failed to download attachment', { type: att.type, err });
+      // Same bound as the url path: a fetchData adapter (Slack et al.) lets
+      // anyone who can message the bot attach files, so cap what we inline.
+      // No Content-Length here (no HTTP response), so the guards are the
+      // declared size precheck plus the actual downloaded byte length.
+      if (typeof att.size === 'number' && att.size > maxBytes) {
+        log.warn('Skipping oversized attachment (declared size)', {
+          type: att.type,
+          size: att.size,
+          maxBytes,
+        });
+      } else {
+        try {
+          const buffer = await att.fetchData();
+          if (buffer.length > maxBytes) {
+            log.warn('Skipping oversized attachment (downloaded bytes)', {
+              type: att.type,
+              bytes: buffer.length,
+              maxBytes,
+            });
+          } else {
+            entry.data = buffer.toString('base64');
+          }
+        } catch (err) {
+          log.warn('Failed to download attachment', { type: att.type, err });
+        }
       }
     } else if (att.url) {
       // Discord (and other url-only adapters) let anyone who can message the

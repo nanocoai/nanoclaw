@@ -534,4 +534,39 @@ describe('enrichAttachments', () => {
       globalThis.fetch = realFetch;
     }
   });
+
+  it('skips fetchData() entirely when the declared size exceeds the cap', async () => {
+    let fetchDataCalled = false;
+    const [entry] = await enrichAttachments(
+      [
+        makeAttachment({
+          name: 'big.bin',
+          size: 100,
+          fetchData: async () => {
+            fetchDataCalled = true;
+            return Buffer.from('should not be read');
+          },
+        }),
+      ],
+      8,
+    );
+    expect(fetchDataCalled).toBe(false);
+    expect(entry.data).toBeUndefined();
+  });
+
+  it('omits data when the fetchData() buffer exceeds the cap (no reliable size ahead of time)', async () => {
+    const [entry] = await enrichAttachments(
+      [makeAttachment({ name: 'nosize.bin', fetchData: async () => Buffer.from('far more than eight bytes') })],
+      8,
+    );
+    expect(entry.data).toBeUndefined();
+  });
+
+  it('still stages fetchData() bytes that are within the cap', async () => {
+    const [entry] = await enrichAttachments(
+      [makeAttachment({ name: 'ok.bin', fetchData: async () => Buffer.from('ok') })],
+      1024,
+    );
+    expect(entry.data).toBe(Buffer.from('ok').toString('base64'));
+  });
 });
