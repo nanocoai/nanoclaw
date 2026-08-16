@@ -146,6 +146,6 @@ describe('host sweep justWoke grace period', () => {
     await runSweepTick();
     expect(wakeContainer).toHaveBeenCalledTimes(1); // no second wake
     expect(killContainer).toHaveBeenCalledTimes(1);
-    expect(killContainer).toHaveBeenCalledWith(SESS, 'claim-stuck');
+    expect(killContainer).toHaveBeenCalledWith(SESS, 'claim-stuck', expect.any(Function));
   });
 });

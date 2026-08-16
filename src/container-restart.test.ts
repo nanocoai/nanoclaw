@@ -78,7 +78,8 @@ describe('restartAgentGroupContainers', () => {
 
     expect(count).toBe(1);
     expect(mockKillContainer).toHaveBeenCalledTimes(1);
-    expect(mockKillContainer).toHaveBeenCalledWith('s1', 'test', undefined);
+    // Third arg is the #2516 journal-recovery onExit callback.
+    expect(mockKillContainer).toHaveBeenCalledWith('s1', 'test', expect.any(Function));
   });
 
   it('does not write wake message when wakeMessage is omitted', () => {
@@ -88,7 +89,8 @@ describe('restartAgentGroupContainers', () => {
     restartAgentGroupContainers('g1', 'test');
 
     expect(mockWriteSessionMessage).not.toHaveBeenCalled();
-    expect(mockKillContainer).toHaveBeenCalledWith('s1', 'test', undefined);
+    // Third arg is the #2516 journal-recovery onExit callback.
+    expect(mockKillContainer).toHaveBeenCalledWith('s1', 'test', expect.any(Function));
   });
 
   it('writes on_wake message and passes onExit callback when wakeMessage is provided', () => {

@@ -400,6 +400,28 @@ export function openOutboundDbRw(agentGroupId: string, sessionId: string): Datab
 }
 
 /**
+ * Roll back a stale outbound.db journal left by a SIGKILLed container (#2516).
+ * The container writes outbound.db in journal_mode=DELETE; a kill
+ * mid-transaction strands `outbound.db-journal`, and the host's READONLY
+ * delivery handle cannot perform hot-journal recovery — every poll then
+ * errors until some writer opens the file, which without this is the NEXT
+ * container spawn (potentially hours away). Opening read-write triggers
+ * SQLite's rollback + journal deletion; close immediately. Only safe once
+ * the container's exit is confirmed — callers wire this as killContainer's
+ * onExit.
+ */
+export function recoverOutboundJournal(agentGroupId: string, sessionId: string): void {
+  const dbPath = outboundDbPath(agentGroupId, sessionId);
+  if (!fs.existsSync(`${dbPath}-journal`)) return;
+  try {
+    openOutboundDbRwRaw(dbPath).close();
+    log.info('Recovered stale outbound journal after container kill', { sessionId });
+  } catch (err) {
+    log.error('Failed to recover stale outbound journal', { sessionId, err });
+  }
+}
+
+/**
  * Write a message directly to a session's outbound DB so the host delivery
  * loop picks it up. Used by the command gate to send denial responses
  * without waking a container.

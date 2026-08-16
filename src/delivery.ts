@@ -139,7 +139,8 @@ async function pollActive(): Promise<void> {
       await deliverSessionMessages(session);
     }
   } catch (err) {
-    log.error('Active delivery poll error', { err });
+    if (isReadonlyRollbackError(err)) log.debug('Active delivery poll hit hot-journal race', { err });
+    else log.error('Active delivery poll error', { err });
   }
 
   setTimeout(pollActive, ACTIVE_POLL_MS);
@@ -154,7 +155,8 @@ async function pollSweep(): Promise<void> {
       await deliverSessionMessages(session);
     }
   } catch (err) {
-    log.error('Sweep delivery poll error', { err });
+    if (isReadonlyRollbackError(err)) log.debug('Sweep delivery poll hit hot-journal race', { err });
+    else log.error('Sweep delivery poll error', { err });
   }
 
   setTimeout(pollSweep, SWEEP_POLL_MS);
@@ -173,6 +175,22 @@ export async function deliverSessionMessages(session: Session): Promise<void> {
   }
 }
 
+/**
+ * The hot-journal race (#2640): the container writes outbound.db in
+ * journal_mode=DELETE, so each commit briefly creates outbound.db-journal.
+ * If a readonly poll's first read lands inside that window, SQLite cannot
+ * determine journal state from a readonly handle and throws
+ * SQLITE_READONLY_ROLLBACK ("attempt to write a readonly database") —
+ * busy_timeout does not apply because it isn't BUSY. Self-healing: the
+ * writer commits within milliseconds and the next poll succeeds, so these
+ * are transient noise, not faults. Exported for tests.
+ */
+export function isReadonlyRollbackError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === 'string' && code.startsWith('SQLITE_READONLY');
+}
+
 async function drainSession(session: Session): Promise<void> {
   const agentGroup = getAgentGroup(session.agent_group_id);
   if (!agentGroup) return;
@@ -188,7 +206,16 @@ async function drainSession(session: Session): Promise<void> {
 
   try {
     // Read all due messages from outbound.db (read-only)
-    const allDue = getDueOutboundMessages(outDb);
+    let allDue: ReturnType<typeof getDueOutboundMessages>;
+    try {
+      allDue = getDueOutboundMessages(outDb);
+    } catch (err) {
+      if (isReadonlyRollbackError(err)) {
+        log.debug('Outbound poll hit hot-journal race; next poll retries', { sessionId: session.id });
+        return;
+      }
+      throw err;
+    }
     if (allDue.length === 0) return;
 
     // Filter out already-delivered messages using inbound.db's delivered table
