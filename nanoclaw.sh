@@ -25,6 +25,22 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
+# --catalog-preseeds is a read-only build-time contract. Never bootstrap or
+# create setup state just to inspect it.
+for arg in "$@"; do
+  if [ "$arg" = "--catalog-preseeds" ]; then
+    if [ "$#" -ne 1 ]; then
+      echo "--catalog-preseeds does not accept other arguments" >&2
+      exit 2
+    fi
+    if ! command -v node >/dev/null 2>&1 || [ ! -x "$PROJECT_ROOT/node_modules/.bin/tsx" ]; then
+      echo "Cannot print the preseed catalog: run pnpm install first." >&2
+      exit 1
+    fi
+    exec "$PROJECT_ROOT/node_modules/.bin/tsx" "$PROJECT_ROOT/setup/catalog-preseeds.ts"
+  fi
+done
+
 # ─── --slack-agents: former testing flag, accepted and ignored ─────────
 # The managed Slack experience is simply the default; the flag that once
 # enabled it is swallowed so older invocations keep working.
@@ -165,6 +181,7 @@ for arg in "$@"; do
     fi
     echo "Usage: bash nanoclaw.sh [options]"
     echo ""
+    echo "  --catalog-preseeds    Print the build-time preseed contract as JSON"
     echo "  --template-path <ref>  Create or update an agent from templates/<ref>"
     echo "  --uninstall            Uninstall this NanoClaw copy"
     echo "  --help, -h             Show this help without installing dependencies"

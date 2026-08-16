@@ -38,4 +38,10 @@ describe('public setup flags', () => {
       errors: [],
     });
   });
+
+  it('uses the cataloged validation rules when parsing flags', () => {
+    expect(parseFlags(['--onecli-api-host', 'not-a-url']).errors).toEqual(['--onecli-api-host: Must be http(s)://…']);
+    expect(parseFlags(['--onecli-api-token', 'wrong']).errors).toEqual(['--onecli-api-token: Must start with oc_']);
+    expect(parseFlags(['--onecli-api-host', 'https://api.onecli.sh']).errors).toEqual([]);
+  });
 });
