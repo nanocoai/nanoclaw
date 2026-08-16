@@ -345,3 +345,93 @@ describe('groups CLI MCP config', () => {
     expect(JSON.parse(getContainerConfig('ag-mcp')!.mcp_servers)).toEqual({});
   });
 });
+
+describe('groups config update clears nullable scalars', () => {
+  beforeEach(() => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    runMigrations(initTestDb());
+  });
+  afterEach(() => {
+    closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+  });
+
+  /**
+   * Pre-fix, `String(v)` stored the empty string rather than NULL, so a scalar
+   * could be set but never unset — and the empty string was handed to the agent
+   * runtime as if it were a real model/provider.
+   */
+  it('stores NULL, not the empty string, when a flag is cleared', async () => {
+    const GID = 'ag-clear';
+    createAgentGroup({ id: GID, name: 'c', folder: 'c', agent_provider: null, created_at: now() });
+    ensureContainerConfig(GID);
+
+    await dispatch(
+      {
+        id: 'r1',
+        command: 'groups-config-update',
+        args: { id: GID, model: 'opus', provider: 'claude', effort: 'high', assistant_name: 'Andy' },
+      },
+      { caller: 'host' },
+    );
+    expect(getContainerConfig(GID)!.model).toBe('opus');
+
+    const cleared = await dispatch(
+      {
+        id: 'r2',
+        command: 'groups-config-update',
+        args: { id: GID, model: '', provider: '', effort: '', assistant_name: '' },
+      },
+      { caller: 'host' },
+    );
+    expect(cleared.ok).toBe(true);
+
+    const row = getContainerConfig(GID)!;
+    expect(row.model).toBeNull();
+    expect(row.provider).toBeNull();
+    expect(row.effort).toBeNull();
+    expect(row.assistant_name).toBeNull();
+  });
+
+  it('leaves unmentioned fields untouched', async () => {
+    const GID = 'ag-partial';
+    createAgentGroup({ id: GID, name: 'p', folder: 'p', agent_provider: null, created_at: now() });
+    ensureContainerConfig(GID);
+
+    await dispatch(
+      { id: 'r1', command: 'groups-config-update', args: { id: GID, model: 'opus', effort: 'high' } },
+      { caller: 'host' },
+    );
+    await dispatch({ id: 'r2', command: 'groups-config-update', args: { id: GID, model: '' } }, { caller: 'host' });
+
+    const row = getContainerConfig(GID)!;
+    expect(row.model).toBeNull();
+    expect(row.effort).toBe('high');
+  });
+
+  /** `Number('')` is 0 — clearing the limit must not silently set a real limit of zero. */
+  it('clears max_messages_per_prompt to NULL rather than 0, and rejects non-numeric input', async () => {
+    const GID = 'ag-num';
+    createAgentGroup({ id: GID, name: 'n', folder: 'n', agent_provider: null, created_at: now() });
+    ensureContainerConfig(GID);
+
+    await dispatch(
+      { id: 'r1', command: 'groups-config-update', args: { id: GID, max_messages_per_prompt: 25 } },
+      { caller: 'host' },
+    );
+    expect(getContainerConfig(GID)!.max_messages_per_prompt).toBe(25);
+
+    await dispatch(
+      { id: 'r2', command: 'groups-config-update', args: { id: GID, max_messages_per_prompt: '' } },
+      { caller: 'host' },
+    );
+    expect(getContainerConfig(GID)!.max_messages_per_prompt).toBeNull();
+
+    const bad = await dispatch(
+      { id: 'r3', command: 'groups-config-update', args: { id: GID, max_messages_per_prompt: 'lots' } },
+      { caller: 'host' },
+    );
+    expect(bad.ok).toBe(false);
+  });
+});
