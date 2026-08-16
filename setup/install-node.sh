@@ -38,10 +38,42 @@ else
       brew install node@22
       ;;
     Linux)
-      echo "STEP: nodesource-setup"
-      curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-      echo "STEP: apt-install-nodejs"
-      sudo apt-get install -y nodejs
+      ID_LIKE=""
+      ID=""
+      if [ -f /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+      fi
+      case "$ID_LIKE $ID" in
+        *debian*|*ubuntu*)
+          echo "STEP: nodesource-setup"
+          curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+          echo "STEP: apt-install-nodejs"
+          sudo apt-get install -y nodejs
+          ;;
+        *rhel*|*fedora*|*centos*)
+          echo "STEP: nodesource-setup-rpm"
+          curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo -E bash -
+          echo "STEP: dnf-install-nodejs"
+          if command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y nodejs
+          else
+            sudo yum install -y nodejs
+          fi
+          ;;
+        *suse*)
+          echo "STEP: zypper-install-nodejs"
+          sudo zypper --non-interactive install nodejs22
+          ;;
+        *)
+          echo "STATUS: failed"
+          echo "ERROR: Unsupported Linux distro: ID=$ID ID_LIKE=$ID_LIKE"
+          echo "ERROR: This script supports Debian/Ubuntu and RHEL/Fedora/CentOS/openSUSE out of the box."
+          echo "ERROR: On other distros, install Node 22 via your distro's package manager (or nvm/uv/fnm), then re-run this script."
+          echo "=== END ==="
+          exit 1
+          ;;
+      esac
       ;;
     *)
       echo "STATUS: failed"
