@@ -1,7 +1,17 @@
 import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
 
-import { closeSessionDb, initTestSessionDb } from './connection.js';
-import { getTurnLog, PROMPT_PREVIEW_CHARS, recordTurn, TURN_LOG_LIMIT } from './usage-log.js';
+import { closeSessionDb, getOutboundDb, initTestSessionDb } from './connection.js';
+import { getTurnLog, PROMPT_PREVIEW_CHARS, recordTurn, TURN_LOG_RETENTION_DAYS } from './usage-log.js';
+
+/** A turn stamped in the past — `recordTurn` always stamps "now". */
+function seedTurnAt(timestamp: string, prompt: string): void {
+  getOutboundDb()
+    .prepare(
+      `INSERT INTO token_usage_log (timestamp, task_series_id, prompt_preview, prompt_chars, input_tokens)
+       VALUES (?, NULL, ?, ?, 1)`,
+    )
+    .run(timestamp, prompt, prompt.length);
+}
 
 describe('usage-log', () => {
   beforeEach(() => {
@@ -103,15 +113,24 @@ describe('usage-log', () => {
     expect(getTurnLog(2).map((r) => r.prompt_preview)).toEqual(['third', 'second']);
   });
 
-  it('trims to the retention cap so a long-lived session cannot grow without bound', () => {
-    for (let i = 0; i < TURN_LOG_LIMIT + 10; i++) {
-      recordTurn({ prompt: `turn ${i}`, usage: { inputTokens: 1 } });
-    }
+  it('drops turns that fall outside the retention window', () => {
+    // Retention is a timeframe, not a row count: "what did we spend last
+    // quarter" has to stay answerable for a busy session and a quiet one alike.
+    const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString();
+    seedTurnAt(daysAgo(TURN_LOG_RETENTION_DAYS + 1), 'too old');
+    seedTurnAt(daysAgo(TURN_LOG_RETENTION_DAYS - 1), 'just inside');
 
-    const rows = getTurnLog(TURN_LOG_LIMIT + 100);
-    expect(rows).toHaveLength(TURN_LOG_LIMIT);
-    expect(rows[0].prompt_preview).toBe(`turn ${TURN_LOG_LIMIT + 9}`);
-    // The oldest survivor is the tenth turn — the first ten aged out.
-    expect(rows[rows.length - 1].prompt_preview).toBe('turn 10');
+    recordTurn({ prompt: 'today', usage: { inputTokens: 1 } });
+
+    expect(getTurnLog().map((r) => r.prompt_preview)).toEqual(['today', 'just inside']);
+  });
+
+  it('keeps every turn inside the window, however many there are', () => {
+    // No row cap: a busy day must not silently evict the rest of the window.
+    for (let i = 0; i < 500; i++) recordTurn({ prompt: `turn ${i}`, usage: { inputTokens: 1 } });
+
+    const rows = getTurnLog(1000);
+    expect(rows).toHaveLength(500);
+    expect(rows[rows.length - 1].prompt_preview).toBe('turn 0');
   });
 });

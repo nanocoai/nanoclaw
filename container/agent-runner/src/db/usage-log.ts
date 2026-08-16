@@ -14,9 +14,14 @@
  * - The prompt is kept as a clipped preview, not in full. This is an
  *   accounting record, not a second copy of the conversation — enough to
  *   recognise a turn, not enough to be a transcript.
- * - The ledger is trimmed to the most recent `TURN_LOG_LIMIT` turns. The
+ * - The ledger keeps the last `TURN_LOG_RETENTION_DAYS` days and no longer. The
  *   totals in `session_state` are the authoritative lifetime figures; this
  *   table is the recent detail behind them.
+ *
+ * Retention is a timeframe rather than a row count on purpose. "What did this
+ * cost last quarter" has to be answerable for a busy session and a quiet one
+ * alike, and a row cap answers it for neither: it silently shortens the window
+ * exactly when spend is high, and pins stale turns forever when it is low.
  */
 import { getOutboundDb } from './connection.js';
 import type { TokenUsageDelta } from './session-state.js';
@@ -24,8 +29,9 @@ import type { TokenUsageDelta } from './session-state.js';
 /** How much of the prompt is kept. Enough to identify the turn on sight. */
 export const PROMPT_PREVIEW_CHARS = 200;
 
-/** Turns retained per session. Beyond this the oldest rows age out. */
-export const TURN_LOG_LIMIT = 5000;
+/** How long a turn stays on the ledger. A quarter, so quarter-over-quarter
+ *  comparisons are possible without the window moving under them. */
+export const TURN_LOG_RETENTION_DAYS = 90;
 
 export interface TurnRecord {
   /** The prompt this turn answered, as it was sent to the provider. */
@@ -66,7 +72,7 @@ function preview(prompt: string): string {
 export function recordTurn(record: TurnRecord): void {
   const db = getOutboundDb();
   const usage = record.usage ?? {};
-  const result = db
+  db
     .prepare(
       `INSERT INTO token_usage_log
          (timestamp, task_series_id, prompt_preview, prompt_chars,
@@ -85,12 +91,11 @@ export function recordTurn(record: TurnRecord): void {
       measured(usage.costUsd),
     );
 
-  // Trim by rowid rather than by count: a bounded delete on the primary key,
-  // cheap enough to run on every insert.
-  const threshold = Number(result.lastInsertRowid) - TURN_LOG_LIMIT;
-  if (threshold > 0) {
-    db.prepare('DELETE FROM token_usage_log WHERE id <= ?').run(threshold);
-  }
+  // Age out on write. Timestamps are ISO-8601 UTC, so string order is
+  // chronological order and the index makes this a range delete over the tail
+  // rather than a scan.
+  const cutoff = new Date(Date.now() - TURN_LOG_RETENTION_DAYS * 86_400_000).toISOString();
+  db.prepare('DELETE FROM token_usage_log WHERE timestamp < ?').run(cutoff);
 }
 
 /** Most recent turns first. */

@@ -274,8 +274,8 @@ CREATE TABLE IF NOT EXISTS container_state (
 
 -- Per-turn usage ledger. The container appends one row per provider turn:
 -- the prompt that turn answered (clipped to a preview), the tokens and cost
--- it reported, and the task series it belonged to. Trimmed to the most recent
--- turns by the container; the lifetime totals live in session_state.
+-- it reported, and the task series it belonged to. The container ages rows out
+-- of it on a fixed time window; the lifetime totals live in session_state.
 -- Numeric columns are nullable: null means the provider reported nothing,
 -- which is not the same as zero.
 CREATE TABLE IF NOT EXISTS token_usage_log (
@@ -290,4 +290,6 @@ CREATE TABLE IF NOT EXISTS token_usage_log (
   cache_creation_tokens INTEGER,
   cost_usd              REAL
 );
+CREATE INDEX IF NOT EXISTS idx_token_usage_log_timestamp
+  ON token_usage_log(timestamp);
 `;

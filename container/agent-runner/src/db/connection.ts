@@ -129,6 +129,8 @@ export function getOutboundDb(): Database {
         cache_creation_tokens INTEGER,
         cost_usd              REAL
       );
+      CREATE INDEX IF NOT EXISTS idx_token_usage_log_timestamp
+        ON token_usage_log(timestamp);
     `);
   }
   return _outbound;
@@ -282,6 +284,7 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
       cache_creation_tokens INTEGER,
       cost_usd              REAL
     );
+    CREATE INDEX idx_token_usage_log_timestamp ON token_usage_log(timestamp);
   `);
 
   return { inbound: _inbound, outbound: _outbound };

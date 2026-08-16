@@ -422,7 +422,7 @@ registerResource({
       description:
         'Token and cost totals, as the provider reported them.\n\n' +
         "Read straight off each session's outbound.db, where the container banks one turn at a time, so the numbers survive container restarts and cover closed sessions too. Only providers that report usage contribute; whatever went unmeasured is counted separately rather than shown as zero, because unmeasured is not the same as free.\n\n" +
-        "--by session (default) and --by agent come from each session's lifetime totals. --by task and --by prompt come from the per-turn ledger, which keeps the most recent turns of each session rather than all of them, so a long-lived session's oldest prompts age out of those two views while its totals stay complete.\n\n" +
+        "--by session (default) and --by agent come from each session's lifetime totals. --by task and --by prompt come from the per-turn ledger, which keeps a fixed recent window rather than all history, so prompts older than that age out of those two views while the totals stay complete.\n\n" +
         'Prompts are stored as a clipped preview — enough to recognise the turn, not a second copy of the conversation.\n\n' +
         'Host callers see every group by default; inside a container the report is always your own group.',
       args: [
