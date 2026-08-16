@@ -15,6 +15,7 @@ describe('--catalog-preseeds', () => {
         'setup/catalog-preseeds.ts',
         'setup/lib/setup-config.ts',
         'setup/providers/registry.ts',
+        'src/timezone.ts',
       ]) {
         fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
         fs.copyFileSync(path.join(process.cwd(), file), path.join(root, file));
@@ -49,6 +50,7 @@ describe('--catalog-preseeds', () => {
           'onecliApiToken',
           'skip',
           'templatePath',
+          'tz',
         ].sort(),
       );
       expect(catalog.preseeds.every((entry) => entry.kind && Array.isArray(entry.options))).toBe(true);
@@ -62,6 +64,10 @@ describe('--catalog-preseeds', () => {
       expect(catalog.preseeds.find((entry) => entry.key === 'onecliApiHost')?.validation).toEqual({
         kind: 'httpUrl',
         message: 'Must be http(s)://…',
+      });
+      expect(catalog.preseeds.find((entry) => entry.key === 'tz')?.validation).toEqual({
+        kind: 'ianaTimezone',
+        message: 'Must be an IANA timezone such as Europe/Lisbon',
       });
       expect(fs.existsSync(path.join(root, 'logs'))).toBe(false);
     } finally {

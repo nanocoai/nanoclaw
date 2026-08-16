@@ -14,6 +14,8 @@
  *   'flag+ui'  — also shown in the advanced-settings screen
  */
 
+import { isValidTimezone } from '../../src/timezone.js';
+
 export type EntrySurface = 'flag' | 'flag+ui';
 
 interface BaseEntry {
@@ -41,7 +43,8 @@ interface StringEntry extends BaseEntry {
   validation?:
     | { kind: 'httpUrl'; message: string }
     | { kind: 'prefix'; value: string; message: string }
-    | { kind: 'nonEmpty'; message: string };
+    | { kind: 'nonEmpty'; message: string }
+    | { kind: 'ianaTimezone'; message: string };
 }
 
 interface EnumEntry extends BaseEntry {
@@ -155,6 +158,20 @@ export const CONFIG: Entry[] = [
     type: 'string',
   },
   {
+    key: 'tz',
+    envVar: 'NANOCLAW_TZ',
+    flag: '--tz',
+    label: 'Timezone',
+    help: 'Use an IANA timezone and skip timezone prompts.',
+    surface: 'flag',
+    preseed: true,
+    type: 'string',
+    validation: {
+      kind: 'ianaTimezone',
+      message: 'Must be an IANA timezone such as Europe/Lisbon',
+    },
+  },
+  {
     key: 'agentName',
     envVar: 'NANOCLAW_AGENT_NAME',
     label: 'Agent name',
@@ -237,5 +254,7 @@ export function validateEntry(entry: Entry, value: string): string | undefined {
       return value.startsWith(rule.value) ? undefined : rule.message;
     case 'nonEmpty':
       return value.trim() ? undefined : rule.message;
+    case 'ianaTimezone':
+      return isValidTimezone(value) ? undefined : rule.message;
   }
 }

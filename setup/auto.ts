@@ -14,6 +14,7 @@
  *                          "Terminal Agent".
  *   NANOCLAW_AGENT_PROVIDER preselect the setup provider and skip the picker
  *                          (for packaged flows). Example: claude.
+ *   NANOCLAW_TZ            preselect an IANA timezone and skip timezone prompts
  *   NANOCLAW_SKIP          comma-separated step names to skip
  *                          (environment|container|onecli|auth|mounts|
  *                           service|cli-agent|timezone|channel|
@@ -228,6 +229,11 @@ async function main(driver: SetupDriver): Promise<void> {
     if (typeof value === 'string') registerSensitiveValue(value);
   }
   applyToEnv(configValues);
+  const configuredTz = process.env.NANOCLAW_TZ?.trim() ?? '';
+  if (configuredTz && !isValidTimezone(configuredTz)) {
+    console.error('error: NANOCLAW_TZ must be an IANA timezone such as Europe/Lisbon');
+    process.exit(1);
+  }
 
   // --uninstall routes to the uninstall flow before any setup side effects —
   // in particular before initProgressionLog(), so an uninstall never resets
@@ -2155,18 +2161,20 @@ function appendProviderImport(modulePath: string): void {
  * a headless `claude -p` pass to resolve them to a real IANA zone.
  */
 async function runTimezoneStep(driver: SetupDriver): Promise<void> {
+  const preseedTz = process.env.NANOCLAW_TZ?.trim();
   const res = await runQuietStep(
     'timezone',
     {
       running: 'Checking your timezone…',
       done: 'Timezone set.',
     },
-    [],
+    preseedTz ? ['--tz', preseedTz] : [],
     driver,
   );
   if (!res.ok && res.terminal?.fields.NEEDS_USER_INPUT !== 'true') {
     await fail('timezone', "Couldn't determine your timezone.", undefined, undefined, driver);
   }
+  if (preseedTz && res.ok) return;
 
   const fields = res.terminal?.fields ?? {};
   const resolvedTz = fields.RESOLVED_TZ;
