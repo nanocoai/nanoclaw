@@ -101,8 +101,27 @@ export interface QueryInput {
 }
 
 export type McpServerConfig =
-  | { type?: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }
-  | { type: 'http'; url: string };
+  | {
+      type?: 'stdio';
+      command: string;
+      args?: string[];
+      env?: Record<string, string>;
+      /**
+       * Container-side root of the plugin this server shipped in, recorded by
+       * the host at stamp time. Consumed (and stripped) by plugin-mcp.ts,
+       * which expands ${PLUGIN_ROOT}/${PLUGIN_DATA} and injects both env vars
+       * before the config reaches a provider.
+       */
+      pluginRoot?: string;
+      /**
+       * Working directory for the server process. By the time a provider sees
+       * it, plugin-mcp.ts has resolved it to an absolute container path.
+       * A provider whose runtime cannot set a spawn directory must shim it
+       * (cwd-shim.ts) or drop it — never launch in the wrong directory.
+       */
+      cwd?: string;
+    }
+  | { type: 'http'; url: string; headers?: Record<string, string> };
 
 export interface AgentQuery {
   /** Push a follow-up message into the active query. */

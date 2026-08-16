@@ -11,7 +11,14 @@ import path from 'path';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 import { TIMEZONE } from './config.js';
-import { configFromDb, parseMcpServerConfig, resolveGroupTimezone, validateMcpServerName } from './container-config.js';
+import {
+  CONTAINER_PLUGINS_DIR,
+  configFromDb,
+  parseMcpServerConfig,
+  resolveGroupTimezone,
+  sanitizeStoredMcpServers,
+  validateMcpServerName,
+} from './container-config.js';
 import { createAgentGroup } from './db/agent-groups.js';
 import { closeDb, initTestDb } from './db/connection.js';
 import { ensureContainerConfig, getContainerConfig, updateContainerConfigScalars } from './db/container-configs.js';
@@ -110,12 +117,103 @@ describe('parseMcpServerConfig', () => {
   ])('rejects invalid transport config %#', (input, message) => {
     expect(() => parseMcpServerConfig(input)).toThrow(message);
   });
+
+  it('honors a declared type and maps streamable-http onto the internal http', () => {
+    expect(parseMcpServerConfig({ type: 'stdio', command: 'server' })).toEqual({
+      command: 'server',
+      args: [],
+      env: {},
+    });
+    expect(parseMcpServerConfig({ type: 'streamable-http', url: 'https://mcp.example.com/mcp' })).toEqual({
+      type: 'http',
+      url: 'https://mcp.example.com/mcp',
+    });
+  });
+
+  it.each([
+    [{ type: 'sse', url: 'https://mcp.example.com/mcp' }, /unsupported transport "sse"/],
+    [{ type: 'websocket', url: 'https://mcp.example.com/mcp' }, /type must be/],
+    [{ type: 'stdio', url: 'https://mcp.example.com/mcp' }, /requires command/],
+    [{ type: 'http', command: 'server' }, /requires url/],
+  ])('rejects a mismatched or unsupported declared type %#', (input, message) => {
+    expect(() => parseMcpServerConfig(input)).toThrow(message);
+  });
+
+  it('accepts headers on http entries and rejects them on stdio entries', () => {
+    expect(parseMcpServerConfig({ url: 'https://mcp.example.com/mcp', headers: { 'X-Client': 'nanoclaw' } })).toEqual({
+      type: 'http',
+      url: 'https://mcp.example.com/mcp',
+      headers: { 'X-Client': 'nanoclaw' },
+    });
+    expect(() => parseMcpServerConfig({ command: 'server', headers: { A: 'b' } })).toThrow(/only valid with url/);
+    expect(() => parseMcpServerConfig({ url: 'https://mcp.example.com/mcp', headers: { A: 1 } })).toThrow(
+      /string values/,
+    );
+  });
+
+  it.each(['./sub', '${PLUGIN_ROOT}', '${PLUGIN_ROOT}/srv', '${PLUGIN_DATA}', '${PLUGIN_DATA}/cache'])(
+    'accepts the fixed cwd form %s',
+    (cwd) => {
+      expect(parseMcpServerConfig({ command: 'server', cwd })).toMatchObject({ cwd });
+    },
+  );
+
+  it.each([
+    ['sub', /cwd must be/],
+    ['/abs', /cwd must be/],
+    ['../up', /cwd must be/],
+    ['./a/../b', /escapes the plugin root/],
+    ['${PLUGIN_ROOT}/../up', /escapes the plugin root/],
+    ['${PLUGIN_DATA}/a/${PLUGIN_ROOT}', /escapes the plugin root/],
+    ['${PLUGIN_DATA}//x', /escapes the plugin root/],
+    ['./a//b', /escapes the plugin root/],
+    [7, /cwd must be/],
+  ])('rejects cwd %s', (cwd, message) => {
+    expect(() => parseMcpServerConfig({ command: 'server', cwd })).toThrow(message);
+  });
+});
+
+describe('sanitizeStoredMcpServers', () => {
+  it('keeps valid entries, preserves a well-formed pluginRoot, and drops the rest', () => {
+    const sanitized = sanitizeStoredMcpServers(
+      {
+        good: { command: 'server', args: [], env: {}, pluginRoot: `${CONTAINER_PLUGINS_DIR}/sdr` },
+        remote: { type: 'http', url: 'https://mcp.example.com/mcp' },
+        badRoot: { command: 'server', pluginRoot: '/etc' },
+        broken: { url: 'http://insecure.example.com' },
+        notAnObject: 42,
+        'bad.name': { command: 'server' },
+      },
+      'test-group',
+    );
+    expect(Object.keys(sanitized).sort()).toEqual(['badRoot', 'good', 'remote']);
+    expect(sanitized.good).toMatchObject({ pluginRoot: `${CONTAINER_PLUGINS_DIR}/sdr` });
+    expect(sanitized.badRoot).not.toHaveProperty('pluginRoot');
+  });
+
+  it('strips cwd from entries without plugin provenance, keeps it with', () => {
+    const sanitized = sanitizeStoredMcpServers(
+      {
+        planted: { command: 'server', cwd: '${PLUGIN_DATA}/x' },
+        plugin: { command: 'server', cwd: '${PLUGIN_DATA}/x', pluginRoot: `${CONTAINER_PLUGINS_DIR}/sdr` },
+      },
+      'test-group',
+    );
+    expect(sanitized.planted).not.toHaveProperty('cwd');
+    expect(sanitized.plugin).toMatchObject({ cwd: '${PLUGIN_DATA}/x' });
+  });
+
+  it('returns empty on a non-object blob', () => {
+    expect(sanitizeStoredMcpServers('garbage', 'test-group')).toEqual({});
+  });
 });
 
 describe('validateMcpServerName', () => {
   it('accepts bare-key-safe names and rejects structural or oversized ones', () => {
     expect(() => validateMcpServerName('brave-search_2')).not.toThrow();
-    for (const name of ['', 'docs]\n[mcp_servers.evil]', 'a b', 'a.b', '"quoted"', 'x'.repeat(65)]) {
+    // __proto__ matches the regex but would set the record's prototype
+    // instead of an own key on assignment — rejected by name.
+    for (const name of ['', 'docs]\n[mcp_servers.evil]', 'a b', 'a.b', '"quoted"', 'x'.repeat(65), '__proto__']) {
       expect(() => validateMcpServerName(name)).toThrow(/1-64 characters/);
     }
   });

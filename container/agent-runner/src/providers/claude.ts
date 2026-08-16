@@ -7,6 +7,7 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
+import { shimCwd } from './cwd-shim.js';
 import { registerProvider } from './provider-registry.js';
 import type {
   AgentProvider,
@@ -472,7 +473,9 @@ export class ClaudeProvider implements AgentProvider {
 
   constructor(options: ProviderOptions = {}) {
     this.assistantName = options.assistantName;
-    this.mcpServers = options.mcpServers ?? {};
+    this.mcpServers = Object.fromEntries(
+      Object.entries(options.mcpServers ?? {}).map(([name, server]) => [name, shimCwd(server)]),
+    );
     this.additionalDirectories = options.additionalDirectories;
     this.model = options.model;
     this.effort = options.effort;

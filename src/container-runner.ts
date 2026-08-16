@@ -23,7 +23,7 @@ import {
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
-import { materializeContainerJson } from './container-config.js';
+import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
@@ -328,6 +328,12 @@ export function buildMounts(
   if (fs.existsSync(containerJsonPath)) {
     mounts.push({ hostPath: containerJsonPath, containerPath: '/workspace/agent/container.json', readonly: true });
   }
+
+  // Stamped plugin content is immutable at runtime (the Agent Plugins
+  // contract: writes go to plugin-data/, which stays RW via the group mount).
+  // Same nested-RO pattern as container.json; initGroupFilesystem creates the
+  // dir before mounts are built, so the mount is unconditional.
+  mounts.push({ hostPath: path.join(groupDir, 'plugins'), containerPath: CONTAINER_PLUGINS_DIR, readonly: true });
 
   // Composer-managed CLAUDE.md artifacts — nested RO mounts. These are
   // regenerated from the shared base + fragments on every spawn; any

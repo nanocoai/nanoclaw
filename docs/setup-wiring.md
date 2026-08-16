@@ -110,5 +110,6 @@ Channel adapter → routeInbound() → resolve messaging_group → resolve agent
 | `src/host-sweep.ts` | Syncs processing_ack, stale detection, recurrence |
 | `src/container-runner.ts` | Spawns containers, OneCLI ensureAgent + applyContainerConfig |
 | `setup/register.ts` | Creates entities (agent_group, messaging_group, wiring) |
+| `setup/templates.ts` | Template discovery + first-agent stamping through `ncl groups create --template` |
 | `setup/verify.ts` | Checks central DB for registered groups |
 | `container/agent-runner/src/db/connection.ts` | Two-DB connection layer (inbound read-only, outbound read-write) |

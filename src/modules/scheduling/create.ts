@@ -45,21 +45,27 @@ export interface ScheduledTaskRow {
 }
 
 /**
+ * The deterministic slug half of a task id. Exposed so template restamping can
+ * find the live series a named task produced (`<slug>-<4hex>`).
+ */
+export function taskNameSlug(name: unknown): string {
+  if (typeof name !== 'string') return '';
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 24)
+    .replace(/-+$/g, '');
+}
+
+/**
  * Short, readable, filesystem/thread-safe task id. With a name → `<slug>-<4hex>`;
  * without one → `t-<6hex>`. Always matches /^[a-z0-9-]+$/ so it is safe as a
  * thread suffix, filename, and copy-pasteable CLI argument.
  */
 export function makeTaskId(name: unknown): string {
   const hex = (n: number): string => randomUUID().replace(/-/g, '').slice(0, n);
-  const slug =
-    typeof name === 'string'
-      ? name
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, '-')
-          .replace(/^-+|-+$/g, '')
-          .slice(0, 24)
-          .replace(/-+$/g, '')
-      : '';
+  const slug = taskNameSlug(name);
   return slug ? `${slug}-${hex(4)}` : `t-${hex(6)}`;
 }
 

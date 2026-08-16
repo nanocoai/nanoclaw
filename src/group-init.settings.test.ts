@@ -35,6 +35,14 @@ afterEach(() => {
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
 });
 
+describe('group filesystem scaffold', () => {
+  it('creates plugins/ so the read-only plugins mount is unconditional', () => {
+    const ag = makeGroup('ag-plugins');
+    initGroupFilesystem(ag, {});
+    expect(fs.statSync(path.join(TEST_ROOT, 'groups', ag.folder, 'plugins')).isDirectory()).toBe(true);
+  });
+});
+
 describe('default settings.json for new groups', () => {
   it('is lean: no agent-teams env key, unmanaged keys intact', () => {
     const ag = makeGroup('ag-lean');

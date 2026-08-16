@@ -43,7 +43,11 @@ git show origin/providers:container/agent-runner/src/providers/opencode.ts      
 git show origin/providers:container/agent-runner/src/providers/mcp-to-opencode.ts       > container/agent-runner/src/providers/mcp-to-opencode.ts
 git show origin/providers:container/agent-runner/src/providers/mcp-to-opencode.test.ts  > container/agent-runner/src/providers/mcp-to-opencode.test.ts
 git show origin/providers:container/agent-runner/src/providers/opencode.factory.test.ts > container/agent-runner/src/providers/opencode.factory.test.ts
+git show origin/providers:container/agent-runner/src/providers/cwd-shim.ts              > container/agent-runner/src/providers/cwd-shim.ts.new && mv container/agent-runner/src/providers/cwd-shim.ts.new container/agent-runner/src/providers/cwd-shim.ts
+git show origin/providers:container/agent-runner/src/providers/cwd-shim.test.ts         > container/agent-runner/src/providers/cwd-shim.test.ts.new && mv container/agent-runner/src/providers/cwd-shim.test.ts.new container/agent-runner/src/providers/cwd-shim.test.ts
 ```
+
+(`cwd-shim.ts` is byte-identical to the trunk copy on current trunks — `mcp-to-opencode.ts` imports it, so copying it keeps the payload self-sufficient on trunks that predate it. These two overwrite real trunk files, so they go through a `.new` + `mv` guard: on a providers branch that predates the cwd payload, `git show` fails without truncating the live copy the default provider imports.)
 
 Also copy the two barrel-registration guards — one per tree. These import the real provider barrels and assert `opencode` is registered, so they go red the moment a barrel import line is deleted or drifts:
 
@@ -137,6 +141,7 @@ for overlay in data/v2-sessions/*/agent-runner-src/providers/; do
   [ -d "$overlay" ] || continue
   cp container/agent-runner/src/providers/opencode.ts "$overlay"
   cp container/agent-runner/src/providers/mcp-to-opencode.ts "$overlay"
+  cp container/agent-runner/src/providers/cwd-shim.ts "$overlay"
   cp container/agent-runner/src/providers/index.ts "$overlay"
   echo "Updated: $overlay"
 done
