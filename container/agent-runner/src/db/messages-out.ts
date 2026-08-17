@@ -4,6 +4,7 @@
  * Writes to outbound.db (container-owned).
  * The host polls this DB (read-only) for undelivered messages.
  */
+import { loadConfig } from '../config.js';
 import { getInboundDb, getOutboundDb } from './connection.js';
 
 export interface MessageOutRow {
@@ -78,11 +79,26 @@ export function writeMessageOut(msg: WriteMessageOut): number {
 }
 
 /**
+ * The router namespaces messages_in.id per agent group by appending
+ * ":<agentGroupId>" (see src/router.ts messageIdForAgent) so the raw
+ * platform id stays unique across per-agent session DBs. Strip exactly
+ * that known suffix — never split on the first/last colon — since
+ * platform ids can legitimately contain colons themselves (e.g.
+ * Telegram's "6037840640:42").
+ */
+export function stripAgentGroupSuffix(id: string, agentGroupId: string): string {
+  if (!agentGroupId) return id;
+  const suffix = `:${agentGroupId}`;
+  return id.endsWith(suffix) ? id.slice(0, -suffix.length) : id;
+}
+
+/**
  * Look up a message's platform ID by seq number.
  * Searches both inbound and outbound DBs since seq spans both.
  *
- * For inbound messages, the Chat SDK message ID is already the platform message ID
- * (e.g., "6037840640:42" for Telegram).
+ * For inbound messages, the Chat SDK message ID is the platform message ID
+ * with the router's ":<agentGroupId>" namespacing suffix appended — strip
+ * it before returning (e.g. "6037840640:42:ag-xxx" -> "6037840640:42").
  *
  * For outbound messages, the internal ID (msg-xxx) won't work for edits/reactions.
  * Instead, look up the platform_message_id from the delivered table (host writes this
@@ -91,11 +107,12 @@ export function writeMessageOut(msg: WriteMessageOut): number {
 export function getMessageIdBySeq(seq: number): string | null {
   const inbound = getInboundDb();
 
-  // Inbound messages: ID is already the platform message ID
+  // Inbound messages: ID is the platform message ID plus the router's
+  // per-agent-group suffix — strip it before returning.
   const inRow = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(seq) as
     | { id: string }
     | undefined;
-  if (inRow) return inRow.id;
+  if (inRow) return stripAgentGroupSuffix(inRow.id, loadConfig().agentGroupId);
 
   // Outbound messages: look up platform message ID from delivered table
   const outRow = getOutboundDb().prepare('SELECT id FROM messages_out WHERE seq = ?').get(seq) as
