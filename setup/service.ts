@@ -101,8 +101,12 @@ export async function run(_args: string[]): Promise<void> {
 /**
  * Symlink bin/ncl into ~/.local/bin so `ncl` is available from anywhere.
  * Idempotent — overwrites an existing symlink but won't clobber a real file.
+ *
+ * Exported so the update/migrate paths can (re)install it too — those paths
+ * don't run the full `service` setup step, so this was previously only ever
+ * called on a fresh install.
  */
-function installCliSymlink(projectRoot: string, homeDir: string): void {
+export function installCliSymlink(projectRoot: string, homeDir: string): void {
   const source = path.join(projectRoot, 'bin', 'ncl');
   const targetDir = path.join(homeDir, '.local', 'bin');
   const target = path.join(targetDir, 'ncl');

@@ -366,6 +366,11 @@ If a retried migration remains unresolved, ask again. Do not show restart
 commands until the unresolved list is empty or the user explicitly chooses
 Restart anyway.
 
+Reinstall the `ncl` CLI symlink so it stays on PATH across this upgrade (the
+fresh-install `service` step isn't part of this flow, so it wouldn't
+otherwise run again):
+- `pnpm exec tsx scripts/install-cli-symlink.ts`
+
 Tell the user:
 - To rollback: `git reset --hard <backup-tag-from-step-1>`
 - Backup branch also exists: `backup/pre-update-<HASH>-<TIMESTAMP>`
