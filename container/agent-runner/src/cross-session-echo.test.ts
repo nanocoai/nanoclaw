@@ -62,12 +62,12 @@ function insertMessage(
   id: string,
   kind: string,
   content: object,
-  opts?: { seq?: number; trigger?: 0 | 1; platformId?: string; channelType?: string; threadId?: string },
+  opts?: { seq?: number; trigger?: 0 | 1; platformId?: string; channelType?: string; threadId?: string; seriesId?: string },
 ) {
   getInboundDb()
     .prepare(
-      `INSERT INTO messages_in (id, seq, kind, timestamp, status, "trigger", platform_id, channel_type, thread_id, content)
-       VALUES (?, ?, ?, datetime('now'), 'pending', ?, ?, ?, ?, ?)`,
+      `INSERT INTO messages_in (id, seq, kind, timestamp, status, "trigger", platform_id, channel_type, thread_id, series_id, content)
+       VALUES (?, ?, ?, datetime('now'), 'pending', ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -77,6 +77,7 @@ function insertMessage(
       opts?.platformId ?? null,
       opts?.channelType ?? null,
       opts?.threadId ?? null,
+      opts?.seriesId ?? null,
       JSON.stringify(content),
     );
 }
@@ -151,6 +152,19 @@ describe('routing (extractRouting)', () => {
     const routing = extractRouting(getPendingMessages());
     expect(routing.taskRun).toBe(true);
     expect(routing.inReplyTo).toBe('t1');
+  });
+
+  it('carries the task row series id; null for chat batches and unstamped task rows', () => {
+    insertMessage('t1', 'task', { prompt: 'daily digest' }, { seq: 2, seriesId: 'task-1780000000000-abc123' });
+    expect(extractRouting(getPendingMessages()).taskSeriesId).toBe('task-1780000000000-abc123');
+
+    initTestSessionDb();
+    insertMessage('m1', 'chat', { sender: 'Alice', text: 'hi' }, { seq: 2 });
+    expect(extractRouting(getPendingMessages()).taskSeriesId).toBeNull();
+
+    initTestSessionDb();
+    insertMessage('t2', 'task', { prompt: 'legacy row' }, { seq: 2 });
+    expect(extractRouting(getPendingMessages()).taskSeriesId).toBeNull();
   });
 
   it('taskRun is false when a real chat row is in the batch', () => {

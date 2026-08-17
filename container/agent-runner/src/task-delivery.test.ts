@@ -39,6 +39,7 @@ const taskRouting: RoutingContext = {
   threadId: 'system:tasks:daily-digest-a1b2',
   inReplyTo: 'run-1',
   taskRun: true,
+  taskSeriesId: 'daily-digest-a1b2',
 };
 
 beforeEach(() => {
@@ -193,7 +194,21 @@ describe('automatic task run summary', () => {
       content: string;
     }[];
     expect(rows).toHaveLength(1);
-    expect(JSON.parse(rows[0].content).text).toBe('Checked the feeds — nothing new.');
+    const content = JSON.parse(rows[0].content);
+    expect(content.text).toBe('Checked the feeds — nothing new.');
+    // No series id supplied — the key stays absent, not null.
+    expect('seriesId' in content).toBe(false);
+  });
+
+  it('stamps the series id on the row when supplied', () => {
+    autoAppendTaskLog('Checked the feeds — nothing new.', 'task-1783456499991-sz4yhw');
+
+    const row = getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log'").get() as {
+      content: string;
+    };
+    const content = JSON.parse(row.content);
+    expect(content.text).toBe('Checked the feeds — nothing new.');
+    expect(content.seriesId).toBe('task-1783456499991-sz4yhw');
   });
 
   it('marks legacy final-output blocks undelivered and never stores raw XML', () => {

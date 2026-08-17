@@ -497,14 +497,15 @@ const TASK_ROUTING = {
   threadId: 'system:tasks:ser-1',
   inReplyTo: 't1',
   taskRun: true,
+  taskSeriesId: 'ser-1',
 };
 
-function taskLogRows(): Array<{ text: string }> {
+function taskLogRows(): Array<{ text: string; seriesId?: string }> {
   return (
     getOutboundDb()
       .prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq")
       .all() as Array<{ content: string }>
-  ).map((r) => JSON.parse(r.content) as { text: string });
+  ).map((r) => JSON.parse(r.content) as { text: string; seriesId?: string });
 }
 
 describe('task-run turn wiring (real processQuery)', () => {
@@ -520,6 +521,8 @@ describe('task-run turn wiring (real processQuery)', () => {
     const logs = taskLogRows();
     expect(logs).toHaveLength(1);
     expect(logs[0].text).toBe('checked feeds — nothing new');
+    // The routing's series id rides on the row for the host's fallback path.
+    expect(logs[0].seriesId).toBe('ser-1');
     // and nothing was delivered as chat
     expect(getUndeliveredMessages().filter((m) => m.kind === 'chat')).toHaveLength(0);
   });

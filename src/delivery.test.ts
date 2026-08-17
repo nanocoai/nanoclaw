@@ -542,6 +542,59 @@ describe('deliverSessionMessages — task_log rows (one-door task delivery)', ()
     const delivered = getDeliveredIds(openInboundDb('ag-1', session.id));
     expect(delivered.has('log-1')).toBe(true);
   });
+
+  it('falls back to the stamped series id when the session is not a task session', async () => {
+    seedAgentAndChannel();
+    // Pre-2.1.48 series live in chat sessions — no system:tasks:* thread id.
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    const db = new Database(outboundDbPath('ag-1', session.id));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, content)
+       VALUES ('log-legacy', datetime('now'), 'task_log', ?)`,
+    ).run(JSON.stringify({ text: 'watered the plants', seriesId: 'legacy-series-c3d4' }));
+    db.close();
+
+    const calls: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_c, _p, _t, _k, content) {
+        calls.push(content);
+        return 'pm';
+      },
+    });
+    await deliverSessionMessages(session);
+
+    expect(calls).toHaveLength(0); // still never delivered to a channel
+    const logFile = `${TEST_DIR}/groups/test-agent/tasks/legacy-series-c3d4.md`;
+    expect(fs.existsSync(logFile)).toBe(true);
+    expect(fs.readFileSync(logFile, 'utf8').trim()).toMatch(/ — watered the plants$/);
+    const delivered = getDeliveredIds(openInboundDb('ag-1', session.id));
+    expect(delivered.has('log-legacy')).toBe(true);
+  });
+
+  it('still ignores a task_log row with no series id outside a task session', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    const db = new Database(outboundDbPath('ag-1', session.id));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, content)
+       VALUES ('log-bare', datetime('now'), 'task_log', ?)`,
+    ).run(JSON.stringify({ text: 'orphan line' }));
+    db.close();
+
+    setDeliveryAdapter({
+      async deliver() {
+        return 'pm';
+      },
+    });
+    await deliverSessionMessages(session);
+
+    expect(fs.existsSync(`${TEST_DIR}/groups/test-agent/tasks`)).toBe(false);
+    // Dropped but acked — the row is not retried forever.
+    const delivered = getDeliveredIds(openInboundDb('ag-1', session.id));
+    expect(delivered.has('log-bare')).toBe(true);
+  });
 });
 
 describe('deliverSessionMessages — batch preview hooks', () => {

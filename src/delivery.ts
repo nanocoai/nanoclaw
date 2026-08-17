@@ -334,6 +334,16 @@ async function deliverMessage(
       } catch (err) {
         log.warn('Failed to append task run log', { id: msg.id, sessionId: session.id, err });
       }
+    } else if (typeof content.seriesId === 'string' && content.seriesId) {
+      // Pre-2.1.48 series live in chat sessions, so there is no
+      // system:tasks:* thread id to derive the series from — fall back to
+      // the id the runner stamped on the row. appendRunLog's charset guard
+      // rejects anything that isn't a plain task id.
+      try {
+        appendRunLog(session.agent_group_id, content.seriesId, typeof content.text === 'string' ? content.text : '');
+      } catch (err) {
+        log.warn('Failed to append task run log', { id: msg.id, sessionId: session.id, err });
+      }
     } else {
       log.warn('task_log row outside a task session — ignoring', { id: msg.id, sessionId: session.id });
     }

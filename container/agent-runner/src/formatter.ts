@@ -117,6 +117,11 @@ export interface RoutingContext {
    *  delivers from a task session; final-text `<message to>` blocks are inert
    *  and the final text auto-appends to the series run log. */
   taskRun: boolean;
+  /** Series id of the task row driving this run, stamped onto the auto-appended
+   *  `task_log` row so the host can still append the run log when the session
+   *  isn't a `system:tasks:*` session (pre-2.1.48 series live in chat sessions).
+   *  Null for chat batches or task rows predating the series_id column. */
+  taskSeriesId: string | null;
 }
 
 /**
@@ -139,6 +144,7 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     taskRun:
       messages.some((m) => m.kind === 'task') &&
       messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
+    taskSeriesId: messages.find((m) => m.kind === 'task')?.series_id ?? null,
   };
 }
 

@@ -602,7 +602,7 @@ export async function processQuery(
           // Errors included: a failed run's text belongs in its log, not chat.
           // A corrective retry handles delivery only; its result is not a
           // second run summary.
-          if (routing.taskRun && !taskBlockNudged) autoAppendTaskLog(event.text);
+          if (routing.taskRun && !taskBlockNudged) autoAppendTaskLog(event.text, routing.taskSeriesId);
           if (resultBlocks === 0 && event.isError === true && !routing.taskRun) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
@@ -1138,7 +1138,7 @@ function escapePromptXml(value: string): string {
  * `task_log` outbound row; the host appends it to the series' tasks/<id>.md
  * with its usual timestamp stamp. Never delivered to anyone.
  */
-export function autoAppendTaskLog(text: string): void {
+export function autoAppendTaskLog(text: string, seriesId: string | null = null): void {
   // Run-log hygiene: an inert <message to> block never belongs in the log as
   // raw XML — replace each with its inner text, marked undelivered, so the
   // log stays readable prose.
@@ -1148,10 +1148,13 @@ export function autoAppendTaskLog(text: string): void {
   );
   const line = stripInternalTags(prose).replace(/\s+/g, ' ').trim().slice(0, 500);
   if (!line) return;
+  // The series id rides on the row so the host can append the log even when
+  // the session isn't a system:tasks:* session (legacy chat-session series
+  // have no thread id to derive it from — see delivery.ts's task_log branch).
   writeMessageOut({
     id: generateId(),
     kind: 'task_log',
-    content: JSON.stringify({ text: line }),
+    content: JSON.stringify(seriesId ? { text: line, seriesId } : { text: line }),
   });
   log('Task run log auto-appended from final text');
 }

@@ -31,6 +31,9 @@ export interface MessageInRow {
   status: string;
   process_after: string | null;
   recurrence: string | null;
+  /** Task-series join key, set on kind='task' rows by the host scheduler.
+   *  Optional: inbound.db predating the column yields undefined (SELECT *). */
+  series_id?: string | null;
   tries: number;
   /** 1 = wake-eligible (default); 0 = accumulated context only */
   trigger: number;
