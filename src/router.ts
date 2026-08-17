@@ -25,12 +25,14 @@ import { recordDroppedMessage } from './db/dropped-messages.js';
 import {
   createMessagingGroup,
   getMessagingGroupAgents,
+  getMessagingGroupByPlatform,
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
-import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
+import { resolveSession, writeSessionMessage } from './session-manager.js';
+import { getDeliveryAdapter } from './delivery.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
@@ -467,8 +469,8 @@ async function deliverToAgent(
     effectiveSessionMode = 'per-thread';
   }
 
-  const { session, created } = resolveSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode);
-
+  // Gate BEFORE resolveSession: a denied or filtered command must not
+  // create a session row or initialize session databases as a side effect.
   // The inbound row's (channel_type, platform_id, thread_id) is the address
   // the agent's reply will be delivered to. Normally it mirrors the source
   // (stamped from the event, with the wiring's thread policy applied). When
@@ -483,7 +485,12 @@ async function deliverToAgent(
 
   // Command gate: classify slash commands before they reach the container.
   // Filtered commands are dropped silently. Denied admin commands get a
-  // permission-denied response written directly to messages_out.
+  // permission-denied notice sent through the live delivery adapter — the
+  // host must never write the container-owned outbound.db itself (single-
+  // writer invariant).
+  // Fire-and-forget: the route must not block on a
+  // slow adapter, and a lost notice is worse than silence-with-logs but not
+  // worth stalling routing over.
   if (event.message.kind === 'chat' || event.message.kind === 'chat-sdk') {
     const gate = gateCommand(event.message.content, userId, agent.agent_group_id);
     if (gate.action === 'filter') {
@@ -491,18 +498,44 @@ async function deliverToAgent(
       return;
     }
     if (gate.action === 'deny') {
-      writeOutboundDirect(session.agent_group_id, session.id, {
-        id: `deny-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        kind: 'chat',
-        platformId: deliveryAddr.platformId,
-        channelType: deliveryAddr.channelType,
-        threadId: deliveryAddr.threadId,
-        content: JSON.stringify({ text: `Permission denied: ${gate.command} requires admin access.` }),
-      });
+      const adapter = getDeliveryAdapter();
+      if (adapter && deliveryAddr.channelType && deliveryAddr.platformId) {
+        // The registry dispatches by exact instance key — a named-instance
+        // channel (e.g. a second Slack app) must not fall through to its
+        // default sibling. The origin address is this mg; a replyTo redirect
+        // resolves its own mg row (same as normal outbound delivery), and an
+        // unknown redirect address defaults downstream to channelType.
+        // Same-address replyTo (e.g. only the thread differs) keeps the
+        // ORIGIN instance — the by-platform lookup deliberately prefers the
+        // default instance and would reply through a sibling bot. Only a
+        // genuinely different target address resolves its own mg row.
+        const sameAddress = deliveryAddr.channelType === mg.channel_type && deliveryAddr.platformId === mg.platform_id;
+        const notifyInstance =
+          event.replyTo === undefined || sameAddress
+            ? mg.instance
+            : getMessagingGroupByPlatform(deliveryAddr.channelType, deliveryAddr.platformId)?.instance;
+        void adapter
+          .deliver(
+            deliveryAddr.channelType,
+            deliveryAddr.platformId,
+            deliveryAddr.threadId,
+            'chat',
+            JSON.stringify({ text: `Permission denied: ${gate.command} requires admin access.` }),
+            undefined,
+            notifyInstance,
+          )
+          .catch((err) => {
+            log.warn('Denial notice delivery failed', { command: gate.command, userId, err });
+          });
+      } else {
+        log.warn('Denial notice not deliverable (no adapter or address)', { command: gate.command, userId });
+      }
       log.info('Admin command denied by gate', { command: gate.command, userId, agentGroupId: agent.agent_group_id });
       return;
     }
   }
+
+  const { session, created } = resolveSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode);
 
   writeSessionMessage(session.agent_group_id, session.id, {
     id: messageIdForAgent(event.message.id, agent.agent_group_id),
