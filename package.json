@@ -27,11 +27,13 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@chat-adapter/discord": "4.36.0",
+    "@chat-adapter/github": "4.36.0",
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
     "@onecli-sh/sdk": "2.2.1",
     "better-sqlite3": "11.10.0",
-    "chat": "4.29.0",
+    "chat": "4.36.0",
     "cron-parser": "5.5.0",
     "kleur": "^4.1.5",
     "yaml": "^2.9.0"
