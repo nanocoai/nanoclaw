@@ -11,6 +11,7 @@ import { readEnvFile } from '../env.js';
 import type { ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
+import { extractSlackRawText } from './slack-raw-text.js';
 
 /**
  * Dedicated bot app on a threaded platform. group threads:true keeps
@@ -47,6 +48,7 @@ registerChannelAdapter('slack', {
       concurrency: 'concurrent',
       supportsThreads: true,
       defaults: SLACK_DEFAULTS,
+      extractRawText: extractSlackRawText,
     });
     bridge.resolveChannelName = async (platformId: string) => {
       try {
