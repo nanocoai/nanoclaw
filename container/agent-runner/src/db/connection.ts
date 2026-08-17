@@ -203,6 +203,7 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
       content        TEXT NOT NULL,
       on_wake        INTEGER NOT NULL DEFAULT 0
     );
+    CREATE INDEX idx_messages_in_poll ON messages_in(status, trigger, seq);
     CREATE TABLE delivered (
       message_out_id      TEXT PRIMARY KEY,
       platform_message_id TEXT,
