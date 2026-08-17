@@ -22,8 +22,8 @@ If all of the following are already present, skip to **Configuration**:
 - `import './opencode.js';` line in `src/providers/index.ts`
 - `import './opencode.js';` line in `container/agent-runner/src/providers/index.ts`
 - `@opencode-ai/sdk` in `container/agent-runner/package.json`
-- `ARG OPENCODE_VERSION` and `"opencode-ai@${OPENCODE_VERSION}"` in `container/Dockerfile`
-- `src/opencode-dockerfile.test.ts` (the Dockerfile install guard)
+- an `opencode-ai` entry in `container/cli-tools.json`
+- `container/agent-runner/src/providers/opencode-cli-tools.test.ts` (the CLI manifest guard)
 
 Missing pieces — continue below. All steps are idempotent; re-running is safe.
 
@@ -80,31 +80,24 @@ Pinned. Bump deliberately, not with `bun update`. Use `1.4.17` — must match th
 cd container/agent-runner && bun add @opencode-ai/sdk@1.4.17 && cd -
 ```
 
-### 5. Add `opencode-ai` to the container Dockerfile
+### 5. Add `opencode-ai` to the CLI manifest
 
-Two edits to `container/Dockerfile`, both idempotent (skip if already present):
+The agent's global Node CLIs install from `container/cli-tools.json` (a json-merge seam), not hand-edited Dockerfile layers. Add OpenCode by appending one entry — idempotent on `name`, so a re-run is a no-op. `opencode-ai` has no native postinstall, so no `onlyBuilt`. The Dockerfile already installs every manifest entry via pinned `pnpm install -g`; no Dockerfile edit is needed.
 
-**(a)** In the "Pin CLI versions" ARG block (around line 22), add after `ARG VERCEL_VERSION=...`:
-
-```dockerfile
-ARG OPENCODE_VERSION=1.4.17
+```json
+{ "name": "opencode-ai", "version": "1.4.17" }
 ```
 
-> **Do not use `latest`** — the CLI and SDK must be the same version. `latest` silently upgrades the CLI to 1.14.x which has a breaking session API change (UUID session IDs → `ses_` prefix) incompatible with SDK 1.4.x.
+Append it to the array in `container/cli-tools.json`.
 
-**(b)** Add a new standalone `RUN` block for the OpenCode CLI, after the existing per-CLI install blocks (around line 111, right after the `@anthropic-ai/claude-code` block). The Dockerfile splits each global CLI into its own layer for cache granularity — keep that pattern; do not collapse them into a single combined `pnpm install -g` call:
+> **Do not use `latest`** — the CLI and SDK must be the same version. `latest` silently upgrades the CLI to 1.14.x which has a breaking session API change (UUID session IDs → `ses_` prefix) incompatible with SDK 1.4.x. The version (`1.4.17`) must match the `@opencode-ai/sdk` version pinned in step 4 — this SKILL.md is the source of truth for both.
 
-```dockerfile
-RUN --mount=type=cache,target=/root/.cache/pnpm \
-    pnpm install -g "opencode-ai@${OPENCODE_VERSION}"
-```
+### 6. Copy the CLI manifest guard
 
-### 6. Copy the Dockerfile install guard
-
-The `opencode-ai` CLI is a globally-installed binary — not importable or typed — so a structural test guards the Dockerfile install. Copy it into the host test tree:
+`opencode-ai` is a globally-installed binary — not importable or typed — so a structural test guards the manifest entry. Copy it into the container test tree:
 
 ```bash
-cp .claude/skills/add-opencode/opencode-dockerfile.test.ts src/opencode-dockerfile.test.ts
+cp .claude/skills/add-opencode/opencode-cli-tools.test.ts container/agent-runner/src/providers/opencode-cli-tools.test.ts
 ```
 
 ### 7. Build and validate
@@ -113,16 +106,15 @@ cp .claude/skills/add-opencode/opencode-dockerfile.test.ts src/opencode-dockerfi
 pnpm run build                                                    # host
 pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit    # container typecheck
 pnpm exec vitest run src/providers/opencode-registration.test.ts  # host registration guard
-pnpm exec vitest run src/opencode-dockerfile.test.ts              # Dockerfile install guard
-cd container/agent-runner && bun test src/providers/opencode-registration.test.ts && cd -  # container registration guard
+cd container/agent-runner && bun test src/providers/opencode-registration.test.ts src/providers/opencode-cli-tools.test.ts && cd -  # container registration + manifest guard
 ./container/build.sh                                              # agent image
 ```
 
-All four must be clean before proceeding. Each guards a distinct integration point:
+All must be clean before proceeding. Each guards a distinct integration point:
 
 - **`src/providers/opencode-registration.test.ts`** (host, vitest) imports the real host barrel (`./index.js` → `listProviderContainerConfigNames`) and asserts `opencode` is present. It goes red if the `import './opencode.js';` line in `src/providers/index.ts` is deleted or drifts, or if that barrel fails to evaluate.
 - **`container/agent-runner/src/providers/opencode-registration.test.ts`** (container, bun:test) imports the real container barrel (`./index.js` → `listProviderNames`) and asserts `opencode` is present. It goes red if the `import './opencode.js';` line in `container/agent-runner/src/providers/index.ts` is deleted or drifts. Because the barrel is imported unmocked, it also pulls in `opencode.ts`, which imports **`@opencode-ai/sdk`** — so this test implicitly guards the step-4 dependency too: if the package isn't installed, the import throws and the test goes red.
-- **`src/opencode-dockerfile.test.ts`** parses `container/Dockerfile` and asserts both the `ARG OPENCODE_VERSION=...` (rejecting `latest`) and the `pnpm install -g "opencode-ai@${OPENCODE_VERSION}"` line are present. The `opencode-ai` CLI binary is not importable, so it is guarded by this structural test plus the container build — not the registration test.
+- **`container/agent-runner/src/providers/opencode-cli-tools.test.ts`** (container, bun:test) reads the real `container/cli-tools.json` and asserts the `opencode-ai` entry is present and pinned to an exact semver (rejecting `latest`). The `opencode-ai` CLI binary is not importable, so it is guarded by this structural test plus the container build — not the registration test.
 - **`pnpm run build`** type-checks the host provider's consumption of the host-side container-config registry; the container typecheck does the same for the container provider against the agent-runner core APIs.
 
 The pre-existing `opencode.factory.test.ts` imports `opencode.ts` directly and self-registers, so it stays green even if a barrel import is removed — it is a unit test of `createProvider('opencode')`, not the registration guard. Keep it; it adds factory coverage but does not stand in for the registration tests above.
@@ -262,6 +254,6 @@ Extra MCP servers still come from **`NANOCLAW_MCP_SERVERS`** / `container_config
 
 ## Next Steps
 
-The registration and Dockerfile guards in step 7 verify the wiring. To confirm an end-to-end round-trip, switch a test group with `ncl groups config update --id <group-id> --provider opencode && ncl groups restart --id <group-id>`, register the matching provider key in OneCLI, and send a message. A clean exchange returns the model's reply with no `Unknown provider: opencode` error and no UUID/session warnings in the logs.
+The registration and CLI manifest guards in step 7 verify the wiring. To confirm an end-to-end round-trip, switch a test group with `ncl groups config update --id <group-id> --provider opencode && ncl groups restart --id <group-id>`, register the matching provider key in OneCLI, and send a message. A clean exchange returns the model's reply with no `Unknown provider: opencode` error and no UUID/session warnings in the logs.
 
 To remove this provider, see [REMOVE.md](REMOVE.md).
