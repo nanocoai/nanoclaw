@@ -1,11 +1,11 @@
 ---
 name: init-first-agent
-description: Walk the operator through creating the first NanoClaw agent for a DM channel — resolve the operator's channel identity, wire the DM messaging group to a new agent, and trigger a welcome DM via the normal delivery path. Use after channel credentials are configured and the service is running.
+description: Walk the operator through wiring the first NanoClaw agent to a DM channel — resolve the operator's channel identity, select or create the agent, and trigger a welcome DM via the normal delivery path. Use after channel credentials are configured and the service is running.
 ---
 
 # Init First Agent
 
-Stand up the first NanoClaw agent for a channel and verify end-to-end delivery by having the agent DM the operator. Everything the skill does is idempotent — rerunning is safe.
+Wire the first NanoClaw agent to a channel and verify end-to-end delivery by having the agent DM the operator. Everything the skill does is idempotent — rerunning is safe.
 
 ## Prerequisites
 
@@ -67,11 +67,26 @@ For Telegram only, there's an existing pair-code primitive. When you run this to
 npx tsx setup/index.ts --step pair-telegram -- --intent new-agent:dm-with-<folder>
 ```
 
-Parse the `PAIR_TELEGRAM_ISSUED` status block for `CODE` and follow the `REMINDER_TO_ASSISTANT` line in that block. Then wait for the `PAIR_TELEGRAM` block — read `PLATFORM_ID` and `PAIRED_USER_ID` from it. telegram.ts's interceptor has already upserted the user and granted owner if none existed yet. Use `PLATFORM_ID` and `PAIRED_USER_ID` directly in step 4.
+Parse the `PAIR_TELEGRAM_ISSUED` status block for `CODE` and follow the `REMINDER_TO_ASSISTANT` line in that block. Then wait for the `PAIR_TELEGRAM` block — read `PLATFORM_ID` and `PAIRED_USER_ID` from it. telegram.ts's interceptor has already upserted the user and granted owner if none existed yet. Use `PLATFORM_ID` and `PAIRED_USER_ID` directly in step 5.
 
-## 4. Run the init script
+## 4. Pick the agent group
 
-First, pick the agent provider. Read `src/providers/index.ts` and collect the installed providers from its `import './<name>.js';` lines — `claude` is always available as the built-in default. If a non-default provider is installed (e.g. codex), ask the user which one this agent should run on; if only claude is available, skip the question and omit the flag.
+List the existing agent groups and their wirings through the admin CLI:
+
+```bash
+ncl groups list --json
+ncl wirings list --json
+```
+
+If setup already installed a template, it appears in the groups result even when it has no wiring. Show the user each group's name, folder, and id, and note which groups already appear as `agent_group_id` values in the wirings result.
+
+- If no group exists, continue without `AGENT_GROUP_ID`; the init script will create one.
+- If groups exist, ask whether to wire one of them or create a new agent. Recommend the sole unwired group when there is exactly one.
+- When the user picks an existing group, record its exact `id` as `AGENT_GROUP_ID`. Do not infer it from the display name or folder.
+
+## 5. Run the init script
+
+When creating a new agent, first pick the provider. Read `src/providers/index.ts` and collect the installed providers from its `import './<name>.js';` lines — `claude` is always available as the built-in default. If a non-default provider is installed (e.g. codex), ask the user which one this agent should run on; if only claude is available, skip the question. An existing group keeps the provider and template configuration it already has.
 
 ```bash
 npx tsx scripts/init-first-agent.ts \
@@ -82,18 +97,24 @@ npx tsx scripts/init-first-agent.ts \
   --agent-name "${AGENT_NAME}"
 ```
 
+When an existing group was selected, append its exact id:
+
+```bash
+  --agent-group-id "${AGENT_GROUP_ID}"
+```
+
 The new group is created on the instance default provider (`DEFAULT_AGENT_PROVIDER` in `.env`, or `claude` when unset). To put it on a different provider, switch after creation with `ncl groups config update --id <group-id> --provider <name>`. Add `--welcome "System instruction: ..."` to override the default welcome prompt.
 
 The script:
 1. Upserts the `users` row and grants `owner` role if no owner exists.
-2. Creates the `agent_groups` row and calls `initGroupFilesystem` at `groups/dm-with-<name>/`.
+2. Uses the selected `agent_groups` row, or creates one and calls `initGroupFilesystem` at `groups/dm-with-<name>/`.
 3. Reuses or creates the DM `messaging_groups` row.
 4. Wires them via `messaging_group_agents` (which auto-creates the companion `agent_destinations` row).
 5. Hands the welcome message to the running service via its CLI socket (`data/cli.sock`), targeting the DM messaging group. The service routes it into the DM session, which wakes the container synchronously. If the socket isn't reachable (service down), falls back to a direct `inbound.db` write that the next host sweep picks up.
 
 Show the script's output to the user.
 
-## 5. Verify
+## 6. Verify
 
 The welcome DM is queued synchronously; the only wait is container cold-start (~60s on first launch) before the agent processes the message and the reply flows through `outbound.db` to the channel.
 
@@ -119,4 +140,4 @@ If they say it didn't arrive, then diagnose using the DB directly (no waiting lo
 
 **Wrong person got the welcome DM** — the `--platform-id` you passed is someone else's DM channel. Rerun with the correct one; the script is idempotent on user/messaging-group/agent-group but writes a new session welcome each run.
 
-**Agent group name collision** — if `dm-with-<display-name>` already exists (e.g. rerunning with the same display name), the script reuses it. Pass a different `--display-name` to get a distinct folder.
+**Agent group name collision** — use step 4 to select the intended group by id. If creating a new agent and `dm-with-<display-name>` already exists, the script reuses it; pass a different `--display-name` to get a distinct folder.

@@ -17,12 +17,18 @@
 # OIDC, a missing role: every one of those ends with auto-merge off and the PR
 # waiting for a person. There is no path through this file where uncertainty
 # results in a merge.
+#
+# Runs on every pull request, deliberately, and NOT filtered on the versions.json
+# path. A required status check that is path-filtered never reports on a PR that
+# does not touch the path, and GitHub reads never-reported as forever-pending —
+# so a filtered job here would block every unrelated PR instead of gating this
+# one. Unchanged pin is therefore a fast, green no-op, which is what lets `verify`
+# be a required check at all. It was not one while this was filtered, and a pin
+# bump merged with this job red.
 name: verify-agent-image
 
 on:
   pull_request:
-    paths:
-      - versions.json
 
 permissions:
   contents: read
@@ -60,7 +66,8 @@ jobs:
 
           if [ "$NEW" = "$OLD" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "versions.json changed but the agent-image pin did not — nothing to verify."
+            echo "The agent-image pin is unchanged — nothing to verify."
+            echo "(Most PRs land here: this job runs on all of them so it can be a required check.)"
             exit 0
           fi
           echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -179,6 +186,21 @@ jobs:
           PY
 
       # AUTO-MERGE GATE. Nothing above can switch this on.
+      #
+      # Keyless Sigstore, so what is being trusted is the publisher's build
+      # workflow identity rather than a key anybody could copy. The defaults
+      # below are that identity; the repo variables exist to point at a fork or
+      # a re-signed image without editing this file.
+      #
+      # Signatures and attestations are ordinary artifacts living beside the
+      # image, as `sha256-<digest>.sig` / `.att` tags IN THE SAME REPOSITORY.
+      # A plain `crane copy` moves the index and its children and leaves those
+      # behind, so a mirrored image verifies as unsigned — indistinguishable
+      # here from genuinely unsigned. Sync with `cosign copy` (or
+      # `crane copy --all-tags`), or set AGENT_IMAGE_SIGNATURE_REPO to the
+      # repository that does hold them: the signature covers the digest, so
+      # verifying it wherever it lives still says something true about these
+      # exact bytes.
       - name: Verify publisher signature
         if: steps.pin.outputs.changed == 'true'
         id: sig
@@ -187,25 +209,53 @@ jobs:
           set -euo pipefail
           IDENTITY='${{ vars.AGENT_IMAGE_SIGNER_IDENTITY }}'
           ISSUER='${{ vars.AGENT_IMAGE_SIGNER_ISSUER }}'
-          if [ -z "$IDENTITY" ] || [ -z "$ISSUER" ]; then
-            echo "No signer configured (AGENT_IMAGE_SIGNER_IDENTITY / _ISSUER)."
-            echo "Signature verification skipped, so this PR needs a human."
-            exit 1
-          fi
+          : "${IDENTITY:=https://github.com/buildecho/images/.github/workflows/build-container.yml@refs/heads/main}"
+          : "${ISSUER:=https://token.actions.githubusercontent.com}"
+
+          REF='${{ steps.pin.outputs.new }}'
+          DIGEST="${REF##*@}"
+          SIG_REPO='${{ vars.AGENT_IMAGE_SIGNATURE_REPO }}'
+          : "${SIG_REPO:=${REF%@*}}"
+
           curl -fsSL https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 -o /usr/local/bin/cosign
           chmod +x /usr/local/bin/cosign
-          cosign verify \
-            --certificate-identity-regexp "$IDENTITY" \
-            --certificate-oidc-issuer "$ISSUER" \
-            '${{ steps.pin.outputs.new }}'
 
+          echo "Verifying the index signature at ${SIG_REPO}@${DIGEST}"
+          cosign verify \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer "$ISSUER" \
+            "${SIG_REPO}@${DIGEST}" > /dev/null
+
+          # Deliberately no attestation check. The publisher does not attach
+          # them: `.att` and `.sbom` are both absent upstream, and that is a
+          # considered choice on their side — BuildKit provenance embeds build
+          # environment detail they do not want redistributed. Verifying an SBOM
+          # that is never published would fail every run and hold this gate
+          # permanently off, which reads as "signature broken" rather than
+          # "attestations not offered".
+          #
+          # If that changes, the check belongs here and must name each CHILD
+          # digest from /tmp/manifest.json rather than the index: attestations
+          # attach per architecture, so verifying the index alone would pass
+          # without ever having looked at an SBOM.
+
+      # Arming auto-merge is a convenience, NOT a verification result, so it
+      # cannot be allowed to decide this job's conclusion. It is the last step,
+      # and without continue-on-error its failure turns the whole job red — on a
+      # draft pull request, whenever allow_auto_merge is off, or on a transient
+      # API error. Now that `verify` is a required check that is a self-inflicted
+      # block, and worse: approve-agent-image only triggers on this workflow
+      # concluding success, so one flaky call here silently breaks the approval
+      # chain behind it. A red job must mean the IMAGE failed a check.
       - name: Enable auto-merge
+        continue-on-error: true
         if: steps.pin.outputs.changed == 'true' && steps.sig.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Signature verified against the configured publisher identity."
-          gh pr merge --squash --auto '${{ github.event.pull_request.number }}'
+          gh pr merge --squash --auto '${{ github.event.pull_request.number }}' \
+            || echo "::notice::Could not arm auto-merge (draft, disabled, or transient). Verification stands; a human merges."
 
       - name: Explain why a human is still needed
         if: steps.pin.outputs.changed == 'true' && steps.sig.outcome != 'success'

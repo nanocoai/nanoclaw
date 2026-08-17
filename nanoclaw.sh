@@ -25,6 +25,21 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
+# ─── --help: show usage without bootstrapping ──────────────────────────
+for arg in "$@"; do
+  if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
+    if command -v node >/dev/null 2>&1 && [ -x "$PROJECT_ROOT/node_modules/.bin/tsx" ]; then
+      exec "$PROJECT_ROOT/node_modules/.bin/tsx" "$PROJECT_ROOT/setup/auto.ts" "$@"
+    fi
+    echo "Usage: bash nanoclaw.sh [options]"
+    echo ""
+    echo "  --template-path <ref>  Create the first agent from templates/<ref>"
+    echo "  --uninstall            Uninstall this NanoClaw copy"
+    echo "  --help, -h             Show this help without installing dependencies"
+    exit 0
+  fi
+done
+
 # ─── --uninstall: short-circuit before any setup work ──────────────────
 # Never install dependencies just to uninstall. With the TS toolchain
 # present, hand straight off to setup:auto (the flow lives in
@@ -407,5 +422,6 @@ fi
 # --silent suppresses pnpm's `> nanoclaw@2.0.0 setup:auto / > tsx setup/auto.ts`
 # preamble so the flow continues visually from "Basics installed" straight
 # into setup:auto's spinner. exec so signals (Ctrl-C) propagate directly.
-# `-- "$@"` forwards any flags (e.g. --onecli-api-host) to setup:auto.
-exec pnpm --silent run setup:auto -- "$@"
+# pnpm forwards arguments after the script name directly. Passing an extra
+# `--` would reach setup:auto and make its parser stop before our flags.
+exec pnpm --silent run setup:auto "$@"

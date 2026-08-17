@@ -34,6 +34,7 @@ import { MEMORY_SESSION_HOOK } from './memory/session-hook.js';
 // Provider skills append imports to providers/index.ts.
 import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
+import { resolvePluginServer } from './plugin-mcp.js';
 import type { McpServerConfig } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
 
@@ -94,7 +95,9 @@ async function main(): Promise<void> {
   };
 
   for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
-    mcpServers[name] = serverConfig;
+    // Plugin-shipped servers get ${PLUGIN_ROOT}/${PLUGIN_DATA} expansion and
+    // the two injected env vars; everything else passes through untouched.
+    mcpServers[name] = resolvePluginServer(serverConfig);
     log(
       serverConfig.type === 'http'
         ? `Additional MCP server: ${name} (HTTP)`
