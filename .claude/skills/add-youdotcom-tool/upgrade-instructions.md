@@ -20,7 +20,7 @@ offer the upgrade, in this order:
 ncl groups config remove-mcp-server --name youdotcom
 ncl groups config add-mcp-server --name youdotcom \
   --command mcp-remote \
-  --args '["https://api.you.com/mcp?tools=you-search,you-answer,you-contents,you-research,you-finance,you-balance,you-discover","--transport","http-only","--enable-proxy"]' \
+  --args '["https://api.you.com/mcp?tools=you-search,you-answer,you-contents,you-research,you-finance,you-balance,you-discover&utm=nanoclaw","--transport","http-only","--enable-proxy"]' \
   --env '{}'
 ncl groups restart
 ```

@@ -1,6 +1,6 @@
 ---
 name: add-youdotcom-tool
-description: Add You.com (YDC) web search, direct answers, content extraction, research, and finance as remote MCP tools for selected NanoClaw agent groups. Starts keyless on the free tier and upgrades to the full toolset with an API key. Use when installing You.com web search, answers, research, or finance without threading a key into the container.
+description: Add You.com web search, direct answers, content extraction, research, and finance research as remote MCP tools for selected NanoClaw agent groups. Starts keyless on the free tier and upgrades to the full toolset with an API key. Use when installing You.com web search, answers, research, or finance without threading a key into the container.
 ---
 
 # Add You.com Tool
@@ -17,10 +17,10 @@ By default the server is registered against You.com's **free tier**
 The [upgrade path](#free-tier-limit) (Phase 5) stores a You.com API key in the
 OneCLI vault and re-registers the server against the full endpoint, adding:
 
-- `mcp__youdotcom__you-answer` — synthesized, citation-backed answer to a single query
 - `mcp__youdotcom__you-contents` — extract page content as markdown or HTML
-- `mcp__youdotcom__you-research` — deeper citation-backed synthesis (effort levels)
-- `mcp__youdotcom__you-finance` — finance-optimized, citation-backed research
+- `mcp__youdotcom__you-answer` — synthesized, citation-backed answer to a query
+- `mcp__youdotcom__you-research` — deeper citation-backed synthesis with various effort levels
+- `mcp__youdotcom__you-finance` — finance-optimized, citation-backed research with various effort levels
 - `mcp__youdotcom__you-balance` — remaining API-key credit balance
 - `mcp__youdotcom__you-discover` — You.com integration recommendations
 
@@ -102,7 +102,7 @@ ncl groups config add-mcp-server \
   --id <group-id> \
   --name youdotcom \
   --command mcp-remote \
-  --args '["https://api.you.com/mcp?profile=free","--transport","http-only","--enable-proxy"]' \
+  --args '["https://api.you.com/mcp?profile=free&utm=nanoclaw","--transport","http-only","--enable-proxy"]' \
   --env '{}'
 ```
 
@@ -120,7 +120,7 @@ ncl groups config add-mcp-server \
   --id <group-id> \
   --name youdotcom_docs \
   --command mcp-remote \
-  --args '["https://you.com/docs/_mcp/server","--transport","http-only","--enable-proxy"]' \
+  --args '["https://you.com/docs/_mcp/server?utm=nanoclaw","--transport","http-only","--enable-proxy"]' \
   --env '{}'
 ```
 
@@ -185,7 +185,7 @@ the free tier does not expose (`you-answer`, `you-contents`, `you-research`,
 ## Free-tier limit
 
 If a You.com search returns HTTP `429` (daily cap reached), or the user asks for
-answers, content extraction, research, or finance while only `you-search` is
+answers, content extraction, research, or finance research while only `you-search` is
 registered, the free tier is the constraint. With Phase 5 installed the agent offers the
 upgrade on its own: the user creates a free API key and stores it through the
 prefilled dashboard link; the key lands in the OneCLI vault and the gateway
@@ -200,12 +200,12 @@ never sees the key.
   (`ncl groups config get --id <group-id>`), then restart it.
 - The agent reports an OAuth or sign-in browser prompt instead of results: the
   server is not returning the free profile. Confirm the registered URL is
-  exactly `https://api.you.com/mcp?profile=free` (keyless) or that the API key
+  exactly `https://api.you.com/mcp?profile=free&utm=nanoclaw` (keyless) or that the API key
   is stored in the vault for host `api.you.com` (keyed) — a keyed request with
   no injected credential falls back to You.com's OAuth challenge.
 - Only `you-search` is available after the key upgrade: the full endpoint must
   request the tools explicitly. Re-register with
-  `https://api.you.com/mcp?tools=you-search,you-answer,you-contents,you-research,you-finance,you-balance,you-discover`.
+  `https://api.you.com/mcp?tools=you-search,you-answer,you-contents,you-research,you-finance,you-balance,you-discover&utm=nanoclaw`.
 - The server fails to connect: `--transport http-only` forces Streamable HTTP.
   For the Docs MCP only, if it will not connect, drop the
   `"--transport","http-only"` pair so the bridge negotiates transport itself.
