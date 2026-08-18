@@ -1,6 +1,6 @@
 ---
 name: add-youdotcom-tool
-description: Add You.com (YDC) web search, content extraction, research, and finance as remote MCP tools for selected NanoClaw agent groups. Starts keyless on the free tier and upgrades to the full toolset with an API key. Use when installing You.com web search, research, or finance without threading a key into the container.
+description: Add You.com (YDC) web search, direct answers, content extraction, research, and finance as remote MCP tools for selected NanoClaw agent groups. Starts keyless on the free tier and upgrades to the full toolset with an API key. Use when installing You.com web search, answers, research, or finance without threading a key into the container.
 ---
 
 # Add You.com Tool
@@ -17,8 +17,9 @@ By default the server is registered against You.com's **free tier**
 The [upgrade path](#free-tier-limit) (Phase 5) stores a You.com API key in the
 OneCLI vault and re-registers the server against the full endpoint, adding:
 
+- `mcp__youdotcom__you-answer` — synthesized, citation-backed answer to a single query
 - `mcp__youdotcom__you-contents` — extract page content as markdown or HTML
-- `mcp__youdotcom__you-research` — citation-backed synthesis (effort levels)
+- `mcp__youdotcom__you-research` — deeper citation-backed synthesis (effort levels)
 - `mcp__youdotcom__you-finance` — finance-optimized, citation-backed research
 - `mcp__youdotcom__you-balance` — remaining API-key credit balance
 - `mcp__youdotcom__you-discover` — You.com integration recommendations
@@ -149,8 +150,8 @@ return a You.com docs URL.
 The free tier is keyless, `you-search` only, and capped at 100 queries per day
 (shared across every group on the host). Install standing instructions so the
 agent offers the API-key upgrade at the moment it hits the cap or needs a tool
-the free tier does not expose (`you-contents`, `you-research`, `you-finance`,
-`you-discover`), instead of dead-ending. For each selected group:
+the free tier does not expose (`you-answer`, `you-contents`, `you-research`,
+`you-finance`, `you-discover`), instead of dead-ending. For each selected group:
 
 1. Resolve the OneCLI dashboard URL the user's browser can reach:
 
@@ -184,8 +185,8 @@ the free tier does not expose (`you-contents`, `you-research`, `you-finance`,
 ## Free-tier limit
 
 If a You.com search returns HTTP `429` (daily cap reached), or the user asks for
-content extraction, research, or finance while only `you-search` is registered,
-the free tier is the constraint. With Phase 5 installed the agent offers the
+answers, content extraction, research, or finance while only `you-search` is
+registered, the free tier is the constraint. With Phase 5 installed the agent offers the
 upgrade on its own: the user creates a free API key and stores it through the
 prefilled dashboard link; the key lands in the OneCLI vault and the gateway
 injects it into the bridge's requests. The agent then re-registers the server
@@ -204,7 +205,7 @@ never sees the key.
   no injected credential falls back to You.com's OAuth challenge.
 - Only `you-search` is available after the key upgrade: the full endpoint must
   request the tools explicitly. Re-register with
-  `https://api.you.com/mcp?tools=you-search,you-contents,you-research,you-finance,you-balance,you-discover`.
+  `https://api.you.com/mcp?tools=you-search,you-answer,you-contents,you-research,you-finance,you-balance,you-discover`.
 - The server fails to connect: `--transport http-only` forces Streamable HTTP.
   For the Docs MCP only, if it will not connect, drop the
   `"--transport","http-only"` pair so the bridge negotiates transport itself.
