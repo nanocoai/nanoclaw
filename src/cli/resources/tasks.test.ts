@@ -23,6 +23,7 @@ const TEST_DIR = '/tmp/nanoclaw-test-cli-tasks';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
 import { createSession, findSessionByAgentGroup, getSessionsByAgentGroup, taskThreadId } from '../../db/sessions.js';
+import { createMessagingGroup } from '../../db/messaging-groups.js';
 import { countDueMessages } from '../../db/session-db.js';
 import { inboundDbPath, initSessionFolder } from '../../session-manager.js';
 import { dispatch } from '../dispatch.js';
@@ -442,6 +443,106 @@ describe('tasks CLI resource', () => {
       const stillDb = new Database(inboundDbPath('ag-1', systemId), { readonly: true });
       expect(countDueMessages(stillDb)).toBe(1); // still just the one past task
       stillDb.close();
+    });
+  });
+
+  describe('legacy pre-2.1.54 recurring tasks (rows in the main chat session)', () => {
+    // Before the per-series system:tasks:* model, task rows lived directly in
+    // the main chat session's inbound.db: messaging_group_id SET, thread_id
+    // NULL. findTaskSessions() only matches messaging_group_id IS NULL, so
+    // that session never showed up for an agent-scoped `ncl tasks` call.
+    function insertLegacyTaskRow(group: string, session: string, id: string, prompt: string): void {
+      const db = new Database(inboundDbPath(group, session));
+      db.prepare(
+        `INSERT INTO messages_in (id, seq, timestamp, status, tries, process_after, recurrence, kind, platform_id, channel_type, thread_id, content, series_id)
+         VALUES (@id, @seq, @timestamp, 'pending', 0, @processAfter, @recurrence, 'task', NULL, NULL, NULL, @content, @id)`,
+      ).run({
+        id,
+        seq: 900,
+        timestamp: now(),
+        processAfter: '2026-01-15T09:00:00Z',
+        recurrence: '0 9 * * *',
+        content: JSON.stringify({ prompt, script: null, originSessionId: null }),
+      });
+      db.close();
+    }
+
+    function createLegacyChatSession(group: string, id: string, messagingGroupId: string): void {
+      createMessagingGroup({
+        id: messagingGroupId,
+        channel_type: 'whatsapp',
+        platform_id: messagingGroupId,
+        name: null,
+        is_group: 0,
+        unknown_sender_policy: 'public',
+        created_at: now(),
+      });
+      createSession({
+        id,
+        agent_group_id: group,
+        messaging_group_id: messagingGroupId,
+        thread_id: null,
+        agent_provider: null,
+        status: 'active',
+        container_status: 'stopped',
+        last_active: null,
+        created_at: now(),
+      });
+      initSessionFolder(group, id);
+    }
+
+    it('tasks-list surfaces a legacy task row living in the caller own chat session', async () => {
+      createLegacyChatSession('ag-1', 'legacy-chat-1', 'mg-legacy-1');
+      insertLegacyTaskRow('ag-1', 'legacy-chat-1', 'legacy-series-1', 'legacy briefing');
+
+      const resp = await dispatch({ id: 'll-1', command: 'tasks-list', args: {} }, agentCtx('ag-1', 'legacy-chat-1'));
+      expect(resp.ok).toBe(true);
+      if (!resp.ok) return;
+      const ids = (resp.data as Array<{ series_id: string }>).map((t) => t.series_id);
+      expect(ids).toContain('legacy-series-1');
+    });
+
+    it('tasks-pause and tasks-cancel reach a legacy task row via the caller own chat session', async () => {
+      createLegacyChatSession('ag-1', 'legacy-chat-2', 'mg-legacy-2');
+      insertLegacyTaskRow('ag-1', 'legacy-chat-2', 'legacy-series-2', 'legacy pause target');
+
+      const paused = await dispatch(
+        { id: 'lp-1', command: 'tasks-pause', args: { id: 'legacy-series-2' } },
+        agentCtx('ag-1', 'legacy-chat-2'),
+      );
+      expect(paused.ok).toBe(true);
+      if (paused.ok) expect((paused.data as { touched: number }).touched).toBe(1);
+
+      const cancelled = await dispatch(
+        { id: 'lc-1', command: 'tasks-cancel', args: { id: 'legacy-series-2' } },
+        agentCtx('ag-1', 'legacy-chat-2'),
+      );
+      expect(cancelled.ok).toBe(true);
+      if (cancelled.ok) expect((cancelled.data as { touched: number }).touched).toBe(1);
+    });
+
+    it('does NOT leak a sibling session own legacy task in the same group (ownSession still gates it)', async () => {
+      createLegacyChatSession('ag-1', 'legacy-chat-a', 'mg-legacy-a');
+      createLegacyChatSession('ag-1', 'legacy-chat-b', 'mg-legacy-b');
+      insertLegacyTaskRow('ag-1', 'legacy-chat-a', 'legacy-series-a', 'owned by a');
+      insertLegacyTaskRow('ag-1', 'legacy-chat-b', 'legacy-series-b', 'owned by b');
+
+      // Agent scoped to legacy-chat-a's own session only ever adds its own
+      // session — it must not also pick up legacy-chat-b's row.
+      const resp = await dispatch({ id: 'lna-1', command: 'tasks-list', args: {} }, agentCtx('ag-1', 'legacy-chat-a'));
+      expect(resp.ok).toBe(true);
+      if (!resp.ok) return;
+      const ids = (resp.data as Array<{ series_id: string }>).map((t) => t.series_id);
+      expect(ids).toContain('legacy-series-a');
+      expect(ids).not.toContain('legacy-series-b');
+
+      // Cross-group isolation is unaffected: ag-2 cannot reach ag-1's legacy row via --session.
+      const cross = await dispatch(
+        { id: 'lna-2', command: 'tasks-list', args: { session: 'legacy-chat-a' } },
+        agentCtx('ag-2', 'chat-2'),
+      );
+      expect(cross.ok).toBe(false);
+      if (!cross.ok) expect(cross.error.message).toContain('session not found');
     });
   });
 
