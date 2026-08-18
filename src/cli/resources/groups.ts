@@ -284,7 +284,14 @@ registerResource({
         const id = (args.id as string) || (ctx.caller === 'agent' ? ctx.agentGroupId : undefined);
         if (!id) throw new Error('--id is required');
         if (args.rebuild) {
-          await buildAgentGroupImage(id);
+          const configRow = getContainerConfig(id);
+          const hasPackages =
+            !!configRow &&
+            ((JSON.parse(configRow.packages_apt) as string[]).length > 0 ||
+              (JSON.parse(configRow.packages_npm) as string[]).length > 0);
+          if (hasPackages) {
+            await buildAgentGroupImage(id);
+          }
         }
         const message = args.message as string | undefined;
 
