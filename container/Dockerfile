@@ -63,11 +63,26 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 # ---- Bun runtime -------------------------------------------------------------
-# Install via the official script (handles multi-arch detection), then move
-# the binary to /usr/local/bin so the non-root `node` user can execute it.
-RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
-    install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun && \
-    rm -rf /root/.bun
+# Download the release zip directly instead of piping bun.sh/install through
+# bash: that script auto-selects the AVX2 build vs. the `-baseline` (SSE4.2
+# floor) build by probing the *build machine's* /proc/cpuinfo, not the
+# machine the image will actually run on. A multi-arch image built on a
+# modern build host (or emulated under buildx) then bakes in an AVX2 binary
+# that SIGILLs on any run host without AVX2 (older Atoms, some cloud/VM
+# SKUs, emulators) — see #3245. Force the amd64 baseline build unconditionally
+# so the shipped image is portable; there is no baseline variant for arm64
+# since AVX2 is an x86 feature.
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) BUN_TARGET=linux-x64-baseline ;; \
+        arm64) BUN_TARGET=linux-aarch64 ;; \
+        *) echo "unsupported architecture for bun install" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/bun.zip \
+        "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-${BUN_TARGET}.zip" && \
+    unzip -q /tmp/bun.zip -d /tmp/bun && \
+    install -m 0755 "/tmp/bun/bun-${BUN_TARGET}/bun" /usr/local/bin/bun && \
+    rm -rf /tmp/bun /tmp/bun.zip
 
 # ---- agent-runner deps -------------------------------------------------------
 # Deps are cached independently of CLI versions. Source is NOT baked in —
