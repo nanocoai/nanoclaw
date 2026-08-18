@@ -1,6 +1,6 @@
 ---
 name: add-youdotcom-tool
-description: Add You.com web search, direct answers, content extraction, research, and finance research as remote MCP tools for selected NanoClaw agent groups. Starts keyless on the free tier and upgrades to the full toolset with an API key. Use when installing You.com web search, answers, research, or finance without threading a key into the container.
+description: Add You.com web search, direct answers, content extraction, research, and finance research as remote MCP tools for selected NanoClaw agent groups. Optionally adds a second keyless Docs MCP server for searching You.com developer documentation. Starts keyless on the free tier and upgrades to the full toolset with an API key. Use when installing You.com web search, answers, research, or finance without threading a key into the container.
 ---
 
 # Add You.com Tool
@@ -24,10 +24,14 @@ OneCLI vault and re-registers the server against the full endpoint, adding:
 - `mcp__youdotcom__you-balance` — remaining API-key credit balance
 - `mcp__youdotcom__you-discover` — You.com integration recommendations
 
-Optionally, the same skill registers a second, keyless **Docs MCP** server for
-searching You.com's own developer documentation:
+Optionally, the same skill registers a second, keyless **Docs MCP** server
+(`https://you.com/docs/_mcp/server`) that searches You.com's own developer
+documentation — API references, guides, code examples, and feature
+explanations. It is separate from the web-search MCP server above and exposes
+a single tool:
 
-- `mcp__youdotcom_docs__searchDocs` — search You.com docs, returns source URLs
+- `mcp__youdotcom_docs__searchDocs` — search You.com docs, returns contextual
+  passages with source URLs
 
 The registration is provider-agnostic: any provider with MCP support picks it
 up (Claude, OpenCode, and Codex all do). Groups on the Claude provider already
@@ -48,9 +52,11 @@ ncl groups list
 Ask two questions:
 
 1. Which agent groups should receive You.com.
-2. Whether to also register the keyless **Docs MCP** server (`searchDocs`) for
-   those groups. Default no — add it only for groups whose users build *with*
-   You.com and want to search its documentation. Skip it otherwise.
+2. Whether to also register the **Docs MCP** — a separate, keyless MCP server
+   at `https://you.com/docs/_mcp/server` that exposes a single tool,
+   `searchDocs`, for searching You.com's developer documentation. Default no
+   — add it only for groups whose users build *with* You.com and want to search
+   its documentation. Skip it otherwise.
 
 If `mcp-remote` is already present at a pinned version, reuse the existing entry
 instead of adding a second one.
@@ -224,5 +230,6 @@ See [REMOVE.md](REMOVE.md) for the idempotent removal procedure.
 ## References
 
 - [You.com MCP Server](https://docs.you.com/developer-resources/mcp-server)
+- [You.com Docs MCP Server](https://you.com/docs/build-with-agents/docs-mcp-server)
 - [You.com API keys](https://you.com/platform/api-keys)
 - [`mcp-remote`](https://github.com/geelen/mcp-remote)
