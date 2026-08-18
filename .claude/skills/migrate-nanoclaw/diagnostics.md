@@ -45,7 +45,6 @@ rm /tmp/nanoclaw-diagnostics.json
 **No**: `rm /tmp/nanoclaw-diagnostics.json`
 
 **Never ask again**:
-1. Replace contents of `.claude/skills/update-nanoclaw/diagnostics.md` with `# Diagnostics — opted out`
-2. Replace contents of `.claude/skills/migrate-nanoclaw/diagnostics.md` with `# Diagnostics — opted out`
-3. Remove the diagnostics sections from each corresponding SKILL.md
-4. `rm /tmp/nanoclaw-diagnostics.json`
+1. Replace contents of `.claude/skills/migrate-nanoclaw/diagnostics.md` with `# Diagnostics — opted out`
+2. Remove the diagnostics section from `.claude/skills/migrate-nanoclaw/SKILL.md`
+3. `rm /tmp/nanoclaw-diagnostics.json`

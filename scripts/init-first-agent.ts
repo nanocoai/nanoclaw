@@ -168,20 +168,29 @@ function wireIfMissing(mg: MessagingGroup, ag: AgentGroup, now: string, label: s
     console.log(`Wiring already exists: ${existing.id} (${label})`);
     return;
   }
+  // Wiring defaults come from the channel's declaration when it has one
+  // (resolveWiringDefaults: engage fields + session_mode + the threads stamp
+  // derived from it — a context whose conversations are thread-rooted
+  // declares per-thread sessions and gets correct session identity from the
+  // first message); stale (undeclared) adapters keep the legacy behavior
+  // exactly: shared sessions, threads column NULL (inherit).
+  const isGroup = mg.is_group === 1;
+  const channelKey = mg.instance ?? mg.channel_type;
+  const resolved = hasDeclaredChannelDefaults(channelKey, mg.channel_type)
+    ? resolveWiringDefaults(channelKey, isGroup, ag.name, mg.channel_type)
+    : undefined;
   // Engage defaults, first hit wins: explicit --engage-pattern → the
   // channel's declared defaults → the legacy heuristic for stale
   // (undeclared) adapters: DMs (is_group=0) respond to everything via a '.'
   // regex, group chats are mention-only; admins can reconfigure via
-  // /manage-channels once the agent is in use.
-  const isGroup = mg.is_group === 1;
-  const channelKey = mg.instance ?? mg.channel_type;
+  // /manage-channels once the agent is in use. An explicit pattern only
+  // overrides the engage fields — the declared session defaults still apply.
   const engage = engagePattern
     ? { engage_mode: 'pattern' as const, engage_pattern: engagePattern }
-    : hasDeclaredChannelDefaults(channelKey, mg.channel_type)
-      ? resolveWiringDefaults(channelKey, isGroup, ag.name, mg.channel_type)
-      : isGroup
+    : (resolved ??
+      (isGroup
         ? { engage_mode: 'mention' as const, engage_pattern: null }
-        : { engage_mode: 'pattern' as const, engage_pattern: '.' };
+        : { engage_mode: 'pattern' as const, engage_pattern: '.' }));
   createMessagingGroupAgent({
     id: generateId('mga'),
     messaging_group_id: mg.id,
@@ -193,7 +202,8 @@ function wireIfMissing(mg: MessagingGroup, ag: AgentGroup, now: string, label: s
     // messages carry no value ('drop').
     sender_scope: 'all',
     ignored_message_policy: 'drop',
-    session_mode: 'shared',
+    session_mode: resolved?.session_mode ?? 'shared',
+    ...(resolved?.threads !== undefined && resolved?.threads !== null ? { threads: resolved.threads } : {}),
     priority: 0,
     created_at: now,
   });

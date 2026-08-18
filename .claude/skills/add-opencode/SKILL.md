@@ -11,141 +11,96 @@ Trunk ships with only the `claude` provider baked in. This skill copies the Open
 
 ## Install
 
-### Pre-flight
+### 1. Copy the provider payload
 
-If all of the following are already present, skip to **Configuration**:
+Fetch the `providers` branch from the configured remote that carries it, then
+overwrite every skill-owned provider file with its canonical registry copy:
 
-- `src/providers/opencode.ts`
-- `container/agent-runner/src/providers/opencode.ts`
-- `src/providers/opencode-registration.test.ts`
-- `container/agent-runner/src/providers/opencode-registration.test.ts`
-- `import './opencode.js';` line in `src/providers/index.ts`
-- `import './opencode.js';` line in `container/agent-runner/src/providers/index.ts`
-- `@opencode-ai/sdk` in `container/agent-runner/package.json`
-- `ARG OPENCODE_VERSION` and `"opencode-ai@${OPENCODE_VERSION}"` in `container/Dockerfile`
-- `src/opencode-dockerfile.test.ts` (the Dockerfile install guard)
-
-Missing pieces — continue below. All steps are idempotent; re-running is safe.
-
-### 1. Fetch the providers branch
-
-```bash
-git fetch origin providers
+```nc:copy from-branch:providers
+src/providers/opencode.ts
+src/providers/opencode-registration.test.ts
+container/agent-runner/src/providers/opencode.ts
+container/agent-runner/src/providers/mcp-to-opencode.ts
+container/agent-runner/src/providers/mcp-to-opencode.test.ts
+container/agent-runner/src/providers/opencode-registration.test.ts
+container/agent-runner/src/providers/opencode.attachments.test.ts
+container/agent-runner/src/providers/opencode.compaction.test.ts
+container/agent-runner/src/providers/opencode.config.test.ts
+container/agent-runner/src/providers/opencode.factory.test.ts
+container/agent-runner/src/providers/opencode.memory.test.ts
+container/agent-runner/src/providers/opencode.question.test.ts
 ```
 
-### 2. Copy the OpenCode source files
+(`cwd-shim.ts` and its test are deliberately **not** in this payload even though `mcp-to-opencode.ts` imports the shim: trunk ships and owns them — the default provider imports `cwd-shim.ts` — and every path listed here becomes a skill-owned file that removal deletes.)
 
-Wholesale copies (owned entirely by this skill — user edits to these files won't survive a re-run, as designed):
-
-```bash
-git show origin/providers:src/providers/opencode.ts                                     > src/providers/opencode.ts
-git show origin/providers:container/agent-runner/src/providers/opencode.ts              > container/agent-runner/src/providers/opencode.ts
-git show origin/providers:container/agent-runner/src/providers/mcp-to-opencode.ts       > container/agent-runner/src/providers/mcp-to-opencode.ts
-git show origin/providers:container/agent-runner/src/providers/mcp-to-opencode.test.ts  > container/agent-runner/src/providers/mcp-to-opencode.test.ts
-git show origin/providers:container/agent-runner/src/providers/opencode.factory.test.ts > container/agent-runner/src/providers/opencode.factory.test.ts
-git show origin/providers:container/agent-runner/src/providers/cwd-shim.ts              > container/agent-runner/src/providers/cwd-shim.ts.new && mv container/agent-runner/src/providers/cwd-shim.ts.new container/agent-runner/src/providers/cwd-shim.ts
-git show origin/providers:container/agent-runner/src/providers/cwd-shim.test.ts         > container/agent-runner/src/providers/cwd-shim.test.ts.new && mv container/agent-runner/src/providers/cwd-shim.test.ts.new container/agent-runner/src/providers/cwd-shim.test.ts
-```
-
-(`cwd-shim.ts` is byte-identical to the trunk copy on current trunks — `mcp-to-opencode.ts` imports it, so copying it keeps the payload self-sufficient on trunks that predate it. These two overwrite real trunk files, so they go through a `.new` + `mv` guard: on a providers branch that predates the cwd payload, `git show` fails without truncating the live copy the default provider imports.)
-
-Also copy the two barrel-registration guards — one per tree. These import the real provider barrels and assert `opencode` is registered, so they go red the moment a barrel import line is deleted or drifts:
-
-```bash
-git show origin/providers:src/providers/opencode-registration.test.ts                          > src/providers/opencode-registration.test.ts
-git show origin/providers:container/agent-runner/src/providers/opencode-registration.test.ts   > container/agent-runner/src/providers/opencode-registration.test.ts
-```
-
-### 3. Append the self-registration imports
+### 2. Register the provider in both runtimes
 
 Each barrel gets one line appended at the end — skip if the line is already present.
 
-`src/providers/index.ts`:
-
-```typescript
+```nc:append to:src/providers/index.ts
 import './opencode.js';
 ```
 
-`container/agent-runner/src/providers/index.ts`:
-
-```typescript
+```nc:append to:container/agent-runner/src/providers/index.ts
 import './opencode.js';
 ```
 
-### 4. Add the agent-runner dependency
+### 3. Install the matched SDK and CLI pins
 
-Pinned. Bump deliberately, not with `bun update`. Use `1.4.17` — must match the `opencode-ai` CLI version pinned in step 5. The 1.14.x SDK has a completely different API and is **incompatible** with the current provider code.
+The agent-runner is a separate Bun package tree. Keep its SDK on the same exact
+version as the globally installed `opencode-ai` CLI:
 
-```bash
-cd container/agent-runner && bun add @opencode-ai/sdk@1.4.17 && cd -
+```nc:dep manager:bun cwd:container/agent-runner
+@opencode-ai/sdk@1.4.17
 ```
 
-### 5. Add `opencode-ai` to the container Dockerfile
-
-Two edits to `container/Dockerfile`, both idempotent (skip if already present):
-
-**(a)** In the "Pin CLI versions" ARG block (around line 22), add after `ARG VERCEL_VERSION=...`:
-
-```dockerfile
-ARG OPENCODE_VERSION=1.4.17
+```nc:json-merge into:container/cli-tools.json key:name
+{
+  "name": "opencode-ai",
+  "version": "1.4.17"
+}
 ```
 
-> **Do not use `latest`** — the CLI and SDK must be the same version. `latest` silently upgrades the CLI to 1.14.x which has a breaking session API change (UUID session IDs → `ses_` prefix) incompatible with SDK 1.4.x.
+Do not use `latest`. OpenCode's CLI and SDK have changed their session API in
+lockstep before; mismatched versions can build cleanly and fail at runtime.
 
-**(b)** Add a new standalone `RUN` block for the OpenCode CLI, after the existing per-CLI install blocks (around line 111, right after the `@anthropic-ai/claude-code` block). The Dockerfile splits each global CLI into its own layer for cache granularity — keep that pattern; do not collapse them into a single combined `pnpm install -g` call:
+### 4. Install the pin guard
 
-```dockerfile
-RUN --mount=type=cache,target=/root/.cache/pnpm \
-    pnpm install -g "opencode-ai@${OPENCODE_VERSION}"
+Copy the structural test that asserts the CLI manifest and SDK package stay on
+the same exact version:
+
+```nc:copy
+opencode-cli-tools.test.ts -> src/opencode-cli-tools.test.ts
 ```
 
-### 6. Copy the Dockerfile install guard
+### 5. Build and validate
 
-The `opencode-ai` CLI is a globally-installed binary — not importable or typed — so a structural test guards the Dockerfile install. Copy it into the host test tree:
-
-```bash
-cp .claude/skills/add-opencode/opencode-dockerfile.test.ts src/opencode-dockerfile.test.ts
+```nc:run effect:build
+pnpm run build
 ```
 
-### 7. Build and validate
-
-```bash
-pnpm run build                                                    # host
-pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit    # container typecheck
-pnpm exec vitest run src/providers/opencode-registration.test.ts  # host registration guard
-pnpm exec vitest run src/opencode-dockerfile.test.ts              # Dockerfile install guard
-cd container/agent-runner && bun test src/providers/opencode-registration.test.ts && cd -  # container registration guard
-./container/build.sh                                              # agent image
+```nc:run effect:build
+pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
 ```
 
-All four must be clean before proceeding. Each guards a distinct integration point:
-
-- **`src/providers/opencode-registration.test.ts`** (host, vitest) imports the real host barrel (`./index.js` → `listProviderContainerConfigNames`) and asserts `opencode` is present. It goes red if the `import './opencode.js';` line in `src/providers/index.ts` is deleted or drifts, or if that barrel fails to evaluate.
-- **`container/agent-runner/src/providers/opencode-registration.test.ts`** (container, bun:test) imports the real container barrel (`./index.js` → `listProviderNames`) and asserts `opencode` is present. It goes red if the `import './opencode.js';` line in `container/agent-runner/src/providers/index.ts` is deleted or drifts. Because the barrel is imported unmocked, it also pulls in `opencode.ts`, which imports **`@opencode-ai/sdk`** — so this test implicitly guards the step-4 dependency too: if the package isn't installed, the import throws and the test goes red.
-- **`src/opencode-dockerfile.test.ts`** parses `container/Dockerfile` and asserts both the `ARG OPENCODE_VERSION=...` (rejecting `latest`) and the `pnpm install -g "opencode-ai@${OPENCODE_VERSION}"` line are present. The `opencode-ai` CLI binary is not importable, so it is guarded by this structural test plus the container build — not the registration test.
-- **`pnpm run build`** type-checks the host provider's consumption of the host-side container-config registry; the container typecheck does the same for the container provider against the agent-runner core APIs.
-
-The pre-existing `opencode.factory.test.ts` imports `opencode.ts` directly and self-registers, so it stays green even if a barrel import is removed — it is a unit test of `createProvider('opencode')`, not the registration guard. Keep it; it adds factory coverage but does not stand in for the registration tests above.
-
-> **Build cache gotcha:** The container buildkit caches COPY steps aggressively. If provider files were already present in the build context before, the new files may not be picked up. If you see "Unknown provider: opencode" after the build, prune the builder and rebuild:
-> ```bash
-> docker builder prune -f && ./container/build.sh
-> ```
-
-### 8. Propagate to existing per-group overlays
-
-Each agent group has a live source overlay at `data/v2-sessions/<group-id>/agent-runner-src/providers/` that **overrides the image at runtime**. This overlay is created when the group is first wired and never auto-updated by image rebuilds. Any group that already existed before this skill ran needs the new files copied in manually.
-
-```bash
-for overlay in data/v2-sessions/*/agent-runner-src/providers/; do
-  [ -d "$overlay" ] || continue
-  cp container/agent-runner/src/providers/opencode.ts "$overlay"
-  cp container/agent-runner/src/providers/mcp-to-opencode.ts "$overlay"
-  cp container/agent-runner/src/providers/cwd-shim.ts "$overlay"
-  cp container/agent-runner/src/providers/index.ts "$overlay"
-  echo "Updated: $overlay"
-done
+```nc:run effect:test
+pnpm exec vitest run src/providers/opencode-registration.test.ts src/opencode-cli-tools.test.ts
 ```
+
+```nc:run effect:test
+cd container/agent-runner && bun test src/providers/opencode-registration.test.ts
+```
+
+```nc:run effect:build
+./container/build.sh
+```
+
+All checks must be clean before proceeding. The registration tests import the
+real host and container barrels; the pin guard covers the non-importable global
+CLI; the two typechecks cover both runtime API boundaries.
+
+NanoClaw v2 mounts one shared read-only agent-runner source tree. There are no
+per-group source overlays to propagate or repair.
 
 ## Configuration
 
@@ -184,6 +139,7 @@ ANTHROPIC_BASE_URL=https://api.deepseek.com/v1
 ```
 
 Register the key:
+
 ```bash
 onecli secrets create --name "DeepSeek" --type generic \
   --value YOUR_KEY --host-pattern "api.deepseek.com" \
@@ -200,6 +156,7 @@ ANTHROPIC_BASE_URL=https://openrouter.ai/api/v1
 ```
 
 Register the key:
+
 ```bash
 onecli secrets create --name "OpenRouter" --type generic \
   --value YOUR_KEY --host-pattern "openrouter.ai" \
@@ -258,10 +215,15 @@ Extra MCP servers still come from **`NANOCLAW_MCP_SERVERS`** / `container_config
 
 - OpenCode keeps a local **`opencode serve`** process and SSE subscription; the provider tears down with **`stream.return`** and **SIGKILL** on the server process on **`abort()`** / shared runtime reset to avoid MCP/zombie hangs.
 - Session continuation uses UUID format (SDK 1.4.x / CLI 1.4.x). Stale sessions are cleared by `isSessionInvalid` on OpenCode-specific error patterns. If you see UUID-related errors after an accidental CLI upgrade, clear `session_state` in `outbound.db` and wipe the `opencode-xdg` directory under the session folder.
-- **`NO_PROXY`** for localhost matters when the OpenCode client talks to `127.0.0.1` inside the container while HTTP(S)_PROXY is set (e.g. OneCLI).
+- **`NO_PROXY`** for localhost matters when the OpenCode client talks to `127.0.0.1` inside the container while HTTP(S)\_PROXY is set (e.g. OneCLI).
 
-## Next Steps
+## Next steps
 
-The registration and Dockerfile guards in step 7 verify the wiring. To confirm an end-to-end round-trip, switch a test group with `ncl groups config update --id <group-id> --provider opencode && ncl groups restart --id <group-id>`, register the matching provider key in OneCLI, and send a message. A clean exchange returns the model's reply with no `Unknown provider: opencode` error and no UUID/session warnings in the logs.
+The host/container registration tests and the CLI/SDK pin guard verify the
+static wiring. To confirm a live round-trip, switch a test group with
+`ncl groups config update --id <group-id> --provider opencode && ncl groups
+restart --id <group-id>`, register the matching provider key in OneCLI, and
+send a message. A clean exchange returns the model's reply with no `Unknown
+provider: opencode` error and no UUID/session warnings in the logs.
 
 To remove this provider, see [REMOVE.md](REMOVE.md).

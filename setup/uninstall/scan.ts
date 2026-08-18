@@ -102,6 +102,14 @@ export function scanInstall(deps: ScanDeps): Inventory {
     { rel: 'start-nanoclaw.sh', what: 'Start script', where: 'start-nanoclaw.sh' },
     { rel: 'nanoclaw.pid', what: 'PID file', where: 'nanoclaw.pid' },
   ]);
+  const updates = path.join(path.dirname(projectRoot), '.nanoclaw-updates', slug);
+  if (fs.existsSync(updates)) {
+    data.push({
+      what: 'Update rollback snapshots',
+      where: `${tilde(updates, home)}/`,
+      path: updates,
+    });
+  }
 
   const runtime = existingItems(projectRoot, home, [
     { rel: 'dist', what: 'Build output' },

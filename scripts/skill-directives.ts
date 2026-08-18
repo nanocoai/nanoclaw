@@ -19,12 +19,13 @@
 //
 //   copy [from-branch:<b>]  body: `PATH` (src==dst) or `SRC -> DST`   overwrite
 //   append to:<file> [at:<marker>]  body: line(s) to add             skip if present
-//   dep [manager:pnpm]      body: `pkg@<exact-semver>` line(s)        reinstall no-op
-//   run [effect:build|test|fetch|external|wire|restart|step|check] [capture:<spec>]  re-runnable
+//   dep [manager:pnpm|bun] [cwd:<dir>] body: exact pkg specs          reinstall no-op
+//   run [effect:build|test|fetch|external|wire|restart|step|check|refresh] [capture:<spec>]  re-runnable
 //        body: shell command(s). {{vars}} are substituted in. effect:wire runs
 //        `ncl …` to wire collected input (no undo — the rows it creates are user
 //        runtime data, not reversed on skill remove). effect:restart restarts the
-//        service so following `ncl` runs reach it; a caller that owns the restart
+//        service so following `ncl` runs reach it; effect:refresh is the only
+//        run effect executed by code-only refresh mode. A caller that owns the restart
 //        (rebuild, or a setup that restarts once) skips it via ApplyOptions.
 //        skipEffects. capture:<var> binds the command's stdout into {{var}} (twin
 //        of prompt) — e.g. resolve an id from an API and feed it to a later step.

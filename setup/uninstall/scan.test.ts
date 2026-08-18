@@ -5,7 +5,7 @@ import path from 'path';
 
 import Database from 'better-sqlite3';
 
-import { getLaunchdLabel, getSystemdUnit } from '../../src/install-slug.js';
+import { getInstallSlug, getLaunchdLabel, getSystemdUnit } from '../../src/install-slug.js';
 import type { RunCommand } from './onecli-agents.js';
 import { detectExistingInstall, scanInstall, type ScanDeps } from './scan.js';
 
@@ -55,6 +55,8 @@ describe('scanInstall path groups', () => {
     }
     fs.writeFileSync(path.join(root, '.env'), 'KEY=v');
     fs.writeFileSync(path.join(root, 'start-nanoclaw.sh'), '#!/bin/bash');
+    const updates = path.join(path.dirname(root), '.nanoclaw-updates', getInstallSlug(root));
+    fs.mkdirSync(updates, { recursive: true });
 
     const inv = scanInstall(deps());
 
@@ -63,7 +65,10 @@ describe('scanInstall path groups', () => {
       'logs',
       '.env',
       'start-nanoclaw.sh',
+      getInstallSlug(root),
     ]);
+    expect(inv.data.at(-1)).toMatchObject({ what: 'Update rollback snapshots', path: updates });
+    fs.rmSync(updates, { recursive: true, force: true });
     expect(inv.runtime.map((i) => path.basename(i.path))).toEqual([
       'dist',
       'node_modules',

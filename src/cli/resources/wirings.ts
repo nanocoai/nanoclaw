@@ -105,7 +105,7 @@ registerResource({
       name: 'session_mode',
       type: 'string',
       description:
-        '"shared" — one session per (agent, messaging group). "per-thread" — separate session per thread/topic. "agent-shared" — one session across all messaging groups wired to this agent. Note: threaded adapters in group chats force per-thread regardless of this setting.',
+        '"shared" — one session per (agent, messaging group). "per-thread" — separate session per thread/topic; requires the wiring to honor thread ids (rejected when its thread policy resolves off — pair with --threads true where the channel context does not honor them). "agent-shared" — one session across all messaging groups wired to this agent. Note: threaded adapters in group chats force per-thread regardless of this setting.',
       enum: ['shared', 'per-thread', 'agent-shared'],
       default: 'shared',
       updatable: true,
@@ -149,6 +149,13 @@ registerResource({
       (merged.engage_pattern === undefined || merged.engage_pattern === null)
     ) {
       merged.engage_pattern = '.';
+    }
+    // Same treatment for the session/threads pairing: pre-existing rows may
+    // hold session_mode='per-thread' with a false-resolving thread policy
+    // (stamped before the coherence check existed). Don't reject unrelated
+    // updates to them — enforce only when either side of the pairing changes.
+    if (updates.session_mode === undefined && updates.threads === undefined) {
+      merged.session_mode = undefined;
     }
     validateEngageAgainstChannel(merged, mg);
     // Carry the sticky→mention coercion (if any) back into the update set.

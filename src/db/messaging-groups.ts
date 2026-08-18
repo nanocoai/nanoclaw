@@ -239,6 +239,14 @@ export function createMessagingGroupAgent(mga: MessagingGroupAgent): void {
     )
     .run(mga);
 
+  // `threads` (migration 019) is written separately so existing callers that
+  // omit it keep passing named-param sets that match the INSERT exactly
+  // (better-sqlite3 rejects missing named params). Omitted/NULL = column
+  // stays NULL = inherit the channel declaration at fanout time.
+  if (mga.threads !== undefined && mga.threads !== null) {
+    getDb().prepare('UPDATE messaging_group_agents SET threads = ? WHERE id = ?').run(mga.threads, mga.id);
+  }
+
   ensureAgentDestinationForWiring(mga);
 }
 
@@ -321,7 +329,13 @@ export function updateMessagingGroupAgent(
   updates: Partial<
     Pick<
       MessagingGroupAgent,
-      'engage_mode' | 'engage_pattern' | 'sender_scope' | 'ignored_message_policy' | 'session_mode' | 'priority'
+      | 'engage_mode'
+      | 'engage_pattern'
+      | 'sender_scope'
+      | 'ignored_message_policy'
+      | 'session_mode'
+      | 'priority'
+      | 'threads'
     >
   >,
 ): void {

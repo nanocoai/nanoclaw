@@ -72,6 +72,7 @@ for arg in "$@"; do
     echo "  $UNINSTALL_RUNTIME ps -aq --filter label=nanoclaw-install=$(_nanoclaw_install_slug) | xargs -r $UNINSTALL_RUNTIME rm -f"
     echo "  $UNINSTALL_RUNTIME rmi $(container_image_base):latest"
     echo "  rm -f ~/.local/bin/ncl    # only if it points at this folder"
+    echo "  rm -rf \"$(dirname "$PROJECT_ROOT")/.nanoclaw-updates/$(_nanoclaw_install_slug)\""
     echo ""
     echo "Then back up $PROJECT_ROOT/.env if you need the keys, and delete the folder."
     exit 1
