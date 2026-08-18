@@ -259,6 +259,25 @@ export function deletePendingApproval(approvalId: string): void {
   getDb().prepare('DELETE FROM pending_approvals WHERE approval_id = ?').run(approvalId);
 }
 
+/**
+ * Atomically claim a still-pending approval, returning true only for the caller
+ * that wins. better-sqlite3 `.run()` is synchronous, so this conditional delete
+ * is a compare-and-set: of two concurrent resolution events for the same id
+ * (a fast double-tap, or a button click racing a text reply), only one sees
+ * `changes === 1`. The loser must not proceed to the approval handler, which
+ * for actions like sending or deleting mail is irreversible and has no
+ * idempotency key. The `status = 'pending'` guard also skips a row a concurrent
+ * "reject with reason" hold already moved to `awaiting_reason`. This just moves
+ * the row removal ahead of the handler; the handler already ran with the row
+ * deleted afterwards regardless of outcome.
+ */
+export function claimPendingApproval(approvalId: string): boolean {
+  const result = getDb()
+    .prepare("DELETE FROM pending_approvals WHERE approval_id = ? AND status = 'pending'")
+    .run(approvalId);
+  return result.changes === 1;
+}
+
 export function getPendingApprovalsByAction(action: string): PendingApproval[] {
   return getDb().prepare('SELECT * FROM pending_approvals WHERE action = ?').all(action) as PendingApproval[];
 }

@@ -16,7 +16,7 @@
  * core iterates handlers and the first one to return `true` claims the response.
  */
 import { wakeContainer } from '../../container-runner.js';
-import { deletePendingApproval, getPendingApproval, getSession } from '../../db/sessions.js';
+import { claimPendingApproval, deletePendingApproval, getPendingApproval, getSession } from '../../db/sessions.js';
 import type { ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
@@ -84,7 +84,21 @@ async function handleRegisteredApproval(
     return;
   }
 
-  // Approved — dispatch to the module that registered for this action.
+  // Approved — dispatch to the module that registered for this action. Claim
+  // the row atomically FIRST: two concurrent resolutions (a fast double-tap, or
+  // a button click racing a text reply) both read the row via getPendingApproval
+  // above, so without an up-front compare-and-set both would invoke the handler
+  // — and approve handlers include irreversible, no-idempotency-key actions
+  // (e.g. sending or deleting mail). Only the winner proceeds; this replaces the
+  // post-handler deletePendingApproval calls below.
+  if (!claimPendingApproval(approval.approval_id)) {
+    log.info('Approval already resolved by a concurrent event — skipping duplicate apply', {
+      approvalId: approval.approval_id,
+      action: approval.action,
+    });
+    return;
+  }
+
   const notify = (text: string): void => {
     writeSessionMessage(session.agent_group_id, session.id, {
       id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -104,7 +118,6 @@ async function handleRegisteredApproval(
       action: approval.action,
     });
     notify(`Your ${approval.action} was approved, but no handler is installed to apply it.`);
-    deletePendingApproval(approval.approval_id);
     await notifyApprovalResolved({ approval, session, outcome: 'approve', userId });
     await wakeContainer(session);
     return;
@@ -121,7 +134,6 @@ async function handleRegisteredApproval(
     );
   }
 
-  deletePendingApproval(approval.approval_id);
   await notifyApprovalResolved({ approval, session, outcome: 'approve', userId });
   await wakeContainer(session);
 }
