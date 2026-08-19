@@ -48,20 +48,26 @@ detect_platform() {
 
 # --- Node.js check ---
 
+# The ceiling exists because better-sqlite3 11.x cannot build against
+# Node 26 (V8 removed APIs it uses) and ships no prebuilt for it. Raise
+# NODE_MAJOR_MAX only after the better-sqlite3 pin supports the runtime.
+NODE_MAJOR_MIN=20
+NODE_MAJOR_MAX=25
+
 check_node() {
   NODE_OK="false"
   NODE_VERSION="not_found"
   NODE_PATH_FOUND=""
+  NODE_MAJOR=""
 
   if command -v node >/dev/null 2>&1; then
     NODE_VERSION=$(node --version 2>/dev/null | sed 's/^v//')
     NODE_PATH_FOUND=$(command -v node)
-    local major
-    major=$(echo "$NODE_VERSION" | cut -d. -f1)
-    if [ "$major" -ge 20 ] 2>/dev/null; then
+    NODE_MAJOR=$(echo "$NODE_VERSION" | cut -d. -f1)
+    if [ "$NODE_MAJOR" -ge "$NODE_MAJOR_MIN" ] 2>/dev/null && [ "$NODE_MAJOR" -le "$NODE_MAJOR_MAX" ] 2>/dev/null; then
       NODE_OK="true"
     fi
-    log "Node $NODE_VERSION at $NODE_PATH_FOUND (major=$major, ok=$NODE_OK)"
+    log "Node $NODE_VERSION at $NODE_PATH_FOUND (major=$NODE_MAJOR, ok=$NODE_OK)"
   else
     log "Node not found"
   fi
@@ -196,8 +202,8 @@ if [ "$NODE_OK" = "false" ]; then
   else
     # install-node.sh refuses to replace an existing Node without consent,
     # so don't run it just to watch it refuse — name the actual fix.
-    log "Node $NODE_VERSION too old (need >= 20) — leaving the existing install alone"
-    echo "Node $NODE_VERSION is too old. NanoClaw needs Node 20 or higher. Do one of these: (1) Update your Node. (2) Run bash nanoclaw.sh and accept the Node installation. Then do the setup again."
+    log "Node $NODE_VERSION outside the supported range (need >= $NODE_MAJOR_MIN and <= $NODE_MAJOR_MAX) — leaving the existing install alone"
+    echo "Node $NODE_VERSION is not supported. NanoClaw needs Node $NODE_MAJOR_MIN to $NODE_MAJOR_MAX. Do one of these: (1) Switch to a supported Node. (2) Run bash nanoclaw.sh and accept the Node installation. Then do the setup again."
   fi
 fi
 install_deps
@@ -208,6 +214,8 @@ STATUS="success"
 if [ "$NODE_OK" = "false" ]; then
   if [ "$NODE_VERSION" = "not_found" ]; then
     STATUS="node_missing"
+  elif [ "$NODE_MAJOR" -gt "$NODE_MAJOR_MAX" ] 2>/dev/null; then
+    STATUS="node_too_new"
   else
     STATUS="node_too_old"
   fi

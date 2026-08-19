@@ -9,6 +9,10 @@
 set -euo pipefail
 
 REQUIRED_NODE_MAJOR=20
+# The ceiling exists because better-sqlite3 11.x cannot build against
+# Node 26 (V8 removed APIs it uses) and ships no prebuilt for it. Raise
+# MAX_NODE_MAJOR only after the better-sqlite3 pin supports the runtime.
+MAX_NODE_MAJOR=25
 
 echo "=== NANOCLAW SETUP: INSTALL_NODE ==="
 
@@ -16,7 +20,7 @@ if command -v node >/dev/null 2>&1; then
   NODE_VERSION="$(node --version 2>/dev/null || echo unknown)"
   major="${NODE_VERSION#v}"
   major="${major%%.*}"
-  if [ "$major" -ge "$REQUIRED_NODE_MAJOR" ] 2>/dev/null; then
+  if { [ "$major" -ge "$REQUIRED_NODE_MAJOR" ] && [ "$major" -le "$MAX_NODE_MAJOR" ]; } 2>/dev/null; then
     echo "STATUS: already-installed"
     echo "NODE_VERSION: $NODE_VERSION"
     echo "=== END ==="
@@ -24,11 +28,15 @@ if command -v node >/dev/null 2>&1; then
   fi
   if [ "${NANOCLAW_NODE_UPGRADE_OK:-0}" != "1" ]; then
     # An existing Node is never replaced without consent — the honest
-    # non-consented outcome for a too-old Node is a clear failure naming
-    # the fix. nanoclaw.sh gathers that consent interactively.
-    echo "STATUS: node-too-old"
+    # non-consented outcome for an unsupported Node is a clear failure
+    # naming the fix. nanoclaw.sh gathers that consent interactively.
+    if [ "$major" -gt "$MAX_NODE_MAJOR" ] 2>/dev/null; then
+      echo "STATUS: node-too-new"
+    else
+      echo "STATUS: node-too-old"
+    fi
     echo "NODE_VERSION: $NODE_VERSION"
-    echo "ERROR: Node $NODE_VERSION is too old. NanoClaw needs Node ${REQUIRED_NODE_MAJOR} or higher. This script does not replace an installed Node without consent. Do one of these: (1) Update or remove your Node, then run the setup again. (2) Run bash nanoclaw.sh and accept the Node installation."
+    echo "ERROR: Node $NODE_VERSION is not supported. NanoClaw needs Node ${REQUIRED_NODE_MAJOR} to ${MAX_NODE_MAJOR}. This script does not replace an installed Node without consent. Do one of these: (1) Switch to a supported Node, then run the setup again. (2) Run bash nanoclaw.sh and accept the Node installation."
     echo "=== END ==="
     exit 1
   fi
@@ -89,9 +97,9 @@ fi
 NODE_VERSION="$(node --version 2>/dev/null || echo unknown)"
 major="${NODE_VERSION#v}"
 major="${major%%.*}"
-if ! [ "$major" -ge "$REQUIRED_NODE_MAJOR" ] 2>/dev/null; then
+if ! { [ "$major" -ge "$REQUIRED_NODE_MAJOR" ] && [ "$major" -le "$MAX_NODE_MAJOR" ]; } 2>/dev/null; then
   echo "STATUS: failed"
-  echo "ERROR: The PATH still finds Node $NODE_VERSION after the installation. Put the new Node first in the PATH (for example ~/.local/bin). Then run the setup again."
+  echo "ERROR: The PATH finds Node $NODE_VERSION after the installation, and NanoClaw needs Node ${REQUIRED_NODE_MAJOR} to ${MAX_NODE_MAJOR}. If an old Node still shadows the new one, put the new Node first in the PATH (for example ~/.local/bin). Then run the setup again."
   echo "=== END ==="
   exit 1
 fi
