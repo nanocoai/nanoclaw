@@ -516,6 +516,17 @@ async function buildContainerArgs(
   if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');
+
+    // Forward supplementary groups so bind-mounted files with group
+    // permissions (e.g. MEGAsync INBOX with umask 0660) are accessible.
+    const groups = process.getgroups?.();
+    if (groups) {
+      for (const gid of groups) {
+        if (gid !== hostUid && gid !== hostGid) {
+          args.push('--group-add', String(gid));
+        }
+      }
+    }
   }
 
   // Volume mounts
