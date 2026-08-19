@@ -17,11 +17,48 @@ import { registerResponseHandler, type ResponsePayload } from '../../response-re
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 
+function pendingQuestionThreadMatchesPayload(
+  pq: { platform_id: string | null; thread_id: string | null },
+  payload: ResponsePayload,
+): boolean {
+  if ((pq.thread_id ?? null) === (payload.threadId ?? null)) return true;
+
+  // Non-threaded/root-channel deliveries are persisted with a null thread_id,
+  // but some Chat SDK adapters report button-click events with the root chat
+  // id in event.threadId (for example Telegram DMs). Treat that root-thread
+  // spelling as equivalent to null while keeping channel_type/platform_id strict.
+  return pq.thread_id === null && payload.threadId === pq.platform_id;
+}
+
+function pendingQuestionMatchesPayload(
+  pq: { channel_type: string | null; platform_id: string | null; thread_id: string | null },
+  payload: ResponsePayload,
+): boolean {
+  return (
+    pq.channel_type === payload.channelType &&
+    pq.platform_id === payload.platformId &&
+    pendingQuestionThreadMatchesPayload(pq, payload)
+  );
+}
+
 async function handleInteractiveResponse(payload: ResponsePayload): Promise<boolean> {
   if (!hasTable(getDb(), 'pending_questions')) return false;
 
   const pq = getPendingQuestion(payload.questionId);
   if (!pq) return false;
+
+  if (!pendingQuestionMatchesPayload(pq, payload)) {
+    log.warn('Rejected question response from unexpected destination', {
+      questionId: payload.questionId,
+      expectedChannelType: pq.channel_type,
+      expectedPlatformId: pq.platform_id,
+      expectedThreadId: pq.thread_id,
+      actualChannelType: payload.channelType,
+      actualPlatformId: payload.platformId,
+      actualThreadId: payload.threadId,
+    });
+    return true; // claimed: this is our questionId, but the response is not authorized
+  }
 
   const session = getSession(pq.session_id);
   if (!session) {

@@ -22,7 +22,13 @@ export interface ChannelSetup {
   onMetadata(platformId: string, name?: string, isGroup?: boolean): void;
 
   /** Called when a user clicks a button/action in a card (e.g., ask_user_question response). */
-  onAction(questionId: string, selectedOption: string, userId: string): void;
+  onAction(
+    questionId: string,
+    selectedOption: string,
+    userId: string,
+    platformId: string,
+    threadId: string | null,
+  ): void;
 }
 
 /** Delivery address used for reply-to overrides and (normally) the inbound's own origin. */
