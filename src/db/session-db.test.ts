@@ -53,6 +53,10 @@ describe('migrateMessagesInTable', () => {
       series_id: string;
     };
     expect(row.series_id).toBe('legacy-1');
+    const indexes = (db.prepare("PRAGMA index_list('messages_in')").all() as Array<{ name: string }>).map(
+      (index) => index.name,
+    );
+    expect(indexes).toContain('idx_messages_in_poll');
     db.close();
   });
 

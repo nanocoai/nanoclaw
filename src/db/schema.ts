@@ -190,6 +190,7 @@ CREATE TABLE IF NOT EXISTS messages_in (
                -- Dying containers (past first poll) skip these rows.
 );
 CREATE INDEX IF NOT EXISTS idx_messages_in_series ON messages_in(series_id);
+CREATE INDEX IF NOT EXISTS idx_messages_in_poll ON messages_in(status, trigger, seq);
 
 -- Host tracks delivery outcomes for messages_out IDs.
 -- Avoids writing to outbound.db (container-owned).

@@ -9,8 +9,8 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb } from './connection.js';
-import { getPendingMessages, markProcessing } from './messages-in.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './connection.js';
+import { getPendingMessages, markCompleted, markProcessing } from './messages-in.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -110,13 +110,35 @@ describe('claimed-but-unsynced rows never hide new work', () => {
   // window, the filter empties it, and newer rows are invisible all turn.
   it('a new message arriving after a full claimed batch is returned immediately', () => {
     const claimed: string[] = [];
-    for (let i = 1; i <= CAP; i++) {
+    for (let i = 1; i <= CAP * 2; i++) {
       insertMessage(`claimed-${i}`, i * 2, 'chat', { sender: 'A', text: `msg ${i}` });
       claimed.push(`claimed-${i}`);
     }
     markProcessing(claimed);
 
-    insertMessage('fresh', (CAP + 1) * 2, 'chat', { sender: 'A', text: 'follow-up' });
+    insertMessage('fresh', (CAP * 2 + 1) * 2, 'chat', { sender: 'A', text: 'follow-up' });
+
+    expect(getPendingMessages().map((m) => m.id)).toEqual(['fresh']);
+  });
+
+  it('never redelivers a completed ack whose inbound row is still pending', () => {
+    insertMessage('done', 2, 'chat', { sender: 'A', text: 'already handled' });
+    markCompleted(['done']);
+    getOutboundDb()
+      .prepare("UPDATE processing_ack SET status_changed = '2000-01-01T00:00:00.000Z' WHERE message_id = 'done'")
+      .run();
+    insertMessage('fresh', 4, 'chat', { sender: 'A', text: 'new work' });
+
+    expect(getPendingMessages().map((m) => m.id)).toEqual(['fresh']);
+  });
+
+  it('never redelivers a stale processing ack', () => {
+    insertMessage('claimed-old', 2, 'chat', { sender: 'A', text: 'still running' });
+    markProcessing(['claimed-old']);
+    getOutboundDb()
+      .prepare("UPDATE processing_ack SET status_changed = '2000-01-01T00:00:00.000Z' WHERE message_id = 'claimed-old'")
+      .run();
+    insertMessage('fresh', 4, 'chat', { sender: 'A', text: 'new work' });
 
     expect(getPendingMessages().map((m) => m.id)).toEqual(['fresh']);
   });
@@ -144,6 +166,35 @@ describe('claimed-but-unsynced rows never hide new work', () => {
     insertContextRow('ctx-new', 102, 'fresh ambient');
 
     expect(getPendingMessages().map((m) => m.id)).toEqual(['chat-new', 'ctx-new']);
+  });
+});
+
+describe('context backlog draining', () => {
+  it('drains newest blocks first across repeated wakes', () => {
+    for (let i = 1; i <= 30; i++) {
+      insertContextRow(`ctx-${i}`, i * 2, `ambient ${i}`);
+    }
+
+    const contextByWake: string[][] = [];
+    for (let wake = 1; wake <= 4; wake++) {
+      const wakeId = `wake-${wake}`;
+      insertMessage(wakeId, 100 + wake * 2, 'chat', { sender: 'A', text: `wake ${wake}` });
+      const batch = getPendingMessages();
+      contextByWake.push(batch.filter((m) => m.trigger === 0).map((m) => m.id));
+
+      const placeholders = batch.map(() => '?').join(', ');
+      getInboundDb()
+        .prepare(`UPDATE messages_in SET status = 'completed' WHERE id IN (${placeholders})`)
+        .run(...batch.map((m) => m.id));
+    }
+
+    expect(contextByWake).toEqual([
+      ['ctx-22', 'ctx-23', 'ctx-24', 'ctx-25', 'ctx-26', 'ctx-27', 'ctx-28', 'ctx-29', 'ctx-30'],
+      ['ctx-13', 'ctx-14', 'ctx-15', 'ctx-16', 'ctx-17', 'ctx-18', 'ctx-19', 'ctx-20', 'ctx-21'],
+      ['ctx-4', 'ctx-5', 'ctx-6', 'ctx-7', 'ctx-8', 'ctx-9', 'ctx-10', 'ctx-11', 'ctx-12'],
+      ['ctx-1', 'ctx-2', 'ctx-3'],
+    ]);
+    expect(getPendingMessages()).toHaveLength(0);
   });
 });
 

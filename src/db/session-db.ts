@@ -332,6 +332,10 @@ export function migrateMessagesInTable(db: Database.Database): void {
     // All existing rows are normal messages, so default 0.
     db.prepare('ALTER TABLE messages_in ADD COLUMN on_wake INTEGER NOT NULL DEFAULT 0').run();
   }
+  // Supports the container's bounded wake/context selection. Keep this in
+  // the lazy migration as well as the baseline schema so existing session
+  // DBs gain the index on their next host-side open.
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_messages_in_poll ON messages_in(status, trigger, seq)').run();
 }
 
 /**
