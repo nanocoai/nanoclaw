@@ -32,6 +32,10 @@ export default defineConfig({
       // import from `bun:test` and only run under Bun (see vitest.config.ts).
       '.claude/skills/add-atomic-chat-tool/atomic-chat-registration.test.ts',
       '.claude/skills/add-ollama-tool/ollama-registration.test.ts',
+      // Skill payload destined for src/: it imports host core by relative
+      // specifier (`./claude-md-compose.js`), which only resolves once the
+      // applier has copied it into src/.
+      '.claude/skills/add-karpathy-llm-wiki/wiki-delivery-seam.test.ts',
     ],
   },
 });
