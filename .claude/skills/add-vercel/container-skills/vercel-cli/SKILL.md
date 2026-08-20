@@ -11,7 +11,17 @@ You can deploy web applications to Vercel using the `vercel` CLI.
 
 ## Auth
 
-Auth is handled by OneCLI — the HTTPS_PROXY injects the real token into API requests automatically. The Vercel CLI requires a token to be present to skip its local credential check, so **always pass `--token placeholder`** on every command. OneCLI replaces this with the real token at the proxy level.
+Auth is handled by OneCLI. **Always pass `--token placeholder`** on every
+command. That is not a way of skipping a local check — the CLI has no local
+token validation. Whatever `--token` receives is sent verbatim as
+`Authorization: Bearer <value>` to `https://api.vercel.com`, and the gateway
+your `HTTPS_PROXY` points at overwrites that header with the real token before
+forwarding. A generic OneCLI secret configured with
+`--header-name Authorization` injects as a *set* (replace) of the header, not an
+add, so the placeholder never reaches Vercel and no duplicate header is sent.
+
+The flag is still required: with no token at all the CLI looks for local login
+credentials, and the container has none.
 
 Before any Vercel operation, verify auth:
 
@@ -19,11 +29,24 @@ Before any Vercel operation, verify auth:
 vercel whoami --token placeholder
 ```
 
-If this fails with an auth error, ask the user to add a Vercel token to OneCLI. They can create one at https://vercel.com/account/tokens and register it via `onecli secrets create` on the host. Once added, retry `vercel whoami`.
+Expect the account's username.
+
+If you instead get **`The token provided via '--token' argument is not valid`**,
+that is the placeholder arriving at Vercel unrewritten — the request went around
+the gateway or no matching secret was injected. It is not a secret leak (the
+placeholder is not a credential), but nothing will work until it is fixed. Tell
+the user which of these to check on the host:
+
+- a Vercel secret exists in the vault, created with `--host-pattern api.vercel.com`, `--header-name Authorization`, `--value-format "Bearer {value}"` (a secret without `--header-name` injects as a query parameter and cannot rewrite the header);
+- the token itself is still valid — create a new one at https://vercel.com/account/tokens and re-register it with `onecli secrets create`;
+- this agent is in `selective` secret mode without the Vercel secret assigned (`onecli agents list`).
+
+Do not ask the user to paste a token to you, and do not try to set
+`VERCEL_TOKEN` yourself — the credential is the gateway's to hold.
 
 ## Deploying
 
-Always use `--yes` to skip interactive prompts and `--token placeholder` for auth (OneCLI replaces with real token).
+Always use `--yes` to skip interactive prompts and `--token placeholder` for auth (the gateway overwrites the header with the real token).
 
 ```bash
 # Deploy to production
@@ -95,6 +118,7 @@ echo "value" | vercel env add VAR_NAME production --token placeholder
 | `Error: Rate limited` | Wait and retry. Don't loop — report to user |
 | `Error: You have reached your project limit` | User needs to upgrade Vercel plan or delete unused projects |
 | `ENOTFOUND api.vercel.com` | Network issue. Check proxy connectivity |
+| `The token provided via '--token' argument is not valid` | The placeholder reached Vercel unrewritten. See **Auth** — do not swap in a real token |
 | Auth error after `vercel whoami` | Credential may be expired. Ask the user to refresh the Vercel token in OneCLI |
 
 ## Building Websites — Delegate to Frontend Engineer
