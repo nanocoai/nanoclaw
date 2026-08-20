@@ -1869,7 +1869,7 @@ async function askChannelChoice(): Promise<ChannelChoice> {
     await brightSelect<ChannelChoice>({
       message: 'Want to chat with your assistant from your phone?',
       options: [
-        { value: 'slack', label: 'Yes, connect Slack' },
+        { value: 'slack', label: 'Yes, connect Slack', hint: 'NEW!! one-click install' },
         { value: 'teams', label: 'Yes, connect Microsoft Teams' },
         { value: 'telegram', label: 'Yes, connect Telegram' },
         { value: 'discord', label: 'Yes, connect Discord' },
