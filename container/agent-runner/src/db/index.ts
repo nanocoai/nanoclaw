@@ -1,11 +1,5 @@
-export {
-  getInboundDb,
-  getOutboundDb,
-  initTestSessionDb,
-  closeSessionDb,
-  touchHeartbeat,
-  clearStaleProcessingAcks,
-} from './connection.js';
+export { touchHeartbeat } from '../heartbeat.js';
+export { setContainerToolInFlight, clearContainerToolInFlight, clearStaleProcessingAcks } from './container-state.js';
 export {
   getPendingMessages,
   markProcessing,

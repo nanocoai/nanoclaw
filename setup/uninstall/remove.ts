@@ -20,19 +20,14 @@ export interface ExecDeps {
   isRoot: boolean;
 }
 
-export function executePlan(
-  actions: RemovalAction[],
-  deps: ExecDeps,
-): { notes: string[] } {
+export function executePlan(actions: RemovalAction[], deps: ExecDeps): { notes: string[] } {
   const notes: string[] = [];
   for (const action of actions) {
     try {
       runAction(action, deps, notes);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      notes.push(
-        `${action.kind}: failed (${msg}) — re-run the uninstaller to retry.`,
-      );
+      notes.push(`${action.kind}: failed (${msg}) — re-run the uninstaller to retry.`);
     }
   }
   return { notes };
@@ -70,12 +65,7 @@ function runAction(action: RemovalAction, deps: ExecDeps, notes: string[]): void
           log('✓ background service removed');
           break;
         case 'systemd-user':
-          runCommand('systemctl', [
-            '--user',
-            'disable',
-            '--now',
-            `${action.unitName}.service`,
-          ]);
+          runCommand('systemctl', ['--user', 'disable', '--now', `${action.unitName}.service`]);
           fs.rmSync(action.unitPath, { force: true });
           runCommand('systemctl', ['--user', 'daemon-reload']);
           log('✓ background service removed');
@@ -83,9 +73,7 @@ function runAction(action: RemovalAction, deps: ExecDeps, notes: string[]): void
         case 'systemd-system':
           if (!deps.isRoot) {
             log('! system service needs root — left in place');
-            notes.push(
-              `System service ${action.unitPath} — re-run with sudo to remove.`,
-            );
+            notes.push(`System service ${action.unitPath} — re-run with sudo to remove.`);
             break;
           }
           runCommand('systemctl', ['disable', '--now', `${action.unitName}.service`]);
@@ -119,12 +107,7 @@ function runAction(action: RemovalAction, deps: ExecDeps, notes: string[]): void
     case 'rm-containers': {
       // Re-list at removal time: the host was alive during the confirm
       // phase and may have spawned containers the scan never saw.
-      const ps = runCommand(action.runtime, [
-        'ps',
-        '-aq',
-        '--filter',
-        `label=${action.labelFilter}`,
-      ]);
+      const ps = runCommand(action.runtime, ['ps', '-aq', '--filter', `label=${action.labelFilter}`]);
       if (ps.status !== 0) {
         notes.push(
           `Containers: '${action.runtime}' unavailable — remove later with: ` +
@@ -147,9 +130,7 @@ function runAction(action: RemovalAction, deps: ExecDeps, notes: string[]): void
         log('✓ removed container image');
       } else {
         log('! could not remove image (in use?)');
-        notes.push(
-          `Image ${action.image}: not removed — retry with: ${action.runtime} rmi ${action.image}`,
-        );
+        notes.push(`Image ${action.image}: not removed — retry with: ${action.runtime} rmi ${action.image}`);
       }
       break;
     }
@@ -158,12 +139,7 @@ function runAction(action: RemovalAction, deps: ExecDeps, notes: string[]): void
       log('✓ removed ncl command');
       break;
     case 'delete-onecli-agent': {
-      const res = runCommand('onecli', [
-        'agents',
-        'delete',
-        '--id',
-        action.agent.uuid,
-      ]);
+      const res = runCommand('onecli', ['agents', 'delete', '--id', action.agent.uuid]);
       if (res.status === 0) {
         log(`✓ deleted OneCLI agent ${action.agent.name} (${action.agent.identifier})`);
       } else if (res.status === null) {

@@ -115,11 +115,40 @@ export function createChannelDeliveryAdapter(): ChannelDeliveryAdapter {
       platformId: string,
       threadId: string | null,
       instance?: string,
+      status?: string,
+      statusKind?: 'auto' | 'agent',
     ): Promise<void> {
       const adapter = getChannelAdapterExact(instance ?? channelType);
-      await adapter?.setTyping?.(platformId, threadId);
+      await adapter?.setTyping?.(platformId, threadId, status, statusKind);
     },
   };
+}
+
+/**
+ * Registry passthrough for the optional per-thread title API. Exact-key
+ * resolution only (`mg.instance ?? mg.channel_type` — same discipline as
+ * delivery/typing dispatch: a named instance must never re-title through a
+ * sibling bot). Missing adapter or missing capability is a silent no-op —
+ * titles are decoration, never worth a delivery failure.
+ */
+export async function setThreadTitle(key: string, platformId: string, threadId: string, title: string): Promise<void> {
+  const adapter = getChannelAdapterExact(key);
+  await adapter?.setThreadTitle?.(platformId, threadId, title);
+}
+
+/**
+ * Registry passthrough for agent-view suggested prompts. Exact-key
+ * resolution; missing adapter/capability is a silent no-op — prompts are
+ * onboarding decoration, never worth a failure.
+ */
+export async function setSuggestedPrompts(
+  key: string,
+  platformId: string,
+  prompts: Array<{ title: string; message: string }>,
+  title?: string,
+): Promise<void> {
+  const adapter = getChannelAdapterExact(key);
+  await adapter?.setSuggestedPrompts?.(platformId, prompts, title);
 }
 
 /**
@@ -233,6 +262,7 @@ export function getChannelContainerConfig(name: string): ChannelRegistration['co
  * Skips adapters that return null (missing credentials).
  */
 export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => ChannelSetup): Promise<void> {
+  hotStartSetupFn = setupFn;
   for (const [name, registration] of registry) {
     try {
       const adapter = await registration.factory();
@@ -294,4 +324,52 @@ export async function teardownChannelAdapters(): Promise<void> {
     }
   }
   activeAdapters.clear();
+}
+
+/**
+ * slack-agent-flow seam — hot-start ONE registered adapter after boot.
+ * Captures the host's setupFn from initChannelAdapters and replays the same
+ * four boot steps (factory → setupFn(adapter) → setup with NetworkError retry
+ * → activeAdapters.set) for a single registry entry, so a freshly provisioned
+ * instance (e.g. `slack-<name>`) comes online without a host restart.
+ * Installed by the slack-agent-flow skill; adapter-hot-start.test.ts pins it.
+ */
+let hotStartSetupFn: ((adapter: ChannelAdapter) => ChannelSetup) | null = null;
+
+export async function startChannelAdapter(key: string): Promise<'started' | 'already-active' | 'no-credentials'> {
+  if (activeAdapters.has(key)) return 'already-active';
+  const registration = registry.get(key);
+  if (!registration) throw new Error(`startChannelAdapter: no registration for '${key}'`);
+  if (!hotStartSetupFn) throw new Error('startChannelAdapter: initChannelAdapters has not run');
+  const adapter = await registration.factory();
+  if (!adapter) return 'no-credentials';
+  const setup = hotStartSetupFn(adapter);
+  let attempt = 0;
+  while (true) {
+    try {
+      await adapter.setup(setup);
+      break;
+    } catch (err) {
+      if (isNetworkError(err) && attempt < SETUP_RETRY_DELAYS_MS.length) {
+        const delay = SETUP_RETRY_DELAYS_MS[attempt]!;
+        log.warn('Hot-start adapter setup failed with network error, retrying', {
+          channel: key,
+          attempt: attempt + 1,
+          delayMs: delay,
+          err: err.message,
+        });
+        await sleep(delay);
+        attempt += 1;
+        continue;
+      }
+      throw err;
+    }
+  }
+  const activeKey = adapter.instance ?? adapter.channelType;
+  if (activeAdapters.has(activeKey)) {
+    log.warn('Duplicate adapter instance key — overwriting previous adapter', { key: activeKey, channel: key });
+  }
+  activeAdapters.set(activeKey, adapter);
+  log.info('Channel adapter hot-started', { channel: key, type: adapter.channelType, instance: activeKey });
+  return 'started';
 }

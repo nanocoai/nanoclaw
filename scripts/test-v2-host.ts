@@ -24,8 +24,8 @@ import { runMigrations } from '../src/db/migrations/index.js';
 import { createAgentGroup } from '../src/db/agent-groups.js';
 import { createMessagingGroup, createMessagingGroupAgent } from '../src/db/messaging-groups.js';
 
-const centralDb = initDb(path.join(TEST_DIR, 'v2.db'));
-runMigrations(centralDb);
+const centralDb = await initDb(path.join(TEST_DIR, 'v2.db'));
+await runMigrations(centralDb);
 
 // Create groups dir for agent folder mount
 const groupsDir = path.resolve(process.cwd(), 'groups');
@@ -33,7 +33,7 @@ const testGroupDir = path.join(groupsDir, 'test-agent-e2e');
 fs.mkdirSync(testGroupDir, { recursive: true });
 fs.writeFileSync(path.join(testGroupDir, 'CLAUDE.md'), '# Test Agent\nYou are a test agent. Be brief.\n');
 
-createAgentGroup({
+await createAgentGroup({
   id: 'ag-e2e',
   name: 'E2E Test Agent',
   folder: 'test-agent-e2e',
@@ -41,7 +41,7 @@ createAgentGroup({
   created_at: new Date().toISOString(),
 });
 
-createMessagingGroup({
+await createMessagingGroup({
   id: 'mg-e2e',
   channel_type: 'test',
   platform_id: 'e2e-channel',
@@ -51,7 +51,7 @@ createMessagingGroup({
   created_at: new Date().toISOString(),
 });
 
-createMessagingGroupAgent({
+await createMessagingGroupAgent({
   id: 'mga-e2e',
   messaging_group_id: 'mg-e2e',
   agent_group_id: 'ag-e2e',
@@ -71,7 +71,7 @@ console.log('\n=== Step 2: Route inbound message ===');
 
 import { routeInbound } from '../src/router.js';
 import { findSession } from '../src/db/sessions.js';
-import { inboundDbPath, outboundDbPath } from '../src/session-manager.js';
+import { inboundDbPath, outboundDbPath } from '../src/mailbox/sqlite/paths.js';
 
 await routeInbound({
   channelType: 'test',
@@ -88,7 +88,7 @@ await routeInbound({
   },
 });
 
-const session = findSession('mg-e2e', null);
+const session = await findSession('mg-e2e', null);
 if (!session) {
   console.log('✗ No session created!');
   process.exit(1);

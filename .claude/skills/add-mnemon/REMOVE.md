@@ -53,7 +53,7 @@ systemctl --user restart $(systemd_unit)
 Mnemon's graph lives at `/home/node/.claude/mnemon/` in each container, which maps to the per-agent-group `.claude/` directory on the host. To find the host path and clear it:
 
 ```bash
-docker inspect $(docker ps --filter name=nanoclaw-v2 --format '{{.Names}}' | head -1) \
+docker inspect $(docker ps --filter label=nanoclaw-session --format "{{.Names}}" | head -1) \
   --format '{{range .Mounts}}{{if eq .Destination "/home/node/.claude"}}{{.Source}}{{end}}{{end}}'
 ```
 

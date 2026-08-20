@@ -5,10 +5,9 @@
  * wakes a fresh container via the onExit callback — race-free.
  */
 import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
-import { countDueMessages } from './db/session-db.js';
 import { getSession, getSessionsByAgentGroup } from './db/sessions.js';
 import { log } from './log.js';
-import { openInboundDb, writeSessionMessage } from './session-manager.js';
+import { withExistingMailboxSession, writeSessionMessage } from './session-manager.js';
 
 /**
  * Kill all running containers for an agent group and respawn them.
@@ -19,14 +18,18 @@ import { openInboundDb, writeSessionMessage } from './session-manager.js';
  * wakeContainer call on exit. Without it, containers are killed and
  * only come back on the next real user message.
  */
-export function restartAgentGroupContainers(agentGroupId: string, reason: string, wakeMessage?: string): number {
-  const sessions = getSessionsByAgentGroup(agentGroupId).filter(
+export async function restartAgentGroupContainers(
+  agentGroupId: string,
+  reason: string,
+  wakeMessage?: string,
+): Promise<number> {
+  const sessions = (await getSessionsByAgentGroup(agentGroupId)).filter(
     (s) => s.status === 'active' && isContainerRunning(s.id),
   );
 
   for (const session of sessions) {
     if (wakeMessage) {
-      writeSessionMessage(agentGroupId, session.id, {
+      await writeSessionMessage(agentGroupId, session.id, {
         id: `restart-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         kind: 'chat',
         timestamp: new Date().toISOString(),
@@ -38,21 +41,28 @@ export function restartAgentGroupContainers(agentGroupId: string, reason: string
           sender: 'system',
           senderId: 'system',
         }),
-        onWake: 1,
+        onWake: true,
       });
     }
     // Always respawn after the kill when there is anything to process: an
     // explicit wake message, or in-flight messages the dying container had
     // claimed. Without this, a provider switch mid-conversation leaves the
     // claimed messages dark until the next inbound or a slow sweep backoff.
-    const hasPending = countDueMessages(openInboundDb(session.agent_group_id, session.id)) > 0;
+    const hasPending =
+      (await withExistingMailboxSession(
+        session.agent_group_id,
+        session.id,
+        (mailbox) => mailbox.countDueMessages() > 0,
+      )) ?? false;
     killContainer(
       session.id,
       reason,
       wakeMessage || hasPending
         ? () => {
-            const s = getSession(session.id);
-            if (s) wakeContainer(s);
+            void (async () => {
+              const s = await getSession(session.id);
+              if (s) await wakeContainer(s);
+            })();
           }
         : undefined,
     );

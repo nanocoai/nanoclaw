@@ -1,7 +1,12 @@
-import fs from 'fs';
-
 import { getAllSessions, getSession, getSessionsByAgentGroup } from '../../db/sessions.js';
-import { outboundDbPath, withOutboundDb } from '../../session-manager.js';
+import {
+  formatHistoryLines,
+  HISTORY_DEFAULT_LIMIT,
+  sessionHistory,
+  type HistoryRow,
+} from '../../modules/cross-session-context/index.js';
+import type { MailboxUsageTurn } from '../../mailbox/types.js';
+import { withExistingMailboxSession } from '../../session-manager.js';
 import { registerResource } from '../crud.js';
 import {
   formatGroupTable,
@@ -17,9 +22,9 @@ import {
 import type { CallerContext } from '../frame.js';
 
 /**
- * The key the container's poll loop accumulates its per-turn token totals
- * under, in each session's `outbound.db`. Mirrored here rather than imported:
- * host and container share no modules, only the two session DBs.
+ * The state key the container's poll loop accumulates its per-turn token
+ * totals under. Mirrored here rather than imported: host and container share
+ * no modules, only the mailbox.
  */
 const USAGE_KEY = 'token_usage';
 
@@ -37,20 +42,14 @@ function roundCost(value: number): number {
  * Read one session's banked totals, or null if it has none.
  *
  * Null covers every way a session can fail to account for itself — never
- * started, DB removed, schema predates `session_state`, row unparseable. They
- * are deliberately not distinguished: the caller reports them as unmeasured,
- * and none of them means the session was free.
+ * started, mailbox gone, nothing ever banked under the key, value unparseable.
+ * They are deliberately not distinguished: the caller reports them as
+ * unmeasured, and none of them means the session was free.
  */
-function readSessionUsage(agentGroupId: string, sessionId: string): UsageRow | null {
-  if (!fs.existsSync(outboundDbPath(agentGroupId, sessionId))) return null;
+async function readSessionUsage(agentGroupId: string, sessionId: string): Promise<UsageRow | null> {
   let raw: string | undefined;
   try {
-    raw = withOutboundDb(agentGroupId, sessionId, (db) => {
-      const row = db.prepare('SELECT value FROM session_state WHERE key = ?').get(USAGE_KEY) as
-        | { value: string }
-        | undefined;
-      return row?.value;
-    });
+    raw = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.getState(USAGE_KEY)?.value);
   } catch {
     return null;
   }
@@ -88,10 +87,13 @@ function readSessionUsage(agentGroupId: string, sessionId: string): UsageRow | n
  * Which sessions this caller may account for. An agent is pinned to its own
  * group regardless of what it passed; `--group` from an agent is never read.
  */
-function selectedSessions(args: Record<string, unknown>, ctx: CallerContext): { id: string; group: string }[] {
+async function selectedSessions(
+  args: Record<string, unknown>,
+  ctx: CallerContext,
+): Promise<{ id: string; group: string }[]> {
   const sessionId = typeof args.session === 'string' ? args.session : undefined;
   if (sessionId) {
-    const session = getSession(sessionId);
+    const session = await getSession(sessionId);
     if (!session || (ctx.caller === 'agent' && session.agent_group_id !== ctx.agentGroupId)) {
       // Same error either way, so this can't be used to probe another group.
       throw new Error(`session not found: ${sessionId}`);
@@ -108,15 +110,15 @@ function selectedSessions(args: Record<string, unknown>, ctx: CallerContext): { 
           ? args.agent_group_id
           : undefined;
 
-  const sessions = group ? getSessionsByAgentGroup(group) : getAllSessions();
+  const sessions = group ? await getSessionsByAgentGroup(group) : await getAllSessions();
   return sessions.map((s) => ({ id: s.id, group: s.agent_group_id }));
 }
 
-function sessionsUsage(args: Record<string, unknown>, ctx: CallerContext): UsageReport {
+async function sessionsUsage(args: Record<string, unknown>, ctx: CallerContext): Promise<UsageReport> {
   const rows: UsageRow[] = [];
   let unreported = 0;
-  for (const { id, group } of selectedSessions(args, ctx)) {
-    const usage = readSessionUsage(group, id);
+  for (const { id, group } of await selectedSessions(args, ctx)) {
+    const usage = await readSessionUsage(group, id);
     if (usage) rows.push(usage);
     else unreported += 1;
   }
@@ -148,22 +150,6 @@ function sessionsUsage(args: Record<string, unknown>, ctx: CallerContext): Usage
   return { sessions: rows, totals: { ...totals, cost_usd: roundCost(totals.cost_usd) }, unreported };
 }
 
-/**
- * A turn as the container wrote it. Nulls are load-bearing: the provider
- * reported nothing for that field, which is not zero.
- */
-interface LedgerRow {
-  timestamp: string;
-  task_series_id: string | null;
-  prompt_preview: string;
-  prompt_chars: number;
-  input_tokens: number | null;
-  output_tokens: number | null;
-  cache_read_tokens: number | null;
-  cache_creation_tokens: number | null;
-  cost_usd: number | null;
-}
-
 /** A number the provider actually reported, or null. */
 function measured(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
@@ -171,42 +157,37 @@ function measured(value: unknown): number | null {
 
 /**
  * One session's per-turn ledger, newest first. Empty covers every way a
- * session can have no detail on file — never started, DB removed, outbound.db
- * older than the ledger table, row unreadable.
+ * session can have no detail on file — never started, mailbox gone, mailbox
+ * older than the ledger, ledger unreadable.
  */
-function readSessionTurns(agentGroupId: string, sessionId: string): PromptUsageRow[] {
-  if (!fs.existsSync(outboundDbPath(agentGroupId, sessionId))) return [];
-  let rows: LedgerRow[];
+async function readSessionTurns(agentGroupId: string, sessionId: string): Promise<PromptUsageRow[]> {
+  let rows: MailboxUsageTurn[] | undefined;
   try {
-    rows = withOutboundDb(
-      agentGroupId,
-      sessionId,
-      (db) => db.prepare('SELECT * FROM token_usage_log ORDER BY id DESC').all() as LedgerRow[],
-    );
+    rows = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.getUsageLog());
   } catch {
     return [];
   }
 
-  return rows.map((r) => {
-    const input = measured(r.input_tokens);
-    const output = measured(r.output_tokens);
-    const cacheRead = measured(r.cache_read_tokens);
-    const cacheCreation = measured(r.cache_creation_tokens);
+  return (rows ?? []).map((r) => {
+    const input = measured(r.inputTokens);
+    const output = measured(r.outputTokens);
+    const cacheRead = measured(r.cacheReadTokens);
+    const cacheCreation = measured(r.cacheCreationTokens);
     const parts = [input, output, cacheRead, cacheCreation].filter((v): v is number => v !== null);
     return {
       session_id: sessionId,
       agent_group_id: agentGroupId,
       timestamp: typeof r.timestamp === 'string' ? r.timestamp : '',
-      task_series_id: r.task_series_id ?? null,
-      prompt_preview: typeof r.prompt_preview === 'string' ? r.prompt_preview : '',
-      prompt_chars: measured(r.prompt_chars) ?? 0,
+      task_series_id: r.taskSeriesId ?? null,
+      prompt_preview: typeof r.promptPreview === 'string' ? r.promptPreview : '',
+      prompt_chars: measured(r.promptChars) ?? 0,
       input_tokens: input,
       output_tokens: output,
       cache_read_tokens: cacheRead,
       cache_creation_tokens: cacheCreation,
       // Null, not zero, when the turn went entirely unmeasured.
       total_tokens: parts.length ? parts.reduce((a, b) => a + b, 0) : null,
-      cost_usd: measured(r.cost_usd),
+      cost_usd: measured(r.costUsd),
     };
   });
 }
@@ -251,11 +232,11 @@ function summarize(
  * Per agent group, from the lifetime totals each session banked — not from the
  * ledger, which only retains recent turns.
  */
-function usageByAgent(args: Record<string, unknown>, ctx: CallerContext): UsageGroupReport {
+async function usageByAgent(args: Record<string, unknown>, ctx: CallerContext): Promise<UsageGroupReport> {
   const groups = new Map<string, Omit<UsageGroupRow, 'key'>>();
   let unmeasured = 0;
-  for (const { id, group } of selectedSessions(args, ctx)) {
-    const usage = readSessionUsage(group, id);
+  for (const { id, group } of await selectedSessions(args, ctx)) {
+    const usage = await readSessionUsage(group, id);
     if (!usage) {
       unmeasured += 1;
       continue;
@@ -272,12 +253,12 @@ function usageByAgent(args: Record<string, unknown>, ctx: CallerContext): UsageG
  * Per task series, from the ledger — the only place the series is recorded.
  * Turns that belong to no task collect under `(chat)`.
  */
-function usageByTask(args: Record<string, unknown>, ctx: CallerContext): UsageGroupReport {
+async function usageByTask(args: Record<string, unknown>, ctx: CallerContext): Promise<UsageGroupReport> {
   const groups = new Map<string, Omit<UsageGroupRow, 'key'>>();
   const seen = new Map<string, Set<string>>();
   let unmeasured = 0;
-  for (const { id, group } of selectedSessions(args, ctx)) {
-    for (const turn of readSessionTurns(group, id)) {
+  for (const { id, group } of await selectedSessions(args, ctx)) {
+    for (const turn of await readSessionTurns(group, id)) {
       if (turn.total_tokens === null && turn.cost_usd === null) unmeasured += 1;
       const key = turn.task_series_id ?? '(chat)';
       const acc = groups.get(key) ?? { ...EMPTY_GROUP };
@@ -303,12 +284,12 @@ function usageByTask(args: Record<string, unknown>, ctx: CallerContext): UsageGr
 /** Newest turns first, one row per prompt. */
 const PROMPT_LIMIT_DEFAULT = 20;
 
-function usageByPrompt(args: Record<string, unknown>, ctx: CallerContext): PromptUsageReport {
+async function usageByPrompt(args: Record<string, unknown>, ctx: CallerContext): Promise<PromptUsageReport> {
   const limitArg = Number(args.limit);
   const limit = Number.isFinite(limitArg) && limitArg > 0 ? Math.floor(limitArg) : PROMPT_LIMIT_DEFAULT;
 
   const turns: PromptUsageRow[] = [];
-  for (const { id, group } of selectedSessions(args, ctx)) turns.push(...readSessionTurns(group, id));
+  for (const { id, group } of await selectedSessions(args, ctx)) turns.push(...(await readSessionTurns(group, id)));
   turns.sort((a, b) => b.timestamp.localeCompare(a.timestamp) || a.session_id.localeCompare(b.session_id));
   const prompts = turns.slice(0, limit);
 
@@ -354,7 +335,7 @@ function grouping(args: Record<string, unknown>): Grouping {
 
 type AnyUsageReport = UsageReport | UsageGroupReport | PromptUsageReport;
 
-function usageReport(args: Record<string, unknown>, ctx: CallerContext): AnyUsageReport {
+async function usageReport(args: Record<string, unknown>, ctx: CallerContext): Promise<AnyUsageReport> {
   switch (grouping(args)) {
     case 'agent':
       return usageByAgent(args, ctx);
@@ -421,7 +402,7 @@ registerResource({
       access: 'open',
       description:
         'Token and cost totals, as the provider reported them.\n\n' +
-        "Read straight off each session's outbound.db, where the container banks one turn at a time, so the numbers survive container restarts and cover closed sessions too. Only providers that report usage contribute; whatever went unmeasured is counted separately rather than shown as zero, because unmeasured is not the same as free.\n\n" +
+        "Read from each session's mailbox, where the container banks one turn at a time, so the numbers survive container restarts and cover closed sessions too. Only providers that report usage contribute; whatever went unmeasured is counted separately rather than shown as zero, because unmeasured is not the same as free.\n\n" +
         "--by session (default) and --by agent come from each session's lifetime totals. --by task and --by prompt come from the per-turn ledger, which keeps a fixed recent window rather than all history, so prompts older than that age out of those two views while the totals stay complete.\n\n" +
         'Prompts are stored as a clipped preview — enough to recognise the turn, not a second copy of the conversation.\n\n' +
         'Host callers see every group by default; inside a container the report is always your own group.',
@@ -453,6 +434,31 @@ registerResource({
       ],
       handler: async (args, ctx) => usageReport(args, ctx),
       formatHuman: (data) => formatUsage(data as AnyUsageReport),
+    },
+    history: {
+      access: 'open',
+      description:
+        'Read a session transcript: inbound + outbound messages merged chronologically.\n\n' +
+        'Output: pipe-separated lines "timestamp|direction(in/out)|kind|sender|text" (text capped at ' +
+        '200 chars), the newest --limit rows in chronological order; `--json` returns the raw rows ' +
+        'with ISO timestamps and uncapped text. Use after `ncl sessions list` to ' +
+        'catch up fully on another conversation of your agent group (you only ever see your own ' +
+        "group's sessions).",
+      examples: [`# Catch up on another session of your group:\nncl sessions history sess-1751234-abc123 --limit 100`],
+      args: [
+        { name: 'id', type: 'string', description: 'Session id (from `ncl sessions list`).', required: true },
+        {
+          name: 'limit',
+          type: 'number',
+          description: `Max rows returned, newest first (default ${HISTORY_DEFAULT_LIMIT}).`,
+          default: HISTORY_DEFAULT_LIMIT,
+        },
+      ],
+      // Self-scoped in the handler: custom ops bypass the dispatcher's generic
+      // scope post-filter, so cross-group callers get "session not found"
+      // (the dispatcher's sessions pre-handler check covers this verb too).
+      handler: async (args, ctx) => await sessionHistory(args, ctx),
+      formatHuman: (data) => formatHistoryLines(data as HistoryRow[]),
     },
   },
 });

@@ -95,8 +95,15 @@ ENV PATH="$PNPM_HOME:$PATH"
 # silently skips claude-code's native-binary postinstall and agent-browser's
 # bin chmod — the agent then crashes at runtime with "native binary not
 # installed". Keep this in lockstep with package.json's `packageManager`.
-ARG PNPM_VERSION=10.33.0
+ARG PNPM_VERSION=10.34.5
 RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+
+# The npm bundled with node:22-slim (10.9.8) vendors tar <7.5.19, which
+# carries a fixable critical (GHSA-23hp-3jrh-7fpw) that the publish gate
+# refuses to ship. Patch-level bump only. Drop this once the base image
+# ships npm >= 10.9.9.
+ARG NPM_VERSION=10.9.9
+RUN npm install -g npm@${NPM_VERSION}
 
 # Global Node CLIs the agent invokes at runtime live in cli-tools.json so a
 # skill can add one with a json-merge instead of editing this Dockerfile.

@@ -20,6 +20,7 @@ import type { Migration } from './index.js';
 export const migration011: Migration = {
   version: 11,
   name: 'pending-sender-approvals',
+  sqliteOnly: true,
   up: (db: Database.Database) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS pending_sender_approvals (

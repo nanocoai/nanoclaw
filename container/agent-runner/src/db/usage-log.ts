@@ -1,7 +1,7 @@
 /**
- * Per-turn usage ledger. Lives in outbound.db alongside the running totals in
- * `session_state`, and answers the question the totals cannot: which prompt
- * cost what.
+ * Per-turn usage ledger. Kept in the mailbox alongside the running totals in
+ * session state, and answers the question the totals cannot: which prompt cost
+ * what.
  *
  * One row per provider turn — the prompt that was answered, the tokens and
  * cost it reported, and the task series it belonged to if it was a task run.
@@ -23,7 +23,8 @@
  * alike, and a row cap answers it for neither: it silently shortens the window
  * exactly when spend is high, and pins stale turns forever when it is low.
  */
-import { getOutboundDb } from './connection.js';
+import { getAgentMailbox } from '../mailbox/index.js';
+import type { UsageTurn } from '../mailbox/types.js';
 import type { TokenUsageDelta } from './session-state.js';
 
 /** How much of the prompt is kept. Enough to identify the turn on sight. */
@@ -42,19 +43,6 @@ export interface TurnRecord {
   usage?: TokenUsageDelta;
 }
 
-export interface TurnUsageRow {
-  id: number;
-  timestamp: string;
-  task_series_id: string | null;
-  prompt_preview: string;
-  prompt_chars: number;
-  input_tokens: number | null;
-  output_tokens: number | null;
-  cache_read_tokens: number | null;
-  cache_creation_tokens: number | null;
-  cost_usd: number | null;
-}
-
 /**
  * A number, or null. Unlike the running totals — where an unreported field
  * folds into a sum and has to become zero — a ledger row can say "not
@@ -70,37 +58,27 @@ function preview(prompt: string): string {
 }
 
 export function recordTurn(record: TurnRecord): void {
-  const db = getOutboundDb();
   const usage = record.usage ?? {};
-  db
-    .prepare(
-      `INSERT INTO token_usage_log
-         (timestamp, task_series_id, prompt_preview, prompt_chars,
-          input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      new Date().toISOString(),
-      record.taskSeriesId ?? null,
-      preview(record.prompt),
-      record.prompt.length,
-      measured(usage.inputTokens),
-      measured(usage.outputTokens),
-      measured(usage.cacheReadTokens),
-      measured(usage.cacheCreationTokens),
-      measured(usage.costUsd),
-    );
-
-  // Age out on write. Timestamps are ISO-8601 UTC, so string order is
-  // chronological order and the index makes this a range delete over the tail
-  // rather than a scan.
+  // Age out on write, so the ledger stays inside its window without a second
+  // pass over it.
   const cutoff = new Date(Date.now() - TURN_LOG_RETENTION_DAYS * 86_400_000).toISOString();
-  db.prepare('DELETE FROM token_usage_log WHERE timestamp < ?').run(cutoff);
+  getAgentMailbox().operations.appendUsageTurn(
+    {
+      timestamp: new Date().toISOString(),
+      taskSeriesId: record.taskSeriesId ?? null,
+      promptPreview: preview(record.prompt),
+      promptChars: record.prompt.length,
+      inputTokens: measured(usage.inputTokens),
+      outputTokens: measured(usage.outputTokens),
+      cacheReadTokens: measured(usage.cacheReadTokens),
+      cacheCreationTokens: measured(usage.cacheCreationTokens),
+      costUsd: measured(usage.costUsd),
+    },
+    cutoff,
+  );
 }
 
 /** Most recent turns first. */
-export function getTurnLog(limit = 100): TurnUsageRow[] {
-  return getOutboundDb()
-    .prepare('SELECT * FROM token_usage_log ORDER BY id DESC LIMIT ?')
-    .all(limit) as TurnUsageRow[];
+export function getTurnLog(limit = 100): UsageTurn[] {
+  return getAgentMailbox().operations.getUsageTurns(limit);
 }

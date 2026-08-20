@@ -18,6 +18,19 @@
 
 ---
 
+<div align="center">
+
+### <img src="https://img.shields.io/badge/NEW!-2EB67D?style=for-the-badge" alt="NEW!" valign="middle"> Agents in Slack: one app per agent <img src="assets/slack-icon.svg" alt="" width="22" valign="middle">
+
+Setup provisions each agent its own Slack app: manifest, avatar, and workspace install, no tokens to paste.
+Spawn teammates from chat: every one gets its own bot identity, container, and memory, with shared rooms and canvases.
+
+[![Quick Start](https://img.shields.io/badge/Quick%20Start%20%E2%86%92-4A154B?style=for-the-badge)](#quick-start)
+
+</div>
+
+---
+
 ## Why I Built NanoClaw
 
 [OpenClaw](https://github.com/openclaw/openclaw) is an impressive project, but I wouldn't have been able to sleep if I had given complex software I didn't understand full access to my life. OpenClaw has nearly half a million lines of code, 53 config files, and 70+ dependencies. Its security is at the application level (allowlists, pairing codes) rather than true OS-level isolation. Everything runs in one Node process with shared memory.
@@ -32,7 +45,7 @@ cd nanoclaw-v2
 bash nanoclaw.sh
 ```
 
-`nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It installs Node, pnpm, and Docker if missing, registers your Anthropic credential with OneCLI, builds the agent container, and pairs your first channel (iMessage, Telegram, Discord, WhatsApp, or a local CLI). If a step fails, Claude Code is invoked automatically to diagnose and resume from where it broke.
+`nanoclaw.sh` walks you from a fresh machine to a named agent you can message. It installs Node, pnpm, and Docker if missing, registers your Anthropic credential with OneCLI, builds the agent container, and pairs your first channel (Slack, Telegram, Discord, WhatsApp, iMessage, or a local CLI). If a step fails, Claude Code is invoked automatically to diagnose and resume from where it broke.
 
 <details>
 <summary><strong>Migrating from NanoClaw v1?</strong></summary>
@@ -140,7 +153,7 @@ No channel or provider skills are currently requested — propose one via an iss
 ## Requirements
 
 - macOS or Linux (Windows via WSL2)
-- Node.js 20+ and pnpm 10+ (the installer will install both if missing)
+- Node.js 22+ and pnpm 10+ (the installer will install both if missing)
 - [Docker Desktop](https://docker.com/products/docker-desktop) (macOS/Windows) or Docker Engine (Linux)
 - [Claude Code](https://claude.ai/download) for `/customize`, `/debug`, error recovery during setup, and all `/add-<channel>` skills
 

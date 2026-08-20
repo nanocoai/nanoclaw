@@ -43,7 +43,7 @@ const COMPOSED_HEADER =
  * Regenerate `groups/<folder>/CLAUDE.md` from the shared base, enabled skill
  * fragments, and MCP server fragments declared in `container.json`.
  */
-export function composeGroupClaudeMd(group: AgentGroup): void {
+export async function composeGroupClaudeMd(group: AgentGroup): Promise<void> {
   const groupDir = path.resolve(GROUPS_DIR, group.folder);
   if (!fs.existsSync(groupDir)) {
     fs.mkdirSync(groupDir, { recursive: true });
@@ -58,7 +58,7 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
   }
 
   // Desired fragment set.
-  const configRow = getContainerConfig(group.id);
+  const configRow = await getContainerConfig(group.id);
   const mcpServers: Record<string, McpServerConfig> = configRow
     ? (JSON.parse(configRow.mcp_servers) as Record<string, McpServerConfig>)
     : {};

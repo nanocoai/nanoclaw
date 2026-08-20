@@ -16,7 +16,8 @@ const TEST_DIR = '/tmp/nanoclaw-test-cli-sessions';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
 import { createSession } from '../../db/sessions.js';
-import { initSessionFolder, outboundDbPath } from '../../session-manager.js';
+import { outboundDbPath } from '../../mailbox/sqlite/paths.js';
+import { initSessionFolder } from '../../session-manager.js';
 import { dispatch } from '../dispatch.js';
 import type { CallerContext } from '../frame.js';
 import './sessions.js';
@@ -25,12 +26,12 @@ function now(): string {
   return new Date().toISOString();
 }
 
-function createGroup(id: string): void {
-  createAgentGroup({ id, name: id, folder: id, agent_provider: null, created_at: now() });
+async function createGroup(id: string): Promise<void> {
+  await createAgentGroup({ id, name: id, folder: id, agent_provider: null, created_at: now() });
 }
 
-function createChatSession(group: string, id: string): void {
-  createSession({
+async function createChatSession(group: string, id: string): Promise<void> {
+  await createSession({
     id,
     agent_group_id: group,
     messaging_group_id: null,
@@ -108,20 +109,20 @@ async function usage(args: Record<string, unknown>, ctx: CallerContext) {
 }
 
 describe('sessions usage', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
     fs.mkdirSync(TEST_DIR, { recursive: true });
-    const db = initTestDb();
-    runMigrations(db);
-    createGroup('ag-1');
-    createGroup('ag-2');
-    createChatSession('ag-1', 'chat-1');
-    createChatSession('ag-1', 'chat-2');
-    createChatSession('ag-2', 'chat-3');
+    const db = await initTestDb();
+    await runMigrations(db);
+    await createGroup('ag-1');
+    await createGroup('ag-2');
+    await createChatSession('ag-1', 'chat-1');
+    await createChatSession('ag-1', 'chat-2');
+    await createChatSession('ag-2', 'chat-3');
   });
 
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 
@@ -302,20 +303,20 @@ interface PromptReport {
 }
 
 describe('sessions usage — per prompt, per agent, per task', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
     fs.mkdirSync(TEST_DIR, { recursive: true });
-    const db = initTestDb();
-    runMigrations(db);
-    createGroup('ag-1');
-    createGroup('ag-2');
-    createChatSession('ag-1', 'chat-1');
-    createChatSession('ag-1', 'chat-2');
-    createChatSession('ag-2', 'chat-3');
+    const db = await initTestDb();
+    await runMigrations(db);
+    await createGroup('ag-1');
+    await createGroup('ag-2');
+    await createChatSession('ag-1', 'chat-1');
+    await createChatSession('ag-1', 'chat-2');
+    await createChatSession('ag-2', 'chat-3');
   });
 
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 

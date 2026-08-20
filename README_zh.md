@@ -108,7 +108,7 @@ NanoClaw 不用配置文件。想改就直接告诉 Claude Code：
 ## 系统要求
 
 - macOS 或 Linux（Windows 通过 WSL2）
-- Node.js 20+ 和 pnpm 10+（安装脚本会在缺失时自动安装）
+- Node.js 22+ 和 pnpm 10+（安装脚本会在缺失时自动安装）
 - [Docker Desktop](https://docker.com/products/docker-desktop)（macOS/Windows）或 Docker Engine（Linux）
 - [Claude Code](https://claude.ai/download)，用于 `/customize`、`/debug`、安装过程中的错误恢复以及所有 `/add-<channel>` 技能
 

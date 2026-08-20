@@ -34,34 +34,34 @@ const GROUP: AgentGroup = {
 };
 
 describe('resolveGroupTimezone', () => {
-  beforeEach(() => {
-    runMigrations(initTestDb());
-    createAgentGroup(GROUP);
-    ensureContainerConfig(GROUP.id);
+  beforeEach(async () => {
+    await runMigrations(await initTestDb());
+    await createAgentGroup(GROUP);
+    await ensureContainerConfig(GROUP.id);
   });
-  afterEach(() => {
-    closeDb();
-  });
-
-  it('returns the install-global timezone when no override is set', () => {
-    expect(resolveGroupTimezone(GROUP.id)).toBe(TIMEZONE);
-    expect(resolveGroupTimezone('ag-no-such-group')).toBe(TIMEZONE);
+  afterEach(async () => {
+    await closeDb();
   });
 
-  it('returns a valid override, and falls back to global on an invalid stored value', () => {
-    updateContainerConfigScalars(GROUP.id, { timezone: 'Asia/Tokyo' });
-    expect(resolveGroupTimezone(GROUP.id)).toBe('Asia/Tokyo');
-
-    updateContainerConfigScalars(GROUP.id, { timezone: 'Not/AZone' });
-    expect(resolveGroupTimezone(GROUP.id)).toBe(TIMEZONE);
+  it('returns the install-global timezone when no override is set', async () => {
+    expect(await resolveGroupTimezone(GROUP.id)).toBe(TIMEZONE);
+    expect(await resolveGroupTimezone('ag-no-such-group')).toBe(TIMEZONE);
   });
 
-  it('configFromDb ships a valid timezone to the container and drops an invalid one', () => {
-    updateContainerConfigScalars(GROUP.id, { timezone: 'Asia/Tokyo' });
-    expect(configFromDb(getContainerConfig(GROUP.id)!, GROUP).timezone).toBe('Asia/Tokyo');
+  it('returns a valid override, and falls back to global on an invalid stored value', async () => {
+    await updateContainerConfigScalars(GROUP.id, { timezone: 'Asia/Tokyo' });
+    expect(await resolveGroupTimezone(GROUP.id)).toBe('Asia/Tokyo');
 
-    updateContainerConfigScalars(GROUP.id, { timezone: 'Not/AZone' });
-    expect(configFromDb(getContainerConfig(GROUP.id)!, GROUP).timezone).toBeUndefined();
+    await updateContainerConfigScalars(GROUP.id, { timezone: 'Not/AZone' });
+    expect(await resolveGroupTimezone(GROUP.id)).toBe(TIMEZONE);
+  });
+
+  it('configFromDb ships a valid timezone to the container and drops an invalid one', async () => {
+    await updateContainerConfigScalars(GROUP.id, { timezone: 'Asia/Tokyo' });
+    expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).timezone).toBe('Asia/Tokyo');
+
+    await updateContainerConfigScalars(GROUP.id, { timezone: 'Not/AZone' });
+    expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).timezone).toBeUndefined();
   });
 });
 

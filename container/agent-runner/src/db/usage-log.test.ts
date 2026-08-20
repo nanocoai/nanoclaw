@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
 
-import { closeSessionDb, getOutboundDb, initTestSessionDb } from './connection.js';
+import { closeSessionDb, getOutboundDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import { getTurnLog, PROMPT_PREVIEW_CHARS, recordTurn, TURN_LOG_RETENTION_DAYS } from './usage-log.js';
 
 /** A turn stamped in the past — `recordTurn` always stamps "now". */
@@ -37,13 +37,13 @@ describe('usage-log', () => {
     const rows = getTurnLog();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
-      prompt_preview: '<message from="dilpreet">how much have we spent</message>',
-      input_tokens: 120,
-      output_tokens: 45,
-      cache_read_tokens: 8000,
-      cache_creation_tokens: 900,
-      cost_usd: 0.0321,
-      task_series_id: null,
+      promptPreview: '<message from="dilpreet">how much have we spent</message>',
+      inputTokens: 120,
+      outputTokens: 45,
+      cacheReadTokens: 8000,
+      cacheCreationTokens: 900,
+      costUsd: 0.0321,
+      taskSeriesId: null,
     });
     expect(rows[0].timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
@@ -55,14 +55,14 @@ describe('usage-log', () => {
     recordTurn({ prompt, usage: { inputTokens: 1 } });
 
     const [row] = getTurnLog();
-    expect(row.prompt_preview).toHaveLength(PROMPT_PREVIEW_CHARS);
-    expect(row.prompt_chars).toBe(PROMPT_PREVIEW_CHARS + 500);
+    expect(row.promptPreview).toHaveLength(PROMPT_PREVIEW_CHARS);
+    expect(row.promptChars).toBe(PROMPT_PREVIEW_CHARS + 500);
   });
 
   it('collapses whitespace so a multi-line prompt stays one readable line', () => {
     recordTurn({ prompt: '  <message>\n\n  first\tsecond  \n</message>  ', usage: { inputTokens: 1 } });
 
-    expect(getTurnLog()[0].prompt_preview).toBe('<message> first second </message>');
+    expect(getTurnLog()[0].promptPreview).toBe('<message> first second </message>');
   });
 
   it('keeps the prompt of an unmeasured turn, with null numbers rather than zeros', () => {
@@ -71,19 +71,19 @@ describe('usage-log', () => {
     recordTurn({ prompt: 'unmeasured turn' });
 
     const [row] = getTurnLog();
-    expect(row.prompt_preview).toBe('unmeasured turn');
-    expect(row.input_tokens).toBeNull();
-    expect(row.output_tokens).toBeNull();
-    expect(row.cost_usd).toBeNull();
+    expect(row.promptPreview).toBe('unmeasured turn');
+    expect(row.inputTokens).toBeNull();
+    expect(row.outputTokens).toBeNull();
+    expect(row.costUsd).toBeNull();
   });
 
   it('leaves an individually absent field null while keeping the reported ones', () => {
     recordTurn({ prompt: 'partial', usage: { inputTokens: 10, outputTokens: 5 } });
 
     const [row] = getTurnLog();
-    expect(row.input_tokens).toBe(10);
-    expect(row.cache_read_tokens).toBeNull();
-    expect(row.cost_usd).toBeNull();
+    expect(row.inputTokens).toBe(10);
+    expect(row.cacheReadTokens).toBeNull();
+    expect(row.costUsd).toBeNull();
   });
 
   it('drops a value that is not a usable number rather than coercing it', () => {
@@ -93,15 +93,15 @@ describe('usage-log', () => {
     });
 
     const [row] = getTurnLog();
-    expect(row.input_tokens).toBeNull();
-    expect(row.output_tokens).toBeNull();
-    expect(row.cost_usd).toBe(0.5);
+    expect(row.inputTokens).toBeNull();
+    expect(row.outputTokens).toBeNull();
+    expect(row.costUsd).toBe(0.5);
   });
 
   it('stamps the task series so a run can be costed on its own', () => {
     recordTurn({ prompt: 'daily briefing', taskSeriesId: 'daily-briefing-a25c', usage: { inputTokens: 7 } });
 
-    expect(getTurnLog()[0].task_series_id).toBe('daily-briefing-a25c');
+    expect(getTurnLog()[0].taskSeriesId).toBe('daily-briefing-a25c');
   });
 
   it('returns newest first, and honours a limit', () => {
@@ -109,8 +109,8 @@ describe('usage-log', () => {
     recordTurn({ prompt: 'second', usage: { inputTokens: 2 } });
     recordTurn({ prompt: 'third', usage: { inputTokens: 3 } });
 
-    expect(getTurnLog().map((r) => r.prompt_preview)).toEqual(['third', 'second', 'first']);
-    expect(getTurnLog(2).map((r) => r.prompt_preview)).toEqual(['third', 'second']);
+    expect(getTurnLog().map((r) => r.promptPreview)).toEqual(['third', 'second', 'first']);
+    expect(getTurnLog(2).map((r) => r.promptPreview)).toEqual(['third', 'second']);
   });
 
   it('drops turns that fall outside the retention window', () => {
@@ -122,7 +122,7 @@ describe('usage-log', () => {
 
     recordTurn({ prompt: 'today', usage: { inputTokens: 1 } });
 
-    expect(getTurnLog().map((r) => r.prompt_preview)).toEqual(['today', 'just inside']);
+    expect(getTurnLog().map((r) => r.promptPreview)).toEqual(['today', 'just inside']);
   });
 
   it('keeps every turn inside the window, however many there are', () => {
@@ -131,6 +131,6 @@ describe('usage-log', () => {
 
     const rows = getTurnLog(1000);
     expect(rows).toHaveLength(500);
-    expect(rows[rows.length - 1].prompt_preview).toBe('turn 0');
+    expect(rows[rows.length - 1].promptPreview).toBe('turn 0');
   });
 });

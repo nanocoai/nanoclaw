@@ -2,7 +2,7 @@
  * Guard conformance — checked with the real registries.
  *
  * The old registry walk is gone: an unmapped consult or an undeclared
- * unguarded registration is now unconstructible — guard() takes the defined
+ * unguarded registration is now unconstructible — await guard() takes the defined
  * GuardedAction value (a dropped module-edge import or typo'd name is a
  * compile error), and the keyed registries require a guard spec or an
  * explicit unguarded(<reason>) declaration. What's left to verify is the

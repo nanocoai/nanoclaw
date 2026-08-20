@@ -14,6 +14,7 @@ import type { Migration } from './index.js';
 export const migration019: Migration = {
   version: 19,
   name: 'wiring-threads-override',
+  sqliteOnly: true,
   up(db) {
     db.exec(`ALTER TABLE messaging_group_agents ADD COLUMN threads INTEGER;`);
   },

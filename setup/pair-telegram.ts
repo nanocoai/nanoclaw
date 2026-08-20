@@ -18,16 +18,10 @@
  * excluded from the host tsconfig, so this file's import resolves only at
  * runtime — tsc won't complain on branches that haven't run add-telegram yet.
  */
-import path from 'path';
-
 import * as p from '@clack/prompts';
 
-import {
-  createPairing,
-  waitForPairing,
-  type PairingIntent,
-} from '../src/channels/telegram-pairing.js';
-import { DATA_DIR } from '../src/config.js';
+import { createPairing, waitForPairing, type PairingIntent } from '../src/channels/telegram-pairing.js';
+import { CENTRAL_DB_PATH } from '../src/config.js';
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 
@@ -87,8 +81,8 @@ export async function run(args: string[]): Promise<void> {
   // pairing primitive itself, but the inbound interceptor running inside the
   // live service needs migrations applied. Touch it here so a fresh install
   // doesn't fail on the first code match.
-  const db = initDb(path.join(DATA_DIR, 'v2.db'));
-  runMigrations(db);
+  const db = await initDb(CENTRAL_DB_PATH);
+  await runMigrations(db);
 
   const MAX_REGENERATIONS = 5;
   let record = await createPairing(intent);
@@ -121,9 +115,7 @@ export async function run(args: string[]): Promise<void> {
         // — byte-identical to the legacy PAIRED_USER_ID below. PAIRED_USER_ID
         // stays for the agent-driven callers that read it directly.
         ADMIN_USER_ID: consumed.consumed!.adminUserId ?? '',
-        PAIRED_USER_ID: consumed.consumed!.adminUserId
-          ? `telegram:${consumed.consumed!.adminUserId}`
-          : '',
+        PAIRED_USER_ID: consumed.consumed!.adminUserId ? `telegram:${consumed.consumed!.adminUserId}` : '',
       });
       return;
     } catch (err) {

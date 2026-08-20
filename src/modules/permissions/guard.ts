@@ -4,7 +4,9 @@
  *
  * senders.admit — the `unknown_sender_policy` switch moved verbatim out of
  * handleUnknownSender: `public` allows (short-circuited before the gate
- * anyway), `request_approval` holds, `strict` denies. The hold is executed by
+ * anyway), `request_approval` holds, `strict` and `decline_notify` deny
+ * (decline_notify's decline + owner-FYI side effects are the caller's — the
+ * message stays dropped either way). The hold is executed by
  * the caller through the module's own pending_sender_approvals flow (card,
  * in-flight dedup) — not the approvals primitive — so this entry has no
  * grantActionName: the approve continuation adds the member and replays
@@ -25,7 +27,7 @@ import { hasAdminPrivilege } from './db/user-roles.js';
 
 export const sendersAdmit = defineGuardedAction({
   action: 'senders.admit',
-  decide: (input) => {
+  decide: async (input) => {
     const policy = input.payload.policy;
     if (policy === 'public') return ALLOW('public messaging group');
     if (policy === 'request_approval') {
@@ -33,20 +35,25 @@ export const sendersAdmit = defineGuardedAction({
         `unknown sender requires admin approval on messaging group ${String(input.payload.messagingGroupId)}`,
       );
     }
+    if (policy === 'decline_notify') {
+      // Deny, not hold: nothing pends and no grant path exists — the caller
+      // sends the polite decline + owner FYI itself (sender-approval.ts).
+      return DENY('unknown sender declined (decline-and-notify policy)');
+    }
     return DENY('unknown sender on a strict messaging group');
   },
 });
 
 export const channelsRegister = defineGuardedAction({
   action: 'channels.register',
-  decide: (input) => {
+  decide: async (input) => {
     if (input.actor.kind !== 'human') return DENY('channel registration resolves via human clicks/replies');
     const questionId = typeof input.payload.questionId === 'string' ? input.payload.questionId : '';
-    const row = getPendingChannelApproval(questionId);
+    const row = await getPendingChannelApproval(questionId);
     if (!row) return DENY(`no pending channel registration for ${questionId || '(missing questionId)'}`);
     if (
       input.actor.userId &&
-      (input.actor.userId === row.approver_user_id || hasAdminPrivilege(input.actor.userId, row.agent_group_id))
+      (input.actor.userId === row.approver_user_id || (await hasAdminPrivilege(input.actor.userId, row.agent_group_id)))
     ) {
       return ALLOW('delivered approver or anchor-group admin');
     }

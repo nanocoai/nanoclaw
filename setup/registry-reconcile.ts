@@ -16,15 +16,13 @@
  * Idempotent — a second run finds nothing pinned and nothing to remove.
  */
 import fs from 'fs';
-import path from 'path';
 import { spawnSync } from 'child_process';
 
-import type DatabaseType from 'better-sqlite3';
-
-import { CONTAINER_IMAGE_BASE, DATA_DIR } from '../src/config.js';
+import { CENTRAL_DB_PATH, CONTAINER_IMAGE_BASE } from '../src/config.js';
 import { CONTAINER_RUNTIME_BIN } from '../src/container-runtime.js';
 import { getAllContainerConfigs, updateContainerConfigScalars } from '../src/db/container-configs.js';
 import { getDb, hasTable, initDb } from '../src/db/connection.js';
+import type { DbDriver } from '../src/db/driver.js';
 import { log } from '../src/log.js';
 import { readImageSource } from './lib/registry-state.js';
 import { emitStatus } from './status.js';
@@ -48,7 +46,7 @@ function emptyResult(): ReconcileResult {
  * Conservative shape for a tag we're willing to hand to `docker rmi`. The value
  * is already constrained (it has to equal a string we built ourselves), but an
  * argv element beginning with `-` would be read as a flag, so gate it the same
- * way `stopContainer` gates container names.
+ * way runtime names are gated (`validateRuntimeName`).
  */
 const SAFE_IMAGE_REF = /^[a-zA-Z0-9][a-zA-Z0-9_.\-/]*:[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
 
@@ -60,10 +58,10 @@ const SAFE_IMAGE_REF = /^[a-zA-Z0-9][a-zA-Z0-9_.\-/]*:[a-zA-Z0-9][a-zA-Z0-9_.-]*
  * there a derived image is a working feature, not residue. The `run()` entry
  * point below carries that guard; a direct caller has to carry it itself.
  */
-export function reconcileDerivedImages(): ReconcileResult {
+export async function reconcileDerivedImages(): Promise<ReconcileResult> {
   const result = emptyResult();
 
-  const dbPath = path.join(DATA_DIR, 'v2.db');
+  const dbPath = CENTRAL_DB_PATH;
   if (!fs.existsSync(dbPath)) {
     // First install: no central DB, so no group has ever built a derived
     // image. Bail before initDb, which would create an empty file here.
@@ -74,20 +72,20 @@ export function reconcileDerivedImages(): ReconcileResult {
   // The step runs standalone (`--step registry-reconcile`) or is called from
   // the container step, which has no DB open. Reuse an existing handle rather
   // than opening a second writer onto the same file.
-  let db: DatabaseType.Database;
+  let db: DbDriver;
   try {
     db = getDb();
   } catch {
-    db = initDb(dbPath);
+    db = await initDb(dbPath);
   }
 
-  if (!hasTable(db, 'container_configs')) {
+  if (!(await hasTable(db, 'container_configs'))) {
     // Migrations haven't run yet. Nothing can be pinned before the table exists.
     log.info('container_configs not present — nothing to reconcile');
     return result;
   }
 
-  for (const row of getAllContainerConfigs()) {
+  for (const row of await getAllContainerConfigs()) {
     if (!row.image_tag) continue;
 
     const derivedTag = `${CONTAINER_IMAGE_BASE}:${row.agent_group_id}`;
@@ -109,7 +107,7 @@ export function reconcileDerivedImages(): ReconcileResult {
     // regardless of what the `docker rmi` below does. Doing it the other way
     // round would open a window where the row points at an image that no
     // longer exists, and the group would fail to spawn instead of downgrading.
-    updateContainerConfigScalars(row.agent_group_id, { image_tag: null });
+    await updateContainerConfigScalars(row.agent_group_id, { image_tag: null });
     result.cleared.push(row.agent_group_id);
     log.info('Cleared derived image pin', { agentGroupId: row.agent_group_id, imageTag: derivedTag });
 
@@ -163,7 +161,7 @@ export async function run(args: string[]): Promise<void> {
     return;
   }
 
-  const result = reconcileDerivedImages();
+  const result = await reconcileDerivedImages();
 
   log.info('Reconcile complete', {
     cleared: result.cleared.length,
