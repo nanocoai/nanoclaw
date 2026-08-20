@@ -99,10 +99,10 @@ vi.mock('../approvals/index.js', async () => {
 import './index.js';
 import { ensureAgentRoom, finishSlackAgentFlow } from './orchestrate.js';
 import { SlackFlowError } from './types.js';
-import { getDeliveryAction } from '../../delivery.js';
+import { getDeliveryAction, setDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
 import { registerChannelAdapter } from '../../channels/channel-registry.js';
-import { closeDb, initTestDb } from '../../db/connection.js';
+import { closeDb, getDb, initTestDb } from '../../db/connection.js';
 import { runMigrations } from '../../db/migrations/index.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { ensureContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
@@ -286,6 +286,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // delivery.ts has no reset helper; clear its module-global test state.
+  setDeliveryAdapter(null!);
   process.chdir(originalCwd);
   delete process.env.NANOCLAW_REGISTRY_TOKEN;
   vi.unstubAllGlobals();
@@ -295,6 +297,51 @@ afterEach(async () => {
 });
 
 describe('slack-aware create_agent — happy path (Slack-origin session)', () => {
+  it('delivers one direct provisioning acknowledgement per created agent', async () => {
+    // Named-instance origin — the very shape this flow provisions. Registry
+    // resolution is exact-key (`instance ?? channelType`, no fallback), so the
+    // ack MUST carry the origin mg's instance or it silently misses the
+    // adapter for every named-instance origin.
+    getDb().prepare(`UPDATE messaging_groups SET instance = 'slack-lion' WHERE id = 'mg-origin'`).run();
+    // S2 origin-auth resolves the token by instance key: slack-lion → SLACK_BOT_TOKEN_LION.
+    fs.appendFileSync(path.join(tmpDir, '.env'), `SLACK_BOT_TOKEN_LION=${ORIGIN_BOT_TOKEN}\n`);
+
+    const deliveries: Array<{
+      channelType: string;
+      platformId: string;
+      threadId: string | null;
+      content: string;
+      instance: string | undefined;
+    }> = [];
+    setDeliveryAdapter({
+      deliver: vi.fn(async (channelType, platformId, threadId, _kind, content, _files, instance) => {
+        deliveries.push({ channelType, platformId, threadId, content, instance });
+        return undefined;
+      }),
+    });
+
+    await runCreateAgent({ name: 'Research', room: 'none' });
+    await runCreateAgent({ name: 'Writer', room: 'none' });
+
+    expect(deliveries).toHaveLength(2);
+    expect(deliveries).toEqual([
+      {
+        channelType: 'slack',
+        platformId: 'slack:D0OPDM',
+        threadId: null,
+        instance: 'slack-lion',
+        content: JSON.stringify({ text: 'Creating "Research" — takes about a minute; it will DM you when ready.' }),
+      },
+      {
+        channelType: 'slack',
+        platformId: 'slack:D0OPDM',
+        threadId: null,
+        instance: 'slack-lion',
+        content: JSON.stringify({ text: 'Creating "Writer" — takes about a minute; it will DM you when ready.' }),
+      },
+    ]);
+  });
+
   it('creates the group, provisions the bot, wires DM + room, posts intros in order', async () => {
     await runCreateAgent({ name: 'Research', instructions: 'dig deep' });
 

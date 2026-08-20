@@ -18,11 +18,17 @@
  * cli_scope trust split as create_agent (./guard.ts, ./room-actions.ts).
  *
  * The handler never touches inbound DBs (guarded handlers replay without
- * one); all requester notifications go through the approvals module's
- * notifyAgent. Token values never appear in notify texts or logs.
+ * one); completion notifications go through the approvals module's
+ * notifyAgent, while the provisioning acknowledgement goes straight to the
+ * origin conversation. Token values never appear in notify texts or logs.
  */
 import { SlackApiError } from '../../channels/slack-lib.js';
-import { reenterGuardedDeliveryAction, registerDeliveryAction, registerDeliveryBatchPreview } from '../../delivery.js';
+import {
+  getDeliveryAdapter,
+  reenterGuardedDeliveryAction,
+  registerDeliveryAction,
+  registerDeliveryBatchPreview,
+} from '../../delivery.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { log } from '../../log.js';
@@ -106,6 +112,10 @@ function successText(name: string, roomChannelId: string | undefined): string {
   );
 }
 
+function ackText(name: string): string {
+  return `Creating "${name}" — takes about a minute; it will DM you when ready.`;
+}
+
 function failureText(
   name: string,
   localName: string,
@@ -145,6 +155,26 @@ async function slackAwareCreateAgent(content: Record<string, unknown>, session: 
   if (!after || after.target_type !== 'agent' || before) return;
   // Non-Slack sessions (and task/a2a sessions with no messaging group) behave exactly as upstream.
   if (!slackOrigin) return;
+
+  const adapter = getDeliveryAdapter();
+  const messagingGroup = session.messaging_group_id ? await getMessagingGroup(session.messaging_group_id) : null;
+  if (!adapter) {
+    log.error('slack-agent-flow creation acknowledgement skipped — no delivery adapter is wired');
+  } else if (messagingGroup) {
+    try {
+      await adapter.deliver(
+        messagingGroup.channel_type,
+        messagingGroup.platform_id,
+        session.thread_id,
+        'chat-sdk',
+        JSON.stringify({ text: ackText(name) }),
+        undefined,
+        messagingGroup.instance,
+      );
+    } catch (err) {
+      log.error('slack-agent-flow creation acknowledgement delivery failed', { err });
+    }
+  }
 
   const slug = await dedupeSlug(deriveInstanceSlug(name), after.target_id);
   try {
