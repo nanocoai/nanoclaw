@@ -1865,6 +1865,7 @@ async function askDisplayName(fallback: string): Promise<string> {
 }
 
 async function askChannelChoice(): Promise<ChannelChoice> {
+  const slackAgentsEnabled = process.env.NANOCLAW_SLACK_AGENTS === '1';
   const choice = ensureAnswer(
     await brightSelect<ChannelChoice>({
       message: 'Want to chat with your assistant from your phone?',
@@ -1884,8 +1885,8 @@ async function askChannelChoice(): Promise<ChannelChoice> {
         },
         {
           value: 'slack',
-          label: 'Yes, connect Slack (experimental)',
-          hint: 'needs public URL',
+          label: 'Yes, connect Slack',
+          hint: slackAgentsEnabled ? 'automatic app setup' : 'Socket Mode — no public URL needed',
         },
         { value: 'teams', label: 'Yes, connect Microsoft Teams', hint: 'complex setup' },
         { value: 'other', label: 'Other…', hint: 'install via /add-<name> after setup' },
