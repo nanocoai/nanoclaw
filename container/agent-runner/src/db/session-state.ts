@@ -79,6 +79,21 @@ export function clearContinuation(providerName: string): void {
 }
 
 /**
+ * The memory/ tree as this provider's context window last saw it, so a resumed
+ * conversation can be told which files moved while it wasn't looking (see
+ * memory/staleness.ts). Keyed per provider for the same reason continuations
+ * are: each holds an independent context window, so they go stale
+ * independently.
+ */
+export function getMemoryFingerprint(providerName: string): string | undefined {
+  return getValue(`memory_fingerprint:${providerName.toLowerCase()}`);
+}
+
+export function setMemoryFingerprint(providerName: string, value: string): void {
+  setValue(`memory_fingerprint:${providerName.toLowerCase()}`, value);
+}
+
+/**
  * The a2a reply stamp: the id of the first inbound message in the batch the
  * agent is currently processing. The poll loop publishes it at batch start;
  * MCP tools (`send_message`, `send_file`) read it and stamp it onto outbound

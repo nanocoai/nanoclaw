@@ -11,10 +11,13 @@ import { getInboundDb, getOutboundDb, touchHeartbeat, clearStaleProcessingAcks }
 import {
   clearContinuation,
   clearCurrentInReplyTo,
+  getMemoryFingerprint,
   migrateLegacyContinuation,
   setContinuation,
   setCurrentInReplyTo,
+  setMemoryFingerprint,
 } from './db/session-state.js';
+import { fingerprintMemoryTree, memoryChangeNotice } from './memory/staleness.js';
 import {
   formatMessages,
   extractRouting,
@@ -236,7 +239,24 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
-    const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+    const formatted = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+
+    // Memory staleness: a resumed conversation can outlive many edits to
+    // memory/ without ever reloading it (see memory/staleness.ts), so open the
+    // turn by naming whatever moved. Skipped without a continuation (the
+    // provider is about to load the whole tree fresh) and for a prompt the
+    // provider parses as a native slash command from its first character.
+    //
+    // This is per QUERY, not per message: the stream deliberately stays open
+    // between turns, so follow-ups arrive via query.push() below and carry no
+    // notice. That covers the case this exists for — a container killed while
+    // idle, then resumed cold against a tree someone else edited — and leaves
+    // a warm stream to pick the edit up at its next query.
+    const notice =
+      continuation !== undefined && !formatted.startsWith('/')
+        ? memoryChangeNotice(getMemoryFingerprint(config.providerName), config.cwd)
+        : undefined;
+    const prompt = notice ? `${notice}\n${formatted}` : formatted;
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
@@ -308,6 +328,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     } finally {
       clearCurrentInReplyTo();
       config.signal?.removeEventListener('abort', abortActiveQuery);
+      // Re-baseline after the turn, not before it: the agent's own memory
+      // edits during this turn are already in its context, so folding them in
+      // here keeps the next turn from reporting the agent's writes back to it.
+      setMemoryFingerprint(config.providerName, fingerprintMemoryTree(config.cwd));
     }
 
     // Ensure completed even if processQuery ended without a result event

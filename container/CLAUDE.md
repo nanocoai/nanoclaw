@@ -18,6 +18,8 @@ Files sent to you arrive at **`/workspace/inbox/<message-id>/<filename>`**, and 
 
 Your persistent memory lives under `/workspace/agent/memory/`. The session-start memory context contains the live top-level index and system definition. Follow that definition when deciding what to store and keep the index accurate so you can retrieve details later.
 
+That context is injected when a conversation starts, not on every turn, so it can fall behind the files on disk — your other sessions and the operator share this tree. When memory files change between turns, the turn opens with a `<memory_changed>` notice naming them; re-read those files rather than answering from the older copy in your context.
+
 Standing role, persona, and behavioral instructions belong in `/workspace/agent/instructions.prepend.md`; durable facts belong in memory. Changes to standing instructions take effect after the group container restarts, so say that when confirming an edit.
 
 ## Conversation history

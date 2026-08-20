@@ -36,7 +36,11 @@ pinned.
 
 The memory hook runs when a context window is created: `startup`, `clear`, and
 `compact`. It does not run on `resume`, because the resumed conversation already
-contains the injected memory context.
+contains the injected memory context — though that copy can age, since a
+continuation survives container restarts while the tree keeps changing. A
+resumed turn therefore opens with a `<memory_changed>` notice naming the files
+that moved since the last turn, so the agent knows to re-read them instead of
+trusting its in-context copy.
 
 The shared tree is an Open Knowledge Format (OKF) v0.1 bundle. Durable Markdown
 concepts use YAML frontmatter with a `type`, while reserved `index.md` and
