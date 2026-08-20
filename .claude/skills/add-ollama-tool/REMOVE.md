@@ -1,49 +1,61 @@
-# Remove Ollama
+# Remove Ollama Tool
 
-Idempotent — safe to run even if some steps were never applied.
+Idempotent — safe to run even if some steps were never applied. There are no
+trunk-source edits to revert: the skill installs one file into the container
+tree and one MCP entry per group.
 
-## 1. Delete the copied files (both trees)
+## 1. Unregister the server from every group that has it
+
+```bash
+ncl groups list
+ncl groups config get --id <group-id>      # look for an `ollama` MCP server
+ncl groups config remove-mcp-server --id <group-id> --name ollama
+```
+
+Approval-gated, like the registration. Repeat for each group.
+
+## 2. Restart the groups you unregistered
+
+MCP servers are read at spawn, so a running container keeps its tools until it
+is replaced:
+
+```bash
+ncl groups restart --id <group-id>
+```
+
+## 3. Delete the installed files
 
 ```bash
 rm -f container/agent-runner/src/ollama-mcp-stdio.ts \
-      container/agent-runner/src/ollama-registration.test.ts \
-      src/ollama-env.ts \
-      src/ollama-wiring.test.ts
+      container/agent-runner/src/ollama-mcp-stdio.test.ts
 ```
 
-## 2. Unregister the MCP server
-
-In `container/agent-runner/src/index.ts`, remove the `ollama: { … }` entry from the `mcpServers` object (leave `nanoclaw` and any other entries).
-
-## 3. Revert the host-side edits
-
-- Remove the `import { ollamaEnv } from './ollama-env.js';` import.
-- Remove the `...ollamaEnv(),` spread from the `env` literal in `composeSessionSpec`.
-- Remove the `[OLLAMA]` branch from the driver's stderr handler in `src/drivers/docker-driver.ts`. If `[OLLAMA]` was the only prefix branch, restore the handler to its single `log.debug(line, …)` form (keep the stderr-tail lines); if other local-model tools still have branches there, just drop the `[OLLAMA]` one and leave the rest intact.
-
-## 4. Remove env vars
-
-Remove the Ollama block from `.env.example`, and the `OLLAMA_HOST` / `OLLAMA_ADMIN_TOOLS` lines from `.env` if you set them.
-
-## 5. Rebuild and restart
-
-Run from your NanoClaw project root:
+No image rebuild is needed — the file was mounted, not baked in. Confirm the
+trees are clean:
 
 ```bash
-pnpm run build && ./container/build.sh
-source setup/lib/install-slug.sh
-
-# macOS
-launchctl kickstart -k gui/$(id -u)/$(launchd_label)
-
-# Linux
-systemctl --user restart $(systemd_unit)
+pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
 ```
+
+`.claude/skills/add-ollama-tool/ollama-install.test.ts` asserts the applied
+state, so `pnpm run test:skills` is expected to fail for this skill after
+removal. That is the same contract every `/add-*` guard test has on a checkout
+where the skill is not applied.
+
+## 4. Nothing else was touched
+
+Earlier versions of this skill patched `container/agent-runner/src/index.ts`,
+`src/container-runner.ts`, `src/drivers/docker-driver.ts`, and `.env.example`,
+and shipped `src/ollama-env.ts`. If you are removing one of those installs, also
+revert those edits and delete `src/ollama-env.ts`, `src/ollama-wiring.test.ts`,
+and `container/agent-runner/src/ollama-registration.test.ts`.
 
 ## Verification
 
-After removal, confirm the tool is gone — in a wired agent, asking it to "list ollama models" should report no such tool, and the logs should show no `[OLLAMA]` lines after the last restart:
-
 ```bash
-grep "\[OLLAMA\]" logs/nanoclaw.log | tail -5
+ncl groups config get --id <group-id> | grep -i ollama || echo "no ollama server"
+ls container/agent-runner/src/ollama-mcp-stdio.ts 2>/dev/null || echo "file removed"
 ```
+
+Then ask a restarted agent to list Ollama models: it should report that it has
+no such tool.

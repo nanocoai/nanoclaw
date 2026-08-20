@@ -3,43 +3,59 @@ name: add-ollama-tool
 description: Add Ollama MCP server so the container agent can call local models and optionally manage the Ollama model library.
 ---
 
-# Add Ollama Integration
+# Add Ollama Tool
 
-This skill adds a stdio-based MCP server that exposes local [Ollama](https://ollama.com) models as tools for the container agent. Claude remains the orchestrator but can offload work to local models served by the Ollama daemon on the host, and can optionally manage the model library directly. Ollama runs locally and is keyless — there are no credentials to thread; the only configuration is the daemon's base URL.
+Install a stdio MCP server that exposes the host's [Ollama](https://ollama.com)
+daemon as tools, and register it for each selected agent group. The agent's own
+provider stays the orchestrator; it offloads work to local models and can
+optionally manage the model library.
 
-Core tools (always available):
-- `ollama_list_models` — list installed models with name, size, and family (`GET /api/tags`)
-- `ollama_generate` — send a prompt to a specified model and return the response (`POST /api/generate`)
+Ollama is local and keyless — there are no credentials to thread. The only
+configuration is the daemon's base URL and one opt-in flag, and both travel in
+the group's MCP entry, so two groups on the same install can point at different
+daemons, or one group can have the tools and another not.
 
-Management tools (opt-in via `OLLAMA_ADMIN_TOOLS=true`):
-- `ollama_pull_model` — pull (download) a model from the Ollama registry (`POST /api/pull`)
-- `ollama_delete_model` — delete a locally installed model to free disk space (`DELETE /api/delete`)
-- `ollama_show_model` — show model details: modelfile, parameters, and architecture info (`POST /api/show`)
-- `ollama_list_running` — list models currently loaded in memory with memory usage and processor type (`GET /api/ps`)
+Core tools (always exposed):
 
-The skill ships the MCP server source (and its tests) in this folder and copies them into the agent-runner tree at install time, then registers the server in `index.ts` and forwards host env vars in `container-runner.ts`. Registering the server is enough to expose its tools — the agent's allow-pattern (`mcp__ollama__*`) is derived from the registered server name.
+- `mcp__ollama__ollama_list_models` — installed models with name, size, family (`GET /api/tags`)
+- `mcp__ollama__ollama_generate` — prompt a named model and return the response (`POST /api/generate`)
+
+Management tools (opt-in, `--admin-tools`):
+
+- `mcp__ollama__ollama_pull_model` — pull a model from the Ollama registry (`POST /api/pull`)
+- `mcp__ollama__ollama_delete_model` — delete a local model to free disk (`DELETE /api/delete`)
+- `mcp__ollama__ollama_show_model` — modelfile, parameters, architecture (`POST /api/show`)
+- `mcp__ollama__ollama_list_running` — models warm in memory, with memory use and CPU/GPU split (`GET /api/ps`)
+
+The skill copies one file into `container/agent-runner/src/` and adds one
+per-group MCP entry through `ncl`. It edits no trunk source: the agent-runner
+tree is bind-mounted read-only into every container at `/app/src`, so the copied
+file is already at a stable container path and needs no image rebuild, and
+registration is runtime state in the `container_configs` table.
 
 ## Phase 1: Pre-flight
 
 ### Check if already applied
 
-Check if `container/agent-runner/src/ollama-mcp-stdio.ts` exists. If it does, skip to Phase 3 (Configure).
+```bash
+ls container/agent-runner/src/ollama-mcp-stdio.ts 2>/dev/null
+ncl groups list
+ncl groups config get --id <group-id>   # look for an `ollama` MCP server
+```
 
-### Check prerequisites
+The file being present means Phase 2 is done; an `ollama` entry in a group's
+config means Phase 3 is done for that group. Both steps are idempotent — a
+second `add-mcp-server` with the same name overwrites the entry.
 
-Verify Ollama is installed and its daemon is reachable. On the host:
+### Check the daemon is reachable from the host
 
 ```bash
 curl -s http://127.0.0.1:11434/api/tags | head
 ```
 
-If the request fails:
-
-1. Install Ollama from https://ollama.com/download.
-2. Start it (the desktop app runs the daemon, or run `ollama serve`).
-3. Confirm the daemon answers: `curl -s http://127.0.0.1:11434/api/tags`.
-
-If no models are installed, suggest pulling one:
+If that fails: install Ollama from https://ollama.com/download, start it (the
+desktop app runs the daemon, or `ollama serve`), and re-run the curl. If it
+answers with an empty `models` list, suggest pulling one:
 
 > You need at least one model. For example:
 >
@@ -49,252 +65,200 @@ If no models are installed, suggest pulling one:
 > ollama pull qwen3-coder:30b  # Best for code tasks (~18GB)
 > ```
 
-## Phase 2: Apply Code Changes
+### Check the container can reach the host at all
 
-### Copy the skill's source and tests into both trees
+`host.docker.internal` is the route this tool uses. Normally the session has it:
+on Linux the spawn adds `--add-host=host.docker.internal:host-gateway`, and
+Docker Desktop provides the name itself (`dockerNetworkArgs`,
+`src/drivers/index.ts`). **Egress lockdown replaces both.** With
+`NANOCLAW_EGRESS_LOCKDOWN=true` the session instead joins a Docker `--internal`
+network — no host route — on which `host.docker.internal` is an alias for the
+OneCLI gateway container (`src/egress-lockdown.ts`). The name still resolves, so
+nothing errors early: the connection simply goes to the gateway and the daemon
+is unreachable. Check before promising anything:
 
-This skill reaches into both the container (Bun) tree and the host (Node) tree, so its
-files go into both, alongside the integration points they cover.
+```bash
+grep -n '^NANOCLAW_EGRESS_LOCKDOWN' .env 2>/dev/null || echo 'lockdown not set (default off)'
+```
+
+If it is `true`, say so plainly: a host-local Ollama daemon is **not reachable**
+from a locked-down session. The options are to expose the daemon at an address
+that is routable from the egress network and pass that as `--host`, or to leave
+lockdown off for the groups that need Ollama. Do not proceed on the assumption
+that `host.docker.internal` works.
+
+## Phase 2: Install the MCP server
 
 ```bash
 S=.claude/skills/add-ollama-tool
-# Container (Bun) tree — the MCP server and the registration wiring test
-cp $S/ollama-mcp-stdio.ts       container/agent-runner/src/ollama-mcp-stdio.ts
-cp $S/ollama-registration.test.ts container/agent-runner/src/ollama-registration.test.ts
-# Host (Node) tree — the env-forwarding helper and the wiring test
-cp $S/ollama-env.ts             src/ollama-env.ts
-cp $S/ollama-wiring.test.ts     src/ollama-wiring.test.ts
+cp $S/ollama-mcp-stdio.ts      container/agent-runner/src/ollama-mcp-stdio.ts
+cp $S/ollama-mcp-stdio.test.ts container/agent-runner/src/ollama-mcp-stdio.test.ts
 ```
 
-### Register the MCP server in the agent-runner
-
-Edit `container/agent-runner/src/index.ts`. Find the `mcpServers` object that currently looks like this:
-
-```ts
-  const mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {
-    nanoclaw: {
-      command: 'bun',
-      args: ['run', mcpServerPath],
-      env: {},
-    },
-  };
-```
-
-Add an `ollama` entry alongside `nanoclaw`:
-
-```ts
-  const mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {
-    nanoclaw: {
-      command: 'bun',
-      args: ['run', mcpServerPath],
-      env: {},
-    },
-    ollama: {
-      command: 'bun',
-      args: ['run', path.join(__dirname, 'ollama-mcp-stdio.ts')],
-      env: {
-        ...(process.env.OLLAMA_HOST ? { OLLAMA_HOST: process.env.OLLAMA_HOST } : {}),
-        ...(process.env.OLLAMA_ADMIN_TOOLS ? { OLLAMA_ADMIN_TOOLS: process.env.OLLAMA_ADMIN_TOOLS } : {}),
-      },
-    },
-  };
-```
-
-`ollama-registration.test.ts` asserts this entry is present and points at the server module — the tool only appears to the agent if it is registered here.
-
-### Forward host env vars into the container
-
-The container receives `TZ` and OneCLI networking vars by default; any other host env
-var the MCP subprocess needs must be forwarded explicitly. The forwarding logic lives in
-the copied `src/ollama-env.ts` (`ollamaEnv()`) — `OLLAMA_HOST` (the daemon base URL)
-and `OLLAMA_ADMIN_TOOLS` (the library-management opt-in flag). Both are configuration, not
-credentials (Ollama itself is local and keyless), so they belong on the composed `env`
-literal — a credential-NAMED key would need the `contributedEnv` lane instead (see
-`add-atomic-chat-tool` for that shape).
-
-Import it in `src/container-runner.ts` (alongside the other local imports):
-
-```ts
-import { ollamaEnv } from './ollama-env.js';
-```
-
-Then, in `composeSessionSpec`, find the `env` literal (the `TZ` line) and spread the helper right after it:
-
-```ts
-  const env: Record<string, string> = {
-    TZ: containerConfig.timezone ?? TIMEZONE,
-    ...ollamaEnv(),
-  };
-```
-
-`ollama-wiring.test.ts` asserts this `...ollamaEnv()` spread exists inside `composeSessionSpec`.
-
-### Surface `[OLLAMA]` log lines at info level
-
-> **Shared block.** This rewrites the driver's container-stderr logger, which other local-model tools (e.g. `add-atomic-chat-tool` for `[ATOMIC]`) also edit to surface their own prefix. Touch only the `[OLLAMA]` branch and leave the rest of the block intact, so the edits coexist and removal restores it cleanly.
-
-Container stderr now lands in the Docker driver: in `src/drivers/docker-driver.ts`, inside `DockerHandle.start()`, find the stderr handler:
-
-```ts
-    proc.onStderr((line) => {
-      log.debug(line, { container: this.name });
-      this.#stderrTail.push(line);
-      if (this.#stderrTail.length > 10) this.#stderrTail.shift();
-    });
-```
-
-Replace the `log.debug` line with a prefix branch (leave the stderr-tail lines intact — they feed the non-zero-exit warning):
-
-```ts
-    proc.onStderr((line) => {
-      if (line.includes('[OLLAMA]')) {
-        log.info(line, { container: this.name });
-      } else {
-        log.debug(line, { container: this.name });
-      }
-      this.#stderrTail.push(line);
-      if (this.#stderrTail.length > 10) this.#stderrTail.shift();
-    });
-```
-
-If `add-atomic-chat-tool` (or another local-model tool) has already turned this into a
-multi-branch block, just add an `else if (line.includes('[OLLAMA]'))` branch instead of
-replacing it.
-
-### Add env-var stubs to `.env.example`
-
-Append to `.env.example`:
+Validate — no image rebuild is involved, `container/agent-runner/src` is mounted
+read-only into every session at `/app/src`:
 
 ```bash
-# Ollama MCP tool (.claude/skills/add-ollama-tool)
-# Override the host where the Ollama daemon listens.
-# Default: http://host.docker.internal:11434 (with fallback to localhost)
-# OLLAMA_HOST=http://host.docker.internal:11434
-
-# Opt in to library-management tools (pull, delete, show, list-running).
-# Leave unset to expose only list + generate.
-# OLLAMA_ADMIN_TOOLS=true
-```
-
-### Validate code changes
-
-```bash
-pnpm run build
 pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
-# Host tree: composeSessionSpec wiring
-pnpm exec vitest run src/ollama-wiring.test.ts
-# Container tree: index.ts registration
-(cd container/agent-runner && bun test src/ollama-registration.test.ts)
-./container/build.sh
+(cd container/agent-runner && bun test src/ollama-mcp-stdio.test.ts)
+pnpm exec vitest run --config vitest.skills.config.ts .claude/skills/add-ollama-tool/ollama-install.test.ts
 ```
 
-All must be clean before proceeding. The wiring and registration tests confirm the two
-integration points — the `composeSessionSpec` spread and the `index.ts` registration — are
-actually in place; a failure means one drifted. (The MCP server's own request/response
-behavior against the Ollama daemon is the author's build-time concern, not part of these
-tests — verify it manually in Phase 4.)
+The behavior test drives the real tools over an in-memory MCP transport against
+a local stub daemon, so it covers the configuration seam and all six handlers.
+The install test checks the shape this skill depends on: the documented
+container path still resolves inside the trunk mount, and
+`ncl groups config add-mcp-server` still accepts the payload Phase 3 sends.
 
-## Phase 3: Configure
+## Phase 3: Register it per group
 
-### Enable library-management tools (optional)
+### Ask about the management tools
 
-Ask the user:
-
-> Would you like the agent to be able to **manage Ollama models** (pull, delete, inspect, list running)?
+> Should the agent be able to **manage Ollama models** — pull, delete, inspect,
+> and list what is loaded?
 >
-> - **Yes** — adds tools to pull new models, delete old ones, show model info, and check what's loaded in memory
-> - **No** — the agent can only list installed models and generate responses (you manage models yourself on the host)
+> - **Yes** — adds `ollama_pull_model`, `ollama_delete_model`,
+>   `ollama_show_model`, `ollama_list_running`. Pull and delete change the model
+>   library on your host.
+> - **No** — the agent can only list installed models and generate. You manage
+>   the library yourself.
 
-If the user wants management tools, add to `.env`:
+Answering yes adds `--admin-tools` to the args below; answering no (or not
+answering) omits it.
+
+### Register
+
+`config add-mcp-server` and `groups restart` are approval-gated. Run from
+inside a container they return `approval-pending` immediately; that is not an
+error — wait for the approval and the follow-up system message.
+
+For each selected `<group-id>`:
 
 ```bash
-OLLAMA_ADMIN_TOOLS=true
+ncl groups config add-mcp-server \
+  --id <group-id> \
+  --name ollama \
+  --command bun \
+  --args '["run","/app/src/ollama-mcp-stdio.ts","--host","http://host.docker.internal:11434","--admin-tools"]'
 ```
 
-If they decline (or don't answer), leave the variable unset — only list + generate are exposed.
+- `--host` is the daemon base URL **as seen from inside the container**.
+  `http://host.docker.internal:11434` is the default Docker route to the host;
+  use a real hostname or IP for a daemon on another machine, and see the
+  lockdown note in Phase 1.
+- Drop `--admin-tools` if the user declined the management tools.
+- The configuration deliberately rides in the args rather than in host
+  environment variables: `.env` is never loaded into the host process
+  environment (`src/env.ts`), and nothing forwards it into a container, so an
+  `OLLAMA_HOST=` line in `.env` would have no effect anywhere.
 
-### Set Ollama host (optional)
-
-By default, the MCP server connects to `http://host.docker.internal:11434` (Docker Desktop) with a fallback to `localhost`. To use a custom Ollama host, add to `.env`:
-
-```bash
-OLLAMA_HOST=http://your-ollama-host:11434
-```
-
-### Restart the service
-
-Run from your NanoClaw project root:
+Restart each group so the new server is picked up:
 
 ```bash
-source setup/lib/install-slug.sh
-launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
-# Linux: systemctl --user restart $(systemd_unit)
+ncl groups restart \
+  --id <group-id> \
+  --message "Ollama tools are installed. Call ollama_list_models and report what came back."
 ```
 
 ## Phase 4: Verify
 
-### Test inference
-
-Tell the user:
-
-> Send a message like: "use ollama to tell me the capital of France"
->
-> The agent should use `ollama_list_models` to find available models, then `ollama_generate` to get a response.
-
-### Test model management (if enabled)
-
-If `OLLAMA_ADMIN_TOOLS=true` was set, tell the user:
-
-> Send a message like: "pull the gemma3:1b model" or "which ollama models are currently loaded in memory?"
->
-> The agent should call `ollama_pull_model` or `ollama_list_running` respectively.
-
-### Check logs if needed
+Confirm the stored config, then the agent's answer:
 
 ```bash
-tail -f logs/nanoclaw.log | grep -i ollama
+ncl groups config get --id <group-id>
 ```
 
-Look for:
-- `[OLLAMA] Listing models...` — list request started
-- `[OLLAMA] Found N models` — models discovered
-- `[OLLAMA] >>> Generating with <model>` — generation started
-- `[OLLAMA] <<< Done: <model> | Xs | N tokens | M chars` — generation completed
-- `[OLLAMA] Pulling model:` — pull in progress (management tools)
-- `[OLLAMA] Deleted:` — model removed (management tools)
+The `ollama` entry should show `command: bun` and the args you passed, including
+the `--host` you chose. Then check the restart message's reply: it must name
+models the daemon actually has. Tell the user:
+
+> Send a message like "use ollama to tell me the capital of France".
+>
+> The agent should call `ollama_list_models` to see what is installed, then
+> `ollama_generate` with one of those names.
+
+If the management tools were enabled:
+
+> Send "which ollama models are currently loaded in memory?" — the agent should
+> call `ollama_list_running`.
+
+The server logs each call to stderr with an `[OLLAMA]` prefix. Where that lands
+is the provider's business, not the host's: Claude Code captures MCP server
+stderr into its own MCP log rather than forwarding it to the container's stderr,
+so do not expect `[OLLAMA]` lines in `logs/nanoclaw.log`. Verify through the
+tool results, which are in the agent transcript.
 
 ## Troubleshooting
 
-### Agent says "Ollama is not installed" or tries to run a CLI
+### The agent says Ollama is not installed, or tries to run an `ollama` CLI
 
-The agent is looking for an `ollama` CLI inside the container instead of using the MCP tools. This means:
-1. The MCP server wasn't copied — check `container/agent-runner/src/ollama-mcp-stdio.ts` exists
-2. The MCP server wasn't registered — check `container/agent-runner/src/index.ts` has the `ollama` entry in `mcpServers` (the allow-pattern is derived from this, so registration is the only thing to check)
-3. The container wasn't rebuilt — run `./container/build.sh`
+It has no `ollama` tools, so it fell back to guessing. In order:
 
-### "Failed to connect to Ollama"
+1. `ls container/agent-runner/src/ollama-mcp-stdio.ts` — Phase 2 applied?
+2. `ncl groups config get --id <group-id>` — is there an `ollama` entry for
+   *this* group? Registration is per group; another group having it is not enough.
+3. Was the group restarted after registration? MCP servers are read at spawn.
 
-1. Verify the daemon is reachable: `curl http://127.0.0.1:11434/api/tags`
-2. Confirm Ollama is running (`ollama list` on the host)
-3. Check Docker can reach the host: `docker run --rm curlimages/curl curl -s http://host.docker.internal:11434/api/tags`
-4. If using a custom host, check `OLLAMA_HOST` in `.env`
+There is no image rebuild step to have missed — the file is mounted, not baked.
 
-### `model not found` / 404 on generate
+### "Failed to connect to Ollama at &lt;url&gt;"
 
-The model name passed to `ollama_generate` must exactly match one of the names returned by `ollama_list_models` (including any `:tag` suffix, e.g. `gemma3:1b`). Ask the agent to list models first, then pick one from that list.
+The message names the URL the server actually used; compare it with the
+`--host` in `ncl groups config get`.
 
-### `ollama_pull_model` times out on large models
+1. Daemon up on the host: `curl -s http://127.0.0.1:11434/api/tags`
+2. Reachable from a container **on the session's own network**. A bare
+   `docker run … curl http://host.docker.internal:…` lands on the default
+   bridge, which is not the network the agent uses, so its answer is noise in
+   both directions: under Docker Desktop it resolves and passes even when the
+   session is locked down, and on Linux Docker it fails to resolve even when the
+   session's route is fine. Reproduce the session's own topology instead:
 
-Large models (7B+) can take several minutes. The tool uses `stream: false` so it blocks until the pull completes — this is intentional. For very large pulls, use the host CLI directly: `ollama pull <model>`.
+   ```bash
+   # Which network is the session on?
+   docker inspect -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}{{.HostConfig.ExtraHosts}}' <container-name>
+
+   # Default (no lockdown): same host-gateway alias the agent gets
+   docker run --rm --add-host=host.docker.internal:host-gateway curlimages/curl \
+     curl -s http://host.docker.internal:11434/api/tags
+
+   # Egress lockdown on: join the actual internal network
+   docker run --rm --network nanoclaw-egress curlimages/curl \
+     curl -s http://host.docker.internal:11434/api/tags
+   ```
+
+   Under lockdown the second command reaches the OneCLI gateway, not your
+   daemon, and will not return Ollama's tag list. That is the expected,
+   documented limitation — see Phase 1.
+
+3. If the daemon binds only `127.0.0.1`, a container cannot reach it however the
+   network is set up. Set `OLLAMA_HOST=0.0.0.0:11434` **on the Ollama daemon**
+   (that is Ollama's own listen-address variable, unrelated to this skill's
+   `--host`) and restart it.
 
 ### Management tools not showing up
 
-Ensure `OLLAMA_ADMIN_TOOLS=true` is set in `.env` and the service was restarted after adding it. The management tools are only registered when that flag is present in the container's environment.
+`ncl groups config get --id <group-id>` — the args must contain
+`--admin-tools`, and the group must have been restarted since. Nothing in
+`.env` affects this.
+
+### `model not found` / 404 on generate
+
+The `model` argument must match a name from `ollama_list_models` exactly,
+including the `:tag` suffix (`gemma3:1b`, not `gemma3`). Ask the agent to list
+first and pick from that list.
+
+### `ollama_pull_model` times out on large models
+
+The tool uses `stream: false` and blocks until the pull finishes; 7B+ models can
+take several minutes. For very large pulls, run `ollama pull <model>` on the
+host instead.
 
 ### Slow first response
 
-Ollama lazy-loads models into memory on first use. The initial call may take longer while the model warms up. Subsequent calls against the same model are fast.
+Ollama lazy-loads a model into memory on first use. Later calls against the same
+model are fast.
 
-### Agent doesn't use Ollama tools
+### The agent has the tools but does not use them
 
-The agent may not know about the tools. Try being explicit: "use the ollama_generate tool with gemma3:1b to answer: ..."
+Be explicit: "use the ollama_generate tool with gemma3:1b to answer: ...".
