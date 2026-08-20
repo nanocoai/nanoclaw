@@ -55,7 +55,7 @@ export async function ensureUserDm(
   userId: string,
   { privacySafeLogs = false }: { privacySafeLogs?: boolean } = {},
 ): Promise<MessagingGroup | null> {
-  const user = getUser(userId);
+  const user = await getUser(userId);
   if (!user) {
     log.warn('ensureUserDm: user not found', privacySafeLogs ? undefined : { userId });
     return null;
@@ -68,9 +68,9 @@ export async function ensureUserDm(
   }
 
   // Cache hit: existing user_dms row → load and return the messaging_group.
-  const cached = getUserDm(userId, channelType);
+  const cached = await getUserDm(userId, channelType);
   if (cached) {
-    const mg = getMessagingGroup(cached.messaging_group_id);
+    const mg = await getMessagingGroup(cached.messaging_group_id);
     if (mg) return mg;
     // Row points to a deleted messaging_group — fall through and re-resolve.
     log.warn(
@@ -86,7 +86,7 @@ export async function ensureUserDm(
   // Find-or-create the underlying messaging_group. A DM we received
   // earlier may already have a row matching (channel_type, platform_id).
   const now = new Date().toISOString();
-  let mg = getMessagingGroupByPlatform(channelType, dmPlatformId);
+  let mg = await getMessagingGroupByPlatform(channelType, dmPlatformId);
   if (!mg) {
     const mgId = `mg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     mg = {
@@ -102,14 +102,14 @@ export async function ensureUserDm(
       unknown_sender_policy: 'strict',
       created_at: now,
     };
-    createMessagingGroup(mg);
+    await createMessagingGroup(mg);
     log.info(
       'ensureUserDm: created DM messaging_group',
       privacySafeLogs ? { channelType } : { userId, channelType, messagingGroupId: mgId },
     );
   }
 
-  upsertUserDm({
+  await upsertUserDm({
     user_id: userId,
     channel_type: channelType,
     messaging_group_id: mg.id,

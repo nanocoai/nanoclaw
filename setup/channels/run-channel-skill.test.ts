@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { execSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -55,7 +55,12 @@ describe('runChannelSkill adapter (Option A)', () => {
       // the secrets + handle a human would supply; the skill resolves platform_id.
       // Values are valid-shaped for the prompts' validate: regexes — validate-at-bind
       // now enforces them on `inputs` too (they used to bypass validation).
-      inputs: { connection: 'webhook', bot_token: 'xoxb-x', signing_secret: '0123456789abcdef', owner_handle: 'U12345678' },
+      inputs: {
+        connection: 'webhook',
+        bot_token: 'xoxb-x',
+        signing_secret: '0123456789abcdef',
+        owner_handle: 'U12345678',
+      },
       wire: (a) => {
         wired.push(a);
         return true;
@@ -155,9 +160,7 @@ describe('runChannelSkill adapter (Option A)', () => {
   // from the document so the test can't drift from what ships.
   it('Teams have_creds probe: either credential key present answers yes', () => {
     const md = readFileSync(join(process.cwd(), '.claude/skills/add-teams/SKILL.md'), 'utf8');
-    const probe = parseDirectives(md).find(
-      (d) => d.kind === 'run' && d.attrs.capture === 'have_creds',
-    );
+    const probe = parseDirectives(md).find((d) => d.kind === 'run' && d.attrs.capture === 'have_creds');
     expect(probe).toBeDefined();
     const cmd = probe!.body.join('\n');
 
@@ -190,8 +193,7 @@ describe('runChannelSkill adapter (Option A)', () => {
     writeFileSync(join(root, '.env'), '');
     writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
 
-    const INSTALL_LINK =
-      'https://teams.microsoft.com/l/app/tapp-123?installAppPackage=true&appTenantId=tenant-1';
+    const INSTALL_LINK = 'https://teams.microsoft.com/l/app/tapp-123?installAppPackage=true&appTenantId=tenant-1';
     const log: string[] = [];
     const opened: string[] = [];
     const steps: string[] = [];
@@ -222,7 +224,12 @@ describe('runChannelSkill adapter (Option A)', () => {
         }
         // owner identity from the CLI session (status --json fence, plain exec)
         if (c.includes('status --json')) {
-          return JSON.stringify({ loggedIn: true, username: 'dan@acme.example', tenantId: 'tenant-1', userObjectId: 'aad-owner-1' });
+          return JSON.stringify({
+            loggedIn: true,
+            username: 'dan@acme.example',
+            tenantId: 'tenant-1',
+            userObjectId: 'aad-owner-1',
+          });
         }
         if (c.includes('login.microsoftonline.com')) return 'eyJfake.bot.token';
         // /members is a sub-path of /v3/conversations — match it FIRST
@@ -411,7 +418,6 @@ describe('runChannelSkill adapter (Option A)', () => {
     expect(fullyApplied(res)).toBe(true);
   });
 
-
   // The resolved leg of wireIfResolved, driven with a minimal fixture skill
   // (the real teams document needs a streaming exec runChannelSkill doesn't
   // expose): when the skill binds owner_handle + platform_id, the adapter asks
@@ -564,7 +570,12 @@ describe('backGate (first-prompt back-to-channel-selection)', () => {
       resolveRemote: () => 'origin',
       agentName: 'Nano',
       role: 'owner',
-      inputs: { connection: 'webhook', bot_token: 'xoxb-x', signing_secret: '0123456789abcdef', owner_handle: 'U12345678' },
+      inputs: {
+        connection: 'webhook',
+        bot_token: 'xoxb-x',
+        signing_secret: '0123456789abcdef',
+        owner_handle: 'U12345678',
+      },
       wire: (a) => {
         wired.push(a);
         return true;
@@ -574,5 +585,93 @@ describe('backGate (first-prompt back-to-channel-selection)', () => {
     expect(result).toBe(BACK_TO_CHANNEL_SELECTION);
     expect(cmds).toHaveLength(0); // the skill never ran
     expect(wired).toHaveLength(0); // the wire was never reached
+  });
+});
+
+describe('materializeCompanionSkill (channels-branch fetch for absent skill dirs)', () => {
+  const makeRoot = (): string => mkdtempSync(join(tmpdir(), 'nc-companion-'));
+
+  it('skill already present (SKILL.md exists): true, no git traffic', async () => {
+    const { materializeCompanionSkill } = await import('./run-channel-skill.js');
+    const root = makeRoot();
+    mkdirSync(join(root, '.claude/skills/slack-a2a-rooms'), { recursive: true });
+    writeFileSync(join(root, '.claude/skills/slack-a2a-rooms/SKILL.md'), '# x\n');
+    const exec = vi.fn();
+    expect(materializeCompanionSkill('slack-a2a-rooms', root, { exec, resolveRemote: () => 'origin' })).toBe(true);
+    expect(exec).not.toHaveBeenCalled();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('a leftover dir WITHOUT SKILL.md does not read as installed — it re-fetches', async () => {
+    const { materializeCompanionSkill } = await import('./run-channel-skill.js');
+    const root = makeRoot();
+    mkdirSync(join(root, '.claude/skills/slack-a2a-rooms/src'), { recursive: true });
+    const cmds: string[] = [];
+    const exec = (command: string): string => {
+      cmds.push(command);
+      return command.includes('ls-tree') ? '.claude/skills/slack-a2a-rooms/SKILL.md\n' : '';
+    };
+    expect(materializeCompanionSkill('slack-a2a-rooms', root, { exec, resolveRemote: () => 'origin' })).toBe(true);
+    expect(cmds[0]).toBe('git fetch origin channels');
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('absent dir: fetches the channels branch and materializes every listed file, quoted', async () => {
+    const { materializeCompanionSkill } = await import('./run-channel-skill.js');
+    const root = makeRoot();
+    const cmds: string[] = [];
+    const exec = (command: string): string => {
+      cmds.push(command);
+      if (command.includes('ls-tree')) {
+        return '.claude/skills/slack-agent-flow/SKILL.md\n.claude/skills/slack-agent-flow/src/modules/slack-agent-flow/index.ts\n';
+      }
+      return '';
+    };
+    expect(materializeCompanionSkill('slack-agent-flow', root, { exec, resolveRemote: () => 'upstream' })).toBe(true);
+    expect(cmds[0]).toBe('git fetch upstream channels');
+    expect(cmds[1]).toBe("git ls-tree -r --name-only 'upstream/channels' -- '.claude/skills/slack-agent-flow'");
+    // One git-show per listed file, into the same relative path — quoted so a
+    // future filename with spaces fails loudly instead of word-splitting.
+    expect(cmds.slice(2)).toEqual([
+      "git show 'upstream/channels:.claude/skills/slack-agent-flow/SKILL.md' > '.claude/skills/slack-agent-flow/SKILL.md'",
+      "git show 'upstream/channels:.claude/skills/slack-agent-flow/src/modules/slack-agent-flow/index.ts' > '.claude/skills/slack-agent-flow/src/modules/slack-agent-flow/index.ts'",
+    ]);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('branch does not carry the skill: false', async () => {
+    const { materializeCompanionSkill } = await import('./run-channel-skill.js');
+    const root = makeRoot();
+    const exec = (command: string): string => (command.includes('ls-tree') ? '\n' : '');
+    expect(materializeCompanionSkill('nope', root, { exec, resolveRemote: () => 'origin' })).toBe(false);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('failure mid-materialization: false, and the partial dir is removed (no poisoned retry)', async () => {
+    const { materializeCompanionSkill } = await import('./run-channel-skill.js');
+    const root = makeRoot();
+    const exec = (command: string): string => {
+      if (command.includes('ls-tree')) return '.claude/skills/slack-agent-flow/SKILL.md\n';
+      if (command.includes('git show')) {
+        // Simulate the redirect creating the parent dir then failing.
+        mkdirSync(join(root, '.claude/skills/slack-agent-flow'), { recursive: true });
+        throw new Error('fatal: bad object');
+      }
+      return '';
+    };
+    expect(materializeCompanionSkill('slack-agent-flow', root, { exec, resolveRemote: () => 'origin' })).toBe(false);
+    // The dir created before the failing git-show must be gone.
+    expect(existsSync(join(root, '.claude/skills/slack-agent-flow'))).toBe(false);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('git failure: false, never throws', async () => {
+    const { materializeCompanionSkill } = await import('./run-channel-skill.js');
+    const root = makeRoot();
+    const exec = (): string => {
+      throw new Error('no network');
+    };
+    expect(materializeCompanionSkill('slack-a2a-rooms', root, { exec, resolveRemote: () => 'origin' })).toBe(false);
+    rmSync(root, { recursive: true, force: true });
   });
 });

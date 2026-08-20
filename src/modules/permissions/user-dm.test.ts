@@ -16,7 +16,8 @@ import {
   registerChannelAdapter,
   teardownChannelAdapters,
 } from '../../channels/channel-registry.js';
-import { closeDb, getDb, initTestDb } from '../../db/connection.js';
+import { closeDb, getDb, initSqliteTestDb } from '../../db/connection.js';
+import { sqliteRaw } from '../../db/drivers/sqlite.js';
 import { createMessagingGroup } from '../../db/messaging-groups.js';
 import { runMigrations } from '../../db/migrations/index.js';
 import { log } from '../../log.js';
@@ -28,8 +29,8 @@ function now(): string {
   return new Date().toISOString();
 }
 
-function seedUser(id: string, kind: string): void {
-  createUser({ id, kind, display_name: null, created_at: now() });
+async function seedUser(id: string, kind: string): Promise<void> {
+  await createUser({ id, kind, display_name: null, created_at: now() });
 }
 
 function registerTestAdapter(channelType: string, openDM?: (handle: string) => Promise<string>): void {
@@ -58,15 +59,15 @@ async function startRegisteredAdapters(): Promise<void> {
   }));
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
-  const db = initTestDb();
-  runMigrations(db);
+  const db = await initSqliteTestDb();
+  await runMigrations(db);
 });
 
 afterEach(async () => {
   await teardownChannelAdapters();
-  closeDb();
+  await closeDb();
 });
 
 describe('ensureUserDm privacy-safe logging', () => {
@@ -76,7 +77,7 @@ describe('ensureUserDm privacy-safe logging', () => {
       throw failure;
     });
     await startRegisteredAdapters();
-    seedUser('legacy-default:default-handle-sentinel', 'legacy-default');
+    await seedUser('legacy-default:default-handle-sentinel', 'legacy-default');
 
     await expect(ensureUserDm('legacy-default:default-handle-sentinel')).resolves.toBeNull();
 
@@ -94,11 +95,11 @@ describe('ensureUserDm privacy-safe logging', () => {
     registerTestAdapter('privacy-direct');
     await startRegisteredAdapters();
 
-    seedUser('privacy-error:private-handle-sentinel', 'privacy-error');
-    seedUser('privacy-direct:stale-handle-sentinel', 'privacy-direct');
-    seedUser('invalid-user-private-sentinel', 'invalid-kind');
+    await seedUser('privacy-error:private-handle-sentinel', 'privacy-error');
+    await seedUser('privacy-direct:stale-handle-sentinel', 'privacy-direct');
+    await seedUser('invalid-user-private-sentinel', 'invalid-kind');
 
-    createMessagingGroup({
+    await createMessagingGroup({
       id: 'messaging-group-private-sentinel',
       channel_type: 'privacy-direct',
       platform_id: 'old-platform-private-sentinel',
@@ -107,15 +108,16 @@ describe('ensureUserDm privacy-safe logging', () => {
       unknown_sender_policy: 'strict',
       created_at: now(),
     });
-    upsertUserDm({
+    await upsertUserDm({
       user_id: 'privacy-direct:stale-handle-sentinel',
       channel_type: 'privacy-direct',
       messaging_group_id: 'messaging-group-private-sentinel',
       resolved_at: now(),
     });
-    getDb().pragma('foreign_keys = OFF');
-    getDb().prepare("DELETE FROM messaging_groups WHERE id = 'messaging-group-private-sentinel'").run();
-    getDb().pragma('foreign_keys = ON');
+    const db = sqliteRaw(getDb());
+    db.pragma('foreign_keys = OFF');
+    db.prepare("DELETE FROM messaging_groups WHERE id = 'messaging-group-private-sentinel'").run();
+    db.pragma('foreign_keys = ON');
 
     const options = { privacySafeLogs: true };
     await expect(ensureUserDm('unknown-user-private-sentinel', options)).resolves.toBeNull();

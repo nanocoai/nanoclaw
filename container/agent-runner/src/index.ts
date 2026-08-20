@@ -1,16 +1,14 @@
 /**
  * NanoClaw Agent Runner v2
  *
- * Runs inside a container. All IO goes through the session DB.
- * No stdin, no stdout markers, no IPC files.
+ * Runs inside a container. All message IO goes through the registered mailbox.
  *
  * Config is read from /workspace/agent/container.json (mounted RO).
  * Only TZ and OneCLI networking vars come from env.
  *
  * Mount structure:
  *   /workspace/
- *     inbound.db        ← host-owned session DB (container reads only)
- *     outbound.db       ← container-owned session DB
+ *     mailbox state     ← selected implementation
  *     .heartbeat        ← container touches for liveness detection
  *     outbox/           ← outbound files
  *     agent/            ← agent group folder (CLAUDE.md, container.json, working files)
@@ -30,6 +28,9 @@ import { buildSystemPromptAddendum } from './destinations.js';
 import { getTaskSeriesId } from './db/session-routing.js';
 import { ensureMemoryScaffold } from './memory/scaffold.js';
 import { MEMORY_SESSION_HOOK } from './memory/session-hook.js';
+// Module barrel — loads registration modules, including the singular mailbox slot.
+import './modules/index.js';
+import { getAgentMailbox, readMailboxContext } from './mailbox/index.js';
 // Providers barrel — each enabled provider self-registers on import.
 // Provider skills append imports to providers/index.ts.
 import './providers/index.js';
@@ -47,6 +48,8 @@ const CWD = '/workspace/agent';
 async function main(): Promise<void> {
   const config = loadConfig();
   const providerName = config.provider.toLowerCase() as ProviderName;
+  const mailbox = getAgentMailbox();
+  await mailbox.start(await readMailboxContext());
 
   log(`Starting v2 agent-runner (provider: ${providerName})`);
 
@@ -115,12 +118,16 @@ async function main(): Promise<void> {
   });
   provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
 
-  await runPollLoop({
-    provider,
-    providerName,
-    cwd: CWD,
-    systemContext: { instructions },
-  });
+  try {
+    await runPollLoop({
+      provider,
+      providerName,
+      cwd: CWD,
+      systemContext: { instructions },
+    });
+  } finally {
+    await mailbox.stop();
+  }
 }
 
 main().catch((err) => {

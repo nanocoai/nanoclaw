@@ -92,11 +92,7 @@ describe('readAgentGroupIds', () => {
 
 describe('splitVaultAgents', () => {
   it('splits mine vs ag-* orphans and ignores foreign identifiers', () => {
-    const agents = [
-      agent('u-1', 'ag-mine'),
-      agent('u-2', 'ag-other'),
-      agent('u-3', 'some-tool'),
-    ];
+    const agents = [agent('u-1', 'ag-mine'), agent('u-2', 'ag-other'), agent('u-3', 'some-tool')];
     const { mine, orphans } = splitVaultAgents(agents, new Set(['ag-mine']), true);
     expect(mine).toEqual([agent('u-1', 'ag-mine')]);
     expect(orphans).toEqual([agent('u-2', 'ag-other')]);

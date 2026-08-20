@@ -10,9 +10,9 @@ import { renderVerbHelp, summaryLine } from '../help-render.js';
 import type { CallerContext } from '../frame.js';
 import { GROUP_SCOPE_RESOURCES, listCommands, register } from '../registry.js';
 
-function getCliScope(ctx: CallerContext): string | undefined {
+async function getCliScope(ctx: CallerContext): Promise<string | undefined> {
   if (ctx.caller !== 'agent') return undefined;
-  return getContainerConfig(ctx.agentGroupId)?.cli_scope ?? 'group';
+  return (await getContainerConfig(ctx.agentGroupId))?.cli_scope ?? 'group';
 }
 
 register({
@@ -21,7 +21,7 @@ register({
   access: 'open',
   parseArgs: () => ({}),
   handler: async (_args, ctx) => {
-    const cliScope = getCliScope(ctx);
+    const cliScope = await getCliScope(ctx);
     let resources = getResources();
     if (cliScope === 'group') {
       resources = resources.filter((r) => GROUP_SCOPE_RESOURCES.has(r.plural));
@@ -80,7 +80,7 @@ export function registerResourceHelpCommands(): void {
         resource: res.plural,
         parseArgs: (raw) => raw,
         handler: async (args, ctx) => {
-          const cliScope = getCliScope(ctx);
+          const cliScope = await getCliScope(ctx);
           const lines: string[] = [];
 
           // `ncl <resource> help <verb>` arrives via the dispatcher's

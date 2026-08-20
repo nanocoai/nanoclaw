@@ -18,13 +18,11 @@
  *     --display-name "Gavriel" \
  *     [--agent-name "Andy"]
  */
-import path from 'path';
-
 // Registration-only: makes the in-tree cli adapter's declared defaults
 // (pattern '.', no threads, 'public') resolvable below.
 import '../src/channels/index.js';
 import { resolveUnknownSenderPolicy, resolveWiringDefaults } from '../src/channels/channel-defaults.js';
-import { DATA_DIR } from '../src/config.js';
+import { CENTRAL_DB_PATH } from '../src/config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import { initDb } from '../src/db/connection.js';
 import {
@@ -88,13 +86,13 @@ function generateId(prefix: string): string {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
-  const db = initDb(path.join(DATA_DIR, 'v2.db'));
-  runMigrations(db);
+  const db = await initDb(CENTRAL_DB_PATH);
+  await runMigrations(db);
 
   const now = new Date().toISOString();
 
   // 1. Synthetic CLI user + owner grant if none exists.
-  upsertUser({
+  await upsertUser({
     id: CLI_SYNTHETIC_USER_ID,
     kind: CLI_CHANNEL,
     display_name: args.displayName,
@@ -108,22 +106,22 @@ async function main(): Promise<void> {
   // 2. Agent group + filesystem.
   const folder = args.folder || `cli-with-${normalizeName(args.displayName)}`;
   const pickedProvider = process.env.NANOCLAW_PICKED_PROVIDER?.trim().toLowerCase();
-  let ag: AgentGroup | undefined = getAgentGroupByFolder(folder);
+  let ag: AgentGroup | undefined = await getAgentGroupByFolder(folder);
   if (!ag) {
     const agId = generateId('ag');
-    createAgentGroup({
+    await createAgentGroup({
       id: agId,
       name: args.agentName,
       folder,
       agent_provider: null,
       created_at: now,
     });
-    ag = getAgentGroupByFolder(folder)!;
+    ag = (await getAgentGroupByFolder(folder))!;
     console.log(`Created agent group: ${ag.id} (${folder})`);
   } else {
     console.log(`Reusing agent group: ${ag.id} (${folder})`);
   }
-  initGroupFilesystem(ag, {
+  await initGroupFilesystem(ag, {
     instructions:
       `# ${args.agentName}\n\n` +
       `You are ${args.agentName}, a personal NanoClaw agent for ${args.displayName}. ` +
@@ -135,7 +133,7 @@ async function main(): Promise<void> {
   });
 
   // 3. CLI messaging group + wiring.
-  let cliMg: MessagingGroup | undefined = getMessagingGroupByPlatform(CLI_CHANNEL, CLI_PLATFORM_ID);
+  let cliMg: MessagingGroup | undefined = await getMessagingGroupByPlatform(CLI_CHANNEL, CLI_PLATFORM_ID);
   if (!cliMg) {
     cliMg = {
       id: generateId('mg'),
@@ -148,16 +146,16 @@ async function main(): Promise<void> {
       unknown_sender_policy: resolveUnknownSenderPolicy(CLI_CHANNEL, false),
       created_at: now,
     };
-    createMessagingGroup(cliMg);
+    await createMessagingGroup(cliMg);
     console.log(`Created CLI messaging group: ${cliMg.id}`);
   }
 
-  const existing = getMessagingGroupAgentByPair(cliMg.id, ag.id);
+  const existing = await getMessagingGroupAgentByPair(cliMg.id, ag.id);
   if (!existing) {
     // cli declares pattern '.' for DMs — every line the operator types is
     // for the agent. Identical to the pre-declaration hardcodes.
     const engage = resolveWiringDefaults(CLI_CHANNEL, false, ag.name);
-    createMessagingGroupAgent({
+    await createMessagingGroupAgent({
       id: generateId('mga'),
       messaging_group_id: cliMg.id,
       agent_group_id: ag.id,

@@ -248,6 +248,16 @@ register({
   handler: async (args) => ({ id: (args as Record<string, unknown>).id, agent_group_id: 'g1' }),
 });
 
+// The real `sessions-history` name — the same pre-handler check covers it.
+register({
+  name: 'sessions-history',
+  description: 'sessions history custom op',
+  resource: 'sessions',
+  access: 'open',
+  parseArgs: (raw) => raw,
+  handler: async (args) => [{ id: (args as Record<string, unknown>).id }],
+});
+
 // Echoes args back — used to assert dash-joined positional id resolution.
 register({
   name: 'groups-get',
@@ -785,6 +795,19 @@ describe('CLI scope enforcement', () => {
     mockGetSession.mockReturnValue(undefined);
 
     const resp = await dispatch({ id: '1', command: 'sessions-get', args: { id: 's-nope' } }, agentCtx());
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.error.code).toBe('handler-error');
+      expect(resp.error.message).toContain('session not found');
+    }
+  });
+
+  it('group: sessions-history gets the same "session not found" for a foreign session UUID', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockGetSession.mockReturnValue({ id: 's-x', agent_group_id: 'other-group' });
+
+    const resp = await dispatch({ id: '1', command: 'sessions-history', args: { id: 's-x' } }, agentCtx());
 
     expect(resp.ok).toBe(false);
     if (!resp.ok) {

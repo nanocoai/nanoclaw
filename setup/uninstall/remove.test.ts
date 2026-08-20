@@ -57,10 +57,7 @@ describe('executePlan', () => {
     fs.mkdirSync(path.join(dir, 'nested'), { recursive: true });
     fs.writeFileSync(path.join(dir, 'nested', 'f.txt'), 'x');
 
-    const { notes } = executePlan(
-      [{ kind: 'delete-path', item: { what: 'Data', where: dir, path: dir } }],
-      deps(),
-    );
+    const { notes } = executePlan([{ kind: 'delete-path', item: { what: 'Data', where: dir, path: dir } }], deps());
 
     expect(fs.existsSync(dir)).toBe(false);
     expect(notes).toEqual([]);

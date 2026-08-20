@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { parseDirectives, validate, promptVar, resolveChatCoreVersion, lintReferenceFloor, lintGateAmbiguity } from './skill-directives.js';
+import {
+  parseDirectives,
+  validate,
+  promptVar,
+  resolveChatCoreVersion,
+  lintReferenceFloor,
+  lintGateAmbiguity,
+} from './skill-directives.js';
 
 // Guards the structured-directive format against the converted add-slack skill:
 // red if the conversion drifts (a directive dropped/renamed) or the parser breaks.
@@ -10,8 +17,9 @@ const directives = parseDirectives(slack);
 describe('skill-directives parser, on the converted add-slack', () => {
   it('extracts every directive in document order — install, credentials, resolve, restart', () => {
     expect(directives.map((d) => d.kind)).toEqual([
-      'copy', // step 1: adapter + test from the channels branch
-      'append', // step 2: barrel registration
+      'copy', // step 1: the base channel payload from the channels branch
+      'append', // step 2: channel barrel — adapter registration
+      'append', // step 2: channel barrel — bot-inbound guard
       'dep', // step 3: pinned package
       'run', // step 4: build
       'run', // step 4: test
@@ -20,9 +28,11 @@ describe('skill-directives parser, on the converted add-slack', () => {
       'operator', // credentials: create-app walkthrough, webhook variant
       'prompt', // credentials: capture bot token
       'prompt', // credentials: capture app-level token (socket only)
+      'prompt', // credentials: app-level token twin (provisioned mode — binds from inputs)
       'prompt', // credentials: capture signing secret (webhook only)
       'env-set', // credentials: bot token (both modes)
       'env-set', // credentials: app token — doubles as the Socket Mode switch
+      'env-set', // credentials: app token, provisioned-mode twin
       'env-set', // credentials: signing secret (webhook only)
       'operator', // credentials: event-delivery walkthrough (webhook only)
       'prompt', // resolve: owner member id (owner_handle)
@@ -49,20 +59,39 @@ describe('skill-directives parser, on the converted add-slack', () => {
     expect(ops[2].attrs.when).toBe('connection=webhook');
   });
 
-  it('reads copy as a branch fetch with the full channel payload', () => {
+  it('reads copy as a branch fetch with the base channel payload', () => {
     const copy = directives.find((d) => d.kind === 'copy')!;
     expect(copy.attrs['from-branch']).toBe('channels');
+    // Base experience only — the agents feature payload (room membership,
+    // canvas, onboarding, their env-file plumbing) moved to /slack-agent-flow.
     expect(copy.body).toEqual([
       'src/channels/slack.ts',
+      'src/channels/slack-lib.ts',
+      'src/channels/slack-lib.test.ts',
+      'src/channels/slack-a2a-guard.ts',
+      'src/channels/slack-a2a-guard.test.ts',
       'src/channels/slack-registration.test.ts',
+      'src/channels/slack-instances-registration.test.ts',
+      'src/provisioning/slack-app.ts',
+      'src/provisioning/slack-app.test.ts',
       'container/skills/slack-formatting/SKILL.md',
     ]);
   });
 
-  it('reads the barrel append target and line', () => {
-    const append = directives.find((d) => d.kind === 'append')!;
-    expect(append.attrs.to).toBe('src/channels/index.ts');
-    expect(append.body).toEqual(["import './slack.js';"]);
+  it('reads the barrel appends: adapter and guard only', () => {
+    const appends = directives.filter((d) => d.kind === 'append');
+    expect(appends.map((d) => d.attrs.to)).toEqual([
+      'src/channels/index.ts',
+      'src/channels/index.ts',
+    ]);
+    // The adapter and the guard are SEPARATE fences (idempotency is keyed on a
+    // fence's first line): an install that already has `import './slack.js';`
+    // from the pre-payload skill still gains the guard on a re-run.
+    expect(appends[0].body).toEqual(["import './slack.js';"]);
+    expect(appends[1].body).toEqual(["import './slack-a2a-guard.js';"]);
+    // The agents-feature module/tool barrel appends live in /slack-agent-flow;
+    // the companion declaration is trunk's, registered by default
+    // (setup/channels/slack-auto-register.ts) — no skill appends it anymore.
   });
 
   it('reads the dependency pinned exactly', () => {
@@ -82,15 +111,20 @@ describe('skill-directives parser, on the converted add-slack', () => {
 
   it('captures prompts into named vars — credentials secret, the mode and handle not', () => {
     const prompts = directives.filter((d) => d.kind === 'prompt');
-    expect(prompts.map(promptVar)).toEqual(['connection', 'bot_token', 'app_token', 'signing_secret', 'owner_handle']);
+    expect(prompts.map(promptVar)).toEqual(['connection', 'bot_token', 'app_token', 'app_token', 'signing_secret', 'owner_handle']);
     expect(prompts[0].args).not.toContain('secret'); // connection — a mode choice, not a secret
+    // The interactive select offers two modes; validate stays wider because
+    // `provisioned` arrives only via pre-bound inputs (the --slack-agents pre-step).
+    expect(prompts[0].attrs.choices).toBe('socket|webhook');
     expect(prompts[1].args).toContain('secret'); // bot_token
-    expect(prompts[2].args).toContain('secret'); // app_token
-    expect(prompts[3].args).toContain('secret'); // signing_secret
-    expect(prompts[4].args).not.toContain('secret'); // owner_handle — a plain id, not a secret
+    expect(prompts[2].args).toContain('secret'); // app_token (socket)
+    expect(prompts[3].args).toContain('secret'); // app_token (provisioned twin)
+    expect(prompts[4].args).toContain('secret'); // signing_secret
+    expect(prompts[5].args).not.toContain('secret'); // owner_handle — a plain id, not a secret
     // Each mode's credential is guard-scoped to its branch.
     expect(prompts[2].attrs.when).toBe('connection=socket');
-    expect(prompts[3].attrs.when).toBe('connection=webhook');
+    expect(prompts[3].attrs.when).toBe('connection=provisioned');
+    expect(prompts[4].attrs.when).toBe('connection=webhook');
     // The prompt body is the question; it does not mention env at all.
     expect(prompts[1].body.join(' ')).toMatch(/Bot User OAuth Token/);
   });
@@ -108,10 +142,12 @@ describe('skill-directives parser, on the converted add-slack', () => {
     expect(envSets.map((d) => d.body)).toEqual([
       ['SLACK_BOT_TOKEN={{bot_token}}'],
       ['SLACK_APP_TOKEN={{app_token}}'],
+      ['SLACK_APP_TOKEN={{app_token}}'],
       ['SLACK_SIGNING_SECRET={{signing_secret}}'],
     ]);
     expect(envSets[1].attrs.when).toBe('connection=socket');
-    expect(envSets[2].attrs.when).toBe('connection=webhook');
+    expect(envSets[2].attrs.when).toBe('connection=provisioned');
+    expect(envSets[3].attrs.when).toBe('connection=webhook');
   });
 
   it('passes validation (well-formed, pinned, every {{var}} captured first)', () => {
@@ -157,7 +193,11 @@ describe('validation catches malformed directives', () => {
 });
 
 describe('json-merge directive', () => {
-  const codex = ['```nc:json-merge into:container/cli-tools.json key:name', '{ "name": "@openai/codex", "version": "0.138.0" }', '```'].join('\n');
+  const codex = [
+    '```nc:json-merge into:container/cli-tools.json key:name',
+    '{ "name": "@openai/codex", "version": "0.138.0" }',
+    '```',
+  ].join('\n');
 
   it('parses into/key attrs and the JSON object body', () => {
     const [d] = parseDirectives(codex);
@@ -199,7 +239,11 @@ describe('json-merge directive', () => {
 
 describe('append at:<marker> attribute', () => {
   it('parses an optional at:<marker> alongside to:', () => {
-    const md = ['```nc:append to:setup/index.ts at:nanoclaw:setup-steps', "  codex: () => import('./codex.js'),", '```'].join('\n');
+    const md = [
+      '```nc:append to:setup/index.ts at:nanoclaw:setup-steps',
+      "  codex: () => import('./codex.js'),",
+      '```',
+    ].join('\n');
     const [d] = parseDirectives(md);
     expect(d.kind).toBe('append');
     expect(d.attrs.to).toBe('setup/index.ts');
@@ -207,7 +251,11 @@ describe('append at:<marker> attribute', () => {
   });
 
   it('still validates an append that carries at: (to + a line are all it needs)', () => {
-    const md = ['```nc:append to:setup/index.ts at:nanoclaw:setup-steps', "  codex: () => import('./codex.js'),", '```'].join('\n');
+    const md = [
+      '```nc:append to:setup/index.ts at:nanoclaw:setup-steps',
+      "  codex: () => import('./codex.js'),",
+      '```',
+    ].join('\n');
     expect(validate(parseDirectives(md))).toEqual([]);
   });
 });
@@ -223,7 +271,14 @@ describe('retired directives', () => {
 
 describe('when: guard + multi-field capture', () => {
   it('parses when: into attrs and lints a guard whose var an earlier prompt defined', () => {
-    const md = ['```nc:prompt mode', 'local or remote', '```', '```nc:prompt server_url when:mode=remote', 'url', '```'].join('\n');
+    const md = [
+      '```nc:prompt mode',
+      'local or remote',
+      '```',
+      '```nc:prompt server_url when:mode=remote',
+      'url',
+      '```',
+    ].join('\n');
     const ds = parseDirectives(md);
     expect(ds[1].attrs.when).toBe('mode=remote');
     expect(validate(ds)).toEqual([]);
@@ -305,7 +360,9 @@ describe('prompt attrs (flags/normalize/reuse)', () => {
 
   it('flags a reuse: that is not a valid ENV_KEY', () => {
     const md = ['```nc:prompt u reuse:not-an-env-key', 'q', '```'].join('\n');
-    expect(validate(parseDirectives(md)).some((p) => /reuse:not-an-env-key must be a valid ENV_KEY/.test(p.message))).toBe(true);
+    expect(
+      validate(parseDirectives(md)).some((p) => /reuse:not-an-env-key must be a valid ENV_KEY/.test(p.message)),
+    ).toBe(true);
   });
 
   it('flags illegal regex flags:', () => {
@@ -333,7 +390,9 @@ describe('lintReferenceFloor (warn-only reference floor)', () => {
   });
 
   it('is silent once a ## Troubleshooting section is present', () => {
-    const md = ['```nc:prompt token secret', 'Paste it.', '```', '', '## Troubleshooting', 'Check the logs.'].join('\n');
+    const md = ['```nc:prompt token secret', 'Paste it.', '```', '', '## Troubleshooting', 'Check the logs.'].join(
+      '\n',
+    );
     expect(lintReferenceFloor(md)).toEqual([]);
   });
 
@@ -356,7 +415,11 @@ describe('lintReferenceFloor (warn-only reference floor)', () => {
 // document structure, the preceding heading, the surrounding prose).
 describe('removed presentation attrs are lint errors', () => {
   it('rejects operator open: — the URL belongs in the body prose', () => {
-    const md = ['```nc:operator open:https://portal.azure.com', 'Visit https://portal.azure.com and click through.', '```'].join('\n');
+    const md = [
+      '```nc:operator open:https://portal.azure.com',
+      'Visit https://portal.azure.com and click through.',
+      '```',
+    ].join('\n');
     const probs = validate(parseDirectives(md));
     expect(probs.some((p) => /operator open: was removed — put the URL in the body prose/.test(p.message))).toBe(true);
   });
@@ -364,7 +427,11 @@ describe('removed presentation attrs are lint errors', () => {
   it('rejects the bare operator gate flag — the barrier is structure-derived', () => {
     const md = ['```nc:operator gate', 'Finish the UI steps.', '```'].join('\n');
     const probs = validate(parseDirectives(md));
-    expect(probs.some((p) => /operator gate was removed — the human barrier is derived from document structure/.test(p.message))).toBe(true);
+    expect(
+      probs.some((p) =>
+        /operator gate was removed — the human barrier is derived from document structure/.test(p.message),
+      ),
+    ).toBe(true);
   });
 
   it('rejects prompt min: — length is regex-encoded now', () => {
@@ -376,23 +443,33 @@ describe('removed presentation attrs are lint errors', () => {
   it('rejects prompt error: — the miss message derives from the question prose', () => {
     const md = ['```nc:prompt token error:bad-token', 'Paste the token.', '```'].join('\n');
     const probs = validate(parseDirectives(md));
-    expect(probs.some((p) => /prompt error: was removed — the validation-miss message derives from the question prose/.test(p.message))).toBe(true);
+    expect(
+      probs.some((p) =>
+        /prompt error: was removed — the validation-miss message derives from the question prose/.test(p.message),
+      ),
+    ).toBe(true);
   });
 
   it('rejects label: on any directive — labels are heading-derived only', () => {
     const md = ['```nc:run effect:build label:build', 'pnpm run build', '```'].join('\n');
     const probs = validate(parseDirectives(md));
-    expect(probs.some((p) => /label: was removed — step labels derive from the preceding heading/.test(p.message))).toBe(true);
+    expect(
+      probs.some((p) => /label: was removed — step labels derive from the preceding heading/.test(p.message)),
+    ).toBe(true);
   });
 
   it('rejects on-fail: on any directive — the hint is always the surrounding prose', () => {
     const md = ['```nc:run effect:test on-fail:rerun', 'pnpm test', '```'].join('\n');
     const probs = validate(parseDirectives(md));
-    expect(probs.some((p) => /on-fail: was removed — the failure hint is always the surrounding prose/.test(p.message))).toBe(true);
+    expect(
+      probs.some((p) => /on-fail: was removed — the failure hint is always the surrounding prose/.test(p.message)),
+    ).toBe(true);
   });
 
   it('still accepts a plain operator block (body-only, no attrs)', () => {
-    const md = ['```nc:prompt bot', 'Bot?', '```', '```nc:operator', 'Open @{{bot}} and press Start.', '```'].join('\n');
+    const md = ['```nc:prompt bot', 'Bot?', '```', '```nc:operator', 'Open @{{bot}} and press Start.', '```'].join(
+      '\n',
+    );
     expect(validate(parseDirectives(md))).toEqual([]);
   });
 });
@@ -403,10 +480,18 @@ describe('removed presentation attrs are lint errors', () => {
 // be runtime-skipped — the static policy cannot know which branch runs.
 describe('lintGateAmbiguity (warn-only unguarded-operator/multi-branch)', () => {
   const branchy = [
-    '```nc:prompt mode', 'local or remote?', '```',
-    '```nc:operator', 'Get ready.', '```',
-    '```nc:prompt server_url when:mode=remote', 'URL?', '```',
-    '```nc:run effect:external when:mode=local', './configure.sh', '```',
+    '```nc:prompt mode',
+    'local or remote?',
+    '```',
+    '```nc:operator',
+    'Get ready.',
+    '```',
+    '```nc:prompt server_url when:mode=remote',
+    'URL?',
+    '```',
+    '```nc:run effect:external when:mode=local',
+    './configure.sh',
+    '```',
   ].join('\n');
 
   it('warns on an unguarded operator followed by guards spanning two branch values', () => {
@@ -424,37 +509,71 @@ describe('lintGateAmbiguity (warn-only unguarded-operator/multi-branch)', () => 
 
   it('is silent when the operator itself is guarded (mutually-exclusive branches gate on their own next action)', () => {
     const md = [
-      '```nc:prompt mode', 'local or remote?', '```',
-      '```nc:operator when:mode=local', 'Get ready.', '```',
-      '```nc:prompt server_url when:mode=remote', 'URL?', '```',
-      '```nc:run effect:external when:mode=local', './configure.sh', '```',
+      '```nc:prompt mode',
+      'local or remote?',
+      '```',
+      '```nc:operator when:mode=local',
+      'Get ready.',
+      '```',
+      '```nc:prompt server_url when:mode=remote',
+      'URL?',
+      '```',
+      '```nc:run effect:external when:mode=local',
+      './configure.sh',
+      '```',
     ].join('\n');
     expect(lintGateAmbiguity(parseDirectives(md))).toEqual([]);
   });
 
   it('is silent when the following guards all share one branch value', () => {
     const md = [
-      '```nc:prompt mode', 'local or remote?', '```',
-      '```nc:operator', 'Get ready.', '```',
-      '```nc:prompt server_url when:mode=remote', 'URL?', '```',
-      '```nc:prompt api_key when:mode=remote', 'Key?', '```',
+      '```nc:prompt mode',
+      'local or remote?',
+      '```',
+      '```nc:operator',
+      'Get ready.',
+      '```',
+      '```nc:prompt server_url when:mode=remote',
+      'URL?',
+      '```',
+      '```nc:prompt api_key when:mode=remote',
+      'Key?',
+      '```',
     ].join('\n');
     expect(lintGateAmbiguity(parseDirectives(md))).toEqual([]);
   });
 
   it('stops scanning at the first unguarded directive (it always runs — no ambiguity past it)', () => {
     const md = [
-      '```nc:prompt mode', 'local or remote?', '```',
-      '```nc:operator', 'Get ready.', '```',
-      '```nc:run effect:build', 'pnpm run build', '```',
-      '```nc:prompt server_url when:mode=remote', 'URL?', '```',
-      '```nc:run effect:external when:mode=local', './configure.sh', '```',
+      '```nc:prompt mode',
+      'local or remote?',
+      '```',
+      '```nc:operator',
+      'Get ready.',
+      '```',
+      '```nc:run effect:build',
+      'pnpm run build',
+      '```',
+      '```nc:prompt server_url when:mode=remote',
+      'URL?',
+      '```',
+      '```nc:run effect:external when:mode=local',
+      './configure.sh',
+      '```',
     ].join('\n');
     expect(lintGateAmbiguity(parseDirectives(md))).toEqual([]);
   });
 
   it('never warns on the in-tree channel skills (none author the pattern)', () => {
-    for (const ch of ['add-slack', 'add-discord', 'add-telegram', 'add-teams', 'add-whatsapp', 'add-signal', 'add-imessage']) {
+    for (const ch of [
+      'add-slack',
+      'add-discord',
+      'add-telegram',
+      'add-teams',
+      'add-whatsapp',
+      'add-signal',
+      'add-imessage',
+    ]) {
       const md = readFileSync(`.claude/skills/${ch}/SKILL.md`, 'utf8');
       expect(lintGateAmbiguity(parseDirectives(md))).toEqual([]);
     }

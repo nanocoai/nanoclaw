@@ -24,12 +24,11 @@ import path from 'path';
 import { isSafeAttachmentName } from '../../attachment-safety.js';
 import { ensureContainedInboxDir, isPathInside } from '../../inbox-safety.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
-import { getInboundSourceSessionId, getMostRecentPeerSourceSessionId } from '../../db/session-db.js';
 import { getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
 import { GuardDenyError, guard } from '../../guard/index.js';
 import { log } from '../../log.js';
-import { openInboundDb, resolveSession, sessionDir, writeSessionMessage } from '../../session-manager.js';
+import { resolveSession, sessionDir, withExistingMailboxSession, writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval, Session } from '../../types.js';
 import { requestApproval } from '../approvals/index.js';
 import { A2A_MESSAGE_GATE_ACTION, a2aSend } from './guard.js';
@@ -206,29 +205,31 @@ export interface RoutableAgentMessage {
  *    has been recorded with `source_session_id` (e.g. fresh installs,
  *    pre-migration data).
  */
-function resolveTargetSession(msg: RoutableAgentMessage, sourceSession: Session, targetAgentGroupId: string): Session {
-  const srcDb = openInboundDb(sourceSession.agent_group_id, sourceSession.id);
-  let originSessionId: string | null = null;
-  try {
+async function resolveTargetSession(
+  msg: RoutableAgentMessage,
+  sourceSession: Session,
+  targetAgentGroupId: string,
+): Promise<Session> {
+  const originSessionId = await withExistingMailboxSession(sourceSession.agent_group_id, sourceSession.id, (srcDb) => {
+    let origin: string | null = null;
     if (msg.in_reply_to) {
-      originSessionId = getInboundSourceSessionId(srcDb, msg.in_reply_to);
+      origin = srcDb.getInboundSourceSessionId(msg.in_reply_to);
     }
-    if (!originSessionId) {
+    if (!origin) {
       // Peer-affinity fallback — covers the case where the container's
       // outbound write didn't carry in_reply_to (e.g. legacy MCP send_message
       // path, container running pre-fix code).
-      originSessionId = getMostRecentPeerSourceSessionId(srcDb, targetAgentGroupId);
+      origin = srcDb.getMostRecentPeerSourceSessionId(targetAgentGroupId);
     }
-  } finally {
-    srcDb.close();
-  }
+    return origin;
+  });
   if (originSessionId) {
-    const candidate = getSession(originSessionId);
+    const candidate = await getSession(originSessionId);
     if (candidate && candidate.agent_group_id === targetAgentGroupId && candidate.status === 'active') {
       return candidate;
     }
   }
-  return resolveSession(targetAgentGroupId, null, null, 'agent-shared').session;
+  return (await resolveSession(targetAgentGroupId, null, null, 'agent-shared')).session;
 }
 
 export async function routeAgentMessage(
@@ -247,7 +248,7 @@ export async function routeAgentMessage(
   // allow, agent_message_policies hold. An approved replay carries the
   // grant — the hold is satisfied but the structure is re-checked live, so
   // revoking a destination between hold and approve blocks delivery.
-  const decision = guard(a2aSend, {
+  const decision = await guard(a2aSend, {
     actor: { kind: 'agent', agentGroupId: sourceAgentGroupId, sessionId: session.id },
     resource: { from: sourceAgentGroupId, to: targetAgentGroupId },
     payload: { id: msg.id, platform_id: targetAgentGroupId, content: msg.content, in_reply_to: msg.in_reply_to },
@@ -262,8 +263,8 @@ export async function routeAgentMessage(
   // consumes the outbound row; `applyA2aMessageGate` re-enters here with the
   // grant on approve.
   if (decision.effect === 'hold') {
-    const sourceName = getAgentGroup(sourceAgentGroupId)?.name ?? sourceAgentGroupId;
-    const targetName = getAgentGroup(targetAgentGroupId)?.name ?? targetAgentGroupId;
+    const sourceName = (await getAgentGroup(sourceAgentGroupId))?.name ?? sourceAgentGroupId;
+    const targetName = (await getAgentGroup(targetAgentGroupId))?.name ?? targetAgentGroupId;
     await requestApproval({
       session,
       agentName: sourceName,
@@ -326,7 +327,7 @@ async function performAgentRoute(
   session: Session,
   targetAgentGroupId: string,
 ): Promise<void> {
-  const targetSession = resolveTargetSession(msg, session, targetAgentGroupId);
+  const targetSession = await resolveTargetSession(msg, session, targetAgentGroupId);
   const a2aMsgId = `a2a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   // If the source message references files (via `send_file`), forward the
@@ -336,7 +337,7 @@ async function performAgentRoute(
   // read the bytes — they live in a session dir it doesn't mount.
   const forwardedContent = forwardFileAttachments(msg, a2aMsgId, session, targetAgentGroupId, targetSession.id);
 
-  writeSessionMessage(targetAgentGroupId, targetSession.id, {
+  await writeSessionMessage(targetAgentGroupId, targetSession.id, {
     id: a2aMsgId,
     kind: 'chat',
     timestamp: new Date().toISOString(),
@@ -353,7 +354,7 @@ async function performAgentRoute(
     a2aMsgId,
     forwardedFileCount: countForwardedFiles(forwardedContent),
   });
-  const fresh = getSession(targetSession.id);
+  const fresh = await getSession(targetSession.id);
   if (fresh) await wakeContainer(fresh);
 }
 

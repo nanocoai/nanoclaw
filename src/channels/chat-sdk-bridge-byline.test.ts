@@ -86,11 +86,11 @@ async function fireAction(
   return { edits, actions };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   captured.chat = null;
-  const db = initTestDb();
-  runMigrations(db);
-  createPendingApproval({
+  const db = await initTestDb();
+  await runMigrations(db);
+  await createPendingApproval({
     approval_id: 'q-1',
     session_id: null,
     request_id: 'q-1',
@@ -106,8 +106,8 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
 });
 
 describe('chat-sdk-bridge approval-card terminal state', () => {

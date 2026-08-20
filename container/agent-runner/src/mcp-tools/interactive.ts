@@ -90,7 +90,7 @@ export const askUserQuestion: McpToolDefinition = {
     const r = routing();
 
     // Write question card to outbound.db
-    writeMessageOut({
+    await writeMessageOut({
       id: questionId,
       kind: 'chat-sdk',
       platform_id: r.platform_id,
@@ -152,7 +152,7 @@ export const sendCard: McpToolDefinition = {
     const id = generateId();
     const r = routing();
 
-    writeMessageOut({
+    await writeMessageOut({
       id,
       kind: 'chat-sdk',
       platform_id: r.platform_id,

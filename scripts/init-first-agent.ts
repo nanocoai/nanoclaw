@@ -32,6 +32,7 @@
  * For direct-addressable channels (telegram, whatsapp, etc.), --platform-id
  * is typically the same as the handle in --user-id, with the channel prefix.
  */
+import fs from 'fs';
 import net from 'net';
 import path from 'path';
 
@@ -42,7 +43,7 @@ import path from 'path';
 import '../src/channels/index.js';
 import { resolveUnknownSenderPolicy, resolveWiringDefaults } from '../src/channels/channel-defaults.js';
 import { hasDeclaredChannelDefaults } from '../src/channels/channel-registry.js';
-import { DATA_DIR, GROUPS_DIR } from '../src/config.js';
+import { CENTRAL_DB_PATH, DATA_DIR, GROUPS_DIR } from '../src/config.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import { initDb } from '../src/db/connection.js';
 import {
@@ -77,6 +78,23 @@ interface Args {
 }
 
 const DEFAULT_WELCOME = 'System instruction: run /welcome to introduce yourself to the user on this new channel.';
+
+/**
+ * Channel-specific welcome addendum, matched HOST-SIDE: this composer knows
+ * the channel, so the welcome skill never scans for applicability — it just
+ * follows the pointer when one is present. Channel install skills drop
+ * `container/skills/welcome/addenda/<channel>.md`; with no file the default
+ * welcome is byte-identical to today's and the skill runs as written.
+ * An explicit --welcome override is always respected verbatim.
+ */
+function defaultWelcome(channel: string): string {
+  const hostPath = path.resolve(process.cwd(), 'container', 'skills', 'welcome', 'addenda', `${channel}.md`);
+  if (!fs.existsSync(hostPath)) return DEFAULT_WELCOME;
+  return (
+    `${DEFAULT_WELCOME} First read /app/skills/welcome/addenda/${channel}.md and follow it — ` +
+    'it adjusts the welcome for this channel.'
+  );
+}
 
 const DEFAULT_ROLE: Role = 'owner';
 
@@ -148,7 +166,7 @@ function parseArgs(argv: string[]): Args {
     displayName: out.displayName!,
     agentName: out.agentName?.trim() || out.displayName!,
     agentGroupId: out.agentGroupId?.trim() || undefined,
-    welcome: out.welcome?.trim() || DEFAULT_WELCOME,
+    welcome: out.welcome?.trim() || defaultWelcome(out.channel!),
     role: out.role ?? DEFAULT_ROLE,
     engagePattern: out.engagePattern?.trim() || undefined,
   };
@@ -162,27 +180,42 @@ function generateId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function wireIfMissing(mg: MessagingGroup, ag: AgentGroup, now: string, label: string, engagePattern?: string): void {
-  const existing = getMessagingGroupAgentByPair(mg.id, ag.id);
+async function wireIfMissing(
+  mg: MessagingGroup,
+  ag: AgentGroup,
+  now: string,
+  label: string,
+  engagePattern?: string,
+): Promise<void> {
+  const existing = await getMessagingGroupAgentByPair(mg.id, ag.id);
   if (existing) {
     console.log(`Wiring already exists: ${existing.id} (${label})`);
     return;
   }
+  // Wiring defaults come from the channel's declaration when it has one
+  // (resolveWiringDefaults: engage fields + session_mode + the threads stamp
+  // derived from it — a context whose conversations are thread-rooted
+  // declares per-thread sessions and gets correct session identity from the
+  // first message); stale (undeclared) adapters keep the legacy behavior
+  // exactly: shared sessions, threads column NULL (inherit).
+  const isGroup = mg.is_group === 1;
+  const channelKey = mg.instance ?? mg.channel_type;
+  const resolved = hasDeclaredChannelDefaults(channelKey, mg.channel_type)
+    ? resolveWiringDefaults(channelKey, isGroup, ag.name, mg.channel_type)
+    : undefined;
   // Engage defaults, first hit wins: explicit --engage-pattern → the
   // channel's declared defaults → the legacy heuristic for stale
   // (undeclared) adapters: DMs (is_group=0) respond to everything via a '.'
   // regex, group chats are mention-only; admins can reconfigure via
-  // /manage-channels once the agent is in use.
-  const isGroup = mg.is_group === 1;
-  const channelKey = mg.instance ?? mg.channel_type;
+  // /manage-channels once the agent is in use. An explicit pattern only
+  // overrides the engage fields — the declared session defaults still apply.
   const engage = engagePattern
     ? { engage_mode: 'pattern' as const, engage_pattern: engagePattern }
-    : hasDeclaredChannelDefaults(channelKey, mg.channel_type)
-      ? resolveWiringDefaults(channelKey, isGroup, ag.name, mg.channel_type)
-      : isGroup
+    : (resolved ??
+      (isGroup
         ? { engage_mode: 'mention' as const, engage_pattern: null }
-        : { engage_mode: 'pattern' as const, engage_pattern: '.' };
-  createMessagingGroupAgent({
+        : { engage_mode: 'pattern' as const, engage_pattern: '.' }));
+  await createMessagingGroupAgent({
     id: generateId('mga'),
     messaging_group_id: mg.id,
     agent_group_id: ag.id,
@@ -193,7 +226,8 @@ function wireIfMissing(mg: MessagingGroup, ag: AgentGroup, now: string, label: s
     // messages carry no value ('drop').
     sender_scope: 'all',
     ignored_message_policy: 'drop',
-    session_mode: 'shared',
+    session_mode: resolved?.session_mode ?? 'shared',
+    ...(resolved?.threads !== undefined && resolved?.threads !== null ? { threads: resolved.threads } : {}),
     priority: 0,
     created_at: now,
   });
@@ -203,14 +237,14 @@ function wireIfMissing(mg: MessagingGroup, ag: AgentGroup, now: string, label: s
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
-  const db = initDb(path.join(DATA_DIR, 'v2.db'));
-  runMigrations(db); // idempotent
+  const db = await initDb(CENTRAL_DB_PATH);
+  await runMigrations(db); // idempotent
 
   const now = new Date().toISOString();
 
   // 1. User + (conditional) owner grant.
   const userId = namespacedUserId(args.channel, args.userId);
-  upsertUser({
+  await upsertUser({
     id: userId,
     kind: args.channel,
     display_name: args.displayName,
@@ -226,31 +260,31 @@ async function main(): Promise<void> {
   let ag: AgentGroup;
   let folder: string;
   if (args.agentGroupId) {
-    const existing = getAgentGroup(args.agentGroupId);
+    const existing = await getAgentGroup(args.agentGroupId);
     if (!existing) throw new Error(`Agent group not found: ${args.agentGroupId}`);
     ag = existing;
     folder = existing.folder;
     console.log(`Using agent group: ${ag.id} (${folder})`);
   } else {
     folder = `dm-with-${normalizeName(args.displayName)}`;
-    const existing = getAgentGroupByFolder(folder);
+    const existing = await getAgentGroupByFolder(folder);
     if (existing) {
       ag = existing;
       console.log(`Reusing agent group: ${ag.id} (${folder})`);
     } else {
       const agId = generateId('ag');
-      createAgentGroup({
+      await createAgentGroup({
         id: agId,
         name: args.agentName,
         folder,
         agent_provider: null,
         created_at: now,
       });
-      ag = getAgentGroupByFolder(folder)!;
+      ag = (await getAgentGroupByFolder(folder))!;
       console.log(`Created agent group: ${ag.id} (${folder})`);
     }
     // A reused group keeps its provider because this insert is idempotent.
-    ensureContainerConfig(ag.id, pickedProvider);
+    await ensureContainerConfig(ag.id, pickedProvider);
     stageGroupPersona(
       path.resolve(GROUPS_DIR, folder),
       `# ${args.agentName}\n\n` +
@@ -266,11 +300,11 @@ async function main(): Promise<void> {
   //  - member: no role grant, just the membership row below.
   // grantRole inserts a new row per call — idempotence check against
   // getUserRoles prevents duplicates on re-runs.
-  const existingRoles = getUserRoles(userId);
+  const existingRoles = await getUserRoles(userId);
   if (args.role === 'owner') {
     const alreadyOwner = existingRoles.some((r) => r.role === 'owner' && r.agent_group_id === null);
     if (!alreadyOwner) {
-      grantRole({
+      await grantRole({
         user_id: userId,
         role: 'owner',
         agent_group_id: null,
@@ -279,11 +313,11 @@ async function main(): Promise<void> {
       });
     }
     // Owner's agent group gets global CLI access
-    updateContainerConfigScalars(ag.id, { cli_scope: 'global' });
+    await updateContainerConfigScalars(ag.id, { cli_scope: 'global' });
   } else if (args.role === 'admin') {
     const alreadyAdmin = existingRoles.some((r) => r.role === 'admin' && r.agent_group_id === ag.id);
     if (!alreadyAdmin) {
-      grantRole({
+      await grantRole({
         user_id: userId,
         role: 'admin',
         agent_group_id: ag.id,
@@ -297,7 +331,7 @@ async function main(): Promise<void> {
   // yes/no even for users without a role grant. INSERT OR IGNORE, so this
   // is a no-op when the row already exists (e.g. re-runs, owners whose
   // access already passes via role).
-  addMember({
+  await addMember({
     user_id: userId,
     agent_group_id: ag.id,
     added_by: null,
@@ -306,7 +340,7 @@ async function main(): Promise<void> {
 
   // 3. DM messaging group.
   const platformId = namespacedPlatformId(args.channel, args.platformId);
-  let dmMg = getMessagingGroupByPlatform(args.channel, platformId);
+  let dmMg = await getMessagingGroupByPlatform(args.channel, platformId);
   if (!dmMg) {
     const mgId = generateId('mg');
     // Policy from the channel declaration (DM context); legacy 'strict' for
@@ -314,7 +348,7 @@ async function main(): Promise<void> {
     const unknownSenderPolicy = hasDeclaredChannelDefaults(args.channel)
       ? resolveUnknownSenderPolicy(args.channel, false)
       : 'strict';
-    createMessagingGroup({
+    await createMessagingGroup({
       id: mgId,
       channel_type: args.channel,
       platform_id: platformId,
@@ -323,14 +357,14 @@ async function main(): Promise<void> {
       unknown_sender_policy: unknownSenderPolicy,
       created_at: now,
     });
-    dmMg = getMessagingGroupByPlatform(args.channel, platformId)!;
+    dmMg = (await getMessagingGroupByPlatform(args.channel, platformId))!;
     console.log(`Created messaging group: ${dmMg.id} (${platformId})`);
   } else {
     console.log(`Reusing messaging group: ${dmMg.id} (${platformId})`);
   }
 
   // 4. Wire DM messaging group to the agent.
-  wireIfMissing(dmMg, ag, now, 'dm', args.engagePattern);
+  await wireIfMissing(dmMg, ag, now, 'dm', args.engagePattern);
 
   // 5. Welcome delivery over the CLI socket. Router picks up the line,
   // writes the message into the DM session's inbound.db, and wakes the

@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
 import { getContinuation, setContinuation } from './db/session-state.js';
+import { getSessionRouting } from './db/session-routing.js';
 import { MockProvider } from './providers/mock.js';
 import type { ProviderExchange } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
@@ -33,6 +34,13 @@ function insertMessage(id: string, content: object, opts?: { platformId?: string
 }
 
 describe('poll loop integration', () => {
+  it('defaults only when the legacy session routing table is absent', () => {
+    expect(getSessionRouting()).toEqual({ channel_type: null, platform_id: null, thread_id: null });
+
+    getInboundDb().exec('CREATE VIEW session_routing AS SELECT * FROM missing_routing');
+    expect(() => getSessionRouting()).toThrow(/missing_routing/);
+  });
+
   it('should pick up a message, process it, and write a response', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'What is the meaning of life?' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-1' });
 

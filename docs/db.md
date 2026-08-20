@@ -2,7 +2,7 @@
 
 Orientation for the data model: the three databases, how they fit together, and the invariants that hold across them. For table-level schemas, follow the links below.
 
-- **[db-central.md](db-central.md)** — every table in `data/v2.db` (identity, wiring, approvals, Chat SDK state) plus the migration system.
+- **[db-central.md](db-central.md)** — every central table (identity, wiring, approvals, Chat SDK state), the driver boundary, and the migration system.
 - **[db-session.md](db-session.md)** — the per-session `inbound.db` + `outbound.db` pair, seq parity, and session folder layout.
 
 Related: [architecture.md](architecture.md) for the high-level design; [api-details.md](api-details.md) for inbound/outbound message content shapes; [isolation-model.md](isolation-model.md) for channel-to-agent wiring modes.
@@ -11,15 +11,15 @@ Related: [architecture.md](architecture.md) for the high-level design; [api-deta
 
 ## 1. The three databases
 
-NanoClaw uses **three kinds of SQLite database**, all on the host filesystem:
+NanoClaw uses one backend-neutral central database and two SQLite session mailboxes:
 
 | DB | Location | Writer | Readers | Purpose |
 |----|----------|--------|---------|---------|
-| **Central** | `data/v2.db` | host | host | Identity, permissions, routing, wiring — the admin plane |
+| **Central** | `data/v2.db` by default; configured backend otherwise | host | host | Identity, permissions, routing, wiring — the admin plane |
 | **Session inbound** | `data/v2-sessions/<agent_group_id>/<session_id>/inbound.db` | host | host (sync), container (read-only) | Host → container messages + routing projections |
 | **Session outbound** | `data/v2-sessions/<agent_group_id>/<session_id>/outbound.db` | container | host (poll), container | Container → host messages + processing status |
 
-**Single-writer rule.** Every SQLite file has exactly one writer. Host writes the central DB and every `inbound.db`; container writes only its own `outbound.db`. This eliminates write contention across the Docker/Apple Container mount boundary — SQLite locking across that boundary is unreliable.
+**Single-writer mailbox rule.** Every session SQLite file has exactly one writer. Host writes every `inbound.db`; container writes only its own `outbound.db`. The default SQLite central DB is host-only, while alternate central backends provide their own concurrency controls.
 
 **Everything is a message.** There is no IPC, stdin piping, or file watcher between host and container. The two session DBs are the sole IO surface. Heartbeat is a file `touch(2)` on `.heartbeat`, not a DB write.
 
@@ -31,7 +31,7 @@ NanoClaw uses **three kinds of SQLite database**, all on the host filesystem:
 
 ```
 data/
-  v2.db                                   ← CENTRAL (host ↔ host)
+  v2.db                                   ← default central backend
   v2-sessions/
     <agent_group_id>/
       .claude-shared/                     ← shared Claude state for the agent group
@@ -88,6 +88,7 @@ These rules are enforced by convention in `src/session-manager.ts` and `containe
 5. **Heartbeat out of band.** File `touch` on `.heartbeat`, not a DB write, so liveness doesn't serialize behind other writers.
 6. **Lazy session-DB migrations.** Central DB uses numbered migrations; per-session DBs use `IF NOT EXISTS` + ad-hoc `ALTER TABLE` helpers for older session folders.
 7. **ACL = row existence.** `agent_destinations` membership is itself the permission — no separate `permissions` table.
+8. **Async central boundary.** Host code reaches central state only through `DbDriver`; backend composition is registered once by `src/db/compose.ts`. Session mailbox access remains a separate seam.
 
 ---
 
@@ -109,8 +110,8 @@ These rules are enforced by convention in `src/session-manager.ts` and `containe
 | `unregistered_senders` | central | `src/db/dropped-messages.ts` | ops tooling |
 | `chat_sdk_*` | central | `src/state-sqlite.ts` | Chat SDK bridge |
 | `schema_version` | central | `src/db/migrations/index.ts` | migration runner |
-| `messages_in` | inbound | `src/db/session-db.ts` | `container/agent-runner/src/db/messages-in.ts` |
-| `delivered` | inbound | `src/db/session-db.ts` (`markDelivered`) | container edit/reaction targeting |
+| `messages_in` | inbound | `src/mailbox/sqlite/` | `container/agent-runner/src/mailbox/sqlite/` |
+| `delivered` | inbound | `src/mailbox/sqlite/session-db.ts` (`markDelivered`) | container edit/reaction targeting |
 | `destinations` | inbound | `writeDestinations()` in `src/session-manager.ts` | container routing / ACL |
 | `session_routing` | inbound | `writeSessionRouting()` in `src/session-manager.ts` | container `send_message` defaults |
 | `messages_out` | outbound | `container/agent-runner/src/db/messages-out.ts` | `src/delivery.ts` poll loop |

@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { isCorruptionError, processQuery } from './poll-loop.js';
+import { processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 import type { AgentQuery, ProviderEvent } from './providers/types.js';
 
@@ -296,10 +296,13 @@ describe('mock provider', () => {
     }
 
     const typed = events.filter((e) => e.type !== 'activity');
-    expect(typed.length).toBeGreaterThanOrEqual(2);
+    expect(typed.length).toBeGreaterThanOrEqual(3);
     expect(typed[0].type).toBe('init');
-    expect(typed[1].type).toBe('result');
-    expect((typed[1] as { text: string }).text).toBe('Echo: Hello');
+    // The mock declares emitsMidTurnText, so the turn's text streams as a
+    // text event before the result repeats it.
+    expect(typed[1].type).toBe('text');
+    expect(typed[2].type).toBe('result');
+    expect((typed[2] as { text: string }).text).toBe('Echo: Hello');
   });
 
   it('should handle push() during active query', async () => {
@@ -354,7 +357,7 @@ describe('end-to-end with mock provider', () => {
 
     for await (const event of query.events) {
       if (event.type === 'result' && event.text) {
-        writeMessageOut({
+        await writeMessageOut({
           id: `out-${Date.now()}`,
           in_reply_to: routing.inReplyTo,
           kind: 'chat',
@@ -463,23 +466,6 @@ describe('error result with no <message> envelope', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
     expect(pushes).toHaveLength(1);
     expect(pushes[0]).toContain('was not delivered');
-  });
-});
-
-describe('isCorruptionError', () => {
-  it('matches the Docker Desktop macOS torn-read symptom', () => {
-    expect(isCorruptionError('database disk image is malformed')).toBe(true);
-  });
-
-  it('matches wrapped SQLite corruption codes', () => {
-    expect(isCorruptionError('SqliteError: SQLITE_CORRUPT_VTAB: ...')).toBe(true);
-    expect(isCorruptionError('file is not a database')).toBe(true);
-  });
-
-  it('returns false for unrelated errors', () => {
-    expect(isCorruptionError('database is locked')).toBe(false);
-    expect(isCorruptionError('no such table: messages_in')).toBe(false);
-    expect(isCorruptionError('')).toBe(false);
   });
 });
 

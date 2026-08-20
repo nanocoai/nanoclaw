@@ -26,14 +26,7 @@ describe('inputsFromEnv (docs/skill-engine-seam.md §6)', () => {
   });
 
   it('errors on an uppercase collision instead of silently merging', () => {
-    const md = [
-      '```nc:prompt bot_token',
-      'Token?',
-      '```',
-      '```nc:prompt Bot_Token',
-      'Token again?',
-      '```',
-    ].join('\n');
+    const md = ['```nc:prompt bot_token', 'Token?', '```', '```nc:prompt Bot_Token', 'Token again?', '```'].join('\n');
     expect(() => inputsFromEnv(md, {})).toThrow(/NC_INPUT_BOT_TOKEN/);
   });
 
