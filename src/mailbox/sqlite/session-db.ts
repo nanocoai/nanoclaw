@@ -309,6 +309,10 @@ export function migrateMessagesInTable(db: Database.Database): void {
     // All existing rows are normal messages, so default 0.
     db.prepare('ALTER TABLE messages_in ADD COLUMN on_wake INTEGER NOT NULL DEFAULT 0').run();
   }
+  // Last, because the partial index is over `trigger` — the column has to
+  // exist by now. Unconditional: it postdates the baseline schema, so DBs
+  // created before it have every other column and still no index.
+  db.prepare('CREATE INDEX IF NOT EXISTS idx_messages_in_engaged ON messages_in(seq) WHERE trigger = 1').run();
 }
 
 /**

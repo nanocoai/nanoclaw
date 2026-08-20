@@ -31,7 +31,12 @@ import { findSessionForAgent } from './db/sessions.js';
 import { backfillNewSession, fanInboundMessage } from './modules/cross-session-context/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
-import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
+import {
+  resolveSession,
+  withExistingMailboxSession,
+  writeSessionMessage,
+  writeOutboundDirect,
+} from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
@@ -468,11 +473,10 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  *                      user wants to disambiguate between multiple agents
  *                      wired to one chat, use engage_mode='pattern' with
  *                      the disambiguator as the regex.
- *   'mention-sticky' — platform mention OR an active per-thread session
- *                      already exists for this (agent, mg, thread). The
- *                      session existence IS our subscription state; once
- *                      a thread has engaged us once, follow-ups arrive
- *                      with no mention and should still fire.
+ *   'mention-sticky' — platform mention OR this (agent, mg, thread) has
+ *                      been mentioned before; once a thread has engaged us
+ *                      once, follow-ups arrive with no mention and should
+ *                      still fire.
  */
 async function evaluateEngage(
   agent: MessagingGroupAgent,
@@ -496,11 +500,18 @@ async function evaluateEngage(
       return isMention;
     case 'mention-sticky': {
       if (isMention) return true;
-      // Sticky follow-up: session already exists for this (agent, mg, thread)
-      // — the thread was activated before, keep firing.
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
+      // Sticky follow-up: the thread activated us before, so keep firing. A
+      // session row is not that evidence — one also gets created to hold
+      // ambient chatter under ignored_message_policy='accumulate', and
+      // accumulating context we were never asked about must not be what
+      // subscribes us. Ask the mailbox whether anything in it ever woke us.
       const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
-      return existing !== undefined;
+      if (!existing) return false;
+      const engaged = await withExistingMailboxSession(existing.agent_group_id, existing.id, (mailbox) =>
+        mailbox.hasEngagedMessage(),
+      );
+      return engaged ?? false;
     }
     default:
       // Unrecognized engage_mode (e.g. stale data from a past CLI version,

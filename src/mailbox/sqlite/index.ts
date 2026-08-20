@@ -172,6 +172,19 @@ function getTaskStats(db: Database.Database, seriesId: string): TaskStats {
   };
 }
 
+/**
+ * The rows where the chat itself addressed the agent: a real chat message
+ * that woke it. Excludes ambient context the agent was never asked about
+ * (trigger = 0) and traffic the runtime injected on its own — cross-session
+ * echoes and agent-to-agent messages.
+ *
+ * `idx_messages_in_engaged` covers exactly this set, so a session that has
+ * never engaged answers from an empty index rather than a full scan.
+ */
+const ENGAGED_MESSAGE_WHERE =
+  "kind IN ('chat','chat-sdk') AND trigger = 1 " +
+  "AND (channel_type IS NULL OR channel_type NOT IN ('session-echo', 'agent'))";
+
 export function wrapSqliteInbound(db: Database.Database, nextSequence = () => nextEvenAcross(db)): InboundMailbox {
   return {
     setRouting: (routing) => {
@@ -269,14 +282,12 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
       ).map((row) => ({ ...row, timestamp: sqliteTimestamp(row.timestamp) })),
     getConversationRoot: () => {
       const row = db
-        .prepare(
-          "SELECT timestamp, content FROM messages_in WHERE kind IN ('chat','chat-sdk') " +
-            "AND trigger = 1 AND (channel_type IS NULL OR channel_type NOT IN ('session-echo', 'agent')) " +
-            'ORDER BY seq ASC LIMIT 1',
-        )
+        .prepare(`SELECT timestamp, content FROM messages_in WHERE ${ENGAGED_MESSAGE_WHERE} ORDER BY seq ASC LIMIT 1`)
         .get() as MailboxTimelineMessage | undefined;
       return row && { ...row, timestamp: sqliteTimestamp(row.timestamp) };
     },
+    hasEngagedMessage: () =>
+      db.prepare(`SELECT 1 FROM messages_in WHERE ${ENGAGED_MESSAGE_WHERE} LIMIT 1`).get() !== undefined,
     findTaskBySeriesSlug: (slug) => {
       const pattern = `${slug}-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]`;
       const row = db

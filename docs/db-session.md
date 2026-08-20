@@ -53,6 +53,9 @@ CREATE TABLE messages_in (
   on_wake        INTEGER NOT NULL DEFAULT 0 -- 1 = only deliver on container's first poll
 );
 CREATE INDEX idx_messages_in_series ON messages_in(series_id);
+-- Partial index over the rows that woke the agent. Backs "has this session
+-- ever engaged?", which mention-sticky asks per inbound message.
+CREATE INDEX idx_messages_in_engaged ON messages_in(seq) WHERE trigger = 1;
 ```
 
 Content shapes: see [api-details.md §Session DB Schema Details](api-details.md#session-db-schema-details).
