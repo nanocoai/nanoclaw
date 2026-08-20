@@ -1,6 +1,7 @@
 import fs from 'fs';
 
 import { MEMORY_SESSION_HOOK, memoryContextForSessionStart, type MemorySessionStartSource } from './session-hook.js';
+import { markMemoryLoaded } from './staleness.js';
 
 function readSource(): MemorySessionStartSource | undefined {
   try {
@@ -19,4 +20,8 @@ function readSource(): MemorySessionStartSource | undefined {
 
 const source = readSource();
 const context = source ? memoryContextForSessionStart(source, process.argv[2]) : undefined;
-if (context) console.log(context);
+if (context) {
+  console.log(context);
+  // This copy is now the conversation's baseline; later edits are newer than it.
+  markMemoryLoaded();
+}

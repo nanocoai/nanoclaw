@@ -28,6 +28,7 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
+import { markMemoryLoaded, memoryChangedSince } from './memory/staleness.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
@@ -57,6 +58,12 @@ export interface PollLoopConfig {
   systemContext?: {
     instructions?: string;
   };
+  /**
+   * Where the memory-load marker lives (see memory/staleness.ts). Defaults to
+   * the session dir, which is fixed inside a container; tests point it at a
+   * temp path instead of relying on /workspace existing.
+   */
+  memoryMarker?: string;
   /**
    * Optional stop signal. In production the loop runs until the container
    * dies; tests pass a signal so an abandoned loop actually exits instead of
@@ -217,7 +224,20 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
-    const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+    const formatted = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+
+    // A resumed conversation never reloads memory/, so it can be holding a copy
+    // someone else has since rewritten (see memory/staleness.ts). Name what
+    // moved, in the turn being answered — a standing instruction gets ignored.
+    // Skipped without a continuation (memory is about to load fresh anyway) and
+    // for a prompt the provider parses as a slash command from its first char.
+    const changed =
+      continuation !== undefined && !formatted.startsWith('/')
+        ? memoryChangedSince(config.cwd, config.memoryMarker)
+        : [];
+    const prompt = changed.length
+      ? `<memory_changed>${changed.map((f) => `memory/${f}`).join(', ')} changed since this conversation loaded memory — re-read before answering from it.</memory_changed>\n${formatted}`
+      : formatted;
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
@@ -288,6 +308,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     } finally {
       clearCurrentInReplyTo();
       config.signal?.removeEventListener('abort', abortActiveQuery);
+      // Re-stamp after the turn, not before: whatever the agent just read or
+      // wrote is in its context now, so the next turn reports only what changed
+      // afterwards — never the agent's own edits back at it.
+      markMemoryLoaded(config.memoryMarker);
     }
 
     // Ensure completed even if processQuery ended without a result event
