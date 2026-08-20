@@ -32,6 +32,14 @@ export default defineConfig({
       // import from `bun:test` and only run under Bun (see vitest.config.ts).
       '.claude/skills/add-atomic-chat-tool/atomic-chat-registration.test.ts',
       '.claude/skills/add-ollama-tool/ollama-registration.test.ts',
+      // Skill payload destined for container/agent-runner/src/mnemon/, whose
+      // tests import from `bun:test` and only run under Bun.
+      '.claude/skills/add-mnemon/mnemon-setup.test.ts',
+      '.claude/skills/add-mnemon/mnemon-startup.test.ts',
+      // Guard for the same skill's host-side reach-ins. It imports host modules
+      // by relative path (`./container-runner.js`), which only resolve from the
+      // `src/` copy the applier makes — where the main suite then guards it.
+      '.claude/skills/add-mnemon/mnemon-install.test.ts',
     ],
   },
 });
