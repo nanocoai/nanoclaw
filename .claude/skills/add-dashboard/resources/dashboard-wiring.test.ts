@@ -19,6 +19,13 @@
  * the three together cover deletion, misplacement, drift, and behavior — for
  * a true code edit, with no registry required.
  *
+ * Startup is the skill's only edit to core: teardown rides the host's
+ * `onHostShutdown` registry from inside dashboard-pusher.ts, so it is a
+ * behavior test in dashboard-pusher.test.ts rather than an assertion here.
+ *
+ * The second describe guards the pusher's two read boundaries, which no
+ * behavior test can see on the default all-SQLite composition.
+ *
  * Ships with the skill; apply copies it to src/.
  */
 import { describe, it, expect } from 'vitest';
@@ -29,6 +36,34 @@ import ts from 'typescript';
 const indexPath = path.resolve(process.cwd(), 'src/index.ts');
 const source = fs.readFileSync(indexPath, 'utf8');
 const sf = ts.createSourceFile('index.ts', source, ts.ScriptTarget.Latest, true);
+
+const pusherPath = path.resolve(process.cwd(), 'src/dashboard-pusher.ts');
+const pusherSf = ts.createSourceFile(
+  'dashboard-pusher.ts',
+  fs.readFileSync(pusherPath, 'utf8'),
+  ts.ScriptTarget.Latest,
+  true,
+);
+
+/** Module specifiers the pusher imports — code, so comments can't fake it. */
+function pusherImports(): string[] {
+  const specifiers: string[] = [];
+  pusherSf.forEachChild((n) => {
+    if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier)) specifiers.push(n.moduleSpecifier.text);
+  });
+  return specifiers;
+}
+
+/** Every string/template literal in the pusher — the SQL and paths it runs. */
+function pusherLiterals(): string[] {
+  const literals: string[] = [];
+  const walk = (node: ts.Node): void => {
+    if (ts.isStringLiteralLike(node) || ts.isTemplateLiteralToken(node)) literals.push(node.text);
+    node.forEachChild(walk);
+  };
+  pusherSf.forEachChild(walk);
+  return literals;
+}
 
 function mainBody(): ts.NodeArray<ts.Statement> {
   let body: ts.NodeArray<ts.Statement> | undefined;
@@ -70,12 +105,46 @@ describe('add-dashboard wiring in src/index.ts', () => {
     const migrateIdx = stmts.findIndex((s) => s.getText(sf).includes('runMigrations('));
     const runningIdx = stmts.findIndex((s) => s.getText(sf).includes("log.info('NanoClaw running')"));
 
-    expect(importIdx, "dynamic import('./dashboard-pusher.js') must be a statement of main()").toBeGreaterThanOrEqual(0);
+    expect(importIdx, "dynamic import('./dashboard-pusher.js') must be a statement of main()").toBeGreaterThanOrEqual(
+      0,
+    );
     expect(callIdx, 'await startDashboard() must be a statement of main()').toBeGreaterThanOrEqual(0);
     expect(migrateIdx, 'runMigrations() anchor not found').toBeGreaterThanOrEqual(0);
     expect(runningIdx, 'boot-complete log anchor not found').toBeGreaterThanOrEqual(0);
     expect(importIdx, 'the dynamic import must come after DB init').toBeGreaterThan(migrateIdx);
     expect(callIdx, 'the call must come after its import (colocated)').toBeGreaterThan(importIdx);
     expect(callIdx, 'startDashboard() must run before the boot-complete log').toBeLessThan(runningIdx);
+  });
+});
+
+/**
+ * The pusher's two read boundaries. Both are invisible to a behavior test on
+ * the default composition — SQLite central DB, SQLite session mailboxes — so
+ * they are asserted on the source: a regression here would keep every test
+ * green locally and only fail on someone else's backend.
+ */
+describe('add-dashboard read boundaries in src/dashboard-pusher.ts', () => {
+  it('never opens session storage directly — per-session reads go through the mailbox seam', () => {
+    const imports = pusherImports();
+    expect(imports, 'session messages must be read through the seam, not a better-sqlite3 handle').not.toContain(
+      'better-sqlite3',
+    );
+    expect(imports, 'the pusher reads sessions via session-manager (withExistingMailboxSession)').toContain(
+      './session-manager.js',
+    );
+    for (const literal of pusherLiterals()) {
+      expect(literal, 'the mailbox owns its storage layout — no session DB file paths here').not.toMatch(
+        /(in|out)bound\.db/,
+      );
+    }
+  });
+
+  it('keeps its central-DB queries dialect-agnostic', () => {
+    // getDb() fronts a driver that is not necessarily SQLite (src/db/driver.ts).
+    for (const literal of pusherLiterals()) {
+      for (const construct of ['NULLS LAST', 'NULLS FIRST', "datetime('now')", 'strftime(']) {
+        expect(literal, `${construct} is backend-specific; keep it out of getDb() queries`).not.toContain(construct);
+      }
+    }
   });
 });

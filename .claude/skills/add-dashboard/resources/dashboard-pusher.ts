@@ -1,11 +1,18 @@
 /**
  * Dashboard pusher — collects NanoClaw state and POSTs a JSON
  * snapshot to the dashboard's /api/ingest endpoint every interval.
+ *
+ * Two read boundaries, both deliberate:
+ * - Central state goes through the async `DbDriver` (`getDb()`), so every
+ *   hand-written query here stays dialect-agnostic — no SQLite-only syntax.
+ * - Per-session messages go through the host mailbox seam
+ *   (`withExistingMailboxSession`), the same read path `ncl sessions history`
+ *   uses. Session storage is not necessarily SQLite files on disk, so this
+ *   file never opens `inbound.db` / `outbound.db` itself.
  */
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
-import Database from 'better-sqlite3';
 
 import { getAllAgentGroups, getAgentGroup } from './db/agent-groups.js';
 import { getSessionsByAgentGroup } from './db/sessions.js';
@@ -20,6 +27,8 @@ import { DATA_DIR, ASSISTANT_NAME } from './config.js';
 import { getDb } from './db/connection.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { log } from './log.js';
+import { onHostShutdown } from './host-lifecycle.js';
+import { withExistingMailboxSession } from './session-manager.js';
 import { readEnvFile } from './env.js';
 
 interface PusherConfig {
@@ -31,6 +40,7 @@ interface PusherConfig {
 let timer: ReturnType<typeof setInterval> | null = null;
 let logTimer: ReturnType<typeof setInterval> | null = null;
 let logOffset = 0;
+let serverStarted = false;
 
 export function startDashboardPusher(config: PusherConfig): void {
   const interval = config.intervalMs || 60000;
@@ -59,7 +69,7 @@ export function stopDashboardPusher(): void {
 }
 
 /**
- * Skill entry point — the single call wired into the host boot sequence.
+ * Skill entry point — the single startup call wired into the host boot sequence.
  *
  * All of the dashboard's startup logic lives here, in the skill's own file,
  * so the integration point in src/index.ts is just `await startDashboard()`.
@@ -75,8 +85,37 @@ export async function startDashboard(): Promise<void> {
   }
   const { startDashboard: startServer } = await import('@nanoco/nanoclaw-dashboard');
   startServer({ port, secret });
+  serverStarted = true;
+  // @nanoco/nanoclaw-dashboard@0.3.0 listens on 0.0.0.0 and its config accepts
+  // only { port, secret } — there is no bind option to narrow it to loopback.
+  // The snapshot carries full message content, so say the exposure out loud
+  // once per boot instead of letting the operator discover it from `ss -lptn`.
+  log.warn('Dashboard listening on all interfaces (0.0.0.0) — DASHBOARD_SECRET is the only access control', { port });
   startDashboardPusher({ port, secret, intervalMs: 60000 });
 }
+
+/**
+ * Teardown counterpart of startDashboard(), driven by the host's shutdown
+ * registry (see the onHostShutdown call below). Stops the two pusher timers
+ * and closes the dashboard's listening socket, so nothing pushes into a closed
+ * DB driver and the port is released before the process exits. Safe to call
+ * when startDashboard() never ran, and safe to call twice.
+ */
+export async function stopDashboard(): Promise<void> {
+  stopDashboardPusher();
+  if (!serverStarted) return;
+  serverStarted = false;
+  const { stopDashboard: stopServer } = await import('@nanoco/nanoclaw-dashboard');
+  await stopServer();
+  log.info('Dashboard stopped');
+}
+
+// Teardown rides the host's own lifecycle registry, registered here at import
+// time and inert until shutdown — so the integration point in src/index.ts
+// stays a single startup call with nothing to remember in shutdown().
+// stopHostModules() runs before the delivery polls stop and before closeDb(),
+// so the push timer can never fire into a closed driver.
+onHostShutdown(() => stopDashboard());
 
 /** Fire-and-forget POST to the dashboard. */
 function postJson(config: PusherConfig, urlPath: string, data: unknown): void {
@@ -156,6 +195,9 @@ async function collectSnapshot(): Promise<Record<string, unknown>> {
     collectTokens(),
     collectContextWindows(),
   ]);
+  // The activity chart and the Messages page read the same per-session
+  // mailboxes, so they share one pass over the sessions we just listed.
+  const { activity, messages } = await collectSessionMailboxes(sessions);
   return {
     timestamp: new Date().toISOString(),
     assistant_name: ASSISTANT_NAME,
@@ -166,8 +208,8 @@ async function collectSnapshot(): Promise<Record<string, unknown>> {
     users,
     tokens,
     context_windows: contextWindows,
-    activity: collectActivity(),
-    messages: collectMessages(),
+    activity,
+    messages,
   };
 }
 
@@ -221,15 +263,30 @@ async function collectAgentGroups() {
   );
 }
 
-async function collectSessions() {
-  return getDb().all<Record<string, unknown>>(
+interface SessionRow extends Record<string, unknown> {
+  id: string;
+  agent_group_id: string;
+  last_active: string | null;
+}
+
+async function collectSessions(): Promise<SessionRow[]> {
+  const rows = await getDb().all<SessionRow>(
     `SELECT s.*, ag.name as agent_group_name, ag.folder as agent_group_folder,
               mg.channel_type, mg.platform_id, mg.name as messaging_group_name
        FROM sessions s
        LEFT JOIN agent_groups ag ON ag.id = s.agent_group_id
-       LEFT JOIN messaging_groups mg ON mg.id = s.messaging_group_id
-       ORDER BY s.last_active DESC NULLS LAST`,
+       LEFT JOIN messaging_groups mg ON mg.id = s.messaging_group_id`,
   );
+  // Most-recently-active first, sessions that never ran last. Sorted here, not
+  // in SQL: `ORDER BY ... DESC NULLS LAST` is SQLite/Postgres-only syntax, and
+  // getDb() fronts a dialect-agnostic driver (src/db/driver.ts). ISO-8601 UTC
+  // timestamps compare correctly as strings.
+  return [...rows].sort((a, b) => {
+    if (a.last_active === b.last_active) return a.id.localeCompare(b.id);
+    if (!a.last_active) return 1;
+    if (!b.last_active) return -1;
+    return a.last_active < b.last_active ? 1 : -1;
+  });
 }
 
 async function collectChannels() {
@@ -522,106 +579,89 @@ function localHourKey(d: Date): string {
     .replace(' ', 'T');
 }
 
-function collectActivity() {
-  const now = Date.now();
-  const buckets: Record<string, { inbound: number; outbound: number }> = {};
-
-  for (let i = 0; i < 24; i++) {
-    const key = localHourKey(new Date(now - i * 3600000));
-    buckets[key] = { inbound: 0, outbound: 0 };
-  }
-
-  const sessionsDir = path.join(DATA_DIR, 'v2-sessions');
-  if (!fs.existsSync(sessionsDir)) return toBucketArray(buckets);
-
-  const cutoff = new Date(now - 86400000).toISOString();
-
-  try {
-    for (const agDir of fs.readdirSync(sessionsDir).filter((d) => d.startsWith('ag-'))) {
-      const agPath = path.join(sessionsDir, agDir);
-      for (const sessDir of fs.readdirSync(agPath).filter((d) => d.startsWith('sess-'))) {
-        for (const [dbName, direction] of [
-          ['outbound.db', 'outbound'],
-          ['inbound.db', 'inbound'],
-        ] as const) {
-          const dbPath = path.join(agPath, sessDir, dbName);
-          if (!fs.existsSync(dbPath)) continue;
-          try {
-            const db = new Database(dbPath, { readonly: true });
-            const table = direction === 'outbound' ? 'messages_out' : 'messages_in';
-            const rows = db.prepare(`SELECT timestamp FROM ${table} WHERE timestamp > ?`).all(cutoff) as {
-              timestamp: string;
-            }[];
-            for (const row of rows) {
-              const key = localHourKey(new Date(row.timestamp));
-              if (buckets[key]) buckets[key][direction]++;
-            }
-            db.close();
-          } catch {
-            /* skip */
-          }
-        }
-      }
-    }
-  } catch {
-    /* skip */
-  }
-
-  return toBucketArray(buckets);
-}
-
 function toBucketArray(buckets: Record<string, { inbound: number; outbound: number }>) {
   return Object.entries(buckets)
     .map(([hour, counts]) => ({ hour, ...counts }))
     .sort((a, b) => a.hour.localeCompare(b.hour));
 }
 
-function collectMessages() {
-  const sessionsDir = path.join(DATA_DIR, 'v2-sessions');
-  if (!fs.existsSync(sessionsDir)) return [];
+/** Newest messages read per session per side. Caps both consumers below. */
+const MAILBOX_READ_LIMIT = 500;
+/** What the Messages page shows per session per side. */
+const MESSAGES_PAGE_LIMIT = 50;
 
-  const results: Array<{ agentGroupId: string; sessionId: string; inbound: unknown[]; outbound: unknown[] }> = [];
-  const limit = 50;
+interface MailboxMessage {
+  timestamp: string;
+  kind: string;
+  content: string;
+}
 
-  try {
-    for (const agDir of fs.readdirSync(sessionsDir).filter((d) => d.startsWith('ag-'))) {
-      const agPath = path.join(sessionsDir, agDir);
-      for (const sessDir of fs.readdirSync(agPath).filter((d) => d.startsWith('sess-'))) {
-        const inbound: unknown[] = [];
-        const outbound: unknown[] = [];
+/**
+ * Activity buckets (last 24 local hours) + the Messages page, in one pass.
+ *
+ * Reads through the host mailbox seam — `withExistingMailboxSession`, the same
+ * read path `ncl sessions history` uses — so this works on whatever mailbox
+ * implementation is composed, not just SQLite files under
+ * `data/v2-sessions/`. Sessions come from the central `sessions` table rather
+ * than a directory scan, and read-only callers never provision storage: a
+ * session with no mailbox yet resolves to `undefined` and is skipped.
+ *
+ * The seam serves the newest `MAILBOX_READ_LIMIT` messages per side, which is
+ * exactly the {timestamp, kind, content} triple the dashboard renders. A
+ * session with more than that inside 24h contributes only its newest
+ * MAILBOX_READ_LIMIT to the chart.
+ */
+async function collectSessionMailboxes(sessions: SessionRow[]): Promise<{
+  activity: Array<{ hour: string; inbound: number; outbound: number }>;
+  messages: Array<{
+    agentGroupId: string;
+    sessionId: string;
+    inbound: MailboxMessage[];
+    outbound: MailboxMessage[];
+  }>;
+}> {
+  const now = Date.now();
+  const buckets: Record<string, { inbound: number; outbound: number }> = {};
+  for (let i = 0; i < 24; i++) {
+    buckets[localHourKey(new Date(now - i * 3600000))] = { inbound: 0, outbound: 0 };
+  }
+  const cutoff = new Date(now - 86400000).toISOString();
+  const messages: Array<{
+    agentGroupId: string;
+    sessionId: string;
+    inbound: MailboxMessage[];
+    outbound: MailboxMessage[];
+  }> = [];
 
-        const inDbPath = path.join(agPath, sessDir, 'inbound.db');
-        if (fs.existsSync(inDbPath)) {
-          try {
-            const db = new Database(inDbPath, { readonly: true });
-            const rows = db.prepare('SELECT * FROM messages_in ORDER BY seq DESC LIMIT ?').all(limit);
-            inbound.push(...(rows as unknown[]).reverse());
-            db.close();
-          } catch {
-            /* skip */
-          }
-        }
+  for (const session of sessions) {
+    let history: { inbound: MailboxMessage[]; outbound: MailboxMessage[] } | undefined;
+    try {
+      history = await withExistingMailboxSession(session.agent_group_id, session.id, (mailbox) => ({
+        inbound: mailbox.getInboundHistory(MAILBOX_READ_LIMIT),
+        outbound: mailbox.getOutboundHistory(MAILBOX_READ_LIMIT),
+      }));
+    } catch (err) {
+      log.debug('Dashboard mailbox read failed', { sessionId: session.id, err });
+      continue;
+    }
+    if (!history) continue;
 
-        const outDbPath = path.join(agPath, sessDir, 'outbound.db');
-        if (fs.existsSync(outDbPath)) {
-          try {
-            const db = new Database(outDbPath, { readonly: true });
-            const rows = db.prepare('SELECT * FROM messages_out ORDER BY seq DESC LIMIT ?').all(limit);
-            outbound.push(...(rows as unknown[]).reverse());
-            db.close();
-          } catch {
-            /* skip */
-          }
-        }
-
-        if (inbound.length > 0 || outbound.length > 0) {
-          results.push({ agentGroupId: agDir, sessionId: sessDir, inbound, outbound });
-        }
+    for (const direction of ['inbound', 'outbound'] as const) {
+      for (const row of history[direction]) {
+        // Seam timestamps are ISO-8601 UTC, so the cutoff compares as a string.
+        if (!row.timestamp || row.timestamp <= cutoff) continue;
+        const key = localHourKey(new Date(row.timestamp));
+        if (buckets[key]) buckets[key][direction]++;
       }
     }
-  } catch {
-    /* skip */
+
+    // The seam returns newest-first; the Messages page reads chronologically.
+    const inbound = [...history.inbound].reverse().slice(-MESSAGES_PAGE_LIMIT);
+    const outbound = [...history.outbound].reverse().slice(-MESSAGES_PAGE_LIMIT);
+    if (inbound.length > 0 || outbound.length > 0) {
+      messages.push({ agentGroupId: session.agent_group_id, sessionId: session.id, inbound, outbound });
+    }
   }
 
-  return results;
+  return { activity: toBucketArray(buckets), messages };
 }
