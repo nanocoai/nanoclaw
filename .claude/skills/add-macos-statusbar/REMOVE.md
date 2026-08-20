@@ -4,16 +4,20 @@ Every step is idempotent — safe to re-run.
 
 ## 1. Unload the launchd service
 
+Compute the install slug to find the correct plist:
+
 ```bash
-launchctl bootout gui/$(id -u)/com.nanoclaw.statusbar 2>/dev/null \
-  || launchctl unload ~/Library/LaunchAgents/com.nanoclaw.statusbar.plist 2>/dev/null \
+INSTALL_SLUG=$(echo -n "$(pwd)" | shasum | cut -c1-8)
+launchctl bootout gui/$(id -u)/com.nanoclaw-v2-${INSTALL_SLUG}.statusbar 2>/dev/null \
+  || launchctl unload ~/Library/LaunchAgents/com.nanoclaw-v2-${INSTALL_SLUG}.statusbar.plist 2>/dev/null \
   || true
 ```
 
 ## 2. Delete the produced files
 
 ```bash
-rm -f ~/Library/LaunchAgents/com.nanoclaw.statusbar.plist \
+INSTALL_SLUG=$(echo -n "$(pwd)" | shasum | cut -c1-8)
+rm -f ~/Library/LaunchAgents/com.nanoclaw-v2-${INSTALL_SLUG}.statusbar.plist \
       dist/statusbar \
       logs/statusbar.log \
       logs/statusbar.error.log

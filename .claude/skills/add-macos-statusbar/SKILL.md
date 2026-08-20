@@ -37,10 +37,14 @@ If not found, tell the user:
 ### Check if already installed
 
 ```bash
-launchctl list | grep com.nanoclaw.statusbar
+launchctl list | grep com.nanoclaw-v2
 ```
 
-If it returns a PID (not `-`), tell the user it's already installed and skip to Phase 3 (Verify).
+If it returns entries with PIDs (not `-`), tell the user the statusbar is already installed and skip to Phase 3 (Verify).
+
+#### About install slugs
+
+Each NanoClaw install gets a unique identifier (the "install slug") derived from the project root: `sha1(projectRoot)[:8]` in hex. This ensures multiple installs on the same Mac don't conflict. The statusbar service is named `com.nanoclaw-v2-{slug}.statusbar`, and the launchd plist is `com.nanoclaw-v2-{slug}.statusbar.plist`. The Swift binary computes this slug automatically at runtime.
 
 ## Phase 2: Compile and Install
 
@@ -63,23 +67,28 @@ xattr -cr dist/statusbar
 
 ### Create the launchd plist
 
-Determine the absolute project root and home directory:
+First, compute the install slug (same way the Swift binary does it):
 
 ```bash
-pwd
-echo $HOME
+INSTALL_SLUG=$(echo -n "$(pwd)" | shasum | cut -c1-8)
 ```
 
-Create `~/Library/LaunchAgents/com.nanoclaw.statusbar.plist`, substituting the actual values
-for `{PROJECT_ROOT}` and `{HOME}`:
+Then create the plist file. Substitute the actual values for `{PROJECT_ROOT}` and `{HOME}`:
 
-```xml
+```bash
+PROJECT_ROOT=$(pwd)
+HOME=$HOME
+INSTALL_SLUG=$(echo -n "$PROJECT_ROOT" | shasum | cut -c1-8)
+
+mkdir -p ~/Library/LaunchAgents
+
+cat > ~/Library/LaunchAgents/com.nanoclaw-v2-${INSTALL_SLUG}.statusbar.plist <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.nanoclaw.statusbar</string>
+    <string>com.nanoclaw-v2-{INSTALL_SLUG}.statusbar</string>
     <key>ProgramArguments</key>
     <array>
         <string>{PROJECT_ROOT}/dist/statusbar</string>
@@ -99,18 +108,23 @@ for `{PROJECT_ROOT}` and `{HOME}`:
     <string>{PROJECT_ROOT}/logs/statusbar.error.log</string>
 </dict>
 </plist>
+EOF
 ```
+
+**Note:** Replace `{INSTALL_SLUG}`, `{PROJECT_ROOT}`, and `{HOME}` with the actual values from the commands above.
 
 ### Load the service
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.statusbar.plist
+INSTALL_SLUG=$(echo -n "$(pwd)" | shasum | cut -c1-8)
+launchctl load ~/Library/LaunchAgents/com.nanoclaw-v2-${INSTALL_SLUG}.statusbar.plist
 ```
 
 ## Phase 3: Verify
 
 ```bash
-launchctl list | grep com.nanoclaw.statusbar
+INSTALL_SLUG=$(echo -n "$(pwd)" | shasum | cut -c1-8)
+launchctl list | grep com.nanoclaw-v2-${INSTALL_SLUG}.statusbar
 ```
 
 The first column should show a PID (not `-`).

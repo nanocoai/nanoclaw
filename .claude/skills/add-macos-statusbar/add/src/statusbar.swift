@@ -1,11 +1,10 @@
 import AppKit
+import Foundation
 
 class StatusBarController: NSObject {
     private var statusItem: NSStatusItem!
     private var isRunning = false
     private var timer: Timer?
-
-    private let plistPath = "\(NSHomeDirectory())/Library/LaunchAgents/com.nanoclaw.plist"
 
     /// Derive the NanoClaw project root from the binary location.
     /// The binary is compiled to {project}/dist/statusbar, so the parent of
@@ -14,6 +13,38 @@ class StatusBarController: NSObject {
         let binary = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
         return binary.deletingLastPathComponent().deletingLastPathComponent().path
     }()
+
+    /// Compute the install slug (sha1(projectRoot)[:8]) to make service labels unique per install.
+    /// Uses `echo -n <projectRoot> | shasum` to compute the hash.
+    private static let installSlug: String = {
+        let task = Process()
+        task.launchPath = "/bin/sh"
+        task.arguments = ["-c", "echo -n '\(projectRoot.replacingOccurrences(of: "'", with: "'\\''"))' | shasum | cut -c1-8"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = Pipe()
+        do {
+            try task.run()
+            task.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "default"
+            return output.isEmpty ? "default" : output
+        } catch {
+            return "default"
+        }
+    }()
+
+    /// Main NanoClaw service label: com.nanoclaw-v2-{slug}
+    private static let mainServiceLabel: String = "com.nanoclaw-v2-\(installSlug)"
+
+    /// Statusbar service label: com.nanoclaw-v2-{slug}.statusbar
+    private static let statusbarLabel: String = "com.nanoclaw-v2-\(installSlug).statusbar"
+
+    /// Plist path for the statusbar service
+    private let statusbarPlistPath: String = "\(NSHomeDirectory())/Library/LaunchAgents/com.nanoclaw-v2-\(StatusBarController.installSlug).statusbar.plist"
+
+    /// Plist path for the main NanoClaw service
+    private let mainPlistPath: String = "\(NSHomeDirectory())/Library/LaunchAgents/com.nanoclaw-v2-\(StatusBarController.installSlug).plist"
 
     override init() {
         super.init()
@@ -47,7 +78,7 @@ class StatusBarController: NSObject {
     private func checkRunning() -> Bool {
         let task = Process()
         task.launchPath = "/bin/launchctl"
-        task.arguments = ["list", "com.nanoclaw"]
+        task.arguments = ["list", StatusBarController.mainServiceLabel]
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = Pipe()
@@ -100,18 +131,18 @@ class StatusBarController: NSObject {
     }
 
     @objc private func startService() {
-        run("/bin/launchctl", ["load", plistPath])
+        run("/bin/launchctl", ["load", mainPlistPath])
         refresh(after: 2)
     }
 
     @objc private func stopService() {
-        run("/bin/launchctl", ["unload", plistPath])
+        run("/bin/launchctl", ["unload", mainPlistPath])
         refresh(after: 2)
     }
 
     @objc private func restartService() {
         let uid = getuid()
-        run("/bin/launchctl", ["kickstart", "-k", "gui/\(uid)/com.nanoclaw"])
+        run("/bin/launchctl", ["kickstart", "-k", "gui/\(uid)/\(StatusBarController.mainServiceLabel)"])
         refresh(after: 3)
     }
 
