@@ -6,6 +6,7 @@ Before removing anything, inspect per-group image pins. Standard NanoClaw derive
 
 ```bash
 if [ -f data/v2.db ]; then
+  project_root="$(git rev-parse --show-toplevel)"
   source setup/lib/install-slug.sh
   image_base="$(container_image_base)"
   foreign=0
@@ -17,7 +18,7 @@ if [ -f data/v2.db ]; then
     elif [ "$package_count" -eq 0 ]; then
       echo "Derived image cannot be rebuilt: $group_id has no configured packages" >&2
       foreign=1
-    elif ! ncl groups get --id "$group_id" >/dev/null; then
+    elif ! "$project_root/bin/ncl" groups get --id "$group_id" >/dev/null; then
       echo "Cannot reach NanoClaw through ncl for derived image: $group_id" >&2
       foreign=1
     fi
@@ -76,6 +77,7 @@ docker run --rm --entrypoint sh "$image" -c \
   'if command -v anydoc; then echo "AnyDoc is still present" >&2; exit 1; fi'
 
 if [ -f data/v2.db ]; then
+  project_root="$(git rev-parse --show-toplevel)"
   image_base="$(container_image_base)"
   while IFS='|' read -r group_id image_tag; do
     [ -z "$group_id" ] && continue
@@ -83,7 +85,7 @@ if [ -f data/v2.db ]; then
       echo "Foreign image pin appeared during removal: $group_id -> $image_tag" >&2
       exit 1
     fi
-    ncl groups restart --id "$group_id" --rebuild
+    "$project_root/bin/ncl" groups restart --id "$group_id" --rebuild
     docker run --rm --entrypoint sh "$image_tag" -c \
       'if command -v anydoc; then echo "AnyDoc is still present" >&2; exit 1; fi'
   done < <(pnpm exec tsx scripts/q.ts data/v2.db \

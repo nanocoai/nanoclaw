@@ -43,6 +43,7 @@ Install one pinned CLI and one focused container skill. Keep document conversion
 
    ```bash
    if [ -f data/v2.db ]; then
+     project_root="$(git rev-parse --show-toplevel)"
      source setup/lib/install-slug.sh
      image_base="$(container_image_base)"
      foreign=0
@@ -54,7 +55,7 @@ Install one pinned CLI and one focused container skill. Keep document conversion
        elif [ "$package_count" -eq 0 ]; then
          echo "Derived image cannot be rebuilt: $group_id has no configured packages" >&2
          foreign=1
-       elif ! ncl groups get --id "$group_id" >/dev/null; then
+       elif ! "$project_root/bin/ncl" groups get --id "$group_id" >/dev/null; then
          echo "Cannot reach NanoClaw through ncl for derived image: $group_id" >&2
          foreign=1
        fi
@@ -95,12 +96,11 @@ pnpm run build
 ./container/build.sh
 ```
 
-If pnpm rejects the package as too new, stop. Do not bypass the release-age policy.
-
 Rebuild standard per-group images so groups with custom packages inherit the updated shared image:
 
 ```bash
 if [ -f data/v2.db ]; then
+  project_root="$(git rev-parse --show-toplevel)"
   source setup/lib/install-slug.sh
   image_base="$(container_image_base)"
   while IFS='|' read -r group_id image_tag; do
@@ -109,7 +109,7 @@ if [ -f data/v2.db ]; then
       echo "Foreign image pin appeared during install: $group_id -> $image_tag" >&2
       exit 1
     fi
-    ncl groups restart --id "$group_id" --rebuild
+    "$project_root/bin/ncl" groups restart --id "$group_id" --rebuild
   done < <(pnpm exec tsx scripts/q.ts data/v2.db \
     "SELECT agent_group_id, image_tag FROM container_configs WHERE image_tag IS NOT NULL ORDER BY agent_group_id")
 fi
