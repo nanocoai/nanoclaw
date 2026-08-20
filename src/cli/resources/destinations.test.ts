@@ -27,7 +27,8 @@ const TEST_DIR = '/tmp/nanoclaw-test-cli-destinations';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
 import { createSession } from '../../db/sessions.js';
-import { initSessionFolder, inboundDbPath } from '../../session-manager.js';
+import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
+import { initSessionFolder } from '../../session-manager.js';
 import { dispatch } from '../dispatch.js';
 // Side-effect import: registers the `destinations-add` / `destinations-remove` commands.
 import './destinations.js';
@@ -53,25 +54,28 @@ describe('destinations CLI custom ops project to inbound.db (#2465)', () => {
   const SESSION_A = 'sess-source-1';
   const SESSION_B = 'sess-source-2';
 
-  beforeEach(() => {
+  beforeEach(async () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
     fs.mkdirSync(TEST_DIR, { recursive: true });
 
-    const db = initTestDb();
-    runMigrations(db);
+    const db = await initTestDb();
+    await runMigrations(db);
 
-    createAgentGroup({ id: SOURCE, name: 'source', folder: 'source', agent_provider: null, created_at: now() });
-    createAgentGroup({ id: TARGET, name: 'target', folder: 'target', agent_provider: null, created_at: now() });
+    await createAgentGroup({ id: SOURCE, name: 'source', folder: 'source', agent_provider: null, created_at: now() });
+    await createAgentGroup({ id: TARGET, name: 'target', folder: 'target', agent_provider: null, created_at: now() });
 
     // Two active sessions for the source agent — both must receive the
     // projected destination row. Fixing only the "newest" session is a
     // common regression shape, so the second session catches that.
-    for (const sid of [SESSION_A, SESSION_B]) {
-      createSession({
+    for (const [sid, threadId] of [
+      [SESSION_A, 'test:destinations-a'],
+      [SESSION_B, 'test:destinations-b'],
+    ] as const) {
+      await createSession({
         id: sid,
         agent_group_id: SOURCE,
         messaging_group_id: null,
-        thread_id: null,
+        thread_id: threadId,
         agent_provider: null,
         status: 'active',
         container_status: 'stopped',
@@ -82,8 +86,8 @@ describe('destinations CLI custom ops project to inbound.db (#2465)', () => {
     }
   });
 
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 

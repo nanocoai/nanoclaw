@@ -83,6 +83,9 @@ function extractText(event: InboundEvent): string {
  * finalize a plain reject immediately rather than strand the requesting agent.
  */
 export async function armReasonCapture(approval: PendingApproval, session: Session, userId: string): Promise<void> {
+  const expiresAt = new Date(Date.now() + REASON_CAPTURE_WINDOW_MS).toISOString();
+  if (!(await markApprovalAwaitingReason(approval.approval_id, expiresAt))) return;
+
   const dm = userId ? await ensureUserDm(userId) : null;
   const adapter = getDeliveryAdapter();
   if (!dm || !adapter) {
@@ -92,7 +95,7 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
       hasDm: Boolean(dm),
       hasAdapter: Boolean(adapter),
     });
-    await finalizeReject(approval, session, userId);
+    await finalizeReject(approval, session, userId, undefined, 'awaiting_reason');
     return;
   }
 
@@ -103,14 +106,12 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
       approvalId: approval.approval_id,
       err,
     });
-    await finalizeReject(approval, session, userId);
+    await finalizeReject(approval, session, userId, undefined, 'awaiting_reason');
     return;
   }
 
   // Prompt is out — now hold the row and arm capture. Order matters: a reply
   // can't arrive before the prompt is read, so there's no lost-message window.
-  const expiresAt = new Date(Date.now() + REASON_CAPTURE_WINDOW_MS).toISOString();
-  markApprovalAwaitingReason(approval.approval_id, expiresAt);
   awaitingReason.set(dmKey(dm.channel_type, dm.platform_id), { approvalId: approval.approval_id, userId });
   log.info('reject-with-reason: awaiting reason reply', { approvalId: approval.approval_id, userId });
 }
@@ -129,16 +130,16 @@ export async function captureReasonReply(event: InboundEvent): Promise<boolean> 
   // This DM is an armed reason channel — disarm regardless of outcome.
   awaitingReason.delete(dmKey(event.channelType, event.platformId));
 
-  const approval = getPendingApproval(arming.approvalId);
+  const approval = await getPendingApproval(arming.approvalId);
   if (!approval || approval.status !== 'awaiting_reason') {
     // Already finalized (e.g. ghosted by the sweep). The reply is no longer a
     // reason — let it route normally instead of swallowing it.
     return false;
   }
 
-  const session = approval.session_id ? getSession(approval.session_id) : null;
+  const session = approval.session_id ? await getSession(approval.session_id) : null;
   if (!session) {
-    deletePendingApproval(approval.approval_id);
+    await deletePendingApproval(approval.approval_id);
     return true;
   }
 
@@ -160,11 +161,11 @@ registerMessageInterceptor(captureReasonReply);
  * requesting agent always gets its decision. Called once per sweep tick.
  */
 export async function sweepAwaitingReasonRejects(): Promise<void> {
-  const rows = getExpiredAwaitingReasonApprovals(new Date().toISOString());
+  const rows = await getExpiredAwaitingReasonApprovals(new Date().toISOString());
   for (const approval of rows) {
-    const session = approval.session_id ? getSession(approval.session_id) : null;
+    const session = approval.session_id ? await getSession(approval.session_id) : null;
     if (!session) {
-      deletePendingApproval(approval.approval_id);
+      await deletePendingApproval(approval.approval_id);
       continue;
     }
     // Plain reject, unknown resolver — the admin opted in but never typed.

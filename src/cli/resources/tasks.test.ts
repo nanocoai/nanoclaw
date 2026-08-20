@@ -22,12 +22,20 @@ vi.mock('../../container-runner.js', () => ({
 const TEST_DIR = '/tmp/nanoclaw-test-cli-tasks';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
-import { createSession, findSessionByAgentGroup, getSessionsByAgentGroup, taskThreadId } from '../../db/sessions.js';
-import { countDueMessages } from '../../db/session-db.js';
-import { inboundDbPath, initSessionFolder } from '../../session-manager.js';
+import {
+  createSession,
+  findSessionByAgentGroup,
+  getSession,
+  getSessionsByAgentGroup,
+  taskThreadId,
+  updateSession,
+} from '../../db/sessions.js';
+import { initSessionFolder, sessionDir, withMailboxSession } from '../../session-manager.js';
+import { inboundDbPath, outboundDbPath } from '../../mailbox/sqlite/paths.js';
 import { dispatch } from '../dispatch.js';
 import { formatTasksTable } from '../format-tasks.js';
 import type { CallerContext } from '../frame.js';
+import { getAgentMailbox } from '../../mailbox/index.js';
 import './tasks.js';
 import '../commands/index.js'; // registers tasks-help for the help-topic test
 
@@ -35,12 +43,12 @@ function now(): string {
   return new Date().toISOString();
 }
 
-function createGroup(id: string): void {
-  createAgentGroup({ id, name: id, folder: id, agent_provider: null, created_at: now() });
+async function createGroup(id: string): Promise<void> {
+  await createAgentGroup({ id, name: id, folder: id, agent_provider: null, created_at: now() });
 }
 
-function createChatSession(group: string, id: string): void {
-  createSession({
+async function createChatSession(group: string, id: string): Promise<void> {
+  await createSession({
     id,
     agent_group_id: group,
     messaging_group_id: null,
@@ -59,19 +67,19 @@ function agentCtx(group = 'ag-1', session = 'chat-1'): CallerContext {
 }
 
 describe('tasks CLI resource', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
     fs.mkdirSync(TEST_DIR, { recursive: true });
-    const db = initTestDb();
-    runMigrations(db);
-    createGroup('ag-1');
-    createGroup('ag-2');
-    createChatSession('ag-1', 'chat-1');
-    createChatSession('ag-2', 'chat-2');
+    const db = await initTestDb();
+    await runMigrations(db);
+    await createGroup('ag-1');
+    await createGroup('ag-2');
+    await createChatSession('ag-1', 'chat-1');
+    await createChatSession('ag-2', 'chat-2');
   });
 
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 
@@ -92,7 +100,7 @@ describe('tasks CLI resource', () => {
     expect(created.session_id).not.toBe('chat-1');
 
     // The task lands in its own isolated per-series session, not the chat session.
-    const sessions = getSessionsByAgentGroup('ag-1');
+    const sessions = await getSessionsByAgentGroup('ag-1');
     const taskSession = sessions.find((s) => s.id === created.session_id);
     expect(taskSession?.thread_id).toBe(taskThreadId(created.series_id));
 
@@ -129,6 +137,31 @@ describe('tasks CLI resource', () => {
     expect(resp.human).toBeDefined();
     expect(resp.human).toMatch(/SERIES\s+SCHEDULE\s+RUNS\s+FAILED\s+LAST RUN\s+NEXT RUN/);
     expect(resp.human).toContain('briefing-');
+  });
+
+  it('list/get do not provision a missing task mailbox', async () => {
+    const missingSession = 'missing-task-mailbox';
+    await createSession({
+      id: missingSession,
+      agent_group_id: 'ag-1',
+      messaging_group_id: null,
+      thread_id: taskThreadId('missing-series'),
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: now(),
+    });
+    const missingDir = sessionDir('ag-1', missingSession);
+    expect(fs.existsSync(missingDir)).toBe(false);
+
+    const list = await dispatch({ id: 'missing-list', command: 'tasks-list', args: {} }, agentCtx());
+    expect(list.ok).toBe(true);
+    if (list.ok) expect(list.data).toEqual([]);
+
+    const get = await dispatch({ id: 'missing-get', command: 'tasks-get', args: { id: 'missing-series' } }, agentCtx());
+    expect(get.ok).toBe(false);
+    expect(fs.existsSync(missingDir)).toBe(false);
   });
 
   it('recurrence more frequent than 4x/day is refused with the quota warning', async () => {
@@ -233,7 +266,7 @@ describe('tasks CLI resource', () => {
       agentCtx(),
     );
 
-    expect(findSessionByAgentGroup('ag-1')?.id).toBe('chat-1');
+    expect((await findSessionByAgentGroup('ag-1'))?.id).toBe('chat-1');
   });
 
   it('group-scoped agents cannot list tasks from another group session', async () => {
@@ -335,6 +368,48 @@ describe('tasks CLI resource', () => {
     expect(new Date(runRow!.process_after).getTime()).toBeLessThanOrEqual(Date.now());
   });
 
+  it('run snapshots the updated schedule instead of an older in-flight occurrence', async () => {
+    const created = await dispatch(
+      {
+        id: 'c-snapshot',
+        command: 'tasks-create',
+        args: { prompt: 'old', name: 'snapshot', process_after: '2999-01-01T00:00:00Z' },
+      },
+      agentCtx('ag-1', 'chat-1'),
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const { series_id, session_id } = created.data as { series_id: string; session_id: string };
+
+    await dispatch({ id: 'r-old', command: 'tasks-run', args: { id: series_id } }, agentCtx('ag-1', 'chat-1'));
+    await dispatch(
+      { id: 'u-new', command: 'tasks-update', args: { id: series_id, prompt: 'new' } },
+      agentCtx('ag-1', 'chat-1'),
+    );
+
+    const listed = await dispatch({ id: 'l-new', command: 'tasks-list', args: {} }, agentCtx('ag-1', 'chat-1'));
+    expect(listed.ok).toBe(true);
+    if (!listed.ok) return;
+    expect((listed.data as Array<{ row_id: string; prompt: string }>)[0]).toMatchObject({
+      row_id: series_id,
+      prompt: 'new',
+    });
+
+    const rerun = await dispatch(
+      { id: 'r-new', command: 'tasks-run', args: { id: series_id } },
+      agentCtx('ag-1', 'chat-1'),
+    );
+    expect(rerun.ok).toBe(true);
+    if (!rerun.ok) return;
+
+    const db = new Database(inboundDbPath('ag-1', session_id), { readonly: true });
+    const prompt = db
+      .prepare("SELECT json_extract(content, '$.prompt') AS prompt FROM messages_in WHERE id = ?")
+      .get((rerun.data as { row_id: string }).row_id) as { prompt: string };
+    db.close();
+    expect(prompt.prompt).toBe('new');
+  });
+
   it('task object exposes origin_session_id and created_at', async () => {
     const r = await dispatch(
       {
@@ -407,7 +482,7 @@ describe('tasks CLI resource', () => {
     const row = (list.data as Array<Record<string, unknown>>).find((t) => t.series_id === series_id);
     expect(row).toBeDefined();
     expect(row?.runs).toBe(3);
-    expect(row?.last_run).toBe('2026-01-15T09:04:00Z'); // max completed process_after
+    expect(row?.last_run).toBe('2026-01-15T09:04:00.000Z'); // max completed process_after
     expect(String(row?.next_run)).toMatch(/^2026-01-15T09:05:00/); // the live pending occurrence
     expect(row?.schedule).toBe('0 9 * * *');
     expect(row?.log).toBe(`tasks/${series_id}.md`);
@@ -428,9 +503,7 @@ describe('tasks CLI resource', () => {
       if (!created.ok) return;
       const systemId = (created.data as { session_id: string }).session_id;
 
-      const dueDb = new Database(inboundDbPath('ag-1', systemId), { readonly: true });
-      expect(countDueMessages(dueDb)).toBe(1); // host sweep would wake this session
-      dueDb.close();
+      expect(await withMailboxSession('ag-1', systemId, (mailbox) => mailbox.countDueMessages())).toBe(1);
 
       // A far-future task in the same system session is not yet due.
       const future = await dispatch(
@@ -439,9 +512,7 @@ describe('tasks CLI resource', () => {
       );
       expect(future.ok).toBe(true);
 
-      const stillDb = new Database(inboundDbPath('ag-1', systemId), { readonly: true });
-      expect(countDueMessages(stillDb)).toBe(1); // still just the one past task
-      stillDb.close();
+      expect(await withMailboxSession('ag-1', systemId, (mailbox) => mailbox.countDueMessages())).toBe(1);
     });
   });
 
@@ -502,6 +573,81 @@ describe('tasks CLI resource', () => {
       expect(resp.ok).toBe(false);
       if (!resp.ok) expect(resp.error.message).toMatch(/--id is required/);
     });
+  });
+
+  it('hard-delete removes the isolated task mailbox, acknowledgements, and run log', async () => {
+    const created = await dispatch(
+      {
+        id: 'del-c',
+        command: 'tasks-create',
+        args: { name: 'delete-me', prompt: 'x', 'process-after': '2999-01-01T00:00:00Z' },
+      },
+      agentCtx('ag-1', 'chat-1'),
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const { series_id, session_id } = created.data as { series_id: string; session_id: string };
+
+    await dispatch(
+      { id: 'del-log', command: 'tasks-append-log', args: { id: series_id, msg: 'history' } },
+      agentCtx('ag-1', 'chat-1'),
+    );
+    const outbound = new Database(outboundDbPath('ag-1', session_id));
+    outbound
+      .prepare('INSERT INTO processing_ack (message_id, status, status_changed) VALUES (?, ?, ?)')
+      .run(series_id, 'completed', now());
+    outbound.close();
+
+    const mailboxPath = sessionDir('ag-1', session_id);
+    const runLog = `${TEST_DIR}/groups/ag-1/tasks/${series_id}.md`;
+    expect(fs.existsSync(mailboxPath)).toBe(true);
+    expect(fs.existsSync(runLog)).toBe(true);
+
+    // Spent/cancelled task sessions are closed by the sweep but must remain
+    // discoverable for explicit hard-delete cleanup.
+    await updateSession(session_id, { status: 'closed' });
+
+    const deleted = await dispatch(
+      { id: 'del', command: 'tasks-delete', args: { id: series_id } },
+      agentCtx('ag-1', 'chat-1'),
+    );
+    expect(deleted.ok).toBe(true);
+    expect(fs.existsSync(mailboxPath)).toBe(false);
+    expect(fs.existsSync(runLog)).toBe(false);
+    expect(await getSession(session_id)).toBeUndefined();
+  });
+
+  it('keeps an isolated task retryable when mailbox destruction fails', async () => {
+    const created = await dispatch(
+      {
+        id: 'retry-c',
+        command: 'tasks-create',
+        args: { name: 'retry-delete', prompt: 'x', 'process-after': '2999-01-01T00:00:00Z' },
+      },
+      agentCtx('ag-1', 'chat-1'),
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const { series_id, session_id } = created.data as { series_id: string; session_id: string };
+    await updateSession(session_id, { status: 'closed' });
+
+    vi.spyOn(getAgentMailbox(), 'destroy').mockRejectedValueOnce(new Error('mailbox unavailable'));
+    const failed = await dispatch(
+      { id: 'retry-del-1', command: 'tasks-delete', args: { id: series_id } },
+      agentCtx('ag-1', 'chat-1'),
+    );
+    expect(failed.ok).toBe(false);
+    expect(await getSession(session_id)).toBeDefined();
+    await expect(
+      withMailboxSession('ag-1', session_id, (mailbox) => mailbox.getTask(series_id)),
+    ).resolves.toBeDefined();
+
+    const retried = await dispatch(
+      { id: 'retry-del-2', command: 'tasks-delete', args: { id: series_id } },
+      agentCtx('ag-1', 'chat-1'),
+    );
+    expect(retried.ok).toBe(true);
+    expect(await getSession(session_id)).toBeUndefined();
   });
 });
 

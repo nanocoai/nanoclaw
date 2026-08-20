@@ -20,14 +20,14 @@ function now(): string {
   return new Date().toISOString();
 }
 
-beforeEach(() => {
-  const db = initTestDb();
-  runMigrations(db);
+beforeEach(async () => {
+  const db = await initTestDb();
+  await runMigrations(db);
 });
 
 afterEach(async () => {
   await teardownChannelAdapters();
-  closeDb();
+  await closeDb();
 });
 
 async function mountMockAdapter(
@@ -68,8 +68,8 @@ async function mountMockAdapter(
   return { delivered, openDMCalls };
 }
 
-function seedAgentGroup(id: string): void {
-  createAgentGroup({
+async function seedAgentGroup(id: string): Promise<void> {
+  await createAgentGroup({
     id,
     name: id.toUpperCase(),
     folder: id,
@@ -78,43 +78,43 @@ function seedAgentGroup(id: string): void {
   });
 }
 
-function seedUser(id: string, kind: string): void {
-  createUser({ id, kind, display_name: null, created_at: now() });
+async function seedUser(id: string, kind: string): Promise<void> {
+  await createUser({ id, kind, display_name: null, created_at: now() });
 }
 
 describe('pickApprover', () => {
-  beforeEach(() => {
-    seedAgentGroup('ag-1');
-    seedAgentGroup('ag-2');
+  beforeEach(async () => {
+    await seedAgentGroup('ag-1');
+    await seedAgentGroup('ag-2');
   });
 
-  it('prefers scoped admins, then globals, then owners — deduplicated', () => {
-    seedUser('u-owner', 'telegram');
-    seedUser('u-ga', 'telegram');
-    seedUser('u-sa', 'telegram');
-    grantRole({ user_id: 'u-owner', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now() });
-    grantRole({ user_id: 'u-ga', role: 'admin', agent_group_id: null, granted_by: null, granted_at: now() });
-    grantRole({ user_id: 'u-sa', role: 'admin', agent_group_id: 'ag-1', granted_by: null, granted_at: now() });
+  it('prefers scoped admins, then globals, then owners — deduplicated', async () => {
+    await seedUser('u-owner', 'telegram');
+    await seedUser('u-ga', 'telegram');
+    await seedUser('u-sa', 'telegram');
+    await grantRole({ user_id: 'u-owner', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now() });
+    await grantRole({ user_id: 'u-ga', role: 'admin', agent_group_id: null, granted_by: null, granted_at: now() });
+    await grantRole({ user_id: 'u-sa', role: 'admin', agent_group_id: 'ag-1', granted_by: null, granted_at: now() });
 
-    expect(pickApprover('ag-1')).toEqual(['u-sa', 'u-ga', 'u-owner']);
-    expect(pickApprover('ag-2')).toEqual(['u-ga', 'u-owner']);
-    expect(pickApprover(null)).toEqual(['u-ga', 'u-owner']);
+    expect(await pickApprover('ag-1')).toEqual(['u-sa', 'u-ga', 'u-owner']);
+    expect(await pickApprover('ag-2')).toEqual(['u-ga', 'u-owner']);
+    expect(await pickApprover(null)).toEqual(['u-ga', 'u-owner']);
   });
 
-  it('returns empty list when nobody is privileged', () => {
-    expect(pickApprover('ag-1')).toEqual([]);
+  it('returns empty list when nobody is privileged', async () => {
+    expect(await pickApprover('ag-1')).toEqual([]);
   });
 });
 
 describe('pickApprovalDelivery', () => {
-  beforeEach(() => {
-    seedAgentGroup('ag-1');
+  beforeEach(async () => {
+    await seedAgentGroup('ag-1');
   });
 
   it('returns the first reachable approver', async () => {
     await mountMockAdapter('telegram');
-    seedUser('telegram:111', 'telegram');
-    seedUser('telegram:222', 'telegram');
+    await seedUser('telegram:111', 'telegram');
+    await seedUser('telegram:222', 'telegram');
 
     const result = await pickApprovalDelivery(['telegram:111', 'telegram:222'], 'telegram');
     expect(result?.userId).toBe('telegram:111');
@@ -124,8 +124,8 @@ describe('pickApprovalDelivery', () => {
   it('prefers same-channel-kind approver on tie-break', async () => {
     await mountMockAdapter('telegram');
     await mountMockAdapter('discord', async (h) => `dm-${h}`);
-    seedUser('telegram:111', 'telegram');
-    seedUser('discord:222', 'discord');
+    await seedUser('telegram:111', 'telegram');
+    await seedUser('discord:222', 'discord');
 
     const result = await pickApprovalDelivery(['telegram:111', 'discord:222'], 'discord');
     expect(result?.userId).toBe('discord:222');
@@ -133,14 +133,14 @@ describe('pickApprovalDelivery', () => {
 
   it('falls through to any reachable approver when none match origin', async () => {
     await mountMockAdapter('telegram');
-    seedUser('telegram:111', 'telegram');
+    await seedUser('telegram:111', 'telegram');
 
     const result = await pickApprovalDelivery(['telegram:111'], 'discord');
     expect(result?.userId).toBe('telegram:111');
   });
 
   it('returns null when nobody is reachable', async () => {
-    seedUser('telegram:111', 'telegram');
+    await seedUser('telegram:111', 'telegram');
     expect(await pickApprovalDelivery(['telegram:111'], 'telegram')).toBeNull();
   });
 });

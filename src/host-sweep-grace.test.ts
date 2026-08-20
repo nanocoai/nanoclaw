@@ -12,6 +12,7 @@
  * (`if (alive && outDb && !justWoke)`) is removed.
  */
 import fs from 'fs';
+import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Override DATA_DIR for tests
@@ -22,6 +23,7 @@ vi.mock('./config.js', async () => {
 
 // Mock container runner to prevent actual Docker spawning
 vi.mock('./container-runner.js', () => ({
+  getContainerStartedAtMs: vi.fn(() => Date.now()),
   isContainerRunning: vi.fn().mockReturnValue(false),
   wakeContainer: vi.fn().mockResolvedValue(true),
   killContainer: vi.fn(),
@@ -31,7 +33,10 @@ import { initTestDb, closeDb, runMigrations, createAgentGroup } from './db/index
 import { createSession } from './db/sessions.js';
 import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
-import { initSessionFolder, openOutboundDbRw, writeSessionMessage } from './session-manager.js';
+import { log } from './log.js';
+import { getAgentMailbox } from './mailbox/index.js';
+import { outboundDbPath } from './mailbox/sqlite/paths.js';
+import { initSessionFolder, writeSessionMessage } from './session-manager.js';
 
 const TEST_DIR = '/tmp/nanoclaw-test-host-sweep-grace';
 const AG = 'ag-test';
@@ -45,16 +50,12 @@ function now(): string {
 }
 
 function seedStaleClaim(messageId: string, ageMs: number): void {
-  const db = openOutboundDbRw(AG, SESS);
-  try {
-    db.prepare('INSERT INTO processing_ack (message_id, status, status_changed) VALUES (?, ?, ?)').run(
-      messageId,
-      'processing',
-      new Date(Date.now() - ageMs).toISOString(),
-    );
-  } finally {
-    db.close();
-  }
+  const db = new Database(outboundDbPath(AG, SESS));
+  db.prepare("INSERT INTO processing_ack (message_id, status, status_changed) VALUES (?, 'processing', ?)").run(
+    messageId,
+    new Date(Date.now() - ageMs).toISOString(),
+  );
+  db.close();
 }
 
 /**
@@ -81,7 +82,7 @@ async function runSweepTick(): Promise<void> {
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.mocked(isContainerRunning).mockReset().mockReturnValue(false);
   vi.mocked(killContainer).mockReset();
   vi.mocked(wakeContainer)
@@ -104,10 +105,10 @@ beforeEach(() => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
 
-  const db = initTestDb();
-  runMigrations(db);
-  createAgentGroup({ id: AG, name: 'Test Agent', folder: 'test-agent', agent_provider: null, created_at: now() });
-  createSession({
+  const db = await initTestDb();
+  await runMigrations(db);
+  await createAgentGroup({ id: AG, name: 'Test Agent', folder: 'test-agent', agent_provider: null, created_at: now() });
+  await createSession({
     id: SESS,
     agent_group_id: AG,
     messaging_group_id: null,
@@ -122,18 +123,53 @@ beforeEach(() => {
 
   // A due message (wakes the container) + a stale claim from a previous crash
   // (would trip claim-stuck if the SLA check ran on the wake tick).
-  writeSessionMessage(AG, SESS, { id: 'm-1', kind: 'chat', timestamp: now(), content: '{"text":"hi"}' });
+  await writeSessionMessage(AG, SESS, { id: 'm-1', kind: 'chat', timestamp: now(), content: '{"text":"hi"}' });
   seedStaleClaim('m-1', 2 * 60 * 60 * 1000); // claimed 2h ago
 });
 
-afterEach(() => {
+afterEach(async () => {
   stopHostSweep();
   setTimeoutSpy.mockRestore();
-  closeDb();
+  await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
 describe('host sweep justWoke grace period', () => {
+  it('uses one mailbox session when no wake is needed', async () => {
+    vi.mocked(isContainerRunning).mockReturnValue(true);
+    const sessionSpy = vi.spyOn(getAgentMailbox(), 'session');
+
+    try {
+      await runSweepTick();
+      expect(wakeContainer).not.toHaveBeenCalled();
+      expect(sessionSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      sessionSpy.mockRestore();
+    }
+  });
+
+  it('logs mailbox failures with session context and retries on a later tick', async () => {
+    const err = new Error('mailbox unavailable');
+    const sessionSpy = vi.spyOn(getAgentMailbox(), 'session').mockRejectedValueOnce(err);
+    const logSpy = vi.spyOn(log, 'error').mockImplementation(() => {});
+
+    try {
+      await runSweepTick();
+      expect(logSpy).toHaveBeenCalledWith('Session mailbox sweep failed', {
+        agentGroupId: AG,
+        sessionId: SESS,
+        err,
+      });
+
+      await runSweepTick();
+      // Failed preflight on tick 1, then preflight + maintenance on tick 2.
+      expect(sessionSpy).toHaveBeenCalledTimes(3);
+    } finally {
+      sessionSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+
   it('does not kill the container on the tick that woke it, kills on a later tick if the claim is still stale', async () => {
     // Tick 1: due message + no running container → wake. The stale claim is
     // still in outbound.db, but the grace period must skip the SLA check.

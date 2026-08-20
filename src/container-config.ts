@@ -258,8 +258,8 @@ export interface ContainerConfig {
  * flip scheduling to UTC — an invalid override falls back to the global tz,
  * same as no override.
  */
-export function resolveGroupTimezone(agentGroupId: string): string {
-  const tz = getContainerConfig(agentGroupId)?.timezone;
+export async function resolveGroupTimezone(agentGroupId: string): Promise<string> {
+  const tz = (await getContainerConfig(agentGroupId))?.timezone;
   return tz && isValidTimezone(tz) ? tz : TIMEZONE;
 }
 
@@ -336,13 +336,13 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
 /**
  * Materialize `container.json` from the DB. Called at spawn time so the
  * container always sees fresh config. Returns the `ContainerConfig` for
- * use by the caller (buildMounts, buildContainerArgs, etc.).
+ * use by the caller (buildMounts, composeSessionSpec, etc.).
  */
-export function materializeContainerJson(agentGroupId: string): ContainerConfig {
-  const group = getAgentGroup(agentGroupId);
+export async function materializeContainerJson(agentGroupId: string): Promise<ContainerConfig> {
+  const group = await getAgentGroup(agentGroupId);
   if (!group) throw new Error(`Agent group not found: ${agentGroupId}`);
 
-  const row = getContainerConfig(agentGroupId);
+  const row = await getContainerConfig(agentGroupId);
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
   const config = configFromDb(row, group);

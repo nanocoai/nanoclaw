@@ -29,11 +29,7 @@ Delete this entry from the `STEPS` map in `setup/index.ts` (skip if already gone
 
 ## 3. Remove credentials
 
-Remove `TELEGRAM_BOT_TOKEN` from `.env`, then re-sync to the container:
-
-```bash
-mkdir -p data/env && cp .env data/env/env
-```
+Remove `TELEGRAM_BOT_TOKEN` from `.env`.
 
 ## 4. Remove the package
 

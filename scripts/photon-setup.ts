@@ -191,7 +191,12 @@ export interface PollOptions {
 }
 
 /** Poll the device-token endpoint until the user approves (RFC 8628 §3.4-3.5). */
-export async function pollForToken(fetchFn: FetchFn, dashboardHost: string, code: DeviceCode, opts: PollOptions = {}): Promise<string> {
+export async function pollForToken(
+  fetchFn: FetchFn,
+  dashboardHost: string,
+  code: DeviceCode,
+  opts: PollOptions = {},
+): Promise<string> {
   const clientId = opts.clientId ?? DEFAULT_CLIENT_ID;
   const sleepFn = opts.sleepFn ?? sleep;
   const now = opts.now ?? Date.now;
@@ -249,10 +254,12 @@ export async function pollForToken(fetchFn: FetchFn, dashboardHost: string, code
 /** Confirm a token works for the project APIs (not just session lookup). */
 export async function validateToken(fetchFn: FetchFn, dashboardHost: string, token: string): Promise<void> {
   const session = await fetchFn(`${dashboardHost}/api/auth/get-session`, { headers: bearer(token) });
-  if (session.status === 401 || session.status === 403) throw new Error('Photon rejected the device token (session lookup)');
+  if (session.status === 401 || session.status === 403)
+    throw new Error('Photon rejected the device token (session lookup)');
   if (!session.ok) throw new Error(`Photon session lookup failed: ${await errorDetail(session)}`);
   const projects = await fetchFn(`${dashboardHost}/api/projects/`, { headers: bearer(token) });
-  if (projects.status === 401 || projects.status === 403) throw new Error('Photon device token rejected by the project API');
+  if (projects.status === 401 || projects.status === 403)
+    throw new Error('Photon device token rejected by the project API');
   if (!projects.ok) throw new Error(`Photon project API check failed: ${await errorDetail(projects)}`);
 }
 
@@ -277,15 +284,27 @@ export function unwrapList(data: unknown): Array<Record<string, unknown>> {
   return [];
 }
 
-export async function listProjects(fetchFn: FetchFn, dashboardHost: string, token: string): Promise<Array<Record<string, unknown>>> {
+export async function listProjects(
+  fetchFn: FetchFn,
+  dashboardHost: string,
+  token: string,
+): Promise<Array<Record<string, unknown>>> {
   const resp = await fetchFn(`${dashboardHost}/api/projects`, { headers: bearer(token) });
   if (!resp.ok) throw new Error(`Photon list-projects failed: ${await errorDetail(resp)}`);
   return unwrapList(await resp.json().catch(() => []));
 }
 
-export function findProjectByName(projects: Array<Record<string, unknown>>, name: string): Record<string, unknown> | undefined {
+export function findProjectByName(
+  projects: Array<Record<string, unknown>>,
+  name: string,
+): Record<string, unknown> | undefined {
   const target = (name || '').trim().toLowerCase();
-  return projects.find((proj) => String(proj.name ?? '').trim().toLowerCase() === target);
+  return projects.find(
+    (proj) =>
+      String(proj.name ?? '')
+        .trim()
+        .toLowerCase() === target,
+  );
 }
 
 /**
@@ -353,7 +372,10 @@ export async function listUsers(
   return unwrapList(await resp.json().catch(() => []));
 }
 
-export function findUserByPhone(users: Array<Record<string, unknown>>, phone: string): Record<string, unknown> | undefined {
+export function findUserByPhone(
+  users: Array<Record<string, unknown>>,
+  phone: string,
+): Record<string, unknown> | undefined {
   const target = normalizePhone(phone);
   return users.find((u) => normalizePhone(String(u.phoneNumber ?? '')) === target);
 }
@@ -420,7 +442,10 @@ export function userOptedIn(user: Record<string, unknown> | undefined): boolean 
  * number, an opted-in row wins over whichever happens to list first — opt-in is
  * scoped to one user-number/assigned-line pair, so only that row routes.
  */
-export function findRoutableUser(users: Array<Record<string, unknown>>, phone: string): Record<string, unknown> | undefined {
+export function findRoutableUser(
+  users: Array<Record<string, unknown>>,
+  phone: string,
+): Record<string, unknown> | undefined {
   const target = normalizePhone(phone);
   const matches = users.filter((u) => normalizePhone(String(u.phoneNumber ?? '')) === target);
   return matches.find(userOptedIn) ?? matches[0];
@@ -495,7 +520,9 @@ export async function waitForOptedInUser(
     opts.onWaiting?.(attempt);
     if (attempt < maxAttempts) await sleepFn(intervalS * 1000);
   }
-  const lastErrorNote = lastError ? ` Last API error: ${lastError instanceof Error ? lastError.message : String(lastError)}.` : '';
+  const lastErrorNote = lastError
+    ? ` Last API error: ${lastError instanceof Error ? lastError.message : String(lastError)}.`
+    : '';
   const target = opts.assignedLine ? `to ${opts.assignedLine}` : 'to the line Photon assigned to it';
   throw new Error(
     `${phone} was not opted in after ${timeoutS}s.${lastErrorNote} Send one message from ${phone} ${target}, then re-run setup — it resumes where it left off.`,
@@ -767,11 +794,15 @@ async function runStatus(args: Args, fetchFn: FetchFn = fetch): Promise<number> 
     return 1;
   }
   if (routing === 'unverified') {
-    p.outro('Could not verify routing. Check connectivity and that the stored project secret is still valid, then try again.');
+    p.outro(
+      'Could not verify routing. Check connectivity and that the stored project secret is still valid, then try again.',
+    );
     return 1;
   }
   if (credentialsReady) {
-    p.outro('Photon credentials are saved, but phone routing is not ready. Re-run setup with --phone to register and opt in your number.');
+    p.outro(
+      'Photon credentials are saved, but phone routing is not ready. Re-run setup with --phone to register and opt in your number.',
+    );
     return 1;
   }
   p.outro('Run setup to finish onboarding.');
@@ -882,7 +913,9 @@ async function runSetup(args: Args, fetchFn: FetchFn = fetch, deps: SetupDeps = 
     try {
       const { user, created } = await ensureUser(fetchFn, args.spectrumHost, projectId, secret, phone);
       const line = userAssignedLine(user);
-      p.log.info(created ? `Created your Photon user (assigned line ${line ?? 'pending'})` : 'Found your existing Photon user');
+      p.log.info(
+        created ? `Created your Photon user (assigned line ${line ?? 'pending'})` : 'Found your existing Photon user',
+      );
       if (userOptedIn(user)) {
         p.log.info('Phone already opted in');
         assigned = line;

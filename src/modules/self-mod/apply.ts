@@ -26,16 +26,21 @@ import { writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { notifyAgent } from '../approvals/index.js';
 
+async function wakeSessionById(sessionId: string): Promise<void> {
+  const session = await getSession(sessionId);
+  if (session) await wakeContainer(session);
+}
+
 export async function applyInstallPackages(payload: Record<string, unknown>, session: Session): Promise<void> {
-  const agentGroup = getAgentGroup(session.agent_group_id);
+  const agentGroup = await getAgentGroup(session.agent_group_id);
   if (!agentGroup) {
-    notifyAgent(session, 'install_packages approved but agent group missing.');
+    await notifyAgent(session, 'install_packages approved but agent group missing.');
     return;
   }
 
-  const configRow = getContainerConfig(agentGroup.id);
+  const configRow = await getContainerConfig(agentGroup.id);
   if (!configRow) {
-    notifyAgent(session, 'install_packages approved but container config missing.');
+    await notifyAgent(session, 'install_packages approved but container config missing.');
     return;
   }
 
@@ -45,14 +50,14 @@ export async function applyInstallPackages(payload: Record<string, unknown>, ses
     for (const pkg of payload.apt as string[]) {
       if (!existing.includes(pkg)) existing.push(pkg);
     }
-    updateContainerConfigJson(agentGroup.id, 'packages_apt', existing);
+    await updateContainerConfigJson(agentGroup.id, 'packages_apt', existing);
   }
   if (payload.npm) {
     const existing = JSON.parse(configRow.packages_npm) as string[];
     for (const pkg of payload.npm as string[]) {
       if (!existing.includes(pkg)) existing.push(pkg);
     }
-    updateContainerConfigJson(agentGroup.id, 'packages_npm', existing);
+    await updateContainerConfigJson(agentGroup.id, 'packages_npm', existing);
   }
 
   const pkgs = [
@@ -62,7 +67,7 @@ export async function applyInstallPackages(payload: Record<string, unknown>, ses
   log.info('Package install approved', { agentGroupId: session.agent_group_id });
   try {
     await buildAgentGroupImage(session.agent_group_id);
-    writeSessionMessage(session.agent_group_id, session.id, {
+    await writeSessionMessage(session.agent_group_id, session.id, {
       id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       kind: 'chat',
       timestamp: new Date().toISOString(),
@@ -74,15 +79,14 @@ export async function applyInstallPackages(payload: Record<string, unknown>, ses
         sender: 'system',
         senderId: 'system',
       }),
-      onWake: 1,
+      onWake: true,
     });
     killContainer(session.id, 'rebuild applied', () => {
-      const s = getSession(session.id);
-      if (s) wakeContainer(s);
+      void wakeSessionById(session.id);
     });
     log.info('Container rebuild completed (bundled with install)', { agentGroupId: session.agent_group_id });
   } catch (e) {
-    notifyAgent(
+    await notifyAgent(
       session,
       `Packages added to config (${pkgs}) but rebuild failed: ${e instanceof Error ? e.message : String(e)}. Tell the user — an admin will need to retry the install_packages request or inspect the build logs.`,
     );
@@ -91,22 +95,22 @@ export async function applyInstallPackages(payload: Record<string, unknown>, ses
 }
 
 export async function applyAddMcpServer(payload: Record<string, unknown>, session: Session): Promise<void> {
-  const agentGroup = getAgentGroup(session.agent_group_id);
+  const agentGroup = await getAgentGroup(session.agent_group_id);
   if (!agentGroup) {
-    notifyAgent(session, 'add_mcp_server approved but agent group missing.');
+    await notifyAgent(session, 'add_mcp_server approved but agent group missing.');
     return;
   }
 
-  const configRow = getContainerConfig(agentGroup.id);
+  const configRow = await getContainerConfig(agentGroup.id);
   if (!configRow) {
-    notifyAgent(session, 'add_mcp_server approved but container config missing.');
+    await notifyAgent(session, 'add_mcp_server approved but container config missing.');
     return;
   }
 
   // Add the new MCP server to the existing map in the DB
   const name = typeof payload.name === 'string' ? payload.name : '';
   if (!name) {
-    notifyAgent(session, 'add_mcp_server approved but server name is missing.');
+    await notifyAgent(session, 'add_mcp_server approved but server name is missing.');
     return;
   }
   let serverConfig: McpServerConfig;
@@ -115,7 +119,7 @@ export async function applyAddMcpServer(payload: Record<string, unknown>, sessio
     serverConfig = parseMcpServerConfig(payload);
     // eslint-disable-next-line no-catch-all/no-catch-all -- approval payload validation must fail closed
   } catch (err) {
-    notifyAgent(
+    await notifyAgent(
       session,
       `add_mcp_server approved but config is invalid: ${err instanceof Error ? err.message : String(err)}.`,
     );
@@ -126,7 +130,7 @@ export async function applyAddMcpServer(payload: Record<string, unknown>, sessio
   // that stamped a plugin server under this name after the card went out.
   const owner = mcpServerPluginOwner(servers[name]);
   if (owner) {
-    notifyAgent(
+    await notifyAgent(
       session,
       `add_mcp_server approved but server "${name}" is owned by plugin "${owner}" — ` +
         'plugin servers can only be changed by updating the plugin and re-stamping.',
@@ -134,9 +138,9 @@ export async function applyAddMcpServer(payload: Record<string, unknown>, sessio
     return;
   }
   servers[name] = serverConfig;
-  updateContainerConfigJson(agentGroup.id, 'mcp_servers', servers);
+  await updateContainerConfigJson(agentGroup.id, 'mcp_servers', servers);
 
-  writeSessionMessage(session.agent_group_id, session.id, {
+  await writeSessionMessage(session.agent_group_id, session.id, {
     id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: 'chat',
     timestamp: new Date().toISOString(),
@@ -148,11 +152,10 @@ export async function applyAddMcpServer(payload: Record<string, unknown>, sessio
       sender: 'system',
       senderId: 'system',
     }),
-    onWake: 1,
+    onWake: true,
   });
   killContainer(session.id, 'mcp server added', () => {
-    const s = getSession(session.id);
-    if (s) wakeContainer(s);
+    void wakeSessionById(session.id);
   });
   log.info('MCP server add approved', { agentGroupId: session.agent_group_id });
 }

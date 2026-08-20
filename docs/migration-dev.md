@@ -76,21 +76,21 @@ Each prints `OK:<details>`, `SKIPPED:<reason>`, or errors to stdout. Exit 0 on s
 
 ```bash
 # Agent groups
-sqlite3 data/v2.db "SELECT * FROM agent_groups"
+pnpm exec tsx scripts/q.ts data/v2.db "SELECT * FROM agent_groups"
 
 # Messaging groups + wiring
-sqlite3 data/v2.db "SELECT mg.id, mg.channel_type, mg.platform_id, mg.unknown_sender_policy, mga.engage_mode, mga.engage_pattern FROM messaging_groups mg JOIN messaging_group_agents mga ON mga.messaging_group_id = mg.id"
+pnpm exec tsx scripts/q.ts data/v2.db "SELECT mg.id, mg.channel_type, mg.platform_id, mg.unknown_sender_policy, mga.engage_mode, mga.engage_pattern FROM messaging_groups mg JOIN messaging_group_agents mga ON mga.messaging_group_id = mg.id"
 
 # Sessions
-sqlite3 data/v2.db "SELECT * FROM sessions"
+pnpm exec tsx scripts/q.ts data/v2.db "SELECT * FROM sessions"
 
 # Users and roles
-sqlite3 data/v2.db "SELECT * FROM users"
-sqlite3 data/v2.db "SELECT * FROM user_roles"
+pnpm exec tsx scripts/q.ts data/v2.db "SELECT * FROM users"
+pnpm exec tsx scripts/q.ts data/v2.db "SELECT * FROM user_roles"
 
 # Session continuation (which Claude Code session will be resumed)
-AG_ID=$(sqlite3 data/v2.db "SELECT id FROM agent_groups LIMIT 1")
-SESS_ID=$(sqlite3 data/v2.db "SELECT id FROM sessions LIMIT 1")
+AG_ID=$(pnpm exec tsx scripts/q.ts data/v2.db "SELECT id FROM agent_groups LIMIT 1")
+SESS_ID=$(pnpm exec tsx scripts/q.ts data/v2.db "SELECT id FROM sessions LIMIT 1")
 sqlite3 data/v2-sessions/$AG_ID/$SESS_ID/outbound.db "SELECT * FROM session_state"
 
 # Scheduled tasks
@@ -108,8 +108,8 @@ python3 -m json.tool logs/setup-migration/handoff.json
 **Bot doesn't respond after switchover:**
 1. Check both services aren't running: `systemctl --user list-units 'nanoclaw*'`
 2. Check error log: `tail logs/nanoclaw.error.log`
-3. Check sender policy: `sqlite3 data/v2.db "SELECT unknown_sender_policy FROM messaging_groups"` — must be `public` before owner is seeded
-4. Check engage pattern: `sqlite3 data/v2.db "SELECT engage_mode, engage_pattern FROM messaging_group_agents"` — should be `pattern` / `.` for respond-to-everything
+3. Check sender policy: `pnpm exec tsx scripts/q.ts data/v2.db "SELECT unknown_sender_policy FROM messaging_groups"` — must be `public` before owner is seeded
+4. Check engage pattern: `pnpm exec tsx scripts/q.ts data/v2.db "SELECT engage_mode, engage_pattern FROM messaging_group_agents"` — should be `pattern` / `.` for respond-to-everything
 
 **Session not continuing from v1:**
 1. Check continuation is set: see "Session continuation" query above

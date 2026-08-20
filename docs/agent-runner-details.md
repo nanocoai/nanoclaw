@@ -504,7 +504,7 @@ processing_ack: (no row) → processing → completed
 
 The agent-runner runs an MCP server (stdio) that exposes NanoClaw tools to the agent. The
 tool modules use the same two-DB connection layer as the rest of the runner
-(`container/agent-runner/src/db/connection.ts`): they read the host-written `inbound.db`
+(`container/agent-runner/src/mailbox/sqlite/connection.ts`): they read the host-written `inbound.db`
 at `/workspace/inbound.db` **read-only** (destinations, session routing, question
 responses, task lists) and write to the container-owned `outbound.db` at
 `/workspace/outbound.db`. There is no shared single-file connection and no WAL — both files

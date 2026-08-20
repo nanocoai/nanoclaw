@@ -48,10 +48,10 @@ const DEFAULT_SETTINGS_JSON =
  * The provider project document is regenerated on every spawn. Initial
  * standing instructions are staged once in the provider-neutral prepend file.
  */
-export function initGroupFilesystem(
+export async function initGroupFilesystem(
   group: AgentGroup,
   opts?: { instructions?: string; provider?: string | null },
-): void {
+): Promise<void> {
   const initialized: string[] = [];
 
   // `opts.provider` absent means "caller has no provider opinion" — for a
@@ -90,7 +90,7 @@ export function initGroupFilesystem(
   // the row already exists (e.g. created by backfill or group creation). On a
   // fresh row, stamp the resolved provider hint so a new group is created on
   // the instance default (or the caller's explicit pick).
-  ensureContainerConfig(group.id, providerHint);
+  await ensureContainerConfig(group.id, providerHint);
   initialized.push('container_configs');
 
   // 2. data/v2-sessions/<id>/.claude-shared/ — Claude state + per-group skills

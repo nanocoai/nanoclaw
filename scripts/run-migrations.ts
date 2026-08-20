@@ -33,9 +33,7 @@ const toVersion = process.argv[3];
 const newCorePath = process.argv[4];
 
 if (!fromVersion || !toVersion || !newCorePath) {
-  console.error(
-    'Usage: tsx scripts/run-migrations.ts <from-version> <to-version> <new-core-path>',
-  );
+  console.error('Usage: tsx scripts/run-migrations.ts <from-version> <to-version> <new-core-path>');
   process.exit(1);
 }
 
@@ -60,10 +58,7 @@ const entries = fs.readdirSync(migrationsDir, { withFileTypes: true });
 const migrationVersions = entries
   .filter((e) => e.isDirectory() && /^\d+\.\d+\.\d+$/.test(e.name))
   .map((e) => e.name)
-  .filter(
-    (v) =>
-      compareSemver(v, fromVersion) > 0 && compareSemver(v, toVersion) <= 0,
-  )
+  .filter((v) => compareSemver(v, fromVersion) > 0 && compareSemver(v, toVersion) <= 0)
   .sort(compareSemver);
 
 const projectRoot = process.cwd();
@@ -80,9 +75,7 @@ for (const version of migrationVersions) {
   }
 
   try {
-    const tsxArgs = tsxBin.endsWith('npx')
-      ? ['tsx', migrationIndex, projectRoot]
-      : [migrationIndex, projectRoot];
+    const tsxArgs = tsxBin.endsWith('npx') ? ['tsx', migrationIndex, projectRoot] : [migrationIndex, projectRoot];
     execFileSync(tsxBin, tsxArgs, {
       stdio: 'pipe',
       cwd: projectRoot,
@@ -95,9 +88,7 @@ for (const version of migrationVersions) {
   }
 }
 
-console.log(
-  JSON.stringify({ migrationsRun: results.length, results }, null, 2),
-);
+console.log(JSON.stringify({ migrationsRun: results.length, results }, null, 2));
 
 // Exit with error if any migration failed
 if (results.some((r) => !r.success)) {

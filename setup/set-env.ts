@@ -45,6 +45,22 @@ export function upsertEnvVar(key: string, value: string): { existed: boolean } {
   return { existed };
 }
 
+/**
+ * Remove a key's line from `.env` entirely, returning whether it was there.
+ *
+ * Distinct from writing an empty or `false` value: for keys where setup tells
+ * "unset" and "answered no" apart, only removal restores the unanswered state.
+ */
+export function removeEnvVar(key: string): { existed: boolean } {
+  const envFile = path.join(process.cwd(), '.env');
+  if (!fs.existsSync(envFile)) return { existed: false };
+  const content = fs.readFileSync(envFile, 'utf-8');
+  const lineRegex = new RegExp(`^${key}=.*\\n?`, 'm');
+  if (!lineRegex.test(content)) return { existed: false };
+  fs.writeFileSync(envFile, content.replace(lineRegex, ''));
+  return { existed: true };
+}
+
 export async function run(args: string[]): Promise<void> {
   const keyIdx = args.indexOf('--key');
   const valueIdx = args.indexOf('--value');

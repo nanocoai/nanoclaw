@@ -2,26 +2,19 @@
  * Step: verify — End-to-end health check of the full installation.
  * Replaces 09-verify.sh
  *
- * Uses better-sqlite3 directly (no sqlite3 CLI), platform-aware service checks.
+ * Uses the configured central-DB driver and platform-aware service checks.
  */
 import { execSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import Database from 'better-sqlite3';
-
-import { DATA_DIR } from '../src/config.js';
 import { readEnvFile } from '../src/env.js';
 import { log } from '../src/log.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
+import { inspectCentralDb } from './central-db-inspection.js';
 import { inspectAgentImage, readImageSource } from './lib/registry-state.js';
-import {
-  getPlatform,
-  getServiceManager,
-  hasSystemd,
-  isRoot,
-} from './platform.js';
+import { getPlatform, getServiceManager, hasSystemd, isRoot } from './platform.js';
 import { emitStatus } from './status.js';
 
 export async function run(_args: string[]): Promise<void> {
@@ -39,11 +32,7 @@ export async function run(_args: string[]): Promise<void> {
   // developers with multiple clones), nothing in this checkout is actually
   // wired up. Surface the mismatch directly so the user knows to point the
   // service at the right folder.
-  let service:
-    | 'not_found'
-    | 'stopped'
-    | 'running'
-    | 'running_other_checkout' = 'not_found';
+  let service: 'not_found' | 'stopped' | 'running' | 'running_other_checkout' = 'not_found';
   let runningFromPath: string | null = null;
   const mgr = getServiceManager();
 
@@ -75,10 +64,7 @@ export async function run(_args: string[]): Promise<void> {
       execSync(`${prefix} is-active ${systemdUnit}`, { stdio: 'ignore' });
       service = 'running';
       try {
-        const pidStr = execSync(
-          `${prefix} show ${systemdUnit} -p MainPID --value`,
-          { encoding: 'utf-8' },
-        ).trim();
+        const pidStr = execSync(`${prefix} show ${systemdUnit} -p MainPID --value`, { encoding: 'utf-8' }).trim();
         const pid = Number(pidStr);
         if (Number.isInteger(pid) && pid > 0) {
           runningFromPath = resolveBinaryScript(pid);
@@ -116,11 +102,7 @@ export async function run(_args: string[]): Promise<void> {
     }
   }
 
-  if (
-    service === 'running' &&
-    runningFromPath &&
-    !isPathInside(runningFromPath, projectRoot)
-  ) {
+  if (service === 'running' && runningFromPath && !isPathInside(runningFromPath, projectRoot)) {
     service = 'running_other_checkout';
   }
 
@@ -198,51 +180,11 @@ export async function run(_args: string[]): Promise<void> {
   //    plus how many agent groups pin an image of their own (reported in step 7).
   //    The two counts get their own try/catch: they read different tables, and a
   //    partially migrated DB must not hide one behind the other's failure.
-  let registeredGroups = 0;
-  let derivedGroups = 0;
-  const dbPath = path.join(DATA_DIR, 'v2.db');
-  if (fs.existsSync(dbPath)) {
-    let db: Database.Database | null = null;
-    try {
-      db = new Database(dbPath, { readonly: true });
-    } catch {
-      // Unreadable (permissions, or mid-migration) — leave both counts at 0
-      // rather than failing the health check on a transient condition.
-    }
-    if (db) {
-      try {
-        // Count agent groups that have at least one messaging group wired
-        const row = db
-          .prepare(
-            `SELECT COUNT(DISTINCT ag.id) as count FROM agent_groups ag
-             JOIN messaging_group_agents mga ON mga.agent_group_id = ag.id`,
-          )
-          .get() as { count: number };
-        registeredGroups = row.count;
-      } catch {
-        // Table might not exist (DB not migrated yet)
-      }
-      try {
-        const row = db
-          .prepare(
-            'SELECT COUNT(*) as count FROM container_configs WHERE image_tag IS NOT NULL',
-          )
-          .get() as { count: number };
-        derivedGroups = row.count;
-      } catch {
-        // Same: container_configs arrives with the migrations
-      }
-      db.close();
-    }
-  }
+  const { registeredGroups, derivedGroups } = await inspectCentralDb(projectRoot);
 
   // 6. Check mount allowlist
   let mountAllowlist = 'missing';
-  if (
-    fs.existsSync(
-      path.join(homeDir, '.config', 'nanoclaw', 'mount-allowlist.json'),
-    )
-  ) {
+  if (fs.existsSync(path.join(homeDir, '.config', 'nanoclaw', 'mount-allowlist.json'))) {
     mountAllowlist = 'configured';
   }
 

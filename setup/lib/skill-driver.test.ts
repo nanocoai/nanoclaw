@@ -3,7 +3,16 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from '
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { runSkill, hostExec, hostExecStream, labelOrdinals, literalChoices, promptValidator, clackResolveInput, type RunSkillOptions } from './skill-driver.js';
+import {
+  runSkill,
+  hostExec,
+  hostExecStream,
+  labelOrdinals,
+  literalChoices,
+  promptValidator,
+  clackResolveInput,
+  type RunSkillOptions,
+} from './skill-driver.js';
 import { fullyApplied, type ApplyEvent } from '../../scripts/skill-apply.js';
 
 // Shared test state for the clack + claude-handoff mocks (hoisted so the vi.mock
@@ -98,7 +107,11 @@ describe('thin skill driver', () => {
   it('runs fully from inputs — resolveInput never touched', async () => {
     const { root, skill } = scratch();
     const ran: string[] = [];
-    const res = await runSkill(skill, { projectRoot: root, inputs: { token: 'FROM-INPUTS' }, exec: (c) => void ran.push(c) });
+    const res = await runSkill(skill, {
+      projectRoot: root,
+      inputs: { token: 'FROM-INPUTS' },
+      exec: (c) => void ran.push(c),
+    });
     expect(fullyApplied(res)).toBe(true);
     expect(ran).toContain('ncl wire --token FROM-INPUTS');
   });

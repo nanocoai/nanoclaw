@@ -5,7 +5,7 @@ import path from 'path';
 
 import Database from 'better-sqlite3';
 
-import { getLaunchdLabel, getSystemdUnit } from '../../src/install-slug.js';
+import { getInstallSlug, getLaunchdLabel, getSystemdUnit } from '../../src/install-slug.js';
 import type { RunCommand } from './onecli-agents.js';
 import { detectExistingInstall, scanInstall, type ScanDeps } from './scan.js';
 
@@ -23,9 +23,7 @@ afterEach(() => {
 });
 
 /** Fake runCommand: unhandled commands fail (binary missing / daemon down). */
-function fakeRun(
-  handlers: Record<string, (args: string[]) => { status: number | null; stdout: string }>,
-): RunCommand {
+function fakeRun(handlers: Record<string, (args: string[]) => { status: number | null; stdout: string }>): RunCommand {
   return (cmd, args) => (handlers[cmd] ?? (() => ({ status: 1, stdout: '' })))(args);
 }
 
@@ -55,6 +53,8 @@ describe('scanInstall path groups', () => {
     }
     fs.writeFileSync(path.join(root, '.env'), 'KEY=v');
     fs.writeFileSync(path.join(root, 'start-nanoclaw.sh'), '#!/bin/bash');
+    const updates = path.join(path.dirname(root), '.nanoclaw-updates', getInstallSlug(root));
+    fs.mkdirSync(updates, { recursive: true });
 
     const inv = scanInstall(deps());
 
@@ -63,11 +63,11 @@ describe('scanInstall path groups', () => {
       'logs',
       '.env',
       'start-nanoclaw.sh',
+      getInstallSlug(root),
     ]);
-    expect(inv.runtime.map((i) => path.basename(i.path))).toEqual([
-      'dist',
-      'node_modules',
-    ]);
+    expect(inv.data.at(-1)).toMatchObject({ what: 'Update rollback snapshots', path: updates });
+    fs.rmSync(updates, { recursive: true, force: true });
+    expect(inv.runtime.map((i) => path.basename(i.path))).toEqual(['dist', 'node_modules']);
     expect(inv.user.map((i) => path.basename(i.path))).toEqual(['groups', 'store']);
   });
 
@@ -83,12 +83,7 @@ describe('scanInstall path groups', () => {
 
 describe('scanInstall service artifacts', () => {
   it('detects the launchd plist on macOS', () => {
-    const plist = path.join(
-      home,
-      'Library',
-      'LaunchAgents',
-      `${getLaunchdLabel(root)}.plist`,
-    );
+    const plist = path.join(home, 'Library', 'LaunchAgents', `${getLaunchdLabel(root)}.plist`);
     fs.mkdirSync(path.dirname(plist), { recursive: true });
     fs.writeFileSync(plist, '<plist/>');
 
@@ -98,13 +93,7 @@ describe('scanInstall service artifacts', () => {
   });
 
   it('detects systemd user unit and pidfile on Linux', () => {
-    const unit = path.join(
-      home,
-      '.config',
-      'systemd',
-      'user',
-      `${getSystemdUnit(root)}.service`,
-    );
+    const unit = path.join(home, '.config', 'systemd', 'user', `${getSystemdUnit(root)}.service`);
     fs.mkdirSync(path.dirname(unit), { recursive: true });
     fs.writeFileSync(unit, '[Unit]');
     fs.writeFileSync(path.join(root, 'nanoclaw.pid'), '12345');

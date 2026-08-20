@@ -136,10 +136,32 @@ export interface ChannelContextDefaults {
    */
   threads: boolean;
   /**
+   * Default session_mode stamped on wirings created in this context
+   * (messaging_group_agents.session_mode). Declared by a context whose
+   * conversations are thread-rooted — each thread is its own conversation, so
+   * each should root its own session from the first message. Applies to
+   * whichever context declares it (dm, group, or both); omitting it means
+   * 'shared', which is today's behavior for every existing adapter. Same
+   * two-level model as the engage fields: this declaration, and the
+   * per-wiring value chosen at creation.
+   *
+   * Declaring 'per-thread' also derives the wiring's threads stamp:
+   * resolveWiringDefaults stamps messaging_group_agents.threads = 1 at
+   * creation (per-thread sessions structurally require honored thread ids);
+   * otherwise the column is left NULL (inherit `threads` — today's behavior).
+   * There is deliberately no independent threads declaration: the stamp is a
+   * code invariant of the session mode, so the incoherent pairing
+   * (per-thread sessions with thread ids stripped) is unrepresentable here.
+   */
+  sessionMode?: 'shared' | 'per-thread';
+  /**
    * unknown_sender_policy stamped on messaging_groups rows auto-created by
    * the router or created by wizard/CLI paths in this context.
+   * 'decline_notify' (DM-shaped channels): the host politely declines the
+   * unknown sender in-channel and sends the owner a one-line FYI — no
+   * approval card; access grants stay explicit (`ncl members add`).
    */
-  unknownSenderPolicy: 'strict' | 'request_approval' | 'public';
+  unknownSenderPolicy: 'strict' | 'request_approval' | 'decline_notify' | 'public';
 }
 
 /**
@@ -197,9 +219,31 @@ export interface ChannelAdapter {
   deliver(platformId: string, threadId: string | null, message: OutboundMessage): Promise<string | undefined>;
 
   // Optional
-  setTyping?(platformId: string, threadId: string | null): Promise<void>;
+  setTyping?(
+    platformId: string,
+    threadId: string | null,
+    status?: string,
+    statusKind?: 'auto' | 'agent',
+  ): Promise<void>;
   syncConversations?(): Promise<ConversationInfo[]>;
   resolveChannelName?(platformId: string): Promise<string | null>;
+
+  /**
+   * Set a human-readable title on a conversation thread. Platforms with a
+   * thread-title concept render this in the conversation list; the router
+   * fires it once when a brand-new per-thread DM session is created, titled
+   * after the first user message.
+   *
+   * Only adapters whose platform has a thread-title concept expose this —
+   * everyone else omits it and callers no-op via optional chaining
+   * (setThreadTitle in channel-registry.ts).
+   */
+  setThreadTitle?(platformId: string, threadId: string, title: string): Promise<void>;
+  setSuggestedPrompts?(
+    platformId: string,
+    prompts: Array<{ title: string; message: string }>,
+    title?: string,
+  ): Promise<void>;
 
   /**
    * Subscribe the bot to a thread so follow-up messages route via the

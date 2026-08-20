@@ -159,7 +159,7 @@ done
 Stop all running agent containers so they pick up the new skills on next wake:
 
 ```bash
-docker ps --format "{{.ID}} {{.Names}}" | grep nanoclaw-v2 | awk '{print $1}' | xargs -r docker stop
+docker ps --filter label=nanoclaw-session -q | xargs -r docker stop
 ```
 
 ## Done

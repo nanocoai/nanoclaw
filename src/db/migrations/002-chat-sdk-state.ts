@@ -5,6 +5,7 @@ import type { Migration } from './index.js';
 export const migration002: Migration = {
   version: 2,
   name: 'chat-sdk-state',
+  sqliteOnly: true,
   up(db: Database.Database) {
     db.exec(`
       CREATE TABLE chat_sdk_kv (

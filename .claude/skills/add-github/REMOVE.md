@@ -18,11 +18,7 @@ rm -f src/channels/github.ts src/channels/github-registration.test.ts
 
 ## 2. Remove credentials
 
-Remove `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`, and `GITHUB_BOT_USERNAME` from `.env`, then re-sync to the container:
-
-```bash
-mkdir -p data/env && cp .env data/env/env
-```
+Remove `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`, and `GITHUB_BOT_USERNAME` from `.env`.
 
 ## 3. Remove the package
 

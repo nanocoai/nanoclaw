@@ -14,10 +14,12 @@
  *  - No agent groups configured: no card, no row
  */
 import fs from 'fs';
+import path from 'path';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 
-import { initTestDb, closeDb, runMigrations } from '../../db/index.js';
+import { initTestDb, closeDb, runMigrations, getDb } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
+import { AGENT_ACCESS_SCOPE_WARNING, createNewAgentGroup } from './channel-approval.js';
 import { createMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { registerChannelAdapter } from '../../channels/channel-registry.js';
 import type { ChannelDefaults } from '../../channels/adapter.js';
@@ -55,13 +57,12 @@ vi.mock('../../delivery.js', () => ({
 vi.mock('./user-dm.js', () => ({
   ensureUserDm: vi.fn(async (userId: string) => {
     const { getDb } = await import('../../db/connection.js');
-    const row = getDb()
-      .prepare(
-        `SELECT mg.* FROM messaging_groups mg
+    const row = await getDb().get(
+      `SELECT mg.* FROM messaging_groups mg
            JOIN user_dms ud ON ud.messaging_group_id = mg.id
           WHERE ud.user_id = ?`,
-      )
-      .get(userId);
+      userId,
+    );
     return row;
   }),
 }));
@@ -81,19 +82,31 @@ function now() {
   return new Date().toISOString();
 }
 
+async function countRows(sql: string, ...params: unknown[]): Promise<number> {
+  return (await getDb().get<{ c: number }>(sql, ...params))!.c;
+}
+
+async function expectAsyncDelivery(action: () => Promise<void>): Promise<void> {
+  const previousDeliveryCount = deliverMock.mock.calls.length;
+  await action();
+  await vi.waitFor(() => {
+    expect(deliverMock.mock.calls.length).toBeGreaterThan(previousDeliveryCount);
+  });
+}
+
 beforeEach(async () => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
-  const db = initTestDb();
-  runMigrations(db);
+  const db = await initTestDb();
+  await runMigrations(db);
 
   await import('./index.js'); // register hooks
 
   // Base fixtures: one agent group + owner with a DM on 'telegram'.
-  createAgentGroup({ id: 'ag-1', name: 'Andy', folder: 'andy', agent_provider: null, created_at: now() });
+  await createAgentGroup({ id: 'ag-1', name: 'Andy', folder: 'andy', agent_provider: null, created_at: now() });
 
-  upsertUser({ id: 'telegram:owner', kind: 'telegram', display_name: 'Owner', created_at: now() });
-  grantRole({
+  await upsertUser({ id: 'telegram:owner', kind: 'telegram', display_name: 'Owner', created_at: now() });
+  await grantRole({
     user_id: 'telegram:owner',
     role: 'owner',
     agent_group_id: null,
@@ -102,7 +115,7 @@ beforeEach(async () => {
   });
 
   // Pre-seed owner's DM messaging group + user_dms mapping.
-  createMessagingGroup({
+  await createMessagingGroup({
     id: 'mg-dm-owner',
     channel_type: 'telegram',
     platform_id: 'dm-owner',
@@ -111,19 +124,20 @@ beforeEach(async () => {
     unknown_sender_policy: 'public',
     created_at: now(),
   });
-  const { getDb } = await import('../../db/connection.js');
-  getDb()
-    .prepare(
-      `INSERT INTO user_dms (user_id, channel_type, messaging_group_id, resolved_at)
-       VALUES (?, ?, ?, ?)`,
-    )
-    .run('telegram:owner', 'telegram', 'mg-dm-owner', now());
+  await getDb().run(
+    `INSERT INTO user_dms (user_id, channel_type, messaging_group_id, resolved_at)
+     VALUES (?, ?, ?, ?)`,
+    'telegram:owner',
+    'telegram',
+    'mg-dm-owner',
+    now(),
+  );
 
   deliverMock.mockClear();
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
@@ -161,8 +175,7 @@ function dmEvent(platformId: string, text = 'hello') {
 describe('unknown-channel registration flow', () => {
   it('delivers an approval card on mention into an unwired group', async () => {
     const { routeInbound } = await import('../../router.js');
-    await routeInbound(groupMention('chat-new'));
-    await new Promise((r) => setTimeout(r, 10));
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-new')));
 
     expect(deliverMock).toHaveBeenCalledTimes(1);
     const [channel, platformId, thread, kind, content] = deliverMock.mock.calls[0];
@@ -174,41 +187,35 @@ describe('unknown-channel registration flow', () => {
     expect(payload.type).toBe('ask_question');
     // Card tells the approver the resolved engage rule.
     expect(payload.question).toContain('will respond to @-mentions in this group');
+    expect(payload.question).toContain(AGENT_ACCESS_SCOPE_WARNING);
     // Single-agent card offers a direct "Connect to <name>" button.
     const connectOption = payload.options.find((o: { value: string }) => o.value.startsWith('connect:'));
     expect(connectOption).toBeDefined();
     expect(connectOption.label).toContain('Andy');
 
-    const { getDb } = await import('../../db/connection.js');
-    const rows = getDb().prepare('SELECT * FROM pending_channel_approvals').all() as Array<{
-      messaging_group_id: string;
-    }>;
+    const rows = await getDb().all<{ messaging_group_id: string }>('SELECT * FROM pending_channel_approvals');
     expect(rows).toHaveLength(1);
   });
 
   it('delivers a card on DM too (non-threaded event)', async () => {
     const { routeInbound } = await import('../../router.js');
-    await routeInbound(dmEvent('dm-new-user'));
-    await new Promise((r) => setTimeout(r, 10));
+    await expectAsyncDelivery(() => routeInbound(dmEvent('dm-new-user')));
 
     expect(deliverMock).toHaveBeenCalledTimes(1);
     const payload = JSON.parse(deliverMock.mock.calls[0][4] as string) as { question: string };
     expect(payload.question).toContain('will respond to all messages');
-    const { getDb } = await import('../../db/connection.js');
-    const count = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number }).c;
+    const count = await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals');
     expect(count).toBe(1);
   });
 
   it('dedups a second mention while the card is pending', async () => {
     const { routeInbound } = await import('../../router.js');
-    await routeInbound(groupMention('chat-busy'));
-    await new Promise((r) => setTimeout(r, 10));
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-busy')));
     await routeInbound(groupMention('chat-busy', '@bot still here'));
     await new Promise((r) => setTimeout(r, 10));
 
     expect(deliverMock).toHaveBeenCalledTimes(1);
-    const { getDb } = await import('../../db/connection.js');
-    const count = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number }).c;
+    const count = await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals');
     expect(count).toBe(1);
   });
 
@@ -218,13 +225,11 @@ describe('unknown-channel registration flow', () => {
     const { wakeContainer } = await import('../../container-runner.js');
     (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
 
-    await routeInbound(groupMention('chat-approve'));
-    await new Promise((r) => setTimeout(r, 10));
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-approve')));
 
-    const { getDb } = await import('../../db/connection.js');
-    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
-      messaging_group_id: string;
-    };
+    const pending = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
     expect(pending).toBeDefined();
 
     // Owner clicks "Connect to Andy" (single-agent card).
@@ -241,9 +246,10 @@ describe('unknown-channel registration flow', () => {
     }
 
     // Wiring created with defaults.
-    const mga = getDb()
-      .prepare('SELECT * FROM messaging_group_agents WHERE messaging_group_id = ?')
-      .get(pending.messaging_group_id) as {
+    const mga = (await getDb().get(
+      'SELECT * FROM messaging_group_agents WHERE messaging_group_id = ?',
+      pending.messaging_group_id,
+    )) as {
       engage_mode: string;
       engage_pattern: string | null;
       sender_scope: string;
@@ -259,14 +265,15 @@ describe('unknown-channel registration flow', () => {
 
     // Triggering sender auto-admitted so sender_scope='known' doesn't
     // bounce the replay into sender-approval.
-    const member = getDb()
-      .prepare('SELECT 1 AS x FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?')
-      .get('telegram:caller', 'ag-1');
+    const member = await getDb().get(
+      'SELECT 1 AS x FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?',
+      'telegram:caller',
+      'ag-1',
+    );
     expect(member).toBeDefined();
 
     // Pending row cleared and container woken via replay.
-    const stillPending = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number })
-      .c;
+    const stillPending = await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals');
     expect(stillPending).toBe(0);
     expect(wakeContainer).toHaveBeenCalled();
   });
@@ -275,13 +282,11 @@ describe('unknown-channel registration flow', () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
 
-    await routeInbound(dmEvent('dm-approve-user'));
-    await new Promise((r) => setTimeout(r, 10));
+    await expectAsyncDelivery(() => routeInbound(dmEvent('dm-approve-user')));
 
-    const { getDb } = await import('../../db/connection.js');
-    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
-      messaging_group_id: string;
-    };
+    const pending = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
 
     for (const handler of getResponseHandlers()) {
       const claimed = await handler({
@@ -295,9 +300,10 @@ describe('unknown-channel registration flow', () => {
       if (claimed) break;
     }
 
-    const mga = getDb()
-      .prepare('SELECT engage_mode, engage_pattern FROM messaging_group_agents WHERE messaging_group_id = ?')
-      .get(pending.messaging_group_id) as { engage_mode: string; engage_pattern: string };
+    const mga = (await getDb().get(
+      'SELECT engage_mode, engage_pattern FROM messaging_group_agents WHERE messaging_group_id = ?',
+      pending.messaging_group_id,
+    )) as { engage_mode: string; engage_pattern: string };
     expect(mga.engage_mode).toBe('pattern');
     expect(mga.engage_pattern).toBe('.');
   });
@@ -326,10 +332,9 @@ describe('unknown-channel registration flow', () => {
 
   async function approvePending(agentGroupId = 'ag-1') {
     const { getResponseHandlers } = await import('../../response-registry.js');
-    const { getDb } = await import('../../db/connection.js');
-    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
-      messaging_group_id: string;
-    };
+    const pending = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
     expect(pending).toBeDefined();
     for (const handler of getResponseHandlers()) {
       const claimed = await handler({
@@ -347,15 +352,14 @@ describe('unknown-channel registration flow', () => {
 
   it('non-threaded group (isGroup flag, null threadId) wires the GROUP default, sticky coerced to mention', async () => {
     const { routeInbound } = await import('../../router.js');
-    await routeInbound(waGroupMention('wa-group-1'));
-    await new Promise((r) => setTimeout(r, 10));
+    await expectAsyncDelivery(() => routeInbound(waGroupMention('wa-group-1')));
 
     const mgId = await approvePending();
 
-    const { getDb } = await import('../../db/connection.js');
-    const mga = getDb()
-      .prepare('SELECT engage_mode, engage_pattern FROM messaging_group_agents WHERE messaging_group_id = ?')
-      .get(mgId) as { engage_mode: string; engage_pattern: string | null };
+    const mga = (await getDb().get(
+      'SELECT engage_mode, engage_pattern FROM messaging_group_agents WHERE messaging_group_id = ?',
+      mgId,
+    )) as { engage_mode: string; engage_pattern: string | null };
     // Faithful fallback group default is mention-sticky, but with no live
     // adapter threads resolve false → coerced to plain mention. NOT the old
     // pattern '.' DM misclassification.
@@ -365,18 +369,19 @@ describe('unknown-channel registration flow', () => {
 
   it('DM on an undeclared channel stays pattern "." through the faithful fallback', async () => {
     const { routeInbound } = await import('../../router.js');
-    await routeInbound({
-      ...waGroupMention('wa-dm-1'),
-      message: { ...waGroupMention('wa-dm-1').message, isGroup: false },
-    });
-    await new Promise((r) => setTimeout(r, 10));
+    await expectAsyncDelivery(() =>
+      routeInbound({
+        ...waGroupMention('wa-dm-1'),
+        message: { ...waGroupMention('wa-dm-1').message, isGroup: false },
+      }),
+    );
 
     const mgId = await approvePending();
 
-    const { getDb } = await import('../../db/connection.js');
-    const mga = getDb()
-      .prepare('SELECT engage_mode, engage_pattern FROM messaging_group_agents WHERE messaging_group_id = ?')
-      .get(mgId) as { engage_mode: string; engage_pattern: string | null };
+    const mga = (await getDb().get(
+      'SELECT engage_mode, engage_pattern FROM messaging_group_agents WHERE messaging_group_id = ?',
+      mgId,
+    )) as { engage_mode: string; engage_pattern: string | null };
     expect(mga.engage_mode).toBe('pattern');
     expect(mga.engage_pattern).toBe('.');
   });
@@ -384,19 +389,16 @@ describe('unknown-channel registration flow', () => {
   it('connect-existing and new-agent approve paths produce identical wirings', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
-    const { getDb } = await import('../../db/connection.js');
 
     // Path 1: connect to existing agent.
-    await routeInbound(groupMention('chat-path-connect'));
-    await new Promise((r) => setTimeout(r, 10));
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-path-connect')));
     const mgIdConnect = await approvePending();
 
     // Path 2: new agent via free-text name reply.
-    await routeInbound(groupMention('chat-path-newagent'));
-    await new Promise((r) => setTimeout(r, 10));
-    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
-      messaging_group_id: string;
-    };
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-path-newagent')));
+    const pending = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
     for (const handler of getResponseHandlers()) {
       const claimed = await handler({
         questionId: pending.messaging_group_id,
@@ -425,8 +427,8 @@ describe('unknown-channel registration flow', () => {
     const select =
       'SELECT engage_mode, engage_pattern, sender_scope, ignored_message_policy, session_mode, priority ' +
       'FROM messaging_group_agents WHERE messaging_group_id = ?';
-    const viaConnect = getDb().prepare(select).get(mgIdConnect);
-    const viaNewAgent = getDb().prepare(select).get(pending.messaging_group_id);
+    const viaConnect = await getDb().get(select, mgIdConnect);
+    const viaNewAgent = await getDb().get(select, pending.messaging_group_id);
     expect(viaNewAgent).toBeDefined();
     expect(viaNewAgent).toEqual(viaConnect);
   });
@@ -435,12 +437,10 @@ describe('unknown-channel registration flow', () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
 
-    await routeInbound(groupMention('chat-deny'));
-    await new Promise((r) => setTimeout(r, 10));
-    const { getDb } = await import('../../db/connection.js');
-    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
-      messaging_group_id: string;
-    };
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-deny')));
+    const pending = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
 
     for (const handler of getResponseHandlers()) {
       const claimed = await handler({
@@ -455,14 +455,13 @@ describe('unknown-channel registration flow', () => {
     }
 
     // denied_at set, pending row cleared, no wiring.
-    const mg = getMessagingGroupByPlatform('telegram', 'chat-deny');
+    const mg = await getMessagingGroupByPlatform('telegram', 'chat-deny');
     expect(mg?.denied_at).not.toBeNull();
     expect(mg?.denied_at).toBeTruthy();
-    const mgaCount = (
-      getDb()
-        .prepare('SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?')
-        .get(pending.messaging_group_id) as { c: number }
-    ).c;
+    const mgaCount = await countRows(
+      'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?',
+      pending.messaging_group_id,
+    );
     expect(mgaCount).toBe(0);
 
     // A follow-up mention on the denied channel: no new card, no new pending row.
@@ -470,8 +469,7 @@ describe('unknown-channel registration flow', () => {
     await routeInbound(groupMention('chat-deny', '@bot please'));
     await new Promise((r) => setTimeout(r, 10));
     expect(deliverMock).not.toHaveBeenCalled();
-    const stillPending = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number })
-      .c;
+    const stillPending = await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals');
     expect(stillPending).toBe(0);
   });
 
@@ -479,12 +477,10 @@ describe('unknown-channel registration flow', () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
 
-    await routeInbound(groupMention('chat-unauth'));
-    await new Promise((r) => setTimeout(r, 10));
-    const { getDb } = await import('../../db/connection.js');
-    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
-      messaging_group_id: string;
-    };
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-unauth')));
+    const pending = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
 
     for (const handler of getResponseHandlers()) {
       const claimed = await handler({
@@ -499,32 +495,34 @@ describe('unknown-channel registration flow', () => {
     }
 
     // No wiring created, pending row preserved so a real approver can act on it.
-    const mgaCount = (
-      getDb()
-        .prepare('SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?')
-        .get(pending.messaging_group_id) as { c: number }
-    ).c;
+    const mgaCount = await countRows(
+      'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?',
+      pending.messaging_group_id,
+    );
     expect(mgaCount).toBe(0);
-    const stillPending = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number })
-      .c;
+    const stillPending = await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals');
     expect(stillPending).toBe(1);
   });
 
   it('does not let a scoped admin connect an unknown channel to another agent group', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
-    const { getDb } = await import('../../db/connection.js');
 
-    createAgentGroup({ id: 'ag-2', name: 'Betty', folder: 'betty', agent_provider: null, created_at: now() });
-    upsertUser({ id: 'telegram:scoped-admin', kind: 'telegram', display_name: 'Scoped Admin', created_at: now() });
-    grantRole({
+    await createAgentGroup({ id: 'ag-2', name: 'Betty', folder: 'betty', agent_provider: null, created_at: now() });
+    await upsertUser({
+      id: 'telegram:scoped-admin',
+      kind: 'telegram',
+      display_name: 'Scoped Admin',
+      created_at: now(),
+    });
+    await grantRole({
       user_id: 'telegram:scoped-admin',
       role: 'admin',
       agent_group_id: 'ag-1',
       granted_by: 'telegram:owner',
       granted_at: now(),
     });
-    createMessagingGroup({
+    await createMessagingGroup({
       id: 'mg-dm-scoped-admin',
       channel_type: 'telegram',
       platform_id: 'dm-scoped-admin',
@@ -533,19 +531,20 @@ describe('unknown-channel registration flow', () => {
       unknown_sender_policy: 'public',
       created_at: now(),
     });
-    getDb()
-      .prepare(
-        `INSERT INTO user_dms (user_id, channel_type, messaging_group_id, resolved_at)
+    await getDb().run(
+      `INSERT INTO user_dms (user_id, channel_type, messaging_group_id, resolved_at)
        VALUES (?, ?, ?, ?)`,
-      )
-      .run('telegram:scoped-admin', 'telegram', 'mg-dm-scoped-admin', now());
+      'telegram:scoped-admin',
+      'telegram',
+      'mg-dm-scoped-admin',
+      now(),
+    );
 
-    await routeInbound(groupMention('chat-scoped-cross-group'));
-    await new Promise((r) => setTimeout(r, 10));
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-scoped-cross-group')));
 
-    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
-      messaging_group_id: string;
-    };
+    const pending = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
     expect(pending).toBeDefined();
     expect(deliverMock).toHaveBeenCalledTimes(1);
     expect(deliverMock.mock.calls[0][1]).toBe('dm-scoped-admin');
@@ -563,8 +562,10 @@ describe('unknown-channel registration flow', () => {
     }
 
     const followupPayload = JSON.parse(deliverMock.mock.calls[1][4] as string) as {
+      question: string;
       options: Array<{ label: string; value: string }>;
     };
+    expect(followupPayload.question).toContain(AGENT_ACCESS_SCOPE_WARNING);
     expect(followupPayload.options.map((option) => option.value)).toContain('connect:ag-1');
     expect(followupPayload.options.map((option) => option.value)).not.toContain('connect:ag-2');
 
@@ -580,27 +581,23 @@ describe('unknown-channel registration flow', () => {
       if (claimed) break;
     }
 
-    const mgaCount = (
-      getDb()
-        .prepare('SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?')
-        .get(pending.messaging_group_id) as { c: number }
-    ).c;
+    const mgaCount = await countRows(
+      'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?',
+      pending.messaging_group_id,
+    );
     expect(mgaCount).toBe(0);
-    const stillPending = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number })
-      .c;
+    const stillPending = await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals');
     expect(stillPending).toBe(1);
   });
 
   it('create new agent: the free-text name reply creates the group and wires the channel', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
-    const { getDb } = await import('../../db/connection.js');
 
-    await routeInbound(groupMention('chat-create-new'));
-    await new Promise((r) => setTimeout(r, 10));
-    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
-      messaging_group_id: string;
-    };
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-create-new')));
+    const pending = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
 
     // Owner clicks "Connect new agent" → name prompt lands in their DM.
     for (const handler of getResponseHandlers()) {
@@ -629,31 +626,26 @@ describe('unknown-channel registration flow', () => {
       },
     });
 
-    const created = getDb().prepare("SELECT id FROM agent_groups WHERE name = 'Newbie'").get() as
-      | { id: string }
-      | undefined;
+    const created = await getDb().get<{ id: string }>("SELECT id FROM agent_groups WHERE name = 'Newbie'");
     expect(created).toBeDefined();
-    const mgaCount = (
-      getDb()
-        .prepare('SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ? AND agent_group_id = ?')
-        .get(pending.messaging_group_id, created!.id) as { c: number }
-    ).c;
+    const mgaCount = await countRows(
+      'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ? AND agent_group_id = ?',
+      pending.messaging_group_id,
+      created!.id,
+    );
     expect(mgaCount).toBe(1);
-    const stillPending = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number })
-      .c;
+    const stillPending = await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals');
     expect(stillPending).toBe(0);
   });
 
   it('a name reply after the registration vanished is consumed without creating anything', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
-    const { getDb } = await import('../../db/connection.js');
 
-    await routeInbound(groupMention('chat-vanished'));
-    await new Promise((r) => setTimeout(r, 10));
-    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
-      messaging_group_id: string;
-    };
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-vanished')));
+    const pending = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
 
     for (const handler of getResponseHandlers()) {
       const claimed = await handler({
@@ -670,11 +662,9 @@ describe('unknown-channel registration flow', () => {
     // The registration disappears between the click and the reply (rejected
     // from another card, group delete cascade, …) — the interceptor no
     // longer finds a pending registration, so the reply must not create.
-    getDb()
-      .prepare('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?')
-      .run(pending.messaging_group_id);
+    await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', pending.messaging_group_id);
 
-    const agentGroupsBefore = (getDb().prepare('SELECT COUNT(*) AS c FROM agent_groups').get() as { c: number }).c;
+    const agentGroupsBefore = await countRows('SELECT COUNT(*) AS c FROM agent_groups');
     await routeInbound({
       channelType: 'telegram',
       platformId: 'dm-owner',
@@ -687,9 +677,9 @@ describe('unknown-channel registration flow', () => {
       },
     });
 
-    const agentGroupsAfter = (getDb().prepare('SELECT COUNT(*) AS c FROM agent_groups').get() as { c: number }).c;
+    const agentGroupsAfter = await countRows('SELECT COUNT(*) AS c FROM agent_groups');
     expect(agentGroupsAfter).toBe(agentGroupsBefore);
-    const mgaCount = (getDb().prepare('SELECT COUNT(*) AS c FROM messaging_group_agents').get() as { c: number }).c;
+    const mgaCount = await countRows('SELECT COUNT(*) AS c FROM messaging_group_agents');
     expect(mgaCount).toBe(0);
   });
 });
@@ -697,30 +687,46 @@ describe('unknown-channel registration flow', () => {
 describe('no-owner / no-agent failure modes', () => {
   it('no owner → no card, no pending row (fresh-install bootstrap path)', async () => {
     // Wipe the owner grant set up in the outer beforeEach.
-    const { getDb } = await import('../../db/connection.js');
-    getDb().prepare('DELETE FROM user_roles').run();
+    await getDb().run('DELETE FROM user_roles');
 
     const { routeInbound } = await import('../../router.js');
     await routeInbound(groupMention('chat-noowner'));
     await new Promise((r) => setTimeout(r, 10));
 
     expect(deliverMock).not.toHaveBeenCalled();
-    const count = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number }).c;
+    const count = await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals');
     expect(count).toBe(0);
   });
 
   it('no agent groups → no card, no pending row', async () => {
-    const { getDb } = await import('../../db/connection.js');
     // Drop foreign-key-dependent rows first, then the agent group itself.
-    getDb().prepare('DELETE FROM user_roles').run();
-    getDb().prepare('DELETE FROM agent_groups').run();
+    await getDb().run('DELETE FROM user_roles');
+    await getDb().run('DELETE FROM agent_groups');
 
     const { routeInbound } = await import('../../router.js');
     await routeInbound(groupMention('chat-noagent'));
     await new Promise((r) => setTimeout(r, 10));
 
     expect(deliverMock).not.toHaveBeenCalled();
-    const count = (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number }).c;
+    const count = await countRows('SELECT COUNT(*) AS c FROM pending_channel_approvals');
     expect(count).toBe(0);
+  });
+});
+
+describe('createNewAgentGroup — disk-aware folder dedupe (A4)', () => {
+  it('skips deleted-group residue on disk and mints the next suffix', async () => {
+    // groups/my-agent exists on disk but no DB row claims it — exactly the
+    // state `ncl groups delete` leaves behind. The dedupe loop must treat
+    // disk presence as taken (matching templates/create-agent.ts) and mint
+    // my-agent-2, never adopt the residue.
+    const residue = path.join(TEST_DIR, 'groups', 'my-agent');
+    fs.mkdirSync(residue, { recursive: true });
+    fs.writeFileSync(path.join(residue, 'memory.md'), 'old group memory\n');
+
+    const ag = await createNewAgentGroup('My Agent');
+
+    expect(ag.folder).toBe('my-agent-2');
+    // Residue untouched.
+    expect(fs.readFileSync(path.join(residue, 'memory.md'), 'utf8')).toBe('old group memory\n');
   });
 });

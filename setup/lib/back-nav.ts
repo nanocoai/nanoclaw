@@ -28,9 +28,7 @@ export type ChannelFlowResult = void | typeof BACK_TO_CHANNEL_SELECTION;
  * otherwise. Esc / Ctrl-C unwinds through `ensureAnswer` (exit 0), the same as
  * every other setup prompt.
  */
-export async function backGate(
-  label: string,
-): Promise<'continue' | typeof BACK_TO_CHANNEL_SELECTION> {
+export async function backGate(label: string): Promise<'continue' | typeof BACK_TO_CHANNEL_SELECTION> {
   const choice = ensureAnswer(
     await brightSelect<'continue' | 'back'>({
       message: `Connect ${label}?`,

@@ -1,6 +1,18 @@
 import { findByRouting } from './destinations.js';
 import type { MessageInRow } from './db/messages-in.js';
-import { TIMEZONE, formatLocalTime } from './timezone.js';
+import { TIMEZONE, formatLocalTime, formatLocalStamp } from './timezone.js';
+
+/**
+ * channel_type marking cross-session context copies (accumulate fan-out from
+ * the agent group's other sessions). Echo rows are ambient context only: they
+ * never provide reply routing, never count as commands, and render as
+ * <cross-session-context> blocks.
+ */
+export const SESSION_ECHO_CHANNEL = 'session-echo';
+
+export function isSessionEcho(msg: MessageInRow): boolean {
+  return msg.channel_type === SESSION_ECHO_CHANNEL;
+}
 
 /**
  * Command categories for messages starting with '/'.
@@ -37,7 +49,9 @@ export function categorizeMessage(msg: MessageInRow): CommandInfo {
   const text = (content.text || '').trim();
   const senderId = extractSenderId(msg, content);
 
-  if (!text.startsWith('/')) {
+  // Cross-session echo rows are ambient copies of another conversation —
+  // a copied "/clear" etc. must never execute here.
+  if (isSessionEcho(msg) || !text.startsWith('/')) {
     return { category: 'none', command: '', text, senderId };
   }
 
@@ -61,6 +75,7 @@ export function categorizeMessage(msg: MessageInRow): CommandInfo {
  * before messages reach the container.
  */
 export function isClearCommand(msg: MessageInRow): boolean {
+  if (isSessionEcho(msg)) return false;
   const content = parseContent(msg.content);
   const text = (content.text || '').trim();
   return text.toLowerCase().startsWith('/clear');
@@ -106,16 +121,24 @@ export interface RoutingContext {
 
 /**
  * Extract routing context from a batch of messages.
- * Uses the first message's routing fields.
+ * Uses the first non-echo message's routing fields — a cross-session echo
+ * row must never decide where the reply goes (its routing is NULL by
+ * contract, but even a malformed row with routing set is skipped). Falls
+ * back to the plain first row if the batch is somehow all echo (shouldn't
+ * happen — echo rows never trigger).
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
-  const first = messages[0];
+  const first = messages.find((m) => !isSessionEcho(m)) ?? messages[0];
   return {
     platformId: first?.platform_id ?? null,
     channelType: first?.channel_type ?? null,
     threadId: first?.thread_id ?? null,
     inReplyTo: first?.id ?? null,
-    taskRun: messages.length > 0 && messages.every((m) => m.kind === 'task'),
+    // Echo rows riding along with a task must not disable one-door delivery:
+    // taskRun as long as at least one task row and no non-task/non-echo row.
+    taskRun:
+      messages.some((m) => m.kind === 'task') &&
+      messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
   };
 }
 
@@ -172,6 +195,7 @@ function formatChatMessages(messages: MessageInRow[]): string {
 }
 
 function formatSingleChat(msg: MessageInRow): string {
+  if (isSessionEcho(msg)) return formatEchoMessage(msg);
   const content = parseContent(msg.content);
   const sender = content.sender || content.author?.fullName || content.author?.userName || 'Unknown';
   const time = formatLocalTime(msg.timestamp, TIMEZONE);
@@ -179,11 +203,37 @@ function formatSingleChat(msg: MessageInRow): string {
   const idAttr = msg.seq != null ? ` id="${msg.seq}"` : '';
   const replyAttr = content.replyTo?.id ? ` reply_to="${escapeXml(String(content.replyTo.id))}"` : '';
   const replyPrefix = formatReplyContext(content.replyTo);
+  const linksSuffix = formatLinks(content.links, text);
   const attachmentsSuffix = formatAttachments(content.attachments);
+  const appContextSuffix = formatAppContext(content.app_context);
 
   const fromAttr = originAttr(msg);
 
-  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${attachmentsSuffix}</message>`;
+  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${linksSuffix}${attachmentsSuffix}${appContextSuffix}</message>`;
+}
+
+/**
+ * Render a cross-session context copy. No id/reply_to attributes — echo rows
+ * are ambient context, not addressable messages. `from` is the human label of
+ * the source conversation (e.g. "#Pixel room", "DM with Gavriel") written by
+ * the host at fan-out time; content.text is already truncated host-side.
+ */
+function formatEchoMessage(msg: MessageInRow): string {
+  const content = parseContent(msg.content);
+  const label = content.echo?.label || 'another conversation';
+  const sender = content.sender || 'Unknown';
+  const time = formatLocalStamp(new Date(msg.timestamp), TIMEZONE);
+  // Timeline rows are the conversation's own preceding history — FIRST-CLASS
+  // context this thread continues from (the agent's own posts render as
+  // sender="you"), unlike cross-session-context ambient echoes from other
+  // live surfaces which must never be acted on in-place. dm-timeline = a DM's
+  // timeline; channel-timeline = a group conversation's (per-thread groups).
+  if (content.echo?.surface === 'dm-timeline' || content.echo?.surface === 'channel-timeline') {
+    const who = (content as { self?: boolean }).self ? 'you' : sender;
+    const tag = content.echo.surface === 'channel-timeline' ? 'channel-history' : 'dm-history';
+    return `<${tag} sender="${escapeXml(who)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</${tag}>`;
+  }
+  return `<cross-session-context from="${escapeXml(label)}" sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</cross-session-context>`;
 }
 
 /**
@@ -268,6 +318,37 @@ function formatReplyContext(replyTo: any): string {
   const text = replyTo.text;
   if (!sender || !text) return '';
   return `\n  <quoted_message from="${escapeXml(sender)}">${escapeXml(text)}</quoted_message>\n`;
+}
+
+/**
+ * Render agent-mode app context — the entities the user was viewing when
+ * they sent this message (content.app_context = { entities: [{ type, id },
+ * …] }, attached by the chat-sdk bridge). One compact line inside the
+ * message block; malformed/empty context renders nothing.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function formatAppContext(appContext: any): string {
+  if (!appContext || !Array.isArray(appContext.entities)) return '';
+  const items = appContext.entities
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .filter((e: any) => typeof e?.type === 'string' && e.type && typeof e?.id === 'string' && e.id)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .map((e: any) => `${e.type} ${e.id}`);
+  if (items.length === 0) return '';
+  return `\n(viewing: ${escapeXml(items.join(', '))})`;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function formatLinks(links: any[] | undefined, text: string): string {
+  if (!Array.isArray(links) || links.length === 0) return '';
+  const urls = [
+    ...new Set(
+      links.flatMap((link) =>
+        typeof link?.url === 'string' && link.url && !text.includes(link.url) ? [link.url] : [],
+      ),
+    ),
+  ];
+  return urls.length === 0 ? '' : `\n${urls.map((url) => `[link: ${escapeXml(url)}]`).join('\n')}`;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

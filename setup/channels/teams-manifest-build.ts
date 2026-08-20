@@ -31,9 +31,7 @@ const rsc = process.argv.includes('--rsc');
 const shortName = process.env.NANOCLAW_AGENT_NAME?.trim() || 'NanoClaw';
 
 if (!appId || !url) {
-  console.error(
-    'usage: teams-manifest-build.ts --app-id <azure-app-id> --url <https-url> [--out <dir>] [--rsc]',
-  );
+  console.error('usage: teams-manifest-build.ts --app-id <azure-app-id> --url <https-url> [--out <dir>] [--rsc]');
   process.exit(2);
 }
 

@@ -29,7 +29,7 @@ export interface ContainerConfigRow {
   updated_at: string;
 }
 
-export type UnknownSenderPolicy = 'strict' | 'request_approval' | 'public';
+export type UnknownSenderPolicy = 'strict' | 'request_approval' | 'decline_notify' | 'public';
 
 export interface MessagingGroup {
   id: string;
@@ -56,6 +56,13 @@ export interface MessagingGroup {
    * the column itself defaults to NULL in SQLite.
    */
   denied_at?: string | null;
+  /**
+   * When set, our own bot has LEFT the platform channel this row maps to
+   * (written by a channel membership module, migration 022) — the wiring
+   * survives, but delivery/typing should skip the row until the bot rejoins
+   * (which clears it). Optional on the TS type per the denied_at convention.
+   */
+  detached_at?: string | null;
   created_at: string;
 }
 
@@ -209,6 +216,13 @@ export interface PendingApproval {
   agent_group_id: string | null;
   channel_type: string | null;
   platform_id: string | null;
+  /**
+   * Adapter instance the card was delivered through (migration 023). NULL
+   * reads as the default instance (= channel_type). Delivery dispatch is
+   * exact-key, so any follow-up edit to the card must address the identity
+   * that posted it, not just the platform.
+   */
+  instance: string | null;
   platform_message_id: string | null;
   /**
    * For OneCLI credential rows, the gateway's request TTL. For a module

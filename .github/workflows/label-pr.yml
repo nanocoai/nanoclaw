@@ -32,7 +32,7 @@ jobs:
             if (body.includes('contributing-guide: v1')) labels.push('follows-guidelines');
 
             // Lowercase GitHub logins; keep in sync with the core team roster.
-            const CORE_TEAM = ['gavrielc', 'koshkoshinsk', 'glifocat', 'gabi-simons', 'omri-maya', 'amit-shafnir', 'moshe-nanoco'];
+            const CORE_TEAM = ['gavrielc', 'koshkoshinsk', 'glifocat', 'gabi-simons', 'omri-maya', 'amit-shafnir', 'moshe-nanoco', 'zvi-fried'];
             const author = context.payload.pull_request.user.login.toLowerCase();
             if (CORE_TEAM.includes(author)) {
               labels.push('core-team');

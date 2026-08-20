@@ -1,6 +1,7 @@
 # Remove OpenCode provider
 
-Idempotent — safe to run even if some steps were never applied. Reverses both the host (`src/providers/`) and container (`container/agent-runner/src/providers/`) trees, the agent-runner dependency, and the Dockerfile CLI install.
+Idempotent — safe to run even if some steps were never applied. Reverses both
+provider trees, the agent-runner dependency, and the global CLI manifest entry.
 
 ## 1. Delete the barrel import lines (both trees)
 
@@ -16,11 +17,16 @@ This unregisters the provider from both `listProviderContainerConfigNames()` (ho
 ```bash
 rm -f src/providers/opencode.ts \
       src/providers/opencode-registration.test.ts \
-      src/opencode-dockerfile.test.ts \
+      src/opencode-cli-tools.test.ts \
       container/agent-runner/src/providers/opencode.ts \
       container/agent-runner/src/providers/mcp-to-opencode.ts \
       container/agent-runner/src/providers/mcp-to-opencode.test.ts \
+      container/agent-runner/src/providers/opencode.attachments.test.ts \
+      container/agent-runner/src/providers/opencode.compaction.test.ts \
+      container/agent-runner/src/providers/opencode.config.test.ts \
       container/agent-runner/src/providers/opencode.factory.test.ts \
+      container/agent-runner/src/providers/opencode.memory.test.ts \
+      container/agent-runner/src/providers/opencode.question.test.ts \
       container/agent-runner/src/providers/opencode-registration.test.ts
 ```
 
@@ -32,50 +38,18 @@ rm -f src/providers/opencode.ts \
 cd container/agent-runner && bun remove @opencode-ai/sdk && cd -
 ```
 
-## 4. Revert the Dockerfile CLI install
+## 4. Remove the global CLI manifest entry
 
-In `container/Dockerfile`, remove both OpenCode edits (skip whichever is already gone):
+Delete the object whose `name` is `opencode-ai` from
+`container/cli-tools.json`. Leave every other CLI entry untouched.
 
-**(a)** Delete the version ARG from the "Pin CLI versions" block:
+## 5. Unset OpenCode env vars
 
-```dockerfile
-ARG OPENCODE_VERSION=1.4.17
-```
-
-**(b)** Delete the standalone OpenCode install layer:
-
-```dockerfile
-RUN --mount=type=cache,target=/root/.cache/pnpm \
-    pnpm install -g "opencode-ai@${OPENCODE_VERSION}"
-```
-
-Leave the other per-CLI install layers (claude-code, agent-browser, vercel) untouched.
-
-## 5. Clean up per-group overlays
-
-Any group that had the OpenCode files copied into its live source overlay still carries them — remove the OpenCode-specific files from each overlay (the barrel `index.ts` is re-synced from the cleaned tree, not deleted):
-
-```bash
-for overlay in data/v2-sessions/*/agent-runner-src/providers/; do
-  [ -d "$overlay" ] || continue
-  rm -f "$overlay/opencode.ts" "$overlay/mcp-to-opencode.ts"
-  [ -f container/agent-runner/src/providers/index.ts ] && \
-    cp container/agent-runner/src/providers/index.ts "$overlay"
-  echo "Cleaned: $overlay"
-done
-```
-
-## 6. Unset OpenCode env vars
-
-Remove any OpenCode-specific lines you added to `.env` (`OPENCODE_PROVIDER`, `OPENCODE_MODEL`, `OPENCODE_SMALL_MODEL`, and `ANTHROPIC_BASE_URL` if no other integration uses it) if no other integration needs them, then re-sync to the container:
-
-```bash
-mkdir -p data/env && cp .env data/env/env
-```
+Remove any OpenCode-specific lines you added to `.env` (`OPENCODE_PROVIDER`, `OPENCODE_MODEL`, `OPENCODE_SMALL_MODEL`, and `ANTHROPIC_BASE_URL` if no other integration uses it) if no other integration needs them.
 
 Switch any group still on OpenCode back to the default provider — set `"provider": "claude"` in `groups/<folder>/container.json` and clear `agent_provider` on the group/session in the DB.
 
-## 7. Rebuild and restart
+## 6. Rebuild and restart
 
 Run from your NanoClaw project root:
 
@@ -99,7 +73,7 @@ After removal, the registration guards no longer apply (their files are gone). C
 ```bash
 grep -R "opencode.js" src/providers/index.ts container/agent-runner/src/providers/index.ts   # no output
 grep "@opencode-ai/sdk" container/agent-runner/package.json                                   # no output
-grep "opencode-ai" container/Dockerfile                                                        # no output
+grep '"opencode-ai"' container/cli-tools.json                                                  # no output
 ```
 
 In a wired agent, requesting `agent_provider = 'opencode'` should fall back to the default provider since `opencode` is no longer in the registry.

@@ -7,7 +7,7 @@ import { routeAgentMessage, type RoutableAgentMessage } from './agent-route.js';
 export const applyA2aMessageGate: ApprovalHandler = async ({ session, payload, approval, notify }) => {
   const { id, platform_id, content, in_reply_to } = payload;
   if (typeof platform_id !== 'string' || !platform_id) {
-    notify('Message approved but the target agent group was missing from the request.');
+    await notify('Message approved but the target agent group was missing from the request.');
     log.warn('a2a_message_gate apply: missing target', { sessionId: session.id });
     return;
   }
@@ -35,7 +35,7 @@ export const applyA2aMessageGate: ApprovalHandler = async ({ session, payload, a
         msgId: msg.id,
         reason: err.message,
       });
-      notify(`Message approved, but not delivered — no longer authorized: ${err.message}`);
+      await notify(`Message approved, but not delivered — no longer authorized: ${err.message}`);
       return;
     }
     throw err;

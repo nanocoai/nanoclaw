@@ -68,7 +68,7 @@ export interface ApprovalHandlerContext {
   /** User ID of the admin who approved. Empty string if unknown. */
   userId: string;
   /** Send a system chat message to the requesting agent's session. */
-  notify: (text: string) => void;
+  notify: (text: string) => Promise<void>;
 }
 
 export type ApprovalHandler = (ctx: ApprovalHandlerContext) => Promise<void>;
@@ -136,7 +136,7 @@ export async function notifyApprovalResolved(event: ApprovalResolvedEvent): Prom
  * Ordered list of user IDs eligible to approve an action for the given agent
  * group. Preference: admins @ that group → global admins → owners.
  */
-export function pickApprover(agentGroupId: string | null): string[] {
+export async function pickApprover(agentGroupId: string | null): Promise<string[]> {
   const approvers: string[] = [];
   const seen = new Set<string>();
   const add = (id: string): void => {
@@ -147,10 +147,10 @@ export function pickApprover(agentGroupId: string | null): string[] {
   };
 
   if (agentGroupId) {
-    for (const r of getAdminsOfAgentGroup(agentGroupId)) add(r.user_id);
+    for (const r of await getAdminsOfAgentGroup(agentGroupId)) add(r.user_id);
   }
-  for (const r of getGlobalAdmins()) add(r.user_id);
-  for (const r of getOwners()) add(r.user_id);
+  for (const r of await getGlobalAdmins()) add(r.user_id);
+  for (const r of await getOwners()) add(r.user_id);
 
   return approvers;
 }
@@ -189,8 +189,8 @@ function channelTypeOf(userId: string): string {
 // ── Request API ──
 
 /** Send a system chat to the agent's session. Used by callers and by the response handler. */
-export function notifyAgent(session: Session, text: string): void {
-  writeSessionMessage(session.agent_group_id, session.id, {
+export async function notifyAgent(session: Session, text: string): Promise<void> {
+  await writeSessionMessage(session.agent_group_id, session.id, {
     id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: 'chat',
     timestamp: new Date().toISOString(),
@@ -199,10 +199,8 @@ export function notifyAgent(session: Session, text: string): void {
     threadId: null,
     content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
   });
-  const fresh = getSession(session.id);
-  if (fresh) {
-    wakeContainer(fresh).catch((err) => log.error('Failed to wake container after notification', { err }));
-  }
+  const fresh = await getSession(session.id);
+  if (fresh) await wakeContainer(fresh);
 }
 
 export interface RequestApprovalOptions {
@@ -229,31 +227,35 @@ export interface RequestApprovalOptions {
 export async function requestApproval(opts: RequestApprovalOptions): Promise<void> {
   const { session, action, payload, title, question, agentName, approverUserId } = opts;
 
-  const approvers = approverUserId ? [approverUserId] : pickApprover(session.agent_group_id);
+  const approvers = approverUserId ? [approverUserId] : await pickApprover(session.agent_group_id);
   if (approvers.length === 0) {
-    notifyAgent(session, `${action} failed: no owner or admin configured to approve.`);
+    await notifyAgent(session, `${action} failed: no owner or admin configured to approve.`);
     return;
   }
 
   const originChannelType = session.messaging_group_id
-    ? (getMessagingGroup(session.messaging_group_id)?.channel_type ?? '')
+    ? ((await getMessagingGroup(session.messaging_group_id))?.channel_type ?? '')
     : '';
 
   const target = await pickApprovalDelivery(approvers, originChannelType);
   if (!target) {
-    notifyAgent(session, `${action} failed: no DM channel found for any eligible approver.`);
+    await notifyAgent(session, `${action} failed: no DM channel found for any eligible approver.`);
     return;
   }
 
   const approvalId = `appr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const normalizedOptions = normalizeOptions(APPROVAL_OPTIONS);
-  createPendingApproval({
+  await createPendingApproval({
     approval_id: approvalId,
     session_id: session.id,
     request_id: approvalId,
     action,
     payload: JSON.stringify(payload),
     created_at: new Date().toISOString(),
+    // The bot identity this card goes out as. This flow persists no delivery
+    // address (it has no card-edit path today), but the instance is the one
+    // piece that cannot be re-derived later, so record it while we hold it.
+    instance: target.messagingGroup.instance ?? null,
     title,
     question,
     options_json: JSON.stringify(normalizedOptions),
@@ -280,8 +282,8 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
       log.error('Failed to deliver approval card', { action, approvalId, err });
       // The single delivery target never saw the card — remove the row so it
       // can't linger as a pending approval nobody can act on.
-      deletePendingApproval(approvalId);
-      notifyAgent(session, `${action} failed: could not deliver approval request to ${target.userId}.`);
+      await deletePendingApproval(approvalId);
+      await notifyAgent(session, `${action} failed: could not deliver approval request to ${target.userId}.`);
       return;
     }
   }

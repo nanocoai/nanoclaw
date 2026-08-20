@@ -55,6 +55,14 @@ const SKILLS = readdirSync(SKILLS_DIR).filter((n) => {
   return existsSync(p) && /^```nc:/m.test(readFileSync(p, 'utf8'));
 });
 
+// Every prose doc a skill ships — install and removal both, since a retired
+// mechanism outlives its install step in the matching REMOVE.md.
+const SKILL_DOCS = readdirSync(SKILLS_DIR).flatMap((n) =>
+  ['SKILL.md', 'REMOVE.md']
+    .filter((f) => existsSync(join(SKILLS_DIR, n, f)))
+    .map((f) => ({ doc: `${n}/${f}`, text: readFileSync(join(SKILLS_DIR, n, f), 'utf8') })),
+);
+
 // ---------------------------------------------------------------------------
 // Fixtures: .claude/skills/<name>/apply-fixtures.json, colocated so a skill
 // edit and its fixture update land in one diff. Prompt-less skills fall back
@@ -162,6 +170,22 @@ describe('skill discovery', () => {
     expect(SKILLS).toContain('add-whatsapp');
     expect(SKILLS.length).toBeGreaterThanOrEqual(10);
   });
+
+  it('finds the prose docs', () => {
+    expect(SKILL_DOCS.map((d) => d.doc)).toContain('add-slack/REMOVE.md');
+    expect(SKILL_DOCS.length).toBeGreaterThanOrEqual(30);
+  });
+});
+
+describe('retired mechanisms', () => {
+  it('no skill doc walks the reader into the data/env mirror', () => {
+    // nc:env-sync is retired: nothing reads data/env/env, and copying .env
+    // there put live tokens in a second place. validate() rejects the fence
+    // form, but the same instruction spelled out as prose and a bash block is
+    // invisible to it — which is how it survived in a dozen REMOVE.md files.
+    const offenders = SKILL_DOCS.filter((d) => d.text.includes('data/env')).map((d) => d.doc);
+    expect(offenders).toEqual([]);
+  });
 });
 
 describe.each(SKILLS)('%s', (name) => {
@@ -170,7 +194,10 @@ describe.each(SKILLS)('%s', (name) => {
   const directives = parseDirectives(md);
   const byLine = new Map(directives.map((d) => [d.line, d]));
   const promptVars = new Set(
-    directives.filter((d) => d.kind === 'prompt').map((d) => promptVar(d)).filter(isString),
+    directives
+      .filter((d) => d.kind === 'prompt')
+      .map((d) => promptVar(d))
+      .filter(isString),
   );
   const guards = [...new Set(directives.map((d) => d.attrs.when).filter(isString))];
   const fixture = loadFixture(name);
@@ -196,7 +223,10 @@ describe.each(SKILLS)('%s', (name) => {
       .filter(isString);
     for (const sc of fixture?.scenarios ?? []) {
       for (const k of Object.keys(sc.inputs ?? {})) {
-        expect(promptVars.has(k), `scenario "${sc.name}" supplies input "${k}" which is not a prompt var of ${name} — stale fixture?`).toBe(true);
+        expect(
+          promptVars.has(k),
+          `scenario "${sc.name}" supplies input "${k}" which is not a prompt var of ${name} — stale fixture?`,
+        ).toBe(true);
       }
       for (const v of unguarded) {
         expect(
@@ -226,7 +256,10 @@ describe.each(SKILLS)('%s', (name) => {
     // exec/stepFields fixture entry is missing (bindCapture binds '' when the
     // stub returned nothing and no validate: catches it).
     for (const [k, v] of Object.entries(res.vars)) {
-      expect(v, `resolved {{${k}}} is empty in scenario "${sc.name}" — add/fix the exec or stepFields fixture entry answering that capture`).not.toBe('');
+      expect(
+        v,
+        `resolved {{${k}}} is empty in scenario "${sc.name}" — add/fix the exec or stepFields fixture entry answering that capture`,
+      ).not.toBe('');
     }
   });
 
@@ -259,7 +292,9 @@ describe.each(SKILLS)('%s', (name) => {
     if (firstBuild >= 0) {
       directives.forEach((d, i) => {
         if (['copy', 'append', 'dep', 'json-merge'].includes(d.kind)) {
-          expect(i, `${d.kind} at line ${d.line} lands after the build — the build would not see it`).toBeLessThan(firstBuild);
+          expect(i, `${d.kind} at line ${d.line} lands after the build — the build would not see it`).toBeLessThan(
+            firstBuild,
+          );
         }
       });
     }

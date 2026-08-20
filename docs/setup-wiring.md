@@ -12,7 +12,7 @@ Last updated: 2026-07-10
 - Scheduling MCP tools emit system actions via messages_out; host applies them to inbound.db in `delivery.ts:handleSystemAction()`
 - Host sweep reads `processing_ack` table + heartbeat file mtime for stale detection
 - Container clears stale `processing_ack` entries on startup (crash recovery)
-- Files: `src/db/schema.ts` (INBOUND_SCHEMA + OUTBOUND_SCHEMA), `src/session-manager.ts`, `src/delivery.ts`, `src/host-sweep.ts`, `container/agent-runner/src/db/connection.ts`, `messages-in.ts`, `messages-out.ts`, `poll-loop.ts`, `mcp-tools/scheduling.ts`, `mcp-tools/interactive.ts`
+- Files: `src/mailbox/sqlite/schema.ts`, `src/session-manager.ts`, `src/delivery.ts`, `src/host-sweep.ts`, `container/agent-runner/src/mailbox/sqlite/connection.ts`, `db/messages-in.ts`, `db/messages-out.ts`, `poll-loop.ts`, `mcp-tools/scheduling.ts`, `mcp-tools/interactive.ts`
 - Container image rebuilt with tsconfig (`container/agent-runner/tsconfig.json`)
 - E2E verified: host → Docker container → agent responds → "E2E works!" ✓
 
@@ -112,4 +112,4 @@ Channel adapter → routeInbound() → resolve messaging_group → resolve agent
 | `setup/register.ts` | Creates entities (agent_group, messaging_group, wiring) |
 | `setup/templates.ts` | Template discovery + first-agent stamping through `ncl groups create --template` |
 | `setup/verify.ts` | Checks central DB for registered groups |
-| `container/agent-runner/src/db/connection.ts` | Two-DB connection layer (inbound read-only, outbound read-write) |
+| `container/agent-runner/src/mailbox/sqlite/connection.ts` | SQLite driver's two-DB connection layer |

@@ -73,9 +73,10 @@ function main(): void {
   const registeredFolders = new Set<string>();
   if (fs.existsSync(v1DbPath)) {
     const v1Db = new Database(v1DbPath, { readonly: true, fileMustExist: true });
-    const rows = v1Db
-      .prepare('SELECT folder, container_config FROM registered_groups')
-      .all() as Array<{ folder: string; container_config: string | null }>;
+    const rows = v1Db.prepare('SELECT folder, container_config FROM registered_groups').all() as Array<{
+      folder: string;
+      container_config: string | null;
+    }>;
     const containerConfigs = new Map<string, string | null>();
     for (const r of rows) {
       registeredFolders.add(r.folder);

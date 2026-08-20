@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 
-import { getOutboundDb, initTestSessionDb } from './connection.js';
+import { getOutboundDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import {
   clearContinuation,
   getContinuation,

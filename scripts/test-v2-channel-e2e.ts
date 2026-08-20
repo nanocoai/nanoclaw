@@ -22,8 +22,8 @@ import { runMigrations } from '../src/db/migrations/index.js';
 import { createAgentGroup } from '../src/db/agent-groups.js';
 import { createMessagingGroup, createMessagingGroupAgent } from '../src/db/messaging-groups.js';
 
-const centralDb = initDb(path.join(TEST_DIR, 'v2.db'));
-runMigrations(centralDb);
+const centralDb = await initDb(path.join(TEST_DIR, 'v2.db'));
+await runMigrations(centralDb);
 
 // Create groups dir for agent folder mount
 const groupsDir = path.resolve(process.cwd(), 'groups');
@@ -31,7 +31,7 @@ const testGroupDir = path.join(groupsDir, 'test-channel-e2e');
 fs.mkdirSync(testGroupDir, { recursive: true });
 fs.writeFileSync(path.join(testGroupDir, 'CLAUDE.md'), '# Test Agent\nYou are a test agent. Be brief.\n');
 
-createAgentGroup({
+await createAgentGroup({
   id: 'ag-chan',
   name: 'Channel E2E Agent',
   folder: 'test-channel-e2e',
@@ -39,7 +39,7 @@ createAgentGroup({
   created_at: new Date().toISOString(),
 });
 
-createMessagingGroup({
+await createMessagingGroup({
   id: 'mg-chan',
   channel_type: 'mock',
   platform_id: 'mock-channel-1',
@@ -49,7 +49,7 @@ createMessagingGroup({
   created_at: new Date().toISOString(),
 });
 
-createMessagingGroupAgent({
+await createMessagingGroupAgent({
   id: 'mga-chan',
   messaging_group_id: 'mg-chan',
   agent_group_id: 'ag-chan',
@@ -71,7 +71,7 @@ import { routeInbound } from '../src/router.js';
 import { setDeliveryAdapter, startActiveDeliveryPoll, stopDeliveryPolls } from '../src/delivery.js';
 import { getChannelAdapter, registerChannelAdapter, initChannelAdapters } from '../src/channels/channel-registry.js';
 import { findSession } from '../src/db/sessions.js';
-import { inboundDbPath } from '../src/session-manager.js';
+import { inboundDbPath } from '../src/mailbox/sqlite/paths.js';
 import type { ChannelAdapter, ChannelSetup, OutboundMessage } from '../src/channels/adapter.js';
 
 // Track delivered messages
@@ -169,7 +169,7 @@ await routeInbound({
   },
 });
 
-const session = findSession('mg-chan', null);
+const session = await findSession('mg-chan', null);
 if (!session) {
   console.log('✗ No session created!');
   cleanup();
@@ -181,7 +181,7 @@ console.log(`✓ Container status: ${session.container_status}`);
 import { execSync } from 'child_process';
 const checkContainerLogs = () => {
   try {
-    const containers = execSync('docker ps -a --filter name=nanoclaw-v2-test-channel --format "{{.Names}}"')
+    const containers = execSync('docker ps -a --filter label=nanoclaw-group-folder=test-channel --format "{{.Names}}"')
       .toString()
       .trim();
     for (const name of containers.split('\n').filter(Boolean)) {
