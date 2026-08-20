@@ -2,47 +2,52 @@
 
 Idempotent — safe to run even if some steps were never applied.
 
-## 1. Delete the copied files (both trees)
+## 1. Unregister the MCP server from every group that has it
+
+The registration is per agent group, in the group's container config. List the groups, then check each one's config for an `atomic_chat` entry under `mcp_servers`:
+
+```bash
+ncl groups list
+ncl groups config get --id <agent-group-id>
+```
+
+For each group that has it:
+
+```bash
+ncl groups config remove-mcp-server --id <agent-group-id> --name atomic_chat
+ncl groups restart --id <agent-group-id>
+```
+
+Until the group restarts, its running container still has the tool.
+
+## 2. Delete the copied files
 
 ```bash
 rm -f container/agent-runner/src/atomic-chat-mcp-stdio.ts \
-      container/agent-runner/src/atomic-chat-registration.test.ts \
-      src/atomic-chat-env.ts \
+      container/agent-runner/src/atomic-chat-mcp-stdio.test.ts \
       src/atomic-chat-wiring.test.ts
 ```
 
-## 2. Unregister the MCP server
+## 3. Revert the optional log edit
 
-In `container/agent-runner/src/index.ts`, remove the `atomic_chat: { … }` entry from the `mcpServers` object (leave `nanoclaw` and any other entries).
+If you applied it: in `src/drivers/docker-driver.ts`, inside `DockerHandle.start()`, restore the stderr handler to its single `log.debug(line, { container: this.name })` form — remove the `[ATOMIC]` info-level branch and keep the stderr-tail lines. If another local-model tool (e.g. `add-ollama-tool`) added its own prefix branch, leave that one alone.
 
-## 3. Revert the host-side edits
-
-- Remove the `import { atomicChatEnv } from './atomic-chat-env.js';` import.
-- Remove the `...atomicChatEnv(),` spread from the `contributedEnv` literal in `composeSessionSpec`.
-- In `src/drivers/docker-driver.ts`, restore the driver's stderr handler to its single `log.debug(line, …)` form (remove the `[ATOMIC]` info-level branch; keep the stderr-tail lines).
-
-## 4. Remove env vars
-
-Remove the Atomic Chat block from `.env.example`, and the `ATOMIC_CHAT_*` lines from `.env` if you set them.
-
-## 5. Rebuild and restart
-
-Run from your NanoClaw project root:
+## 4. Rebuild the host
 
 ```bash
-pnpm run build && ./container/build.sh
-source setup/lib/install-slug.sh
-
-# macOS
-launchctl kickstart -k gui/$(id -u)/$(launchd_label)
-
-# Linux
-systemctl --user restart $(systemd_unit)
+pnpm run build
 ```
+
+No image rebuild and no service restart are needed: the agent-runner source is a read-only bind mount, and nothing in the host process holds Atomic Chat state. (If you reverted the log edit, the running host keeps the old behavior until it is restarted — harmless, and it goes away on the next restart.)
 
 ## Verification
 
-After removal, confirm the tool is gone — in a wired agent, asking it to "list atomic chat models" should report no such tool, and the logs should show no `[ATOMIC]` lines after the last restart:
+```bash
+ncl groups config get --id <agent-group-id>    # no atomic_chat under mcp_servers
+grep -rl atomic-chat container/agent-runner/src src   # no matches
+```
+
+In a wired agent, asking it to "list atomic chat models" should report no such tool, and no new `[ATOMIC]` lines should appear in `logs/nanoclaw.log`:
 
 ```bash
 grep "\[ATOMIC\]" logs/nanoclaw.log | tail -5

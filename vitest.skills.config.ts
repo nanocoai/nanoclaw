@@ -30,7 +30,7 @@ export default defineConfig({
       '**/node_modules/**',
       // Skill payload destined for container/agent-runner/src/, whose tests
       // import from `bun:test` and only run under Bun (see vitest.config.ts).
-      '.claude/skills/add-atomic-chat-tool/atomic-chat-registration.test.ts',
+      '.claude/skills/add-atomic-chat-tool/atomic-chat-mcp-stdio.test.ts',
       '.claude/skills/add-ollama-tool/ollama-registration.test.ts',
     ],
   },
