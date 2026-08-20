@@ -1,13 +1,20 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from '../server.js';
+import { discoveryParsers } from '../parsers.js';
 
 const STUB = fileURLToPath(new URL('./fixtures/stub-cli.js', import.meta.url));
 const tmp = mkdtempSync(join(tmpdir(), 'clidash-test-'));
+
+// The stub CLI replays test/fixtures/ncl-help.txt for `help`, so the resource
+// count follows the fixture instead of a magic number that rots on refresh.
+const FIXTURE_RESOURCES = discoveryParsers['ncl-help'](
+  readFileSync(fileURLToPath(new URL('./fixtures/ncl-help.txt', import.meta.url)), 'utf8'),
+).map((r) => r.name);
 
 function stubCli(extra = {}) {
   return {
@@ -50,7 +57,7 @@ test('/api/clis: lists configured CLIs with discovered resources', async () => {
     const names = body.clis[0].resources.map((r) => r.name);
     assert.ok(names.includes('sessions'));
     assert.ok(names.includes('groups'));
-    assert.equal(names.length, 11);
+    assert.deepEqual(names, FIXTURE_RESOURCES);
   });
 });
 
@@ -174,33 +181,47 @@ test('/api/r: concurrent requests for the same resource coalesce into one exec',
   });
 });
 
-// ------------------------------------------------------------- /api/view
+// ------------------------------------------------- exec concurrency gate
+//
+// The UI asks for every resource at once. Without a cap those CLI subprocesses
+// race for the same cores and each one's wall time grows with the size of the
+// batch until they all trip the exec timeout together — which is how a healthy
+// install ends up with an error in every tab.
 
-test('/api/view: runs a view plugin with a bound fetch helper', async () => {
-  const viewsDir = join(tmp, 'views');
-  writeFileSync(join(viewsDir, '..', 'placeholder'), ''); // ensure tmp exists
-  const { mkdirSync } = await import('node:fs');
-  mkdirSync(viewsDir, { recursive: true });
-  writeFileSync(
-    join(viewsDir, 'stub-overview.js'),
-    'export default async function ({ fetch }) {\n' +
-    '  const rows = await fetch("sessions");\n' +
-    '  return { count: rows.length, first: rows[0].id };\n' +
-    '}\n',
-  );
-  await withServer(makeConfig({ stub: stubCli() }, { viewsDir }), async (base) => {
-    const res = await fetch(`${base}/api/view/stub/overview`);
-    assert.equal(res.status, 200);
-    const body = await res.json();
-    assert.equal(body.ok, true);
-    assert.deepEqual(body.result, { count: 2, first: 'sessions-1' });
+test('exec gate: never runs more than maxConcurrentExecs CLI processes at once', async () => {
+  const countFile = join(tmp, 'count-gate.txt');
+  const cli = stubCli({ resources: ['a', 'b', 'c', 'd', 'e', 'f'] });
+  delete cli.discover;
+  // Each exec stamps its start and end, so overlap is measurable from the log.
+  cli.env = { STUB_COUNT_FILE: countFile, STUB_SLEEP_MS: '60', STUB_STAMP: '1' };
+  await withServer(makeConfig({ stub: cli }, { maxConcurrentExecs: 2 }), async (base) => {
+    const bodies = await Promise.all(
+      ['a', 'b', 'c', 'd', 'e', 'f'].map((r) => fetch(`${base}/api/r/stub/${r}`).then((res) => res.json())),
+    );
+    for (const body of bodies) assert.equal(body.ok, true, body.error);
   });
+  const events = readFileSync(countFile, 'utf8').trim().split('\n');
+  let live = 0;
+  let peak = 0;
+  for (const line of events) {
+    if (line.startsWith('start ')) peak = Math.max(peak, ++live);
+    else if (line.startsWith('end ')) live--;
+  }
+  assert.equal(events.filter((l) => l.startsWith('start ')).length, 6, 'all six resources ran');
+  assert.ok(peak <= 2, `peak concurrency was ${peak}, expected ≤ 2`);
 });
 
-test('/api/view: missing view → 404; bad view name → 404', async () => {
-  await withServer(makeConfig({ stub: stubCli() }, { viewsDir: join(tmp, 'views') }), async (base) => {
-    assert.equal((await fetch(`${base}/api/view/stub/nope`)).status, 404);
-    assert.equal((await fetch(`${base}/api/view/stub/..%2F..%2Fserver`)).status, 404);
+test('exec gate: a queued call is not killed for waiting its turn', async () => {
+  const cli = stubCli({ resources: ['a', 'b', 'c', 'd'] });
+  delete cli.discover;
+  // Four 150ms execs one at a time = 600ms of wall clock, well past the 250ms
+  // exec timeout. The timeout must apply per spawn, not from enqueue.
+  cli.env = { STUB_SLEEP_MS: '150' };
+  await withServer(makeConfig({ stub: cli }, { maxConcurrentExecs: 1, execTimeoutMs: 250 }), async (base) => {
+    const bodies = await Promise.all(
+      ['a', 'b', 'c', 'd'].map((r) => fetch(`${base}/api/r/stub/${r}`).then((res) => res.json())),
+    );
+    for (const body of bodies) assert.equal(body.ok, true, body.error);
   });
 });
 

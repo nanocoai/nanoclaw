@@ -6,21 +6,25 @@ Resources:
   dropped-messages     Dropped message log — tracks messages that were dropped by the router or access gate. Aggregates by (channel_type, platform_id) with a running count. Reasons include: no_agent_wired (no wiring exists), no_agent_engaged (wiring exists but engage rules didn't fire), unknown_sender_strict (sender not recognized, strict policy), unknown_sender_request_approval (sender not recognized, approval requested).
                        verbs: list
   groups               Agent group — a logical agent identity. Each group has its own workspace folder (CLAUDE.md, skills, container config), conversation history, and container image. Multiple messaging groups can be wired to one agent group.
-                       verbs: list, get, create, update, delete, restart, config get, config update, config add-mcp-server, config remove-mcp-server, config add-package, config remove-package
+                       verbs: list, get, update, create, delete, restart, config get, config update, config add-mcp-server, config remove-mcp-server, config add-package, config remove-package, config add-mount, config remove-mount
   members              Agent group member — grants an unprivileged user permission to interact with an agent group. Users with admin or owner roles on the group are implicitly members and do not need a separate membership row. Membership is checked by the router when sender_scope is "known".
                        verbs: list, add, remove
-  messaging-groups     Messaging group — one chat or channel on one platform (a Telegram DM, a Discord channel, a Slack thread root, an email address). Identity is the (channel_type, platform_id) pair, which must be unique.
-                       verbs: list, get, create, update, delete
+  messaging-groups     Messaging group — one chat or channel on one platform (a Telegram DM, a Discord channel, a Slack thread root, an email address). Identity is the (channel_type, platform_id, instance) triple, which must be unique.
+                       verbs: list, get, create, update, delete, send
+  policies             Agent-to-agent approval policy. A row requires every message from one agent to another to be approved by a human before delivery — without un-wiring the connection. No row = free flow. Directed and per-pair: gate both directions with two policies. Operator-only (agents cannot manage their own gates).
+                       verbs: list, set, remove
   roles                User role — privilege grant. "owner" is always global and has full control. "admin" can be global (agent_group_id null) or scoped to a specific agent group. Admin at a group implies membership. Approval routing prefers admins/owners reachable on the same messaging platform as the request origin (e.g. a Telegram request routes the approval card to an admin on Telegram when possible).
                        verbs: list, grant, revoke
   sessions             Session — the runtime unit. Maps one (agent_group, messaging_group, thread) combination to a container with its own inbound.db and outbound.db. Created automatically by the router when a message arrives.
-                       verbs: list, get
+                       verbs: list, get, history
+  tasks                Scheduled task — prompt plus run time. Tasks run from the agent group system session and the agent chooses delivery destination at fire time.
+                       verbs: list, get, create, append-log, update, cancel, run, pause, resume, delete
   user-dms             User DM cache — maps (user, channel_type) to the messaging group used for DM delivery. Populated lazily by ensureUserDm() when the host needs to cold-DM a user (approvals, pairing). For direct-addressable channels (Telegram, WhatsApp) the handle IS the DM chat ID. For resolution-required channels (Discord, Slack) the adapter's openDM resolves it.
                        verbs: list
   users                User — a messaging-platform identity. Each row is one sender on one channel. A single human may have multiple user rows across channels (no cross-channel linking yet).
                        verbs: list, get, create, update
   wirings              Wiring — connects a messaging group to an agent group. Determines which agent handles messages from which chat. The same messaging group can be wired to multiple agents; the same agent can be wired to multiple messaging groups.
-                       verbs: list, get, create, update, delete
+                       verbs: list, get, update, delete, create
 
 Commands:
   help                 List available resources and commands.

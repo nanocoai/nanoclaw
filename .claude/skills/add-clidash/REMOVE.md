@@ -10,6 +10,10 @@ rm -f ~/.config/systemd/user/clidash.service
 
 # Remove the tool:
 rm -rf tools/clidash
+
+# `tools/` is not a standard NanoClaw directory — step 1 of the install created
+# it. Remove it too if nothing else of yours lives there:
+rmdir tools 2>/dev/null || true
 ```
 
 If you added the config to `.gitignore` in step 2 of the install, remove that

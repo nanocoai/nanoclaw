@@ -8,8 +8,13 @@
 // Refresh UX: on first load every resource of every CLI is prefetched so nav is
 // instant. 60s auto-refresh + a manual button. Background refreshes diff-and-
 // inject (the data DOM rebuilds only when the data signature changes).
+//
+// What a refresh deliberately does NOT prefetch: per-resource help text. Every
+// `/api/help/...` hit is a CLI subprocess, and help never changes, so it is
+// fetched once, lazily, when its tab is first opened (see ensureHelp).
 
 import { mdToHtml } from './md.js';
+import { buildOverview } from './overview.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -32,7 +37,8 @@ const state = {
   openDocGroups: new Set(), // which doc groups (e.g. agents) are expanded
   docCache: new Map(),
   configCache: new Map(),   // groupId -> container config (for the overview page)
-  helpCache: new Map(),     // "cli/resource" -> help text | null (prefetched each cycle)
+  helpCache: new Map(),     // "cli/resource" -> help text | null (fetched lazily, once)
+  helpPending: new Set(),   // "cli/resource" currently being fetched
   detail: null,
   sidebarOpen: false,
   renderedSig: null,
@@ -101,13 +107,6 @@ function coarseAgo(date) {
   if (h < 24) return h === 1 ? '1 hour ago' : `${h} hours ago`;
   const d = Math.floor(h / 24);
   return d === 1 ? '1 day ago' : `${d} days ago`;
-}
-
-function staleness(lastActive) {
-  if (!lastActive) return 'gray';
-  const min = (Date.now() - new Date(lastActive).getTime()) / 60000;
-  if (Number.isNaN(min)) return 'gray';
-  return min < 15 ? 'green' : min < 120 ? 'amber' : 'red';
 }
 
 function el(tag, attrs = {}, children = []) {
@@ -254,7 +253,7 @@ async function refresh(force = false) {
   }));
   for (const lg of state.logs) {
     jobs.push(fetchJson(`/api/log/${encodeURIComponent(lg.name)}`).then((body) => {
-      if (body.ok) state.logCache.set(lg.name, { text: body.text, command: body.command });
+      if (body.ok) state.logCache.set(lg.name, { text: body.text, command: body.command, missing: !!body.missing, note: body.note ?? null });
       render();
     }));
   }
@@ -266,12 +265,6 @@ async function refresh(force = false) {
         else state.errors.set(key, body.raw ? `${body.error}\n\n${body.raw}` : body.error);
         render();
       }));
-      if (c.help) {
-        jobs.push(fetchJson(`/api/help/${c.name}/${encodeURIComponent(r.name)}`).then((body) => {
-          state.helpCache.set(key, body.ok ? body.text : null);
-          render();
-        }));
-      }
     }
   }
   await Promise.all(jobs);
@@ -286,6 +279,20 @@ async function refresh(force = false) {
   state.lastUpdated = new Date();
   state.refreshing = false;
   render();
+}
+
+// Fetch a resource's help text the first time its tab is rendered, then keep it
+// forever — the text is static and each fetch costs a CLI subprocess.
+function ensureHelp(cliName, resource) {
+  const key = `${cliName}/${resource}`;
+  if (state.helpCache.has(key) || state.helpPending.has(key)) return;
+  state.helpPending.add(key);
+  fetchJson(`/api/help/${cliName}/${encodeURIComponent(resource)}`).then((body) => {
+    state.helpPending.delete(key);
+    state.helpCache.set(key, body.ok ? body.text : null);
+    state.renderedSig = null;
+    render();
+  });
 }
 
 async function openDoc(collectionName, path) {
@@ -375,7 +382,7 @@ function dataSignature() {
       activity: state.activity?.sessions ?? null,
     } : null,
     activity: v.type === 'activity' ? state.activity : null,
-    log: v.type === 'log' ? state.logCache.get(v.name)?.text ?? null : null,
+    log: v.type === 'log' ? state.logCache.get(v.name) ?? null : null,
     docFiles: coll ? coll.files.map((f) => f.path) : null,
     docPath: state.activeDocPath,
     docGroupsOpen: coll ? [...state.openDocGroups] : null,
@@ -470,53 +477,49 @@ function renderOverviewPage() {
   const content = $('content');
   const groups = state.snapshots.get('ncl/groups')?.rows;
   if (!groups) { content.replaceChildren(el('div', { class: 'empty' }, 'Loading…')); return; }
-  const sessions = state.snapshots.get('ncl/sessions')?.rows ?? [];
-  const wirings = state.snapshots.get('ncl/wirings')?.rows ?? [];
-  const mgs = state.snapshots.get('ncl/messaging-groups')?.rows ?? [];
-  const act = state.activity?.sessions ?? [];
-  const mgName = (id) => mgs.find((m) => m.id === id)?.name ?? mgs.find((m) => m.id === id)?.platform_id ?? id;
+
+  // All derivation happens in buildOverview (public/overview.js, unit-tested);
+  // everything below is rendering.
+  const { title, cards } = buildOverview({
+    groups,
+    sessions: state.snapshots.get('ncl/sessions')?.rows ?? [],
+    wirings: state.snapshots.get('ncl/wirings')?.rows ?? [],
+    messagingGroups: state.snapshots.get('ncl/messaging-groups')?.rows ?? [],
+    activity: state.activity?.sessions ?? [],
+    configs: state.configCache,
+  });
 
   const field = (k, v, cls = '') => el('div', { class: 'ov-field' }, [el('span', { class: 'k' }, k), el('span', { class: `v ${cls}` }, v)]);
 
-  const cards = groups.map((g) => {
-    const gs = sessions.filter((s) => s.agent_group_id === g.id);
-    const lastActive = gs.map((s) => s.last_active).filter(Boolean).sort().at(-1) ?? null;
-    const container = gs.some((s) => s.container_status === 'running') ? 'running' : (gs[0]?.container_status ?? 'none');
-    const ga = act.filter((a) => a.agent_group_id === g.id);
-    const msgIn = ga.reduce((a, s) => a + s.in, 0), msgOut = ga.reduce((a, s) => a + s.out, 0);
-    const cfg = state.configCache.get(g.id);
-    const chans = wirings.filter((w) => w.agent_group_id === g.id).map((w) => `${mgs.find((m) => m.id === w.messaging_group_id)?.channel_type ?? '?'}: ${mgName(w.messaging_group_id)}`);
-    const status = staleness(lastActive);
-    const containerColor = container === 'running' ? 'green' : container === 'idle' ? 'green' : container === 'none' ? 'gray' : 'gray';
-
+  const cardNodes = cards.map((card) => {
     const fields = [
-      el('div', { class: 'ov-field' }, [el('span', { class: 'k' }, 'container'), badgeChip(container, { running: 'green', idle: 'green', stopped: 'gray', none: 'gray' })]),
-      field('sessions', String(gs.length)),
-      field('messages', `${msgIn} in · ${msgOut} out`),
-      field('last active', lastActive ? relTime(lastActive) : '—', lastActive ? '' : 'dim'),
+      el('div', { class: 'ov-field' }, [el('span', { class: 'k' }, 'container'), badgeChip(card.container, { running: 'green', idle: 'green', stopped: 'gray', none: 'gray' })]),
+      field('sessions', String(card.sessions)),
+      field('messages', `${card.messagesIn} in · ${card.messagesOut} out`),
+      field('last active', card.lastActive ? relTime(card.lastActive) : '—', card.lastActive ? '' : 'dim'),
     ];
-    if (cfg) {
-      fields.push(field('provider / model', `${cfg.provider ?? 'claude'} / ${cfg.model ?? 'default'}`));
-      fields.push(el('div', { class: 'ov-field' }, [el('span', { class: 'k' }, 'cli scope'), badgeChip(cfg.cli_scope ?? 'group', { global: 'amber', group: 'green', disabled: 'gray' })]));
-      const pkgs = (cfg.packages_apt?.length ?? 0) + (cfg.packages_npm?.length ?? 0);
-      const mcp = Object.keys(cfg.mcp_servers ?? {}).length;
-      if (pkgs || mcp) fields.push(field('extras', `${pkgs} pkgs · ${mcp} mcp`));
+    if (card.config) {
+      fields.push(field('provider / model', `${card.config.provider} / ${card.config.model}`));
+      fields.push(el('div', { class: 'ov-field' }, [el('span', { class: 'k' }, 'cli scope'), badgeChip(card.config.cliScope, { global: 'amber', group: 'green', disabled: 'gray' })]));
+      if (card.config.packages || card.config.mcpServers) {
+        fields.push(field('extras', `${card.config.packages} pkgs · ${card.config.mcpServers} mcp`));
+      }
     }
 
     return el('div', { class: 'ov-card' }, [
       el('div', { class: 'ov-head' }, [
-        el('span', { class: `dot ${status}` }),
-        el('span', { class: 'ov-name' }, g.name),
-        el('span', { class: 'ov-folder' }, g.folder),
+        el('span', { class: `dot ${card.status}` }),
+        el('span', { class: 'ov-name' }, card.title),
+        el('span', { class: 'ov-folder' }, card.subtitle),
       ]),
       el('div', { class: 'ov-fields' }, fields),
-      el('div', { class: 'ov-chans' }, chans.map((c) => el('span', { class: 'badge' }, c))),
+      el('div', { class: 'ov-chans' }, card.badges.map((b) => el('span', { class: 'badge' }, b))),
     ]);
   });
 
   content.replaceChildren(
-    el('h2', { class: 'page-title' }, 'Agents overview'),
-    el('div', { class: 'ov-cards' }, cards),
+    el('h2', { class: 'page-title' }, title),
+    el('div', { class: 'ov-cards' }, cardNodes),
   );
 }
 
@@ -582,6 +585,15 @@ function renderLogPage(name) {
   const label = state.logs.find((l) => l.name === name)?.label ?? name;
   const cached = state.logCache.get(name);
   if (!cached) { content.replaceChildren(el('h2', { class: 'page-title' }, label), el('div', { class: 'empty' }, 'Loading…')); return; }
+  if (!cached.text) {
+    // Allowlisted but empty or not created yet (the host only writes these logs
+    // when it runs under the service) — an empty page, not an error.
+    content.replaceChildren(
+      el('h2', { class: 'page-title' }, label),
+      el('div', { class: 'empty' }, cached.missing ? 'No output yet — this log file does not exist.' : 'No output yet — this log file is empty.'),
+    );
+    return;
+  }
   const view = el('div', { class: 'log-view' });
   for (const line of cached.text.split('\n')) {
     const lvl = /\bERROR\b/i.test(line) ? 'err' : /\bWARN(ING)?\b/i.test(line) ? 'warn' : '';
@@ -653,7 +665,13 @@ function renderTable(cliName, resource) {
   const error = state.errors.get(key);
   const canDrill = (cli.commands || []).includes('get');
   const parts = [el('h2', { class: 'page-title' }, resource)];
-  if (cli.help) parts.push(helpPanel(state.helpCache.get(key)));
+  if (cli.help) {
+    ensureHelp(cliName, resource);
+    // helpPanel returns null when help is known to be unavailable, and
+    // replaceChildren would stringify that null into the page.
+    const panel = helpPanel(state.helpCache.get(key));
+    if (panel) parts.push(panel);
+  }
   if (error && snapshot) parts.push(el('div', { class: 'stale-note' }, `⚠ live fetch failing — snapshot from ${new Date(snapshot.fetchedAt).toLocaleTimeString()}`));
   if (!snapshot) {
     parts.push(error ? el('div', { class: 'tab-error' }, [`Failed to load ${resource}.`, el('pre', {}, error)]) : el('div', { class: 'empty' }, 'Loading…'));

@@ -16,10 +16,15 @@ works for any list-as-JSON CLI.
   argv templates; `{resource}` is the sole substitution and is validated
   against the discovered/static resource allowlist. Never a shell.
 - **Standalone** — no imports from NanoClaw source; the core is extractable to
-  its own repo. The NanoClaw-specific knowledge lives entirely in the config
-  and in the `views/ncl-overview.js` view plugin.
+  its own repo. The NanoClaw-specific knowledge lives in the config, the
+  `ncl-help` discovery parser, and `public/overview.js`.
 
 ## Run
+
+Prerequisite: whatever CLI you point it at has to work. For `ncl` that means the
+NanoClaw host must be running — `ncl` talks to `data/ncl.sock`, so with the host
+stopped every clidash panel reports "cannot reach NanoClaw host". Check with
+`ncl groups list` before starting clidash.
 
 ```bash
 cp clidash.config.example.json clidash.config.json   # then edit paths if needed
@@ -29,7 +34,8 @@ PORT=4690 BIND=127.0.0.1 node server.js               # env overrides
 ```
 
 Run it from `tools/clidash/`; the example config uses paths relative to the
-NanoClaw root two levels up, so it works out of the box once `ncl` is built.
+NanoClaw root two levels up, so it works out of the box (`bin/ncl` ships with
+NanoClaw — there is nothing to build).
 
 ## Configure (`clidash.config.json`)
 
@@ -65,18 +71,39 @@ Per-CLI `env` (merged over the server's env) and `cwd` are supported. See
 `enrich`/`badges`/`summary` table decorations and the `activity`/`logs`/`docs`
 sections.
 
+Two top-level knobs govern how hard clidash drives the CLI. Both are optional:
+
+| Key | Default | Purpose |
+|---|---|---|
+| `execTimeoutMs` | `30000` | per-exec timeout, measured from spawn |
+| `maxConcurrentExecs` | `availableParallelism()`, clamped to 2–6 | how many CLI processes may run at once |
+
+They matter because the CLIs clidash drives are usually scripts, not compiled
+binaries: NanoClaw's `bin/ncl` execs `pnpm exec tsx src/cli/client.ts`, ~0.7s of
+CPU per call on an idle 2-vCPU host. A refresh asks for every resource at once,
+so without a cap those processes fight over the same cores and all trip the
+timeout together. Queueing them keeps each call near its idle cost; a queued
+call is never killed for waiting its turn.
+
 ## API
 
 | Route | Returns |
 |---|---|
 | `GET /api/clis` | configured CLIs + discovered/static resources (discovery cached 60s) |
-| `GET /api/r/<cli>/<resource>` | `{ok, rows, fetchedAt}` — coalesced, 10s exec timeout |
-| `GET /api/view/<cli>/<view>` | curated view plugin from `views/<cli>-<view>.js` |
+| `GET /api/r/<cli>/<resource>` | `{ok, rows, command, fetchedAt}` — coalesced per cli+resource |
+| `GET /api/cmd/<cli>/<cmd>?resource=&id=` | one drill-down command (`get`, `config-get`, …) |
+| `GET /api/help/<cli>/<resource>` | raw `<cli> <resource> help` text, cached for the process lifetime |
+| `GET /api/activity` | per-session inbound/outbound totals + a daily series, read from the session DBs |
+| `GET /api/logs`, `GET /api/log/<name>` | the allowlist, and a tail of one entry (`missing:true` when it does not exist yet) |
+| `GET /api/docs`, `GET /api/doc?c=&p=` | file-viewer collections, and one file's contents |
 
-View plugins are the only per-CLI *code*, and optional: a default-exported
-async function receiving `{ fetch }` (bound to that CLI) returning JSON.
-`views/ncl-overview.js` joins groups + sessions + messaging-groups + wirings
-into per-agent status cards (green <15m / amber <2h / red older).
+The only derived page is the Agents overview, and it is derived in the browser:
+`public/overview.js` joins the groups / sessions / wirings / messaging-groups
+rows the UI already holds with the activity totals and per-group container
+config into status cards (green <15m / amber <2h / red older). It is a pure
+function, unit-tested in `test/overview.test.js`, so the tested code and the
+rendered code are the same code — and it costs no extra CLI execs, which a
+server-side join would.
 
 ## Test
 
@@ -84,6 +111,10 @@ into per-agent status cards (green <15m / amber <2h / red older).
 npm test            # unit + integration (node:test, stub CLI — no real CLI needed)
 ./test/smoke.sh     # against a running instance
 ```
+
+`test/fixtures/ncl-help.txt` is a captured snapshot of `ncl help`. Nothing
+asserts an exact resource list against it, so it only needs refreshing when you
+want the fixture to look current: `ncl help > test/fixtures/ncl-help.txt`.
 
 ## Deploy as a service
 

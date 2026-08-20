@@ -35,6 +35,21 @@ It's distinct from `/add-dashboard` (which pushes JSON snapshots to a separate
 build step, no push pipeline, and no edits to NanoClaw source — it just reads
 `ncl` and the session DBs.
 
+## Prerequisites
+
+**The NanoClaw host must be running.** clidash shells out to `ncl`, and `ncl`
+reaches the host over a Unix socket at `data/ncl.sock` — with the host stopped
+every panel reports `cannot reach NanoClaw host`. Confirm before you start:
+
+```bash
+bin/ncl groups list
+```
+
+If that errors, start the host (`systemctl --user start nanoclaw`,
+`launchctl kickstart -k gui/$(id -u)/com.nanoclaw`, or `pnpm run dev`) and retry.
+
+Node ≥ 22.5 is required (clidash reads the session DBs via `node:sqlite`).
+
 ## Steps
 
 ### 1. Copy the tool into place
@@ -69,8 +84,10 @@ don't want to commit install-specific paths:
 echo 'tools/clidash/clidash.config.json' >> ../../.gitignore
 ```
 
-The example assumes `ncl` is built at `bin/ncl`. If `bin/ncl` doesn't exist,
-build it first (`pnpm run build`) or point `clis.ncl.bin` at the right path.
+`bin/ncl` ships with NanoClaw (a shell wrapper around
+`pnpm exec tsx src/cli/client.ts`) — there is nothing to build. If your checkout
+layout differs, point `clis.ncl.bin` at your `ncl` launcher and `clis.ncl.cwd` at
+the repo root.
 
 ### 3. Test
 
@@ -88,12 +105,17 @@ All tests should pass (Node ≥ 22.5, `node:test`, zero dependencies).
 node server.js          # serves http://127.0.0.1:4690
 ```
 
-In another shell, confirm it's live and that `ncl` discovery worked:
+In another shell, run the bundled smoke test. It checks discovery, two real
+`ncl` resource tables, the three filesystem-backed panels, and the static UI —
+the same endpoints the dashboard's own refresh cycle drives:
 
 ```bash
-curl -s http://127.0.0.1:4690/api/clis | head -c 400      # CLIs + discovered resources
-curl -s http://127.0.0.1:4690/api/r/ncl/groups | head -c 400   # a real resource table
+./test/smoke.sh                             # defaults to http://127.0.0.1:4690
+./test/smoke.sh http://127.0.0.1:4690       # or name the base URL
 ```
+
+Every line should read `OK`. A failure on `/api/clis` or `/api/r/...` almost
+always means the host isn't running (see Prerequisites).
 
 Then open `http://127.0.0.1:4690/` in a browser. You should see the Agents
 overview plus a tab per `ncl` resource.
@@ -143,18 +165,31 @@ launchd plist the same way the main NanoClaw service is configured.
 | `activity` | `sessionsRoot` + `days` for the message-activity charts |
 | `logs` | `dir`, `tailLines`, and an allowlist of `files` to tail |
 | `docs` | file viewer: `root`, a `deny` glob list, and `collections` of glob patterns |
+| `execTimeoutMs` | per-exec timeout, measured from spawn (default `30000`) |
+| `maxConcurrentExecs` | how many CLI processes may run at once (default: this host's parallelism, clamped to 2–6) |
+
+The last two matter because `bin/ncl` is a script, not a compiled binary — each
+call pays a pnpm resolve plus a TypeScript transpile (~0.7s of CPU on an idle
+2-vCPU host). A dashboard refresh asks for every resource at once, so clidash
+queues those execs a few at a time; unqueued they would fight over the same
+cores and all trip the timeout together. Lower `maxConcurrentExecs` on a busy or
+single-core host, raise it on a big one.
 
 Adding a second CLI is config-only — e.g. `docker` is included as a `jsonlines`
-example. View plugins (`views/<cli>-<view>.js`) are the only per-CLI code and
-are optional.
+example. The only per-CLI *code* is a discovery parser in `parsers.js`, and only
+for CLIs that need runtime discovery instead of a static `resources` list.
 
 ## Troubleshooting
 
 - **`ENOENT` / config not found** — run from `tools/clidash/` and make sure you
   copied `clidash.config.example.json` to `clidash.config.json` (step 2), or set
   `CLIDASH_CONFIG=/abs/path.json`.
-- **No `ncl` resources / discovery empty** — `bin/ncl` isn't built or the path
-  is wrong. Build it (`pnpm run build`) or fix `clis.ncl.bin`.
+- **No `ncl` resources / discovery empty** — most often the host isn't running,
+  and `ncl` is printing `cannot reach NanoClaw host`. Start it (see
+  Prerequisites), then check `clis.ncl.bin` / `clis.ncl.cwd`.
+- **Every tab reports a timeout** — the host is CPU-starved and the exec queue
+  can't drain inside `execTimeoutMs`. Lower `maxConcurrentExecs` to 2, or raise
+  `execTimeoutMs`.
 - **docker tab errors** — the docker daemon isn't running, or remove the
   `docker` CLI from config if you don't need it.
 - **Can't reach it from another device** — it binds `127.0.0.1`; set
@@ -162,6 +197,11 @@ are optional.
 - **Empty Activity/Logs/Files** — check that `activity.sessionsRoot`,
   `logs.dir`, and `docs.root` resolve to your NanoClaw root (relative to where
   you launch `node server.js`).
+- **A Logs tab says "this log file does not exist"** — expected, not a
+  misconfiguration. `logs/nanoclaw.log` and `logs/nanoclaw.error.log` exist only
+  because the service redirects the host's stdout/stderr into them, so an
+  install running via `pnpm run dev` has neither, and a healthy service install
+  has no error log until something errors.
 
 ## Removal
 

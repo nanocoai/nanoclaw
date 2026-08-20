@@ -1,9 +1,14 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from '../server.js';
 
 const STUB = fileURLToPath(new URL('./fixtures/stub-cli.js', import.meta.url));
+const tmp = mkdtempSync(join(tmpdir(), 'clidash-help-'));
+after(() => rmSync(tmp, { recursive: true, force: true }));
 
 function cli(extra = {}) {
   return {
@@ -49,6 +54,22 @@ test('/api/help: unknown cli → 404', async () => {
   await withServer({ ncl: cli() }, async (base) => {
     assert.equal((await fetch(`${base}/api/help/nope/sessions`)).status, 404);
   });
+});
+
+test('/api/help: help text is exec\'d once and then served from cache', async () => {
+  // Help output is static, and every miss is a CLI subprocess. The UI opens the
+  // same tab repeatedly; only the first open may pay for an exec.
+  const countFile = join(tmp, 'count-help.txt');
+  const c = cli({ env: { STUB_COUNT_FILE: countFile } });
+  await withServer({ ncl: c }, async (base) => {
+    for (let i = 0; i < 3; i++) {
+      const body = await (await fetch(`${base}/api/help/ncl/sessions`)).json();
+      assert.equal(body.ok, true);
+    }
+  });
+  const helpCalls = readFileSync(countFile, 'utf8').trim().split('\n')
+    .filter((line) => line === 'sessions help');
+  assert.equal(helpCalls.length, 1, `expected one help exec, saw ${helpCalls.length}`);
 });
 
 test('/api/clis: reports help availability per cli', async () => {

@@ -29,12 +29,33 @@ test('tailFile: maxLines larger than file returns all lines', async () => {
   assert.equal(lines.length, 10);
 });
 
+test('tailFile: a file that does not exist yet is an empty tail, not a throw', async () => {
+  const { lines, text, missing } = await tailFile(join(dir, 'never-written.log'), 10);
+  assert.deepEqual(lines, []);
+  assert.equal(text, '');
+  assert.equal(missing, true);
+});
+
+test('tailFile: a non-ENOENT failure still throws', async () => {
+  // `dir` is a directory, so reading it is EISDIR — real misconfiguration, and
+  // it must not be swallowed the way a not-created-yet log file is.
+  await assert.rejects(() => tailFile(dir, 10), (err) => err.code !== 'ENOENT');
+});
+
 // ---- server endpoints ----
 
 function cfg() {
   return {
     port: 0, bind: '127.0.0.1', clis: {},
-    logs: { dir, tailLines: 5, files: [{ name: 'app.log', label: 'app' }, { name: 'error.log', label: 'errors' }] },
+    logs: {
+      dir,
+      tailLines: 5,
+      files: [
+        { name: 'app.log', label: 'app' },
+        { name: 'error.log', label: 'errors' },
+        { name: 'never-written.log', label: 'not created yet' },
+      ],
+    },
   };
 }
 async function withServer(config, fn) {
@@ -47,7 +68,7 @@ async function withServer(config, fn) {
 test('/api/logs: lists the configured log files', async () => {
   await withServer(cfg(), async (base) => {
     const body = await (await fetch(`${base}/api/logs`)).json();
-    assert.deepEqual(body.files.map((f) => f.name), ['app.log', 'error.log']);
+    assert.deepEqual(body.files.map((f) => f.name), ['app.log', 'error.log', 'never-written.log']);
   });
 });
 
@@ -64,6 +85,32 @@ test('/api/log: returns the tail text + a tail command', async () => {
     assert.match(body.text, /line 9$/);
     assert.equal(body.text.split('\n').length, 5); // tailLines
     assert.match(body.command, /tail -n 5 .*app\.log/);
+  });
+});
+
+test('/api/log: an allowlisted file that does not exist yet is an empty tail, not a 502', async () => {
+  // NanoClaw's logs/nanoclaw{,.error}.log only exist because the service
+  // redirects the host's stdout/stderr into them: a `pnpm run dev` install has
+  // neither, and a healthy service install has no error log until it errors.
+  // The Logs tab must render empty there instead of surfacing an ENOENT.
+  await withServer(cfg(), async (base) => {
+    const res = await fetch(`${base}/api/log/never-written.log`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.text, '');
+    assert.equal(body.missing, true);
+    assert.match(body.note, /does not exist yet/);
+    // paths an operator sees are absolute, never relative to clidash's cwd
+    assert.match(body.command, /^tail -n 5 \//);
+  });
+});
+
+test('/api/log: an existing file reports missing:false', async () => {
+  await withServer(cfg(), async (base) => {
+    const body = await (await fetch(`${base}/api/log/error.log`)).json();
+    assert.equal(body.missing, false);
+    assert.equal(body.note, undefined);
   });
 });
 

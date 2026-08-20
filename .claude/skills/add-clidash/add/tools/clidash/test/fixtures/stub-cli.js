@@ -6,9 +6,19 @@ import { fileURLToPath } from 'node:url';
 
 const args = process.argv.slice(2);
 
-if (process.env.STUB_COUNT_FILE) {
+// STUB_STAMP turns the call log into a start/end trace, so a test can measure
+// how many stub processes were alive at once (the exec concurrency gate).
+const stamp = (phase) => {
+  if (process.env.STUB_COUNT_FILE && process.env.STUB_STAMP) {
+    appendFileSync(process.env.STUB_COUNT_FILE, `${phase} ${args.join(' ')}\n`);
+  }
+};
+
+if (process.env.STUB_COUNT_FILE && !process.env.STUB_STAMP) {
   appendFileSync(process.env.STUB_COUNT_FILE, args.join(' ') + '\n');
 }
+stamp('start');
+process.on('exit', () => stamp('end'));
 
 const sleepMs = Number(process.env.STUB_SLEEP_MS || 0);
 

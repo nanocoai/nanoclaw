@@ -1,7 +1,6 @@
 // clidash — CLI-agnostic read-only web dashboard.
 // Node built-ins only. All per-CLI knowledge lives in clidash.config.json;
-// the only per-CLI code is optional view plugins (views/) and discovery
-// parsers (parsers.js).
+// the only per-CLI code is the discovery parsers in parsers.js.
 //
 // Security model: the server can only exec the configured argv templates.
 // `{resource}` is the sole substitution and is validated against the
@@ -9,8 +8,9 @@
 
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
+import { availableParallelism } from 'node:os';
 import { dirname, join, resolve, sep, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { discoveryParsers, parseOutput, unwrapPath } from './parsers.js';
@@ -21,12 +21,23 @@ import { tailFile } from './logs.js';
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const MAX_DOC_BYTES = 2 * 1024 * 1024; // cap a single served document at 2 MB
 
+// The CLIs clidash drives are usually *scripts*, not compiled binaries — NanoClaw's
+// `bin/ncl` execs `pnpm exec tsx src/cli/client.ts`, so every invocation pays a
+// full pnpm resolve plus a TypeScript transpile (~0.7s of CPU on an idle 2-vCPU
+// host). One dashboard refresh asks for every resource at once, so without a cap
+// those processes race for the same cores and each one's wall time grows with the
+// size of the batch until they all trip the exec timeout together. Queueing a few
+// at a time keeps per-call wall time near the idle cost: a slow host then degrades
+// in latency instead of failing every tab.
+const DEFAULT_MAX_CONCURRENT_EXECS = Math.max(2, Math.min(6, availableParallelism()));
+
 const DEFAULTS = {
   bind: '127.0.0.1',
   port: 4690,
   refreshSeconds: 60,
-  execTimeoutMs: 10_000,
+  execTimeoutMs: 30_000,
   discoveryTtlMs: 60_000,
+  maxConcurrentExecs: DEFAULT_MAX_CONCURRENT_EXECS,
 };
 
 const CONTENT_TYPES = {
@@ -43,33 +54,59 @@ const CONTENT_TYPES = {
 export function createApp(userConfig) {
   const config = { ...DEFAULTS, ...userConfig };
   const publicDir = resolve(config.publicDir ?? join(MODULE_DIR, 'public'));
-  const viewsDir = resolve(config.viewsDir ?? join(MODULE_DIR, 'views'));
 
   // Human-readable form of a command, for display in the UI ("the command run").
   const displayCmd = (bin, args) => `${basename(bin)} ${args.join(' ')}`;
 
-  // ---- exec --------------------------------------------------------------
+  // ---- exec ----------------------------------------------------------------
+  //
+  // Every exec passes through a concurrency gate (see DEFAULT_MAX_CONCURRENT_EXECS).
+  // The exec timeout is measured from spawn, not from enqueue, so a queued call is
+  // never killed for waiting its turn — it just answers later.
 
-  function execCli(cliCfg, args, label) {
-    return new Promise((resolvePromise, rejectPromise) => {
-      execFile(cliCfg.bin, args, {
-        cwd: cliCfg.cwd,
-        timeout: config.execTimeoutMs,
-        maxBuffer: 32 * 1024 * 1024,
-        env: { ...process.env, ...cliCfg.env },
-      }, (error, stdout, stderr) => {
-        if (error) {
-          const timedOut = error.killed || error.signal === 'SIGTERM';
-          const detail = stderr.trim() || error.message;
-          const msg = timedOut
-            ? `${label} timed out after ${config.execTimeoutMs}ms`
-            : `${label} failed: ${detail}`;
-          rejectPromise(new Error(msg));
-          return;
-        }
-        resolvePromise(stdout);
+  const maxConcurrentExecs = Math.max(1, config.maxConcurrentExecs);
+  let inFlight = 0;
+  const execQueue = [];
+
+  function acquireExecSlot() {
+    if (inFlight < maxConcurrentExecs) {
+      inFlight++;
+      return Promise.resolve();
+    }
+    return new Promise((release) => execQueue.push(release));
+  }
+
+  function releaseExecSlot() {
+    const next = execQueue.shift();
+    if (next) next(); // hand the slot straight to the next waiter
+    else inFlight--;
+  }
+
+  async function execCli(cliCfg, args, label) {
+    await acquireExecSlot();
+    try {
+      return await new Promise((resolvePromise, rejectPromise) => {
+        execFile(cliCfg.bin, args, {
+          cwd: cliCfg.cwd,
+          timeout: config.execTimeoutMs,
+          maxBuffer: 32 * 1024 * 1024,
+          env: { ...process.env, ...cliCfg.env },
+        }, (error, stdout, stderr) => {
+          if (error) {
+            const timedOut = error.killed || error.signal === 'SIGTERM';
+            const detail = stderr.trim() || error.message;
+            const msg = timedOut
+              ? `${label} timed out after ${config.execTimeoutMs}ms`
+              : `${label} failed: ${detail}`;
+            rejectPromise(new Error(msg));
+            return;
+          }
+          resolvePromise(stdout);
+        });
       });
-    });
+    } finally {
+      releaseExecSlot();
+    }
   }
 
   // ---- resource discovery (cached, coalesced, keeps last good) -----------
@@ -173,7 +210,12 @@ export function createApp(userConfig) {
   }
 
   // ---- per-resource help (raw text from `<cli> <resource> help`) -----------
+  //
+  // Help text is static for the life of the CLI binary, so it is cached for the
+  // life of the process. Re-execing `<cli> <resource> help` for every resource on
+  // every UI refresh would double the exec load for output that never changes.
 
+  const helpCache = new Map(); // "cli\0resource" -> help text
   const helpInflight = new Map();
   async function runHelp(cliName, resourceName) {
     const cliCfg = config.clis[cliName];
@@ -183,45 +225,17 @@ export function createApp(userConfig) {
       const e = new Error(`Unknown resource "${resourceName}"`); e.statusCode = 404; throw e;
     }
     const key = `${cliName}\0${resourceName}`;
+    if (helpCache.has(key)) return helpCache.get(key);
     if (helpInflight.has(key)) return helpInflight.get(key);
     const args = cliCfg.help.map((a) => a.replaceAll('{resource}', resourceName));
-    const promise = execCli(cliCfg, args, `${cliName} ${resourceName} help`).finally(() => helpInflight.delete(key));
+    const promise = execCli(cliCfg, args, `${cliName} ${resourceName} help`)
+      .then((text) => {
+        helpCache.set(key, text);
+        return text;
+      })
+      .finally(() => helpInflight.delete(key));
     helpInflight.set(key, promise);
     return promise;
-  }
-
-  // ---- view plugins --------------------------------------------------------
-
-  async function listViews(cliName) {
-    try {
-      const files = await readdir(viewsDir);
-      return files
-        .filter((f) => f.startsWith(`${cliName}-`) && f.endsWith('.js'))
-        .map((f) => f.slice(cliName.length + 1, -3));
-    } catch {
-      return [];
-    }
-  }
-
-  async function runView(cliName, viewName) {
-    if (!/^[a-zA-Z0-9_-]+$/.test(viewName)) {
-      const err = new Error(`Invalid view name`);
-      err.statusCode = 404;
-      throw err;
-    }
-    const file = join(viewsDir, `${cliName}-${viewName}.js`);
-    let mod;
-    try {
-      mod = await import(pathToFileURL(file).href);
-    } catch (e) {
-      if (e.code === 'ERR_MODULE_NOT_FOUND') {
-        const err = new Error(`No view "${viewName}" for CLI "${cliName}"`);
-        err.statusCode = 404;
-        throw err;
-      }
-      throw e;
-    }
-    return mod.default({ fetch: (resource) => fetchRows(cliName, resource) });
   }
 
   // ---- http ----------------------------------------------------------------
@@ -271,7 +285,6 @@ export function createApp(userConfig) {
           const entry = {
             name,
             refreshSeconds: config.refreshSeconds,
-            views: await listViews(name),
             commands: Object.keys(config.clis[name].commands ?? {}),
             enrich: config.clis[name].enrich ?? null,
             badges: config.clis[name].badges ?? null,
@@ -330,17 +343,6 @@ export function createApp(userConfig) {
         return;
       }
 
-      if (segments[1] === 'api' && segments[2] === 'view' && segments.length === 5) {
-        const [, , , cliName, viewName] = segments;
-        if (!config.clis[cliName]) {
-          sendJson(res, 404, { ok: false, error: `Unknown CLI "${cliName}"` });
-          return;
-        }
-        const result = await runView(cliName, viewName);
-        sendJson(res, 200, { ok: true, result, fetchedAt: new Date().toISOString() });
-        return;
-      }
-
       // Log tails (allowlisted files under logs.dir).
       if (urlPath === '/api/logs') {
         sendJson(res, 200, { files: (config.logs?.files ?? []).map((f) => ({ name: f.name, label: f.label ?? f.name })) });
@@ -351,8 +353,18 @@ export function createApp(userConfig) {
         const file = config.logs?.files?.find((f) => f.name === name);
         if (!file) { sendJson(res, 404, { ok: false, error: `Unknown log "${name}"` }); return; }
         const lines = config.logs.tailLines ?? 400;
-        const { text } = await tailFile(join(config.logs.dir, name), lines);
-        sendJson(res, 200, { ok: true, text, command: `tail -n ${lines} ${join(config.logs.dir, name)}`, fetchedAt: new Date().toISOString() });
+        // Absolute, so a "no such file" or EACCES message names a path an operator
+        // can act on rather than something relative to clidash's own cwd.
+        const abs = resolve(config.logs.dir, name);
+        const { text, missing } = await tailFile(abs, lines);
+        sendJson(res, 200, {
+          ok: true,
+          text,
+          missing,
+          ...(missing ? { note: `${abs} does not exist yet` } : {}),
+          command: `tail -n ${lines} ${abs}`,
+          fetchedAt: new Date().toISOString(),
+        });
         return;
       }
 

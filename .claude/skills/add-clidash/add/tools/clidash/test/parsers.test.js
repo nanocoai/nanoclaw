@@ -4,22 +4,36 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { discoveryParsers, parseOutput, unwrapPath } from '../parsers.js';
 
+// A snapshot of `ncl help`. It goes stale every time ncl gains a resource, so
+// nothing here asserts an exact resource list or count — refresh it with
+// `ncl help > test/fixtures/ncl-help.txt` and these tests keep their meaning.
 const fixture = readFileSync(
   fileURLToPath(new URL('./fixtures/ncl-help.txt', import.meta.url)),
   'utf8',
 );
 
+// Every resource the shipped example config names in its enrich/summary/badges
+// decorations or that the Agents overview joins. Discovery must find all of them
+// in real `ncl help` output, or those config sections are silently dead.
+const CONFIG_REQUIRED_RESOURCES = [
+  'groups', 'sessions', 'messaging-groups', 'wirings', 'users', 'roles',
+  'members', 'destinations', 'user-dms', 'dropped-messages',
+];
+
 // ---------------------------------------------------------------- ncl-help
 
-test('ncl-help: parses all listable resources from real captured output', () => {
-  const resources = discoveryParsers['ncl-help'](fixture);
-  assert.deepEqual(
-    resources.map((r) => r.name),
-    [
-      'approvals', 'destinations', 'dropped-messages', 'groups', 'members',
-      'messaging-groups', 'roles', 'sessions', 'user-dms', 'users', 'wirings',
-    ],
-  );
+test('ncl-help: finds every resource the example config depends on', () => {
+  const names = discoveryParsers['ncl-help'](fixture).map((r) => r.name);
+  for (const required of CONFIG_REQUIRED_RESOURCES) {
+    assert.ok(names.includes(required), `discovery missed "${required}" — the example config references it`);
+  }
+});
+
+test('ncl-help: yields unique, well-formed resource names and nothing else', () => {
+  const names = discoveryParsers['ncl-help'](fixture).map((r) => r.name);
+  assert.ok(names.length >= CONFIG_REQUIRED_RESOURCES.length);
+  assert.equal(new Set(names).size, names.length, 'duplicate resource names');
+  for (const name of names) assert.match(name, /^[a-z][a-z0-9-]*$/);
 });
 
 test('ncl-help: every parsed resource has a non-empty description and a list verb', () => {
@@ -30,14 +44,16 @@ test('ncl-help: every parsed resource has a non-empty description and a list ver
   }
 });
 
-test('ncl-help: parses verbs correctly, including multi-word verbs', () => {
+test('ncl-help: parses verbs correctly, keeping multi-word verbs intact', () => {
   const resources = discoveryParsers['ncl-help'](fixture);
   const groups = resources.find((r) => r.name === 'groups');
-  assert.deepEqual(groups.verbs, [
-    'list', 'get', 'create', 'update', 'delete', 'restart',
-    'config get', 'config update', 'config add-mcp-server',
-    'config remove-mcp-server', 'config add-package', 'config remove-package',
-  ]);
+  // `groups` is the resource with multi-word verbs; they must survive as one
+  // entry each rather than splitting on the internal space.
+  for (const verb of ['list', 'get', 'create', 'delete', 'config get', 'config update']) {
+    assert.ok(groups.verbs.includes(verb), `groups is missing verb "${verb}"`);
+  }
+  assert.ok(!groups.verbs.includes('config'), 'a multi-word verb was split');
+  for (const verb of groups.verbs) assert.equal(verb, verb.trim());
 });
 
 test('ncl-help: excludes resources without a list verb', () => {
