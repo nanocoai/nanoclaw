@@ -4,6 +4,7 @@ import {
   markProcessing,
   markCompleted,
   markScriptSkipped,
+  markFailed,
   type MessageInRow,
 } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
@@ -263,6 +264,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const abortActiveQuery = () => query.abort();
     if (config.signal?.aborted) abortActiveQuery();
     else config.signal?.addEventListener('abort', abortActiveQuery, { once: true });
+    let taskRunErrored = false;
     try {
       const result = await processQuery(
         query,
@@ -291,28 +293,45 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuation(config.providerName);
       }
 
-      // Write error response so the user knows something went wrong
-      writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
-      });
+      if (routing.taskRun) {
+        // Task batches carry no routing fields by design (the agent chooses
+        // delivery destination at fire time) — a `chat` error message here
+        // would have platform_id/channel_type both NULL and get silently
+        // dropped by delivery.ts's routing-field guard. Route it the same
+        // door a successful task run's final text uses instead, and fail
+        // the run so `ncl tasks list` and recurrence backoff both see it.
+        autoAppendTaskLog(`Run FAILED: ${errMsg}`);
+        taskRunErrored = true;
+      } else {
+        // Write error response so the user knows something went wrong
+        writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        });
+      }
 
-      // The batch is still acked completed below (no redelivery). Without
-      // this line the only log trace of the errored turn is "Query error"
-      // followed by a "Completed" line that reads like success.
-      log(`Errored batch will be acked completed — ${processingIds.length} message(s), no redelivery`);
+      // Without this line the only log trace of the errored turn is "Query
+      // error" followed by a "Completed"/"Failed" line that reads like success.
+      log(
+        `Errored batch will be acked ${taskRunErrored ? 'failed' : 'completed'} — ${processingIds.length} message(s), no redelivery`,
+      );
     } finally {
       clearCurrentInReplyTo();
       config.signal?.removeEventListener('abort', abortActiveQuery);
     }
 
     // Ensure completed even if processQuery ended without a result event
-    // (e.g. stream closed unexpectedly).
-    markCompleted(processingIds);
+    // (e.g. stream closed unexpectedly). A task run that errored acks failed
+    // instead, so the series' run history records the failure.
+    if (taskRunErrored) {
+      for (const id of processingIds) markFailed(id);
+    } else {
+      markCompleted(processingIds);
+    }
     log(`Completed ${ids.length} message(s)`);
   }
 }

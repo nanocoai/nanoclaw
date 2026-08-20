@@ -430,6 +430,51 @@ describe('poll loop — provider error recovery', () => {
   });
 });
 
+describe('poll loop — task-run error accounting (#3223)', () => {
+  it('routes a task-turn error to the run log instead of an unroutable chat message, and fails the run', async () => {
+    // Task batches carry no routing fields by design — platform_id/channel_type
+    // are both NULL, unlike the chat messages `insertMessage` above creates.
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, thread_id, content)
+         VALUES ('t1', 'task', datetime('now'), 'pending', NULL, NULL, 'system:tasks:ser-1', ?)`,
+      )
+      .run(JSON.stringify({ prompt: 'reply ok' }));
+
+    const provider = new ThrowingProvider('model rejected: needs newer CLI');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2000);
+
+    await waitFor(() => {
+      const rows = getOutboundDb().prepare("SELECT 1 FROM messages_out WHERE kind = 'task_log'").all();
+      return rows.length > 0;
+    }, 2000);
+    controller.abort();
+
+    // No unroutable chat error message with NULL routing fields was written
+    const out = getUndeliveredMessages();
+    expect(out.filter((m) => m.kind === 'chat')).toHaveLength(0);
+
+    // The error landed in the task run log instead (one-door delivery)
+    const logs = getOutboundDb()
+      .prepare("SELECT content FROM messages_out WHERE kind = 'task_log'")
+      .all() as Array<{ content: string }>;
+    expect(logs).toHaveLength(1);
+    expect(JSON.parse(logs[0].content).text).toContain('Run FAILED');
+    expect(JSON.parse(logs[0].content).text).toContain('model rejected: needs newer CLI');
+
+    // The batch acks failed, not completed, via processing_ack — the host's
+    // syncProcessingAcks maps that to a FAILED messages_in row so run history
+    // and recurrence backoff both see the failure instead of a clean complete.
+    const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 't1'").get() as {
+      status: string;
+    };
+    expect(ack.status).toBe('failed');
+
+    await loopPromise.catch(() => {});
+  });
+});
+
 describe('poll loop — stale session recovery', () => {
   it('clears continuation when provider reports session invalid', async () => {
     // Pre-seed a continuation so the local variable in runPollLoop is set.
