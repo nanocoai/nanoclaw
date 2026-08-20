@@ -149,7 +149,9 @@ Per-agent-group container runtime config (provider, model, packages, MCP servers
 | `group` (default) | Agent can access `groups`, `sessions`, `destinations`, `members`, `tasks` only, scoped to its own agent group. `--id` and group args are auto-filled. Cross-group access rejected. `cli_scope` changes blocked. |
 | `global` | Unrestricted. Set automatically for owner agent groups via `init-first-agent`. |
 
-Key files: `src/db/container-configs.ts`, `src/container-config.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/claude-md-compose.ts` (instructions exclusion).
+**`base_url`** — per-group model endpoint. NULL (default) calls the provider's own endpoint; a value points THIS group's inference somewhere else (a local Ollama speaking Anthropic's `/v1/messages`, a self-hosted gateway) where `.env`'s `ANTHROPIC_BASE_URL` moves every claude group at once. Set with `ncl groups config update --base-url <url>` (`""` clears); HTTPS required unless the host is loopback / `host.docker.internal`; operator-only — denied for container callers at any `cli_scope`, because the endpoint receives every prompt the group assembles. Realized at spawn as contributed provider env (`endpointEnvFor`, `src/providers/endpoint-env.ts`); only the built-in `claude` provider maps it. See [docs/ollama.md](docs/ollama.md) and `/add-ollama-provider`.
+
+Key files: `src/db/container-configs.ts`, `src/container-config.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/claude-md-compose.ts` (instructions exclusion), `src/providers/endpoint-env.ts` (endpoint → provider env).
 
 ## Container Restart
 

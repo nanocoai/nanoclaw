@@ -1,78 +1,90 @@
-# Running Agents on Local Ollama
+# Running an Agent on Local Ollama
 
-NanoClaw agents can be routed to a local [Ollama](https://ollama.com) instance instead of the Anthropic API. This cuts API costs to zero and keeps all inference on your hardware.
+One NanoClaw agent group can run its inference on a local [Ollama](https://ollama.com) daemon instead of the Anthropic API: zero token cost, nothing leaving the machine, open-weight models. It is a per-group setting, so a local group and a Claude group coexist in the same install.
 
-## How It Works
+`/add-ollama-provider` is the step-by-step. This document is the why, the tradeoffs, and the two performance notes that decide whether the result feels usable.
 
-Ollama exposes an Anthropic-compatible `/v1/messages` endpoint. The Claude Code CLI (which runs inside agent containers) uses the Anthropic SDK, which reads `ANTHROPIC_BASE_URL` to find the API host. Pointing that variable at Ollama is all that's needed — no new provider code, no changes to the agent runtime.
+## How it works
 
-```
-┌─────────────────────────────┐
-│  Agent container            │
-│                             │
-│  Claude Code CLI            │
-│    ↓ ANTHROPIC_BASE_URL     │
-│    http://host.docker.      │      ┌──────────────────┐
-│    internal:11434    ───────┼─────▶│  Ollama :11434   │
-│                             │      │  gemma4:latest   │
-└─────────────────────────────┘      └──────────────────┘
-```
-
-`host.docker.internal` is Docker's magic hostname that resolves to the host machine from inside a container — so Ollama running on your Mac or Linux box is reachable at that address.
-
-## The OneCLI Complication
-
-NanoClaw normally runs API calls through an OneCLI HTTPS proxy that injects real credentials in place of a placeholder key. When redirecting to Ollama you need to bypass that proxy so requests go direct. Two env vars handle this:
-
-- `NO_PROXY=host.docker.internal` — tells the Anthropic SDK's HTTP client to skip the proxy for that hostname
-- `no_proxy=host.docker.internal` — lowercase variant for tools that check the lowercase form
-
-Both are set in the agent group's `container.json` alongside `ANTHROPIC_BASE_URL`.
-
-## Network Isolation
-
-Setting `ANTHROPIC_BASE_URL` redirects requests but doesn't prevent a misconfigured agent from accidentally reaching `api.anthropic.com` directly. The `blockedHosts` field in `container.json` adds a Docker `--add-host` flag that resolves the domain to `0.0.0.0`, making it physically unreachable from inside the container:
-
-```json
-"blockedHosts": ["api.anthropic.com"]
-```
-
-With this in place, even if the model setting drifts back to a Claude model name, the API call will fail immediately rather than silently billing your account.
-
-## Model Selection
-
-The Claude Code CLI reads its model from `~/.claude/settings.json` inside the container, which NanoClaw bind-mounts from `data/v2-sessions/<agent-group-id>/.claude-shared/settings.json`. Set `"model": "gemma4:latest"` (or whatever Ollama model you've pulled) there. Use the exact name from `ollama list`.
-
-Model selection considerations for Apple Silicon:
-
-| Model | Size | Quality | Speed (M4 Pro) |
-|-------|------|---------|----------------|
-| `gemma4:latest` | 12B | Good general-purpose | Fast |
-| `qwen3-coder:latest` | 32B | Excellent for coding tasks | Moderate |
-| `llama3.2:latest` | 3B | Basic | Very fast |
-
-The agent uses tool calls extensively (read/write files, shell commands). Models that support tool use reliably work best. Gemma 4 and Qwen 3 Coder both handle structured tool calls well.
-
-## Allowing Prompt Caching (filter the cache-busting hash)
-
-Out of the box this path is slow — every reply re-reads the whole multi-thousand-token system prompt from scratch, even for a one-word answer. Ollama has a prompt cache that should skip that repeated work, but on this path it never kicks in.
-
-**Cause.** The Claude Agent SDK adds a per-request hash to the front of every prompt — `x-anthropic-billing-header: ...; cch=<hash>;`. It changes on every request, and Ollama's cache only reuses a prompt whose start is unchanged. So that one shifting value at the front makes Ollama treat every prompt as new and re-read all of it. (Ollama ignores the hash itself, so filtering it has no effect on output.)
-
-**Fix.** Run a tiny proxy between the container and Ollama that filters the hash out (pins `cch=<hash>` to a constant). The start of the prompt is now stable, so the cache kicks in and only the new message gets processed. In our setup — a 31B model on Apple Silicon — follow-up replies dropped from ~80s to ~4s; your numbers will vary with model size and hardware. Output is unchanged, since Ollama ignores the value anyway.
-
-Point the agent group's `ANTHROPIC_BASE_URL` at the proxy instead of Ollama directly (everything else from the sections above is unchanged):
+Ollama serves an Anthropic-compatible `/v1/messages`. The Claude Agent SDK inside the agent container reads `ANTHROPIC_BASE_URL` to decide where to call. Pointing that at Ollama is the entire mechanism — no provider code, no changes to the agent runtime.
 
 ```
-ANTHROPIC_BASE_URL=http://host.docker.internal:11999   # the proxy
-# proxy forwards to http://127.0.0.1:11434 (Ollama)
+┌──────────────────────────────┐
+│  Agent container             │
+│                              │
+│  Claude Agent SDK            │
+│    ↓ ANTHROPIC_BASE_URL      │
+│    http://host.docker.       │      ┌──────────────────────┐
+│    internal:11434     ───────┼─────▶│  Ollama :11434       │
+│                              │      │  <your model>        │
+└──────────────────────────────┘      └──────────────────────┘
 ```
 
-The proxy is ~40 lines of dependency-free Node:
+`host.docker.internal` is how a container addresses the host; the runtime maps it for every session. A container's own `localhost` is the container.
+
+## Where the setting lives
+
+`container_configs.base_url`, one row per agent group in the central DB, set with:
+
+```bash
+ncl groups config update --id <group-id> --base-url http://host.docker.internal:11434 --model <model>
+ncl groups restart --id <group-id>
+```
+
+At the group's next spawn the host turns that into container env (`endpointEnvFor`, `src/providers/endpoint-env.ts`):
+
+| Variable | Value | Why |
+|---|---|---|
+| `ANTHROPIC_BASE_URL` | the endpoint | where the SDK calls |
+| `ANTHROPIC_AUTH_TOKEN` | `placeholder` | the SDK sends an `Authorization` header or nothing; Ollama ignores the value |
+| `NO_PROXY` / `no_proxy` | the endpoint's host | send the request straight to Ollama instead of through the credential-injecting gateway proxy |
+
+The proxy bypass is added **only for a loopback / `host.docker.internal` endpoint**. A remote HTTPS endpoint deliberately keeps the proxy in the path, because that is how OneCLI attaches its real credential without the credential ever entering the container. And it is *merged* into whatever the gateway already exempts, never substituted for it.
+
+Three rules worth knowing before you set it:
+
+- **HTTPS off-box.** Plain HTTP is accepted only for `localhost`, `127.0.0.1`, `[::1]` and `host.docker.internal`. `http://ollama.mybox.lan` is refused; terminate TLS or tunnel it to a local port.
+- **Operator-only.** An agent cannot set it from inside its container, at any `cli_scope`, with or without approval. The endpoint receives every prompt the group assembles — memory, instructions, whatever a tool just read — so moving it is an exfiltration primitive, and an approval card reading `--base-url https://…` is exactly the kind a human waves through.
+- **`groups/<folder>/container.json` is generated output.** It is rewritten from the DB at every spawn; editing it changes nothing. The DB, via `ncl`, is the only input.
+
+Other providers (`opencode`, `codex`) configure their endpoints through their own surfaces, so `--base-url` is refused for a group running one of them rather than stored where nothing reads it.
+
+## The three routes, and which one you want
+
+| Goal | Route |
+|---|---|
+| One group local | `--base-url` per group (this document) |
+| Every claude group on one Anthropic-compatible endpoint | `ANTHROPIC_BASE_URL` in `.env` + the `src/providers/claude.ts` registration that `/setup` wires |
+| A different agent framework (OpenRouter, DeepSeek, a ChatGPT subscription) | `/add-opencode`, `/add-codex` |
+| Claude still planning, a local model as a callable tool | `/add-ollama-tool`, `/add-atomic-chat-tool` |
+
+## Egress lockdown makes this impossible
+
+With `NANOCLAW_EGRESS_LOCKDOWN=true`, containers join an `--internal` Docker network with no route off-box, and `host.docker.internal` is re-aliased to the OneCLI gateway container (`src/egress-lockdown.ts`). It resolves — to the gateway, never to the host's Ollama — and no env var changes that. Either run Ollama as a container attached to the `nanoclaw-egress` network and point `base_url` at its container name, or turn lockdown off for the install.
+
+## Model selection
+
+Use the exact name from `ollama list`, tag included. The agent is tool-heavy: it reads and writes files, runs shell commands, and calls `send_message` to reply at all. A model that handles structured tool calls unreliably does not look slow, it looks broken — so pick a large instruct or coder model rather than the smallest one that fits. Anything in the 3B class is for experiments, not for an agent doing work.
+
+Rough hardware framing: a quantized ~30B model wants ~24GB of unified memory or VRAM to be comfortable; a ~12B model runs on 16GB.
+
+## Speed: cold start, and the prompt-cache trap
+
+**Cold start.** The first request loads the model — 5-30s depending on size. `curl -s http://localhost:11434/api/ps` shows it once resident.
+
+**Every turn re-reading the whole prompt.** Out of the box this path is slow in a way that looks like the model being slow: each reply re-processes the entire multi-thousand-token system prompt, even for a one-word answer.
+
+The cause is one value, not the model. The Claude Agent SDK prefixes every request with a per-request hash (`x-anthropic-billing-header: …; cch=<hash>;`). Ollama's prefix cache only reuses a prompt whose beginning is unchanged, so a value that changes every turn makes every prompt new. Ollama ignores the hash itself, so pinning it changes nothing about the output.
+
+The fix is a ~40-line proxy between the container and Ollama that pins the hash to a constant, with `base_url` pointing at the proxy instead of Ollama:
+
+```bash
+ncl groups config update --id <group-id> --base-url http://host.docker.internal:11999
+```
 
 ```js
-// ollama-cch-proxy.mjs — normalize the SDK's per-request cch nonce so Ollama's
-// prefix cache survives across turns. Listens on :11999, forwards to Ollama.
+// ollama-cch-proxy.mjs — pin the SDK's per-request cch nonce so Ollama's prefix
+// cache survives across turns. Listens on :11999, forwards to Ollama.
 import http from 'node:http';
 
 const TARGET_HOST = process.env.OLLAMA_HOST || '127.0.0.1';
@@ -95,68 +107,47 @@ const server = http.createServer((req, res) => {
         proxyRes.pipe(res);
       },
     );
-    proxyReq.on('error', (e) => { res.writeHead(502); res.end(String(e)); });
+    proxyReq.on('error', (e) => {
+      res.writeHead(502);
+      res.end(String(e));
+    });
     proxyReq.end(body);
   });
 });
 server.listen(LISTEN_PORT, '0.0.0.0', () => console.log(`cch-proxy :${LISTEN_PORT} -> ${TARGET_HOST}:${TARGET_PORT}`));
 ```
 
-Run it durably so it survives reboots. On Linux, a systemd user service:
+On one 31B-on-Apple-Silicon setup this took follow-up replies from ~80s to ~4s; the numbers move with model size and hardware. Run it durably — a systemd user unit on Linux (`systemctl --user enable --now`, plus `loginctl enable-linger "$USER"` so it survives logout), a launchd user agent on macOS.
 
-```ini
-# ~/.config/systemd/user/ollama-cch-proxy.service
-[Unit]
-Description=Ollama cch-normalizing proxy for NanoClaw
-After=network-online.target
+Scope: this only affects the Claude-Agent-SDK path. Codex and OpenCode never emit the hash and get prefix caching for free.
 
-[Service]
-ExecStart=/usr/bin/node %h/.config/nanoclaw/ollama-cch-proxy.mjs
-Restart=always
+## Verifying without Ollama
 
-[Install]
-WantedBy=default.target
-```
+`scripts/test-v2-endpoint-e2e.ts` stands up a fake Anthropic-shape endpoint on a local port, routes a real message through a real container with `base_url` pointed at it, and reports whether the canned reply came back through delivery:
 
 ```bash
-systemctl --user enable --now ollama-cch-proxy
-loginctl enable-linger "$USER"   # so it runs without an active login session
+pnpm exec tsx scripts/test-v2-endpoint-e2e.ts
 ```
 
-On macOS use a `launchd` user agent (`~/Library/LaunchAgents/`) running the same script.
-
-**Scope.** This only affects the Claude-Code-CLI → Ollama path described here. Codex and OpenCode don't use the Claude Agent SDK, so they never emit the `cch` hash and get prompt caching for free.
-
-## What Changes at the Code Level
-
-Three files need to support this feature. See `/add-ollama-provider` for the exact changes.
-
-**`src/container-config.ts`** — `ContainerConfig` interface needs `env` and `blockedHosts` fields so the per-group JSON can carry them.
-
-**`src/container-runner.ts`** — At container spawn time, `env` entries become `-e KEY=VAL` Docker flags (applied after OneCLI's injected vars so they win), and `blockedHosts` entries become `--add-host HOST:0.0.0.0` flags.
-
-**`container/Dockerfile`** — The container runs as the host user's uid (e.g. 501 on macOS), not as the `node` user (uid 1000). The home directory must be `chmod 777` so any uid can write `~/.claude.json` and `~/.claude/settings.json`.
+A PASS means the routing, the env, the spawn and the delivery path all work, which separates "Ollama or the model is the problem" from "the wiring is the problem". The stub it drives (`scripts/anthropic-endpoint-stub.mjs`) also runs standalone if you want to point a group at a canned endpoint by hand.
 
 ## Tradeoffs
 
 | | Ollama (local) | Anthropic API |
 |---|---|---|
-| Cost | Free | Pay-per-token |
-| Privacy | Fully local | Data sent to Anthropic |
-| Model quality | Good (open-weight) | Excellent (Claude) |
-| Cold start | 5–30s (model load) | ~1s |
-| Context window | Varies by model | 200k tokens (Sonnet) |
-| Tool use reliability | Good (large models) | Excellent |
-| Hardware req. | 16GB+ RAM | None |
+| Cost | free | pay-per-token |
+| Privacy | stays on the machine | sent to Anthropic |
+| Model quality | good (open-weight) | excellent |
+| Cold start | 5-30s (model load) | ~1s |
+| Context window | model-dependent, usually far smaller | large |
+| Tool-use reliability | good on large models, poor on small | excellent |
+| Hardware | 16GB+, more for larger models | none |
 
-For personal automation on capable hardware, the tradeoff favors local. For complex multi-step tasks requiring large context or high reliability, Claude is still ahead.
+For personal automation on capable hardware the tradeoff often favors local. For long multi-step work, large context, or anything where a fumbled tool call costs real time, Claude is still ahead. Keep both: the setting is per group.
 
-## Reverting to Claude
+## See also
 
-Remove the `env` and `blockedHosts` keys from `groups/<folder>/container.json`, remove `"model"` from the shared settings file, and restart the service. No rebuild needed.
-
-## See Also
-
-- `/add-ollama-provider` — step-by-step skill to configure any agent group for Ollama
-- [Ollama Anthropic compatibility docs](https://ollama.com/blog/openai-compatibility) — upstream docs on the API bridge
-- `docs/architecture.md` — how the container spawn and env injection pipeline works
+- `/add-ollama-provider` — configure a group for Ollama
+- `/add-ollama-tool` — Ollama as a callable MCP tool, with Claude still planning
+- [db-central.md](db-central.md#115-container_configs) — the `container_configs` table, including `base_url`
+- [Ollama's API compatibility docs](https://docs.ollama.com/api)

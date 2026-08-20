@@ -44,6 +44,7 @@ import { validateAdditionalMounts } from './modules/mount-security/index.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
 import './providers/index.js';
+import { endpointEnvFor } from './providers/endpoint-env.js';
 import {
   getProviderContainerConfig,
   providerProvidesAgentSurfaces,
@@ -682,6 +683,17 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     ...(contribution.env ?? {}),
     ...(gateway.env ?? {}),
   };
+  // The per-group endpoint override has the last word on where this group's
+  // inference goes: it is chosen for THIS group, so it wins over both the
+  // provider registration's install-global endpoint and the gateway's. Same
+  // lane, because the placeholder bearer it carries is credential-NAMED.
+  if (containerConfig.baseUrl) {
+    // The session's provider wins over the group's, same as everywhere else —
+    // the endpoint has to be expressed in the vocabulary of the provider that
+    // will actually run.
+    const provider = resolveProviderName(session.agent_provider, containerConfig.provider);
+    Object.assign(contributedEnv, endpointEnvFor(provider, containerConfig.baseUrl, contributedEnv));
+  }
 
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();

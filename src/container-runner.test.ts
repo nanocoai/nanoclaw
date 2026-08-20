@@ -24,6 +24,7 @@ import {
   toMountSpecs,
 } from './container-runner.js';
 import type { SupervisedHandle } from './drivers/session-events.js';
+import { isSecretShaped } from './drivers/types.js';
 import { log } from './log.js';
 import type { VolumeMount } from './providers/provider-container-registry.js';
 import type { AgentGroup, Session } from './types.js';
@@ -100,13 +101,20 @@ const mounts: VolumeMount[] = [
   },
 ];
 
-function compose(overrides: { gateway?: Record<string, unknown>; contribution?: Record<string, unknown> } = {}) {
+function compose(
+  overrides: {
+    gateway?: Record<string, unknown>;
+    contribution?: Record<string, unknown>;
+    containerConfig?: Partial<ContainerConfig>;
+    session?: Partial<Session>;
+  } = {},
+) {
   return composeSessionSpec({
     agentGroup,
-    session,
+    session: { ...session, ...overrides.session } as Session,
     containerName: 'nanoclaw-v2-agent-one-1700000000000',
     mounts,
-    containerConfig,
+    containerConfig: { ...containerConfig, ...overrides.containerConfig },
     mailboxEnvironment: { NANOCLAW_MAILBOX_BACKEND: 'sqlite' },
     contribution: (overrides.contribution ?? {}) as never,
     gateway: (overrides.gateway ?? {}) as never,
@@ -144,6 +152,51 @@ describe('composeSessionSpec', () => {
       ANTHROPIC_AUTH_TOKEN: 'placeholder',
     });
     expect(spec.containers[0].env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+  });
+
+  it('routes a per-group endpoint override onto the contributed lane', () => {
+    // The whole point of the base_url field: one group's inference goes
+    // somewhere else. The placeholder bearer that comes with it is a
+    // credential-NAMED key, which validateSpec refuses on the composed lane —
+    // hence the contributed lane, and hence this assertion pair.
+    const spec = compose({ containerConfig: { baseUrl: 'http://host.docker.internal:11434' } });
+    expect(spec.containers[0].contributedEnv).toMatchObject({
+      ANTHROPIC_BASE_URL: 'http://host.docker.internal:11434',
+      ANTHROPIC_AUTH_TOKEN: 'placeholder',
+      NO_PROXY: 'host.docker.internal',
+      no_proxy: 'host.docker.internal',
+    });
+    expect(spec.containers[0].env.ANTHROPIC_BASE_URL).toBeUndefined();
+    // Why the lane is load-bearing rather than stylistic.
+    expect(isSecretShaped('ANTHROPIC_AUTH_TOKEN', 'placeholder')).toBe(true);
+  });
+
+  it('lets the per-group endpoint win over the install-global and gateway ones', () => {
+    // Both other lanes are install-wide; base_url was chosen for THIS group.
+    const spec = compose({
+      containerConfig: { baseUrl: 'http://127.0.0.1:11434' },
+      contribution: { env: { ANTHROPIC_BASE_URL: 'https://install-global.example.com' } },
+      gateway: { env: { ANTHROPIC_BASE_URL: 'https://gateway.example.com', NO_PROXY: 'gateway.internal' } },
+    });
+    expect(spec.containers[0].contributedEnv?.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:11434');
+    // …without dropping what the gateway had exempted from its proxy.
+    expect(spec.containers[0].contributedEnv?.NO_PROXY).toBe('gateway.internal,127.0.0.1');
+  });
+
+  it('contributes no endpoint env when no override is set', () => {
+    const env = compose().containers[0].contributedEnv ?? {};
+    expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+  });
+
+  it('expresses the endpoint in the vocabulary of the provider that will run', () => {
+    // The session's provider wins over the group's; a provider that owns its
+    // own endpoint config gets no Anthropic env invented for it.
+    const spec = compose({
+      containerConfig: { baseUrl: 'http://host.docker.internal:11434', provider: 'claude' },
+      session: { agent_provider: 'opencode' },
+    });
+    expect(spec.containers[0].contributedEnv?.ANTHROPIC_BASE_URL).toBeUndefined();
   });
 
   it('passes non-secret mailbox environment on the composed lane', () => {

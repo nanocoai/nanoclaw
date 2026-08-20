@@ -14,13 +14,14 @@ import { TIMEZONE } from './config.js';
 import {
   CONTAINER_PLUGINS_DIR,
   configFromDb,
+  parseBaseUrl,
   parseMcpServerConfig,
   resolveGroupTimezone,
   sanitizeStoredMcpServers,
   validateMcpServerName,
 } from './container-config.js';
 import { createAgentGroup } from './db/agent-groups.js';
-import { closeDb, initTestDb } from './db/connection.js';
+import { closeDb, getDb, initTestDb } from './db/connection.js';
 import { ensureContainerConfig, getContainerConfig, updateContainerConfigScalars } from './db/container-configs.js';
 import { runMigrations } from './db/migrations/index.js';
 import type { AgentGroup } from './types.js';
@@ -62,6 +63,56 @@ describe('resolveGroupTimezone', () => {
 
     await updateContainerConfigScalars(GROUP.id, { timezone: 'Not/AZone' });
     expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).timezone).toBeUndefined();
+  });
+});
+
+describe('base_url read-back (configFromDb)', () => {
+  beforeEach(async () => {
+    await runMigrations(await initTestDb());
+    await createAgentGroup(GROUP);
+    await ensureContainerConfig(GROUP.id);
+  });
+  afterEach(async () => {
+    await closeDb();
+  });
+
+  it('ships a valid endpoint to the container', async () => {
+    await updateContainerConfigScalars(GROUP.id, { base_url: 'http://host.docker.internal:11434' });
+    expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).baseUrl).toBe(
+      'http://host.docker.internal:11434',
+    );
+  });
+
+  it('absent stays absent — no endpoint invented for a group that never set one', async () => {
+    expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).baseUrl).toBeUndefined();
+  });
+
+  it('drops a value that could only have arrived by hand-editing the DB', async () => {
+    // Defense in depth: the ncl path validates, but a row edited underneath it
+    // must not redirect a group's whole prompt stream to a plaintext host.
+    await getDb().run(
+      'UPDATE container_configs SET base_url = ? WHERE agent_group_id = ?',
+      'http://evil.example.com',
+      GROUP.id,
+    );
+    expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).baseUrl).toBeUndefined();
+  });
+});
+
+describe('parseBaseUrl', () => {
+  it('accepts HTTPS anywhere and plain HTTP only on this machine', () => {
+    expect(parseBaseUrl('https://endpoint.example.com')).toBe('https://endpoint.example.com');
+    expect(parseBaseUrl('  http://host.docker.internal:11434  ')).toBe('http://host.docker.internal:11434');
+    expect(parseBaseUrl('http://127.0.0.1:11434')).toBe('http://127.0.0.1:11434');
+    expect(parseBaseUrl('http://localhost:11434/v1')).toBe('http://localhost:11434/v1');
+  });
+
+  it('rejects a bare host, a foreign scheme, plaintext off-box, and inline credentials', () => {
+    expect(() => parseBaseUrl('host.docker.internal:11434')).toThrow(/absolute http/);
+    expect(() => parseBaseUrl('ftp://host.docker.internal')).toThrow(/absolute http/);
+    expect(() => parseBaseUrl('http://ollama.example.com')).toThrow(/HTTPS/);
+    expect(() => parseBaseUrl('https://user:pw@endpoint.example.com')).toThrow(/credentials/);
+    expect(() => parseBaseUrl('https://endpoint.example.com#frag')).toThrow(/credentials or fragments/);
   });
 });
 

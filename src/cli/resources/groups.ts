@@ -2,12 +2,13 @@ import { randomUUID } from 'crypto';
 
 import {
   mcpServerPluginOwner,
+  parseBaseUrl,
   parseMcpServerConfig,
   validateMcpServerName,
   type AdditionalMountConfig,
   type McpServerConfig,
 } from '../../container-config.js';
-import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
+import { buildAgentGroupImage, killContainer, resolveProviderName, wakeContainer } from '../../container-runner.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getDb, hasTable } from '../../db/connection.js';
@@ -22,6 +23,7 @@ import { getSessionDriver } from '../../drivers/index.js';
 import { assertValidGroupFolder, groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import { checkMountAdmissibleAtWrite } from '../../modules/mount-security/index.js';
+import { endpointOverrideSupported } from '../../providers/endpoint-env.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
 import {
   formatRestampResult,
@@ -52,6 +54,19 @@ function parseTimezoneFlag(value: unknown): string | null | undefined {
   return tz;
 }
 
+/**
+ * `--base-url`: undefined = untouched, null = cleared back to the provider
+ * default, string = a validated endpoint. Same "" -> NULL convention as
+ * --timezone, and the same rejection point: invalid values throw in the
+ * handler so the operator (or, after approval, the agent) sees why.
+ */
+function parseBaseUrlFlag(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  const raw = String(value);
+  if (raw.trim() === '') return null;
+  return parseBaseUrl(raw);
+}
+
 /** Deserialize JSON columns for display. */
 function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
   return {
@@ -69,6 +84,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     additional_mounts: JSON.parse(row.additional_mounts),
     cli_scope: row.cli_scope,
     timezone: row.timezone,
+    base_url: row.base_url,
     updated_at: row.updated_at,
   };
 }
@@ -372,7 +388,9 @@ registerResource({
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
         'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
-        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
+        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart), ' +
+        '--base-url (this group\'s model endpoint, e.g. a local Ollama at http://host.docker.internal:11434; "" clears back to the provider default). ' +
+        'Operator-only: --base-url cannot be set from inside a container.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -390,12 +408,15 @@ registerResource({
             | 'max_messages_per_prompt'
             | 'cli_scope'
             | 'timezone'
+            | 'base_url'
           >
         > = {};
         if (args.provider !== undefined) updates.provider = args.provider as string;
         const timezone = parseTimezoneFlag(args.timezone);
         if (timezone !== undefined) updates.timezone = timezone;
         if (args.model !== undefined) updates.model = args.model as string;
+        const baseUrl = parseBaseUrlFlag(args['base-url'] ?? args.base_url);
+        if (baseUrl !== undefined) updates.base_url = baseUrl;
         if (args.effort !== undefined) updates.effort = args.effort as string;
         if (args.image_tag !== undefined) updates.image_tag = args.image_tag as string;
         if (args.assistant_name !== undefined) updates.assistant_name = args.assistant_name as string;
@@ -409,9 +430,23 @@ registerResource({
           updates.cli_scope = scope;
         }
 
+        if (updates.base_url) {
+          // Refuse rather than store a value nothing reads: only providers this
+          // seam can express an endpoint for may carry one, and a silent no-op
+          // here is a group that keeps calling the endpoint the operator
+          // thought they had just changed.
+          const provider = resolveProviderName(null, updates.provider ?? row.provider);
+          if (!endpointOverrideSupported(provider)) {
+            throw new Error(
+              `--base-url is not supported for provider "${provider}" — it configures its endpoint through its own ` +
+                'config surface, not the Anthropic env vars. Only the built-in "claude" provider reads this field.',
+            );
+          }
+        }
+
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone, --base-url',
           );
         }
 

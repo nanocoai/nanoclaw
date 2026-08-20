@@ -31,7 +31,7 @@ vi.mock('../modules/agent-to-agent/write-destinations.js', () => ({
 
 import { initTestDb, closeDb, getDb, runMigrations, createAgentGroup, createMessagingGroup } from '../db/index.js';
 import { createSession } from '../db/sessions.js';
-import { getContainerConfig } from '../db/container-configs.js';
+import { ensureContainerConfig, getContainerConfig, updateContainerConfigScalars } from '../db/container-configs.js';
 import { getDestinations } from '../modules/agent-to-agent/db/agent-destinations.js';
 import { registerResource } from './crud.js';
 import { lookup } from './registry.js';
@@ -187,6 +187,64 @@ describe('genericCreate postCreate hook', () => {
     expect(destinations).toHaveLength(1);
     expect(destinations[0].target_type).toBe('channel');
     expect(destinations[0].target_id).toBe('mg-1');
+  });
+});
+
+describe('groups config update --base-url', () => {
+  const ID = 'ag-endpoint';
+
+  beforeEach(async () => {
+    await createAgentGroup({
+      id: ID,
+      name: 'Endpoint',
+      folder: 'endpoint',
+      agent_provider: null,
+      created_at: new Date().toISOString(),
+    });
+    await ensureContainerConfig(ID, 'claude');
+  });
+
+  const update = (args: Record<string, unknown>) =>
+    lookup('groups-config-update')!.handler({ id: ID, ...args }, hostCtx);
+
+  it('stores a validated local endpoint and clears it with ""', async () => {
+    await update({ 'base-url': 'http://host.docker.internal:11434' });
+    expect((await getContainerConfig(ID))!.base_url).toBe('http://host.docker.internal:11434');
+
+    // Same "" -> NULL convention as --timezone: back to the provider default.
+    await update({ 'base-url': '' });
+    expect((await getContainerConfig(ID))!.base_url).toBeNull();
+  });
+
+  it('refuses plaintext HTTP to anywhere that is not this machine', async () => {
+    // Every prompt this group assembles travels this URL.
+    await expect(update({ 'base-url': 'http://ollama.example.com:11434' })).rejects.toThrow(/HTTPS/);
+    expect((await getContainerConfig(ID))!.base_url).toBeNull();
+  });
+
+  it('refuses a non-URL, a non-HTTP scheme, and inline credentials', async () => {
+    await expect(update({ 'base-url': 'localhost:11434' })).rejects.toThrow(/absolute http:\/\/ or https:\/\//);
+    await expect(update({ 'base-url': 'ftp://host.docker.internal' })).rejects.toThrow(
+      /absolute http:\/\/ or https:\/\//,
+    );
+    await expect(update({ 'base-url': 'https://user:pw@endpoint.example.com' })).rejects.toThrow(/credentials/);
+  });
+
+  it('refuses an endpoint for a provider that owns its own endpoint config', async () => {
+    // Storing it would be a silent no-op — the group would keep calling the
+    // endpoint the operator thought they had just changed.
+    await expect(update({ provider: 'opencode', 'base-url': 'http://host.docker.internal:11434' })).rejects.toThrow(
+      /not supported for provider "opencode"/,
+    );
+
+    await updateContainerConfigScalars(ID, { provider: 'opencode' });
+    await expect(update({ 'base-url': 'http://host.docker.internal:11434' })).rejects.toThrow(/opencode/);
+  });
+
+  it('reports the endpoint back on config get', async () => {
+    await update({ 'base-url': 'https://endpoint.example.com' });
+    const shown = (await lookup('groups-config-get')!.handler({ id: ID }, hostCtx)) as Record<string, unknown>;
+    expect(shown.base_url).toBe('https://endpoint.example.com');
   });
 });
 

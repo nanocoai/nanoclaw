@@ -1,182 +1,153 @@
 ---
 name: add-ollama-provider
-description: Route a NanoClaw agent group to a local Ollama model instead of the Anthropic API. Ollama speaks the Anthropic API natively (v1/messages), so no provider code changes are needed — just env var overrides and a model setting. Use when the user wants to run their agent locally, cut API costs, or experiment with open-weight models. See docs/ollama.md for background.
+description: Point one NanoClaw agent group at a local Ollama model instead of the Anthropic API. Ollama serves the Anthropic API natively (/v1/messages), so the group needs an endpoint and a model — both `ncl groups config` fields, no source changes. Use when the user wants an agent running on their own hardware, zero token cost, or open-weight models. See docs/ollama.md for the tradeoffs.
 ---
 
 # Add Ollama Provider
 
-Routes an agent group to a local Ollama instance instead of the Anthropic API.
-See `docs/ollama.md` for how this works and the tradeoffs involved.
+Routes **one** agent group's inference to a local [Ollama](https://ollama.com) daemon. Ollama exposes an Anthropic-compatible `/v1/messages`, so the provider code is unchanged: the group gets a `base_url` and a `model`, both fields of its container config.
+
+Two `ncl` commands and a restart. No files are edited, nothing is rebuilt, and the host service keeps running.
+
+Background, tradeoffs, model picks, and the prompt-cache speedup: [docs/ollama.md](../../../docs/ollama.md).
+
+## Pick the route that matches the ask
+
+Ask the user which of these they want before configuring anything — three of the four are not this skill:
+
+| What the user wants | Route | Source changes |
+|---|---|---|
+| **One** agent group on a local model | this skill: `ncl groups config update --base-url --model` | none |
+| **Every** claude group on one Anthropic-compatible endpoint (a self-hosted gateway, a proxy) | `ANTHROPIC_BASE_URL` in `.env` + the `src/providers/claude.ts` registration, which `/setup` wires | none |
+| A different agent framework entirely (OpenRouter, DeepSeek, ChatGPT subscription) | `/add-opencode` or `/add-codex` | skill-installed provider |
+| Claude still planning, a local model available as a tool it can call | `/add-ollama-tool` or `/add-atomic-chat-tool` | skill-installed MCP server |
 
 ## Prerequisites
 
-1. **Ollama is installed and running** on the host — verify: `curl -s http://localhost:11434/api/tags`
-2. **A model is pulled** — e.g. `ollama pull gemma4` or `ollama pull qwen3-coder`
-3. **The agent group already exists** — run `/init-first-agent` first if needed
+1. **Ollama is running on the host** — `curl -s http://localhost:11434/api/tags` returns JSON.
+2. **A tool-capable model is pulled** — `ollama list`. The agent leans on tool calls (read/write files, shell, send_message); a model that fumbles structured tool use will look broken rather than slow. Larger instruct/coder models handle it; 3B-class models generally do not.
+3. **The agent group exists** — `ncl groups list`. Run `/init-first-agent` first if there is none.
+4. **Egress lockdown is off** — see the next section. This is the one prerequisite that silently defeats everything downstream.
 
-## 1. Check source support
-
-The feature requires two fields in `ContainerConfig` (`env` and `blockedHosts`) and their
-corresponding wiring in `container-runner.ts`. Check if already present:
+## 1. Check egress lockdown
 
 ```bash
-grep -c 'blockedHosts' src/container-config.ts src/container-runner.ts
+grep -E '^NANOCLAW_EGRESS_LOCKDOWN=' .env
 ```
 
-If either count is 0, apply the changes in steps 1a and 1b. Otherwise skip to step 2.
+Empty or `false`: continue.
 
-### 1a. Extend ContainerConfig
+`true`: **stop and tell the user.** Under lockdown, containers join an `--internal` Docker network with no route off-box, and `host.docker.internal` is re-aliased to the OneCLI gateway container — so it resolves, but to the gateway, never to the host's Ollama. No env var works around that; it is the posture working as designed (`src/egress-lockdown.ts`). The options to offer:
 
-In `src/container-config.ts`, add to the `ContainerConfig` interface:
+- Run Ollama **as a container on the egress network** (`docker network connect nanoclaw-egress <ollama-container>`) and use its container name as the host in step 3.
+- Turn lockdown off for this install (`NANOCLAW_EGRESS_LOCKDOWN=false` in `.env`, restart the service) if the user accepts open egress for their agents.
 
-```typescript
-env?: Record<string, string>;
-blockedHosts?: string[];
-```
+## 2. Ask the user (plain text, not AskUserQuestion)
 
-And in `readContainerConfig`, add inside the returned object:
+1. **Which agent group?**
 
-```typescript
-env: raw.env,
-blockedHosts: raw.blockedHosts,
-```
+   ```bash
+   ncl groups list
+   ```
 
-### 1b. Wire into container-runner
+2. **Which Ollama model?** Use the exact name from the host:
 
-In `src/container-runner.ts`, after the `NANOCLAW_MCP_SERVERS` block, add:
+   ```bash
+   curl -s http://localhost:11434/api/tags | grep '"name"'
+   ```
 
-```typescript
-// Per-agent-group env overrides — applied last to win over OneCLI values.
-if (containerConfig.env) {
-  for (const [key, value] of Object.entries(containerConfig.env)) {
-    args.push('-e', `${key}=${value}`);
-  }
-}
+Record the group id as `GROUP_ID` and the model as `MODEL`.
 
-// Blocked hosts: resolve to 0.0.0.0 so they are unreachable inside the container.
-if (containerConfig.blockedHosts) {
-  for (const host of containerConfig.blockedHosts) {
-    args.push('--add-host', `${host}:0.0.0.0`);
-  }
-}
-```
-
-### 1c. Fix home directory permissions (if not already done)
-
-The container may run as your host uid (not uid 1000). Check the Dockerfile:
+## 3. Point the group at Ollama
 
 ```bash
-grep 'chmod.*home/node' container/Dockerfile
+ncl groups config update --id <GROUP_ID> \
+  --base-url http://host.docker.internal:11434 \
+  --model <MODEL>
 ```
 
-If it shows `chmod 755`, change it to `chmod 777` so any uid can write there.
-Then rebuild the container image: `./container/build.sh`
+`host.docker.internal` — not `localhost` — is how a container reaches a service on the host; on Linux the runtime maps it for every session. Keep the port as Ollama's (`11434`) unless the user runs it elsewhere.
 
-## 2. Identify the setup
+What that one command sets up at the group's next spawn:
 
-Ask the user (plain text, not AskUserQuestion):
+- `ANTHROPIC_BASE_URL` pointing at Ollama, so the Anthropic SDK inside the container calls it instead of `api.anthropic.com`.
+- A placeholder bearer token, because the SDK sends an `Authorization` header or nothing at all. Ollama ignores it. **No real credential is involved**, here or anywhere: credentials live in the OneCLI vault and never enter a container.
+- `NO_PROXY`/`no_proxy` for that host, so the request goes straight to Ollama rather than through the credential-injecting gateway proxy — merged into whatever the gateway already exempts, not replacing it.
+- The model name, read by the provider inside the container.
 
-1. **Which agent group?** List available groups: `pnpm exec tsx scripts/q.ts data/v2.db "SELECT folder, name FROM agent_groups;"`
-2. **Which Ollama model?** List available: `curl -s http://localhost:11434/api/tags | grep '"name"'`
-3. **Block Anthropic API?** Recommended yes — prevents accidental spend if config drifts.
+Two things worth telling the user:
 
-Record as `FOLDER`, `MODEL`, and `BLOCK_ANTHROPIC`.
+- This is **operator-only**. The same command from inside a container is refused, at any `cli_scope`, approval or not: the endpoint receives every prompt the group assembles, so it is not the agent's to move.
+- Only plain-HTTP-to-this-machine and HTTPS-to-anywhere are accepted. `http://ollama.mybox.lan:11434` is rejected — put a TLS terminator in front, or tunnel it to a local port.
 
-## 3. Configure container.json
-
-Read `groups/<FOLDER>/container.json`. Add (or merge into) an `env` block and optionally `blockedHosts`:
-
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://host.docker.internal:11434",
-    "ANTHROPIC_API_KEY": "ollama",
-    "NO_PROXY": "host.docker.internal",
-    "no_proxy": "host.docker.internal"
-  },
-  "blockedHosts": ["api.anthropic.com"]
-}
-```
-
-Omit `blockedHosts` if the user declined step 2.
-
-**Why these vars:** `ANTHROPIC_BASE_URL` redirects the Anthropic SDK to Ollama.
-`ANTHROPIC_API_KEY=ollama` satisfies the SDK's key requirement (Ollama ignores it).
-`NO_PROXY` bypasses the OneCLI HTTPS proxy for requests to `host.docker.internal`
-so they reach Ollama directly instead of going through the credential gateway.
-
-## 4. Set the model
-
-Read the agent group's shared Claude settings:
+## 4. Restart the group
 
 ```bash
-# Find the agent group ID
-AG_ID=$(pnpm exec tsx scripts/q.ts data/v2.db "SELECT id FROM agent_groups WHERE folder='<FOLDER>';")
-SETTINGS=data/v2-sessions/$AG_ID/.claude-shared/settings.json
+ncl groups restart --id <GROUP_ID>
 ```
 
-Add `"model": "<MODEL>"` to that settings file. Create the file if it doesn't exist:
+Container config takes effect at spawn, so the group's running containers have to go. The host service itself is untouched — no source changed and no image needs rebuilding.
 
-```json
-{
-  "model": "gemma4:latest"
-}
+## 5. Tell the model what it is
+
+Open-weight models trained on public conversations often introduce themselves as Claude. Add a line to the group's **standing instructions**, `groups/<folder>/instructions.prepend.md` — creating the file if it does not exist:
+
+```markdown
+You run on the local model `<MODEL>` served by Ollama, not on Claude. Say so if asked.
 ```
 
-If the file already has content, merge the `model` key in — don't overwrite existing keys.
-
-**Why here and not container.json:** Claude Code reads its model from its own settings
-file, not from env vars. This file is bind-mounted into the container as `~/.claude/settings.json`.
-
-## 5. Build and restart
-
-Run from your NanoClaw project root:
-
-```bash
-export PATH="/opt/homebrew/bin:$PATH"
-pnpm run build
-source setup/lib/install-slug.sh
-launchctl unload ~/Library/LaunchAgents/$(launchd_label).plist
-launchctl load   ~/Library/LaunchAgents/$(launchd_label).plist
-# Linux: systemctl --user restart $(systemd_unit)
-```
+Write it there, not in `groups/<folder>/CLAUDE.md`: that file is composed from the shared base plus these standing instructions at every spawn, so an edit to it is erased the next time the group wakes.
 
 ## 6. Verify
 
-Send a message to the agent. Then confirm:
+Send the agent a message on its channel, then:
 
 ```bash
-# Ollama shows the model as active
+# Ollama has the model loaded and busy
 curl -s http://localhost:11434/api/ps | grep '"name"'
 
-# Container has the right env vars
+# The container is actually pointed at Ollama
 CTR=$(docker ps --filter "label=nanoclaw-group-folder=<FOLDER>" --format "{{.Names}}" | head -1)
-docker inspect "$CTR" --format '{{json .HostConfig.ExtraHosts}}'
-docker exec "$CTR" env | grep ANTHROPIC
+docker exec "$CTR" env | grep -E 'ANTHROPIC_BASE_URL|NO_PROXY'
 ```
 
-Expected: `api.anthropic.com:0.0.0.0` in ExtraHosts, `ANTHROPIC_BASE_URL=http://host.docker.internal:11434`.
+Expect `ANTHROPIC_BASE_URL=http://host.docker.internal:11434` and the same host in `NO_PROXY`.
 
-## Reverting to Claude
+To prove the wiring **before** installing Ollama — or to tell "Ollama is broken" apart from "the routing is broken" — run the endpoint harness, which stands a fake Anthropic-shape endpoint up on a local port, routes a real message through a real container, and reports whether the canned reply came back:
 
-To switch back to the Anthropic API:
+```bash
+pnpm exec tsx scripts/test-v2-endpoint-e2e.ts
+```
 
-1. Remove the `env` and `blockedHosts` keys from `groups/<FOLDER>/container.json`
-2. Remove `"model"` from the shared settings file
-3. Restart the service
+## Reverting
 
-No rebuild needed — both files are read at container spawn time.
+[REMOVE.md](REMOVE.md).
+
+## Why this skill ships no test
+
+Its entire footprint is two container-config fields written through `ncl` — no
+file is added, no import is wired, so there is no line in the tree whose
+deletion a test could catch. The mechanism those fields drive is guarded in
+trunk, and `pnpm test` runs all of it:
+
+| Guard | What breaks it |
+|---|---|
+| `src/providers/endpoint-env.test.ts` | endpoint → provider env, the local-only proxy bypass, the `NO_PROXY` merge |
+| `src/container-runner.test.ts` | the contributed env lane, and a per-group endpoint beating the install-global and gateway ones |
+| `src/container-config.test.ts` | the URL rule, and the read-back that drops a hand-edited value |
+| `src/cli/crud.test.ts` | `--base-url` write, clear, and refusal for unsupported providers |
+| `src/cli/dispatch.test.ts` | the operator-only denial for container callers |
 
 ## Troubleshooting
 
-**Agent hangs, no response:** Ollama may be loading the model cold (large models take 10–30s).
-Watch `curl -s http://localhost:11434/api/ps` — the model appears once loaded.
+**First reply takes 10-30s, then nothing is fast.** Cold model load, then no prompt caching. Watch `curl -s http://localhost:11434/api/ps` for the load. For the caching part, the Claude Agent SDK puts a per-request nonce at the front of every prompt, which defeats Ollama's prefix cache; [docs/ollama.md](../../../docs/ollama.md) has a ~40-line proxy that pins it and the base URL to point at instead.
 
-**"model not found" error in container logs:** The model name in settings.json doesn't match
-what Ollama has. Run `ollama list` on the host and use the exact name shown.
+**"model not found".** The name in the config is not what Ollama has. Compare `ollama list` with `ncl groups config get --id <GROUP_ID>` and re-run step 3 with the exact string, tag included.
 
-**Responses claim to be Claude:** The model was trained on data that includes Claude conversations.
-Add a line to `groups/<FOLDER>/CLAUDE.md` telling it what model it runs on.
+**The agent answers, but `api/ps` shows no activity.** It is still reaching Anthropic — the config did not land or the container predates it. Check `ncl groups config get --id <GROUP_ID>` shows your `base_url`, then re-run step 4; only a fresh container picks up config.
 
-**Agent responds but Ollama shows no activity:** `NO_PROXY` may not have taken effect for
-`http_proxy` (lowercase). Add both `NO_PROXY` and `no_proxy` to the env block.
+**Every reply is an auth or connection error.** `docker exec <CTR> curl -s http://host.docker.internal:11434/api/tags` from inside the container: empty means the container cannot see the host — re-check step 1 (lockdown), and that Ollama is bound to all interfaces (`OLLAMA_HOST=0.0.0.0`) rather than loopback only.
+
+**Tool calls loop, stall, or come back malformed.** A model limitation, not a wiring one. Try a larger tool-capable model, or keep this group for chat work and leave tool-heavy groups on Claude — the setting is per group precisely so both can coexist.
+
+**Responses claim to be Claude.** Step 5.

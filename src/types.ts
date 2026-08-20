@@ -26,6 +26,12 @@ export interface ContainerConfigRow {
   additional_mounts: string; // JSON: AdditionalMountConfig[]
   cli_scope: string; // 'disabled' | 'group' | 'global'
   timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  /**
+   * Per-group model endpoint. NULL = the provider's own default endpoint.
+   * Validated at the write path and re-validated on read (`configFromDb`):
+   * absolute URL, HTTPS unless the host is loopback / host.docker.internal.
+   */
+  base_url: string | null;
   updated_at: string;
 }
 

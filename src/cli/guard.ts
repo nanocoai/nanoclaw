@@ -59,6 +59,17 @@ async function commandDecide(cmd: CommandDef, input: GuardInput) {
   }
 
   const args = input.payload;
+
+  // Operator-only ARG, for any cli_scope and with or without approval: the
+  // model endpoint is where every prompt this group ever assembles — memory,
+  // instructions, whatever a tool read — gets sent. An agent that can move it
+  // can exfiltrate all of that to a host of its choosing, and an approval card
+  // reading "config update --base-url https://…" is exactly the kind of change
+  // a human waves through. Operators set it from the host socket.
+  if (args.base_url !== undefined || args['base-url'] !== undefined) {
+    return DENY('Cannot change the model endpoint (--base-url) from inside a container.');
+  }
+
   const cliScope = (await getContainerConfig(actor.agentGroupId))?.cli_scope ?? 'group';
 
   if (cliScope === 'disabled') {

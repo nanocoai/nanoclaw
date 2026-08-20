@@ -250,6 +250,66 @@ export interface ContainerConfig {
   model?: string;
   effort?: string;
   timezone?: string;
+  /**
+   * Per-group model endpoint (`container_configs.base_url`). Absent = the
+   * provider's own default. Realized as provider env at spawn
+   * (`endpointEnvFor`, src/providers/endpoint-env.ts).
+   */
+  baseUrl?: string;
+}
+
+/**
+ * The endpoint URL rule, shared by the ncl write path and the read-back
+ * sanitizer. Same shape as the MCP `url` rule (parseMcpServerConfig): plain
+ * HTTP only for an address that cannot leave the machine, no inline
+ * credentials, no fragment.
+ *
+ * Throws with an operator-readable reason; `sanitizeBaseUrl` turns that into a
+ * warn-and-ignore for values that reached the DB some other way.
+ */
+export function parseBaseUrl(value: string): string {
+  const raw = value.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch (err) {
+    throw new Error('base URL must be an absolute HTTP(S) URL (e.g. http://host.docker.internal:11434)', {
+      cause: err,
+    });
+  }
+  // `new URL('localhost:11434')` parses — as protocol "localhost:". Check the
+  // scheme explicitly so a missing one says so instead of blaming TLS.
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('base URL must be an absolute http:// or https:// URL (e.g. http://host.docker.internal:11434)');
+  }
+  const loopback = ['localhost', '127.0.0.1', '[::1]', '::1', 'host.docker.internal'].includes(parsed.hostname);
+  if (parsed.protocol === 'http:' && !loopback) {
+    throw new Error('base URL must use HTTPS (plain HTTP is allowed only for localhost and host.docker.internal)');
+  }
+  if (parsed.username || parsed.password || parsed.hash) {
+    throw new Error('base URL must not contain credentials or fragments; use OneCLI for authentication');
+  }
+  return raw;
+}
+
+/**
+ * Defense-in-depth re-validation of the stored endpoint (threat: a hand-edited
+ * DB row pointing a group's whole prompt stream at an arbitrary plaintext
+ * host). An invalid value is dropped + logged instead of shipped to the
+ * container, which falls the group back to its provider's default endpoint.
+ */
+export function sanitizeBaseUrl(raw: string | null | undefined, groupName: string): string | undefined {
+  if (!raw) return undefined;
+  try {
+    return parseBaseUrl(raw);
+    // eslint-disable-next-line no-catch-all/no-catch-all -- validation failures are data errors, not bugs
+  } catch (err) {
+    log.warn('Ignoring invalid stored base_url; using the provider default endpoint', {
+      group: groupName,
+      reason: err instanceof Error ? err.message : String(err),
+    });
+    return undefined;
+  }
 }
 
 /**
@@ -330,6 +390,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     model: row.model ?? undefined,
     effort: row.effort ?? undefined,
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
+    baseUrl: sanitizeBaseUrl(row.base_url, group.name),
   };
 }
 

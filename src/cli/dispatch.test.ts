@@ -390,6 +390,23 @@ describe('CLI scope enforcement', () => {
     }
   });
 
+  it('blocks a --base-url change from any container caller, at any scope', async () => {
+    // The endpoint receives every prompt the group assembles, so this is
+    // operator-only like hostOnly commands — not merely approval-gated, and
+    // not relaxed by cli_scope: 'global'.
+    for (const scope of ['group', 'global'] as const) {
+      mockGetContainerConfig.mockReturnValue({ cli_scope: scope });
+      for (const args of [{ base_url: 'https://evil.example.com' }, { 'base-url': 'https://evil.example.com' }]) {
+        const resp = await dispatch({ id: '1', command: 'groups-test', args }, agentCtx());
+        expect(resp.ok, `scope=${scope} args=${JSON.stringify(args)}`).toBe(false);
+        if (!resp.ok) {
+          expect(resp.error.code).toBe('forbidden');
+          expect(resp.error.message).toContain('base-url');
+        }
+      }
+    }
+  });
+
   it('group: blocks non-group resources', async () => {
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
 

@@ -327,11 +327,14 @@ CREATE TABLE container_configs (
   additional_mounts      TEXT NOT NULL DEFAULT '[]',
   cli_scope              TEXT NOT NULL DEFAULT 'group',   -- disabled | group | global
   timezone               TEXT,                            -- IANA id; NULL = install-global TZ (added by migration 20)
+  base_url               TEXT,                            -- this group's model endpoint; NULL = provider default (added by migration 24)
   updated_at             TEXT NOT NULL
 );
 ```
 
 `timezone` overrides the install-global timezone for one agent group: host-side scheduling (cron interpretation, `--process-after`, run-log stamps) resolves it live via `resolveGroupTimezone` (`src/container-config.ts`); the container gets it as its `TZ` env on next respawn. Set via `ncl groups config update --timezone <IANA>` (`""` clears back to NULL) or `ncl groups create --timezone`.
+
+`base_url` points ONE agent group's inference somewhere else — a local Ollama speaking Anthropic's `/v1/messages`, a self-hosted gateway, a staging endpoint — where `.env`'s `ANTHROPIC_BASE_URL` (the optional `src/providers/claude.ts` registration) moves every claude group at once. Validated at the write path and re-validated on read (`parseBaseUrl` / `sanitizeBaseUrl`, `src/container-config.ts`): absolute URL, HTTPS unless the host is loopback / `host.docker.internal`, no inline credentials. Realized at spawn as provider env on the CONTRIBUTED lane (`endpointEnvFor`, `src/providers/endpoint-env.ts` → `ANTHROPIC_BASE_URL`, a placeholder bearer, and — for a local endpoint only — `NO_PROXY`/`no_proxy`), so it wins over both the install-global registration and the gateway. Set via `ncl groups config update --base-url <url>` (`""` clears back to NULL); operator-only, denied for any container caller at any `cli_scope` (`src/cli/guard.ts`) because the endpoint receives every prompt the group assembles. Effective on the group's next spawn (`ncl groups restart`). See [ollama.md](ollama.md).
 
 - **Readers:** `src/container-config.ts`, `src/container-runner.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/claude-md-compose.ts`
 - **Writers:** `src/db/container-configs.ts`, `src/modules/self-mod/apply.ts`, `src/backfill-container-configs.ts`
@@ -440,6 +443,7 @@ Several early migrations were later renamed/retired and replaced by "module" fil
 | 20 | `container-config-timezone` | `020-container-config-timezone.ts` | `container_configs.timezone` — per-agent-group timezone override (NULL = install-global) |
 | 21 | `approval-question-render-metadata` | `021-approval-question.ts` | `question` card-body column on all three approval tables so terminal edits retain the original request |
 | 22 | `messaging-group-detached-at` | `022-messaging-group-detached.ts` | `messaging_groups.detached_at` — records when the bot left a channel without deleting its wiring |
+| 24 | `container-config-base-url` | `024-container-config-base-url.ts` | `container_configs.base_url` — per-agent-group model endpoint (NULL = provider default) |
 
 Numbers 5 and 6 are intentionally absent — migrations were renumbered during early development.
 
