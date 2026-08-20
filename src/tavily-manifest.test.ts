@@ -21,9 +21,10 @@ function repoRoot(): string {
 
 describe('the Tavily MCP bridge is installed in the agent image', () => {
   const root = repoRoot();
-  const manifest = JSON.parse(
-    fs.readFileSync(path.join(root, 'container', 'cli-tools.json'), 'utf8'),
-  ) as Array<{ name: string; version: string }>;
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'container', 'cli-tools.json'), 'utf8')) as Array<{
+    name: string;
+    version: string;
+  }>;
 
   it('appears in the CLI manifest', () => {
     expect(manifest.map((entry) => entry.name)).toContain('mcp-remote');

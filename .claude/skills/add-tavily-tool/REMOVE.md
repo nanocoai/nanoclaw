@@ -1,7 +1,7 @@
 # Remove Tavily Tool
 
-Every step is idempotent. Apply it only to groups where `/add-tavily-tool` was
-installed.
+Every step is idempotent when applied in order per the checks below. Apply this
+only to groups where `/add-tavily-tool` was installed.
 
 ## 1. Unregister Tavily
 
@@ -12,11 +12,16 @@ ncl groups list
 ncl groups config get --id <group-id>
 ```
 
-For every group with a `tavily` MCP entry:
+For every group with a `tavily` MCP entry (see the `mcp_servers` field above):
 
 ```bash
 ncl groups config remove-mcp-server --id <group-id> --name tavily
 ```
+
+On a second run, this command will error with "MCP server 'tavily' not found" —
+that is expected, and the removal is complete. The `config get` check above
+prevents you from calling the remove command on groups that don't have the
+entry.
 
 ## 2. Remove the dependency guard
 

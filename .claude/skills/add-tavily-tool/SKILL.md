@@ -62,6 +62,15 @@ Build the image and run the guard:
 pnpm exec vitest run src/tavily-manifest.test.ts
 ```
 
+`./container/build.sh` rebuilds the agent image to include the new global CLI
+tool (`mcp-remote`). On a standard (non-hardened) install, this is a full
+multi-GB rebuild from the Node base image and can take several minutes. On
+hardened installs (where you pull a prebuilt image), it applies a lightweight
+overlay. The rebuilding is necessary only on first install; if you are
+reinstalling the skill, this step may be skipped on non-hardened installs if
+you confirm the previous `./container/build.sh` run succeeded and `mcp-remote`
+is already in the image.
+
 The manifest is the only source-backed integration point. Per-group MCP
 registration is runtime state stored through `ncl`, so it has no in-tree line
 for a registration test to guard.
@@ -96,6 +105,13 @@ ncl groups restart \
   --message "Tavily Search and Extract are installed. Run one Tavily search with max_results 1 and report whether it succeeds."
 ```
 
+The restart command returns `{ "restarted": <count> }`. If `restarted` is 0, the
+group has no running container at the moment — this is normal for a freshly
+configured group. The Tavily configuration will be picked up the next time the
+group receives a message (a user sends a message to one of the group's wired
+channels, or an incoming notification arrives). You can move to Phase 4, or
+send a test message now to trigger the smoke test immediately.
+
 ## Phase 4: Verify
 
 Confirm the stored configuration contains one `tavily` server with both
@@ -105,9 +121,13 @@ headers:
 ncl groups config get --id <group-id>
 ```
 
-Then check the selected agent's test response. The call must use
+If the group was restarted in Phase 3 (check for `"restarted": 1` or higher),
+check the selected agent's test response. The call must use
 `mcp__tavily__tavily_search`. Tavily Crawl, Map, and Research must not appear in
 the Tavily namespace.
+
+If `restarted` was 0, the test message was not delivered on restart. The group
+will run the smoke test on its next regular message, or skip to Phase 5 now.
 
 ## Phase 5: Install the upgrade path
 
@@ -121,16 +141,22 @@ moment instead of dead-ending. For each selected group:
    docker inspect onecli --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^APP_URL='
    ```
 
-   If the value is a loopback or container-bridge address (`127.0.0.1`,
-   `172.17.0.1`, `host.docker.internal`), ask the operator which URL they open
-   the OneCLI dashboard at, suggesting `http://127.0.0.1:10254` as the default.
-   A public or tailnet `APP_URL` needs no question.
-2. Gate the deeplink: `curl -fs <dashboard-url>/connections/custom` must return
-   HTTP 200. If it does not (older OneCLI without the prefill route), replace
-   step 2 of the template with: "Ask an operator to run, on the host:
-   `onecli secrets create --name tavily --type generic --host-pattern
-   mcp.tavily.com --header-name Authorization --value-format 'Bearer {value}'
-   --file <key-file>`".
+   Use the `APP_URL` value you see (e.g., `http://127.0.0.1:10254` or
+   `http://172.17.0.1:10254`). If that address is unreachable from your browser
+   (e.g., OneCLI is on a remote machine or behind a firewall), ask the operator
+   which URL they use to reach the OneCLI dashboard instead. Otherwise, proceed
+   with the `APP_URL` value.
+2. Gate the deeplink: probe the exact URL the template emits after substitution.
+   The template targets
+   `{{ONECLI_DASHBOARD_URL}}/connections/secrets?create=generic&host=mcp.tavily.com&name=Tavily&header=Authorization&format=Bearer%20%7Bvalue%7D`;
+   test it with `curl -fs '<dashboard-url>/connections/secrets?create=generic&host=mcp.tavily.com&name=Tavily&header=Authorization&format=Bearer%20%7Bvalue%7D'`.
+   If it returns HTTP 200, the route is available. If it returns 404 (older
+   OneCLI without the prefill route), replace step 2 of the template with: "Ask
+   an operator to run, on the host: `onecli secrets create --name tavily --type
+   generic --host-pattern mcp.tavily.com --header-name Authorization
+   --value-format 'Bearer {value}' --file <key-file>`". If the probe fails with a
+   connection error (connection refused, timeout), use the operator-supplied URL
+   from step 1.
 3. Substitute `{{ONECLI_DASHBOARD_URL}}` in
    [upgrade-instructions.md](upgrade-instructions.md) with the resolved URL and
    write the block into `groups/<group-folder>/instructions.prepend.md`:
@@ -139,9 +165,9 @@ moment instead of dead-ending. For each selected group:
    into `groups/<group-folder>/CLAUDE.md`; it is regenerated at spawn and
    appended blocks are lost.
 4. Have the operator open the composed deeplink once and confirm the create
-   dialog loads with host `mcp.tavily.com` prefilled. If they supplied a public
-   URL while `APP_URL` was a loopback address, suggest setting the public URL in
-   the OneCLI dashboard (Settings, Instance) so future links stay stable.
+   dialog loads with host `mcp.tavily.com` prefilled. If the link does not load,
+   revisit step 1 and verify the dashboard URL is correct for the operator's
+   network.
 5. Restart each selected group: `ncl groups restart --id <group-id>`.
 
 ## Keyless limit
