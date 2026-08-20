@@ -44,25 +44,35 @@ track (not the `@chat-adapter/*` family), so it carries its own pin:
 @beeper/chat-adapter-matrix@0.2.0
 ```
 
-### 4. Patch matrix-js-sdk ESM imports
+### 4. Wire the ESM-fix pnpm patch
 
 The adapter's published dist references `matrix-js-sdk/lib/...` without `.js`
-extensions, which fails under Node 22 strict ESM resolution. Add the missing
-extensions (idempotent — safe to re-run). Re-run this after every `pnpm install`
-that touches the adapter:
+extensions, which Node's ESM loader rejects — once the barrel imports the
+adapter, the host crashes at startup. Trunk ships the fix as a pnpm patch
+(`patches/@beeper__chat-adapter-matrix@0.2.0.patch`); wire it into the
+workspace so every future `pnpm install` re-applies it. (The previous
+in-place node_modules edit silently reverted on any reinstall — observed as
+a production host crash-loop.)
 
 ```nc:run effect:external
 node -e '
-  const fs = require("fs"), path = require("path");
-  const root = "node_modules/.pnpm";
-  const dir = fs.readdirSync(root).find(d => d.startsWith("@beeper+chat-adapter-matrix@"));
-  if (!dir) { console.log("Matrix adapter not installed"); process.exit(0); }
-  const f = path.join(root, dir, "node_modules/@beeper/chat-adapter-matrix/dist/index.js");
-  fs.writeFileSync(f, fs.readFileSync(f, "utf8").replace(
-    /from "(matrix-js-sdk\/lib\/[^"]+?)(?<!\.js)"/g, "from \"$1.js\""
-  ));
-  console.log("Patched", f);
+  const fs = require("fs");
+  const f = "pnpm-workspace.yaml";
+  let s = fs.readFileSync(f, "utf8");
+  if (s.includes("@beeper/chat-adapter-matrix@0.2.0")) {
+    console.log("patchedDependencies entry already present");
+  } else {
+    if (!/^patchedDependencies:/m.test(s)) s = s.trimEnd() + "\n\npatchedDependencies:\n";
+    s = s.replace(/^patchedDependencies:\n/m,
+      "patchedDependencies:\n  \x27@beeper/chat-adapter-matrix@0.2.0\x27: patches/@beeper__chat-adapter-matrix@0.2.0.patch\n");
+    fs.writeFileSync(f, s);
+    console.log("patchedDependencies entry added");
+  }
 '
+```
+
+```nc:run effect:external
+pnpm install --no-frozen-lockfile
 ```
 
 ### 5. Build
