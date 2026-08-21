@@ -303,6 +303,14 @@ export interface MountValidationResult {
   realHostPath?: string;
   resolvedContainerPath?: string;
   effectiveReadonly?: boolean;
+  /**
+   * Owning gid of the mount root, set only when the mount is granted
+   * read-write. `docker run --user uid:gid` sets a primary group only and
+   * drops supplementary groups, so a host directory that's writable via group
+   * membership (not world-writable) needs its gid granted back explicitly —
+   * see `MountSpec.groupId`.
+   */
+  groupId?: number;
 }
 
 /**
@@ -379,12 +387,38 @@ export function validateMount(mount: AdditionalMount): MountValidationResult {
     }
   }
 
+  // Grant the mount root's owning gid as a supplementary group so a
+  // group-writable-only directory (not world-writable) is actually writable —
+  // `--user uid:gid` sets a primary group and drops supplementary ones.
+  // Skip gid 0: granting the container process root-group membership is a
+  // broader escalation than "let this rw mount work", so a root-group-owned
+  // rw mount stays write-denied rather than silently widened.
+  let groupId: number | undefined;
+  if (!effectiveReadonly) {
+    try {
+      const gid = fs.statSync(realPath).gid;
+      if (gid > 0) {
+        groupId = gid;
+      } else {
+        log.info('Mount root is group-0 owned - not granting root-group supplementary access', {
+          mount: mount.hostPath,
+        });
+      }
+    } catch (err) {
+      log.warn('Could not stat mount root to resolve owning gid', {
+        mount: mount.hostPath,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   return {
     allowed: true,
     reason: `Allowed under root "${allowedRoot.path}"${allowedRoot.description ? ` (${allowedRoot.description})` : ''}`,
     realHostPath: realPath,
     resolvedContainerPath: containerPath,
     effectiveReadonly,
+    groupId,
   };
 }
 
@@ -400,11 +434,13 @@ export function validateAdditionalMounts(
   hostPath: string;
   containerPath: string;
   readonly: boolean;
+  groupId?: number;
 }> {
   const validatedMounts: Array<{
     hostPath: string;
     containerPath: string;
     readonly: boolean;
+    groupId?: number;
   }> = [];
 
   for (const mount of mounts) {
@@ -415,6 +451,7 @@ export function validateAdditionalMounts(
         hostPath: result.realHostPath!,
         containerPath: `/workspace/extra/${result.resolvedContainerPath}`,
         readonly: result.effectiveReadonly!,
+        groupId: result.groupId,
       });
 
       log.debug('Mount validated successfully', {
@@ -422,6 +459,7 @@ export function validateAdditionalMounts(
         hostPath: result.realHostPath,
         containerPath: result.resolvedContainerPath,
         readonly: result.effectiveReadonly,
+        groupId: result.groupId,
         reason: result.reason,
       });
     } else {
