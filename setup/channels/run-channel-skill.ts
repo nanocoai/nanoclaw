@@ -286,6 +286,7 @@ export async function runChannelSkill(
   const res = await runSkill(`.claude/skills/add-${channel}`, {
     projectRoot,
     exec: overrides.exec,
+    execStream: overrides.execStream,
     resolveInput: overrides.resolveInput,
     resolveRemote: overrides.resolveRemote,
     // The already-resolved agent name is pre-supplied so a skill that consumes
