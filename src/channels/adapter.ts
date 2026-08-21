@@ -44,8 +44,9 @@ export interface DeliveryAddress {
  */
 export interface InboundEvent {
   channelType: string;
-  /** Receiving adapter instance; stamped host-side (src/index.ts onInbound).
-   *  Absent (e.g. CLI onInboundEvent) means the default instance (= channelType). */
+  /** Receiving adapter instance; stamped host-side (src/index.ts onInbound) or
+   *  carried by the CLI admin transport's `to.instance`. Absent means the
+   *  default instance (= channelType). */
   instance?: string;
   platformId: string;
   threadId: string | null;
