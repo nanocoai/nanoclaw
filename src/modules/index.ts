@@ -29,3 +29,4 @@ import './maintenance-worker-actions/index.js';
 import './maintenance-transcript/index.js';
 import './lease-manager-filesystem/index.js';
 import './lease-document-delivery/index.js';
+import './lease-manager-generate/index.js';
