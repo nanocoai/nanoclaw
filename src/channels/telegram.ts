@@ -57,16 +57,11 @@ function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
   };
 }
 
-/** Look up the bot username via Telegram getMe. Cached after first call. */
+/** Look up the bot username via Telegram getMe. */
 async function fetchBotUsername(token: string): Promise<string | null> {
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
-    const json = (await res.json()) as { ok: boolean; result?: { username?: string } };
-    return json.ok ? (json.result?.username ?? null) : null;
-  } catch (err) {
-    log.warn('Telegram getMe failed', { err });
-    return null;
-  }
+  const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+  const json = (await res.json()) as { ok: boolean; result?: { username?: string } };
+  return json.ok ? (json.result?.username ?? null) : null;
 }
 
 function isGroupPlatformId(platformId: string): boolean {
@@ -334,7 +329,10 @@ registerChannelAdapter('telegram', {
       maxTextLength: 4000,
     });
 
-    const botUsernamePromise = fetchBotUsername(token);
+    const botUsernamePromise = withRetry(() => fetchBotUsername(token), 'getMe').catch((err) => {
+      log.warn('Telegram getMe failed', { err });
+      return null;
+    });
 
     const wrapped: ChannelAdapter = {
       ...bridge,
