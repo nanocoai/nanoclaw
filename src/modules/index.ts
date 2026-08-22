@@ -26,6 +26,7 @@ import './agent-to-agent/index.js';
 import './self-mod/index.js';
 import './lowes-materials/index.js';
 import './maintenance-worker-actions/index.js';
+import './maintenance-properties/index.js';
 import './maintenance-transcript/index.js';
 import './lease-manager-filesystem/index.js';
 import './lease-document-delivery/index.js';
