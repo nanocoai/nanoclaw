@@ -103,6 +103,13 @@ export interface ApprovalResolvedEvent {
   outcome: 'approve' | 'reject';
   /** Namespaced user ID (`<channel>:<handle>`) of the resolving admin. Empty string if unknown. */
   userId: string;
+  /**
+   * Free text captured via "Reject with reason…", when present. Undefined for
+   * a plain Reject, an Approve, or any resolution that never went through the
+   * reason-capture flow. Purely additive — existing callbacks that don't read
+   * this field see no behavior change.
+   */
+  reason?: string;
 }
 
 export type ApprovalResolvedHandler = (event: ApprovalResolvedEvent) => Promise<void> | void;

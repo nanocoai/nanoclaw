@@ -57,7 +57,7 @@ export async function finalizeReject(
   });
 
   await deletePendingApproval(approval.approval_id);
-  await notifyApprovalResolved({ approval, session, outcome: 'reject', userId });
+  await notifyApprovalResolved({ approval, session, outcome: 'reject', userId, reason });
   await wakeContainer(session);
   return true;
 }
