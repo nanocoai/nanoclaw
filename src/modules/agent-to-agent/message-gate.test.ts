@@ -9,7 +9,14 @@ import { getMessagePolicy, removeMessagePolicy, setMessagePolicy } from './db/ag
 import { applyA2aMessageGate } from './message-gate.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
 import { getDb } from '../../db/connection.js';
-import { createPendingApproval, createSession, deletePendingApproval, getPendingApproval } from '../../db/sessions.js';
+import {
+  a2aThreadId,
+  createPendingApproval,
+  createSession,
+  deletePendingApproval,
+  getPendingApproval,
+  getSessionsByAgentGroup,
+} from '../../db/sessions.js';
 import { requestApproval } from '../approvals/index.js';
 import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
 import { initSessionFolder } from '../../session-manager.js';
@@ -69,6 +76,13 @@ function makeSession(id: string, agentGroupId: string): Session {
   };
 }
 
+/** The dedicated a2a session `agentGroupId` uses for `peerAgentGroupId`, if one exists yet. */
+async function findDedicatedA2aSession(agentGroupId: string, peerAgentGroupId: string): Promise<Session | undefined> {
+  const threadId = a2aThreadId(peerAgentGroupId);
+  const sessions = await getSessionsByAgentGroup(agentGroupId);
+  return sessions.find((s) => s.messaging_group_id === null && s.thread_id === threadId);
+}
+
 /** Seed a live a2a hold row (what requestApproval writes) and return it as the grant. */
 async function seedA2aHold(approvalId: string, payload: Record<string, unknown>): Promise<PendingApproval> {
   await createPendingApproval({
@@ -101,6 +115,11 @@ describe('agent message policies', () => {
     await createAgentGroup({ id: B, name: 'B', folder: 'b', agent_provider: null, created_at: now() });
     SA = makeSession('sess-A', A);
     SB = makeSession('sess-B', B);
+    // Pre-seeded to exactly the shape resolveA2aSession(B, A) would find/reuse
+    // (messaging_group_id null, thread_id system:a2a:A), so a fresh A→B send
+    // with no in_reply_to lands here via Tier 3 rather than creating a second
+    // dedicated session — mirrors the same fixture fix in agent-route.test.ts.
+    SB.thread_id = a2aThreadId(A);
     await createSession(SA);
     await createSession(SB);
     initSessionFolder(A, SA.id);
@@ -180,7 +199,12 @@ describe('agent message policies', () => {
       SA,
     );
     expect(requestApproval).not.toHaveBeenCalled();
-    expect(readInbound(A, SA.id)).toHaveLength(1);
+    // SA has no prior self a2a history and isn't itself the dedicated
+    // system:a2a:A session, so this lands in the dedicated self session
+    // (Tier 3), not SA directly.
+    const dedicated = await findDedicatedA2aSession(A, A);
+    expect(dedicated).toBeDefined();
+    expect(readInbound(A, dedicated!.id)).toHaveLength(1);
   });
 
   it('ghost policy (policy row, no destination row) still denies — deny beats the policy hold', async () => {

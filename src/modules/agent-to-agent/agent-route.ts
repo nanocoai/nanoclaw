@@ -24,11 +24,11 @@ import path from 'path';
 import { isSafeAttachmentName } from '../../attachment-safety.js';
 import { ensureContainedInboxDir, isPathInside } from '../../inbox-safety.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
-import { getSession } from '../../db/sessions.js';
+import { a2aThreadId, getSession } from '../../db/sessions.js';
 import { wakeContainer } from '../../container-runner.js';
 import { GuardDenyError, guard } from '../../guard/index.js';
 import { log } from '../../log.js';
-import { resolveSession, sessionDir, withExistingMailboxSession, writeSessionMessage } from '../../session-manager.js';
+import { resolveA2aSession, sessionDir, withExistingMailboxSession, writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval, Session } from '../../types.js';
 import { requestApproval } from '../approvals/index.js';
 import { A2A_MESSAGE_GATE_ACTION, a2aSend } from './guard.js';
@@ -185,51 +185,75 @@ export interface RoutableAgentMessage {
 /**
  * Pick which session of `targetAgentGroupId` should receive this a2a message.
  *
- * Three layers, highest-fidelity first:
+ * Three layers, highest-fidelity first. Tiers 1 and 2 carry different trust
+ * levels and are validated differently — see inline comments below; the
+ * short version is that explicit reply metadata (1) is trusted for any
+ * active session of the target agent group, channel-bound or not, while the
+ * peer-affinity guess (2) is trusted only for that exact peer's own
+ * dedicated a2a session, never a channel session, a task session, or
+ * another peer's a2a session.
  *
  * 1. **Direct return-path** (in_reply_to lookup): if the message is a reply
  *    (`in_reply_to` set), open the source agent's inbound DB and read the
- *    triggering row's `source_session_id`. That column was stamped when the
- *    original outbound was routed — it's the session that started the
- *    conversation, and replies should land there even when the target has
- *    multiple active sessions.
+ *    triggering row's `source_session_id`. That column is only ever
+ *    stamped by this module's own `performAgentRoute` (never by the
+ *    ordinary channel-inbound path), so a hit here is a deliberate,
+ *    message-specific signal — trusted even when the resolved session is
+ *    channel-bound. This is what lets a reply return to a real, existing
+ *    private channel-bound session (e.g. Pepper's Telegram DM).
  *
  * 2. **Peer-affinity fallback**: if (1) misses (in_reply_to is null or the
  *    referenced row isn't an a2a inbound), look up the most recent a2a
  *    inbound *from the target agent group* in source's inbound and use its
  *    `source_session_id`. The intuition: the last time this peer talked to
- *    me, which target session was driving? Route the reply there, since
- *    that's the session most plausibly in active conversation.
+ *    me, which target session was driving? This is a guess, not a
+ *    message-specific reply — it must never be allowed to land on a
+ *    channel-bound session, a task session, or a different peer's own
+ *    dedicated session, so it's only accepted when the candidate is
+ *    exactly this peer's dedicated `system:a2a:<peerAgentGroupId>` session.
  *
- * 3. **Newest active session**: legacy heuristic. Used when no prior a2a
- *    has been recorded with `source_session_id` (e.g. fresh installs,
- *    pre-migration data).
+ * 3. **Dedicated peer session**: get-or-create this exact peer's own
+ *    `system:a2a:<peerAgentGroupId>` session under the target agent group —
+ *    isolated from any channel-bound session, so channel-facing traffic and
+ *    private a2a traffic never share a conversation. Never the generic
+ *    "newest active session" heuristic — that heuristic can return a real,
+ *    channel-bound session and was the root cause this three-tier design
+ *    replaces.
  */
 async function resolveTargetSession(
   msg: RoutableAgentMessage,
   sourceSession: Session,
   targetAgentGroupId: string,
 ): Promise<Session> {
-  const originSessionId = await withExistingMailboxSession(sourceSession.agent_group_id, sourceSession.id, (srcDb) => {
-    let origin: string | null = null;
+  const originInfo = await withExistingMailboxSession(sourceSession.agent_group_id, sourceSession.id, (srcDb) => {
     if (msg.in_reply_to) {
-      origin = srcDb.getInboundSourceSessionId(msg.in_reply_to);
+      const origin = srcDb.getInboundSourceSessionId(msg.in_reply_to);
+      if (origin) return { originSessionId: origin, viaExplicitReply: true };
     }
-    if (!origin) {
-      // Peer-affinity fallback — covers the case where the container's
-      // outbound write didn't carry in_reply_to (e.g. legacy MCP send_message
-      // path, container running pre-fix code).
-      origin = srcDb.getMostRecentPeerSourceSessionId(targetAgentGroupId);
-    }
-    return origin;
+    // Peer-affinity fallback — covers the case where the container's
+    // outbound write didn't carry in_reply_to (e.g. legacy MCP send_message
+    // path, container running pre-fix code).
+    const origin = srcDb.getMostRecentPeerSourceSessionId(targetAgentGroupId);
+    return { originSessionId: origin, viaExplicitReply: false };
   });
-  if (originSessionId) {
-    const candidate = await getSession(originSessionId);
+
+  if (originInfo?.originSessionId) {
+    const candidate = await getSession(originInfo.originSessionId);
     if (candidate && candidate.agent_group_id === targetAgentGroupId && candidate.status === 'active') {
-      return candidate;
+      if (originInfo.viaExplicitReply) {
+        return candidate;
+      }
+      // Tier 2 candidate — only trust it as this exact peer's own dedicated
+      // a2a session. Rejects channel sessions (messaging_group_id set),
+      // task sessions (system:tasks:*), and another peer's a2a session
+      // (system:a2a:<different-agent-group-id>).
+      const expectedThreadId = a2aThreadId(sourceSession.agent_group_id);
+      if (candidate.messaging_group_id === null && candidate.thread_id === expectedThreadId) {
+        return candidate;
+      }
     }
   }
-  return (await resolveSession(targetAgentGroupId, null, null, 'agent-shared')).session;
+  return (await resolveA2aSession(targetAgentGroupId, sourceSession.agent_group_id)).session;
 }
 
 export async function routeAgentMessage(

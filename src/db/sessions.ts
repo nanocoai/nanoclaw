@@ -4,6 +4,7 @@ import { getDb, hasTable } from './connection.js';
 // ── Sessions ──
 
 export const TASKS_SYSTEM_THREAD_ID = 'system:tasks';
+export const A2A_SYSTEM_THREAD_ID = 'system:a2a';
 
 export async function createSession(session: Session): Promise<void> {
   await getDb().run(
@@ -93,6 +94,15 @@ export async function findSystemSession(agentGroupId: string, threadId: string):
 /** Per-task session thread id for a scheduled task series. */
 export function taskThreadId(seriesId: string): string {
   return `${TASKS_SYSTEM_THREAD_ID}:${seriesId}`;
+}
+
+/**
+ * Per-peer session thread id for a dedicated agent-to-agent conversation.
+ * Peer-keyed so a second peer (if one is ever wired) gets its own session
+ * too, rather than all a2a traffic funneling into one shared conversation.
+ */
+export function a2aThreadId(peerAgentGroupId: string): string {
+  return `${A2A_SYSTEM_THREAD_ID}:${peerAgentGroupId}`;
 }
 
 /** True for any task session thread — a per-series one or the legacy shared one. */
