@@ -10,12 +10,23 @@ export interface CommandRunner {
   tryRun(command: string, args: string[], cwd?: string): { ok: boolean; stdout: string };
 }
 
+/**
+ * Output cap for captured commands. Node defaults to 1 MB, which a full test
+ * run or an image build exceeds routinely.
+ */
+const MAX_CAPTURED_OUTPUT_BYTES = 256 * 1024 * 1024;
+
 export function createCommandRunner(): CommandRunner {
   const run = (command: string, args: string[], cwd?: string): string =>
     execFileSync(command, args, {
       cwd,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      // The captured commands include `pnpm test` and the image build, both of
+      // which print far more than Node's 1 MB default allows. Overflowing it
+      // kills the child with ENOBUFS, which the transaction then reports as a
+      // validation failure with no relation to what was being validated.
+      maxBuffer: MAX_CAPTURED_OUTPUT_BYTES,
     }).trim();
   return {
     run,
