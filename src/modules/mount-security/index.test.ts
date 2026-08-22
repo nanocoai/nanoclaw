@@ -117,3 +117,68 @@ describe('loadMountAllowlist', () => {
     expect(loadMountAllowlist()).toBeNull();
   });
 });
+
+describe('validateMount groupId (supplementary group for group-writable rw mounts)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('grants the mount root owning gid as groupId when the mount is read-write', () => {
+    writeAllowlist({
+      allowedRoots: [{ path: projectsDir, allowReadWrite: true }],
+      blockedPatterns: [],
+    });
+    vi.spyOn(fs, 'statSync').mockReturnValue({ gid: 1004 } as fs.Stats);
+
+    const result = validateMount({ hostPath: repoDir, readonly: false });
+    expect(result.allowed).toBe(true);
+    expect(result.effectiveReadonly).toBe(false);
+    expect(result.groupId).toBe(1004);
+  });
+
+  it('does not grant groupId when the mount stays read-only', () => {
+    writeAllowlist({
+      allowedRoots: [{ path: projectsDir, allowReadWrite: true }],
+      blockedPatterns: [],
+    });
+    vi.spyOn(fs, 'statSync').mockReturnValue({ gid: 1004 } as fs.Stats);
+
+    const result = validateMount({ hostPath: repoDir, readonly: true });
+    expect(result.allowed).toBe(true);
+    expect(result.effectiveReadonly).toBe(true);
+    expect(result.groupId).toBeUndefined();
+  });
+
+  it('does not grant root-group (gid 0) membership even on a read-write mount', () => {
+    writeAllowlist({
+      allowedRoots: [{ path: projectsDir, allowReadWrite: true }],
+      blockedPatterns: [],
+    });
+    vi.spyOn(fs, 'statSync').mockReturnValue({ gid: 0 } as fs.Stats);
+
+    const result = validateMount({ hostPath: repoDir, readonly: false });
+    expect(result.allowed).toBe(true);
+    expect(result.effectiveReadonly).toBe(false);
+    expect(result.groupId).toBeUndefined();
+  });
+
+  it('leaves groupId unset when stat fails, without failing the mount', () => {
+    writeAllowlist({
+      allowedRoots: [{ path: projectsDir, allowReadWrite: true }],
+      blockedPatterns: [],
+    });
+    // Only the mount-root stat (not the allowlist file's own mtime-cache stat)
+    // should fail here, or loadMountAllowlist itself would report "no
+    // allowlist configured" for an unrelated reason.
+    const realStatSync = fs.statSync.bind(fs);
+    vi.spyOn(fs, 'statSync').mockImplementation((p, ...rest) => {
+      if (p === configFile) return realStatSync(p, ...rest);
+      throw new Error('EACCES');
+    });
+
+    const result = validateMount({ hostPath: repoDir, readonly: false });
+    expect(result.allowed).toBe(true);
+    expect(result.effectiveReadonly).toBe(false);
+    expect(result.groupId).toBeUndefined();
+  });
+});
