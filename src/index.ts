@@ -121,6 +121,7 @@ async function main(): Promise<void> {
                 timestamp: message.timestamp,
                 isMention: message.isMention,
                 isGroup: message.isGroup,
+                isAutomated: message.isAutomated,
               },
             }),
           )
