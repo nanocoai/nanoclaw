@@ -486,13 +486,20 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     // Project chat-sdk's nested author into the flat sender fields the router
     // expects (see src/router.ts extractAndUpsertUser). Native adapters already
     // populate these directly; this brings chat-sdk adapters in line.
-    const author = serialized.author as { userId?: string; fullName?: string; userName?: string } | undefined;
+    const author = serialized.author as
+      { userId?: string; fullName?: string; userName?: string; isBot?: boolean | 'unknown' } | undefined;
     if (author) {
       const name = author.fullName ?? author.userName;
       serialized.senderId = author.userId;
       serialized.sender = name;
       serialized.senderName = name;
     }
+    // Chat SDK normalizes each adapter's own bot-authorship signal (Discord
+    // author.bot/webhook_id, Slack bot_id, Telegram from.is_bot) onto
+    // author.isBot. `isBot === true` is the only automated signal we act
+    // on — `"unknown"` stays unautomated so an unclassifiable sender is
+    // never silently and permanently dropped.
+    const isAutomated = author?.isBot === true;
 
     // Drop raw to save DB space (can be very large)
     serialized.raw = undefined;
@@ -504,6 +511,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       timestamp: message.metadata.dateSent.toISOString(),
       isMention,
       isGroup,
+      isAutomated,
     };
   }
 

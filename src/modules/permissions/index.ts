@@ -10,7 +10,9 @@
  *      unknown_sender_policy (strict/request_approval/decline_notify/public) and the
  *      owner/global-admin/scoped-admin/member access hierarchy. Records its
  *      own `dropped_messages` row on refusal (structural drops are recorded
- *      by core).
+ *      by core). Automated senders (event.message.isAutomated) are always
+ *      denied silently regardless of policy — never held for approval,
+ *      never sent a decline (see handleUnknownSender, issue #3235).
  *
  * Without this module: sender resolution is a no-op (userId=null); the
  * access gate is not registered and core defaults to allow-all.
@@ -133,6 +135,25 @@ async function handleUnknownSender(
     messaging_group_id: mg.id,
     agent_group_id: agentGroupId,
   };
+
+  // Automated senders (platform webhooks/bots — event.message.isAutomated,
+  // set by the adapter from a platform-confirmed bot signal) can never
+  // click through an approval card, and Allow is worse for this sender
+  // class (it adds a stable bot identity to agent_group_members, so the
+  // agent then engages on every future automated post). Treat them as
+  // strict regardless of unknown_sender_policy — deny silently, no card,
+  // no decline-notify DM — so a recurring webhook can't generate an
+  // unbounded stream of cards (issue #3235).
+  if (event.message.isAutomated) {
+    log.info('MESSAGE DROPPED — automated sender (treated as strict)', {
+      messagingGroupId: mg.id,
+      agentGroupId,
+      userId,
+      accessReason,
+    });
+    await recordDroppedMessage({ ...dropRecord, reason: `automated_sender_${mg.unknown_sender_policy}` });
+    return;
+  }
 
   // The admission decision is the guard's senders.admit decision (./guard.ts)
   // — unknown_sender_policy verbatim: strict → deny, request_approval → hold,

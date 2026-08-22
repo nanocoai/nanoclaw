@@ -61,6 +61,11 @@ export interface InboundEvent {
     isMention?: boolean;
     /** True when the source is a group/channel thread, false for DMs. */
     isGroup?: boolean;
+    /**
+     * Platform-confirmed signal that the sender is a bot/webhook, not a
+     * human. See InboundMessage.isAutomated for the full explanation.
+     */
+    isAutomated?: boolean;
   };
   replyTo?: DeliveryAddress;
 }
@@ -89,6 +94,26 @@ export interface InboundMessage {
   isMention?: boolean;
   /** True when the source is a group/channel thread, false for DMs. */
   isGroup?: boolean;
+  /**
+   * Platform-confirmed signal that the sender is a bot/webhook, not a human.
+   *
+   * Set by adapters that know the platform's own bot-authorship signal —
+   * e.g. the Chat SDK bridge sets it true from `message.author.isBot ===
+   * true` (Discord `author.bot` / webhook_id, Slack `bot_id`, Telegram
+   * `from.is_bot` all normalize to this through Chat SDK's Author type).
+   * `isBot` can also be the literal string `"unknown"` on platforms that
+   * can't tell — that is deliberately NOT treated as automated, since
+   * misclassifying a human as a bot would silently and permanently drop
+   * their messages with no recourse.
+   *
+   * Used by the permissions gate (src/modules/permissions/index.ts) to
+   * auto-drop unknown automated senders before the approval flow instead
+   * of generating an approval card the sender can never click through.
+   *
+   * Adapters that don't set it leave it undefined — treated as "not
+   * automated", i.e. today's behavior.
+   */
+  isAutomated?: boolean;
 }
 
 /** A file attachment to deliver alongside a message. */
