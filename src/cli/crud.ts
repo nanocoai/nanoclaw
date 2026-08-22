@@ -58,6 +58,20 @@ export interface CustomOperation {
   formatHuman?: (data: unknown) => string;
 }
 
+/**
+ * A standard CRUD verb's access level, optionally paired with `hostOnly`.
+ * Plain `Access` is shorthand for `{ access }` with `hostOnly` unset — every
+ * existing resource's `operations` block keeps working unchanged. Use the
+ * object form when a verb must be rejected for every container caller
+ * regardless of `cli_scope` (see `CommandDef.hostOnly` in ./registry.ts) —
+ * e.g. a resource whose rows only the host operator may ever read or write.
+ */
+export type OperationSpec = Access | { access: Access; hostOnly?: boolean };
+
+export function resolveOp(op: OperationSpec): { access: Access; hostOnly?: boolean } {
+  return typeof op === 'string' ? { access: op } : op;
+}
+
 export interface ResourceDef {
   /** Singular name: 'group'. */
   name: string;
@@ -78,11 +92,11 @@ export interface ResourceDef {
   columns: ColumnDef[];
   /** Which standard CRUD operations are enabled. */
   operations: {
-    list?: Access;
-    get?: Access;
-    create?: Access;
-    update?: Access;
-    delete?: Access;
+    list?: OperationSpec;
+    get?: OperationSpec;
+    create?: OperationSpec;
+    update?: OperationSpec;
+    delete?: OperationSpec;
   };
   /** Portable ORDER BY expression for list. Defaults to the first timestamp
    * column descending, then the resource id for deterministic ties. */
@@ -460,11 +474,13 @@ export function registerResource(def: ResourceDef): void {
   resources.set(def.plural, def);
 
   if (def.operations.list) {
+    const { access, hostOnly } = resolveOp(def.operations.list);
     register({
       name: `${def.plural}-list`,
       action: `${def.plural}.list`,
       description: `List all ${def.plural}.`,
-      access: def.operations.list,
+      access,
+      hostOnly,
       resource: def.plural,
       generic: 'list',
       parseArgs: (raw) => normalizeArgs(raw),
@@ -473,11 +489,13 @@ export function registerResource(def: ResourceDef): void {
   }
 
   if (def.operations.get) {
+    const { access, hostOnly } = resolveOp(def.operations.get);
     register({
       name: `${def.plural}-get`,
       action: `${def.plural}.get`,
       description: `Get a ${def.name} by ID.`,
-      access: def.operations.get,
+      access,
+      hostOnly,
       resource: def.plural,
       generic: 'get',
       parseArgs: (raw) => normalizeArgs(raw),
@@ -486,11 +504,13 @@ export function registerResource(def: ResourceDef): void {
   }
 
   if (def.operations.create) {
+    const { access, hostOnly } = resolveOp(def.operations.create);
     register({
       name: `${def.plural}-create`,
       action: `${def.plural}.create`,
       description: `Create a new ${def.name}.`,
-      access: def.operations.create,
+      access,
+      hostOnly,
       resource: def.plural,
       parseArgs: (raw) => normalizeArgs(raw),
       handler: genericCreate(def),
@@ -498,11 +518,13 @@ export function registerResource(def: ResourceDef): void {
   }
 
   if (def.operations.update) {
+    const { access, hostOnly } = resolveOp(def.operations.update);
     register({
       name: `${def.plural}-update`,
       action: `${def.plural}.update`,
       description: `Update a ${def.name}.`,
-      access: def.operations.update,
+      access,
+      hostOnly,
       resource: def.plural,
       parseArgs: (raw) => normalizeArgs(raw),
       handler: genericUpdate(def),
@@ -510,11 +532,13 @@ export function registerResource(def: ResourceDef): void {
   }
 
   if (def.operations.delete) {
+    const { access, hostOnly } = resolveOp(def.operations.delete);
     register({
       name: `${def.plural}-delete`,
       action: `${def.plural}.delete`,
       description: `Delete a ${def.name}.`,
-      access: def.operations.delete,
+      access,
+      hostOnly,
       resource: def.plural,
       parseArgs: (raw) => normalizeArgs(raw),
       handler: genericDelete(def),

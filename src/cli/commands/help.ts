@@ -5,7 +5,7 @@
  *   ncl groups help         — show group resource details (verbs, columns, enums)
  */
 import { getContainerConfig } from '../../db/container-configs.js';
-import { getResources } from '../crud.js';
+import { getResources, resolveOp } from '../crud.js';
 import { renderVerbHelp, summaryLine } from '../help-render.js';
 import type { CallerContext } from '../frame.js';
 import { GROUP_SCOPE_RESOURCES, listCommands, register } from '../registry.js';
@@ -112,11 +112,11 @@ export function registerResourceHelpCommands(): void {
           const idHint = idAutoFilled ? '' : ' <id>';
           const tag = (access: string | undefined) => (!access || access === 'open' ? '' : ` [${access}]`);
           const verbs: string[] = [];
-          if (res.operations.list) verbs.push(`list${tag(res.operations.list)}`);
-          if (res.operations.get) verbs.push(`get${idHint}${tag(res.operations.get)}`);
-          if (res.operations.create) verbs.push(`create${tag(res.operations.create)}`);
-          if (res.operations.update) verbs.push(`update${idHint}${tag(res.operations.update)}`);
-          if (res.operations.delete) verbs.push(`delete${idHint}${tag(res.operations.delete)}`);
+          if (res.operations.list) verbs.push(`list${tag(resolveOp(res.operations.list).access)}`);
+          if (res.operations.get) verbs.push(`get${idHint}${tag(resolveOp(res.operations.get).access)}`);
+          if (res.operations.create) verbs.push(`create${tag(resolveOp(res.operations.create).access)}`);
+          if (res.operations.update) verbs.push(`update${idHint}${tag(resolveOp(res.operations.update).access)}`);
+          if (res.operations.delete) verbs.push(`delete${idHint}${tag(resolveOp(res.operations.delete).access)}`);
           if (res.customOperations) {
             for (const [verb, op] of Object.entries(res.customOperations)) {
               verbs.push(`${verb}${tag(op.access)} — ${summaryLine(op.description)}`);
