@@ -319,6 +319,20 @@ registerChannelAdapter('telegram', {
     const telegramAdapter = createTelegramAdapter({
       botToken: token,
       mode: 'polling',
+      longPolling: {
+        // Telegram persists allowed_updates server-side per bot token: if it
+        // is ever omitted, "the previous setting will be used" (Bot API
+        // docs). Pinning the full list here means a token that previously
+        // polled with a narrower set (e.g. a v1 install) can never silently
+        // blackhole update types we depend on, such as channel posts.
+        allowedUpdates: [
+          'message',
+          'edited_message',
+          'channel_post',
+          'edited_channel_post',
+          'callback_query',
+        ],
+      },
     });
     const bridge = createChatSdkBridge({
       adapter: telegramAdapter,
