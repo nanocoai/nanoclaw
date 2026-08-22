@@ -15,3 +15,7 @@ import './dropped-messages.js';
 import './approvals.js';
 import './sessions.js';
 import './tasks.js';
+import './lowes-purchase-orders.js';
+import './lowes-purchase-line-items.js';
+import './lowes-buy-it-again-candidates.js';
+import './preferred-materials.js';

@@ -86,6 +86,58 @@ describe('module migration registry', () => {
     ).toEqual({ name: 'test_module_applied' });
   });
 
+  it('runs a module migration exactly once across repeated runMigrations calls', async () => {
+    const registry = await freshRegistry();
+    const db = await freshTestDb();
+    let upCalls = 0;
+    const idempotent: ModuleMigration = {
+      version: 1,
+      name: 'module:test-owner:idempotent',
+      async up(driver) {
+        upCalls++;
+        await driver.exec('CREATE TABLE test_module_idempotent (id TEXT PRIMARY KEY)');
+      },
+    };
+    registry.registerMigration(idempotent);
+
+    await registry.runMigrations(db);
+    await registry.runMigrations(db);
+    await registry.runMigrations(db);
+
+    expect(upCalls).toBe(1);
+    expect(
+      await db.all("SELECT name FROM schema_version WHERE name = 'module:test-owner:idempotent'"),
+    ).toHaveLength(1);
+  });
+
+  it('applies module migrations in deterministic registration order even under a real FK dependency', async () => {
+    const registry = await freshRegistry();
+    const db = await freshTestDb();
+    // Registered in dependency order (parent before child) — mirrors the
+    // real Away Mode case (sessions table must exist before the queue
+    // table's FK to it). version numbers deliberately reversed to prove
+    // ordering comes from registration order, not version.
+    registry.registerMigration(
+      testModuleMigration('module:test-order:parent', 'test_order_parent', 999),
+    );
+    const child: ModuleMigration = {
+      version: 1,
+      name: 'module:test-order:child',
+      async up(driver) {
+        // Fails outright if the parent table doesn't exist yet — proves
+        // real ordering, not just distinct table names.
+        await driver.exec(
+          'CREATE TABLE test_order_child (id TEXT PRIMARY KEY, parent_id TEXT NOT NULL REFERENCES test_order_parent(id))',
+        );
+      },
+    };
+    registry.registerMigration(child);
+
+    await expect(registry.runMigrations(db)).resolves.toBeUndefined();
+    expect(await db.hasTable('test_order_parent')).toBe(true);
+    expect(await db.hasTable('test_order_child')).toBe(true);
+  });
+
   it('preserves the explicit migration-list override', async () => {
     const registry = await freshRegistry();
     const db = await freshTestDb();
