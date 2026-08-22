@@ -17,7 +17,30 @@ import type { CallerContext } from './frame.js';
  * consumed by both dispatch enforcement and `ncl help` filtering, so the
  * agent is never shown a resource the gate would reject (or vice versa).
  */
-export const GROUP_SCOPE_RESOURCES = new Set(['groups', 'sessions', 'destinations', 'members', 'tasks']);
+export const GROUP_SCOPE_RESOURCES = new Set([
+  'groups',
+  'sessions',
+  'destinations',
+  'members',
+  'tasks',
+  // KNOWN LIMITATION (flagged for operator review, not silently shipped):
+  // unlike every other entry in this set, worker time/activity data has no
+  // per-agent-group scoping column (there is exactly one Maintenance
+  // Coordinator in this system today, so it was never modeled as
+  // multi-tenant). Whitelisting it here grants read access to ALL workers'
+  // records to ANY cli_scope='group' agent, not only Maintenance
+  // Coordinator -- the same shape every other whitelisted resource has
+  // (self-scoped via scopeField), but this one has no scopeField to
+  // self-scope with. maintenance-transcript does NOT have this issue (it
+  // only ever reads the calling agent group's own session). Properly
+  // restricting maintenance-history to the real Maintenance Coordinator
+  // agent group specifically would need a new per-resource/per-group
+  // capability concept this codebase doesn't have yet -- a real design
+  // decision, not something to improvise here. Mitigated today only by
+  // every other agent group's own instructions never mentioning this tool.
+  'maintenance-history',
+  'maintenance-transcript',
+]);
 
 export type Access = 'open' | 'approval' | 'hidden';
 

@@ -25,3 +25,5 @@ import './permissions/index.js';
 import './agent-to-agent/index.js';
 import './self-mod/index.js';
 import './lowes-materials/index.js';
+import './maintenance-worker-actions/index.js';
+import './maintenance-transcript/index.js';

@@ -19,3 +19,5 @@ import './lowes-purchase-orders.js';
 import './lowes-purchase-line-items.js';
 import './lowes-buy-it-again-candidates.js';
 import './preferred-materials.js';
+import './maintenance-history.js';
+import './maintenance-transcript.js';

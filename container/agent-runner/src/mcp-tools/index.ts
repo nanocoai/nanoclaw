@@ -9,6 +9,7 @@ import './core.js';
 import './interactive.js';
 import './agents.js';
 import './self-mod.js';
+import './maintenance-history.js';
 // Module barrel — loads registration modules, including the singular mailbox slot.
 import '../modules/index.js';
 import { getAgentMailbox, readMailboxContext } from '../mailbox/index.js';
