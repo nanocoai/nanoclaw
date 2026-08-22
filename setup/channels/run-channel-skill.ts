@@ -21,6 +21,7 @@ import { dirname, join } from 'node:path';
 
 import * as p from '@clack/prompts';
 
+import { gitShowToFileCommand } from '../../scripts/git-show-to-file.js';
 import { firstFailureHint, fullyApplied } from '../../scripts/skill-apply.js';
 import * as setupLog from '../logs.js';
 import { BACK_TO_CHANNEL_SELECTION, backGate, type ChannelFlowResult } from '../lib/back-nav.js';
@@ -57,8 +58,7 @@ export function materializeCompanionSkill(
   if (existsSync(join(projectRoot, dir, 'SKILL.md'))) return true;
   const exec =
     deps.exec ??
-    ((command: string) =>
-      execSync(command, { cwd: projectRoot, stdio: ['ignore', 'pipe', 'pipe'] }).toString());
+    ((command: string) => execSync(command, { cwd: projectRoot, stdio: ['ignore', 'pipe', 'pipe'] }).toString());
   try {
     const remote = (deps.resolveRemote ?? channelsRemote(projectRoot))();
     exec(`git fetch ${remote} ${CHANNELS_BRANCH}`);
@@ -69,7 +69,7 @@ export function materializeCompanionSkill(
     if (files.length === 0) return false;
     for (const file of files) {
       mkdirSync(dirname(join(projectRoot, file)), { recursive: true });
-      exec(`git show '${remote}/${CHANNELS_BRANCH}:${file}' > '${file}'`);
+      exec(gitShowToFileCommand(`${remote}/${CHANNELS_BRANCH}`, file, file));
     }
     return true;
   } catch {

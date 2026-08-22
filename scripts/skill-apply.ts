@@ -25,6 +25,7 @@
 import { execSync } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, appendFileSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { gitShowToFileCommand } from './git-show-to-file.js';
 import { parseDirectives, promptVar, type Directive } from './skill-directives.js';
 
 // What an `nc:prompt` DECLARES about the value it needs — the core seam's input
@@ -656,7 +657,7 @@ async function applyOne(
           // may not exist on trunk (e.g. container skills that live only on
           // the channels branch). Mirror the local-copy path's mkdir.
           mkdirSync(dirname(join(root, destOf(l))), { recursive: true });
-          await exec(`git show ${remote}/${b}:${srcOf(l)} > ${destOf(l)}`);
+          await exec(gitShowToFileCommand(`${remote}/${b}`, srcOf(l), destOf(l)));
         }
       } else {
         for (const l of d.body) {
