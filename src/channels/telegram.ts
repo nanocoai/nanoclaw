@@ -319,6 +319,16 @@ registerChannelAdapter('telegram', {
     const telegramAdapter = createTelegramAdapter({
       botToken: token,
       mode: 'polling',
+      longPolling: {
+        // Reactions and callback queries are not included in Telegram's
+        // default allowed_updates set — once we set this list explicitly,
+        // all wanted update types must be enumerated. message + edited_message
+        // are the existing baseline; message_reaction unlocks 👍/👎 ingestion
+        // (Chat SDK already routes via processReaction); callback_query is
+        // included pre-emptively so future inline-keyboard work doesn't need
+        // another config edit.
+        allowedUpdates: ['message', 'edited_message', 'callback_query', 'message_reaction'],
+      },
     });
     const bridge = createChatSdkBridge({
       adapter: telegramAdapter,
