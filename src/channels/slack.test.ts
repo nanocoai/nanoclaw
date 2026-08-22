@@ -343,6 +343,67 @@ describe('SlackChannel', () => {
       );
     });
 
+    it('marks a configured operator user as is_operator', async () => {
+      (readEnvFile as any).mockReturnValueOnce({
+        SLACK_BOT_TOKEN: 'xoxb-test-token',
+        SLACK_APP_TOKEN: 'xapp-test-token',
+        REMOTE_CONTROL_OPERATORS: 'U_OPERATOR, U_OTHER',
+      });
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({ user: 'U_OPERATOR', text: '/remote-control' }),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({ is_operator: true, is_bot_message: false }),
+      );
+    });
+
+    it('does not mark a non-operator user as is_operator', async () => {
+      (readEnvFile as any).mockReturnValueOnce({
+        SLACK_BOT_TOKEN: 'xoxb-test-token',
+        SLACK_APP_TOKEN: 'xapp-test-token',
+        REMOTE_CONTROL_OPERATORS: 'U_OPERATOR',
+      });
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      await triggerMessageEvent(
+        createMessageEvent({ user: 'U_USER_456', text: '/remote-control' }),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({ is_operator: false }),
+      );
+    });
+
+    it('never marks a bot message as is_operator even if its id is listed', async () => {
+      (readEnvFile as any).mockReturnValueOnce({
+        SLACK_BOT_TOKEN: 'xoxb-test-token',
+        SLACK_APP_TOKEN: 'xapp-test-token',
+        REMOTE_CONTROL_OPERATORS: 'U_BOT_123',
+      });
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      // Same id as the bot user; still a bot message, so not an operator.
+      await triggerMessageEvent(
+        createMessageEvent({ user: 'U_BOT_123', text: '/remote-control' }),
+      );
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({ is_operator: false, is_bot_message: true }),
+      );
+    });
+
     it('identifies IM channel type as non-group', async () => {
       const opts = createTestOpts({
         registeredGroups: vi.fn(() => ({

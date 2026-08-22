@@ -79,9 +79,18 @@ export function getActiveSession(): RemoteControlSession | null {
 
 export function isRemoteControlAuthorized(
   isMainGroup: boolean | undefined,
-  msg: Pick<NewMessage, 'is_from_me'>,
+  msg: Pick<NewMessage, 'is_operator' | 'is_bot_message'>,
 ): boolean {
-  return isMainGroup === true && msg.is_from_me === true;
+  // Remote control spawns a full host-control session, so gate it on a
+  // configured trusted operator in the main group. Never authorize on
+  // is_from_me / is_bot_message: those are true for the bot's own output, so an
+  // echoed message (or any other bot in the channel) could otherwise self-
+  // trigger host control. Reject bot messages explicitly as defense in depth.
+  return (
+    isMainGroup === true &&
+    msg.is_operator === true &&
+    msg.is_bot_message !== true
+  );
 }
 
 /** @internal — exported for testing only */

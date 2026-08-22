@@ -35,6 +35,7 @@ export class SlackChannel implements Channel {
 
   private app: App;
   private botUserId: string | undefined;
+  private operators: Set<string>;
   private connected = false;
   private outgoingQueue: Array<{ jid: string; text: string }> = [];
   private flushing = false;
@@ -47,7 +48,11 @@ export class SlackChannel implements Channel {
 
     // Read tokens from .env (not process.env — keeps secrets off the environment
     // so they don't leak to child processes, matching NanoClaw's security pattern)
-    const env = readEnvFile(['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN']);
+    const env = readEnvFile([
+      'SLACK_BOT_TOKEN',
+      'SLACK_APP_TOKEN',
+      'REMOTE_CONTROL_OPERATORS',
+    ]);
     const botToken = env.SLACK_BOT_TOKEN;
     const appToken = env.SLACK_APP_TOKEN;
 
@@ -56,6 +61,15 @@ export class SlackChannel implements Channel {
         'SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in .env',
       );
     }
+
+    // Slack user IDs allowed to run privileged commands (remote control).
+    // Comma-separated in .env; empty means no one is authorized (fail closed).
+    this.operators = new Set(
+      (env.REMOTE_CONTROL_OPERATORS || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    );
 
     this.app = new App({
       token: botToken,
@@ -97,6 +111,10 @@ export class SlackChannel implements Channel {
       if (!groups[jid]) return;
 
       const isBotMessage = !!msg.bot_id || msg.user === this.botUserId;
+      // Operator status is the ONLY authorization signal for privileged commands.
+      // A bot message is never an operator, even if its user id is listed.
+      const isOperator =
+        !isBotMessage && !!msg.user && this.operators.has(msg.user);
 
       let senderName: string;
       if (isBotMessage) {
@@ -131,6 +149,7 @@ export class SlackChannel implements Channel {
         timestamp,
         is_from_me: isBotMessage,
         is_bot_message: isBotMessage,
+        is_operator: isOperator,
       });
     });
   }

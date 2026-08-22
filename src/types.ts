@@ -51,6 +51,11 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  // True only when the message was sent by a configured trusted operator (not a
+  // bot). This is the authorization signal for privileged actions such as remote
+  // control; never derive authorization from is_from_me / is_bot_message, which
+  // are true for the bot's own output. Live per-delivery signal, not persisted.
+  is_operator?: boolean;
   thread_id?: string;
   reply_to_message_id?: string;
   reply_to_message_content?: string;

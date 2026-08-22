@@ -81,18 +81,27 @@ describe('remote-control', () => {
   // --- startRemoteControl ---
 
   describe('isRemoteControlAuthorized', () => {
-    it('allows self-sent commands in the main group', () => {
-      expect(isRemoteControlAuthorized(true, { is_from_me: true })).toBe(true);
+    it('allows operator commands in the main group', () => {
+      expect(isRemoteControlAuthorized(true, { is_operator: true })).toBe(true);
     });
 
-    it('rejects non-self commands even in the main group', () => {
-      expect(isRemoteControlAuthorized(true, { is_from_me: false })).toBe(
+    it('rejects non-operator commands even in the main group', () => {
+      expect(isRemoteControlAuthorized(true, { is_operator: false })).toBe(
         false,
       );
     });
 
+    it('rejects bot messages even if flagged as operator', () => {
+      expect(
+        isRemoteControlAuthorized(true, {
+          is_operator: true,
+          is_bot_message: true,
+        }),
+      ).toBe(false);
+    });
+
     it('rejects commands outside the main group', () => {
-      expect(isRemoteControlAuthorized(false, { is_from_me: true })).toBe(
+      expect(isRemoteControlAuthorized(false, { is_operator: true })).toBe(
         false,
       );
     });
