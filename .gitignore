@@ -51,3 +51,14 @@ AGENTS.md
 docs/maintainer-guide.md
 docs/drafts/
 forks.md
+
+# Away Mode: POLICY.md is tracked design documentation; the queue/journal/
+# audit-trail directories are runtime-generated per-installation state.
+away-mode/journal/*
+away-mode/audit/*
+away-mode/queue/*
+!away-mode/journal/.gitkeep
+!away-mode/audit/.gitkeep
+!away-mode/audit/README.md
+!away-mode/queue/.gitkeep
+!away-mode/queue/README.md

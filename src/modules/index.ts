@@ -31,3 +31,4 @@ import './lease-manager-filesystem/index.js';
 import './lease-document-delivery/index.js';
 import './lease-manager-generate/index.js';
 import './lease-manager-write/index.js';
+import './away-mode-decisions/index.js';
