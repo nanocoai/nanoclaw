@@ -11,6 +11,7 @@ import './agents.js';
 import './self-mod.js';
 import './maintenance-history.js';
 import './maintenance-coordinator.js';
+import './maintenance-trello-read.js';
 import './lease-manager-filesystem.js';
 import './lease-document-delivery.js';
 import './lease-manager-generate.js';
