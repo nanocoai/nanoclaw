@@ -45,10 +45,14 @@ describe('gatePolicy — §5.1 parity table (real skills)', () => {
     expect(d[3].flavor).toBe('completed');
   });
 
-  it('telegram: the pairing operator gains a readiness pause before the effect:step', () => {
+  it('telegram: each pairing operator gains a readiness pause before its own effect:step', () => {
     const d = decisions(loadSkill('telegram'));
-    expect(d.map((g) => g.needsConfirm)).toEqual([false, true]); // BotFather → prompt; pairing → step
-    expect(d[1].flavor).toBe('readiness'); // "a 4-digit code is about to appear"
+    // BotFather → prompt; second-bot BotFather → its own prompt; default-bot
+    // pairing → its step (the second-bot operator and step are guard-incompatible,
+    // when:add_another=yes, and skipped); second-bot pairing → its own --instance step.
+    expect(d.map((g) => g.needsConfirm)).toEqual([false, false, true, true]);
+    expect(d[2].flavor).toBe('readiness'); // "a pairing code is about to appear"
+    expect(d[3].flavor).toBe('readiness');
   });
 
   it('signal: readiness pause before the QR device-link step', () => {
@@ -69,13 +73,16 @@ describe('gatePolicy — §5.1 parity table (real skills)', () => {
     expect(d[2].flavor).toBe('readiness');
   });
 
-  it('imessage: guard-compatibility — the local block skips the remote-only prompts and gates on the local configure run', () => {
+  it('imessage: guard-compatibility — each backend operator skips the other branch and gates on its own side effect', () => {
     const d = decisions(loadSkill('imessage'));
-    // local (when:mode=local) → skips remote operator + 2 remote prompts →
-    // run effect:external when:mode=local ⇒ confirm ("stop and wait" restored);
-    // remote (when:mode=remote) → prompt server_url (identical guard) ⇒ no confirm.
-    expect(d.map((g) => g.needsConfirm)).toEqual([true, false]);
-    expect(d[0].flavor).toBe('completed');
+    // local FDA operator (when:backend=local) → skips the hosted-only blocks
+    // (guard-incompatible) → run effect:external when:backend=local (the local
+    // configure) ⇒ confirm ("stop and wait" restored); hosted device-login
+    // explainer → the photon effect:step ⇒ readiness pause; hosted
+    // first-contact text → the platform_id capture run ⇒ confirm (the text
+    // must be sent before the wire).
+    expect(d.map((g) => g.needsConfirm)).toEqual([true, true, true]);
+    expect(d.map((g) => g.flavor)).toEqual(['completed', 'readiness', 'completed']);
   });
 
   it('discord: the invite operator gains a confirm before the DM resolve (effect:fetch)', () => {
@@ -162,9 +169,12 @@ describe('extractOfferUrl — §5.2 inventory', () => {
     expect(extractOfferUrl(operatorBody(loadSkill('slack'), 0))).toBeUndefined();
   });
 
-  it('discord: the developers-portal block gains an offer; imessage: photon.codes', () => {
+  it('discord: the developers-portal block gains an offer; imessage: none — the login URL is per-run', () => {
     expect(extractOfferUrl(operatorBody(loadSkill('discord'), 0))).toBe('https://discord.com/developers/applications');
-    expect(extractOfferUrl(operatorBody(loadSkill('imessage'), 1))).toBe('https://photon.codes');
+    // imessage's device-login operator names photon.codes but carries no
+    // offerable URL — the real login URL is minted per run and printed by the
+    // step itself, so a static offer would open the wrong page.
+    expect(extractOfferUrl(operatorBody(loadSkill('imessage'), 1))).toBeUndefined();
   });
 
   it('signal: a non-http scheme (sgnl://…) never matches', () => {

@@ -12,6 +12,7 @@ const TEST_DIR = '/tmp/nanoclaw-test-upgrade-state';
 
 import {
   enforceUpgradeTripwire,
+  getCodeIdentity,
   getCodeVersion,
   isUpgradeCurrent,
   markerPath,
@@ -36,9 +37,11 @@ describe('upgrade-state', () => {
     expect(readUpgradeState()).toBeNull();
   });
 
-  it('write then read round-trips, with version/via/updatedAt', () => {
+  it('write then read round-trips, with version/commit/tree/via/updatedAt', () => {
     const written = writeUpgradeState({ version: '9.9.9', via: 'test' });
     expect(written).toMatchObject({ version: '9.9.9', via: 'test' });
+    expect(written.commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(written.tree).toMatch(/^[0-9a-f]{40}$/);
     expect(written.updatedAt).toBeTruthy();
     expect(readUpgradeState()).toEqual(written);
   });
@@ -47,12 +50,41 @@ describe('upgrade-state', () => {
     expect(writeUpgradeState({ via: 'test' }).version).toBe(getCodeVersion());
   });
 
+  it('binds the marker to the exact Git commit and tree', () => {
+    expect(writeUpgradeState({ via: 'test' })).toMatchObject(getCodeIdentity());
+  });
+
+  it('can stamp and validate a recovery marker when Git is unavailable', () => {
+    const projectRoot = fs.mkdtempSync('/tmp/nanoclaw-no-git-');
+    fs.writeFileSync(path.join(projectRoot, 'package.json'), JSON.stringify({ version: '1.2.3' }));
+    try {
+      expect(getCodeIdentity(projectRoot)).toEqual({ version: '1.2.3', commit: 'unknown', tree: 'unknown' });
+      expect(writeUpgradeState({ via: 'recovery', projectRoot })).toMatchObject({
+        version: '1.2.3',
+        commit: 'unknown',
+        tree: 'unknown',
+      });
+      expect(isUpgradeCurrent(projectRoot)).toBe(true);
+    } finally {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   it('isUpgradeCurrent: false when absent, false on mismatch, true on match', () => {
     expect(isUpgradeCurrent()).toBe(false);
     writeUpgradeState({ version: '0.0.0-nope', via: 'test' });
     expect(isUpgradeCurrent()).toBe(false);
     writeUpgradeState({ version: getCodeVersion(), via: 'test' });
     expect(isUpgradeCurrent()).toBe(true);
+  });
+
+  it('rejects a legacy version-only marker even when the package version matches', () => {
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    fs.writeFileSync(
+      path.join(TEST_DIR, 'upgrade-state.json'),
+      JSON.stringify({ version: getCodeVersion(), updatedAt: new Date().toISOString(), via: 'legacy' }),
+    );
+    expect(isUpgradeCurrent()).toBe(false);
   });
 
   it('treats a corrupt marker as absent (fails closed, never throws)', () => {
@@ -86,5 +118,35 @@ describe('upgrade-state', () => {
 
     exitSpy.mockRestore();
     errSpy.mockRestore();
+  });
+});
+
+describe('git-less runtimes', () => {
+  const GITLESS = path.join(TEST_DIR, 'gitless-checkout');
+
+  function gitlessCheckout(version: string): string {
+    fs.mkdirSync(GITLESS, { recursive: true });
+    fs.writeFileSync(path.join(GITLESS, 'package.json'), JSON.stringify({ version }));
+    return GITLESS;
+  }
+
+  function writeMarker(marker: Record<string, string>): void {
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    fs.writeFileSync(markerPath(), JSON.stringify({ updatedAt: new Date().toISOString(), via: 'update', ...marker }));
+  }
+
+  it('accepts a version-matching marker when Git cannot identify the checkout', () => {
+    writeMarker({ version: '9.9.9', commit: 'a'.repeat(40), tree: 'b'.repeat(40) });
+    expect(isUpgradeCurrent(gitlessCheckout('9.9.9'))).toBe(true);
+  });
+
+  it('still trips on a version mismatch when Git is unavailable', () => {
+    writeMarker({ version: '1.0.0', commit: 'a'.repeat(40), tree: 'b'.repeat(40) });
+    expect(isUpgradeCurrent(gitlessCheckout('9.9.9'))).toBe(false);
+  });
+
+  it('a marker recorded without Git still trips where Git identifies the checkout', () => {
+    writeMarker({ version: getCodeVersion(), commit: 'unknown', tree: 'unknown' });
+    expect(isUpgradeCurrent()).toBe(false);
   });
 });

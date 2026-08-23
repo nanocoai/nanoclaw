@@ -10,7 +10,8 @@
  * The host re-validates on the delivery side against the central DB,
  * so even if this table is stale the host's enforcement is authoritative.
  */
-import { getInboundDb } from './db/connection.js';
+import { getAgentMailbox } from './mailbox/index.js';
+import type { Destination } from './mailbox/types.js';
 
 export interface DestinationEntry {
   name: string;
@@ -23,55 +24,33 @@ export interface DestinationEntry {
 
 export type SessionMode = { kind: 'chat' } | { kind: 'task'; taskId: string };
 
-interface DestRow {
-  name: string;
-  display_name: string | null;
-  type: 'channel' | 'agent';
-  channel_type: string | null;
-  platform_id: string | null;
-  agent_group_id: string | null;
-}
-
-function rowToEntry(row: DestRow): DestinationEntry {
+function destinationEntry(destination: Destination): DestinationEntry {
   return {
-    name: row.name,
-    displayName: row.display_name ?? row.name,
-    type: row.type,
-    channelType: row.channel_type ?? undefined,
-    platformId: row.platform_id ?? undefined,
-    agentGroupId: row.agent_group_id ?? undefined,
+    name: destination.name,
+    displayName: destination.displayName ?? destination.name,
+    type: destination.type,
+    channelType: destination.channelType ?? undefined,
+    platformId: destination.platformId ?? undefined,
+    agentGroupId: destination.agentGroupId ?? undefined,
   };
 }
 
 export function getAllDestinations(): DestinationEntry[] {
-  const rows = getInboundDb().prepare('SELECT * FROM destinations ORDER BY name').all() as DestRow[];
-  return rows.map(rowToEntry);
+  return getAgentMailbox().operations.getDestinations().map(destinationEntry);
 }
 
 export function findByName(name: string): DestinationEntry | undefined {
-  const row = getInboundDb().prepare('SELECT * FROM destinations WHERE name = ?').get(name) as DestRow | undefined;
-  return row ? rowToEntry(row) : undefined;
+  const destination = getAgentMailbox().operations.findDestinationByName(name);
+  return destination && destinationEntry(destination);
 }
 
-/**
- * Reverse lookup: given routing fields from an inbound message, find
- * which destination they correspond to (what does this agent call the sender?).
- */
 export function findByRouting(
   channelType: string | null | undefined,
   platformId: string | null | undefined,
 ): DestinationEntry | undefined {
   if (!channelType || !platformId) return undefined;
-  const db = getInboundDb();
-  const row =
-    channelType === 'agent'
-      ? (db
-          .prepare("SELECT * FROM destinations WHERE type = 'agent' AND agent_group_id = ?")
-          .get(platformId) as DestRow | undefined)
-      : (db
-          .prepare("SELECT * FROM destinations WHERE type = 'channel' AND channel_type = ? AND platform_id = ?")
-          .get(channelType, platformId) as DestRow | undefined);
-  return row ? rowToEntry(row) : undefined;
+  const destination = getAgentMailbox().operations.findDestinationByRouting(channelType, platformId);
+  return destination && destinationEntry(destination);
 }
 
 /**

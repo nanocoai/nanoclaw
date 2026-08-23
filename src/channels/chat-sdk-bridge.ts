@@ -15,15 +15,18 @@ import {
   LinkButton,
   type CardChild,
   type Adapter,
+  type AssistantContextChangedEvent,
+  type AssistantThreadStartedEvent,
   type ConcurrencyStrategy,
   type Message as ChatMessage,
 } from 'chat';
 import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
-import { getAskQuestionRender } from '../db/sessions.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
+import { INSTANCE_KEY_RE } from './channel-registry.js';
+import { resolveQuestionRender } from './question-render-registry.js';
 
 /** Adapter with optional gateway support (e.g., Discord). */
 interface GatewayAdapter extends Adapter {
@@ -41,9 +44,266 @@ export interface ReplyContext {
   sender: string;
 }
 
+// ---------------------------------------------------------------------------
+// Agent-DM opened hook (assistant_thread_started)
+// ---------------------------------------------------------------------------
+
+/** The user opened an agent DM (assistant thread started). Registered by the
+ *  host to (re)assert onboarding prompts at a moment the user is provably
+ *  looking — prompt sets made before the DM was ever opened may not render. */
+export interface AgentDmOpenedEvent {
+  instance: string;
+  channelId: string;
+}
+
+let agentDmOpenedHandler: ((event: AgentDmOpenedEvent) => void | Promise<void>) | null = null;
+
+export function setAgentDmOpenedHandler(fn: (event: AgentDmOpenedEvent) => void | Promise<void>): void {
+  agentDmOpenedHandler = fn;
+}
+
+function dispatchAgentDmOpened(event: AgentDmOpenedEvent): void {
+  if (!agentDmOpenedHandler) return;
+  try {
+    Promise.resolve(agentDmOpenedHandler(event)).catch((err) =>
+      log.warn('Agent-DM opened handler failed', { channelId: event.channelId, err }),
+    );
+  } catch (err) {
+    log.warn('Agent-DM opened handler threw', { channelId: event.channelId, err });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Agent-mode app context
+// ---------------------------------------------------------------------------
+
+/** One "what the user is viewing" entity, rendered by the container formatter. */
+export interface AppContextEntity {
+  type: string;
+  id: string;
+}
+
+/**
+ * Latest assistant context per (instance, DM channel, user), attached to the
+ * NEXT inbound DM message as content.app_context and consumed. Platforms
+ * whose DM surface materializes threads and reports client context send
+ * app_context as its own event (assistant_thread_started legacy /
+ * app_context_changed in agent view), not on the message payload, so the
+ * bridge has to hold it across the event → message gap. Short TTL: a stale
+ * "viewing X" is worse than none.
+ */
+const APP_CONTEXT_TTL_MS = 5 * 60 * 1000;
+const appContextCache = new Map<string, { entities: AppContextEntity[]; at: number }>();
+
+/** Channel ids arrive both raw ("D0123") and platform-encoded ("slack:D0123")
+ *  depending on the emitting path — key on the final segment so both match. */
+function appContextKey(instance: string, channelId: string, userId: string): string {
+  const channel = channelId.includes(':') ? channelId.slice(channelId.lastIndexOf(':') + 1) : channelId;
+  return `${instance}|${channel}|${userId}`;
+}
+
+/**
+ * Derive ordered entities from an SDK assistant event. The installed chat
+ * core (4.29.0) parses assistant_thread_started / app_context_changed into a
+ * `context` object (channelId/teamId/threadEntryPoint — the legacy assistant
+ * context shape) with no entities array; prefer a real `entities` array
+ * whenever a future SDK forwards the platform's ordered agent-context
+ * entities.
+ */
+export function appContextEntities(
+  event: AssistantThreadStartedEvent | AssistantContextChangedEvent,
+): AppContextEntity[] {
+  const raw = event as unknown as Record<string, unknown>;
+  const direct = raw.entities ?? (raw.context as Record<string, unknown> | undefined)?.entities;
+  if (Array.isArray(direct)) {
+    return direct
+      .map((e) => {
+        const entity = e as Record<string, unknown> | null;
+        const type = typeof entity?.type === 'string' ? entity.type : '';
+        const idValue = entity?.id ?? entity?.channel_id ?? entity?.entity_id;
+        const id = typeof idValue === 'string' ? idValue : '';
+        return { type, id };
+      })
+      .filter((e) => e.type !== '' && e.id !== '');
+  }
+  const channelId = event.context?.channelId;
+  return typeof channelId === 'string' && channelId ? [{ type: 'channel', id: channelId }] : [];
+}
+
+export function cacheAppContext(
+  instance: string,
+  channelId: string,
+  userId: string,
+  entities: AppContextEntity[],
+  now = Date.now(),
+): void {
+  const key = appContextKey(instance, channelId, userId);
+  if (entities.length === 0) {
+    appContextCache.delete(key);
+    return;
+  }
+  appContextCache.set(key, { entities, at: now });
+}
+
+/** Consume the cached context (single-shot: it describes what the user was
+ *  viewing when they sent the NEXT message, not every message after). */
+export function takeAppContext(
+  instance: string,
+  channelId: string,
+  userId: string,
+  now = Date.now(),
+): AppContextEntity[] | undefined {
+  const key = appContextKey(instance, channelId, userId);
+  const hit = appContextCache.get(key);
+  if (!hit) return undefined;
+  appContextCache.delete(key);
+  if (now - hit.at > APP_CONTEXT_TTL_MS) return undefined;
+  return hit.entities;
+}
+
+/**
+ * Attach the cached app context to an inbound DM message's content JSON
+ * (content.app_context = { entities: [...] }). A context the SDK attached
+ * directly on the message payload wins — the cache only fills the
+ * event → message gap.
+ */
+export function attachAppContext(
+  content: Record<string, unknown>,
+  instance: string,
+  channelId: string,
+  userId: string | undefined,
+): void {
+  if (content.app_context) return;
+  if (!userId) return;
+  const entities = takeAppContext(instance, channelId, userId);
+  if (entities && entities.length > 0) {
+    content.app_context = { entities };
+  }
+}
+
+/**
+ * Root-thread a top-level DM message: on platforms whose DM surface
+ * materializes conversation threads (agent-view semantics), every top-level
+ * DM message is the root of a conversation thread — replying in-thread and
+ * setting per-thread status on that ts is what OPENS the thread in the
+ * client. Such adapters map top-level DM messages to an EMPTY threadTs
+ * (`…:<channel>:`), so without this the thread never materializes: no
+ * in-thread reply, no status target, no per-thread session.
+ *
+ * The message id is the platform ts for chat-sdk adapters, so appending it to
+ * the dangling `:` yields the canonical thread id. Plain (non-agent) DM
+ * wirings are unaffected downstream: the router strips thread ids when the
+ * wiring's thread policy is off, restoring today's top-level behavior.
+ */
+export function normalizeDmThreadId(threadId: string, messageId: string): string {
+  if (threadId.endsWith(':') && messageId && !messageId.includes(':')) {
+    return threadId + messageId;
+  }
+  return threadId;
+}
+
 /** Extract reply context from a platform-specific raw message. Return null if no reply. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ReplyContextExtractor = (raw: Record<string, any>) => ReplyContext | null;
+
+// ---------------------------------------------------------------------------
+// Membership hook
+// ---------------------------------------------------------------------------
+
+/**
+ * A member joined (or left) a channel/group conversation one of our bridge
+ * instances is in. Forwarded from the Chat SDK's member_joined_channel
+ * dispatch; `left` is reserved for member_left_channel, which the installed
+ * chat core (4.29.0) does NOT dispatch — see the TODO at the
+ * onMemberJoinedChannel registration in setup().
+ */
+export interface MembershipEvent {
+  /** Adapter-instance key of the bridge that saw the event (defaults to the
+   *  platform name for default instances). */
+  instance: string;
+  /** Semantic platform key (`adapter.name`) — the key membership handlers
+   *  are registered under. */
+  channelType: string;
+  channelId: string;
+  userId: string;
+  inviterId?: string;
+  left?: boolean;
+}
+
+export type MembershipHandler = (event: MembershipEvent) => void | Promise<void>;
+
+const membershipHandlers = new Map<string, MembershipHandler>();
+
+/**
+ * Register THE membership handler for a channel type (single registration —
+ * one channel-side module owns it; a second registration for the same
+ * channel type overwrites with a warning, mirroring the router's hook
+ * discipline). The bridge invokes it fire-and-forget for every membership
+ * event on every bridge instance of that channel type; errors are logged,
+ * never thrown into SDK dispatch. With no handler registered the bridge
+ * behaves exactly as before.
+ */
+export function setMembershipHandler(channelType: string, fn: MembershipHandler): void {
+  if (membershipHandlers.has(channelType)) {
+    log.warn('Membership handler overwritten', { channelType });
+  }
+  membershipHandlers.set(channelType, fn);
+}
+
+function dispatchMembership(event: MembershipEvent): void {
+  const handler = membershipHandlers.get(event.channelType);
+  if (!handler) return;
+  try {
+    Promise.resolve(handler(event)).catch((err) =>
+      log.error('Membership handler failed', {
+        channelType: event.channelType,
+        channelId: event.channelId,
+        userId: event.userId,
+        err,
+      }),
+    );
+  } catch (err) {
+    log.error('Membership handler threw', {
+      channelType: event.channelType,
+      channelId: event.channelId,
+      userId: event.userId,
+      err,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Inbound policy registration
+// ---------------------------------------------------------------------------
+
+/**
+ * Wrap of the host's `ChannelSetup`, applied at bridge setup time. Every
+ * inbound dispatch path (onSubscribedMessage / onNewMention / onDirectMessage
+ * / onNewMessage) funnels through the stored setup's `onInbound`, so a policy
+ * that wraps `onInbound` intercepts them all at a single point — e.g. to
+ * drop, re-attribute, or rate-limit bot-authored messages before routing.
+ *
+ * `instanceKey` is the bridge's registry key (`config.instance ??
+ * adapter.name`): the wrap runs once per bridge instance, so policy state
+ * captured in the returned closure is naturally per-instance (= per bot
+ * identity when several bridges share one platform).
+ */
+export type BridgeInboundPolicy = (setup: ChannelSetup, instanceKey: string) => ChannelSetup | Promise<ChannelSetup>;
+
+const bridgeInboundPolicies = new Map<string, BridgeInboundPolicy>();
+
+/**
+ * Register THE inbound policy for a channel type (single registration — the
+ * owning module registers on barrel import; a second registration overwrites
+ * with a warning, mirroring the router's hook discipline). Bridges whose
+ * channel type has no registered policy are unaffected.
+ */
+export function registerBridgeInboundPolicy(channelType: string, wrap: BridgeInboundPolicy): void {
+  if (bridgeInboundPolicies.has(channelType)) {
+    log.warn('Bridge inbound policy overwritten', { channelType });
+  }
+  bridgeInboundPolicies.set(channelType, wrap);
+}
 
 export interface ChatSdkBridgeConfig {
   adapter: Adapter;
@@ -101,7 +361,7 @@ export interface ChatSdkBridgeConfig {
 /**
  * Decode the actual option value from a button callback. Buttons are encoded
  * with an integer index (to keep under Telegram's 64-byte callback_data cap),
- * and the real value is looked up via `getAskQuestionRender(questionId)`.
+ * and the real value is looked up via `resolveQuestionRender(questionId)`.
  * Falls back to treating the tail as a literal value so old in-flight cards
  * (encoded before this shortening landed) still resolve.
  */
@@ -116,6 +376,31 @@ function resolveSelectedOption(
     if (render.options[idx]) return render.options[idx].value;
   }
   return candidate;
+}
+
+interface TerminalApprovalCard {
+  title: string;
+  question: string;
+  resolution: string;
+}
+
+/**
+ * Keep an approval's full context after it resolves. The muted resolution
+ * replaces the actions row, making the card visibly inactive without
+ * discarding the request an admin decided on.
+ */
+export function buildTerminalApprovalCard({ title, question, resolution }: TerminalApprovalCard) {
+  const children: CardChild[] = [];
+  if (question) children.push(CardText(question));
+  children.push(CardText(resolution, { style: 'muted' }));
+  return Card({ title, children });
+}
+
+function terminalApprovalMessage(spec: TerminalApprovalCard) {
+  return {
+    card: buildTerminalApprovalCard(spec),
+    fallbackText: [spec.title, spec.question, spec.resolution].filter(Boolean).join('\n\n'),
+  };
 }
 
 export function splitForLimit(text: string, limit: number): string[] {
@@ -143,13 +428,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   // whitespace-only names, which are config bugs — '' is falsy, so it
   // would skip a truthiness guard, dead-end the webhook route, and
   // collapse the state namespace into the default instance's keyspace.
-  if (config.instance !== undefined && !/^[A-Za-z0-9._-]+$/.test(config.instance)) {
+  if (config.instance !== undefined && !INSTANCE_KEY_RE.test(config.instance)) {
     throw new Error(
       `chat-sdk bridge instance ${JSON.stringify(config.instance)} must be URL-safe: ` +
         `non-empty, only letters, digits, '.', '_' or '-'`,
     );
   }
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
+  /** Registry/routing key for this bridge — also the app-context cache
+   *  namespace. Default instances key by the platform name. */
+  const instanceKey = config.instance ?? adapter.name;
   let chat: Chat;
   let state: SqliteStateAdapter;
   let setupConfig: ChannelSetup;
@@ -229,7 +517,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     defaults: config.defaults,
 
     async setup(hostConfig: ChannelSetup) {
-      setupConfig = hostConfig;
+      // Apply the registered inbound policy (if any) for this channel type.
+      // Wrapping here — the single point every dispatch path reads back
+      // through — means one policy covers onSubscribedMessage, onNewMention,
+      // onDirectMessage and onNewMessage alike.
+      const inboundPolicy = bridgeInboundPolicies.get(adapter.name);
+      setupConfig = inboundPolicy ? await inboundPolicy(hostConfig, instanceKey) : hostConfig;
 
       // State namespace: ONLY for a named non-default instance. A skill
       // that explicitly names the primary instance after the platform
@@ -285,7 +578,17 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           sender: (message.author as any)?.fullName ?? (message.author as any)?.userId ?? 'unknown',
           threadId: thread.id,
         });
-        await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, true, false));
+        const inbound = await messageToInbound(message, true, false);
+        // Agent-mode app context: DM-only by platform design.
+        attachAppContext(
+          inbound.content as Record<string, unknown>,
+          instanceKey,
+          channelId,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (message.author as any)?.userId,
+        );
+        const dmThreadId = normalizeDmThreadId(thread.id, message.id);
+        await setupConfig.onInbound(channelId, dmThreadId, inbound);
       });
 
       // Plain messages in unsubscribed threads.
@@ -303,6 +606,37 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, false, true));
       });
 
+      // Agent-mode assistant context: cache the latest "what the user is
+      // viewing" per (channel, user). The installed chat core (4.29.0)
+      // dispatches both the legacy assistant_thread_started and the
+      // agent_view app_context_changed events into these handlers.
+      const rememberAppContext = (event: AssistantThreadStartedEvent | AssistantContextChangedEvent): void => {
+        cacheAppContext(instanceKey, event.channelId, event.userId, appContextEntities(event));
+      };
+      chat.onAssistantThreadStarted((event) => {
+        rememberAppContext(event);
+        dispatchAgentDmOpened({ instance: instanceKey, channelId: event.channelId });
+      });
+      chat.onAssistantContextChanged(rememberAppContext);
+
+      // Membership events: forwarded to the handler registered for this
+      // channel type (setMembershipHandler); no-op when none is registered.
+      // The chat core dispatches only member_joined_channel;
+      // member_left_channel arrives at the adapter but has no SDK handler
+      // in 4.29.0.
+      // TODO(member-left): when the chat core grows an onMemberLeftChannel
+      // dispatch, register it here and forward with { left: true } — the
+      // MembershipEvent type and dispatchMembership already carry it.
+      chat.onMemberJoinedChannel((event) => {
+        dispatchMembership({
+          instance: instanceKey,
+          channelType: adapter.name,
+          channelId: event.channelId,
+          userId: event.userId,
+          inviterId: event.inviterId,
+        });
+      });
+
       // Handle button clicks (ask_user_question)
       chat.onAction(async (event) => {
         if (!event.actionId.startsWith('ncq:')) return;
@@ -313,7 +647,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const userId = event.user?.userId || '';
 
         // Resolve render metadata BEFORE dispatching onAction (which deletes the row).
-        const render = getAskQuestionRender(questionId);
+        const render = await resolveQuestionRender(questionId);
         // New format: button id/value is an integer index into options (kept
         // short to fit Telegram's 64-byte callback_data cap). Old format:
         // the full value is embedded in actionId/value directly.
@@ -324,12 +658,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
         // Update the card to show the selected answer, who acted, and remove buttons
         const actorName = event.user?.userName || event.user?.fullName || '';
-        const byLine = actorName ? ` — ${actorName}` : '';
+        const resolution = actorName ? `${selectedLabel} by ${actorName}` : selectedLabel;
         try {
           const tid = event.threadId;
-          await adapter.editMessage(tid, event.messageId, {
-            markdown: `${title}\n\n${selectedLabel}${byLine}`,
-          });
+          await adapter.editMessage(
+            tid,
+            event.messageId,
+            render?.question
+              ? terminalApprovalMessage({ title, question: render.question, resolution })
+              : { markdown: `${title}\n\n${resolution}` },
+          );
         } catch (err) {
           log.warn('Failed to update card after action', { err });
         }
@@ -338,6 +676,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       });
 
       await chat.initialize();
+
+      // Test seam: unit tests drive the SDK's public process* dispatchers
+      // (processAssistantContextChanged, …) against the handlers registered
+      // above without a live platform. Not part of the ChannelAdapter
+      // contract.
+      (bridge as unknown as { _chat?: Chat })._chat = chat;
 
       // Start Gateway listener for adapters that support it (e.g., Discord)
       const gatewayAdapter = adapter as GatewayAdapter;
@@ -357,7 +701,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           const startedAt = Date.now();
           // Capture the long-running listener promise via waitUntil
           let listenerPromise: Promise<unknown> | undefined;
-          gatewayAdapter.startGatewayListener!(
+          void gatewayAdapter.startGatewayListener!(
             {
               waitUntil: (p: Promise<unknown>) => {
                 listenerPromise = p;
@@ -392,11 +736,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
               }
               setTimeout(startGateway, delayMs);
             };
-            listenerPromise.then(() => reschedule()).catch(reschedule);
+            void listenerPromise.then(() => reschedule()).catch(reschedule);
           });
         };
         startGateway();
         log.info('Gateway listener started', { adapter: adapter.name });
+      } else if ('runtimeMode' in adapter && adapter.runtimeMode === 'polling') {
+        // Polling adapters (Telegram) pull updates themselves; a route here
+        // would only bind the shared webhook port for nothing. Read after
+        // initialize(): the adapter resolves mode 'auto' there.
+        log.info('Polling adapter: no webhook route registered', { adapter: adapter.name });
       } else {
         // Non-gateway adapters (Slack, Teams, GitHub, etc.) — register on the
         // shared webhook server. The handler key stays adapter.name (the
@@ -416,9 +765,23 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       const content = message.content as Record<string, unknown>;
 
       if (content.operation === 'edit' && content.messageId) {
-        await adapter.editMessage(tid, content.messageId as string, {
-          markdown: transformText((content.text as string) || (content.markdown as string) || ''),
-        });
+        const terminalCard = content.terminalCard as Partial<TerminalApprovalCard> | undefined;
+        if (
+          terminalCard &&
+          typeof terminalCard.title === 'string' &&
+          typeof terminalCard.question === 'string' &&
+          typeof terminalCard.resolution === 'string'
+        ) {
+          await adapter.editMessage(
+            tid,
+            content.messageId as string,
+            terminalApprovalMessage(terminalCard as TerminalApprovalCard),
+          );
+        } else {
+          await adapter.editMessage(tid, content.messageId as string, {
+            markdown: transformText((content.text as string) || (content.markdown as string) || ''),
+          });
+        }
         return;
       }
 
@@ -446,7 +809,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
               // full value. Telegram caps callback_data at 64 bytes, and
               // long values (e.g. ISO datetimes, URLs) push the JSON payload
               // well past that. The onAction handlers resolve the index back
-              // to the real value via getAskQuestionRender(questionId).
+              // to the real value via resolveQuestionRender(questionId).
               options.map((opt, idx) =>
                 Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx), style: opt.style }),
               ),
@@ -675,13 +1038,15 @@ async function handleForwardedEvent(
       const originalEmbeds =
         ((interaction.message as Record<string, unknown>)?.embeds as Array<Record<string, unknown>>) || [];
       const originalDescription = (originalEmbeds[0]?.description as string) || '';
-      const render = questionId ? getAskQuestionRender(questionId) : undefined;
+      const render = questionId ? await resolveQuestionRender(questionId) : undefined;
       // Discord custom_id mirrors the new index-based encoding (see Button
       // construction). Decode back to the real option value for downstream.
       const selectedOption = resolveSelectedOption(render, tail, tail);
       const cardTitle = render?.title ?? ((originalEmbeds[0]?.title as string) || '❓ Question');
       const matchedOpt = render?.options.find((o) => o.value === selectedOption);
       const selectedLabel = matchedOpt?.selectedLabel ?? selectedOption ?? customId;
+      const actorName = user?.global_name || user?.username || '';
+      const resolution = actorName ? `${selectedLabel} by ${actorName}` : selectedLabel;
       try {
         await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
           method: 'POST',
@@ -692,7 +1057,8 @@ async function handleForwardedEvent(
               embeds: [
                 {
                   title: cardTitle,
-                  description: `${originalDescription}\n\n${selectedLabel}`,
+                  description: originalDescription || render?.question || '',
+                  footer: { text: resolution },
                 },
               ],
               components: [], // remove buttons

@@ -24,48 +24,36 @@ Adds WeChat support via **iLink Bot API** — the first-party Tencent API for pe
 
 NanoClaw doesn't ship channels in trunk. This skill copies the WeChat adapter in from the `channels` branch.
 
-### Pre-flight (idempotent)
+### 1. Copy the adapter and its registration test
 
-Skip to **Credentials** if all of these are already in place:
+Fetch the `channels` branch from the configured remote that carries it, then
+overwrite the skill-owned files with the canonical registry copies:
 
-- `src/channels/wechat.ts` exists
-- `src/channels/wechat-registration.test.ts` exists
-- `src/channels/index.ts` contains `import './wechat.js';`
-- `wechat-ilink-client` is listed in `package.json` dependencies
-
-Otherwise continue. Every step below is safe to re-run.
-
-### 1. Fetch the channels branch
-
-```bash
-git fetch origin channels
+```nc:copy from-branch:channels
+src/channels/wechat.ts
+src/channels/wechat-registration.test.ts
 ```
 
-### 2. Copy the adapter and its registration test
-
-```bash
-git show origin/channels:src/channels/wechat.ts                 > src/channels/wechat.ts
-git show origin/channels:src/channels/wechat-registration.test.ts > src/channels/wechat-registration.test.ts
-```
-
-### 3. Append the self-registration import
+### 2. Append the self-registration import
 
 Append to `src/channels/index.ts` (skip if the line is already present):
 
-```typescript
+```nc:append to:src/channels/index.ts
 import './wechat.js';
 ```
 
-### 4. Install the library (pinned)
+### 3. Install the library (pinned)
 
-```bash
-pnpm install wechat-ilink-client@0.1.0
+```nc:dep
+wechat-ilink-client@0.1.0
 ```
 
-### 5. Build and validate
+### 4. Build and validate
 
-```bash
+```nc:run effect:build
 pnpm run build
+```
+```nc:run effect:test
 pnpm exec vitest run src/channels/wechat-registration.test.ts
 ```
 

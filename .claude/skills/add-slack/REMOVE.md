@@ -2,33 +2,44 @@
 
 Every step is idempotent — safe to re-run.
 
-## 1. Remove the adapter
+## 1. Remove the registrations
 
-Delete the self-registration import from `src/channels/index.ts` (skip if already gone):
+Delete the appended lines (skip any already gone):
 
-```typescript
-import './slack.js';
-```
+- `src/channels/index.ts`: `import './slack.js';` and `import './slack-a2a-guard.js';`
 
-Then delete the copied adapter, its registration test, and the `slack-formatting`
-container skill (part of the channel payload — trunk doesn't ship it):
+## 2. Remove the payload files
 
 ```bash
-rm -f src/channels/slack.ts src/channels/slack-registration.test.ts container/skills/slack-formatting/SKILL.md
+rm -f src/channels/slack.ts src/channels/slack-lib.ts src/channels/slack-lib.test.ts \
+  src/channels/slack-a2a-guard.ts src/channels/slack-a2a-guard.test.ts \
+  src/channels/slack-registration.test.ts \
+  src/channels/slack-instances-registration.test.ts \
+  src/provisioning/slack-app.ts src/provisioning/slack-app.test.ts \
+  container/skills/slack-formatting/SKILL.md
 ```
 
-## 2. Remove credentials
+## 3. Remove credentials
 
 Remove `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, and `SLACK_SIGNING_SECRET` from
-`.env` (each is present only if its delivery mode was configured).
+`.env` (each is present only if its delivery mode was configured). If named
+instances were configured, also remove `SLACK_INSTANCES` and every suffixed
+`SLACK_BOT_TOKEN_<NAME>` / `SLACK_APP_TOKEN_<NAME>` /
+`SLACK_SIGNING_SECRET_<NAME>` line.
 
-## 3. Remove the package
+## 4. Remove the package
 
 ```bash
 pnpm uninstall @chat-adapter/slack
 ```
 
-## 4. Rebuild and restart
+## 5. Feature skills
+
+If the agents feature was applied on top, remove those skills first:
+`slack-agent-flow` (its REMOVE.md), then `slack-a2a-rooms` (removal steps in
+its SKILL.md).
+
+## 6. Rebuild and restart
 
 ```bash
 pnpm run build

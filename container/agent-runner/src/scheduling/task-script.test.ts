@@ -7,13 +7,13 @@
  *   (gated → plain 'completed': the monitor working as designed).
  *
  * The host leg (ack → FAILED run → streak backoff) is pinned in
- * src/db/session-db.test.ts and src/modules/scheduling/recurrence.test.ts —
+ * the host SQLite driver tests and src/modules/scheduling/recurrence.test.ts —
  * both sides pin the literal 'script-skip:error'; if either renames it, its
  * own test goes red.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../db/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
 import { getPendingMessages, markScriptSkipped } from '../db/messages-in.js';
 import { applyPreTaskScripts } from './task-script.js';
 

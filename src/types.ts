@@ -26,10 +26,17 @@ export interface ContainerConfigRow {
   additional_mounts: string; // JSON: AdditionalMountConfig[]
   cli_scope: string; // 'disabled' | 'group' | 'global'
   timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  /**
+   * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
+   * Optional on the TS type because the trunk schema does not carry the
+   * column: a deployment whose driver realizes more than one tier adds it,
+   * and `SELECT *` rows surface it here. Absent means the default tier.
+   */
+  runtime_tier?: string | null;
   updated_at: string;
 }
 
-export type UnknownSenderPolicy = 'strict' | 'request_approval' | 'public';
+export type UnknownSenderPolicy = 'strict' | 'request_approval' | 'decline_notify' | 'public';
 
 export interface MessagingGroup {
   id: string;
@@ -56,6 +63,13 @@ export interface MessagingGroup {
    * the column itself defaults to NULL in SQLite.
    */
   denied_at?: string | null;
+  /**
+   * When set, our own bot has LEFT the platform channel this row maps to
+   * (written by a channel membership module, migration 022) — the wiring
+   * survives, but delivery/typing should skip the row until the bot rejoins
+   * (which clears it). Optional on the TS type per the denied_at convention.
+   */
+  detached_at?: string | null;
   created_at: string;
 }
 
@@ -209,6 +223,13 @@ export interface PendingApproval {
   agent_group_id: string | null;
   channel_type: string | null;
   platform_id: string | null;
+  /**
+   * Adapter instance the card was delivered through (migration 023). NULL
+   * reads as the default instance (= channel_type). Delivery dispatch is
+   * exact-key, so any follow-up edit to the card must address the identity
+   * that posted it, not just the platform.
+   */
+  instance: string | null;
   platform_message_id: string | null;
   /**
    * For OneCLI credential rows, the gateway's request TTL. For a module
@@ -218,6 +239,8 @@ export interface PendingApproval {
   expires_at: string | null;
   status: 'pending' | 'approved' | 'rejected' | 'expired' | 'awaiting_reason';
   title: string;
+  /** Original approval-card body, retained when the card reaches a terminal state. */
+  question: string;
   options_json: string;
   /** When set, only this exact user may resolve the approval. */
   approver_user_id: string | null;

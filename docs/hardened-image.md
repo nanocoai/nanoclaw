@@ -1,4 +1,4 @@
-# Agent image: pull instead of build (opt-in)
+# Hardened agent image (recommended for Claude)
 
 By default `./container/build.sh` builds the agent container on your machine from a public Node
 base — three to ten minutes, no account, no request to any service. **That stays the default and
@@ -8,6 +8,9 @@ Alternatively an install can **fetch a prebuilt, hardened image** instead. It is
 exactly the name the build would have written (`nanoclaw-agent-v2-<slug>:latest`), so nothing
 downstream can tell the two apart: the host spawns the same tag either way, and derived per-group
 builds still work offline.
+
+**For Claude installs, we recommend the hardened image.** Local builds remain supported if you
+prefer an unauthenticated build on your own machine.
 
 That image is built by **[Echo](https://echo.ai)**, who rebuild the sandbox's contents — Chromium,
 Node, Bun, pnpm, git and the rest — from scratch with only the essentials, and patch what remains.
@@ -56,7 +59,7 @@ allowlist, and per-group resource limits all do more here than any image can.
 
 | | Pull | Build |
 |---|---|---|
-| `install_packages` | Works, as a derived image | Works |
+| `install_packages` (apt and npm only) | Works, as a derived image | Works |
 | Non-Claude providers | Only if the publisher baked the CLI, or you add it | Work |
 | Custom `Dockerfile` edits | Replaced on the next refresh | Yours |
 | `INSTALL_CJK_FONTS` | Whatever the publisher baked — or `fonts-noto-cjk` via `install_packages` | Your choice |
@@ -67,6 +70,12 @@ prints what to run instead, so a skill that rebuilds can't silently replace the 
 `install_packages` is the exception, and it works because it never rebuilds the base — it builds
 a small image `FROM` the one you pulled and adds your layers, then pins that group to it. The
 vendor's bytes are still underneath, unmodified.
+
+It reaches apt and npm packages only (`packages_apt` and `packages_npm`). A `Dockerfile` that
+installs by any other means — `pip`, a `curl | sh` vendor installer, a language toolchain fetched
+in a `RUN` — has no equivalent here, so those additions are lost on the switch and cannot be put
+back through the derived image. Check what your `Dockerfile` adds before opting in; if anything
+it installs falls outside apt and npm, local builds are the path that keeps it.
 
 What that costs is the vendor's claim over that one group. Their scan covered the base, not
 whatever you added on top, so a derived image labels itself `derived` rather than inheriting
@@ -117,23 +126,53 @@ Either way the architecture that gets tagged is checked against the daemon's
 before anything is retagged, so a single-architecture reference on the wrong
 machine fails loudly instead of landing an image that only runs under emulation.
 
-## Using it
+## Existing installs: switch to the hardened image
+
+### Detect
+
+Check what this install is configured to use and what the local image actually contains:
 
 ```bash
-# refresh to the pinned image
-./container/build.sh pull
-
-# force a local build and leave the pull path
-./container/build.sh build
-
-# what am I actually running?
 pnpm exec tsx setup/index.ts --step registry
+```
 
-# go back to building locally
-pnpm exec tsx setup/index.ts --step registry -- --opt-out
+`Image source: build here` means the install is still using the local-build path.
+
+### Why
+
+Echo rebuilds Chromium, Node, Bun, pnpm, git, and the base packages from scratch with only the
+essentials, then patches what remains. This improves patch currency and provenance for the
+sandbox components; it does not change the agent code mounted from your checkout or replace
+NanoClaw's runtime isolation controls.
+
+### Fix
+
+For a Claude install, sign in and refresh to the pinned image:
+
+```bash
+bash setup/registry-login.sh
+pnpm exec tsx setup/index.ts --step registry -- --refresh
 ```
 
 Nothing re-pulls on its own — `--refresh` is how a new image reaches you.
+
+### Verify
+
+```bash
+pnpm exec tsx setup/index.ts --step registry
+```
+
+The status should report `Image source: pull a pinned image`, `On this machine: hardened`, and
+`PIN_MATCH: true`.
+
+### Rollback
+
+Return to the fully supported local-build path:
+
+```bash
+pnpm exec tsx setup/index.ts --step registry -- --opt-out
+./container/build.sh build
+```
 
 `--status` reports what you asked for **and** what the local tag actually holds. Those can
 disagree, for instance if a pull failed and a local build filled in. The image carries its own
@@ -182,7 +221,7 @@ account-takeover bugs happen — and there is no way to merge them today. Pick o
 | Symptom | Cause |
 |---|---|
 | `./container/build.sh` exits 3 | Pinned install. `pull` to refresh, `build` to force local. |
-| Setup never offers the pull option | No `agent-image` pin in `versions.json` — nothing to fetch. |
+| Setup never offers the pull option | The option needs a Claude install and an `agent-image` pin in `versions.json`. Existing installs can follow [the migration above](#existing-installs-switch-to-the-hardened-image). |
 | Pull fails: lockfile mismatch | The image was built against a different `container/agent-runner/bun.lock`. Refresh the pin or build locally. |
 | Pull fails: architecture mismatch | The reference names one architecture and it isn't this daemon's. Use a multi-arch index, or the reference for this architecture. |
 | "No agent-image reference for linux/…" | The pin is per-platform and has no entry for this machine. Build locally, or set `NANOCLAW_AGENT_IMAGE_REF`. |

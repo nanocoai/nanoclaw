@@ -19,44 +19,56 @@ export interface PendingChannelApproval {
   created_at: string;
   /** Card title shown at creation and re-used by getAskQuestionRender on click. */
   title: string;
+  /** Original card body retained when the approval reaches a terminal state. */
+  question: string;
   /** Normalized options (JSON-encoded NormalizedOption[]) — same shape persisted on pending_approvals. */
   options_json: string;
 }
 
-export function createPendingChannelApproval(row: PendingChannelApproval): void {
-  getDb()
-    .prepare(
-      `INSERT INTO pending_channel_approvals (
+export async function createPendingChannelApproval(row: PendingChannelApproval): Promise<void> {
+  await getDb().run(
+    `INSERT INTO pending_channel_approvals (
          messaging_group_id, agent_group_id, original_message,
-         approver_user_id, created_at, title, options_json
+         approver_user_id, created_at, title, question, options_json
        )
        VALUES (
          @messaging_group_id, @agent_group_id, @original_message,
-         @approver_user_id, @created_at, @title, @options_json
+         @approver_user_id, @created_at, @title, @question, @options_json
        )`,
-    )
-    .run(row);
+    row,
+  );
 }
 
-export function getPendingChannelApproval(messagingGroupId: string): PendingChannelApproval | undefined {
-  return getDb()
-    .prepare('SELECT * FROM pending_channel_approvals WHERE messaging_group_id = ?')
-    .get(messagingGroupId) as PendingChannelApproval | undefined;
+export async function getPendingChannelApproval(messagingGroupId: string): Promise<PendingChannelApproval | undefined> {
+  return getDb().get<PendingChannelApproval>(
+    'SELECT * FROM pending_channel_approvals WHERE messaging_group_id = ?',
+    messagingGroupId,
+  );
 }
 
-export function hasInFlightChannelApproval(messagingGroupId: string): boolean {
-  const row = getDb()
-    .prepare('SELECT 1 AS x FROM pending_channel_approvals WHERE messaging_group_id = ?')
-    .get(messagingGroupId) as { x: number } | undefined;
+export async function hasInFlightChannelApproval(messagingGroupId: string): Promise<boolean> {
+  const row = await getDb().get<{ x: number }>(
+    'SELECT 1 AS x FROM pending_channel_approvals WHERE messaging_group_id = ?',
+    messagingGroupId,
+  );
   return row !== undefined;
 }
 
-export function updatePendingChannelApprovalCard(messagingGroupId: string, title: string, optionsJson: string): void {
-  getDb()
-    .prepare('UPDATE pending_channel_approvals SET title = ?, options_json = ? WHERE messaging_group_id = ?')
-    .run(title, optionsJson, messagingGroupId);
+export async function updatePendingChannelApprovalCard(
+  messagingGroupId: string,
+  title: string,
+  question: string,
+  optionsJson: string,
+): Promise<void> {
+  await getDb().run(
+    'UPDATE pending_channel_approvals SET title = ?, question = ?, options_json = ? WHERE messaging_group_id = ?',
+    title,
+    question,
+    optionsJson,
+    messagingGroupId,
+  );
 }
 
-export function deletePendingChannelApproval(messagingGroupId: string): void {
-  getDb().prepare('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?').run(messagingGroupId);
+export async function deletePendingChannelApproval(messagingGroupId: string): Promise<void> {
+  await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', messagingGroupId);
 }

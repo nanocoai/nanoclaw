@@ -59,8 +59,7 @@ interface IntEntry extends BaseEntry {
 
 export type Entry = StringEntry | EnumEntry | BoolEntry | IntEntry;
 
-const httpUrl = (v: string): string | undefined =>
-  /^https?:\/\/\S+/.test(v) ? undefined : 'Must be http(s)://…';
+const httpUrl = (v: string): string | undefined => (/^https?:\/\/\S+/.test(v) ? undefined : 'Must be http(s)://…');
 
 export const CONFIG: Entry[] = [
   {
@@ -104,6 +103,15 @@ export const CONFIG: Entry[] = [
     type: 'string',
     secret: true,
     validate: (v) => (v.trim() ? undefined : 'Required'),
+  },
+  {
+    key: 'templatePath',
+    label: 'Agent template',
+    help: 'Create or update an agent from a local template ref under templates/ (for example, sales/sdr).',
+    surface: 'flag+ui',
+    group: 'Agent',
+    type: 'string',
+    placeholder: 'sales/sdr',
   },
 
   // Existing env-var knobs — flag-only so they don't clutter the UI screen.

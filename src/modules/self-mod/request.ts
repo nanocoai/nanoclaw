@@ -14,15 +14,17 @@
  */
 import { createHash } from 'node:crypto';
 
+import { mcpServerPluginOwner, parseMcpServerConfig, validateMcpServerName } from '../../container-config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
+import { getContainerConfig } from '../../db/container-configs.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
 import { notifyAgent, requestApproval } from '../approvals/index.js';
 
-export function validateInstallPackages(content: Record<string, unknown>, session: Session): boolean {
-  const agentGroup = getAgentGroup(session.agent_group_id);
+export async function validateInstallPackages(content: Record<string, unknown>, session: Session): Promise<boolean> {
+  const agentGroup = await getAgentGroup(session.agent_group_id);
   if (!agentGroup) {
-    notifyAgent(session, 'install_packages failed: agent group not found.');
+    await notifyAgent(session, 'install_packages failed: agent group not found.');
     return false;
   }
 
@@ -33,22 +35,22 @@ export function validateInstallPackages(content: Record<string, unknown>, sessio
   const NPM_RE = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
   const MAX_PACKAGES = 20;
   if (apt.length + npm.length === 0) {
-    notifyAgent(session, 'install_packages failed: at least one apt or npm package is required.');
+    await notifyAgent(session, 'install_packages failed: at least one apt or npm package is required.');
     return false;
   }
   if (apt.length + npm.length > MAX_PACKAGES) {
-    notifyAgent(session, `install_packages failed: max ${MAX_PACKAGES} packages per request.`);
+    await notifyAgent(session, `install_packages failed: max ${MAX_PACKAGES} packages per request.`);
     return false;
   }
   const invalidApt = apt.find((p) => !APT_RE.test(p));
   if (invalidApt) {
-    notifyAgent(session, `install_packages failed: invalid apt package name "${invalidApt}".`);
+    await notifyAgent(session, `install_packages failed: invalid apt package name "${invalidApt}".`);
     log.warn('install_packages: invalid apt package rejected', { pkg: invalidApt });
     return false;
   }
   const invalidNpm = npm.find((p) => !NPM_RE.test(p));
   if (invalidNpm) {
-    notifyAgent(session, `install_packages failed: invalid npm package name "${invalidNpm}".`);
+    await notifyAgent(session, `install_packages failed: invalid npm package name "${invalidNpm}".`);
     log.warn('install_packages: invalid npm package rejected', { pkg: invalidNpm });
     return false;
   }
@@ -56,7 +58,7 @@ export function validateInstallPackages(content: Record<string, unknown>, sessio
 }
 
 export async function requestInstallPackagesHold(content: Record<string, unknown>, session: Session): Promise<void> {
-  const agentGroup = getAgentGroup(session.agent_group_id);
+  const agentGroup = await getAgentGroup(session.agent_group_id);
   if (!agentGroup) return;
   const apt = (content.apt as string[]) || [];
   const npm = (content.npm as string[]) || [];
@@ -71,17 +73,6 @@ export async function requestInstallPackagesHold(content: Record<string, unknown
     title: 'Install Packages Request',
     question: `Agent "${agentGroup.name}" is attempting to install a package + rebuild container:\n${packageList}${reason ? `\nReason: ${reason}` : ''}`,
   });
-}
-
-/** True if `value` is an array of strings. */
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((v) => typeof v === 'string');
-}
-
-/** True if `value` is a plain object mapping string keys to string values. */
-function isStringRecord(value: unknown): value is Record<string, string> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  return Object.values(value).every((v) => typeof v === 'string');
 }
 
 const MAX_MCP_ARGS = 32;
@@ -101,8 +92,11 @@ const MCP_PAYLOAD_MAX_BYTES = 16384;
  * `<redacted: N bytes, sha256 XXXXXXXX>` placeholder — but the verbatim
  * value still goes into the approval payload and is applied unchanged.
  */
-const SECRET_ENV_KEY_RE = /(TOKEN|SECRET|PASSW(OR)?D|API_?KEY|APIKEY|CREDENTIAL|PRIVATE_?KEY|AUTH)/i;
-const SECRET_VALUE_RE = /^(sk-|ghp_|github_pat_|xox[a-z]-|AKIA|-----BEGIN )/;
+// Exported for the template/plugin stamp path, where the same patterns drive
+// rejection (a real key must never ship inside a template) instead of card
+// redaction. Keep the two uses on one definition.
+export const SECRET_ENV_KEY_RE = /(TOKEN|SECRET|PASSW(OR)?D|API_?KEY|APIKEY|CREDENTIAL|PRIVATE_?KEY|AUTH)/i;
+export const SECRET_VALUE_RE = /^(sk-|ghp_|github_pat_|xox[a-z]-|AKIA|-----BEGIN )/;
 
 /** Card-only placeholder for a secret-shaped value: byte length + sha256 fingerprint. */
 function redactSecret(value: string): string {
@@ -125,88 +119,146 @@ export function escapeInvisibles(s: string): string {
   });
 }
 
-export function validateAddMcpServer(content: Record<string, unknown>, session: Session): boolean {
-  const agentGroup = getAgentGroup(session.agent_group_id);
+export async function validateAddMcpServer(content: Record<string, unknown>, session: Session): Promise<boolean> {
+  const agentGroup = await getAgentGroup(session.agent_group_id);
   if (!agentGroup) {
-    notifyAgent(session, 'add_mcp_server failed: agent group not found.');
+    await notifyAgent(session, 'add_mcp_server failed: agent group not found.');
     return false;
   }
-  const serverName = content.name as string;
-  const command = content.command as string;
-  if (typeof serverName !== 'string' || !serverName || typeof command !== 'string' || !command) {
-    notifyAgent(session, 'add_mcp_server failed: name and command are required.');
+  const serverName = typeof content.name === 'string' ? content.name : '';
+  if (!serverName) {
+    await notifyAgent(session, 'add_mcp_server failed: name is required.');
     return false;
   }
-  if (content.args !== undefined && !isStringArray(content.args)) {
-    notifyAgent(session, 'add_mcp_server failed: args must be an array of strings.');
-    return false;
-  }
-  if (content.env !== undefined && !isStringRecord(content.env)) {
-    notifyAgent(session, 'add_mcp_server failed: env must be a map of string keys to string values.');
+  let serverConfig;
+  try {
+    validateMcpServerName(serverName);
+    serverConfig = parseMcpServerConfig(content);
+    // eslint-disable-next-line no-catch-all/no-catch-all -- parse failures are expected user input errors
+  } catch (err) {
+    await notifyAgent(session, `add_mcp_server failed: ${err instanceof Error ? err.message : String(err)}.`);
     return false;
   }
 
-  const args = (content.args as string[] | undefined) || [];
-  const env = (content.env as Record<string, string> | undefined) || {};
+  // Plugin-owned servers are template content: reject before an approval round
+  // is spent — the only sanctioned change path is updating the plugin and
+  // re-stamping (apply.ts re-checks in case an approval races a restamp).
+  const configRow = await getContainerConfig(agentGroup.id);
+  const existing = configRow ? (JSON.parse(configRow.mcp_servers) as Record<string, unknown>)[serverName] : undefined;
+  const owner = mcpServerPluginOwner(existing);
+  if (owner) {
+    await notifyAgent(
+      session,
+      `add_mcp_server failed: server "${serverName}" is owned by plugin "${owner}". ` +
+        'Plugin servers can only be changed by updating the plugin and re-stamping (ncl groups create --template <ref> --yes).',
+    );
+    return false;
+  }
+
+  // cwd only means something for plugin-shipped servers (the runtime resolves
+  // it against the plugin root, which approval-added servers never have — it
+  // would be silently dropped). Rejecting keeps the card honest: an approver
+  // must never sign a working directory that won't take effect.
+  if (serverConfig.type !== 'http' && serverConfig.cwd !== undefined) {
+    await notifyAgent(session, 'add_mcp_server failed: cwd is only supported for plugin-shipped servers.');
+    return false;
+  }
+
+  const args = serverConfig.type === 'http' ? [] : (serverConfig.args ?? []);
+  const env = serverConfig.type === 'http' ? {} : (serverConfig.env ?? {});
 
   if (args.length > MAX_MCP_ARGS) {
-    notifyAgent(session, `add_mcp_server failed: max ${MAX_MCP_ARGS} args per server.`);
+    await notifyAgent(session, `add_mcp_server failed: max ${MAX_MCP_ARGS} args per server.`);
     return false;
   }
   if (Object.keys(env).length > MAX_MCP_ENV_VARS) {
-    notifyAgent(session, `add_mcp_server failed: max ${MAX_MCP_ENV_VARS} env vars per server.`);
+    await notifyAgent(session, `add_mcp_server failed: max ${MAX_MCP_ENV_VARS} env vars per server.`);
     return false;
   }
-  if (Buffer.byteLength(JSON.stringify({ name: serverName, command, args, env }), 'utf8') > MCP_PAYLOAD_MAX_BYTES) {
-    notifyAgent(session, `add_mcp_server failed: payload exceeds ${MCP_PAYLOAD_MAX_BYTES} bytes.`);
+  if (Buffer.byteLength(JSON.stringify({ name: serverName, ...serverConfig }), 'utf8') > MCP_PAYLOAD_MAX_BYTES) {
+    await notifyAgent(session, `add_mcp_server failed: payload exceeds ${MCP_PAYLOAD_MAX_BYTES} bytes.`);
     return false;
   }
   return true;
 }
 
 export async function requestAddMcpServerHold(content: Record<string, unknown>, session: Session): Promise<void> {
-  const agentGroup = getAgentGroup(session.agent_group_id);
+  const agentGroup = await getAgentGroup(session.agent_group_id);
   if (!agentGroup) return; // precheck already answered the requester
   const serverName = content.name as string;
-  const command = content.command as string;
-  const args = (content.args as string[] | undefined) || [];
-  const env = (content.env as Record<string, string> | undefined) || {};
+  const serverConfig = parseMcpServerConfig(content);
 
-  // Card-only view: secret-shaped values render as redaction placeholders;
-  // the payload below keeps the verbatim values.
-  const displayArgs = args.map((a) => (SECRET_VALUE_RE.test(a) ? redactSecret(a) : a));
-  const displayEnv = Object.fromEntries(
-    Object.entries(env).map(([k, v]) => [
-      k,
-      SECRET_ENV_KEY_RE.test(k) || SECRET_VALUE_RE.test(v) ? redactSecret(v) : v,
-    ]),
-  );
+  let fields: string[];
+  if (serverConfig.type === 'http') {
+    // Redact per path segment and per query value, never the origin — the
+    // admin must always see the true destination host, and SECRET_VALUE_RE
+    // is start-anchored so testing the whole URL would match nothing. A
+    // Zapier-style https://host/s/<token>/mcp must not render the token raw.
+    const u = new URL(serverConfig.url);
+    const redactSeg = (s: string): string => (SECRET_VALUE_RE.test(s) ? redactSecret(s) : s);
+    const path = u.pathname.split('/').map(redactSeg).join('/');
+    // Keep the query byte-faithful unless a value actually needs redacting —
+    // re-serializing decodes percent-escapes and can invent structure.
+    const entries = [...u.searchParams];
+    const query = entries.some(([, v]) => SECRET_VALUE_RE.test(v))
+      ? `?${entries.map(([k, v]) => `${k}=${redactSeg(v)}`).join('&')}`
+      : u.search;
+    const displayUrl = u.origin + path + query;
+    fields = [
+      `name: ${escapeInvisibles(JSON.stringify(serverName))}`,
+      `type: ${escapeInvisibles(JSON.stringify(serverConfig.type))}`,
+      `url: ${escapeInvisibles(JSON.stringify(displayUrl))}`,
+    ];
+    if (serverConfig.headers !== undefined) {
+      const displayHeaders = Object.fromEntries(
+        Object.entries(serverConfig.headers).map(([k, v]) => [
+          k,
+          SECRET_ENV_KEY_RE.test(k) || SECRET_VALUE_RE.test(v) ? redactSecret(v) : v,
+        ]),
+      );
+      fields.push(`headers: ${escapeInvisibles(JSON.stringify(displayHeaders))}`);
+    }
+  } else {
+    const args = serverConfig.args ?? [];
+    const env = serverConfig.env ?? {};
+    // Card-only view: secret-shaped values render as redaction placeholders;
+    // the payload below keeps the verbatim values.
+    const displayArgs = args.map((a) => (SECRET_VALUE_RE.test(a) ? redactSecret(a) : a));
+    const displayEnv = Object.fromEntries(
+      Object.entries(env).map(([k, v]) => [
+        k,
+        SECRET_ENV_KEY_RE.test(k) || SECRET_VALUE_RE.test(v) ? redactSecret(v) : v,
+      ]),
+    );
+    fields = [
+      `name: ${escapeInvisibles(JSON.stringify(serverName))}`,
+      `command: ${escapeInvisibles(JSON.stringify(serverConfig.command))}`,
+      `args: ${escapeInvisibles(JSON.stringify(displayArgs))}`,
+      `env: ${escapeInvisibles(JSON.stringify(displayEnv))}`,
+    ];
+  }
+  if (serverConfig.instructions !== undefined) {
+    fields.push(`instructions: ${escapeInvisibles(JSON.stringify(serverConfig.instructions))}`);
+  }
 
   // JSON-encode each field (exact boundaries, embedded newlines render as
   // visible \n escapes), escape invisibles/backticks, and wrap the payload
   // in a code fence — no payload content can add lines to the card, spoof
   // another field, or break out of the fence.
   const question =
-    `Agent "${agentGroup.name}" is attempting to add a new MCP server:\n` +
-    '```\n' +
-    `name: ${escapeInvisibles(JSON.stringify(serverName))}\n` +
-    `command: ${escapeInvisibles(JSON.stringify(command))}\n` +
-    `args: ${escapeInvisibles(JSON.stringify(displayArgs))}\n` +
-    `env: ${escapeInvisibles(JSON.stringify(displayEnv))}\n` +
-    '```';
+    `Agent "${agentGroup.name}" is attempting to add a new MCP server:\n` + '```\n' + fields.join('\n') + '\n' + '```';
   if (Buffer.byteLength(question, 'utf8') > MCP_APPROVAL_CARD_MAX_BYTES) {
-    notifyAgent(
+    await notifyAgent(
       session,
-      `add_mcp_server failed: rendered approval card exceeds ${MCP_APPROVAL_CARD_MAX_BYTES} bytes — trim args/env.`,
+      `add_mcp_server failed: rendered approval card exceeds ${MCP_APPROVAL_CARD_MAX_BYTES} bytes — trim the MCP configuration.`,
     );
     return;
   }
-
   await requestApproval({
     session,
     agentName: agentGroup.name,
     action: 'add_mcp_server',
-    payload: { name: serverName, command, args, env },
+    payload: { name: serverName, ...serverConfig },
     title: 'Add MCP Request',
     question,
   });

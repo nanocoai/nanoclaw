@@ -48,24 +48,24 @@ function containerConfig(): ContainerConfig {
   return { mcpServers: {}, packages: { apt: [], npm: [] }, additionalMounts: [], skills: [] };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   fs.mkdirSync(TEST_ROOT, { recursive: true });
-  runMigrations(initTestDb());
+  await runMigrations(await initTestDb());
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
 });
 
 describe('initGroupFilesystem agent surfaces', () => {
-  it('stages provider-neutral instructions and default Claude support files', () => {
+  it('stages provider-neutral instructions and default Claude support files', async () => {
     const ag = group('ag-default', 'default-group');
-    createAgentGroup(ag);
+    await createAgentGroup(ag);
 
-    initGroupFilesystem(ag, { instructions: 'hello' });
+    await initGroupFilesystem(ag, { instructions: 'hello' });
 
     const groupDir = path.join(GROUPS_DIR, ag.folder);
     const claudeDir = path.join(DATA_DIR, 'v2-sessions', ag.id, '.claude-shared');
@@ -80,10 +80,10 @@ describe('initGroupFilesystem agent surfaces', () => {
     expect(settings.hooks.SessionStart).toBeUndefined();
   });
 
-  it('disables native Claude memory in existing settings without clobbering other values', () => {
+  it('disables native Claude memory in existing settings without clobbering other values', async () => {
     const ag = group('ag-existing-claude', 'existing-claude-group');
-    createAgentGroup(ag);
-    initGroupFilesystem(ag);
+    await createAgentGroup(ag);
+    await initGroupFilesystem(ag);
 
     const settingsFile = path.join(DATA_DIR, 'v2-sessions', ag.id, '.claude-shared', 'settings.json');
     const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
@@ -96,7 +96,7 @@ describe('initGroupFilesystem agent surfaces', () => {
     ];
     fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n');
 
-    initGroupFilesystem(ag);
+    await initGroupFilesystem(ag);
 
     const reconciled = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
     expect(reconciled.autoMemoryEnabled).toBe(false);
@@ -111,15 +111,15 @@ describe('initGroupFilesystem agent surfaces', () => {
   it.each([
     ['malformed JSON', '{"hooks":'],
     ['a non-object root', '[]\n'],
-  ])('warns and leaves existing settings unchanged for %s', (_label, content) => {
+  ])('warns and leaves existing settings unchanged for %s', async (_label, content) => {
     const ag = group('ag-invalid-claude', 'invalid-claude-group');
-    createAgentGroup(ag);
-    initGroupFilesystem(ag);
+    await createAgentGroup(ag);
+    await initGroupFilesystem(ag);
 
     const settingsFile = path.join(DATA_DIR, 'v2-sessions', ag.id, '.claude-shared', 'settings.json');
     fs.writeFileSync(settingsFile, content);
 
-    initGroupFilesystem(ag);
+    await initGroupFilesystem(ag);
 
     expect(fs.readFileSync(settingsFile, 'utf-8')).toBe(content);
     expect(log.warn).toHaveBeenCalledWith(
@@ -128,11 +128,11 @@ describe('initGroupFilesystem agent surfaces', () => {
     );
   });
 
-  it('stages the same provider-neutral instructions for a provider with its own surfaces', () => {
+  it('stages the same provider-neutral instructions for a provider with its own surfaces', async () => {
     const ag = group('ag-surfy', 'surfy-group');
-    createAgentGroup(ag);
+    await createAgentGroup(ag);
 
-    initGroupFilesystem(ag, { instructions: 'hello', provider: 'surfaces-test-provider' });
+    await initGroupFilesystem(ag, { instructions: 'hello', provider: 'surfaces-test-provider' });
 
     const groupDir = path.join(GROUPS_DIR, ag.folder);
     const sessionRoot = path.join(DATA_DIR, 'v2-sessions', ag.id);
@@ -143,11 +143,11 @@ describe('initGroupFilesystem agent surfaces', () => {
     expect(fs.existsSync(path.join(sessionRoot, '.claude-shared'))).toBe(false);
   });
 
-  it('writes nothing at all for a surfaces-owning provider without instructions', () => {
+  it('writes nothing at all for a surfaces-owning provider without instructions', async () => {
     const ag = group('ag-surfy-bare', 'surfy-bare-group');
-    createAgentGroup(ag);
+    await createAgentGroup(ag);
 
-    initGroupFilesystem(ag, { provider: 'surfaces-test-provider' });
+    await initGroupFilesystem(ag, { provider: 'surfaces-test-provider' });
 
     const groupDir = path.join(GROUPS_DIR, ag.folder);
     expect(fs.existsSync(path.join(groupDir, 'CLAUDE.local.md'))).toBe(false);
@@ -155,11 +155,11 @@ describe('initGroupFilesystem agent surfaces', () => {
     expect(fs.existsSync(path.join(groupDir, PERSONA_PREPEND_FILE))).toBe(false);
   });
 
-  it('treats an unregistered provider name as default support files without creating memory', () => {
+  it('treats an unregistered provider name as default support files without creating memory', async () => {
     const ag = group('ag-unknown', 'unknown-group');
-    createAgentGroup(ag);
+    await createAgentGroup(ag);
 
-    initGroupFilesystem(ag, { provider: 'not-registered' });
+    await initGroupFilesystem(ag, { provider: 'not-registered' });
 
     const groupDir = path.join(GROUPS_DIR, ag.folder);
     expect(fs.existsSync(path.join(groupDir, 'CLAUDE.local.md'))).toBe(false);
@@ -168,14 +168,14 @@ describe('initGroupFilesystem agent surfaces', () => {
 });
 
 describe('initGroupFilesystem legacy seed isolation', () => {
-  it('leaves .seed.md untouched for the manual migration workflow', () => {
+  it('leaves .seed.md untouched for the manual migration workflow', async () => {
     const ag = group('ag-seed', 'seed-group');
-    createAgentGroup(ag);
+    await createAgentGroup(ag);
     const groupDir = path.join(GROUPS_DIR, ag.folder);
     fs.mkdirSync(groupDir, { recursive: true });
     fs.writeFileSync(path.join(groupDir, '.seed.md'), 'seeded identity\n');
 
-    initGroupFilesystem(ag, {});
+    await initGroupFilesystem(ag, {});
 
     expect(fs.readFileSync(path.join(groupDir, '.seed.md'), 'utf-8')).toBe('seeded identity\n');
     expect(fs.existsSync(path.join(groupDir, PERSONA_PREPEND_FILE))).toBe(false);
@@ -185,13 +185,13 @@ describe('initGroupFilesystem legacy seed isolation', () => {
 });
 
 describe('buildMounts agent surfaces', () => {
-  it('mounts the default surfaces for an unregistered provider (today’s behavior)', () => {
+  it('mounts the default surfaces for an unregistered provider (today’s behavior)', async () => {
     const ag = group('ag-mounts-default', 'mounts-default');
-    createAgentGroup(ag);
-    ensureContainerConfig(ag.id);
-    initGroupFilesystem(ag, {});
+    await createAgentGroup(ag);
+    await ensureContainerConfig(ag.id);
+    await initGroupFilesystem(ag, {});
 
-    const mounts = buildMounts(ag, session('s1', ag.id), containerConfig(), 'claude', {});
+    const mounts = await buildMounts(ag, session('s1', ag.id), containerConfig(), 'claude', {});
 
     const byContainerPath = new Map(mounts.map((m) => [m.containerPath, m]));
     expect(byContainerPath.has('/home/node/.claude')).toBe(true);
@@ -201,11 +201,11 @@ describe('buildMounts agent surfaces', () => {
     expect(fs.existsSync(path.join(GROUPS_DIR, ag.folder, 'CLAUDE.md'))).toBe(true);
   });
 
-  it('suppresses the default surfaces and keeps contributed mounts for a surfaces-providing provider', () => {
+  it('suppresses the default surfaces and keeps contributed mounts for a surfaces-providing provider', async () => {
     const ag = group('ag-mounts-surfy', 'mounts-surfy');
-    createAgentGroup(ag);
-    ensureContainerConfig(ag.id);
-    initGroupFilesystem(ag, { provider: 'surfaces-test-provider' });
+    await createAgentGroup(ag);
+    await ensureContainerConfig(ag.id);
+    await initGroupFilesystem(ag, { provider: 'surfaces-test-provider' });
 
     const contributed = {
       mounts: [
@@ -216,7 +216,13 @@ describe('buildMounts agent surfaces', () => {
         },
       ],
     };
-    const mounts = buildMounts(ag, session('s2', ag.id), containerConfig(), 'surfaces-test-provider', contributed);
+    const mounts = await buildMounts(
+      ag,
+      session('s2', ag.id),
+      containerConfig(),
+      'surfaces-test-provider',
+      contributed,
+    );
 
     const containerPaths = mounts.map((m) => m.containerPath);
     expect(containerPaths).not.toContain('/home/node/.claude');

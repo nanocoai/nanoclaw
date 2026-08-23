@@ -13,7 +13,7 @@ export interface UnregisteredSender {
   last_seen: string;
 }
 
-export function recordDroppedMessage(msg: {
+export async function recordDroppedMessage(msg: {
   channel_type: string;
   platform_id: string;
   user_id: string | null;
@@ -21,11 +21,10 @@ export function recordDroppedMessage(msg: {
   reason: string;
   messaging_group_id: string | null;
   agent_group_id: string | null;
-}): void {
+}): Promise<void> {
   const now = new Date().toISOString();
-  getDb()
-    .prepare(
-      `INSERT INTO unregistered_senders (channel_type, platform_id, user_id, sender_name, reason, messaging_group_id, agent_group_id, message_count, first_seen, last_seen)
+  await getDb().run(
+    `INSERT INTO unregistered_senders (channel_type, platform_id, user_id, sender_name, reason, messaging_group_id, agent_group_id, message_count, first_seen, last_seen)
        VALUES (@channel_type, @platform_id, @user_id, @sender_name, @reason, @messaging_group_id, @agent_group_id, 1, @now, @now)
        ON CONFLICT (channel_type, platform_id) DO UPDATE SET
          user_id = COALESCE(excluded.user_id, unregistered_senders.user_id),
@@ -33,12 +32,10 @@ export function recordDroppedMessage(msg: {
          reason = excluded.reason,
          message_count = unregistered_senders.message_count + 1,
          last_seen = excluded.last_seen`,
-    )
-    .run({ ...msg, now });
+    { ...msg, now },
+  );
 }
 
-export function getUnregisteredSenders(limit = 50): UnregisteredSender[] {
-  return getDb()
-    .prepare('SELECT * FROM unregistered_senders ORDER BY last_seen DESC LIMIT ?')
-    .all(limit) as UnregisteredSender[];
+export async function getUnregisteredSenders(limit = 50): Promise<UnregisteredSender[]> {
+  return getDb().all<UnregisteredSender>('SELECT * FROM unregistered_senders ORDER BY last_seen DESC LIMIT ?', limit);
 }

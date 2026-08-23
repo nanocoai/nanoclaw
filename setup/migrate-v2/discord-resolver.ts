@@ -117,11 +117,7 @@ export async function buildDiscordResolver(
   const channelToGuild = new Map<string, string>();
   for (const guild of guilds) {
     try {
-      const channels = await getJson<Channel[]>(
-        `${DISCORD_API}/guilds/${guild.id}/channels`,
-        token,
-        fetchImpl,
-      );
+      const channels = await getJson<Channel[]>(`${DISCORD_API}/guilds/${guild.id}/channels`, token, fetchImpl);
       for (const ch of channels) {
         channelToGuild.set(ch.id, guild.id);
       }
@@ -147,11 +143,7 @@ export async function buildDiscordResolver(
     if (seen.has(channelId)) continue;
     seen.add(channelId);
     try {
-      const ch = await getJson<ChannelInfo>(
-        `${DISCORD_API}/channels/${channelId}`,
-        token,
-        fetchImpl,
-      );
+      const ch = await getJson<ChannelInfo>(`${DISCORD_API}/channels/${channelId}`, token, fetchImpl);
       if (ch.type === CHANNEL_TYPE_DM || ch.type === CHANNEL_TYPE_GROUP_DM) {
         dmChannels.add(channelId);
       }

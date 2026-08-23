@@ -8,6 +8,23 @@ export interface AgentProvider {
    */
   readonly supportsNativeSlashCommands: boolean;
 
+  /**
+   * Optional capability: true when the provider surfaces EVERY assistant text
+   * segment as a streamed `text` event before the turn's `result` — so the
+   * result text is always a repeat of a segment that already streamed
+   * (empirically: the SDK result is exactly the last streamed segment). When
+   * declared, mid-turn streaming becomes the SINGLE content door: the
+   * poll-loop delivers complete <message> blocks at parse time from the
+   * streamed events (assembling blocks split across segments), and the
+   * final-result handler never delivers content — error results are
+   * surfaced, and a turn that delivered nothing while its result still
+   * carries content gets the wrap-nudge so the retry streams through the
+   * mid-turn door. Providers that omit this (or set false) keep the single
+   * result-door delivery path: text events are delivery-inert and blocks in
+   * the final result text are delivered from there.
+   */
+  readonly emitsMidTurnText?: boolean;
+
   /** Register shared memory through the provider's native session-start mechanism. */
   registerMemorySessionHook(hook: MemorySessionHookRegistration): void;
 
@@ -100,11 +117,28 @@ export interface QueryInput {
   };
 }
 
-export interface McpServerConfig {
-  command: string;
-  args: string[];
-  env: Record<string, string>;
-}
+export type McpServerConfig =
+  | {
+      type?: 'stdio';
+      command: string;
+      args?: string[];
+      env?: Record<string, string>;
+      /**
+       * Container-side root of the plugin this server shipped in, recorded by
+       * the host at stamp time. Consumed (and stripped) by plugin-mcp.ts,
+       * which expands ${PLUGIN_ROOT}/${PLUGIN_DATA} and injects both env vars
+       * before the config reaches a provider.
+       */
+      pluginRoot?: string;
+      /**
+       * Working directory for the server process. By the time a provider sees
+       * it, plugin-mcp.ts has resolved it to an absolute container path.
+       * A provider whose runtime cannot set a spawn directory must shim it
+       * (cwd-shim.ts) or drop it — never launch in the wrong directory.
+       */
+      cwd?: string;
+    }
+  | { type: 'http'; url: string; headers?: Record<string, string> };
 
 export interface AgentQuery {
   /** Push a follow-up message into the active query. */
@@ -129,8 +163,21 @@ export type ProviderEvent =
    * dropping it as un-wrapped scratchpad, and to skip the re-wrap nudge.
    */
   | { type: 'result'; text: string | null; isError?: boolean }
+  /**
+   * An assistant text segment emitted mid-turn (e.g. between tool calls).
+   * The SDK's final `result` carries only the LAST assistant text, so a
+   * complete <message to="..."> block composed before a trailing tool call
+   * never reaches the result event. For providers declaring
+   * `emitsMidTurnText`, the poll-loop scans these segments for closed
+   * message blocks and delivers them as they are emitted (chat runs only,
+   * with cross-segment assembly of split blocks); the final result never
+   * delivers content — repeats are inert there, and an undelivered turn
+   * gets the wrap-nudge instead.
+   */
+  | { type: 'text'; text: string }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
+  | { type: 'file'; path: string }
   /**
    * Liveness signal. Providers MUST yield this on every underlying SDK
    * event (tool call, thinking, partial message, anything) so the

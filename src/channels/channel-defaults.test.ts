@@ -5,6 +5,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup } from './adapter.js';
+import type { MessagingGroup } from '../types.js';
 
 function makeDefaults(marker: string, threads = true): ChannelDefaults {
   return {
@@ -181,11 +182,15 @@ describe('resolveWiringDefaults', () => {
     expect(resolveWiringDefaults('mock', true, 'C-3PO (dev)')).toEqual({
       engage_mode: 'pattern',
       engage_pattern: '\\bC-3PO \\(dev\\)',
+      session_mode: 'shared',
+      threads: null,
     });
     // DM context: no token, pattern passes through untouched.
     expect(resolveWiringDefaults('mock', false, 'C-3PO (dev)')).toEqual({
       engage_mode: 'pattern',
       engage_pattern: '.',
+      session_mode: 'shared',
+      threads: null,
     });
   });
 
@@ -221,6 +226,8 @@ describe('resolveWiringDefaults', () => {
     expect(resolveWiringDefaults('mock', true, 'Andy')).toEqual({
       engage_mode: 'mention',
       engage_pattern: null,
+      session_mode: 'shared',
+      threads: null,
     });
   });
 
@@ -234,6 +241,8 @@ describe('resolveWiringDefaults', () => {
     expect(resolveWiringDefaults('mock', true, 'Andy')).toEqual({
       engage_mode: 'mention-sticky',
       engage_pattern: null,
+      session_mode: 'shared',
+      threads: null,
     });
   });
 
@@ -245,6 +254,111 @@ describe('resolveWiringDefaults', () => {
     });
 
     expect(() => resolveWiringDefaults('mock', false, 'Andy')).toThrow(/without an engagePattern/);
+  });
+
+  it("a declared per-thread sessionMode always derives the threads=1 stamp (the field can't disagree)", async () => {
+    const { resolveWiringDefaults } = await withDeclaration({
+      dm: {
+        engageMode: 'pattern',
+        engagePattern: '.',
+        threads: false,
+        sessionMode: 'per-thread',
+        unknownSenderPolicy: 'public',
+      },
+      group: { engageMode: 'mention', threads: true, unknownSenderPolicy: 'strict' },
+      mentions: 'platform',
+    });
+
+    expect(resolveWiringDefaults('mock', false, 'Andy')).toEqual({
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      session_mode: 'per-thread',
+      threads: 1,
+    });
+    // No sessionMode declared in the group context → shared, threads NULL.
+    expect(resolveWiringDefaults('mock', true, 'Andy')).toEqual({
+      engage_mode: 'mention',
+      engage_pattern: null,
+      session_mode: 'shared',
+      threads: null,
+    });
+  });
+});
+
+describe('validateEngageAgainstChannel — per-thread/threads coherence (ncl update path)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(async () => {
+    const { teardownChannelAdapters } = await import('./channel-registry.js');
+    await teardownChannelAdapters();
+    vi.resetModules();
+  });
+
+  function makeMg(channelType: string, isGroup = false): MessagingGroup {
+    return {
+      id: 'mg-1',
+      channel_type: channelType,
+      platform_id: `${channelType}:@me:owner`,
+      name: 'Owner DM',
+      is_group: isGroup ? 1 : 0,
+      unknown_sender_policy: 'strict',
+      created_at: new Date().toISOString(),
+    };
+  }
+
+  async function withDeclaration(defaults?: ChannelDefaults) {
+    const reg = await import('./channel-registry.js');
+    reg.registerChannelAdapter('mock', { factory: () => null, ...(defaults ? { defaults } : {}) });
+    return import('./channel-defaults.js');
+  }
+
+  const dmThreadsFalse: ChannelDefaults = {
+    dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'public' },
+    group: { engageMode: 'mention', threads: true, unknownSenderPolicy: 'strict' },
+    mentions: 'platform',
+  };
+
+  it("rejects session_mode 'per-thread' when the inherited (NULL) thread policy resolves off", async () => {
+    const { validateEngageAgainstChannel } = await withDeclaration(dmThreadsFalse);
+
+    expect(() => validateEngageAgainstChannel({ session_mode: 'per-thread' }, makeMg('mock'))).toThrow(
+      /session_mode 'per-thread' requires honored thread ids/,
+    );
+  });
+
+  it("rejects an explicit threads=false alongside session_mode 'per-thread' even on a threads:true context", async () => {
+    const { validateEngageAgainstChannel } = await withDeclaration(dmThreadsFalse);
+
+    expect(() =>
+      validateEngageAgainstChannel({ session_mode: 'per-thread', threads: 0 }, makeMg('mock', true)),
+    ).toThrow(/explicit threads=false/);
+  });
+
+  it('accepts per-thread when the pairing is coherent (explicit threads=1, or a threads:true context)', async () => {
+    const { validateEngageAgainstChannel } = await withDeclaration(dmThreadsFalse);
+
+    // Explicit stamp beats the false dm inherit.
+    expect(() =>
+      validateEngageAgainstChannel({ session_mode: 'per-thread', threads: 1 }, makeMg('mock')),
+    ).not.toThrow();
+    // Group context inherits threads: true.
+    expect(() => validateEngageAgainstChannel({ session_mode: 'per-thread' }, makeMg('mock', true))).not.toThrow();
+    // Non-per-thread modes are untouched by the check.
+    expect(() => validateEngageAgainstChannel({ session_mode: 'shared', threads: 0 }, makeMg('mock'))).not.toThrow();
+  });
+
+  it('stays lenient on the inherit arm for undeclared (stale) adapters, but still rejects an explicit threads=false', async () => {
+    const { validateEngageAgainstChannel } = await withDeclaration(undefined);
+
+    // The conservative fallback declaration has threads:false, but rejecting
+    // on it would wrongly block offline-managed wirings — mirror the mention
+    // checks' hasDeclaredChannelDefaults gate.
+    expect(() => validateEngageAgainstChannel({ session_mode: 'per-thread' }, makeMg('mock'))).not.toThrow();
+    expect(() => validateEngageAgainstChannel({ session_mode: 'per-thread', threads: 0 }, makeMg('mock'))).toThrow(
+      /session_mode 'per-thread' requires honored thread ids/,
+    );
   });
 });
 

@@ -4,6 +4,7 @@ import type { Migration } from './index.js';
 export const migration014: Migration = {
   version: 14,
   name: 'container-configs',
+  sqliteOnly: true,
   up(db: Database.Database) {
     db.exec(`
       CREATE TABLE container_configs (

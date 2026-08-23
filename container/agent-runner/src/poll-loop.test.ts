@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { isCorruptionError, processQuery } from './poll-loop.js';
+import { processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 import type { AgentQuery, ProviderEvent } from './providers/types.js';
 
@@ -296,10 +296,13 @@ describe('mock provider', () => {
     }
 
     const typed = events.filter((e) => e.type !== 'activity');
-    expect(typed.length).toBeGreaterThanOrEqual(2);
+    expect(typed.length).toBeGreaterThanOrEqual(3);
     expect(typed[0].type).toBe('init');
-    expect(typed[1].type).toBe('result');
-    expect((typed[1] as { text: string }).text).toBe('Echo: Hello');
+    // The mock declares emitsMidTurnText, so the turn's text streams as a
+    // text event before the result repeats it.
+    expect(typed[1].type).toBe('text');
+    expect(typed[2].type).toBe('result');
+    expect((typed[2] as { text: string }).text).toBe('Echo: Hello');
   });
 
   it('should handle push() during active query', async () => {
@@ -354,7 +357,7 @@ describe('end-to-end with mock provider', () => {
 
     for await (const event of query.events) {
       if (event.type === 'result' && event.text) {
-        writeMessageOut({
+        await writeMessageOut({
           id: `out-${Date.now()}`,
           in_reply_to: routing.inReplyTo,
           kind: 'chat',
@@ -411,6 +414,34 @@ const ERR_ROUTING = {
   inReplyTo: 'm1',
 };
 
+it('does not push accumulated-only follow-ups into an active query', async () => {
+  const pushes: string[] = [];
+
+  async function* events(): AsyncGenerator<ProviderEvent> {
+    yield { type: 'init', continuation: 'sess-1' };
+    insertMessage('m1', 'chat', { sender: 'A', text: 'context only' }, { trigger: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 750));
+  }
+
+  await processQuery(
+    {
+      push: (message) => pushes.push(message),
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    },
+    ERR_ROUTING,
+    [],
+    'claude',
+    undefined,
+    'prompt',
+    undefined,
+  );
+
+  expect(pushes).toHaveLength(0);
+  expect(getPendingMessages().map((m) => m.id)).toEqual(['m1']);
+});
+
 describe('error result with no <message> envelope', () => {
   it('delivers a budget/billing error to the triggering channel and does not nudge', async () => {
     const budgetText = 'Spending limit reached. Add your own key at https://example.com/keys';
@@ -435,23 +466,6 @@ describe('error result with no <message> envelope', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
     expect(pushes).toHaveLength(1);
     expect(pushes[0]).toContain('was not delivered');
-  });
-});
-
-describe('isCorruptionError', () => {
-  it('matches the Docker Desktop macOS torn-read symptom', () => {
-    expect(isCorruptionError('database disk image is malformed')).toBe(true);
-  });
-
-  it('matches wrapped SQLite corruption codes', () => {
-    expect(isCorruptionError('SqliteError: SQLITE_CORRUPT_VTAB: ...')).toBe(true);
-    expect(isCorruptionError('file is not a database')).toBe(true);
-  });
-
-  it('returns false for unrelated errors', () => {
-    expect(isCorruptionError('database is locked')).toBe(false);
-    expect(isCorruptionError('no such table: messages_in')).toBe(false);
-    expect(isCorruptionError('')).toBe(false);
   });
 });
 
@@ -505,9 +519,20 @@ describe('task-run turn wiring (real processQuery)', () => {
       // A SECOND task run lands while the query is open — the follow-up poller
       // pushes it and must reset the per-turn correction state.
       insertMessage('t2', 'task', { prompt: 'fire two' });
-      const deadline = Date.now() + 5000;
+      // The poller ticks every ACTIVE_POLL_INTERVAL_MS (500ms), so this
+      // normally resolves in well under a second. The generous deadline is
+      // for slow shared CI runners — and it must stay well below the test's
+      // own timeout (set below), so exhaustion fails on the diagnostic throw
+      // rather than a mute test timeout.
+      const deadline = Date.now() + 15_000;
       while (!pushes.some((p) => p.includes('fire two')) && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 50));
+      }
+      if (!pushes.some((p) => p.includes('fire two'))) {
+        throw new Error(
+          `follow-up poller never pushed the second task run within 15s; ` +
+            `pushes seen (${pushes.length}): ${JSON.stringify(pushes.map((p) => p.slice(0, 80)))}`,
+        );
       }
 
       // Turn 2 repeats the mistake. This receives a second independent nudge
@@ -538,5 +563,8 @@ describe('task-run turn wiring (real processQuery)', () => {
     expect(logs[1]).toContain('[undelivered → local-cli] fire two result');
     expect(logs).not.toContain('first delivery decision handled');
     expect(logs).not.toContain('second delivery decision handled');
-  });
+    // Explicit budget: the default 5s equalled the old inner deadline, so on
+    // slow runners the test died as a mute timeout instead of reaching the
+    // diagnostic throw above (observed consistently on CI-hosted runners).
+  }, 20_000);
 });

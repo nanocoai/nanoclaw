@@ -68,7 +68,7 @@ Message history (v1 `messages` table, v1 `chats` table) is **not migrated**. The
 - `series_id` — groups recurring occurrences; set to the task id on first insert
 - `status` — `pending` | `processing` | `completed` | `failed` | `paused`
 
-The public API is `insertTask()` in `src/modules/scheduling/db.ts`. Recurrence is computed in the user's TZ via `cron-parser` (see `src/modules/scheduling/recurrence.ts`). The migration maps v1's `schedule_type`+`schedule_value` pair into a single cron string before calling `insertTask()`.
+The public task API is the mailbox contract. The SQLite implementation lives in `src/mailbox/sqlite/tasks.ts`. Recurrence is computed in the user's TZ via `cron-parser` (see `src/modules/scheduling/recurrence.ts`).
 
 Tasks can exist before a session is awake — the host sweep creates/wakes the container on the first due tick.
 

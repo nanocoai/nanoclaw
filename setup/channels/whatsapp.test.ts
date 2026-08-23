@@ -25,13 +25,11 @@ function runFence(pred: (d: Directive) => boolean): Directive {
 
 // Substitute {{vars}} the way the engine does, then run through bash -c in cwd.
 function bash(body: string[], vars: Record<string, string>, cwd: string): string {
-  const cmd = body
-    .join('\n')
-    .replace(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g, (_, name) => {
-      const v = vars[name];
-      if (v === undefined) throw new Error(`unresolved {{${name}}}`);
-      return v;
-    });
+  const cmd = body.join('\n').replace(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g, (_, name) => {
+    const v = vars[name];
+    if (v === undefined) throw new Error(`unresolved {{${name}}}`);
+    return v;
+  });
   return execFileSync('bash', ['-c', cmd], { cwd, encoding: 'utf-8' });
 }
 
@@ -91,7 +89,9 @@ describe('.env write fences (replace, not append)', () => {
   it('a mode-switching re-run replaces the flag — no stale true left behind', () => {
     bash(dedicated.body, {}, dir);
     bash(shared.body, {}, dir);
-    const lines = env().split('\n').filter((l) => l.startsWith('ASSISTANT_HAS_OWN_NUMBER='));
+    const lines = env()
+      .split('\n')
+      .filter((l) => l.startsWith('ASSISTANT_HAS_OWN_NUMBER='));
     expect(lines).toEqual(['ASSISTANT_HAS_OWN_NUMBER=false']);
     expect(env()).not.toContain('=true');
   });

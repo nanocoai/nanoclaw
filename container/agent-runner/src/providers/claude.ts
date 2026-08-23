@@ -4,9 +4,10 @@ import path from 'path';
 
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
-import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
+import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
+import { shimCwd } from './cwd-shim.js';
 import { registerProvider } from './provider-registry.js';
 import type {
   AgentProvider,
@@ -73,18 +74,25 @@ export function classifyRateLimitEvent(
 // - AskUserQuestion: SDK returns a placeholder instead of blocking on a
 //   real answer — we have mcp__nanoclaw__ask_user_question that persists
 //   the question and blocks on the real reply.
+// - SendMessage: addresses Claude Code's own in-session subagents, which are
+//   unrelated to NanoClaw agent groups — but the name reads as the obvious
+//   way to message another agent, so an agent that just called
+//   mcp__nanoclaw__create_agent reaches for it and gets "No agent named 'x'
+//   is currently addressable". mcp__nanoclaw__send_message is the real
+//   agent-to-agent path (it resolves the destination map in inbound.db).
 // - EnterPlanMode / ExitPlanMode / EnterWorktree / ExitWorktree: Claude
 //   Code UI affordances; in a headless container they'd appear stuck.
 // - DesignSync: desktop design-tool integration — nothing to sync with in a
 //   headless container (~9.3KB/turn schema).
 // - ReportFindings: code-review-reporting UI affordance with no headless
 //   host surface to receive it (~1.9KB/turn schema).
-const SDK_DISALLOWED_TOOLS = [
+export const SDK_DISALLOWED_TOOLS = [
   'CronCreate',
   'CronDelete',
   'CronList',
   'ScheduleWakeup',
   'AskUserQuestion',
+  'SendMessage',
   'EnterPlanMode',
   'ExitPlanMode',
   'EnterWorktree',
@@ -98,7 +106,7 @@ const SDK_DISALLOWED_TOOLS = [
 // added via `add_mcp_server` (or wired in container.json directly) is
 // reachable to the agent — without this, the SDK's allowedTools filter
 // silently drops every MCP namespace not listed here.
-const TOOL_ALLOWLIST = [
+export const TOOL_ALLOWLIST = [
   'Bash',
   'Read',
   'Write',
@@ -112,7 +120,6 @@ const TOOL_ALLOWLIST = [
   'TaskStop',
   'TeamCreate',
   'TeamDelete',
-  'SendMessage',
   'TodoWrite',
   'ToolSearch',
   'Skill',
@@ -455,6 +462,21 @@ const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not fou
 
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
+  /**
+   * Static capability, not runtime state: this provider yields a `text`
+   * event for every assistant message that carries non-empty text (see the
+   * assistant-message branch in query() — one event per message, text blocks
+   * joined). The SDK's result text repeats the final assistant message's
+   * text, so the final result is expected to repeat an already-streamed
+   * segment. NOTE this containment is an SDK premise, not something this
+   * provider enforces: the result event's text is taken verbatim from the
+   * SDK's own `result` / `errors[]` fields, which the provider cannot prove
+   * equal to streamed content. The poll-loop keys its one-door mid-turn
+   * delivery on this flag; the result door never delivers content — if the
+   * streaming door missed everything (premise violation), the poll-loop
+   * fires the wrap-nudge so the model re-sends through the mid-turn door.
+   */
+  readonly emitsMidTurnText = true;
 
   private assistantName?: string;
   private mcpServers: Record<string, McpServerConfig>;
@@ -466,7 +488,9 @@ export class ClaudeProvider implements AgentProvider {
 
   constructor(options: ProviderOptions = {}) {
     this.assistantName = options.assistantName;
-    this.mcpServers = options.mcpServers ?? {};
+    this.mcpServers = Object.fromEntries(
+      Object.entries(options.mcpServers ?? {}).map(([name, server]) => [name, shimCwd(server)]),
+    );
     this.additionalDirectories = options.additionalDirectories;
     this.model = options.model;
     this.effort = options.effort;
@@ -571,6 +595,32 @@ export class ClaudeProvider implements AgentProvider {
 
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };
+        } else if (message.type === 'assistant') {
+          // Surface each assistant message's text as it streams in. The final
+          // `result` event only carries the LAST assistant text — a wrapped
+          // <message> block composed between tool calls would otherwise be
+          // invisible to the poll-loop and silently lost.
+          //
+          // ONE text event per assistant message, joining its text blocks in
+          // content order ('' separator — the blocks are adjacent output).
+          // Emitting per-BLOCK events would hand the poll-loop's block parser
+          // fragments: a <message> block (or an <internal> span) spanning two
+          // text blocks of the same assistant message would look unterminated
+          // in each event, while the turn's result text — which reports the
+          // final message's text as a whole — could still contain it complete.
+          // Joining pins the containment premise at the granularity the
+          // result reports. Blocks split across ASSISTANT MESSAGES (a tool
+          // call between them) remain unparseable mid-turn by design; the
+          // poll-loop's midTurnSent===0 fallback and wrap-nudge cover that.
+          const content = (message as { message?: { content?: Array<{ type?: string; text?: string }> } }).message
+            ?.content;
+          if (Array.isArray(content)) {
+            const text = content
+              .filter((block) => block.type === 'text' && block.text)
+              .map((block) => block.text)
+              .join('');
+            if (text) yield { type: 'text', text };
+          }
         } else if (message.type === 'result') {
           // `result` text exists only on subtype:"success"; error subtypes
           // (e.g. a non-retryable 403 billing_error) carry their message in

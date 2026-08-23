@@ -32,6 +32,7 @@ import { parseDirectives, promptVar } from '../../scripts/skill-directives.js';
 import { extractOfferUrl, gatePolicy } from '../../scripts/skill-policy.js';
 import * as setupLog from '../logs.js';
 import { isHeadless } from '../platform.js';
+import { emitStatus } from '../status.js';
 import { openUrl } from './browser.js';
 import { isHelpEscape, offerClaudeHandoff, validateWithHelpEscape } from './claude-handoff.js';
 import { startSpinner } from './runner.js';
@@ -92,7 +93,9 @@ export interface PrompterContext {
  * against the prompt's declared `validate:`/`flags:` (the engine's
  * validate-at-bind is the programmatic backstop, not the UX).
  */
-export function clackResolveInput(ctx: PrompterContext = {}): (name: string, meta: InputMeta) => Promise<string | undefined> {
+export function clackResolveInput(
+  ctx: PrompterContext = {},
+): (name: string, meta: InputMeta) => Promise<string | undefined> {
   // The `?` help-escape is only meaningful at a real terminal: it hands the
   // operator off to an interactive Claude session (stdio inherited). In a
   // headless / non-TTY run nobody can type `?` into a clack prompt anyway, and
@@ -105,10 +108,14 @@ export function clackResolveInput(ctx: PrompterContext = {}): (name: string, met
     const guarded = validateWithHelpEscape(check);
     // clearOnError wipes a rejected secret so the operator re-pastes cleanly
     // (a half-pasted token isn't left masked in the field).
-    // An either/or prompt renders as an arrow-key select — the options come
-    // straight from the validate regex (literalChoices). No re-ask loop and no
-    // `?` help-escape there: every choice is valid and self-describing.
-    const choices = meta.secret ? null : literalChoices(meta.validate);
+    // An either/or prompt renders as an arrow-key select — options come from
+    // an explicit `choices:` attr when declared (validate may accept MORE
+    // values than are offered, for modes that only arrive via pre-bound
+    // inputs), else straight from the validate regex (literalChoices). No
+    // re-ask loop and no `?` help-escape there: every choice is valid and
+    // self-describing.
+    const declared = meta.choices?.split('|').filter(Boolean);
+    const choices = meta.secret ? null : declared?.length ? declared : literalChoices(meta.validate);
     const ans = choices
       ? await p.select({ message: meta.question, options: choices.map((c) => ({ value: c, label: c })) })
       : meta.secret
@@ -234,7 +241,8 @@ async function reuseFromEnv(
     // stale credential that no longer matches the declared shape is never
     // offered — prompting fresh beats a loud validate-at-bind dead-end.
     const shape = promptShape.get(v);
-    if (shape?.validate && !new RegExp(shape.validate, shape.flags).test(normalizeValue(existing, shape.normalize))) continue;
+    if (shape?.validate && !new RegExp(shape.validate, shape.flags).test(normalizeValue(existing, shape.normalize)))
+      continue;
     if (await confirm(`Found an existing ${key} (${maskValue(existing)}). Use it?`)) reuse[v] = existing;
   }
   return reuse;
@@ -274,14 +282,22 @@ export function hostExec(projectRoot: string, rawLog?: string): (cmd: string) =>
       });
       let out = '';
       let err = '';
-      child.stdout.on('data', (c: Buffer) => { out += c.toString('utf8'); });
-      child.stderr.on('data', (c: Buffer) => { err += c.toString('utf8'); });
+      child.stdout.on('data', (c: Buffer) => {
+        out += c.toString('utf8');
+      });
+      child.stderr.on('data', (c: Buffer) => {
+        err += c.toString('utf8');
+      });
       child.on('error', reject);
       child.on('close', (code) => {
         tee(cmd, out, err);
         if (code === 0) return resolve(out);
         const stderr = err.trim();
-        const head = stderr.split('\n').map((l) => l.trim()).find(Boolean) ?? 'command failed';
+        const head =
+          stderr
+            .split('\n')
+            .map((l) => l.trim())
+            .find(Boolean) ?? 'command failed';
         reject(new Error(`exit ${code ?? '?'}: ${head}${stderr ? `\n${stderr}` : ''}`));
       });
     });
@@ -325,8 +341,15 @@ export function hostExecStream(projectRoot: string): (cmd: string) => Promise<St
         while ((idx = buf.indexOf('\n')) !== -1) {
           const line = buf.slice(0, idx);
           buf = buf.slice(idx + 1);
-          if (/^=== NANOCLAW SETUP: \S+ ===/.test(line)) { current = { fields: {} }; continue; }
-          if (line.startsWith('=== END ===')) { if (current) blocks.push(current); current = null; continue; }
+          if (/^=== NANOCLAW SETUP: \S+ ===/.test(line)) {
+            current = { fields: {} };
+            continue;
+          }
+          if (line.startsWith('=== END ===')) {
+            if (current) blocks.push(current);
+            current = null;
+            continue;
+          }
           if (current) {
             const c = line.indexOf(':');
             if (c > 0) current.fields[line.slice(0, c).trim()] = line.slice(c + 1).trim();
@@ -402,17 +425,32 @@ function defaultOnEvent(
   const gates = gatePolicy(md);
   const ordinals = labelOrdinals(md);
   let active: ReturnType<typeof startSpinner> | null = null;
+  // Non-TTY (CI, a pipeline log, or a nested apply whose stdout is the parent
+  // driver's tee): a spinner can't animate, but silence is worse — a two-minute
+  // image build with no line at all reads as a hang. Print one plain line per
+  // finished step instead, with the same caption and timing the spinner shows.
+  let plain: { base: string; start: number } | null = null;
   return async (e) => {
     if (e.type === 'step-start') {
-      if (!process.stdout.isTTY || e.label === null) return; // quiet: non-TTY, or instant/cheap step
+      if (e.label === null) return; // instant/cheap step — no caption declared
       const base = e.label.replace(/…+$/, '') + (ordinals.get(e.line) ?? '');
+      if (!process.stdout.isTTY) {
+        plain = { base, start: Date.now() };
+        return;
+      }
       active = startSpinner({ running: `${base}…`, done: base, failed: `${base} failed` });
       return;
     }
     if (e.type === 'step-end') {
-      if (!active) return; // never started a spinner for this one
-      active.stop({ ok: e.ok });
-      active = null;
+      if (active) {
+        active.stop({ ok: e.ok });
+        active = null;
+      } else if (plain) {
+        const line = `${plain.base}${e.ok ? '' : ' failed'} ${plainDuration(Date.now() - plain.start)}`;
+        if (e.ok) p.log.success(line);
+        else p.log.error(line);
+        plain = null;
+      }
       return;
     }
     // operator: note → URL offer → natural-barrier confirm.
@@ -426,8 +464,14 @@ function defaultOnEvent(
   };
 }
 
+/** `(3s)` / `(1m 42s)` — the spinner's timing suffix, for the plain non-TTY step line. */
+export function plainDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s >= 60 ? `(${Math.floor(s / 60)}m ${s % 60}s)` : `(${s}s)`;
+}
+
 /** Fork-aware registry-branch remote (same resolver setup/channels/slack.ts uses). */
-function channelsRemote(projectRoot: string): () => string {
+export function channelsRemote(projectRoot: string): () => string {
   return () =>
     execSync('source setup/lib/channels-remote.sh; resolve_channels_remote', {
       cwd: projectRoot,
@@ -529,6 +573,18 @@ export async function runSkill(skillDir: string, opts: RunSkillOptions = {}): Pr
   });
 }
 
+/**
+ * The CLI's machine-readable verdict for one apply. A skill can nest another
+ * skill's apply as an `nc:run effect:step` (e.g. /add-dial offering
+ * /add-dial-tool): the streaming exec resolves a step from its terminal
+ * `=== NANOCLAW SETUP: … ===` block AND a zero exit, so the CLI emits both — a
+ * partial apply (deferred input, a bounced directive) is `failed` and exits 1
+ * instead of reading as success to a caller that can only see the exit code.
+ */
+export function applyOutcome(res: ApplyResult): { status: 'success' | 'failed'; exitCode: 0 | 1 } {
+  return fullyApplied(res) ? { status: 'success', exitCode: 0 } : { status: 'failed', exitCode: 1 };
+}
+
 // CLI: pnpm exec tsx setup/lib/skill-driver.ts <skillDir>   — apply a skill interactively.
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
   void (async () => {
@@ -546,5 +602,13 @@ if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
       for (const t of res.agentTasks) p.log.warn(`Needs an agent (${t.kind}): ${t.reason}`);
       p.outro('Applied with gaps — see above.');
     }
+    const outcome = applyOutcome(res);
+    emitStatus('SKILL_APPLY', {
+      STATUS: outcome.status,
+      SKILL: skillDir,
+      DEFERRED: res.deferred.length,
+      AGENT_TASKS: res.agentTasks.length,
+    });
+    process.exitCode = outcome.exitCode;
   })();
 }

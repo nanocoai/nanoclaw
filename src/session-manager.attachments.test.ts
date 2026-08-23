@@ -40,14 +40,14 @@ function now(): string {
   return new Date().toISOString();
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
 
-  const db = initTestDb();
-  runMigrations(db);
+  const db = await initTestDb();
+  await runMigrations(db);
 
-  createAgentGroup({ id: AG, name: 'SaveAtt', folder: 'saveatt', agent_provider: null, created_at: now() });
+  await createAgentGroup({ id: AG, name: 'SaveAtt', folder: 'saveatt', agent_provider: null, created_at: now() });
   const sess: Session = {
     id: SESS,
     agent_group_id: AG,
@@ -59,17 +59,17 @@ beforeEach(() => {
     last_active: null,
     created_at: now(),
   };
-  createSession(sess);
+  await createSession(sess);
   initSessionFolder(AG, SESS);
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
 describe('extractAttachmentFiles — inbox-root symlink containment (#2828 sibling)', () => {
-  it('does not write an attachment outside the session root via a symlinked inbox root', () => {
+  it('does not write an attachment outside the session root via a symlinked inbox root', async () => {
     // Attacker-controlled location outside the session sandbox.
     const canaryDir = path.join(TEST_DIR, 'canary-outside');
     fs.mkdirSync(canaryDir, { recursive: true });
@@ -84,7 +84,7 @@ describe('extractAttachmentFiles — inbox-root symlink containment (#2828 sibli
       attachments: [{ name: 'pwn.txt', data: Buffer.from('attacker-bytes').toString('base64') }],
     });
 
-    writeSessionMessage(AG, SESS, {
+    await writeSessionMessage(AG, SESS, {
       id: 'evil-inbox-root',
       kind: 'chat',
       timestamp: now(),

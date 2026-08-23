@@ -33,9 +33,7 @@ db.exec(`
 `);
 
 // Insert test message
-db.prepare(
-  `INSERT INTO messages_in (id, kind, timestamp, status, content) VALUES (?, 'chat', ?, 'pending', ?)`,
-).run(
+db.prepare(`INSERT INTO messages_in (id, kind, timestamp, status, content) VALUES (?, 'chat', ?, 'pending', ?)`).run(
   'test-1',
   new Date().toISOString(),
   JSON.stringify({ sender: 'Gavriel', text: 'Say "Hello from v2!" and nothing else. Do not use any tools.' }),
@@ -47,7 +45,7 @@ db.close();
 process.env.SESSION_DB_PATH = DB_PATH;
 process.env.AGENT_PROVIDER = 'claude';
 
-const { getInboundDb, closeSessionDb } = await import('../container/agent-runner/src/db/connection.js');
+const { getInboundDb, closeSessionDb } = await import('../container/agent-runner/src/mailbox/sqlite/connection.js');
 const { getUndeliveredMessages } = await import('../container/agent-runner/src/db/messages-out.js');
 const { getPendingMessages } = await import('../container/agent-runner/src/db/messages-in.js');
 const { createProvider } = await import('../container/agent-runner/src/providers/factory.js');
