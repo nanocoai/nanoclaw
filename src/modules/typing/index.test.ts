@@ -1,12 +1,14 @@
 /**
- * Typing-refresh instance forwarding tests.
+ * Typing-refresh tests: instance forwarding and per-channel cadence.
  *
  * Three tick sites can fire setTyping — the immediate tick on a new
- * refresher, the 4s interval tick, and the immediate re-trigger when
+ * refresher, the interval tick (period derived from the adapter's typingTimeoutMs), and the immediate re-trigger when
  * startTypingRefresh is called for an already-refreshing session. All three
  * must forward the adapter instance, or a named instance's typing indicator
  * fires through the wrong bot.
  */
+import fs from 'fs';
+
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 
 vi.mock('../../config.js', async () => {
@@ -18,12 +20,13 @@ import { setTypingAdapter, startTypingRefresh, stopTypingRefresh } from './index
 
 type Call = { channelType: string; platformId: string; threadId: string | null; instance?: string };
 
-function captureAdapter() {
+function captureAdapter(timeouts: Record<string, number> = {}) {
   const calls: Call[] = [];
   setTypingAdapter({
     async setTyping(channelType, platformId, threadId, instance) {
       calls.push({ channelType, platformId, threadId, instance });
     },
+    typingTimeoutMs: (channelType) => timeouts[channelType],
   });
   return calls;
 }
@@ -119,5 +122,52 @@ describe('startTypingRefresh — instance forwarding', () => {
         instance: 'telegram',
       });
     }
+  });
+});
+
+describe('startTypingRefresh: per-channel cadence', () => {
+  beforeEach(() => {
+    // Past the 15 s grace window the refresher only keeps going while the
+    // heartbeat is fresh; hold it fresh for the whole window.
+    vi.spyOn(fs, 'statSync').mockImplementation(() => ({ mtimeMs: Date.now() }) as fs.Stats);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('re-fires 20% before the adapter-declared timeout expires', async () => {
+    const calls = captureAdapter({ 'whatsapp-cloud': 25_000 });
+    startTypingRefresh('sess-1', 'ag-1', 'whatsapp-cloud', 'wa:1', null);
+    await vi.advanceTimersByTimeAsync(0);
+    calls.length = 0;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls).toHaveLength(3); // 25 s timeout -> every 20 s
+  });
+
+  it('re-fires every 4 s when the adapter declares nothing (5 s default timeout)', async () => {
+    const calls = captureAdapter();
+    startTypingRefresh('sess-1', 'ag-1', 'telegram', 'tg:1', null);
+    await vi.advanceTimersByTimeAsync(0);
+    calls.length = 0;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls).toHaveLength(15);
+  });
+
+  it('re-trigger from a channel with a different timeout switches the cadence', async () => {
+    const calls = captureAdapter({ 'whatsapp-cloud': 25_000 });
+    startTypingRefresh('sess-1', 'ag-1', 'telegram', 'tg:1', null);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Agent-shared session re-triggered from the slower platform: the 4 s
+    // refresher must be re-armed at 20 s, not left as-is.
+    startTypingRefresh('sess-1', 'ag-1', 'whatsapp-cloud', 'wa:1', null);
+    await vi.advanceTimersByTimeAsync(0);
+    calls.length = 0;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(calls).toHaveLength(3);
   });
 });

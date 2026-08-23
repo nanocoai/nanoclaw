@@ -238,6 +238,19 @@ describe('channel registry — instance keying', () => {
     );
     expect(tester.delivered).toHaveLength(1);
   });
+
+  it('reports the exact-key adapter declared typing timeout through the delivery bridge', async () => {
+    const reg = await import('./channel-registry.js');
+    reg.registerChannelAdapter('whatsapp-cloud', {
+      factory: () => ({ ...createMockAdapter('whatsapp', 'whatsapp-cloud'), typingTimeoutMs: 25_000 }),
+    });
+    reg.registerChannelAdapter('whatsapp', { factory: () => createMockAdapter('whatsapp') });
+    await reg.initChannelAdapters(mockSetup);
+
+    const bridge = reg.createChannelDeliveryAdapter();
+    expect(bridge.typingTimeoutMs?.('whatsapp', 'whatsapp-cloud')).toBe(25_000);
+    expect(bridge.typingTimeoutMs?.('whatsapp')).toBeUndefined();
+  });
 });
 
 describe('channel + router integration', () => {

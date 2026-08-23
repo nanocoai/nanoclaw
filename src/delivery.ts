@@ -71,6 +71,8 @@ export interface ChannelDeliveryAdapter {
     status?: string,
     statusKind?: 'auto' | 'agent',
   ): Promise<void>;
+  /** The adapter's declared typing-indicator lifetime (`ChannelAdapter.typingTimeoutMs`); undefined = host default. */
+  typingTimeoutMs?(channelType: string, instance?: string): number | undefined;
 }
 
 let deliveryAdapter: ChannelDeliveryAdapter | null = null;

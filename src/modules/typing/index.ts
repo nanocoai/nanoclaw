@@ -21,7 +21,10 @@ import fs from 'fs';
 
 import { heartbeatPath } from '../../session-manager.js';
 
-const TYPING_REFRESH_MS = 4000;
+/** Lifetime of a platform's typing indicator when the adapter declares none (`ChannelAdapter.typingTimeoutMs`; Telegram ~5 s). */
+const DEFAULT_TYPING_TIMEOUT_MS = 5000;
+/** Re-fire this fraction of the lifetime before it expires: 5 s -> 4 s, WhatsApp Cloud 25 s -> 20 s. */
+const TYPING_REFRESH_BUFFER = 0.2;
 /**
  * Grace window from startTypingRefresh: fire typing unconditionally
  * for this long regardless of heartbeat state. Covers container
@@ -46,6 +49,7 @@ const POST_DELIVERY_PAUSE_MS = 10000;
 
 interface TypingAdapter {
   setTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
+  typingTimeoutMs?(channelType: string, instance?: string): number | undefined;
 }
 
 interface TypingTarget {
@@ -105,28 +109,13 @@ export function startTypingRefresh(
   threadId: string | null,
   instance?: string,
 ): void {
-  const existing = typingRefreshers.get(sessionId);
-  if (existing) {
-    // Already refreshing. Fire an immediate tick for the new inbound
-    // event and reset the grace window — the new message restarts
-    // the container-wake latency budget. Also clear any lingering
-    // post-delivery pause: a new inbound means the user expects
-    // typing to show immediately.
-    triggerTyping(channelType, platformId, threadId, instance).catch(() => {});
-    existing.startedAt = Date.now();
-    existing.pausedUntil = 0;
-    // Keep the stored entry self-consistent: a re-trigger can arrive from
-    // a different chat address (agent-shared sessions span messaging
-    // groups, possibly on different platforms/instances), so the address
-    // fields and the owning instance must move together — a torn entry
-    // (old address + new instance) would hand e.g. a telegram platformId
-    // to a Slack instance's setTyping on the next interval tick.
-    existing.channelType = channelType;
-    existing.platformId = platformId;
-    existing.threadId = threadId;
-    existing.instance = instance;
-    return;
-  }
+  // A re-trigger (new inbound for a session already refreshing, possibly from
+  // another channel in an agent-shared session) restarts the refresher:
+  // immediate tick, fresh grace window, interval re-armed at this channel's cadence.
+  stopTypingRefresh(sessionId);
+  const timeout = adapter?.typingTimeoutMs?.(channelType, instance) ?? DEFAULT_TYPING_TIMEOUT_MS;
+  // Floor guards a zero/negative declaration from becoming a hot loop on the platform's typing endpoint.
+  const period = Math.max(1_000, Math.round(timeout * (1 - TYPING_REFRESH_BUFFER)));
 
   // Immediate tick + periodic refresh.
   triggerTyping(channelType, platformId, threadId, instance).catch(() => {});
@@ -149,7 +138,7 @@ export function startTypingRefresh(
     // Out of grace AND heartbeat stale — agent is idle, stop refreshing.
     clearInterval(entry.interval);
     typingRefreshers.delete(sessionId);
-  }, TYPING_REFRESH_MS);
+  }, period);
   // unref so a stale refresher can't hold the event loop alive.
   interval.unref();
   typingRefreshers.set(sessionId, {
