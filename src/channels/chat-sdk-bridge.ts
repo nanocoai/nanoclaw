@@ -103,7 +103,7 @@ function appContextKey(instance: string, channelId: string, userId: string): str
 
 /**
  * Derive ordered entities from an SDK assistant event. The installed chat
- * core (4.29.0) parses assistant_thread_started / app_context_changed into a
+ * core (4.32.0) parses assistant_thread_started / app_context_changed into a
  * `context` object (channelId/teamId/threadEntryPoint — the legacy assistant
  * context shape) with no entities array; prefer a real `entities` array
  * whenever a future SDK forwards the platform's ordered agent-context
@@ -213,7 +213,7 @@ export type ReplyContextExtractor = (raw: Record<string, any>) => ReplyContext |
  * A member joined (or left) a channel/group conversation one of our bridge
  * instances is in. Forwarded from the Chat SDK's member_joined_channel
  * dispatch; `left` is reserved for member_left_channel, which the installed
- * chat core (4.29.0) does NOT dispatch — see the TODO at the
+ * chat core (4.32.0) does NOT dispatch — see the TODO at the
  * onMemberJoinedChannel registration in setup().
  */
 export interface MembershipEvent {
@@ -606,7 +606,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       });
 
       // Agent-mode assistant context: cache the latest "what the user is
-      // viewing" per (channel, user). The installed chat core (4.29.0)
+      // viewing" per (channel, user). The installed chat core (4.32.0)
       // dispatches both the legacy assistant_thread_started and the
       // agent_view app_context_changed events into these handlers.
       const rememberAppContext = (event: AssistantThreadStartedEvent | AssistantContextChangedEvent): void => {
@@ -622,7 +622,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // channel type (setMembershipHandler); no-op when none is registered.
       // The chat core dispatches only member_joined_channel;
       // member_left_channel arrives at the adapter but has no SDK handler
-      // in 4.29.0.
+      // in 4.32.0.
       // TODO(member-left): when the chat core grows an onMemberLeftChannel
       // dispatch, register it here and forward with { left: true } — the
       // MembershipEvent type and dispatchMembership already carry it.

@@ -6,8 +6,8 @@ description: Add Telegram channel integration via Chat SDK.
 # Add Telegram Channel
 
 Adds Telegram bot support via the Chat SDK bridge. NanoClaw doesn't ship
-channels in trunk — this skill copies the Telegram adapter, its
-formatting/pairing helpers, and their tests in from the `channels` branch. The
+channels in trunk — this skill copies the Telegram adapter, its pairing helper,
+and their tests in from the `channels` branch. The
 `pair-telegram` setup step is maintained in trunk, so it is not copied here.
 
 The mechanical steps under **Apply** carry `nc:` directive fences: an agent
@@ -19,17 +19,18 @@ safe to re-run; anything a parser can't apply falls back to the prose beside it.
 
 ### 1. Copy the adapter, helpers, and tests
 
-Fetch the `channels` branch and copy the Telegram adapter, its pairing and
-markdown-sanitize helpers (with their tests), and the registration test into
-place (overwrite — the branch is canonical):
+Fetch the `channels` branch and copy the Telegram adapter, its pairing helper
+(with its test), and the focused adapter tests into place (overwrite — the
+branch is canonical):
 
 ```nc:copy from-branch:channels
 src/channels/telegram.ts
 src/channels/telegram-pairing.ts
 src/channels/telegram-pairing.test.ts
-src/channels/telegram-markdown-sanitize.ts
-src/channels/telegram-markdown-sanitize.test.ts
 src/channels/telegram-registration.test.ts
+src/channels/telegram-connect-group.test.ts
+src/channels/telegram-slash.test.ts
+src/channels/telegram-outbound.test.ts
 ```
 
 ### 2. Register the adapter
@@ -57,19 +58,19 @@ clean-upstream rebuild). The pairing handshake below spawns this step:
 Pinned to an exact version — the supply-chain policy rejects ranges and `latest`:
 
 ```nc:dep
-@chat-adapter/telegram@4.29.0
+@chat-adapter/telegram@4.32.0
 ```
 
 ### 5. Build and validate
 
 Build first: it guards the typed `createChatSdkBridge(...)` core call and proves
-the dependency is installed. Then run the one integration test.
+the dependency is installed. Then run the focused tests.
 
 ```nc:run effect:build
 pnpm run build
 ```
 ```nc:run effect:test
-pnpm exec vitest run src/channels/telegram-registration.test.ts
+pnpm exec vitest run src/channels/telegram
 ```
 
 `telegram-registration.test.ts` imports the real channel barrel and asserts the

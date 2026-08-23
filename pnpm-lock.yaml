@@ -13,34 +13,34 @@ importers:
         version: 0.2.0(zod@4.4.3)
       '@bitbasti/chat-adapter-webex':
         specifier: ^0.1.0
-        version: 0.1.0(chat@4.29.0(zod@4.4.3))(zod@4.4.3)
+        version: 0.1.0(chat@4.32.0(zod@4.4.3))(zod@4.4.3)
       '@chat-adapter/discord':
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.32.0
+        version: 4.32.0(zod@4.4.3)
       '@chat-adapter/gchat':
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.32.0
+        version: 4.32.0(zod@4.4.3)
       '@chat-adapter/github':
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.32.0
+        version: 4.32.0(zod@4.4.3)
       '@chat-adapter/linear':
-        specifier: 4.29.0
-        version: 4.29.0(graphql@17.0.2)(zod@4.4.3)
+        specifier: 4.32.0
+        version: 4.32.0(graphql@17.0.2)(zod@4.4.3)
       '@chat-adapter/slack':
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.32.0
+        version: 4.32.0(zod@4.4.3)
       '@chat-adapter/state-memory':
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.32.0
+        version: 4.32.0(zod@4.4.3)
       '@chat-adapter/teams':
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.32.0
+        version: 4.32.0(zod@4.4.3)
       '@chat-adapter/telegram':
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.32.0
+        version: 4.32.0(zod@4.4.3)
       '@chat-adapter/whatsapp':
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.32.0
+        version: 4.32.0(zod@4.4.3)
       '@clack/core':
         specifier: ^1.2.0
         version: 1.2.0
@@ -52,7 +52,7 @@ importers:
         version: 2.2.1
       '@resend/chat-sdk-adapter':
         specifier: ^0.1.1
-        version: 0.1.1(@chat-adapter/shared@4.38.1(zod@4.4.3))(chat@4.29.0(zod@4.4.3))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+        version: 0.1.1(@chat-adapter/shared@4.38.1(zod@4.4.3))(chat@4.32.0(zod@4.4.3))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@types/qrcode':
         specifier: ^1.5.6
         version: 1.5.6
@@ -63,14 +63,14 @@ importers:
         specifier: 11.10.0
         version: 11.10.0
       chat:
-        specifier: 4.29.0
-        version: 4.29.0(zod@4.4.3)
+        specifier: 4.32.0
+        version: 4.32.0(zod@4.4.3)
       chat-adapter-imessage:
         specifier: ^0.1.1
-        version: 0.1.1(chat@4.29.0(zod@4.4.3))(typescript@5.9.3)(zod@4.4.3)
+        version: 0.1.1(chat@4.32.0(zod@4.4.3))(typescript@5.9.3)(zod@4.4.3)
       chat-adapter-mattermost:
         specifier: ^1.1.3
-        version: 1.1.3(chat@4.29.0(zod@4.4.3))(zod@4.4.3)
+        version: 1.1.3(chat@4.32.0(zod@4.4.3))(zod@4.4.3)
       cron-parser:
         specifier: 5.5.0
         version: 5.5.0
@@ -162,52 +162,52 @@ packages:
   '@cacheable/utils@2.5.0':
     resolution: {integrity: sha512-buipgOVDkkPXNR5+xBpDw7Zk2n1EvU7qBJCNUcL7rhQ//kfpOXPAvQ511Os0vpLYJ1pZnvudNytkQt2hst3wqA==}
 
-  '@chat-adapter/discord@4.29.0':
-    resolution: {integrity: sha512-C6pDVKn7s0PhvgeqldYxoShWXJzthwtlo+sCesqenh56M03eHsioinqxeJttmtK8y1ZD8/qiP2lAZufDwuEQhA==}
+  '@chat-adapter/discord@4.32.0':
+    resolution: {integrity: sha512-npJGIv0jjhhupKdLSF6Di+64mJXFkwEDfx/DOlDn41x66KnJjx2QcqvkuPBpx557kSwWXLgwIq5KWx/rQ+tEPg==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/gchat@4.29.0':
-    resolution: {integrity: sha512-SZ5ZgzFmZ4oRj0AAISbjPztPiICTpw+RdPiPywNwqGWt2LItUOL+8+dl8zZMk+F86E/r0sqRjdbc8+9GqUe2pA==}
+  '@chat-adapter/gchat@4.32.0':
+    resolution: {integrity: sha512-QQRRpTmsIt1seYeZONalIurzpxJqHC1g8GEG+TJaCD5OamL65c4GTQJhRdA7FBgOZHEkvwT/TiKNwp4twK0cCA==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/github@4.29.0':
-    resolution: {integrity: sha512-B6OXzMbIibSylhWSx+zgJj71jv9ojBuLsR/UJTi2Ft8pVnNyjckuW9zjkjH3MJBNbErHqlv4511lADHUzzt6yQ==}
+  '@chat-adapter/github@4.32.0':
+    resolution: {integrity: sha512-0HHSI2rd7XXE3rt37uUS+zWbTK6JSl1mAUtQk5hm1SBtyP23BV4B4pDCdR/X5Eo9e0i9sMNYR7CNwfab1+7g3Q==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/linear@4.29.0':
-    resolution: {integrity: sha512-4cq7pBv0CICka8V0uuae7bNfb1rTdmYjsNjOs7Gkr4vChlhDxRUEGUoiBqvOEYKqxFtFOkRk9Wod0tIQmbPySw==}
+  '@chat-adapter/linear@4.32.0':
+    resolution: {integrity: sha512-ibOpeURIjpjxF2OyJ3hTYnVbT2oSKRbOUFhb+KJaw+YBUUHTXwcPCeUGhW+dLVBKOFiBZU3hO12eYbpXueQobA==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/shared@4.29.0':
-    resolution: {integrity: sha512-ARqTDoHJHKN9rpytbFPJbNmqqx3fOg5xwsTZdlingQPAssOSeHDBdqrFJkgDhyCRGbmDtG09cuS0FkVzeoh2qg==}
+  '@chat-adapter/shared@4.32.0':
+    resolution: {integrity: sha512-ANXYe2dbSmr9A+yUAnV8TfFht4GM6f3zR5LnAYtQdNnRI9CJfXIUXuhRaVBe5RD8IEgGXyGi4BKj5qdjBtUumA==}
     engines: {node: '>=20'}
 
   '@chat-adapter/shared@4.38.1':
     resolution: {integrity: sha512-zJiMl43fiS3a2RjLFdCyTUTqcDY2xss1Acbzc9yfsw8YAkS0LZRdrNmp9/RjLhZB0+FzLarNAayvdKqF2GwnQg==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/slack@4.29.0':
-    resolution: {integrity: sha512-s2DXAwkTpmiIKSATXgrO879s1pqFwS70Y0JPd+TRGRzDeh6nfqt5dnKt5Bug0P1zwkB6DoPurhnYS9nqhSmD/w==}
+  '@chat-adapter/slack@4.32.0':
+    resolution: {integrity: sha512-QZ7KYV8K1w5O91JzMuz5qTCpUaWfEgcxr/UFrBKSp30ZdaHbLH7BqOXHYLoFVwFnoEwKpInCgCgpEl36IU9ffQ==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/state-memory@4.29.0':
-    resolution: {integrity: sha512-+L5LPj9VkyXFXAcfFlTvf2JihuFfQV5U9TfXDlQeG7k6NMEA8irt4a0c6MTxFP7OI5YENknVwRGzmcUubvEWSw==}
+  '@chat-adapter/state-memory@4.32.0':
+    resolution: {integrity: sha512-fN91ZzjRUUhgeVReukvrDkaaQXC+x0jETR+77vg67y95g1LnUaqSFBz+WOyYLaTT7i7JGz9aEMlBNt6uYu66dg==}
     engines: {node: '>=20'}
 
   '@chat-adapter/state-redis@4.38.1':
     resolution: {integrity: sha512-SNxn0igBRISmZI53HVdWHjlNFkn87gzSjlj+KkctnLVUd5q8ijitmip4EBg4hq7/UXiwYcxovd7En+3Jttxavg==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/teams@4.29.0':
-    resolution: {integrity: sha512-KQq1JOeE8kgp13CAviT8+7A4KHO4uZOceV4VbIZdJiyDsChR08KTOeCNAKd6wr48zyF5SulJUjMbnOy745NTFw==}
+  '@chat-adapter/teams@4.32.0':
+    resolution: {integrity: sha512-g5NIBsAjpQDnxhNzuKLB+1TusoNdeANCecX/HKpyei369//YJdZE0VmXDHtZEwAAaF2zvJ5ZmVHcVRo5VJUmVg==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/telegram@4.29.0':
-    resolution: {integrity: sha512-015tU3HEjFQWw7DgebXWkDeQA6lTdTVEO4btAV3f6U1kEnOfjLVJq98latcsM1WkEvv+3LIFKpsz9pG53aamBw==}
+  '@chat-adapter/telegram@4.32.0':
+    resolution: {integrity: sha512-3QzXYJsT3vJMAP0KDrhSyppJ5bKo243ruytgCPyjqJ2J705J6Wy+KLD41b24hp6swYhpNGH1s5xOHpvPbNg/0g==}
     engines: {node: '>=20'}
 
-  '@chat-adapter/whatsapp@4.29.0':
-    resolution: {integrity: sha512-CDKmlDHmiiJ2xtca0wZ2DIYnySUFuiKn6f3ZQvschFVa6pSaDmaldmJc3iul+ELi10+RE7x5+immfc//+TTzFg==}
+  '@chat-adapter/whatsapp@4.32.0':
+    resolution: {integrity: sha512-n3MbH4aSYpAk4mFKjuAvva4yJH94n1WA+47xNOHu7TLgoIPt1i96DOsERXCpiKqGlC/Nc+1/04DgYGzSTj6WWQ==}
     engines: {node: '>=20'}
 
   '@clack/core@1.2.0':
@@ -1561,8 +1561,8 @@ packages:
     peerDependencies:
       chat: ^4.29.0
 
-  chat@4.29.0:
-    resolution: {integrity: sha512-KdPfzaie5ivYytyRICTERg5xT+LeCbYefokvNAqTHe92eqkFaoTMXXkSitikxJVWhZIb2YoXF1b9UZHyzSzKzw==}
+  chat@4.32.0:
+    resolution: {integrity: sha512-0NlJcCLycTy8kytRsZEnW4Gzomm+SNh1Yg7y9GVYB5fTjyhOxCcnzqrythgXNn2dvv7VeihDIISpNU0WZdOKKg==}
     engines: {node: '>=20'}
     peerDependencies:
       ai: ^6.0.182
@@ -3462,9 +3462,9 @@ snapshots:
 
   '@beeper/chat-adapter-matrix@0.2.0(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/state-memory': 4.29.0(zod@4.4.3)
+      '@chat-adapter/state-memory': 4.32.0(zod@4.4.3)
       '@chat-adapter/state-redis': 4.38.1(zod@4.4.3)
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.32.0(zod@4.4.3)
       marked: 15.0.12
       matrix-js-sdk: 41.9.0
       node-html-parser: 7.1.0
@@ -3476,10 +3476,10 @@ snapshots:
       - workflow
       - zod
 
-  '@bitbasti/chat-adapter-webex@0.1.0(chat@4.29.0(zod@4.4.3))(zod@4.4.3)':
+  '@bitbasti/chat-adapter-webex@0.1.0(chat@4.32.0(zod@4.4.3))(zod@4.4.3)':
     dependencies:
       '@chat-adapter/shared': 4.38.1(zod@4.4.3)
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.32.0(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - supports-color
@@ -3506,10 +3506,10 @@ snapshots:
       hashery: 1.5.1
       keyv: 5.6.0
 
-  '@chat-adapter/discord@4.29.0(zod@4.4.3)':
+  '@chat-adapter/discord@4.32.0(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.29.0(zod@4.4.3)
-      chat: 4.29.0(zod@4.4.3)
+      '@chat-adapter/shared': 4.32.0(zod@4.4.3)
+      chat: 4.32.0(zod@4.4.3)
       discord-api-types: 0.37.120
       discord-interactions: 4.4.0
       discord.js: 14.27.0
@@ -3520,42 +3520,42 @@ snapshots:
       - utf-8-validate
       - zod
 
-  '@chat-adapter/gchat@4.29.0(zod@4.4.3)':
+  '@chat-adapter/gchat@4.32.0(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.29.0(zod@4.4.3)
+      '@chat-adapter/shared': 4.32.0(zod@4.4.3)
       '@googleapis/chat': 44.7.0
       '@googleapis/workspaceevents': 9.2.0
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.32.0(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - supports-color
       - zod
 
-  '@chat-adapter/github@4.29.0(zod@4.4.3)':
+  '@chat-adapter/github@4.32.0(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.29.0(zod@4.4.3)
+      '@chat-adapter/shared': 4.32.0(zod@4.4.3)
       '@octokit/auth-app': 8.3.0
       '@octokit/rest': 22.0.1
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.32.0(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - supports-color
       - zod
 
-  '@chat-adapter/linear@4.29.0(graphql@17.0.2)(zod@4.4.3)':
+  '@chat-adapter/linear@4.32.0(graphql@17.0.2)(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.29.0(zod@4.4.3)
+      '@chat-adapter/shared': 4.32.0(zod@4.4.3)
       '@linear/sdk': 76.0.0(graphql@17.0.2)
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.32.0(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - graphql
       - supports-color
       - zod
 
-  '@chat-adapter/shared@4.29.0(zod@4.4.3)':
+  '@chat-adapter/shared@4.32.0(zod@4.4.3)':
     dependencies:
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.32.0(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - supports-color
@@ -3570,12 +3570,12 @@ snapshots:
       - workflow
       - zod
 
-  '@chat-adapter/slack@4.29.0(zod@4.4.3)':
+  '@chat-adapter/slack@4.32.0(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.29.0(zod@4.4.3)
+      '@chat-adapter/shared': 4.32.0(zod@4.4.3)
       '@slack/socket-mode': 2.0.7
       '@slack/web-api': 7.19.0
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.32.0(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - bufferutil
@@ -3584,9 +3584,9 @@ snapshots:
       - utf-8-validate
       - zod
 
-  '@chat-adapter/state-memory@4.29.0(zod@4.4.3)':
+  '@chat-adapter/state-memory@4.32.0(zod@4.4.3)':
     dependencies:
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.32.0(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - supports-color
@@ -3604,33 +3604,33 @@ snapshots:
       - workflow
       - zod
 
-  '@chat-adapter/teams@4.29.0(zod@4.4.3)':
+  '@chat-adapter/teams@4.32.0(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.29.0(zod@4.4.3)
+      '@chat-adapter/shared': 4.32.0(zod@4.4.3)
       '@microsoft/teams.api': 2.0.15
       '@microsoft/teams.apps': 2.0.15
       '@microsoft/teams.cards': 2.0.15
       '@microsoft/teams.graph-endpoints': 2.0.15
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.32.0(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - debug
       - supports-color
       - zod
 
-  '@chat-adapter/telegram@4.29.0(zod@4.4.3)':
+  '@chat-adapter/telegram@4.32.0(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.29.0(zod@4.4.3)
-      chat: 4.29.0(zod@4.4.3)
+      '@chat-adapter/shared': 4.32.0(zod@4.4.3)
+      chat: 4.32.0(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - supports-color
       - zod
 
-  '@chat-adapter/whatsapp@4.29.0(zod@4.4.3)':
+  '@chat-adapter/whatsapp@4.32.0(zod@4.4.3)':
     dependencies:
-      '@chat-adapter/shared': 4.29.0(zod@4.4.3)
-      chat: 4.29.0(zod@4.4.3)
+      '@chat-adapter/shared': 4.32.0(zod@4.4.3)
+      chat: 4.32.0(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - supports-color
@@ -4373,12 +4373,12 @@ snapshots:
     dependencies:
       '@redis/client': 5.12.1
 
-  '@resend/chat-sdk-adapter@0.1.1(@chat-adapter/shared@4.38.1(zod@4.4.3))(chat@4.29.0(zod@4.4.3))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
+  '@resend/chat-sdk-adapter@0.1.1(@chat-adapter/shared@4.38.1(zod@4.4.3))(chat@4.32.0(zod@4.4.3))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
     dependencies:
       '@chat-adapter/shared': 4.38.1(zod@4.4.3)
       '@react-email/components': 1.0.8(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@react-email/render': 2.0.4(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.32.0(zod@4.4.3)
       hast-util-to-html: 9.0.5
       mdast-util-to-hast: 13.2.1
       resend: 6.9.2(@react-email/render@2.0.4(react-dom@19.2.8(react@19.2.8))(react@19.2.8))
@@ -4900,12 +4900,12 @@ snapshots:
 
   character-entities@2.0.2: {}
 
-  chat-adapter-imessage@0.1.1(chat@4.29.0(zod@4.4.3))(typescript@5.9.3)(zod@4.4.3):
+  chat-adapter-imessage@0.1.1(chat@4.32.0(zod@4.4.3))(typescript@5.9.3)(zod@4.4.3):
     dependencies:
       '@chat-adapter/shared': 4.38.1(zod@4.4.3)
       '@photon-ai/advanced-imessage-kit': 1.16.0(typescript@5.9.3)
       '@photon-ai/imessage-kit': 2.1.2
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.32.0(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - bufferutil
@@ -4916,17 +4916,17 @@ snapshots:
       - workflow
       - zod
 
-  chat-adapter-mattermost@1.1.3(chat@4.29.0(zod@4.4.3))(zod@4.4.3):
+  chat-adapter-mattermost@1.1.3(chat@4.32.0(zod@4.4.3))(zod@4.4.3):
     dependencies:
       '@chat-adapter/shared': 4.38.1(zod@4.4.3)
-      chat: 4.29.0(zod@4.4.3)
+      chat: 4.32.0(zod@4.4.3)
     transitivePeerDependencies:
       - ai
       - supports-color
       - workflow
       - zod
 
-  chat@4.29.0(zod@4.4.3):
+  chat@4.32.0(zod@4.4.3):
     dependencies:
       '@workflow/serde': 4.1.0-beta.2
       mdast-util-to-string: 4.0.0

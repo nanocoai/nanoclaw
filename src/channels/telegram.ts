@@ -2,7 +2,7 @@
  * Telegram channel adapter (v2) — uses Chat SDK bridge, with an inbound
  * interceptor for setup pairing and the owner/global-admin `/connect_group` command.
  */
-import { createTelegramAdapter } from '@chat-adapter/telegram';
+import { TelegramAdapter } from '@chat-adapter/telegram';
 
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
@@ -311,12 +311,22 @@ export function createTelegramInboundInterceptor(
   };
 }
 
+// From @chat-adapter/telegram 4.31 a message starting with a bot_command entity goes to
+// chat.processSlashCommand (registered handlers only, no fallback) and never reaches onInbound.
+// NanoClaw handles "/" commands downstream of inbound (command-gate, the interceptor above),
+// so keep the pre-4.31 path. Drop when upstream offers an opt-out. telegram-slash.test.ts pins it.
+class NanoclawTelegramAdapter extends TelegramAdapter {
+  protected override handleSlashCommandUpdate(): boolean {
+    return false;
+  }
+}
+
 registerChannelAdapter('telegram', {
   factory: () => {
     const env = readEnvFile(['TELEGRAM_BOT_TOKEN']);
     if (!env.TELEGRAM_BOT_TOKEN) return null;
     const token = env.TELEGRAM_BOT_TOKEN;
-    const telegramAdapter = createTelegramAdapter({
+    const telegramAdapter = new NanoclawTelegramAdapter({
       botToken: token,
       mode: 'polling',
     });

@@ -13,10 +13,7 @@ import './telegram.js';
 Then delete the copied adapter, helpers, tests, registration test, and setup step:
 
 ```bash
-rm -f src/channels/telegram.ts src/channels/telegram-registration.test.ts \
-  src/channels/telegram-pairing.ts src/channels/telegram-markdown-sanitize.ts \
-  src/channels/telegram-pairing.test.ts src/channels/telegram-markdown-sanitize.test.ts \
-  setup/pair-telegram.ts
+rm -f src/channels/telegram*.ts setup/pair-telegram.ts
 ```
 
 ## 2. Remove the setup step
