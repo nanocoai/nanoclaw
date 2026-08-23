@@ -3,5 +3,4 @@ onlyBuiltDependencies:
   - protobufjs
   - sharp
 
-pnpm:
-  minimumReleaseAge: 4320
+minimumReleaseAge: 4320
