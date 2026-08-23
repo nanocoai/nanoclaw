@@ -948,6 +948,7 @@ export class OpenCodeProvider implements AgentProvider {
           }
 
           const partTextByMessageId = new Map<string, string>();
+          const deltaTextByMessageId = new Map<string, string>();
           const roleByMessageId = new Map<string, string>();
           const partMessageIds = new Set<string>();
           const erroredMessageIds = new Set<string>();
@@ -1008,6 +1009,26 @@ export class OpenCodeProvider implements AgentProvider {
                     if (part.type === 'text' && part.text) {
                       partTextByMessageId.set(part.messageID, part.text);
                     }
+                  }
+                  break;
+                }
+                case 'message.part.delta': {
+                  // Deltas causally precede the snapshot they'll eventually
+                  // consolidate into (and precede `session.idle`, which can't
+                  // fire mid-stream). Accumulate them as a fallback so a
+                  // snapshot that lands too close to `session.idle` — or never
+                  // lands at all — doesn't discard an answer that already
+                  // streamed.
+                  const delta = ev.properties as
+                    | { sessionID?: string; messageID?: string; field?: string; delta?: string }
+                    | undefined;
+                  if (delta?.sessionID && delta.sessionID !== turnSessionId) break;
+                  if (delta?.messageID && delta.field === 'text' && delta.delta) {
+                    partMessageIds.add(delta.messageID);
+                    deltaTextByMessageId.set(
+                      delta.messageID,
+                      (deltaTextByMessageId.get(delta.messageID) ?? '') + delta.delta,
+                    );
                   }
                   break;
                 }
@@ -1095,7 +1116,7 @@ export class OpenCodeProvider implements AgentProvider {
             if (partMessageIds.has(msgId) || erroredMessageIds.has(msgId)) {
               sawAssistantWork = true;
             }
-            resultText = partTextByMessageId.get(msgId) ?? resultText;
+            resultText = partTextByMessageId.get(msgId) ?? deltaTextByMessageId.get(msgId) ?? resultText;
           }
           return { resultText, sawAssistantWork };
         }
