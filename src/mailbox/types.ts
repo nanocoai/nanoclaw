@@ -84,6 +84,14 @@ export interface MailboxHistoryMessage {
   content: string;
 }
 
+/** One inbound message looked up by its exact `seq` (the id shown to the agent as `<message id="...">`). */
+export interface MailboxMessageBySeq {
+  timestamp: string;
+  kind: string;
+  content: string;
+  channelType: string | null;
+}
+
 export interface MailboxTimelineMessage {
   timestamp: string;
   content: string;
@@ -119,6 +127,7 @@ export interface InboundMailbox {
   countLiveTasks(): number;
   prunePendingMessages(channelType: string, before: string, keep: number): number;
   getInboundHistory(limit: number): MailboxHistoryMessage[];
+  getInboundMessageBySeq(seq: number): MailboxMessageBySeq | undefined;
   getConversationRoot(): MailboxTimelineMessage | undefined;
   findTaskBySeriesSlug(slug: string): TaskRecord | undefined;
 }
