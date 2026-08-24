@@ -81,6 +81,12 @@ export interface ProviderExchange {
 export interface ProviderOptions {
   assistantName?: string;
   mcpServers?: Record<string, McpServerConfig>;
+  /**
+   * Configured external MCP servers whose first startup must finish before
+   * the provider accepts the initial prompt. The built-in NanoClaw server is
+   * intentionally excluded by the caller.
+   */
+  startupMcpServerNames?: string[];
   env?: Record<string, string | undefined>;
   additionalDirectories?: string[];
   /**

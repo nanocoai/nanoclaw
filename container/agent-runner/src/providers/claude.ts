@@ -2,7 +2,12 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import {
+  query as sdkQuery,
+  type HookCallback,
+  type PreCompactHookInput,
+  type Query,
+} from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
@@ -452,6 +457,8 @@ function transcriptStartMs(transcriptPath: string): number | null {
  * with a 1M-context model variant or when emergency-tuning a deployment.
  */
 const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || '165000';
+const MCP_STARTUP_POLL_MS = 50;
+const MCP_STARTUP_TIMEOUT_MS = 30_000;
 
 /**
  * Stale-session detection. Matches Claude Code's error text when a
@@ -459,6 +466,38 @@ const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WIN
  * session ID, etc.
  */
 const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`MCP startup timed out after ${MCP_STARTUP_TIMEOUT_MS}ms`)),
+      timeoutMs,
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+async function waitForMcpStartup(query: Pick<Query, 'mcpServerStatus'>, serverNames: string[]): Promise<void> {
+  const deadline = Date.now() + MCP_STARTUP_TIMEOUT_MS;
+  while (true) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new Error(`MCP startup timed out after ${MCP_STARTUP_TIMEOUT_MS}ms`);
+    const statuses = await withTimeout(query.mcpServerStatus(), remainingMs);
+    const byName = new Map(statuses.map((server) => [server.name, server.status]));
+    const waiting = serverNames.some((name) => !byName.has(name) || byName.get(name) === 'pending');
+    if (!waiting) return;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(MCP_STARTUP_POLL_MS, remainingMs)));
+  }
+}
 
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
@@ -480,6 +519,8 @@ export class ClaudeProvider implements AgentProvider {
 
   private assistantName?: string;
   private mcpServers: Record<string, McpServerConfig>;
+  private startupMcpServerNames: string[];
+  private startupBarrierUsed = false;
   private env: Record<string, string | undefined>;
   private additionalDirectories?: string[];
   private model?: string;
@@ -491,6 +532,7 @@ export class ClaudeProvider implements AgentProvider {
     this.mcpServers = Object.fromEntries(
       Object.entries(options.mcpServers ?? {}).map(([name, server]) => [name, shimCwd(server)]),
     );
+    this.startupMcpServerNames = options.startupMcpServerNames ?? [];
     this.additionalDirectories = options.additionalDirectories;
     this.model = options.model;
     this.effort = options.effort;
@@ -549,7 +591,12 @@ export class ClaudeProvider implements AgentProvider {
   query(input: QueryInput): AgentQuery {
     if (!this.memorySessionHook) throw new Error('Claude memory session hook was not registered');
     const stream = new MessageStream();
-    stream.push(input.prompt);
+    const waitForStartup = !this.startupBarrierUsed && this.startupMcpServerNames.length > 0;
+    if (waitForStartup) {
+      this.startupBarrierUsed = true;
+    } else {
+      stream.push(input.prompt);
+    }
 
     const instructions = input.systemContext?.instructions;
 
@@ -581,6 +628,17 @@ export class ClaudeProvider implements AgentProvider {
         },
       },
     });
+
+    if (waitForStartup) {
+      void (async () => {
+        try {
+          await waitForMcpStartup(sdkResult, this.startupMcpServerNames);
+        } catch (err) {
+          log(`MCP startup wait failed; continuing: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        stream.push(input.prompt);
+      })();
+    }
 
     let aborted = false;
 
