@@ -21,8 +21,9 @@ afterEach(() => {
 });
 
 describe('buildOpenCodeConfig provider transport', () => {
-  it('anthropic provider gets no provider options', () => {
+  it('native cloud providers defer to OpenCode credentials and catalog', () => {
     process.env.OPENCODE_PROVIDER = 'anthropic';
+    process.env.OPENCODE_MODEL = 'anthropic/claude-sonnet-4-6';
     delete process.env.ANTHROPIC_BASE_URL;
     const config = buildOpenCodeConfig({});
     expect(config.provider).toEqual({});
@@ -38,13 +39,12 @@ describe('buildOpenCodeConfig provider transport', () => {
     expect(entry.options).toEqual({ apiKey: 'placeholder', baseURL: 'https://inference.example.test/v1' });
   });
 
-  it('no base URL leaves the provider default transport', () => {
+  it('no base URL leaves the native provider unconfigured', () => {
     process.env.OPENCODE_PROVIDER = 'openai';
     process.env.OPENCODE_MODEL = 'openai/gpt-5.2';
     delete process.env.ANTHROPIC_BASE_URL;
     const config = buildOpenCodeConfig({});
-    const entry = (config.provider as Record<string, Record<string, unknown>>).openai;
-    expect(entry.npm).toBeUndefined();
+    expect(config.provider).toEqual({});
   });
 
   it('openrouter with a base URL keeps its native transport (no pin)', () => {

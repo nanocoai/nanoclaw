@@ -61,7 +61,10 @@ function killProcessTree(proc: ChildProcess): void {
   }
 }
 
-function spawnOpencodeServer(config: Record<string, unknown>, timeoutMs = 10_000): Promise<{ url: string; proc: ChildProcess }> {
+function spawnOpencodeServer(
+  config: Record<string, unknown>,
+  timeoutMs = 10_000,
+): Promise<{ url: string; proc: ChildProcess }> {
   return new Promise((resolve, reject) => {
     const hostname = '127.0.0.1';
     const port = 4096;
@@ -283,54 +286,51 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
     })
     .filter((entry) => entry !== 'text');
   const modelModalities =
-    requestedModalities.length > 0
-      ? { input: ['text', ...requestedModalities], output: ['text'] }
-      : undefined;
+    requestedModalities.length > 0 ? { input: ['text', ...requestedModalities], output: ['text'] } : undefined;
 
-  const providerOptions: Record<string, unknown> =
-    provider === 'anthropic'
-      ? {}
-      : {
-          [provider]: {
-            // A custom base URL on the `openai` provider means a self-hosted
-            // OpenAI-compatible endpoint (vLLM, llama.cpp, …). The stock openai
-            // SDK package speaks the Responses API, whose multi-turn history
-            // vLLM rejects (assistant items lack id/status) — pin the Chat
-            // Completions transport. Scoped to `openai` only: other providers
-            // (e.g. `openrouter`, set alongside ANTHROPIC_BASE_URL per the
-            // documented OpenRouter config) ship their own native ai-sdk
-            // package and must keep OpenCode's default transport resolution.
-            ...(provider === 'openai' && proxyUrl ? { npm: '@ai-sdk/openai-compatible' } : {}),
-            options: { apiKey: 'placeholder', baseURL: proxyUrl },
-            ...(modelsToRegister.length > 0
-              ? {
-                  models: Object.fromEntries(
-                    modelsToRegister.map((mid) => {
-                      // limit/modalities describe the MAIN model only — the env
-                      // vars name no small-model equivalent. Spreading them onto
-                      // a distinct OPENCODE_SMALL_MODEL entry would falsely
-                      // declare its context window and media support as the
-                      // main model's own. A small model that differs from the
-                      // main one gets a bare entry instead, which resolves
-                      // through OpenCode's own undeclared-model default.
-                      const isMainModel = mid === providerModelId;
-                      return [
-                        mid,
-                        {
-                          id: mid,
-                          name: mid,
-                          tool_call: true,
-                          ...(isMainModel && effort ? { options: { reasoningEffort: effort } } : {}),
-                          ...(isMainModel && modelLimit ? { limit: modelLimit } : {}),
-                          ...(isMainModel && modelModalities ? { attachment: true, modalities: modelModalities } : {}),
-                        },
-                      ];
-                    }),
-                  ),
-                }
-              : {}),
-          },
-        };
+  const providerOptions: Record<string, unknown> = proxyUrl
+    ? {
+        [provider]: {
+          // A custom base URL on the `openai` provider means a self-hosted
+          // OpenAI-compatible endpoint (vLLM, llama.cpp, …). The stock openai
+          // SDK package speaks the Responses API, whose multi-turn history
+          // vLLM rejects (assistant items lack id/status) — pin the Chat
+          // Completions transport. Scoped to `openai` only: other providers
+          // (e.g. `openrouter`, set alongside ANTHROPIC_BASE_URL per the
+          // documented OpenRouter config) ship their own native ai-sdk
+          // package and must keep OpenCode's default transport resolution.
+          ...(provider === 'openai' && proxyUrl ? { npm: '@ai-sdk/openai-compatible' } : {}),
+          options: { apiKey: 'placeholder', baseURL: proxyUrl },
+          ...(modelsToRegister.length > 0
+            ? {
+                models: Object.fromEntries(
+                  modelsToRegister.map((mid) => {
+                    // limit/modalities describe the MAIN model only — the env
+                    // vars name no small-model equivalent. Spreading them onto
+                    // a distinct OPENCODE_SMALL_MODEL entry would falsely
+                    // declare its context window and media support as the
+                    // main model's own. A small model that differs from the
+                    // main one gets a bare entry instead, which resolves
+                    // through OpenCode's own undeclared-model default.
+                    const isMainModel = mid === providerModelId;
+                    return [
+                      mid,
+                      {
+                        id: mid,
+                        name: mid,
+                        tool_call: true,
+                        ...(isMainModel && effort ? { options: { reasoningEffort: effort } } : {}),
+                        ...(isMainModel && modelLimit ? { limit: modelLimit } : {}),
+                        ...(isMainModel && modelModalities ? { attachment: true, modalities: modelModalities } : {}),
+                      },
+                    ];
+                  }),
+                ),
+              }
+            : {}),
+        },
+      }
+    : {};
 
   const mcp = mcpServersToOpenCodeConfig(options.mcpServers);
 
