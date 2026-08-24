@@ -1,6 +1,6 @@
 {
   "name": "nanoclaw",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Personal AI assistant. Lightweight, secure, customizable.",
   "type": "module",
   "packageManager": "pnpm@10.34.5",
