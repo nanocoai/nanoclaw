@@ -13,6 +13,8 @@
  */
 import { spawn } from 'child_process';
 
+export const PING_AGENT_FOLDER = 'ping_test';
+
 export type PingResult = 'ok' | 'no_reply' | 'socket_error' | 'auth_error';
 
 export function classifyPingResult(exitCode: number | null, stdout: string, stderr = ''): PingResult {
@@ -20,7 +22,10 @@ export function classifyPingResult(exitCode: number | null, stdout: string, stde
   if (
     /Invalid bearer token/i.test(output) ||
     /authentication[_ ]error/i.test(output) ||
-    /Failed to authenticate/i.test(output)
+    /Failed to authenticate/i.test(output) ||
+    /Please run \/login/i.test(output) ||
+    /Not logged in/i.test(output) ||
+    /Invalid API key/i.test(output)
   ) {
     return 'auth_error';
   }

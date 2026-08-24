@@ -18,6 +18,8 @@ import { SelectPrompt } from '@clack/core';
 import { isCancel } from '@clack/prompts';
 import { styleText } from 'node:util';
 
+import { brandBody } from './theme.js';
+
 const BULLET_ACTIVE = '●';
 const BULLET_INACTIVE = '○';
 const BAR = '│';
@@ -65,16 +67,40 @@ export interface BrightSelectOptions<T> {
 }
 
 /**
+ * Discard any stdin buffered while no prompt was reading — keypresses made
+ * during spinners and installs otherwise get consumed by the next select the
+ * instant it opens, submitting it before it ever renders for the user (a
+ * stray `↓`+`Enter` silently picks option 2). Raw-mode reads only see kernel
+ * tty data via the event loop, so the drain needs a real (short) window.
+ */
+export function flushStdin(windowMs = 50): Promise<void> {
+  return new Promise((resolve) => {
+    const stdin = process.stdin;
+    if (!stdin.isTTY) return resolve();
+    const wasRaw = stdin.isRaw === true;
+    stdin.setRawMode?.(true);
+    const discard = (): void => {};
+    stdin.on('data', discard);
+    stdin.resume();
+    setTimeout(() => {
+      stdin.off('data', discard);
+      stdin.pause();
+      if (!wasRaw) stdin.setRawMode?.(false);
+      resolve();
+    }, windowMs);
+  });
+}
+
+/**
  * Matches the return shape of `p.select` — resolves to the selected value
  * on submit, or to clack's cancel symbol on Ctrl-C / Esc. Callers pass
  * the result through `ensureAnswer(...)` the same way they do for
  * `p.select`.
  */
-export function brightSelect<T>(
-  opts: BrightSelectOptions<T>,
-): Promise<T | symbol> {
+export async function brightSelect<T>(opts: BrightSelectOptions<T>): Promise<T | symbol> {
   const { message, options, initialValue } = opts;
 
+  await flushStdin();
   return new SelectPrompt({
     options: options as Array<{ value: T; label?: string; hint?: string }>,
     initialValue,
@@ -89,13 +115,9 @@ export function brightSelect<T>(
       lines.push(`${headerIcon(st)}  ${message}`);
 
       if (st === 'submit' || st === 'cancel') {
-        const selected =
-          options.find((o) => o.value === this.value)?.label ??
-          String(this.value ?? '');
+        const selected = options.find((o) => o.value === this.value)?.label ?? String(this.value ?? '');
         const shown =
-          st === 'cancel'
-            ? styleText(['strikethrough', 'dim'], selected)
-            : styleText('dim', selected);
+          st === 'cancel' ? styleText(['strikethrough', 'dim'], selected) : styleText('dim', brandBody(selected));
         lines.push(`${grayBar}  ${shown}`);
         return lines.join('\n');
       }
@@ -104,11 +126,10 @@ export function brightSelect<T>(
       options.forEach((opt, idx) => {
         const label = opt.label ?? String(opt.value);
         const hint = opt.hint ? ` ${styleText('dim', `(${opt.hint})`)}` : '';
-        const marker =
-          idx === cursor
-            ? styleText('green', BULLET_ACTIVE)
-            : styleText('dim', BULLET_INACTIVE);
-        lines.push(`${bar}  ${marker} ${label}${hint}`);
+        const isActive = idx === cursor;
+        const marker = isActive ? styleText('green', BULLET_ACTIVE) : styleText('dim', BULLET_INACTIVE);
+        const shownLabel = isActive ? brandBody(label) : label;
+        lines.push(`${bar}  ${marker} ${shownLabel}${hint}`);
       });
       lines.push(styleText(color, CAP_BOT));
       return lines.join('\n');

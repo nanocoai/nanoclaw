@@ -1,0 +1,62 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. Three scenarios cover all when:connection= legs (socket, webhook, provisioned); the auth.test stub answers the connected_as capture and conversations.open answers platform_id. The payload copy/append/dep/build/test steps need no stubs — they run through the stubbed exec.",
+  "scenarios": [
+    {
+      "name": "socket",
+      "inputs": {
+        "connection": "socket",
+        "bot_token": "xoxb-fake-bot-token",
+        "app_token": "xapp-fake-app-token",
+        "owner_handle": "U12345678"
+      },
+      "exec": [
+        {
+          "match": "auth.test",
+          "stdout": "@nano in Acme"
+        },
+        {
+          "match": "conversations.open",
+          "stdout": "slack:D0FAKE"
+        }
+      ]
+    },
+    {
+      "name": "webhook",
+      "inputs": {
+        "connection": "webhook",
+        "bot_token": "xoxb-fake-bot-token",
+        "signing_secret": "0123456789abcdef",
+        "owner_handle": "U12345678"
+      },
+      "exec": [
+        {
+          "match": "auth.test",
+          "stdout": "@nano in Acme"
+        },
+        {
+          "match": "conversations.open",
+          "stdout": "slack:D0FAKE"
+        }
+      ]
+    },
+    {
+      "name": "provisioned",
+      "inputs": {
+        "connection": "provisioned",
+        "bot_token": "xoxb-fake-bot-token",
+        "app_token": "xapp-fake-app-token",
+        "owner_handle": "U12345678"
+      },
+      "exec": [
+        {
+          "match": "auth.test",
+          "stdout": "@nano in Acme"
+        },
+        {
+          "match": "conversations.open",
+          "stdout": "slack:D0FAKE"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "enabledManagers": ["custom.regex"],
+  "customManagers": [
+    {
+      "description": "The agent-image pin in versions.json, single-reference form. Matches only a digest-pinned reference: a bare tag is not something to bump, and the pull path warns about it separately.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^versions\\.json$/"],
+      "matchStrings": [
+        "\"agent-image\"\\s*:\\s*\"(?<depName>[^@\"]+)@(?<currentDigest>sha256:[a-f0-9]{64})\""
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker",
+      "autoReplaceStringTemplate": "\"agent-image\": \"{{{depName}}}@{{{newDigest}}}\""
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Never auto-merge here. The merge gate is the signature check in verify-agent-image.yml, which enables auto-merge itself only when cosign verifies the image against the publisher's identity. Renovate must not have a second, weaker opinion.",
+      "matchManagers": ["custom.regex"],
+      "automerge": false,
+      "labels": ["agent-image", "supply-chain"],
+      "commitMessageTopic": "agent image",
+      "commitMessageExtra": "to {{{newDigest}}}",
+      "prBodyNotes": [
+        "Merging this changes the bytes every pinned install runs.",
+        "",
+        "`verify-agent-image` must be green before this can merge: it re-pulls the digest and checks the manifest is a multi-arch index, that the agent-runner lock label matches `container/agent-runner/bun.lock` in this branch, that the image declares itself `hardened`, and that the size has not moved implausibly.",
+        "",
+        "Auto-merge switches on only if that job can also verify a publisher signature over the digest. Without one, this waits for a human — a label is a claim the pusher makes about themselves, and this file decides what other people execute."
+      ]
+    }
+  ],
+  "prConcurrentLimit": 1,
+  "rebaseWhen": "behind-base-branch"
+}

@@ -1,5 +1,5 @@
 /**
- * nc — chat with your NanoClaw agent from the terminal.
+ * ncl — chat with your NanoClaw agent from the terminal.
  *
  * Usage:
  *   pnpm run chat <message...>
@@ -36,7 +36,7 @@ function main(): void {
     const e = err as NodeJS.ErrnoException;
     if (e.code === 'ENOENT' || e.code === 'ECONNREFUSED') {
       console.error(`NanoClaw daemon not reachable at ${socketPath()}.`);
-      console.error('Start the service (launchctl/systemd) before running nc.');
+      console.error('Start the service (launchctl/systemd) before running ncl.');
     } else {
       console.error('CLI socket error:', err);
     }

@@ -1,0 +1,62 @@
+name: Registry skills
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.skills.outputs.matrix }}
+      channels: ${{ steps.refs.outputs.channels }}
+      providers: ${{ steps.refs.outputs.providers }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - id: skills
+        run: |
+          matrix=$(pnpm exec tsx scripts/test-registry-skills.ts --list)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+      - id: refs
+        run: |
+          git fetch origin channels providers
+          echo "channels=$(git rev-parse origin/channels)" >> "$GITHUB_OUTPUT"
+          echo "providers=$(git rev-parse origin/providers)" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: oven-sh/setup-bun@v2
+        if: matrix.bun
+        with:
+          bun-version: 1.3.12
+      - run: pnpm install --frozen-lockfile
+      - name: Apply and test ${{ matrix.skill }}
+        env:
+          REGISTRY_CHANNELS_SHA: ${{ needs.discover.outputs.channels }}
+          REGISTRY_PROVIDERS_SHA: ${{ needs.discover.outputs.providers }}
+        run: pnpm exec tsx scripts/test-registry-skills.ts "${{ matrix.skill }}"

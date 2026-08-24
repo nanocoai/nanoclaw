@@ -7,6 +7,8 @@ description: Add a persistent wiki knowledge base to a NanoClaw group. Based on 
 
 Set up a persistent wiki knowledge base on NanoClaw, based on Karpathy's LLM Wiki pattern.
 
+Each step is safe to re-run: directory creation uses `mkdir -p`, initial wiki files are created only if absent, the container skill is preserved unless the user opts to update it, and the group CLAUDE.md section is replaced in place via marker comments rather than duplicated.
+
 ## Step 1: Read the pattern
 
 Read `${CLAUDE_SKILL_DIR}/llm-wiki.md` — this is the full LLM Wiki idea as written by Karpathy. Understand it thoroughly before proceeding. Summarize the core idea to the user briefly, then discuss what they want to build.
@@ -33,15 +35,26 @@ Based on this discussion, create three things:
 
 ### 3a. Directory structure
 
-Create `wiki/` and `sources/` directories in the group folder. Create initial `index.md` and `log.md` per the pattern's Indexing and Logging section. Adapt to the user's domain.
+Create `wiki/` and `sources/` directories in the group folder (`mkdir -p` — safe if they already exist). Create initial `index.md` and `log.md` per the pattern's Indexing and Logging section, adapted to the user's domain. Skip any of these files that already exist so a populated wiki is never clobbered on re-run.
 
 ### 3b. Container skill
 
-Create a `container/skills/wiki/SKILL.md` tailored to this user's wiki. This is the schema layer from the pattern — it tells the agent how to maintain the wiki. Base it on the pattern's Operations section (ingest, query, lint) and the conventions you agreed on with the user. Don't over-prescribe — the pattern says "your LLM figures out the rest."
+Create `container/skills/wiki/SKILL.md` tailored to this user's wiki. This is the schema layer from the pattern — it tells the agent how to maintain the wiki. Base it on the pattern's Operations section (ingest, query, lint) and the conventions you agreed on with the user. Don't over-prescribe — the pattern says "your LLM figures out the rest."
+
+If `container/skills/wiki/SKILL.md` already exists, ask the user whether to update it before overwriting, so an existing tailored schema is preserved on re-run.
 
 ### 3c. Group CLAUDE.md
 
-Edit the group's CLAUDE.md to add a wiki section. This is critical — it's what turns the agent into a wiki maintainer. It should:
+Edit the group's CLAUDE.md to add a wiki section, wrapped in marker comments so it can be located and replaced on re-run:
+
+```markdown
+<!-- BEGIN karpathy-llm-wiki -->
+## Wiki
+...section body...
+<!-- END karpathy-llm-wiki -->
+```
+
+If a `<!-- BEGIN karpathy-llm-wiki -->` block already exists, replace it in place rather than appending a second copy. This is critical — it's what turns the agent into a wiki maintainer. The section should:
 
 - Explain the wiki system concisely: what it is, the three layers (sources, wiki, schema), the three operations (ingest, query, lint)
 - Index the key files and folders (`wiki/`, `sources/`, `wiki/index.md`, `wiki/log.md`)
@@ -71,40 +84,16 @@ AskUserQuestion: "Want periodic wiki health checks?"
 2. **Monthly**
 3. **Skip** — lint manually
 
-If yes, create a NanoClaw scheduled task that runs in the wiki group. This is NOT a Claude Code cron job — it's a NanoClaw group task that runs in the agent container. Insert it into the SQLite database:
+If yes, ask the agent to schedule the lint task using the `schedule_task` MCP tool in conversation.
+
+## Step 6: Restart
+
+Run from your NanoClaw project root:
 
 ```bash
-pnpm exec tsx -e "
-const Database = require('better-sqlite3');
-const { CronExpressionParser } = require('cron-parser');
-const db = new Database('store/messages.db');
-const interval = CronExpressionParser.parse('<cron-expr>', { tz: process.env.TZ || 'UTC' });
-const nextRun = interval.next().toISOString();
-db.prepare('INSERT INTO scheduled_tasks (id, group_folder, chat_jid, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-  'wiki-lint',
-  '<group_folder>',
-  '<chat_jid>',
-  'Run a wiki lint pass per the wiki container skill. Check for contradictions, orphan pages, stale content, missing cross-references, and gaps. Report findings and offer to fix issues.',
-  'cron',
-  '<cron-expr>',
-  'group',
-  nextRun,
-  'active',
-  new Date().toISOString()
-);
-db.close();
-"
-```
-
-Use the group's `folder` and `chat_jid` from the registered groups table. Cron expressions: `0 10 * * 0` (weekly Sunday 10am) or `0 10 1 * *` (monthly 1st at 10am).
-
-## Step 6: Build and restart
-
-```bash
-pnpm run build
-./container/build.sh
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # macOS
-# Linux: systemctl --user restart nanoclaw
+source setup/lib/install-slug.sh
+launchctl kickstart -k gui/$(id -u)/$(launchd_label)  # macOS
+systemctl --user restart $(systemd_unit)              # Linux
 ```
 
 Tell the user to test by sending a source to the wiki group.

@@ -1,0 +1,14 @@
+{
+  "name": "clidash",
+  "version": "0.1.0",
+  "description": "CLI-agnostic read-only web dashboard — derives tabs and tables from any CLI that lists resources as JSON",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test 'test/*.test.js'"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}

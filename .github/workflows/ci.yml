@@ -5,14 +5,17 @@ on:
     branches: [main]
 
 jobs:
-  ci:
+  test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node-version }}
           cache: pnpm
       - uses: oven-sh/setup-bun@v2
         with:
@@ -37,3 +40,12 @@ jobs:
       - name: Container tests
         working-directory: container/agent-runner
         run: bun test
+
+  # Repository rules require exact `ci`; always run it so matrix failures remain blocking.
+  ci:
+    if: always()
+    needs: test
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.test.result }}" = success

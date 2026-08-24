@@ -17,7 +17,7 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { isValidTimezone } from '../../src/timezone.js';
-import { fitToWidth } from './theme.js';
+import { fitToWidth, fmtDuration } from './theme.js';
 
 export function claudeCliAvailable(): boolean {
   try {
@@ -34,9 +34,7 @@ export function claudeCliAvailable(): boolean {
  * resolved zone string on success, or null if the CLI is missing, Claude
  * errored, or the reply wasn't a valid IANA zone.
  */
-export async function resolveTimezoneViaClaude(
-  input: string,
-): Promise<string | null> {
+export async function resolveTimezoneViaClaude(input: string): Promise<string | null> {
   if (!claudeCliAvailable()) return null;
 
   const prompt = buildPrompt(input);
@@ -44,38 +42,29 @@ export async function resolveTimezoneViaClaude(
   const s = p.spinner();
   const start = Date.now();
   const label = 'Looking up that timezone…';
-  s.start(fitToWidth(label, ' (999s)'));
+  s.start(fitToWidth(label, ' (99m 59s)'));
   const tick = setInterval(() => {
-    const elapsed = Math.round((Date.now() - start) / 1000);
-    const suffix = ` (${elapsed}s)`;
+    const suffix = ` (${fmtDuration(Date.now() - start)})`;
     s.message(`${fitToWidth(label, suffix)}${k.dim(suffix)}`);
   }, 1000);
 
   const reply = await queryClaude(prompt);
 
   clearInterval(tick);
-  const elapsed = Math.round((Date.now() - start) / 1000);
-  const suffix = ` (${elapsed}s)`;
+  const suffix = ` (${fmtDuration(Date.now() - start)})`;
 
   const resolved = reply ? extractTimezone(reply) : null;
   if (resolved) {
-    s.stop(
-      `${fitToWidth(`Interpreted as ${resolved}.`, suffix)}${k.dim(suffix)}`,
-    );
+    s.stop(`${fitToWidth(`Interpreted as ${resolved}.`, suffix)}${k.dim(suffix)}`);
     return resolved;
   }
-  s.stop(
-    `${fitToWidth("Couldn't interpret that as a timezone.", suffix)}${k.dim(
-      suffix,
-    )}`,
-    1,
-  );
+  s.stop(`${fitToWidth("Couldn't interpret that as a timezone.", suffix)}${k.dim(suffix)}`, 1);
   return null;
 }
 
 function buildPrompt(input: string): string {
   return [
-    'Convert the user\'s description of where they are into a single IANA',
+    "Convert the user's description of where they are into a single IANA",
     'timezone identifier (e.g. "America/New_York", "Europe/London",',
     '"Asia/Jerusalem"). Respond with ONLY the IANA string on a single line,',
     'nothing else — no prose, no quotes, no punctuation. If you cannot',

@@ -9,7 +9,8 @@ set -euo pipefail
 # Flow:
 #   1. Run `claude setup-token` under a PTY (via script(1)) so the browser
 #      OAuth dance works and its token is captured into a tempfile.
-#   2. Regex the sk-ant-oat…AA token out of the ANSI-stripped capture.
+#   2. Parse the sk-ant-oat…AA token out of the capture via the shared
+#      PTY-capture parser (setup/lib/captured-token.ts).
 #   3. Register it with OneCLI.
 #
 # Env overrides:
@@ -51,13 +52,34 @@ command -v script >/dev/null \
 tmpfile=$(mktemp -t claude-setup-token.XXXXXX)
 trap 'rm -f "$tmpfile"' EXIT
 
-cat <<'EOF'
+# Detect headless. Mirrors `isHeadless()` in setup/platform.ts: on Linux
+# with neither DISPLAY nor WAYLAND_DISPLAY set, no graphical session
+# exists, so `claude setup-token` won't be able to auto-open a browser
+# and the user will need to copy the printed sign-in URL by hand. The
+# pre-message copy below is swapped accordingly so we don't promise a
+# browser pop that will never happen.
+is_headless=0
+if [ "$(uname -s)" = "Linux" ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+  is_headless=1
+fi
+
+if [ "$is_headless" = "1" ]; then
+  cat <<'EOF'
+A sign-in link will appear for you to sign in with your Claude account.
+When you finish, we'll save the token to your OneCLI vault automatically.
+
+Press Enter to continue, or edit the command first.
+
+EOF
+else
+  cat <<'EOF'
 A browser window will open for you to sign in with your Claude account.
 When you finish, we'll save the token to your OneCLI vault automatically.
 
 Press Enter to continue, or edit the command first.
 
 EOF
+fi
 
 cmd="claude setup-token"
 if [ "${BASH_VERSINFO[0]:-0}" -ge 4 ]; then
@@ -78,12 +100,11 @@ else
   script -q "$tmpfile" $cmd
 fi
 
-# Strip ANSI codes + newlines (TTY wraps the token mid-string), then match
-# the sk-ant-oat…AA token. perl because BSD grep caps {n,m} at 255.
-token=$(sed $'s/\x1b\\[[0-9;]*[a-zA-Z]//g' "$tmpfile" \
-        | tr -d '\n\r' \
-        | perl -ne 'print "$1\n" while /(sk-ant-oat[A-Za-z0-9_-]{80,500}AA)/g' \
-        | tail -1 || true)
+# Extract the token via the shared PTY-capture parser (setup/lib/captured-token.ts),
+# so this script and setup/lib/claude-assist.ts stay in lockstep on the
+# normalization rules (ANSI/control stripping, un-wrapping the token).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+token=$(pnpm exec tsx "$SCRIPT_DIR/lib/captured-token.ts" claude "$tmpfile" || true)
 
 if [ -z "$token" ]; then
   keep=$(mktemp -t claude-setup-token-log.XXXXXX)

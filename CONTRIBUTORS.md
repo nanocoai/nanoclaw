@@ -16,6 +16,7 @@ Thanks to everyone who has contributed to NanoClaw!
 - [flobo3](https://github.com/flobo3) — Flo
 - [edwinwzhe](https://github.com/edwinwzhe) — Edwin He
 - [scottgl9](https://github.com/scottgl9) — Scott Glover
+- [ingyukoh](https://github.com/ingyukoh) — Ingyu Koh
 - [cschmidt](https://github.com/cschmidt) — Carl Schmidt
 - [leonalfredbot-ship-it](https://github.com/leonalfredbot-ship-it) — Alfred-the-buttler
 - [moktamd](https://github.com/moktamd)
@@ -24,3 +25,4 @@ Thanks to everyone who has contributed to NanoClaw!
 - [lbsnrs](https://github.com/lbsnrs) — Andreas Liebschner
 - [spencer-whitman](https://github.com/spencer-whitman)
 - [lazure-ocean](https://github.com/lazure-ocean) — Cyril Ionov
+- [joel-nanoco](https://github.com/joel-nanoco) — Joel

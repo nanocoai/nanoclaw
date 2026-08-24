@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+#
+# ncl — NanoClaw CLI launcher.
+#
+# Resolves the project root from this script's location, cd's there so the
+# host-resolved DATA_DIR matches the running host, and execs the TS entry
+# via tsx. Symlink this file into a directory on your PATH (or alias `ncl`
+# to its full path) to invoke from anywhere:
+#
+#   ln -s "$(pwd)/bin/ncl" /usr/local/bin/ncl
+#   # or
+#   alias ncl="$(pwd)/bin/ncl"
+
+set -euo pipefail
+
+SCRIPT="${BASH_SOURCE[0]}"
+# Resolve symlinks so PROJECT_ROOT points at the real checkout.
+while [ -h "$SCRIPT" ]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+  SCRIPT="$(readlink "$SCRIPT")"
+  [[ "$SCRIPT" != /* ]] && SCRIPT="$DIR/$SCRIPT"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+cd "$PROJECT_ROOT"
+exec pnpm exec tsx src/cli/client.ts "$@"

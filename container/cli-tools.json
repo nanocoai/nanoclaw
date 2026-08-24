@@ -1,0 +1,12 @@
+[
+  {
+    "name": "agent-browser",
+    "version": "0.27.1",
+    "onlyBuilt": true
+  },
+  {
+    "name": "@anthropic-ai/claude-code",
+    "version": "2.1.238",
+    "onlyBuilt": true
+  }
+]

@@ -2,8 +2,11 @@
  * Offer Claude-assisted debugging when a setup step fails.
  *
  * Flow:
- *   1. Check `claude` is on PATH and has a working credential. If not,
- *      silently skip — pre-auth failures can't use this path.
+ *   1. Check `claude` is on PATH — if not, offer to install it via
+ *      setup/install-claude.sh. Then check auth via `claude auth status`
+ *      — if not signed in, offer to run `claude setup-token` (browser
+ *      OAuth with code-paste fallback for headless/remote systems).
+ *      If either is declined or fails, silently skip.
  *   2. Ask the user for consent ("Want me to ask Claude for a fix?").
  *   3. Build a minimal prompt: the one-paragraph situation, the failing
  *      step's name/message/hint, and a short list of *file references*
@@ -16,15 +19,17 @@
  *
  * Skippable with NANOCLAW_SKIP_CLAUDE_ASSIST=1 for CI/scripted runs.
  */
-import { execSync, spawn } from 'child_process';
+import { execSync, spawn, spawnSync } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import * as p from '@clack/prompts';
 import k from 'kleur';
 
+import { extractClaudeOAuthToken } from './captured-token.js';
 import { ensureAnswer } from './runner.js';
-import { fitToWidth } from './theme.js';
+import { brandBody, fitToWidth, fmtDuration, note } from './theme.js';
 
 export interface AssistContext {
   stepName: string;
@@ -39,20 +44,12 @@ export interface AssistContext {
  * rather than us stuffing contents into the prompt. Keys are step names as
  * they appear in fail() calls; values are repo-relative paths.
  */
-const STEP_FILES: Record<string, string[]> = {
+export const STEP_FILES: Record<string, string[]> = {
   bootstrap: ['setup.sh', 'setup/install-node.sh', 'nanoclaw.sh'],
   environment: ['setup/environment.ts'],
-  container: [
-    'setup/container.ts',
-    'setup/install-docker.sh',
-    'container/Dockerfile',
-  ],
+  container: ['setup/container.ts', 'setup/install-docker.sh', 'container/Dockerfile'],
   onecli: ['setup/onecli.ts'],
-  auth: [
-    'setup/auth.ts',
-    'setup/register-claude-token.sh',
-    'setup/install-claude.sh',
-  ],
+  auth: ['setup/auth.ts', 'setup/register-claude-token.sh', 'setup/install-claude.sh'],
   mounts: ['setup/mounts.ts'],
   service: ['setup/service.ts'],
   'cli-agent': ['setup/cli-agent.ts', 'scripts/init-cli-agent.ts'],
@@ -60,24 +57,24 @@ const STEP_FILES: Record<string, string[]> = {
   channel: ['setup/auto.ts'],
   verify: ['setup/verify.ts'],
   // Channel-specific sub-steps:
-  'telegram-install': ['setup/add-telegram.sh', 'setup/channels/telegram.ts'],
+  'telegram-install': ['.claude/skills/add-telegram/SKILL.md', 'scripts/skill-apply.ts', 'setup/channels/telegram.ts'],
   'telegram-validate': ['setup/channels/telegram.ts'],
   'pair-telegram': ['setup/pair-telegram.ts', 'setup/channels/telegram.ts'],
-  'discord-install': ['setup/add-discord.sh', 'setup/channels/discord.ts'],
-  'slack-install': ['setup/add-slack.sh', 'setup/channels/slack.ts'],
+  'discord-install': ['.claude/skills/add-discord/SKILL.md', 'scripts/skill-apply.ts', 'setup/channels/discord.ts'],
+  'slack-install': ['.claude/skills/add-slack/SKILL.md', 'scripts/skill-apply.ts', 'setup/channels/slack.ts'],
   'slack-validate': ['setup/channels/slack.ts'],
-  'imessage-install': ['setup/add-imessage.sh', 'setup/channels/imessage.ts'],
-  'imessage': ['setup/channels/imessage.ts'],
-  'teams-install': ['setup/add-teams.sh', 'setup/channels/teams.ts'],
-  'teams-manifest': ['setup/lib/teams-manifest.ts', 'setup/channels/teams.ts'],
-  'init-first-agent': [
-    'scripts/init-first-agent.ts',
-    'setup/channels/telegram.ts',
-    'setup/channels/discord.ts',
+  'imessage-install': ['.claude/skills/add-imessage/SKILL.md', 'scripts/skill-apply.ts', 'scripts/photon-setup.ts'],
+  imessage: ['setup/channels/run-channel-skill.ts', 'scripts/photon-setup.ts'],
+  'teams-install': [
+    '.claude/skills/add-teams/SKILL.md',
+    'scripts/skill-apply.ts',
+    'setup/channels/run-channel-skill.ts',
   ],
+  'teams-manifest': ['setup/lib/teams-manifest.ts', 'setup/channels/teams-manifest-build.ts'],
+  'init-first-agent': ['scripts/init-first-agent.ts', 'setup/channels/telegram.ts', 'setup/channels/discord.ts'],
 };
 
-const BIG_PICTURE_FILES = ['README.md', 'setup/auto.ts'];
+export const BIG_PICTURE_FILES = ['README.md', 'setup/auto.ts'];
 
 /**
  * Returns `true` if the user ran a Claude-suggested fix command; callers
@@ -85,12 +82,9 @@ const BIG_PICTURE_FILES = ['README.md', 'setup/auto.ts'];
  * Returns `false` for every other outcome (skipped, declined, no command,
  * Claude unreachable, user chose not to run).
  */
-export async function offerClaudeAssist(
-  ctx: AssistContext,
-  projectRoot: string = process.cwd(),
-): Promise<boolean> {
+export async function offerClaudeAssist(ctx: AssistContext, projectRoot: string = process.cwd()): Promise<boolean> {
   if (process.env.NANOCLAW_SKIP_CLAUDE_ASSIST === '1') return false;
-  if (!isClaudeUsable()) return false;
+  if (!(await ensureClaudeReady(projectRoot))) return false;
 
   const want = ensureAnswer(
     await p.confirm({
@@ -106,15 +100,12 @@ export async function offerClaudeAssist(
 
   const parsed = parseResponse(response);
   if (!parsed) {
-    p.log.warn("Claude responded but I couldn't parse a command out of it.");
+    p.log.warn(brandBody("Claude responded but I couldn't parse a command out of it."));
     p.log.message(k.dim(response.trim().slice(0, 500)));
     return false;
   }
 
-  p.note(
-    `${parsed.reason}\n\n${k.cyan('$')} ${parsed.command}`,
-    "Claude's suggestion",
-  );
+  note(`${parsed.reason}\n\n${k.cyan('$')} ${parsed.command}`, "Claude's suggestion");
 
   const run = ensureAnswer(
     await p.confirm({
@@ -128,15 +119,107 @@ export async function offerClaudeAssist(
   return true;
 }
 
-function isClaudeUsable(): boolean {
+function isClaudeInstalled(): boolean {
   try {
     execSync('command -v claude', { stdio: 'ignore' });
+    return true;
   } catch {
     return false;
   }
-  // Availability without auth is half the story; a real query will still
-  // fail if the token isn't registered. We try first and surface the error
-  // rather than pre-checking auth with a separate round trip.
+}
+
+function isClaudeAuthenticated(): boolean {
+  try {
+    execSync('claude auth status', { stdio: 'ignore', timeout: 5_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when the Claude CLI is already installed AND signed in — the only
+ * state in which a non-claude install may be offered a Claude debugger.
+ * Unlike `ensureClaudeReady`, this never prompts and has no side effects.
+ */
+export function isClaudeReady(): boolean {
+  return isClaudeInstalled() && isClaudeAuthenticated();
+}
+
+export async function ensureClaudeReady(projectRoot: string): Promise<boolean> {
+  if (!isClaudeInstalled()) {
+    const install = ensureAnswer(
+      await p.confirm({
+        message: 'Claude CLI is needed to diagnose this. Install it now?',
+        initialValue: true,
+      }),
+    );
+    if (!install) return false;
+
+    const code = spawnSync('bash', ['setup/install-claude.sh'], {
+      cwd: projectRoot,
+      stdio: 'inherit',
+    }).status;
+    if (code !== 0 || !isClaudeInstalled()) {
+      p.log.error("Couldn't install the Claude CLI.");
+      return false;
+    }
+    p.log.success('Claude CLI installed.');
+  }
+
+  if (!isClaudeAuthenticated()) {
+    const auth = ensureAnswer(
+      await p.confirm({
+        message: "Claude CLI isn't signed in. Sign in now? (a browser will open)",
+        initialValue: true,
+      }),
+    );
+    if (!auth) return false;
+
+    // setup-token has an interactive TUI; reset terminal to cooked mode
+    // so its prompts render correctly after clack's raw-mode prompts.
+    spawnSync('stty', ['sane'], { stdio: 'inherit' });
+
+    // Run under script(1) to capture the OAuth token from PTY output
+    // while preserving interactive TTY for the browser OAuth flow.
+    // Same approach as register-claude-token.sh, but we set the env var
+    // instead of writing to OneCLI.
+    const tmpfile = path.join(os.tmpdir(), `claude-setup-token-${process.pid}`);
+    try {
+      const isUtilLinux = (() => {
+        try {
+          return execSync('script --version 2>&1', { encoding: 'utf-8' }).includes('util-linux');
+        } catch {
+          return false;
+        }
+      })();
+      const scriptArgs = isUtilLinux
+        ? ['-q', '-c', 'claude setup-token', tmpfile]
+        : ['-q', tmpfile, 'claude', 'setup-token'];
+
+      spawnSync('script', scriptArgs, {
+        cwd: projectRoot,
+        stdio: 'inherit',
+      });
+
+      if (!isClaudeAuthenticated() && fs.existsSync(tmpfile)) {
+        const token = extractClaudeOAuthToken(fs.readFileSync(tmpfile, 'utf-8'));
+        if (token) process.env.CLAUDE_CODE_OAUTH_TOKEN = token;
+      }
+    } finally {
+      // eslint-disable-next-line no-empty -- best-effort temp cleanup
+      try {
+        fs.unlinkSync(tmpfile);
+      } catch {}
+    }
+
+    if (!isClaudeAuthenticated()) {
+      p.log.error("Couldn't complete Claude sign-in.");
+      return false;
+    }
+    p.log.success('Claude CLI signed in.');
+  }
+
   return true;
 }
 
@@ -146,9 +229,7 @@ function buildPrompt(ctx: AssistContext, projectRoot: string): string {
     ...BIG_PICTURE_FILES,
     ...stepRefs,
     'logs/setup.log',
-    ctx.rawLogPath
-      ? path.relative(projectRoot, ctx.rawLogPath)
-      : 'logs/setup-steps/',
+    ctx.rawLogPath ? path.relative(projectRoot, ctx.rawLogPath) : 'logs/setup-steps/',
   ].filter((v, i, a) => a.indexOf(v) === i);
 
   const hintLine = ctx.hint ? `Hint shown to the user: ${ctx.hint}\n` : '';
@@ -192,10 +273,7 @@ const SPINNER_FRAMES = ['◒', '◐', '◓', '◑'];
 const HIDE_CURSOR = '\x1b[?25l';
 const SHOW_CURSOR = '\x1b[?25h';
 
-async function queryClaudeUnderSpinner(
-  prompt: string,
-  projectRoot: string,
-): Promise<string | null> {
+async function queryClaudeUnderSpinner(prompt: string, projectRoot: string): Promise<string | null> {
   const out = process.stdout;
   const start = Date.now();
   const actions: string[] = [];
@@ -205,9 +283,8 @@ async function queryClaudeUnderSpinner(
     // Move cursor back to the start of the block (WINDOW_SIZE + 1 = header + window).
     out.write(`\x1b[${WINDOW_SIZE + 1}A`);
 
-    const elapsed = Math.round((Date.now() - start) / 1000);
     const icon = SPINNER_FRAMES[frameIdx % SPINNER_FRAMES.length];
-    const suffix = ` (${elapsed}s)`;
+    const suffix = ` (${fmtDuration(Date.now() - start)})`;
     const header = fitToWidth('Asking Claude to diagnose…', suffix);
     out.write(`\x1b[2K${k.cyan(icon)}  ${header}${k.dim(suffix)}\n`);
 
@@ -257,23 +334,17 @@ async function queryClaudeUnderSpinner(
     let stderr = '';
     let settled = false;
 
-    const finish = (
-      kind: 'ok' | 'error',
-      payload: string | null,
-    ): void => {
+    const finish = (kind: 'ok' | 'error', payload: string | null): void => {
       clearInterval(frameTick);
       clearBlock();
       out.write(SHOW_CURSOR);
       process.off('exit', restoreCursorOnExit);
-      const elapsed = Math.round((Date.now() - start) / 1000);
-      const suffix = ` (${elapsed}s)`;
+      const suffix = ` (${fmtDuration(Date.now() - start)})`;
       if (kind === 'ok') {
-        p.log.success(`${fitToWidth('Claude replied.', suffix)}${k.dim(suffix)}`);
+        p.log.success(`${brandBody(fitToWidth('Claude replied.', suffix))}${k.dim(suffix)}`);
         resolve(payload);
       } else {
-        p.log.error(
-          `${fitToWidth("Claude couldn't help here.", suffix)}${k.dim(suffix)}`,
-        );
+        p.log.error(`${fitToWidth("Claude couldn't help here.", suffix)}${k.dim(suffix)}`);
         const tail = stderr.trim().split('\n').slice(-3).join('\n');
         if (tail) p.log.message(k.dim(tail));
         resolve(null);
@@ -286,14 +357,7 @@ async function queryClaudeUnderSpinner(
     //
     // Resume the same session on repeat invocations so Claude carries
     // context across failures in one setup run.
-    const claudeArgs = [
-      '-p',
-      '--output-format',
-      'stream-json',
-      '--verbose',
-      '--permission-mode',
-      'bypassPermissions',
-    ];
+    const claudeArgs = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-mode', 'bypassPermissions'];
     if (claudeSessionId) {
       claudeArgs.push('--resume', claudeSessionId);
     }
@@ -365,8 +429,7 @@ interface StreamEvent {
   session_id?: string;
   message?: {
     content?: Array<
-      | { type: 'text'; text: string }
-      | { type: 'tool_use'; name: string; input: Record<string, unknown> }
+      { type: 'text'; text: string } | { type: 'tool_use'; name: string; input: Record<string, unknown> }
     >;
   };
 }
@@ -392,14 +455,15 @@ function handleStreamEvent(
 }
 
 function formatToolUse(name: string, input: Record<string, unknown>): string {
-  const truncate = (v: string, n: number): string =>
-    v.length > n ? v.slice(0, n) + '…' : v;
+  const truncate = (v: string, n: number): string => (v.length > n ? v.slice(0, n) + '…' : v);
   if (name === 'Read') {
     const f = String(input.file_path ?? '');
     return `Reading ${shortenPath(f)}`;
   }
   if (name === 'Bash') {
-    const cmd = String(input.command ?? '').replace(/\s+/g, ' ').trim();
+    const cmd = String(input.command ?? '')
+      .replace(/\s+/g, ' ')
+      .trim();
     return `Running ${truncate(cmd, 60)}`;
   }
   if (name === 'Grep') return `Searching for "${truncate(String(input.pattern ?? ''), 40)}"`;
@@ -412,9 +476,7 @@ function shortenPath(abs: string): string {
   return abs.startsWith(`${root}/`) ? abs.slice(root.length + 1) : abs;
 }
 
-function parseResponse(
-  raw: string,
-): { reason: string; command: string } | null {
+function parseResponse(raw: string): { reason: string; command: string } | null {
   // Accept the fields anywhere in the output — Claude sometimes wraps the
   // answer in a trailing explanation we can safely ignore.
   const reasonMatch = raw.match(/^\s*REASON:\s*(.+?)\s*$/m);

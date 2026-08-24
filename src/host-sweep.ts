@@ -1,11 +1,8 @@
 /**
- * Host sweep — periodic maintenance of all session DBs.
+ * Host sweep — periodic maintenance of all session mailboxes.
  *
- * Two-DB architecture:
- *   - Reads processing_ack + container_state from outbound.db
- *   - Writes to inbound.db (host-owned) for status updates + recurrence
- *   - Uses heartbeat file mtime for liveness (never polls DB for it)
- *   - Never writes to outbound.db — preserves single-writer-per-file invariant
+ * Reads runner-owned processing/container state and maintains host-owned
+ * inbound state through the registered mailbox.
  *
  * Stuck / idle detection (replaces the old IDLE_TIMEOUT setTimeout + 10-min
  * heartbeat threshold):
@@ -19,6 +16,11 @@
  *        → kill. Covers the "alive but silent for 30 min" case. Extended
  *        only while Bash is declared as running longer, honouring the
  *        user's own timeout directive. Kill then resets processing rows.
+ *        When no heartbeat file exists yet, falls back to the tracked
+ *        container spawn time so a container that goes idle without ever
+ *        reaching an SDK event —
+ *        and so never writes a heartbeat — still ages out instead of
+ *        living forever (see decideStuckAction's grace-period comment).
  *
  *     2. Message-scoped stuck: for each 'processing' row, tolerance =
  *        max(60s, current_bash_timeout_ms_if_Bash_running). If
@@ -26,25 +28,16 @@
  *        → kill + reset this message + tries++. Semantics: "container
  *        claimed a message and went quiet past tolerance since the claim."
  */
-import type Database from 'better-sqlite3';
 import fs from 'fs';
 
-import { getActiveSessions } from './db/sessions.js';
+import { ensureEgressNetwork } from './egress-lockdown.js';
+import { getActiveSessions, isTaskThread, updateSession } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
-import {
-  countDueMessages,
-  getContainerState,
-  getMessageForRetry,
-  getProcessingClaims,
-  markMessageFailed,
-  retryWithBackoff,
-  syncProcessingAcks,
-  type ContainerState,
-} from './db/session-db.js';
 import { log } from './log.js';
-import { openInboundDb, openOutboundDb, inboundDbPath, heartbeatPath } from './session-manager.js';
-import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
+import { heartbeatPath, withExistingMailboxSession } from './session-manager.js';
+import { getContainerStartedAtMs, isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
 import type { Session } from './types.js';
+import type { ContainerState, InboundMailbox, OutboundMailbox } from './mailbox/index.js';
 
 const SWEEP_INTERVAL_MS = 60_000;
 // Absolute idle ceiling for a running container. If the heartbeat file hasn't
@@ -64,28 +57,38 @@ export type StuckDecision =
 
 /**
  * Pure decision for whether a running container should be killed this sweep
- * tick. Inputs are all deterministic; filesystem + DB reads happen in the
+ * tick. Inputs are all deterministic; filesystem and mailbox reads happen in the
  * caller.
  */
 export function decideStuckAction(args: {
   now: number;
   heartbeatMtimeMs: number; // 0 when heartbeat file absent
+  containerStartedAtMs?: number; // fallback when heartbeat file absent
   containerState: ContainerState | null;
-  claims: Array<{ message_id: string; status_changed: string }>;
+  claims: Array<{ messageId: string; statusChanged: string }>;
 }): StuckDecision {
-  const { now, heartbeatMtimeMs, containerState, claims } = args;
+  const { now, heartbeatMtimeMs, containerStartedAtMs, containerState, claims } = args;
   const declaredBashMs = bashTimeoutMs(containerState);
 
-  // Ceiling check only applies when we have an actual heartbeat timestamp.
-  // A freshly-spawned container hasn't had any SDK activity yet so no
-  // heartbeat file exists — if we treated that as infinitely stale we'd
-  // kill every container within seconds of spawn. Genuinely-dead containers
-  // that never wrote a heartbeat are caught by the separate "container
-  // process not running" cleanup path, not here. If a fresh container is
-  // hanging at the gate (claimed a message but never did anything) the
-  // claim-stuck check below handles it.
-  if (heartbeatMtimeMs !== 0) {
-    const heartbeatAge = now - heartbeatMtimeMs;
+  // Ceiling check prefers the heartbeat file's mtime. A freshly-spawned
+  // container hasn't had any SDK activity yet so no heartbeat file exists —
+  // if we treated that as infinitely stale we'd kill every container within
+  // seconds of spawn. But "no heartbeat file" isn't only a spawn-grace-period
+  // signal: a container can also finish its one turn (or find nothing to do)
+  // without its poll loop ever reaching an SDK event, in which case a
+  // heartbeat file is never created for the rest of that container's life,
+  // and it sits alive-but-idle forever, immune to this check. Falling back
+  // to the container's spawn timestamp gives fresh spawns the same grace
+  // period as before (age starts at ~0) while still aging out a
+  // container that never ticks. Genuinely-dead containers that never wrote a
+  // heartbeat AND have no session record are caught by the separate
+  // "container process not running" cleanup path, not here. If a fresh
+  // container is hanging at the gate (claimed a message but never did
+  // anything) the claim-stuck check below handles it independently of this
+  // fallback.
+  const effectiveHeartbeatMs = heartbeatMtimeMs !== 0 ? heartbeatMtimeMs : (containerStartedAtMs ?? 0);
+  if (effectiveHeartbeatMs !== 0) {
+    const heartbeatAge = now - effectiveHeartbeatMs;
     const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
     if (heartbeatAge > ceiling) {
       return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling };
@@ -94,12 +97,12 @@ export function decideStuckAction(args: {
 
   const tolerance = Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0);
   for (const claim of claims) {
-    const claimedAt = Date.parse(claim.status_changed);
+    const claimedAt = Date.parse(claim.statusChanged);
     if (Number.isNaN(claimedAt)) continue;
     const claimAge = now - claimedAt;
     if (claimAge <= tolerance) continue;
     if (heartbeatMtimeMs > claimedAt) continue;
-    return { action: 'kill-claim', messageId: claim.message_id, claimAgeMs: claimAge, toleranceMs: tolerance };
+    return { action: 'kill-claim', messageId: claim.messageId, claimAgeMs: claimAge, toleranceMs: tolerance };
   }
 
   return { action: 'ok' };
@@ -110,7 +113,7 @@ let running = false;
 export function startHostSweep(): void {
   if (running) return;
   running = true;
-  sweep();
+  void sweep();
 }
 
 export function stopHostSweep(): void {
@@ -120,8 +123,18 @@ export function stopHostSweep(): void {
 async function sweep(): Promise<void> {
   if (!running) return;
 
+  // Re-heal the egress network so already-running agents keep their gateway hop
+  // if it was detached out-of-band. Best-effort here: a heal failure isn't a
+  // leak (agents stay on the internal net), so log and continue. No-op when
+  // lockdown is disabled.
   try {
-    const sessions = getActiveSessions();
+    ensureEgressNetwork();
+  } catch (err) {
+    log.error('Egress lockdown re-heal failed', { err });
+  }
+
+  try {
+    const sessions = await getActiveSessions();
     for (const session of sessions) {
       await sweepSession(session);
     }
@@ -129,72 +142,104 @@ async function sweep(): Promise<void> {
     log.error('Host sweep error', { err });
   }
 
-  setTimeout(sweep, SWEEP_INTERVAL_MS);
+  // Finalize any "Reject with reason…" holds whose reply window elapsed (admin
+  // ghosted, or the host restarted mid-capture). Central-DB scan, once per tick
+  // — not per session.
+  // MODULE-HOOK:approvals-reason-sweep:start
+  try {
+    const { sweepAwaitingReasonRejects } = await import('./modules/approvals/index.js');
+    await sweepAwaitingReasonRejects();
+  } catch (err) {
+    log.error('Reject-with-reason sweep failed', { err });
+  }
+  // MODULE-HOOK:approvals-reason-sweep:end
+
+  setTimeout(() => void sweep(), SWEEP_INTERVAL_MS);
+}
+
+/** A per-task session with no live tasks and no running container is spent → close it. */
+export function shouldCloseTaskSession(
+  threadId: string | null,
+  containerRunning: boolean,
+  liveTaskCount: number,
+): boolean {
+  return isTaskThread(threadId) && !containerRunning && liveTaskCount === 0;
 }
 
 async function sweepSession(session: Session): Promise<void> {
-  const agentGroup = getAgentGroup(session.agent_group_id);
+  const agentGroup = await getAgentGroup(session.agent_group_id);
   if (!agentGroup) return;
 
-  const inPath = inboundDbPath(agentGroup.id, session.id);
-  if (!fs.existsSync(inPath)) return;
-
-  let inDb: Database.Database;
-  let outDb: Database.Database | null = null;
   try {
-    inDb = openInboundDb(agentGroup.id, session.id);
-  } catch {
-    return;
+    let dueCount = 0;
+    let shouldWake = false;
+    const exists = await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
+      mailbox.applyProcessingAcks(mailbox.getTerminalProcessingAcks());
+      dueCount = mailbox.countDueMessages();
+      shouldWake = dueCount > 0 && !isContainerRunning(session.id);
+      if (!shouldWake) {
+        await maintainSessionMailbox(mailbox, session, agentGroup.id, false);
+      }
+      return true;
+    });
+    if (!exists) return;
+
+    if (!shouldWake) return;
+
+    // Waking refreshes routing through the mailbox. Keep it outside the
+    // session transaction so serialized implementations do not re-enter
+    // themselves while the sweep still owns the session.
+    log.info('Waking container for due messages', { sessionId: session.id, count: dueCount });
+    await wakeContainer(session);
+
+    await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
+      await maintainSessionMailbox(mailbox, session, agentGroup.id, true);
+    });
+  } catch (err) {
+    log.error('Session mailbox sweep failed', {
+      agentGroupId: agentGroup.id,
+      sessionId: session.id,
+      err,
+    });
+  }
+}
+
+async function maintainSessionMailbox(
+  mailbox: InboundMailbox & OutboundMailbox,
+  session: Session,
+  agentGroupId: string,
+  justWoke: boolean,
+): Promise<void> {
+  const alive = isContainerRunning(session.id);
+  if (alive && !justWoke) {
+    enforceRunningContainerSla(mailbox, mailbox, session, agentGroupId);
+  }
+  if (!alive) {
+    resetStuckProcessingRows(mailbox, mailbox, session, 'container not running');
   }
 
-  try {
-    outDb = openOutboundDb(agentGroup.id, session.id);
-  } catch {
-    // outbound.db might not exist yet (container hasn't started)
+  // MODULE-HOOK:scheduling-recurrence:start
+  const { handleRecurrence } = await import('./modules/scheduling/recurrence.js');
+  await handleRecurrence(mailbox, session);
+  // MODULE-HOOK:scheduling-recurrence:end
+
+  if (isTaskThread(session.thread_id)) {
+    const liveTasks = mailbox.countLiveTasks();
+    if (shouldCloseTaskSession(session.thread_id, isContainerRunning(session.id), liveTasks)) {
+      await updateSession(session.id, { status: 'closed' });
+      log.info('Closed spent task session', { sessionId: session.id, threadId: session.thread_id });
+    }
   }
 
+  // MODULE-HOOK:cross-session-echo-prune:start
   try {
-    // 1. Sync processing_ack → messages_in status
-    if (outDb) {
-      syncProcessingAcks(inDb, outDb);
-    }
-
-    // 2. Wake a container if work is due and nothing is running. Ordered
-    // before the crashed-container cleanup so a fresh container gets a chance
-    // to clean its own orphan processing_ack rows on startup (see
-    // container/agent-runner/src/db/connection.ts). Otherwise the reset path
-    // would keep bumping process_after into the future, dueCount would stay 0,
-    // and the wake would never fire.
-    const dueCount = countDueMessages(inDb);
-    if (dueCount > 0 && !isContainerRunning(session.id)) {
-      log.info('Waking container for due messages', { sessionId: session.id, count: dueCount });
-      await wakeContainer(session);
-    }
-
-    const alive = isContainerRunning(session.id);
-
-    // 3. Running-container SLA: absolute ceiling + per-claim stuck rules.
-    if (alive && outDb) {
-      enforceRunningContainerSla(inDb, outDb, session, agentGroup.id);
-    }
-
-    // 4. Crashed-container cleanup: processing rows left behind get retried.
-    // Only fires when wake in step 2 didn't pick up the work (no due messages,
-    // or wake failed). resetStuckProcessingRows itself is idempotent — it
-    // skips messages already scheduled for a future retry.
-    if (!alive && outDb) {
-      resetStuckProcessingRows(inDb, outDb, session, 'container not running');
-    }
-
-    // 5. Recurrence fanout for completed recurring tasks.
-    // MODULE-HOOK:scheduling-recurrence:start
-    const { handleRecurrence } = await import('./modules/scheduling/recurrence.js');
-    await handleRecurrence(inDb, session);
-    // MODULE-HOOK:scheduling-recurrence:end
-  } finally {
-    inDb.close();
-    outDb?.close();
+    const { pruneEchoBacklog } = await import('./modules/cross-session-context/index.js');
+    const pruned = pruneEchoBacklog(mailbox);
+    if (pruned > 0) log.info('Pruned session-echo backlog', { sessionId: session.id, pruned });
+  } catch (err) {
+    log.error('Echo backlog prune failed', { sessionId: session.id, err });
   }
+  // MODULE-HOOK:cross-session-echo-prune:end
 }
 
 function heartbeatMtimeMs(agentGroupId: string, sessionId: string): number {
@@ -207,21 +252,22 @@ function heartbeatMtimeMs(agentGroupId: string, sessionId: string): number {
 }
 
 function bashTimeoutMs(state: ContainerState | null): number | null {
-  if (!state || state.current_tool !== 'Bash') return null;
-  return typeof state.tool_declared_timeout_ms === 'number' ? state.tool_declared_timeout_ms : null;
+  if (!state || state.currentTool !== 'Bash') return null;
+  return state.toolDeclaredTimeoutMs;
 }
 
 function enforceRunningContainerSla(
-  inDb: Database.Database,
-  outDb: Database.Database,
+  inDb: InboundMailbox,
+  outDb: OutboundMailbox,
   session: Session,
   agentGroupId: string,
 ): void {
   const decision = decideStuckAction({
     now: Date.now(),
     heartbeatMtimeMs: heartbeatMtimeMs(agentGroupId, session.id),
-    containerState: getContainerState(outDb),
-    claims: getProcessingClaims(outDb),
+    containerStartedAtMs: getContainerStartedAtMs(session.id),
+    containerState: outDb.getContainerState(),
+    claims: outDb.getProcessingClaims(),
   });
 
   if (decision.action === 'ok') return;
@@ -247,16 +293,25 @@ function enforceRunningContainerSla(
   resetStuckProcessingRows(inDb, outDb, session, 'claim-stuck');
 }
 
-function resetStuckProcessingRows(
-  inDb: Database.Database,
-  outDb: Database.Database,
+export function _resetStuckProcessingRowsForTesting(
+  inDb: InboundMailbox,
+  outDb: OutboundMailbox,
   session: Session,
   reason: string,
 ): void {
-  const claims = getProcessingClaims(outDb);
+  resetStuckProcessingRows(inDb, outDb, session, reason);
+}
+
+function resetStuckProcessingRows(
+  inDb: InboundMailbox,
+  outDb: OutboundMailbox,
+  session: Session,
+  reason: string,
+): void {
+  const claims = outDb.getProcessingClaims();
   const now = Date.now();
-  for (const { message_id } of claims) {
-    const msg = getMessageForRetry(inDb, message_id, 'pending');
+  for (const { messageId } of claims) {
+    const msg = inDb.getMessageForRetry(messageId, 'pending');
     if (!msg) continue;
 
     // Already rescheduled for a future retry — don't bump tries again. The
@@ -265,7 +320,7 @@ function resetStuckProcessingRows(
     if (msg.processAfter && Date.parse(msg.processAfter) > now) continue;
 
     if (msg.tries >= MAX_TRIES) {
-      markMessageFailed(inDb, msg.id);
+      inDb.markMessageFailed(msg.id);
       log.warn('Message marked as failed after max retries', {
         messageId: msg.id,
         sessionId: session.id,
@@ -274,7 +329,7 @@ function resetStuckProcessingRows(
     } else {
       const backoffMs = BACKOFF_BASE_MS * Math.pow(2, msg.tries);
       const backoffSec = Math.floor(backoffMs / 1000);
-      retryWithBackoff(inDb, msg.id, backoffSec);
+      inDb.retryWithBackoff(msg.id, backoffSec);
       log.info('Reset stale message with backoff', {
         messageId: msg.id,
         tries: msg.tries,
@@ -282,5 +337,18 @@ function resetStuckProcessingRows(
         reason,
       });
     }
+  }
+
+  // Drop the orphan 'processing' rows. Without this, the next sweep tick
+  // would re-read them, see the old status_changed timestamp, conclude the
+  // freshly respawned container is stuck, and SIGKILL it before its
+  // agent-runner has a chance to run clearStaleProcessingAcks() on startup.
+  try {
+    const cleared = outDb.deleteOrphanProcessingClaims();
+    if (cleared > 0) {
+      log.info('Cleared orphan processing claims', { sessionId: session.id, cleared, reason });
+    }
+  } catch (err) {
+    log.warn('Failed to clear orphan processing claims', { sessionId: session.id, err });
   }
 }

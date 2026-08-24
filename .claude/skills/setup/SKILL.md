@@ -7,4 +7,4 @@ description: Run initial NanoClaw setup. Use when user wants to install NanoClaw
 
 Tell the user to run `bash nanoclaw.sh` in their terminal. That script handles the full end-to-end setup — dependencies, container image, OneCLI vault, Anthropic credential, service, first agent, and optional channel wiring.
 
-If they hit an error partway through, it will offer Claude-assisted recovery inline — no need to come back here.
+If they hit an error partway through, the script offers Claude-assisted recovery inline and resumes from where it stopped.

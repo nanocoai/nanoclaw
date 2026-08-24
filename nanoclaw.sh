@@ -25,6 +25,74 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
+# ─── --slack-agents: former testing flag, accepted and ignored ─────────
+# The managed Slack experience is simply the default; the flag that once
+# enabled it is swallowed so older invocations keep working.
+_filtered_args=()
+for arg in "$@"; do
+  if [ "$arg" = "--slack-agents" ]; then
+    :
+  else
+    _filtered_args+=("$arg")
+  fi
+done
+set -- ${_filtered_args[@]+"${_filtered_args[@]}"}
+unset _filtered_args
+
+# ─── --help: show usage without bootstrapping ──────────────────────────
+for arg in "$@"; do
+  if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
+    if command -v node >/dev/null 2>&1 && [ -x "$PROJECT_ROOT/node_modules/.bin/tsx" ]; then
+      exec "$PROJECT_ROOT/node_modules/.bin/tsx" "$PROJECT_ROOT/setup/auto.ts" "$@"
+    fi
+    echo "Usage: bash nanoclaw.sh [options]"
+    echo ""
+    echo "  --template-path <ref>  Create or update an agent from templates/<ref>"
+    echo "  --uninstall            Uninstall this NanoClaw copy"
+    echo "  --help, -h             Show this help without installing dependencies"
+    exit 0
+  fi
+done
+
+# ─── --uninstall: short-circuit before any setup work ──────────────────
+# Never install dependencies just to uninstall. With the TS toolchain
+# present, hand straight off to setup:auto (the flow lives in
+# setup/uninstall/); without it, print manual cleanup guidance. Runs
+# before diagnostics.sh is sourced so a pure uninstall doesn't emit
+# setup_launched, and before all pre-flights/bootstrap.
+for arg in "$@"; do
+  if [ "$arg" = "--uninstall" ]; then
+    # exec tsx directly rather than `pnpm run -- …`: pnpm passes the `--`
+    # separator through to the script, where the flag parser treats
+    # everything after it as positional args and the flags get dropped.
+    # Gate on node (tsx's shebang interpreter) — pnpm isn't used here.
+    if command -v node >/dev/null 2>&1 && [ -x "$PROJECT_ROOT/node_modules/.bin/tsx" ]; then
+      exec "$PROJECT_ROOT/node_modules/.bin/tsx" "$PROJECT_ROOT/setup/auto.ts" "$@"
+    fi
+    export NANOCLAW_PROJECT_ROOT="$PROJECT_ROOT"
+    # shellcheck source=setup/lib/install-slug.sh
+    source "$PROJECT_ROOT/setup/lib/install-slug.sh"
+    UNINSTALL_RUNTIME="${CONTAINER_RUNTIME:-docker}"
+    echo "Can't run the uninstaller: dependencies are missing (node_modules/)."
+    echo "Either re-run 'bash nanoclaw.sh' once to restore them, or clean up manually:"
+    echo ""
+    if [ "$(uname -s)" = "Darwin" ]; then
+      echo "  launchctl unload ~/Library/LaunchAgents/$(launchd_label).plist"
+      echo "  rm -f ~/Library/LaunchAgents/$(launchd_label).plist"
+    else
+      echo "  systemctl --user disable --now $(systemd_unit).service"
+      echo "  rm -f ~/.config/systemd/user/$(systemd_unit).service && systemctl --user daemon-reload"
+    fi
+    echo "  $UNINSTALL_RUNTIME ps -aq --filter label=nanoclaw-install=$(_nanoclaw_install_slug) | xargs -r $UNINSTALL_RUNTIME rm -f"
+    echo "  $UNINSTALL_RUNTIME rmi $(container_image_base):latest"
+    echo "  rm -f ~/.local/bin/ncl    # only if it points at this folder"
+    echo "  rm -rf \"$(dirname "$PROJECT_ROOT")/.nanoclaw-updates/$(_nanoclaw_install_slug)\""
+    echo ""
+    echo "Then back up $PROJECT_ROOT/.env if you need the keys, and delete the folder."
+    exit 1
+  fi
+done
+
 LOGS_DIR="$PROJECT_ROOT/logs"
 STEPS_DIR="$LOGS_DIR/setup-steps"
 PROGRESS_LOG="$LOGS_DIR/setup.log"
@@ -129,10 +197,123 @@ rm -f  "$PROGRESS_LOG"
 mkdir -p "$STEPS_DIR" "$LOGS_DIR"
 write_header
 
-# NanoClaw wordmark — clack's intro carries the "let's get you set up" framing,
-# so we don't print a subtitle here. setup:auto sees NANOCLAW_BOOTSTRAPPED=1 and
-# skips re-printing the wordmark, keeping the flow visually continuous.
-printf '\n  %s%s\n\n' "$(bold 'Nano')" "$(brand_bold 'Claw')"
+# NanoClaw splash — under-the-sea lobster mascot in truecolor braille,
+# with the figlet wordmark and taglines below. Pre-rendered into
+# assets/setup-splash.txt (built from assets/nanoclaw-icon.png via chafa +
+# figlet); the bash script just streams the literal frame. clack's intro
+# then carries the "let's get you set up" framing — setup:auto sees
+# NANOCLAW_BOOTSTRAPPED=1 and skips re-printing the wordmark.
+cat "$PROJECT_ROOT/assets/setup-splash.txt"
+
+# ─── pre-flight: minimum hardware specs ────────────────────────────────
+# NanoClaw runs an agent container per session. Below this threshold the
+# host + container + agent will struggle (OOM under load). Soft warn — the
+# user can override.
+
+# RAM floor is set below 4 GB because "4 GB" VMs typically report 3700–3900 MB
+# after kernel reserves (e.g. Hetzner CX21 ≈ 3814, AWS t3.medium ≈ 3800).
+MIN_MEM_MB=3700
+
+detect_mem_mb() {
+  case "$(uname -s)" in
+    Linux)
+      awk '/^MemTotal:/ {printf "%d", $2 / 1024}' /proc/meminfo 2>/dev/null
+      ;;
+    Darwin)
+      local bytes
+      bytes=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+      echo $(( bytes / 1024 / 1024 ))
+      ;;
+  esac
+}
+
+MEM_MB=$(detect_mem_mb)
+: "${MEM_MB:=0}"
+
+LOW_MEM=false
+[ "$MEM_MB" -gt 0 ] && [ "$MEM_MB" -lt "$MIN_MEM_MB" ] && LOW_MEM=true
+
+if [ "$LOW_MEM" = true ]; then
+  printf '  %s\n' "$(red 'Warning: this machine likely cannot run NanoClaw.')"
+  printf '  %s\n' "$(dim 'NanoClaw recommends a 4 GB+ RAM machine. Below this, the host + agent')"
+  printf '  %s\n' "$(dim 'container will run out of memory under most workloads. A stronger')"
+  printf '  %s\n' "$(dim 'machine is strongly recommended.')"
+  printf '  %s\n' "$(dim "  · Detected RAM: ${MEM_MB} MB")"
+  printf '\n'
+  read -r -p "  $(bold 'Try anyway?') [y/N] " SPECS_ANS </dev/tty
+
+  case "${SPECS_ANS:-N}" in
+    [Yy]*)
+      ph_event setup_low_specs_continued mem_mb="$MEM_MB" low_mem="$LOW_MEM"
+      printf '\n'
+      ;;
+    *)
+      ph_event setup_low_specs_aborted mem_mb="$MEM_MB" low_mem="$LOW_MEM"
+      printf '\n  %s\n\n' "$(dim 'Aborted. Re-run after upgrading the host.')"
+      exit 1
+      ;;
+  esac
+fi
+
+# ─── pre-flight: Google Cloud VM warning (Linux) ──────────────────────
+# NanoClaw is known to not run reliably on Google Compute Engine instances.
+# Warn early — before the root check or bootstrap spinner — so users can
+# switch providers before sinking time into setup. Detection uses DMI
+# (no network round-trip), which on GCE reports "Google" / "Google
+# Compute Engine".
+if [ "$(uname -s)" = "Linux" ] \
+  && { grep -qi 'Google' /sys/class/dmi/id/product_name 2>/dev/null \
+    || grep -qi 'Google' /sys/class/dmi/id/sys_vendor   2>/dev/null; }; then
+  printf '  %s\n' "$(red 'Warning: Google Cloud VM detected.')"
+  printf '  %s\n' "$(dim 'Google blocks sudo commands, so NanoClaw is unlikely to run successfully on this VM.')"
+  printf '  %s\n\n' "$(dim 'If you want to run NanoClaw successfully, switch to a different provider (Hetzner, Hostinger, exe.dev and others..).')"
+  read -r -p "  $(bold 'Try anyway?') [y/N] " GCE_ANS </dev/tty
+
+  case "${GCE_ANS:-N}" in
+    [Yy]*)
+      ph_event setup_gce_continued
+      printf '\n'
+      ;;
+    *)
+      ph_event setup_gce_aborted
+      printf '\n  %s\n\n' "$(dim 'Aborted. Re-run on a non-GCE host to continue.')"
+      exit 1
+      ;;
+  esac
+fi
+
+# ─── pre-flight: root user warning (Linux) ────────────────────────────
+if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" -eq 0 ]; then
+  printf '  %s\n' \
+    "$(red 'Warning: you are running as root.')"
+  printf '  %s\n' \
+    "$(dim "Running NanoClaw as root is not recommended. It can cause permission")"
+  printf '  %s\n\n' \
+    "$(dim "issues with containers, services, and file ownership.")"
+  printf '  %s\n' "$(bold '1)') $(dim 'Show me instructions for creating a new Linux user')"
+  printf '  %s\n\n' "$(bold '2)') $(dim 'Continue setting up NanoClaw as root user (not recommended)')"
+  read -r -p "  $(bold 'Choose [1/2]: ')" ROOT_ANS </dev/tty
+
+  case "${ROOT_ANS:-1}" in
+    2)
+      ph_event setup_root_continued
+      printf '\n'
+      ;;
+    *)
+      ph_event setup_root_aborted
+      printf '\n  %s\n' "$(bold 'To set up a regular user (via SSH):')"
+      printf '  %s\n\n' "$(dim 'Not using SSH? Refer to your hosting provider docs or ask your coding agent to help you set up SSH access.')"
+      printf '  %s\n' "$(dim '1. Create a new user:           adduser nanoclaw')"
+      printf '  %s\n' "$(dim '2. Add to sudo group:           usermod -aG sudo nanoclaw')"
+      printf '  %s\n' "$(dim '3. Enable passwordless sudo:    echo "nanoclaw ALL=(ALL) NOPASSWD:ALL" | tee /etc/sudoers.d/nanoclaw')"
+      printf '  %s\n' "$(dim '4. Log out:                     exit')"
+      printf '  %s\n' "$(dim '5. Log back in as the new user: ssh nanoclaw@your-server')"
+      printf '  %s\n' "$(dim '6. Clone the repo:              git clone https://github.com/nanocoai/nanoclaw.git && cd nanoclaw')"
+      printf '  %s\n\n' "$(dim '7. Re-run setup:               bash nanoclaw.sh')"
+      exit 1
+      ;;
+  esac
+fi
 
 # ─── pre-flight: Homebrew on macOS ─────────────────────────────────────
 # setup/install-node.sh and setup/install-docker.sh both require `brew` on
@@ -188,9 +369,6 @@ BOOTSTRAP_RAW="${STEPS_DIR}/01-bootstrap.log"
 BOOTSTRAP_LABEL="Installing the basics"
 BOOTSTRAP_START=$(date +%s)
 
-# One-line "why" that teaches a differentiator while the user waits.
-printf '%s  %s\n' "$(gray '│')" \
-  "$(dim "Small. Runs on your machine. Yours to modify.")"
 spinner_start "$BOOTSTRAP_LABEL"
 
 # Run in the background so we can tick elapsed time. Capture exit code via
@@ -259,5 +437,6 @@ fi
 # --silent suppresses pnpm's `> nanoclaw@2.0.0 setup:auto / > tsx setup/auto.ts`
 # preamble so the flow continues visually from "Basics installed" straight
 # into setup:auto's spinner. exec so signals (Ctrl-C) propagate directly.
-# `-- "$@"` forwards any flags (e.g. --onecli-api-host) to setup:auto.
-exec pnpm --silent run setup:auto -- "$@"
+# pnpm forwards arguments after the script name directly. Passing an extra
+# `--` would reach setup:auto and make its parser stop before our flags.
+exec pnpm --silent run setup:auto "$@"

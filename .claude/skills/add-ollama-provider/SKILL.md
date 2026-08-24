@@ -76,7 +76,7 @@ Then rebuild the container image: `./container/build.sh`
 
 Ask the user (plain text, not AskUserQuestion):
 
-1. **Which agent group?** List available groups: `sqlite3 data/v2.db "SELECT folder, name FROM agent_groups;"`
+1. **Which agent group?** List available groups: `pnpm exec tsx scripts/q.ts data/v2.db "SELECT folder, name FROM agent_groups;"`
 2. **Which Ollama model?** List available: `curl -s http://localhost:11434/api/tags | grep '"name"'`
 3. **Block Anthropic API?** Recommended yes — prevents accidental spend if config drifts.
 
@@ -111,7 +111,7 @@ Read the agent group's shared Claude settings:
 
 ```bash
 # Find the agent group ID
-AG_ID=$(sqlite3 data/v2.db "SELECT id FROM agent_groups WHERE folder='<FOLDER>';")
+AG_ID=$(pnpm exec tsx scripts/q.ts data/v2.db "SELECT id FROM agent_groups WHERE folder='<FOLDER>';")
 SETTINGS=data/v2-sessions/$AG_ID/.claude-shared/settings.json
 ```
 
@@ -130,12 +130,15 @@ file, not from env vars. This file is bind-mounted into the container as `~/.cla
 
 ## 5. Build and restart
 
+Run from your NanoClaw project root:
+
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
 pnpm run build
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
-# Linux: systemctl --user restart nanoclaw
+source setup/lib/install-slug.sh
+launchctl unload ~/Library/LaunchAgents/$(launchd_label).plist
+launchctl load   ~/Library/LaunchAgents/$(launchd_label).plist
+# Linux: systemctl --user restart $(systemd_unit)
 ```
 
 ## 6. Verify
@@ -147,7 +150,7 @@ Send a message to the agent. Then confirm:
 curl -s http://localhost:11434/api/ps | grep '"name"'
 
 # Container has the right env vars
-CTR=$(docker ps --filter "name=nanoclaw-v2-<FOLDER>" --format "{{.Names}}" | head -1)
+CTR=$(docker ps --filter "label=nanoclaw-group-folder=<FOLDER>" --format "{{.Names}}" | head -1)
 docker inspect "$CTR" --format '{{json .HostConfig.ExtraHosts}}'
 docker exec "$CTR" env | grep ANTHROPIC
 ```

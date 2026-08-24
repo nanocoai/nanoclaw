@@ -17,22 +17,24 @@
  * drops (no agent wired, no trigger match); the access gate writes rows
  * for policy refusals.
  */
-import { getChannelAdapter } from './channels/channel-registry.js';
+import { getChannelAdapter, getChannelDefaults } from './channels/channel-registry.js';
+import { resolveThreadPolicy, resolveUnknownSenderPolicy } from './channels/channel-defaults.js';
 import { gateCommand } from './command-gate.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
 import {
-  createMessagingGroup,
+  createMessagingGroupIfAbsent,
   getMessagingGroupAgents,
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
-import { startTypingRefresh } from './modules/typing/index.js';
+import { backfillNewSession, fanInboundMessage } from './modules/cross-session-context/index.js';
+import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
-import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
+import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
 
 function generateId(): string {
@@ -47,7 +49,7 @@ function generateId(): string {
  * carry enough info to identify a sender. Without the hook, every message
  * arrives at the gate with userId=null.
  */
-export type SenderResolverFn = (event: InboundEvent) => string | null;
+export type SenderResolverFn = (event: InboundEvent) => string | null | Promise<string | null>;
 
 let senderResolver: SenderResolverFn | null = null;
 
@@ -74,7 +76,7 @@ export type AccessGateFn = (
   userId: string | null,
   mg: MessagingGroup,
   agentGroupId: string,
-) => AccessGateResult;
+) => AccessGateResult | Promise<AccessGateResult>;
 
 let accessGate: AccessGateFn | null = null;
 
@@ -97,7 +99,7 @@ export type SenderScopeGateFn = (
   userId: string | null,
   mg: MessagingGroup,
   agent: MessagingGroupAgent,
-) => AccessGateResult;
+) => AccessGateResult | Promise<AccessGateResult>;
 
 let senderScopeGate: SenderScopeGateFn | null = null;
 
@@ -106,6 +108,24 @@ export function setSenderScopeGate(fn: SenderScopeGateFn): void {
     log.warn('Sender-scope gate overwritten');
   }
   senderScopeGate = fn;
+}
+
+/**
+ * Message-interceptor hook. Runs at the very top of routeInbound, before
+ * messaging-group resolution. When an interceptor returns true the message is
+ * consumed and routing stops. Multiple interceptors may register; they run in
+ * registration order and the first to claim the message (return true) wins.
+ *
+ * Used by modules to capture free-text DM replies during multi-step approval
+ * flows — the permissions module (agent naming during channel registration)
+ * and the approvals module (reject-with-reason capture).
+ */
+export type MessageInterceptorFn = (event: InboundEvent) => Promise<boolean>;
+
+const messageInterceptors: MessageInterceptorFn[] = [];
+
+export function registerMessageInterceptor(fn: MessageInterceptorFn): void {
+  messageInterceptors.push(fn);
 }
 
 /**
@@ -129,6 +149,57 @@ export function setChannelRequestGate(fn: ChannelRequestGateFn): void {
   channelRequestGate = fn;
 }
 
+/**
+ * Session-created hook. When an engaged (waking) message creates a
+ * brand-new session, registered hooks are notified after the triggering
+ * message is written to the session's inbound DB, with the resolved
+ * messaging group, thread id, session mode, and triggering message.
+ *
+ * Channel modules can use it for platform-specific conversation bootstrap
+ * (thread naming, retiring onboarding affordances) without the router
+ * carrying platform timing knowledge. The hook fires for every
+ * created+engaged session — is_group / session-mode filtering is the
+ * consumer's business.
+ *
+ * Fire-and-forget: hooks are try/caught (and async rejections logged), so
+ * a failing hook can never affect routing or the container wake. No-op
+ * when nothing is registered.
+ */
+export interface SessionCreatedEvent {
+  /** The just-created session. */
+  session: Session;
+  /** The messaging group the triggering message arrived on. */
+  mg: MessagingGroup;
+  /** Platform address of the triggering inbound event. */
+  platformId: string;
+  /** Resolved thread id after the wiring's thread policy (null = no thread). */
+  threadId: string | null;
+  /** Resolved session mode after the wiring's thread policy. */
+  sessionMode: MessagingGroupAgent['session_mode'];
+  /** The triggering inbound message as received from the adapter. */
+  message: { id: string; kind: string; content: string; timestamp: string };
+}
+
+export type SessionCreatedHook = (event: SessionCreatedEvent) => void | Promise<void>;
+
+const sessionCreatedHooks: SessionCreatedHook[] = [];
+
+export function registerSessionCreatedHook(hook: SessionCreatedHook): void {
+  sessionCreatedHooks.push(hook);
+}
+
+function dispatchSessionCreated(event: SessionCreatedEvent): void {
+  for (const hook of sessionCreatedHooks) {
+    try {
+      Promise.resolve(hook(event)).catch((err) =>
+        log.error('Session-created hook failed', { sessionId: event.session.id, err }),
+      );
+    } catch (err) {
+      log.error('Session-created hook threw', { sessionId: event.session.id, err });
+    }
+  }
+}
+
 function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string } {
   try {
     return JSON.parse(raw);
@@ -142,9 +213,19 @@ function safeParseContent(raw: string): { text?: string; sender?: string; sender
  * Creates messaging group + session if they don't exist yet.
  */
 export async function routeInbound(event: InboundEvent): Promise<void> {
+  // Pre-route interceptors — let modules consume messages before any routing
+  // (e.g. free-text DM replies during multi-step approval flows). They run in
+  // registration order; the first to claim the message stops routing. The
+  // sequential await is intentional — first-to-claim is order-dependent.
+  for (const intercept of messageInterceptors) {
+    if (await intercept(event)) return;
+  }
+
   // 0. Apply the adapter's thread policy. Non-threaded adapters (Telegram,
-  //    WhatsApp, iMessage, email) collapse threads to the channel.
-  const adapter = getChannelAdapter(event.channelType);
+  //    WhatsApp, iMessage, email) collapse threads to the channel. Resolved
+  //    by the RECEIVING instance — sibling instances of one platform can
+  //    differ in thread support.
+  const adapter = getChannelAdapter(event.instance ?? event.channelType);
   if (adapter && !adapter.supportsThreads) {
     event = { ...event, threadId: null };
   }
@@ -154,8 +235,14 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // 1. Combined lookup: messaging_group row + count of wired agents in a
   //    single query. Cheap short-circuit for the common "unwired channel"
   //    case — one DB read and we're out, no auto-create, no sender
-  //    resolution, no log spam.
-  const found = getMessagingGroupWithAgentCount(event.channelType, event.platformId);
+  //    resolution, no log spam. Exact-on-instance: an unknown named
+  //    instance falls through to auto-create rather than hijacking a
+  //    sibling instance's row.
+  const found = await getMessagingGroupWithAgentCount(
+    event.channelType,
+    event.platformId,
+    event.instance ?? event.channelType,
+  );
 
   let mg: MessagingGroup;
   let agentCount: number;
@@ -169,19 +256,39 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       id: mgId,
       channel_type: event.channelType,
       platform_id: event.platformId,
+      // Persist the receiving instance — without this, the first bot's row
+      // would absorb every sibling instance's traffic.
+      instance: event.instance ?? event.channelType,
       name: null,
       is_group: event.message.isGroup ? 1 : 0,
-      unknown_sender_policy: 'request_approval',
+      // Policy from the receiving channel's declared defaults (DM vs group
+      // context); undeclared adapters resolve through the behavior-faithful
+      // fallback, which is 'request_approval' in both contexts — identical
+      // to the historical hardcode.
+      unknown_sender_policy: resolveUnknownSenderPolicy(
+        event.instance ?? event.channelType,
+        event.message.isGroup === true,
+        event.channelType,
+      ),
       denied_at: null,
       created_at: new Date().toISOString(),
     };
-    createMessagingGroup(mg);
-    log.info('Auto-created messaging group', {
-      id: mgId,
-      channelType: event.channelType,
-      platformId: event.platformId,
-    });
-    agentCount = 0;
+    const created = await createMessagingGroupIfAbsent(mg);
+    const resolved = await getMessagingGroupWithAgentCount(
+      event.channelType,
+      event.platformId,
+      event.instance ?? event.channelType,
+    );
+    if (!resolved) throw new Error('Messaging group disappeared after first-message insert');
+    mg = resolved.mg;
+    agentCount = resolved.agentCount;
+    if (created) {
+      log.info('Auto-created messaging group', {
+        id: mgId,
+        channelType: event.channelType,
+        platformId: event.platformId,
+      });
+    }
   } else {
     mg = found.mg;
     agentCount = found.agentCount;
@@ -200,7 +307,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     }
 
     const parsed = safeParseContent(event.message.content);
-    recordDroppedMessage({
+    await recordDroppedMessage({
       channel_type: event.channelType,
       platform_id: event.platformId,
       user_id: null,
@@ -231,17 +338,17 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // 2. Sender resolution (permissions module upserts the users row as a
   //    side effect so later role/access lookups find a real record).
   //    Without the module, userId is null — downstream tolerates it.
-  const userId: string | null = senderResolver ? senderResolver(event) : null;
+  const userId: string | null = senderResolver ? await senderResolver(event) : null;
 
   // 3. Fetch wired agents in full (we already know the count is > 0; now
   //    we need their actual rows for fan-out).
-  const agents = getMessagingGroupAgents(mg.id);
+  const agents = await getMessagingGroupAgents(mg.id);
 
   // 4. Fan-out: evaluate each wired agent independently against engage_mode,
   //    sender_scope, and access gate. An agent that engages gets its own
   //    session and container wake. An agent that declines but has
   //    ignored_message_policy='accumulate' still gets the message stored in
-  //    its session (trigger=0) so the context is available when it does
+  //    its session without triggering a wake so the context is available when it does
   //    engage later. Drop policy = skip silently.
   //
   //    Subscribe (for mention-sticky wirings on threaded platforms) fires
@@ -252,41 +359,65 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   const parsed = safeParseContent(event.message.content);
   const messageText = parsed.text ?? '';
 
+  // Per-wiring thread policy inputs, resolved once per event. Each wiring's
+  // threads override (NULL = inherit) resolves against the channel's declared
+  // defaults, hard-bounded by the live adapter's raw capability. Undeclared
+  // adapters resolve through the behavior-faithful fallback, so a NULL-threads
+  // wiring reproduces the historical supportsThreads-derived routing exactly.
+  const channelDefaults = getChannelDefaults(mg.instance ?? mg.channel_type, mg.channel_type);
+  const supportsThreads = adapter?.supportsThreads === true;
+
   let engagedCount = 0;
   let accumulatedCount = 0;
   let subscribed = false;
 
   for (const agent of agents) {
-    const agentGroup = getAgentGroup(agent.agent_group_id);
+    const agentGroup = await getAgentGroup(agent.agent_group_id);
     if (!agentGroup) continue;
 
-    const engages = evaluateEngage(agent, messageText, isMention, mg, event.threadId);
+    // Effective thread id for THIS wiring: the event-derived address is
+    // policy-stripped when the wiring (or its channel declaration) opts out
+    // of threads. event.replyTo is operator intent from the CLI admin
+    // transport and is never nulled. Guard: platform thread ids must never
+    // collide with the reserved 'system:%' session namespace
+    // (src/db/sessions.ts) — they are platform-native identifiers, and this
+    // is the only place an inbound thread id enters session resolution.
+    const threadsEnabled = resolveThreadPolicy(
+      agent.threads ?? null,
+      channelDefaults,
+      mg.is_group === 1,
+      supportsThreads,
+    );
+    const effectiveThreadId = threadsEnabled ? event.threadId : null;
 
-    const accessOk = engages && (!accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed);
-    const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
+    const engages = await evaluateEngage(agent, messageText, isMention, mg, effectiveThreadId);
+
+    const accessOk = engages && (!accessGate || (await accessGate(event, userId, mg, agent.agent_group_id)).allowed);
+    const scopeOk = engages && (!senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed);
 
     if (engages && accessOk && scopeOk) {
-      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, true);
+      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true);
       engagedCount++;
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
       // platform's subscribed-message path carries follow-ups without
-      // requiring another @mention. Threaded-adapter only; DMs and
-      // non-threaded platforms skip.
+      // requiring another @mention. Uses this wiring's OWN effective thread
+      // id — a non-null value already implies the adapter supports threads
+      // (resolveThreadPolicy hard-ANDs the capability). DMs, non-threaded
+      // platforms, and thread-opted-out wirings skip.
       if (
         !subscribed &&
         agent.engage_mode === 'mention-sticky' &&
-        adapter?.supportsThreads &&
-        adapter.subscribe &&
-        event.threadId !== null &&
+        adapter?.subscribe &&
+        effectiveThreadId !== null &&
         mg.is_group !== 0
       ) {
         subscribed = true;
         // Fire-and-forget — subscribe is platform-side bookkeeping and
         // shouldn't block message routing. Errors are logged inside the
         // adapter (or by the promise rejection handler below).
-        void adapter.subscribe(event.platformId, event.threadId).catch((err) => {
-          log.warn('adapter.subscribe failed', { channelType: event.channelType, threadId: event.threadId, err });
+        void adapter.subscribe(event.platformId, effectiveThreadId).catch((err) => {
+          log.warn('adapter.subscribe failed', { channelType: event.channelType, threadId: effectiveThreadId, err });
         });
       }
     } else if (agent.ignored_message_policy === 'accumulate' && !(engages && (!accessOk || !scopeOk))) {
@@ -297,7 +428,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       // message (which also stages their attachments to disk via
       // writeSessionMessage → extractAttachmentFiles) is exactly what the
       // gate is meant to prevent.
-      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, false);
+      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, false);
       accumulatedCount++;
     } else {
       log.debug('Message not engaged for agent (drop policy)', {
@@ -311,7 +442,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   }
 
   if (engagedCount + accumulatedCount === 0) {
-    recordDroppedMessage({
+    await recordDroppedMessage({
       channel_type: event.channelType,
       platform_id: event.platformId,
       user_id: userId,
@@ -343,13 +474,13 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  *                      a thread has engaged us once, follow-ups arrive
  *                      with no mention and should still fire.
  */
-function evaluateEngage(
+async function evaluateEngage(
   agent: MessagingGroupAgent,
   text: string,
   isMention: boolean,
   mg: MessagingGroup,
   threadId: string | null,
-): boolean {
+): Promise<boolean> {
   switch (agent.engage_mode) {
     case 'pattern': {
       const pat = agent.engage_pattern ?? '.';
@@ -368,10 +499,17 @@ function evaluateEngage(
       // Sticky follow-up: session already exists for this (agent, mg, thread)
       // — the thread was activated before, keep firing.
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
-      const existing = findSessionForAgent(agent.agent_group_id, mg.id, threadId);
+      const existing = await findSessionForAgent(agent.agent_group_id, mg.id, threadId);
       return existing !== undefined;
     }
     default:
+      // Unrecognized engage_mode (e.g. stale data from a past CLI version,
+      // or a direct DB write — the column has no CHECK constraint). Fail
+      // closed but leave a trail so this doesn't look like a mystery drop.
+      log.warn('Unknown engage_mode — treating as no-engage. Check wiring configuration.', {
+        engage_mode: agent.engage_mode,
+        wiring_id: agent.id,
+      });
       return false;
   }
 }
@@ -382,41 +520,51 @@ async function deliverToAgent(
   mg: MessagingGroup,
   event: InboundEvent,
   userId: string | null,
-  adapterSupportsThreads: boolean,
+  threadsEnabled: boolean,
+  effectiveThreadId: string | null,
   wake: boolean,
 ): Promise<void> {
-  // Apply the adapter thread policy: threaded adapter in a group chat →
-  // per-thread session regardless of wiring. agent-shared preserved (it's
-  // a cross-channel directive the adapter doesn't know about). DMs collapse
-  // sub-threads to one session (is_group=0 short-circuit).
+  // Apply the resolved thread policy (wiring override AND channel declaration
+  // AND adapter capability — resolveThreadPolicy at fanout): thread-enabled
+  // wiring in a group chat → per-thread session regardless of wiring
+  // session_mode. agent-shared preserved (it's a cross-channel directive the
+  // adapter doesn't know about). DMs collapse sub-threads to one session
+  // (is_group=0 short-circuit).
   let effectiveSessionMode = agent.session_mode;
-  if (adapterSupportsThreads && effectiveSessionMode !== 'agent-shared' && mg.is_group !== 0) {
+  if (threadsEnabled && effectiveSessionMode !== 'agent-shared' && mg.is_group !== 0) {
     effectiveSessionMode = 'per-thread';
   }
 
-  const { session, created } = resolveSession(agent.agent_group_id, mg.id, event.threadId, effectiveSessionMode);
+  const { session, created } = await resolveSession(
+    agent.agent_group_id,
+    mg.id,
+    effectiveThreadId,
+    effectiveSessionMode,
+  );
 
   // The inbound row's (channel_type, platform_id, thread_id) is the address
   // the agent's reply will be delivered to. Normally it mirrors the source
-  // (stamped from the event). When the caller supplied `replyTo` (CLI admin
-  // transport acting on operator intent), the reply is redirected there.
+  // (stamped from the event, with the wiring's thread policy applied). When
+  // the caller supplied `replyTo` (CLI admin transport acting on operator
+  // intent), the reply is redirected there — replyTo is exempt from
+  // thread-policy stripping.
   const deliveryAddr = event.replyTo ?? {
     channelType: event.channelType,
     platformId: event.platformId,
-    threadId: event.threadId,
+    threadId: effectiveThreadId,
   };
 
   // Command gate: classify slash commands before they reach the container.
   // Filtered commands are dropped silently. Denied admin commands get a
   // permission-denied response written directly to messages_out.
   if (event.message.kind === 'chat' || event.message.kind === 'chat-sdk') {
-    const gate = gateCommand(event.message.content, userId, agent.agent_group_id);
+    const gate = await gateCommand(event.message.content, userId, agent.agent_group_id);
     if (gate.action === 'filter') {
       log.debug('Filtered command dropped by gate', { agentGroupId: agent.agent_group_id });
       return;
     }
     if (gate.action === 'deny') {
-      writeOutboundDirect(session.agent_group_id, session.id, {
+      await writeOutboundDirect(session.agent_group_id, session.id, {
         id: `deny-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         kind: 'chat',
         platformId: deliveryAddr.platformId,
@@ -429,16 +577,59 @@ async function deliverToAgent(
     }
   }
 
-  writeSessionMessage(session.agent_group_id, session.id, {
-    id: messageIdForAgent(event.message.id, agent.agent_group_id),
+  if (wake && created) {
+    // New-session backfill (cross-session context): a just-born session is
+    // seeded with its conversation's top-level timeline from sibling
+    // sessions BEFORE the triggering message is written, so replying to
+    // something said in another thread lands with that context in view.
+    await backfillNewSession(agentGroup, session, mg);
+  }
+
+  const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
+  await writeSessionMessage(session.agent_group_id, session.id, {
+    id: messageId,
     kind: event.message.kind,
     timestamp: event.message.timestamp,
     platformId: deliveryAddr.platformId,
     channelType: deliveryAddr.channelType,
     threadId: deliveryAddr.threadId,
     content: event.message.content,
-    trigger: wake ? 1 : 0,
+    trigger: wake,
   });
+
+  if (wake) {
+    // Cross-session context: fan the triggering message into sibling
+    // sessions of the SAME conversation as trigger=0 'session-echo' rows.
+    // Only the engaged branch fans — the accumulate branch above (trigger=0)
+    // never does, so ambient backlog is never copied twice. Never throws.
+    await fanInboundMessage({
+      session,
+      mg,
+      messageId,
+      kind: event.message.kind,
+      channelType: deliveryAddr.channelType,
+      content: event.message.content,
+      timestamp: event.message.timestamp,
+    });
+  }
+
+  if (wake && created) {
+    // A brand-new engaged session: notify registered modules with the
+    // resolved wiring context (fire-and-forget — see dispatchSessionCreated).
+    dispatchSessionCreated({
+      session,
+      mg,
+      platformId: event.platformId,
+      threadId: effectiveThreadId,
+      sessionMode: effectiveSessionMode,
+      message: {
+        id: event.message.id,
+        kind: event.message.kind,
+        content: event.message.content,
+        timestamp: event.message.timestamp,
+      },
+    });
+  }
 
   log.info('Message routed', {
     sessionId: session.id,
@@ -454,10 +645,22 @@ async function deliverToAgent(
   if (wake) {
     // Typing indicator + wake are only for the engaged branch; accumulated
     // messages sit silently until a real trigger fires.
-    startTypingRefresh(session.id, session.agent_group_id, event.channelType, event.platformId, event.threadId);
-    const freshSession = getSession(session.id);
+    // Typing fires via the adapter instance that owns this chat's row.
+    startTypingRefresh(
+      session.id,
+      session.agent_group_id,
+      event.channelType,
+      event.platformId,
+      effectiveThreadId,
+      mg.instance,
+    );
+    const freshSession = await getSession(session.id);
     if (freshSession) {
-      await wakeContainer(freshSession);
+      const woke = await wakeContainer(freshSession);
+      // wakeContainer never throws — it returns false on transient spawn
+      // failure (host-sweep retries). Stop the typing indicator we just
+      // started so it doesn't leak; the inbound row stays pending.
+      if (!woke) stopTypingRefresh(freshSession.id);
     }
   }
 }

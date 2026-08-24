@@ -1,0 +1,51 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. Three scenarios cover all four number_mode/shared_confirm guard values, both auth methods, and both when:mode= legs. The echo stubs answer the mode/platform_id/owner_handle captures; stepFields feed the QR / pairing-code step's terminal block (capture:bot_phone=PHONE); the 'test(n)' stub answers the engage_pattern capture on the shared leg.",
+  "scenarios": [
+    {
+      "name": "shared-qr",
+      "inputs": {
+        "number_mode": "shared",
+        "shared_confirm": "continue",
+        "auth_method": "qr",
+        "agent_name": "Nano",
+        "selfchat_engage": "mention"
+      },
+      "exec": [
+        { "match": "echo shared", "stdout": "shared" },
+        { "match": "test(n)", "stdout": "^@Nano\\b" },
+        { "match": "@s.whatsapp.net", "stdout": "15550001111@s.whatsapp.net" }
+      ],
+      "stepFields": { "PHONE": "15550001111" }
+    },
+    {
+      "name": "dedicated-pairing-code",
+      "inputs": {
+        "number_mode": "dedicated",
+        "auth_method": "pairing-code",
+        "phone": "15550001111",
+        "chat_phone": "15559998888",
+        "agent_name": "Nano"
+      },
+      "exec": [
+        { "match": "echo dedicated", "stdout": "dedicated" },
+        { "match": "@s.whatsapp.net", "stdout": "15559998888@s.whatsapp.net" }
+      ],
+      "stepFields": { "PHONE": "15550001111" }
+    },
+    {
+      "name": "shared-bails-to-dedicated",
+      "inputs": {
+        "number_mode": "shared",
+        "shared_confirm": "dedicated",
+        "auth_method": "qr",
+        "chat_phone": "15559998888",
+        "agent_name": "Nano"
+      },
+      "exec": [
+        { "match": "echo dedicated", "stdout": "dedicated" },
+        { "match": "@s.whatsapp.net", "stdout": "15559998888@s.whatsapp.net" }
+      ],
+      "stepFields": { "PHONE": "15550001111" }
+    }
+  ]
+}

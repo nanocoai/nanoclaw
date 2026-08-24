@@ -59,8 +59,7 @@ interface IntEntry extends BaseEntry {
 
 export type Entry = StringEntry | EnumEntry | BoolEntry | IntEntry;
 
-const httpUrl = (v: string): string | undefined =>
-  /^https?:\/\/\S+/.test(v) ? undefined : 'Must be http(s)://…';
+const httpUrl = (v: string): string | undefined => (/^https?:\/\/\S+/.test(v) ? undefined : 'Must be http(s)://…');
 
 export const CONFIG: Entry[] = [
   {
@@ -70,8 +69,8 @@ export const CONFIG: Entry[] = [
     surface: 'flag+ui',
     group: 'OneCLI',
     type: 'url',
-    default: 'https://app.onecli.sh',
-    placeholder: 'https://app.onecli.sh',
+    default: 'https://api.onecli.sh',
+    placeholder: 'https://api.onecli.sh',
     validate: httpUrl,
   },
   {
@@ -105,6 +104,15 @@ export const CONFIG: Entry[] = [
     secret: true,
     validate: (v) => (v.trim() ? undefined : 'Required'),
   },
+  {
+    key: 'templatePath',
+    label: 'Agent template',
+    help: 'Create or update an agent from a local template ref under templates/ (for example, sales/sdr).',
+    surface: 'flag+ui',
+    group: 'Agent',
+    type: 'string',
+    placeholder: 'sales/sdr',
+  },
 
   // Existing env-var knobs — flag-only so they don't clutter the UI screen.
   {
@@ -122,6 +130,49 @@ export const CONFIG: Entry[] = [
     help: 'Skip the "what should your assistant call you?" prompt.',
     surface: 'flag',
     type: 'string',
+  },
+  {
+    key: 'agentProvider',
+    envVar: 'NANOCLAW_AGENT_PROVIDER',
+    label: 'Agent provider',
+    help: 'Preselect the setup provider and skip the provider picker.',
+    surface: 'flag',
+    type: 'string',
+  },
+  {
+    key: 'assistMode',
+    envVar: 'NANOCLAW_SETUP_ASSIST_MODE',
+    label: 'Assist mode',
+    help: 'Use non-interactive Claude assist on failure instead of interactive handoff.',
+    surface: 'flag',
+    type: 'boolean',
+    default: false,
+  },
+
+  // Uninstall route — handled in auto.ts before any setup work begins.
+  {
+    key: 'uninstall',
+    label: 'Uninstall',
+    help: 'Remove this NanoClaw copy (service, containers, data, vault agents). Asks per group.',
+    surface: 'flag',
+    type: 'boolean',
+    default: false,
+  },
+  {
+    key: 'dryRun',
+    label: 'Uninstall dry run',
+    help: 'With --uninstall: preview what would be removed without changing anything.',
+    surface: 'flag',
+    type: 'boolean',
+    default: false,
+  },
+  {
+    key: 'yes',
+    label: 'Uninstall without prompts',
+    help: 'With --uninstall: delete everything found without asking (orphan vault agents are still kept).',
+    surface: 'flag',
+    type: 'boolean',
+    default: false,
   },
 ];
 

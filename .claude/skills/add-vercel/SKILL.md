@@ -90,30 +90,56 @@ onecli secrets list | grep -i vercel
 OneCLI uses selective secret mode — secrets must be explicitly assigned to each agent. Get the Vercel secret ID from the output above, then assign it to every agent:
 
 ```bash
-# For each agent, add the Vercel secret to its assigned secrets list.
-# First get current assignments, then set them with the new secret appended.
-VERCEL_SECRET_ID=$(onecli secrets list 2>/dev/null | grep -B2 "Vercel" | grep '"id"' | head -1 | sed 's/.*"id": "//;s/".*//')
-for agent in $(onecli agents list 2>/dev/null | grep '"id"' | sed 's/.*"id": "//;s/".*//'); do
-  CURRENT=$(onecli agents secrets --id "$agent" 2>/dev/null | grep '"' | grep -v hint | grep -v data | sed 's/.*"//;s/".*//' | tr '\n' ',' | sed 's/,$//')
-  onecli agents set-secrets --id "$agent" --secret-ids "${CURRENT:+$CURRENT,}$VERCEL_SECRET_ID"
+# set-secrets replaces the entire list — read and merge for each agent.
+VERCEL_SECRET_ID=$(onecli secrets list | jq -r '.data[] | select(.name | test("(?i)vercel")) | .id' | head -1)
+for agent in $(onecli agents list | jq -r '.data[].id'); do
+  CURRENT=$(onecli agents secrets --id "$agent" | jq -r '[.data[]] | join(",")')
+  MERGED=$(printf '%s' "$CURRENT,$VERCEL_SECRET_ID" | tr ',' '\n' | sort -u | paste -sd ',' -)
+  onecli agents set-secrets --id "$agent" --secret-ids "$MERGED"
 done
 ```
 
 ## Phase 4: Ensure Vercel CLI in Container Image
 
-Check if `vercel` is already in the Dockerfile:
+The Vercel CLI is not in the agent image by default — this skill is what adds
+it. It goes in `container/cli-tools.json` as a json-merge rather than a
+Dockerfile edit, which is what keeps the change deterministic and removable.
 
 ```bash
-grep -q 'vercel' container/Dockerfile && echo "PRESENT" || echo "MISSING"
+grep -q '"vercel"' container/cli-tools.json && echo "PRESENT" || echo "MISSING"
 ```
 
-If `MISSING`, add `vercel` to the global npm install line in `container/Dockerfile`, then rebuild:
+If `MISSING`, append the entry, keeping an exact pinned version — the manifest
+rejects ranges, so the supply-chain policy still applies:
+
+```json
+{ "name": "vercel", "version": "52.2.1" }
+```
+
+Then apply it:
 
 ```bash
 ./container/build.sh
 ```
 
-If `PRESENT`, skip — no rebuild needed.
+On an install that builds its own image, that rebuilds it. On one that fetches a
+published image, the same command adds Vercel as a single layer on top of the
+image already there, so the publisher's patched components underneath are kept —
+you are adding a tool, not replacing the runtime. The command says what that does
+and does not cover.
+
+If `PRESENT`, the CLI is already in the manifest — skip the rebuild.
+
+## Phase 4b: Copy and Run the Dependency Guard
+
+The Vercel CLI is a globally-installed binary — not importable or typed — so a structural test guards the install. Copy it into the host test tree and run it:
+
+```bash
+cp .claude/skills/add-vercel/vercel-manifest.test.ts src/vercel-manifest.test.ts
+pnpm exec vitest run src/vercel-manifest.test.ts
+```
+
+The test asserts both halves of the install: a pinned `vercel` entry in `container/cli-tools.json`, and the container skill at `container/skills/vercel-cli/`. Either alone is a broken install — a manifest entry with no skill leaves the agent a binary nobody told it about, and a skill with no entry tells it to run a command that is not there.
 
 ## Phase 5: Sync Skills to Running Agent Groups
 
@@ -133,7 +159,7 @@ done
 Stop all running agent containers so they pick up the new skills on next wake:
 
 ```bash
-docker ps --format "{{.ID}} {{.Names}}" | grep nanoclaw-v2 | awk '{print $1}' | xargs -r docker stop
+docker ps --filter label=nanoclaw-session -q | xargs -r docker stop
 ```
 
 ## Done

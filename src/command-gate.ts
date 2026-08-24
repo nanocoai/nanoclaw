@@ -7,12 +7,12 @@
  *   "Permission denied" response written directly to messages_out
  * - Normal messages: pass through unchanged
  */
-import { getDb, hasTable } from './db/connection.js';
+import { hasAdminPrivilege } from './modules/permissions/db/user-roles.js';
 
 export type GateResult = { action: 'pass' } | { action: 'filter' } | { action: 'deny'; command: string };
 
-const FILTERED_COMMANDS = new Set(['/help', '/login', '/logout', '/doctor', '/config', '/remote-control']);
-const ADMIN_COMMANDS = new Set(['/clear', '/compact', '/context', '/cost', '/files']);
+const FILTERED_COMMANDS = new Set(['/start', '/help', '/login', '/logout', '/doctor', '/config', '/remote-control']);
+const ADMIN_COMMANDS = new Set(['/clear', '/compact', '/context', '/cost', '/files', '/upload-trace']);
 
 /**
  * Classify a message and decide whether it should reach the container.
@@ -20,7 +20,7 @@ const ADMIN_COMMANDS = new Set(['/clear', '/compact', '/context', '/cost', '/fil
  * 'filter' for silently-dropped commands, 'deny' for unauthorized
  * admin commands.
  */
-export function gateCommand(content: string, userId: string | null, agentGroupId: string): GateResult {
+export async function gateCommand(content: string, userId: string | null, agentGroupId: string): Promise<GateResult> {
   let text: string;
   try {
     const parsed = JSON.parse(content);
@@ -36,7 +36,7 @@ export function gateCommand(content: string, userId: string | null, agentGroupId
   if (FILTERED_COMMANDS.has(command)) return { action: 'filter' };
 
   if (ADMIN_COMMANDS.has(command)) {
-    if (isAdmin(userId, agentGroupId)) {
+    if (await isAdmin(userId, agentGroupId)) {
       return { action: 'pass' };
     }
     return { action: 'deny', command };
@@ -46,18 +46,7 @@ export function gateCommand(content: string, userId: string | null, agentGroupId
   return { action: 'pass' };
 }
 
-function isAdmin(userId: string | null, agentGroupId: string): boolean {
+async function isAdmin(userId: string | null, agentGroupId: string): Promise<boolean> {
   if (!userId) return false;
-  if (!hasTable(getDb(), 'user_roles')) return true; // no permissions module = allow all
-  const db = getDb();
-  const row = db
-    .prepare(
-      `SELECT 1 FROM user_roles
-       WHERE user_id = ?
-         AND (role = 'owner' OR role = 'admin')
-         AND (agent_group_id IS NULL OR agent_group_id = ?)
-       LIMIT 1`,
-    )
-    .get(userId, agentGroupId);
-  return row != null;
+  return hasAdminPrivilege(userId, agentGroupId);
 }

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>clidash</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/site.webmanifest">
+  <meta name="theme-color" content="#0a0c11">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <button id="hamburger" class="hamburger" title="Menu" aria-label="Toggle menu">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="18" y2="18"/></svg>
+  </button>
+  <div id="scrim" class="scrim" hidden></div>
+
+  <div class="app">
+    <aside id="sidebar" class="sidebar">
+      <div class="brand"><h1>clidash</h1></div>
+      <div class="controls">
+        <button id="refresh" class="refresh" title="Refresh now">↻ refresh</button>
+        <button id="pause" class="pause" title="Pause auto-refresh">⏸ pause</button>
+      </div>
+      <div id="updated" class="updated"></div>
+      <nav id="nav" class="nav"></nav>
+    </aside>
+
+    <main class="main">
+      <div id="banner" class="banner" hidden></div>
+      <div id="cmdline" class="cmdline" hidden></div>
+      <section id="content" class="content"></section>
+    </main>
+  </div>
+
+  <div id="detail" class="detail-overlay" hidden></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
