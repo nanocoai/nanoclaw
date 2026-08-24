@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 type McpStatus = {
   name: string;
@@ -31,19 +34,43 @@ mock.module('@anthropic-ai/claude-agent-sdk', () => ({
 }));
 
 const { ClaudeProvider } = await import('./claude.js');
+const { MEMORY_SESSION_HOOK } = await import('../memory/session-hook.js');
 
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+let tmp: string;
+let previousHome: string | undefined;
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+} {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 beforeEach(() => {
   captures.length = 0;
   statusResponses = [];
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-mcp-startup-'));
+  previousHome = process.env.HOME;
+  process.env.HOME = tmp;
 });
+
+afterEach(() => {
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+function prepare(provider: InstanceType<typeof ClaudeProvider>): InstanceType<typeof ClaudeProvider> {
+  provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
+  return provider;
+}
 
 describe('Claude MCP startup ordering', () => {
   test('holds the first prompt until configured MCP startup leaves pending', async () => {
@@ -55,13 +82,15 @@ describe('Claude MCP startup ordering', () => {
       Promise.resolve([{ name: 'memory', status: 'connected' }]),
     ];
 
-    const provider = new ClaudeProvider({
-      mcpServers: {
-        nanoclaw: { command: 'bun', args: [], env: {} },
-        memory: { command: 'memory-server', args: [], env: {} },
-      },
-      startupMcpServerNames: ['memory'],
-    });
+    const provider = prepare(
+      new ClaudeProvider({
+        mcpServers: {
+          nanoclaw: { command: 'bun', args: [], env: {} },
+          memory: { command: 'memory-server', args: [], env: {} },
+        },
+        startupMcpServerNames: ['memory'],
+      }),
+    );
     provider.query({ prompt: 'first prompt', cwd: '/workspace/agent' });
 
     const iterator = captures[0].prompt[Symbol.asyncIterator]();
@@ -92,12 +121,14 @@ describe('Claude MCP startup ordering', () => {
   });
 
   test('does not add a startup barrier without configured MCP servers', async () => {
-    const provider = new ClaudeProvider({
-      mcpServers: {
-        nanoclaw: { command: 'bun', args: [], env: {} },
-      },
-      startupMcpServerNames: [],
-    });
+    const provider = prepare(
+      new ClaudeProvider({
+        mcpServers: {
+          nanoclaw: { command: 'bun', args: [], env: {} },
+        },
+        startupMcpServerNames: [],
+      }),
+    );
     provider.query({ prompt: 'normal prompt', cwd: '/workspace/agent' });
 
     const iterator = captures[0].prompt[Symbol.asyncIterator]();
@@ -109,30 +140,37 @@ describe('Claude MCP startup ordering', () => {
   });
 
   test('releases the first prompt when startup status fails', async () => {
-    statusResponses = [Promise.reject(new Error('status unavailable'))];
-    const provider = new ClaudeProvider({
-      mcpServers: {
-        nanoclaw: { command: 'bun', args: [], env: {} },
-        memory: { command: 'memory-server', args: [], env: {} },
-      },
-      startupMcpServerNames: ['memory'],
-    });
+    const failedStatus = deferred<McpStatus[]>();
+    statusResponses = [failedStatus.promise];
+    const provider = prepare(
+      new ClaudeProvider({
+        mcpServers: {
+          nanoclaw: { command: 'bun', args: [], env: {} },
+          memory: { command: 'memory-server', args: [], env: {} },
+        },
+        startupMcpServerNames: ['memory'],
+      }),
+    );
     provider.query({ prompt: 'first prompt', cwd: '/workspace/agent' });
 
     const iterator = captures[0].prompt[Symbol.asyncIterator]();
-    expect(await iterator.next()).toMatchObject({ value: { message: { content: 'first prompt' } } });
+    const firstPrompt = iterator.next();
+    failedStatus.reject(new Error('status unavailable'));
+    expect(await firstPrompt).toMatchObject({ value: { message: { content: 'first prompt' } } });
     expect(captures[0].statusCalls).toBe(1);
   });
 
   test('applies the barrier only to the first query', async () => {
     statusResponses = [Promise.resolve([{ name: 'memory', status: 'connected' }])];
-    const provider = new ClaudeProvider({
-      mcpServers: {
-        nanoclaw: { command: 'bun', args: [], env: {} },
-        memory: { command: 'memory-server', args: [], env: {} },
-      },
-      startupMcpServerNames: ['memory'],
-    });
+    const provider = prepare(
+      new ClaudeProvider({
+        mcpServers: {
+          nanoclaw: { command: 'bun', args: [], env: {} },
+          memory: { command: 'memory-server', args: [], env: {} },
+        },
+        startupMcpServerNames: ['memory'],
+      }),
+    );
 
     provider.query({ prompt: 'first prompt', cwd: '/workspace/agent' });
     const firstIterator = captures[0].prompt[Symbol.asyncIterator]();
