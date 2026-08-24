@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -117,6 +118,27 @@ async function main(): Promise<void> {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+/**
+ * True when this module was started as the process entrypoint.
+ *
+ * `import.meta.url` is realpath-resolved by the loader, so the argv path has
+ * to be resolved the same way: the documented flow runs this controller from
+ * `$(mktemp -d)`, which on macOS is under `/var/folders` — a symlink to
+ * `/private/var/folders`. Comparing unresolved paths there never matches, and
+ * the documented invocation exits 0 having done nothing at all.
+ */
+function startedAsEntrypoint(argvPath: string | undefined): boolean {
+  if (!argvPath) return false;
+  const resolved = path.resolve(argvPath);
+  let real = resolved;
+  try {
+    real = fs.realpathSync(resolved);
+  } catch {
+    // Not on disk under that name — fall back to the unresolved comparison.
+  }
+  return import.meta.url === pathToFileURL(real).href || import.meta.url === pathToFileURL(resolved).href;
+}
+
+if (startedAsEntrypoint(process.argv[1])) {
   void main();
 }
