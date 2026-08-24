@@ -172,14 +172,44 @@ export async function drainContainers(
   timeoutMs = 300_000,
 ): Promise<void> {
   const runtime = process.env.CONTAINER_RUNTIME ?? 'docker';
-  const label = `nanoclaw-install=${getInstallSlug(projectRoot)}`;
+  const slug = getInstallSlug(projectRoot);
+  const label = `nanoclaw-install=${slug}`;
+  /**
+   * Apple Container's CLI has no `ps` alias and no `--filter`; list JSON and
+   * filter by label client-side. Docker keeps the native filter. Same split
+   * the session drivers make.
+   */
+  const listActive = (): { ok: boolean; ids: string[] } => {
+    if (runtime === 'container') {
+      const res = env.runner.tryRun(runtime, ['list', '--format', 'json']);
+      if (!res.ok) return { ok: false, ids: [] };
+      try {
+        const entries = JSON.parse(res.stdout || '[]') as Array<{
+          status: string | { state?: string };
+          configuration: { id: string; labels?: Record<string, string> };
+        }>;
+        const stateOf = (e: (typeof entries)[number]): string | undefined =>
+          typeof e.status === 'string' ? e.status : e.status?.state;
+        return {
+          ok: true,
+          ids: entries
+            .filter((e) => stateOf(e) === 'running' && e.configuration.labels?.['nanoclaw-install'] === slug)
+            .map((e) => e.configuration.id),
+        };
+      } catch {
+        return { ok: false, ids: [] };
+      }
+    }
+    const res = env.runner.tryRun(runtime, ['ps', '-q', '--filter', `label=${label}`]);
+    return { ok: res.ok, ids: res.stdout ? res.stdout.split('\n').filter(Boolean) : [] };
+  };
   const started = Date.now();
   while (true) {
-    const listed = env.runner.tryRun(runtime, ['ps', '-q', '--filter', `label=${label}`]);
+    const listed = listActive();
     if (!listed.ok) throw new Error(`Cannot inspect active NanoClaw containers with ${runtime}`);
-    if (!listed.stdout) return;
+    if (listed.ids.length === 0) return;
     if (Date.now() - started >= timeoutMs) {
-      throw new Error(`Timed out waiting for active NanoClaw containers: ${listed.stdout.split('\n').join(', ')}`);
+      throw new Error(`Timed out waiting for active NanoClaw containers: ${listed.ids.join(', ')}`);
     }
     await env.sleep(1_000);
   }
