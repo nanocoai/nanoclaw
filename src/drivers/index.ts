@@ -150,6 +150,16 @@ export function createSessionDriver(kind: DriverKind, overrides: Partial<MountPo
   return driver;
 }
 
+/**
+ * The already-selected driver, or null — never instantiates. For consumers
+ * that must arm only when a runtime is actually in use: the boot sequence
+ * selects the driver before the sweep starts, while a unit suite that never
+ * selected one sees null instead of triggering selection as a side effect.
+ */
+export function peekSessionDriver(): SessionEventsDriver | null {
+  return installed;
+}
+
 /** Test seam: drop the memoized driver so a suite can select another one. */
 export function resetSessionDriver(next: SessionDriver | null = null): void {
   // Tests may inject raw fakes; the probe (isSessionEventsDriver) guards resync,

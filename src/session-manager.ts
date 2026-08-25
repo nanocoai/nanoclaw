@@ -24,6 +24,7 @@ import {
 } from './db/sessions.js';
 import { log } from './log.js';
 import { getAgentMailbox, type InboundMessage, type MailboxSession } from './mailbox/index.js';
+import { enqueueSessionReconcile } from './reconcile-feeds.js';
 import type { Session } from './types.js';
 
 /** Root directory for all session data. */
@@ -310,6 +311,10 @@ export async function writeSessionMessage(
     });
   });
   await updateSession(sessionId, { last_active: new Date().toISOString() });
+  // Ask for a prompt reconcile now that the message is durable: a wake that
+  // fails transiently is retried within the queue's cadence instead of
+  // waiting for the next resync tick. No-op when the sweep isn't running.
+  enqueueSessionReconcile(sessionId);
 }
 
 /**
