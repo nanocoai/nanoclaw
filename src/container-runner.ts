@@ -9,6 +9,7 @@
  */
 import { exec } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { promisify } from 'util';
 
@@ -29,6 +30,7 @@ import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { getSessionClaim, releaseSessionClaim, shadowWrite, tryClaimSession } from './db/coordination.js';
 import { getDb, hasTable } from './db/connection.js';
 import { getSession } from './db/sessions.js';
 import { getSessionDriver, isSessionEventsDriver } from './drivers/index.js';
@@ -97,9 +99,39 @@ interface ActiveSessionRuntime {
   finishedPromise: Promise<void>;
   resolveFinished: () => void;
   stopReason?: string;
+  /** Incarnation this process shadow-claimed in session_claims, if the write landed. */
+  claimIncarnation?: number;
 }
 
 const activeContainers = new Map<string, ActiveSessionRuntime>();
+
+// Claimant identity for the shadow rows in session_claims. Process-scoped and
+// human-readable; the durable host-instance lease id takes over as claimant
+// when the rows become authoritative.
+const CLAIMANT_ID = `${os.hostname()}:${process.pid}`;
+
+/**
+ * Shadow-claim a session this process now runs (spawned or adopted). The
+ * in-memory registry stays authoritative — a lost CAS or failed write logs
+ * and changes nothing.
+ */
+async function shadowClaimSession(sessionId: string, runtime: ActiveSessionRuntime): Promise<void> {
+  await shadowWrite('session-claim', async () => {
+    const current = await getSessionClaim(sessionId);
+    const incarnation = await tryClaimSession({
+      sessionId,
+      instanceId: CLAIMANT_ID,
+      expectedIncarnation: current?.incarnation ?? 0,
+      containerRef: runtime.containerName,
+      now: new Date().toISOString(),
+    });
+    if (incarnation === null) {
+      log.warn('Session shadow claim lost the incarnation race', { sessionId, claimant: CLAIMANT_ID });
+      return;
+    }
+    runtime.claimIncarnation = incarnation;
+  });
+}
 
 /**
  * In-flight wake promises, keyed by session id. Deduplicates concurrent
@@ -253,6 +285,8 @@ async function spawnContainer(session: Session): Promise<void> {
     }
     throw err;
   }
+
+  await shadowClaimSession(session.id, runtime);
 }
 
 /**
@@ -336,6 +370,17 @@ async function finish(sessionId: string, runtime: ActiveSessionRuntime, failure?
   if (activeContainers.get(sessionId) === runtime) {
     activeContainers.delete(sessionId);
   }
+  if (runtime.claimIncarnation !== undefined) {
+    const incarnation = runtime.claimIncarnation;
+    await shadowWrite('session-claim-release', () =>
+      releaseSessionClaim({
+        sessionId,
+        instanceId: CLAIMANT_ID,
+        incarnation,
+        now: new Date().toISOString(),
+      }),
+    );
+  }
   for (const callback of runtime.exitCallbacks) {
     try {
       callback();
@@ -408,6 +453,7 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
       void finishAndResolve(session.id, failure);
     });
     await markContainerRunning(session.id);
+    await shadowClaimSession(session.id, runtime);
     adopted += 1;
   }
 

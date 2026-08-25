@@ -6,6 +6,7 @@
  */
 import { isContainerRunning, killContainer } from './container-runner.js';
 import { requestWake } from './request-wake.js';
+import { setStopIntent, shadowWrite } from './db/coordination.js';
 import { getSession, getSessionsByAgentGroup } from './db/sessions.js';
 import { log } from './log.js';
 import { withExistingMailboxSession, writeSessionMessage } from './session-manager.js';
@@ -55,14 +56,21 @@ export async function restartAgentGroupContainers(
         session.id,
         (mailbox) => mailbox.countDueMessages() > 0,
       )) ?? false;
+    const willRespawn = Boolean(wakeMessage || hasPending);
+    // Shadow the respawn plan durably before the kill; the on_wake mechanism
+    // stays authoritative. Cleared once the respawn request has been made.
+    if (willRespawn) {
+      await shadowWrite('stop-intent', () => setStopIntent(session.id, 'respawn_after_stop', new Date().toISOString()));
+    }
     killContainer(
       session.id,
       reason,
-      wakeMessage || hasPending
+      willRespawn
         ? () => {
             void (async () => {
               const s = await getSession(session.id);
               if (s) await requestWake(s, 'container-restart');
+              await shadowWrite('stop-intent-clear', () => setStopIntent(session.id, null, new Date().toISOString()));
             })();
           }
         : undefined,

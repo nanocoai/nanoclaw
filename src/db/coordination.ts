@@ -13,6 +13,21 @@
 import { randomUUID } from 'crypto';
 
 import { getDb } from './connection.js';
+import { log } from '../log.js';
+
+/**
+ * Run a shadow write. Failures log and are swallowed — shadow state must
+ * never affect the authoritative path, so no caller may see a throw.
+ */
+export async function shadowWrite(label: string, write: () => Promise<unknown>): Promise<void> {
+  /* eslint-disable no-catch-all/no-catch-all -- shadow writes must never affect the authoritative path */
+  try {
+    await write();
+  } catch (err) {
+    log.warn('Coordination shadow write failed', { label, err });
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
+}
 
 export interface HostInstanceRow {
   instance_id: string;

@@ -18,6 +18,7 @@ import {
   getMessagingGroupByPlatform,
   getMessagingGroupForOwnDestination,
 } from './db/messaging-groups.js';
+import { clearDeliveryAttempt, recordDeliveryAttempt, shadowWrite } from './db/coordination.js';
 import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
 import { isUnguarded, type Unguarded } from './guard/index.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
@@ -224,6 +225,7 @@ async function drainSession(session: Session): Promise<void> {
       const firstDelivery = delivered.size === 0;
       delivered.add(msg.id);
       deliveryAttempts.delete(msg.id);
+      await shadowWrite('delivery-attempt-clear', () => clearDeliveryAttempt(msg.id));
       if (msg.kind !== 'system' && msg.channelType !== 'agent') {
         pauseTypingRefreshAfterDelivery(session.id);
         if (msg.kind !== 'task_log') {
@@ -250,6 +252,17 @@ async function drainSession(session: Session): Promise<void> {
     } catch (err) {
       const attempts = (deliveryAttempts.get(msg.id) ?? 0) + 1;
       deliveryAttempts.set(msg.id, attempts);
+      // Shadow row mirrors the in-memory count; the map stays authoritative
+      // (no real backoff schedule exists in this path — retry is the next poll).
+      await shadowWrite('delivery-attempt', () =>
+        recordDeliveryAttempt({
+          messageId: msg.id,
+          sessionId: session.id,
+          now: new Date().toISOString(),
+          nextAttemptAt: null,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
       if (attempts >= MAX_DELIVERY_ATTEMPTS) {
         log.error('Message delivery failed permanently, giving up', {
           messageId: msg.id,
@@ -260,6 +273,7 @@ async function drainSession(session: Session): Promise<void> {
         try {
           await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => mailbox.markDeliveryFailed(msg.id));
           deliveryAttempts.delete(msg.id);
+          await shadowWrite('delivery-attempt-clear', () => clearDeliveryAttempt(msg.id));
         } catch (markErr) {
           log.error('Failed to record permanent delivery failure', {
             messageId: msg.id,
