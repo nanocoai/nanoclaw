@@ -230,7 +230,7 @@ function parseLimitEnv(varName: string, raw: string | undefined): number | undef
 
 export function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> {
   const provider = process.env.OPENCODE_PROVIDER || 'anthropic';
-  const model = process.env.OPENCODE_MODEL;
+  const model = options.model ?? process.env.OPENCODE_MODEL;
   const smallModel = process.env.OPENCODE_SMALL_MODEL;
   // Reasoning effort from the group's container config (ncl groups config
   // update --effort). OpenCode forwards a free-form per-model `options` object
@@ -412,7 +412,7 @@ let sharedInit: Promise<SharedRuntime> | null = null;
 function runtimeConfigKey(options: ProviderOptions, cwd: string): string {
   return JSON.stringify({
     mcp: mcpServersToOpenCodeConfig(options.mcpServers),
-    model: process.env.OPENCODE_MODEL,
+    model: options.model ?? process.env.OPENCODE_MODEL,
     small: process.env.OPENCODE_SMALL_MODEL,
     op: process.env.OPENCODE_PROVIDER,
     cwd,

@@ -21,6 +21,20 @@ afterEach(() => {
 });
 
 describe('buildOpenCodeConfig provider transport', () => {
+  it('uses ProviderOptions.model before the compatibility env fallback', () => {
+    process.env.OPENCODE_PROVIDER = 'openai';
+    process.env.OPENCODE_MODEL = 'openai/legacy-model';
+    const config = buildOpenCodeConfig({ model: 'openai/typed-model' });
+    expect(config.model).toBe('openai/typed-model');
+  });
+
+  it('falls back to OPENCODE_MODEL when ProviderOptions.model is omitted', () => {
+    process.env.OPENCODE_PROVIDER = 'openai';
+    process.env.OPENCODE_MODEL = 'openai/legacy-model';
+    const config = buildOpenCodeConfig({});
+    expect(config.model).toBe('openai/legacy-model');
+  });
+
   it('native cloud providers defer to OpenCode credentials and catalog', () => {
     process.env.OPENCODE_PROVIDER = 'anthropic';
     process.env.OPENCODE_MODEL = 'anthropic/claude-sonnet-4-6';
