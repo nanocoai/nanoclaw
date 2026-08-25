@@ -259,7 +259,9 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     title,
     question,
     options_json: JSON.stringify(normalizedOptions),
-    approver_user_id: approverUserId ?? null,
+    // The DM'd approver is the identity this card was routed to; recording it
+    // makes resolution exact — only that user may decide the row.
+    approver_user_id: approverUserId ?? target.userId ?? null,
   });
 
   const adapter = getDeliveryAdapter();

@@ -21,7 +21,12 @@ import { ONECLI_API_KEY, ONECLI_URL } from '../config.js';
 import type { MountSpec } from '../drivers/types.js';
 import { log } from '../log.js';
 
-import { registerGatewayProvider, type GatewayContribution } from './gateway-provider-registry.js';
+import {
+  registerGatewayProvider,
+  type GatewayApprovalRequest,
+  type GatewayApprovalSource,
+  type GatewayContribution,
+} from './gateway-provider-registry.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 
@@ -57,8 +62,29 @@ export function contributionFromArgs(args: readonly string[], groupScope: string
   return { env, mounts };
 }
 
+/**
+ * OneCLI's approvals capability: the SDK's manual-approval long-poll, mapped
+ * to the neutral request shape. `listPending`/`decide` are deliberately
+ * absent — the gateway does not redeliver un-decided requests on reconnect
+ * and the SDK exposes no late-decision surface, so the capability flags
+ * honestly say so and the approvals module degrades accordingly.
+ */
+function onecliApprovalSource(): GatewayApprovalSource {
+  return {
+    subscribe(handler) {
+      const handle = onecli.configureManualApproval(async (request) =>
+        // The SDK's ApprovalRequest is structurally the neutral shape (the
+        // hosted gateway's `summary` rides as an extra field).
+        handler(request as unknown as GatewayApprovalRequest),
+      );
+      return { stop: () => handle.stop() };
+    },
+  };
+}
+
 registerGatewayProvider('onecli', () => ({
   kind: 'onecli',
+  approvals: onecliApprovalSource,
   async contribute({ key, groupName }) {
     // OneCLI agent identifier is always the agent group id — stable across
     // sessions and reversible via getAgentGroup() for approval routing.

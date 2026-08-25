@@ -50,6 +50,51 @@ export interface GatewayProviderInput {
   capabilities: DriverCapabilities;
 }
 
+/**
+ * A credentialed request held by the gateway awaiting a human decision, in
+ * provider-neutral vocabulary (the shape every credential-proxy gateway
+ * shares: what is being called, by which agent, until when).
+ */
+export interface GatewayApprovalRequest {
+  /** The gateway's own request id — the dedupe key across reconnects. */
+  id: string;
+  /** ISO-8601: when the gateway gives up waiting for a decision. */
+  expiresAt: string;
+  method: string;
+  host: string;
+  path: string;
+  bodyPreview?: string;
+  /** The requesting agent; `externalId` is the agent group id when set. */
+  agent: { externalId?: string; name: string };
+  /** Optional structured summary (action + labeled fields) for the card. */
+  summary?: { action?: string; details?: { label: string; value: string }[] };
+}
+
+export type GatewayApprovalDecision = 'approve' | 'deny';
+
+export interface GatewayApprovalSubscription {
+  stop(): void;
+}
+
+/**
+ * The manual-approvals capability of a gateway. `subscribe` is the one
+ * required member: the handler is invoked per held request and its resolved
+ * value is the decision. The optional members are capability flags —
+ * implement them only when the gateway genuinely supports the operation:
+ *
+ * - `listPending` — enumerate requests still held gateway-side, for
+ *   reconnect reconciliation. A gateway that does not redeliver un-decided
+ *   requests on reconnect and offers no enumeration omits it.
+ * - `decide` — deliver a decision outside the subscribe callback (a late
+ *   decision for a request whose original callback did not survive a
+ *   restart). Returns false when the gateway no longer holds the request.
+ */
+export interface GatewayApprovalSource {
+  subscribe(handler: (request: GatewayApprovalRequest) => Promise<GatewayApprovalDecision>): GatewayApprovalSubscription;
+  listPending?(): Promise<GatewayApprovalRequest[]>;
+  decide?(requestId: string, decision: GatewayApprovalDecision): Promise<boolean>;
+}
+
 export interface GatewayProvider {
   /** Identity, for logs and selection — never a branch above the seam. */
   readonly kind: string;
@@ -60,6 +105,12 @@ export interface GatewayProvider {
    * credentials, and it must not launch.
    */
   contribute(input: GatewayProviderInput): Promise<GatewayContribution>;
+  /**
+   * Manual-approvals capability. Absent when the gateway has no held-request
+   * approval flow; the approvals module consumes this seam and never imports
+   * a gateway SDK directly.
+   */
+  approvals?(): GatewayApprovalSource;
 }
 
 /** Not a union: overlays bring their own kinds (see `DriverKind`). */
