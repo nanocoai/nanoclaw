@@ -1,7 +1,8 @@
 /**
- * Delivery attempt rows: recorded with the failure, cleared on success or
- * permanent give-up. (Originally written for the shadow phase; the rows are
- * now the authority for retry counts and every assertion carried unchanged.)
+ * Delivery attempt counts are read from `delivery_attempts` rows, not process
+ * memory — so a host restart no longer resets them. Rows written "by a
+ * previous process life" (seeded directly) must count toward the give-up
+ * decision of the current one.
  */
 import Database from 'better-sqlite3';
 import fs from 'fs';
@@ -18,16 +19,16 @@ vi.mock('./config.js', async () => {
   const actual = await vi.importActual<typeof import('./config.js')>('./config.js');
   return {
     ...actual,
-    DATA_DIR: '/tmp/nanoclaw-test-delivery-shadow',
-    GROUPS_DIR: '/tmp/nanoclaw-test-delivery-shadow/groups',
+    DATA_DIR: '/tmp/nanoclaw-test-delivery-authority',
+    GROUPS_DIR: '/tmp/nanoclaw-test-delivery-authority/groups',
   };
 });
 
-const TEST_DIR = '/tmp/nanoclaw-test-delivery-shadow';
+const TEST_DIR = '/tmp/nanoclaw-test-delivery-authority';
 
 import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
-import { getDeliveryAttempt } from './db/coordination.js';
-import { outboundDbPath } from './mailbox/sqlite/paths.js';
+import { getDeliveryAttempt, recordDeliveryAttempt } from './db/coordination.js';
+import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { resolveSession } from './session-manager.js';
 import { deliverSessionMessages, setDeliveryAdapter } from './delivery.js';
 
@@ -63,6 +64,28 @@ function insertOutbound(agentGroupId: string, sessionId: string, msgId: string):
   db.close();
 }
 
+/** Attempts recorded by "a previous process life" — rows only, no module state. */
+async function seedPriorAttempts(messageId: string, sessionId: string, count: number): Promise<void> {
+  for (let i = 0; i < count; i++) {
+    await recordDeliveryAttempt({
+      messageId,
+      sessionId,
+      now: now(),
+      nextAttemptAt: null,
+      error: 'failure from before the restart',
+    });
+  }
+}
+
+function deliveredRow(agentGroupId: string, sessionId: string, msgId: string): { status: string } | undefined {
+  const db = new Database(inboundDbPath(agentGroupId, sessionId), { readonly: true });
+  const row = db.prepare('SELECT status FROM delivered WHERE message_out_id = ?').get(msgId) as
+    | { status: string }
+    | undefined;
+  db.close();
+  return row;
+}
+
 beforeEach(async () => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
@@ -75,67 +98,48 @@ afterEach(async () => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
-describe('delivery attempt shadow rows', () => {
-  it('records attempts with the error, and clears on eventual success', async () => {
-    await seedAgentAndChannel();
-    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
-    insertOutbound('ag-1', session.id, 'out-1');
-
-    let failuresLeft = 1;
-    setDeliveryAdapter({
-      async deliver() {
-        if (failuresLeft > 0) {
-          failuresLeft -= 1;
-          throw new Error('channel offline');
-        }
-        return 'plat-msg-1';
-      },
-    });
-
-    await deliverSessionMessages(session);
-    const afterFailure = await getDeliveryAttempt('out-1');
-    expect(afterFailure?.attempts).toBe(1);
-    expect(afterFailure?.session_id).toBe(session.id);
-    expect(afterFailure?.last_error).toContain('channel offline');
-
-    await deliverSessionMessages(session);
-    expect(await getDeliveryAttempt('out-1')).toBeUndefined();
-  });
-
-  it('clears the row when delivery gives up permanently', async () => {
+describe('delivery attempts survive a restart', () => {
+  it('two attempts from a previous life plus one live failure is permanent give-up', async () => {
     await seedAgentAndChannel();
     const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound('ag-1', session.id, 'out-poison');
+    await seedPriorAttempts('out-poison', session.id, 2);
 
+    let callCount = 0;
     setDeliveryAdapter({
       async deliver() {
-        throw new Error('always fails');
+        callCount++;
+        throw new Error('still failing after the restart');
       },
     });
 
-    // MAX_DELIVERY_ATTEMPTS is 3: two failures leave the row counting…
+    // One live failure — attempt 3 of 3 overall. The old in-memory counter
+    // would have called this attempt 1 and retried the poison message
+    // through every future crash loop.
     await deliverSessionMessages(session);
-    await deliverSessionMessages(session);
-    expect((await getDeliveryAttempt('out-poison'))?.attempts).toBe(2);
-
-    // …the third marks the message failed mailbox-side and clears the row —
-    // the attempt bookkeeping's job is done.
-    await deliverSessionMessages(session);
+    expect(callCount).toBe(1);
+    expect(deliveredRow('ag-1', session.id, 'out-poison')?.status).toBe('failed');
     expect(await getDeliveryAttempt('out-poison')).toBeUndefined();
+
+    // And it stays failed — the adapter is never consulted again.
+    await deliverSessionMessages(session);
+    expect(callCount).toBe(1);
   });
 
-  it('never writes a row for a first-time success', async () => {
+  it('a success after the restart clears the persisted count', async () => {
     await seedAgentAndChannel();
     const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
-    insertOutbound('ag-1', session.id, 'out-clean');
+    insertOutbound('ag-1', session.id, 'out-recovers');
+    await seedPriorAttempts('out-recovers', session.id, 2);
 
     setDeliveryAdapter({
       async deliver() {
-        return 'plat-msg-2';
+        return 'plat-msg-ok';
       },
     });
 
     await deliverSessionMessages(session);
-    expect(await getDeliveryAttempt('out-clean')).toBeUndefined();
+    expect(deliveredRow('ag-1', session.id, 'out-recovers')?.status).toBe('delivered');
+    expect(await getDeliveryAttempt('out-recovers')).toBeUndefined();
   });
 });

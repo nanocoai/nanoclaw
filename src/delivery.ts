@@ -18,7 +18,7 @@ import {
   getMessagingGroupByPlatform,
   getMessagingGroupForOwnDestination,
 } from './db/messaging-groups.js';
-import { clearDeliveryAttempt, recordDeliveryAttempt, shadowWrite } from './db/coordination.js';
+import { clearDeliveryAttempt, recordDeliveryAttempt } from './db/coordination.js';
 import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
 import { isUnguarded, type Unguarded } from './guard/index.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
@@ -34,8 +34,45 @@ const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
 const MAX_DELIVERY_ATTEMPTS = 3;
 
-/** Track delivery attempt counts. Resets on process restart (gives failed messages a fresh chance). */
-const deliveryAttempts = new Map<string, number>();
+/**
+ * Attempt counts live in the `delivery_attempts` table, so they survive a
+ * host restart: a poison message gets MAX_DELIVERY_ATTEMPTS total, not
+ * MAX_DELIVERY_ATTEMPTS per process lifetime (the old in-memory counter
+ * reset on every restart, so a crash-looping host retried it forever).
+ * Bookkeeping failures must never break delivery: a failed record skips the
+ * give-up decision for this tick (the message just retries next poll), and a
+ * failed clear leaves a stale row the next lifecycle of the same id clears.
+ */
+async function recordAttemptRow(messageId: string, sessionId: string, err: unknown): Promise<number | null> {
+  /* eslint-disable no-catch-all/no-catch-all -- attempt bookkeeping must never break delivery */
+  try {
+    return await recordDeliveryAttempt({
+      messageId,
+      sessionId,
+      now: new Date().toISOString(),
+      nextAttemptAt: null,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  } catch (recordErr) {
+    log.error('Failed to record delivery attempt — retrying next poll without a count', {
+      messageId,
+      sessionId,
+      err: recordErr,
+    });
+    return null;
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
+}
+
+async function clearAttemptRow(messageId: string): Promise<void> {
+  /* eslint-disable no-catch-all/no-catch-all -- attempt bookkeeping must never break delivery */
+  try {
+    await clearDeliveryAttempt(messageId);
+  } catch (err) {
+    log.warn('Failed to clear delivery attempt row', { messageId, err });
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
+}
 
 /**
  * Sessions whose outbound queue is currently being drained.
@@ -183,7 +220,7 @@ async function drainSession(session: Session): Promise<void> {
   // notifications, cli_request → dispatch) open their own sessions on this
   // same key, and implementations may serialize session() per key — holding
   // the session across delivery would deadlock them. Same re-entry class the
-  // sweep avoids around wakeContainer (see host-sweep.ts sweepSession).
+  // reconciler avoids around requestWake (see reconcile-session.ts).
   let delivered: Set<string>;
   let pending: OutboundMessage[];
   try {
@@ -224,8 +261,7 @@ async function drainSession(session: Session): Promise<void> {
       );
       const firstDelivery = delivered.size === 0;
       delivered.add(msg.id);
-      deliveryAttempts.delete(msg.id);
-      await shadowWrite('delivery-attempt-clear', () => clearDeliveryAttempt(msg.id));
+      await clearAttemptRow(msg.id);
       if (msg.kind !== 'system' && msg.channelType !== 'agent') {
         pauseTypingRefreshAfterDelivery(session.id);
         if (msg.kind !== 'task_log') {
@@ -250,20 +286,8 @@ async function drainSession(session: Session): Promise<void> {
         }
       }
     } catch (err) {
-      const attempts = (deliveryAttempts.get(msg.id) ?? 0) + 1;
-      deliveryAttempts.set(msg.id, attempts);
-      // Shadow row mirrors the in-memory count; the map stays authoritative
-      // (no real backoff schedule exists in this path — retry is the next poll).
-      await shadowWrite('delivery-attempt', () =>
-        recordDeliveryAttempt({
-          messageId: msg.id,
-          sessionId: session.id,
-          now: new Date().toISOString(),
-          nextAttemptAt: null,
-          error: err instanceof Error ? err.message : String(err),
-        }),
-      );
-      if (attempts >= MAX_DELIVERY_ATTEMPTS) {
+      const attempts = await recordAttemptRow(msg.id, session.id, err);
+      if (attempts !== null && attempts >= MAX_DELIVERY_ATTEMPTS) {
         log.error('Message delivery failed permanently, giving up', {
           messageId: msg.id,
           sessionId: session.id,
@@ -272,8 +296,7 @@ async function drainSession(session: Session): Promise<void> {
         });
         try {
           await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => mailbox.markDeliveryFailed(msg.id));
-          deliveryAttempts.delete(msg.id);
-          await shadowWrite('delivery-attempt-clear', () => clearDeliveryAttempt(msg.id));
+          await clearAttemptRow(msg.id);
         } catch (markErr) {
           log.error('Failed to record permanent delivery failure', {
             messageId: msg.id,
@@ -285,6 +308,7 @@ async function drainSession(session: Session): Promise<void> {
         log.warn('Message delivery failed, will retry', {
           messageId: msg.id,
           sessionId: session.id,
+          // null: the bookkeeping write itself failed; count unknown this tick.
           attempt: attempts,
           maxAttempts: MAX_DELIVERY_ATTEMPTS,
           err,
