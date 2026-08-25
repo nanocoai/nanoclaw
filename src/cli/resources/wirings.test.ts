@@ -15,6 +15,7 @@ vi.mock('../../log.js', () => ({
 // sessions run in this test, but the module must not open on-disk DB files.
 vi.mock('../../modules/agent-to-agent/write-destinations.js', () => ({
   writeDestinations: vi.fn(),
+  reportUnreachableWiredChats: vi.fn(),
 }));
 
 import type { ChannelDefaults } from '../../channels/adapter.js';

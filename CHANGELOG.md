@@ -4,6 +4,8 @@ All notable changes to NanoClaw will be documented in this file.
 
 ## [Unreleased]
 
+- **An agent that cannot address one of its wired chats now says so in the host log.** Sending is name-based, so a wired chat with no destination row is a chat the agent cannot address: its `<message to="…">` blocks are dropped inside the container, the turn is still acknowledged as processed, and from the chat it reads as the agent ignoring you. The container does report the drop, but it reaches the host at `debug` and a default `LOG_LEVEL=info` install never prints it. The host now checks the agent's wirings against its destination map on every wake and on every destination edit, and warns once with the chats it cannot address. It is a warning rather than an error because an absent row also means "not authorized" — the row is the ACL, and removing one is deliberate — so the report names the consequence without prescribing a fix.
+
 ## [2.3.0] - 2026-08-24
 
 - [BREAKING] **A new Slack experience — per-agent provisioned Slack apps, agent spawning from Slack, and UX improvements — is available to classic single-bot Slack installs.** Classic Slack keeps working unchanged; this gate asks for a decision, not a forced migration. New installs and non-Slack installs are unaffected. **Migration:** run `/migrate-slack-agents` — it detects classic state (exits cleanly otherwise) and either walks the upgrade or records the choice to stay on classic; both outcomes satisfy this requirement.

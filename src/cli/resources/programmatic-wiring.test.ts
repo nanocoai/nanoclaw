@@ -48,7 +48,10 @@ vi.mock('../../group-init.js', async () => {
 
 // wirings' postCommit projects destinations into live session DBs — no
 // sessions run in this test, but the module must not open on-disk DB files.
-vi.mock('../../modules/agent-to-agent/write-destinations.js', () => ({ writeDestinations: vi.fn() }));
+vi.mock('../../modules/agent-to-agent/write-destinations.js', () => ({
+  writeDestinations: vi.fn(),
+  reportUnreachableWiredChats: vi.fn(),
+}));
 
 const TEST_DIR = '/tmp/nanoclaw-test-cli-programmatic-wiring';
 
