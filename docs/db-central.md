@@ -440,6 +440,7 @@ Several early migrations were later renamed/retired and replaced by "module" fil
 | 20 | `container-config-timezone` | `020-container-config-timezone.ts` | `container_configs.timezone` — per-agent-group timezone override (NULL = install-global) |
 | 21 | `approval-question-render-metadata` | `021-approval-question.ts` | `question` card-body column on all three approval tables so terminal edits retain the original request |
 | 22 | `messaging-group-detached-at` | `022-messaging-group-detached.ts` | `messaging_groups.detached_at` — records when the bot left a channel without deleting its wiring |
+| 24 | `backfill-wiring-destinations` | `024-backfill-wiring-destinations.ts` | The missing `agent_destinations` channel row for wirings created after `agent-destinations` ran but before wiring creation provisioned one; existing destinations and custom names are left as they are |
 
 Numbers 5 and 6 are intentionally absent — migrations were renumbered during early development.
 

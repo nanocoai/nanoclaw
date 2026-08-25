@@ -4,6 +4,8 @@ All notable changes to NanoClaw will be documented in this file.
 
 ## [Unreleased]
 
+- **Agents wired to a chat before destinations became explicit can reply again.** A wiring created after the `agent-destinations` migration ran, but before every wiring path provisioned its companion row, had no destination for its own chat — so the agent composed a correctly-addressed reply, found no name to address, and the block was dropped inside the container. At the default log level nothing surfaced on the host (the container's warning only appears under `LOG_LEVEL=debug`) and the message was still acknowledged as processed, so it read as the agent ignoring the chat. A migration now backfills the missing row for every such wiring; existing destinations and custom local names are untouched. Wirings that predate the `agent-destinations` backfill are deliberately left alone — that migration already gave them a row, so a missing one means it was revoked with `ncl destinations remove`, and restoring it would re-grant a permission an admin took away.
+
 ## [2.3.0] - 2026-08-24
 
 - [BREAKING] **A new Slack experience — per-agent provisioned Slack apps, agent spawning from Slack, and UX improvements — is available to classic single-bot Slack installs.** Classic Slack keeps working unchanged; this gate asks for a decision, not a forced migration. New installs and non-Slack installs are unaffected. **Migration:** run `/migrate-slack-agents` — it detects classic state (exits cleanly otherwise) and either walks the upgrade or records the choice to stay on classic; both outcomes satisfy this requirement.
