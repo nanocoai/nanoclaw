@@ -12,6 +12,7 @@ import { closeDb, initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
 import { getSessionDriver } from './drivers/index.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
+import { startHostInstanceLease, stopHostInstanceLease } from './host-instance.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { startHostModules, stopHostModules } from './host-lifecycle.js';
 import { routeInbound } from './router.js';
@@ -153,6 +154,10 @@ async function main(): Promise<void> {
   // actual work begins here, after DB + delivery are ready and before polls.
   await startHostModules({ db, signal: hostAbortController.signal });
 
+  // 5b. Register this host process in durable state and keep its lease fresh
+  // (shadow state — observability across restarts, no behavior reads it).
+  await startHostInstanceLease();
+
   // 6. Start delivery polls
   startActiveDeliveryPoll();
   startSweepDeliveryPoll();
@@ -173,6 +178,8 @@ async function shutdown(signal: string): Promise<void> {
   log.info('Shutdown signal received', { signal });
   hostAbortController.abort();
   await stopHostModules();
+  // Stamp the durable stop before the DB closes below.
+  await stopHostInstanceLease();
   stopDeliveryPolls();
   stopHostSweep();
   await stopCliServer();
