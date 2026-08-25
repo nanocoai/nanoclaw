@@ -1,7 +1,8 @@
 /**
- * Session-claim shadow writes through the real lifecycle: adoption claims a
- * session (incarnation bump + CAS), finalization releases the claim. The
- * in-memory registry stays authoritative throughout.
+ * Session-claim writes through the real lifecycle: adoption claims a session
+ * (incarnation bump + CAS), finalization releases the claim. (Originally
+ * written for the shadow phase; the rows are now the fencing authority and
+ * every assertion carried unchanged.)
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 

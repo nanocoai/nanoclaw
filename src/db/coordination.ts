@@ -182,6 +182,11 @@ export async function releaseSessionClaim(args: {
   return result.changes > 0;
 }
 
+/** Sessions carrying an unconsumed stop intent (startup recovery reads this). */
+export async function listSessionsWithStopIntent(): Promise<SessionClaimRow[]> {
+  return getDb().all<SessionClaimRow>('SELECT * FROM session_claims WHERE stop_intent IS NOT NULL');
+}
+
 /** Durable stop intent — survives a host restart, unlike the on-wake promise. */
 export async function setStopIntent(
   sessionId: string,
