@@ -409,17 +409,18 @@ let sharedRuntime: SharedRuntime | null = null;
 let sharedConfigKey: string | null = null;
 let sharedInit: Promise<SharedRuntime> | null = null;
 
-function runtimeConfigKey(options: ProviderOptions): string {
+function runtimeConfigKey(options: ProviderOptions, cwd: string): string {
   return JSON.stringify({
     mcp: mcpServersToOpenCodeConfig(options.mcpServers),
     model: process.env.OPENCODE_MODEL,
     small: process.env.OPENCODE_SMALL_MODEL,
     op: process.env.OPENCODE_PROVIDER,
+    cwd,
   });
 }
 
-async function ensureSharedRuntime(options: ProviderOptions): Promise<SharedRuntime> {
-  const key = runtimeConfigKey(options);
+async function ensureSharedRuntime(options: ProviderOptions, cwd: string): Promise<SharedRuntime> {
+  const key = runtimeConfigKey(options, cwd);
   if (sharedRuntime && sharedConfigKey === key) return sharedRuntime;
 
   if (sharedInit) return sharedInit;
@@ -430,7 +431,10 @@ async function ensureSharedRuntime(options: ProviderOptions): Promise<SharedRunt
     }
     const config = buildOpenCodeConfig(options);
     const { url, proc } = await spawnOpencodeServer(config);
-    const client = createOpencodeClient({ baseUrl: url });
+    // OpenCode scopes sessions and tool execution by the directory carried by
+    // the SDK client. The server process cwd is not sufficient: without this
+    // option the SDK defaults requests to the server's launch directory.
+    const client = createOpencodeClient({ baseUrl: url, directory: cwd });
     const questionClient = createOpencodeQuestionClient({ baseUrl: url });
     const sub = await client.event.subscribe();
     const stream = sub.stream as AsyncGenerator<{ type: string; properties: Record<string, unknown> }, void, void>;
@@ -691,7 +695,7 @@ export interface OpenCodeRuntimeHandle {
 }
 
 export interface OpenCodeRuntimeDeps {
-  getRuntime(options: ProviderOptions): Promise<OpenCodeRuntimeHandle>;
+  getRuntime(options: ProviderOptions, cwd: string): Promise<OpenCodeRuntimeHandle>;
 }
 
 /**
@@ -901,7 +905,9 @@ export class OpenCodeProvider implements AgentProvider {
 
     async function* gen(): AsyncGenerator<ProviderEvent> {
       let initYielded = false;
-      const rt = self.runtime ? await self.runtime.getRuntime(self.options) : await ensureSharedRuntime(self.options);
+      const rt = self.runtime
+        ? await self.runtime.getRuntime(self.options, input.cwd)
+        : await ensureSharedRuntime(self.options, input.cwd);
       const { client, stream, questionClient } = rt;
 
       while (!aborted) {

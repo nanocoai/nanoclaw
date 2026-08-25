@@ -194,6 +194,26 @@ describe('OpenCodeProvider empty-resume fallback', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it('passes the query cwd into runtime creation', async () => {
+    const fake = createFakeRuntime([assistantReply('ses_fresh_1', 'in the right directory')]);
+    let runtimeCwd: string | undefined;
+    const provider = new OpenCodeProvider(
+      {},
+      {
+        getRuntime: async (options, cwd) => {
+          runtimeCwd = cwd;
+          return fake.runtime.getRuntime(options, cwd);
+        },
+      },
+    );
+    provider.registerMemorySessionHook(MEMORY_HOOK);
+    const query = provider.query({ prompt: 'pwd', cwd: dir });
+    query.end();
+    await collect(query.events);
+
+    expect(runtimeCwd).toBe(dir);
+  });
+
   it('starts a fresh session when a resume idles with only the user echo', async () => {
     const fake = createFakeRuntime([userIdle('ses_stale'), assistantReply('ses_fresh_1', 'Hey!')]);
     const provider = new OpenCodeProvider({}, fake.runtime);
