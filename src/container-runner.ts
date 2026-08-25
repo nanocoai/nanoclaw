@@ -31,6 +31,7 @@ import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import {
+  getLiveHostInstance,
   getSessionClaim,
   listSessionsWithStopIntent,
   releaseSessionClaim,
@@ -39,6 +40,7 @@ import {
   tryClaimSession,
   type SessionClaimRow,
 } from './db/coordination.js';
+import { getHostInstanceId } from './host-instance.js';
 import { getDb, hasTable } from './db/connection.js';
 import { getSession } from './db/sessions.js';
 import { getSessionDriver, isSessionEventsDriver } from './drivers/index.js';
@@ -113,10 +115,13 @@ interface ActiveSessionRuntime {
 
 const activeContainers = new Map<string, ActiveSessionRuntime>();
 
-// Claimant identity for the shadow rows in session_claims. Process-scoped and
-// human-readable; the durable host-instance lease id takes over as claimant
-// when the rows become authoritative.
-const CLAIMANT_ID = `${os.hostname()}:${process.pid}`;
+// Claimant identity for the session_claims rows: the host's durable lease
+// instance id when the lease is running, else a process-scoped fallback
+// (tests, tools). The lease id is what makes claims answerable against
+// host_instances liveness below.
+function claimantId(): string {
+  return getHostInstanceId() ?? `${os.hostname()}:${process.pid}`;
+}
 
 /**
  * Claim a session this process is about to run (spawn or adopt). The
@@ -125,12 +130,30 @@ const CLAIMANT_ID = `${os.hostname()}:${process.pid}`;
  * first, and the caller must not start or adopt a container for it. Returns
  * the claimed incarnation, or null when the claim was lost. Throws on a
  * failed write — a claim that cannot be recorded is a claim not held.
+ *
+ * A claim held by a LIVE peer host (a host_instances row that is not stopped
+ * and whose lease is unexpired) is refused outright — two live hosts must
+ * never trade a session back and forth. A claim whose holder is stopped,
+ * lease-expired, or unknown (older claimant-id schemes) stays takeover-able:
+ * a crashed claimant must never wedge a session.
  */
 async function claimSessionRun(sessionId: string, containerRef: string): Promise<number | null> {
   const current = await getSessionClaim(sessionId);
+  const self = claimantId();
+  if (current?.claimed_by && current.claimed_by !== self) {
+    const holder = await getLiveHostInstance(current.claimed_by, new Date().toISOString());
+    if (holder) {
+      log.warn('Refusing session claim held by a live peer host', {
+        sessionId,
+        holder: current.claimed_by,
+        claimant: self,
+      });
+      return null;
+    }
+  }
   return tryClaimSession({
     sessionId,
-    instanceId: CLAIMANT_ID,
+    instanceId: self,
     expectedIncarnation: current?.incarnation ?? 0,
     containerRef,
     now: new Date().toISOString(),
@@ -143,7 +166,7 @@ async function releaseClaimQuietly(sessionId: string, incarnation: number): Prom
   await shadowWrite('session-claim-release', () =>
     releaseSessionClaim({
       sessionId,
-      instanceId: CLAIMANT_ID,
+      instanceId: claimantId(),
       incarnation,
       now: new Date().toISOString(),
     }),

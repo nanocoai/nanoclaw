@@ -31,6 +31,7 @@
  */
 import fs from 'fs';
 
+import { getSessionClaim } from './db/coordination.js';
 import { getSession, isTaskThread, updateSession } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { log } from './log.js';
@@ -136,7 +137,7 @@ async function reconcileActiveSession(session: Session): Promise<void> {
       dueCount = mailbox.countDueMessages();
       shouldWake = dueCount > 0 && !isContainerRunning(session.id);
       if (!shouldWake) {
-        await maintainSessionMailbox(mailbox, session, agentGroup.id, false);
+        await maintainSessionMailbox(mailbox, session, agentGroup.id);
       }
       return true;
     });
@@ -151,7 +152,7 @@ async function reconcileActiveSession(session: Session): Promise<void> {
     await requestWake(session, 'due-message');
 
     await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
-      await maintainSessionMailbox(mailbox, session, agentGroup.id, true);
+      await maintainSessionMailbox(mailbox, session, agentGroup.id);
     });
   } catch (err) {
     log.error('Session mailbox sweep failed', {
@@ -166,11 +167,10 @@ async function maintainSessionMailbox(
   mailbox: InboundMailbox & OutboundMailbox,
   session: Session,
   agentGroupId: string,
-  justWoke: boolean,
 ): Promise<void> {
   const alive = isContainerRunning(session.id);
-  if (alive && !justWoke) {
-    enforceRunningContainerSla(mailbox, mailbox, session, agentGroupId);
+  if (alive) {
+    await enforceRunningContainerSla(mailbox, mailbox, session, agentGroupId);
   }
   if (!alive) {
     resetStuckProcessingRows(mailbox, mailbox, session, 'container not running');
@@ -214,18 +214,46 @@ function bashTimeoutMs(state: ContainerState | null): number | null {
   return state.toolDeclaredTimeoutMs;
 }
 
-function enforceRunningContainerSla(
+/**
+ * The incarnation gate: evidence that predates the current incarnation's
+ * durable claim time is not evidence against this container. A heartbeat
+ * mtime older than the claim is the previous incarnation's file — treated as
+ * absent, so the spawn-time fallback gives the fresh container its grace. A
+ * processing claim older than the claim time was inherited from a crashed
+ * predecessor — its age is measured from this incarnation's start, so the
+ * fresh container gets a full tolerance window to clear it before it can
+ * kill. Replaces the old wake-tick grace flag: the fence is a durable fact
+ * about when this incarnation began, not volatile "we just woke it"
+ * bookkeeping — it survives restarts and applies on every pass, not only the
+ * one that issued the wake.
+ */
+async function enforceRunningContainerSla(
   inDb: InboundMailbox,
   outDb: OutboundMailbox,
   session: Session,
   agentGroupId: string,
-): void {
+): Promise<void> {
+  let incarnationStartMs = 0;
+  const claimRow = await getSessionClaim(session.id);
+  if (claimRow?.claimed_at) {
+    const parsed = Date.parse(claimRow.claimed_at);
+    if (!Number.isNaN(parsed)) incarnationStartMs = parsed;
+  }
+
+  const rawHeartbeatMs = heartbeatMtimeMs(agentGroupId, session.id);
+  const gatedHeartbeatMs = rawHeartbeatMs >= incarnationStartMs ? rawHeartbeatMs : 0;
+  const gatedClaims = outDb.getProcessingClaims().map((claim) => {
+    const claimedAt = Date.parse(claim.statusChanged);
+    if (Number.isNaN(claimedAt) || claimedAt >= incarnationStartMs) return claim;
+    return { ...claim, statusChanged: new Date(incarnationStartMs).toISOString() };
+  });
+
   const decision = decideStuckAction({
     now: Date.now(),
-    heartbeatMtimeMs: heartbeatMtimeMs(agentGroupId, session.id),
+    heartbeatMtimeMs: gatedHeartbeatMs,
     containerStartedAtMs: getContainerStartedAtMs(session.id),
     containerState: outDb.getContainerState(),
-    claims: outDb.getProcessingClaims(),
+    claims: gatedClaims,
   });
 
   if (decision.action === 'ok') return;

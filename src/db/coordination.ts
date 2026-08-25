@@ -105,6 +105,20 @@ export async function markHostInstanceStopped(instanceId: string, now: string): 
   await getDb().run('UPDATE host_instances SET stopped_at = ? WHERE instance_id = ?', now, instanceId);
 }
 
+/**
+ * One instance, only if live: not gracefully stopped and lease still ahead of
+ * `now`. Undefined for unknown ids (rows from older claimant-id schemes
+ * included) — an unknown claimant reads as not-live, which is what lets a
+ * claim it holds be taken over.
+ */
+export async function getLiveHostInstance(instanceId: string, now: string): Promise<HostInstanceRow | undefined> {
+  return getDb().get<HostInstanceRow>(
+    'SELECT * FROM host_instances WHERE instance_id = ? AND stopped_at IS NULL AND lease_expires_at > ?',
+    instanceId,
+    now,
+  );
+}
+
 /** Instances whose lease is still ahead of `now` and not gracefully stopped. */
 export async function listLiveHostInstances(now: string): Promise<HostInstanceRow[]> {
   return getDb().all<HostInstanceRow>(
