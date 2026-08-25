@@ -165,8 +165,17 @@ async function spawnContainer(session: Session): Promise<void> {
   // changes take effect on wake. Destinations come from the agent-to-agent
   // module — skip when the module isn't installed (table absent).
   if (await hasTable(getDb(), 'agent_destinations')) {
-    const { writeDestinations } = await import('./modules/agent-to-agent/write-destinations.js');
-    await writeDestinations(agentGroup.id, session.id);
+    const { writeDestinations, reportUnreachableWiredChats } =
+      await import('./modules/agent-to-agent/write-destinations.js');
+    const destinations = await writeDestinations(agentGroup.id, session.id);
+    // Wake is when a missing destination starts costing replies, so it is
+    // where the agent's routing gets checked against its wirings. Diagnostic
+    // only — a failure here must not keep the container from starting.
+    try {
+      await reportUnreachableWiredChats(agentGroup.id, destinations);
+    } catch (err) {
+      log.debug('Wired-chat reachability check failed', { agentGroupId: agentGroup.id, err });
+    }
   }
   await writeSessionRouting(agentGroup.id, session.id);
   const mailboxKey = { agentGroupId: agentGroup.id, sessionId: session.id };

@@ -16,16 +16,30 @@ import { registerResource } from '../crud.js';
  * local_name silently drops with "unknown destination" until restart.
  * See the destination-projection invariant in
  * src/modules/agent-to-agent/db/agent-destinations.ts.
+ *
+ * Also reports, once per call, any wired chat the edit leaves the agent unable
+ * to address.
  */
 export async function projectDestinationsToSessions(agentGroupId: string): Promise<void> {
   if (!(await hasTable(getDb(), 'agent_destinations'))) return;
-  const { writeDestinations } = await import('../../modules/agent-to-agent/write-destinations.js');
+  const { writeDestinations, reportUnreachableWiredChats } =
+    await import('../../modules/agent-to-agent/write-destinations.js');
   for (const session of await getSessionsByAgentGroup(agentGroupId)) {
     try {
       await writeDestinations(agentGroupId, session.id);
     } catch (err) {
       log.warn('Failed to project destinations to session mailbox', { agentGroupId, sessionId: session.id, err });
     }
+  }
+  // Once for the agent group, not once per session — the routing this reports
+  // on is the same for every session, and an edit that leaves a wired chat
+  // unaddressable should say so once rather than once per open thread. The
+  // mutation is already committed by the time we get here, so a failure in the
+  // diagnostic must not surface to the operator as a failed command.
+  try {
+    await reportUnreachableWiredChats(agentGroupId);
+  } catch (err) {
+    log.debug('Wired-chat reachability check failed', { agentGroupId, err });
   }
 }
 

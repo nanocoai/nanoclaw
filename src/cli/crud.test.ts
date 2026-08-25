@@ -27,6 +27,7 @@ vi.mock('../log.js', () => ({
 const writeDestinationsSpy = vi.fn();
 vi.mock('../modules/agent-to-agent/write-destinations.js', () => ({
   writeDestinations: (...args: unknown[]) => writeDestinationsSpy(...args),
+  reportUnreachableWiredChats: vi.fn(),
 }));
 
 import { initTestDb, closeDb, getDb, runMigrations, createAgentGroup, createMessagingGroup } from '../db/index.js';
