@@ -12,7 +12,7 @@ import { closeDb, initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
 import { getSessionDriver } from './drivers/index.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
-import { startHostInstanceLease, stopHostInstanceLease } from './host-instance.js';
+import { awaitHostLeadership, startHostInstanceLease, stopHostInstanceLease, stopHostLeadership } from './host-instance.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { startHostModules, stopHostModules } from './host-lifecycle.js';
 import { routeInbound } from './router.js';
@@ -79,6 +79,17 @@ async function main(): Promise<void> {
   // Idempotent — skips groups that already have a config row.
   if (db.dialect === 'sqlite') await backfillContainerConfigs();
   else log.info('Skipping local container.json backfill for non-local central DB');
+
+  // 1c. Register this host process in durable state and keep its lease fresh;
+  // claim fencing reads the instance rows to protect a live host's sessions.
+  await startHostInstanceLease();
+
+  // 1d. Exactly one active host per shared central DB. On SQLite this
+  // short-circuits (same box by construction — the ncl-socket guard already
+  // protects it); on a network backend a second host waits here in standby
+  // and takes over when the leader's lease lapses. Everything below runs as
+  // the active host only, and adoption doubles as the takeover resync.
+  await awaitHostLeadership();
 
   // 2. Session runtime: prove it is reachable, then reconcile what survived a
   // restart. Adoption replaces the old reap-everything cleanup — a session that
@@ -154,10 +165,6 @@ async function main(): Promise<void> {
   // actual work begins here, after DB + delivery are ready and before polls.
   await startHostModules({ db, signal: hostAbortController.signal });
 
-  // 5b. Register this host process in durable state and keep its lease fresh
-  // (shadow state — observability across restarts, no behavior reads it).
-  await startHostInstanceLease();
-
   // 6. Start delivery polls
   startActiveDeliveryPoll();
   startSweepDeliveryPoll();
@@ -178,7 +185,9 @@ async function shutdown(signal: string): Promise<void> {
   log.info('Shutdown signal received', { signal });
   hostAbortController.abort();
   await stopHostModules();
-  // Stamp the durable stop before the DB closes below.
+  // Hand leadership off promptly (a standby acquires on its next retry),
+  // then stamp the durable stop — both before the DB closes below.
+  await stopHostLeadership();
   await stopHostInstanceLease();
   stopDeliveryPolls();
   stopHostSweep();

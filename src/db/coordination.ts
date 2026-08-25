@@ -127,6 +127,72 @@ export async function listLiveHostInstances(now: string): Promise<HostInstanceRo
   );
 }
 
+// ── host_leadership ──
+
+export interface HostLeadershipRow {
+  install_id: string;
+  leader_instance_id: string;
+  acquired_at: string;
+  lease_expires_at: string;
+}
+
+/**
+ * CAS-acquire the install's leader row. Succeeds when the row is absent, when
+ * the incumbent's lease has lapsed as of `now`, or when the incumbent is the
+ * caller (re-acquire after a missed renewal). A live incumbent wins.
+ */
+export async function tryAcquireHostLeadership(args: {
+  installId: string;
+  instanceId: string;
+  now: string;
+  leaseExpiresAt: string;
+}): Promise<boolean> {
+  const result = await getDb().run(
+    `INSERT INTO host_leadership (install_id, leader_instance_id, acquired_at, lease_expires_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT (install_id) DO UPDATE SET
+       leader_instance_id = excluded.leader_instance_id,
+       acquired_at = excluded.acquired_at,
+       lease_expires_at = excluded.lease_expires_at
+     WHERE host_leadership.lease_expires_at <= excluded.acquired_at
+        OR host_leadership.leader_instance_id = excluded.leader_instance_id`,
+    args.installId,
+    args.instanceId,
+    args.now,
+    args.leaseExpiresAt,
+  );
+  return result.changes > 0;
+}
+
+/** Renew only while still the leader. False means leadership was lost. */
+export async function renewHostLeadership(
+  installId: string,
+  instanceId: string,
+  leaseExpiresAt: string,
+): Promise<boolean> {
+  const result = await getDb().run(
+    'UPDATE host_leadership SET lease_expires_at = ? WHERE install_id = ? AND leader_instance_id = ?',
+    leaseExpiresAt,
+    installId,
+    instanceId,
+  );
+  return result.changes > 0;
+}
+
+/** Release only if the caller still holds the row — a prompt handoff on graceful shutdown. */
+export async function releaseHostLeadership(installId: string, instanceId: string): Promise<boolean> {
+  const result = await getDb().run(
+    'DELETE FROM host_leadership WHERE install_id = ? AND leader_instance_id = ?',
+    installId,
+    instanceId,
+  );
+  return result.changes > 0;
+}
+
+export async function getHostLeadership(installId: string): Promise<HostLeadershipRow | undefined> {
+  return getDb().get<HostLeadershipRow>('SELECT * FROM host_leadership WHERE install_id = ?', installId);
+}
+
 // ── session_claims ──
 
 export async function getSessionClaim(sessionId: string): Promise<SessionClaimRow | undefined> {
