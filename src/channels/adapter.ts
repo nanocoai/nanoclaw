@@ -102,6 +102,11 @@ export interface OutboundMessage {
   kind: string;
   content: unknown; // parsed JSON from messages_out
   files?: OutboundFile[]; // file attachments from the session outbox
+  /** Display label of the sending agent (container config assistant_name,
+   *  else the agent group name). Adapters that speak through a shared human
+   *  identity prefix outgoing text with it so each agent is distinguishable
+   *  on one number/account; dedicated-identity adapters ignore it. */
+  senderLabel?: string;
 }
 
 /** Discovered conversation info (from syncConversations). */

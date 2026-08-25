@@ -7,6 +7,7 @@ This fork maintains as few source modifications as possible. Every carried patch
 | File | What it changes | Why | Upstream PR |
 |------|-----------------|-----|------------|
 | `src/host-sweep.ts` | Container idle-ceiling timeout is now configurable via the `NANOCLAW_IDLE_CEILING_MS` environment variable (integer milliseconds, default 30 minutes), read from either the process environment or the `.env` file. The validation accepts only positive integers; invalid or unset values fall back to the default. | The 30-minute hardcoded absolute idle ceiling is unsuitable for deployments where agents legitimately sit idle longer or should be reaped sooner. Making it tunable per-deployment enables production flexibility. | Offered upstream (draft prepared, not yet filed) |
+| `src/delivery.ts`, `src/channels/adapter.ts`, `src/channels/channel-registry.ts` (+ `patches/whatsapp-per-agent-sender-label.patch` for the skill-installed `src/channels/whatsapp.ts`) | Per-agent sender label: delivery resolves the sending agent's label (container config `assistant_name`, else group name) and passes it as `OutboundMessage.senderLabel`; the WhatsApp adapter in shared mode prefixes outgoing text with that label instead of the install-wide `ASSISTANT_NAME`, and recognises any agent's label as a self-echo. | Several agents wired to one shared WhatsApp number were all labelled with the single `ASSISTANT_NAME`, so the reader could not tell which agent answered. | to open (nanocoai/nanoclaw) |
 
 ## Not in this fork
 
