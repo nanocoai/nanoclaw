@@ -64,8 +64,8 @@ and ask even when there is a single agent:
 ```nc:operator
 Agents on this install: {{agent_groups}}. Giving an agent Dial lets it text and call any number and buy numbers, billed to your Dial account. Agents you leave out are blocked at the gateway (reversible by running /add-dial-tool again). Agents created after this run have Dial until the next run.
 ```
-```nc:prompt dial_agents validate:^(all|none|ag-[A-Za-z0-9-]+(\s*,\s*ag-[A-Za-z0-9-]+)*)$ normalize:trim
-Which agents may use Dial? Enter agent ids separated by commas (the `ag-…` column), `all` for every agent, or `none` to install the tool with every agent blocked for now.
+```nc:prompt dial_agents validate:^(all|none|ag-[A-Za-z0-9-]+(,ag-[A-Za-z0-9-]+)*)$ normalize:trim
+Which agents may use Dial? Enter agent ids separated by commas with no spaces (the `ag-…` column), `all` for every agent, or `none` to install the tool with every agent blocked for now.
 ```
 
 `all` and `none` cannot be mixed with ids, and an empty answer is never

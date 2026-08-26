@@ -14,6 +14,8 @@ import {
   clackResolveInput,
   applyOutcome,
   plainDuration,
+  parseDriverArgv,
+  unknownInputKeys,
   type RunSkillOptions,
 } from './skill-driver.js';
 import { fullyApplied, type ApplyEvent, type ApplyResult } from '../../scripts/skill-apply.js';
@@ -579,5 +581,46 @@ describe('non-TTY step lines (CI logs, a nested apply under the parent driver)',
     expect(success).toHaveBeenCalledTimes(1);
     expect(success.mock.calls[0][0]).toMatch(/^Build the image \(\d+s\)$/);
     success.mockRestore();
+  });
+});
+
+describe('parseDriverArgv (the CLI argv contract behind nested `--input` handoffs)', () => {
+  it('parses the skill dir and repeated --input pairs, keeping later `=` in the value', () => {
+    expect(parseDriverArgv(['skills/x', '--input', 'a=1', '--input', 'b=k=v'])).toEqual({
+      skillDir: 'skills/x',
+      inputs: { a: '1', b: 'k=v' },
+    });
+    expect(parseDriverArgv(['skills/x'])).toEqual({ skillDir: 'skills/x', inputs: {} });
+  });
+
+  it('refuses a bare argument — the orphaned half of an unquoted, word-split --input', () => {
+    expect(parseDriverArgv(['skills/x', 'ag-b'])).toEqual({ error: 'unexpected argument: ag-b' });
+    expect(parseDriverArgv(['skills/x', '--input', 'dial_agents=ag-a', 'ag-b'])).toEqual({
+      error: 'unexpected argument: ag-b',
+    });
+  });
+
+  it('refuses --input with a missing or malformed pair', () => {
+    expect(parseDriverArgv(['skills/x', '--input'])).toEqual({ error: '--input expects key=value, got nothing' });
+    expect(parseDriverArgv(['skills/x', '--input', 'novalue'])).toEqual({
+      error: '--input expects key=value, got: novalue',
+    });
+    expect(parseDriverArgv(['skills/x', '--input', '=v'])).toEqual({ error: '--input expects key=value, got: =v' });
+    expect(parseDriverArgv([])).toEqual({ error: 'missing <skill-dir>' });
+  });
+});
+
+describe('unknownInputKeys (a typoed --input key must refuse, not fall through to a piped prompt)', () => {
+  it('flags keys naming no nc:prompt var and accepts ones that do', () => {
+    const skill = mkdtempSync(join(tmpdir(), 'driver-keys-'));
+    writeFileSync(
+      join(skill, 'SKILL.md'),
+      ['# Keys', '', '## Ask', '', '```nc:prompt dial_agents validate:^(all|none)$', 'Which agents?', '```', ''].join(
+        '\n',
+      ),
+    );
+    expect(unknownInputKeys(skill, { dial_agents: 'all' })).toEqual([]);
+    expect(unknownInputKeys(skill, { dail_agents: 'all' })).toEqual(['dail_agents']);
+    expect(unknownInputKeys(skill, { dial_agents: 'all', extra: 'x' })).toEqual(['extra']);
   });
 });

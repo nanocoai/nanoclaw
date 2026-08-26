@@ -41,9 +41,18 @@
       "inputs": {
         "reuse_choice": "reuse",
         "inbound_access": "public",
-        "install_tool": "yes"
+        "install_tool": "yes",
+        "dial_agents": "all"
       },
       "exec": [
+        {
+          "match": "(.data|length)==0",
+          "stdout": "yes"
+        },
+        {
+          "match": "join(\", \")",
+          "stdout": "ag-1787000000000-aaaaaa (Nano)"
+        },
         {
           "match": "package.json",
           "stdout": "nanoclaw/2.2.0"
@@ -76,6 +85,40 @@
         "install_tool": "no"
       },
       "exec": [
+        {
+          "match": "package.json",
+          "stdout": "nanoclaw/2.2.0"
+        },
+        {
+          "match": "command -v dial",
+          "stdout": "/usr/local/bin/dial"
+        },
+        {
+          "match": "dial doctor",
+          "stdout": "{\"auth\":{\"signedIn\":true,\"email\":\"operator@example.com\"}}"
+        },
+        {
+          "match": "number list",
+          "stdout": "+14155550123"
+        }
+      ],
+      "stepFields": {
+        "PLATFORM_ID": "+14155550123",
+        "PAIRED_NUMBER": "+14155550199"
+      }
+    },
+    {
+      "name": "signed-in-no-agent-groups",
+      "inputs": {
+        "reuse_choice": "reuse",
+        "inbound_access": "public",
+        "install_tool": "yes"
+      },
+      "exec": [
+        {
+          "match": "(.data|length)==0",
+          "stdout": "no"
+        },
         {
           "match": "package.json",
           "stdout": "nanoclaw/2.2.0"
