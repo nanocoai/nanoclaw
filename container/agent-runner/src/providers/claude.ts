@@ -75,17 +75,18 @@ export { SDK_DISALLOWED_TOOLS, TOOL_ALLOWLIST } from './claude-config.js';
 export function buildClaudeToolPolicy(
   mcpServers: Record<string, McpServerConfig>,
   builtinToolMode?: 'mcp-only',
+  webSearchMode?: 'disabled',
 ): {
   allowedTools: string[];
   disallowedTools: string[];
 } {
   const mcp = resolveClaudeMcpServers(mcpServers, {});
   const executionPolicy = resolveClaudeExecutionPolicy();
+  const allowedTools = (
+    builtinToolMode === 'mcp-only' ? mcp.allowedTools.filter((tool) => !TOOL_ALLOWLIST.includes(tool)) : mcp.allowedTools
+  ).filter((tool) => webSearchMode !== 'disabled' || tool !== 'WebSearch');
   return {
-    allowedTools:
-      builtinToolMode === 'mcp-only'
-        ? mcp.allowedTools.filter((tool) => !TOOL_ALLOWLIST.includes(tool))
-        : mcp.allowedTools,
+    allowedTools,
     disallowedTools: [...executionPolicy.disallowedTools, ...mcp.disallowedTools],
   };
 }
@@ -219,6 +220,7 @@ export class ClaudeProvider implements AgentProvider {
   private env: Record<string, string | undefined>;
   private additionalDirectories?: string[];
   private builtinToolMode?: 'mcp-only';
+  private webSearchMode?: 'disabled';
   private memorySessionHook?: MemorySessionHookRegistration;
 
   /**
@@ -233,6 +235,7 @@ export class ClaudeProvider implements AgentProvider {
     this.inference = configuration.inference as ReturnType<typeof resolveClaudeInference>;
     this.executionPolicy = configuration.executionPolicy as ReturnType<typeof resolveClaudeExecutionPolicy>;
     this.builtinToolMode = options.builtinToolMode;
+    this.webSearchMode = options.webSearchMode;
     this.env = {
       ...(options.env ?? {}),
       CLAUDE_CODE_AUTO_COMPACT_WINDOW,
@@ -272,10 +275,11 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
 
-    const allowedTools =
+    const allowedTools = (
       this.builtinToolMode === 'mcp-only'
         ? this.mcp.allowedTools.filter((tool) => !TOOL_ALLOWLIST.includes(tool))
-        : this.mcp.allowedTools;
+        : this.mcp.allowedTools
+    ).filter((tool) => this.webSearchMode !== 'disabled' || tool !== 'WebSearch');
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {

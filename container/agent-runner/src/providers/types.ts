@@ -92,6 +92,8 @@ export interface ProviderOptions {
    * keeps the provider default; a tier it did not declare never reaches it.
    */
   speed?: ProviderSpeed;
+  /** Disable the provider's native web-search tool while preserving other built-ins. */
+  webSearchMode?: 'disabled';
   responseDeliveryMode?: 'terminal';
   /** Remove provider-native tools; only configured MCP tools remain model-visible. */
   builtinToolMode?: 'mcp-only';
