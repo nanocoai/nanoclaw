@@ -92,6 +92,7 @@ export class CodexProvider implements AgentProvider {
   private readonly mcpServers: Record<string, McpServerConfig>;
   private readonly model?: string;
   private readonly effort?: CodexReasoningEffort;
+  private readonly webSearchMode?: 'disabled';
   private readonly runtime: CodexRuntimeDeps;
   private memorySessionHook?: CodexMemorySessionHook;
 
@@ -100,6 +101,7 @@ export class CodexProvider implements AgentProvider {
     this.model = options.model;
     this.runtime = runtime;
     this.effort = normalizeEffort(options.effort);
+    this.webSearchMode = options.webSearchMode;
   }
 
   registerMemorySessionHook(hook: CodexMemorySessionHook): void {
@@ -146,6 +148,7 @@ export class CodexProvider implements AgentProvider {
       self.runtime.writeCodexConfigToml(self.mcpServers, memorySessionHook, {
         model: self.model,
         effort: self.effort,
+        webSearchMode: self.webSearchMode,
       });
       const server = self.runtime.spawnCodexAppServer();
       activeServer = server;

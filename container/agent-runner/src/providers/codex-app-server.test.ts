@@ -61,15 +61,17 @@ describe('Codex config TOML', () => {
         },
       },
       MEMORY_SESSION_HOOK,
-      { model: 'gpt-5', effort: 'medium' },
+      { model: 'gpt-5', effort: 'medium', webSearchMode: 'disabled' },
     );
 
     const content = fs.readFileSync(path.join(tmpHome, '.codex', 'config.toml'), 'utf-8');
     expect(content).toContain('sandbox_mode = "danger-full-access"');
     expect(content).toContain('approval_policy = "never"');
     expect(content).toContain('project_doc_max_bytes = 32768');
+    expect(content).toContain('respect_system_proxy = true');
     expect(content).toContain('model = "gpt-5"');
     expect(content).toContain('model_reasoning_effort = "medium"');
+    expect(content).toContain('web_search = "disabled"');
     expect(content).toContain('[features]\nmemories = false');
     expect(content).toContain('[memories]\nuse_memories = false\ngenerate_memories = false');
     expect(content).not.toContain('[sandbox_workspace_write]');
@@ -111,6 +113,7 @@ describe('Codex config TOML', () => {
     );
 
     const content = fs.readFileSync(path.join(tmpHome, '.codex', 'config.toml'), 'utf-8');
+    expect(content).not.toContain('web_search =');
     expect(content).toContain(
       'command = "/workspace/agent/plugins/sdr/run.js"\n' +
         'cwd = "/workspace/agent/plugin-data/sdr"\n' +
