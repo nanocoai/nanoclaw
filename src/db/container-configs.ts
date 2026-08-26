@@ -12,6 +12,7 @@ const SCALAR_COLUMNS = new Set([
   'cli_scope',
   'timezone',
   'web_search_mode',
+  'builtin_tool_mode',
   'response_delivery_mode',
 ]);
 const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages_npm', 'additional_mounts']);
@@ -89,6 +90,7 @@ export async function updateContainerConfigScalars(
       | 'cli_scope'
       | 'timezone'
       | 'web_search_mode'
+      | 'builtin_tool_mode'
       | 'response_delivery_mode'
     >
   >,

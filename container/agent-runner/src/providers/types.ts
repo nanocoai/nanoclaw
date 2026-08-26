@@ -94,6 +94,8 @@ export interface ProviderOptions {
    */
   effort?: string;
   responseDeliveryMode?: 'terminal';
+  /** Remove provider-native tools; only configured MCP tools remain model-visible. */
+  builtinToolMode?: 'mcp-only';
 }
 
 export interface QueryInput {

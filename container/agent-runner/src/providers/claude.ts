@@ -137,13 +137,16 @@ function mcpAllowPattern(serverName: string): string {
   return `mcp__${serverName.replace(/[^a-zA-Z0-9_-]/g, '_')}__*`;
 }
 
-export function buildClaudeToolPolicy(mcpServers: Record<string, McpServerConfig>): {
+export function buildClaudeToolPolicy(
+  mcpServers: Record<string, McpServerConfig>,
+  builtinToolMode?: 'mcp-only',
+): {
   allowedTools: string[];
   disallowedTools: string[];
 } {
   return {
     allowedTools: [
-      ...TOOL_ALLOWLIST,
+      ...(builtinToolMode === 'mcp-only' ? [] : TOOL_ALLOWLIST),
       ...Object.entries(mcpServers).flatMap(
         ([name, server]) => server.enabledTools?.map((tool) => mcpToolName(name, tool)) ?? [mcpAllowPattern(name)],
       ),
@@ -506,6 +509,7 @@ export class ClaudeProvider implements AgentProvider {
   private mcpServers: Record<string, McpServerConfig>;
   private env: Record<string, string | undefined>;
   private additionalDirectories?: string[];
+  private builtinToolMode?: 'mcp-only';
   private model?: string;
   private effort?: string;
   private memorySessionHook?: MemorySessionHookRegistration;
@@ -516,6 +520,7 @@ export class ClaudeProvider implements AgentProvider {
       Object.entries(options.mcpServers ?? {}).map(([name, server]) => [name, shimCwd(server)]),
     );
     this.additionalDirectories = options.additionalDirectories;
+    this.builtinToolMode = options.builtinToolMode;
     this.model = options.model;
     this.effort = options.effort;
     this.env = {
@@ -577,7 +582,7 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
 
-    const toolPolicy = buildClaudeToolPolicy(this.mcpServers);
+    const toolPolicy = buildClaudeToolPolicy(this.mcpServers, this.builtinToolMode);
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {

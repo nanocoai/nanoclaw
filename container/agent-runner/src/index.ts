@@ -120,6 +120,7 @@ async function main(): Promise<void> {
     model: config.model,
     effort: config.effort,
     responseDeliveryMode: config.responseDeliveryMode,
+    builtinToolMode: config.builtinToolMode,
   });
   provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
 

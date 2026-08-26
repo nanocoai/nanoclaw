@@ -69,6 +69,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     cli_scope: row.cli_scope,
     timezone: row.timezone,
     web_search_mode: row.web_search_mode ?? null,
+    builtin_tool_mode: row.builtin_tool_mode ?? null,
     response_delivery_mode: row.response_delivery_mode ?? null,
     updated_at: row.updated_at,
   };
@@ -375,6 +376,7 @@ registerResource({
         'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
         '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart), ' +
         '--web-search-mode (default preserves provider behavior; disabled removes provider-native web search), ' +
+        '--builtin-tool-mode (default preserves provider tools; mcp-only removes provider-native execution/network tools), ' +
         '--response-delivery-mode (default preserves mid-turn delivery; terminal exposes only final-result delivery).',
       handler: async (args) => {
         const id = args.id as string;
@@ -394,6 +396,7 @@ registerResource({
             | 'cli_scope'
             | 'timezone'
             | 'web_search_mode'
+            | 'builtin_tool_mode'
             | 'response_delivery_mode'
           >
         > = {};
@@ -408,6 +411,13 @@ registerResource({
             throw new Error('--web-search-mode must be one of: default, disabled');
           }
           updates.web_search_mode = mode === 'default' ? null : mode;
+        }
+        if (args.builtin_tool_mode !== undefined || args['builtin-tool-mode'] !== undefined) {
+          const mode = String(args.builtin_tool_mode ?? args['builtin-tool-mode']);
+          if (mode !== 'default' && mode !== 'mcp-only') {
+            throw new Error('--builtin-tool-mode must be one of: default, mcp-only');
+          }
+          updates.builtin_tool_mode = mode === 'default' ? null : mode;
         }
         if (args.response_delivery_mode !== undefined || args['response-delivery-mode'] !== undefined) {
           const mode = String(args.response_delivery_mode ?? args['response-delivery-mode']);
@@ -430,7 +440,7 @@ registerResource({
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone, --web-search-mode, --response-delivery-mode',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone, --web-search-mode, --builtin-tool-mode, --response-delivery-mode',
           );
         }
 

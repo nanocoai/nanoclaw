@@ -279,6 +279,8 @@ export interface ContainerConfig {
   runtimeTier?: 'container' | 'vm';
   /** Provider-neutral policy; absent/default preserves provider-native behavior. */
   webSearchMode?: 'disabled';
+  /** Opt-in provider-neutral removal of provider-native execution/network tools. */
+  builtinToolMode?: 'mcp-only';
   /** Opt-in single-result delivery; absent/default preserves normal conversations. */
   responseDeliveryMode?: 'terminal';
 }
@@ -287,6 +289,14 @@ function parseWebSearchMode(raw: string | null | undefined, groupName: string): 
   if (raw == null || raw === 'default') return undefined;
   if (raw === 'disabled') return raw;
   throw new Error(`agent group "${groupName}" has invalid web_search_mode "${raw}" — expected "default" or "disabled"`);
+}
+
+function parseBuiltinToolMode(raw: string | null | undefined, groupName: string): 'mcp-only' | undefined {
+  if (raw == null || raw === 'default') return undefined;
+  if (raw === 'mcp-only') return raw;
+  throw new Error(
+    `agent group "${groupName}" has invalid builtin_tool_mode "${raw}" — expected "default" or "mcp-only"`,
+  );
 }
 
 function parseResponseDeliveryMode(raw: string | null | undefined, groupName: string): 'terminal' | undefined {
@@ -416,6 +426,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
     runtimeTier: parseRuntimeTier(row.runtime_tier, group.name),
     webSearchMode: parseWebSearchMode(row.web_search_mode, group.name),
+    builtinToolMode: parseBuiltinToolMode(row.builtin_tool_mode, group.name),
     responseDeliveryMode: parseResponseDeliveryMode(row.response_delivery_mode, group.name),
   };
 }

@@ -28,6 +28,8 @@ export interface ContainerConfigRow {
   timezone: string | null; // IANA id; NULL = follow the install-global timezone
   /** NULL/default preserves provider behavior; disabled removes provider-native web search. */
   web_search_mode?: string | null;
+  /** NULL/default preserves provider tools; mcp-only removes provider-native execution/network tools. */
+  builtin_tool_mode?: string | null;
   /** NULL/default preserves normal mid-turn delivery; terminal defers user-visible text to the final result. */
   response_delivery_mode?: string | null;
   /**

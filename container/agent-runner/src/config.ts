@@ -21,6 +21,7 @@ export interface RunnerConfig {
   model?: string;
   effort?: string;
   responseDeliveryMode?: 'terminal';
+  builtinToolMode?: 'mcp-only';
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -51,6 +52,7 @@ export function loadConfig(): RunnerConfig {
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
     responseDeliveryMode: raw.responseDeliveryMode === 'terminal' ? 'terminal' : undefined,
+    builtinToolMode: raw.builtinToolMode === 'mcp-only' ? 'mcp-only' : undefined,
   };
 
   return _config;
