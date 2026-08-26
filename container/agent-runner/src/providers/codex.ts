@@ -108,6 +108,7 @@ export class CodexProvider implements AgentProvider {
   private readonly inference: CodexConfigPlan['inference'];
   private readonly tone: ReturnType<typeof codexTone.toSettings>;
   private readonly webSearchMode?: 'disabled';
+  private readonly builtinToolMode?: 'mcp-only';
   private readonly runtime: CodexRuntimeDeps;
   private memorySessionHook?: CodexMemorySessionHook;
 
@@ -125,6 +126,7 @@ export class CodexProvider implements AgentProvider {
     this.runtime = runtime;
     this.tone = (configuration?.tone as typeof this.tone | undefined) ?? codexTone.toSettings(codexTone.default);
     this.webSearchMode = options.webSearchMode;
+    this.builtinToolMode = options.builtinToolMode;
     if (configuration) {
       this.inference = configuration.inference as CodexConfigPlan['inference'];
       this.mcpServers = configuration.mcpServers as Record<string, McpServerConfig>;
@@ -185,6 +187,7 @@ export class CodexProvider implements AgentProvider {
         self.runtime.writeCodexConfigToml(self.mcpServers, memorySessionHook, {
           ...self.inference,
           webSearchMode: self.webSearchMode,
+          builtinToolMode: self.builtinToolMode,
         });
       }
       const server = self.runtime.spawnCodexAppServer();
