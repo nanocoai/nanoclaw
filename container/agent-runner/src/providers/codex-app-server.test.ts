@@ -53,11 +53,13 @@ describe('Codex config TOML', () => {
           command: 'bun',
           args: ['run', '/app/src/mcp-tools/index.ts'],
           env: { FOO: 'bar' },
+          disabledTools: ['send_message', 'add_reaction'],
         },
         docs: {
           type: 'http',
           url: 'https://mcp.example.com/mcp',
           headers: { 'X-Api-Version': '2024-06' },
+          enabledTools: ['search', 'extract'],
         },
       },
       MEMORY_SESSION_HOOK,
@@ -77,12 +79,13 @@ describe('Codex config TOML', () => {
     expect(content).not.toContain('[sandbox_workspace_write]');
     expect(content).not.toContain('writable_roots =');
     expect(content).toContain('[mcp_servers.nanoclaw]');
+    expect(content).toContain('disabled_tools = ["send_message", "add_reaction"]');
     expect(content).toContain('command = "bun"');
     expect(content).toContain('args = ["run", "/app/src/mcp-tools/index.ts"]');
     expect(content).toContain('[mcp_servers.nanoclaw.env]');
     expect(content).toContain('FOO = "bar"');
     expect(content).toContain(
-      '[mcp_servers.docs]\nurl = "https://mcp.example.com/mcp"\n[mcp_servers.docs.http_headers]\n"X-Api-Version" = "2024-06"',
+      '[mcp_servers.docs]\nenabled_tools = ["search", "extract"]\nurl = "https://mcp.example.com/mcp"\n[mcp_servers.docs.http_headers]\n"X-Api-Version" = "2024-06"',
     );
 
     const hooks = JSON.parse(fs.readFileSync(path.join(tmpHome, '.codex', 'hooks.json'), 'utf-8'));

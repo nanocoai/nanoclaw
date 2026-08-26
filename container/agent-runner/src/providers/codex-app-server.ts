@@ -411,6 +411,12 @@ export function writeCodexConfigToml(
   for (const [name, config] of Object.entries(servers)) {
     const tomlName = tomlKey(name);
     lines.push(`[mcp_servers.${tomlName}]`);
+    if (config.enabledTools?.length) {
+      lines.push(`enabled_tools = [${config.enabledTools.map(tomlBasicString).join(', ')}]`);
+    }
+    if (config.disabledTools?.length) {
+      lines.push(`disabled_tools = [${config.disabledTools.map(tomlBasicString).join(', ')}]`);
+    }
     if (config.type === 'http') {
       lines.push(`url = ${tomlBasicString(config.url)}`);
       if (config.headers && Object.keys(config.headers).length > 0) {
