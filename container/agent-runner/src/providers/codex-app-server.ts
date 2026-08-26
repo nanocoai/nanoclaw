@@ -109,6 +109,7 @@ export interface ThreadParams {
   cwd: string;
   baseInstructions?: string;
   developerInstructions?: string;
+  builtinToolMode?: 'mcp-only';
 }
 
 export interface TurnParams {
@@ -276,6 +277,10 @@ export async function startOrResumeCodexThread(
     developerInstructions: params.developerInstructions,
     personality: 'friendly',
     persistExtendedHistory: false,
+    // Empty is Codex app-server's native opt-out from workspace-bound tools
+    // (shell, apply_patch, browser/direct-fetch helpers). Explicit MCP tools
+    // remain available to the model.
+    environments: params.builtinToolMode === 'mcp-only' ? [] : undefined,
   };
 
   if (threadId) {
