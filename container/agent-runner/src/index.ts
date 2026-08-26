@@ -92,6 +92,7 @@ async function main(): Promise<void> {
     env: { ...process.env },
     additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
     webSearchMode: config.webSearchMode,
+    builtinToolMode: config.builtinToolMode,
   });
 
   await runPollLoop({

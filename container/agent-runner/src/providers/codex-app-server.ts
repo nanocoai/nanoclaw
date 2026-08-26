@@ -379,7 +379,12 @@ export function attachCodexAutoApproval(server: AppServer): void {
 export function writeCodexConfigToml(
   servers: Record<string, McpServerConfig>,
   memorySessionHook: CodexMemorySessionHook,
-  opts: { model?: string; effort?: string; webSearchMode?: 'disabled' } = {},
+  opts: {
+    model?: string;
+    effort?: string;
+    webSearchMode?: 'disabled';
+    builtinToolMode?: 'mcp-only';
+  } = {},
 ): void {
   const codexConfigDir = path.join(process.env.HOME || '/home/node', '.codex');
   fs.mkdirSync(codexConfigDir, { recursive: true });
@@ -402,6 +407,34 @@ export function writeCodexConfigToml(
   // memory disabled even if its defaults or a user-level config change.
   lines.push('[features]');
   lines.push('memories = false');
+  if (opts.builtinToolMode === 'mcp-only') {
+    for (const feature of [
+      'shell_tool',
+      'unified_exec',
+      'code_mode',
+      'code_mode_only',
+      'js_repl',
+      'js_repl_tools_only',
+      'browser_use',
+      'browser_use_external',
+      'in_app_browser',
+      'computer_use',
+      'apps',
+      'connectors',
+      'plugins',
+      'remote_plugin',
+      'tool_search',
+      'search_tool',
+      'standalone_web_search',
+      'web_search',
+      'image_generation',
+      'multi_agent',
+      'apply_patch_freeform',
+      'workspace_dependencies',
+    ]) {
+      lines.push(`${feature} = false`);
+    }
+  }
   lines.push('');
   lines.push('[memories]');
   lines.push('use_memories = false');

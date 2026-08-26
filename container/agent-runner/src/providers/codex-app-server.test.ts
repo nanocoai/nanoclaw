@@ -63,7 +63,7 @@ describe('Codex config TOML', () => {
         },
       },
       MEMORY_SESSION_HOOK,
-      { model: 'gpt-5', effort: 'medium', webSearchMode: 'disabled' },
+      { model: 'gpt-5', effort: 'medium', webSearchMode: 'disabled', builtinToolMode: 'mcp-only' },
     );
 
     const content = fs.readFileSync(path.join(tmpHome, '.codex', 'config.toml'), 'utf-8');
@@ -75,6 +75,25 @@ describe('Codex config TOML', () => {
     expect(content).toContain('model_reasoning_effort = "medium"');
     expect(content).toContain('web_search = "disabled"');
     expect(content).toContain('[features]\nmemories = false');
+    for (const feature of [
+      'shell_tool',
+      'unified_exec',
+      'code_mode',
+      'js_repl',
+      'browser_use',
+      'browser_use_external',
+      'in_app_browser',
+      'computer_use',
+      'apps',
+      'connectors',
+      'plugins',
+      'tool_search',
+      'search_tool',
+      'standalone_web_search',
+      'web_search',
+    ]) {
+      expect(content).toContain(`${feature} = false`);
+    }
     expect(content).toContain('[memories]\nuse_memories = false\ngenerate_memories = false');
     expect(content).not.toContain('[sandbox_workspace_write]');
     expect(content).not.toContain('writable_roots =');

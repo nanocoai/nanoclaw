@@ -93,6 +93,7 @@ export class CodexProvider implements AgentProvider {
   private readonly model?: string;
   private readonly effort?: CodexReasoningEffort;
   private readonly webSearchMode?: 'disabled';
+  private readonly builtinToolMode?: 'mcp-only';
   private readonly runtime: CodexRuntimeDeps;
   private memorySessionHook?: CodexMemorySessionHook;
 
@@ -102,6 +103,7 @@ export class CodexProvider implements AgentProvider {
     this.runtime = runtime;
     this.effort = normalizeEffort(options.effort);
     this.webSearchMode = options.webSearchMode;
+    this.builtinToolMode = options.builtinToolMode;
   }
 
   registerMemorySessionHook(hook: CodexMemorySessionHook): void {
@@ -149,6 +151,7 @@ export class CodexProvider implements AgentProvider {
         model: self.model,
         effort: self.effort,
         webSearchMode: self.webSearchMode,
+        builtinToolMode: self.builtinToolMode,
       });
       const server = self.runtime.spawnCodexAppServer();
       activeServer = server;
