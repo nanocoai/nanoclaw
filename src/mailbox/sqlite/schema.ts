@@ -83,7 +83,8 @@ CREATE TABLE IF NOT EXISTS container_state (
 -- Per-turn usage ledger. The runner appends one row per provider turn: the
 -- prompt that turn answered (clipped to a preview), the tokens and cost it
 -- reported, and the task series it belonged to. The runner ages rows out on a
--- fixed time window; the lifetime totals live in session_state.
+-- fixed time window as it writes, so a session that stopped running keeps its
+-- last window; the lifetime totals live in session_state.
 -- Numeric columns are nullable: null means the provider reported nothing,
 -- which is not the same as zero.
 CREATE TABLE IF NOT EXISTS token_usage_log (

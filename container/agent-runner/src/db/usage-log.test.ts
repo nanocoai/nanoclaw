@@ -114,8 +114,8 @@ describe('usage-log', () => {
   });
 
   it('drops turns that fall outside the retention window', () => {
-    // Retention is a timeframe, not a row count: "what did we spend last
-    // quarter" has to stay answerable for a busy session and a quiet one alike.
+    // Retention is a timeframe, not a row count: "what did the last N days
+    // cost" has to stay answerable for a busy session and a quiet one alike.
     const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString();
     seedTurnAt(daysAgo(TURN_LOG_RETENTION_DAYS + 1), 'too old');
     seedTurnAt(daysAgo(TURN_LOG_RETENTION_DAYS - 1), 'just inside');
@@ -123,6 +123,17 @@ describe('usage-log', () => {
     recordTurn({ prompt: 'today', usage: { inputTokens: 1 } });
 
     expect(getTurnLog().map((r) => r.promptPreview)).toEqual(['today', 'just inside']);
+  });
+
+  it('leaves a session that stopped running holding whatever it last held', () => {
+    // Age-out rides on the next write, and nothing else can carry it: the host
+    // only ever reads outbound.db, and a session with no traffic never wakes to
+    // prune itself. So the window bounds a live ledger, not a retired one —
+    // pinned here because the docs say so on the strength of this test.
+    const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString();
+    seedTurnAt(daysAgo(TURN_LOG_RETENTION_DAYS * 4), 'from long ago');
+
+    expect(getTurnLog().map((r) => r.promptPreview)).toEqual(['from long ago']);
   });
 
   it('keeps every turn inside the window, however many there are', () => {

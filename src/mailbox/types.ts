@@ -155,8 +155,9 @@ export interface OutboundMailbox {
   /**
    * The runner's per-turn usage ledger, newest turn first. Empty when the
    * runner has banked no turns — including because it predates the ledger.
-   * The ledger keeps a recent window, not all history; lifetime totals are
-   * state, read through getState.
+   * The ledger keeps a recent window, not all history — a window the runner
+   * trims as it writes, so a session that has stopped running still holds
+   * whatever it last held. Lifetime totals are state, read through getState.
    *
    * `limit` caps how many turns are read, not only how many come back — pass
    * it whenever the caller wants the recent ones rather than the whole ledger.

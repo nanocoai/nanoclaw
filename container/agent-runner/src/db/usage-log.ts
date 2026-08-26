@@ -18,10 +18,15 @@
  *   totals in `session_state` are the authoritative lifetime figures; this
  *   table is the recent detail behind them.
  *
- * Retention is a timeframe rather than a row count on purpose. "What did this
- * cost last quarter" has to be answerable for a busy session and a quiet one
+ * Retention is a timeframe rather than a row count on purpose. "What did the
+ * last N days cost" has to be answerable for a busy session and a quiet one
  * alike, and a row cap answers it for neither: it silently shortens the window
  * exactly when spend is high, and pins stale turns forever when it is low.
+ *
+ * The window bounds a session that is still running. Age-out happens on write
+ * and there is nowhere else to put it — the host only reads this file, and a
+ * session with no traffic never wakes to prune itself — so a retired session
+ * keeps its last window indefinitely rather than emptying out behind it.
  */
 import { getAgentMailbox } from '../mailbox/index.js';
 import type { UsageTurn } from '../mailbox/types.js';
@@ -30,8 +35,8 @@ import type { TokenUsageDelta } from './session-state.js';
 /** How much of the prompt is kept. Enough to identify the turn on sight. */
 export const PROMPT_PREVIEW_CHARS = 200;
 
-/** How long a turn stays on the ledger. A quarter, so quarter-over-quarter
- *  comparisons are possible without the window moving under them. */
+/** How long a turn stays on the ledger. A quarter: long enough that a monthly
+ *  bill can still be broken down per prompt after it lands. */
 export const TURN_LOG_RETENTION_DAYS = 90;
 
 export interface TurnRecord {
