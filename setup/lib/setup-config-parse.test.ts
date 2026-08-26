@@ -38,6 +38,10 @@ describe('public setup flags', () => {
       errors: [],
     });
   });
+  it('accepts a valid --tz preseed and rejects a non-IANA value', () => {
+    expect(parseFlags(['--tz', 'Asia/Jerusalem']).errors).toEqual([]);
+    expect(parseFlags(['--tz', 'local']).errors).toEqual(['--tz: Must be an IANA timezone such as Europe/Lisbon']);
+  });
 
   it('uses the cataloged validation rules when parsing flags', () => {
     expect(parseFlags(['--onecli-api-host', 'not-a-url']).errors).toEqual(['--onecli-api-host: Must be http(s)://…']);
