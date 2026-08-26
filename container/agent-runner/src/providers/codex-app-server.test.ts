@@ -8,6 +8,7 @@ import {
   CODEX_APP_SERVER_ARGS,
   attachCodexAutoApproval,
   buildCodexProcessEnv,
+  startCodexTurn,
   startOrResumeCodexThread,
   tomlBasicString,
   writeCodexConfigToml,
@@ -53,34 +54,59 @@ describe('Codex config TOML', () => {
           command: 'bun',
           args: ['run', '/app/src/mcp-tools/index.ts'],
           env: { FOO: 'bar' },
+          disabledTools: ['send_message', 'add_reaction'],
         },
         docs: {
           type: 'http',
           url: 'https://mcp.example.com/mcp',
           headers: { 'X-Api-Version': '2024-06' },
+          enabledTools: ['search', 'extract'],
         },
       },
       MEMORY_SESSION_HOOK,
-      { model: 'gpt-5', effort: 'medium' },
+      { model: 'gpt-5', effort: 'medium', webSearchMode: 'disabled', builtinToolMode: 'mcp-only' },
     );
 
     const content = fs.readFileSync(path.join(tmpHome, '.codex', 'config.toml'), 'utf-8');
     expect(content).toContain('sandbox_mode = "danger-full-access"');
     expect(content).toContain('approval_policy = "never"');
     expect(content).toContain('project_doc_max_bytes = 32768');
+    expect(content).toContain('respect_system_proxy = true');
     expect(content).toContain('model = "gpt-5"');
     expect(content).toContain('model_reasoning_effort = "medium"');
+    expect(content).toContain('web_search = "disabled"');
     expect(content).toContain('[features]\nmemories = false');
+    for (const feature of [
+      'shell_tool',
+      'unified_exec',
+      'code_mode',
+      'js_repl',
+      'browser_use',
+      'browser_use_external',
+      'in_app_browser',
+      'computer_use',
+      'apps',
+      'connectors',
+      'plugins',
+      'tool_search',
+      'search_tool',
+      'standalone_web_search',
+      'web_search',
+      'goals',
+    ]) {
+      expect(content).toContain(`${feature} = false`);
+    }
     expect(content).toContain('[memories]\nuse_memories = false\ngenerate_memories = false');
     expect(content).not.toContain('[sandbox_workspace_write]');
     expect(content).not.toContain('writable_roots =');
     expect(content).toContain('[mcp_servers.nanoclaw]');
+    expect(content).toContain('disabled_tools = ["send_message", "add_reaction"]');
     expect(content).toContain('command = "bun"');
     expect(content).toContain('args = ["run", "/app/src/mcp-tools/index.ts"]');
     expect(content).toContain('[mcp_servers.nanoclaw.env]');
     expect(content).toContain('FOO = "bar"');
     expect(content).toContain(
-      '[mcp_servers.docs]\nurl = "https://mcp.example.com/mcp"\n[mcp_servers.docs.http_headers]\n"X-Api-Version" = "2024-06"',
+      '[mcp_servers.docs]\nenabled_tools = ["search", "extract"]\nurl = "https://mcp.example.com/mcp"\n[mcp_servers.docs.http_headers]\n"X-Api-Version" = "2024-06"',
     );
 
     const hooks = JSON.parse(fs.readFileSync(path.join(tmpHome, '.codex', 'hooks.json'), 'utf-8'));
@@ -111,6 +137,7 @@ describe('Codex config TOML', () => {
     );
 
     const content = fs.readFileSync(path.join(tmpHome, '.codex', 'config.toml'), 'utf-8');
+    expect(content).not.toContain('web_search =');
     expect(content).toContain(
       'command = "/workspace/agent/plugins/sdr/run.js"\n' +
         'cwd = "/workspace/agent/plugin-data/sdr"\n' +
@@ -223,6 +250,48 @@ describe('Codex thread SessionStart source', () => {
 
     expect(requests[0].method).toBe('thread/resume');
     expect(requests[0].params.sessionStartSource).toBeUndefined();
+  });
+
+  it('removes Codex workspace environments for MCP-only groups', async () => {
+    const { server, requests } = autoRespondingServer();
+
+    await startOrResumeCodexThread(server, undefined, {
+      cwd: '/workspace/agent',
+      builtinToolMode: 'mcp-only',
+    });
+
+    expect(requests[0]).toMatchObject({
+      method: 'thread/start',
+      params: { environments: [] },
+    });
+  });
+
+  it('does not send unsupported environments to thread/resume', async () => {
+    const { server, requests } = autoRespondingServer();
+
+    await startOrResumeCodexThread(server, 'thread-existing', {
+      cwd: '/workspace/agent',
+      builtinToolMode: 'mcp-only',
+    });
+
+    expect(requests[0]).toMatchObject({ method: 'thread/resume' });
+    expect(requests[0].params.environments).toBeUndefined();
+  });
+
+  it('removes Codex workspace environments on every MCP-only turn', async () => {
+    const { server, requests } = autoRespondingServer();
+
+    await startCodexTurn(server, {
+      threadId: 'thread-existing',
+      inputText: 'hello',
+      cwd: '/workspace/agent',
+      builtinToolMode: 'mcp-only',
+    });
+
+    expect(requests[0]).toMatchObject({
+      method: 'turn/start',
+      params: { environments: [] },
+    });
   });
 });
 
@@ -346,7 +415,10 @@ function autoRespondingServer(): {
           const request = JSON.parse(line) as { id: number; method: string; params: Record<string, unknown> };
           requests.push(request);
           const threadId = (request.params.threadId as string | undefined) ?? 'thread-new';
-          server.pending.get(request.id)?.resolve({ id: request.id, result: { thread: { id: threadId } } });
+          server.pending.get(request.id)?.resolve({
+            id: request.id,
+            result: { thread: { id: threadId }, turn: { id: 'turn-new' } },
+          });
         },
       },
     },

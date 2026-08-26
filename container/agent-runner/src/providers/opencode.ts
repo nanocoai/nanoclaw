@@ -68,7 +68,10 @@ function killProcessTree(proc: ChildProcess): void {
   }
 }
 
-function spawnOpencodeServer(config: Record<string, unknown>, timeoutMs = 10_000): Promise<{ url: string; proc: ChildProcess }> {
+function spawnOpencodeServer(
+  config: Record<string, unknown>,
+  timeoutMs = 10_000,
+): Promise<{ url: string; proc: ChildProcess }> {
   return new Promise((resolve, reject) => {
     const hostname = '127.0.0.1';
     const port = 4096;
@@ -297,9 +300,7 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
     })
     .filter((entry) => entry !== 'text');
   const modelModalities =
-    requestedModalities.length > 0
-      ? { input: ['text', ...requestedModalities], output: ['text'] }
-      : undefined;
+    requestedModalities.length > 0 ? { input: ['text', ...requestedModalities], output: ['text'] } : undefined;
 
   const providerOptions: Record<string, unknown> =
     provider === 'anthropic'
@@ -841,6 +842,9 @@ export class OpenCodeProvider implements AgentProvider {
   private memorySessionHook?: OpenCodeMemorySessionHook;
 
   constructor(options: ProviderOptions = {}, runtime?: OpenCodeRuntimeDeps) {
+    if (options.builtinToolMode === 'mcp-only') {
+      throw new Error('OpenCode does not support builtinToolMode=mcp-only; refusing to ignore the group tool boundary');
+    }
     this.options = options;
     this.runtime = runtime;
   }

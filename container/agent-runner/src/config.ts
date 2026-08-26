@@ -16,6 +16,8 @@ export interface RunnerConfig {
   agentGroupId: string;
   maxMessagesPerPrompt: number;
   mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
+  webSearchMode?: 'disabled';
+  builtinToolMode?: 'mcp-only';
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -43,6 +45,8 @@ export function loadConfig(): RunnerConfig {
     agentGroupId: (raw.agentGroupId as string) || '',
     maxMessagesPerPrompt: (raw.maxMessagesPerPrompt as number) || DEFAULT_MAX_MESSAGES,
     mcpServers: (raw.mcpServers as RunnerConfig['mcpServers']) || {},
+    webSearchMode: raw.webSearchMode === 'disabled' ? 'disabled' : undefined,
+    builtinToolMode: raw.builtinToolMode === 'mcp-only' ? 'mcp-only' : undefined,
   };
 
   return _config;

@@ -92,6 +92,8 @@ export class CodexProvider implements AgentProvider {
   private readonly mcpServers: Record<string, McpServerConfig>;
   private readonly model?: string;
   private readonly effort?: CodexReasoningEffort;
+  private readonly webSearchMode?: 'disabled';
+  private readonly builtinToolMode?: 'mcp-only';
   private readonly runtime: CodexRuntimeDeps;
   private memorySessionHook?: CodexMemorySessionHook;
 
@@ -100,6 +102,8 @@ export class CodexProvider implements AgentProvider {
     this.model = options.model;
     this.runtime = runtime;
     this.effort = normalizeEffort(options.effort);
+    this.webSearchMode = options.webSearchMode;
+    this.builtinToolMode = options.builtinToolMode;
   }
 
   registerMemorySessionHook(hook: CodexMemorySessionHook): void {
@@ -146,6 +150,8 @@ export class CodexProvider implements AgentProvider {
       self.runtime.writeCodexConfigToml(self.mcpServers, memorySessionHook, {
         model: self.model,
         effort: self.effort,
+        webSearchMode: self.webSearchMode,
+        builtinToolMode: self.builtinToolMode,
       });
       const server = self.runtime.spawnCodexAppServer();
       activeServer = server;
@@ -160,6 +166,7 @@ export class CodexProvider implements AgentProvider {
           model: self.model,
           cwd: input.cwd,
           baseInstructions: input.systemContext?.instructions,
+          builtinToolMode: self.builtinToolMode,
         });
         activeThreadId = threadId;
 
@@ -180,6 +187,7 @@ export class CodexProvider implements AgentProvider {
             self.model,
             self.effort,
             input.cwd,
+            self.builtinToolMode,
             (turnId) => {
               activeTurnId = turnId;
             },
@@ -232,6 +240,7 @@ async function* runOneTurn(
   model: string | undefined,
   effort: string | undefined,
   cwd: string,
+  builtinToolMode: 'mcp-only' | undefined,
   setActiveTurn: (turnId: string) => void,
   clearActiveTurn: () => void,
   hasInit: () => boolean,
@@ -360,6 +369,7 @@ async function* runOneTurn(
       model,
       effort,
       cwd,
+      builtinToolMode,
     });
     setActiveTurn(turnId);
     const imagesBefore = listGeneratedImages(threadId);
