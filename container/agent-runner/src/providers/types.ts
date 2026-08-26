@@ -25,6 +25,10 @@ export interface ProviderOptions {
   mcpServers?: Record<string, McpServerConfig>;
   env?: Record<string, string | undefined>;
   additionalDirectories?: string[];
+  model?: string;
+  effort?: string;
+  /** Provider-neutral request to remove provider-native web search. */
+  webSearchMode?: 'disabled';
 }
 
 export interface QueryInput {
