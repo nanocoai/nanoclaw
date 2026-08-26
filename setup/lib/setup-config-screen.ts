@@ -14,7 +14,7 @@ import * as p from '@clack/prompts';
 
 import { brightSelect } from './bright-select.js';
 import { ensureAnswer } from './runner.js';
-import { CONFIG, type Entry } from './setup-config.js';
+import { CONFIG, validateEntry, type Entry } from './setup-config.js';
 import type { ConfigValues } from './setup-config-parse.js';
 import type { SetupDriver } from './setup-driver.js';
 
@@ -138,7 +138,7 @@ async function promptOne(e: Entry, values: ConfigValues, driver?: SetupDriver): 
   const validate = (v: string | undefined): string | undefined => {
     const s = (v ?? '').trim();
     if (!s) return undefined;
-    return e.validate?.(s);
+    return validateEntry(e, s);
   };
   const ans = driver
     ? await driver.prompt({

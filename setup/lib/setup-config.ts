@@ -30,13 +30,18 @@ interface BaseEntry {
   group?: string;
   /** Mask in UI, redact in logs. */
   secret?: boolean;
+  /** Expose this flag-only setting to app setup preflight. */
+  preseed?: boolean;
 }
 
 interface StringEntry extends BaseEntry {
   type: 'string' | 'url';
   default?: string;
   placeholder?: string;
-  validate?: (v: string) => string | undefined;
+  validation?:
+    | { kind: 'httpUrl'; message: string }
+    | { kind: 'prefix'; value: string; message: string }
+    | { kind: 'nonEmpty'; message: string };
 }
 
 interface EnumEntry extends BaseEntry {
@@ -77,9 +82,8 @@ export const CONFIG: Entry[] = [
     surface: 'flag+ui',
     group: 'OneCLI',
     type: 'url',
-    default: 'https://api.onecli.sh',
     placeholder: 'https://api.onecli.sh',
-    validate: validateHttpUrl,
+    validation: { kind: 'httpUrl', message: 'Must be http(s)://…' },
   },
   {
     key: 'onecliApiToken',
@@ -90,7 +94,7 @@ export const CONFIG: Entry[] = [
     type: 'string',
     secret: true,
     placeholder: 'oc_…',
-    validate: (v) => (v.startsWith('oc_') ? undefined : 'Must start with oc_'),
+    validation: { kind: 'prefix', value: 'oc_', message: 'Must start with oc_' },
   },
   {
     key: 'anthropicBaseUrl',
@@ -100,7 +104,7 @@ export const CONFIG: Entry[] = [
     group: 'Anthropic',
     type: 'url',
     placeholder: 'https://api.anthropic.com',
-    validate: validateHttpUrl,
+    validation: { kind: 'httpUrl', message: 'Must be http(s)://…' },
   },
   {
     key: 'anthropicAuthToken',
@@ -110,7 +114,7 @@ export const CONFIG: Entry[] = [
     group: 'Anthropic',
     type: 'string',
     secret: true,
-    validate: (v) => (v.trim() ? undefined : 'Required'),
+    validation: { kind: 'nonEmpty', message: 'Required' },
   },
   {
     key: 'templatePath',
@@ -129,6 +133,7 @@ export const CONFIG: Entry[] = [
     label: 'Skip steps',
     help: 'Comma-separated step names to skip (debugging only).',
     surface: 'flag',
+    preseed: true,
     type: 'string',
   },
   {
@@ -137,6 +142,7 @@ export const CONFIG: Entry[] = [
     label: 'Display name',
     help: 'Skip the "what should your assistant call you?" prompt.',
     surface: 'flag',
+    preseed: true,
     type: 'string',
   },
   {
@@ -145,7 +151,26 @@ export const CONFIG: Entry[] = [
     label: 'Agent provider',
     help: 'Preselect the setup provider and skip the provider picker.',
     surface: 'flag',
+    preseed: true,
     type: 'string',
+  },
+  {
+    key: 'agentName',
+    envVar: 'NANOCLAW_AGENT_NAME',
+    label: 'Agent name',
+    help: 'Name the first messaging-channel agent.',
+    surface: 'flag',
+    preseed: true,
+    type: 'string',
+  },
+  {
+    key: 'hardenedImage',
+    envVar: 'NANOCLAW_HARDENED_IMAGE',
+    label: 'Use pre-built image',
+    help: 'Use the hardened pre-built image instead of building locally.',
+    surface: 'flag',
+    preseed: true,
+    type: 'boolean',
   },
   {
     key: 'assistMode',
@@ -198,4 +223,19 @@ export function flagFor(e: Entry): string {
 
 export function findByFlag(flag: string): Entry | null {
   return CONFIG.find((e) => flagFor(e) === flag) ?? null;
+}
+
+export function validateEntry(entry: Entry, value: string): string | undefined {
+  if (entry.type !== 'string' && entry.type !== 'url') return undefined;
+  const rule = entry.validation;
+  if (!rule) return undefined;
+
+  switch (rule.kind) {
+    case 'httpUrl':
+      return validateHttpUrl(value);
+    case 'prefix':
+      return value.startsWith(rule.value) ? undefined : rule.message;
+    case 'nonEmpty':
+      return value.trim() ? undefined : rule.message;
+  }
 }

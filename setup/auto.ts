@@ -40,7 +40,7 @@ import { BACK_TO_CHANNEL_SELECTION } from './lib/back-nav.js';
 import { runChannelSkillWithPreStep } from './channels/run-channel-skill.js';
 import { runInheritScript } from './lib/inherit-script.js';
 import { pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
-import { getSetupProvider, listSetupProviders, runSetupProviderAuth } from './providers/registry.js';
+import { getSetupProvider, listSetupProviderChoices, runSetupProviderAuth } from './providers/registry.js';
 import { applyProviderSkill } from './providers/install.js';
 // Provider payloads self-register their picker entry + auth on import.
 import './providers/index.js';
@@ -1312,15 +1312,6 @@ function sendChatMessage(driver: SetupDriver, message: string): Promise<void> {
 
 // ─── auth step (select → branch) ────────────────────────────────────────
 
-// Providers offered for install are hard-wired in trunk — an audited control
-// surface (no branch enumeration that anyone with write access could extend).
-// Codex is the only one offered here; opencode/ollama install via their own
-// /add-* skills. Each is installed by applying its `/add-<name>` SKILL.md
-// in-process via the directive engine.
-const INSTALLABLE_PROVIDERS = [
-  { value: 'codex', label: 'Codex', hint: 'OpenAI — ChatGPT subscription or API key' },
-] as const;
-
 // `pickSavedByPreviousRun`: the .env bridge promoted a pick persisted by a
 // PREVIOUS run. That pick is a default to confirm, not a decision to replay:
 // the operator may be rerunning precisely to change it. In-process presets
@@ -1831,11 +1822,6 @@ function finishRegistryLogin(driver: SetupDriver, durationMs: number, method?: s
 }
 
 async function askAgentProviderChoice(driver: SetupDriver): Promise<string> {
-  const installed = listSetupProviders();
-  const installedNames = new Set(installed.map((entry) => entry.value));
-  // Offer the hard-wired installable providers this install hasn't wired yet —
-  // selecting one applies its `/add-<name>` SKILL.md in-process.
-  const available = INSTALLABLE_PROVIDERS.filter((prov) => !installedNames.has(prov.value));
   // On a pinned install every non-Claude runtime forces a local rebuild — the
   // image bakes /app/node_modules and the CLI manifest, and each changes one.
   // Say so on the option rather than only at the confirm two steps later, so
@@ -1845,14 +1831,11 @@ async function askAgentProviderChoice(driver: SetupDriver): Promise<string> {
   const note = (value: string, hint: string): string =>
     pinned && value !== 'claude' ? `${hint} — ⚠ not in the pre-built image; needs a local build` : hint;
 
-  const options = [
-    ...installed.map(({ value, label, hint }) => ({ value, label, hint: note(value, hint) })),
-    ...available.map((prov) => ({
-      value: prov.value,
-      label: prov.label,
-      hint: note(prov.value, `${prov.hint} — installs now`),
-    })),
-  ];
+  const options = listSetupProviderChoices().map(({ value, label, hint }) => ({
+    value,
+    label,
+    hint: note(value, hint),
+  }));
   const preset = process.env.NANOCLAW_AGENT_PROVIDER?.trim().toLowerCase();
   if (preset) {
     if (!options.some((option) => option.value === preset)) {

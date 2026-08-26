@@ -13,7 +13,7 @@
  *   --key            booleans only (sets true)
  *   --no-key         booleans only (sets false)
  */
-import { CONFIG, envVarFor, flagFor, findByFlag, type Entry } from './setup-config.js';
+import { CONFIG, envVarFor, flagFor, findByFlag, validateEntry, type Entry } from './setup-config.js';
 
 export type ConfigValues = Record<string, string | boolean | number>;
 
@@ -40,7 +40,7 @@ export function readFromEnv(env: NodeJS.ProcessEnv = process.env): ConfigValues 
     const raw = env[envVarFor(e)];
     if (raw === undefined || raw === '') continue;
     const v = coerce(e, raw);
-    if ((e.type === 'string' || e.type === 'url') && e.validate?.(raw)) continue;
+    if ((e.type === 'string' || e.type === 'url') && validateEntry(e, raw)) continue;
     if (v !== undefined) out[e.key] = v;
   }
   return out;
@@ -115,7 +115,7 @@ export function parseFlags(argv: string[]): FlagParseResult {
       continue;
     }
     if (entry.type === 'string' || entry.type === 'url') {
-      const err = entry.validate?.(raw);
+      const err = validateEntry(entry, raw);
       if (err) {
         errors.push(`${name}: ${err}`);
         continue;

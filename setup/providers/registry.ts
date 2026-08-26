@@ -39,6 +39,12 @@ export interface SetupProviderEntry {
 
 const registry = new Map<string, SetupProviderEntry>();
 
+// Audited providers offered for installation when their payload is not
+// already present. Provider branches register themselves in the map above.
+const INSTALLABLE_PROVIDERS = [
+  { value: 'codex', label: 'Codex', hint: 'OpenAI - ChatGPT subscription or API key' },
+] as const;
+
 registry.set('claude', {
   value: 'claude',
   label: 'Claude',
@@ -80,4 +86,17 @@ export async function runSetupProviderAuth(entry: SetupProviderEntry, driver: Se
 /** Claude (the default) first, then the rest in registration order. */
 export function listSetupProviders(): SetupProviderEntry[] {
   return [...registry.values()];
+}
+
+/** The shared picker/catalog choices, including provider payloads installable from trunk. */
+export function listSetupProviderChoices(): Array<{ value: string; label: string; hint: string }> {
+  const installed = listSetupProviders();
+  const installedNames = new Set(installed.map((entry) => entry.value));
+  return [
+    ...installed.map(({ value, label, hint }) => ({ value, label, hint })),
+    ...INSTALLABLE_PROVIDERS.filter(({ value }) => !installedNames.has(value)).map((provider) => ({
+      ...provider,
+      hint: `${provider.hint} - installs now`,
+    })),
+  ];
 }
