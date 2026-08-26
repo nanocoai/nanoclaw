@@ -379,6 +379,20 @@ describe('Codex thread SessionStart source', () => {
     expect(requests[0].params.config).toEqual({ bypass_hook_trust: true });
     expect(requests[0].params.sessionStartSource).toBeUndefined();
   });
+
+  it('removes Codex workspace environments for MCP-only groups', async () => {
+    const { server, requests } = autoRespondingServer();
+
+    await startOrResumeCodexThread(server, undefined, {
+      cwd: '/workspace/agent',
+      builtinToolMode: 'mcp-only',
+    });
+
+    expect(requests[0]).toMatchObject({
+      method: 'thread/start',
+      params: { environments: [] },
+    });
+  });
 });
 
 describe('Codex auto-approval', () => {

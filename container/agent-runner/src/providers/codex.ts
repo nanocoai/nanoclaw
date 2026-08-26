@@ -204,6 +204,7 @@ export class CodexProvider implements AgentProvider {
           ...self.tone,
           cwd: input.cwd,
           baseInstructions: input.systemContext?.instructions,
+          builtinToolMode: self.builtinToolMode,
         });
         activeThreadId = threadId;
 

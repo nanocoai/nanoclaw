@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 
 import { CodexProvider, type CodexRuntimeDeps } from './codex.js';
-import type { AppServer, JsonRpcNotification, TurnParams } from './codex-app-server.js';
+import type { AppServer, JsonRpcNotification, ThreadParams, TurnParams } from './codex-app-server.js';
 import type { ProviderEvent } from './types.js';
 
 const MEMORY_SESSION_HOOK = {
@@ -140,6 +140,21 @@ describe('CodexProvider active turns', () => {
     expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'final answer' }]);
   });
 
+  it('propagates MCP-only mode to Codex thread creation', async () => {
+    const fake = createFakeCodexRuntime();
+    const provider = createCodexProvider({ builtinToolMode: 'mcp-only' }, fake.runtime);
+    const query = provider.query({ prompt: 'first prompt', cwd: '/workspace/agent' });
+    const events: ProviderEvent[] = [];
+    const collect = collectEvents(query.events, events);
+
+    await waitFor(() => fake.threadCalls.length === 1 && fake.startCalls.length === 1);
+    query.end();
+    fake.completeTurn('final answer');
+    await collect;
+
+    expect(fake.threadCalls[0].builtinToolMode).toBe('mcp-only');
+  });
+
   it('delivers harness-generated images as file events — the model never sends them itself', async () => {
     const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-'));
     const prevHome = process.env.CODEX_HOME;
@@ -198,6 +213,7 @@ describe('CodexProvider active turns', () => {
 
 function createFakeCodexRuntime(opts: { rejectSteer?: boolean } = {}) {
   const server = fakeServer();
+  const threadCalls: ThreadParams[] = [];
   const startCalls: TurnParams[] = [];
   const steerCalls: Array<{ threadId: string; turnId: string; inputText: string }> = [];
   const interruptCalls: Array<{ threadId: string; turnId: string }> = [];
@@ -213,7 +229,10 @@ function createFakeCodexRuntime(opts: { rejectSteer?: boolean } = {}) {
     spawnCodexAppServer: () => server,
     attachCodexAutoApproval: () => {},
     initializeCodexAppServer: async () => {},
-    startOrResumeCodexThread: async (_server, threadId) => threadId ?? 'thread-1',
+    startOrResumeCodexThread: async (_server, threadId, params) => {
+      threadCalls.push(params);
+      return threadId ?? 'thread-1';
+    },
     startCodexTurn: async (_server, params) => {
       startCalls.push(params);
       const turnId = `turn-${startCalls.length}`;
@@ -234,6 +253,7 @@ function createFakeCodexRuntime(opts: { rejectSteer?: boolean } = {}) {
 
   return {
     runtime,
+    threadCalls,
     startCalls,
     steerCalls,
     interruptCalls,
