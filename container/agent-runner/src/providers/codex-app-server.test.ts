@@ -92,6 +92,7 @@ describe('Codex config TOML', () => {
       'search_tool',
       'standalone_web_search',
       'web_search',
+      'goals',
     ]) {
       expect(content).toContain(`${feature} = false`);
     }

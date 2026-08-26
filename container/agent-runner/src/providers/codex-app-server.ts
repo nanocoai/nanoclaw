@@ -437,6 +437,7 @@ export function writeCodexConfigToml(
       'multi_agent',
       'apply_patch_freeform',
       'workspace_dependencies',
+      'goals',
     ]) {
       lines.push(`${feature} = false`);
     }
