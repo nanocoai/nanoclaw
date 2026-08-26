@@ -9,17 +9,17 @@ import type { ResolvedRuntimeConfiguration } from '../provider-contracts/registr
 // constructor and registerMemorySessionHook. This module never imports the
 // contract — registration is two-step so it compiles on a core without one.
 import {
+  resolveClaudeExecutionPolicy,
+  resolveClaudeMcpServers,
   SDK_DISALLOWED_TOOLS,
-  type resolveClaudeExecutionPolicy,
   type resolveClaudeInference,
-  type resolveClaudeMcpServers,
   type resolveClaudeMemoryRuntime,
 } from './claude-config.js';
 // Transcript archiving and rotation are this provider's own concern: both
 // read the SDK's on-disk .jsonl, which no other provider has.
 import { archiveClaudeTranscript, rotateClaudeContinuation } from './claude-history.js';
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
 function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
@@ -69,6 +69,19 @@ export function classifyRateLimitEvent(
 }
 
 export { SDK_DISALLOWED_TOOLS, TOOL_ALLOWLIST } from './claude-config.js';
+
+/** Pure tool-policy derivation for a raw mcpServers map — used by tests to verify enforcement in isolation. */
+export function buildClaudeToolPolicy(mcpServers: Record<string, McpServerConfig>): {
+  allowedTools: string[];
+  disallowedTools: string[];
+} {
+  const mcp = resolveClaudeMcpServers(mcpServers, {});
+  const executionPolicy = resolveClaudeExecutionPolicy();
+  return {
+    allowedTools: mcp.allowedTools,
+    disallowedTools: [...executionPolicy.disallowedTools, ...mcp.disallowedTools],
+  };
+}
 
 interface SDKUserMessage {
   type: 'user';
