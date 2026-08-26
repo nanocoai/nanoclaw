@@ -32,6 +32,14 @@ describe('Claude MCP tool policy', () => {
     expect(policy.allowedTools).toContain('mcp__docs__*');
   });
 
+  it('removes only native WebSearch when web search is disabled', () => {
+    const policy = buildClaudeToolPolicy({}, undefined, 'disabled');
+
+    expect(policy.allowedTools).not.toContain('WebSearch');
+    expect(policy.allowedTools).toContain('WebFetch');
+    expect(policy.allowedTools).toContain('Bash');
+  });
+
   it('maps deny entries to exact MCP tools', () => {
     const policy = buildClaudeToolPolicy({
       nanoclaw: { command: 'bun', disabledTools: ['send_message', 'add_reaction'] },

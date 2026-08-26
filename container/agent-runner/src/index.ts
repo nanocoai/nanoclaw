@@ -126,6 +126,7 @@ async function main(): Promise<void> {
     model: config.model,
     effort: config.effort,
     speed: config.speed,
+    webSearchMode: config.webSearchMode,
     responseDeliveryMode: config.responseDeliveryMode,
     builtinToolMode: config.builtinToolMode,
   });
