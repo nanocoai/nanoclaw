@@ -5,6 +5,7 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
+import { turnUsage } from '../db/usage-baseline.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { shimCwd } from './cwd-shim.js';
@@ -51,13 +52,31 @@ export function usageFromResult(message: unknown): ProviderUsage | undefined {
   const num = (value: unknown): number | undefined =>
     typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 
-  return {
+  const usage: ProviderUsage = {
     inputTokens: num(m.usage.input_tokens),
     outputTokens: num(m.usage.output_tokens),
     cacheCreationTokens: num(m.usage.cache_creation_input_tokens),
     cacheReadTokens: num(m.usage.cache_read_input_tokens),
     costUsd: num(m.total_cost_usd),
   };
+
+  // A usage block none of whose fields survived is still a truthy object, and
+  // callers bank on truthiness — that would count the turn as measured and
+  // free. Nothing reported means nothing to report.
+  return Object.values(usage).some((value) => value !== undefined) ? usage : undefined;
+}
+
+/**
+ * What the turn cost, which is not what the result says it cost.
+ *
+ * The SDK's figures are cumulative over its session, and one query takes
+ * several turns, so the readings have to be differenced before anything banks
+ * them. See `db/usage-baseline` for why, and for the resume case that makes it
+ * worse.
+ */
+export function turnUsageFromResult(message: unknown): ProviderUsage | undefined {
+  const sessionId = (message as { session_id?: unknown } | null)?.session_id;
+  return turnUsage(usageFromResult(message), typeof sessionId === 'string' ? sessionId : null);
 }
 
 /**
@@ -657,7 +676,7 @@ export class ClaudeProvider implements AgentProvider {
           // billing/quota notice to the user rather than dropping the turn.
           const m = message as { result?: string; is_error?: boolean; errors?: string[] };
           const text = m.result ?? (m.errors && m.errors.length > 0 ? m.errors.join('\n') : null);
-          yield { type: 'result', text, isError: m.is_error === true, usage: usageFromResult(message) };
+          yield { type: 'result', text, isError: m.is_error === true, usage: turnUsageFromResult(message) };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'rate_limit_event') {
