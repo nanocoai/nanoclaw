@@ -347,8 +347,8 @@ export function wrapSqliteOutbound(
       if (!row) return undefined;
       return parseStateRecord({ key: row.key, value: row.value, updatedAt: sqliteTimestamp(row.updated_at) });
     },
-    getUsageLog: () =>
-      getUsageLog(readable()).map((row) => ({
+    getUsageLog: (limit) =>
+      getUsageLog(readable(), limit).map((row) => ({
         timestamp: sqliteTimestamp(row.timestamp),
         taskSeriesId: row.task_series_id,
         promptPreview: row.prompt_preview,

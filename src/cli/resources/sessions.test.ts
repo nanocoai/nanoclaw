@@ -20,7 +20,7 @@ import { outboundDbPath } from '../../mailbox/sqlite/paths.js';
 import { initSessionFolder } from '../../session-manager.js';
 import { dispatch } from '../dispatch.js';
 import type { CallerContext } from '../frame.js';
-import './sessions.js';
+import { PROMPT_LIMIT_MAX } from './sessions.js';
 
 function now(): string {
   return new Date().toISOString();
@@ -441,6 +441,44 @@ describe('sessions usage — per prompt, per agent, per task', () => {
     expect(resp.ok).toBe(true);
     if (!resp.ok) return;
     expect((resp.data as PromptReport).prompts.map((p) => p.prompt_preview)).toEqual(['three', 'two']);
+  });
+
+  it('still returns the newest prompts across sessions when each is read as a window', async () => {
+    // Each session is read newest-first up to the limit, then merged: the
+    // globally newest N are always inside the per-session newest N, so the
+    // window is a bound on work rather than a change of answer.
+    seedTurns('ag-1', 'chat-1', [
+      { timestamp: '2026-08-14T09:00:00.000Z', prompt_preview: 'a-old', input_tokens: 1 },
+      { timestamp: '2026-08-14T13:00:00.000Z', prompt_preview: 'a-new', input_tokens: 1 },
+    ]);
+    seedTurns('ag-1', 'chat-2', [
+      { timestamp: '2026-08-14T10:00:00.000Z', prompt_preview: 'b-old', input_tokens: 1 },
+      { timestamp: '2026-08-14T12:00:00.000Z', prompt_preview: 'b-new', input_tokens: 1 },
+    ]);
+
+    const resp = await usage({ by: 'prompt', limit: 2 }, agentCtx());
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) return;
+    expect((resp.data as PromptReport).prompts.map((p) => p.prompt_preview)).toEqual(['a-new', 'b-new']);
+  });
+
+  it('caps an outsized --limit rather than reading the fleet’s whole ledger', async () => {
+    // `ncl` calls time out at 30s. A limit is a request for rows to read, so
+    // an unbounded one is a request to read everything every session retains.
+    seedTurns(
+      'ag-1',
+      'chat-1',
+      Array.from({ length: PROMPT_LIMIT_MAX + 5 }, (_, i) => ({
+        timestamp: `2026-08-14T10:00:${String(i % 60).padStart(2, '0')}.${String(i).padStart(3, '0')}Z`,
+        prompt_preview: `turn ${i}`,
+        input_tokens: 1,
+      })),
+    );
+
+    const resp = await usage({ by: 'prompt', limit: 100_000 }, agentCtx());
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) return;
+    expect((resp.data as PromptReport).prompts).toHaveLength(PROMPT_LIMIT_MAX);
   });
 
   it('shows an unmeasured prompt as unmeasured, never as free', async () => {

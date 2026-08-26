@@ -9,7 +9,13 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, afterEach } from 'vitest';
 
-import { ensureSchema, getInboundSourceSessionId, migrateMessagesInTable, syncProcessingAcks } from './session-db.js';
+import {
+  ensureSchema,
+  getInboundSourceSessionId,
+  getUsageLog,
+  migrateMessagesInTable,
+  syncProcessingAcks,
+} from './session-db.js';
 
 const TEST_DIR = '/tmp/nanoclaw-session-db-test';
 const DB_PATH = path.join(TEST_DIR, 'inbound.db');
@@ -152,5 +158,41 @@ describe('syncProcessingAcks — script-skip counter', () => {
     syncProcessingAcks(inDb, outDb);
 
     expect(status(inDb, 't1')).toBe('completed');
+  });
+});
+
+describe('getUsageLog', () => {
+  function freshLedger(turns: number) {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    const outPath = path.join(TEST_DIR, 'outbound.db');
+    ensureSchema(outPath, 'outbound');
+    const outDb = new Database(outPath);
+    const stmt = outDb.prepare(
+      `INSERT INTO token_usage_log (timestamp, prompt_preview, prompt_chars, input_tokens)
+       VALUES (?, ?, ?, ?)`,
+    );
+    for (let i = 0; i < turns; i++) stmt.run(`2026-08-14T10:${String(i).padStart(2, '0')}:00.000Z`, `turn ${i}`, 6, i);
+    return outDb;
+  }
+
+  it('reads only the newest turns when given a window', () => {
+    // Without this the caller's --limit bounds what it prints, not what it
+    // reads: every session's whole retained ledger is loaded and sorted so
+    // that a handful of rows can be shown.
+    const outDb = freshLedger(5);
+
+    expect(getUsageLog(outDb, 2).map((r) => r.prompt_preview)).toEqual(['turn 4', 'turn 3']);
+
+    outDb.close();
+  });
+
+  it('reads the whole ledger when no window is asked for', () => {
+    // The aggregate views have to see every turn to add them up.
+    const outDb = freshLedger(5);
+
+    expect(getUsageLog(outDb)).toHaveLength(5);
+
+    outDb.close();
   });
 });

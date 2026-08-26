@@ -157,8 +157,11 @@ export interface OutboundMailbox {
    * runner has banked no turns — including because it predates the ledger.
    * The ledger keeps a recent window, not all history; lifetime totals are
    * state, read through getState.
+   *
+   * `limit` caps how many turns are read, not only how many come back — pass
+   * it whenever the caller wants the recent ones rather than the whole ledger.
    */
-  getUsageLog(): MailboxUsageTurn[];
+  getUsageLog(limit?: number): MailboxUsageTurn[];
   getDueMessages(excludeIds?: ReadonlySet<string>): OutboundMessage[];
   writeDirect(message: DirectOutboundMessage): Promise<void>;
   getOutboundHistory(limit: number): MailboxHistoryMessage[];

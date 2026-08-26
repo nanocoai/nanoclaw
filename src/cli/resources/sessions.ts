@@ -160,10 +160,10 @@ function measured(value: unknown): number | null {
  * session can have no detail on file — never started, mailbox gone, mailbox
  * older than the ledger, ledger unreadable.
  */
-async function readSessionTurns(agentGroupId: string, sessionId: string): Promise<PromptUsageRow[]> {
+async function readSessionTurns(agentGroupId: string, sessionId: string, limit?: number): Promise<PromptUsageRow[]> {
   let rows: MailboxUsageTurn[] | undefined;
   try {
-    rows = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.getUsageLog());
+    rows = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.getUsageLog(limit));
   } catch {
     return [];
   }
@@ -295,13 +295,24 @@ async function usageByTask(args: Record<string, unknown>, ctx: CallerContext): P
 
 /** Newest turns first, one row per prompt. */
 const PROMPT_LIMIT_DEFAULT = 20;
+/**
+ * Ceiling on `--limit`. The limit decides how much of each session's ledger is
+ * read, not only how much is printed, so an unbounded one asks every session
+ * in the fleet for everything it retains — and `ncl` gives a call 30 seconds.
+ */
+export const PROMPT_LIMIT_MAX = 500;
 
 async function usageByPrompt(args: Record<string, unknown>, ctx: CallerContext): Promise<PromptUsageReport> {
   const limitArg = Number(args.limit);
-  const limit = Number.isFinite(limitArg) && limitArg > 0 ? Math.floor(limitArg) : PROMPT_LIMIT_DEFAULT;
+  const asked = Number.isFinite(limitArg) && limitArg > 0 ? Math.floor(limitArg) : PROMPT_LIMIT_DEFAULT;
+  const limit = Math.min(asked, PROMPT_LIMIT_MAX);
 
+  // Read each session newest-first up to the limit, then merge: the newest N
+  // overall are always among each session's newest N, so this bounds the work
+  // without changing the answer.
   const turns: PromptUsageRow[] = [];
-  for (const { id, group } of await selectedSessions(args, ctx)) turns.push(...(await readSessionTurns(group, id)));
+  for (const { id, group } of await selectedSessions(args, ctx))
+    turns.push(...(await readSessionTurns(group, id, limit)));
   turns.sort((a, b) => b.timestamp.localeCompare(a.timestamp) || a.session_id.localeCompare(b.session_id));
   const prompts = turns.slice(0, limit);
 
@@ -434,7 +445,7 @@ registerResource({
         {
           name: 'limit',
           type: 'number',
-          description: `Prompts to list with --by prompt (default ${PROMPT_LIMIT_DEFAULT}).`,
+          description: `Prompts to list with --by prompt (default ${PROMPT_LIMIT_DEFAULT}, capped at ${PROMPT_LIMIT_MAX}).`,
         },
       ],
       examples: [
