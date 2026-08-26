@@ -22,6 +22,7 @@ export interface RunnerConfig {
   effort?: string;
   speed?: ProviderSpeed;
   responseDeliveryMode?: 'terminal';
+  builtinToolMode?: 'mcp-only';
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -60,6 +61,7 @@ export function runnerConfigFromRaw(raw: Record<string, unknown>): RunnerConfig 
     effort: (raw.effort as string) || undefined,
     speed: readSpeed(raw),
     responseDeliveryMode: raw.responseDeliveryMode === 'terminal' ? 'terminal' : undefined,
+    builtinToolMode: raw.builtinToolMode === 'mcp-only' ? 'mcp-only' : undefined,
   };
 }
 

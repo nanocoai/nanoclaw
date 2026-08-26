@@ -37,6 +37,8 @@ export interface ContainerConfigRow {
   speed: ContainerSpeed | null; // NULL = install/provider default
   /** NULL/default preserves provider behavior; disabled removes provider-native web search. */
   web_search_mode?: string | null;
+  /** NULL/default preserves provider tools; mcp-only removes provider-native execution/network tools. */
+  builtin_tool_mode?: string | null;
   /** NULL/default preserves normal mid-turn delivery; terminal defers user-visible text to the final result. */
   response_delivery_mode?: string | null;
   /**

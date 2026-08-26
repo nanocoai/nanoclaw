@@ -103,6 +103,21 @@ describe('resolveGroupTimezone', () => {
 
     expect(() => configFromDb({ ...row, web_search_mode: 'live' }, GROUP)).toThrow(/invalid web_search_mode "live"/);
   });
+
+  it('preserves default built-in tools and materializes an MCP-only policy', async () => {
+    const row = (await getContainerConfig(GROUP.id))!;
+    expect(configFromDb(row, GROUP).builtinToolMode).toBeUndefined();
+
+    await updateContainerConfigScalars(GROUP.id, { builtin_tool_mode: 'mcp-only' });
+    expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).builtinToolMode).toBe('mcp-only');
+
+    await updateContainerConfigScalars(GROUP.id, { builtin_tool_mode: null });
+    expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).builtinToolMode).toBeUndefined();
+
+    expect(() => configFromDb({ ...row, builtin_tool_mode: 'shell' }, GROUP)).toThrow(
+      /invalid builtin_tool_mode "shell"/,
+    );
+  });
 });
 
 describe('parseMcpServerConfig', () => {
