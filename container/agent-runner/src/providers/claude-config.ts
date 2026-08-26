@@ -78,6 +78,10 @@ export function mcpAllowPattern(serverName: string): string {
   return `mcp__${serverName.replace(/[^a-zA-Z0-9_-]/g, '_')}__*`;
 }
 
+function mcpToolName(server: string, tool: string): string {
+  return `mcp__${server.replace(/[^a-zA-Z0-9_-]/g, '_')}__${tool}`;
+}
+
 /**
  * Claude runs unrestricted inside the container: NanoClaw's container
  * isolation and the OneCLI allow-list are the security boundary, not the
@@ -118,16 +122,27 @@ export function resolveClaudeInference(
 /**
  * The SDK's stdio server config has no cwd field, so stdio servers with a
  * cwd are wrapped through the shell shim; the allowlist gains one pattern
- * per server so the SDK's tool filter doesn't drop their namespaces.
+ * per server so the SDK's tool filter doesn't drop their namespaces. A
+ * server that declares `enabledTools` is bound to exactly those tool names
+ * instead of the wildcard pattern; `disabledTools` subtracts specific tools
+ * from an otherwise-wildcard server.
  */
 export function resolveClaudeMcpServers(
   input: Record<string, McpServerConfig>,
   _environment: NodeJS.ProcessEnv,
-): { mcpServers: Record<string, McpServerConfig>; allowedTools: string[] } {
+): { mcpServers: Record<string, McpServerConfig>; allowedTools: string[]; disallowedTools: string[] } {
   const mcpServers = Object.fromEntries(Object.entries(input).map(([name, server]) => [name, shimCwd(server)]));
   return {
     mcpServers,
-    allowedTools: [...TOOL_ALLOWLIST, ...Object.keys(mcpServers).map(mcpAllowPattern)],
+    allowedTools: [
+      ...TOOL_ALLOWLIST,
+      ...Object.entries(mcpServers).flatMap(
+        ([name, server]) => server.enabledTools?.map((tool) => mcpToolName(name, tool)) ?? [mcpAllowPattern(name)],
+      ),
+    ],
+    disallowedTools: Object.entries(mcpServers).flatMap(
+      ([name, server]) => server.disabledTools?.map((tool) => mcpToolName(name, tool)) ?? [],
+    ),
   };
 }
 

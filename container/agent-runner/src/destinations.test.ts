@@ -108,4 +108,14 @@ describe('buildSystemPromptAddendum — multi-destination routing guidance', () 
     expect(prompt).not.toContain('For user-visible escalation output, default to');
     expect(prompt).not.toContain('your own channel destination(s):');
   });
+
+  it('terminal delivery requires one final response and omits mid-turn guidance', () => {
+    seedDestination('casa', 'Casa', 'whatsapp', 'group-1@g.us');
+
+    const prompt = buildSystemPromptAddendum('Researcher', { kind: 'chat' }, 'terminal');
+
+    expect(prompt).toContain('terminal delivery');
+    expect(prompt).toContain('exactly one final');
+    expect(prompt).not.toContain('handy for a quick acknowledgment');
+  });
 });

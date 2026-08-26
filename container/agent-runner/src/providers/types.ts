@@ -92,6 +92,7 @@ export interface ProviderOptions {
    * keeps the provider default; a tier it did not declare never reaches it.
    */
   speed?: ProviderSpeed;
+  responseDeliveryMode?: 'terminal';
 }
 
 export interface QueryInput {
@@ -136,8 +137,16 @@ export type McpServerConfig =
        * (cwd-shim.ts) or drop it — never launch in the wrong directory.
        */
       cwd?: string;
+      enabledTools?: string[];
+      disabledTools?: string[];
     }
-  | { type: 'http'; url: string; headers?: Record<string, string> };
+  | {
+      type: 'http';
+      url: string;
+      headers?: Record<string, string>;
+      enabledTools?: string[];
+      disabledTools?: string[];
+    };
 
 export interface AgentQuery {
   /** Push a follow-up message into the active query. */

@@ -261,7 +261,7 @@ export class ClaudeProvider implements AgentProvider {
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
           : undefined,
         allowedTools: [...this.mcp.allowedTools],
-        disallowedTools: [...this.executionPolicy.disallowedTools],
+        disallowedTools: [...this.executionPolicy.disallowedTools, ...this.mcp.disallowedTools],
         env: this.env,
         model: this.inference.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
