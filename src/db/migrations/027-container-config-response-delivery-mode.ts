@@ -4,8 +4,7 @@ import type { Migration } from './index.js';
 export const migration027: Migration = {
   version: 27,
   name: 'container-config-response-delivery-mode',
-  sqliteOnly: true,
-  up(db) {
-    db.exec(`ALTER TABLE container_configs ADD COLUMN response_delivery_mode TEXT;`);
+  async up(db) {
+    await db.exec(`ALTER TABLE container_configs ADD COLUMN response_delivery_mode TEXT;`);
   },
 };

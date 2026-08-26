@@ -10,8 +10,7 @@ import type { Migration } from './index.js';
 export const migration026: Migration = {
   version: 26,
   name: 'container-config-web-search-mode',
-  sqliteOnly: true,
-  up(db) {
-    db.exec(`ALTER TABLE container_configs ADD COLUMN web_search_mode TEXT;`);
+  async up(db) {
+    await db.exec(`ALTER TABLE container_configs ADD COLUMN web_search_mode TEXT;`);
   },
 };
