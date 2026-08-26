@@ -119,6 +119,7 @@ async function main(): Promise<void> {
     additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
     model: config.model,
     effort: config.effort,
+    webSearchMode: config.webSearchMode,
     responseDeliveryMode: config.responseDeliveryMode,
     builtinToolMode: config.builtinToolMode,
   });

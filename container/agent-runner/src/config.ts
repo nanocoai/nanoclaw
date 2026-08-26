@@ -20,6 +20,7 @@ export interface RunnerConfig {
   mcpServers: Record<string, McpServerConfig>;
   model?: string;
   effort?: string;
+  webSearchMode?: 'disabled';
   responseDeliveryMode?: 'terminal';
   builtinToolMode?: 'mcp-only';
 }
@@ -51,6 +52,7 @@ export function loadConfig(): RunnerConfig {
     mcpServers: (raw.mcpServers as RunnerConfig['mcpServers']) || {},
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
+    webSearchMode: raw.webSearchMode === 'disabled' ? 'disabled' : undefined,
     responseDeliveryMode: raw.responseDeliveryMode === 'terminal' ? 'terminal' : undefined,
     builtinToolMode: raw.builtinToolMode === 'mcp-only' ? 'mcp-only' : undefined,
   };

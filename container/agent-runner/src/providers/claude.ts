@@ -140,13 +140,16 @@ function mcpAllowPattern(serverName: string): string {
 export function buildClaudeToolPolicy(
   mcpServers: Record<string, McpServerConfig>,
   builtinToolMode?: 'mcp-only',
+  webSearchMode?: 'disabled',
 ): {
   allowedTools: string[];
   disallowedTools: string[];
 } {
   return {
     allowedTools: [
-      ...(builtinToolMode === 'mcp-only' ? [] : TOOL_ALLOWLIST),
+      ...(builtinToolMode === 'mcp-only'
+        ? []
+        : TOOL_ALLOWLIST.filter((tool) => webSearchMode !== 'disabled' || tool !== 'WebSearch')),
       ...Object.entries(mcpServers).flatMap(
         ([name, server]) => server.enabledTools?.map((tool) => mcpToolName(name, tool)) ?? [mcpAllowPattern(name)],
       ),
@@ -510,6 +513,7 @@ export class ClaudeProvider implements AgentProvider {
   private env: Record<string, string | undefined>;
   private additionalDirectories?: string[];
   private builtinToolMode?: 'mcp-only';
+  private webSearchMode?: 'disabled';
   private model?: string;
   private effort?: string;
   private memorySessionHook?: MemorySessionHookRegistration;
@@ -521,6 +525,7 @@ export class ClaudeProvider implements AgentProvider {
     );
     this.additionalDirectories = options.additionalDirectories;
     this.builtinToolMode = options.builtinToolMode;
+    this.webSearchMode = options.webSearchMode;
     this.model = options.model;
     this.effort = options.effort;
     this.env = {
@@ -582,7 +587,7 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
 
-    const toolPolicy = buildClaudeToolPolicy(this.mcpServers, this.builtinToolMode);
+    const toolPolicy = buildClaudeToolPolicy(this.mcpServers, this.builtinToolMode, this.webSearchMode);
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {

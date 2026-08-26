@@ -93,6 +93,8 @@ export interface ProviderOptions {
    * through to the underlying SDK. If omitted, the SDK default is used.
    */
   effort?: string;
+  /** Disable the provider's native web-search tool while preserving other built-ins. */
+  webSearchMode?: 'disabled';
   responseDeliveryMode?: 'terminal';
   /** Remove provider-native tools; only configured MCP tools remain model-visible. */
   builtinToolMode?: 'mcp-only';
