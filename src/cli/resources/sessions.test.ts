@@ -281,7 +281,7 @@ interface GroupReport {
     total_tokens: number;
     cost_usd: number;
   }>;
-  totals: { turns: number; total_tokens: number; cost_usd: number };
+  totals: { sessions: number; turns: number; total_tokens: number; cost_usd: number };
   unmeasured: number;
 }
 
@@ -358,6 +358,57 @@ describe('sessions usage — per prompt, per agent, per task', () => {
     expect(report.groups.map((g) => g.key)).toEqual(['daily-briefing-a25c', 'weekly-report-b31f', '(chat)']);
     expect(report.groups[0]).toMatchObject({ turns: 2, total_tokens: 165, cost_usd: 0.015 });
     expect(report.groups[2]).toMatchObject({ key: '(chat)', turns: 1, total_tokens: 8 });
+  });
+
+  it('counts a session once in the total however many series it ran', async () => {
+    // Task keys are not disjoint the way agent keys are: one session runs many
+    // series, so summing the per-row session counts reports more sessions than
+    // exist. The TOTAL line is about the fleet, not about the column above it.
+    seedTurns('ag-1', 'chat-1', [
+      { task_series_id: 'daily-briefing-a25c', input_tokens: 100, cost_usd: 0.01 },
+      { task_series_id: 'weekly-report-b31f', input_tokens: 20, cost_usd: 0.002 },
+      { input_tokens: 7, cost_usd: 0.001 },
+    ]);
+
+    const resp = await usage({ by: 'task' }, agentCtx());
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) return;
+    const report = resp.data as GroupReport;
+
+    expect(report.groups).toHaveLength(3);
+    expect(report.totals.sessions).toBe(1);
+    expect(report.totals.turns).toBe(3);
+  });
+
+  it('leaves an unmeasured turn out of its task’s totals', async () => {
+    // The table footnotes these as "not counted above", and `--by prompt`
+    // already keeps them out. Counted in both places, one turn reads as a
+    // measured turn that cost nothing plus an unmeasured one.
+    seedTurns('ag-1', 'chat-1', [
+      { task_series_id: 'daily-briefing-a25c', input_tokens: 100, cost_usd: 0.01 },
+      { task_series_id: 'daily-briefing-a25c' },
+    ]);
+
+    const resp = await usage({ by: 'task' }, agentCtx());
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) return;
+    const report = resp.data as GroupReport;
+
+    expect(report.unmeasured).toBe(1);
+    expect(report.groups[0]).toMatchObject({ key: 'daily-briefing-a25c', turns: 1, total_tokens: 100 });
+    expect(report.totals.turns).toBe(1);
+  });
+
+  it('reports a series whose every turn went unmeasured as no usage at all', async () => {
+    seedTurns('ag-1', 'chat-1', [{ task_series_id: 'daily-briefing-a25c' }]);
+
+    const resp = await usage({ by: 'task' }, agentCtx());
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) return;
+    const report = resp.data as GroupReport;
+
+    expect(report.groups).toEqual([]);
+    expect(report.unmeasured).toBe(1);
   });
 
   it('lists individual prompts newest first, across the caller’s sessions', async () => {

@@ -213,18 +213,21 @@ function addInto(acc: Omit<UsageGroupRow, 'key'>, r: Omit<UsageGroupRow, 'key' |
   acc.cost_usd = roundCost(acc.cost_usd + r.cost_usd);
 }
 
+/**
+ * `sessions` is passed rather than summed off the rows: task keys are not
+ * disjoint the way agent keys are — one session runs many series and appears
+ * under each — so adding the column up counts it once per series it ran.
+ */
 function summarize(
   groups: Map<string, Omit<UsageGroupRow, 'key'>>,
   by: 'agent' | 'task',
   unmeasured: number,
+  sessions: number,
 ): UsageGroupReport {
   const rows: UsageGroupRow[] = [...groups].map(([key, g]) => ({ key, ...g }));
   rows.sort((a, b) => b.total_tokens - a.total_tokens || a.key.localeCompare(b.key));
-  const totals = { ...EMPTY_GROUP };
-  for (const r of rows) {
-    addInto(totals, r);
-    totals.sessions += r.sessions;
-  }
+  const totals = { ...EMPTY_GROUP, sessions };
+  for (const r of rows) addInto(totals, r);
   return { by, groups: rows, totals, unmeasured };
 }
 
@@ -235,6 +238,7 @@ function summarize(
 async function usageByAgent(args: Record<string, unknown>, ctx: CallerContext): Promise<UsageGroupReport> {
   const groups = new Map<string, Omit<UsageGroupRow, 'key'>>();
   let unmeasured = 0;
+  let sessions = 0;
   for (const { id, group } of await selectedSessions(args, ctx)) {
     const usage = await readSessionUsage(group, id);
     if (!usage) {
@@ -244,9 +248,10 @@ async function usageByAgent(args: Record<string, unknown>, ctx: CallerContext): 
     const acc = groups.get(group) ?? { ...EMPTY_GROUP };
     addInto(acc, usage);
     acc.sessions += 1;
+    sessions += 1;
     groups.set(group, acc);
   }
-  return summarize(groups, 'agent', unmeasured);
+  return summarize(groups, 'agent', unmeasured, sessions);
 }
 
 /**
@@ -256,10 +261,17 @@ async function usageByAgent(args: Record<string, unknown>, ctx: CallerContext): 
 async function usageByTask(args: Record<string, unknown>, ctx: CallerContext): Promise<UsageGroupReport> {
   const groups = new Map<string, Omit<UsageGroupRow, 'key'>>();
   const seen = new Map<string, Set<string>>();
+  const measuredSessions = new Set<string>();
   let unmeasured = 0;
   for (const { id, group } of await selectedSessions(args, ctx)) {
     for (const turn of await readSessionTurns(group, id)) {
-      if (turn.total_tokens === null && turn.cost_usd === null) unmeasured += 1;
+      if (turn.total_tokens === null && turn.cost_usd === null) {
+        // Counted apart, as `--by prompt` does and as the table's footnote
+        // promises — summed in as a zero it would read as a free turn.
+        unmeasured += 1;
+        continue;
+      }
+      measuredSessions.add(id);
       const key = turn.task_series_id ?? '(chat)';
       const acc = groups.get(key) ?? { ...EMPTY_GROUP };
       addInto(acc, {
@@ -278,7 +290,7 @@ async function usageByTask(args: Record<string, unknown>, ctx: CallerContext): P
       groups.set(key, acc);
     }
   }
-  return summarize(groups, 'task', unmeasured);
+  return summarize(groups, 'task', unmeasured, measuredSessions.size);
 }
 
 /** Newest turns first, one row per prompt. */
