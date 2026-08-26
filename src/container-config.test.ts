@@ -106,6 +106,24 @@ describe('resolveGroupTimezone', () => {
 });
 
 describe('parseMcpServerConfig', () => {
+  it('preserves a bounded MCP tool allowlist', () => {
+    expect(
+      parseMcpServerConfig({
+        url: 'https://mcp.example.com/mcp',
+        enabledTools: ['search', 'extract', 'search'],
+      }),
+    ).toEqual({ type: 'http', url: 'https://mcp.example.com/mcp', enabledTools: ['search', 'extract'] });
+  });
+
+  it('rejects conflicting or unsafe MCP tool policies', () => {
+    expect(() =>
+      parseMcpServerConfig({ url: 'https://mcp.example.com/mcp', enabledTools: ['search'], disabledTools: ['crawl'] }),
+    ).toThrow(/mutually exclusive/);
+    expect(() => parseMcpServerConfig({ url: 'https://mcp.example.com/mcp', enabledTools: ['bad tool'] })).toThrow(
+      /safe MCP tool names/,
+    );
+  });
+
   it('preserves stdio config and accepts HTTPS Streamable HTTP config', () => {
     expect(parseMcpServerConfig({ command: 'pnpm', args: ['dlx', 'server'], env: { TOKEN: 'stub' } })).toEqual({
       command: 'pnpm',
