@@ -6,6 +6,7 @@ import path from 'path';
 import type { RunCommand } from './onecli-agents.js';
 import type { RemovalAction } from './plan.js';
 import { backupEnv, executePlan, type ExecDeps } from './remove.js';
+import { pathIdentity } from './scan.js';
 
 let tempDir: string;
 
@@ -29,25 +30,28 @@ function deps(overrides: Partial<ExecDeps> = {}): ExecDeps {
 describe('backupEnv', () => {
   it('backs up to .env.bak', () => {
     const envPath = path.join(tempDir, '.env');
+    const backupRoot = path.join(tempDir, 'backup');
     fs.writeFileSync(envPath, 'KEY=secret');
 
-    const backup = backupEnv(envPath);
+    const backup = backupEnv(envPath, backupRoot);
 
-    expect(backup).toBe(path.join(tempDir, '.env.bak'));
+    expect(backup).toBe(path.join(backupRoot, '.env.bak'));
     expect(fs.readFileSync(backup, 'utf-8')).toBe('KEY=secret');
   });
 
   it('falls back to a timestamped name when .env.bak exists', () => {
     const envPath = path.join(tempDir, '.env');
+    const backupRoot = path.join(tempDir, 'backup');
     fs.writeFileSync(envPath, 'KEY=new');
-    fs.writeFileSync(path.join(tempDir, '.env.bak'), 'KEY=old');
+    fs.mkdirSync(backupRoot);
+    fs.writeFileSync(path.join(backupRoot, '.env.bak'), 'KEY=old');
 
-    const backup = backupEnv(envPath);
+    const backup = backupEnv(envPath, backupRoot);
 
-    expect(path.basename(backup)).toMatch(/^\.env\.bak\.\d{8}-\d{6}$/);
+    expect(path.basename(backup)).toMatch(/^\.env\.bak\.\d+-\d+-\d+$/);
     expect(fs.readFileSync(backup, 'utf-8')).toBe('KEY=new');
     // The earlier backup is never clobbered.
-    expect(fs.readFileSync(path.join(tempDir, '.env.bak'), 'utf-8')).toBe('KEY=old');
+    expect(fs.readFileSync(path.join(backupRoot, '.env.bak'), 'utf-8')).toBe('KEY=old');
   });
 });
 
@@ -63,7 +67,7 @@ describe('executePlan', () => {
     expect(notes).toEqual([]);
   });
 
-  it('continues past a failing action and records a note', () => {
+  it('blocks dependent deletion after a service-stop failure', () => {
     const dir = path.join(tempDir, 'logs');
     fs.mkdirSync(dir);
     const actions: RemovalAction[] = [
@@ -79,13 +83,13 @@ describe('executePlan', () => {
       throw new Error('launchctl exploded');
     };
 
-    const { notes } = executePlan(actions, deps({ runCommand: failing }));
+    const { notes, results } = executePlan(actions, deps({ runCommand: failing }));
 
-    expect(notes).toHaveLength(1);
+    expect(notes).toHaveLength(2);
     expect(notes[0]).toContain('unload-service');
     expect(notes[0]).toContain('launchctl exploded');
-    // Later actions still ran.
-    expect(fs.existsSync(dir)).toBe(false);
+    expect(fs.existsSync(dir)).toBe(true);
+    expect(results.at(-1)?.outcome).toBe('untouched');
   });
 
   it('leaves a system unit in place without root and notes the sudo command', () => {
@@ -126,10 +130,10 @@ describe('executePlan', () => {
     const envPath = path.join(tempDir, '.env');
     fs.writeFileSync(envPath, 'KEY=secret');
 
-    const { notes } = executePlan([{ kind: 'backup-env', envPath }], deps());
+    const { notes } = executePlan([{ kind: 'backup-env', envPath, backupRoot: path.join(tempDir, 'backup') }], deps());
 
     expect(fs.existsSync(envPath)).toBe(false);
-    expect(fs.readFileSync(path.join(tempDir, '.env.bak'), 'utf-8')).toBe('KEY=secret');
+    expect(fs.readFileSync(path.join(tempDir, 'backup', '.env.bak'), 'utf-8')).toBe('KEY=secret');
     expect(notes).toEqual([]);
   });
 
@@ -139,7 +143,10 @@ describe('executePlan', () => {
     fs.chmodSync(tempDir, 0o555); // backup destination unwritable
 
     try {
-      const { notes } = executePlan([{ kind: 'backup-env', envPath }], deps());
+      const { notes } = executePlan(
+        [{ kind: 'backup-env', envPath, backupRoot: path.join(tempDir, 'backup') }],
+        deps(),
+      );
       expect(fs.existsSync(envPath)).toBe(true);
       expect(notes.some((n) => n.includes('backup-env'))).toBe(true);
     } finally {
@@ -174,6 +181,66 @@ describe('executePlan', () => {
     expect(notes.some((n) => n.includes('xargs -r docker rm -f'))).toBe(true);
   });
 
+  it('blocks data and runtime deletion when container shutdown fails', () => {
+    const dataPath = path.join(tempDir, 'data');
+    const runtimePath = path.join(tempDir, 'node_modules');
+    fs.mkdirSync(dataPath);
+    fs.mkdirSync(runtimePath);
+
+    const result = executePlan(
+      [
+        {
+          kind: 'rm-containers',
+          runtime: 'docker',
+          labelFilter: 'nanoclaw-install=test',
+        },
+        {
+          kind: 'delete-path',
+          item: { what: 'Data', where: dataPath, path: dataPath },
+        },
+        {
+          kind: 'delete-runtime-path',
+          item: {
+            what: 'Runtime',
+            where: runtimePath,
+            path: runtimePath,
+          },
+        },
+      ],
+      deps({ runCommand: () => ({ status: null, stdout: '' }) }),
+    );
+
+    expect(result.results.map((entry) => entry.outcome)).toEqual(['failed', 'untouched', 'untouched']);
+    expect(fs.existsSync(dataPath)).toBe(true);
+    expect(fs.existsSync(runtimePath)).toBe(true);
+  });
+
+  it('removes an already-stopped launchd service registration', () => {
+    const unitPath = path.join(tempDir, 'service.plist');
+    fs.writeFileSync(unitPath, 'service');
+
+    const result = executePlan(
+      [
+        {
+          kind: 'unload-service',
+          flavor: 'launchd',
+          unitPath,
+          unitName: 'service',
+        },
+      ],
+      deps({
+        runCommand: () => ({
+          status: 1,
+          stdout: '',
+          stderr: 'Could not find specified service',
+        }),
+      }),
+    );
+
+    expect(result.results[0]?.outcome).toBe('removed');
+    expect(fs.existsSync(unitPath)).toBe(false);
+  });
+
   it('notes a manual delete when onecli itself cannot be run', () => {
     const { notes } = executePlan(
       [
@@ -205,5 +272,260 @@ describe('executePlan', () => {
     );
 
     expect(calls).toEqual([['onecli', 'agents', 'delete', '--id', 'u-123']]);
+  });
+
+  it('leaves an exact filesystem artifact untouched when its identity changed', () => {
+    const unitPath = path.join(tempDir, 'service.plist');
+    fs.writeFileSync(unitPath, 'approved');
+    const expectedIdentity = pathIdentity(unitPath);
+    fs.writeFileSync(unitPath, 'replacement');
+
+    const result = executePlan(
+      [
+        {
+          kind: 'unload-service',
+          flavor: 'launchd',
+          unitPath,
+          unitName: 'service',
+          expectedIdentity,
+          identityRequired: true,
+        },
+      ],
+      deps(),
+    );
+
+    expect(result.results[0]?.outcome).toBe('untouched');
+    expect(fs.readFileSync(unitPath, 'utf8')).toBe('replacement');
+  });
+
+  it('deletes an unchanged exact file but preserves a replacement', () => {
+    const keptPath = path.join(tempDir, 'start-nanoclaw.sh');
+    fs.writeFileSync(keptPath, '#!/bin/sh\n');
+    const keptIdentity = pathIdentity(keptPath);
+    const removed = executePlan(
+      [
+        {
+          kind: 'delete-path',
+          item: { what: 'Start script', where: keptPath, path: keptPath },
+          expectedIdentity: keptIdentity,
+          identityRequired: true,
+        },
+      ],
+      deps(),
+    );
+    expect(removed.results[0]?.outcome).toBe('removed');
+    expect(fs.existsSync(keptPath)).toBe(false);
+
+    const replacementPath = path.join(tempDir, 'replacement.txt');
+    fs.writeFileSync(replacementPath, 'approved');
+    const replacementIdentity = pathIdentity(replacementPath);
+    fs.writeFileSync(replacementPath, 'replacement');
+    const preserved = executePlan(
+      [
+        {
+          kind: 'delete-path',
+          item: { what: 'Replacement', where: replacementPath, path: replacementPath },
+          expectedIdentity: replacementIdentity,
+          identityRequired: true,
+        },
+      ],
+      deps(),
+    );
+    expect(preserved.results[0]?.outcome).toBe('untouched');
+    expect(fs.readFileSync(replacementPath, 'utf8')).toBe('replacement');
+  });
+
+  it('does not unlink a service unit replaced while the stop command is running', () => {
+    const unitPath = path.join(tempDir, 'service.plist');
+    const dataPath = path.join(tempDir, 'data');
+    fs.writeFileSync(unitPath, 'approved');
+    fs.mkdirSync(dataPath);
+    const expectedIdentity = pathIdentity(unitPath);
+    const result = executePlan(
+      [
+        {
+          kind: 'unload-service',
+          flavor: 'launchd',
+          unitPath,
+          unitName: 'service',
+          expectedIdentity,
+          identityRequired: true,
+        },
+        { kind: 'delete-path', item: { what: 'Data', where: dataPath, path: dataPath } },
+      ],
+      deps({
+        runCommand: () => {
+          fs.writeFileSync(unitPath, 'replacement');
+          return { status: 0, stdout: '' };
+        },
+      }),
+    );
+
+    expect(result.results[0]).toEqual(
+      expect.objectContaining({
+        outcome: 'untouched',
+        error: expect.objectContaining({ code: 'identity_changed' }),
+      }),
+    );
+    expect(result.results[1]).toEqual(
+      expect.objectContaining({
+        outcome: 'untouched',
+        error: expect.objectContaining({ code: 'service_prerequisite_failed' }),
+      }),
+    );
+    expect(fs.readFileSync(unitPath, 'utf8')).toBe('replacement');
+    expect(fs.existsSync(dataPath)).toBe(true);
+  });
+
+  it('rechecks a checkout-owned directory root immediately before recursive deletion', () => {
+    const dir = path.join(tempDir, 'data');
+    fs.mkdirSync(dir);
+    const expectedRootIdentity = pathIdentity(dir);
+    fs.renameSync(dir, `${dir}.approved`);
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, 'replacement.txt'), 'keep');
+
+    const result = executePlan(
+      [
+        {
+          kind: 'delete-path',
+          item: { what: 'Data', where: dir, path: dir },
+          expectedRootIdentity,
+        },
+      ],
+      deps(),
+    );
+
+    expect(result.results[0]?.outcome).toBe('untouched');
+    expect(fs.readFileSync(path.join(dir, 'replacement.txt'), 'utf8')).toBe('keep');
+  });
+
+  it('does not signal a non-host pidfile target that mentions this checkout', () => {
+    const pidFile = path.join(tempDir, 'nanoclaw.pid');
+    const processPattern = `${tempDir}/dist/index.js`;
+    fs.writeFileSync(pidFile, '321');
+    const killed: number[] = [];
+    const result = executePlan(
+      [
+        {
+          kind: 'kill-pid',
+          pidFile,
+          processPattern,
+          expectedIdentity: pathIdentity(pidFile),
+          identityRequired: true,
+        },
+      ],
+      deps({
+        runCommand: () => ({ status: 0, stdout: `/usr/bin/vim ${processPattern}\n` }),
+        killProcess: (pid) => {
+          killed.push(pid);
+        },
+      }),
+    );
+
+    expect(result.results[0]?.outcome).toBe('untouched');
+    expect(killed).toEqual([]);
+    expect(fs.existsSync(pidFile)).toBe(true);
+  });
+
+  it('waits for an owned pidfile process to stop before satisfying the prerequisite', () => {
+    const pidFile = path.join(tempDir, 'nanoclaw.pid');
+    const processPattern = `${tempDir}/dist/index.js`;
+    fs.writeFileSync(pidFile, '321');
+    let checks = 0;
+    const result = executePlan(
+      [
+        {
+          kind: 'kill-pid',
+          pidFile,
+          processPattern,
+          expectedIdentity: pathIdentity(pidFile),
+          identityRequired: true,
+        },
+      ],
+      deps({
+        runCommand: () => ({ status: ++checks < 4 ? 0 : 1, stdout: `/usr/bin/node ${processPattern}\n` }),
+        killProcess: () => {},
+        sleep: () => {},
+      }),
+    );
+
+    expect(result.results[0]?.outcome).toBe('removed');
+    expect(checks).toBeGreaterThanOrEqual(4);
+    expect(fs.existsSync(pidFile)).toBe(false);
+  });
+
+  it('re-lists only the NanoClaw node argv shape, not editors or grep', () => {
+    const processPattern = `${tempDir}/dist/index.js`;
+    const killed: number[] = [];
+    let listings = 0;
+    const result = executePlan(
+      [{ kind: 'pkill-host', pattern: processPattern }],
+      deps({
+        runCommand: () => ({
+          status: 0,
+          stdout:
+            listings++ === 0
+              ? `321 /usr/bin/node ${processPattern}\n322 /usr/bin/vim ${processPattern}\n323 grep ${processPattern}\n`
+              : `322 /usr/bin/vim ${processPattern}\n323 grep ${processPattern}\n`,
+        }),
+        killProcess: (pid) => {
+          killed.push(pid);
+        },
+        sleep: () => {},
+      }),
+    );
+
+    expect(result.results[0]?.outcome).toBe('removed');
+    expect(killed).toEqual([321]);
+  });
+
+  it('rechecks the exact image identity immediately before removal', () => {
+    const calls: string[][] = [];
+    const result = executePlan(
+      [
+        {
+          kind: 'rmi',
+          runtime: 'docker',
+          image: 'img:latest',
+          expectedIdentity: '{"Id":"approved"}',
+          identityRequired: true,
+        },
+      ],
+      deps({
+        runCommand: (cmd, args) => {
+          calls.push([cmd, ...args]);
+          return { status: 0, stdout: '{"Id":"replacement"}' };
+        },
+      }),
+    );
+
+    expect(result.results[0]?.outcome).toBe('untouched');
+    expect(calls).toEqual([['docker', 'image', 'inspect', 'img:latest']]);
+  });
+
+  it('does not delete OneCLI agents after service failure', () => {
+    const unitPath = path.join(tempDir, 'service.plist');
+    const dataPath = path.join(tempDir, 'data');
+    fs.writeFileSync(unitPath, 'service');
+    fs.mkdirSync(dataPath);
+    const calls: string[][] = [];
+    const runCommand: RunCommand = (cmd, args) => {
+      calls.push([cmd, ...args]);
+      if (cmd === 'launchctl') return { status: 1, stdout: '' };
+      return { status: 0, stdout: '' };
+    };
+    const result = executePlan(
+      [
+        { kind: 'unload-service', flavor: 'launchd', unitPath, unitName: 'service' },
+        { kind: 'delete-onecli-agent', agent: { uuid: 'u-1', identifier: 'ag-1', name: 'Agent' } },
+        { kind: 'delete-path', item: { what: 'Data', where: dataPath, path: dataPath } },
+      ],
+      deps({ runCommand }),
+    );
+
+    expect(result.results.map((entry) => entry.outcome)).toEqual(['failed', 'untouched', 'untouched']);
+    expect(calls.some((call) => call.join(' ') === 'onecli agents delete --id u-1')).toBe(false);
+    expect(fs.existsSync(dataPath)).toBe(true);
   });
 });

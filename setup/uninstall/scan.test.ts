@@ -7,7 +7,7 @@ import Database from 'better-sqlite3';
 
 import { getInstallSlug, getLaunchdLabel, getSystemdUnit } from '../../src/install-slug.js';
 import type { RunCommand } from './onecli-agents.js';
-import { detectExistingInstall, scanInstall, type ScanDeps } from './scan.js';
+import { credentialBackupRoot, detectExistingInstall, pathIdentity, scanInstall, type ScanDeps } from './scan.js';
 
 let root: string;
 let home: string;
@@ -32,13 +32,18 @@ function deps(overrides: Partial<ScanDeps> = {}): ScanDeps {
     projectRoot: root,
     home,
     platform: 'darwin',
-    runCommand: fakeRun({}),
+    runCommand: fakeRun({
+      ps: () => ({ status: 0, stdout: '' }),
+      onecli: () => ({ status: 0, stdout: '{"data":[]}' }),
+    }),
     ...overrides,
   };
 }
 
 const dockerUp = (containerIds: string[], hasImage: boolean) =>
   fakeRun({
+    ps: () => ({ status: 0, stdout: '' }),
+    onecli: () => ({ status: 0, stdout: '{"data":[]}' }),
     docker: (args) => {
       if (args[0] === 'ps') return { status: 0, stdout: containerIds.join('\n') + '\n' };
       if (args[0] === 'image') return { status: hasImage ? 0 : 1, stdout: '' };
@@ -47,6 +52,20 @@ const dockerUp = (containerIds: string[], hasImage: boolean) =>
   });
 
 describe('scanInstall path groups', () => {
+  it('uses the Linux state directory for credential backups', () => {
+    const previous = process.env.XDG_STATE_HOME;
+    const stateHome = path.join(home, 'state');
+    process.env.XDG_STATE_HOME = stateHome;
+    try {
+      expect(credentialBackupRoot(home, 'linux', 'install-slug')).toBe(
+        path.join(stateHome, 'nanoclaw', 'uninstall-backups', 'install-slug'),
+      );
+    } finally {
+      if (previous === undefined) delete process.env.XDG_STATE_HOME;
+      else process.env.XDG_STATE_HOME = previous;
+    }
+  });
+
   it('puts dist and node_modules in runtime, not data', () => {
     for (const dir of ['data', 'logs', 'dist', 'node_modules', 'groups', 'store']) {
       fs.mkdirSync(path.join(root, dir));
@@ -71,6 +90,27 @@ describe('scanInstall path groups', () => {
     expect(inv.user.map((i) => path.basename(i.path))).toEqual(['groups', 'store']);
   });
 
+  it('reports credential backups separately so receipts preserve them', () => {
+    const backupRoot = credentialBackupRoot(home, 'darwin', getInstallSlug(root));
+    fs.mkdirSync(backupRoot, { recursive: true });
+    fs.writeFileSync(path.join(backupRoot, '.env.bak'), 'KEY=old');
+    fs.writeFileSync(path.join(backupRoot, '.env.bak.20260101-120000'), 'KEY=older');
+
+    const inv = scanInstall(deps());
+
+    expect(inv.envBackups.map((item) => path.basename(item.path))).toEqual(['.env.bak', '.env.bak.20260101-120000']);
+    expect(inv.data).toEqual([]);
+  });
+
+  it('reports legacy in-checkout backups separately as unsafe residue', () => {
+    fs.writeFileSync(path.join(root, '.env.bak'), 'KEY=old');
+
+    const inv = scanInstall(deps());
+
+    expect(inv.envBackups).toEqual([]);
+    expect(inv.legacyEnvBackups?.map((item) => path.basename(item.path))).toEqual(['.env.bak']);
+  });
+
   it('finds nothing in an empty checkout', () => {
     const inv = scanInstall(deps());
     expect(inv.data).toEqual([]);
@@ -78,6 +118,17 @@ describe('scanInstall path groups', () => {
     expect(inv.user).toEqual([]);
     expect(inv.service.containerIds).toEqual([]);
     expect(inv.service.image).toBeUndefined();
+  });
+
+  it('inventories a dangling .env symlink without following it', () => {
+    const env = path.join(root, '.env');
+    fs.symlinkSync(path.join(root, 'missing-secret'), env);
+
+    const inv = scanInstall(deps());
+
+    expect(inv.data.map((item) => path.basename(item.path))).toContain('.env');
+    expect(inv.identity?.exactPaths[env]).toBe(pathIdentity(env));
+    expect(inv.identity?.exactPaths[env]).toMatch(/^symlink:/);
   });
 });
 
@@ -111,11 +162,50 @@ describe('scanInstall service artifacts', () => {
     expect(inv.notes).toEqual([]);
   });
 
+  it('inventories only an exact checkout host argv shape', () => {
+    const script = path.join(root, 'dist', 'index.js');
+    const inv = scanInstall(
+      deps({
+        runCommand: fakeRun({
+          ps: () => ({
+            status: 0,
+            stdout: `41 /usr/bin/node ${script}\n42 /usr/bin/vim ${script}\n43 node ${script} --extra\n`,
+          }),
+        }),
+      }),
+    );
+
+    expect(inv.service.hostProcessIds).toEqual([41]);
+  });
+
   it('degrades with a manual-cleanup note when docker is unavailable', () => {
     const inv = scanInstall(deps());
     expect(inv.service.containerIds).toEqual([]);
     expect(inv.service.image).toBeUndefined();
+    expect(inv.service.containerRuntimeAvailable).toBe(false);
     expect(inv.notes.some((n) => n.includes("'docker' unavailable"))).toBe(true);
+  });
+});
+
+describe('scanInstall ownership identity', () => {
+  it('snapshots the checkout, exact files, scoped roots, and container selector', () => {
+    const data = path.join(root, 'data');
+    const pid = path.join(root, 'nanoclaw.pid');
+    const env = path.join(root, '.env');
+    const start = path.join(root, 'start-nanoclaw.sh');
+    fs.mkdirSync(data);
+    fs.writeFileSync(pid, '123');
+    fs.writeFileSync(env, 'TOKEN=secret');
+    fs.writeFileSync(start, '#!/bin/sh');
+
+    const inv = scanInstall(deps({ platform: 'linux' }));
+
+    expect(inv.identity?.root).toBeTruthy();
+    expect(inv.identity?.exactPaths[pid]).toContain('file:');
+    expect(inv.identity?.exactPaths[env]).toContain('file:');
+    expect(inv.identity?.exactPaths[start]).toContain('file:');
+    expect(inv.identity?.scopedRoots[data]).toContain('node:');
+    expect(inv.identity?.containerSelector).toBe(`nanoclaw-install=${inv.slug}`);
   });
 });
 
@@ -147,7 +237,10 @@ describe('scanInstall OneCLI agents', () => {
       { id: 'u-2', identifier: 'ag-other', name: 'Other', isDefault: false },
     ],
   });
-  const onecliUp = fakeRun({ onecli: () => ({ status: 0, stdout: vault }) });
+  const onecliUp = fakeRun({
+    ps: () => ({ status: 0, stdout: '' }),
+    onecli: () => ({ status: 0, stdout: vault }),
+  });
 
   it('splits mine vs orphans against the central DB', () => {
     fs.mkdirSync(path.join(root, 'data'));
@@ -168,6 +261,16 @@ describe('scanInstall OneCLI agents', () => {
     expect(inv.onecli.mine).toEqual([]);
     expect(inv.onecli.orphans.map((a) => a.identifier)).toEqual(['ag-mine', 'ag-other']);
     expect(inv.notes.some((n) => n.includes("Couldn't read agent_groups"))).toBe(true);
+  });
+
+  it('reports an uninspectable artifact when OneCLI cannot be inventoried', () => {
+    const inv = scanInstall(
+      deps({
+        runCommand: fakeRun({ ps: () => ({ status: 0, stdout: '' }) }),
+      }),
+    );
+    expect(inv.onecli.available).toBe(false);
+    expect(inv.notes.some((n) => n.includes("Couldn't inspect OneCLI agents"))).toBe(true);
   });
 });
 
