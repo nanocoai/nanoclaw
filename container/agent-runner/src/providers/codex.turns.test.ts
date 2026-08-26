@@ -153,6 +153,7 @@ describe('CodexProvider active turns', () => {
     await collect;
 
     expect(fake.threadCalls[0].builtinToolMode).toBe('mcp-only');
+    expect(fake.startCalls[0].builtinToolMode).toBe('mcp-only');
   });
 
   it('delivers harness-generated images as file events — the model never sends them itself', async () => {

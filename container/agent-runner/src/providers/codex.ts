@@ -187,6 +187,7 @@ export class CodexProvider implements AgentProvider {
             self.model,
             self.effort,
             input.cwd,
+            self.builtinToolMode,
             (turnId) => {
               activeTurnId = turnId;
             },
@@ -239,6 +240,7 @@ async function* runOneTurn(
   model: string | undefined,
   effort: string | undefined,
   cwd: string,
+  builtinToolMode: 'mcp-only' | undefined,
   setActiveTurn: (turnId: string) => void,
   clearActiveTurn: () => void,
   hasInit: () => boolean,
@@ -367,6 +369,7 @@ async function* runOneTurn(
       model,
       effort,
       cwd,
+      builtinToolMode,
     });
     setActiveTurn(turnId);
     const imagesBefore = listGeneratedImages(threadId);

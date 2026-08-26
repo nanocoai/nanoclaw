@@ -8,6 +8,7 @@ import {
   CODEX_APP_SERVER_ARGS,
   attachCodexAutoApproval,
   buildCodexProcessEnv,
+  startCodexTurn,
   startOrResumeCodexThread,
   tomlBasicString,
   writeCodexConfigToml,
@@ -263,6 +264,34 @@ describe('Codex thread SessionStart source', () => {
       params: { environments: [] },
     });
   });
+
+  it('does not send unsupported environments to thread/resume', async () => {
+    const { server, requests } = autoRespondingServer();
+
+    await startOrResumeCodexThread(server, 'thread-existing', {
+      cwd: '/workspace/agent',
+      builtinToolMode: 'mcp-only',
+    });
+
+    expect(requests[0]).toMatchObject({ method: 'thread/resume' });
+    expect(requests[0].params.environments).toBeUndefined();
+  });
+
+  it('removes Codex workspace environments on every MCP-only turn', async () => {
+    const { server, requests } = autoRespondingServer();
+
+    await startCodexTurn(server, {
+      threadId: 'thread-existing',
+      inputText: 'hello',
+      cwd: '/workspace/agent',
+      builtinToolMode: 'mcp-only',
+    });
+
+    expect(requests[0]).toMatchObject({
+      method: 'turn/start',
+      params: { environments: [] },
+    });
+  });
 });
 
 describe('Codex auto-approval', () => {
@@ -385,7 +414,10 @@ function autoRespondingServer(): {
           const request = JSON.parse(line) as { id: number; method: string; params: Record<string, unknown> };
           requests.push(request);
           const threadId = (request.params.threadId as string | undefined) ?? 'thread-new';
-          server.pending.get(request.id)?.resolve({ id: request.id, result: { thread: { id: threadId } } });
+          server.pending.get(request.id)?.resolve({
+            id: request.id,
+            result: { thread: { id: threadId }, turn: { id: 'turn-new' } },
+          });
         },
       },
     },
