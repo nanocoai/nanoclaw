@@ -373,7 +373,8 @@ registerResource({
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
         'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
         '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart), ' +
-        '--web-search-mode (default preserves provider behavior; disabled removes provider-native web search).',
+        '--web-search-mode (default preserves provider behavior; disabled removes provider-native web search), ' +
+        '--response-delivery-mode (default preserves mid-turn delivery; terminal exposes only final-result delivery).',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -392,6 +393,7 @@ registerResource({
             | 'cli_scope'
             | 'timezone'
             | 'web_search_mode'
+            | 'response_delivery_mode'
           >
         > = {};
         if (args.provider !== undefined) updates.provider = args.provider as string;
@@ -405,6 +407,13 @@ registerResource({
             throw new Error('--web-search-mode must be one of: default, disabled');
           }
           updates.web_search_mode = mode === 'default' ? null : mode;
+        }
+        if (args.response_delivery_mode !== undefined || args['response-delivery-mode'] !== undefined) {
+          const mode = String(args.response_delivery_mode ?? args['response-delivery-mode']);
+          if (mode !== 'default' && mode !== 'terminal') {
+            throw new Error('--response-delivery-mode must be one of: default, terminal');
+          }
+          updates.response_delivery_mode = mode === 'default' ? null : mode;
         }
         if (args.image_tag !== undefined) updates.image_tag = args.image_tag as string;
         if (args.assistant_name !== undefined) updates.assistant_name = args.assistant_name as string;
@@ -420,7 +429,7 @@ registerResource({
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone, --web-search-mode',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone, --web-search-mode, --response-delivery-mode',
           );
         }
 
@@ -435,7 +444,8 @@ registerResource({
       description:
         'Add an MCP server to a group. Requires `ncl groups restart` to take effect. ' +
         'Use --id <group-id> --name <server-name> with either --command <cmd> [--args <json-array>] [--env <json-object>] ' +
-        'or --url <url> [--headers <json-object>] (HTTPS, or plain HTTP for localhost / host.docker.internal).',
+        'or --url <url> [--headers <json-object>] (HTTPS, or plain HTTP for localhost / host.docker.internal). ' +
+        'Use --enabled-tools <json-array> to expose only a bounded subset.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -460,6 +470,10 @@ registerResource({
           args: args.args === undefined ? undefined : JSON.parse(String(args.args)),
           env: args.env === undefined ? undefined : JSON.parse(String(args.env)),
           headers: args.headers === undefined ? undefined : JSON.parse(String(args.headers)),
+          enabledTools:
+            args.enabled_tools === undefined && args['enabled-tools'] === undefined
+              ? undefined
+              : JSON.parse(String(args.enabled_tools ?? args['enabled-tools'])),
         });
         await updateContainerConfigJson(id, 'mcp_servers', servers);
 

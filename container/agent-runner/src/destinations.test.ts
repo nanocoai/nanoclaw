@@ -73,4 +73,14 @@ describe('buildSystemPromptAddendum — multi-destination routing guidance', () 
     expect(prompt).not.toContain('<message to=');
     expect(prompt).not.toContain('default to addressing');
   });
+
+  it('terminal delivery requires one final response and omits mid-turn guidance', () => {
+    seedDestination('casa', 'Casa', 'whatsapp', 'group-1@g.us');
+
+    const prompt = buildSystemPromptAddendum('Researcher', { kind: 'chat' }, 'terminal');
+
+    expect(prompt).toContain('terminal delivery');
+    expect(prompt).toContain('exactly one final');
+    expect(prompt).not.toContain('handy for a quick acknowledgment');
+  });
 });

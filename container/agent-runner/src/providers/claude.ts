@@ -22,6 +22,10 @@ function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
 }
 
+function mcpToolName(server: string, tool: string): string {
+  return `mcp__${server.replace(/[^A-Za-z0-9_-]/g, '_')}__${tool}`;
+}
+
 export interface SdkRateLimitInfo {
   status?: string;
   resetsAt?: number;
@@ -563,8 +567,18 @@ export class ClaudeProvider implements AgentProvider {
         systemPrompt: instructions
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
           : undefined,
-        allowedTools: [...TOOL_ALLOWLIST, ...Object.keys(this.mcpServers).map(mcpAllowPattern)],
-        disallowedTools: SDK_DISALLOWED_TOOLS,
+        allowedTools: [
+          ...TOOL_ALLOWLIST,
+          ...Object.entries(this.mcpServers).flatMap(
+            ([name, server]) => server.enabledTools?.map((tool) => mcpToolName(name, tool)) ?? [mcpAllowPattern(name)],
+          ),
+        ],
+        disallowedTools: [
+          ...SDK_DISALLOWED_TOOLS,
+          ...Object.entries(this.mcpServers).flatMap(
+            ([name, server]) => server.disabledTools?.map((tool) => mcpToolName(name, tool)) ?? [],
+          ),
+        ],
         env: this.env,
         model: this.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any

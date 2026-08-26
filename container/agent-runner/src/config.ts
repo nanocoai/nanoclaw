@@ -20,6 +20,7 @@ export interface RunnerConfig {
   mcpServers: Record<string, McpServerConfig>;
   model?: string;
   effort?: string;
+  responseDeliveryMode?: 'terminal';
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -49,6 +50,7 @@ export function loadConfig(): RunnerConfig {
     mcpServers: (raw.mcpServers as RunnerConfig['mcpServers']) || {},
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
+    responseDeliveryMode: raw.responseDeliveryMode === 'terminal' ? 'terminal' : undefined,
   };
 
   return _config;
