@@ -130,6 +130,7 @@ export interface TurnParams {
   model?: string;
   effort?: string;
   cwd?: string;
+  builtinToolMode?: 'mcp-only';
 }
 
 export function spawnCodexAppServer(): AppServer {
@@ -296,10 +297,6 @@ export async function startOrResumeCodexThread(
     developerInstructions: params.developerInstructions,
     personality: params.personality ?? codexTone.default,
     persistExtendedHistory: false,
-    // Empty is Codex app-server's native opt-out from workspace-bound tools
-    // (shell, apply_patch, browser/direct-fetch helpers). Explicit MCP tools
-    // remain available to the model.
-    environments: params.builtinToolMode === 'mcp-only' ? [] : undefined,
   };
 
   if (threadId) {
@@ -317,6 +314,9 @@ export async function startOrResumeCodexThread(
 
   const resp = await sendCodexRequest(server, 'thread/start', {
     ...commonParams,
+    // thread/resume does not accept environments in Codex 0.146. New threads
+    // get the sticky default here; every turn also carries the override.
+    environments: params.builtinToolMode === 'mcp-only' ? [] : undefined,
     sessionStartSource: 'startup',
     experimentalRawEvents: false,
   });
@@ -335,6 +335,7 @@ export async function startCodexTurn(server: AppServer, params: TurnParams): Pro
     model: params.model,
     effort: params.effort,
     cwd: params.cwd,
+    environments: params.builtinToolMode === 'mcp-only' ? [] : undefined,
   });
   if (resp.error) throw new Error(`turn/start failed: ${resp.error.message}`);
   const result = resp.result as { turn?: { id?: string } } | undefined;
