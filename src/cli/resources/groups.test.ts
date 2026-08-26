@@ -328,23 +328,28 @@ describe('groups config web-search mode (host-only)', () => {
       {
         id: 'web-1',
         command: 'groups-config-update',
-        args: { id: GID, 'web-search-mode': 'disabled' },
+        args: { id: GID, 'web-search-mode': 'disabled', 'response-delivery-mode': 'terminal' },
       },
       { caller: 'host' },
     );
     expect(disable.ok).toBe(true);
     expect((await getContainerConfig(GID))!.web_search_mode).toBe('disabled');
+    expect((await getContainerConfig(GID))!.response_delivery_mode).toBe('terminal');
+    if (disable.ok) {
+      expect((disable.data as Record<string, unknown>).response_delivery_mode).toBe('terminal');
+    }
 
     const restore = await dispatch(
       {
         id: 'web-2',
         command: 'groups-config-update',
-        args: { id: GID, 'web-search-mode': 'default' },
+        args: { id: GID, 'web-search-mode': 'default', 'response-delivery-mode': 'default' },
       },
       { caller: 'host' },
     );
     expect(restore.ok).toBe(true);
     expect((await getContainerConfig(GID))!.web_search_mode).toBeNull();
+    expect((await getContainerConfig(GID))!.response_delivery_mode).toBeNull();
   });
 
   it('rejects an unknown web-search mode', async () => {

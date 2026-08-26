@@ -69,6 +69,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     cli_scope: row.cli_scope,
     timezone: row.timezone,
     web_search_mode: row.web_search_mode ?? null,
+    response_delivery_mode: row.response_delivery_mode ?? null,
     updated_at: row.updated_at,
   };
 }
