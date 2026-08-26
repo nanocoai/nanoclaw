@@ -53,7 +53,15 @@ const headless =
     vals[name];
 const recordingExec = () => {
   const cmds: string[] = [];
-  return { cmds, exec: (c: string) => void cmds.push(c) };
+  const calls: Array<{ command: string; args: string[] }> = [];
+  return {
+    cmds,
+    calls,
+    exec: (command: string, args: string[] = []) => {
+      cmds.push(command);
+      calls.push({ command, args });
+    },
+  };
 };
 
 beforeEach(() => {
@@ -409,14 +417,16 @@ describe('nc:run variable substitution', () => {
   });
 
   it('interpolates a prompted {{var}} into run commands; var-free runs pass through unchanged', async () => {
-    const { cmds, exec } = recordingExec();
+    const { cmds, calls, exec } = recordingExec();
     await applySkill(rskill, rroot, { resolveInput: headless({ owner_email: 'you@example.com' }), exec });
-    expect(cmds).toContain(
-      'ncl messaging-groups create --channel-type resend --platform-id resend:you@example.com --is-group 0',
-    );
-    expect(cmds).toContain(
-      'ncl messaging-groups send --channel-type resend --platform-id resend:you@example.com --text "hello"',
-    );
+    expect(calls).toContainEqual({
+      command: 'ncl messaging-groups create --channel-type resend --platform-id resend:"${1}" --is-group 0',
+      args: ['you@example.com'],
+    });
+    expect(calls).toContainEqual({
+      command: 'ncl messaging-groups send --channel-type resend --platform-id resend:"${1}" --text "hello"',
+      args: ['you@example.com'],
+    });
     expect(cmds).toContain('pnpm run build');
   });
 
@@ -471,15 +481,18 @@ describe('nc:run capture', () => {
   });
 
   it('binds a command stdout (trimmed) into {{var}} and substitutes it downstream', async () => {
-    const cmds: string[] = [];
+    const calls: Array<{ command: string; args: string[] }> = [];
     // exec returns stdout for the resolve command (simulating `… | jq -r .channel.id`).
-    const exec = (c: string): string | void => {
-      cmds.push(c);
-      if (c.startsWith('resolve-dm')) return 'D0SLACK123\n';
+    const exec = (command: string, args: string[] = []): string | void => {
+      calls.push({ command, args });
+      if (command.startsWith('resolve-dm')) return 'D0SLACK123\n';
     };
     await applySkill(cskill, croot, { resolveInput: headless({ user_id: 'U999' }), exec });
-    expect(cmds).toContain('resolve-dm U999'); // resolved with the prompted id
-    expect(cmds).toContain('ncl messaging-groups create --channel-type slack --platform-id slack:D0SLACK123'); // captured value flowed downstream
+    expect(calls).toContainEqual({ command: 'resolve-dm "${1}"', args: ['U999'] });
+    expect(calls).toContainEqual({
+      command: 'ncl messaging-groups create --channel-type slack --platform-id slack:"${1}"',
+      args: ['D0SLACK123'],
+    });
   });
 
   it('lint accepts {{dm_channel}} as defined by the earlier capture', () => {
@@ -656,17 +669,20 @@ describe('programmatic apply via inputs', () => {
 
   it('runs the whole skill from inputs alone — no resolver, nothing deferred or bounced', async () => {
     writeFileSync(join(pskill, 'SKILL.md'), PROGRAMMATIC_SKILL);
-    const cmds: string[] = [];
-    const exec = (c: string): string | void => {
-      cmds.push(c);
-      if (c.startsWith('resolve-thing')) return 'T-42\n';
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const exec = (command: string, args: string[] = []): string | void => {
+      calls.push({ command, args });
+      if (command.startsWith('resolve-thing')) return 'T-42\n';
     };
     const res = await applySkill(pskill, proot, { inputs: { owner: 'ada' }, exec });
     expect(fullyApplied(res)).toBe(true);
     expect(res.deferred).toEqual([]);
     expect(res.agentTasks).toEqual([]);
-    expect(cmds).toContain('resolve-thing ada'); // prompt input flowed through
-    expect(cmds).toContain('ncl wire --owner ada --thing T-42'); // captured value flowed through
+    expect(calls).toContainEqual({ command: 'resolve-thing "${1}"', args: ['ada'] });
+    expect(calls).toContainEqual({
+      command: 'ncl wire --owner "${1}" --thing "${2}"',
+      args: ['ada', 'T-42'],
+    });
     expect(res.operatorMessages).toEqual(['Go create the thing, ada.']); // human step collected for relay
   });
 

@@ -37,10 +37,11 @@ async function run(inputs: Record<string, string>): Promise<Recorded> {
   const seq: Recorded['seq'] = [];
   const res = await applySkill(SKILL_DIR, root, {
     inputs,
-    exec: (cmd: string) => {
-      seq.push({ type: 'exec', text: cmd });
+    exec: (cmd: string, args: string[] = []) => {
+      const rendered = cmd.replace(/\$\{(\d+)\}/g, (_match, index: string) => args[Number(index) - 1] ?? '');
+      seq.push({ type: 'exec', text: rendered });
       if (/^(git|pnpm|bash)\b/.test(cmd) || cmd.startsWith('grep') || cmd.startsWith('touch')) return '';
-      return execFileSync('bash', ['-c', cmd], { cwd: root, encoding: 'utf-8' });
+      return execFileSync('bash', ['-c', cmd, 'nanoclaw-skill', ...args], { cwd: root, encoding: 'utf-8' });
     },
     execStream: async () => ({ ok: true, fields: { PHONE: BOT_PHONE } }),
     resolveRemote: () => 'origin',

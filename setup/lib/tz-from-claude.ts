@@ -17,11 +17,18 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { isValidTimezone } from '../../src/timezone.js';
+import { childEnvWithoutSetupSecrets } from './secret-file.js';
 import { fitToWidth, fmtDuration } from './theme.js';
+import type { SetupDriver } from './setup-driver.js';
 
-export function claudeCliAvailable(): boolean {
+const MAX_MACHINE_TIMEZONE_OUTPUT_BYTES = 64 * 1024;
+
+export function claudeCliAvailable(driver?: SetupDriver): boolean {
   try {
-    execSync('command -v claude', { stdio: 'ignore' });
+    execSync('command -v claude', {
+      stdio: 'ignore',
+      ...(driver?.mode === 'ndjson' ? { env: childEnvWithoutSetupSecrets() } : {}),
+    });
     return true;
   } catch {
     return false;
@@ -34,10 +41,19 @@ export function claudeCliAvailable(): boolean {
  * resolved zone string on success, or null if the CLI is missing, Claude
  * errored, or the reply wasn't a valid IANA zone.
  */
-export async function resolveTimezoneViaClaude(input: string): Promise<string | null> {
-  if (!claudeCliAvailable()) return null;
+export async function resolveTimezoneViaClaude(input: string, driver?: SetupDriver): Promise<string | null> {
+  if (!claudeCliAvailable(driver)) return null;
 
   const prompt = buildPrompt(input);
+
+  if (driver?.mode === 'ndjson') {
+    driver.progress('timezone-lookup', 'running', 'Looking up that timezone');
+    const reply = await queryClaude(prompt, driver);
+    driver.throwIfCancelled();
+    const resolved = reply ? extractTimezone(reply) : null;
+    driver.progress('timezone-lookup', resolved ? 'succeeded' : 'failed');
+    return resolved;
+  }
 
   const s = p.spinner();
   const start = Date.now();
@@ -58,7 +74,7 @@ export async function resolveTimezoneViaClaude(input: string): Promise<string | 
     s.stop(`${fitToWidth(`Interpreted as ${resolved}.`, suffix)}${k.dim(suffix)}`);
     return resolved;
   }
-  s.stop(`${fitToWidth("Couldn't interpret that as a timezone.", suffix)}${k.dim(suffix)}`, 1);
+  s.error(`${fitToWidth("Couldn't interpret that as a timezone.", suffix)}${k.dim(suffix)}`);
   return null;
 }
 
@@ -75,26 +91,69 @@ function buildPrompt(input: string): string {
   ].join('\n');
 }
 
-function queryClaude(prompt: string): Promise<string | null> {
+function queryClaude(prompt: string, driver?: SetupDriver): Promise<string | null> {
   return new Promise((resolve) => {
+    const machine = driver?.mode === 'ndjson';
     const child = spawn('claude', ['-p', '--output-format', 'text'], {
       stdio: ['pipe', 'pipe', 'pipe'],
+      ...(machine ? { detached: true, env: childEnvWithoutSetupSecrets() } : {}),
     });
     let stdout = '';
+    let outputBytes = 0;
     let settled = false;
     const settle = (value: string | null): void => {
       if (settled) return;
       settled = true;
+      driver?.cancellationSignal?.removeEventListener('abort', onAbort);
       resolve(value);
     };
+    const stopGroup = (): void => {
+      if (!machine || !child.pid) return;
+      const processGroupId = child.pid;
+      try {
+        process.kill(-processGroupId, 'SIGTERM');
+      } catch {
+        /* already gone */
+      }
+      setTimeout(() => {
+        try {
+          process.kill(-processGroupId, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }, 250);
+    };
+    const onAbort = (): void => {
+      stopGroup();
+      settle(null);
+    };
+    driver?.cancellationSignal?.addEventListener('abort', onAbort, { once: true });
+    if (driver?.cancellationSignal?.aborted) onAbort();
 
+    const accepts = (chunk: Buffer): boolean => {
+      if (settled) return false;
+      if (machine) {
+        outputBytes += chunk.byteLength;
+        if (outputBytes > MAX_MACHINE_TIMEZONE_OUTPUT_BYTES) {
+          stopGroup();
+          settle(null);
+          return false;
+        }
+      }
+      return true;
+    };
     child.stdout.on('data', (c: Buffer) => {
+      if (!accepts(c)) return;
       stdout += c.toString('utf-8');
+    });
+    child.stderr.on('data', (c: Buffer) => {
+      accepts(c);
     });
     child.on('close', (code) => {
       settle(code === 0 && stdout.trim() ? stdout : null);
     });
     child.on('error', () => settle(null));
+    child.stdin.on('error', () => settle(null));
 
     child.stdin.end(prompt);
   });

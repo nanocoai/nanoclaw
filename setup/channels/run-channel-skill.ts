@@ -27,6 +27,7 @@ import { BACK_TO_CHANNEL_SELECTION, backGate, type ChannelFlowResult } from '../
 import { askOperatorRole, type OperatorRole } from '../lib/role-prompt.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
 import { channelsRemote, hostExec, runSkill, type RunSkillOptions } from '../lib/skill-driver.js';
+import type { SetupDriver } from '../lib/setup-driver.js';
 import { clearTemplatePick } from '../templates.js';
 import { getChannelPreStep, getCompanionSkills } from './companions.js';
 
@@ -180,9 +181,18 @@ interface WireArgs {
   instance?: string;
 }
 
-export async function resolveAgentName(): Promise<string> {
+export async function resolveAgentName(driver?: SetupDriver): Promise<string> {
   const preset = process.env.NANOCLAW_AGENT_NAME?.trim();
   if (preset) return preset;
+  if (driver) {
+    const answer = await driver.prompt({
+      kind: 'text',
+      message: 'What should your assistant be called?',
+      placeholder: DEFAULT_AGENT_NAME,
+      default: DEFAULT_AGENT_NAME,
+    });
+    return String(answer).trim() || DEFAULT_AGENT_NAME;
+  }
   const answer = ensureAnswer(
     await p.text({
       message: 'What should your assistant be called?',
@@ -194,7 +204,7 @@ export async function resolveAgentName(): Promise<string> {
 }
 
 /** The shared wire: init-first-agent (group + owner role + cli_scope + wiring + /welcome). */
-async function initFirstAgent(args: WireArgs): Promise<boolean> {
+async function initFirstAgent(args: WireArgs, driver?: SetupDriver): Promise<boolean> {
   const res = await runQuietChild(
     'init-first-agent',
     'pnpm',
@@ -220,6 +230,7 @@ async function initFirstAgent(args: WireArgs): Promise<boolean> {
     ],
     { running: `Wiring ${args.agentName} to your ${args.channel} DMs…`, done: 'Agent wired.' },
     { extraFields: { CHANNEL: args.channel, AGENT_NAME: args.agentName, PLATFORM_ID: args.platformId } },
+    driver,
   );
   return res.ok;
 }
@@ -266,25 +277,27 @@ export async function runChannelSkill(
   // First-prompt back gate — the very first thing, before any side effect
   // (agent-name/role prompts, the skill run, the wire).
   // Opt-in via offerBack so headless callers + existing tests are unaffected.
-  if (overrides.offerBack) {
+  if (overrides.offerBack && overrides.driver?.mode !== 'ndjson') {
     const label = channel.charAt(0).toUpperCase() + channel.slice(1);
     const gate = await (overrides.backGate ?? backGate)(label);
     if (gate === BACK_TO_CHANNEL_SELECTION) return BACK_TO_CHANNEL_SELECTION;
   }
 
   const projectRoot = overrides.projectRoot ?? process.cwd();
-  const failWith = overrides.fail ?? fail;
+  const failWith =
+    overrides.fail ?? ((stepName, msg, hint, rawLogPath) => fail(stepName, msg, hint, rawLogPath, overrides.driver));
   // The agent name + role are wire inputs — in wireIfResolved mode, defer the
   // prompts past the skill run (only a fresh create resolves the wire inputs;
   // a drop-through re-run asks nothing).
   const askLater = overrides.wireIfResolved;
-  let agentName = askLater ? '' : (overrides.agentName ?? (await resolveAgentName()));
-  let role = askLater ? undefined : (overrides.role ?? (await askOperatorRole(channel)));
+  let agentName = askLater ? '' : (overrides.agentName ?? (await resolveAgentName(overrides.driver)));
+  let role = askLater ? undefined : (overrides.role ?? (await askOperatorRole(channel, overrides.driver)));
 
   // Channel-specific: install adapter, collect credentials, resolve the wire
   // inputs. The whole channel-specific procedure lives in the SKILL.md.
   const res = await runSkill(`.claude/skills/add-${channel}`, {
     projectRoot,
+    driver: overrides.driver,
     exec: overrides.exec,
     execStream: overrides.execStream,
     resolveInput: overrides.resolveInput,
@@ -309,14 +322,18 @@ export async function runChannelSkill(
     step: overrides.step ?? `${channel}-install`,
   });
   if (!fullyApplied(res)) {
-    if (res.deferred.length) p.log.warn(`Still needs: ${res.deferred.join(', ')}`);
+    if (res.deferred.length) {
+      const warning = `Still needs: ${res.deferred.join(', ')}`;
+      if (overrides.driver) overrides.driver.log('warn', warning);
+      else p.log.warn(warning);
+    }
     // A bounced reason can carry a full stderr dump (a Node stacktrace). The
     // terminal gets ONE line per bounce — the first line, which hostExec
     // composes as `exit <code>: <first stderr line>` — and the full text goes
     // to a raw step log, written only when there's actually more than one line
     // to keep (SSF-004; the reference prose is deliberately not dumped either).
     let rawLog: string | undefined;
-    if (res.agentTasks.some((t) => t.reason.includes('\n'))) {
+    if (overrides.driver?.mode !== 'ndjson' && res.agentTasks.some((t) => t.reason.includes('\n'))) {
       rawLog = setupLog.stepRawLog(`${channel}-install-bounce`);
       writeFileSync(rawLog, res.agentTasks.map((t) => `## ${t.kind} (line ${t.line})\n${t.reason}\n`).join('\n'));
     }
@@ -326,7 +343,12 @@ export async function runChannelSkill(
         .map((l) => l.trim())
         .filter(Boolean);
       const more = lines.length > 1 ? ` (+${lines.length - 1} more lines in ${rawLog})` : '';
-      p.log.warn(`Needs an agent (${t.kind}): ${lines[0] ?? t.reason}${more}`);
+      const warning =
+        overrides.driver?.mode === 'ndjson'
+          ? `Needs an agent (${t.kind}); see the authored recovery below.`
+          : `Needs an agent (${t.kind}): ${lines[0] ?? t.reason}${more}`;
+      if (overrides.driver) overrides.driver.log('warn', warning);
+      else p.log.warn(warning);
     }
     // Surface the bounced step's OWN prose as the failure hint + Claude-handoff
     // context (fail() dims the hint and forwards it to offerClaudeOnFailure),
@@ -347,7 +369,11 @@ export async function runChannelSkill(
   await applyCompanionSkills(channel, projectRoot, overrides);
 
   // Identity confirmation captured by the skill (e.g. add-slack's auth.test).
-  if (res.vars.connected_as) p.log.success(`Connected to ${channel} as ${res.vars.connected_as}.`);
+  if (res.vars.connected_as) {
+    const message = `Connected to ${channel} as ${res.vars.connected_as}.`;
+    if (overrides.driver) overrides.driver.log('success', message);
+    else p.log.success(message);
+  }
 
   const ownerHandle = res.vars.owner_handle;
   const platformId = res.vars.platform_id;
@@ -365,13 +391,13 @@ export async function runChannelSkill(
     );
   }
   if (overrides.wireIfResolved) {
-    agentName = overrides.agentName ?? (await resolveAgentName());
-    role = overrides.role ?? (await askOperatorRole(channel));
+    agentName = overrides.agentName ?? (await resolveAgentName(overrides.driver));
+    role = overrides.role ?? (await askOperatorRole(channel, overrides.driver));
   }
 
   // Shared wire — the same procedure for every channel. role is defined here:
   // it's only undefined in an unresolved wireIfResolved run (returned above).
-  const wire = overrides.wire ?? initFirstAgent;
+  const wire = overrides.wire ?? ((args) => initFirstAgent(args, overrides.driver));
   // A skill-resolved engage pattern (WhatsApp shared-mode "@<name> only"
   // self-chat) rides along to init-first-agent's --engage-pattern; unset means
   // the wiring's own DM default applies.
@@ -419,14 +445,16 @@ export async function runChannelSkillWithPreStep(
   overrides: ChannelSkillOverrides = {},
 ): Promise<ChannelFlowResult> {
   const preStep = getChannelPreStep(channel);
-  if (!preStep) return runChannelSkill(channel, displayName, overrides);
+  // Pre-steps own terminal prompts of their own. Under the machine protocol every
+  // prompt must flow through the driver, so the manual skill path runs instead.
+  if (!preStep || overrides.driver?.mode === 'ndjson') return runChannelSkill(channel, displayName, overrides);
 
   if (overrides.offerBack) {
     const label = channel.charAt(0).toUpperCase() + channel.slice(1);
     const gate = await (overrides.backGate ?? backGate)(label);
     if (gate === BACK_TO_CHANNEL_SELECTION) return BACK_TO_CHANNEL_SELECTION;
   }
-  const agentName = overrides.agentName ?? (await resolveAgentName());
+  const agentName = overrides.agentName ?? (await resolveAgentName(overrides.driver));
   const preBound = await preStep(agentName);
   return runChannelSkill(channel, displayName, {
     ...overrides,

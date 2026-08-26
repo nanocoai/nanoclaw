@@ -47,6 +47,7 @@ import * as p from '@clack/prompts';
 import { installCredentialHelper } from './install-cred-helper.js';
 import { readEnvFile } from '../src/env.js';
 import { DEFAULT_BROKER_URL, readAgentImagePin, writeImageSource } from './lib/registry-state.js';
+import { DriverCancelled, DriverTerminalError, type SetupDriver } from './lib/setup-driver.js';
 import { commandExists, isHeadless, isWSL } from './platform.js';
 import { emitStatus } from './status.js';
 
@@ -79,6 +80,7 @@ const HOST_ID_FILE = path.join(CONFIG_DIR, 'host-id');
 const MAX_DEVICE_WAIT_MS = 900_000;
 const HTTP_TIMEOUT_MS = 20_000;
 const PROBE_TIMEOUT_MS = 8_000;
+const MAX_HTTP_RESPONSE_BYTES = 256 * 1024;
 /**
  * RFC 8628 §3.5 puts the `slow_down` step at 5 seconds. WorkOS documents a
  * smaller one; the spec's is compliant with both and costs a few seconds of
@@ -163,6 +165,11 @@ class LoginError extends Error {
 
 type LoginMethod = 'device' | 'code' | 'token';
 
+export type RegistryLoginDriverResult =
+  | { kind: 'ready'; method: 'device' | 'code' | 'existing' }
+  | { kind: 'skipped'; reason: 'declined' }
+  | { kind: 'failed'; reason: 'sign-in-failed' };
+
 interface Options {
   interactive: boolean;
   /** Sign in again even when a valid credential is already on disk. */
@@ -199,6 +206,11 @@ function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw new DriverCancelled(typeof signal.reason === 'string' ? signal.reason : undefined);
+}
+
 // ---------------------------------------------------------------------------
 // HTTP
 
@@ -213,23 +225,66 @@ interface HttpResult {
   body: Record<string, unknown> | undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+async function readBoundedResponseBody(res: Response): Promise<string> {
+  // A body-less response (204, HEAD, or a minimal test double) has nothing to
+  // bound; `text()` resolves to what little there is.
+  if (!res.body) return res.text();
+  const reader = res.body.getReader();
+  const chunks: Buffer[] = [];
+  let receivedBytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      receivedBytes += value.byteLength;
+      if (receivedBytes > MAX_HTTP_RESPONSE_BYTES) {
+        try {
+          await reader.cancel();
+        } catch {
+          // The size failure below is the useful diagnosis; cancellation is best-effort cleanup.
+        }
+        throw new LoginError(
+          'The authentication service returned more than 256 KiB of data.',
+          'Check the configured registry and identity-provider endpoints, then retry.',
+        );
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, receivedBytes).toString('utf8');
+}
+
 /**
- * Throws only on transport failure — an HTTP error status is data here, because
- * the device grant signals `authorization_pending` as a 400 and that is the
- * normal case, not an exception.
+ * Throws on transport failure or an oversized body. An HTTP error status is
+ * data here, because the device grant signals `authorization_pending` as a 400
+ * and that is the normal case, not an exception.
  */
-async function http(url: string, req: HttpRequest, timeoutMs: number): Promise<HttpResult> {
+async function http(
+  url: string,
+  req: HttpRequest,
+  timeoutMs: number,
+  cancellationSignal?: AbortSignal,
+): Promise<HttpResult> {
+  throwIfAborted(cancellationSignal);
   const res = await fetch(url, {
     method: req.method,
     headers: req.headers,
     body: req.body,
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: cancellationSignal
+      ? AbortSignal.any([AbortSignal.timeout(timeoutMs), cancellationSignal])
+      : AbortSignal.timeout(timeoutMs),
   });
-  const text = await res.text();
+  const text = await readBoundedResponseBody(res);
   let body: Record<string, unknown> | undefined;
   try {
     const parsed: unknown = text ? JSON.parse(text) : undefined;
-    body = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : undefined;
+    body = isRecord(parsed) ? parsed : undefined;
   } catch {
     // A proxy's HTML error page, most likely. The status still tells us enough.
   }
@@ -320,14 +375,14 @@ function readFileOrUndefined(file: string): string | undefined {
   }
 }
 
-function readAccountCredential(): AccountCredential | undefined {
+function readAccountCredential(report: (line: string) => void = console.log): AccountCredential | undefined {
   const raw = readFileOrUndefined(ACCOUNT_FILE);
   if (!raw) return undefined;
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    console.log(`Ignoring an unreadable credential at ${ACCOUNT_FILE}; signing in again.`);
+    report(`Ignoring an unreadable credential at ${ACCOUNT_FILE}; signing in again.`);
     return undefined;
   }
   if (!parsed || typeof parsed !== 'object') return undefined;
@@ -373,7 +428,7 @@ function resolveRegistryHost(fromBroker: string | undefined): string | undefined
  * worth trusting. Any cached password the helper stashed there is dropped: a
  * new token invalidates it.
  */
-function persistCredential(cred: AccountCredential): void {
+function persistCredential(cred: AccountCredential, report: (line: string) => void = console.log): void {
   const record: AccountCredential = { ...cred, registry: resolveRegistryHost(cred.registry) };
   writeSecretFile(ACCOUNT_FILE, `${JSON.stringify(record, null, 2)}\n`);
   ensureHostId();
@@ -382,9 +437,9 @@ function persistCredential(cred: AccountCredential): void {
     `${JSON.stringify({ version: 1, broker_url: record.api, registry: record.registry ?? '', token: record.token }, null, 2)}\n`,
   );
   if (!record.registry) {
-    console.log('   Note: no registry is pinned yet, so the image pull will have nothing to authenticate against.');
+    report('   Note: no registry is pinned yet, so the image pull will have nothing to authenticate against.');
   }
-  wireDockerCredentialHelper(record.registry);
+  wireDockerCredentialHelper(record.registry, report);
 
   // Record that this install pulls, HERE rather than at the call sites.
   //
@@ -411,16 +466,16 @@ function persistCredential(cred: AccountCredential): void {
  * succeeded is worth keeping even when we cannot write to a bin directory, and
  * `--step registry -- --status` reports the gap.
  */
-function wireDockerCredentialHelper(registry?: string): void {
+function wireDockerCredentialHelper(registry?: string, report: (line: string) => void = console.log): void {
   if (!registry) return;
   try {
     const result = installCredentialHelper({ registryHost: registry });
     if (!result.onPath) {
-      console.log(`   Note: ${path.dirname(result.helperPath)} is not on PATH, so docker will not find the helper.`);
+      report(`   Note: ${path.dirname(result.helperPath)} is not on PATH, so docker will not find the helper.`);
     }
   } catch (err) {
-    console.log(`   Note: couldn't point docker at the credential helper (${message(err)}).`);
-    console.log('   Run `pnpm exec tsx setup/install-cred-helper.ts` once that is fixed.');
+    report(`   Note: couldn't point docker at the credential helper (${message(err)}).`);
+    report('   Run `pnpm exec tsx setup/install-cred-helper.ts` once that is fixed.');
   }
 }
 
@@ -460,11 +515,12 @@ type ProbeState =
   | { state: 'unreachable'; reason: string };
 
 /** Is this token still good? Used for idempotence, so it must not be fatal. */
-async function probeSession(api: string, token: string): Promise<ProbeState> {
+async function probeSession(api: string, token: string, cancellationSignal?: AbortSignal): Promise<ProbeState> {
   let res: HttpResult;
   try {
-    res = await http(`${api}/v1/session/probe`, bearerGet(token), PROBE_TIMEOUT_MS);
+    res = await http(`${api}/v1/session/probe`, bearerGet(token), PROBE_TIMEOUT_MS, cancellationSignal);
   } catch (err) {
+    throwIfAborted(cancellationSignal);
     return { state: 'unreachable', reason: message(err) };
   }
   if (res.status === 401 || res.status === 403) return { state: 'unauthorized' };
@@ -499,11 +555,13 @@ function enrollWire(body: EnrollBody): Record<string, unknown> {
   return body.method === 'idp' ? { ...common, workos_token: body.access_token } : common;
 }
 
-async function enroll(api: string, body: EnrollBody): Promise<EnrollResult> {
+async function enroll(api: string, body: EnrollBody, cancellationSignal?: AbortSignal): Promise<EnrollResult> {
   let res: HttpResult;
   try {
-    res = await http(`${api}/v1/enroll`, json(enrollWire(body)), HTTP_TIMEOUT_MS);
+    res = await http(`${api}/v1/enroll`, json(enrollWire(body)), HTTP_TIMEOUT_MS, cancellationSignal);
   } catch (err) {
+    throwIfAborted(cancellationSignal);
+    if (err instanceof LoginError) throw err;
     throw new LoginError(
       `Couldn't reach the NanoClaw account service at ${api}: ${message(err)}`,
       `Check your network, then re-run. Point ${ENV.api} elsewhere if you run your own.`,
@@ -633,7 +691,7 @@ interface IdpConfig {
  */
 type BrokerProbe = { kind: 'idp'; config: IdpConfig } | { kind: 'no-idp' } | { kind: 'not-a-broker'; detail: string };
 
-async function probeBroker(api: string): Promise<BrokerProbe> {
+async function probeBroker(api: string, cancellationSignal?: AbortSignal): Promise<BrokerProbe> {
   const fromEnv = str(process.env[ENV.clientId]);
   if (fromEnv) {
     return {
@@ -652,8 +710,10 @@ async function probeBroker(api: string): Promise<BrokerProbe> {
       `${api}/v1/auth-config`,
       { method: 'GET', headers: { accept: 'application/json' } },
       PROBE_TIMEOUT_MS,
+      cancellationSignal,
     );
   } catch (err) {
+    throwIfAborted(cancellationSignal);
     return { kind: 'not-a-broker', detail: message(err) };
   }
 
@@ -694,11 +754,16 @@ interface DeviceAuthorization {
   intervalS: number;
 }
 
-async function requestDeviceAuthorization(cfg: IdpConfig): Promise<DeviceAuthorization> {
+async function requestDeviceAuthorization(
+  cfg: IdpConfig,
+  cancellationSignal?: AbortSignal,
+): Promise<DeviceAuthorization> {
   let res: HttpResult;
   try {
-    res = await http(cfg.deviceEndpoint, form({ client_id: cfg.clientId }), HTTP_TIMEOUT_MS);
+    res = await http(cfg.deviceEndpoint, form({ client_id: cfg.clientId }), HTTP_TIMEOUT_MS, cancellationSignal);
   } catch (err) {
+    throwIfAborted(cancellationSignal);
+    if (err instanceof LoginError) throw err;
     throw new LoginError(`Couldn't reach the sign-in provider: ${message(err)}`, 'Check your network and re-run.');
   }
 
@@ -785,16 +850,26 @@ function openInBrowser(url: string): void {
   }
 }
 
-async function pollForIdpToken(cfg: IdpConfig, device: DeviceAuthorization): Promise<string> {
+async function pollForIdpToken(
+  cfg: IdpConfig,
+  device: DeviceAuthorization,
+  cancellationSignal?: AbortSignal,
+): Promise<string> {
   let intervalMs = device.intervalS * 1000;
   const deadline = Date.now() + Math.min(device.expiresInS * 1000, MAX_DEVICE_WAIT_MS);
   let transportFailures = 0;
 
   for (;;) {
+    throwIfAborted(cancellationSignal);
     if (Date.now() >= deadline) {
       throw new LoginError('Timed out waiting for the sign-in to be approved.', 'Re-run setup to get a fresh code.');
     }
-    await sleep(intervalMs);
+    try {
+      await sleep(intervalMs, undefined, cancellationSignal ? { signal: cancellationSignal } : undefined);
+    } catch (err) {
+      throwIfAborted(cancellationSignal);
+      throw err;
+    }
 
     let res: HttpResult;
     try {
@@ -802,8 +877,11 @@ async function pollForIdpToken(cfg: IdpConfig, device: DeviceAuthorization): Pro
         cfg.tokenEndpoint,
         form({ grant_type: DEVICE_GRANT_TYPE, device_code: device.deviceCode, client_id: cfg.clientId }),
         HTTP_TIMEOUT_MS,
+        cancellationSignal,
       );
     } catch (err) {
+      throwIfAborted(cancellationSignal);
+      if (err instanceof LoginError) throw err;
       // A closed lid or a flaky hotspot must not cost the user their code, so a
       // transport failure is retried rather than surfaced.
       if (++transportFailures > MAX_POLL_TRANSPORT_FAILURES) {
@@ -850,14 +928,107 @@ async function pollForIdpToken(cfg: IdpConfig, device: DeviceAuthorization): Pro
   }
 }
 
-async function deviceLogin(api: string, cfg: IdpConfig): Promise<EnrollResult> {
-  const device = await requestDeviceAuthorization(cfg);
-  const headless = isHeadless();
-  printDeviceCard(device, headless);
-  if (!headless) openInBrowser(device.verificationUriComplete ?? device.verificationUri);
+type DevicePresentation = (device: DeviceAuthorization) => boolean | Promise<boolean>;
 
-  const idpToken = await pollForIdpToken(cfg, device);
-  return enroll(api, { method: 'idp', provider: 'workos', access_token: idpToken, client: clientRecord() });
+async function deviceLogin(
+  api: string,
+  cfg: IdpConfig,
+  present: DevicePresentation = (device) => {
+    const headless = isHeadless();
+    printDeviceCard(device, headless);
+    if (!headless) openInBrowser(device.verificationUriComplete ?? device.verificationUri);
+    return true;
+  },
+  cancellationSignal?: AbortSignal,
+): Promise<{ kind: 'ready'; enrollment: EnrollResult } | { kind: 'skipped' }> {
+  const device = await requestDeviceAuthorization(cfg, cancellationSignal);
+  if (!(await present(device))) return { kind: 'skipped' };
+  const idpToken = await pollForIdpToken(cfg, device, cancellationSignal);
+  const enrollment = await enroll(
+    api,
+    { method: 'idp', provider: 'workos', access_token: idpToken, client: clientRecord() },
+    cancellationSignal,
+  );
+  return { kind: 'ready', enrollment };
+}
+
+function httpsUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'https:') return url.href;
+  } catch {
+    // Rejected below with a fixed message so untrusted URL text never reaches output.
+  }
+  throw new LoginError('The sign-in provider returned an unsafe verification URL.');
+}
+
+async function presentDeviceAuthorization(driver: SetupDriver, device: DeviceAuthorization): Promise<boolean> {
+  driver.throwIfCancelled();
+  const verificationUrl = httpsUrl(device.verificationUri);
+  const displayUrl = httpsUrl(device.verificationUriComplete ?? device.verificationUri);
+  driver.display({
+    id: 'registry-verification-url',
+    kind: 'url',
+    url: displayUrl,
+    label: 'NanoClaw sign-in URL',
+    sensitive: true,
+  });
+  driver.display({
+    id: 'registry-user-code',
+    kind: 'code',
+    content: device.userCode,
+    label: 'Verification code',
+    sensitive: true,
+  });
+  const action = await driver.externalAction(
+    {
+      id: 'registry-open-browser',
+      kind: 'openURL',
+      title: 'Open NanoClaw sign-in',
+      // The complete URL embeds the code. Keep it in the sensitive display;
+      // the action uses the provider's code-free verification page.
+      url: verificationUrl,
+    },
+    () => true,
+  );
+  if (action === 'attempted' && driver.mode === 'terminal' && !isHeadless()) {
+    openInBrowser(displayUrl);
+  }
+  if (action !== 'declined') {
+    driver.progress('registry-login', 'running', 'Waiting for browser approval');
+  }
+  return action !== 'declined';
+}
+
+type StoredCredentialResult =
+  | { kind: 'none' | 'invalid' }
+  | { kind: 'different'; api: string }
+  | { kind: 'ready'; credential: AccountCredential; verified: true }
+  | { kind: 'ready'; credential: AccountCredential; verified: false; reason: string };
+
+async function resolveStoredCredential(
+  api: string,
+  force: boolean,
+  cancellationSignal?: AbortSignal,
+  report: (line: string) => void = console.log,
+): Promise<StoredCredentialResult> {
+  const existing = readAccountCredential(report);
+  if (!existing || force) return { kind: 'none' };
+  if (existing.api !== api) return { kind: 'different', api: existing.api };
+
+  const probe = await probeSession(existing.api, existing.token, cancellationSignal);
+  if (probe.state === 'unauthorized') return { kind: 'invalid' };
+  if (probe.state === 'unreachable') {
+    return { kind: 'ready', credential: existing, verified: false, reason: probe.reason };
+  }
+  const refreshed: AccountCredential = {
+    ...existing,
+    email: probe.email ?? existing.email,
+    registry: probe.registry ?? existing.registry,
+    entitlements: probe.entitlements,
+  };
+  persistCredential(refreshed, report);
+  return { kind: 'ready', credential: refreshed, verified: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -1012,6 +1183,37 @@ async function maybeAskEmailConsent(api: string, cred: AccountCredential, curren
   if (optIn) p.log.success("You're on the list.");
 }
 
+async function maybeAskEmailConsentWithDriver(
+  api: string,
+  cred: AccountCredential,
+  current: boolean | null,
+  driver: SetupDriver,
+): Promise<void> {
+  if (current !== null) return;
+  driver.note(CONSENT_LINES.join('\n'));
+  const answer = await driver.prompt({
+    id: 'registry-email-consent',
+    kind: 'confirm',
+    message: 'Email me security and project updates?',
+    default: true,
+  });
+  const optIn = answer === true;
+  try {
+    const res = await http(
+      `${api}/v1/account/preferences`,
+      json({ email_updates: optIn, consent_version: CONSENT_VERSION, source: 'cli' }, cred.token),
+      HTTP_TIMEOUT_MS,
+      driver.cancellationSignal,
+    );
+    if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    throwIfAborted(driver.cancellationSignal);
+    if (optIn) driver.log('warn', "Couldn't record the email preference. Sign in again to retry.");
+    return;
+  }
+  if (optIn) driver.log('success', "You're on the list.");
+}
+
 function reportSuccess(cred: AccountCredential, method: LoginMethod): void {
   // The wizard reports the outcome itself, in its own voice, immediately after
   // we exit. Saying it here too gives the user the same fact twice in two
@@ -1038,6 +1240,86 @@ function reportSkipped(reason: string, detail?: string): void {
   emitLoginStatus({ STATUS: 'skipped', REASON: reason });
 }
 
+function finishDriverLogin(driver: SetupDriver, result: RegistryLoginDriverResult): RegistryLoginDriverResult {
+  driver.progress('registry-login', result.kind === 'ready' || result.kind === 'skipped' ? 'succeeded' : 'failed');
+  return result;
+}
+
+/** Registry authentication rendered by either setup driver. */
+export async function runRegistryLoginWithDriver(
+  driver: SetupDriver,
+  options: { force?: boolean; api?: string } = {},
+): Promise<RegistryLoginDriverResult> {
+  const api = resolveApiBase(options.api);
+  const report = (line: string): void => driver.log('info', line.trim());
+
+  try {
+    driver.throwIfCancelled();
+    driver.progress('registry-login', 'running', 'Authenticating with NanoClaw');
+    const stored = await resolveStoredCredential(api, options.force ?? false, driver.cancellationSignal, report);
+    if (stored.kind === 'ready') return finishDriverLogin(driver, { kind: 'ready', method: 'existing' });
+
+    const broker = await probeBroker(api, driver.cancellationSignal);
+    if (broker.kind === 'not-a-broker') {
+      return finishDriverLogin(driver, { kind: 'failed', reason: 'sign-in-failed' });
+    }
+
+    if (broker.kind === 'no-idp') driver.note('Browser authentication is not configured for this registry.');
+    const code = await driver.prompt({
+      id: 'registry-enrollment-code',
+      kind: 'secret',
+      message:
+        broker.kind === 'no-idp'
+          ? 'Enrollment code (leave blank to build locally)'
+          : 'Enrollment code (optional, leave blank to sign in with your browser)',
+      sensitive: true,
+      validation: { maxLength: 4096 },
+    });
+
+    let enrollment: EnrollResult;
+    let loginMethod: 'device' | 'code';
+    if (typeof code === 'string' && code.length > 0) {
+      enrollment = await enroll(api, { method: 'code', code, client: clientRecord() }, driver.cancellationSignal);
+      loginMethod = 'code';
+    } else if (broker.kind === 'no-idp') {
+      return finishDriverLogin(driver, { kind: 'skipped', reason: 'declined' });
+    } else {
+      let displayed = false;
+      let deviceResult: Awaited<ReturnType<typeof deviceLogin>>;
+      try {
+        deviceResult = await deviceLogin(
+          api,
+          broker.config,
+          async (device) => {
+            displayed = true;
+            return presentDeviceAuthorization(driver, device);
+          },
+          driver.cancellationSignal,
+        );
+      } finally {
+        if (displayed) {
+          driver.clearDisplay('registry-verification-url');
+          driver.clearDisplay('registry-user-code');
+        }
+      }
+      if (deviceResult.kind === 'skipped') {
+        return finishDriverLogin(driver, { kind: 'skipped', reason: 'declined' });
+      }
+      enrollment = deviceResult.enrollment;
+      loginMethod = 'device';
+    }
+
+    driver.throwIfCancelled();
+    persistCredential(enrollment.credential, report);
+    await maybeAskEmailConsentWithDriver(api, enrollment.credential, enrollment.emailUpdates, driver);
+    return finishDriverLogin(driver, { kind: 'ready', method: loginMethod });
+  } catch (err) {
+    if (err instanceof DriverCancelled || err instanceof DriverTerminalError) throw err;
+    throwIfAborted(driver.cancellationSignal);
+    return finishDriverLogin(driver, { kind: 'failed', reason: 'sign-in-failed' });
+  }
+}
+
 export async function run(argv: string[]): Promise<void> {
   const opts = parseArgs(argv);
   // Only a non-interactive caller can be parsing us. See `emitLoginStatus`.
@@ -1048,57 +1330,48 @@ export async function run(argv: string[]): Promise<void> {
   // through a browser dance it already completed. A credential for a different
   // service is not that — tokens are meaningless across brokers, so retargeting
   // has to mean signing in again rather than probing the old one.
-  const existing = readAccountCredential();
-  if (existing && !opts.force && existing.api !== api) {
-    console.log(`The stored sign-in is for ${existing.api}; signing in to ${api} instead.`);
-  } else if (existing && !opts.force) {
-    const probe = await probeSession(existing.api, existing.token);
-    if (probe.state === 'ok') {
-      const refreshed: AccountCredential = {
-        ...existing,
-        email: probe.email ?? existing.email,
-        registry: probe.registry ?? existing.registry,
-        entitlements: probe.entitlements,
-      };
-      persistCredential(refreshed);
-      console.log(`Already authenticated as ${refreshed.email ?? refreshed.account_id}.`);
+  const stored = await resolveStoredCredential(api, opts.force);
+  if (stored.kind === 'different') {
+    console.log(`The stored sign-in is for ${stored.api}; signing in to ${api} instead.`);
+  } else if (stored.kind === 'ready') {
+    if (stored.verified) {
+      console.log(`Already authenticated as ${stored.credential.email ?? stored.credential.account_id}.`);
       emitLoginStatus({
         STATUS: 'skipped',
         REASON: 'already-signed-in',
-        ACCOUNT: refreshed.account_id,
-        EMAIL: refreshed.email ?? '',
-        ENTITLEMENTS: refreshed.entitlements.join(','),
+        ACCOUNT: stored.credential.account_id,
+        EMAIL: stored.credential.email ?? '',
+        ENTITLEMENTS: stored.credential.entitlements.join(','),
       });
       return;
     }
-    if (probe.state === 'unreachable') {
-      // `unreachable` is broader than "offline": probeSession reports it for
-      // every status that is not 200/401/403, so a gateway 404, a proxy error
-      // and a credential the service no longer knows all land here. Keeping
-      // the credential is therefore a guess, and which way to guess depends
-      // on what the caller does next.
-      //
-      // It is also the only outcome a stale credential can reach without
-      // being caught: the `existing.api !== api` check above cannot fire on
-      // a record written before that field existed, because
-      // `readAccountCredential` fills the gap with the current target.
-      if (opts.requireVerified) {
-        reportSkipped(
-          'unverified',
-          `Couldn't reach the account service (${probe.reason}); the stored sign-in could not be checked.`,
-        );
-        return;
-      }
-      // Offline is not a reason to discard a working credential — the pull that
-      // needs it may well be served from the local image cache anyway.
-      console.log(`Couldn't reach the account service (${probe.reason}); keeping the stored sign-in.`);
-      emitLoginStatus({
-        STATUS: 'skipped',
-        REASON: 'already-signed-in-unverified',
-        ACCOUNT: existing.account_id,
-      });
+    // `unreachable` is broader than "offline": probeSession reports it for
+    // every status that is not 200/401/403, so a gateway 404, a proxy error
+    // and a credential the service no longer knows all land here. Keeping
+    // the credential is therefore a guess, and which way to guess depends
+    // on what the caller does next.
+    //
+    // It is also the only outcome a stale credential can reach without
+    // being caught: the `different` check above cannot fire on a record
+    // written before the api field existed, because `readAccountCredential`
+    // fills the gap with the current target.
+    if (opts.requireVerified) {
+      reportSkipped(
+        'unverified',
+        `Couldn't reach the account service (${stored.reason}); the stored sign-in could not be checked.`,
+      );
       return;
     }
+    // Offline is not a reason to discard a working credential. The pull that
+    // needs it may well be served from the local image cache anyway.
+    console.log(`Couldn't reach the account service (${stored.reason}); keeping the stored sign-in.`);
+    emitLoginStatus({
+      STATUS: 'skipped',
+      REASON: 'already-signed-in-unverified',
+      ACCOUNT: stored.credential.account_id,
+    });
+    return;
+  } else if (stored.kind === 'invalid') {
     console.log('The stored NanoClaw sign-in is no longer valid — signing in again.');
   }
 
@@ -1182,9 +1455,14 @@ export async function run(argv: string[]): Promise<void> {
     reportSkipped('declined');
     return;
   }
-  const { credential: cred, emailUpdates } = typed
-    ? await enroll(api, { method: 'code', code: typed, client: clientRecord() })
+  const result = typed
+    ? { kind: 'ready' as const, enrollment: await enroll(api, { method: 'code', code: typed, client: clientRecord() }) }
     : await deviceLogin(api, idp);
+  if (result.kind === 'skipped') {
+    reportSkipped('declined');
+    return;
+  }
+  const { credential: cred, emailUpdates } = result.enrollment;
   persistCredential(cred);
 
   reportSuccess(cred, typed ? 'code' : 'device');

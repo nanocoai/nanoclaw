@@ -23,6 +23,9 @@ vi.mock('../lib/bright-select.js', async (importActual) => {
 
 afterEach(() => delete process.env.NANOCLAW_TEMPLATE_AGENT_ID);
 
+const renderedCommand = (command: string, args: string[] = []): string =>
+  command.replace(/\$\{(\d+)\}/g, (_match, index: string) => args[Number(index) - 1] ?? '');
+
 // Drives the real add-slack skill through the adapter with every side effect
 // injected (no real ncl/git/clack/init-first-agent): confirms it runs the skill
 // (install + creds + resolve), reads the resolved owner_handle + platform_id from
@@ -37,7 +40,8 @@ describe('runChannelSkill adapter (Option A)', () => {
     writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
 
     const cmds: string[] = [];
-    const exec = (c: string): string | void => {
+    const exec = (command: string, args: string[] = []): string | void => {
+      const c = renderedCommand(command, args);
       cmds.push(c);
       if (c.includes('auth.test')) return '@bot in Acme\n'; // identity capture
       // the resolve run: conversations.open piped through jq → "slack:<channel>"
@@ -109,7 +113,8 @@ describe('runChannelSkill adapter (Option A)', () => {
 
     await runChannelSkill('teams', 'Acme Corp', {
       projectRoot: root,
-      exec: (c) => {
+      exec: (command, args) => {
+        const c = renderedCommand(command, args);
         log.push(`exec:${c}`);
         if (c.includes('TEAMS_APP_ID=.')) return 'yes'; // the have_creds probe
       },
@@ -206,7 +211,8 @@ describe('runChannelSkill adapter (Option A)', () => {
 
     const res = await runSkill('.claude/skills/add-teams', {
       projectRoot: root,
-      exec: (c) => {
+      exec: (command, args) => {
+        const c = renderedCommand(command, args);
         log.push(`exec:${c}`);
         if (c.includes('TEAMS_APP_ID=.')) return 'no'; // the have_creds probe: nothing configured yet
         if (c.includes(' app create ')) {
@@ -268,7 +274,8 @@ describe('runChannelSkill adapter (Option A)', () => {
     expect(
       log.some(
         (c) =>
-          c.includes(' app update tapp-123') &&
+          c.includes(' app update ') &&
+          c.includes('tapp-123') &&
           c.includes('--color-icon setup/assets/teams/color.png') &&
           c.includes('--outline-icon setup/assets/teams/outline.png'),
       ),
@@ -319,7 +326,8 @@ describe('runChannelSkill adapter (Option A)', () => {
     const log: string[] = [];
     const res = await runSkill('.claude/skills/add-teams', {
       projectRoot: root,
-      exec: (c) => {
+      exec: (command, args) => {
+        const c = renderedCommand(command, args);
         log.push(`exec:${c}`);
         if (c.includes('TEAMS_APP_ID=.')) return 'no';
         if (c.includes(' app create ')) {
@@ -378,7 +386,8 @@ describe('runChannelSkill adapter (Option A)', () => {
     const log: string[] = [];
     const res = await runSkill('.claude/skills/add-teams', {
       projectRoot: root,
-      exec: (c) => {
+      exec: (command, args) => {
+        const c = renderedCommand(command, args);
         log.push(`exec:${c}`);
         if (c.includes('TEAMS_APP_ID=.')) return 'no'; // probe first — it also contains "echo yes"
         if (c.trim() === 'echo yes') return 'yes'; // the logged-in-account rebind

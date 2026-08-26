@@ -59,7 +59,15 @@ interface IntEntry extends BaseEntry {
 
 export type Entry = StringEntry | EnumEntry | BoolEntry | IntEntry;
 
-const httpUrl = (v: string): string | undefined => (/^https?:\/\/\S+/.test(v) ? undefined : 'Must be http(s)://…');
+export function validateHttpUrl(value: string): string | undefined {
+  if (/[\u0000-\u0020\u007f]/.test(value)) return 'Must not contain whitespace or control characters';
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && url.hostname ? undefined : 'Must be http(s)://…';
+  } catch {
+    return 'Must be http(s)://…';
+  }
+}
 
 export const CONFIG: Entry[] = [
   {
@@ -71,7 +79,7 @@ export const CONFIG: Entry[] = [
     type: 'url',
     default: 'https://api.onecli.sh',
     placeholder: 'https://api.onecli.sh',
-    validate: httpUrl,
+    validate: validateHttpUrl,
   },
   {
     key: 'onecliApiToken',
@@ -92,7 +100,7 @@ export const CONFIG: Entry[] = [
     group: 'Anthropic',
     type: 'url',
     placeholder: 'https://api.anthropic.com',
-    validate: httpUrl,
+    validate: validateHttpUrl,
   },
   {
     key: 'anthropicAuthToken',
