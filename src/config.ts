@@ -11,6 +11,7 @@ const envConfig = readEnvFile([
   'ASSISTANT_HAS_OWN_NUMBER',
   'ONECLI_URL',
   'ONECLI_API_KEY',
+  'ONECLI_SANDBOX_NETWORK',
   'TZ',
   'DEFAULT_AGENT_PROVIDER',
   'CONTAINER_CPU_LIMIT',
@@ -76,6 +77,11 @@ export const INSTALL_SLUG = getInstallSlug(PROJECT_ROOT);
 export const CONTAINER_INSTALL_LABEL = `nanoclaw-install=${INSTALL_SLUG}`;
 export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
 export const ONECLI_API_KEY = process.env.ONECLI_API_KEY || envConfig.ONECLI_API_KEY;
+// Docker network exposed by a local OneCLI install. OneCLI defaults to this
+// name; operators who override RUNNER_SANDBOX_NETWORK in OneCLI should mirror
+// that value here so NanoClaw sessions join the same network.
+export const ONECLI_SANDBOX_NETWORK =
+  process.env.ONECLI_SANDBOX_NETWORK || envConfig.ONECLI_SANDBOX_NETWORK || 'onecli-sandboxes';
 // Per-container resource caps, passed through to `docker run`. Default empty =
 // no flag added = today's unbounded behavior (don't OOM existing OSS workloads).
 // Operators opt in: CONTAINER_CPU_LIMIT=2, CONTAINER_MEMORY_LIMIT=8g.

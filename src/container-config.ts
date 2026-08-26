@@ -252,6 +252,14 @@ export interface ContainerConfig {
   timezone?: string;
   /** Session isolation tier for the group's containers; absent = the composer's default ('container'). */
   runtimeTier?: 'container' | 'vm';
+  /** Provider-neutral policy; absent/default preserves provider-native behavior. */
+  webSearchMode?: 'disabled';
+}
+
+function parseWebSearchMode(raw: string | null | undefined, groupName: string): 'disabled' | undefined {
+  if (raw == null || raw === 'default') return undefined;
+  if (raw === 'disabled') return raw;
+  throw new Error(`agent group "${groupName}" has invalid web_search_mode "${raw}" — expected "default" or "disabled"`);
 }
 
 /**
@@ -372,6 +380,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     effort: row.effort ?? undefined,
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
     runtimeTier: parseRuntimeTier(row.runtime_tier, group.name),
+    webSearchMode: parseWebSearchMode(row.web_search_mode, group.name),
   };
 }
 

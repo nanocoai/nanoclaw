@@ -68,6 +68,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     additional_mounts: JSON.parse(row.additional_mounts),
     cli_scope: row.cli_scope,
     timezone: row.timezone,
+    web_search_mode: row.web_search_mode ?? null,
     updated_at: row.updated_at,
   };
 }
@@ -371,7 +372,8 @@ registerResource({
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
         'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
-        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
+        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart), ' +
+        '--web-search-mode (default preserves provider behavior; disabled removes provider-native web search).',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -389,6 +391,7 @@ registerResource({
             | 'max_messages_per_prompt'
             | 'cli_scope'
             | 'timezone'
+            | 'web_search_mode'
           >
         > = {};
         if (args.provider !== undefined) updates.provider = args.provider as string;
@@ -396,6 +399,13 @@ registerResource({
         if (timezone !== undefined) updates.timezone = timezone;
         if (args.model !== undefined) updates.model = args.model as string;
         if (args.effort !== undefined) updates.effort = args.effort as string;
+        if (args.web_search_mode !== undefined || args['web-search-mode'] !== undefined) {
+          const mode = String(args.web_search_mode ?? args['web-search-mode']);
+          if (mode !== 'default' && mode !== 'disabled') {
+            throw new Error('--web-search-mode must be one of: default, disabled');
+          }
+          updates.web_search_mode = mode === 'default' ? null : mode;
+        }
         if (args.image_tag !== undefined) updates.image_tag = args.image_tag as string;
         if (args.assistant_name !== undefined) updates.assistant_name = args.assistant_name as string;
         if (args.max_messages_per_prompt !== undefined)
@@ -410,7 +420,7 @@ registerResource({
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone, --web-search-mode',
           );
         }
 

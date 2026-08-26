@@ -90,6 +90,19 @@ describe('resolveGroupTimezone', () => {
     );
     expect(configFromDb({ ...row, runtime_tier: null }, GROUP).runtimeTier).toBeUndefined();
   });
+
+  it('preserves default provider web search and materializes an explicit disable', async () => {
+    const row = (await getContainerConfig(GROUP.id))!;
+    expect(configFromDb(row, GROUP).webSearchMode).toBeUndefined();
+
+    await updateContainerConfigScalars(GROUP.id, { web_search_mode: 'disabled' });
+    expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).webSearchMode).toBe('disabled');
+
+    await updateContainerConfigScalars(GROUP.id, { web_search_mode: null });
+    expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).webSearchMode).toBeUndefined();
+
+    expect(() => configFromDb({ ...row, web_search_mode: 'live' }, GROUP)).toThrow(/invalid web_search_mode "live"/);
+  });
 });
 
 describe('parseMcpServerConfig', () => {
