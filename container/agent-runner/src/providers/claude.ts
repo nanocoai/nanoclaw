@@ -137,6 +137,26 @@ function mcpAllowPattern(serverName: string): string {
   return `mcp__${serverName.replace(/[^a-zA-Z0-9_-]/g, '_')}__*`;
 }
 
+export function buildClaudeToolPolicy(mcpServers: Record<string, McpServerConfig>): {
+  allowedTools: string[];
+  disallowedTools: string[];
+} {
+  return {
+    allowedTools: [
+      ...TOOL_ALLOWLIST,
+      ...Object.entries(mcpServers).flatMap(
+        ([name, server]) => server.enabledTools?.map((tool) => mcpToolName(name, tool)) ?? [mcpAllowPattern(name)],
+      ),
+    ],
+    disallowedTools: [
+      ...SDK_DISALLOWED_TOOLS,
+      ...Object.entries(mcpServers).flatMap(
+        ([name, server]) => server.disabledTools?.map((tool) => mcpToolName(name, tool)) ?? [],
+      ),
+    ],
+  };
+}
+
 interface SDKUserMessage {
   type: 'user';
   message: { role: 'user'; content: string };
@@ -557,6 +577,7 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
 
+    const toolPolicy = buildClaudeToolPolicy(this.mcpServers);
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {
@@ -567,18 +588,8 @@ export class ClaudeProvider implements AgentProvider {
         systemPrompt: instructions
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
           : undefined,
-        allowedTools: [
-          ...TOOL_ALLOWLIST,
-          ...Object.entries(this.mcpServers).flatMap(
-            ([name, server]) => server.enabledTools?.map((tool) => mcpToolName(name, tool)) ?? [mcpAllowPattern(name)],
-          ),
-        ],
-        disallowedTools: [
-          ...SDK_DISALLOWED_TOOLS,
-          ...Object.entries(this.mcpServers).flatMap(
-            ([name, server]) => server.disabledTools?.map((tool) => mcpToolName(name, tool)) ?? [],
-          ),
-        ],
+        allowedTools: toolPolicy.allowedTools,
+        disallowedTools: toolPolicy.disallowedTools,
         env: this.env,
         model: this.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any

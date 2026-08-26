@@ -95,7 +95,7 @@ async function main(): Promise<void> {
       command: 'bun',
       args: ['run', mcpServerPath],
       env: {},
-      ...(config.responseDeliveryMode === 'terminal'
+      ...(config.responseDeliveryMode === 'terminal' && !taskId
         ? { disabledTools: ['send_message', 'send_file', 'edit_message', 'add_reaction'] }
         : {}),
     },
