@@ -158,7 +158,14 @@ export function formatUsageTable(report: UsageReport): string {
 
 export function formatGroupTable(report: UsageGroupReport): string {
   const keyCol = report.by === 'agent' ? 'AGENT GROUP' : 'TASK';
-  if (!report.groups.length) return 'No usage recorded yet.';
+  const unit = report.by === 'agent' ? 'session' : 'turn';
+  if (!report.groups.length) {
+    // Every group unmeasured leaves nothing to tabulate, but "nothing recorded"
+    // is the wrong answer: turns ran, we just can't cost them.
+    return report.unmeasured > 0
+      ? `No usage recorded yet (${report.unmeasured} unmeasured ${unit}(s)).`
+      : 'No usage recorded yet.';
+  }
 
   const cols = [keyCol, 'SESSIONS', 'TURNS', 'IN', 'OUT', 'CACHE R', 'CACHE W', 'TOTAL', 'COST'];
   const cells = (key: string, r: Omit<UsageGroupRow, 'key'>) => [
@@ -179,10 +186,7 @@ export function formatGroupTable(report: UsageGroupReport): string {
     cells('TOTAL', report.totals),
   );
   if (report.unmeasured > 0) {
-    out.push(
-      '',
-      `${report.unmeasured} unmeasured ${report.by === 'agent' ? 'session' : 'turn'}(s) (not counted above).`,
-    );
+    out.push('', `${report.unmeasured} unmeasured ${unit}(s) (not counted above).`);
   }
   return out.join('\n');
 }

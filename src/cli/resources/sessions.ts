@@ -91,7 +91,11 @@ async function selectedSessions(
   args: Record<string, unknown>,
   ctx: CallerContext,
 ): Promise<{ id: string; group: string }[]> {
-  const sessionId = typeof args.session === 'string' ? args.session : undefined;
+  // `--session`, or the id a positional `ncl sessions usage <id>` lands in —
+  // widening to the whole fleet because the caller used the positional form
+  // answers a question nobody asked.
+  const named = typeof args.session === 'string' ? args.session : undefined;
+  const sessionId = named ?? (typeof args.id === 'string' ? args.id : undefined);
   if (sessionId) {
     const session = await getSession(sessionId);
     if (!session || (ctx.caller === 'agent' && session.agent_group_id !== ctx.agentGroupId)) {
@@ -441,7 +445,11 @@ registerResource({
           type: 'string',
           description: 'Agent group id (host callers; always your own group inside a container).',
         },
-        { name: 'session', type: 'string', description: 'Limit to one session id.' },
+        {
+          name: 'session',
+          type: 'string',
+          description: 'Limit to one session id. Also taken positionally: `ncl sessions usage <session-id>`.',
+        },
         {
           name: 'limit',
           type: 'number',
@@ -454,6 +462,7 @@ registerResource({
         'ncl sessions usage --by task',
         'ncl sessions usage --by prompt --limit 50',
         'ncl sessions usage --session sess-abc',
+        'ncl sessions usage sess-abc',
       ],
       handler: async (args, ctx) => usageReport(args, ctx),
       formatHuman: (data) => formatUsage(data as AnyUsageReport),

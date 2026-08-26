@@ -211,6 +211,28 @@ describe('sessions usage', () => {
     expect(resp.error.message).toContain('chat-3');
   });
 
+  it('takes a session id positionally, the way every other sessions verb does', async () => {
+    // `ncl sessions usage chat-2` arrives as a command with the id glued on.
+    // Read as nothing it silently widens the question to the whole fleet —
+    // an answer to something the caller did not ask.
+    seedUsage('ag-1', 'chat-1', { input_tokens: 100, output_tokens: 10, cost_usd: 0.01, turns: 1 });
+    seedUsage('ag-1', 'chat-2', { input_tokens: 200, output_tokens: 20, cost_usd: 0.02, turns: 2 });
+
+    const resp = await dispatch({ id: 'req-1', command: 'sessions-usage-chat-2', args: {} }, agentCtx());
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) return;
+    expect((resp.data as UsageReport).sessions.map((s) => s.session_id)).toEqual(['chat-2']);
+  });
+
+  it('refuses a positional session id from another group', async () => {
+    seedUsage('ag-2', 'chat-3', { input_tokens: 999, output_tokens: 999, cost_usd: 9.99, turns: 9 });
+
+    const resp = await dispatch({ id: 'req-1', command: 'sessions-usage-chat-3', args: {} }, agentCtx());
+    expect(resp.ok).toBe(false);
+    if (resp.ok) return;
+    expect(resp.error.message).toContain('chat-3');
+  });
+
   it('a host caller sees every group', async () => {
     seedUsage('ag-1', 'chat-1', { input_tokens: 100, output_tokens: 10, cost_usd: 0.01, turns: 1 });
     seedUsage('ag-2', 'chat-3', { input_tokens: 5, output_tokens: 5, cost_usd: 0.005, turns: 1 });
@@ -551,5 +573,17 @@ describe('sessions usage — per prompt, per agent, per task', () => {
     if (!tasks.ok) return;
     expect(tasks.human).toContain('daily-briefing-a25c');
     expect(tasks.human).toContain('TOTAL');
+  });
+
+  it('says turns ran unmeasured rather than claiming nothing has run', async () => {
+    // With no table to footnote, the count was dropped and the report read as
+    // "nothing here yet" — which is the opposite of what happened.
+    seedTurns('ag-1', 'chat-1', [{ task_series_id: 'daily-briefing-a25c' }, {}]);
+
+    const resp = await usage({ by: 'task' }, agentCtx());
+    expect(resp.ok).toBe(true);
+    if (!resp.ok) return;
+    expect(resp.human).toContain('2');
+    expect(resp.human).toContain('unmeasured');
   });
 });
