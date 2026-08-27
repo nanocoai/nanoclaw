@@ -19,6 +19,7 @@ import {
   type AssistantThreadStartedEvent,
   type ConcurrencyStrategy,
   type Message as ChatMessage,
+  type Attachment,
 } from 'chat';
 import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
@@ -419,6 +420,124 @@ export function splitForLimit(text: string, limit: number): string[] {
   return chunks;
 }
 
+/**
+ * Serialize inbound attachments, downloading their bytes so the host can stage
+ * them to the session inbox. Two adapter shapes exist:
+ *
+ *   - `fetchData()` — auth-aware fetch (Slack private URLs, etc.). Preferred.
+ *   - `url` only — a public CDN link with no fetchData (e.g. Discord). We fetch
+ *     it here; otherwise the entry reaches the host with no `data`, and
+ *     `extractAttachmentFiles` skips it (it only stages entries that carry
+ *     `data`), so the agent is told a file exists but can never read it.
+ *
+ * `url` is always preserved on the entry as a last-resort fallback when neither
+ * download path yields bytes. Both paths cap the bytes they inline (see
+ * `maxBytes`); oversized attachments stay metadata/url-only.
+ */
+/**
+ * Cap on inbound attachment bytes we download and inline (base64) into a
+ * prompt. Overridable via MAX_INBOUND_ATTACHMENT_BYTES; defaults to 10 MB.
+ * Anything larger is left as a url-only reference, so a large or repeated
+ * upload from anyone who can message the bot can't blow up the POST body or
+ * the prompt context.
+ */
+function defaultMaxInboundAttachmentBytes(): number {
+  const v = Number(process.env.MAX_INBOUND_ATTACHMENT_BYTES);
+  return Number.isFinite(v) && v > 0 ? v : 10 * 1024 * 1024;
+}
+
+export async function enrichAttachments(
+  attachments: Attachment[],
+  maxBytes: number = defaultMaxInboundAttachmentBytes(),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<Record<string, any>[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const enriched: Record<string, any>[] = [];
+  for (const att of attachments) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const entry: Record<string, any> = {
+      type: att.type,
+      name: att.name,
+      mimeType: att.mimeType,
+      size: att.size,
+      url: att.url,
+      width: (att as unknown as Record<string, unknown>).width,
+      height: (att as unknown as Record<string, unknown>).height,
+    };
+    if (att.fetchData) {
+      // Same bound as the url path: a fetchData adapter (Slack et al.) lets
+      // anyone who can message the bot attach files, so cap what we inline.
+      // No Content-Length here (no HTTP response), so the guards are the
+      // declared size precheck plus the actual downloaded byte length.
+      if (typeof att.size === 'number' && att.size > maxBytes) {
+        log.warn('Skipping oversized attachment (declared size)', {
+          type: att.type,
+          size: att.size,
+          maxBytes,
+        });
+      } else {
+        try {
+          const buffer = await att.fetchData();
+          if (buffer.length > maxBytes) {
+            log.warn('Skipping oversized attachment (downloaded bytes)', {
+              type: att.type,
+              bytes: buffer.length,
+              maxBytes,
+            });
+          } else {
+            entry.data = buffer.toString('base64');
+          }
+        } catch (err) {
+          log.warn('Failed to download attachment', { type: att.type, err });
+        }
+      }
+    } else if (att.url) {
+      // Discord (and other url-only adapters) let anyone who can message the
+      // bot attach files. Bound what we download + inline so a large or
+      // repeated upload can't blow up the POST body / prompt context. When we
+      // decline to stage the bytes, the url stays on the entry as a reference.
+      if (typeof att.size === 'number' && att.size > maxBytes) {
+        log.warn('Skipping oversized url attachment (declared size)', {
+          type: att.type,
+          url: att.url,
+          size: att.size,
+          maxBytes,
+        });
+      } else {
+        try {
+          const res = await fetch(att.url);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const declared = Number(res.headers.get('content-length'));
+          if (Number.isFinite(declared) && declared > maxBytes) {
+            log.warn('Skipping oversized url attachment (content-length)', {
+              type: att.type,
+              url: att.url,
+              contentLength: declared,
+              maxBytes,
+            });
+          } else {
+            const buffer = Buffer.from(await res.arrayBuffer());
+            if (buffer.length > maxBytes) {
+              log.warn('Skipping oversized url attachment (downloaded bytes)', {
+                type: att.type,
+                url: att.url,
+                bytes: buffer.length,
+                maxBytes,
+              });
+            } else {
+              entry.data = buffer.toString('base64');
+            }
+          }
+        } catch (err) {
+          log.warn('Failed to download attachment from url', { type: att.type, url: att.url, err });
+        }
+      }
+    }
+    enriched.push(entry);
+  }
+  return enriched;
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   // The instance name becomes a webhook route segment (the route regex is
@@ -453,28 +572,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
     // Download attachment data before serialization loses fetchData()
     if (message.attachments && message.attachments.length > 0) {
-      const enriched = [];
-      for (const att of message.attachments) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const entry: Record<string, any> = {
-          type: att.type,
-          name: att.name,
-          mimeType: att.mimeType,
-          size: att.size,
-          width: (att as unknown as Record<string, unknown>).width,
-          height: (att as unknown as Record<string, unknown>).height,
-        };
-        if (att.fetchData) {
-          try {
-            const buffer = await att.fetchData();
-            entry.data = buffer.toString('base64');
-          } catch (err) {
-            log.warn('Failed to download attachment', { type: att.type, err });
-          }
-        }
-        enriched.push(entry);
-      }
-      serialized.attachments = enriched;
+      serialized.attachments = await enrichAttachments(message.attachments);
     }
 
     // Extract reply context via platform-specific hook

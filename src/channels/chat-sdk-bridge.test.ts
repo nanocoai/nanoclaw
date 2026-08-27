@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
+import type { Adapter, AdapterPostableMessage, Attachment, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, enrichAttachments, splitForLimit } from './chat-sdk-bridge.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
@@ -486,5 +486,154 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(calls).toHaveLength(1);
     const msg = calls[0].message as { markdown?: string };
     expect(msg.markdown).toBe('plain hello');
+  });
+});
+
+describe('enrichAttachments', () => {
+  function makeAttachment(partial: Partial<Attachment>): Attachment {
+    return { type: 'file', ...partial } as Attachment;
+  }
+
+  it('downloads bytes from a url-only attachment (Discord case) and stages them as base64', async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(Buffer.from('hello from message.txt'), { status: 200 })) as typeof fetch;
+    try {
+      const [entry] = await enrichAttachments([
+        makeAttachment({ name: 'message.txt', mimeType: 'text/plain', url: 'https://cdn.discord/x.txt' }),
+      ]);
+      expect(entry.data).toBe(Buffer.from('hello from message.txt').toString('base64'));
+      expect(entry.url).toBe('https://cdn.discord/x.txt');
+      expect(entry.name).toBe('message.txt');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('prefers fetchData() over url when both are present', async () => {
+    const realFetch = globalThis.fetch;
+    let fetchCalled = false;
+    globalThis.fetch = (async () => {
+      fetchCalled = true;
+      return new Response(Buffer.from('from-url'), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const [entry] = await enrichAttachments([
+        makeAttachment({
+          name: 'a.png',
+          url: 'https://cdn/x.png',
+          fetchData: async () => Buffer.from('from-fetchData'),
+        }),
+      ]);
+      expect(entry.data).toBe(Buffer.from('from-fetchData').toString('base64'));
+      expect(fetchCalled).toBe(false);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('keeps url as a fallback and omits data when the url download fails', async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response('nope', { status: 404 })) as typeof fetch;
+    try {
+      const [entry] = await enrichAttachments([makeAttachment({ name: 'message.txt', url: 'https://cdn/gone.txt' })]);
+      expect(entry.data).toBeUndefined();
+      expect(entry.url).toBe('https://cdn/gone.txt');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('leaves an attachment with neither fetchData nor url as metadata-only', async () => {
+    const [entry] = await enrichAttachments([makeAttachment({ name: 'mystery', size: 10 })]);
+    expect(entry.data).toBeUndefined();
+    expect(entry.url).toBeUndefined();
+    expect(entry.name).toBe('mystery');
+  });
+
+  it('skips the url download entirely when the declared size exceeds the cap (keeps url, no bytes)', async () => {
+    const realFetch = globalThis.fetch;
+    let fetchCalled = false;
+    globalThis.fetch = (async () => {
+      fetchCalled = true;
+      return new Response(Buffer.from('should not be read'), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const [entry] = await enrichAttachments(
+        [makeAttachment({ name: 'big.png', size: 100, url: 'https://cdn/big.png' })],
+        8,
+      );
+      expect(fetchCalled).toBe(false);
+      expect(entry.data).toBeUndefined();
+      expect(entry.url).toBe('https://cdn/big.png');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('omits data when the downloaded url body exceeds the cap, even if size metadata is absent (keeps url)', async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(Buffer.from('far more than eight bytes'), { status: 200 })) as typeof fetch;
+    try {
+      const [entry] = await enrichAttachments(
+        [makeAttachment({ name: 'nosize.bin', url: 'https://cdn/nosize.bin' })],
+        8,
+      );
+      expect(entry.data).toBeUndefined();
+      expect(entry.url).toBe('https://cdn/nosize.bin');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('still stages url bytes that are within the cap', async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(Buffer.from('ok'), { status: 200 })) as typeof fetch;
+    try {
+      const [entry] = await enrichAttachments(
+        [makeAttachment({ name: 'small.txt', url: 'https://cdn/small.txt' })],
+        1024,
+      );
+      expect(entry.data).toBe(Buffer.from('ok').toString('base64'));
+      expect(entry.url).toBe('https://cdn/small.txt');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('skips fetchData() entirely when the declared size exceeds the cap', async () => {
+    let fetchDataCalled = false;
+    const [entry] = await enrichAttachments(
+      [
+        makeAttachment({
+          name: 'big.bin',
+          size: 100,
+          fetchData: async () => {
+            fetchDataCalled = true;
+            return Buffer.from('should not be read');
+          },
+        }),
+      ],
+      8,
+    );
+    expect(fetchDataCalled).toBe(false);
+    expect(entry.data).toBeUndefined();
+  });
+
+  it('omits data when the fetchData() buffer exceeds the cap (no reliable size ahead of time)', async () => {
+    const [entry] = await enrichAttachments(
+      [makeAttachment({ name: 'nosize.bin', fetchData: async () => Buffer.from('far more than eight bytes') })],
+      8,
+    );
+    expect(entry.data).toBeUndefined();
+  });
+
+  it('still stages fetchData() bytes that are within the cap', async () => {
+    const [entry] = await enrichAttachments(
+      [makeAttachment({ name: 'ok.bin', fetchData: async () => Buffer.from('ok') })],
+      1024,
+    );
+    expect(entry.data).toBe(Buffer.from('ok').toString('base64'));
   });
 });
