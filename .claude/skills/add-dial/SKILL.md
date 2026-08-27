@@ -82,14 +82,19 @@ lockfile for what is a single send — and the CLI ships in lockstep with the Di
 API, so a contract change arrives as a CLI release rather than breaking a
 request pinned in the adapter.
 
-### 5. Build and validate
+### 5. Build
 
 Build first: it guards the adapter's typed core calls and proves the dependency
-is installed. Then run the one integration test.
+is installed.
 
 ```nc:run effect:build
 pnpm run build
 ```
+
+### 6. Validate
+
+Then run the one integration test.
+
 ```nc:run effect:test
 pnpm exec vitest run src/channels/dial-registration.test.ts
 ```
@@ -100,6 +105,8 @@ SMS/voice is verified manually once the service runs.
 
 ## Sign in to Dial
 
+### Install the CLI
+
 Dial's CLI owns the account credential (an auth file it writes on sign-in), so
 the setup uses the `dial` CLI here. Ensure it's installed — this installs it if
 it's missing (for the full onboarding/auth reference, see the `dial-cli` skill or
@@ -108,6 +115,8 @@ it's missing (for the full onboarding/auth reference, see the `dial-cli` skill o
 ```nc:run effect:external
 command -v dial || curl -fsSL https://getdial.ai/install | bash
 ```
+
+### Identify this install
 
 Calls this setup makes to Dial identify the install. The `dial` CLI prepends
 `DIAL_USER_AGENT` to its own token, so the account's requests stay attributable
@@ -119,6 +128,8 @@ command below with it:
 ```nc:run capture:dial_ua validate:^nanoclaw/\S+$ effect:fetch
 node -p "'nanoclaw/'+(require('./package.json').version||'unknown')" 2>/dev/null || echo nanoclaw/unknown
 ```
+
+### Pin the CLI path
 
 Now pin the CLI's **absolute** path into `.env`. The adapter shells out to `dial`
 to register its inbound command target, and it runs inside the NanoClaw service,
@@ -136,11 +147,15 @@ command -v dial
 DIAL_CLI_PATH={{dial_cli_path}}
 ```
 
+### Check the sign-in
+
 Check whether you're already signed in:
 
 ```nc:run capture:signed_in=.auth.signedIn validate:^(true|false)$ effect:fetch
 DIAL_USER_AGENT={{dial_ua}} dial doctor --json
 ```
+
+### Skip the reuse question when signed out
 
 If you're **not** signed in, go straight to email verification — default the
 choice so the branch guard below stays single-valued:
@@ -148,6 +163,8 @@ choice so the branch guard below stays single-valued:
 ```nc:run capture:reuse_choice when:signed_in=false effect:external
 echo switch
 ```
+
+### Read the account
 
 If you **are** signed in, read which account (for the prompt below) and ask
 whether to reuse it or sign in as a different one (matches the old wizard's
@@ -163,12 +180,16 @@ You're already signed in to Dial as {{connected_email}}.
 Reuse this Dial account, or sign in as a different one? (reuse/switch)
 ```
 
+### Reuse the account
+
 **Reuse** — no verification needed; with no `--code` the command just (re)installs
 the NanoClaw agent skill:
 
 ```nc:run effect:external when:reuse_choice=reuse
 DIAL_USER_AGENT={{dial_ua}} dial auth verify-otp --agent nanoclaw
 ```
+
+### Send the code
 
 **Switch (or not signed in)** — verify an email with a one-time code. Collect the email:
 
@@ -182,6 +203,8 @@ Send the code (`--force` re-sends even if a prior code is pending):
 DIAL_USER_AGENT={{dial_ua}} dial auth login {{owner_email}} --force
 ```
 
+### Verify the code
+
 Collect the code (resolves inline, right after the send above):
 
 ```nc:prompt otp validate:^\d{6}$ when:reuse_choice=switch
@@ -194,6 +217,8 @@ Verify it and provision your number (this also installs the NanoClaw agent skill
 DIAL_USER_AGENT={{dial_ua}} dial auth verify-otp --code {{otp}} --agent nanoclaw
 ```
 
+### Confirm the line
+
 Confirm the account's number — this becomes the agent's public line (its
 `platform_id`):
 
@@ -204,6 +229,8 @@ DIAL_USER_AGENT={{dial_ua}} dial number list --json | jq -er '.numbers[0].number
 Your agent's Dial line is {{platform_id}}.
 ```
 
+### Set the inbound greeting
+
 Set the line's inbound behavior — the system prompt the AI uses on calls *into*
 this number. Verification no longer takes an instruction, so a fresh number
 starts on Dial's default greeting until this runs:
@@ -211,6 +238,8 @@ starts on Dial's default greeting until this runs:
 ```nc:run effect:external
 DIAL_USER_AGENT={{dial_ua}} dial number set {{platform_id}} --inbound-instruction "You are a friendly AI receptionist answering calls to this number. Greet the caller, ask how you can help, and take a clear message — their name, number, and reason for calling — if you cannot help directly."
 ```
+
+### Pin the default sender
 
 Make that line the CLI's default sender. Verification saves whichever number
 the account considers primary — the **oldest** one — while the line picked above
@@ -256,6 +285,8 @@ Open line: anyone who knows {{platform_id}} can text the agent and will get a re
 
 ## Restart
 
+### Restart the service
+
 Restart the service so it loads the Dial adapter, and wait for its CLI socket.
 The adapter must be live and polling before pairing — it's the thing that
 observes the code you text:
@@ -263,6 +294,8 @@ observes the code you text:
 ```nc:run effect:restart
 bash setup/lib/restart.sh
 ```
+
+### Start inbound delivery
 
 Wire inbound event delivery and the command target. Both are best-effort: a
 sandbox/CI without a user-service supervisor can't run the `listen` daemon, but
@@ -272,9 +305,16 @@ Troubleshooting), so these never fail the run:
 ```nc:run effect:external
 DIAL_USER_AGENT={{dial_ua}} dial listen install || true
 ```
+
+### Register the command target
+
+Point the daemon at the adapter's event handler (same best-effort rule):
+
 ```nc:run effect:external
 DIAL_USER_AGENT={{dial_ua}} dial local-target add cmd "$PWD/data/dial/handle-dial-event.sh" || true
 ```
+
+### Register the line (owner-only)
 
 Register the line, carrying the access choice from above onto its own row. One
 `platform_id` serves many correspondents, so it's a group (`--is-group 1`) and
@@ -284,6 +324,11 @@ existing row, and does NOT reset a policy you have since changed with `ncl`:
 ```nc:run effect:wire when:inbound_access=owner
 ncl messaging-groups create --channel-type dial --platform-id {{platform_id}} --is-group 1 --name "Dial {{platform_id}}" --unknown-sender-policy strict
 ```
+
+### Register the line (public)
+
+The same row, open to anyone who texts it:
+
 ```nc:run effect:wire when:inbound_access=public
 ncl messaging-groups create --channel-type dial --platform-id {{platform_id}} --is-group 1 --name "Dial {{platform_id}}" --unknown-sender-policy public
 ```
@@ -338,8 +383,28 @@ CLI and its skill in the agent image, and registers the account's key with
 OneCLI. It needs OneCLI; if that isn't set up it says so, and the channel
 still works without the tool:
 
-```nc:run effect:step when:install_tool=yes
-pnpm exec tsx setup/lib/skill-driver.ts .claude/skills/add-dial-tool
+The tool's own document asks which agents may use Dial. Ask it here instead: a
+nested step's stdout is a pipe, so clack cannot echo what is typed into it, and
+this skill owns the operator's terminal. List the groups, then collect the answer
+and hand it down:
+
+```nc:run capture:has_agents validate:^(yes|no)$ when:install_tool=yes effect:fetch
+ncl groups list --json | jq -r 'if (.data|length)==0 then "no" else "yes" end'
+```
+```nc:operator when:has_agents=no
+No agent groups exist yet, so there is nothing to grant Dial to — skipping the tool install. Run `/add-dial-tool` once your first agent exists; the channel below works either way.
+```
+```nc:run capture:agent_groups when:has_agents=yes effect:fetch
+ncl groups list --json | jq -r '[.data[] | "\(.id) (\(.name))"] | join(", ")'
+```
+```nc:operator when:has_agents=yes
+Agents on this install: {{agent_groups}}. Giving an agent Dial lets it text and call any number and buy numbers, billed to your Dial account. Agents you leave out are blocked at the gateway (reversible by running /add-dial-tool again). Agents created after this run have Dial until the next run.
+```
+```nc:prompt dial_agents validate:^(all|none|ag-[A-Za-z0-9-]+(,ag-[A-Za-z0-9-]+)*)$ normalize:trim when:has_agents=yes
+Which agents may use Dial? Enter agent ids separated by commas with no spaces (the `ag-…` column), `all` for every agent, or `none` to install the tool with every agent blocked for now.
+```
+```nc:run effect:step when:has_agents=yes
+pnpm exec tsx setup/lib/skill-driver.ts .claude/skills/add-dial-tool --input 'dial_agents={{dial_agents}}'
 ```
 
 Then tell the sandboxed agent which line is its own. The container authenticates

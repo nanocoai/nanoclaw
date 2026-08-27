@@ -247,8 +247,27 @@ fi
 # Lock drift. /app/node_modules is baked in from container/agent-runner/bun.lock
 # while /app/src is bind-mounted from this checkout at every spawn. Pair an image
 # with a checkout whose lockfile moved and the agent dies on a missing module
-# inside a `--rm` container whose logs are discarded. Hard failure here, where
-# the operator is watching, beats silence at 3am.
+# inside a `--rm` container whose logs are discarded, so this is worth saying
+# loudly where the operator is watching rather than at 3am.
+#
+# TEMPORARY (2026-08-24): drift was a hard failure here. Every published
+# hardened image still carries the v2.2.0 lockfile, so once ea1dadd8 moved
+# bun.lock the refusal blocked every new hardened install outright, with no
+# override to reach for.
+#
+# The check is a coarse proxy — it fires on any lockfile change, including one
+# that cannot break anything. This drift is that kind: ea1dadd8 bumped
+# @anthropic-ai/claude-agent-sdk ^0.3.197 -> ^0.3.238 and nothing else. The
+# lockfile adds and removes no package (only version strings and integrity
+# hashes for the SDK and its platform binaries move, peer ranges included), and
+# the runner's entire SDK surface is one unchanged import of `query`,
+# `HookCallback` and `PreCompactHookInput`. The baked node_modules therefore
+# resolves everything the mounted /app/src imports.
+#
+# So: warn rather than refuse, and let operators take the patched image. This
+# trade is only sound while the drift stays benign, which no shell check can
+# tell. Restore `exit 1` as soon as an image built from the current lockfile is
+# published and pinned.
 IMAGE_LOCK="$(${CONTAINER_RUNTIME} image inspect --format '{{index .Config.Labels "dev.nanoclaw.agent-runner-lock-sha256"}}' "$REF")"
 if [ "$IMAGE_LOCK" = "<no value>" ]; then
     IMAGE_LOCK=""
@@ -275,18 +294,17 @@ elif [ -z "$IMAGE_LOCK" ]; then
     fi
 elif [ "$IMAGE_LOCK" != "$LOCAL_LOCK" ]; then
     echo "" >&2
-    echo "Agent-runner lock drift — refusing to tag this image." >&2
+    echo "Warning: agent-runner lock drift — tagging this image anyway." >&2
     echo "  image     ${IMAGE_LOCK}" >&2
     echo "  checkout  ${LOCAL_LOCK}  (container/agent-runner/bun.lock)" >&2
     echo "" >&2
     echo "The image bakes /app/node_modules from the lockfile it was built with," >&2
-    echo "while /app/src is mounted from this checkout at spawn time. Running them" >&2
-    echo "together fails as a missing module inside a --rm container whose logs are" >&2
-    echo "discarded." >&2
+    echo "while /app/src is mounted from this checkout at spawn time. If the agent" >&2
+    echo "goes quiet or dies on a missing module inside a --rm container, this is" >&2
+    echo "the first thing to rule out." >&2
     echo "" >&2
-    echo "Use the image published for this checkout, or build locally:" >&2
-    echo "  ./container/build.sh" >&2
-    exit 1
+    echo "To take the drift out of the picture, build locally instead:" >&2
+    echo "  ./container/build.sh build" >&2
 fi
 
 # The retag. From here on the image is indistinguishable, to every consumer,

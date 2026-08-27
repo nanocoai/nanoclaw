@@ -17,6 +17,9 @@ The mechanical steps under **Install** carry `nc:` directive fences: an agent re
 
 ### Pre-flight
 
+Requires `src/project-doc-compose.ts` on trunk. If it is missing, stop and tell
+the operator to run `/update-nanoclaw` first.
+
 Check whether the payload is already wired (a prior apply, or a trunk that still carries it). All of these present means installed — skip to **Authenticate**:
 
 - `src/providers/codex.ts` and `src/providers/codex-agents-md.ts`
@@ -27,7 +30,7 @@ Check whether the payload is already wired (a prior apply, or a trunk that still
 
 ### 1. Fetch and copy the payload
 
-Fetch the `providers` branch and copy the Codex payload into all three trees (additive — overwrite each file, never merge the branch). The host files are the provider contribution + AGENTS.md compose + their guards; the container files are the provider runtime (turn loop, JSON-RPC wrapper, native memory SessionStart hook, per-exchange archiver) + their guards; the setup file is the picker entry + vault auth walk-through; `container/AGENTS.md` is the runtime-contract base the composed AGENTS.md embeds.
+Fetch the `providers` branch and copy the Codex payload into all three trees (additive — overwrite each file, never merge the branch). The host files are the provider contribution + the AGENTS.md spec (composition itself lives in trunk's `src/project-doc-compose.ts`) + their guards; the container files are the provider runtime (turn loop, JSON-RPC wrapper, native memory SessionStart hook, per-exchange archiver) + their guards; the setup file is the picker entry + vault auth walk-through; `container/AGENTS.md` is the runtime-contract base the composed AGENTS.md embeds.
 
 ```nc:copy from-branch:providers
 src/providers/codex.ts

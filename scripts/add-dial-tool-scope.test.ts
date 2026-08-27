@@ -132,7 +132,7 @@ S="$STATE"
 arg() { local k="$1"; shift; while [ $# -gt 0 ]; do if [ "$1" = "$k" ]; then echo "$2"; return; fi; shift; done; }
 case "$1 $2" in
   "secrets list") cat "$S/secrets.json" ;;
-  "secrets update") f=$(arg --file "$@"); [ -n "$f" ] && cat "$f" > "$S/key-seen"; echo '{"status":"updated"}' ;;
+  "secrets delete") i=$(arg --id "$@"); jq --arg i "$i" '.data |= map(select(.id != $i))' "$S/secrets.json" > "$S/t" && mv "$S/t" "$S/secrets.json"; echo '{"status":"deleted"}' ;;
   "secrets create") f=$(arg --file "$@"); [ -n "$f" ] && cat "$f" > "$S/key-seen"; jq '.data += [{"id":"sec-new","name":"Dial API"}]' "$S/secrets.json" > "$S/t" && mv "$S/t" "$S/secrets.json"; echo '{"id":"sec-new"}' ;;
   "agents list") ${opts.agentsListFails ? 'echo "boom" >&2; exit 1' : 'cat "$S/agents.json"'} ;;
   "agents secrets") cat "$S/assigned.json" ;;
@@ -337,18 +337,23 @@ describe('add-dial-tool: scoping Dial to the chosen agents', () => {
 });
 
 describe('add-dial-tool: registering the host credential with OneCLI', () => {
-  it('updates the existing Dial secret with the key the host is signed in with (never create-if-absent)', () => {
+  it('replaces the existing Dial secret (delete, then create from the temp file) — `secrets update` takes the value only on argv', () => {
     const { status, stdout } = sh(CMD.credential);
     expect(status).toBe(0);
     const lines = callLines();
-    const update = lines.find((l) => l.startsWith('onecli secrets update'));
-    expect(update).toMatch(/^onecli secrets update --id sec-dial --file \S+ --host-pattern api\.getdial\.ai$/);
-    expect(lines.some((l) => l.startsWith('onecli secrets create'))).toBe(false);
+    expect(lines).toContain('onecli secrets delete --id sec-dial');
+    const create = lines.find((l) => l.startsWith('onecli secrets create'));
+    expect(create).toMatch(
+      /^onecli secrets create --name Dial API --type generic --file \S+ --host-pattern api\.getdial\.ai --header-name Authorization --value-format Bearer \{value\}$/,
+    );
+    expect(lines.indexOf('onecli secrets delete --id sec-dial')).toBeLessThan(lines.indexOf(create!));
+    expect(lines.some((l) => l.startsWith('onecli secrets update'))).toBe(false);
+    expect(lines.some((l) => /--value(\s|=)/.test(l))).toBe(false);
     // The key reaches OneCLI through the temp file, never argv or stdout, and the file is gone after.
     expect(fs.readFileSync(path.join(state, 'key-seen'), 'utf8')).toBe('sk_test\n');
-    expect(update).not.toContain('sk_test');
+    expect(create).not.toContain('sk_test');
     expect(stdout).not.toContain('sk_test');
-    const tmp = (update ?? '').match(/--file (\S+)/)?.[1] ?? '';
+    const tmp = (create ?? '').match(/--file (\S+)/)?.[1] ?? '';
     expect(fs.existsSync(tmp)).toBe(false);
   });
 

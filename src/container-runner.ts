@@ -27,7 +27,7 @@ import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-con
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
-import { composeGroupClaudeMd } from './claude-md-compose.js';
+import { composeGroupProjectDoc, DEFAULT_PROJECT_DOC } from './project-doc-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { getSession } from './db/sessions.js';
@@ -467,18 +467,18 @@ export async function buildMounts(
   // dir) apply unless the provider's registration declares it provides its own.
   const defaultSurfaces = !providerProvidesAgentSurfaces(provider);
 
+  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
   const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
   if (defaultSurfaces) {
     syncSkillSymlinks(claudeDir, containerConfig);
 
-    // Compose CLAUDE.md fresh every spawn from the shared base, enabled skill
-    // fragments, and MCP server instructions. See `claude-md-compose.ts`.
-    await composeGroupClaudeMd(agentGroup);
+    // Compose CLAUDE.md fresh every spawn: every instruction source inlined
+    // into one flat file. See `project-doc-compose.ts`.
+    await composeGroupProjectDoc(agentGroup, groupDir, DEFAULT_PROJECT_DOC);
   }
 
   const mounts: VolumeMount[] = [];
   const sessDir = sessionDir(agentGroup.id, session.id);
-  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
   const scope = agentGroup.id;
 
   // Session workspace: mailbox-selected state plus outbox and heartbeat files.
@@ -533,8 +533,9 @@ export async function buildMounts(
     scope,
   });
 
-  // Composer-managed CLAUDE.md artifacts — nested RO mounts, regenerated from
-  // the shared base + fragments on every spawn.
+  // The composed project document — one nested RO mount on top of the RW group
+  // dir, holding the full text of every instruction source. `container/CLAUDE.md`
+  // is read on the host at compose time, so nothing needs it inside the container.
   const composedClaudeMd = path.join(groupDir, 'CLAUDE.md');
   if (defaultSurfaces && fs.existsSync(composedClaudeMd)) {
     mounts.push({
@@ -542,28 +543,6 @@ export async function buildMounts(
       containerPath: '/workspace/agent/CLAUDE.md',
       readonly: true,
       mountClass: 'group-state',
-      scope,
-    });
-  }
-  const fragmentsDir = path.join(groupDir, '.claude-fragments');
-  if (defaultSurfaces && fs.existsSync(fragmentsDir)) {
-    mounts.push({
-      hostPath: fragmentsDir,
-      containerPath: '/workspace/agent/.claude-fragments',
-      readonly: true,
-      mountClass: 'group-state',
-      scope,
-    });
-  }
-
-  // Shared CLAUDE.md — a release surface, read-only.
-  const sharedClaudeMd = path.join(projectRoot, 'container', 'CLAUDE.md');
-  if (defaultSurfaces && fs.existsSync(sharedClaudeMd)) {
-    mounts.push({
-      hostPath: sharedClaudeMd,
-      containerPath: '/app/CLAUDE.md',
-      readonly: true,
-      mountClass: 'install-surface',
       scope,
     });
   }
@@ -802,6 +781,10 @@ export function parsePidsLimit(value: string): number | undefined {
  * Sync skill symlinks in .claude-shared/skills/ to match the container.json
  * selection. Each symlink points to a container path (/app/skills/<name>) so
  * it's dangling on the host but valid inside the container.
+ *
+ * Not the mechanism the composer stopped using: skill discovery is a directory
+ * scan that follows a link wherever it lands, and only `@` imports are gated on
+ * resolving inside the project directory.
  */
 export function syncSkillSymlinks(
   claudeDir: string,

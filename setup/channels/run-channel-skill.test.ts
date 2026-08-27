@@ -82,6 +82,8 @@ describe('runChannelSkill adapter (Option A)', () => {
       role: 'owner',
       agentGroupId: 'ag-template',
     });
+    // no skill-resolved `instance` var: the wire targets the default instance
+    expect(wired[0].instance).toBeUndefined();
     // the adapter no longer emits any ncl wiring itself — that's init-first-agent's job
     expect(cmds.some((c) => c.startsWith('ncl '))).toBe(false);
     // clears the template pick exactly when the wire consumed the stamped
@@ -422,7 +424,9 @@ describe('runChannelSkill adapter (Option A)', () => {
   // (the real teams document needs a streaming exec runChannelSkill doesn't
   // expose): when the skill binds owner_handle + platform_id, the adapter asks
   // nothing extra (agentName/role injected) and reaches the shared wire with
-  // the composed teams user id.
+  // the composed teams user id. A skill-resolved `instance` var (a named
+  // bot's registry key) rides along to the wire; kill condition: drop
+  // `instance: res.vars.instance` from the wire call in run-channel-skill.ts.
   const wireChannel = 'wiretest';
   const wireSkillDir = join(process.cwd(), '.claude/skills', `add-${wireChannel}`);
   afterEach(() => rmSync(wireSkillDir, { recursive: true, force: true }));
@@ -444,6 +448,9 @@ describe('runChannelSkill adapter (Option A)', () => {
         '```nc:run capture:platform_id effect:fetch',
         'echo-platform',
         '```',
+        '```nc:run capture:instance effect:fetch',
+        'echo-instance',
+        '```',
         '',
       ].join('\n'),
     );
@@ -455,6 +462,7 @@ describe('runChannelSkill adapter (Option A)', () => {
       exec: (c) => {
         if (c === 'echo-owner') return '29:owner-xyz\n';
         if (c === 'echo-platform') return 'teams:enc-conv:enc-url\n';
+        if (c === 'echo-instance') return 'telegram-mega\n';
       },
       resolveRemote: () => 'origin',
       wireIfResolved: true,
@@ -475,6 +483,7 @@ describe('runChannelSkill adapter (Option A)', () => {
       displayName: 'Dan Mill',
       agentName: 'Nano',
       role: 'owner',
+      instance: 'telegram-mega',
     });
     // no template pick in play (NANOCLAW_TEMPLATE_AGENT_ID unset): a fresh-agent
     // wire must leave the persisted pick alone

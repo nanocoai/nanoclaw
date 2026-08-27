@@ -195,7 +195,6 @@ describe('buildMounts agent surfaces', () => {
 
     const byContainerPath = new Map(mounts.map((m) => [m.containerPath, m]));
     expect(byContainerPath.has('/home/node/.claude')).toBe(true);
-    expect(byContainerPath.has('/app/CLAUDE.md')).toBe(true);
     expect(byContainerPath.has('/workspace/agent/CLAUDE.md')).toBe(true);
     // Composer ran: the generated project doc exists on disk.
     expect(fs.existsSync(path.join(GROUPS_DIR, ag.folder, 'CLAUDE.md'))).toBe(true);
@@ -226,7 +225,6 @@ describe('buildMounts agent surfaces', () => {
 
     const containerPaths = mounts.map((m) => m.containerPath);
     expect(containerPaths).not.toContain('/home/node/.claude');
-    expect(containerPaths).not.toContain('/app/CLAUDE.md');
     expect(containerPaths).not.toContain('/workspace/agent/CLAUDE.md');
     // Composer did NOT run for this group.
     expect(fs.existsSync(path.join(GROUPS_DIR, ag.folder, 'CLAUDE.md'))).toBe(false);

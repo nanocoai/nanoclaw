@@ -64,6 +64,18 @@ describe('resolveGroupTimezone', () => {
     expect(configFromDb((await getContainerConfig(GROUP.id))!, GROUP).timezone).toBeUndefined();
   });
 
+  // The composer widens a corrupt selection to 'all' rather than dropping
+  // skills. This reading used to be a bare cast, so a row that is not JSON
+  // threw here first and the tolerance never applied: every spawn failed, and
+  // `wakeContainer`'s transient-retry contract left the group dark.
+  it('configFromDb widens a corrupt skill selection instead of throwing', async () => {
+    const row = (await getContainerConfig(GROUP.id))!;
+    expect(configFromDb(row, GROUP).skills).toBe('all');
+    expect(configFromDb({ ...row, skills: '["welcome"]' }, GROUP).skills).toEqual(['welcome']);
+    expect(configFromDb({ ...row, skills: '{not json' }, GROUP).skills).toBe('all');
+    expect(configFromDb({ ...row, skills: 'null' }, GROUP).skills).toBe('all');
+  });
+
   it('configFromDb ships a declared runtime tier and refuses an unknown one', async () => {
     // The trunk schema carries no runtime_tier column, so the row surfaces it
     // only where a deployment's migration added it — modeled here by spreading

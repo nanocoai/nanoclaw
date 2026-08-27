@@ -1,5 +1,9 @@
 {
-  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. The getMe stub answers the bot_username capture (the operator block after the restart renders it); stepFields feed the pairing step's terminal block (capture:platform_id=PLATFORM_ID,owner_handle=ADMIN_USER_ID).",
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts: shaped fake values only, never real credentials. Two scenarios: a first install (the TELEGRAM_BOT_TOKEN probe answers 'no', add_another derives to 'no', the first-bot steps run, the default pairing step runs) and a rerun that adds a second bot (the probe answers 'yes', add_another derives to 'ask' and the prompt answers yes, name mega, a second token; the getMe stubs answer both bot_username captures with different usernames so the same-bot check passes, the tr/echo stubs answer bot_name_env and instance, the set-env writes are effect:step and need no stdout). stepFields feed every effect:step's terminal block (the pairing step's capture:platform_id=PLATFORM_ID,owner_handle=ADMIN_USER_ID).",
+  "coverageExclude": [
+    "add_another=ask"
+  ],
+  "coverageExcludeReason": "add_another=ask is the probe's rerun answer that only gates the add_another prompt, which re-binds the same var to yes or no before the run ends, so no scenario can finish with vars.add_another='ask'. The add-another scenario exercises the guard at runtime (its prompt only runs under it).",
   "scenarios": [
     {
       "name": "pairing",
@@ -7,9 +11,29 @@
         "bot_token": "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
       },
       "exec": [
+        { "match": "^TELEGRAM_BOT_TOKEN=.+' .env", "stdout": "no" },
+        { "match": "echo ask || echo no", "stdout": "no" },
         { "match": "getMe", "stdout": "nanoclaw_bot" }
       ],
       "stepFields": { "PLATFORM_ID": "telegram:123456789", "ADMIN_USER_ID": "987654321" }
+    },
+    {
+      "name": "add-another",
+      "inputs": {
+        "bot_token": "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "add_another": "yes",
+        "bot_name": "mega",
+        "bot_token_2": "987654321:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+      },
+      "exec": [
+        { "match": "^TELEGRAM_BOT_TOKEN=.+' .env", "stdout": "yes" },
+        { "match": "echo ask || echo no", "stdout": "ask" },
+        { "match": "bot123456789:AAAA", "stdout": "nanoclaw_bot" },
+        { "match": "bot987654321:BBBB", "stdout": "mega_bot" },
+        { "match": "tr 'a-z-' 'A-Z_'", "stdout": "MEGA" },
+        { "match": "echo telegram-", "stdout": "telegram-mega" }
+      ],
+      "stepFields": { "PLATFORM_ID": "telegram:123456789", "ADMIN_USER_ID": "987654321", "INSTANCE": "telegram-mega" }
     }
   ]
 }

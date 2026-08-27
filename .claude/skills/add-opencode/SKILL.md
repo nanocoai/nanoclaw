@@ -114,6 +114,11 @@ These variables are read **on the host** and passed into the container only when
 - `OPENCODE_MODEL` — full model id in `provider/model` form, e.g. `deepseek/deepseek-chat`.
 - `OPENCODE_SMALL_MODEL` — optional second model for lighter tasks; defaults to `OPENCODE_MODEL` if unset.
 - `ANTHROPIC_BASE_URL` — **required for non-`anthropic` providers.** The opencode container provider passes this as the `baseURL` for the upstream provider config so requests route through OneCLI's credential proxy or directly to the provider's API. Set it to the provider's API base URL (e.g. `https://api.deepseek.com/v1`, `https://openrouter.ai/api/v1`).
+- `OPENCODE_MODEL_CONTEXT_LIMIT` — optional context window, in tokens, declared for **`OPENCODE_MODEL` only** (not the small model); OpenCode auto-compacts as a session approaches it, and a model its registry does not know resolves to `0` and so never compacts. Anything but a positive integer is logged and treated as unset, which emits no limit and leaves behavior unchanged.
+- `OPENCODE_MODEL_OUTPUT_LIMIT` — optional max output tokens for the same main model, only applied alongside a valid context limit (without one it is logged and ignored). Anything but a positive integer is logged and treated as unset.
+- `OPENCODE_MODEL_INPUT_MODALITIES` — optional comma-separated subset of `text,audio,image,video,pdf`, declared for **`OPENCODE_MODEL` only**. OpenCode drops any file part whose modality the model does not declare, so images and PDFs never reach a registry-unknown custom model unless this is set. Unrecognized entries are logged and skipped; unset declares nothing and leaves behavior unchanged. A distinct `OPENCODE_SMALL_MODEL` never inherits this; it keeps the undeclared-model default regardless.
+
+  Declaring the modality only opens OpenCode's gate. NanoClaw must also pass channel attachments to the provider as structured file parts; until that support is available, attachments remain prompt text.
 
 Credentials: register provider API keys in OneCLI with the matching `--host-pattern` (e.g. `api.deepseek.com`, `openrouter.ai`). OneCLI injects them via `HTTPS_PROXY` in the container — the key never lives in `.env` or the container environment.
 

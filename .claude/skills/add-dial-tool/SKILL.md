@@ -64,8 +64,8 @@ and ask even when there is a single agent:
 ```nc:operator
 Agents on this install: {{agent_groups}}. Giving an agent Dial lets it text and call any number and buy numbers, billed to your Dial account. Agents you leave out are blocked at the gateway (reversible by running /add-dial-tool again). Agents created after this run have Dial until the next run.
 ```
-```nc:prompt dial_agents validate:^(all|none|ag-[A-Za-z0-9-]+(\s*,\s*ag-[A-Za-z0-9-]+)*)$ normalize:trim
-Which agents may use Dial? Enter agent ids separated by commas (the `ag-…` column), `all` for every agent, or `none` to install the tool with every agent blocked for now.
+```nc:prompt dial_agents validate:^(all|none|ag-[A-Za-z0-9-]+(,ag-[A-Za-z0-9-]+)*)$ normalize:trim
+Which agents may use Dial? Enter agent ids separated by commas with no spaces (the `ag-…` column), `all` for every agent, or `none` to install the tool with every agent blocked for now.
 ```
 
 `all` and `none` cannot be mixed with ids, and an empty answer is never
@@ -172,15 +172,18 @@ this adds Dial as a layer on top of it; on one that builds its own it rebuilds:
 
 Read the API key from the host auth file — the single source of truth, written
 by `dial auth login` / `dial auth verify-otp` — and put it in the OneCLI vault
-for `api.getdial.ai`. Always **upsert**: the vault is keyed by name, so an
+for `api.getdial.ai`. Always **replace**: the vault is keyed by name, so an
 existing "Dial API" secret is not necessarily this account's (re-onboarding,
 switching accounts, or rotating the key all leave a secret whose value points at
 the previous account, and a sandboxed agent then lists *that* account's numbers).
-The key travels through a `0600` temp file that is removed right after (`--file`), so it
-never sits on a command line or in a captured variable:
+A stale secret is deleted and a fresh one created rather than updated in place:
+`onecli secrets update` accepts a new value only on the command line, and the key
+must never sit on one. It travels through a `0600` temp file that is removed right
+after (`--file`), so it is never on argv or in a captured variable. Selective-mode
+agents pick the new id up in the merge step below:
 
 ```nc:run effect:external
-T=$(mktemp) && chmod 600 "$T" && jq -r '.apiKey // empty' "${XDG_DATA_HOME:-$HOME/.local/share}/dial/auth.v1.json" > "$T" 2>/dev/null; [ -s "$T" ] || { rm -f "$T"; echo "no Dial API key in the host auth file — sign in with dial auth login / verify-otp, then re-run" >&2; exit 1; }; S=$(onecli secrets list | jq -r 'first(.data[] | select(.name | test("(?i)dial"))) | .id // empty'); if [ -n "$S" ]; then onecli secrets update --id "$S" --file "$T" --host-pattern api.getdial.ai >/dev/null; else onecli secrets create --name "Dial API" --type generic --file "$T" --host-pattern api.getdial.ai --header-name Authorization --value-format "Bearer {value}" >/dev/null; fi; rc=$?; rm -f "$T"; exit $rc
+T=$(mktemp) && chmod 600 "$T" && jq -r '.apiKey // empty' "${XDG_DATA_HOME:-$HOME/.local/share}/dial/auth.v1.json" > "$T" 2>/dev/null; [ -s "$T" ] || { rm -f "$T"; echo "no Dial API key in the host auth file — sign in with dial auth login / verify-otp, then re-run" >&2; exit 1; }; S=$(onecli secrets list | jq -r 'first(.data[] | select(.name | test("(?i)dial"))) | .id // empty'); if [ -n "$S" ]; then onecli secrets delete --id "$S" >/dev/null || { rm -f "$T"; echo "could not remove the previous Dial secret $S" >&2; exit 1; }; fi; onecli secrets create --name "Dial API" --type generic --file "$T" --host-pattern api.getdial.ai --header-name Authorization --value-format "Bearer {value}" >/dev/null; rc=$?; rm -f "$T"; exit $rc
 ```
 
 ## Scope it to the chosen agents
@@ -229,9 +232,11 @@ group's `.claude-shared/skills/` holds symlinks into that mount that are synced
 when the container spawns — so nothing is copied per session. A running agent
 keeps its old image until it respawns, so restart every group; without a
 `--message` each one comes back on its next message, on the new image, with the
-CLI on `PATH` and the skill in place:
+CLI on `PATH` and the skill in place. This is a restart effect, so it does not
+fire after an earlier step bounced — agents keep the image they have until the
+gap above is fixed and the skill is re-applied:
 
-```nc:run effect:external
+```nc:run effect:restart
 ncl groups list --json | jq -r '.data[].id' | while read -r gid; do ncl groups restart --id "$gid" >/dev/null || { echo "could not restart $gid" >&2; exit 1; }; done
 ```
 

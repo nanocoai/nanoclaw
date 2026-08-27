@@ -145,11 +145,14 @@ describe('createChatSdkBridge.setup — webhook route and state namespace', () =
   // StateAdapter (chat_sdk_* tables) and an adapter.initialize — nothing
   // platform-side. registerWebhookAdapter is mocked at module level so we
   // can assert the (chat, adapterName, routingPath) triple.
-  function setupStubAdapter(): Adapter {
-    return stubAdapter({
-      name: 'slack',
-      initialize: async () => {},
-    } as unknown as Partial<Adapter>);
+  // runtimeMode is assigned inside initialize(), as the Telegram adapter does
+  // when mode 'auto' resolves: a guard that reads it earlier sees undefined.
+  function setupStubAdapter(runtimeMode?: 'webhook' | 'polling'): Adapter {
+    const adapter = stubAdapter({ name: 'slack' }) as Adapter & { runtimeMode?: string };
+    adapter.initialize = async () => {
+      adapter.runtimeMode = runtimeMode;
+    };
+    return adapter;
   }
 
   beforeEach(async () => {
@@ -194,6 +197,34 @@ describe('createChatSdkBridge.setup — webhook route and state namespace', () =
     const [, adapterName, routingPath] = vi.mocked(registerWebhookAdapter).mock.calls[0];
     expect(adapterName).toBe('slack');
     expect(routingPath ?? adapterName).toBe('slack');
+    await bridge.teardown();
+  });
+
+  // Polling adapters (Telegram) pull updates themselves; a registered route
+  // would lazily bind the shared webhook port, and a busy port then crashes a
+  // Telegram-only host. Kill condition: delete the `runtimeMode === 'polling'`
+  // branch in setup() and the polling case goes red.
+  it('polling adapter (mode resolved inside initialize) registers no webhook route', async () => {
+    const { registerWebhookAdapter } = await import('../webhook-server.js');
+    const bridge = createChatSdkBridge({ adapter: setupStubAdapter('polling'), supportsThreads: true });
+    await bridge.setup(hostConfig);
+    expect(registerWebhookAdapter).not.toHaveBeenCalled();
+    await bridge.teardown();
+  });
+
+  it('webhook adapter registers the route', async () => {
+    const { registerWebhookAdapter } = await import('../webhook-server.js');
+    const bridge = createChatSdkBridge({ adapter: setupStubAdapter('webhook'), supportsThreads: true });
+    await bridge.setup(hostConfig);
+    expect(registerWebhookAdapter).toHaveBeenCalledTimes(1);
+    await bridge.teardown();
+  });
+
+  it('adapter without runtimeMode registers the route (non-Telegram adapters declare none)', async () => {
+    const { registerWebhookAdapter } = await import('../webhook-server.js');
+    const bridge = createChatSdkBridge({ adapter: setupStubAdapter(), supportsThreads: true });
+    await bridge.setup(hostConfig);
+    expect(registerWebhookAdapter).toHaveBeenCalledTimes(1);
     await bridge.teardown();
   });
 
