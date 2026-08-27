@@ -310,15 +310,33 @@ async function deliverMessage(
   // the only delivery path from a task session). Append to the series log,
   // never deliver. The caller marks it delivered so it isn't retried.
   if (msg.kind === 'task_log') {
-    if (session.messaging_group_id === null && isTaskThread(session.thread_id) && session.thread_id) {
-      const series = session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
+    // Series resolution, in order of authority: the session's own
+    // system:tasks:<series> thread id, then the series the runner stamped
+    // into the row. A task that fired in a chat session (legacy pre-2.1.48
+    // series) has no task thread id, and dropping its log recorded runs as
+    // if they never happened (#3301). The stamp is container-authored, so it
+    // never overrides a per-series task session's thread id, and
+    // appendRunLog's charset guard keeps a corrupt stamp from writing
+    // outside tasks/. The legacy SHARED task thread (bare 'system:tasks')
+    // slices to '' — fall through to the stamp there too. `content` itself
+    // is container-authored and may be any JSON value, null included.
+    const threadSeries =
+      session.messaging_group_id === null && isTaskThread(session.thread_id) && session.thread_id
+        ? session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length)
+        : '';
+    const stampedSeries = content && typeof content.series === 'string' ? content.series : '';
+    const series = threadSeries || stampedSeries || null;
+    if (series) {
       try {
         await appendRunLog(session.agent_group_id, series, typeof content.text === 'string' ? content.text : '');
       } catch (err) {
-        log.warn('Failed to append task run log', { id: msg.id, sessionId: session.id, err });
+        log.warn('Failed to append task run log', { id: msg.id, sessionId: session.id, series, err });
       }
     } else {
-      log.warn('task_log row outside a task session — ignoring', { id: msg.id, sessionId: session.id });
+      log.warn('task_log row with no resolvable series (no per-series thread, no stamp) — ignoring', {
+        id: msg.id,
+        sessionId: session.id,
+      });
     }
     return;
   }
