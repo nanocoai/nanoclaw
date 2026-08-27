@@ -33,6 +33,7 @@ src/channels/dial-user-agent.ts
 src/channels/dial-user-agent.test.ts
 src/channels/dial-registration.test.ts
 src/channels/dial-grant.test.ts
+src/channels/dial-status.test.ts
 ```
 
 The `dial-cli` container skill is deliberately **not** copied here.
