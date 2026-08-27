@@ -20,7 +20,7 @@ vi.mock('child_process', () => ({
 // Keep the auth flow's structured logging out of logs/setup.log.
 vi.mock('../logs.js', () => ({ step: vi.fn(), userInput: vi.fn() }));
 
-import { buildCodexFailurePrompt, runCodexLoginAuth, verifyCodexInstall } from './codex.js';
+import { buildCodexFailurePrompt, runCodexInstallCheck, runCodexLoginAuth, verifyCodexInstall } from './codex.js';
 
 // Structural guard for the codex payload wiring: provider files, both barrel
 // imports, and the pinned Dockerfile install. Goes red if any of them is
@@ -30,6 +30,15 @@ describe('verifyCodexInstall', () => {
     const { ok, problems } = verifyCodexInstall();
     expect(problems).toEqual([]);
     expect(ok).toBe(true);
+  });
+
+  it('blocks setup when the payload is incomplete', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-install-check-'));
+    try {
+      await expect(runCodexInstallCheck(root)).rejects.toThrow(/Codex provider is not fully installed/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

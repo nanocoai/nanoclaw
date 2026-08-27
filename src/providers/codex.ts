@@ -23,8 +23,8 @@
  *
  * Memory and exchange archiving are NOT handled here either. The shared
  * runner scaffolds memory, while the container-side provider registers its
- * native SessionStart hook and persists exchanges through
- * `onExchangeComplete`.
+ * native SessionStart hook and reports completed exchanges for the declared
+ * archive plan.
  */
 import fs from 'fs';
 import path from 'path';
@@ -38,6 +38,9 @@ import { registerProviderContainerConfig } from './provider-container-registry.j
 registerProviderContainerConfig(
   'codex',
   async (ctx) => {
+    const coreOwnsProviderSurfaces = (ctx as typeof ctx & { coreOwnsProviderSurfaces?: true }).coreOwnsProviderSurfaces;
+    if (coreOwnsProviderSurfaces) return {};
+
     // Per-group codex state (config.toml, thread metadata).
     const codexDir = path.join(DATA_DIR, 'v2-sessions', ctx.agentGroupId, '.codex-shared');
     fs.mkdirSync(codexDir, { recursive: true });
