@@ -11,8 +11,15 @@ import { createOpencodeClient, type FilePartInput, type OpencodeClient } from '@
 import { createOpencodeClient as createOpencodeQuestionClient } from '@opencode-ai/sdk/v2';
 
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
-import { mcpServersToOpenCodeConfig } from './mcp-to-opencode.js';
+import type {
+  AgentProvider,
+  AgentQuery,
+  McpServerConfig,
+  ProviderEvent,
+  ProviderOptions,
+  QueryInput,
+} from './types.js';
+import { mcpServersToOpenCodeConfig, type OpenCodeMcpEntry } from './mcp-to-opencode.js';
 import { getAllDestinations } from '../destinations.js';
 
 function log(msg: string): void {
@@ -266,16 +273,39 @@ function parseLimitEnv(varName: string, raw: string | undefined): number | undef
   return Number(trimmed);
 }
 
-export function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> {
-  const provider = process.env.OPENCODE_PROVIDER || 'anthropic';
-  const model = process.env.OPENCODE_MODEL;
-  const smallModel = process.env.OPENCODE_SMALL_MODEL;
-  // Reasoning effort from the group's container config (ncl groups config
-  // update --effort). OpenCode forwards a free-form per-model `options` object
-  // to the ai-sdk provider, which maps reasoningEffort onto reasoning_effort in
-  // the request body.
-  const effort = options.effort;
-  const proxyUrl = process.env.ANTHROPIC_BASE_URL;
+/** The inference-selection section of the OpenCode config (see resolveOpenCodeInference). */
+export interface OpenCodeInferenceConfig {
+  model?: string;
+  smallModel?: string;
+  enabledProviders: string[];
+  providerOptions: Record<string, unknown>;
+}
+
+/**
+ * Inference selection: which provider and model OpenCode talks to, and how
+ * hard it reasons. Pure — it reads only its arguments — so the runtime
+ * contract declares it as the `inference` capability and core runs it.
+ *
+ * Model identity comes from the OPENCODE_* environment the host provisions.
+ * The group's container config (`ncl groups config update --effort`, the core
+ * `inference` input) steers reasoning effort only: OpenCode forwards a
+ * free-form per-model `options` object to the ai-sdk provider, which maps
+ * reasoningEffort onto reasoning_effort in the request body.
+ *
+ * The core input's `model` and `speed` members have NO effect for OpenCode:
+ * the model is OPENCODE_MODEL, and OpenCode has no serving-tier switch to map
+ * `speed` onto. Only `effort` varies the output, and only for a model the
+ * emitted config registers itself (every provider except `anthropic`).
+ */
+export function resolveOpenCodeInference(
+  input: { model?: string; effort?: string; speed?: string },
+  environment: NodeJS.ProcessEnv,
+): OpenCodeInferenceConfig {
+  const provider = environment.OPENCODE_PROVIDER || 'anthropic';
+  const model = environment.OPENCODE_MODEL;
+  const smallModel = environment.OPENCODE_SMALL_MODEL;
+  const effort = input.effort;
+  const proxyUrl = environment.ANTHROPIC_BASE_URL;
 
   const providerModelId = model ? model.replace(new RegExp(`^${provider}/`), '') : undefined;
   const providerSmallModelId = smallModel ? smallModel.replace(new RegExp(`^${provider}/`), '') : undefined;
@@ -287,8 +317,8 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
   // Undeclared custom models resolve limit.context to 0, which silently disables
   // compaction and kills long sessions against a fixed-window backend (e.g. vLLM).
   // Absent these env vars, behavior is unchanged (no `limit` key emitted).
-  const contextLimitEnv = process.env.OPENCODE_MODEL_CONTEXT_LIMIT;
-  const outputLimitEnv = process.env.OPENCODE_MODEL_OUTPUT_LIMIT;
+  const contextLimitEnv = environment.OPENCODE_MODEL_CONTEXT_LIMIT;
+  const outputLimitEnv = environment.OPENCODE_MODEL_OUTPUT_LIMIT;
   const contextLimit = parseLimitEnv('OPENCODE_MODEL_CONTEXT_LIMIT', contextLimitEnv);
   const outputLimit = parseLimitEnv('OPENCODE_MODEL_OUTPUT_LIMIT', outputLimitEnv);
   if (outputLimitEnv !== undefined && contextLimit === undefined) {
@@ -311,7 +341,7 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
   // `attachment` is a registry/UI flag rather than a pipeline gate, but it is
   // set alongside so the entry stays internally consistent.
   // Absent this env var, behavior is unchanged (no capability keys emitted).
-  const modalityEnv = process.env.OPENCODE_MODEL_INPUT_MODALITIES;
+  const modalityEnv = environment.OPENCODE_MODEL_INPUT_MODALITIES;
   const requestedModalities = (modalityEnv ?? '')
     .split(',')
     .map((entry) => entry.trim().toLowerCase())
@@ -371,7 +401,62 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
           },
         };
 
-  const mcp = mcpServersToOpenCodeConfig(options.mcpServers);
+  return { model, smallModel, enabledProviders: [provider], providerOptions };
+}
+
+/**
+ * Execution policy: the container and the OneCLI allow-list are the security
+ * boundary, so every tool category OpenCode knows stays allowed — except the
+ * interactive `question` tool — and OpenCode's self-update and snapshot
+ * machinery stay off. A fixed stance, so the runtime contract states it as a
+ * value rather than a resolve of anything.
+ *
+ * A flat `permission: 'allow'` string leaves every category — including
+ * `question`, OpenCode's built-in interactive multi-choice tool — to
+ * whatever OpenCode's own default/merge resolves it to. Server logs from
+ * a live session showed that resolution land on BOTH `question -> deny *`
+ * and `question -> allow *` for the same session: internally
+ * contradictory, and whichever rule wins last, `allow` sometimes does —
+ * and a headless container has no human to answer an interactive
+ * question, so any path that lets it fire wedges the session forever
+ * (see OpenCodeProvider's question.asked handling below for the runtime
+ * belt-and-suspenders). Enumerate every known permission category
+ * explicitly instead of relying on the wildcard string, so `question`
+ * resolves to a single deterministic value — `deny` — that can never
+ * contradict itself, while every other category keeps the prior
+ * "allow everything" behavior.
+ * A category OpenCode adds after this list was written is absent from it,
+ * and so resolves to OpenCode's own default rather than to `allow`.
+ */
+export const OPENCODE_EXECUTION_POLICY = {
+  permission: OPENCODE_PERMISSION_POLICY,
+  autoupdate: false,
+  snapshot: false,
+} as const;
+
+export type OpenCodeExecutionPolicy = typeof OPENCODE_EXECUTION_POLICY;
+
+/** MCP wiring: NanoClaw's server map translated into OpenCode's local/remote `mcp` entries. */
+export function resolveOpenCodeMcpServers(
+  input: Record<string, McpServerConfig> | undefined,
+  _environment?: NodeJS.ProcessEnv,
+): Record<string, OpenCodeMcpEntry> {
+  return mcpServersToOpenCodeConfig(input);
+}
+
+/** The config sections the runtime contract declares, resolved. */
+export interface OpenCodeConfigSections {
+  inference: OpenCodeInferenceConfig;
+  executionPolicy: OpenCodeExecutionPolicy;
+  mcp: Record<string, OpenCodeMcpEntry>;
+}
+
+/**
+ * Assemble the OPENCODE_CONFIG_CONTENT document from its resolved sections.
+ * The key order and the conditional keys here ARE the emitted JSON's layout.
+ */
+export function assembleOpenCodeConfig(sections: OpenCodeConfigSections): Record<string, unknown> {
+  const { inference, executionPolicy, mcp } = sections;
 
   // Named explicitly rather than left to the cwd walk: OpenCode takes the
   // FIRST of AGENTS.md, CLAUDE.md, CONTEXT.md it finds and stops, so a stale
@@ -389,32 +474,36 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
   const instructions = [`${AGENT_DIR}/CLAUDE.md`, `${AGENT_DIR}/CLAUDE.local.md`];
 
   return {
-    ...(model ? { model } : {}),
-    ...(smallModel ? { small_model: smallModel } : {}),
-    enabled_providers: [provider],
-    // A flat `permission: 'allow'` string leaves every category — including
-    // `question`, OpenCode's built-in interactive multi-choice tool — to
-    // whatever OpenCode's own default/merge resolves it to. Server logs from
-    // a live session showed that resolution land on BOTH `question -> deny *`
-    // and `question -> allow *` for the same session: internally
-    // contradictory, and whichever rule wins last, `allow` sometimes does —
-    // and a headless container has no human to answer an interactive
-    // question, so any path that lets it fire wedges the session forever
-    // (see OpenCodeProvider's question.asked handling below for the runtime
-    // belt-and-suspenders). Enumerate every known permission category
-    // explicitly instead of relying on the wildcard string, so `question`
-    // resolves to a single deterministic value — `deny` — that can never
-    // contradict itself, while every other category keeps the prior
-    // "allow everything" behavior.
-    // A category OpenCode adds after this list was written is absent from it,
-    // and so resolves to OpenCode's own default rather than to `allow`.
-    permission: OPENCODE_PERMISSION_POLICY,
-    autoupdate: false,
-    snapshot: false,
-    provider: providerOptions,
+    ...(inference.model ? { model: inference.model } : {}),
+    ...(inference.smallModel ? { small_model: inference.smallModel } : {}),
+    enabled_providers: inference.enabledProviders,
+    permission: executionPolicy.permission,
+    autoupdate: executionPolicy.autoupdate,
+    snapshot: executionPolicy.snapshot,
+    provider: inference.providerOptions,
     instructions,
     mcp,
   };
+}
+
+/**
+ * Build the OpenCode config for one provider instance. `resolved` carries the
+ * sections a contract core already resolved through the runtime contract and
+ * handed to the factory — those are consumed as-is. Any section not handed
+ * over is resolved here from the very functions the contract declares, which
+ * is every section on a pre-contract core. Both paths land on the same bytes.
+ */
+export function buildOpenCodeConfig(
+  options: ProviderOptions,
+  environment: NodeJS.ProcessEnv = process.env,
+  resolved: Partial<OpenCodeConfigSections> = {},
+): Record<string, unknown> {
+  return assembleOpenCodeConfig({
+    inference:
+      resolved.inference ?? resolveOpenCodeInference({ model: options.model, effort: options.effort }, environment),
+    executionPolicy: resolved.executionPolicy ?? OPENCODE_EXECUTION_POLICY,
+    mcp: resolved.mcp ?? resolveOpenCodeMcpServers(options.mcpServers, environment),
+  });
 }
 
 type SharedRuntime = {
@@ -438,7 +527,10 @@ function runtimeConfigKey(options: ProviderOptions): string {
   });
 }
 
-async function ensureSharedRuntime(options: ProviderOptions): Promise<SharedRuntime> {
+async function ensureSharedRuntime(
+  options: ProviderOptions,
+  resolved: Partial<OpenCodeConfigSections> = {},
+): Promise<SharedRuntime> {
   const key = runtimeConfigKey(options);
   if (sharedRuntime && sharedConfigKey === key) return sharedRuntime;
 
@@ -448,7 +540,7 @@ async function ensureSharedRuntime(options: ProviderOptions): Promise<SharedRunt
     if (sharedRuntime) {
       destroySharedRuntime();
     }
-    const config = buildOpenCodeConfig(options);
+    const config = buildOpenCodeConfig(options, process.env, resolved);
     const { url, proc } = await spawnOpencodeServer(config);
     const client = createOpencodeClient({ baseUrl: url });
     const questionClient = createOpencodeQuestionClient({ baseUrl: url });
@@ -593,6 +685,32 @@ export type OpenCodeMemorySource = 'startup' | 'compact';
 const MEMORY_HOOK_TIMEOUT_MS = 10_000;
 
 /**
+ * How the registered memory session hook is run: the command, the lifecycle
+ * sources it serves, and the per-run timeout. This is the `memory` capability
+ * the runtime contract declares. OpenCode has no native session-start hook
+ * file to write the command into (Claude's settings.json, Codex's hooks.json),
+ * so the provider executes this itself at the moments a context window is
+ * built — see createMemoryLifecycle. Pure: derived from the registration alone.
+ */
+export interface OpenCodeMemoryHookRun {
+  readonly command: string;
+  readonly sources: readonly string[];
+  readonly timeoutMs: number;
+}
+
+export function resolveOpenCodeMemory(
+  hook: OpenCodeMemorySessionHook,
+  _environment?: NodeJS.ProcessEnv,
+): OpenCodeMemoryHookRun {
+  return { command: hook.command, sources: hook.sources, timeoutMs: MEMORY_HOOK_TIMEOUT_MS };
+}
+
+/** A contract core hands over the resolved run; a bare registration resolves here. */
+function memoryHookRun(hook: OpenCodeMemorySessionHook | OpenCodeMemoryHookRun): OpenCodeMemoryHookRun {
+  return 'timeoutMs' in hook ? hook : resolveOpenCodeMemory(hook, process.env);
+}
+
+/**
  * Run the registered memory session hook and return what it printed.
  *
  * The hook reads a Claude-style SessionStart payload on stdin and prints the
@@ -605,24 +723,25 @@ const MEMORY_HOOK_TIMEOUT_MS = 10_000;
  * one log line, no injection, never a thrown turn.
  */
 export function runMemorySessionHook(
-  hook: OpenCodeMemorySessionHook | undefined,
+  hook: OpenCodeMemorySessionHook | OpenCodeMemoryHookRun | undefined,
   source: OpenCodeMemorySource,
 ): string | undefined {
   if (!hook) {
     log(`No memory session hook registered; skipping ${source} memory injection`);
     return undefined;
   }
-  if (!hook.sources.includes(source)) {
+  const run = memoryHookRun(hook);
+  if (!run.sources.includes(source)) {
     log(`Memory session hook does not declare source ${source}; skipping injection`);
     return undefined;
   }
 
   try {
-    const res = spawnSync(hook.command, {
+    const res = spawnSync(run.command, {
       shell: true,
       input: JSON.stringify({ hook_event_name: 'SessionStart', source }),
       encoding: 'utf-8',
-      timeout: MEMORY_HOOK_TIMEOUT_MS,
+      timeout: run.timeoutMs,
     });
     if (res.error || res.status !== 0) {
       const why = res.error ? res.error.message : `exit ${String(res.status)}`;
@@ -658,7 +777,7 @@ export function runMemorySessionHook(
  * memory rides the same exactly-once next-prompt slot as the routing reminder.
  */
 export function createMemoryLifecycle(
-  hook: OpenCodeMemorySessionHook | undefined,
+  hook: OpenCodeMemorySessionHook | OpenCodeMemoryHookRun | undefined,
   isResume: boolean,
 ): {
   openingInstructions(systemInstructions?: string): string | undefined;
@@ -840,25 +959,59 @@ export async function drainPendingQuestions(
   }
 }
 
+/**
+ * Structural mirror of the contract core's `ResolvedRuntimeConfiguration` —
+ * what `createProvider` hands the factory after running the contract's
+ * configuration resolves. Mirrored, not imported: the type lives in
+ * `provider-contracts/registry.ts`, which a pre-contract core does not have.
+ */
+export interface OpenCodeResolvedConfiguration {
+  executionPolicy?: unknown;
+  inference?: unknown;
+  mcpServers?: unknown;
+}
+
 export class OpenCodeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
 
   private readonly options: ProviderOptions;
   private readonly runtime?: OpenCodeRuntimeDeps;
+  /** Config sections a contract core resolved for this instance; empty on a pre-contract core. */
+  private readonly resolved: Partial<OpenCodeConfigSections>;
   private activeSessionId: string | undefined;
-  private memorySessionHook?: OpenCodeMemorySessionHook;
+  private memorySessionHook?: OpenCodeMemoryHookRun;
 
-  constructor(options: ProviderOptions = {}, runtime?: OpenCodeRuntimeDeps) {
+  /**
+   * `configuration` is present on a contract core: core has already run the
+   * contract's resolves and hands the results over, so they are consumed
+   * as-is. Without it (a pre-contract core) buildOpenCodeConfig derives the
+   * same sections itself, exactly as it always did.
+   */
+  constructor(
+    options: ProviderOptions = {},
+    runtime?: OpenCodeRuntimeDeps,
+    configuration?: OpenCodeResolvedConfiguration,
+  ) {
     this.options = options;
     this.runtime = runtime;
+    this.resolved = configuration
+      ? {
+          inference: configuration.inference as OpenCodeInferenceConfig | undefined,
+          executionPolicy: configuration.executionPolicy as OpenCodeExecutionPolicy | undefined,
+          mcp: configuration.mcpServers as Record<string, OpenCodeMcpEntry> | undefined,
+        }
+      : {};
   }
 
   // OpenCode has no native session-start hook mechanism to hand the command to
   // (as the Claude Agent SDK's settings.json and Codex's hooks.json have), so
-  // the provider stores the registration and runs the command itself at the
-  // lifecycle points OpenCode does expose — see createMemoryLifecycle.
-  registerMemorySessionHook(hook: OpenCodeMemorySessionHook): void {
-    this.memorySessionHook = hook;
+  // the provider stores how the hook runs and runs the command itself at the
+  // lifecycle points OpenCode does expose — see createMemoryLifecycle. A
+  // contract core resolves that (`memory`) through the runtime contract and
+  // passes it as the second argument; a pre-contract core passes only the
+  // registration, which resolves to the same run here.
+  registerMemorySessionHook(hook: OpenCodeMemorySessionHook, memory?: unknown): void {
+    this.memorySessionHook = (memory as OpenCodeMemoryHookRun | undefined) ?? resolveOpenCodeMemory(hook, process.env);
   }
 
   isSessionInvalid(err: unknown): boolean {
@@ -921,7 +1074,9 @@ export class OpenCodeProvider implements AgentProvider {
 
     async function* gen(): AsyncGenerator<ProviderEvent> {
       let initYielded = false;
-      const rt = self.runtime ? await self.runtime.getRuntime(self.options) : await ensureSharedRuntime(self.options);
+      const rt = self.runtime
+        ? await self.runtime.getRuntime(self.options)
+        : await ensureSharedRuntime(self.options, self.resolved);
       const { client, stream, questionClient } = rt;
 
       while (!aborted) {
@@ -1187,5 +1342,10 @@ export class OpenCodeProvider implements AgentProvider {
 }
 
 // Function-form registration only; the runtime contract attaches itself from
-// provider-contracts/opencode.ts, so this module compiles on either core.
-registerProvider('opencode', (opts) => new OpenCodeProvider(opts));
+// provider-contracts/opencode.ts, so this module compiles on either core. A
+// contract core passes the resolved configuration as the second argument; a
+// pre-contract core calls with the options alone.
+registerProvider(
+  'opencode',
+  (opts, configuration?: OpenCodeResolvedConfiguration) => new OpenCodeProvider(opts, undefined, configuration),
+);
