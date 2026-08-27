@@ -23,7 +23,9 @@ Remove the Matrix env vars apply set — `MATRIX_BASE_URL`, `MATRIX_USER_ID`, `M
 ## 3. Remove the package
 
 ```bash
+pnpm pkg delete 'pnpm.patchedDependencies[@beeper/chat-adapter-matrix@0.2.0]'
 pnpm uninstall @beeper/chat-adapter-matrix
+rm -f patches/@beeper__chat-adapter-matrix@0.2.0.patch
 ```
 
 ## 4. Rebuild and restart

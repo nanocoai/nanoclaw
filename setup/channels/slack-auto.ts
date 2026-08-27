@@ -132,6 +132,18 @@ export interface BootstrapDeps {
   importModule?: (fileUrl: string) => Promise<ProvisioningCore>;
 }
 
+/** Whether an earlier setup run already saved this install's Slack app credentials. */
+function hasSavedSlackBotToken(root: string): boolean {
+  try {
+    return fs
+      .readFileSync(path.join(root, '.env'), 'utf8')
+      .split('\n')
+      .some((line) => /^\s*SLACK_BOT_TOKEN\s*=\s*\S/.test(line));
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The installing host's package.json version — the clientRecord idiom from
  * setup/registry-login.ts, against the same root the provisioning-core
@@ -212,6 +224,13 @@ export async function maybeAutoProvisionSlack(
   agentName: string,
   deps: BootstrapDeps = {},
 ): Promise<Record<string, string> | undefined> {
+  if (hasSavedSlackBotToken(deps.root ?? process.cwd())) {
+    p.log.info(
+      `${agentName} already has a Slack app connected from a previous run — reusing its saved credentials instead of creating a new one.`,
+    );
+    return undefined;
+  }
+
   const core = await loadProvisioningCore(deps);
   if (!core) {
     p.log.warn("Couldn't load the Slack provisioning module — walking through manual app creation instead.");

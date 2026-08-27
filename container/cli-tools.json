@@ -6,7 +6,7 @@
   },
   {
     "name": "@anthropic-ai/claude-code",
-    "version": "2.1.197",
+    "version": "2.1.238",
     "onlyBuilt": true
   }
 ]

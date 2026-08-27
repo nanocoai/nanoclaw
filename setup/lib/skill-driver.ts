@@ -32,6 +32,7 @@ import { parseDirectives, promptVar } from '../../scripts/skill-directives.js';
 import { extractOfferUrl, gatePolicy } from '../../scripts/skill-policy.js';
 import * as setupLog from '../logs.js';
 import { isHeadless } from '../platform.js';
+import { emitStatus } from '../status.js';
 import { openUrl } from './browser.js';
 import { isHelpEscape, offerClaudeHandoff, validateWithHelpEscape } from './claude-handoff.js';
 import { startSpinner } from './runner.js';
@@ -424,17 +425,32 @@ function defaultOnEvent(
   const gates = gatePolicy(md);
   const ordinals = labelOrdinals(md);
   let active: ReturnType<typeof startSpinner> | null = null;
+  // Non-TTY (CI, a pipeline log, or a nested apply whose stdout is the parent
+  // driver's tee): a spinner can't animate, but silence is worse — a two-minute
+  // image build with no line at all reads as a hang. Print one plain line per
+  // finished step instead, with the same caption and timing the spinner shows.
+  let plain: { base: string; start: number } | null = null;
   return async (e) => {
     if (e.type === 'step-start') {
-      if (!process.stdout.isTTY || e.label === null) return; // quiet: non-TTY, or instant/cheap step
+      if (e.label === null) return; // instant/cheap step — no caption declared
       const base = e.label.replace(/…+$/, '') + (ordinals.get(e.line) ?? '');
+      if (!process.stdout.isTTY) {
+        plain = { base, start: Date.now() };
+        return;
+      }
       active = startSpinner({ running: `${base}…`, done: base, failed: `${base} failed` });
       return;
     }
     if (e.type === 'step-end') {
-      if (!active) return; // never started a spinner for this one
-      active.stop({ ok: e.ok });
-      active = null;
+      if (active) {
+        active.stop({ ok: e.ok });
+        active = null;
+      } else if (plain) {
+        const line = `${plain.base}${e.ok ? '' : ' failed'} ${plainDuration(Date.now() - plain.start)}`;
+        if (e.ok) p.log.success(line);
+        else p.log.error(line);
+        plain = null;
+      }
       return;
     }
     // operator: note → URL offer → natural-barrier confirm.
@@ -446,6 +462,12 @@ function defaultOnEvent(
     // UI step is finished first — never an abort, never a throw.
     if (gate?.needsConfirm) await confirm(GATE_WORDING[gate.flavor]);
   };
+}
+
+/** `(3s)` / `(1m 42s)` — the spinner's timing suffix, for the plain non-TTY step line. */
+export function plainDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s >= 60 ? `(${Math.floor(s / 60)}m ${s % 60}s)` : `(${s}s)`;
 }
 
 /** Fork-aware registry-branch remote (same resolver setup/channels/slack.ts uses). */
@@ -551,16 +573,79 @@ export async function runSkill(skillDir: string, opts: RunSkillOptions = {}): Pr
   });
 }
 
+/**
+ * The CLI's machine-readable verdict for one apply. A skill can nest another
+ * skill's apply as an `nc:run effect:step` (e.g. /add-dial offering
+ * /add-dial-tool): the streaming exec resolves a step from its terminal
+ * `=== NANOCLAW SETUP: … ===` block AND a zero exit, so the CLI emits both — a
+ * partial apply (deferred input, a bounced directive) is `failed` and exits 1
+ * instead of reading as success to a caller that can only see the exit code.
+ */
+export function applyOutcome(res: ApplyResult): { status: 'success' | 'failed'; exitCode: 0 | 1 } {
+  return fullyApplied(res) ? { status: 'success', exitCode: 0 } : { status: 'failed', exitCode: 1 };
+}
+
+/**
+ * Parse the driver CLI's argv (everything after node + script path):
+ * `<skillDir> [--input key=value]...`.
+ *
+ * `--input` pre-binds a prompt the caller already collected. A nested step's
+ * stdout is a pipe, so clack cannot echo what the operator types there; a
+ * parent that owns the terminal asks first and passes the answer down.
+ * Every argument after the skill dir must be a recognised flag. Skipping an
+ * unexpected one would swallow exactly the failure this flag can cause: an
+ * unquoted `--input k={{var}}` in a caller's document word-splits, and the
+ * orphaned half arrives here as a bare argv entry. Silently dropping it
+ * leaves the child validating a truncated value; refusing names it.
+ */
+export function parseDriverArgv(
+  argv: string[],
+): { skillDir: string; inputs: Record<string, string> } | { error: string } {
+  const skillDir = argv[0];
+  if (!skillDir) return { error: 'missing <skill-dir>' };
+  const inputs: Record<string, string> = {};
+  for (let i = 1; i < argv.length; i++) {
+    const arg = argv[i] ?? '';
+    if (arg !== '--input') return { error: `unexpected argument: ${arg}` };
+    if (i + 1 >= argv.length) return { error: '--input expects key=value, got nothing' };
+    const pair = argv[++i] ?? '';
+    const eq = pair.indexOf('=');
+    if (eq <= 0) return { error: `--input expects key=value, got: ${pair}` };
+    inputs[pair.slice(0, eq)] = pair.slice(eq + 1);
+  }
+  return { skillDir, inputs };
+}
+
+/**
+ * The `--input` keys that name no `nc:prompt` var in the skill document. The
+ * engine ignores keys it has no prompt for, so a typo here would leave the
+ * child asking that prompt itself — through the pipe, unechoed, the exact
+ * failure `--input` exists to avoid. The CLI refuses them instead.
+ */
+export function unknownInputKeys(skillDir: string, inputs: Record<string, string>): string[] {
+  const known = new Set(
+    parseDirectives(readFileSync(join(skillDir, 'SKILL.md'), 'utf8'))
+      .filter((d) => d.kind === 'prompt')
+      .map((d) => promptVar(d))
+      .filter((v): v is string => typeof v === 'string'),
+  );
+  return Object.keys(inputs).filter((k) => !known.has(k));
+}
+
 // CLI: pnpm exec tsx setup/lib/skill-driver.ts <skillDir>   — apply a skill interactively.
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
   void (async () => {
-    const skillDir = process.argv[2];
-    if (!skillDir) {
-      console.error('usage: pnpm exec tsx setup/lib/skill-driver.ts <skillDir>');
+    const usage = (msg: string): never => {
+      console.error(`${msg}\nusage: skill-driver <skill-dir> [--input key=value]...`);
       process.exit(2);
-    }
+    };
+    const parsed = parseDriverArgv(process.argv.slice(2));
+    if ('error' in parsed) usage(parsed.error);
+    const { skillDir, inputs } = parsed;
+    const unknown = unknownInputKeys(skillDir, inputs);
+    if (unknown.length) usage(`--input names no prompt in ${skillDir}/SKILL.md: ${unknown.join(', ')}`);
     p.intro(`Applying ${skillDir}`);
-    const res = await runSkill(skillDir);
+    const res = await runSkill(skillDir, Object.keys(inputs).length ? { inputs } : {});
     if (fullyApplied(res)) {
       p.outro('Done — fully applied.');
     } else {
@@ -568,5 +653,13 @@ if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
       for (const t of res.agentTasks) p.log.warn(`Needs an agent (${t.kind}): ${t.reason}`);
       p.outro('Applied with gaps — see above.');
     }
+    const outcome = applyOutcome(res);
+    emitStatus('SKILL_APPLY', {
+      STATUS: outcome.status,
+      SKILL: skillDir,
+      DEFERRED: res.deferred.length,
+      AGENT_TASKS: res.agentTasks.length,
+    });
+    process.exitCode = outcome.exitCode;
   })();
 }

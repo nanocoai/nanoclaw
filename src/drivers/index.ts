@@ -109,6 +109,11 @@ export function mountPolicy(env: NodeJS.ProcessEnv = process.env): MountPolicy {
     surfaceRoots: [
       path.join(projectRoot, 'container', 'agent-runner', 'src'),
       path.join(projectRoot, 'container', 'skills'),
+      // Not mounted any more — the composer reads it on the host. The root
+      // stays because it is what forces install-surface (and therefore
+      // read-only) on an operator additionalMount whose allowlisted root
+      // happens to cover the project tree. Without it the agent could get a
+      // writable mount of the base document inlined into its prompt.
       path.join(projectRoot, 'container', 'CLAUDE.md'),
     ],
     // Must resolve to the same path an egress overlay's provisioner writes

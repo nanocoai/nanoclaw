@@ -333,7 +333,7 @@ CREATE TABLE container_configs (
 
 `timezone` overrides the install-global timezone for one agent group: host-side scheduling (cron interpretation, `--process-after`, run-log stamps) resolves it live via `resolveGroupTimezone` (`src/container-config.ts`); the container gets it as its `TZ` env on next respawn. Set via `ncl groups config update --timezone <IANA>` (`""` clears back to NULL) or `ncl groups create --timezone`.
 
-- **Readers:** `src/container-config.ts`, `src/container-runner.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/claude-md-compose.ts`
+- **Readers:** `src/container-config.ts`, `src/container-runner.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/project-doc-compose.ts`
 - **Writers:** `src/db/container-configs.ts`, `src/modules/self-mod/apply.ts`, `src/backfill-container-configs.ts`
 
 ### 1.16 `pending_sender_approvals`

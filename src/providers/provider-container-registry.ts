@@ -68,9 +68,9 @@ export interface ProviderHostCapabilities {
   /**
    * Optional. When true, this provider owns its agent-facing surfaces — the
    * composed project doc, skill-discovery links, and provider state dir —
-   * and the host must NOT compose or mount the default ones (composed
-   * CLAUDE.md, `.claude-fragments`, `/app/CLAUDE.md`, `/home/node/.claude`,
-   * project document). The provider's config fn does its own composing and
+   * and the host must NOT compose or mount the default ones (the composed
+   * project document at `/workspace/agent/CLAUDE.md`, skill-discovery links,
+   * `/home/node/.claude`). The provider's config fn does its own composing and
    * returns its own mounts. Default off — providers that omit
    * this get the default surfaces, which is today's behavior.
    */

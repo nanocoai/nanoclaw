@@ -17,6 +17,7 @@ import type {
   DriverCapabilities,
   SessionDriver,
   SessionEvent,
+  SessionExecSpec,
   SessionHandle,
   SessionKey,
   SessionSnapshot,
@@ -47,6 +48,9 @@ class FakeHandle implements SessionHandle {
       return new Promise((resolve, reject) => this.pendingStatus.push({ resolve, reject }));
     }
     return this.statusValue;
+  }
+  execSpec(command: string[]): SessionExecSpec {
+    return { bin: 'fake', argsTty: command, argsPlain: command };
   }
   async stop(reason: string): Promise<void> {
     this.stops.push(reason);

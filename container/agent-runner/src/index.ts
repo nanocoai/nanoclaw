@@ -12,8 +12,8 @@
  *     .heartbeat        ← container touches for liveness detection
  *     outbox/           ← outbound files
  *     agent/            ← agent group folder (CLAUDE.md, container.json, working files)
+ *       CLAUDE.md       ← composed project document (RO nested mount)
  *       container.json  ← per-group config (RO nested mount)
- *     global/           ← shared global memory (RO)
  *   /app/src/           ← shared agent-runner source (RO)
  *   /app/skills/        ← shared skills (RO)
  *   /home/node/.claude/ ← Claude SDK state + skill symlinks (RW)
@@ -60,9 +60,9 @@ async function main(): Promise<void> {
   // Runtime-generated system-prompt addendum: agent identity (name) plus
   // the live destinations map. Everything else (capabilities, per-module
   // instructions, per-channel formatting) is loaded by Claude Code from
-  // /workspace/agent/CLAUDE.md — the composed entry imports the shared
-  // base (/app/CLAUDE.md) and each enabled module's fragment. Memory is
-  // supplied separately by each provider's native lifecycle hook.
+  // /workspace/agent/CLAUDE.md — one flat file the host composes per spawn
+  // with every instruction source inlined, no imports. Memory is supplied
+  // separately by each provider's native lifecycle hook.
   const taskId = getTaskSeriesId();
   const instructions = buildSystemPromptAddendum(
     config.assistantName || undefined,

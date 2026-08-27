@@ -72,6 +72,7 @@ vi.mock('../lib/registry-state.js', () => ({
 vi.mock('../lib/runner.js', () => ({ ensureAnswer: <T>(answer: T): T => answer }));
 vi.mock('../lib/theme.js', () => ({ wrapForGutter: (message: string): string => message }));
 
+import { brightSelect } from '../lib/bright-select.js';
 import {
   PROVISIONING_MODULE,
   loadProvisioningCore,
@@ -240,6 +241,29 @@ describe('provisioning-core bootstrap', () => {
     const result = spawnSync(tsxBin, [probePath], { encoding: 'utf-8' });
     expect(result.status).toBe(0);
     expect(result.stdout).toBe('loaded-ts');
+  });
+});
+
+describe('setup rerun credential reuse', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.infos.length = 0;
+  });
+
+  it('reuses a saved bot token without loading or offering automatic provisioning again', async () => {
+    const root = track(rootWithModule());
+    fs.writeFileSync(path.join(root, '.env'), 'SLACK_BOT_TOKEN=xoxb-existing\n');
+    const importModule = vi.fn(async () => {
+      throw new Error('provisioning core must not load on a rerun');
+    });
+
+    await expect(maybeAutoProvisionSlack('Hubert', { root, importModule })).resolves.toBeUndefined();
+
+    expect(brightSelect).not.toHaveBeenCalled();
+    expect(importModule).not.toHaveBeenCalled();
+    expect(state.infos).toEqual([
+      'Hubert already has a Slack app connected from a previous run — reusing its saved credentials instead of creating a new one.',
+    ]);
   });
 });
 

@@ -455,9 +455,9 @@ This is documented as a pattern, not a built-in feature.
     ... working files
 ```
 
-Two directory mounts: session folder at `/workspace`, agent group folder at `/workspace/agent/`. The agent-runner CDs into `/workspace/agent/` to run the agent. Claude SDK writes `.claude/` at `/workspace/.claude/` (root of the workspace).
+Two directory mounts: session folder at `/workspace`, agent group folder at `/workspace/agent/`, plus nested read-only file mounts over the group dir (the composed `CLAUDE.md`, `container.json`). The agent-runner CDs into `/workspace/agent/` to run the agent. Claude SDK writes `.claude/` at `/workspace/.claude/` (root of the workspace).
 
-The runtime is Docker (`src/container-runtime.ts` hardcodes the `docker` binary); nested bind mounts make this layout straightforward. The layout deliberately sticks to directory mounts (no file-level mounts) so it stays portable to runtimes that only support directory mounts.
+The runtime is Docker (`src/container-runtime.ts` hardcodes the `docker` binary); nested bind mounts make this layout straightforward. Directory mounts carry the bulk of the layout, so it stays close to portable for runtimes with weaker file-mount support; the nested file mounts exist to make individual files read-only on top of a read-write dir.
 
 **Cross-mount DB access:** The two files exist precisely so each has a single writer — the
 host writes `inbound.db`, the container writes `outbound.db` — which removes writer

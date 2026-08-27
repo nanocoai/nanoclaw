@@ -120,3 +120,33 @@ describe('upgrade-state', () => {
     errSpy.mockRestore();
   });
 });
+
+describe('git-less runtimes', () => {
+  const GITLESS = path.join(TEST_DIR, 'gitless-checkout');
+
+  function gitlessCheckout(version: string): string {
+    fs.mkdirSync(GITLESS, { recursive: true });
+    fs.writeFileSync(path.join(GITLESS, 'package.json'), JSON.stringify({ version }));
+    return GITLESS;
+  }
+
+  function writeMarker(marker: Record<string, string>): void {
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    fs.writeFileSync(markerPath(), JSON.stringify({ updatedAt: new Date().toISOString(), via: 'update', ...marker }));
+  }
+
+  it('accepts a version-matching marker when Git cannot identify the checkout', () => {
+    writeMarker({ version: '9.9.9', commit: 'a'.repeat(40), tree: 'b'.repeat(40) });
+    expect(isUpgradeCurrent(gitlessCheckout('9.9.9'))).toBe(true);
+  });
+
+  it('still trips on a version mismatch when Git is unavailable', () => {
+    writeMarker({ version: '1.0.0', commit: 'a'.repeat(40), tree: 'b'.repeat(40) });
+    expect(isUpgradeCurrent(gitlessCheckout('9.9.9'))).toBe(false);
+  });
+
+  it('a marker recorded without Git still trips where Git identifies the checkout', () => {
+    writeMarker({ version: getCodeVersion(), commit: 'unknown', tree: 'unknown' });
+    expect(isUpgradeCurrent()).toBe(false);
+  });
+});

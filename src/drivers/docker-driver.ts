@@ -36,6 +36,7 @@ import {
   type MountSpec,
   type SessionDriver,
   type SessionEvent,
+  type SessionExecSpec,
   type SessionFailure,
   type SessionHandle,
   type SessionKey,
@@ -103,7 +104,7 @@ export class DockerSessionDriver implements SessionDriver {
   }
 
   async prepare(spec: SessionSpec): Promise<SessionHandle> {
-    validateSpec(spec, this.#policy);
+    validateSpec(spec, this.#policy, this.capabilities());
 
     const extra = spec.containers.filter((c) => c.role !== 'agent');
     if (extra.length > 0) {
@@ -536,6 +537,15 @@ class DockerHandle implements SessionHandle {
     } catch {
       /* `--rm` usually got there first */
     }
+  }
+
+  /** `docker exec` against this session's container — see `SessionExecSpec`. */
+  execSpec(command: string[]): SessionExecSpec {
+    return {
+      bin: 'docker',
+      argsTty: ['exec', '-it', this.name, ...command],
+      argsPlain: ['exec', '-i', this.name, ...command],
+    };
   }
 }
 

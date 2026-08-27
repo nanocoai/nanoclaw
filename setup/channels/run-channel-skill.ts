@@ -176,6 +176,8 @@ interface WireArgs {
   agentGroupId?: string;
   /** Explicit DM engage regex (e.g. WhatsApp shared-mode "@<name> only" self-chat). */
   engagePattern?: string;
+  /** Adapter instance registry key (e.g. telegram-mega) when the skill wired a named bot; unset = default instance. */
+  instance?: string;
 }
 
 export async function resolveAgentName(): Promise<string> {
@@ -214,6 +216,7 @@ async function initFirstAgent(args: WireArgs): Promise<boolean> {
       args.role,
       ...(args.agentGroupId ? ['--agent-group-id', args.agentGroupId] : []),
       ...(args.engagePattern ? ['--engage-pattern', args.engagePattern] : []),
+      ...(args.instance ? ['--instance', args.instance] : []),
     ],
     { running: `Wiring ${args.agentName} to your ${args.channel} DMs…`, done: 'Agent wired.' },
     { extraFields: { CHANNEL: args.channel, AGENT_NAME: args.agentName, PLATFORM_ID: args.platformId } },
@@ -283,6 +286,7 @@ export async function runChannelSkill(
   const res = await runSkill(`.claude/skills/add-${channel}`, {
     projectRoot,
     exec: overrides.exec,
+    execStream: overrides.execStream,
     resolveInput: overrides.resolveInput,
     resolveRemote: overrides.resolveRemote,
     // The already-resolved agent name is pre-supplied so a skill that consumes
@@ -381,6 +385,7 @@ export async function runChannelSkill(
     role: role!,
     agentGroupId: templateAgentGroupId,
     engagePattern: res.vars.engage_pattern || undefined,
+    instance: res.vars.instance || undefined,
   });
   if (!ok) {
     await failWith(

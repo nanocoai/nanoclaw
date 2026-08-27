@@ -188,6 +188,37 @@ describe('retired mechanisms', () => {
   });
 });
 
+describe('add-dial ↔ add-dial-tool agent-scope duplication', () => {
+  // The consent warning and the dial_agents prompt exist verbatim in BOTH
+  // skills: the parent asks (it owns the terminal; a nested step's stdout is a
+  // pipe) and hands the answer down via --input, the child re-asks only when
+  // run standalone. Duplication is deliberate — the shared-helper-file version
+  // was a shell-injection vector — but drift between the copies means the
+  // parent can accept an answer the child's validate-at-bind rejects, bouncing
+  // the operator three steps after they answered. Pin the copies together.
+  const dirs = (name: string) => parseDirectives(readFileSync(join(SKILLS_DIR, name, 'SKILL.md'), 'utf8'));
+  const parent = dirs('add-dial');
+  const child = dirs('add-dial-tool');
+
+  it('the dial_agents prompt matches: validate, flags, normalize, question text', () => {
+    const promptOf = (ds: Directive[]) => ds.find((d) => d.kind === 'prompt' && promptVar(d) === 'dial_agents');
+    const pp = promptOf(parent);
+    const cp = promptOf(child);
+    expect(pp).toBeDefined();
+    expect(cp).toBeDefined();
+    for (const attr of ['validate', 'flags', 'normalize'] as const) expect(pp!.attrs[attr]).toBe(cp!.attrs[attr]);
+    expect(pp!.body).toEqual(cp!.body);
+  });
+
+  it('the consent warning matches', () => {
+    const warnOf = (ds: Directive[]) =>
+      ds.find((d) => d.kind === 'operator' && d.body.join('\n').includes('Giving an agent Dial'));
+    const pw = warnOf(parent);
+    expect(pw).toBeDefined();
+    expect(pw!.body).toEqual(warnOf(child)?.body);
+  });
+});
+
 describe.each(SKILLS)('%s', (name) => {
   const dir = join(SKILLS_DIR, name);
   const md = readFileSync(join(dir, 'SKILL.md'), 'utf8');

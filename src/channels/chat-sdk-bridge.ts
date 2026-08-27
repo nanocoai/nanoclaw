@@ -25,6 +25,7 @@ import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
+import { INSTANCE_KEY_RE } from './channel-registry.js';
 import { resolveQuestionRender } from './question-render-registry.js';
 
 /** Adapter with optional gateway support (e.g., Discord). */
@@ -427,7 +428,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   // whitespace-only names, which are config bugs — '' is falsy, so it
   // would skip a truthiness guard, dead-end the webhook route, and
   // collapse the state namespace into the default instance's keyspace.
-  if (config.instance !== undefined && !/^[A-Za-z0-9._-]+$/.test(config.instance)) {
+  if (config.instance !== undefined && !INSTANCE_KEY_RE.test(config.instance)) {
     throw new Error(
       `chat-sdk bridge instance ${JSON.stringify(config.instance)} must be URL-safe: ` +
         `non-empty, only letters, digits, '.', '_' or '-'`,
@@ -740,6 +741,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         };
         startGateway();
         log.info('Gateway listener started', { adapter: adapter.name });
+      } else if ('runtimeMode' in adapter && adapter.runtimeMode === 'polling') {
+        // Polling adapters (Telegram) pull updates themselves; a route here
+        // would only bind the shared webhook port for nothing. Read after
+        // initialize(): the adapter resolves mode 'auto' there.
+        log.info('Polling adapter: no webhook route registered', { adapter: adapter.name });
       } else {
         // Non-gateway adapters (Slack, Teams, GitHub, etc.) — register on the
         // shared webhook server. The handler key stays adapter.name (the

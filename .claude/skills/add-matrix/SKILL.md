@@ -34,7 +34,22 @@ is already present). This one line is the skill's only reach-in into core:
 import './matrix.js';
 ```
 
-### 3. Install the adapter package
+### 3. Configure the ESM patch
+
+The published adapter references `matrix-js-sdk/lib/...` without `.js`
+extensions, which fails under Node 22 strict ESM resolution. Register the
+committed pnpm patch before installing the package. pnpm reapplies it after
+every install and fails if the pinned package drifts away from the patch:
+
+```nc:copy
+patches/@beeper__chat-adapter-matrix@0.2.0.patch
+```
+
+```nc:run effect:refresh
+pnpm pkg set 'pnpm.patchedDependencies[@beeper/chat-adapter-matrix@0.2.0]=patches/@beeper__chat-adapter-matrix@0.2.0.patch'
+```
+
+### 4. Install the adapter package
 
 Pinned to an exact version — the supply-chain policy rejects ranges and `latest`.
 The Matrix adapter lives in the `@beeper/` namespace and versions on its own
@@ -44,35 +59,17 @@ track (not the `@chat-adapter/*` family), so it carries its own pin:
 @beeper/chat-adapter-matrix@0.2.0
 ```
 
-### 4. Patch matrix-js-sdk ESM imports
-
-The adapter's published dist references `matrix-js-sdk/lib/...` without `.js`
-extensions, which fails under Node 22 strict ESM resolution. Add the missing
-extensions (idempotent — safe to re-run). Re-run this after every `pnpm install`
-that touches the adapter:
-
-```nc:run effect:external
-node -e '
-  const fs = require("fs"), path = require("path");
-  const root = "node_modules/.pnpm";
-  const dir = fs.readdirSync(root).find(d => d.startsWith("@beeper+chat-adapter-matrix@"));
-  if (!dir) { console.log("Matrix adapter not installed"); process.exit(0); }
-  const f = path.join(root, dir, "node_modules/@beeper/chat-adapter-matrix/dist/index.js");
-  fs.writeFileSync(f, fs.readFileSync(f, "utf8").replace(
-    /from "(matrix-js-sdk\/lib\/[^"]+?)(?<!\.js)"/g, "from \"$1.js\""
-  ));
-  console.log("Patched", f);
-'
-```
-
-### 5. Build
+### 5. Verify and build
 
 Build guards the typed `createChatSdkBridge(...)` core call the adapter makes
-and proves the dependency is installed and the ESM patch took. It also fails if
-the `import './matrix.js';` line is missing or the barrel can't evaluate.
+and fails if the `import './matrix.js';` line is missing. The direct Node import
+checks the published ESM entrypoint using the real runtime resolver:
 
 ```nc:run effect:build
 pnpm run build
+```
+```nc:run effect:test
+node --input-type=module -e 'await import("@beeper/chat-adapter-matrix")'
 ```
 ```nc:run effect:test
 pnpm exec vitest run src/channels/matrix-registration.test.ts

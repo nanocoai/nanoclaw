@@ -9,7 +9,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.197",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.238",
     "@anthropic-ai/sdk": "^0.108.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "cron-parser": "^5.0.0",
