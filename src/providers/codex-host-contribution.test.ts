@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const TEST_ROOT = '/tmp/nanoclaw-codex-host-contribution-test';
 const DATA_DIR = path.join(TEST_ROOT, 'data');
 const GROUPS_DIR = path.join(TEST_ROOT, 'groups');
+const newCoreIt = fs.existsSync(path.join(process.cwd(), 'src/provider-contracts/realize.ts')) ? it : it.skip;
 
 vi.mock('../config.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../config.js')>()),
@@ -37,6 +38,35 @@ import type { AgentGroup, Session } from '../types.js';
 
 function group(id: string, folder: string): AgentGroup {
   return { id, name: folder, folder, agent_provider: null, created_at: new Date().toISOString() } as AgentGroup;
+}
+
+type MountShape = { containerPath: string; hostPath: string; readonly: boolean };
+
+const CODEX_CONTAINER_PATHS = [
+  '/home/node/.codex',
+  '/workspace/agent/AGENTS.md',
+  '/workspace/agent/.agents',
+  '/home/node/.agents',
+];
+
+function codexMounts(mounts: readonly MountShape[]): MountShape[] {
+  return mounts
+    .filter((mount) => CODEX_CONTAINER_PATHS.includes(mount.containerPath))
+    .map(({ containerPath, hostPath, readonly }) => ({ containerPath, hostPath, readonly }));
+}
+
+function expectedCodexMounts(groupDir: string, codexShared: string): MountShape[] {
+  const agentsDir = path.join(groupDir, '.agents');
+  return [
+    { containerPath: '/home/node/.codex', hostPath: codexShared, readonly: false },
+    { containerPath: '/workspace/agent/.agents', hostPath: agentsDir, readonly: true },
+    { containerPath: '/home/node/.agents', hostPath: agentsDir, readonly: true },
+    { containerPath: '/workspace/agent/AGENTS.md', hostPath: path.join(groupDir, 'AGENTS.md'), readonly: true },
+  ];
+}
+
+function byContainerPath(mounts: readonly MountShape[]): MountShape[] {
+  return [...mounts].sort((left, right) => left.containerPath.localeCompare(right.containerPath));
 }
 
 describe('codex host contribution against real core', () => {
@@ -96,9 +126,35 @@ describe('codex host contribution against real core', () => {
     };
     const mounts = await buildMounts(ag, session, config, 'codex', contribution);
     const containerPaths = mounts.map((m) => m.containerPath);
-    expect(containerPaths).toContain('/home/node/.codex');
-    expect(containerPaths.some((p) => p.endsWith('AGENTS.md'))).toBe(true);
+    // The same four codex mounts on either core generation; only their order
+    // differs (the contract core realizes declared surfaces first), so the set
+    // is asserted here and the order in the contract-core test below.
+    expect(byContainerPath(codexMounts(mounts))).toEqual(byContainerPath(expectedCodexMounts(groupDir, codexShared)));
     expect(containerPaths).not.toContain('/home/node/.claude');
+  });
+
+  newCoreIt('orders the declared codex surfaces ahead of the composed AGENTS.md', async () => {
+    const ag = group('ag-codex-order', 'codex-order-group');
+    await createAgentGroup(ag);
+    await ensureContainerConfig(ag.id);
+    const groupDir = path.join(GROUPS_DIR, ag.folder);
+    const contribution = await getProviderContainerConfig('codex')!({
+      sessionDir: path.join(DATA_DIR, 'v2-sessions', ag.id, 'session-1'),
+      agentGroupId: ag.id,
+      groupDir,
+      selectedSkills: [],
+      hostEnv: process.env,
+    });
+    const session = { id: 'session-1', agent_group_id: ag.id } as Session;
+    const config: ContainerConfig = {
+      mcpServers: {},
+      packages: { apt: [], npm: [] },
+      additionalMounts: [],
+      skills: [],
+    };
+    const mounts = await buildMounts(ag, session, config, 'codex', contribution);
+    const codexShared = path.join(DATA_DIR, 'v2-sessions', ag.id, '.codex-shared');
+    expect(codexMounts(mounts)).toEqual(expectedCodexMounts(groupDir, codexShared));
   });
 
   it('mirrors per-group template skills from the Claude plane into .agents/skills', async () => {
@@ -124,5 +180,41 @@ describe('codex host contribution against real core', () => {
     expect(fs.existsSync(path.join(mirrored, 'SKILL.md'))).toBe(true);
     // A real dir, not a symlink — so it survives syncCodexSkillLinks' symlink-only prune.
     expect(fs.lstatSync(mirrored).isSymbolicLink()).toBe(false);
+  });
+
+  newCoreIt('lets new core realize declared surfaces without legacy duplicates', async () => {
+    const ag = group('ag-codex-contract', 'codex-contract-group');
+    await createAgentGroup(ag);
+    await ensureContainerConfig(ag.id);
+    const groupDir = path.join(GROUPS_DIR, ag.folder);
+    const session = { id: 'session-contract', agent_group_id: ag.id } as Session;
+    const config: ContainerConfig = {
+      mcpServers: {},
+      packages: { apt: [], npm: [] },
+      additionalMounts: [],
+      skills: [],
+    };
+    const context = {
+      sessionDir: path.join(DATA_DIR, 'v2-sessions', ag.id, session.id),
+      agentGroupId: ag.id,
+      groupDir,
+      selectedSkills: [],
+      hostEnv: process.env,
+      coreOwnsProviderSurfaces: true as const,
+    };
+
+    const contribution = await getProviderContainerConfig('codex')!(context);
+    expect(contribution).toEqual({});
+
+    const mounts = await buildMounts(ag, session, config, 'codex', contribution);
+    expect(mounts.filter((mount) => mount.containerPath === '/home/node/.codex')).toHaveLength(1);
+    expect(mounts.filter((mount) => mount.containerPath === '/workspace/agent/AGENTS.md')).toHaveLength(1);
+    for (const destination of ['/workspace/agent/.agents', '/home/node/.agents']) {
+      expect(mounts.find((mount) => mount.containerPath === destination)?.hostPath).toBe(
+        path.join(groupDir, '.agents'),
+      );
+    }
+    expect(fs.existsSync(path.join(groupDir, '.agents', 'skills'))).toBe(true);
+    expect(fs.existsSync(path.join(DATA_DIR, 'v2-sessions', ag.id, '.codex-shared', 'auth.json'))).toBe(true);
   });
 });

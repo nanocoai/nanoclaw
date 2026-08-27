@@ -1,0 +1,69 @@
+name: Provider contract
+
+on:
+  pull_request:
+    branches: [providers]
+  push:
+    branches: [providers]
+
+permissions:
+  contents: read
+
+env:
+  # The core this payload is verified against. Until the provider-contract
+  # core stack merges to main, this pin must track the HEAD of that stack
+  # (currently feat/group-tone-speed); bump it whenever the stack is amended.
+  COMPATIBLE_CORE_SHA: 13df3566e1cafb54bfaa118fba874b9dcd563629
+  COMPATIBLE_CHANNELS_SHA: 4bd51d583c5a8749d1d76c36f8d04ab6f1c7e2a8
+  # A pre-contract main commit that still carries /add-codex and /add-opencode:
+  # the old-core gate installs the pre-contract payloads there and refreshes
+  # them to this PR's head, proving the payload still lands on an old install.
+  OLD_CORE_SHA: 99283f3e274b2b1dae47b141ac4f11f56ad8eb2d
+
+jobs:
+  combined-providers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out provider PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          path: provider-payload
+      - name: Check out compatible core
+        uses: actions/checkout@v4
+        with:
+          repository: nanocoai/nanoclaw
+          ref: ${{ env.COMPATIBLE_CORE_SHA }}
+          path: core
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: core/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: core/pnpm-lock.yaml
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.12
+      - id: provider
+        name: Pin provider payload head
+        run: |
+          sha=$(git -C provider-payload rev-parse HEAD)
+          git -C core fetch ../provider-payload "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - run: pnpm install --frozen-lockfile
+        working-directory: core
+      - name: Install, refresh, and verify provider head
+        working-directory: core
+        env:
+          REGISTRY_CHANNELS_SHA: ${{ env.COMPATIBLE_CHANNELS_SHA }}
+          REGISTRY_PROVIDERS_SHA: ${{ steps.provider.outputs.sha }}
+        run: pnpm exec tsx scripts/test-registry-skills.ts --combined-providers
+      - name: Install legacy providers on the old core, then refresh them to provider head
+        working-directory: core
+        env:
+          REGISTRY_CHANNELS_SHA: ${{ env.COMPATIBLE_CHANNELS_SHA }}
+          REGISTRY_PROVIDERS_SHA: ${{ steps.provider.outputs.sha }}
+        run: pnpm exec tsx scripts/test-registry-skills.ts --old-provider-refresh "$OLD_CORE_SHA"

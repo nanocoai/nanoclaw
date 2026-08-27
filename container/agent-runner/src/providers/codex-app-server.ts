@@ -67,6 +67,17 @@ export interface AppServer {
 
 export type CodexReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 
+const SUPPORTED_EFFORTS = new Set<CodexReasoningEffort>(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+
+export function normalizeCodexEffort(effort: string | undefined): CodexReasoningEffort | undefined {
+  const normalized = effort?.trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (!SUPPORTED_EFFORTS.has(normalized as CodexReasoningEffort)) {
+    throw new Error(`Unsupported Codex reasoning effort: ${effort}`);
+  }
+  return normalized as CodexReasoningEffort;
+}
+
 // Codex runs unrestricted inside the container. NanoClaw's container isolation and
 // the OneCLI allow-list are the security boundary — not Codex's own sandbox/approval
 // primitives (which can't run here anyway: workspace-write/read-only need user
@@ -272,6 +283,8 @@ export async function startOrResumeCodexThread(
     cwd: params.cwd,
     approvalPolicy: CODEX_APPROVAL_POLICY,
     sandbox: CODEX_SANDBOX_MODE,
+    // App-server ignores the CLI hook-trust flag; apply it to every thread.
+    config: { bypass_hook_trust: true },
     baseInstructions: params.baseInstructions,
     developerInstructions: params.developerInstructions,
     personality: 'friendly',
@@ -376,37 +389,119 @@ export function attachCodexAutoApproval(server: AppServer): void {
   });
 }
 
+/**
+ * Who writes config.toml / hooks.json before a query. The provider's own
+ * direct write (in CodexProvider.query) runs only while this is false. The
+ * runtime contract module (provider-contracts/codex.ts) flips it to true when
+ * it loads, because on that core the contract's beforeQuery performs the
+ * write — so each query writes the files exactly once on either core.
+ */
+export const codexRuntimeOwnership = { contractOwnsRuntimeFiles: false };
+
 export function writeCodexConfigToml(
   servers: Record<string, McpServerConfig>,
   memorySessionHook: CodexMemorySessionHook,
-  opts: { model?: string; effort?: string } = {},
+  opts: { model?: string; effort?: string; fastMode?: boolean } = {},
 ): void {
   const codexConfigDir = path.join(process.env.HOME || '/home/node', '.codex');
   fs.mkdirSync(codexConfigDir, { recursive: true });
   const configTomlPath = path.join(codexConfigDir, 'config.toml');
   const hooksJsonPath = path.join(codexConfigDir, 'hooks.json');
+  fs.writeFileSync(configTomlPath, renderCodexConfigToml(buildCodexConfigPlan(servers, opts)));
+  const hooksExist = fs.existsSync(hooksJsonPath);
+  fs.writeFileSync(
+    hooksJsonPath,
+    reconcileCodexHooksJson(
+      hooksExist ? fs.readFileSync(hooksJsonPath, 'utf-8') : '',
+      memorySessionHook,
+      hooksJsonPath,
+      hooksExist,
+    ),
+  );
+}
 
+export interface CodexConfigPlan {
+  executionPolicy: {
+    sandboxMode: string;
+    approvalPolicy: string;
+    projectDocumentMaxBytes: number;
+  };
+  inference: { model?: string; effort?: string; fastMode?: boolean };
+  memory: { memories: false; useMemories: false; generateMemories: false };
+  mcpServers: Record<string, McpServerConfig>;
+}
+
+// Per-capability plan functions. The runtime contract probes these same
+// functions, and the lifecycle callback uses the direct writer below.
+
+export function codexExecutionPolicySection(): CodexConfigPlan['executionPolicy'] {
+  return {
+    sandboxMode: CODEX_SANDBOX_MODE,
+    approvalPolicy: CODEX_APPROVAL_POLICY,
+    projectDocumentMaxBytes: CODEX_PROJECT_DOC_MAX_BYTES,
+  };
+}
+
+/**
+ * The contract path receives the raw core input and normalizes here; the
+ * legacy provider path normalizes in its constructor and passes the result
+ * through `buildCodexConfigPlan` untouched — both land on the same bytes.
+ */
+export function codexInferenceSection(input: {
+  model?: string;
+  effort?: string;
+  speed?: string;
+}): CodexConfigPlan['inference'] {
+  return {
+    model: input.model,
+    effort: normalizeCodexEffort(input.effort),
+    fastMode: input.speed === 'fast' || undefined,
+  };
+}
+
+export function codexMemorySection(): CodexConfigPlan['memory'] {
+  return { memories: false, useMemories: false, generateMemories: false };
+}
+
+export function codexMcpServersSection(input: Record<string, McpServerConfig>): CodexConfigPlan['mcpServers'] {
+  return input;
+}
+
+export function buildCodexConfigPlan(
+  servers: Record<string, McpServerConfig>,
+  opts: { model?: string; effort?: string; fastMode?: boolean } = {},
+): CodexConfigPlan {
+  return {
+    executionPolicy: codexExecutionPolicySection(),
+    inference: opts,
+    memory: codexMemorySection(),
+    mcpServers: codexMcpServersSection(servers),
+  };
+}
+
+export function renderCodexConfigToml(plan: CodexConfigPlan): string {
   // Instance-level defaults the app-server reads on startup; threads/turns inherit them.
   const lines: string[] = [
-    `sandbox_mode = ${tomlBasicString(CODEX_SANDBOX_MODE)}`,
-    `approval_policy = ${tomlBasicString(CODEX_APPROVAL_POLICY)}`,
-    `project_doc_max_bytes = ${CODEX_PROJECT_DOC_MAX_BYTES}`,
+    `sandbox_mode = ${tomlBasicString(plan.executionPolicy.sandboxMode)}`,
+    `approval_policy = ${tomlBasicString(plan.executionPolicy.approvalPolicy)}`,
+    `project_doc_max_bytes = ${plan.executionPolicy.projectDocumentMaxBytes}`,
   ];
-  if (opts.model) lines.push(`model = ${tomlBasicString(opts.model)}`);
-  if (opts.effort) lines.push(`model_reasoning_effort = ${tomlBasicString(opts.effort)}`);
+  if (plan.inference.model) lines.push(`model = ${tomlBasicString(plan.inference.model)}`);
+  if (plan.inference.effort) lines.push(`model_reasoning_effort = ${tomlBasicString(plan.inference.effort)}`);
+  if (plan.inference.fastMode) lines.push('service_tier = "fast"');
   lines.push('');
 
   // NanoClaw owns persistent memory across providers. Keep Codex's native
   // memory disabled even if its defaults or a user-level config change.
   lines.push('[features]');
-  lines.push('memories = false');
+  lines.push(`memories = ${plan.memory.memories}`);
   lines.push('');
   lines.push('[memories]');
-  lines.push('use_memories = false');
-  lines.push('generate_memories = false');
+  lines.push(`use_memories = ${plan.memory.useMemories}`);
+  lines.push(`generate_memories = ${plan.memory.generateMemories}`);
   lines.push('');
 
-  for (const [name, config] of Object.entries(servers)) {
+  for (const [name, config] of Object.entries(plan.mcpServers)) {
     const tomlName = tomlKey(name);
     lines.push(`[mcp_servers.${tomlName}]`);
     if (config.type === 'http') {
@@ -441,8 +536,18 @@ export function writeCodexConfigToml(
     lines.push('');
   }
 
-  fs.writeFileSync(configTomlPath, lines.join('\n'));
-  const hooksConfig = readHooksConfig(hooksJsonPath);
+  return lines.join('\n');
+}
+
+export function reconcileCodexHooksJson(
+  current: string,
+  memorySessionHook: CodexMemorySessionHook,
+  filePath = 'Codex hooks config',
+  exists = Boolean(current),
+): string {
+  const parsed: unknown = exists ? JSON.parse(current) : {};
+  if (!isRecord(parsed)) throw new Error(`${filePath} must contain a JSON object`);
+  const hooksConfig = parsed;
   const hooks = objectProperty(hooksConfig, 'hooks');
   const sessionStart = arrayProperty(hooks, 'SessionStart');
 
@@ -455,16 +560,7 @@ export function writeCodexConfigToml(
     hooks: [{ type: 'command', command: memorySessionHook.command, timeout: 10 }],
   });
   hooks.SessionStart = nextSessionStart;
-  fs.writeFileSync(hooksJsonPath, JSON.stringify(hooksConfig, null, 2) + '\n');
-}
-
-function readHooksConfig(filePath: string): Record<string, unknown> {
-  if (!fs.existsSync(filePath)) return {};
-  const parsed: unknown = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-  if (!isRecord(parsed)) {
-    throw new Error(`${filePath} must contain a JSON object`);
-  }
-  return parsed;
+  return JSON.stringify(hooksConfig, null, 2) + '\n';
 }
 
 function objectProperty(parent: Record<string, unknown>, key: string): Record<string, unknown> {

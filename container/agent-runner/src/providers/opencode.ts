@@ -27,6 +27,30 @@ const MODEL_INPUT_MODALITIES = ['text', 'audio', 'image', 'video', 'pdf'] as con
 
 const SESSION_STATUS_RETRY_ERROR_AFTER = 3;
 
+// OpenCode's permission stance inside the NanoClaw container: the container
+// and the OneCLI allow-list are the boundary, so every category OpenCode knows
+// today is allowed except the interactive `question` tool. Declared here (the
+// provider's own config module) and exported so the runtime contract can
+// state it as its execution policy without this module importing the contract.
+export const OPENCODE_PERMISSION_POLICY = {
+  read: 'allow',
+  edit: 'allow',
+  glob: 'allow',
+  grep: 'allow',
+  list: 'allow',
+  bash: 'allow',
+  task: 'allow',
+  external_directory: 'allow',
+  todowrite: 'allow',
+  question: 'deny',
+  webfetch: 'allow',
+  websearch: 'allow',
+  codesearch: 'allow',
+  lsp: 'allow',
+  doom_loop: 'allow',
+  skill: 'allow',
+} as const;
+
 /**
  * The agent workspace: the group directory the host mounts RW, holding the
  * composed project document, the group's memory, and its working files. Both
@@ -68,7 +92,10 @@ function killProcessTree(proc: ChildProcess): void {
   }
 }
 
-function spawnOpencodeServer(config: Record<string, unknown>, timeoutMs = 10_000): Promise<{ url: string; proc: ChildProcess }> {
+function spawnOpencodeServer(
+  config: Record<string, unknown>,
+  timeoutMs = 10_000,
+): Promise<{ url: string; proc: ChildProcess }> {
   return new Promise((resolve, reject) => {
     const hostname = '127.0.0.1';
     const port = 4096;
@@ -297,9 +324,7 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
     })
     .filter((entry) => entry !== 'text');
   const modelModalities =
-    requestedModalities.length > 0
-      ? { input: ['text', ...requestedModalities], output: ['text'] }
-      : undefined;
+    requestedModalities.length > 0 ? { input: ['text', ...requestedModalities], output: ['text'] } : undefined;
 
   const providerOptions: Record<string, unknown> =
     provider === 'anthropic'
@@ -383,24 +408,7 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
     // "allow everything" behavior.
     // A category OpenCode adds after this list was written is absent from it,
     // and so resolves to OpenCode's own default rather than to `allow`.
-    permission: {
-      read: 'allow',
-      edit: 'allow',
-      glob: 'allow',
-      grep: 'allow',
-      list: 'allow',
-      bash: 'allow',
-      task: 'allow',
-      external_directory: 'allow',
-      todowrite: 'allow',
-      question: 'deny',
-      webfetch: 'allow',
-      websearch: 'allow',
-      codesearch: 'allow',
-      lsp: 'allow',
-      doom_loop: 'allow',
-      skill: 'allow',
-    },
+    permission: OPENCODE_PERMISSION_POLICY,
     autoupdate: false,
     snapshot: false,
     provider: providerOptions,
@@ -1178,4 +1186,6 @@ export class OpenCodeProvider implements AgentProvider {
   }
 }
 
+// Function-form registration only; the runtime contract attaches itself from
+// provider-contracts/opencode.ts, so this module compiles on either core.
 registerProvider('opencode', (opts) => new OpenCodeProvider(opts));

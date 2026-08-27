@@ -379,9 +379,8 @@ export async function offerCodexFailureAssist(ctx: AssistContext, projectRoot: s
  * the payload moves to the providers branch, a failed check means the install
  * step should run (or the user finishes via /add-codex).
  */
-export function verifyCodexInstall(): { ok: boolean; problems: string[] } {
+export function verifyCodexInstall(root = process.cwd()): { ok: boolean; problems: string[] } {
   const problems: string[] = [];
-  const root = process.cwd();
 
   const requiredFiles = [
     'src/providers/codex.ts',
@@ -417,9 +416,9 @@ export function verifyCodexInstall(): { ok: boolean; problems: string[] } {
   return { ok: problems.length === 0, problems };
 }
 
-export async function runCodexInstallCheck(): Promise<void> {
+export async function runCodexInstallCheck(root = process.cwd()): Promise<void> {
   p.log.step(brandBody('Checking the Codex provider install…'));
-  const { ok, problems } = verifyCodexInstall();
+  const { ok, problems } = verifyCodexInstall(root);
   if (ok) {
     setupLog.step('codex-install', 'success', 0, {});
     p.log.success(brandBody('Codex installed properly.'));
@@ -431,9 +430,10 @@ export async function runCodexInstallCheck(): Promise<void> {
   for (const problem of problems) console.log(k.dim(`   • ${problem}`));
   p.log.warn(
     brandBody(
-      'Finish it with your coding agent of choice: open Codex CLI or Claude Code in this repo and run the /add-codex skill. Setup will continue — Codex groups will work once the install completes.',
+      'Finish it with your coding agent of choice: open Codex CLI or Claude Code in this repo and run the /add-codex skill.',
     ),
   );
+  throw new Error(`Codex provider is not fully installed: ${problems.join('; ')}`);
 }
 
 // Self-registration: the setup picker and the standalone `provider-auth` step
