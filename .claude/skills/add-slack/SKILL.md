@@ -63,7 +63,7 @@ import './slack-a2a-guard.js';
 
 Pinned exactly — the supply-chain policy rejects ranges and `latest`:
 ```nc:dep
-@chat-adapter/slack@4.29.0
+@chat-adapter/slack@4.38.1
 ```
 
 ### 4. Build and validate

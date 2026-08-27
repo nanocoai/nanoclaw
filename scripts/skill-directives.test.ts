@@ -96,7 +96,7 @@ describe('skill-directives parser, on the converted add-slack', () => {
 
   it('reads the dependency pinned exactly', () => {
     const dep = directives.find((d) => d.kind === 'dep')!;
-    expect(dep.body).toEqual(['@chat-adapter/slack@4.29.0']);
+    expect(dep.body).toEqual(['@chat-adapter/slack@4.38.1']);
   });
 
   it('tags the runs with their effects', () => {
