@@ -47,10 +47,16 @@ export function sqliteGetPendingMessages(isFirstPoll: boolean, limit: number): M
       ),
     );
     const unclaimed = pending.filter(({ id }) => !acked.has(id));
-    const wake = unclaimed.filter(({ trigger }) => trigger === 1).slice(0, limit);
-    const remaining = limit - wake.length;
-    const context = remaining > 0 ? unclaimed.filter(({ trigger }) => trigger === 0).slice(-remaining) : [];
-    return [...wake, ...context].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+    // System rows are control responses consumed by dedicated lookups. Keep
+    // them visible for compatibility, but only in slots that turn messages do
+    // not need; the poll loop filters them before building the prompt.
+    const turn = unclaimed.filter(({ kind }) => kind !== 'system');
+    const wake = turn.filter(({ trigger }) => trigger === 1).slice(0, limit);
+    const contextSlots = limit - wake.length;
+    const context = contextSlots > 0 ? turn.filter(({ trigger }) => trigger === 0).slice(-contextSlots) : [];
+    const systemSlots = limit - wake.length - context.length;
+    const system = systemSlots > 0 ? unclaimed.filter(({ kind }) => kind === 'system').slice(0, systemSlots) : [];
+    return [...system, ...wake, ...context].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
   } finally {
     inbound.close();
   }
