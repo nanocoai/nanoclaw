@@ -178,6 +178,10 @@ export async function refreshInstalledSkills(
             cwd: root,
             encoding: 'utf8',
             stdio: ['ignore', 'pipe', 'pipe'],
+            // Same 1 MB default, same failure: a package install prints more
+            // than that, and the refresh dies with ENOBUFS for reasons that
+            // have nothing to do with the refresh.
+            maxBuffer: 256 * 1024 * 1024,
           });
         },
         resolveDependencyCommand: (request) => portableDependencyCommand(root, bunOnHost, request),
