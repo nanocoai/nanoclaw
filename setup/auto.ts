@@ -40,7 +40,7 @@ import { BACK_TO_CHANNEL_SELECTION } from './lib/back-nav.js';
 import { runChannelSkillWithPreStep } from './channels/run-channel-skill.js';
 import { runInheritScript } from './lib/inherit-script.js';
 import { pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
-import { getSetupProvider, listSetupProviders } from './providers/registry.js';
+import { getSetupProvider, listSetupProviders, runSetupProviderAuth } from './providers/registry.js';
 import { applyProviderSkill } from './providers/install.js';
 // Provider payloads self-register their picker entry + auth on import.
 import './providers/index.js';
@@ -516,7 +516,7 @@ async function main(driver: SetupDriver): Promise<void> {
     // each via `ncl groups config update --provider` right after creating it
     // (the creation scripts inherit it and apply at create — see picked-provider). Existing groups switch the
     // same way (docs/provider-migration.md).
-    agentProvider = await askAgentProviderChoice();
+    agentProvider = await askAgentProviderChoice(driver);
     setPickedProvider(agentProvider);
 
     // A pulled image bakes /app/node_modules and the CLI manifest, and every
@@ -525,22 +525,24 @@ async function main(driver: SetupDriver): Promise<void> {
     // pinned install, and reaching that refusal aborts setup with no way out
     // short of re-running it.
     if (agentProvider !== 'claude' && readImageSource() === 'hardened') {
-      const leave = ensureAnswer(
-        await p.confirm({
-          message: `${agentProvider} needs a sandbox image built on this machine. Stop using the pre-built one?`,
-          initialValue: true,
-        }),
+      const leave = await confirmPrompt(
+        driver,
+        'provider-leave-hardened-image',
+        `${agentProvider} needs a sandbox image built on this machine. Stop using the pre-built one?`,
+        true,
       );
       if (!leave) {
         await fail(
           'auth',
           `${agentProvider} can't run on the pre-built sandbox image.`,
           'Re-run setup and choose Claude to keep the pre-built image.',
+          undefined,
+          driver,
         );
       }
       writeImageSource('local');
       setupLog.userInput('image_source', 'local');
-      p.log.info(brandBody('Switched back to a locally built sandbox image.'));
+      driver.log('info', brandBody('Switched back to a locally built sandbox image.'));
     }
 
     let providerEntry = getSetupProvider(agentProvider);
@@ -552,42 +554,53 @@ async function main(driver: SetupDriver): Promise<void> {
       // already ran, the CLI manifest just changed), then load the payload's
       // setup module so it self-registers.
       const skillDir = `.claude/skills/add-${agentProvider}`;
-      const s = p.spinner();
-      s.start(`Installing ${agentProvider}…`);
+      const providerSpinner = driver.mode === 'terminal' ? p.spinner() : null;
+      if (providerSpinner) providerSpinner.start(`Installing ${agentProvider}…`);
+      else driver.progress(`add-${agentProvider}`, 'running', `Installing ${agentProvider}`);
       let blockers: string[];
       try {
-        ({ blockers } = await applyProviderSkill(skillDir, process.cwd()));
+        ({ blockers } = await applyProviderSkill(skillDir, PROJECT_ROOT));
       } catch (err) {
-        s.stop(`Couldn't install ${agentProvider}.`, 1);
+        if (providerSpinner) providerSpinner.error(`Couldn't install ${agentProvider}.`);
+        else driver.progress(`add-${agentProvider}`, 'failed');
         const message = err instanceof Error ? err.message : String(err);
-        await fail(`add-${agentProvider}`, `Couldn't install ${agentProvider}.`, message);
+        await fail(`add-${agentProvider}`, `Couldn't install ${agentProvider}.`, message, undefined, driver);
         return; // unreachable — fail() exits — but narrows blockers for TS
       }
       if (blockers.length) {
-        s.stop(`Couldn't install ${agentProvider}.`, 1);
-        await fail(`add-${agentProvider}`, `Couldn't install ${agentProvider}.`, blockers.join('; '));
+        if (providerSpinner) providerSpinner.error(`Couldn't install ${agentProvider}.`);
+        else driver.progress(`add-${agentProvider}`, 'failed');
+        await fail(
+          `add-${agentProvider}`,
+          `Couldn't install ${agentProvider}.`,
+          blockers.join('; '),
+          undefined,
+          driver,
+        );
       }
-      s.stop(`${agentProvider} installed.`);
-      p.log.info(brandBody('Rebuilding the container image with the new provider…'));
+      if (providerSpinner) providerSpinner.stop(`${agentProvider} installed.`);
+      else driver.progress(`add-${agentProvider}`, 'succeeded');
+      driver.log('info', brandBody('Rebuilding the container image with the new provider…'));
       // The rebuild is not optional here: the provider's CLI manifest is baked
       // into the image, so continuing past a failed build would authenticate a
       // runtime the container cannot actually start.
-      const rebuild = buildContainerImage();
+      const rebuild = driver.mode === 'ndjson' ? await rebuildProviderImage(driver) : buildContainerImage();
       if (!rebuild.ok) {
         await fail(
           `add-${agentProvider}`,
           `Couldn't rebuild the container image for ${agentProvider}. ${rebuild.message}`,
           rebuild.hint,
+          undefined,
+          driver,
         );
       }
       await import(`./providers/${agentProvider}.js`);
       providerEntry = getSetupProvider(agentProvider);
     }
     if (providerEntry?.runAuth) {
-      await providerEntry.runAuth();
-      await providerEntry.runInstallCheck?.();
+      await runSetupProviderAuth(providerEntry, driver);
     } else {
-      await runAuthStep();
+      await runAuthStep(driver);
     }
     // Persist the pick as the instance-wide default so every future group
     // (channel-approved, ncl-created) is created on this provider. Read from
@@ -1560,7 +1573,7 @@ function finishRegistryLogin(driver: SetupDriver, durationMs: number, method?: s
   driver.log('success', brandBody("Authenticated. Your assistant's sandbox will be fetched, not built."));
 }
 
-async function askAgentProviderChoice(): Promise<string> {
+async function askAgentProviderChoice(driver: SetupDriver): Promise<string> {
   const installed = listSetupProviders();
   const installedNames = new Set(installed.map((entry) => entry.value));
   // Offer the hard-wired installable providers this install hasn't wired yet —
@@ -1597,21 +1610,19 @@ async function askAgentProviderChoice(): Promise<string> {
   // instead of silently resetting it to claude. Fall back to claude if the
   // persisted default isn't an offered option (e.g. its provider was removed).
   const currentDefault = options.some((o) => o.value === DEFAULT_AGENT_PROVIDER) ? DEFAULT_AGENT_PROVIDER : 'claude';
-  const choice = ensureAnswer(
-    await brightSelect<string>({
-      message: 'Which agent runtime should power your assistant?',
-      options,
-      initialValue: currentDefault,
-    }),
-  ) as string;
+  const choice = await selectPrompt(driver, 'agent-provider', {
+    message: 'Which agent runtime should power your assistant?',
+    options,
+    initialValue: currentDefault,
+  });
   setupLog.userInput('agent_provider', choice);
   phEmit('agent_provider_chosen', { provider: choice });
   return choice;
 }
 
-async function runAuthStep(): Promise<void> {
+async function runAuthStep(driver: SetupDriver): Promise<void> {
   if (anthropicSecretExists()) {
-    p.log.success(brandBody('Your Claude account is already connected.'));
+    driver.log('success', brandBody('Your Claude account is already connected.'));
     setupLog.step('auth', 'skipped', 0, { REASON: 'secret-already-present' });
     return;
   }
@@ -1622,72 +1633,96 @@ async function runAuthStep(): Promise<void> {
   const customBaseUrl = process.env.NANOCLAW_ANTHROPIC_BASE_URL?.trim();
   const customAuthToken = process.env.NANOCLAW_ANTHROPIC_AUTH_TOKEN?.trim();
   if (customBaseUrl && customAuthToken) {
-    await runCustomEndpointAuth(customBaseUrl, customAuthToken);
+    registerSensitiveValue(customAuthToken);
+    await runCustomEndpointAuth(driver, customBaseUrl, customAuthToken);
     return;
   }
 
-  const method = ensureAnswer(
-    await brightSelect({
-      message: 'How would you like to connect to Claude?',
-      options: [
-        {
-          value: 'subscription',
-          label: 'Sign in with my Claude subscription',
-          hint: 'recommended if you have Pro or Max',
-        },
-        {
-          value: 'oauth',
-          label: 'Paste an OAuth token I already have',
-          hint: 'sk-ant-oat…',
-        },
-        {
-          value: 'api',
-          label: 'Paste an Anthropic API key',
-          hint: 'pay-per-use via console.anthropic.com',
-        },
-        {
-          value: 'skip',
-          label: "Skip — I'll connect later",
-          hint: 'not recommended — Claude helps debug setup issues',
-        },
-      ],
-    }),
-  ) as 'subscription' | 'oauth' | 'api' | 'skip';
+  const method = await selectPrompt(driver, 'anthropic-auth-method', {
+    message: 'How would you like to connect to Claude?',
+    options: [
+      {
+        value: 'subscription',
+        label: 'Sign in with my Claude subscription',
+        hint: 'recommended if you have Pro or Max',
+      },
+      {
+        value: 'oauth',
+        label: 'Paste an OAuth token I already have',
+        hint: 'sk-ant-oat…',
+      },
+      {
+        value: 'api',
+        label: 'Paste an Anthropic API key',
+        hint: 'pay-per-use via console.anthropic.com',
+      },
+      {
+        value: 'skip',
+        label: "Skip - I'll connect later",
+        hint: 'not recommended - Claude helps debug setup issues',
+      },
+    ],
+  });
   setupLog.userInput('auth_method', method);
   phEmit('auth_method_chosen', { method });
 
   if (method === 'skip') {
-    const confirmed = ensureAnswer(
-      await p.confirm({
-        message:
-          "Skip Claude sign-in? The agent won't be able to run until you connect, and we won't be able to help debug setup errors.",
-        initialValue: false,
-      }),
+    const confirmed = await confirmPrompt(
+      driver,
+      'anthropic-auth-skip-confirm',
+      "Skip Claude sign-in? The agent won't be able to run until you connect, and we won't be able to help debug setup errors.",
+      false,
     );
     if (!confirmed) {
       // Loop back to the auth picker so they can choose a real method.
-      return runAuthStep();
+      return runAuthStep(driver);
     }
     setupLog.step('auth', 'skipped', 0, { REASON: 'user-skipped' });
-    p.log.warn(brandBody('Claude sign-in skipped. Re-run setup or run `bash nanoclaw.sh` to finish later.'));
+    driver.log('warn', brandBody('Claude sign-in skipped. Re-run setup or run `bash nanoclaw.sh` to finish later.'));
     return;
   }
 
   if (method === 'subscription') {
-    await runSubscriptionAuth();
+    await runSubscriptionAuth(driver);
   } else {
-    await runPasteAuth(method);
+    await runPasteAuth(driver, method);
   }
 }
 
-async function runSubscriptionAuth(): Promise<void> {
-  p.log.step(brandBody('Opening the Claude sign-in flow…'));
-  console.log(k.dim('   (a browser will open for sign-in; this part is interactive)'));
-  console.log();
+async function runSubscriptionAuth(driver: SetupDriver): Promise<void> {
+  driver.log('step', brandBody('Opening the Claude sign-in flow…'));
+  if (driver.mode === 'ndjson') {
+    const start = Date.now();
+    const result = await runClaudeSubscriptionMachineAuth(driver);
+    const durationMs = Date.now() - start;
+    if (!result.ok) {
+      setupLog.step('auth', 'failed', durationMs, {
+        METHOD: 'subscription',
+        ERROR: result.reason,
+        ...(result.detail ? { DETAIL: result.detail } : {}),
+      });
+      await fail(
+        'auth',
+        "Couldn't complete the Claude sign-in.",
+        result.reason === 'spawn_failed'
+          ? 'Install the Claude CLI, then rerun setup or choose a paste option.'
+          : 'Re-run setup and try again, or choose a paste option instead.',
+        undefined,
+        driver,
+      );
+    }
+    setupLog.step('auth', 'interactive', durationMs, { METHOD: 'subscription' });
+    driver.log('success', brandBody('Claude account connected.'));
+    return;
+  }
+  if (driver.mode === 'terminal') {
+    console.log(k.dim('   (a browser will open for sign-in; this part is interactive)'));
+    console.log();
+  }
   const start = Date.now();
   const code = await runInheritScript('bash', ['setup/register-claude-token.sh']);
   const durationMs = Date.now() - start;
-  console.log();
+  if (driver.mode === 'terminal') console.log();
   if (code !== 0) {
     setupLog.step('auth', 'failed', durationMs, {
       EXIT_CODE: code,
@@ -1697,71 +1732,77 @@ async function runSubscriptionAuth(): Promise<void> {
       'auth',
       "Couldn't complete the Claude sign-in.",
       'Re-run setup and try again, or choose a paste option instead.',
+      undefined,
+      driver,
     );
   }
   setupLog.step('auth', 'interactive', durationMs, { METHOD: 'subscription' });
-  p.log.success(brandBody('Claude account connected.'));
+  driver.log('success', brandBody('Claude account connected.'));
 }
 
-async function runPasteAuth(method: 'oauth' | 'api'): Promise<void> {
+async function runPasteAuth(driver: SetupDriver, method: 'oauth' | 'api'): Promise<void> {
   const label = method === 'oauth' ? 'OAuth token' : 'API key';
   const prefix = method === 'oauth' ? 'sk-ant-oat' : 'sk-ant-api';
 
-  const answer = ensureAnswer(
-    await p.password({
-      message: `Paste your ${label}`,
-      clearOnError: true,
-      validate: (v) => {
-        // Strip any internal whitespace so a line-wrapped paste that did
-        // survive into clack can still validate. The mid-token-newline
-        // case where clack only sees the first line is caught by the
-        // shape check below.
-        const cleaned = (v ?? '').replace(/\s+/g, '');
-        if (!cleaned) return 'Required';
-        if (!cleaned.startsWith(prefix)) {
-          return `Should start with ${prefix}…`;
-        }
-        if (method === 'oauth' && !/^sk-ant-oat[A-Za-z0-9_-]{80,500}AA$/.test(cleaned)) {
-          return cleaned.length < 90
-            ? 'Token looks truncated — line breaks in the paste can cut it off. Widen your terminal so the token fits on one line, then paste again.'
-            : "Token shape doesn't look right (expected sk-ant-oat…AA).";
-        }
-        return undefined;
-      },
-    }),
-  );
+  const answer = await secretPrompt(driver, `anthropic-${method}-secret`, {
+    message: `Paste your ${label}`,
+    validateValue: (answerValue) => {
+      const v = String(answerValue);
+      // Strip any internal whitespace so a line-wrapped paste that did
+      // survive into clack can still validate. The mid-token-newline
+      // case where clack only sees the first line is caught by the
+      // shape check below.
+      const cleaned = (v ?? '').replace(/\s+/g, '');
+      if (!cleaned) return 'Required';
+      if (!cleaned.startsWith(prefix)) {
+        return `Should start with ${prefix}…`;
+      }
+      if (method === 'oauth' && !/^sk-ant-oat[A-Za-z0-9_-]{80,500}AA$/.test(cleaned)) {
+        return cleaned.length < 90
+          ? 'Token looks truncated - line breaks in the paste can cut it off. Widen your terminal so the token fits on one line, then paste again.'
+          : "Token shape doesn't look right (expected sk-ant-oat…AA).";
+      }
+      return undefined;
+    },
+  });
   const token = (answer as string).replace(/\s+/g, '');
 
-  const res = await withSecretFile(token, (filePath) =>
+  const run = (childArgs: string[]): Promise<Awaited<ReturnType<typeof runQuietChild>>> =>
     runQuietChild(
       'auth',
       'onecli',
-      [
-        'secrets',
-        'create',
-        '--name',
-        'Anthropic',
-        '--type',
-        'anthropic',
-        '--file',
-        filePath,
-        '--host-pattern',
-        'api.anthropic.com',
-      ],
+      childArgs,
       {
         running: `Saving your ${label} to your OneCLI vault…`,
         done: 'Claude account connected.',
       },
       {
         extraFields: { METHOD: method },
+        ...(driver.mode === 'ndjson' ? { env: childEnvWithoutSetupSecrets() } : {}),
       },
-    ),
+      driver,
+    );
+  const res = await withSecretFile(token, (filePath) =>
+    run([
+      'secrets',
+      'create',
+      '--name',
+      'Anthropic',
+      '--type',
+      'anthropic',
+      '--file',
+      filePath,
+      '--host-pattern',
+      'api.anthropic.com',
+    ]),
   );
   if (!res.ok) {
     await fail(
       'auth',
       `Couldn't save your ${label} to the vault.`,
       'Make sure OneCLI is running (`onecli version`), then retry.',
+      undefined,
+      driver,
     );
   }
 }
@@ -1772,7 +1813,7 @@ async function runPasteAuth(method: 'oauth' | 'api'): Promise<void> {
  * Authorization header on the wire — the container only ever sees
  * ANTHROPIC_BASE_URL + a placeholder bearer.
  */
-async function runCustomEndpointAuth(baseUrl: string, token: string): Promise<void> {
+async function runCustomEndpointAuth(driver: SetupDriver, baseUrl: string, token: string): Promise<void> {
   let host: string;
   let canonicalBaseUrl: string;
   try {
@@ -1782,44 +1823,55 @@ async function runCustomEndpointAuth(baseUrl: string, token: string): Promise<vo
     host = parsed.hostname;
     canonicalBaseUrl = parsed.toString();
   } catch {
-    await fail('auth', `Invalid Anthropic base URL: ${baseUrl}`, 'Check --anthropic-base-url and retry.');
+    await fail(
+      'auth',
+      `Invalid Anthropic base URL: ${baseUrl}`,
+      'Check --anthropic-base-url and retry.',
+      undefined,
+      driver,
+    );
     return;
   }
 
-  const res = await withSecretFile(token, (filePath) =>
+  const args = (filePath: string): string[] => [
+    'secrets',
+    'create',
+    '--name',
+    'Anthropic',
+    '--type',
+    'generic',
+    '--file',
+    filePath,
+    '--host-pattern',
+    host,
+    '--header-name',
+    'Authorization',
+    '--value-format',
+    'Bearer {value}',
+  ];
+  const run = (childArgs: string[]): Promise<Awaited<ReturnType<typeof runQuietChild>>> =>
     runQuietChild(
       'auth',
       'onecli',
-      [
-        'secrets',
-        'create',
-        '--name',
-        'Anthropic',
-        '--type',
-        'generic',
-        '--file',
-        filePath,
-        '--host-pattern',
-        host,
-        '--header-name',
-        'Authorization',
-        '--value-format',
-        'Bearer {value}',
-      ],
+      childArgs,
       {
         running: `Saving your Anthropic auth token to your OneCLI vault…`,
         done: 'Claude account connected.',
       },
       {
         extraFields: { METHOD: 'custom-endpoint', HOST: host },
+        ...(driver.mode === 'ndjson' ? { env: childEnvWithoutSetupSecrets() } : {}),
       },
-    ),
-  );
+      driver,
+    );
+  const res = await withSecretFile(token, (filePath) => run(args(filePath)));
   if (!res.ok) {
     await fail(
       'auth',
       `Couldn't save your Anthropic auth token to the vault.`,
       'Make sure OneCLI is running (`onecli version`), then retry.',
+      undefined,
+      driver,
     );
   }
 

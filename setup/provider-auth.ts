@@ -16,7 +16,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { buildContainerImage } from './lib/container-build.js';
-import { getSetupProvider, listSetupProviders } from './providers/registry.js';
+import { TerminalSetupDriver } from './lib/setup-driver.js';
+import { getSetupProvider, listSetupProviders, runSetupProviderAuth } from './providers/registry.js';
 import { applyProviderSkill } from './providers/install.js';
 // Provider payloads self-register on import.
 import './providers/index.js';
@@ -91,6 +92,6 @@ export async function run(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  await entry.runAuth();
-  await entry.runInstallCheck?.();
+  const driver = new TerminalSetupDriver('setup');
+  await runSetupProviderAuth(entry, driver);
 }
