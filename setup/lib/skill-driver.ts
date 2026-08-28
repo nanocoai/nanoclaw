@@ -642,6 +642,72 @@ export function hostExecStream(
           });
         }
       };
+      const renderBlock = (block: { type: string; fields: Record<string, string> }): void => {
+        if (driver?.mode !== 'ndjson') return;
+        if (block.type === 'PAIR_TELEGRAM_CODE' && block.fields.CODE) {
+          activeDisplayIds.add('telegram-pairing-code');
+          driver.display({
+            id: 'telegram-pairing-code',
+            kind: 'code',
+            content: block.fields.CODE,
+            sensitive: true,
+            label: 'Telegram pairing code',
+          });
+        } else if (block.type === 'WHATSAPP_AUTH_QR' && block.fields.QR) {
+          activeDisplayIds.add('whatsapp-auth');
+          driver.display({
+            id: 'whatsapp-auth',
+            kind: 'qr',
+            payload: block.fields.QR,
+            sensitive: true,
+            label: 'WhatsApp QR code',
+          });
+        } else if (block.type === 'WHATSAPP_AUTH_PAIRING_CODE' && block.fields.CODE) {
+          activeDisplayIds.add('whatsapp-auth');
+          driver.display({
+            id: 'whatsapp-auth',
+            kind: 'code',
+            content: block.fields.CODE,
+            sensitive: true,
+            label: 'WhatsApp pairing code',
+          });
+        } else if (block.type === 'SIGNAL_AUTH_QR' && block.fields.QR) {
+          activeDisplayIds.add('signal-auth');
+          driver.display({
+            id: 'signal-auth',
+            kind: 'qr',
+            payload: block.fields.QR,
+            sensitive: true,
+            label: 'Signal linking QR',
+          });
+        } else if (block.type === 'PHOTON_DEVICE' && block.fields.URL && block.fields.CODE) {
+          activeDisplayIds.add('photon-device');
+          driver.display({
+            id: 'photon-device',
+            kind: 'code',
+            content: `${block.fields.URL}\n${block.fields.CODE}`,
+            sensitive: true,
+            label: 'Approve this Photon device',
+          });
+        } else if (block.type === 'PHOTON_DEVICE_CLEAR') {
+          activeDisplayIds.delete('photon-device');
+          driver.clearDisplay('photon-device');
+        } else if (block.type === 'PHOTON_OPT_IN' && block.fields.PHONE) {
+          activeDisplayIds.add('photon-opt-in');
+          driver.display({
+            id: 'photon-opt-in',
+            kind: 'text',
+            content: block.fields.LINE
+              ? `Open Messages on ${block.fields.PHONE} and send one message to ${block.fields.LINE}. Setup continues when Photon confirms the opt-in.`
+              : `Photon has not assigned an iMessage line to ${block.fields.PHONE} yet. Setup is waiting for the line and the first message from that phone.`,
+            sensitive: true,
+            label: 'One step needed on your phone',
+          });
+        } else if (block.type === 'PHOTON_OPT_IN_CLEAR') {
+          activeDisplayIds.delete('photon-opt-in');
+          driver.clearDisplay('photon-opt-in');
+        }
+      };
       let buf = '';
       const onChunk = (chunk: Buffer): void => {
         if (outputLimitExceeded) return;
@@ -665,7 +731,10 @@ export function hostExecStream(
             continue;
           }
           if (line.startsWith('=== END ===')) {
-            if (current) blocks.push(current);
+            if (current) {
+              blocks.push(current);
+              renderBlock(current);
+            }
             current = null;
             continue;
           }

@@ -411,6 +411,81 @@ process.stdout.write('=== NANOCLAW SETUP: TEST ===\\nSTATUS: success\\n=== END =
     }
   });
 
+  it('maps Photon embedded blocks to replaceable sensitive displays', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'driver-photon-'));
+    const seen: string[] = [];
+    const driver = {
+      mode: 'ndjson',
+      display: (display: { id: string; sensitive: boolean }) => seen.push(`display:${display.id}:${display.sensitive}`),
+      clearDisplay: (id: string) => seen.push(`clear:${id}`),
+    } as unknown as SetupDriver;
+    const out = await hostExecStream(
+      root,
+      driver,
+    )(
+      [
+        "printf '%s\\n' '=== NANOCLAW SETUP: PHOTON_DEVICE ===' 'URL: https://example.com/device' 'CODE: ABCD-1234' '=== END ==='",
+        "printf '%s\\n' '=== NANOCLAW SETUP: PHOTON_DEVICE_CLEAR ===' '=== END ==='",
+        "printf '%s\\n' '=== NANOCLAW SETUP: PHOTON_OPT_IN ===' 'PHONE: +15551234567' 'LINE: +15558887777' '=== END ==='",
+        "printf '%s\\n' '=== NANOCLAW SETUP: PHOTON_OPT_IN_CLEAR ===' '=== END ==='",
+        "printf '%s\\n' '=== NANOCLAW SETUP: PHOTON ===' 'STATUS: success' 'PHONE: +15551234567' '=== END ==='",
+      ].join('; '),
+    );
+    expect(out.ok).toBe(true);
+    expect(seen).toEqual([
+      'display:photon-device:true',
+      'clear:photon-device',
+      'display:photon-opt-in:true',
+      'clear:photon-opt-in',
+    ]);
+  });
+
+  it('renders Teams device login as an external action in machine mode', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'driver-teams-'));
+    const prefix = join(root, 'global');
+    const bin = join(root, 'bin');
+    mkdirSync(join(prefix, 'bin'), { recursive: true });
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'npm'), `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(prefix)}\n`);
+    writeFileSync(
+      join(prefix, 'bin', 'teams'),
+      "#!/bin/sh\nprintf 'Open https://microsoft.com/devicelogin\\nEnter code ABCD-EFGH\\n=== NANOCLAW SETUP: TEAMS-LOGIN ===\\nSTATUS: success\\n=== END ===\\n'\n",
+    );
+    chmodSync(join(bin, 'npm'), 0o755);
+    chmodSync(join(prefix, 'bin', 'teams'), 0o755);
+    const actions: Array<{ kind: string; url?: string }> = [];
+    const displays: Array<{ id: string; kind: string; sensitive: boolean; content?: string }> = [];
+    const cleared: string[] = [];
+    const driver = {
+      mode: 'ndjson',
+      externalAction: async (action: { kind: string; url?: string }, verify: () => boolean | Promise<boolean>) => {
+        actions.push(action);
+        expect(await verify()).toBe(true);
+        return 'attempted' as const;
+      },
+      display: (display: { id: string; kind: string; sensitive: boolean; content?: string }) => displays.push(display),
+      clearDisplay: (id: string) => cleared.push(id),
+    } as unknown as SetupDriver;
+    const result = await hostExecStream(
+      root,
+      driver,
+    )('"$(npm prefix -g 2>/dev/null)/bin/teams" login && echo \'"loggedIn": true\'');
+    expect(result.ok).toBe(true);
+    expect(actions).toEqual([
+      {
+        id: 'teams-login-open-url',
+        kind: 'openURL',
+        title: 'Open Microsoft device login',
+        url: 'https://microsoft.com/devicelogin',
+      },
+    ]);
+    expect(displays).toEqual([
+      expect.objectContaining({ id: 'teams-login-url', kind: 'url', sensitive: true }),
+      expect.objectContaining({ id: 'teams-login-code', kind: 'code', content: 'ABCD-EFGH', sensitive: true }),
+    ]);
+    expect(cleared).toEqual(['teams-login-url', 'teams-login-code']);
+  });
+
   function reuseScratch(): { root: string; skill: string } {
     const root = mkdtempSync(join(tmpdir(), 'reuse-'));
     const skill = mkdtempSync(join(tmpdir(), 'reuse-skill-'));

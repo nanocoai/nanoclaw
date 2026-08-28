@@ -20,7 +20,8 @@
  * SIGNAL_AUTH block is parsed — the driver's `capture:<var>=ACCOUNT` reads the
  * phone number from it.
  *
- * Block schema (parent parses this one block):
+ * Block schema:
+ *   SIGNAL_AUTH_QR       { QR: "sgnl://…" }                  sensitive display
  *   SIGNAL_AUTH          { STATUS: success, ACCOUNT: +<digits> }  — terminal
  *                        { STATUS: skipped, ACCOUNT, REASON: already-authenticated }
  *                        { STATUS: failed, ERROR: <reason> }
@@ -170,6 +171,7 @@ export async function run(_args: string[]): Promise<void> {
         // NANOCLAW SETUP block would be consumed, not shown).
         if (/^(sgnl|tsdevice):\/\/linkdevice\?/.test(line) && !qrEmitted) {
           qrEmitted = true;
+          emitStatus('SIGNAL_AUTH_QR', { QR: line });
           printLink(line);
         }
       }
