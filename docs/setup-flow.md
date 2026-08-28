@@ -121,13 +121,14 @@ On failure the completion block names the failing step and its error:
 ### Level 3: raw per-step logs
 
 `logs/setup-steps/NN-step-name.log` — one file per step, numbered in
-execution order (zero-padded 2-digit prefix for natural sorting). Full
-verbatim stdout + stderr from the child process. Truncated and rewritten
-on each run (not appended).
+execution order (zero-padded 2-digit prefix for natural sorting). Full verbatim
+stdout + stderr from the child process. Truncated and rewritten on each run
+(not appended).
 
-Contents are whatever the step emits: apt output, docker build layers,
-pnpm install spam, `curl` bodies, etc. This is the evidence plane —
-"what did the shell actually see?" Nothing is filtered.
+Contents are whatever the step emits: apt output, docker build layers, pnpm
+install spam, `curl` bodies, etc. This is the evidence plane: "what did the shell
+actually see?" Nothing is filtered in terminal mode. Protocol mode keeps secret
+values and sensitive QR or pairing displays out of these logs.
 
 ## Contract for a new step
 
@@ -160,10 +161,10 @@ installer invoked from `auto.ts`), it must:
 The driver handles the rest: spinner in level 1, structured append to
 level 2, raw capture to level 3.
 
-## The Anthropic exception
+## The Anthropic terminal exception
 
-Anthropic credential registration (`setup/register-claude-token.sh`) is
-the **one** permitted break in the visual flow. Why:
+Anthropic credential registration (`setup/register-claude-token.sh`) is the
+**one** permitted break in the normal terminal visual flow. Why:
 
 - `claude setup-token` opens a browser, runs its own OAuth prompt, and
   prints the token. It owns the TTY via `script(1)`.
@@ -182,6 +183,13 @@ The level-2 log still gets an entry (`auth [interactive] → success`
 with the method — subscription / oauth / api). Level-3 captures
 are optional here; mirroring `script -q` output is tricky and the risk of
 leaking the token to disk outweighs the debugging value.
+
+Machine mode does not run this terminal script. It pipes `claude setup-token`
+through the private interactive-process seam, and the Claude adapter translates
+only the provider URL, authorization-code prompt, and progress into driver
+events. The returned token is registered as sensitive, passed to OneCLI through
+a one-use `0600` file, and removed with the isolated auth home in `finally`.
+Terminal users still take the inherited-stdio path above.
 
 ## Channel installs are skill-driven
 
@@ -205,6 +213,8 @@ convention — [skill-engine-seam.md](skill-engine-seam.md) §6).
 | `setup/logs.ts` | The logging primitives (`step`, `userInput`, `complete`, `stepRawLog`, `reset`). Single source of truth for level 2/3 formatting and file paths. |
 | `setup/<step>.ts` | Individual step implementations. Must emit one terminal status block; must not write directly to the terminal. |
 | `setup/register-claude-token.sh` | The Anthropic exception. Inherits stdio, prints its own UI, returns a status to the driver. |
+| `setup/lib/claude-subscription-auth.ts` | Machine-only Claude subscription adapter: provider output interpretation, semantic driver events, isolated credential capture, and vault handoff. |
+| `setup/lib/interactive-process.ts` | Provider-neutral private child boundary for terminal inheritance or bounded machine pipes, minimal environment, and process-group cancellation. |
 | `setup/lib/skill-driver.ts` | Generic skill runner: applies a SKILL.md's `nc:` directives via the engine (`scripts/skill-apply.ts`) and renders its events through clack — prompts via `resolveInput`, spinners for step events, operator notes with the gate/URL-offer policy from `scripts/skill-policy.ts`. Owns all prompting/gating presentation; the engine only declares and emits. |
 | `setup/channels/run-channel-skill.ts` | The generic channel-install entry: drives the channel's `/add-<channel>` SKILL.md through the skill driver, then owns the shared wire (agent name + operator role → `scripts/init-first-agent.ts`). One flow for every channel — no bespoke per-channel code. |
 | `setup/pair-telegram.ts` | Emits `PAIR_TELEGRAM_CODE` / `PAIR_TELEGRAM_ATTEMPT` / `PAIR_TELEGRAM` status blocks. Never prints UI. The driver renders it via clack notes. |
@@ -234,6 +244,3 @@ convention — [skill-engine-seam.md](skill-engine-seam.md) §6).
 - **Raw log rotation for multi-run installs.** Currently each run
   overwrites. Fine for now; revisit if support needs to compare
   successive attempts.
-- **Structured output from `register-claude-token.sh`.** The interactive
-  step emits no machine-readable status today. Future could add a
-  post-interaction status block with the method used.
