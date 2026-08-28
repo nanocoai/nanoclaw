@@ -30,7 +30,7 @@ import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
 import { composeGroupProjectDoc, DEFAULT_PROJECT_DOC } from './project-doc-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
-import { getSession } from './db/sessions.js';
+import { getRunningSessions, getSession } from './db/sessions.js';
 import { getSessionDriver, isSessionEventsDriver } from './drivers/index.js';
 import type { SupervisedHandle, SupervisedSnapshot } from './drivers/session-events.js';
 import { GROUP_FOLDER_LABEL, labelValueLegal, specInvalid } from './drivers/types.js';
@@ -378,19 +378,24 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
  * through the DB; now the host re-registers it and delivery resumes. The OneCLI
  * gateway resolves credentials per request on the host side, so an adopted
  * session's egress keeps working without any per-process state to rebuild.
+ *
+ * It is also the only place `container_status` drift gets corrected: a row is
+ * marked stopped by the in-process exit handler, so a container that died with
+ * no host attached leaves the row stuck on 'running'. See the clearing pass.
  */
-export async function adoptRunningSessions(): Promise<{ adopted: number; stopped: number }> {
+export async function adoptRunningSessions(): Promise<{ adopted: number; stopped: number; cleared: number }> {
   const driver = getSessionDriver();
   let snapshots: SupervisedSnapshot[];
   try {
     snapshots = await driver.listSessions(INSTALL_SLUG);
   } catch (err) {
     log.warn('Failed to list existing sessions for adoption', { err });
-    return { adopted: 0, stopped: 0 };
+    return { adopted: 0, stopped: 0, cleared: 0 };
   }
 
   let adopted = 0;
   let stopped = 0;
+  const adoptedIds = new Set<string>();
   for (const { handle, phase } of snapshots) {
     const session = handle.key.sessionId ? await getSession(handle.key.sessionId) : undefined;
     // The snapshot's phase is the listing's own truth: a corpse arrives as
@@ -408,8 +413,24 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
       void finishAndResolve(session.id, failure);
     });
     await markContainerRunning(session.id);
+    adoptedIds.add(session.id);
     adopted += 1;
   }
+
+  // The snapshot listing only tells us about containers that still exist. A
+  // session whose container died while no host was listening is absent from it
+  // entirely, so the loop above never visits the row — and `container_status`
+  // is only ever cleared by the in-process exit handler, which that container
+  // outlived. Without this pass the row says 'running' for the rest of the
+  // install's life: `getRunningSessions()` keeps returning it, delivery keeps
+  // polling it, and the diagnostics heartbeat check flags it forever.
+  let cleared = 0;
+  for (const session of await getRunningSessions()) {
+    if (adoptedIds.has(session.id)) continue;
+    await markContainerStopped(session.id);
+    cleared += 1;
+  }
+  if (cleared > 0) log.info('Cleared stale running container status', { sessions: cleared });
 
   await driver.reapResidue?.(INSTALL_SLUG).catch?.(() => {});
   // Reconcile terminals the watch stream missed while no host was listening —
@@ -417,10 +438,10 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
   // resync wires here rather than into new periodic machinery.
   if (isSessionEventsDriver(driver)) await driver.resync(INSTALL_SLUG).catch(() => {});
 
-  if (adopted > 0 || stopped > 0) {
-    log.info('Reconciled sessions at startup', { adopted, stopped });
+  if (adopted > 0 || stopped > 0 || cleared > 0) {
+    log.info('Reconciled sessions at startup', { adopted, stopped, cleared });
   }
-  return { adopted, stopped };
+  return { adopted, stopped, cleared };
 }
 
 /**
