@@ -79,7 +79,7 @@ import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
 import type { AgentGroup } from '../src/types.js';
 import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-claude.js';
 import * as setupLog from './logs.js';
-import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
+import { fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
 import { emit as phEmit } from './lib/diagnostics.js';
 import {
   accentGreen,
@@ -188,16 +188,47 @@ async function main(driver: SetupDriver): Promise<void> {
   // NANOCLAW_* sees them unchanged.
   const flagResult = parseFlags(process.argv.slice(2));
   if (flagResult.help) {
+    if (driver.mode === 'ndjson') {
+      driver.error('help_requested', 'Machine mode does not render terminal help.', [
+        { kind: 'rerun', args: ['--help'] },
+      ]);
+    }
     printHelp();
-    process.exit(0);
+    return;
   }
   if (flagResult.errors.length > 0) {
+    if (driver.mode === 'ndjson') {
+      driver.error('invalid_arguments', flagResult.errors.join('; '));
+    }
     for (const err of flagResult.errors) console.error(`error: ${err}`);
     console.error('');
     console.error('Run with --help for the full list of supported flags.');
     process.exit(1);
   }
   let configValues = { ...readFromEnv(), ...flagResult.values };
+  if (driver.mode === 'ndjson') {
+    const secretEntries = CONFIG.filter((entry) => entry.secret);
+    const secretLaunch =
+      secretEntries.some((entry) => process.env[envVarFor(entry)] !== undefined) ||
+      process.env.NANOCLAW_REGISTRY_ENROLL_CODE !== undefined ||
+      process.env.NANOCLAW_REGISTRY_TOKEN !== undefined;
+    const secretFlag = secretEntries.some((entry) => entry.key in flagResult.values);
+    if (secretLaunch || secretFlag) {
+      driver.error(
+        'secret_transport_forbidden',
+        'Machine setup does not accept secrets through flags or environment. Use the structured authentication prompts instead.',
+      );
+    }
+    if (configValues.anthropicBaseUrl !== undefined) {
+      driver.error(
+        'custom_endpoint_unsupported',
+        'Machine setup does not accept custom Anthropic endpoints through advanced configuration.',
+      );
+    }
+  }
+  for (const value of [configValues.onecliApiToken, configValues.anthropicAuthToken]) {
+    if (typeof value === 'string') registerSensitiveValue(value);
+  }
   applyToEnv(configValues);
 
   // --uninstall routes to the uninstall flow before any setup side effects —
@@ -223,20 +254,24 @@ async function main(driver: SetupDriver): Promise<void> {
   // On sg re-exec, the user already chose — skip straight to standard.
   let startChoice: 'default' | 'advanced' = 'default';
   if (process.env.NANOCLAW_REEXEC_SG !== '1') {
-    startChoice = ensureAnswer(
-      await brightSelect<'default' | 'advanced'>({
-        message: 'How would you like to begin?',
-        options: [
-          { value: 'default', label: 'Standard setup' },
-          { value: 'advanced', label: 'Advanced', hint: 'override defaults' },
-        ],
-        initialValue: 'default',
-      }),
-    ) as 'default' | 'advanced';
+    startChoice = await selectPrompt(driver, 'setup-start-choice', {
+      message: 'How would you like to begin?',
+      options: [
+        { value: 'default', label: 'Standard setup' },
+        { value: 'advanced', label: 'Advanced', hint: 'override defaults' },
+      ],
+      initialValue: 'default',
+    });
     setupLog.userInput('start_choice', startChoice);
   }
   if (startChoice === 'advanced') {
-    configValues = await runAdvancedScreen(configValues);
+    configValues = await runAdvancedScreen(configValues, driver);
+    if (driver.mode === 'ndjson' && configValues.anthropicBaseUrl !== undefined) {
+      driver.error(
+        'custom_endpoint_unsupported',
+        'Machine setup does not accept custom Anthropic endpoints through advanced configuration.',
+      );
+    }
     applyToEnv(configValues);
   }
 
@@ -246,35 +281,43 @@ async function main(driver: SetupDriver): Promise<void> {
       .map((s) => s.trim())
       .filter(Boolean),
   );
+  if (driver.mode === 'ndjson' && skip.has('verify')) {
+    driver.error('verify_cannot_be_skipped', 'Machine setup must run the existing verification step.');
+  }
 
   // Offer removal when setup lands on an existing install. Skipped on every
   // resume path — both the fail() retry and the sg-docker re-exec pass
   // NANOCLAW_SKIP (and the latter sets NANOCLAW_REEXEC_SG) — so the prompt
   // appears at most once per fresh run.
   const isResume = process.env.NANOCLAW_REEXEC_SG === '1' || skip.size > 0;
-  if (!isResume && detectExistingInstall(process.cwd())) {
-    const action = ensureAnswer(
-      await brightSelect<'keep' | 'uninstall'>({
-        message: 'NanoClaw is already installed in this folder. What would you like to do?',
-        options: [
-          {
-            value: 'keep',
-            label: 'Keep it & continue setup',
-            hint: 'recommended — re-running setup is safe',
-          },
-          {
-            value: 'uninstall',
-            label: 'Uninstall NanoClaw & exit',
-            hint: 'removes service, data, and agent files — asks before each step',
-          },
-        ],
-        initialValue: 'keep',
-      }),
-    ) as 'keep' | 'uninstall';
+  if (!isResume && detectExistingInstall(PROJECT_ROOT)) {
+    const action = await selectPrompt(driver, 'existing-install-action', {
+      message: 'NanoClaw is already installed in this folder. What would you like to do?',
+      options: [
+        {
+          value: 'keep',
+          label: 'Keep it & continue setup',
+          hint: 'recommended - re-running setup is safe',
+        },
+        {
+          value: 'uninstall',
+          label: 'Uninstall NanoClaw & exit',
+          hint: 'removes service, data, and agent files - asks before each step',
+        },
+      ],
+      initialValue: 'keep',
+    });
     setupLog.userInput('existing_install', action);
     phEmit('existing_install_detected', { action });
     if (action === 'uninstall') {
-      await runUninstallFlow({ dryRun: false, yes: false, invokedFrom: 'setup-detection' });
+      if (driver.mode === 'ndjson') {
+        driver.error(
+          'uninstall_requires_fresh_run',
+          'Start a fresh uninstall operation so its plan and receipt use the uninstall envelope.',
+          [{ kind: 'rerun', args: ['--uninstall', '--protocol', 'nanoclaw.driver.v1'] }],
+        );
+      }
+      await runUninstallFlow({ dryRun: false, yes: false, invokedFrom: 'setup-detection' }, driver);
     }
   }
 
