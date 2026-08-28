@@ -204,11 +204,14 @@ async function main(driver: SetupDriver): Promise<void> {
   // in particular before initProgressionLog(), so an uninstall never resets
   // logs/setup.log on its way to (possibly) deleting logs/ entirely.
   if (configValues.uninstall === true) {
-    await runUninstallFlow({
-      dryRun: configValues.dryRun === true,
-      yes: configValues.yes === true,
-      invokedFrom: 'flag',
-    });
+    await runUninstallFlow(
+      {
+        dryRun: configValues.dryRun === true,
+        yes: configValues.yes === true,
+        invokedFrom: 'flag',
+      },
+      driver,
+    );
   }
 
   printIntro(driver);
