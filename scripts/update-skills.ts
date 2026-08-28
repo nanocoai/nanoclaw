@@ -18,10 +18,17 @@ export interface SkillRefreshResult {
   name: string;
   skillName: string;
   kind: InstalledSkillKind;
-  status: 'refreshed' | 'failed';
+  // 'unmanaged': a barrel import with no `add-<name>` skill anywhere — a
+  // hand-written local adapter. Left untouched; never blocks the refresh.
+  status: 'refreshed' | 'failed' | 'unmanaged';
   applied: string[];
   skipped: string[];
   errors: string[];
+  // Payload files this refresh overwrote whose local content differed from
+  // the incoming registry bytes — deliberate local patches included. The
+  // operator re-applies (or upstreams) them; without this list the only way
+  // to notice the loss is to diff the tree afterwards.
+  localDiffDiscarded: string[];
 }
 
 export interface SkillsRefreshReport {
@@ -91,9 +98,22 @@ function readImports(file: string): string[] {
 }
 
 export function detectInstalledSkills(root: string): InstalledSkill[] {
-  const channels = readImports(path.join(root, 'src/channels/index.ts'))
+  const imported = readImports(path.join(root, 'src/channels/index.ts'))
     .filter((name) => name !== 'cli')
     .map((name) => ({ name, skillName: `add-${name}`, kind: 'channel' as const }));
+  // A barrel import with no `add-<name>` skill of its own whose module file a
+  // sibling skill's SKILL.md ships (add-slack copies and appends
+  // slack-a2a-guard) is owned by that sibling: refreshing the sibling
+  // refreshes it, so it is not an installable unit of its own.
+  const channels = imported.filter((entry) => {
+    if (fs.existsSync(path.join(root, '.claude/skills', entry.skillName, 'SKILL.md'))) return true;
+    const ownedBySibling = imported.some((sibling) => {
+      if (sibling.name === entry.name) return false;
+      const skillMd = path.join(root, '.claude/skills', sibling.skillName, 'SKILL.md');
+      return fs.existsSync(skillMd) && fs.readFileSync(skillMd, 'utf8').includes(`src/channels/${entry.name}.ts`);
+    });
+    return !ownedBySibling;
+  });
   const providers = new Set([
     ...readImports(path.join(root, 'src/providers/index.ts')),
     ...readImports(path.join(root, 'container/agent-runner/src/providers/index.ts')),
@@ -155,7 +175,8 @@ export async function refreshInstalledSkills(
   for (const skill of selected) {
     const skillDir = path.join(root, '.claude/skills', skill.skillName);
     const errors: string[] = [];
-    if (!fs.existsSync(path.join(skillDir, 'SKILL.md'))) {
+    const skillMdMissing = !fs.existsSync(path.join(skillDir, 'SKILL.md'));
+    if (skillMdMissing) {
       errors.push(`Missing ${path.relative(root, path.join(skillDir, 'SKILL.md'))}`);
     } else {
       const directives = parseDirectives(fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8'));
@@ -165,7 +186,25 @@ export async function refreshInstalledSkills(
     }
 
     if (errors.length > 0) {
-      results.push({ ...skill, status: 'failed', applied: [], skipped: [], errors });
+      // Under implicit 'all' selection, a barrel import with no skill anywhere
+      // is a hand-written local adapter, not a broken install: report it as
+      // unmanaged and leave its code untouched rather than failing the whole
+      // refresh. An explicitly requested name keeps the hard failure — the
+      // caller named it and expects it to refresh. A prose-only SKILL.md stays
+      // a blocking failure in both modes: the skill is managed, it just needs
+      // an agent (not this headless path) to refresh it.
+      if (requested === 'all' && skillMdMissing) {
+        results.push({
+          ...skill,
+          status: 'unmanaged',
+          applied: [],
+          skipped: errors.map((reason) => `left untouched — ${reason}`),
+          errors: [],
+          localDiffDiscarded: [],
+        });
+        continue;
+      }
+      results.push({ ...skill, status: 'failed', applied: [], skipped: [], errors, localDiffDiscarded: [] });
       continue;
     }
 
@@ -194,6 +233,7 @@ export async function refreshInstalledSkills(
         applied: result.applied,
         skipped: result.skipped,
         errors,
+        localDiffDiscarded: result.localDiffDiscarded,
       });
     } catch (err) {
       results.push({
@@ -202,6 +242,7 @@ export async function refreshInstalledSkills(
         applied: [],
         skipped: [],
         errors: [err instanceof Error ? err.message : String(err)],
+        localDiffDiscarded: [],
       });
     }
   }
@@ -209,7 +250,7 @@ export async function refreshInstalledSkills(
   return {
     schema: 'nanoclaw-skill-refresh/v1',
     schemaVersion: 1,
-    success: results.every((result) => result.status === 'refreshed'),
+    success: results.every((result) => result.status !== 'failed'),
     selected: selected.map((skill) => skill.name),
     remotes,
     skills: results,

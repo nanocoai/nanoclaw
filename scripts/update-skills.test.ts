@@ -50,6 +50,25 @@ describe('installed skill detection', () => {
       { name: 'slack', skillName: 'add-slack', kind: 'channel' },
     ]);
   });
+
+  it('attributes a sibling-shipped barrel import to its owning skill instead of inventing one', () => {
+    // add-slack copies AND appends slack-a2a-guard; there is no
+    // add-slack-a2a-guard skill. The guard import must not become a phantom
+    // skill whose missing SKILL.md fails the refresh.
+    const root = temp('nanoclaw-skills-sibling-');
+    write(root, 'src/channels/index.ts', "import './cli.js';\nimport './slack.js';\nimport './slack-a2a-guard.js';\n");
+    write(root, 'src/providers/index.ts', '');
+    write(root, 'container/agent-runner/src/providers/index.ts', '');
+    write(
+      root,
+      '.claude/skills/add-slack/SKILL.md',
+      ['# Apply', '```nc:copy from-branch:channels', 'src/channels/slack.ts', 'src/channels/slack-a2a-guard.ts', '```'].join(
+        '\n',
+      ),
+    );
+
+    expect(detectInstalledSkills(root)).toEqual([{ name: 'slack', skillName: 'add-slack', kind: 'channel' }]);
+  });
 });
 
 describe('registry refresh end to end', () => {
@@ -94,6 +113,7 @@ describe('registry refresh end to end', () => {
         '# Apply',
         '```nc:copy from-branch:channels',
         'src/channels/demo.ts',
+        'src/channels/demo-lib.ts',
         '```',
         '```nc:append to:src/channels/index.ts',
         "import './demo.js';",
@@ -102,8 +122,12 @@ describe('registry refresh end to end', () => {
     );
     commit(seed, 'main');
     run(seed, 'git', ['checkout', '-b', 'channels']);
+    write(seed, 'src/channels/demo.ts', 'export const payload = "installed-old";\n');
+    write(seed, 'src/channels/demo-lib.ts', 'export const lib = "installed-old";\n');
+    commit(seed, 'registry payload v1');
     write(seed, 'src/channels/demo.ts', 'export const payload = "upstream-current";\n');
-    commit(seed, 'registry payload');
+    write(seed, 'src/channels/demo-lib.ts', 'export const lib = "upstream-current";\n');
+    commit(seed, 'registry payload v2');
     run(seed, 'git', ['checkout', 'main']);
 
     const official = temp('nanoclaw-skills-official-');
@@ -118,7 +142,11 @@ describe('registry refresh end to end', () => {
     fs.rmSync(install, { recursive: true });
     run(path.dirname(install), 'git', ['clone', fork, install]);
     run(install, 'git', ['remote', 'add', 'upstream', official]);
+    // demo.ts is a stock copy of registry v1 — an ordinary upgrade, never
+    // reported. demo-lib.ts carries a deliberate local patch no registry
+    // commit ever shipped — the refresh must say it discarded it.
     write(install, 'src/channels/demo.ts', 'export const payload = "installed-old";\n');
+    write(install, 'src/channels/demo-lib.ts', 'export const lib = "locally patched";\n');
     fs.appendFileSync(path.join(install, 'src/channels/index.ts'), "import './demo.js';\n");
     commit(install, 'install demo channel');
 
@@ -128,6 +156,28 @@ describe('registry refresh end to end', () => {
     expect(report.remotes).toEqual({ channels: 'upstream' });
     expect(report.skills).toMatchObject([{ name: 'demo', status: 'refreshed' }]);
     expect(fs.readFileSync(path.join(install, 'src/channels/demo.ts'), 'utf8')).toContain('upstream-current');
+    expect(fs.readFileSync(path.join(install, 'src/channels/demo-lib.ts'), 'utf8')).toContain('upstream-current');
+    expect(report.skills[0].localDiffDiscarded).toEqual(['src/channels/demo-lib.ts']);
+  });
+
+  it("leaves a hand-written adapter untouched as 'unmanaged' instead of failing the refresh", async () => {
+    const root = temp('nanoclaw-skills-unmanaged-');
+    write(root, 'src/channels/index.ts', "import './cli.js';\nimport './homegrown.js';\n");
+    write(root, 'src/channels/homegrown.ts', 'export const mine = true;\n');
+    write(root, 'src/providers/index.ts', '');
+    write(root, 'container/agent-runner/src/providers/index.ts', '');
+
+    const report = await refreshInstalledSkills(root);
+
+    expect(report.success, JSON.stringify(report, null, 2)).toBe(true);
+    expect(report.skills).toMatchObject([{ name: 'homegrown', status: 'unmanaged' }]);
+    expect(report.skills[0].skipped.join('\n')).toContain('left untouched');
+    expect(fs.readFileSync(path.join(root, 'src/channels/homegrown.ts'), 'utf8')).toBe('export const mine = true;\n');
+
+    // Naming it explicitly still demands a refreshable skill.
+    const explicit = await refreshInstalledSkills(root, ['homegrown']);
+    expect(explicit.success).toBe(false);
+    expect(explicit.skills[0]).toMatchObject({ name: 'homegrown', status: 'failed' });
   });
 
   it('returns a blocking structured failure for prose-only installed skills', async () => {
