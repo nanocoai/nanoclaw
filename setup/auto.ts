@@ -657,7 +657,7 @@ async function main(driver: SetupDriver): Promise<void> {
     const preset = process.env.NANOCLAW_DISPLAY_NAME?.trim();
     const existing = await detectExistingDisplayName(process.cwd());
     const fallback = process.env.USER?.trim() || 'Operator';
-    displayName = preset || existing || (await askDisplayName(fallback));
+    displayName = preset || existing || (await askDisplayName(driver, fallback));
     return displayName;
   }
 
@@ -795,36 +795,41 @@ async function main(driver: SetupDriver): Promise<void> {
     let backed = true;
     while (backed) {
       backed = false;
-      channelChoice = await askChannelChoice();
+      channelChoice = await askChannelChoice(driver);
       if (channelChoice !== 'skip' && channelChoice !== 'other') {
         await resolveDisplayName();
       }
-      let result: void | typeof BACK_TO_CHANNEL_SELECTION;
+      let result: void | typeof BACK_TO_CHANNEL_SELECTION = undefined;
       // Every channel now runs through the SKILL.md-driven flow — the whole
       // connect+wire procedure lives in each add-<channel>/SKILL.md.
       if (channelChoice === 'telegram') {
-        result = await runChannelSkillWithPreStep('telegram', displayName!, { offerBack: true });
+        result = await runChannelSkillWithPreStep('telegram', displayName!, { offerBack: true, driver });
       } else if (channelChoice === 'discord') {
-        result = await runChannelSkillWithPreStep('discord', displayName!, { offerBack: true });
+        result = await runChannelSkillWithPreStep('discord', displayName!, { offerBack: true, driver });
       } else if (channelChoice === 'whatsapp') {
-        result = await runChannelSkillWithPreStep('whatsapp', displayName!, { offerBack: true });
+        result = await runChannelSkillWithPreStep('whatsapp', displayName!, { offerBack: true, driver });
       } else if (channelChoice === 'signal') {
-        result = await runChannelSkillWithPreStep('signal', displayName!, { offerBack: true });
+        result = await runChannelSkillWithPreStep('signal', displayName!, { offerBack: true, driver });
       } else if (channelChoice === 'teams') {
         // Fresh create resolves the owner DM proactively and wires inline (the
         // welcome message reaches the human first); a drop-through re-run
         // resolves nothing and falls back to the deferred-wire ending.
-        result = await runChannelSkillWithPreStep('teams', displayName!, { wireIfResolved: true, offerBack: true });
+        result = await runChannelSkillWithPreStep('teams', displayName!, {
+          wireIfResolved: true,
+          offerBack: true,
+          driver,
+        });
       } else if (channelChoice === 'slack') {
-        result = await runChannelSkillWithPreStep('slack', displayName!, { offerBack: true });
+        result = await runChannelSkillWithPreStep('slack', displayName!, { offerBack: true, driver });
       } else if (channelChoice === 'imessage') {
-        result = await runChannelSkillWithPreStep('imessage', displayName!, { offerBack: true });
+        result = await runChannelSkillWithPreStep('imessage', displayName!, { offerBack: true, driver });
       } else if (channelChoice === 'dial') {
-        result = await runChannelSkillWithPreStep('dial', displayName!, { offerBack: true });
+        result = await runChannelSkillWithPreStep('dial', displayName!, { offerBack: true, driver });
       } else if (channelChoice === 'other') {
-        result = await askOtherChannelName();
+        result = await askOtherChannelName(driver);
       } else {
-        p.log.info(
+        driver.log(
+          'info',
           brandBody(
             wrapForGutter(
               'No messaging app for now. You can add one later (like Telegram, Discord, WhatsApp, Teams, Slack, or iMessage).',
@@ -2060,53 +2065,53 @@ async function runTimezoneStep(driver: SetupDriver): Promise<void> {
 
 // ─── prompts owned by the sequencer ────────────────────────────────────
 
-async function askDisplayName(fallback: string): Promise<string> {
-  const answer = ensureAnswer(
-    await p.text({
-      message: `What should your assistant call ${accentGreen('you')}?`,
-      placeholder: fallback,
-      defaultValue: fallback,
-    }),
-  );
+async function askDisplayName(driver: SetupDriver, fallback: string): Promise<string> {
+  const answer = await textPrompt(driver, 'display-name', {
+    message: `What should your assistant call ${accentGreen('you')}?`,
+    placeholder: fallback,
+    default: fallback,
+  });
   const value = (answer as string).trim() || fallback;
   setupLog.userInput('display_name', value);
   return value;
 }
 
-async function askChannelChoice(): Promise<ChannelChoice> {
-  const choice = ensureAnswer(
-    await brightSelect<ChannelChoice>({
-      message: 'Want to chat with your assistant from your phone?',
-      options: [
-        { value: 'slack', label: 'Yes, connect Slack', hint: 'NEW!! one-click install' },
-        { value: 'teams', label: 'Yes, connect Microsoft Teams' },
-        { value: 'telegram', label: 'Yes, connect Telegram' },
-        { value: 'discord', label: 'Yes, connect Discord' },
-        { value: 'whatsapp', label: 'Yes, connect WhatsApp', hint: 'best with a dedicated number' },
-        { value: 'dial', label: 'Yes, connect Dial', hint: 'a dedicated phone number for your agent — place calls, SMS — worldwide' },
-        {
-          value: 'signal',
-          label: 'Yes, connect Signal',
-          hint: 'needs signal-cli installed',
-        },
-        {
-          value: 'imessage',
-          label: 'Yes, connect iMessage',
-          hint: 'local Mac or hosted iMessage (via photon.codes)',
-        },
-        { value: 'other', label: 'Other…', hint: 'install via /add-<name> after setup' },
-        { value: 'skip', label: 'Skip for now', hint: "I'll just use the terminal" },
-      ],
-    }),
-  );
+async function askChannelChoice(driver: SetupDriver): Promise<ChannelChoice> {
+  const choice = await selectPrompt(driver, 'channel-choice', {
+    message: 'Want to chat with your assistant from your phone?',
+    options: [
+      { value: 'slack', label: 'Yes, connect Slack', hint: 'NEW!! one-click install' },
+      { value: 'teams', label: 'Yes, connect Microsoft Teams' },
+      { value: 'telegram', label: 'Yes, connect Telegram' },
+      { value: 'discord', label: 'Yes, connect Discord' },
+      { value: 'whatsapp', label: 'Yes, connect WhatsApp', hint: 'best with a dedicated number' },
+      {
+        value: 'dial',
+        label: 'Yes, connect Dial',
+        hint: 'a dedicated phone number for your agent — place calls, SMS — worldwide',
+      },
+      {
+        value: 'signal',
+        label: 'Yes, connect Signal',
+        hint: 'needs signal-cli installed',
+      },
+      {
+        value: 'imessage',
+        label: 'Yes, connect iMessage',
+        hint: 'local Mac or hosted iMessage (via photon.codes)',
+      },
+      { value: 'other', label: 'Other…', hint: 'install via /add-<name> after setup' },
+      { value: 'skip', label: 'Skip for now', hint: "I'll just use the terminal" },
+    ],
+  });
   setupLog.userInput('channel_choice', String(choice));
   phEmit('channel_chosen', { channel: String(choice) });
   return choice;
 }
 
-async function askOtherChannelName(): Promise<void | typeof BACK_TO_CHANNEL_SELECTION> {
-  const action = ensureAnswer(
-    await brightSelect<'type' | 'back'>({
+async function askOtherChannelName(driver: SetupDriver): Promise<void | typeof BACK_TO_CHANNEL_SELECTION> {
+  if (driver.mode === 'terminal') {
+    const action = await selectPrompt(driver, 'other-channel-action', {
       message: 'Which channel would you like to install?',
       options: [
         {
@@ -2117,23 +2122,22 @@ async function askOtherChannelName(): Promise<void | typeof BACK_TO_CHANNEL_SELE
         { value: 'back', label: '← Back to channel selection' },
       ],
       initialValue: 'type',
-    }),
-  );
-  if (action === 'back') return BACK_TO_CHANNEL_SELECTION;
+    });
+    if (action === 'back') return BACK_TO_CHANNEL_SELECTION;
+  }
 
-  const answer = ensureAnswer(
-    await p.text({
-      message: 'Channel name',
-      placeholder: 'e.g. matrix, github, linear, webex',
-    }),
-  );
+  const answer = await textPrompt(driver, 'other-channel-name', {
+    message: 'Channel name',
+    placeholder: 'e.g. matrix, github, linear, webex',
+  });
   const name = (answer as string)
     .trim()
     .toLowerCase()
     .replace(/^\/?(add-)?/, '');
   setupLog.userInput('other_channel', name);
   phEmit('channel_other_named', { channel: name });
-  p.log.info(
+  driver.log(
+    'info',
     brandBody(
       wrapForGutter(
         `No bash installer for ${k.bold(name)} — open Claude Code after setup and run ${k.bold(`/add-${name}`)} to install it.`,
