@@ -59,6 +59,8 @@ export interface McpStdioServerConfig {
    */
   plugin?: string;
   instructions?: string;
+  enabledTools?: string[];
+  disabledTools?: string[];
 }
 
 export interface McpHttpServerConfig {
@@ -68,6 +70,8 @@ export interface McpHttpServerConfig {
   /** See McpStdioServerConfig.plugin — same ownership marker. */
   plugin?: string;
   instructions?: string;
+  enabledTools?: string[];
+  disabledTools?: string[];
 }
 
 export type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig;
@@ -142,6 +146,13 @@ export function parseMcpServerConfig(input: Record<string, unknown>): McpServerC
   if (instructions !== undefined && typeof instructions !== 'string') {
     throw new Error('MCP instructions must be a string');
   }
+  const enabledTools = parseToolNames(input.enabledTools ?? input.enabled_tools, 'enabledTools');
+  const disabledTools = parseToolNames(input.disabledTools ?? input.disabled_tools, 'disabledTools');
+  if (enabledTools && disabledTools) throw new Error('enabledTools and disabledTools are mutually exclusive');
+  const toolPolicy = {
+    ...(enabledTools === undefined ? {} : { enabledTools }),
+    ...(disabledTools === undefined ? {} : { disabledTools }),
+  };
 
   if (url !== undefined) {
     if (command !== undefined) throw new Error('Provide exactly one of command or url');
@@ -172,6 +183,7 @@ export function parseMcpServerConfig(input: Record<string, unknown>): McpServerC
       url,
       ...(headers === undefined ? {} : { headers }),
       ...(instructions === undefined ? {} : { instructions }),
+      ...toolPolicy,
     };
   }
   if (command === undefined) throw new Error('Provide exactly one of command or url');
@@ -194,7 +206,20 @@ export function parseMcpServerConfig(input: Record<string, unknown>): McpServerC
     env,
     ...(cwd === undefined ? {} : { cwd }),
     ...(instructions === undefined ? {} : { instructions }),
+    ...toolPolicy,
   };
+}
+
+function parseToolNames(value: unknown, field: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    !value.every((name) => typeof name === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(name))
+  ) {
+    throw new Error(`${field} must be a non-empty array of safe MCP tool names`);
+  }
+  return [...new Set(value)];
 }
 
 function parseStringRecord(value: unknown, flag: string): Record<string, string> | undefined {
@@ -252,6 +277,34 @@ export interface ContainerConfig {
   timezone?: string;
   /** Session isolation tier for the group's containers; absent = the composer's default ('container'). */
   runtimeTier?: 'container' | 'vm';
+  /** Provider-neutral policy; absent/default preserves provider-native behavior. */
+  webSearchMode?: 'disabled';
+  /** Opt-in provider-neutral removal of provider-native execution/network tools. */
+  builtinToolMode?: 'mcp-only';
+  /** Opt-in single-result delivery; absent/default preserves normal conversations. */
+  responseDeliveryMode?: 'terminal';
+}
+
+function parseWebSearchMode(raw: string | null | undefined, groupName: string): 'disabled' | undefined {
+  if (raw == null || raw === 'default') return undefined;
+  if (raw === 'disabled') return raw;
+  throw new Error(`agent group "${groupName}" has invalid web_search_mode "${raw}" — expected "default" or "disabled"`);
+}
+
+function parseBuiltinToolMode(raw: string | null | undefined, groupName: string): 'mcp-only' | undefined {
+  if (raw == null || raw === 'default') return undefined;
+  if (raw === 'mcp-only') return raw;
+  throw new Error(
+    `agent group "${groupName}" has invalid builtin_tool_mode "${raw}" — expected "default" or "mcp-only"`,
+  );
+}
+
+function parseResponseDeliveryMode(raw: string | null | undefined, groupName: string): 'terminal' | undefined {
+  if (raw == null || raw === 'default') return undefined;
+  if (raw === 'terminal') return raw;
+  throw new Error(
+    `agent group "${groupName}" has invalid response_delivery_mode "${raw}" — expected "default" or "terminal"`,
+  );
 }
 
 /**
@@ -372,6 +425,9 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     effort: row.effort ?? undefined,
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
     runtimeTier: parseRuntimeTier(row.runtime_tier, group.name),
+    webSearchMode: parseWebSearchMode(row.web_search_mode, group.name),
+    builtinToolMode: parseBuiltinToolMode(row.builtin_tool_mode, group.name),
+    responseDeliveryMode: parseResponseDeliveryMode(row.response_delivery_mode, group.name),
   };
 }
 

@@ -306,3 +306,85 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
   });
 });
+
+describe('groups config web-search mode (host-only)', () => {
+  beforeEach(async () => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    await runMigrations(await initTestDb());
+  });
+
+  afterEach(async () => {
+    await closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+  });
+
+  it('sets and clears the per-group override without changing provider defaults globally', async () => {
+    const GID = 'ag-web-search';
+    await createAgentGroup({ id: GID, name: 'web', folder: 'web', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+
+    const disable = await dispatch(
+      {
+        id: 'web-1',
+        command: 'groups-config-update',
+        args: {
+          id: GID,
+          'web-search-mode': 'disabled',
+          'builtin-tool-mode': 'mcp-only',
+          'response-delivery-mode': 'terminal',
+        },
+      },
+      { caller: 'host' },
+    );
+    expect(disable.ok).toBe(true);
+    expect((await getContainerConfig(GID))!.web_search_mode).toBe('disabled');
+    expect((await getContainerConfig(GID))!.builtin_tool_mode).toBe('mcp-only');
+    expect((await getContainerConfig(GID))!.response_delivery_mode).toBe('terminal');
+    if (disable.ok) {
+      expect((disable.data as Record<string, unknown>).response_delivery_mode).toBe('terminal');
+      expect((disable.data as Record<string, unknown>).builtin_tool_mode).toBe('mcp-only');
+    }
+
+    const restore = await dispatch(
+      {
+        id: 'web-2',
+        command: 'groups-config-update',
+        args: {
+          id: GID,
+          'web-search-mode': 'default',
+          'builtin-tool-mode': 'default',
+          'response-delivery-mode': 'default',
+        },
+      },
+      { caller: 'host' },
+    );
+    expect(restore.ok).toBe(true);
+    expect((await getContainerConfig(GID))!.web_search_mode).toBeNull();
+    expect((await getContainerConfig(GID))!.builtin_tool_mode).toBeNull();
+    expect((await getContainerConfig(GID))!.response_delivery_mode).toBeNull();
+  });
+
+  it('rejects an unknown web-search mode', async () => {
+    const GID = 'ag-web-search-invalid';
+    await createAgentGroup({
+      id: GID,
+      name: 'web-invalid',
+      folder: 'web-invalid',
+      agent_provider: null,
+      created_at: now(),
+    });
+    await ensureContainerConfig(GID);
+
+    const response = await dispatch(
+      {
+        id: 'web-invalid',
+        command: 'groups-config-update',
+        args: { id: GID, 'web-search-mode': 'enabled' },
+      },
+      { caller: 'host' },
+    );
+    expect(response.ok).toBe(false);
+    if (!response.ok) expect(response.error.message).toMatch(/default, disabled/);
+  });
+});

@@ -60,19 +60,29 @@ export function findByRouting(
  * per-agent-group and changes when the operator renames an agent, while
  * the shared base is identical across all agents.
  */
-export function buildSystemPromptAddendum(assistantName?: string, mode: SessionMode = { kind: 'chat' }): string {
+export function buildSystemPromptAddendum(
+  assistantName?: string,
+  mode: SessionMode = { kind: 'chat' },
+  responseDeliveryMode?: 'terminal',
+): string {
   const sections: string[] = [];
 
   if (assistantName) {
-    sections.push(['# You are ' + assistantName, '', `Your name is **${assistantName}**. Use it when the channel asks who you are, when introducing yourself, and when signing any message that explicitly calls for a signature.`].join('\n'));
+    sections.push(
+      [
+        '# You are ' + assistantName,
+        '',
+        `Your name is **${assistantName}**. Use it when the channel asks who you are, when introducing yourself, and when signing any message that explicitly calls for a signature.`,
+      ].join('\n'),
+    );
   }
 
-  sections.push(buildDestinationsSection(mode));
+  sections.push(buildDestinationsSection(mode, responseDeliveryMode));
 
   return sections.join('\n\n');
 }
 
-function buildDestinationsSection(mode: SessionMode): string {
+function buildDestinationsSection(mode: SessionMode, responseDeliveryMode?: 'terminal'): string {
   const all = getAllDestinations();
   const lines = ['## Sending messages', ''];
 
@@ -108,6 +118,12 @@ function buildDestinationsSection(mode: SessionMode): string {
     'When replying to an incoming message, default to addressing the destination it came `from` (every inbound `<message>` tag carries a `from="name"` attribute). Pick a different destination when the request asks for it (e.g., "tell Laura that…").',
   );
   lines.push('');
+  if (responseDeliveryMode === 'terminal') {
+    lines.push(
+      'This group uses terminal delivery: do not send acknowledgments, reactions, files, edits, or progress messages mid-turn. Complete the work first, then return exactly one final `<message to="name">…</message>` response.',
+    );
+    return lines.join('\n');
+  }
   lines.push(
     'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. Always pass its explicit `to` destination. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
   );

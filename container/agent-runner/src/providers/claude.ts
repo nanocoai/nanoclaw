@@ -22,6 +22,10 @@ function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
 }
 
+function mcpToolName(server: string, tool: string): string {
+  return `mcp__${server.replace(/[^A-Za-z0-9_-]/g, '_')}__${tool}`;
+}
+
 export interface SdkRateLimitInfo {
   status?: string;
   resetsAt?: number;
@@ -131,6 +135,32 @@ export const TOOL_ALLOWLIST = [
 // allowlist patterns match what the SDK actually exposes.
 function mcpAllowPattern(serverName: string): string {
   return `mcp__${serverName.replace(/[^a-zA-Z0-9_-]/g, '_')}__*`;
+}
+
+export function buildClaudeToolPolicy(
+  mcpServers: Record<string, McpServerConfig>,
+  builtinToolMode?: 'mcp-only',
+  webSearchMode?: 'disabled',
+): {
+  allowedTools: string[];
+  disallowedTools: string[];
+} {
+  return {
+    allowedTools: [
+      ...(builtinToolMode === 'mcp-only'
+        ? []
+        : TOOL_ALLOWLIST.filter((tool) => webSearchMode !== 'disabled' || tool !== 'WebSearch')),
+      ...Object.entries(mcpServers).flatMap(
+        ([name, server]) => server.enabledTools?.map((tool) => mcpToolName(name, tool)) ?? [mcpAllowPattern(name)],
+      ),
+    ],
+    disallowedTools: [
+      ...SDK_DISALLOWED_TOOLS,
+      ...Object.entries(mcpServers).flatMap(
+        ([name, server]) => server.disabledTools?.map((tool) => mcpToolName(name, tool)) ?? [],
+      ),
+    ],
+  };
 }
 
 interface SDKUserMessage {
@@ -482,6 +512,8 @@ export class ClaudeProvider implements AgentProvider {
   private mcpServers: Record<string, McpServerConfig>;
   private env: Record<string, string | undefined>;
   private additionalDirectories?: string[];
+  private builtinToolMode?: 'mcp-only';
+  private webSearchMode?: 'disabled';
   private model?: string;
   private effort?: string;
   private memorySessionHook?: MemorySessionHookRegistration;
@@ -492,6 +524,8 @@ export class ClaudeProvider implements AgentProvider {
       Object.entries(options.mcpServers ?? {}).map(([name, server]) => [name, shimCwd(server)]),
     );
     this.additionalDirectories = options.additionalDirectories;
+    this.builtinToolMode = options.builtinToolMode;
+    this.webSearchMode = options.webSearchMode;
     this.model = options.model;
     this.effort = options.effort;
     this.env = {
@@ -553,6 +587,7 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
 
+    const toolPolicy = buildClaudeToolPolicy(this.mcpServers, this.builtinToolMode, this.webSearchMode);
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {
@@ -563,8 +598,8 @@ export class ClaudeProvider implements AgentProvider {
         systemPrompt: instructions
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
           : undefined,
-        allowedTools: [...TOOL_ALLOWLIST, ...Object.keys(this.mcpServers).map(mcpAllowPattern)],
-        disallowedTools: SDK_DISALLOWED_TOOLS,
+        allowedTools: toolPolicy.allowedTools,
+        disallowedTools: toolPolicy.disallowedTools,
         env: this.env,
         model: this.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any

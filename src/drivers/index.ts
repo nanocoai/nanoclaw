@@ -39,9 +39,10 @@
 import os from 'os';
 import path from 'path';
 
-import { DATA_DIR, GROUPS_DIR } from '../config.js';
+import { DATA_DIR, GROUPS_DIR, ONECLI_SANDBOX_NETWORK, ONECLI_URL } from '../config.js';
 import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from '../egress-lockdown.js';
 import { readEnvFile } from '../env.js';
+import { configuredGatewayProviderKind } from '../gateway-providers/index.js';
 import { log } from '../log.js';
 
 import { DockerSessionDriver, agentContainerName } from './docker-driver.js';
@@ -80,7 +81,31 @@ function dockerNetworkArgs(spec: SessionSpec): string[] {
     log.info('Egress lockdown active', { containerName: agentContainerName(spec), network: EGRESS_NETWORK });
     return egressNetworkArgs();
   }
+  const oneCliNetwork = localOneCliDockerNetwork({
+    gatewayProvider: configuredGatewayProviderKind(),
+    oneCliUrl: ONECLI_URL,
+    sandboxNetwork: ONECLI_SANDBOX_NETWORK,
+  });
+  if (oneCliNetwork) return ['--network', oneCliNetwork];
   return os.platform() === 'linux' ? ['--add-host=host.docker.internal:host-gateway'] : [];
+}
+
+/**
+ * A local OneCLI proxy advertises the Docker-only hostname `gateway`; the
+ * agent therefore has to join OneCLI's sandbox network to resolve it. Remote
+ * OneCLI deployments remain on NanoClaw's normal topology. Kept pure and
+ * exported so the selection contract is regression-testable without Docker.
+ */
+export function localOneCliDockerNetwork(input: {
+  gatewayProvider: string;
+  oneCliUrl: string | undefined;
+  sandboxNetwork: string;
+}): string | null {
+  if (input.gatewayProvider !== 'onecli' || !input.oneCliUrl || !input.sandboxNetwork.trim()) return null;
+  if (!URL.canParse(input.oneCliUrl)) return null;
+  const url = new URL(input.oneCliUrl);
+  const local = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+  return (url.protocol === 'http:' || url.protocol === 'https:') && local ? input.sandboxNetwork.trim() : null;
 }
 
 registerSessionDriver(

@@ -19,6 +19,7 @@ import {
   configuredDriverKind,
   createSessionDriver,
   getSessionDriver,
+  localOneCliDockerNetwork,
   mountPolicy,
   readSetting,
   resetSessionDriver,
@@ -216,5 +217,51 @@ describe('readSetting', () => {
   it('trims and treats blank as unset', () => {
     writeEnv('NANOCLAW_SESSION_MATERIAL_ROOT=   \n');
     expect(readSetting('NANOCLAW_SESSION_MATERIAL_ROOT', {})).toBe('');
+  });
+});
+
+describe('localOneCliDockerNetwork', () => {
+  it('joins the configured sandbox network for a local OneCLI gateway', () => {
+    expect(
+      localOneCliDockerNetwork({
+        gatewayProvider: 'onecli',
+        oneCliUrl: 'http://127.0.0.1:10256/w/workspace',
+        sandboxNetwork: 'onecli-sandboxes',
+      }),
+    ).toBe('onecli-sandboxes');
+  });
+
+  it('preserves normal topology for remote gateways and other providers', () => {
+    expect(
+      localOneCliDockerNetwork({
+        gatewayProvider: 'onecli',
+        oneCliUrl: 'https://gateway.example.com',
+        sandboxNetwork: 'onecli-sandboxes',
+      }),
+    ).toBeNull();
+    expect(
+      localOneCliDockerNetwork({
+        gatewayProvider: 'custom',
+        oneCliUrl: 'http://localhost:10256',
+        sandboxNetwork: 'onecli-sandboxes',
+      }),
+    ).toBeNull();
+  });
+
+  it('fails closed for malformed URLs and blank network names', () => {
+    expect(
+      localOneCliDockerNetwork({
+        gatewayProvider: 'onecli',
+        oneCliUrl: 'not-a-url',
+        sandboxNetwork: 'onecli-sandboxes',
+      }),
+    ).toBeNull();
+    expect(
+      localOneCliDockerNetwork({
+        gatewayProvider: 'onecli',
+        oneCliUrl: 'http://localhost:10256',
+        sandboxNetwork: ' ',
+      }),
+    ).toBeNull();
   });
 });

@@ -93,6 +93,11 @@ export interface ProviderOptions {
    * through to the underlying SDK. If omitted, the SDK default is used.
    */
   effort?: string;
+  /** Disable the provider's native web-search tool while preserving other built-ins. */
+  webSearchMode?: 'disabled';
+  responseDeliveryMode?: 'terminal';
+  /** Remove provider-native tools; only configured MCP tools remain model-visible. */
+  builtinToolMode?: 'mcp-only';
 }
 
 export interface QueryInput {
@@ -137,8 +142,16 @@ export type McpServerConfig =
        * (cwd-shim.ts) or drop it — never launch in the wrong directory.
        */
       cwd?: string;
+      enabledTools?: string[];
+      disabledTools?: string[];
     }
-  | { type: 'http'; url: string; headers?: Record<string, string> };
+  | {
+      type: 'http';
+      url: string;
+      headers?: Record<string, string>;
+      enabledTools?: string[];
+      disabledTools?: string[];
+    };
 
 export interface AgentQuery {
   /** Push a follow-up message into the active query. */

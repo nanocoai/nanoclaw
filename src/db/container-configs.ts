@@ -11,6 +11,9 @@ const SCALAR_COLUMNS = new Set([
   'max_messages_per_prompt',
   'cli_scope',
   'timezone',
+  'web_search_mode',
+  'builtin_tool_mode',
+  'response_delivery_mode',
 ]);
 const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages_npm', 'additional_mounts']);
 
@@ -86,6 +89,9 @@ export async function updateContainerConfigScalars(
       | 'max_messages_per_prompt'
       | 'cli_scope'
       | 'timezone'
+      | 'web_search_mode'
+      | 'builtin_tool_mode'
+      | 'response_delivery_mode'
     >
   >,
 ): Promise<void> {
