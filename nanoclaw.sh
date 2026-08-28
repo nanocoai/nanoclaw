@@ -371,7 +371,7 @@ fi
 # The ceiling exists because better-sqlite3 11.x cannot build against
 # Node 26 (V8 removed APIs it uses) and ships no prebuilt for it. Raise
 # NODE_MAJOR_MAX only after the better-sqlite3 pin supports the runtime.
-NODE_MAJOR_REQUIRED=20
+NODE_MAJOR_REQUIRED=22
 NODE_MAJOR_MAX=25
 if command -v node >/dev/null 2>&1; then
   NODE_FOUND_VERSION="$(node --version 2>/dev/null || echo unknown)"

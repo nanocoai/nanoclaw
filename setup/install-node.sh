@@ -8,7 +8,7 @@
 # it. Pure bash by design — runs before Node exists on the host.
 set -euo pipefail
 
-REQUIRED_NODE_MAJOR=20
+REQUIRED_NODE_MAJOR=22
 # The ceiling exists because better-sqlite3 11.x cannot build against
 # Node 26 (V8 removed APIs it uses) and ships no prebuilt for it. Raise
 # MAX_NODE_MAJOR only after the better-sqlite3 pin supports the runtime.
@@ -46,12 +46,15 @@ fi
 
 if command -v uvx >/dev/null 2>&1; then
   echo "STEP: uvx-nodeenv"
-  uvx nodeenv -n lts ~/node
+  # --force: ~/node can pre-exist (an earlier attempt, or the old Node the
+  # user consented to replace); nodeenv refuses a non-empty target otherwise.
+  uvx nodeenv --force -n lts ~/node
   mkdir -p ~/.local/bin
   ln -sf ~/node/bin/node ~/.local/bin/node
   ln -sf ~/node/bin/npm ~/.local/bin/npm
   ln -sf ~/node/bin/npx ~/.local/bin/npx
   ln -sf ~/node/bin/pnpm ~/.local/bin/pnpm
+  export PATH="$HOME/.local/bin:$PATH"
 else
   case "$(uname -s)" in
     Darwin)
@@ -71,6 +74,7 @@ else
       ln -sf "$BREW_NODE_PREFIX/bin/node" ~/.local/bin/node
       ln -sf "$BREW_NODE_PREFIX/bin/npm" ~/.local/bin/npm
       ln -sf "$BREW_NODE_PREFIX/bin/npx" ~/.local/bin/npx
+      export PATH="$HOME/.local/bin:$PATH"
       ;;
     Linux)
       echo "STEP: nodesource-setup"

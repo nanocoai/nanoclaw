@@ -51,7 +51,7 @@ detect_platform() {
 # The ceiling exists because better-sqlite3 11.x cannot build against
 # Node 26 (V8 removed APIs it uses) and ships no prebuilt for it. Raise
 # NODE_MAJOR_MAX only after the better-sqlite3 pin supports the runtime.
-NODE_MAJOR_MIN=20
+NODE_MAJOR_MIN=22
 NODE_MAJOR_MAX=25
 
 check_node() {
@@ -194,6 +194,15 @@ if [ "$NODE_OK" = "false" ]; then
     log "Node missing or upgrade consented — running setup/install-node.sh"
     echo "Installing Node via setup/install-node.sh"
     if bash "$PROJECT_ROOT/setup/install-node.sh" 2>&1 | tee -a "$LOG_FILE"; then
+      # install-node.sh exports PATH only inside its own process; re-derive
+      # the new Node's location here so check_node sees it.
+      if [ -x "$HOME/.local/bin/node" ]; then
+        export PATH="$HOME/.local/bin:$PATH"
+      elif [ "$PLATFORM" = "macos" ] && command -v brew >/dev/null 2>&1; then
+        if NODE22_PREFIX="$(brew --prefix node@22 2>/dev/null)"; then
+          export PATH="$NODE22_PREFIX/bin:$PATH"
+        fi
+      fi
       hash -r 2>/dev/null || true
       check_node
     else
