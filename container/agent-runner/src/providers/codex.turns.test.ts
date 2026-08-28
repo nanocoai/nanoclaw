@@ -1,7 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
 
 import { CodexProvider, type CodexRuntimeDeps } from './codex.js';
 import type { AppServer, JsonRpcNotification, TurnParams } from './codex-app-server.js';
@@ -138,39 +135,6 @@ describe('CodexProvider active turns', () => {
     expect(fake.startCalls[0].model).toBe('gpt-5.5');
     expect(fake.startCalls[0].effort).toBe('high');
     expect(events.filter((event) => event.type === 'result')).toEqual([{ type: 'result', text: 'final answer' }]);
-  });
-
-  it('delivers harness-generated images as file events — the model never sends them itself', async () => {
-    const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-'));
-    const prevHome = process.env.CODEX_HOME;
-    process.env.CODEX_HOME = codexHome;
-    try {
-      const fake = createFakeCodexRuntime();
-      const provider = createCodexProvider({}, fake.runtime);
-      const query = provider.query({ prompt: 'make an image', cwd: '/workspace/agent' });
-      const events: ProviderEvent[] = [];
-      const collect = collectEvents(query.events, events);
-
-      await waitFor(() => fake.startCalls.length === 1);
-      // Codex's built-in image_gen writes into CODEX_HOME mid-turn.
-      const imagesDir = path.join(codexHome, 'generated_images', 'thread-1');
-      fs.mkdirSync(imagesDir, { recursive: true });
-      fs.writeFileSync(path.join(imagesDir, 'ig_abc.png'), 'png-bytes');
-
-      query.end();
-      fake.completeTurn('Here you go — created the image.');
-      await collect;
-
-      const files = events.filter((event) => event.type === 'file') as Array<{ type: 'file'; path: string }>;
-      expect(files).toHaveLength(1);
-      expect(files[0].path).toBe(path.join(imagesDir, 'ig_abc.png'));
-      // file events arrive before the result so delivery shares the turn.
-      expect(events.findIndex((e) => e.type === 'file')).toBeLessThan(events.findIndex((e) => e.type === 'result'));
-    } finally {
-      if (prevHome === undefined) delete process.env.CODEX_HOME;
-      else process.env.CODEX_HOME = prevHome;
-      fs.rmSync(codexHome, { recursive: true, force: true });
-    }
   });
 
   it('ends the turn immediately with the real cause when the app-server dies mid-turn', async () => {

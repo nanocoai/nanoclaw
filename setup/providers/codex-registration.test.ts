@@ -15,6 +15,7 @@ describe('codex setup registration', () => {
   it('registers codex with auth + install check via the barrel', () => {
     const codex = getSetupProvider('codex');
     expect(codex).toBeDefined();
+    expect(codex!.supportsStructuredAuth).toBe(true);
     expect(typeof codex!.runAuth).toBe('function');
     expect(typeof codex!.runInstallCheck).toBe('function');
     expect(typeof codex!.offerFailureAssist).toBe('function');
