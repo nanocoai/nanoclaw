@@ -419,6 +419,66 @@ export function splitForLimit(text: string, limit: number): string[] {
   return chunks;
 }
 
+/**
+ * Build the serialized inbox entry for one inbound attachment, downloading its
+ * bytes into `entry.data` (base64) so the host can stage a real file.
+ *
+ * The chat-sdk core strips `data`/`fetchData` when it serializes a message but
+ * keeps `fetchMetadata`; adapters restore the downloader via
+ * `rehydrateAttachment`. url-only adapters (e.g. Discord) expose `url` instead.
+ * Recovering here fixes inbound attachments (incl. Telegram voice/audio) that
+ * reach this point without a live `fetchData`. See nanoclaw#2888.
+ */
+export async function enrichInboundAttachment(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  att: any,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  adapter: any,
+): Promise<Record<string, unknown>> {
+  const entry: Record<string, unknown> = {
+    type: att.type,
+    name: att.name,
+    mimeType: att.mimeType,
+    size: att.size,
+    width: att.width,
+    height: att.height,
+  };
+
+  let fetchData: (() => Promise<Buffer>) | undefined = att.fetchData;
+  if (!fetchData && typeof adapter?.rehydrateAttachment === 'function') {
+    try {
+      fetchData = adapter.rehydrateAttachment(att)?.fetchData;
+    } catch (err) {
+      log.warn('Failed to rehydrate attachment downloader', { type: att.type, err });
+    }
+  }
+
+  if (fetchData) {
+    try {
+      const buffer = await fetchData();
+      entry.data = buffer.toString('base64');
+    } catch (err) {
+      log.warn('Failed to download attachment', { type: att.type, err });
+    }
+  } else if (typeof att.url === 'string' && att.url) {
+    try {
+      const res = await fetch(att.url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buffer = Buffer.from(await res.arrayBuffer());
+      const MAX_BYTES = 25 * 1024 * 1024;
+      if (buffer.length > MAX_BYTES) {
+        throw new Error(`attachment exceeds ${MAX_BYTES} bytes (${buffer.length})`);
+      }
+      entry.data = buffer.toString('base64');
+      entry.url = att.url;
+    } catch (err) {
+      log.warn('Failed to download attachment via url', { type: att.type, err });
+    }
+  }
+
+  return entry;
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   // The instance name becomes a webhook route segment (the route regex is
@@ -451,28 +511,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const serialized = message.toJSON() as Record<string, any>;
 
-    // Download attachment data before serialization loses fetchData()
+    // Download attachment data before serialization loses fetchData(); recover
+    // a lost downloader via the adapter or a url fallback (see nanoclaw#2888).
     if (message.attachments && message.attachments.length > 0) {
       const enriched = [];
       for (const att of message.attachments) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const entry: Record<string, any> = {
-          type: att.type,
-          name: att.name,
-          mimeType: att.mimeType,
-          size: att.size,
-          width: (att as unknown as Record<string, unknown>).width,
-          height: (att as unknown as Record<string, unknown>).height,
-        };
-        if (att.fetchData) {
-          try {
-            const buffer = await att.fetchData();
-            entry.data = buffer.toString('base64');
-          } catch (err) {
-            log.warn('Failed to download attachment', { type: att.type, err });
-          }
-        }
-        enriched.push(entry);
+        enriched.push(await enrichInboundAttachment(att, adapter));
       }
       serialized.attachments = enriched;
     }

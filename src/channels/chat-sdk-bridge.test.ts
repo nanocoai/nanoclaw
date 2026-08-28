@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, splitForLimit, enrichInboundAttachment } from './chat-sdk-bridge.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
@@ -486,5 +486,57 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(calls).toHaveLength(1);
     const msg = calls[0].message as { markdown?: string };
     expect(msg.markdown).toBe('plain hello');
+  });
+});
+
+describe('enrichInboundAttachment', () => {
+  it('downloads bytes via fetchData when present', async () => {
+    const att = {
+      type: 'audio',
+      mimeType: 'audio/ogg',
+      size: 3,
+      fetchData: async () => Buffer.from('abc'),
+    };
+    const entry = await enrichInboundAttachment(att, {});
+    expect(entry.data).toBe(Buffer.from('abc').toString('base64'));
+  });
+
+  it('recovers via adapter.rehydrateAttachment when fetchData is absent (#2888 — Telegram voice)', async () => {
+    // Post-serialize shape: no fetchData, but fetchMetadata.fileId survives.
+    const att = { type: 'audio', mimeType: 'audio/ogg', size: 3, fetchMetadata: { fileId: 'f1' } };
+    const adapter = {
+      rehydrateAttachment: (a: Record<string, unknown>) => ({ ...a, fetchData: async () => Buffer.from('ogg') }),
+    };
+    const entry = await enrichInboundAttachment(att, adapter);
+    expect(entry.data).toBe(Buffer.from('ogg').toString('base64'));
+  });
+
+  it('does not throw when rehydrateAttachment throws (adapter robustness)', async () => {
+    const att = { type: 'audio', mimeType: 'audio/ogg', size: 3, fetchMetadata: { fileId: 'f1' } };
+    const adapter = {
+      rehydrateAttachment: () => {
+        throw new Error('boom');
+      },
+    };
+    const entry = await enrichInboundAttachment(att, adapter);
+    expect(entry.data).toBeUndefined();
+  });
+
+  it('falls back to fetching att.url for url-only adapters (#2888 — Discord)', async () => {
+    const att = { type: 'image', mimeType: 'image/png', size: 3, url: 'https://example/y.png' };
+    const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new TextEncoder().encode('png').buffer,
+    } as unknown as Response);
+    const entry = await enrichInboundAttachment(att, {});
+    expect(entry.data).toBe(Buffer.from('png').toString('base64'));
+    expect(spy).toHaveBeenCalledWith('https://example/y.png');
+    spy.mockRestore();
+  });
+
+  it('leaves data unset without throwing when nothing can download', async () => {
+    const att = { type: 'audio', mimeType: 'audio/ogg', size: 3 };
+    const entry = await enrichInboundAttachment(att, {});
+    expect(entry.data).toBeUndefined();
   });
 });
