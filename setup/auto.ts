@@ -274,15 +274,22 @@ async function main(driver: SetupDriver): Promise<void> {
   }
 
   if (!skip.has('environment')) {
-    const res = await runQuietStep('environment', {
-      running: 'Checking your system…',
-      done: 'Your system looks good.',
-    });
+    const res = await runQuietStep(
+      'environment',
+      {
+        running: 'Checking your system…',
+        done: 'Your system looks good.',
+      },
+      [],
+      driver,
+    );
     if (!res.ok) {
       await fail(
         'environment',
         "Your system doesn't look quite right.",
         'See logs/setup-steps/ for details, then retry.',
+        undefined,
+        driver,
       );
     }
   }
@@ -319,11 +326,16 @@ async function main(driver: SetupDriver): Promise<void> {
         ),
       ),
     );
-    const res = await runWindowedStep('container', {
-      running: "Preparing your assistant's sandbox…",
-      done: 'Sandbox ready.',
-      failed: "Couldn't prepare the sandbox.",
-    });
+    const res = await runWindowedStep(
+      'container',
+      {
+        running: "Preparing your assistant's sandbox…",
+        done: 'Sandbox ready.',
+        failed: "Couldn't prepare the sandbox.",
+      },
+      [],
+      driver,
+    );
     if (!res.ok) {
       const err = res.terminal?.fields.ERROR;
       if (err === 'runtime_not_available') {
@@ -331,6 +343,8 @@ async function main(driver: SetupDriver): Promise<void> {
           'container',
           "Docker isn't available.",
           'Install Docker Desktop (or start it if already installed), then retry.',
+          undefined,
+          driver,
         );
       }
       if (err === 'docker_group_not_active') {
@@ -338,6 +352,8 @@ async function main(driver: SetupDriver): Promise<void> {
           'container',
           "Docker was just installed but your shell doesn't know yet.",
           'Log out and back in (or run `newgrp docker` in a new shell), then retry.',
+          undefined,
+          driver,
         );
       }
       // The pull path fails for reasons a build never has, and "prune the build
@@ -347,6 +363,8 @@ async function main(driver: SetupDriver): Promise<void> {
           'container',
           'This install is set to fetch a pre-built sandbox image, but nothing says which one.',
           `Set ${AGENT_IMAGE_REF_ENV_KEY} in .env (or add an "${AGENT_IMAGE_PIN}" pin to versions.json), or run \`${REGISTRY_STEP} -- --opt-out\` to build it here instead.`,
+          undefined,
+          driver,
         );
       }
       if (err === 'image_pull_failed') {
@@ -354,19 +372,24 @@ async function main(driver: SetupDriver): Promise<void> {
           'container',
           "Couldn't fetch the sandbox image.",
           `Check your connection and that authentication finished, then retry — or run \`${REGISTRY_STEP} -- --opt-out\` to build it here instead.`,
+          undefined,
+          driver,
         );
       }
       await fail(
         'container',
         "Couldn't build the sandbox.",
         'If Docker has a stale cache, try: `docker builder prune -f`, then retry.',
+        undefined,
+        driver,
       );
     }
-    maybeReexecUnderSg();
+    maybeReexecUnderSg(driver);
   }
 
   if (!skip.has('onecli')) {
-    p.log.message(
+    driver.log(
+      'message',
       brandBody(
         dimWrap(
           'Your assistant never gets your API keys directly. The vault adds them to approved requests as they leave the sandbox.',
@@ -382,18 +405,24 @@ async function main(driver: SetupDriver): Promise<void> {
       // so skip the local-vs-fresh prompt entirely. Health-check it here
       // rather than letting the step fail silently — a typo in the URL is a
       // common mistake and the answer is human-fixable.
-      const s = p.spinner();
-      s.start(`Checking remote OneCLI at ${remoteHost}…`);
+      const remoteSpinner = driver.mode === 'terminal' ? p.spinner() : null;
+      if (remoteSpinner) remoteSpinner.start(`Checking remote OneCLI at ${remoteHost}…`);
+      else driver.progress('onecli-remote-check', 'running', `Checking remote OneCLI at ${remoteHost}`);
       const healthy = await pollHealth(remoteHost, 5000);
+      driver.throwIfCancelled();
       if (!healthy) {
-        s.stop(`Couldn't reach OneCLI at ${remoteHost}.`, 1);
+        if (remoteSpinner) remoteSpinner.error(`Couldn't reach OneCLI at ${remoteHost}.`);
+        else driver.progress('onecli-remote-check', 'failed');
         await fail(
           'onecli',
           `Couldn't reach OneCLI at ${remoteHost}.`,
           'Check the URL and that OneCLI is running on the remote machine, then retry.',
+          undefined,
+          driver,
         );
       }
-      s.stop('Remote OneCLI is reachable.');
+      if (remoteSpinner) remoteSpinner.stop('Remote OneCLI is reachable.');
+      else driver.progress('onecli-remote-check', 'succeeded');
 
       const res = await runQuietStep(
         'onecli',
@@ -402,6 +431,7 @@ async function main(driver: SetupDriver): Promise<void> {
           done: 'OneCLI vault ready.',
         },
         ['--remote-url', remoteHost],
+        driver,
       );
       if (!res.ok) {
         const err = res.terminal?.fields.ERROR;
@@ -409,6 +439,8 @@ async function main(driver: SetupDriver): Promise<void> {
           'onecli',
           `Couldn't connect to remote OneCLI (${err ?? 'unknown error'}).`,
           'Check the URL and that OneCLI is running on the remote machine, then retry.',
+          undefined,
+          driver,
         );
       }
     } else {
@@ -418,23 +450,21 @@ async function main(driver: SetupDriver): Promise<void> {
       const existing = detectExistingOnecli();
       let reuse = false;
       if (existing) {
-        const choice = ensureAnswer(
-          await brightSelect({
-            message: `Found an existing OneCLI at ${existing.apiHost}. What would you like to do?`,
-            options: [
-              {
-                value: 'reuse',
-                label: 'Use the existing instance',
-                hint: 'recommended — keeps other apps bound to this vault working',
-              },
-              {
-                value: 'fresh',
-                label: 'Install a fresh instance for NanoClaw',
-                hint: 'reinstalls onecli; other apps may need to reconnect',
-              },
-            ],
-          }),
-        ) as 'reuse' | 'fresh';
+        const choice = await selectPrompt(driver, 'onecli-existing-choice', {
+          message: `Found an existing OneCLI at ${existing.apiHost}. What would you like to do?`,
+          options: [
+            {
+              value: 'reuse',
+              label: 'Use the existing instance',
+              hint: 'recommended - keeps other apps bound to this vault working',
+            },
+            {
+              value: 'fresh',
+              label: 'Install a fresh instance for NanoClaw',
+              hint: 'reinstalls onecli; other apps may need to reconnect',
+            },
+          ],
+        });
         setupLog.userInput('onecli_choice', choice);
         reuse = choice === 'reuse';
       }
@@ -446,6 +476,7 @@ async function main(driver: SetupDriver): Promise<void> {
           done: 'OneCLI vault ready.',
         },
         reuse ? ['--reuse'] : [],
+        driver,
       );
       if (!res.ok) {
         const err = res.terminal?.fields.ERROR;
@@ -454,12 +485,16 @@ async function main(driver: SetupDriver): Promise<void> {
             'onecli',
             'OneCLI was installed but your shell needs to refresh to see it.',
             'Open a new shell or run `export PATH="$HOME/.local/bin:$PATH"`, then retry.',
+            undefined,
+            driver,
           );
         }
         await fail(
           'onecli',
           `Couldn't set up OneCLI (${err ?? 'unknown error'}).`,
           'Make sure curl is installed and ~/.local/bin is writable, then retry.',
+          undefined,
+          driver,
         );
       }
     }
@@ -567,9 +602,10 @@ async function main(driver: SetupDriver): Promise<void> {
         skipped: 'Access rules already set.',
       },
       ['--empty'],
+      driver,
     );
     if (!res.ok) {
-      await fail('mounts', "Couldn't write access rules.");
+      await fail('mounts', "Couldn't write access rules.", undefined, undefined, driver);
     }
   }
 
@@ -579,11 +615,12 @@ async function main(driver: SetupDriver): Promise<void> {
       done: 'NanoClaw is running.',
     });
     if (!res.ok) {
-      await fail('service', "Couldn't start NanoClaw.", 'See logs/nanoclaw.error.log for details.');
+      await fail('service', "Couldn't start NanoClaw.", 'See logs/nanoclaw.error.log for details.', undefined, driver);
     }
     if (res.terminal?.fields.DOCKER_GROUP_STALE === 'true') {
-      p.log.warn(brandBody("NanoClaw's permissions need a tweak before it can reach Docker."));
-      p.log.message(
+      driver.log('warn', brandBody("NanoClaw's permissions need a tweak before it can reach Docker."));
+      driver.log(
+        'message',
         brandBody(
           '  sudo setfacl -m u:$(whoami):rw /var/run/docker.sock\n' + `  systemctl --user restart ${getSystemdUnit()}`,
         ),
@@ -717,7 +754,7 @@ async function main(driver: SetupDriver): Promise<void> {
   }
 
   if (!skip.has('timezone')) {
-    await runTimezoneStep();
+    await runTimezoneStep(driver);
   }
 
   const templateAgentOutcome = await installSelectedTemplateAgent(agentProvider);
@@ -1807,13 +1844,18 @@ function appendProviderImport(modulePath: string): void {
  * the usual `--step timezone -- --tz <zone>` path. Free-text answers get
  * a headless `claude -p` pass to resolve them to a real IANA zone.
  */
-async function runTimezoneStep(): Promise<void> {
-  const res = await runQuietStep('timezone', {
-    running: 'Checking your timezone…',
-    done: 'Timezone set.',
-  });
+async function runTimezoneStep(driver: SetupDriver): Promise<void> {
+  const res = await runQuietStep(
+    'timezone',
+    {
+      running: 'Checking your timezone…',
+      done: 'Timezone set.',
+    },
+    [],
+    driver,
+  );
   if (!res.ok && res.terminal?.fields.NEEDS_USER_INPUT !== 'true') {
-    await fail('timezone', "Couldn't determine your timezone.");
+    await fail('timezone', "Couldn't determine your timezone.", undefined, undefined, driver);
   }
 
   const fields = res.terminal?.fields ?? {};
@@ -1828,11 +1870,11 @@ async function runTimezoneStep(): Promise<void> {
   //     persisting — users shouldn't be surprised the agent "already knew"
   //     their timezone from system settings they didn't think about.
   if (!needsInput && !isUtc && resolvedTz && resolvedTz !== 'none') {
-    const confirmed = ensureAnswer(
-      await p.confirm({
-        message: `I detected ${resolvedTz} from your computer settings. Is that right?`,
-        initialValue: true,
-      }),
+    const confirmed = await confirmPrompt(
+      driver,
+      'timezone-detected-confirm',
+      `I detected ${resolvedTz} from your computer settings. Is that right?`,
+      true,
     );
     setupLog.userInput('timezone_confirm_detected', String(confirmed));
     if (confirmed) return;
@@ -1848,41 +1890,39 @@ async function runTimezoneStep(): Promise<void> {
   // straight to the free-text prompt — the user already said "not that".
   let choice: 'keep' | 'answer' = 'answer';
   if (needsInput || isUtc) {
-    choice = ensureAnswer(
-      await brightSelect({
-        message,
-        options: needsInput
-          ? [
-              { value: 'answer', label: "I'll tell you where I am" },
-              { value: 'keep', label: 'Leave it as UTC' },
-            ]
-          : [
-              { value: 'keep', label: 'Keep UTC', hint: 'remote server / happy with UTC' },
-              { value: 'answer', label: "I'm somewhere else" },
-            ],
-      }),
-    ) as 'keep' | 'answer';
+    choice = await selectPrompt(driver, 'timezone-choice', {
+      message,
+      options: needsInput
+        ? [
+            { value: 'answer', label: "I'll tell you where I am" },
+            { value: 'keep', label: 'Leave it as UTC' },
+          ]
+        : [
+            { value: 'keep', label: 'Keep UTC', hint: 'remote server / happy with UTC' },
+            { value: 'answer', label: "I'm somewhere else" },
+          ],
+    });
     setupLog.userInput('timezone_choice', choice);
   }
 
   if (choice === 'keep') return;
 
-  const answer = ensureAnswer(
-    await p.text({
-      message: 'Where are you? (city, region, or IANA zone)',
-      placeholder: 'e.g. New York, London, Asia/Tokyo',
-      validate: (v) => (v && v.trim() ? undefined : 'Required'),
-    }),
-  );
+  const answer = await textPrompt(driver, 'timezone-location', {
+    message: 'Where are you? (city, region, or IANA zone)',
+    placeholder: 'e.g. New York, London, Asia/Tokyo',
+    validation: { required: true },
+    validateValue: (value) => (String(value).trim() ? undefined : 'Required'),
+  });
   const raw = (answer as string).trim();
   setupLog.userInput('timezone_input', raw);
 
   let tz: string | null = isValidTimezone(raw) ? raw : null;
   if (!tz) {
-    if (claudeCliAvailable()) {
-      tz = await resolveTimezoneViaClaude(raw);
+    if (claudeCliAvailable(driver)) {
+      tz = await resolveTimezoneViaClaude(raw, driver);
     } else {
-      p.log.warn(
+      driver.log(
+        'warn',
         brandBody(
           wrapForGutter(
             "That's not a standard IANA zone and I can't call Claude to interpret it here — try again with a zone like `America/New_York` or `Europe/London`.",
@@ -1896,18 +1936,17 @@ async function runTimezoneStep(): Promise<void> {
   if (!tz) {
     // One retry with a direct-IANA ask; if that fails too, leave the
     // previously-detected value in .env and move on rather than looping.
-    const retryAnswer = ensureAnswer(
-      await p.text({
-        message: 'Enter an IANA timezone string',
-        placeholder: 'e.g. America/New_York',
-        validate: (v) => {
-          const s = (v ?? '').trim();
-          if (!s) return 'Required';
-          if (!isValidTimezone(s)) return 'Not a valid IANA zone';
-          return undefined;
-        },
-      }),
-    );
+    const retryAnswer = await textPrompt(driver, 'timezone-iana', {
+      message: 'Enter an IANA timezone string',
+      placeholder: 'e.g. America/New_York',
+      validation: { required: true },
+      validateValue: (value) => {
+        const s = String(value).trim();
+        if (!s) return 'Required';
+        if (!isValidTimezone(s)) return 'Not a valid IANA zone';
+        return undefined;
+      },
+    });
     tz = (retryAnswer as string).trim();
     setupLog.userInput('timezone_retry', tz);
   }
@@ -1919,9 +1958,10 @@ async function runTimezoneStep(): Promise<void> {
       done: `Timezone set to ${tz}.`,
     },
     ['--tz', tz],
+    driver,
   );
   if (!persist.ok) {
-    await fail('timezone', `Couldn't save timezone ${tz}.`);
+    await fail('timezone', `Couldn't save timezone ${tz}.`, undefined, undefined, driver);
   }
 }
 
@@ -2080,7 +2120,7 @@ function detectExistingOnecli(): { version: string; apiHost: string } | null {
  * daemon is up. Detect that and re-exec the whole driver under `sg docker`
  * so the rest of the run inherits the docker group without a re-login.
  */
-function maybeReexecUnderSg(): void {
+function maybeReexecUnderSg(driver: SetupDriver): void {
   if (process.env.NANOCLAW_REEXEC_SG === '1') return;
   if (process.platform !== 'linux') return;
   const info = spawnSync('docker', ['info'], { encoding: 'utf-8' });
@@ -2089,15 +2129,22 @@ function maybeReexecUnderSg(): void {
   if (!/permission denied/i.test(err)) return;
   if (spawnSync('which', ['sg'], { stdio: 'ignore' }).status !== 0) return;
 
-  p.log.warn(brandBody('Docker socket not accessible in current group. Re-executing under `sg docker`.'));
+  driver.log('warn', brandBody('Docker socket not accessible in current group. Re-executing under `sg docker`.'));
   const existingSkip = (process.env.NANOCLAW_SKIP ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
   const skipList = [...new Set([...existingSkip, ...setupLog.completedStepNames()])].join(',');
-  const res = spawnSync('sg', ['docker', '-c', 'pnpm run setup:auto'], {
+  if (driver.mode === 'ndjson') driver.handoff();
+  const command = driver.mode === 'ndjson' ? 'exec ./node_modules/.bin/tsx setup/auto.ts' : 'pnpm run setup:auto';
+  const res = spawnSync('sg', ['docker', '-c', command], {
     stdio: 'inherit',
-    env: { ...process.env, NANOCLAW_REEXEC_SG: '1', ...(skipList ? { NANOCLAW_SKIP: skipList } : {}) },
+    env: {
+      ...process.env,
+      NANOCLAW_REEXEC_SG: '1',
+      ...(driver.mode === 'ndjson' ? { NANOCLAW_DRIVER_CONTINUATION: '1' } : {}),
+      ...(skipList ? { NANOCLAW_SKIP: skipList } : {}),
+    },
   });
   process.exit(res.status ?? 1);
 }
