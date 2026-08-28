@@ -32,3 +32,5 @@ main().catch((err) => {
   log(`MCP server error: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
 });
+import './canvas.js';
+import './rooms.js';
