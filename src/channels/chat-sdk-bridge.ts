@@ -419,6 +419,39 @@ export function splitForLimit(text: string, limit: number): string[] {
   return chunks;
 }
 
+/** @internal exported for testing */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function enrichAttachment(att: Record<string, any>): Promise<Record<string, any>> {
+  const entry: Record<string, any> = {
+    type: att.type,
+    name: att.name,
+    mimeType: att.mimeType,
+    size: att.size,
+    width: att.width,
+    height: att.height,
+  };
+  if (att.fetchData) {
+    try {
+      const buffer = await att.fetchData();
+      entry.data = buffer.toString('base64');
+    } catch (err) {
+      log.warn('Failed to download attachment', { type: att.type, err });
+    }
+  } else if (att.url) {
+    try {
+      const res = await fetch(att.url as string);
+      if (res.ok) {
+        entry.data = Buffer.from(await res.arrayBuffer()).toString('base64');
+      } else {
+        log.warn('Failed to download attachment from URL', { url: att.url, status: res.status });
+      }
+    } catch (err) {
+      log.warn('Failed to download attachment from URL', { url: att.url, err });
+    }
+  }
+  return entry;
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   // The instance name becomes a webhook route segment (the route regex is
@@ -453,28 +486,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
     // Download attachment data before serialization loses fetchData()
     if (message.attachments && message.attachments.length > 0) {
-      const enriched = [];
-      for (const att of message.attachments) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const entry: Record<string, any> = {
-          type: att.type,
-          name: att.name,
-          mimeType: att.mimeType,
-          size: att.size,
-          width: (att as unknown as Record<string, unknown>).width,
-          height: (att as unknown as Record<string, unknown>).height,
-        };
-        if (att.fetchData) {
-          try {
-            const buffer = await att.fetchData();
-            entry.data = buffer.toString('base64');
-          } catch (err) {
-            log.warn('Failed to download attachment', { type: att.type, err });
-          }
-        }
-        enriched.push(entry);
-      }
-      serialized.attachments = enriched;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      serialized.attachments = await Promise.all(message.attachments.map((a) => enrichAttachment(a as any)));
     }
 
     // Extract reply context via platform-specific hook
