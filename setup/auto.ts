@@ -65,6 +65,15 @@ import { runAdvancedScreen } from './lib/setup-config-screen.js';
 import { CONFIG, envVarFor, validateHttpUrl } from './lib/setup-config.js';
 import { runWindowedStep } from './lib/windowed-runner.js';
 import { runUninstallFlow } from './uninstall/flow.js';
+import {
+  createSetupDriver,
+  DriverCancelled,
+  DriverTerminalError,
+  type DriverPrompt,
+  type SetupReceipt,
+  type SetupDriver,
+} from './lib/setup-driver.js';
+import { buildSetupReceipt, inspectService, queryHostHealth } from './lib/service-health.js';
 import { detectExistingInstall } from './uninstall/scan.js';
 import { detectRegisteredGroups, detectExistingDisplayName, readEnvKey } from './environment.js';
 import { pollHealth } from './onecli.js';
@@ -126,7 +135,45 @@ type ChannelChoice =
   | 'other'
   | 'skip';
 
-async function main(): Promise<void> {
+async function selectPrompt<T extends string>(
+  driver: SetupDriver,
+  id: string,
+  opts: {
+    message: string;
+    options: Array<{ value: T; label: string; hint?: string }>;
+    initialValue?: T;
+  },
+): Promise<T> {
+  return driver.prompt({
+    id,
+    kind: 'singleChoice',
+    message: opts.message,
+    choices: opts.options.map(({ value, label, hint }) => ({ id: value, label, hint })),
+    ...(opts.initialValue !== undefined ? { default: opts.initialValue } : {}),
+  }) as Promise<T>;
+}
+
+async function confirmPrompt(driver: SetupDriver, id: string, message: string, initialValue = false): Promise<boolean> {
+  return driver.prompt({ id, kind: 'confirm', message, default: initialValue }) as Promise<boolean>;
+}
+
+async function textPrompt(
+  driver: SetupDriver,
+  id: string,
+  spec: Omit<DriverPrompt, 'id' | 'kind' | 'sensitive'>,
+): Promise<string> {
+  return driver.prompt({ ...spec, id, kind: 'text', sensitive: false }) as Promise<string>;
+}
+
+async function secretPrompt(
+  driver: SetupDriver,
+  id: string,
+  spec: Omit<DriverPrompt, 'id' | 'kind' | 'sensitive'>,
+): Promise<string> {
+  return driver.prompt({ ...spec, id, kind: 'secret', sensitive: true }) as Promise<string>;
+}
+
+async function main(driver: SetupDriver): Promise<void> {
   // Make sure ~/.local/bin is on PATH for every child process we spawn.
   // Installers we run mid-setup (OneCLI, claude) drop binaries there and
   // append a PATH line to the user's shell rc, but rc updates don't reach
@@ -162,7 +209,7 @@ async function main(): Promise<void> {
     });
   }
 
-  printIntro();
+  printIntro(driver);
   initProgressionLog();
   phEmit('auto_started');
 
@@ -2057,12 +2104,12 @@ function maybeReexecUnderSg(): void {
 
 // ─── intro + progression-log init ──────────────────────────────────────
 
-function printIntro(): void {
+function printIntro(driver: SetupDriver): void {
   const isReexec = process.env.NANOCLAW_REEXEC_SG === '1';
   const wordmark = `${k.bold('Nano')}${brandBold('Claw')}`;
 
   if (isReexec) {
-    p.intro(`${brandChip(' Welcome ')}  ${wordmark}  ${k.dim('· picking up where we left off')}`);
+    driver.intro(`${brandChip(' Welcome ')}  ${wordmark}  ${k.dim('· picking up where we left off')}`);
     return;
   }
 
@@ -2070,7 +2117,7 @@ function printIntro(): void {
   // welcome framing alone so the two don't double up. Standalone runs of
   // setup:auto still see this as the first line — fine without the wordmark
   // since the line itself signals the start of the flow.
-  p.intro("Let's get you set up.");
+  driver.intro("Let's get you set up.");
 }
 
 /**
@@ -2108,8 +2155,52 @@ function initProgressionLog(): void {
   });
 }
 
-main().catch((err) => {
-  p.log.error(err instanceof Error ? err.message : String(err));
-  p.cancel('Setup aborted.');
-  process.exit(1);
-});
+// Compare realpaths. Node resolves symlinks for `import.meta.url` but not for
+// `process.argv[1]`, and nanoclaw.sh execs this file by an absolute path built
+// from bash's logical pwd. Without the realpath a symlinked checkout made
+// `--help` and `--uninstall` exit 0 having done nothing.
+const nanoclawEntryPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
+let nanoclawEntryHref = nanoclawEntryPath ? pathToFileURL(nanoclawEntryPath).href : '';
+if (nanoclawEntryPath) {
+  try {
+    nanoclawEntryHref = pathToFileURL(fs.realpathSync(nanoclawEntryPath)).href;
+  } catch {
+    // An entry path that cannot be resolved simply will not match.
+  }
+}
+if (nanoclawEntryHref === import.meta.url) {
+  const rootDriver = createSetupDriver(
+    process.argv.includes('--uninstall') || process.env.NANOCLAW_OPERATION === 'uninstall' ? 'uninstall' : 'setup',
+  );
+
+  main(rootDriver).catch((err) => {
+    if (err instanceof DriverCancelled) {
+      rootDriver.cancelled();
+      process.exitCode = rootDriver.mode === 'ndjson' ? 2 : 0;
+      return;
+    }
+    if (err instanceof DriverTerminalError) {
+      process.exitCode = err.exitCode;
+      return;
+    }
+    if (rootDriver.mode === 'ndjson') {
+      try {
+        rootDriver.error('unexpected_error', err instanceof Error ? err.message : String(err), [
+          {
+            kind: 'rerun',
+            args:
+              rootDriver.operation === 'uninstall'
+                ? ['--uninstall', '--protocol', 'nanoclaw.driver.v1']
+                : ['--protocol', 'nanoclaw.driver.v1'],
+          },
+        ]);
+      } catch {
+        process.exitCode = 1;
+      }
+      return;
+    }
+    p.log.error(err instanceof Error ? err.message : String(err));
+    p.cancel('Setup aborted.');
+    process.exitCode = 1;
+  });
+}
