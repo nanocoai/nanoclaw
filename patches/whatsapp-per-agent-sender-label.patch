@@ -1,0 +1,67 @@
+diff --git a/src/channels/whatsapp.ts b/src/channels/whatsapp.ts
+index 60686860..6cf1e50f 100644
+--- a/src/channels/whatsapp.ts
++++ b/src/channels/whatsapp.ts
+@@ -40,6 +40,8 @@ import type { GroupMetadata, WAMessageKey, WAMessage, WASocket } from '@whiskeys
+ 
+ import { isSafeAttachmentName } from '../attachment-safety.js';
+ import { DATA_DIR } from '../config.js';
++import { getAllAgentGroups } from '../db/agent-groups.js';
++import { getContainerConfig } from '../db/container-configs.js';
+ import { readEnvFile } from '../env.js';
+ import { log } from '../log.js';
+ import { registerChannelAdapter } from './channel-registry.js';
+@@ -402,6 +404,35 @@ export function computeWhatsappDefaults(shared: boolean): ChannelDefaults {
+ // shared-number handling is channel-local.
+ const waEnv = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER']);
+ const ASSISTANT_NAME = waEnv.ASSISTANT_NAME || 'Andy';
++
++/**
++ * Shared mode labels. Outgoing text is prefixed `<label>: ` so the reader can
++ * tell agents apart on one shared number, and so the adapter can recognise
++ * its own echoes. The label is per sending agent (OutboundMessage.senderLabel:
++ * assistant_name, else the group name), falling back to ASSISTANT_NAME. Echo
++ * detection therefore accepts every agent's label plus ASSISTANT_NAME; the set
++ * is re-read at most every few seconds so renamed/added agents are picked up
++ * without a restart.
++ */
++const LABEL_TTL_MS = 5_000;
++let labelCache: { at: number; labels: string[] } = { at: 0, labels: [] };
++function knownSenderLabels(): string[] {
++  const now = Date.now();
++  if (now - labelCache.at < LABEL_TTL_MS) return labelCache.labels;
++  const labels = new Set<string>([ASSISTANT_NAME]);
++  try {
++    for (const g of getAllAgentGroups()) {
++      labels.add(getContainerConfig(g.id)?.assistant_name || g.name);
++    }
++  } catch {
++    // DB not ready (adapter starting before the host schema) — ASSISTANT_NAME alone.
++  }
++  labelCache = { at: now, labels: [...labels].filter(Boolean) };
++  return labelCache.labels;
++}
++function isKnownSenderLabelPrefixed(text: string): boolean {
++  return knownSenderLabels().some((label) => text.startsWith(`${label}:`));
++}
+ const WHATSAPP_SHARED = resolveSharedMode(waEnv.ASSISTANT_HAS_OWN_NUMBER);
+ const WHATSAPP_DEFAULTS: ChannelDefaults = computeWhatsappDefaults(WHATSAPP_SHARED);
+ 
+@@ -885,7 +916,7 @@ registerChannelAdapter('whatsapp', {
+               if (sentMessageCache.has(msg.key.id || '')) continue;
+             }
+ 
+-            const isBotMessage = WHATSAPP_SHARED ? content.startsWith(`${ASSISTANT_NAME}:`) : false;
++            const isBotMessage = WHATSAPP_SHARED ? isKnownSenderLabelPrefixed(content) : false;
+ 
+             // Check if this reply answers a pending question via slash command
+             const pending = pendingQuestions.get(chatJid);
+@@ -1068,7 +1099,7 @@ registerChannelAdapter('whatsapp', {
+ 
+         if (text) {
+           const { text: formatted, mentions } = formatWhatsApp(text);
+-          const prefixed = WHATSAPP_SHARED ? `${ASSISTANT_NAME}: ${formatted}` : formatted;
++          const prefixed = WHATSAPP_SHARED ? `${message.senderLabel || ASSISTANT_NAME}: ${formatted}` : formatted;
+           return sendRawMessage(platformId, prefixed, mentions);
+         }
+       },
