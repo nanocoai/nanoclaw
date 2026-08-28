@@ -172,4 +172,29 @@ describe('SQLite mailbox canonical serialization', () => {
       { timestamp: '2026-01-01T00:00:04.000Z', content: '{"text":"top level"}' },
     ]);
   });
+
+  it('counts only chat messages that woke the agent as engagement', () => {
+    const inboundDb = new Database(':memory:');
+    databases.push(inboundDb);
+    inboundDb.exec(INBOUND_SCHEMA);
+    const inbound = wrapSqliteInbound(inboundDb);
+    const insert = (id: string, seq: number, kind: string, channelType: string | null, trigger: 0 | 1) =>
+      inboundDb
+        .prepare(
+          `INSERT INTO messages_in (id, seq, timestamp, kind, channel_type, content, trigger)
+           VALUES (?, ?, '2026-01-01T00:00:00.000Z', ?, ?, '{"text":"x"}', ?)`,
+        )
+        .run(id, seq, kind, channelType, trigger);
+
+    expect(inbound.hasEngagedMessage()).toBe(false);
+
+    insert('ambient', 2, 'chat', 'slack', 0); // accumulated context
+    insert('echo', 4, 'chat', 'session-echo', 1); // fanned from a sibling session
+    insert('a2a', 6, 'chat', 'agent', 1); // another agent, not this chat
+    insert('task', 8, 'task', 'slack', 1); // a scheduled run, not a mention
+    expect(inbound.hasEngagedMessage()).toBe(false);
+
+    insert('real', 10, 'chat-sdk', 'slack', 1);
+    expect(inbound.hasEngagedMessage()).toBe(true);
+  });
 });

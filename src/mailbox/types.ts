@@ -120,6 +120,15 @@ export interface InboundMailbox {
   prunePendingMessages(channelType: string, before: string, keep: number): number;
   getInboundHistory(limit: number): MailboxHistoryMessage[];
   getConversationRoot(): MailboxTimelineMessage | undefined;
+  /**
+   * True once a message from this session's own chat has woken the agent —
+   * someone addressed it here, rather than the session merely existing.
+   *
+   * The distinction matters because sessions are also created to hold
+   * context the agent was never asked about: accumulated ambient chatter,
+   * cross-session echoes, agent-to-agent traffic. None of those count.
+   */
+  hasEngagedMessage(): boolean;
   findTaskBySeriesSlug(slug: string): TaskRecord | undefined;
 }
 

@@ -90,6 +90,40 @@ describe('migrateMessagesInTable', () => {
     expect(getInboundSourceSessionId(db, 'does-not-exist')).toBeNull();
     db.close();
   });
+
+  it('indexes engaged messages on a legacy DB that has no trigger column yet', () => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+
+    const db = new Database(DB_PATH);
+    db.exec(`
+      CREATE TABLE messages_in (
+        id             TEXT PRIMARY KEY,
+        seq            INTEGER UNIQUE,
+        kind           TEXT NOT NULL,
+        timestamp      TEXT NOT NULL,
+        status         TEXT DEFAULT 'pending',
+        process_after  TEXT,
+        recurrence     TEXT,
+        tries          INTEGER DEFAULT 0,
+        platform_id    TEXT,
+        channel_type   TEXT,
+        thread_id      TEXT,
+        content        TEXT NOT NULL
+      );
+    `);
+
+    // The index is partial over `trigger`, so it can only be created after
+    // that column has been added — this throws if the order ever slips.
+    migrateMessagesInTable(db);
+    migrateMessagesInTable(db); // idempotent
+
+    const indexes = (db.prepare("PRAGMA index_list('messages_in')").all() as Array<{ name: string }>).map(
+      (i) => i.name,
+    );
+    expect(indexes).toContain('idx_messages_in_engaged');
+    db.close();
+  });
 });
 
 describe('syncProcessingAcks — script-skip counter', () => {
