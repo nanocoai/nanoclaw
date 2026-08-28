@@ -44,7 +44,6 @@ import { getSetupProvider, listSetupProviders, runSetupProviderAuth } from './pr
 import { applyProviderSkill } from './providers/install.js';
 // Provider payloads self-register their picker entry + auth on import.
 import './providers/index.js';
-import { brightSelect } from './lib/bright-select.js';
 import { buildContainerImage } from './lib/container-build.js';
 import { offerClaudeOnFailure } from './lib/claude-handoff.js';
 import { setPickedProvider } from './lib/picked-provider.js';
@@ -89,7 +88,6 @@ import {
   dimWrap,
   fitToWidth,
   fmtDuration,
-  note,
   wrapForGutter,
 } from './lib/theme.js';
 import { isValidTimezone } from '../src/timezone.js';
@@ -913,13 +911,19 @@ async function main(driver: SetupDriver): Promise<void> {
   // premature "your assistant is saying hi" (no welcome DM exists yet).
   let wiringPending = false;
 
+  let verified = false;
   if (!skip.has('verify')) {
-    const res = await runQuietStep('verify', {
-      running: 'Making sure everything works together…',
-      done: "Everything's connected.",
-      failed: 'A few things still need your attention.',
-    });
-    if (!res.ok) {
+    const res = await runQuietStep(
+      'verify',
+      {
+        running: 'Making sure everything works together…',
+        done: "Everything's connected.",
+        failed: 'A few things still need your attention.',
+      },
+      [],
+      driver,
+    );
+    if (!res.ok || (driver.mode === 'ndjson' && res.terminal?.fields.STATUS !== 'success')) {
       const notes: string[] = [];
       if (res.terminal?.fields.CREDENTIALS !== 'configured') {
         notes.push("• Your Claude account isn't connected. Re-run setup and try again.");
@@ -945,7 +949,7 @@ async function main(driver: SetupDriver): Promise<void> {
         );
       }
       if (notes.length > 0) {
-        note(notes.join('\n'), "What's left");
+        driver.note(notes.join('\n'), "What's left");
       }
       // "What's left" is a soft failure — we don't abort like fail(), but the
       // user is still stuck and a fix is exactly what claude-assist is for.
@@ -958,17 +962,43 @@ async function main(driver: SetupDriver): Promise<void> {
         service_running: res.terminal?.fields.SERVICE === 'running',
         has_credentials: res.terminal?.fields.CREDENTIALS === 'configured',
       });
-      await offerClaudeOnFailure({
-        stepName: 'verify',
-        msg: summary || 'Verification completed with unresolved issues.',
-        hint: `Terminal block: ${JSON.stringify(res.terminal?.fields ?? {})}`,
-        rawLogPath: res.rawLog,
-      });
-      p.outro(k.yellow('Almost there. A few things still need your attention.'));
-      return;
+      if (driver.mode === 'terminal') {
+        await offerClaudeOnFailure({
+          stepName: 'verify',
+          msg: summary || 'Verification completed with unresolved issues.',
+          hint: `Terminal block: ${JSON.stringify(res.terminal?.fields ?? {})}`,
+          rawLogPath: res.rawLog,
+        });
+        driver.outro(k.yellow('Almost there. A few things still need your attention.'));
+        return;
+      }
+      driver.error(
+        'verification_failed',
+        summary || 'Verification completed with unresolved issues.',
+        [
+          {
+            kind: 'manual',
+            title: 'Resolve verification issues',
+            instructions: notes.length ? notes : ['Inspect the verify raw log, fix the issue, and rerun setup.'],
+          },
+        ],
+        'verify',
+      );
     }
+    verified = res.terminal?.fields.STATUS === 'success';
     wiringPending = res.terminal?.fields.WIRING === 'pending_first_dm';
   }
+
+  if (driver.mode === 'ndjson' && !verified) {
+    driver.error(
+      'verification_required',
+      'Setup cannot complete until verification reports STATUS: success.',
+      [],
+      'verify',
+    );
+  }
+
+  const setupReceipt = await completionReceipt(driver);
 
   const rows: [string, string][] = [
     ['Chat in the terminal:', 'pnpm run chat hi'],
@@ -977,11 +1007,11 @@ async function main(driver: SetupDriver): Promise<void> {
   ];
   const labelWidth = Math.max(...rows.map(([l]) => l.length));
   const nextSteps = rows.map(([l, c]) => `${k.cyan(l.padEnd(labelWidth))}  ${c}`).join('\n');
-  note(nextSteps, 'Try these');
+  driver.note(nextSteps, 'Try these');
 
   // Always-on warning goes before the "check your DMs" directive so the
   // caveat doesn't land after the user's already looked away at their phone.
-  note(
+  driver.note(
     wrapForGutter(
       "NanoClaw runs on this machine. It's only reachable while this computer is on and connected to the internet. For always-on availability, run it on a cloud VM — or keep this machine awake.",
       6,
@@ -989,6 +1019,7 @@ async function main(driver: SetupDriver): Promise<void> {
     'Heads up',
   );
 
+  driver.throwIfCancelled();
   setupLog.complete(Date.now() - RUN_START);
   phEmit('setup_completed', { duration_ms: Date.now() - RUN_START });
 
@@ -996,21 +1027,65 @@ async function main(driver: SetupDriver): Promise<void> {
   if (wiringPending) {
     // No welcome DM exists yet — the one remaining action is the last thing
     // on screen, in the same bright framed style as the "go say hi" banner.
-    note(
+    driver.note(
       `${brandBold('→')} ${k.bold(`Have the person you want wired DM the bot once in ${dmTarget ?? 'your chat app'} ("hi" works).`)}\nNanoClaw registers their identity and chat from that first message; then run /init-first-agent with your coding agent and pick them.`,
       "What's left",
     );
-    p.outro(k.green("You're set — one DM to go."));
+    driver.outro(k.green("You're set - one DM to go."));
   } else if (dmTarget) {
     // Bright framed banner (not dim) — the whole point of the feedback was
     // that the welcome-message signal was too easy to miss. Use p.note so it
     // renders with a visible box, cyan-bold the directive line, and put it
     // as the last thing before outro.
-    note(`${brandBold('→')} ${k.bold(`Check your ${dmTarget} — your assistant is saying hi.`)}`, 'Go say hi');
-    p.outro(k.green("You're set."));
+    driver.note(`${brandBold('→')} ${k.bold(`Check your ${dmTarget} - your assistant is saying hi.`)}`, 'Go say hi');
+    driver.outro(k.green("You're set."));
   } else {
-    p.outro(k.green("You're ready! Chat with `pnpm run chat hi`."));
+    driver.outro(k.green("You're ready! Chat with `pnpm run chat hi`."));
   }
+  driver.throwIfCancelled();
+  driver.completeSetup(setupReceipt);
+}
+
+async function completionReceipt(driver: SetupDriver): Promise<SetupReceipt> {
+  if (driver.mode === 'terminal') {
+    return {
+      version: 1,
+      service: { state: 'running', manager: 'pidfile', checkoutRoot: PROJECT_ROOT },
+      health: { status: 'healthy' },
+      resources: {
+        groups: { state: 'empty', count: 0 },
+        policies: { state: 'empty', count: 0 },
+        skills: { state: 'empty', count: 0 },
+      },
+      completedAt: new Date().toISOString(),
+    };
+  }
+  driver.throwIfCancelled();
+  const service = inspectService(PROJECT_ROOT);
+  let health = await queryHostHealth(PROJECT_ROOT, { signal: driver.cancellationSignal });
+  for (let attempt = 0; !health && attempt < 20; attempt++) {
+    driver.throwIfCancelled();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    driver.throwIfCancelled();
+    health = await queryHostHealth(PROJECT_ROOT, { signal: driver.cancellationSignal });
+  }
+  driver.throwIfCancelled();
+  const result = buildSetupReceipt(PROJECT_ROOT, service, health);
+  if (!result.ok) {
+    driver.error(
+      result.code,
+      result.message,
+      [
+        {
+          kind: 'manual',
+          title: 'Inspect the running service',
+          instructions: ['Confirm the service points at this checkout and rerun machine setup.'],
+        },
+      ],
+      'verify',
+    );
+  }
+  return result.receipt;
 }
 
 function channelDmLabel(choice: ChannelChoice): string | null {

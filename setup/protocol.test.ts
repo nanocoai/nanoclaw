@@ -30,6 +30,52 @@ afterEach(() => {
   fs.rmSync(testHome, { recursive: true, force: true });
 });
 
+async function run(status: 'success' | 'failed' | 'skipped'): Promise<{
+  code: number | null;
+  stdout: string;
+  events: Array<Record<string, unknown>>;
+}> {
+  const child = spawn(process.execPath, ['--import', TSX_LOADER, AUTO], {
+    cwd: setupRoot,
+    env: {
+      ...process.env,
+      HOME: testHome,
+      NANOCLAW_PROTOCOL: 'nanoclaw.driver.v1',
+      NANOCLAW_OPERATION: 'setup',
+      NANOCLAW_NO_DIAGNOSTICS: '1',
+      NANOCLAW_SKIP: 'environment,container,onecli,auth,mounts,service,cli-agent,timezone,channel,first-chat',
+      VERIFY_STATUS: status,
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const events: Array<Record<string, unknown>> = [];
+  let stdout = '';
+  let buffer = '';
+  child.stdout.on('data', (chunk: Buffer) => {
+    stdout += chunk.toString('utf8');
+    buffer += chunk.toString('utf8');
+    let newline: number;
+    while ((newline = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      if (!line) continue;
+      const event = JSON.parse(line) as Record<string, unknown>;
+      events.push(event);
+      const prompt = event.prompt as { id?: string } | undefined;
+      if (event.type === 'prompt' && prompt?.id === 'setup-start-choice') {
+        child.stdin.write(
+          `${JSON.stringify({ ...envelope, type: 'answer', promptId: prompt.id, value: 'default' })}\n`,
+        );
+      }
+    }
+  });
+  const code = await new Promise<number | null>((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', resolve);
+  });
+  return { code, stdout, events };
+}
+
 describe('machine setup completion boundary', () => {
   it.each([
     ['flag', ['--onecli-api-token', 'oc_direct-secret'], {}],
@@ -64,4 +110,82 @@ describe('machine setup completion boundary', () => {
     expect(`${result.stdout}${result.stderr}`).not.toContain('oc_direct-secret');
   });
 
+  it.each([
+    ['success', 1, false, 'service_identity_unproven'],
+    ['failed', 1, false, 'verification_failed'],
+    ['skipped', 1, false, 'verification_failed'],
+  ] as const)(
+    'requires verify and service health before completion (%s)',
+    async (status, exitCode, completes, errorCode) => {
+      const result = await run(status);
+
+      expect(result.code, result.stdout).toBe(exitCode);
+      expect(result.stdout[0]).toBe('{');
+      expect(result.events.filter((event) => event.type === 'hello')).toHaveLength(1);
+      expect(result.events.some((event) => event.type === 'complete')).toBe(completes);
+      if (!completes) {
+        expect(result.events.at(-1)).toEqual(
+          expect.objectContaining({
+            type: 'error',
+            code: errorCode,
+          }),
+        );
+      }
+    },
+    15_000,
+  );
+
+  it('reports SIGINT during the remote health check as cancelled with exit 2', async () => {
+    const child = spawn(process.execPath, ['--import', TSX_LOADER, AUTO], {
+      cwd: setupRoot,
+      env: {
+        ...process.env,
+        HOME: testHome,
+        NANOCLAW_PROTOCOL: 'nanoclaw.driver.v1',
+        NANOCLAW_OPERATION: 'setup',
+        NANOCLAW_NO_DIAGNOSTICS: '1',
+        NANOCLAW_ONECLI_API_HOST: 'http://127.0.0.1:1',
+        NANOCLAW_SKIP: 'environment,container,auth,mounts,service,cli-agent,timezone,channel,first-chat',
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const events: Array<Record<string, unknown>> = [];
+    let buffer = '';
+    let signalled = false;
+    child.stdout.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString('utf8');
+      let newline: number;
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (!line) continue;
+        const event = JSON.parse(line) as Record<string, unknown>;
+        events.push(event);
+        const prompt = event.prompt as { id?: string } | undefined;
+        if (event.type === 'prompt' && prompt?.id === 'setup-start-choice') {
+          child.stdin.write(
+            `${JSON.stringify({ ...envelope, type: 'answer', promptId: prompt.id, value: 'default' })}\n`,
+          );
+        }
+        if (
+          event.type === 'progress' &&
+          event.stepId === 'onecli-remote-check' &&
+          event.state === 'running' &&
+          !signalled
+        ) {
+          signalled = true;
+          child.kill('SIGINT');
+        }
+      }
+    });
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', resolve);
+    });
+
+    expect(signalled).toBe(true);
+    expect(code).toBe(2);
+    expect(events.at(-1)?.type).toBe('cancelled');
+    expect(events.some((event) => event.type === 'error')).toBe(false);
+  }, 15_000);
 });
