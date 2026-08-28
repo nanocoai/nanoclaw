@@ -108,6 +108,8 @@ describe('approval-resolved callbacks', () => {
     expect(events[0].approval.action).toBe('test_reject_action');
     expect(events[0].session.id).toBe('sess-1');
     expect(events[0].userId).toBe('slack:admin-1');
+    // Plain reject (not routed through reject-with-reason capture) — no reason text.
+    expect(events[0].reason).toBeUndefined();
   });
 
   it('fires registered callbacks on approve after the action handler ran', async () => {

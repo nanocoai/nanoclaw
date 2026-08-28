@@ -267,6 +267,18 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
           .prepare('SELECT timestamp, kind, content FROM messages_in ORDER BY seq DESC LIMIT ?')
           .all(limit) as MailboxHistoryMessage[]
       ).map((row) => ({ ...row, timestamp: sqliteTimestamp(row.timestamp) })),
+    getInboundMessageBySeq: (seq) => {
+      const row = db
+        .prepare('SELECT timestamp, kind, content, channel_type FROM messages_in WHERE seq = ?')
+        .get(seq) as { timestamp: string; kind: string; content: string; channel_type: string | null } | undefined;
+      if (!row) return undefined;
+      return {
+        timestamp: sqliteTimestamp(row.timestamp),
+        kind: row.kind,
+        content: row.content,
+        channelType: row.channel_type,
+      };
+    },
     getConversationRoot: () => {
       const row = db
         .prepare(

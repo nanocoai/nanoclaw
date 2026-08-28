@@ -39,6 +39,7 @@
     "chat": "4.29.0",
     "cron-parser": "5.5.0",
     "kleur": "^4.1.5",
+    "xlsx": "0.18.5",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

@@ -29,7 +29,7 @@ import { writeSessionMessage } from '../../session-manager.js';
 import { upsertUser } from '../permissions/db/users.js';
 import { upsertUserDm } from '../permissions/db/user-dms.js';
 import { grantRole } from '../permissions/db/user-roles.js';
-import { REJECT_WITH_REASON_VALUE } from './primitive.js';
+import { REJECT_WITH_REASON_VALUE, registerApprovalResolvedHandler, type ApprovalResolvedEvent } from './primitive.js';
 
 vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
@@ -216,6 +216,28 @@ describe('reject with reason', () => {
     expect(lastRelayedText()).toBe('Your create_agent request was rejected by admin.');
   });
 
+  it('passes the captured reason through to the approval-resolved event, unchanged agent-facing relay', async () => {
+    const { captureReasonReply } = await import('./reason-capture.js');
+    const events: ApprovalResolvedEvent[] = [];
+    registerApprovalResolvedHandler((event) => {
+      events.push(event);
+    });
+
+    seedApproval('appr-reason-event', 'install_packages');
+    await clickRejectWithReason('appr-reason-event');
+    const consumed = await captureReasonReply(dmReply('too risky for prod'));
+
+    expect(consumed).toBe(true);
+    // Everything the pre-existing behavior already asserted, unaffected by the new field.
+    expect(await getPendingApproval('appr-reason-event')).toBeUndefined();
+    expect(lastRelayedText()).toBe('Your install_packages request was rejected by admin: "too risky for prod"');
+    // The new field: the resolved event now also carries the reason text.
+    expect(events).toHaveLength(1);
+    expect(events[0].outcome).toBe('reject');
+    expect(events[0].approval.approval_id).toBe('appr-reason-event');
+    expect(events[0].reason).toBe('too risky for prod');
+  });
+
   it('does not swallow a later DM once the hold was already finalized', async () => {
     const { captureReasonReply } = await import('./reason-capture.js');
     await seedApproval('appr-5');
@@ -281,5 +303,27 @@ describe('plain reject (regression)', () => {
     expect(await getPendingApproval('appr-plain')).toBeUndefined();
     expect(delivered).toHaveLength(0);
     expect(lastRelayedText()).toBe('Your install_packages request was rejected by admin.');
+  });
+
+  it('leaves the approval-resolved event reason undefined (no reason-capture flow involved)', async () => {
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    const events: ApprovalResolvedEvent[] = [];
+    registerApprovalResolvedHandler((event) => {
+      events.push(event);
+    });
+
+    seedApproval('appr-plain-no-reason', 'install_packages');
+    await handleApprovalsResponse({
+      questionId: 'appr-plain-no-reason',
+      value: 'reject',
+      userId: 'admin-1',
+      channelType: DM_CHANNEL,
+      platformId: '',
+      threadId: null,
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0].outcome).toBe('reject');
+    expect(events[0].reason).toBeUndefined();
   });
 });

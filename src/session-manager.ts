@@ -14,6 +14,7 @@ import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import { isUniqueViolation } from './db/errors.js';
 import {
+  a2aThreadId,
   createSession,
   findSystemSession,
   findSessionByAgentGroup,
@@ -192,6 +193,56 @@ export async function resolveTaskSession(
     }
     initSessionFolder(agentGroupId, id);
     log.info('Task session created', { id, agentGroupId, seriesId });
+
+    return { session, created: true };
+  });
+}
+
+/**
+ * Find or create the dedicated agent-to-agent session an agent group uses
+ * for one specific peer (thread `system:a2a:<peerAgentGroupId>`).
+ *
+ * Isolated from any channel-bound session for the same agent group — a
+ * shared worker-facing session and this peer's private a2a session are two
+ * entirely separate conversations, even though both run under the same
+ * agent group and read/write the same durable tool state. Peer-keyed so a
+ * second peer (if one is ever wired) gets its own session too, rather than
+ * all a2a traffic funneling into one shared conversation. Mirrors
+ * resolveTaskSession's shape exactly — same creation-lock/race-recovery
+ * pattern, only the thread-id helper and log line differ.
+ */
+export async function resolveA2aSession(
+  agentGroupId: string,
+  peerAgentGroupId: string,
+): Promise<{ session: Session; created: boolean }> {
+  const threadId = a2aThreadId(peerAgentGroupId);
+  return withSessionCreationLock(`system\0${agentGroupId}\0${threadId}`, async () => {
+    const existing = await findSystemSession(agentGroupId, threadId);
+    if (existing) return { session: existing, created: false };
+
+    const id = generateId();
+    const session: Session = {
+      id,
+      agent_group_id: agentGroupId,
+      messaging_group_id: null,
+      thread_id: threadId,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: new Date().toISOString(),
+    };
+
+    try {
+      await createSession(session);
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      const raced = await findSystemSession(agentGroupId, threadId);
+      if (!raced) throw error;
+      return { session: raced, created: false };
+    }
+    initSessionFolder(agentGroupId, id);
+    log.info('A2A session created', { id, agentGroupId, peerAgentGroupId });
 
     return { session, created: true };
   });

@@ -1,3 +1,4 @@
+import { getConfig } from './config.js';
 import { findByRouting } from './destinations.js';
 import type { MessageInRow } from './db/messages-in.js';
 import { TIMEZONE, formatLocalTime, formatLocalStamp } from './timezone.js';
@@ -237,13 +238,54 @@ function formatEchoMessage(msg: MessageInRow): string {
 }
 
 /**
+ * The running container's own agent_group_id, or null if config isn't
+ * loaded (e.g. a unit test that never called loadConfig()) or the field is
+ * empty. Never throws — originAttr must keep working (falling through to
+ * its existing behavior) even without config.
+ */
+function ownAgentGroupId(): string | null {
+  try {
+    return getConfig().agentGroupId || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Build a ` from="destination_name"` attribute string from a message's routing
  * fields. Shared by all formatters so the agent always knows where a message
  * originated — critical for explicit addressing.
+ *
+ * Labeling only — this has no bearing on delivery, routing, membership, or
+ * approval authorization, all of which are decided elsewhere (the host's
+ * routeInbound path, the destinations ACL, the approvals response handler)
+ * before a message ever reaches this formatter. This function only decides
+ * what string the agent sees for a message that already arrived.
+ *
+ * Three cases:
+ *  1. A known destination (another agent this group can address, or a wired
+ *     channel) — labeled with that destination's real name, as before.
+ *  2. This container's OWN internal system notifications (channel_type
+ *     'agent' with platform_id equal to this agent's own agent_group_id —
+ *     the shape every notifyAgent()/approval-resolution message uses to
+ *     write into an agent's own session). No agent group ever has a
+ *     destinations-table row pointing at itself, so before this fix every
+ *     one of these genuine, host-authored notifications fell through to the
+ *     generic "unknown" branch below and read exactly like an unrecognized
+ *     external sender — confirmed the cause of tonight's Pepper confusion.
+ *     Labeled "system" instead, distinctly from both a known destination and
+ *     an actually-unknown sender.
+ *  3. Anything else (a real unrecognized/external sender, e.g. an
+ *     unregistered platform id) — unchanged "unknown:<channel>:<platform>"
+ *     fallback, so a genuinely untrusted origin still reads as unknown.
  */
 function originAttr(msg: MessageInRow): string {
   const fromDest = findByRouting(msg.channel_type, msg.platform_id);
   if (fromDest) return ` from="${escapeXml(fromDest.name)}"`;
+  const selfId = ownAgentGroupId();
+  if (msg.channel_type === 'agent' && selfId && msg.platform_id === selfId) {
+    return ` from="system"`;
+  }
   if (msg.channel_type || msg.platform_id) {
     return ` from="unknown:${escapeXml(msg.channel_type || '')}:${escapeXml(msg.platform_id || '')}"`;
   }

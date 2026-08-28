@@ -9,7 +9,7 @@
  * is host locale-dependent for decorators (month abbr, "," separator) but
  * stable for the numeric parts we assert on (hour, minute, year).
  */
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, mock } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb } from './mailbox/sqlite/connection.js';
 import { getPendingMessages } from './db/messages-in.js';
@@ -325,5 +325,111 @@ describe('app_context rendering (Slack agent mode, contract C4)', () => {
     });
     const result = formatMessages(getPendingMessages());
     expect(result).toContain('(viewing: channel C1&lt;&amp;&gt;)');
+  });
+});
+
+/**
+ * Sender-label (`from=`) formatting — see originAttr() in formatter.ts.
+ *
+ * This is a labeling/display concern only. None of these tests touch, and
+ * the fix does not change, delivery, routing, membership, or approval
+ * authorization — those are all decided before a message ever reaches the
+ * formatter (host routeInbound, the destinations ACL, the approvals
+ * response handler). A message's `from=` label is purely what the agent
+ * sees in its own context window for something that already arrived.
+ */
+describe('sender-label (from=) formatting', () => {
+  const SELF_GROUP_ID = 'ag-self-under-test';
+
+  function insertRoutedMessage(id: string, content: object, channelType: string | null, platformId: string | null) {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, channel_type, platform_id, content)
+         VALUES (?, 'chat', ?, 'pending', ?, ?, ?)`,
+      )
+      .run(id, new Date().toISOString(), channelType, platformId, JSON.stringify(content));
+  }
+
+  function seedDestination(name: string, agentGroupId: string) {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, agent_group_id)
+         VALUES (?, ?, 'agent', ?)`,
+      )
+      .run(name, name, agentGroupId);
+  }
+
+  // mock.module replaces the module for the whole test file/process, not
+  // just this describe block -- other code (getMaxMessagesPerPrompt) also
+  // calls getConfig(), so this must be a complete, safe RunnerConfig, not
+  // just the one field this test cares about.
+  mock.module('./config.js', () => ({
+    getConfig: () => ({
+      provider: 'claude',
+      assistantName: 'Test',
+      groupName: 'Test',
+      agentGroupId: SELF_GROUP_ID,
+      maxMessagesPerPrompt: 10,
+      mcpServers: {},
+    }),
+  }));
+
+  it('labels a real internal system notification (own agent_group_id on the "agent" channel) as "system"', () => {
+    // Exactly the shape notifyAgent()/approval resolution writes for an
+    // agent's own session — channel_type 'agent', platform_id === this
+    // container's own agent_group_id. This is the case that used to read as
+    // "unknown:agent:..." and was mistaken for a spoofed sender tonight.
+    insertRoutedMessage('m-self', { text: 'Kirk responded to the card.', sender: 'system', senderId: 'system' }, 'agent', SELF_GROUP_ID);
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('from="system"');
+    expect(result).not.toContain('unknown:agent');
+  });
+
+  it('leaves a known destination (another real agent) labeled with its real name, unaffected', () => {
+    seedDestination('lease-manager', 'ag-other-real-agent');
+    insertRoutedMessage('m-known', { text: 'hi' }, 'agent', 'ag-other-real-agent');
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('from="lease-manager"');
+  });
+
+  it('still labels a genuinely unrecognized external sender as unknown', () => {
+    insertRoutedMessage('m-ext', { text: 'hi' }, 'telegram', 'telegram:999999999');
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('from="unknown:telegram:telegram:999999999"');
+  });
+
+  it('does not mislabel a different agent group as "system" just because it is on the agent channel', () => {
+    // Not this container's own id, and not a registered destination either —
+    // must fall through to the genuine "unknown" case, never "system".
+    insertRoutedMessage('m-other-agent', { text: 'hi' }, 'agent', 'ag-some-unrelated-group');
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('from="unknown:agent:ag-some-unrelated-group"');
+    expect(result).not.toContain('from="system"');
+  });
+
+  it('keeps the legitimate cli:claude-code identity distinct via sender=, independent of the from= fix', () => {
+    // cli:claude-code messages arrive on a real channel (e.g. telegram), not
+    // the self-referential agent case, so from= is unaffected by this fix —
+    // what makes the identity distinct and legitimate is the explicit,
+    // consistent sender= text, unchanged here.
+    insertRoutedMessage(
+      'm-claude-code',
+      { text: 'status update', sender: 'Claude Code (Away Mode, not Kirk)', senderId: 'cli:claude-code' },
+      'telegram',
+      'telegram:8855929473',
+    );
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('sender="Claude Code (Away Mode, not Kirk)"');
+  });
+
+  it('does not change authorization: the same message content is delivered to the agent regardless of its from= label', () => {
+    // The fix only changes a display attribute. Prove the actual message
+    // text/sender still comes through identically for the internal-system
+    // case, i.e. nothing about what the agent is told to have happened
+    // changed -- only how the sender of that notification reads.
+    insertRoutedMessage('m-content', { text: 'Kirk approved this.', sender: 'system', senderId: 'system' }, 'agent', SELF_GROUP_ID);
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('sender="system"');
+    expect(result).toContain('Kirk approved this.');
   });
 });

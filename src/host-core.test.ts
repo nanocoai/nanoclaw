@@ -1398,10 +1398,24 @@ describe('agent-to-agent routing', () => {
     expect(JSON.parse(rows[0].content).text).toBe('research this');
   });
 
-  it('A2A return path routes to originating session, not newest (#2332)', async () => {
-    // PA has Slack session, then gets wired to Discord (newer session).
-    // Researcher responds to PA. With the return-path fix, the reply
-    // routes back to the Slack session (originator) not Discord (newest).
+  it('A2A return path with no in_reply_to routes to the dedicated peer session, never a channel-bound session (#2332)', async () => {
+    // PA has a Slack session, then gets wired to Discord (newer session).
+    // Researcher responds to PA with no in_reply_to threaded through.
+    //
+    // #2332's original fix trusted peer-affinity ("last session that
+    // contacted me") into *any* active session of the target agent group,
+    // including a channel-bound one — that stopped "newest wins" but still
+    // let an untrusted a2a reply land directly in a real Slack/Discord
+    // session. That's the same production vulnerability class the
+    // dedicated-peer-session model (session-manager.ts resolveA2aSession,
+    // agent-route.ts resolveTargetSession) closes: peer-affinity without an
+    // explicit in_reply_to is only trusted for the peer's own dedicated
+    // system:a2a:<peerId> session, never a channel-bound one. So the reply
+    // here — no in_reply_to — must land in PA's dedicated a2a-with-researcher
+    // session, not Slack (the old "origin") and not Discord (the old
+    // "newest"). Explicit in_reply_to threading back into a real channel
+    // session is covered separately by the Pepper/MC dedicated-session tests
+    // in agent-route.test.ts.
     const { routeAgentMessage } = await import('./modules/agent-to-agent/agent-route.js');
 
     const { session: paSlackSession } = await resolveSession('ag-pa', 'mg-slack', null, 'shared');
@@ -1440,9 +1454,21 @@ describe('agent-to-agent routing', () => {
     const discordA2a = discordDb.prepare("SELECT * FROM messages_in WHERE channel_type = 'agent'").all();
     discordDb.close();
 
-    // Fixed: response lands in Slack (origin) not Discord (newest)
-    expect(slackA2a).toHaveLength(1);
+    // Neither channel-bound session receives it...
+    expect(slackA2a).toHaveLength(0);
     expect(discordA2a).toHaveLength(0);
+
+    // ...it lands in PA's dedicated a2a-with-researcher session instead.
+    const { a2aThreadId } = await import('./db/sessions.js');
+    const paSessions = await getSessionsByAgentGroup('ag-pa');
+    const dedicated = paSessions.find(
+      (s) => s.messaging_group_id === null && s.thread_id === a2aThreadId('ag-researcher'),
+    );
+    expect(dedicated).toBeDefined();
+    const dedicatedDb = new Database(inboundDbPath('ag-pa', dedicated!.id));
+    const dedicatedA2a = dedicatedDb.prepare("SELECT * FROM messages_in WHERE channel_type = 'agent'").all();
+    dedicatedDb.close();
+    expect(dedicatedA2a).toHaveLength(1);
   });
 
   it('BUG: A2A-only session gets null session_routing (#2332)', async () => {
