@@ -62,6 +62,24 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 # ~300MB Chromium. We've already installed the system one above.
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
+# ---- Proxy bypass for host-local services ------------------------------------
+# A gateway provider (OneCLI) injects HTTP_PROXY/HTTPS_PROXY so all agent egress
+# is credential-injected. That proxy cannot serve a request aimed at the Docker
+# host: it accepts the connection and closes it. An MCP server published on
+# host.docker.internal therefore answers a direct request but returns an empty
+# reply through the proxy, so the SDK registers the server and loads none of its
+# tools -- with no error in the agent log.
+#
+# `ncl groups config add-mcp-server` explicitly permits plain HTTP for localhost
+# and host.docker.internal, so those URLs are a supported configuration that
+# could not work.
+#
+# no_proxy matches on the *target* host, so this exempts only host-local
+# traffic; external calls still route through the gateway and still get their
+# credentials injected.
+ENV no_proxy=host.docker.internal,localhost,127.0.0.1
+ENV NO_PROXY=host.docker.internal,localhost,127.0.0.1
+
 # ---- Bun runtime -------------------------------------------------------------
 # Install via the official script (handles multi-arch detection), then move
 # the binary to /usr/local/bin so the non-root `node` user can execute it.
