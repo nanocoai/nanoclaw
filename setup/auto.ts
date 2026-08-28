@@ -311,7 +311,9 @@ async function main(driver: SetupDriver): Promise<void> {
   }
 
   if (!skip.has('container')) {
-    p.log.message(
+    await ensureMachineContainerRuntime(driver);
+    driver.log(
+      'message',
       brandBody(dimWrap('Your assistant lives in its own sandbox. It can only see what you explicitly share.', 4)),
     );
     // Asked before the step runs, because the step is what acts on the answer.
@@ -610,10 +612,16 @@ async function main(driver: SetupDriver): Promise<void> {
   }
 
   if (!skip.has('service')) {
-    const res = await runQuietStep('service', {
-      running: 'Starting NanoClaw in the background…',
-      done: 'NanoClaw is running.',
-    });
+    await ensureMachineServicePermissions(driver);
+    const res = await runQuietStep(
+      'service',
+      {
+        running: 'Starting NanoClaw in the background…',
+        done: 'NanoClaw is running.',
+      },
+      [],
+      driver,
+    );
     if (!res.ok) {
       await fail('service', "Couldn't start NanoClaw.", 'See logs/nanoclaw.error.log for details.', undefined, driver);
     }
@@ -2051,6 +2059,125 @@ async function askOtherChannelName(): Promise<void | typeof BACK_TO_CHANNEL_SELE
 }
 
 // ─── interactive / env helpers ─────────────────────────────────────────
+
+type ContainerRuntimeStatus = 'ready' | 'missing' | 'stopped' | 'permission' | 'other';
+
+function containerRuntimeStatus(): ContainerRuntimeStatus {
+  const result = spawnSync('docker', ['info'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+  if (result.error && (result.error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+  if (result.status === 0) return 'ready';
+  const output = `${result.stderr ?? ''}\n${result.stdout ?? ''}`;
+  if (/permission denied/i.test(output)) return 'permission';
+  if (/cannot connect|is the docker daemon running|no such file/i.test(output)) return 'stopped';
+  return 'other';
+}
+
+async function waitForContainerRuntime(): Promise<boolean> {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    if (containerRuntimeStatus() === 'ready') return true;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  return false;
+}
+
+async function ensureMachineContainerRuntime(driver: SetupDriver): Promise<void> {
+  if (driver.mode !== 'ndjson') return;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const status = containerRuntimeStatus();
+    if (status === 'ready') return;
+    if (status === 'missing') {
+      driver.error('container_runtime_required', 'Docker must be installed before setup can continue.', [
+        {
+          kind: 'manual',
+          title: 'Install Docker',
+          instructions: ['Install Docker Desktop on macOS or Docker Engine on Linux, then rerun setup.'],
+        },
+      ]);
+    }
+    if (status === 'stopped') {
+      const action =
+        process.platform === 'darwin'
+          ? {
+              id: 'start-docker',
+              kind: 'startApplication' as const,
+              title: 'Start Docker Desktop',
+              application: 'Docker',
+            }
+          : null;
+      if (!action)
+        driver.error('container_runtime_not_started', 'Docker must be running before setup can continue.', [
+          {
+            kind: 'manual',
+            title: 'Start Docker',
+            instructions: ['Start the Docker service in a terminal, then rerun setup.'],
+          },
+        ]);
+      const result = await driver.externalAction(action, waitForContainerRuntime);
+      if (result === 'attempted') continue;
+      driver.error('container_runtime_not_started', 'Docker must be running before setup can continue.', [
+        { kind: 'manual', title: 'Start Docker', instructions: ['Start Docker Desktop, then rerun setup.'] },
+      ]);
+    }
+    if (status === 'permission') {
+      const user = process.env.USER?.trim();
+      const groups = user
+        ? (spawnSync('id', ['-nG', user], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] }).stdout ?? '')
+        : '';
+      if (groups.split(/\s+/).includes('docker')) maybeReexecUnderSg(driver);
+      driver.error('container_runtime_permission', 'This login session cannot access Docker yet.', [
+        {
+          kind: 'manual',
+          title: 'Refresh Docker group membership',
+          instructions: ['Add your user to the docker group if needed.', 'Log out and back in, then rerun setup.'],
+        },
+      ]);
+    }
+    driver.error('container_runtime_unavailable', 'Docker is installed but its status could not be verified.', [
+      {
+        kind: 'manual',
+        title: 'Check Docker',
+        instructions: ['Run docker info in a terminal, fix the reported problem, then rerun setup.'],
+      },
+    ]);
+  }
+  driver.error('container_runtime_unavailable', 'Docker did not become ready.');
+}
+
+async function ensureMachineServicePermissions(driver: SetupDriver): Promise<void> {
+  if (driver.mode !== 'ndjson' || process.platform !== 'linux' || process.getuid?.() === 0) return;
+  if (spawnSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'ignore' }).status !== 0) return;
+  if (containerRuntimeStatus() !== 'ready') return;
+  const probe = (): boolean =>
+    spawnSync('systemd-run', ['--user', '--pipe', '--wait', 'docker', 'info'], { stdio: 'ignore' }).status === 0;
+  if (probe() || spawnSync('which', ['setfacl'], { stdio: 'ignore' }).status !== 0) return;
+  const user = process.env.USER?.trim();
+  if (!user) driver.error('service_permission_unknown_user', 'Could not determine the user for Docker socket access.');
+  driver.error('service_permission_required', 'The service cannot access Docker in machine mode.', [
+    {
+      kind: 'manual',
+      title: 'Grant Docker socket access',
+      instructions: [`Run setfacl for ${user} in a terminal, then rerun setup.`],
+    },
+  ]);
+}
+
+async function rebuildProviderImage(driver: SetupDriver): Promise<ReturnType<typeof buildContainerImage>> {
+  const result = await runQuietChild(
+    'provider-image-build',
+    path.join(PROJECT_ROOT, 'container', 'build.sh'),
+    [],
+    { running: 'Rebuilding the sandbox image…', done: 'Sandbox image rebuilt.' },
+    undefined,
+    driver,
+  );
+  return result.ok
+    ? { ok: true }
+    : {
+        ok: false,
+        message: `The container image build failed (exit ${result.exitCode}).`,
+        hint: `Inspect ${result.rawLog}, fix Docker or the build input, then retry.`,
+      };
+}
 
 function ensureLocalBinOnPath(): void {
   const localBin = path.join(os.homedir(), '.local', 'bin');
