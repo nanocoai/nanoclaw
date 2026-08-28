@@ -10,6 +10,7 @@ const TSX_LOADER = import.meta.resolve('tsx');
 const HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-child.ts');
 const CONTINUATION_HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-continuation.ts');
 const TTY_HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-tty.ts');
+const SKILL_HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-skill.ts');
 const CANCEL_RACE_HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-cancel-race.ts');
 const CHILD_CANCEL_HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-child-cancel.ts');
 const WINDOWED_CANCEL_HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-windowed-cancel.ts');
@@ -276,6 +277,63 @@ describe('NDJSON setup driver child boundary', () => {
       expect(fs.readFileSync(calls, 'utf8')).toContain('login');
     } finally {
       fs.rmSync(temp, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('treats a machine skill answer as data, not shell syntax', async () => {
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-driver-skill-project-'));
+    const skillDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-driver-skill-'));
+    const markers = ['single-injected', 'double-injected', 'bare-injected'].map((name) => path.join(projectRoot, name));
+    const answer = `x'; touch ${markers[0]}; #' "$(touch ${markers[1]})" \`touch ${markers[2]}\` $HOME`;
+    fs.writeFileSync(path.join(projectRoot, 'package.json'), '{"name":"fixture"}');
+    fs.writeFileSync(
+      path.join(skillDir, 'SKILL.md'),
+      "# fixture\n\n```nc:prompt agent_name normalize:trim validate:^.+$\nAssistant name?\n```\n```nc:run effect:external\nprintf '%s\\n' '{{agent_name}}' > single.txt\nprintf '%s\\n' \"{{agent_name}}\" > double.txt\nprintf '%s\\n' {{agent_name}} > bare.txt\n```\n",
+    );
+    try {
+      const child = spawn(process.execPath, ['--import', TSX_LOADER, SKILL_HARNESS], {
+        cwd: projectRoot,
+        env: {
+          ...process.env,
+          NANOCLAW_PROTOCOL: 'nanoclaw.driver.v1',
+          NANOCLAW_TEST_PROJECT_ROOT: projectRoot,
+          NANOCLAW_TEST_SKILL_DIR: skillDir,
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      const events: Array<Record<string, unknown>> = [];
+      let buffer = '';
+      child.stdout.on('data', (chunk: Buffer) => {
+        buffer += chunk.toString('utf8');
+        let newline: number;
+        while ((newline = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          if (!line) continue;
+          const event = JSON.parse(line) as Record<string, unknown>;
+          events.push(event);
+          if (event.type === 'prompt') {
+            const prompt = event.prompt as { id: string };
+            child.stdin.write(
+              `${JSON.stringify({ ...envelope, type: 'answer', promptId: prompt.id, value: answer })}\n`,
+            );
+          }
+        }
+      });
+      const code = await new Promise<number | null>((resolve, reject) => {
+        child.on('error', reject);
+        child.on('close', resolve);
+      });
+
+      expect(code).toBe(0);
+      expect(events.at(-1)?.type).toBe('complete');
+      expect(markers.every((marker) => !fs.existsSync(marker))).toBe(true);
+      for (const file of ['single.txt', 'double.txt', 'bare.txt']) {
+        expect(fs.readFileSync(path.join(projectRoot, file), 'utf8')).toBe(`${answer}\n`);
+      }
+    } finally {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+      fs.rmSync(skillDir, { recursive: true, force: true });
     }
   }, 15_000);
 

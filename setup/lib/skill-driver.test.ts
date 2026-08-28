@@ -611,6 +611,87 @@ process.stdout.write('=== NANOCLAW SETUP: TEST ===\\nSTATUS: success\\n=== END =
     expect(fullyApplied(res)).toBe(true);
   });
 
+  it('machine driver preserves URL-offer and natural-barrier policy before the side effect', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'machine-policy-'));
+    const skill = mkdtempSync(join(tmpdir(), 'machine-policy-skill-'));
+    writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
+    writeFileSync(
+      join(skill, 'SKILL.md'),
+      '# machine policy\n\n```nc:operator\nOpen https://example.com/setup and finish.\n```\n```nc:run effect:build\necho build\n```\n',
+    );
+    const calls: string[] = [];
+    const driver = {
+      mode: 'ndjson',
+      operation: 'setup',
+      prompt: async (spec: { message: string }) => {
+        calls.push(`prompt:${spec.message}`);
+        return true;
+      },
+      display: (display: { kind: string }) => {
+        calls.push(`display:${display.kind}`);
+      },
+      note: () => {
+        calls.push('note');
+      },
+      progress: (_id: string, state: string) => {
+        calls.push(`progress:${state}`);
+      },
+      throwIfCancelled: () => {},
+    } as unknown as SetupDriver;
+
+    await runSkill(skill, {
+      projectRoot: root,
+      driver,
+      exec: () => {
+        calls.push('exec');
+      },
+    });
+
+    expect(calls).toEqual([
+      'note',
+      'prompt:Open https://example.com/setup in your browser?',
+      'display:url',
+      "prompt:Done with the steps above? Continue when you're ready.",
+      'progress:pending',
+      'progress:running',
+      'exec',
+      'progress:succeeded',
+    ]);
+  });
+
+  it('stops before a later skill side effect when the driver is cancelled', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'machine-cancel-'));
+    const skill = mkdtempSync(join(tmpdir(), 'machine-cancel-skill-'));
+    writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
+    writeFileSync(
+      join(skill, 'SKILL.md'),
+      '# cancel\n\n```nc:run effect:build\nfirst\n```\n```nc:run effect:wire\nsecond\n```\n',
+    );
+    let cancelled = false;
+    const commands: string[] = [];
+    const driver = {
+      mode: 'ndjson',
+      operation: 'setup',
+      progress: () => {},
+      throwIfCancelled: () => {
+        if (cancelled) throw new Error('driver cancelled');
+      },
+    } as unknown as SetupDriver;
+
+    await expect(
+      runSkill(skill, {
+        projectRoot: root,
+        driver,
+        exec: (command) => {
+          commands.push(command);
+          cancelled = true;
+        },
+      }),
+    ).rejects.toThrow('driver cancelled');
+
+    expect(commands).toEqual(['first']);
+  });
+
   it('default handler: readiness flavor before an effect:step; decline = proceed (never an abort)', async () => {
     const root = mkdtempSync(join(tmpdir(), 'gate-step-'));
     const skill = mkdtempSync(join(tmpdir(), 'gate-step-skill-'));
@@ -824,5 +905,54 @@ describe('non-TTY step lines (CI logs, a nested apply under the parent driver)',
     expect(success).toHaveBeenCalledTimes(1);
     expect(success.mock.calls[0][0]).toMatch(/^Build the image \(\d+s\)$/);
     success.mockRestore();
+  });
+});
+
+describe('headless confirm invariant (terminal driver, stdout not a TTY)', () => {
+  // Every terminal-channel install now hands runSkill a driver, so the driver's
+  // presence must not decide the confirm seam on its own. A terminal run
+  // redirected to a log file has a driver and no TTY, and it has to keep
+  // defaultConfirm's invariant: resolve true WITHOUT prompting, so a scripted
+  // install with full inputs never stalls at a URL offer or a natural barrier.
+  it('terminal driver + non-TTY stdout: confirm proceeds without prompting the driver', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'headless-confirm-'));
+    const skill = mkdtempSync(join(tmpdir(), 'headless-confirm-skill-'));
+    writeFileSync(join(root, 'package.json'), '{"name":"scratch"}');
+    writeFileSync(
+      join(skill, 'SKILL.md'),
+      '# headless demo\n\n## Portal step\nTell the user:\n```nc:operator\nOpen https://example.com/setup and finish the app.\n```\n\n## Build\n```nc:run effect:build\necho build\n```\n',
+    );
+    const prompted: string[] = [];
+    const driver = {
+      mode: 'terminal',
+      operation: 'setup',
+      prompt: async (spec: { message: string }) => {
+        prompted.push(spec.message);
+        return true;
+      },
+      note: () => {},
+      progress: () => {},
+      throwIfCancelled: () => {},
+    } as unknown as SetupDriver;
+
+    const prevTTY = process.stdout.isTTY;
+    process.stdout.isTTY = false; // a headless run: setup redirected to a log file
+    const opened: string[] = [];
+    const ran: string[] = [];
+    try {
+      // `confirm` is deliberately NOT injected here: the default seam is the thing under test.
+      const res = await runSkill(skill, {
+        projectRoot: root,
+        driver,
+        openUrl: async (u) => void opened.push(u),
+        exec: (command) => void ran.push(command),
+      });
+      expect(prompted).toEqual([]); // never stalled: no URL offer, no barrier question
+      expect(opened).toEqual(['https://example.com/setup']); // auto-accepted, so the open still happened
+      expect(ran).toEqual(['echo build']); // and the gated side effect still ran
+      expect(fullyApplied(res)).toBe(true);
+    } finally {
+      process.stdout.isTTY = prevTTY;
+    }
   });
 });

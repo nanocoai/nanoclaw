@@ -758,6 +758,7 @@ function defaultOnEvent(
   md: string,
   confirm: (message: string) => Promise<boolean>,
   open: (url: string) => Promise<void>,
+  driver?: SetupDriver,
 ): (e: ApplyEvent) => Promise<void> {
   const gates = gatePolicy(md);
   const ordinals = labelOrdinals(md);
@@ -769,6 +770,12 @@ function defaultOnEvent(
   let plain: { base: string; start: number } | null = null;
   return async (e) => {
     if (e.type === 'step-start') {
+      if (driver?.mode === 'ndjson') {
+        const id = `skill-${e.line}`;
+        driver.progress(id, 'pending', e.label ?? e.kind);
+        driver.progress(id, 'running', e.label ?? e.kind);
+        return;
+      }
       if (e.label === null) return; // instant/cheap step — no caption declared
       const base = e.label.replace(/…+$/, '') + (ordinals.get(e.line) ?? '');
       if (!process.stdout.isTTY) {
@@ -779,6 +786,11 @@ function defaultOnEvent(
       return;
     }
     if (e.type === 'step-end') {
+      if (driver?.mode === 'ndjson') {
+        driver.progress(`skill-${e.line}`, e.ok ? 'succeeded' : 'failed', e.label ?? e.kind);
+        driver.throwIfCancelled();
+        return;
+      }
       if (active) {
         active.stop({ ok: e.ok });
         active = null;
@@ -791,7 +803,8 @@ function defaultOnEvent(
       return;
     }
     // operator: note → URL offer → natural-barrier confirm.
-    p.note(e.text, 'Your turn');
+    if (driver) driver.note(e.text, 'Your turn');
+    else p.note(e.text, 'Your turn');
     const url = extractOfferUrl(e.text);
     if (url !== undefined && (await confirm(`Open ${url} in your browser?`))) await open(url);
     const gate = gates.get(e.line);
@@ -879,12 +892,19 @@ export async function runSkill(skillDir: string, opts: RunSkillOptions = {}): Pr
   const confirm =
     opts.confirm ??
     (opts.driver
-      ? async (message: string) =>
-          (await opts.driver!.prompt({
-            kind: 'confirm',
-            message,
-            default: true,
-          })) === true
+      ? async (message: string) => {
+          // Terminal mode keeps defaultConfirm's headless invariant: a non-TTY
+          // run proceeds without prompting, so a scripted install with full
+          // inputs never stalls on a barrier or an offer.
+          if (opts.driver!.mode === 'terminal' && !process.stdout.isTTY) return true;
+          return (
+            (await opts.driver!.prompt({
+              kind: 'confirm',
+              message,
+              default: true,
+            })) === true
+          );
+        }
       : defaultConfirm);
   const open =
     opts.openUrl ??
@@ -910,6 +930,7 @@ export async function runSkill(skillDir: string, opts: RunSkillOptions = {}): Pr
       inputs = { ...inputs, ...reused };
     }
   }
+  const machineSecrets = new Set<string>();
   // The default operator policy derives from the skill document itself
   // (gatePolicy keys on directive lines) — read it once here; the engine reads
   // the same file for the actual apply.
@@ -919,6 +940,49 @@ export async function runSkill(skillDir: string, opts: RunSkillOptions = {}): Pr
   } catch {
     // missing SKILL.md — the engine will produce an empty result anyway
   }
+  for (const directive of parseDirectives(md)) {
+    if (directive.kind !== 'prompt') continue;
+    const name = promptVar(directive);
+    const value = name ? inputs?.[name] : undefined;
+    if (!value) continue;
+    const normalized = normalizeValue(
+      value,
+      typeof directive.attrs.normalize === 'string' ? directive.attrs.normalize : undefined,
+    );
+    if (!directive.args.includes('secret')) continue;
+    registerSensitiveValue(value);
+    registerSensitiveValue(normalized);
+    machineSecrets.add(value);
+    machineSecrets.add(normalized);
+  }
+  const acquireInput =
+    opts.resolveInput ??
+    (opts.driver?.mode === 'ndjson'
+      ? async (name: string, meta: InputMeta): Promise<string | undefined> => {
+          const choices = meta.secret ? null : literalChoices(meta.validate);
+          const value = await opts.driver!.prompt({
+            id: `skill-${basename(skillDir)}-${name}`,
+            kind: choices ? 'singleChoice' : meta.secret ? 'secret' : 'text',
+            message: meta.question,
+            sensitive: meta.secret,
+            ...(choices ? { choices: choices.map((choice) => ({ id: choice, label: choice })) } : {}),
+            validateValue: (answer) => promptValidator(meta.validate, meta.flags, meta.question)?.(String(answer)),
+          });
+          return typeof value === 'string' && value.length > 0 ? value : undefined;
+        }
+      : clackResolveInput({ channel: opts.channel, step: opts.step }));
+  const resolveInput = async (name: string, meta: InputMeta): Promise<string | undefined> => {
+    const value = await acquireInput(name, meta);
+    if (!value) return undefined;
+    const normalized = normalizeValue(value, meta.normalize);
+    if (meta.secret) {
+      registerSensitiveValue(value);
+      registerSensitiveValue(normalized);
+      machineSecrets.add(value);
+      machineSecrets.add(normalized);
+    }
+    return value;
+  };
   // One raw log per skill apply (level 3): every default-exec command appends
   // its `$ cmd` + output there. Allocated only when the default exec is used —
   // an injected exec (tests, agent relay) owns its own capture.
@@ -927,15 +991,38 @@ export async function runSkill(skillDir: string, opts: RunSkillOptions = {}): Pr
     rawLog = setupLog.stepRawLog(`skill-${basename(skillDir)}`);
     writeFileSync(rawLog, `# skill ${basename(skillDir)} — ${new Date().toISOString()}\n\n`);
   }
-  return applySkill(skillDir, projectRoot, {
+  const defaultExec = opts.exec ?? hostExec(projectRoot, rawLog, opts.driver, machineSecrets);
+  const defaultExecStream = opts.execStream ?? hostExecStream(projectRoot, opts.driver, machineSecrets);
+  const machine = opts.driver?.mode === 'ndjson' || process.env.NANOCLAW_PROTOCOL === 'nanoclaw.driver.v1';
+  const exec =
+    machine && opts.exec
+      ? (command: string, args: string[] = []) =>
+          withMachineSecretTransport(command, args, machineSecrets, opts.driver, async (safeCommand, safeArgs) =>
+            opts.exec!(safeCommand, safeArgs),
+          )
+      : defaultExec;
+  const execStream =
+    machine && opts.execStream
+      ? (command: string, args: string[] = []) =>
+          withMachineSecretTransport(command, args, machineSecrets, opts.driver, opts.execStream!)
+      : defaultExecStream;
+  const onEvent = opts.onEvent ?? defaultOnEvent(md, confirm, open, opts.driver);
+  opts.driver?.throwIfCancelled?.();
+  const result = await applySkill(skillDir, projectRoot, {
     inputs,
-    resolveInput: opts.resolveInput ?? clackResolveInput({ channel: opts.channel, step: opts.step }),
-    onEvent: opts.onEvent ?? defaultOnEvent(md, confirm, open),
-    exec: opts.exec ?? hostExec(projectRoot, rawLog),
-    execStream: opts.execStream ?? hostExecStream(projectRoot),
+    resolveInput,
+    onEvent: async (event) => {
+      opts.driver?.throwIfCancelled?.();
+      await onEvent(event);
+      opts.driver?.throwIfCancelled?.();
+    },
+    exec,
+    execStream,
     resolveRemote: opts.resolveRemote ?? channelsRemote(projectRoot),
     skipEffects: opts.skipEffects,
   });
+  opts.driver?.throwIfCancelled?.();
+  return result;
 }
 
 /**
