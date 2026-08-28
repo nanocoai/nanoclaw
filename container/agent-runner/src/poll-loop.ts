@@ -3,6 +3,7 @@ import {
   getPendingMessages,
   markProcessing,
   markCompleted,
+  markFailed,
   markScriptSkipped,
   type MessageInRow,
 } from './db/messages-in.js';
@@ -271,15 +272,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuation(config.providerName);
       }
 
-      // Write error response so the user knows something went wrong
-      await writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
-      });
+      if (await handleTurnError(err, routing, processingIds)) {
+        // Task turn: error is in the run log, batch acked failed (feeds the
+        // series' FAILED count and recurrence backoff). No redelivery; the
+        // finally below still clears in_reply_to on this path.
+        log(`Errored task run — ${processingIds.length} message(s) acked failed, error in run log`);
+        continue;
+      }
 
       // The batch is still acked completed below (no redelivery). Without
       // this line the only log trace of the errored turn is "Query error"
@@ -553,7 +552,17 @@ export async function processQuery(
         // follow-up pushes. The agent may have responded via MCP
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
-        markCompleted(initialBatchIds);
+        // Exception: a task run whose provider surfaced a non-retryable
+        // error as a result event (isError) is a FAILED run — ack it failed
+        // so the accounting matches the thrown-error path in the poll loop's
+        // catch (handleTurnError) instead of depending on how a provider
+        // happens to report failure.
+        const failedTaskRun = routing.taskRun && event.isError === true;
+        if (failedTaskRun) {
+          for (const id of initialBatchIds) markFailed(id);
+        } else {
+          markCompleted(initialBatchIds);
+        }
         if (event.text) {
           const { sent, hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
             midTurnSent,
@@ -576,7 +585,8 @@ export async function processQuery(
           // Errors included: a failed run's text belongs in its log, not chat.
           // A corrective retry handles delivery only; its result is not a
           // second run summary.
-          if (routing.taskRun && !taskBlockNudged) await autoAppendTaskLog(event.text);
+          if (routing.taskRun && !taskBlockNudged)
+            await autoAppendTaskLog(failedTaskRun ? `Run FAILED: ${event.text}` : event.text);
           if (resultBlocks === 0 && event.isError === true && !routing.taskRun) {
             // Non-retryable error turn (e.g. a 403 billing_error) with no
             // <message> envelope: deliver the notice instead of dropping it as
@@ -1129,6 +1139,50 @@ export async function autoAppendTaskLog(text: string): Promise<void> {
     content: JSON.stringify({ text: line }),
   });
   log('Task run log auto-appended from final text');
+}
+
+/**
+ * Errored-turn ack routing. A task turn has no chat routing (platform/channel
+ * are null by design — the agent picks delivery at fire time), so writing its
+ * error as a chat row produced an unroutable message the host dropped
+ * ("Message missing routing fields") while the clean `completed` ack hid the
+ * failure from the series' run history entirely. Instead: append the error to
+ * the task run log (the run's one durable artifact) and ack `failed`, which
+ * the host's ack sync records as a FAILED occurrence — surfacing in
+ * `ncl tasks list` and feeding the recurrence backoff streak. Chat turns keep
+ * the legacy behavior: a routed error chat, ack left to the loop's normal
+ * completed path. Returns true when it acked the batch itself (task turns).
+ */
+export async function handleTurnError(
+  err: unknown,
+  routing: RoutingContext,
+  processingIds: string[],
+): Promise<boolean> {
+  const errMsg = err instanceof Error ? err.message : String(err);
+  if (routing.taskRun) {
+    // markFailed is monotonic — it only demotes live `processing` claims. If
+    // nothing was demoted, the batch already settled (a result event landed
+    // before this error), so the run itself succeeded: log the late error
+    // for the operator but do NOT stamp "Run FAILED" on a completed run.
+    let demoted = 0;
+    for (const id of processingIds) if (markFailed(id)) demoted++;
+    if (demoted > 0) {
+      await autoAppendTaskLog(`Run FAILED: ${errMsg}`);
+    } else {
+      log(`Post-run provider error (batch already settled): ${errMsg}`);
+    }
+    return true;
+  }
+  // Write error response so the user knows something went wrong
+  await writeMessageOut({
+    id: generateId(),
+    kind: 'chat',
+    platform_id: routing.platformId,
+    channel_type: routing.channelType,
+    thread_id: routing.threadId,
+    content: JSON.stringify({ text: `Error: ${errMsg}` }),
+  });
+  return false;
 }
 
 async function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): Promise<void> {

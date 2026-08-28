@@ -146,9 +146,10 @@ export function syncProcessingAcks(inDb: Database.Database, outDb: Database.Data
 
   if (completed.length === 0) return;
 
-  // `script-skip:error` (pre-task script crashed) lands as a FAILED run —
-  // semantically true, and it lets recurrence derive the trailing failed
-  // streak from the occurrence rows themselves (no stored counter).
+  // `script-skip:error` (pre-task script crashed) and `failed` (errored task
+  // turn, runner's markFailed) land as FAILED runs — semantically true, and it
+  // lets recurrence derive the trailing failed streak from the occurrence rows
+  // themselves (no stored counter).
   const completeStmt = inDb.prepare(
     "UPDATE messages_in SET status = 'completed' WHERE id = ? AND status NOT IN ('completed', 'failed')",
   );
@@ -157,7 +158,7 @@ export function syncProcessingAcks(inDb: Database.Database, outDb: Database.Data
   );
   inDb.transaction(() => {
     for (const { message_id, status } of completed) {
-      (status === 'script-skip:error' ? failStmt : completeStmt).run(message_id);
+      (status === 'script-skip:error' || status === 'failed' ? failStmt : completeStmt).run(message_id);
     }
   })();
 }

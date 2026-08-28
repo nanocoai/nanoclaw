@@ -80,7 +80,7 @@ export async function handleRecurrence(inDb: InboundMailbox, session: Session): 
         await appendHostTaskNote(
           session.agent_group_id,
           msg.seriesId,
-          `auto-paused after ${scriptFails} consecutive script failures (host); fix the script, then \`ncl tasks resume ${msg.seriesId}\``,
+          `auto-paused after ${scriptFails} consecutive failed runs (host); check this run log for the error (script failure or errored agent turn), then \`ncl tasks resume ${msg.seriesId}\``,
         );
         log.warn('Task series auto-paused: script keeps failing', {
           seriesId: msg.seriesId,
