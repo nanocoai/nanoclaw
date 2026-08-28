@@ -301,14 +301,14 @@ async function main(driver: SetupDriver): Promise<void> {
   // loses that choice on a full rerun.
   let savedPickBridged = false;
   if (!process.env.NANOCLAW_TEMPLATE_PATH?.trim()) {
-    const savedPick = readEnvKey('NANOCLAW_TEMPLATE_PATH')?.trim();
+    const savedPick = readEnvKey('NANOCLAW_TEMPLATE_PATH', PROJECT_ROOT)?.trim();
     if (savedPick) {
       process.env.NANOCLAW_TEMPLATE_PATH = savedPick;
       savedPickBridged = true;
     }
   }
   if (!isResume) {
-    await runTemplateSetup(savedPickBridged, await detectRegisteredGroups(process.cwd()));
+    await runTemplateSetup(driver, savedPickBridged, await detectRegisteredGroups(PROJECT_ROOT));
   }
 
   if (!skip.has('container')) {
@@ -780,7 +780,7 @@ async function main(driver: SetupDriver): Promise<void> {
     await runTimezoneStep(driver);
   }
 
-  const templateAgentOutcome = await installSelectedTemplateAgent(agentProvider);
+  const templateAgentOutcome = await installSelectedTemplateAgent(driver, agentProvider);
 
   // v1 → v2 migration is handled by `bash migrate-v2.sh`, not the setup flow.
   // Users migrating from v1 run that script before (or instead of) setup.
@@ -1092,118 +1092,128 @@ const INSTALLABLE_PROVIDERS = [
 // the operator may be rerunning precisely to change it. In-process presets
 // (--template-path, the Advanced screen, self re-execs, an exported env var)
 // keep the silent skip.
-async function runTemplateSetup(pickSavedByPreviousRun: boolean, hasRegisteredAgents: boolean): Promise<void> {
+export async function runTemplateSetup(
+  driver: SetupDriver,
+  pickSavedByPreviousRun: boolean,
+  hasRegisteredAgents: boolean,
+): Promise<void> {
   const preset = process.env.NANOCLAW_TEMPLATE_PATH?.trim();
   if (preset) {
-    if (listLocalTemplates().some((template) => template.ref === preset)) {
+    if (listLocalTemplates(driver).some((template) => template.ref === preset)) {
       if (!pickSavedByPreviousRun) {
         applyTemplatePick(preset);
-        p.log.success(`Using template "${preset}".`);
+        driver.log('success', `Using template "${preset}".`);
         return;
       }
-      const resume = ensureAnswer(
-        await p.confirm({
-          message: `Continue with template "${preset}" from the previous run?`,
-          initialValue: true,
-        }),
+      const resume = await confirmPrompt(
+        driver,
+        'template-resume',
+        `Continue with template "${preset}" from the previous run?`,
+        true,
       );
       setupLog.userInput('template_resume', String(resume));
       if (resume) {
         applyTemplatePick(preset);
-        p.log.success(`Using template "${preset}".`);
+        driver.log('success', `Using template "${preset}".`);
         return;
       }
       clearTemplatePick();
-      p.log.info(
-        `If that run already stamped an agent from "${preset}", it is kept — pick it again anytime, or wire it later with /init-first-agent.`,
+      driver.log(
+        'info',
+        `If that run already stamped an agent from "${preset}", it is kept. Pick it again anytime, or wire it later with /init-first-agent.`,
       );
     } else {
       clearTemplatePick();
-      p.log.warn(`Template "${preset}" not found under ${TEMPLATES_DIR} — pick one below.`);
-      p.log.info(
-        `If a previous run already stamped an agent from "${preset}", it is kept — wire it later with /init-first-agent.`,
+      driver.log('warn', `Template "${preset}" not found under ${TEMPLATES_DIR}. Pick one below.`);
+      driver.log(
+        'info',
+        `If a previous run already stamped an agent from "${preset}", it is kept. Wire it later with /init-first-agent.`,
       );
     }
   }
 
   for (;;) {
-    const source = ensureAnswer(
-      await brightSelect<'none' | 'library' | 'local'>({
-        message: hasRegisteredAgents
-          ? 'Would you like to add or update an agent from a template?'
-          : 'How should we create your first agent?',
-        options: [
-          hasRegisteredAgents
-            ? { value: 'none', label: 'No template changes', hint: 'recommended' }
-            : { value: 'none', label: 'Fresh agent', hint: 'recommended — shape it by chatting' },
-          { value: 'library', label: 'From the NanoClaw template library', hint: 'prebuilt agents' },
-          { value: 'local', label: 'From local templates', hint: 'templates/ in this install' },
-        ],
-        initialValue: 'none',
-      }),
-    ) as 'none' | 'library' | 'local';
+    const source = await selectPrompt(driver, 'template-source', {
+      message: hasRegisteredAgents
+        ? 'Would you like to add or update an agent from a template?'
+        : 'How should we create your first agent?',
+      options: [
+        hasRegisteredAgents
+          ? { value: 'none', label: 'No template changes', hint: 'recommended' }
+          : { value: 'none', label: 'Fresh agent', hint: 'recommended - shape it by chatting' },
+        { value: 'library', label: 'From the NanoClaw template library', hint: 'prebuilt agents' },
+        { value: 'local', label: 'From local templates', hint: 'templates/ in this install' },
+      ],
+      initialValue: 'none',
+    });
     setupLog.userInput('template_source', source);
     if (source === 'none') return;
 
-    const ref = source === 'library' ? await pickLibraryTemplate() : await pickLocalTemplate();
+    const ref = source === 'library' ? await pickLibraryTemplate(driver) : await pickLocalTemplate(driver);
     if (!ref) continue;
     applyTemplatePick(ref);
     setupLog.userInput('template_ref', ref);
-    p.log.success(`Template "${ref}" selected.`);
+    driver.log('success', `Template "${ref}" selected.`);
     return;
   }
 }
 
-// listTemplatesFromDir throws the migration error for a pre-plugin layout.
-// A stale local templates/ must not abort an otherwise-working install:
-// surface the message as a warning and treat the dir as empty.
-function listLocalTemplates(): TemplateEntry[] {
+function listLocalTemplates(driver: SetupDriver): TemplateEntry[] {
   try {
     return listTemplatesFromDir(TEMPLATES_DIR);
-  } catch (err) {
-    p.log.warn(err instanceof Error ? err.message : String(err));
+  } catch (error) {
+    driver.log('warn', error instanceof Error ? error.message : String(error));
     return [];
   }
 }
 
-async function pickLibraryTemplate(): Promise<string | undefined> {
-  const spinner = p.spinner();
-  spinner.start('Fetching the template library…');
+async function pickLibraryTemplate(driver: SetupDriver): Promise<string | undefined> {
+  const spinner = driver.mode === 'terminal' ? p.spinner() : null;
+  if (spinner) spinner.start('Fetching the template library…');
+  else driver.progress('template-source', 'running', 'Fetching the template library');
   let registry: ClonedRegistry;
   try {
     registry = cloneRegistry();
-  } catch (err) {
-    spinner.stop('Could not reach the template library.');
-    const message = err instanceof Error ? err.message : String(err);
+  } catch (error) {
+    if (spinner) spinner.stop('Could not reach the template library.');
+    else driver.progress('template-source', 'failed');
+    const message = error instanceof Error ? error.message : String(error);
     setupLog.step('template-source', 'interactive', 0, { source: 'library', error: message });
-    p.log.warn(message);
+    driver.log('warn', message);
     return undefined;
   }
 
   try {
     const templates = listTemplatesFromDir(registry.dir).filter((template) => template.ref !== '.');
     if (templates.length === 0) {
-      spinner.stop('The template library is empty.');
+      if (spinner) spinner.stop('The template library is empty.');
+      else driver.progress('template-source', 'succeeded', 'The template library is empty');
       return undefined;
     }
-    spinner.stop(`Found ${templates.length} template${templates.length === 1 ? '' : 's'}.`);
-    const ref = await chooseTemplate(templates);
+    if (spinner) spinner.stop(`Found ${templates.length} template${templates.length === 1 ? '' : 's'}.`);
+    else
+      driver.progress(
+        'template-source',
+        'succeeded',
+        `Found ${templates.length} template${templates.length === 1 ? '' : 's'}`,
+      );
+    const ref = await chooseTemplate(driver, templates);
     if (!ref) return undefined;
 
     const destination = path.join(TEMPLATES_DIR, ref);
     if (fs.existsSync(destination)) {
-      if (!listLocalTemplates().some((template) => template.ref === ref)) {
-        p.log.warn(`Can't install "${ref}": that path already exists but isn't a valid template.`);
+      if (!listLocalTemplates(driver).some((template) => template.ref === ref)) {
+        driver.log('warn', `Can't install "${ref}": that path already exists but is not a valid template.`);
         return undefined;
       }
-      p.log.info(`Keeping your existing local copy of "${ref}".`);
+      driver.log('info', `Keeping your existing local copy of "${ref}".`);
     } else {
       try {
         copyTemplate(registry.dir, ref, TEMPLATES_DIR);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
         setupLog.step('template-copy', 'interactive', 0, { ref, error: message });
-        p.log.warn(`Couldn't copy "${ref}" into templates/: ${message}`);
+        driver.log('warn', `Couldn't copy "${ref}" into templates/: ${message}`);
         return undefined;
       }
     }
@@ -1213,42 +1223,43 @@ async function pickLibraryTemplate(): Promise<string | undefined> {
   }
 }
 
-async function pickLocalTemplate(): Promise<string | undefined> {
-  const templates = listLocalTemplates().filter((template) => template.ref !== '.');
+async function pickLocalTemplate(driver: SetupDriver): Promise<string | undefined> {
+  const templates = listLocalTemplates(driver).filter((template) => template.ref !== '.');
   if (templates.length === 0) {
-    p.log.info(`No local templates in ${TEMPLATES_DIR}.`);
+    driver.log('info', `No local templates in ${TEMPLATES_DIR}.`);
     return undefined;
   }
-  return chooseTemplate(templates);
+  return chooseTemplate(driver, templates);
 }
 
 const BACK_TO_TEMPLATE_SOURCE = '\0back';
 
-async function chooseTemplate(templates: TemplateEntry[]): Promise<string | undefined> {
-  const ref = ensureAnswer(
-    await p.autocomplete<string>({
-      message: 'Choose a template',
-      options: [
-        ...templates.map((template) => ({
-          value: template.ref,
-          label: template.name,
-          hint: template.ref.includes('/') ? template.ref : undefined,
-        })),
-        { value: BACK_TO_TEMPLATE_SOURCE, label: '← Back' },
-      ],
-      maxItems: 5,
-      placeholder: 'type to search',
-    }),
-  ) as string;
-  return ref === BACK_TO_TEMPLATE_SOURCE ? undefined : ref;
+async function chooseTemplate(driver: SetupDriver, templates: TemplateEntry[]): Promise<string | undefined> {
+  const ref = await driver.prompt({
+    id: 'template-choice',
+    kind: 'singleChoice',
+    message: 'Choose a template',
+    choices: [
+      ...templates.map((template) => ({
+        id: template.ref,
+        label: template.name,
+        ...(template.ref.includes('/') ? { hint: template.ref } : {}),
+      })),
+      { id: BACK_TO_TEMPLATE_SOURCE, label: '← Back' },
+    ],
+    searchable: true,
+    placeholder: 'type to search',
+  });
+  return ref === BACK_TO_TEMPLATE_SOURCE ? undefined : String(ref);
 }
 
 type TemplateAgentOutcome = 'none' | 'channel-target' | 'restamped';
-type TemplateSetupOperation =
-  | TemplateOperation
-  | { kind: 'connect'; agentGroupId: string };
+type TemplateSetupOperation = TemplateOperation | { kind: 'connect'; agentGroupId: string };
 
-async function installSelectedTemplateAgent(provider?: string): Promise<TemplateAgentOutcome> {
+export async function installSelectedTemplateAgent(
+  driver: SetupDriver,
+  provider?: string,
+): Promise<TemplateAgentOutcome> {
   const ref = process.env.NANOCLAW_TEMPLATE_PATH?.trim();
   if (!ref) return 'none';
   if (process.env.NANOCLAW_TEMPLATE_AGENT_ID?.trim()) return 'channel-target';
@@ -1259,21 +1270,26 @@ async function installSelectedTemplateAgent(provider?: string): Promise<Template
   const presetName = process.env.NANOCLAW_AGENT_NAME?.trim() || undefined;
   const transport = new SocketTransport();
   const runNcl = async (command: string, args: Record<string, unknown>): Promise<unknown> => {
-    const response = await transport.sendFrame({ id: randomUUID(), command, args });
+    const response = await transport.sendFrame(
+      { id: randomUUID(), command, args },
+      { signal: driver.cancellationSignal },
+    );
     if (!response.ok) throw new Error(response.error.message);
     return response.data;
   };
 
   const start = Date.now();
   phEmit('step_started', { step: 'template-agent' });
+  driver.progress('template-agent', 'running', `Preparing the "${ref}" template`);
   try {
     const agents = await listTemplateAgents(ref, runNcl);
-    const operation = await chooseTemplateOperation(ref, agents);
+    const operation = await chooseTemplateOperation(driver, ref, agents);
     if (!operation) {
       clearTemplatePick();
       setupLog.step('template-agent', 'success', Date.now() - start, { ref, cancelled: true });
       phEmit('step_completed', { step: 'template-agent', status: 'success' });
-      p.log.info('No template changes made.');
+      driver.progress('template-agent', 'succeeded');
+      driver.log('info', 'No template changes made.');
       return 'none';
     }
 
@@ -1289,39 +1305,39 @@ async function installSelectedTemplateAgent(provider?: string): Promise<Template
         operation: 'connect',
       });
       phEmit('step_completed', { step: 'template-agent', status: 'success' });
-      p.log.success(`Ready to connect agent "${group.name}".`);
+      driver.progress('template-agent', 'succeeded');
+      driver.log('success', `Ready to connect agent "${group.name}".`);
       return 'channel-target';
     }
 
     const name =
       operation.kind === 'create' && agents.length > 0
-        ? await askNewTemplateAgentName(agents, presetName)
+        ? await askNewTemplateAgentName(driver, agents, presetName)
         : presetName;
 
-    p.log.step(
-      brandBody(
-        operation.kind === 'create' ? `Installing the "${ref}" template…` : `Preparing the "${ref}" template update…`,
-      ),
+    driver.progress(
+      'template-agent',
+      'running',
+      operation.kind === 'create' ? `Installing the "${ref}" template` : `Preparing the "${ref}" template update`,
     );
     const result = await installTemplateAgent({
       ref,
       operation,
       name,
-      timezone: readEnvKey('TZ') ?? undefined,
+      timezone: readEnvKey('TZ', PROJECT_ROOT) ?? undefined,
       provider,
       runNcl,
       confirmReplace: async (plan) => {
-        const resets = plan.changes.filter((c) => c.action !== 'unchanged' && c.action !== 'skip');
-        const customized = resets.filter((c) => c.customized).length;
-        const replace = ensureAnswer(
-          await p.confirm({
-            message:
-              `Agent "${plan.group.name}" is already stamped from this template. Update it in place? ` +
-              `${resets.length} plugin-owned surface${resets.length === 1 ? '' : 's'} will be reset` +
-              (customized > 0 ? ` (${customized} with local edits that will be lost)` : '') +
-              '. Provider, memory, chats, and wiring are kept.',
-            initialValue: customized === 0,
-          }),
+        const resets = plan.changes.filter((change) => change.action !== 'unchanged' && change.action !== 'skip');
+        const customized = resets.filter((change) => change.customized).length;
+        const replace = await confirmPrompt(
+          driver,
+          'template-replace',
+          `Agent "${plan.group.name}" is already stamped from this template. Update it in place? ` +
+            `${resets.length} plugin-owned surface${resets.length === 1 ? '' : 's'} will be reset` +
+            (customized > 0 ? ` (${customized} with local edits that will be lost)` : '') +
+            '. Provider, memory, chats, and wiring are kept.',
+          customized === 0,
         );
         setupLog.userInput('template_replace', String(replace));
         return replace;
@@ -1335,7 +1351,8 @@ async function installSelectedTemplateAgent(provider?: string): Promise<Template
         cancelled: true,
       });
       phEmit('step_completed', { step: 'template-agent', status: 'success' });
-      p.log.info('Template update cancelled. The agent was left unchanged.');
+      driver.progress('template-agent', 'succeeded');
+      driver.log('info', 'Template update cancelled. The agent was left unchanged.');
       return 'none';
     }
 
@@ -1344,11 +1361,12 @@ async function installSelectedTemplateAgent(provider?: string): Promise<Template
       agent_group_id: result.group.id,
     });
     phEmit('step_completed', { step: 'template-agent', status: 'success' });
+    driver.progress('template-agent', 'succeeded');
     if (result.status === 'updated') {
       // Restamping preserves wiring, so it has no deferred channel work and
       // must not make the channel step consume this existing agent as "new".
       clearTemplatePick();
-      p.log.success(`Template agent "${result.group.name}" updated in place.`);
+      driver.log('success', `Template agent "${result.group.name}" updated in place.`);
       return 'restamped';
     }
 
@@ -1358,17 +1376,18 @@ async function installSelectedTemplateAgent(provider?: string): Promise<Template
     clearTemplatePick();
     process.env.NANOCLAW_TEMPLATE_AGENT_ID = result.group.id;
     process.env.NANOCLAW_AGENT_NAME = result.group.name;
-    p.log.success(`Template agent "${result.group.name}" created.`);
+    driver.log('success', `Template agent "${result.group.name}" created.`);
     return 'channel-target';
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     setupLog.step('template-agent', 'failed', Date.now() - start, { ref, error: message });
     phEmit('step_completed', { step: 'template-agent', status: 'failed' });
+    driver.progress('template-agent', 'failed');
     // Warn-and-continue (the ping-skip pattern): a template failure must not
     // abort an otherwise-working install. The pick stays in .env so a rerun
     // retries this template.
-    p.log.warn(`Couldn't install the "${ref}" template: ${message}`);
-    note(
+    driver.log('warn', `Couldn't install the "${ref}" template: ${message}`);
+    driver.note(
       [
         wrapForGutter('Setup continues without it; you still get a fresh default agent. To retry the template:', 6),
         '',
@@ -1384,56 +1403,60 @@ async function installSelectedTemplateAgent(provider?: string): Promise<Template
 }
 
 async function chooseTemplateOperation(
+  driver: SetupDriver,
   ref: string,
   agents: readonly SetupTemplateAgent[],
 ): Promise<TemplateSetupOperation | undefined> {
   if (agents.length === 0) return { kind: 'create' };
 
+  // Choice ids are `<kind>:<agentGroupId>` so the same wire shape serves the
+  // terminal renderer and the machine protocol (which carries string ids only).
   const options = agents.flatMap((agent) => [
     ...(agent.isWired
       ? []
-      : [{
-          value: { kind: 'connect', agentGroupId: agent.id } as const,
-          label: `Connect "${agent.name}" to a channel`,
-          hint: `groups/${agent.folder} · not connected`,
-        }]),
+      : [
+          {
+            value: `connect:${agent.id}`,
+            label: `Connect "${agent.name}" to a channel`,
+            hint: `groups/${agent.folder} · not connected`,
+          },
+        ]),
     {
-      value: { kind: 'restamp', agentGroupId: agent.id } as const,
+      value: `restamp:${agent.id}`,
       label: `Update "${agent.name}" in place`,
       hint: `groups/${agent.folder} · keeps provider, memory, chats, and wiring`,
     },
   ]);
-  const choice = ensureAnswer(
-    await brightSelect<TemplateSetupOperation | { kind: 'cancel' }>({
-      message: `The "${ref}" template is already in use. What would you like to do?`,
-      options: [
-        ...options,
-        { value: { kind: 'create' }, label: 'Create another agent' },
-        { value: { kind: 'cancel' }, label: 'Cancel' },
-      ],
-      initialValue: options[0].value,
-    }),
-  ) as TemplateSetupOperation | { kind: 'cancel' };
-  setupLog.userInput(
-    'template_operation',
-    'agentGroupId' in choice ? `${choice.kind}:${choice.agentGroupId}` : choice.kind,
-  );
-  return choice.kind === 'cancel' ? undefined : choice;
+  const choice = await selectPrompt(driver, 'template-operation', {
+    message: `The "${ref}" template is already in use. What would you like to do?`,
+    options: [...options, { value: 'create', label: 'Create another agent' }, { value: 'cancel', label: 'Cancel' }],
+    initialValue: options[0].value,
+  });
+  setupLog.userInput('template_operation', choice);
+  if (choice === 'cancel') return undefined;
+  if (choice === 'create') return { kind: 'create' };
+  const separator = choice.indexOf(':');
+  const kind = choice.slice(0, separator);
+  const agentGroupId = choice.slice(separator + 1);
+  if (kind === 'connect') return { kind: 'connect', agentGroupId };
+  if (kind === 'restamp') return { kind: 'restamp', agentGroupId };
+  throw new Error(`Unknown template operation: ${choice}`);
 }
 
 async function askNewTemplateAgentName(
+  driver: SetupDriver,
   agents: readonly AgentGroup[],
   initialValue?: string,
 ): Promise<string> {
-  const answer = ensureAnswer(
-    await p.text({
-      message: 'Name the new agent',
-      placeholder: 'e.g. EMEA Sales',
-      ...(initialValue ? { initialValue } : {}),
-      validate: (value) => validateNewTemplateAgentName(value, agents),
-    }),
-  );
-  const name = (answer as string).trim();
+  const preset = initialValue?.trim() || undefined;
+  const answer = await textPrompt(driver, 'template-agent-name', {
+    message: 'Name the new agent',
+    placeholder: 'e.g. EMEA Sales',
+    ...(preset ? { default: preset } : {}),
+    // An empty answer accepts the default; anything typed must be unique.
+    validateValue: (value) => validateNewTemplateAgentName(String(value).trim() || preset, agents),
+  });
+  const name = answer.trim() || preset || '';
   setupLog.userInput('template_agent_name', name);
   return name;
 }
