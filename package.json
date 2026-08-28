@@ -29,7 +29,8 @@
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:skills": "vitest run --config vitest.skills.config.ts"
   },
   "dependencies": {
     "@clack/core": "^1.2.0",

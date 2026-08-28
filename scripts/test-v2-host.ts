@@ -7,7 +7,22 @@
  * 4. Poll outbound.db for messages_out response
  *
  * Usage: pnpm exec tsx scripts/test-v2-host.ts
+ *
+ * Needs the agent image for this checkout (`./container/build.sh`) and, for
+ * step 3 to actually answer, working Claude credentials via the OneCLI vault.
+ * To exercise everything up to and including the container spawn without a
+ * vault, select the harness's offline gateway:
+ *
+ *   NANOCLAW_GATEWAY_PROVIDER=harness-noop pnpm exec tsx scripts/test-v2-host.ts
+ *
+ * The agent then has no credentials, so step 3 times out by design — the run
+ * is still proof that routing, session creation, inbound.db, spec composition
+ * and `docker create/start` all work.
  */
+// Fills the host composition slots (mailbox today). Must come first: every
+// path below resolves a session, and an unregistered mailbox throws.
+import './harness-bootstrap.js';
+
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
@@ -22,24 +37,31 @@ console.log('\n=== Step 1: Init central DB ===');
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import { createAgentGroup } from '../src/db/agent-groups.js';
+import { initGroupFilesystem } from '../src/group-init.js';
 import { createMessagingGroup, createMessagingGroupAgent } from '../src/db/messaging-groups.js';
+import type { AgentGroup } from '../src/types.js';
 
 const centralDb = await initDb(path.join(TEST_DIR, 'v2.db'));
 await runMigrations(centralDb);
 
-// Create groups dir for agent folder mount
-const groupsDir = path.resolve(process.cwd(), 'groups');
-const testGroupDir = path.join(groupsDir, 'test-agent-e2e');
-fs.mkdirSync(testGroupDir, { recursive: true });
-fs.writeFileSync(path.join(testGroupDir, 'CLAUDE.md'), '# Test Agent\nYou are a test agent. Be brief.\n');
-
-await createAgentGroup({
+// The agent group's filesystem AND its container_configs row are both
+// scaffolded by initGroupFilesystem. Hand-rolling the folder is not enough:
+// spawn calls materializeContainerJson, which throws
+// `Container config not found for agent group: ...` when the row is missing.
+const group: AgentGroup = {
   id: 'ag-e2e',
   name: 'E2E Test Agent',
   folder: 'test-agent-e2e',
   agent_provider: 'claude',
   created_at: new Date().toISOString(),
+};
+await createAgentGroup(group);
+await initGroupFilesystem(group, {
+  instructions: 'You are a test agent. Be brief.',
+  provider: 'claude',
 });
+
+const testGroupDir = path.resolve(process.cwd(), 'groups', group.folder);
 
 await createMessagingGroup({
   id: 'mg-e2e',

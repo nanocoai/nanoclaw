@@ -306,6 +306,64 @@ export interface MountValidationResult {
 }
 
 /**
+ * Write-time admissibility check for a mount an operator is about to persist.
+ *
+ * `validateMount` below is the spawn-time gate: it needs the allowlist, needs
+ * the host path to exist NOW, and its verdict is a log line — a rejected mount
+ * is silently dropped from the container. That is correct at spawn (a mount
+ * whose root vanished must not block the agent) but useless as operator
+ * feedback, because by then the row is long since written.
+ *
+ * So this is the subset of the same rules that is stable at write time and
+ * whose violation can never become admissible later:
+ *
+ *   - the container path shape. Spawn always rewrites the mount to
+ *     `/workspace/extra/<containerPath>`, so an absolute container path is not
+ *     "wrong for now", it is unusable forever.
+ *   - the blocked host patterns. `.ssh`, `.local/bin`, `.config/nanoclaw` and
+ *     friends are refused by every allowlist (they are merged in, not
+ *     overridable), so naming one is likewise permanently inadmissible.
+ *
+ * Deliberately NOT checked here: allowed roots, host-path existence, and
+ * read-write eligibility. All three legitimately change between the `ncl` call
+ * and the next spawn (allowlist edited, directory created later), so failing on
+ * them would refuse mounts that will work. Spawn stays the authority.
+ */
+export function checkMountAdmissibleAtWrite(mount: AdditionalMount): { ok: true } | { ok: false; reason: string } {
+  const containerPath = mount.containerPath || path.basename(mount.hostPath);
+  if (!isValidContainerPath(containerPath)) {
+    return {
+      ok: false,
+      reason:
+        `Invalid container path "${containerPath}": additional mounts must use a RELATIVE ` +
+        'container path. Every additional mount is placed under /workspace/extra/, so pass ' +
+        `--container ${JSON.stringify(path.basename(containerPath.replace(/\/+$/, '')) || 'name')} ` +
+        `and the agent will find it at /workspace/extra/${path.basename(containerPath.replace(/\/+$/, '')) || 'name'}. ` +
+        'Absolute paths, "..", and ":" are refused (an absolute path would be silently dropped at spawn).',
+    };
+  }
+
+  // Blocked patterns are merged into every allowlist, so the default list is
+  // the floor whether or not an allowlist exists yet. Match on the resolved
+  // real path when the path exists, on the expanded path when it does not —
+  // the check is a substring test either way.
+  const allowlist = loadMountAllowlist();
+  const blockedPatterns = allowlist?.blockedPatterns ?? DEFAULT_BLOCKED_PATTERNS;
+  const expanded = expandPath(mount.hostPath);
+  const blocked = matchesBlockedPattern(getRealPath(expanded) ?? expanded, blockedPatterns);
+  if (blocked !== null) {
+    return {
+      ok: false,
+      reason:
+        `Host path "${mount.hostPath}" matches blocked pattern "${blocked}" and can never be ` +
+        'mounted. Blocked patterns are merged into every allowlist and cannot be overridden.',
+    };
+  }
+
+  return { ok: true };
+}
+
+/**
  * Validate a single additional mount against the allowlist.
  * Returns validation result with reason.
  */

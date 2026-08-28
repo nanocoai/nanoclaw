@@ -278,16 +278,20 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 
+  // The container path is RELATIVE — spawn places every additional mount at
+  // /workspace/extra/<containerPath>. This test used to pass an absolute
+  // '/home/node/.gmail-mcp', which the CLI accepted and mount security then
+  // silently dropped at spawn, so the fixture taught an unusable shape.
   it('adds a mount idempotently and removes it (host caller)', async () => {
     const GID = 'ag-mount';
     await createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
     await ensureContainerConfig(GID);
-    const args = { id: GID, host: '/data/.gmail-mcp', container: '/home/node/.gmail-mcp', ro: true };
+    const args = { id: GID, host: '/data/gmail-mcp', container: 'gmail-mcp', ro: true };
 
     const add = await dispatch({ id: 'r1', command: 'groups-config-add-mount', args }, { caller: 'host' });
     expect(add.ok).toBe(true);
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([
-      { hostPath: '/data/.gmail-mcp', containerPath: '/home/node/.gmail-mcp', readonly: true },
+      { hostPath: '/data/gmail-mcp', containerPath: 'gmail-mcp', readonly: true },
     ]);
 
     // idempotent: a second add does not duplicate
@@ -298,11 +302,52 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
       {
         id: 'r3',
         command: 'groups-config-remove-mount',
-        args: { id: GID, host: '/data/.gmail-mcp', container: '/home/node/.gmail-mcp' },
+        args: { id: GID, host: '/data/gmail-mcp', container: 'gmail-mcp' },
       },
       { caller: 'host' },
     );
     expect(rm.ok).toBe(true);
+    expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
+  });
+
+  it('rejects an absolute container path instead of persisting a row spawn will drop', async () => {
+    const GID = 'ag-mount-abs';
+    await createAgentGroup({ id: GID, name: 'm2', folder: 'm2', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+
+    const resp = await dispatch(
+      {
+        id: 'r4',
+        command: 'groups-config-add-mount',
+        args: { id: GID, host: '/data/rtk', container: '/usr/local/bin/rtk', ro: true },
+      },
+      { caller: 'host' },
+    );
+
+    expect(resp.ok).toBe(false);
+    const err = (resp as { ok: false; error: { message: string } }).error.message;
+    expect(err).toMatch(/RELATIVE/);
+    expect(err).toMatch(/workspace\/extra/);
+    // and nothing was written
+    expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
+  });
+
+  it('rejects a host path on the blocked list at write time', async () => {
+    const GID = 'ag-mount-blocked';
+    await createAgentGroup({ id: GID, name: 'm3', folder: 'm3', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+
+    const resp = await dispatch(
+      {
+        id: 'r5',
+        command: 'groups-config-add-mount',
+        args: { id: GID, host: '~/.local/bin', container: 'bin', ro: true },
+      },
+      { caller: 'host' },
+    );
+
+    expect(resp.ok).toBe(false);
+    expect((resp as { ok: false; error: { message: string } }).error.message).toMatch(/blocked pattern/);
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
   });
 });

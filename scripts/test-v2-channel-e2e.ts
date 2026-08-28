@@ -5,7 +5,18 @@
  * agent-runner → Claude → messages_out → delivery → mock adapter.deliver()
  *
  * Usage: pnpm exec tsx scripts/test-v2-channel-e2e.ts
+ *
+ * Needs the agent image for this checkout (`./container/build.sh`) and, for a
+ * real answer, Claude credentials via the OneCLI vault. To exercise the whole
+ * pipeline up to and including the container spawn without a vault, select the
+ * harness's offline gateway:
+ *
+ *   NANOCLAW_GATEWAY_PROVIDER=harness-noop pnpm exec tsx scripts/test-v2-channel-e2e.ts
  */
+// Fills the host composition slots (mailbox today). Must come first: every
+// path below resolves a session, and an unregistered mailbox throws.
+import './harness-bootstrap.js';
+
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
@@ -20,24 +31,33 @@ console.log('\n=== Step 1: Init central DB ===');
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import { createAgentGroup } from '../src/db/agent-groups.js';
+import { initGroupFilesystem } from '../src/group-init.js';
 import { createMessagingGroup, createMessagingGroupAgent } from '../src/db/messaging-groups.js';
+import { GROUP_FOLDER_LABEL, LABELS } from '../src/drivers/types.js';
+import { INSTALL_SLUG } from '../src/config.js';
+import type { AgentGroup } from '../src/types.js';
 
 const centralDb = await initDb(path.join(TEST_DIR, 'v2.db'));
 await runMigrations(centralDb);
 
-// Create groups dir for agent folder mount
-const groupsDir = path.resolve(process.cwd(), 'groups');
-const testGroupDir = path.join(groupsDir, 'test-channel-e2e');
-fs.mkdirSync(testGroupDir, { recursive: true });
-fs.writeFileSync(path.join(testGroupDir, 'CLAUDE.md'), '# Test Agent\nYou are a test agent. Be brief.\n');
-
-await createAgentGroup({
+// The agent group's filesystem AND its container_configs row are both
+// scaffolded by initGroupFilesystem. Hand-rolling the folder is not enough:
+// spawn calls materializeContainerJson, which throws
+// `Container config not found for agent group: ...` when the row is missing.
+const group: AgentGroup = {
   id: 'ag-chan',
   name: 'Channel E2E Agent',
   folder: 'test-channel-e2e',
   agent_provider: 'claude',
   created_at: new Date().toISOString(),
+};
+await createAgentGroup(group);
+await initGroupFilesystem(group, {
+  instructions: 'You are a test agent. Be brief.',
+  provider: 'claude',
 });
+
+const testGroupDir = path.resolve(process.cwd(), 'groups', group.folder);
 
 await createMessagingGroup({
   id: 'mg-chan',
@@ -71,7 +91,7 @@ import { routeInbound } from '../src/router.js';
 import { setDeliveryAdapter, startActiveDeliveryPoll, stopDeliveryPolls } from '../src/delivery.js';
 import { getChannelAdapter, registerChannelAdapter, initChannelAdapters } from '../src/channels/channel-registry.js';
 import { findSession } from '../src/db/sessions.js';
-import { inboundDbPath } from '../src/mailbox/sqlite/paths.js';
+import { inboundDbPath, outboundDbPath } from '../src/mailbox/sqlite/paths.js';
 import type { ChannelAdapter, ChannelSetup, OutboundMessage } from '../src/channels/adapter.js';
 
 // Track delivered messages
@@ -150,10 +170,8 @@ console.log('✓ Mock adapter & delivery configured');
 // --- Step 3: Simulate inbound message through adapter ---
 console.log('\n=== Step 3: Simulate inbound message ===');
 
-// This is what a real adapter would do when receiving a platform message
-const adapterSetup = (mockAdapter as { _setup?: ChannelSetup })._setup;
-
-// Call routeInbound directly (simulating onInbound callback)
+// Call routeInbound directly — exactly what the adapter's onInbound callback
+// above does when a real platform message arrives.
 await routeInbound({
   channelType: 'mock',
   platformId: 'mock-channel-1',
@@ -181,7 +199,13 @@ console.log(`✓ Container status: ${session.container_status}`);
 import { execSync } from 'child_process';
 const checkContainerLogs = () => {
   try {
-    const containers = execSync('docker ps -a --filter label=nanoclaw-group-folder=test-channel --format "{{.Names}}"')
+    // Scope to THIS install and this group's folder — the label is
+    // `nanoclaw-group-folder` carrying the full folder name, and a peer
+    // install's containers must never be read (or reported) as ours.
+    const containers = execSync(
+      `docker ps -a --filter label=${LABELS.install}=${INSTALL_SLUG} ` +
+        `--filter label=${GROUP_FOLDER_LABEL}=${group.folder} --format "{{.Names}}"`,
+    )
       .toString()
       .trim();
     for (const name of containers.split('\n').filter(Boolean)) {
@@ -193,8 +217,10 @@ const checkContainerLogs = () => {
   }
 };
 
-const sessDbPath = inboundDbPath('ag-chan', session.id);
-console.log(`✓ Session DB: ${sessDbPath}`);
+const inDbPath = inboundDbPath('ag-chan', session.id);
+const outDbPath = outboundDbPath('ag-chan', session.id);
+console.log(`✓ Inbound DB:  ${inDbPath}`);
+console.log(`✓ Outbound DB: ${outDbPath}`);
 
 // --- Step 4: Wait for delivery through mock adapter ---
 console.log('\n=== Step 4: Waiting for delivery through mock adapter... ===');
@@ -211,13 +237,16 @@ await new Promise<void>((resolve) => {
       console.log(`\n✗ Timed out after ${TIMEOUT_MS / 1000}s`);
       // Check session DB directly
       try {
-        const db = new Database(sessDbPath, { readonly: true });
+        // messages_out lives in outbound.db (the container is its sole
+        // writer); reading it from inbound.db threw and the surrounding catch
+        // swallowed the whole diagnostic.
+        const db = new Database(outDbPath, { readonly: true });
         const out = db.prepare('SELECT * FROM messages_out').all();
         console.log(`  messages_out rows: ${out.length}`);
         if (out.length > 0) console.log('  (messages exist but delivery failed)');
         db.close();
-      } catch {
-        /* ignore */
+      } catch (err) {
+        console.log(`  (could not read outbound DB: ${err})`);
       }
       checkContainerLogs();
       cleanup();
@@ -235,25 +264,35 @@ await new Promise<void>((resolve) => {
 // --- Step 5: Print results ---
 console.log('\n\n=== Results ===');
 
-console.log('\nSession DB:');
+console.log('\nSession DBs:');
 try {
-  const db = new Database(sessDbPath, { readonly: true });
-  const inRows = db.prepare('SELECT * FROM messages_in').all() as Array<Record<string, unknown>>;
-  const outRows = db.prepare('SELECT * FROM messages_out').all() as Array<Record<string, unknown>>;
-  db.close();
+  const inDb = new Database(inDbPath, { readonly: true });
+  const inRows = inDb.prepare('SELECT * FROM messages_in').all() as Array<Record<string, unknown>>;
+  inDb.close();
 
-  console.log(`  messages_in: ${inRows.length} row(s)`);
+  console.log(`  messages_in (inbound.db): ${inRows.length} row(s)`);
   for (const r of inRows) {
     console.log(`    [${r.id}] status=${r.status} kind=${r.kind}`);
   }
-  console.log(`  messages_out: ${outRows.length} row(s)`);
+} catch (err) {
+  console.log(`  (could not read inbound DB: ${err})`);
+}
+
+try {
+  // Separate try/catch per file: the two DBs fail independently, and one
+  // unreadable file must not hide the other's rows.
+  const outDb = new Database(outDbPath, { readonly: true });
+  const outRows = outDb.prepare('SELECT * FROM messages_out').all() as Array<Record<string, unknown>>;
+  outDb.close();
+
+  console.log(`  messages_out (outbound.db): ${outRows.length} row(s)`);
   for (const r of outRows) {
     const content = JSON.parse(r.content as string);
-    console.log(`    [${r.id}] kind=${r.kind} delivered=${r.delivered}`);
+    console.log(`    [${r.id}] kind=${r.kind}`);
     console.log(`    → ${content.text}`);
   }
 } catch (err) {
-  console.log(`  (could not read session DB: ${err})`);
+  console.log(`  (could not read outbound DB: ${err})`);
 }
 
 console.log('\nDelivered through mock adapter:');

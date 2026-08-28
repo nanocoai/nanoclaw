@@ -612,7 +612,10 @@ export function dockerEventToSessionEvent(doc: unknown, installSlug: string): Se
 export function agentContainerName(spec: SessionSpec): string {
   const raw = `${spec.key.installSlug}-${spec.key.sessionId}`.replaceAll(/[^a-zA-Z0-9_.-]/g, '-');
   if (raw.length <= 48) return `ncl-${raw}`;
-  const hash = createHash('sha256').update(`${spec.key.installSlug} ${spec.key.sessionId}`).digest('hex').slice(0, 8);
+  const hash = createHash('sha256')
+    .update(`${spec.key.installSlug}\u0000${spec.key.sessionId}`)
+    .digest('hex')
+    .slice(0, 8);
   return `ncl-${raw.slice(0, 39)}-${hash}`;
 }
 

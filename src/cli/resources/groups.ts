@@ -21,6 +21,7 @@ import {
 import { getSessionDriver } from '../../drivers/index.js';
 import { assertValidGroupFolder, groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
+import { checkMountAdmissibleAtWrite } from '../../modules/mount-security/index.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
 import {
   formatRestampResult,
@@ -558,7 +559,9 @@ registerResource({
       description:
         "Mount a host directory into a group's containers. OPERATOR-ONLY — never runnable from " +
         'inside a container (mounting host paths is a filesystem-access boundary). Requires ' +
-        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <container-path> [--ro].',
+        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> ' +
+        '--container <relative-name> [--ro]. The container path must be RELATIVE — the mount ' +
+        'lands at /workspace/extra/<relative-name>.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -568,6 +571,13 @@ registerResource({
 
         const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
+
+        // Fail here rather than persist a row that spawn will silently drop.
+        // Only the permanently-inadmissible rules are enforced at write time;
+        // see checkMountAdmissibleAtWrite for what is deliberately left to
+        // spawn (allowed roots, host-path existence, rw eligibility).
+        const admissible = checkMountAdmissibleAtWrite({ hostPath, containerPath });
+        if (!admissible.ok) throw new Error(admissible.reason);
 
         const mount: AdditionalMountConfig = {
           hostPath,

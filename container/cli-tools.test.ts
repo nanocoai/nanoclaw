@@ -52,12 +52,32 @@ describe('cli-tools manifest', () => {
     }
   });
 
-  it('bakes in nothing that a skill is meant to add on request', () => {
-    // Regression guard for the opt-in boundary. `vercel` was baked in and is
-    // now added by /add-vercel; anything reintroducing it here silently puts a
-    // deployment CLI, and its credential surface, into every agent again.
-    const names = manifest.map((t) => t.name);
-    expect(names).not.toContain('vercel');
+  it('carries only the keys the installer reads, correctly typed', () => {
+    // The installer consumes exactly `name`, `version` and `onlyBuilt`. A key
+    // it does not read is either a typo (`onlyBuild`, `pin`) that silently
+    // does nothing, or an expectation the seam does not honour. Deliberately
+    // NOT a name blacklist: this manifest is the opt-in surface every
+    // `/add-<cli>` skill appends to, so a test that named specific tools as
+    // forbidden could never be green after a legitimate install.
+    const allowed = new Set(['name', 'version', 'onlyBuilt']);
+    for (const tool of manifest) {
+      for (const key of Object.keys(tool)) {
+        expect(allowed.has(key), `${(tool as { name?: string }).name}: unknown manifest key "${key}"`).toBe(true);
+      }
+      if ('onlyBuilt' in tool) {
+        expect(typeof tool.onlyBuilt, `${tool.name}: onlyBuilt must be a boolean`).toBe('boolean');
+      }
+    }
+  });
+
+  it('every name is an installable npm package name (the spec is name@version)', () => {
+    // `pnpm install -g <name>@<version>` word-splits on spaces and reads `@`
+    // as the version delimiter, so a scope typo or an embedded range in the
+    // name installs the wrong thing (or nothing) with no build error.
+    const npmName = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
+    for (const tool of manifest) {
+      expect(tool.name, `"${tool.name}" is not a valid npm package name`).toMatch(npmName);
+    }
   });
 
   it('is wired into the Dockerfile build (COPY manifest + run installer)', () => {

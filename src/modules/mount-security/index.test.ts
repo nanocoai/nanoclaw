@@ -28,7 +28,7 @@ vi.mock('../../config.js', async () => {
   };
 });
 
-import { loadMountAllowlist, validateMount } from './index.js';
+import { checkMountAdmissibleAtWrite, loadMountAllowlist, validateMount } from './index.js';
 
 let tmpDir: string;
 let configFile: string;
@@ -115,5 +115,44 @@ describe('loadMountAllowlist', () => {
   it('returns null when the allowlist file is missing', () => {
     // No file written.
     expect(loadMountAllowlist()).toBeNull();
+  });
+});
+
+describe('checkMountAdmissibleAtWrite', () => {
+  it('rejects an absolute container path and names the relative rule', () => {
+    writeAllowlist({ allowedRoots: [{ path: projectsDir, allowReadWrite: true }], blockedPatterns: [] });
+
+    const result = checkMountAdmissibleAtWrite({ hostPath: repoDir, containerPath: '/usr/local/bin/rtk' });
+    expect(result.ok).toBe(false);
+    expect((result as { ok: false; reason: string }).reason).toMatch(/RELATIVE/);
+    expect((result as { ok: false; reason: string }).reason).toMatch(/\/workspace\/extra\/rtk/);
+  });
+
+  it('rejects a traversing or colon-bearing container path', () => {
+    writeAllowlist({ allowedRoots: [{ path: projectsDir, allowReadWrite: true }], blockedPatterns: [] });
+
+    expect(checkMountAdmissibleAtWrite({ hostPath: repoDir, containerPath: '../escape' }).ok).toBe(false);
+    expect(checkMountAdmissibleAtWrite({ hostPath: repoDir, containerPath: 'repo:rw' }).ok).toBe(false);
+  });
+
+  it('rejects a blocked host pattern even with no allowlist on disk', () => {
+    // No allowlist file: the default blocked list is still the floor, because
+    // loadMountAllowlist merges it into every allowlist it does parse.
+    const result = checkMountAdmissibleAtWrite({ hostPath: path.join(tmpDir, '.local', 'bin'), containerPath: 'bin' });
+    expect(result.ok).toBe(false);
+    expect((result as { ok: false; reason: string }).reason).toMatch(/blocked pattern "\.local\/bin"/);
+  });
+
+  it('accepts a relative container path, leaving allowed-root and existence checks to spawn', () => {
+    // Deliberately NOT under any allowed root, and the host path does not
+    // exist: both are spawn-time concerns that can legitimately change before
+    // the next spawn, so the write-time check must not refuse them.
+    expect(checkMountAdmissibleAtWrite({ hostPath: '/data/gmail-mcp', containerPath: 'gmail-mcp' })).toEqual({
+      ok: true,
+    });
+  });
+
+  it('derives the container path from the host basename when none is given', () => {
+    expect(checkMountAdmissibleAtWrite({ hostPath: repoDir })).toEqual({ ok: true });
   });
 });

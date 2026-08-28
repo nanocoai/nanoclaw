@@ -1,14 +1,18 @@
-# install-slug.sh — shell mirror of setup/lib/install-slug.ts.
+# install-slug.sh — shell mirror of src/install-slug.ts.
 #
 # Source this file after $PROJECT_ROOT is set:
 #
 #   source "$PROJECT_ROOT/setup/lib/install-slug.sh"
-#   label=$(launchd_label)        # com.nanoclaw-v2-<slug>
-#   unit=$(systemd_unit)          # nanoclaw-v2-<slug>
-#   image=$(container_image_base) # nanoclaw-agent-v2-<slug>
+#   label=$(launchd_label)        # com.nanoclaw-v2-<slug>  <- getLaunchdLabel
+#   unit=$(systemd_unit)          # nanoclaw-v2-<slug>      <- getSystemdUnit
+#   image=$(container_image_base) # nanoclaw-agent-v2-<slug> <- getContainerImageBase
 #
-# Slug is sha1(PROJECT_ROOT)[:8] — must match the TS helper exactly so both
-# halves of setup name things consistently.
+# Slug is sha1(PROJECT_ROOT)[:8] — must match `getInstallSlug` in
+# src/install-slug.ts exactly. The lockstep now spans src/ (the host and the
+# CLI) and setup/ + container/build.sh (the shell half), not just setup: the
+# host resolves the image tag it spawns from the TS helper while build.sh tags
+# the image from this one, so a divergence means the host looks for an image
+# nobody built. src/install-slug.test.ts asserts the two halves agree.
 
 _nanoclaw_install_slug() {
   local root="${NANOCLAW_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
