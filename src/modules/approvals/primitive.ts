@@ -21,6 +21,7 @@
  * exposing just user-roles/user-dms) is more churn than it's worth. Revisit
  * if either module becomes genuinely optional (see REFACTOR_PLAN open q #3).
  */
+import { recordAgentSent } from '../../agent-context.js';
 import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { createPendingApproval, deletePendingApproval, getSession } from '../../db/sessions.js';
@@ -277,6 +278,15 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
           question,
           options: APPROVAL_OPTIONS,
         }),
+      );
+      // The approval card is composed by the host, not the agent. Mirror its
+      // text so the approver's reply ("why?", "what is this for?") has a
+      // referent in the agent's context.
+      recordAgentSent(
+        target.messagingGroup.channel_type,
+        target.messagingGroup.platform_id,
+        `${title}: ${question}`,
+        target.messagingGroup.instance ?? undefined,
       );
     } catch (err) {
       log.error('Failed to deliver approval card', { action, approvalId, err });

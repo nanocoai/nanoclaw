@@ -18,6 +18,7 @@
  * Reuses, not reinvents: the agent-naming prompt-then-capture pattern
  * (in-memory map + next-DM interceptor) and the shared finalizeReject path.
  */
+import { recordAgentSent } from '../../agent-context.js';
 import type { InboundEvent } from '../../channels/adapter.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import {
@@ -101,6 +102,9 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
 
   try {
     await adapter.deliver(dm.channel_type, dm.platform_id, null, 'chat-sdk', JSON.stringify({ text: PROMPT_TEXT }));
+    // The agent did not compose this prompt, so without mirroring it the
+    // approver's free-text reason arrives as a reply to nothing.
+    recordAgentSent(dm.channel_type, dm.platform_id, PROMPT_TEXT);
   } catch (err) {
     log.error('reject-with-reason: reason prompt delivery failed, finalizing plain reject', {
       approvalId: approval.approval_id,
