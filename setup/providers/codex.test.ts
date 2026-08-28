@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock child_process so runCodexLoginAuth never spawns a real codex CLI; the
 // spawn stand-in plays `codex login` writing auth.json into whatever
@@ -20,7 +20,30 @@ vi.mock('child_process', () => ({
 // Keep the auth flow's structured logging out of logs/setup.log.
 vi.mock('../logs.js', () => ({ step: vi.fn(), userInput: vi.fn() }));
 
-import { buildCodexFailurePrompt, runCodexLoginAuth, verifyCodexInstall } from './codex.js';
+// Drive both prompts in runCodexAuthStep — the keep/reconnect choice and the
+// auth-method picker — without an interactive session.
+const mockBrightSelect = vi.fn();
+vi.mock('../lib/bright-select.js', () => ({
+  brightSelect: (...args: unknown[]) => mockBrightSelect(...args),
+}));
+
+// Stub p.password for the API-key path; leave everything else (p.log,
+// p.isCancel, p.confirm, p.cancel) real so the existing runCodexLoginAuth
+// tests keep working unchanged.
+const mockPassword = vi.fn();
+vi.mock('@clack/prompts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@clack/prompts')>();
+  return {
+    ...actual,
+    password: (...args: unknown[]) => mockPassword(...args),
+  };
+});
+
+import { buildCodexFailurePrompt, runCodexAuthStep, runCodexLoginAuth, verifyCodexInstall } from './codex.js';
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 // Structural guard for the codex payload wiring: provider files, both barrel
 // imports, and the pinned Dockerfile install. Goes red if any of them is
@@ -97,5 +120,127 @@ describe('runCodexLoginAuth', () => {
 
     // The isolated dir holds a live credential — gone once vaulted.
     expect(fs.existsSync(codexHome!)).toBe(false);
+  });
+
+  it('updates an existing vault secret when reconnecting', async () => {
+    mockSpawnSync.mockReturnValue({ status: 0, stdout: '', stderr: '' });
+    mockExecFileSync.mockReturnValue('');
+
+    let loginEnv: NodeJS.ProcessEnv | undefined;
+    mockSpawn.mockImplementation((...args: unknown[]) => {
+      const opts = args[2] as { env?: NodeJS.ProcessEnv };
+      loginEnv = opts.env;
+      fs.writeFileSync(path.join(opts.env!.CODEX_HOME!, 'auth.json'), '{"tokens":{"access":"fresh"}}');
+      const child = new EventEmitter();
+      setImmediate(() => child.emit('close', 0));
+      return child;
+    });
+
+    await runCodexLoginAuth('browser', {
+      id: 'secret-123',
+      name: 'OpenAI',
+      type: 'openai',
+      hostPattern: 'chatgpt.com',
+    });
+
+    const vaultCall = mockExecFileSync.mock.calls.find((c) => {
+      const args = c[1] as string[];
+      return c[0] === 'onecli' && args[0] === 'secrets' && args[1] === 'update';
+    });
+    expect(vaultCall).toBeDefined();
+    const vaultArgs = vaultCall![1] as string[];
+    expect(vaultArgs).toContain('--id');
+    expect(vaultArgs[vaultArgs.indexOf('--id') + 1]).toBe('secret-123');
+    expect(vaultArgs[vaultArgs.indexOf('--value') + 1]).toBe('{"tokens":{"access":"fresh"}}');
+    expect(fs.existsSync(loginEnv!.CODEX_HOME!)).toBe(false);
+  });
+});
+
+// Recovery-flow coverage: when an OpenAI/Codex secret already exists in the
+// vault, runCodexAuthStep must surface a keep/reconnect choice rather than
+// short-circuit as success. Stale credentials would otherwise leave the only
+// documented recovery path (re-run the auth step) unreachable.
+describe('runCodexAuthStep', () => {
+  // Stub `onecli secrets list` to return one matching OpenAI secret. Other
+  // onecli calls (secrets create/update) return empty on success.
+  function withExistingSecret(
+    secret = { id: 'secret-123', name: 'OpenAI', type: 'openai', hostPattern: 'chatgpt.com' },
+  ): void {
+    mockExecFileSync.mockImplementation((...args: unknown[]) => {
+      const cmd = args[0] as string;
+      const cmdArgs = args[1] as string[];
+      if (cmd === 'onecli' && cmdArgs[0] === 'secrets' && cmdArgs[1] === 'list') {
+        return JSON.stringify({ data: [secret] });
+      }
+      return '';
+    });
+  }
+
+  it('offers keep/reconnect when a secret already exists and skips when user picks keep', async () => {
+    withExistingSecret();
+    mockBrightSelect.mockResolvedValueOnce('keep');
+
+    await runCodexAuthStep();
+
+    // The user saw the keep/reconnect prompt.
+    expect(mockBrightSelect).toHaveBeenCalledTimes(1);
+    const promptArgs = mockBrightSelect.mock.calls[0][0] as { message: string };
+    expect(promptArgs.message).toContain('already exists in OneCLI');
+
+    // No login spawned, no vault mutation.
+    expect(mockSpawn).not.toHaveBeenCalled();
+    const vaultWrite = mockExecFileSync.mock.calls.find((c) => {
+      const cmdArgs = c[1] as string[];
+      return c[0] === 'onecli' && cmdArgs[0] === 'secrets' && (cmdArgs[1] === 'create' || cmdArgs[1] === 'update');
+    });
+    expect(vaultWrite).toBeUndefined();
+  });
+
+  it('routes reconnect + browser through runCodexLoginAuth(existing) and writes secrets update --id', async () => {
+    withExistingSecret();
+    mockBrightSelect
+      .mockResolvedValueOnce('reconnect') // keep/reconnect prompt
+      .mockResolvedValueOnce('browser'); // method picker
+    mockSpawnSync.mockReturnValue({ status: 0, stdout: '', stderr: '' });
+    mockSpawn.mockImplementation((...args: unknown[]) => {
+      const opts = args[2] as { env?: NodeJS.ProcessEnv };
+      fs.writeFileSync(path.join(opts.env!.CODEX_HOME!, 'auth.json'), '{"tokens":{"access":"fresh"}}');
+      const child = new EventEmitter();
+      setImmediate(() => child.emit('close', 0));
+      return child;
+    });
+
+    await runCodexAuthStep();
+
+    const vaultCall = mockExecFileSync.mock.calls.find((c) => {
+      const cmdArgs = c[1] as string[];
+      return c[0] === 'onecli' && cmdArgs[0] === 'secrets' && cmdArgs[1] === 'update';
+    });
+    expect(vaultCall).toBeDefined();
+    const vaultArgs = vaultCall![1] as string[];
+    expect(vaultArgs[vaultArgs.indexOf('--id') + 1]).toBe('secret-123');
+    expect(vaultArgs[vaultArgs.indexOf('--value') + 1]).toBe('{"tokens":{"access":"fresh"}}');
+  });
+
+  it('routes reconnect + api through runCodexApiKeyAuth(existing) and writes secrets update --id with the new key', async () => {
+    withExistingSecret();
+    mockBrightSelect
+      .mockResolvedValueOnce('reconnect')
+      .mockResolvedValueOnce('api');
+    mockPassword.mockResolvedValueOnce('sk-fresh-key');
+
+    await runCodexAuthStep();
+
+    const vaultCall = mockExecFileSync.mock.calls.find((c) => {
+      const cmdArgs = c[1] as string[];
+      return c[0] === 'onecli' && cmdArgs[0] === 'secrets' && cmdArgs[1] === 'update';
+    });
+    expect(vaultCall).toBeDefined();
+    const vaultArgs = vaultCall![1] as string[];
+    expect(vaultArgs[vaultArgs.indexOf('--id') + 1]).toBe('secret-123');
+    expect(vaultArgs[vaultArgs.indexOf('--value') + 1]).toBe('sk-fresh-key');
+
+    // The login flow never spawned a real codex CLI on the API-key path.
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 });

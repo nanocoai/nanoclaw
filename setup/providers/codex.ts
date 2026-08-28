@@ -66,11 +66,11 @@ function findOpenAISecret(secrets: OnecliSecret[]): OnecliSecret | undefined {
   });
 }
 
-function openAISecretExists(): boolean {
+function existingOpenAISecret(): OnecliSecret | undefined {
   try {
-    return findOpenAISecret(listSecrets()) !== undefined;
+    return findOpenAISecret(listSecrets());
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -85,10 +85,31 @@ function ensureAnswer<T>(value: T | symbol): T {
 }
 
 export async function runCodexAuthStep(): Promise<void> {
-  if (openAISecretExists()) {
-    p.log.success(brandBody('Your OpenAI account is already connected.'));
-    setupLog.step('auth', 'skipped', 0, { REASON: 'openai-secret-already-present', PROVIDER: 'codex' });
-    return;
+  const existing = existingOpenAISecret();
+  if (existing) {
+    const action = ensureAnswer(
+      await brightSelect<'keep' | 'reconnect'>({
+        message: 'An OpenAI/Codex credential already exists in OneCLI. What should setup do?',
+        options: [
+          {
+            value: 'keep',
+            label: 'Keep existing credential',
+            hint: 'use this if Codex is already working',
+          },
+          {
+            value: 'reconnect',
+            label: 'Reconnect OpenAI account',
+            hint: 'refresh a stale or revoked ChatGPT login',
+          },
+        ],
+      }),
+    );
+    setupLog.userInput('codex_existing_secret_action', action);
+    if (action === 'keep') {
+      p.log.success(brandBody('Your OpenAI account is already connected.'));
+      setupLog.step('auth', 'skipped', 0, { REASON: 'openai-secret-already-present', PROVIDER: 'codex' });
+      return;
+    }
   }
 
   const method = ensureAnswer(
@@ -134,14 +155,14 @@ export async function runCodexAuthStep(): Promise<void> {
   }
 
   if (method === 'api') {
-    await runCodexApiKeyAuth();
+    await runCodexApiKeyAuth(existing);
     return;
   }
 
-  await runCodexLoginAuth(method);
+  await runCodexLoginAuth(method, existing);
 }
 
-async function runCodexApiKeyAuth(): Promise<void> {
+async function runCodexApiKeyAuth(existing?: OnecliSecret): Promise<void> {
   const key = ensureAnswer(
     await p.password({
       message: 'Paste your OpenAI API key (sk-…)',
@@ -150,22 +171,30 @@ async function runCodexApiKeyAuth(): Promise<void> {
   ) as string;
 
   try {
-    execFileSync(
-      'onecli',
-      [
-        'secrets',
-        'create',
-        '--name',
-        'Codex',
-        '--type',
-        'openai',
-        '--value',
-        key.trim(),
-        '--host-pattern',
-        'api.openai.com',
-      ],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
-    );
+    if (existing) {
+      execFileSync(
+        'onecli',
+        ['secrets', 'update', '--id', existing.id, '--value', key.trim(), '--host-pattern', 'api.openai.com'],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+    } else {
+      execFileSync(
+        'onecli',
+        [
+          'secrets',
+          'create',
+          '--name',
+          'Codex',
+          '--type',
+          'openai',
+          '--value',
+          key.trim(),
+          '--host-pattern',
+          'api.openai.com',
+        ],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+    }
   } catch (err) {
     setupLog.step('auth', 'failed', 0, { PROVIDER: 'codex', METHOD: 'api', ERROR: String(err) });
     p.log.error(
@@ -179,7 +208,7 @@ async function runCodexApiKeyAuth(): Promise<void> {
   p.log.success(brandBody('OpenAI account connected.'));
 }
 
-export async function runCodexLoginAuth(method: 'browser' | 'device'): Promise<void> {
+export async function runCodexLoginAuth(method: 'browser' | 'device', existing?: OnecliSecret): Promise<void> {
   const codexCheck = spawnSync('codex', ['--version'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
   if (codexCheck.status !== 0) {
     p.log.error(
@@ -237,22 +266,39 @@ export async function runCodexLoginAuth(method: 'browser' | 'device'): Promise<v
   }
 
   try {
-    execFileSync(
-      'onecli',
-      [
-        'secrets',
-        'create',
-        '--name',
-        'Codex',
-        '--type',
-        'openai',
-        '--file',
-        authJsonPath,
-        '--host-pattern',
-        'chatgpt.com',
-      ],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
-    );
+    if (existing) {
+      execFileSync(
+        'onecli',
+        [
+          'secrets',
+          'update',
+          '--id',
+          existing.id,
+          '--value',
+          fs.readFileSync(authJsonPath, 'utf-8'),
+          '--host-pattern',
+          'chatgpt.com',
+        ],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+    } else {
+      execFileSync(
+        'onecli',
+        [
+          'secrets',
+          'create',
+          '--name',
+          'Codex',
+          '--type',
+          'openai',
+          '--file',
+          authJsonPath,
+          '--host-pattern',
+          'chatgpt.com',
+        ],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+    }
   } catch (err) {
     removeLoginHome();
     setupLog.step('auth', 'failed', durationMs, { PROVIDER: 'codex', METHOD: method, ERROR: String(err) });
