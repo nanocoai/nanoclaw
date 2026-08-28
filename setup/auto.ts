@@ -51,10 +51,8 @@ import { setPickedProvider } from './lib/picked-provider.js';
 import {
   AGENT_IMAGE_PIN,
   AGENT_IMAGE_REF_ENV_KEY,
-  REGISTRY_LOGIN_SCRIPT,
   imageSourceDecided,
   readAgentImagePin,
-  loginScriptAvailable,
   readImageSource,
   writeImageSource,
   type ImageSource,
@@ -82,7 +80,6 @@ import type { AgentGroup } from '../src/types.js';
 import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-claude.js';
 import * as setupLog from './logs.js';
 import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
-import { withSecretFile } from './lib/secret-file.js';
 import { emit as phEmit } from './lib/diagnostics.js';
 import {
   accentGreen,
@@ -98,6 +95,10 @@ import {
 import { isValidTimezone } from '../src/timezone.js';
 import { DEFAULT_AGENT_PROVIDER, TEMPLATES_DIR } from '../src/config.js';
 import { SocketTransport } from '../src/cli/socket-client.js';
+import { registerSensitiveValue } from './lib/redaction.js';
+import { childEnvWithoutSetupSecrets, withSecretFile } from './lib/secret-file.js';
+import { runClaudeSubscriptionMachineAuth } from './lib/claude-subscription-auth.js';
+import { runRegistryLoginWithDriver } from './registry-login.js';
 import {
   applyTemplatePick,
   clearTemplatePick,
@@ -120,7 +121,7 @@ const RUN_START = Date.now();
 /** How an operator reaches the registry step again once setup has finished. */
 const REGISTRY_STEP = 'pnpm exec tsx setup/index.ts --step registry';
 
-/** `setup/registry-login.sh`'s "nothing was signed in, and that is fine" code. */
+/** Metric-compatible code for "nothing was signed in, and that is fine". */
 const LOGIN_EXIT_SKIPPED = 2;
 
 type ChannelChoice =
@@ -317,8 +318,9 @@ async function main(driver: SetupDriver): Promise<void> {
       brandBody(dimWrap('Your assistant lives in its own sandbox. It can only see what you explicitly share.', 4)),
     );
     // Asked before the step runs, because the step is what acts on the answer.
-    await chooseImageSource();
-    p.log.message(
+    await chooseImageSource(driver);
+    driver.log(
+      'message',
       brandBody(
         dimWrap(
           readImageSource() === 'hardened'
@@ -1436,7 +1438,7 @@ async function askNewTemplateAgentName(
  * Returns having done nothing when the question is already settled, which also
  * covers `NANOCLAW_HARDENED_IMAGE=true` passed in by a packaged flow.
  */
-async function chooseImageSource(): Promise<void> {
+async function chooseImageSource(driver: SetupDriver): Promise<void> {
   if (imageSourceDecided()) return;
 
   // The runtime pick happens later (the auth step), so this is the best signal
@@ -1448,7 +1450,8 @@ async function chooseImageSource(): Promise<void> {
     'claude'
   ).toLowerCase();
   if (plannedProvider !== 'claude') {
-    p.log.info(
+    driver.log(
+      'info',
       brandBody(
         `Building the sandbox here — the pre-built image is Claude-only, and ${plannedProvider} needs an image of its own.`,
       ),
@@ -1462,7 +1465,8 @@ async function chooseImageSource(): Promise<void> {
   // good answer cannot be honoured.
   if (!readAgentImagePin()) return;
 
-  p.log.message(
+  driver.log(
+    'message',
     brandBody(
       dimWrap(
         "Your assistant's sandbox contains a browser and a language runtime — Chromium, Node, Bun and a handful of tools. Isolation keeps a misbehaving agent away from your machine, but it does nothing about known vulnerabilities in that software itself.",
@@ -1470,7 +1474,8 @@ async function chooseImageSource(): Promise<void> {
       ),
     ),
   );
-  p.log.message(
+  driver.log(
+    'message',
     brandBody(
       dimWrap(
         'Our partner Echo (echo.ai) rebuilds those components from scratch with only the essentials and patches what remains, which takes the known-vulnerability count from thousands to near zero. Building here instead gives you the same software, straight from its public base image.',
@@ -1478,7 +1483,8 @@ async function chooseImageSource(): Promise<void> {
       ),
     ),
   );
-  p.log.message(
+  driver.log(
+    'message',
     brandBody(
       dimWrap(
         'Fetching it means authenticating with NanoClaw: we record your email address and that you fetched an image, nothing else. Building sends nothing at all.',
@@ -1487,67 +1493,71 @@ async function chooseImageSource(): Promise<void> {
     ),
   );
 
-  const choice = ensureAnswer(
-    await brightSelect<ImageSource>({
-      message: "Where should your assistant's sandbox image come from?",
-      options: [
-        {
-          value: 'hardened',
-          label: 'Fetch the hardened image, built by Echo',
-          hint: 'recommended — patched components; needs authentication',
-        },
-        {
-          value: 'local',
-          label: 'Build it here',
-          hint: 'no account, nothing recorded; takes 3-10 min',
-        },
-      ],
-      initialValue: 'hardened',
-    }),
-  ) as ImageSource;
+  const choice = await selectPrompt(driver, 'image-source', {
+    message: "Where should your assistant's sandbox image come from?",
+    options: [
+      {
+        value: 'hardened',
+        label: 'Fetch the hardened image, built by Echo',
+        hint: 'recommended - patched components; needs authentication',
+      },
+      {
+        value: 'local',
+        label: 'Build it here',
+        hint: 'no account, nothing recorded; takes 3-10 min',
+      },
+    ],
+    initialValue: 'hardened',
+  });
   setupLog.userInput('image_source', choice);
   phEmit('image_source_chosen', { source: choice });
 
   writeImageSource(choice);
   if (choice === 'local') return;
 
-  if (!loginScriptAvailable()) {
-    p.log.warn(brandBody(`This copy of NanoClaw has no ${REGISTRY_LOGIN_SCRIPT} — building the sandbox here instead.`));
-    writeImageSource('local');
-    return;
-  }
-
-  p.log.step(brandBody('Authenticating with NanoClaw…'));
-  console.log(k.dim('   (a code appears below; finish in your browser)'));
-  console.log();
+  driver.log('step', brandBody('Authenticating with NanoClaw…'));
   const start = Date.now();
-  const code = await runInheritScript('bash', [REGISTRY_LOGIN_SCRIPT]);
+  const result = await runRegistryLoginWithDriver(driver);
   const durationMs = Date.now() - start;
-  console.log();
-
-  if (code !== 0) {
-    // Falling back rather than aborting: a local build is a complete, supported
-    // install, and stranding someone at the first step because a device flow
-    // timed out would be a worse trade than the patch currency they lose.
-    // The script exits 2 for a deliberate skip, which is not a failure and
-    // should not read as one in the log.
-    const skipped = code === LOGIN_EXIT_SKIPPED;
-    setupLog.step('registry-login', skipped ? 'skipped' : 'failed', durationMs, { EXIT_CODE: code });
-    phEmit('registry_login_declined', { exit_code: code, skipped });
-    writeImageSource('local');
-    p.log.warn(
-      brandBody(
-        skipped
-          ? 'Not authenticated — building the sandbox here instead.'
-          : "Authentication didn't finish — building the sandbox here instead.",
-      ),
+  if (result.kind !== 'ready') {
+    useLocalImageAfterRegistryLogin(
+      driver,
+      result.kind === 'skipped',
+      result.kind === 'skipped' ? LOGIN_EXIT_SKIPPED : 1,
+      durationMs,
+      { REASON: result.reason },
     );
-    p.log.message(k.dim(`Re-run setup to try again, or check with \`${REGISTRY_STEP} -- --status\`.`));
     return;
   }
+  finishRegistryLogin(driver, durationMs, result.method);
+}
 
-  setupLog.step('registry-login', 'interactive', durationMs, {});
-  p.log.success(brandBody("Authenticated. Your assistant's sandbox will be fetched, not built."));
+function useLocalImageAfterRegistryLogin(
+  driver: SetupDriver,
+  skipped: boolean,
+  exitCode: number,
+  durationMs: number,
+  fields: Record<string, string | number>,
+): void {
+  // A local build is a complete supported install, so a declined or failed
+  // registry sign-in never strands setup.
+  setupLog.step('registry-login', skipped ? 'skipped' : 'failed', durationMs, fields);
+  phEmit('registry_login_declined', { exit_code: exitCode, skipped });
+  writeImageSource('local');
+  driver.log(
+    'warn',
+    brandBody(
+      skipped
+        ? 'Not authenticated - building the sandbox here instead.'
+        : "Authentication didn't finish - building the sandbox here instead.",
+    ),
+  );
+  driver.log('message', k.dim(`Re-run setup to try again, or check with \`${REGISTRY_STEP} -- --status\`.`));
+}
+
+function finishRegistryLogin(driver: SetupDriver, durationMs: number, method?: string): void {
+  setupLog.step('registry-login', 'interactive', durationMs, method ? { METHOD: method } : {});
+  driver.log('success', brandBody("Authenticated. Your assistant's sandbox will be fetched, not built."));
 }
 
 async function askAgentProviderChoice(): Promise<string> {
