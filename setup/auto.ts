@@ -117,6 +117,7 @@ import {
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI_AGENT_NAME = 'Terminal Agent';
 const RUN_START = Date.now();
+const MAX_MACHINE_CHAT_OUTPUT_BYTES = 64 * 1024;
 
 /** How an operator reaches the registry step again once setup has finished. */
 const REGISTRY_STEP = 'pnpm exec tsx setup/index.ts --step registry';
@@ -655,13 +656,13 @@ async function main(driver: SetupDriver): Promise<void> {
   async function resolveDisplayName(): Promise<string> {
     if (displayName) return displayName;
     const preset = process.env.NANOCLAW_DISPLAY_NAME?.trim();
-    const existing = await detectExistingDisplayName(process.cwd());
+    const existing = await detectExistingDisplayName(PROJECT_ROOT);
     const fallback = process.env.USER?.trim() || 'Operator';
     displayName = preset || existing || (await askDisplayName(driver, fallback));
     return displayName;
   }
 
-  if (!skip.has('cli-agent') && (await detectRegisteredGroups(process.cwd()))) {
+  if (!skip.has('cli-agent') && (await detectRegisteredGroups(PROJECT_ROOT))) {
     skip.add('cli-agent');
     skip.add('first-chat');
   }
@@ -675,16 +676,20 @@ async function main(driver: SetupDriver): Promise<void> {
         done: 'Assistant wired up.',
       },
       ['--display-name', displayName!, '--agent-name', CLI_AGENT_NAME, '--folder', PING_AGENT_FOLDER],
+      driver,
     );
     if (!res.ok) {
       await fail(
         'cli-agent',
         "Couldn't bring your assistant online.",
         `You can retry later with \`pnpm exec tsx scripts/init-cli-agent.ts --display-name "${displayName!}" --agent-name "${CLI_AGENT_NAME}"\`.`,
+        undefined,
+        driver,
       );
     }
     if (!skip.has('first-chat')) {
-      p.log.message(
+      driver.log(
+        'message',
         brandBody(
           dimWrap(
             "Your assistant runs in an isolated sandbox. I'm going to send it a quick test message (ping) and wait for a reply (pong) to confirm it's responding. First startup typically takes 30–60 seconds while the sandbox warms up.",
@@ -692,7 +697,7 @@ async function main(driver: SetupDriver): Promise<void> {
           ),
         ),
       );
-      const ping = await confirmAssistantResponds();
+      const ping = await confirmAssistantResponds(driver);
       if (ping === 'ok') {
         phEmit('first_chat_ready');
         const cleanupRawLog = setupLog.stepRawLog('cleanup-cli-agent');
@@ -701,6 +706,8 @@ async function main(driver: SetupDriver): Promise<void> {
           'pnpm',
           ['exec', 'tsx', 'scripts/delete-cli-agent.ts', '--folder', PING_AGENT_FOLDER],
           cleanupRawLog,
+          undefined,
+          driver,
         );
         setupLog.step(
           'cleanup-cli-agent',
@@ -710,28 +717,27 @@ async function main(driver: SetupDriver): Promise<void> {
           cleanupRawLog,
         );
         if (!cleanup.ok) {
-          p.log.warn(
+          driver.log(
+            'warn',
             brandBody(
               `Couldn't clean up the test agent — it may still appear in your agent list. See ${cleanupRawLog} for details.`,
             ),
           );
         }
-        const next = ensureAnswer(
-          await brightSelect<'continue' | 'chat'>({
-            message: 'What next?',
-            options: [
-              {
-                value: 'continue',
-                label: 'Continue with setup',
-                hint: 'recommended',
-              },
-              {
-                value: 'chat',
-                label: 'Pause here and chat with your agent from the terminal',
-              },
-            ],
-          }),
-        ) as 'continue' | 'chat';
+        const next = await selectPrompt(driver, 'first-chat-next', {
+          message: 'What next?',
+          options: [
+            {
+              value: 'continue',
+              label: 'Continue with setup',
+              hint: 'recommended',
+            },
+            {
+              value: 'chat',
+              label: 'Pause here and chat with your agent from the terminal',
+            },
+          ],
+        });
         setupLog.userInput('first_chat_choice', next);
         if (next === 'chat') {
           const terminalAgentName = `${displayName!}'s Terminal`;
@@ -748,30 +754,40 @@ async function main(driver: SetupDriver): Promise<void> {
               terminalAgentName,
             ],
             { running: `Creating ${terminalAgentName}…`, done: `${terminalAgentName} is ready.` },
+            undefined,
+            driver,
           );
           if (!createRes.ok) {
             await fail(
               'create-terminal-agent',
               `Couldn't create ${terminalAgentName}.`,
               'You can retry later with `pnpm exec tsx scripts/init-cli-agent.ts`.',
+              undefined,
+              driver,
             );
           }
-          await runFirstChat();
+          await runFirstChat(driver);
         }
       } else {
         phEmit('first_chat_failed', { reason: ping });
-        renderPingFailureNote(ping);
-        await offerClaudeOnFailure({
-          stepName: 'cli-agent',
-          msg:
-            ping === 'socket_error'
-              ? "NanoClaw service isn't listening on its CLI socket."
-              : 'No reply from the assistant within 30 seconds.',
-          hint:
-            ping === 'socket_error'
-              ? 'Socket at data/cli.sock did not accept a connection.'
-              : 'Agent container may be failing to start or authenticate.',
-        });
+        renderPingFailureNote(driver, ping);
+        if (driver.mode === 'terminal') {
+          await offerClaudeOnFailure({
+            stepName: 'cli-agent',
+            msg:
+              ping === 'socket_error'
+                ? "NanoClaw service isn't listening on its CLI socket."
+                : ping === 'output_limit'
+                  ? 'The assistant returned more output than setup can safely display.'
+                  : 'No reply from the assistant within 30 seconds.',
+            hint:
+              ping === 'socket_error'
+                ? 'Socket at data/cli.sock did not accept a connection.'
+                : ping === 'output_limit'
+                  ? 'Inspect logs/nanoclaw.log for a runaway response.'
+                  : 'Agent container may be failing to start or authenticate.',
+          });
+        }
       }
     }
   }
@@ -983,7 +999,14 @@ function channelDmLabel(choice: ChannelChoice): string | null {
  * "patient" and "is this hung?". Returns the raw result so the caller can
  * branch between the chat loop (ok) and a diagnostic note (anything else).
  */
-async function confirmAssistantResponds(): Promise<PingResult> {
+async function confirmAssistantResponds(driver: SetupDriver): Promise<PingResult> {
+  if (driver.mode === 'ndjson') {
+    driver.progress('first-chat-ping', 'running', 'Waking your assistant');
+    const result = await pingCliAgent(30_000, driver);
+    driver.throwIfCancelled();
+    driver.progress('first-chat-ping', result === 'ok' ? 'succeeded' : 'failed');
+    return result;
+  }
   const s = p.spinner();
   const start = Date.now();
   const label = 'Waking your assistant…';
@@ -1001,13 +1024,17 @@ async function confirmAssistantResponds(): Promise<PingResult> {
     s.stop(`${k.bold(fitToWidth('Your assistant is ready.', suffix))}${k.dim(suffix)}`);
   } else {
     const msg =
-      result === 'socket_error' ? "Couldn't reach the NanoClaw service." : "Your assistant didn't reply in time.";
-    s.stop(`${k.bold(fitToWidth(msg, suffix))}${k.dim(suffix)}`, 1);
+      result === 'socket_error'
+        ? "Couldn't reach the NanoClaw service."
+        : result === 'output_limit'
+          ? 'Your assistant returned too much output.'
+          : "Your assistant didn't reply in time.";
+    s.error(`${k.bold(fitToWidth(msg, suffix))}${k.dim(suffix)}`);
   }
   return result;
 }
 
-function renderPingFailureNote(result: PingResult): void {
+function renderPingFailureNote(driver: SetupDriver, result: PingResult): void {
   const body =
     result === 'socket_error'
       ? [
@@ -1019,11 +1046,16 @@ function renderPingFailureNote(result: PingResult): void {
           `  macOS:  launchctl kickstart -k gui/$(id -u)/${getLaunchdLabel()}`,
           `  Linux:  systemctl --user restart ${getSystemdUnit()}`,
         ].join('\n')
-      : wrapForGutter(
-          'No reply from your assistant within 30 seconds. Check `logs/nanoclaw.log` for clues, then try `pnpm run chat hi`.',
-          6,
-        );
-  note(body, 'Skipping the first chat');
+      : result === 'output_limit'
+        ? wrapForGutter(
+            'The assistant returned more output than setup can safely display. Check `logs/nanoclaw.log`, then try `pnpm run chat hi`.',
+            6,
+          )
+        : wrapForGutter(
+            'No reply from your assistant within 30 seconds. Check `logs/nanoclaw.log` for clues, then try `pnpm run chat hi`.',
+            6,
+          );
+  driver.note(body, 'Skipping the first chat');
 }
 
 /**
@@ -1037,8 +1069,8 @@ function renderPingFailureNote(result: PingResult): void {
  * explain once, then offer "message or Enter to continue" so the chat is
  * clearly optional.
  */
-async function runFirstChat(): Promise<void> {
-  note(
+async function runFirstChat(driver: SetupDriver): Promise<void> {
+  driver.note(
     wrapForGutter(
       [
         'Your assistant runs in a sandbox on this machine.',
@@ -1051,31 +1083,107 @@ async function runFirstChat(): Promise<void> {
     'How this works',
   );
   let first = true;
-  while (true) {
-    const answer = ensureAnswer(
-      await p.text({
+  try {
+    while (true) {
+      const answer = await textPrompt(driver, first ? 'first-chat-message' : 'first-chat-another', {
         message: first
           ? 'Try a quick hello — or press Enter to continue setup'
           : 'Another message? Press Enter to continue setup',
         placeholder: first ? 'e.g. "hi, what can you do?"' : 'press Enter to continue',
-      }),
-    );
-    first = false;
-    const text = ((answer as string | undefined) ?? '').trim();
-    if (!text) return;
-    await sendChatMessage(text);
+      });
+      first = false;
+      const text = answer.trim();
+      if (!text) return;
+      await sendChatMessage(driver, text);
+    }
+  } finally {
+    if (driver.mode === 'ndjson') driver.clearDisplay('first-chat-response');
   }
 }
 
-function sendChatMessage(message: string): Promise<void> {
-  return new Promise((resolve) => {
+function sendChatMessage(driver: SetupDriver, message: string): Promise<void> {
+  return new Promise((resolve, reject) => {
     // `pnpm --silent` suppresses the `> nanoclaw@… chat` preamble so the
     // agent's reply reads as a clean block under the prompt. Splitting on
     // whitespace mirrors `pnpm run chat hello world` — chat.ts joins argv
     // with spaces on the far side.
-    const child = spawn('pnpm', ['--silent', 'run', 'chat', ...message.split(/\s+/)], {
-      stdio: ['ignore', 'inherit', 'inherit'],
-    });
+    const child = spawn(
+      'pnpm',
+      ['--silent', 'run', 'chat', ...message.split(/\s+/)],
+      driver.mode === 'ndjson'
+        ? { stdio: ['ignore', 'pipe', 'pipe'], detached: true, env: childEnvWithoutSetupSecrets() }
+        : { stdio: ['ignore', 'inherit', 'inherit'] },
+    );
+    const stopGroup = (): void => {
+      if (driver.mode !== 'ndjson' || !child.pid) return;
+      const processGroupId = child.pid;
+      try {
+        process.kill(-processGroupId, 'SIGTERM');
+      } catch {
+        /* already gone */
+      }
+      setTimeout(() => {
+        try {
+          process.kill(-processGroupId, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }, 250);
+    };
+    driver.cancellationSignal?.addEventListener('abort', stopGroup, { once: true });
+    if (driver.cancellationSignal?.aborted) stopGroup();
+    if (driver.mode === 'ndjson') {
+      let response = '';
+      let responseBytes = 0;
+      let outputLimitExceeded = false;
+      let settled = false;
+      const append = (chunk: Buffer): void => {
+        if (outputLimitExceeded) return;
+        responseBytes += chunk.byteLength;
+        if (responseBytes > MAX_MACHINE_CHAT_OUTPUT_BYTES) {
+          outputLimitExceeded = true;
+          stopGroup();
+          return;
+        }
+        response += chunk.toString('utf8');
+      };
+      child.stdout?.on('data', (chunk: Buffer) => {
+        append(chunk);
+      });
+      child.stderr?.on('data', (chunk: Buffer) => {
+        append(chunk);
+      });
+      child.on('close', () => {
+        if (settled) return;
+        settled = true;
+        driver.cancellationSignal?.removeEventListener('abort', stopGroup);
+        if (outputLimitExceeded) {
+          try {
+            driver.error('first_chat_output_limit', 'The terminal chat returned more than 64 KiB of output.');
+          } catch (error) {
+            reject(error);
+          }
+          return;
+        }
+        if (response.trim()) {
+          driver.display({
+            id: 'first-chat-response',
+            kind: 'text',
+            content: response.trim(),
+            sensitive: false,
+            label: 'Assistant',
+          });
+        }
+        resolve();
+      });
+      child.on('error', () => {
+        if (settled) return;
+        settled = true;
+        driver.cancellationSignal?.removeEventListener('abort', stopGroup);
+        resolve();
+      });
+      return;
+    }
     child.on('close', () => resolve());
     child.on('error', () => resolve());
   });
