@@ -19,6 +19,7 @@ export interface RunnerConfig {
   maxMessagesPerPrompt: number;
   mcpServers: Record<string, McpServerConfig>;
   model?: string;
+  fallbackModel?: string;
   effort?: string;
   /** API fast serving tier (host-configured; see the host's container-config). */
   fastMode?: boolean;
@@ -50,6 +51,7 @@ export function loadConfig(): RunnerConfig {
     maxMessagesPerPrompt: (raw.maxMessagesPerPrompt as number) || DEFAULT_MAX_MESSAGES,
     mcpServers: (raw.mcpServers as RunnerConfig['mcpServers']) || {},
     model: (raw.model as string) || undefined,
+    fallbackModel: (raw.fallbackModel as string) || undefined,
     effort: (raw.effort as string) || undefined,
     fastMode: raw.fastMode === true || undefined,
   };

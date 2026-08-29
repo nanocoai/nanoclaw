@@ -89,6 +89,11 @@ export interface ProviderOptions {
    */
   model?: string;
   /**
+   * Fallback model used by the underlying SDK if `model` is unavailable
+   * (rate limit, capacity, etc.). If omitted, no fallback is used.
+   */
+  fallbackModel?: string;
+  /**
    * Reasoning effort (`'low' | 'medium' | 'high' | 'xhigh' | 'max'`). Passed
    * through to the underlying SDK. If omitted, the SDK default is used.
    */

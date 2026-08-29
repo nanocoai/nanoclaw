@@ -114,6 +114,7 @@ async function main(): Promise<void> {
     env: { ...process.env },
     additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
     model: config.model,
+    fallbackModel: config.fallbackModel,
     effort: config.effort,
     fastMode: config.fastMode,
   });

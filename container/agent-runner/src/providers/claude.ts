@@ -483,6 +483,7 @@ export class ClaudeProvider implements AgentProvider {
   private env: Record<string, string | undefined>;
   private additionalDirectories?: string[];
   private model?: string;
+  private fallbackModel?: string;
   private effort?: string;
   private fastMode?: boolean;
   private memorySessionHook?: MemorySessionHookRegistration;
@@ -494,6 +495,7 @@ export class ClaudeProvider implements AgentProvider {
     );
     this.additionalDirectories = options.additionalDirectories;
     this.model = options.model;
+    this.fallbackModel = options.fallbackModel;
     this.effort = options.effort;
     this.fastMode = options.fastMode;
     this.env = {
@@ -569,6 +571,7 @@ export class ClaudeProvider implements AgentProvider {
         disallowedTools: SDK_DISALLOWED_TOOLS,
         env: this.env,
         model: this.model,
+        fallbackModel: this.fallbackModel,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.effort as any,
         permissionMode: 'bypassPermissions',
@@ -589,15 +592,34 @@ export class ClaudeProvider implements AgentProvider {
     });
 
     let aborted = false;
+    const primaryModel = this.model;
+    const fallbackModel = this.fallbackModel;
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
+      let activeModel: string | undefined = primaryModel;
+      let fallbackAnnounced = false;
       for await (const message of sdkResult) {
         if (aborted) return;
         messageCount++;
 
         // Yield activity for every SDK event so the poll loop knows the agent is working
         yield { type: 'activity' };
+
+        if (fallbackModel && primaryModel && message.type === 'assistant') {
+          const turnModel = (message as { message?: { model?: string } }).message?.model;
+          if (turnModel && turnModel !== activeModel) {
+            log(`Active model transition: ${activeModel ?? '(unset)'} -> ${turnModel}`);
+            if (!fallbackAnnounced && turnModel !== primaryModel) {
+              yield {
+                type: 'progress',
+                message: `Primary model "${primaryModel}" unavailable — continuing on fallback "${turnModel}".`,
+              };
+              fallbackAnnounced = true;
+            }
+            activeModel = turnModel;
+          }
+        }
 
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };
