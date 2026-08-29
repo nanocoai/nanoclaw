@@ -61,5 +61,7 @@ describe('whatsapp-cloud channel registration', () => {
     expect(adapter!.instance).toBe('whatsapp-cloud');
     // channelType stays the semantic platform key, shared with native whatsapp.
     expect(adapter!.channelType).toBe('whatsapp');
+    // The declared indicator lifetime reaches the registry.
+    expect(adapter!.typingTimeoutMs).toBe(25_000);
   });
 });
