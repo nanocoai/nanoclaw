@@ -39,7 +39,13 @@ async function run(inputs: Record<string, string>): Promise<Recorded> {
     inputs,
     exec: (cmd: string) => {
       seq.push({ type: 'exec', text: cmd });
-      if (/^(git|pnpm|bash)\b/.test(cmd) || cmd.startsWith('grep') || cmd.startsWith('touch')) return '';
+      if (
+        /^(git|pnpm|bash)\b/.test(cmd) ||
+        cmd.includes('git show') ||
+        cmd.startsWith('grep') ||
+        cmd.startsWith('touch')
+      )
+        return '';
       return execFileSync('bash', ['-c', cmd], { cwd: root, encoding: 'utf-8' });
     },
     execStream: async () => ({ ok: true, fields: { PHONE: BOT_PHONE } }),

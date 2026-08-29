@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { gitShowToFileCommand } from '../../scripts/git-show-to-file.js';
 import { runChannelSkill } from './run-channel-skill.js';
 import { runSkill } from '../lib/skill-driver.js';
 import { fullyApplied } from '../../scripts/skill-apply.js';
@@ -639,11 +640,18 @@ describe('materializeCompanionSkill (channels-branch fetch for absent skill dirs
     expect(materializeCompanionSkill('slack-agent-flow', root, { exec, resolveRemote: () => 'upstream' })).toBe(true);
     expect(cmds[0]).toBe('git fetch upstream channels');
     expect(cmds[1]).toBe("git ls-tree -r --name-only 'upstream/channels' -- '.claude/skills/slack-agent-flow'");
-    // One git-show per listed file, into the same relative path — quoted so a
-    // future filename with spaces fails loudly instead of word-splitting.
+    // One atomic git-show copy per listed file, into the same relative path.
     expect(cmds.slice(2)).toEqual([
-      "git show 'upstream/channels:.claude/skills/slack-agent-flow/SKILL.md' > '.claude/skills/slack-agent-flow/SKILL.md'",
-      "git show 'upstream/channels:.claude/skills/slack-agent-flow/src/modules/slack-agent-flow/index.ts' > '.claude/skills/slack-agent-flow/src/modules/slack-agent-flow/index.ts'",
+      gitShowToFileCommand(
+        'upstream/channels',
+        '.claude/skills/slack-agent-flow/SKILL.md',
+        '.claude/skills/slack-agent-flow/SKILL.md',
+      ),
+      gitShowToFileCommand(
+        'upstream/channels',
+        '.claude/skills/slack-agent-flow/src/modules/slack-agent-flow/index.ts',
+        '.claude/skills/slack-agent-flow/src/modules/slack-agent-flow/index.ts',
+      ),
     ]);
     rmSync(root, { recursive: true, force: true });
   });
@@ -662,7 +670,7 @@ describe('materializeCompanionSkill (channels-branch fetch for absent skill dirs
     const exec = (command: string): string => {
       if (command.includes('ls-tree')) return '.claude/skills/slack-agent-flow/SKILL.md\n';
       if (command.includes('git show')) {
-        // Simulate the redirect creating the parent dir then failing.
+        // Simulate the helper starting the copy and then failing.
         mkdirSync(join(root, '.claude/skills/slack-agent-flow'), { recursive: true });
         throw new Error('fatal: bad object');
       }

@@ -29,7 +29,11 @@ echo "STEP: fetch-channels-branch"
 git fetch origin channels
 
 echo "STEP: copy-files"
-git show origin/channels:src/channels/github.ts > src/channels/github.ts
+temp_file="$(mktemp src/channels/.github.ts.XXXXXX)"
+trap 'rm -f -- "$temp_file"' EXIT
+git show origin/channels:src/channels/github.ts > "$temp_file"
+mv -- "$temp_file" src/channels/github.ts
+trap - EXIT
 
 echo "STEP: register-import"
 if ! grep -q "import './github.js';" src/channels/index.ts; then

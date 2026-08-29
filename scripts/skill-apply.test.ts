@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gitShowToFileCommand } from './git-show-to-file.js';
 import {
   applySkill,
   removeSkill,
@@ -190,7 +191,7 @@ describe('apply engine lifecycle', () => {
 
 // from-branch copy: the dest may live only on the registry branch (e.g. a
 // container skill trunk no longer ships), so the engine must create the
-// parent directory itself — the shell redirect in `git show src > dest` can't.
+// parent directory before running the atomic git-show helper.
 const FROM_BRANCH_SKILL = `# from-branch demo
 
 ## Pull the formatting skill from the channels branch
@@ -200,7 +201,7 @@ container/skills/demo-formatting/SKILL.md
 `;
 
 describe('from-branch copy apply path', () => {
-  it('creates the missing dest parent dir before the git-show redirect', async () => {
+  it('creates the missing dest parent dir before the atomic git-show copy', async () => {
     const fskill = mkdtempSync(join(tmpdir(), 'nc-skill-fb-'));
     const froot = mkdtempSync(join(tmpdir(), 'nc-proj-fb-'));
     writeFileSync(join(fskill, 'SKILL.md'), FROM_BRANCH_SKILL);
@@ -211,15 +212,18 @@ describe('from-branch copy apply path', () => {
     const { cmds, exec } = recordingExec();
     const res = await applySkill(fskill, froot, { exec, resolveRemote: () => 'origin' });
 
-    // the redirect target's parent now exists, so the exec'd `git show … > dest`
-    // (mocked here) would not fail with ENOENT on a real run
+    // The destination parent exists before the helper runs (mocked here).
     expect(existsSync(join(froot, 'container/skills/demo-formatting'))).toBe(true);
     expect(cmds).toContain('git fetch origin channels');
     expect(
-      cmds.some((c) =>
-        /^git show origin\/channels:container\/skills\/demo-formatting\/SKILL\.md > container\/skills\/demo-formatting\/SKILL\.md$/.test(
-          c,
-        ),
+      cmds.some(
+        (c) =>
+          c ===
+          gitShowToFileCommand(
+            'origin/channels',
+            'container/skills/demo-formatting/SKILL.md',
+            'container/skills/demo-formatting/SKILL.md',
+          ),
       ),
     ).toBe(true);
     expect(res.journal).toContainEqual({ op: 'wrote', path: 'container/skills/demo-formatting/SKILL.md' });

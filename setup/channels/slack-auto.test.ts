@@ -5,6 +5,8 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { gitShowToFileCommand } from '../../scripts/git-show-to-file.js';
+
 const state = vi.hoisted(() => ({
   account: undefined as { api?: string; token: string } | undefined,
   installToken: undefined as string | undefined,
@@ -187,9 +189,9 @@ describe('provisioning-core bootstrap', () => {
       'git remote',
       'git ls-remote --heads origin channels',
       'git fetch origin channels',
-      `git show origin/channels:${PROVISIONING_MODULE} > ${PROVISIONING_MODULE}`,
+      gitShowToFileCommand('origin/channels', PROVISIONING_MODULE, PROVISIONING_MODULE),
     ]);
-    // the parent directory exists before the git show redirect runs
+    // The parent directory exists before the atomic git-show copy runs.
     expect(fs.existsSync(path.join(root, 'src/provisioning'))).toBe(true);
     expect(importModule).toHaveBeenCalledExactlyOnceWith(pathToFileURL(path.join(root, PROVISIONING_MODULE)).href);
   });
