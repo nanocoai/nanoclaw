@@ -488,3 +488,41 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(msg.markdown).toBe('plain hello');
   });
 });
+
+describe('createChatSdkBridge.deliver — reactions are best-effort', () => {
+  it('does not throw when the platform rejects a reaction (no delivery failure/retry)', async () => {
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({
+        name: 'telegram',
+        addReaction: async () => {
+          throw new Error('Bad Request: REACTION_INVALID');
+        },
+      } as unknown as Partial<Adapter>),
+      supportsThreads: false,
+    });
+    await expect(
+      bridge.deliver('telegram:42', null, {
+        kind: 'chat-sdk',
+        content: { operation: 'reaction', messageId: '123:456', emoji: 'white_check_mark' },
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('applies a reaction the platform accepts', async () => {
+    const calls: string[] = [];
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({
+        name: 'telegram',
+        addReaction: async (_t: string, _m: string, emoji: string) => {
+          calls.push(emoji);
+        },
+      } as unknown as Partial<Adapter>),
+      supportsThreads: false,
+    });
+    await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: { operation: 'reaction', messageId: '123:456', emoji: 'eyes' },
+    });
+    expect(calls).toEqual(['eyes']);
+  });
+});
