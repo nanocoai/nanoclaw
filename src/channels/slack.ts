@@ -20,7 +20,6 @@ import { readEnvFile } from '../env.js';
 import type { ChannelAdapter, ChannelContextDefaults, ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
-import { extractSlackRawText } from './slack-raw-text.js';
 
 /**
  * Dedicated bot app on a threaded platform. group threads:true keeps
@@ -176,7 +175,6 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
   });
   const bridge = createChatSdkBridge({
     adapter: slackAdapter,
-    extractRawText: extractSlackRawText,
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
     concurrency: 'concurrent',
     supportsThreads: true,
