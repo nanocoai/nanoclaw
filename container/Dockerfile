@@ -123,7 +123,7 @@ COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # ---- Workspace + permissions -------------------------------------------------
-RUN mkdir -p /workspace/group /workspace/extra && \
+RUN mkdir -p /workspace/agent /workspace/extra && \
     chown -R node:node /workspace && \
     chmod 777 /home/node
 
@@ -132,7 +132,7 @@ RUN mkdir -p /workspace/group /workspace/extra && \
 RUN find / -xdev -perm -4000 -type f -exec chmod u-s {} + || true
 
 USER node
-WORKDIR /workspace/group
+WORKDIR /workspace/agent
 
 # Only applies to a bare `docker run` — the host spawn overrides ENTRYPOINT and
 # passes --init instead (see hardeningArgs in src/container-runner.ts).
