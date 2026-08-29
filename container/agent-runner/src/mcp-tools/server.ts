@@ -28,6 +28,24 @@ function log(msg: string): void {
 const allTools: McpToolDefinition[] = [];
 const toolMap = new Map<string, McpToolDefinition>();
 
+/**
+ * Optional per-deployment allowlist. When `NANOCLAW_MCP_TOOL_ALLOWLIST` is set
+ * to a comma-separated list of tool names, only those tools are listed and
+ * invocable; every other registered tool is hidden. Unset (the default) exposes
+ * all registered tools — no behavior change.
+ */
+function enabledTools(): McpToolDefinition[] {
+  const configured = process.env.NANOCLAW_MCP_TOOL_ALLOWLIST;
+  if (!configured) return allTools;
+  const allowed = new Set(
+    configured
+      .split(',')
+      .map((name) => name.trim())
+      .filter(Boolean),
+  );
+  return allTools.filter((definition) => allowed.has(definition.tool.name));
+}
+
 export function registerTools(tools: McpToolDefinition[]): void {
   for (const t of tools) {
     if (toolMap.has(t.tool.name)) {
@@ -128,12 +146,14 @@ export async function startMcpServer(
   const server = new Server({ name: 'nanoclaw', version: '2.0.0' }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: allTools.map((t) => t.tool),
+    tools: enabledTools().map((t) => t.tool),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
-    const tool = toolMap.get(name);
+    // Resolve against the allowlist so a disabled tool cannot be invoked even
+    // if the client already knew its name from a prior listing.
+    const tool = enabledTools().find((definition) => definition.tool.name === name);
     if (!tool) {
       return { content: [{ type: 'text', text: `Unknown tool: ${name}` }] };
     }
@@ -142,5 +162,6 @@ export async function startMcpServer(
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  log(`MCP server started with ${allTools.length} tools: ${allTools.map((t) => t.tool.name).join(', ')}`);
+  const tools = enabledTools();
+  log(`MCP server started with ${tools.length} tools: ${tools.map((t) => t.tool.name).join(', ')}`);
 }
