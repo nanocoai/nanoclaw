@@ -35,6 +35,36 @@ import { registerResource } from '../crud.js';
 import { localizeIsoTimestamps } from '../format.js';
 
 /**
+ * Parse a nullable string flag: undefined = not passed, null = explicit clear
+ * (empty string → back to the column default), otherwise the value.
+ *
+ * Without this, `--model ""` stored the empty string rather than NULL, and the
+ * empty string reached the agent runtime as a real value — a config scalar
+ * could be set but never unset. `--timezone` already had these semantics; this
+ * is the same rule for its siblings.
+ */
+function parseNullableFlag(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  const str = String(value);
+  return str === '' ? null : str;
+}
+
+/**
+ * Parse a nullable numeric flag. Same clearing rule as `parseNullableFlag`,
+ * and it rejects non-numeric input rather than storing the `NaN`/`0` that a
+ * bare `Number(value)` yields (`Number('') === 0` silently set a real limit
+ * of zero where a clear was intended).
+ */
+function parseNullableNumberFlag(value: unknown, flag: string): number | null | undefined {
+  if (value === undefined) return undefined;
+  const str = String(value);
+  if (str === '') return null;
+  const num = Number(str);
+  if (!Number.isFinite(num)) throw new Error(`${flag} must be a number, or "" to clear it`);
+  return num;
+}
+
+/**
  * Parse a --timezone flag: undefined = not passed, null = explicit clear
  * (empty string → follow the install default), otherwise a validated IANA id.
  * Invalid ids throw here, in the handler — for agent callers that is after
@@ -372,7 +402,8 @@ registerResource({
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
         'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
-        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
+        '--timezone (IANA id like "Europe/Lisbon"; scheduled-task times follow it immediately, message display after restart). ' +
+        'Pass "" to any of these except --cli-scope to clear it back to the column default.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -392,15 +423,20 @@ registerResource({
             | 'timezone'
           >
         > = {};
-        if (args.provider !== undefined) updates.provider = args.provider as string;
+        const provider = parseNullableFlag(args.provider);
+        if (provider !== undefined) updates.provider = provider;
         const timezone = parseTimezoneFlag(args.timezone);
         if (timezone !== undefined) updates.timezone = timezone;
-        if (args.model !== undefined) updates.model = args.model as string;
-        if (args.effort !== undefined) updates.effort = args.effort as string;
-        if (args.image_tag !== undefined) updates.image_tag = args.image_tag as string;
-        if (args.assistant_name !== undefined) updates.assistant_name = args.assistant_name as string;
-        if (args.max_messages_per_prompt !== undefined)
-          updates.max_messages_per_prompt = Number(args.max_messages_per_prompt);
+        const model = parseNullableFlag(args.model);
+        if (model !== undefined) updates.model = model;
+        const effort = parseNullableFlag(args.effort);
+        if (effort !== undefined) updates.effort = effort;
+        const imageTag = parseNullableFlag(args.image_tag);
+        if (imageTag !== undefined) updates.image_tag = imageTag;
+        const assistantName = parseNullableFlag(args.assistant_name);
+        if (assistantName !== undefined) updates.assistant_name = assistantName;
+        const maxMessages = parseNullableNumberFlag(args.max_messages_per_prompt, '--max-messages-per-prompt');
+        if (maxMessages !== undefined) updates.max_messages_per_prompt = maxMessages;
         if (args['cli-scope'] !== undefined || args.cli_scope !== undefined) {
           const scope = (args['cli-scope'] ?? args.cli_scope) as string;
           if (!['disabled', 'group', 'global'].includes(scope)) {
