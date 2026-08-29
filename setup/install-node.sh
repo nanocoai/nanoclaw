@@ -10,9 +10,26 @@ set -euo pipefail
 
 echo "=== NANOCLAW SETUP: INSTALL_NODE ==="
 
+# Minimum supported Node. The floor is 22.14.0, not 22.0.0: better-sqlite3 13
+# prebuilds segfault on open (SIGSEGV in napi_module_register_by_symbol, no
+# stderr) on Node 22 releases older than 22.14.0 — see
+# https://github.com/WiseLibs/better-sqlite3/issues/1514. The comparison must
+# therefore consider the minor version, not just the major.
+NODE_MIN_MAJOR=22
+NODE_MIN_MINOR=14
+
+node_version_ok() {
+  # $1 = version like "22.13.1"; returns 0 when >= NODE_MIN_MAJOR.NODE_MIN_MINOR
+  local major minor
+  major=$(echo "$1" | cut -d. -f1)
+  minor=$(echo "$1" | cut -d. -f2)
+  [ "$major" -gt "$NODE_MIN_MAJOR" ] 2>/dev/null && return 0
+  [ "$major" -eq "$NODE_MIN_MAJOR" ] 2>/dev/null && [ "$minor" -ge "$NODE_MIN_MINOR" ] 2>/dev/null
+}
+
 if command -v node >/dev/null 2>&1; then
-  NODE_MAJOR="$(node --version | sed 's/^v//' | cut -d. -f1)"
-  if [ "$NODE_MAJOR" -ge 22 ] 2>/dev/null; then
+  NODE_VERSION="$(node --version | sed 's/^v//')"
+  if node_version_ok "$NODE_VERSION"; then
     echo "STATUS: already-installed"
     echo "NODE_VERSION: $(node --version)"
     echo "=== END ==="

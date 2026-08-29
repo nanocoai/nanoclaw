@@ -48,6 +48,11 @@ detect_platform() {
 
 # --- Node.js check ---
 
+# Minimum supported Node is 22.14.0, not 22.0.0: better-sqlite3 13 prebuilds
+# segfault on open (silent SIGSEGV, no stderr) on Node 22 releases older than
+# 22.14.0 — see https://github.com/WiseLibs/better-sqlite3/issues/1514. Check
+# the minor version too, or an affected Node passes here and the install dies
+# later with an undiagnosable native crash.
 check_node() {
   NODE_OK="false"
   NODE_VERSION="not_found"
@@ -56,12 +61,15 @@ check_node() {
   if command -v node >/dev/null 2>&1; then
     NODE_VERSION=$(node --version 2>/dev/null | sed 's/^v//')
     NODE_PATH_FOUND=$(command -v node)
-    local major
+    local major minor
     major=$(echo "$NODE_VERSION" | cut -d. -f1)
-    if [ "$major" -ge 22 ] 2>/dev/null; then
+    minor=$(echo "$NODE_VERSION" | cut -d. -f2)
+    if [ "$major" -gt 22 ] 2>/dev/null; then
+      NODE_OK="true"
+    elif [ "$major" -eq 22 ] 2>/dev/null && [ "$minor" -ge 14 ] 2>/dev/null; then
       NODE_OK="true"
     fi
-    log "Node $NODE_VERSION at $NODE_PATH_FOUND (major=$major, ok=$NODE_OK)"
+    log "Node $NODE_VERSION at $NODE_PATH_FOUND (major=$major, minor=$minor, ok=$NODE_OK)"
   else
     log "Node not found"
   fi
@@ -148,13 +156,16 @@ install_deps() {
     return
   fi
 
-  # Verify native module (better-sqlite3)
+  # Verify native module (better-sqlite3). Open a throwaway database, not
+  # just require(): on an affected Node (see the 22.14.0 floor above) the
+  # require succeeds and the process segfaults on `new Database()` with
+  # nothing on stderr — the open is the only observable failure.
   log "Verifying native modules"
-  if node -e "require('better-sqlite3')" >> "$LOG_FILE" 2>&1; then
+  if node -e "new (require('better-sqlite3'))(':memory:')" >> "$LOG_FILE" 2>&1; then
     NATIVE_OK="true"
     log "better-sqlite3 loads OK"
   else
-    log "better-sqlite3 failed to load"
+    log "better-sqlite3 failed to load or open — if Node is 22.x older than 22.14.0, upgrade Node (better-sqlite3 13 prebuilds segfault on open there)"
   fi
 }
 
@@ -185,7 +196,7 @@ detect_platform
 check_node
 if [ "$NODE_OK" = "false" ]; then
   log "Node missing or too old — running setup/install-node.sh"
-  echo "Node 22+ not found — installing via setup/install-node.sh"
+  echo "Node 22.14.0+ not found — installing via setup/install-node.sh"
   if bash "$PROJECT_ROOT/setup/install-node.sh" 2>&1 | tee -a "$LOG_FILE"; then
     if [ -x "$HOME/.local/bin/node" ]; then
       export PATH="$HOME/.local/bin:$PATH"
