@@ -1,97 +1,58 @@
 ---
 name: add-context-tool
-description: Add Context.dev web search, scraping, extraction, parsing, brand intelligence, monitors, and batches as remote MCP tools for selected NanoClaw agent groups.
+description: Add Context.dev live web search, scraping, crawling, extraction, document parsing, news, and brand intelligence as remote MCP tools for selected NanoClaw agent groups.
 ---
 
 # Add Context.dev Tool
 
-Install the pinned `mcp-remote` bridge in the agent image and register the
-Context.dev remote MCP server for selected agent groups. Context.dev supplies
-the tool descriptions and input schemas at runtime.
+Register Context.dev's hosted MCP server with selected NanoClaw agent groups.
+NanoClaw connects through its native remote-MCP support, and OneCLI injects the
+Context.dev API key without exposing it to the agent or storing it in NanoClaw
+configuration.
 
-Context.dev supports two access modes:
-
-- **Standard (recommended):** exposes web search, scraping, crawling,
-  extraction, document parsing, screenshots, brand intelligence, and read-only
-  monitor and batch inspection. It omits tools that create, modify, delete, or
-  immediately run monitors and batches.
-- **Full:** exposes the complete public Context.dev MCP catalog, including
-  monitor and batch operations that consume credits or change account state.
-
-Web scraping tools can optionally execute browser actions on third-party pages.
-Agents must use those actions only when the user explicitly requests them.
+Context.dev also exposes monitor and batch operations that can consume credits
+or change account state. Tell the operator that those tools will be available
+and should only be used when they explicitly request the corresponding action.
 
 ## Phase 1: Pre-flight
 
-Check whether the bridge is already in the image manifest, then list the groups:
+Confirm NanoClaw and OneCLI are available, then list the groups:
 
 ```bash
-grep -n '"mcp-remote"' container/cli-tools.json || true
-ncl groups list
+ncl groups list --json
+onecli version
 ```
 
-Ask which agent groups should receive Context.dev and whether each group should
-use Standard or Full access. Use Standard unless the operator explicitly asks
-for monitor or batch writes. Inspect each selected group's current
+If OneCLI is unavailable, stop and ask the operator to run `/init-onecli`, then
+re-run this skill.
+
+Ask which agent groups should receive Context.dev. Accept group IDs from
+`ncl groups list --json`, not display names. Inspect each selected group's
 configuration before changing it:
 
 ```bash
 ncl groups config get --id <group-id>
 ```
 
-If `mcp-remote` is already present at a pinned version, reuse the existing entry
-instead of adding a second one. If a selected group already has a `context`
-server with the requested configuration, leave it unchanged.
+## Phase 2: Store the credential in OneCLI
 
-## Phase 2: Install the MCP bridge
-
-Add this object to the top-level array in `container/cli-tools.json` when an
-entry named `mcp-remote` is not already present:
-
-```json
-{
-  "name": "mcp-remote",
-  "version": "0.1.38"
-}
-```
-
-Keep the JSON valid and limit the entry to the two fields shown. Copy the
-dependency guard into the host test tree:
+Check whether a Context.dev credential already exists:
 
 ```bash
-cp .claude/skills/add-context-tool/context-manifest.test.ts src/context-manifest.test.ts
+onecli secrets list | jq -e '.data[] | select(.name == "Context.dev")'
 ```
 
-Build the image and run the guard:
-
-```bash
-./container/build.sh
-pnpm exec vitest run src/context-manifest.test.ts
-```
-
-The manifest is the only source-backed integration point. Per-group MCP
-registration is runtime state stored through `ncl`, so there is no in-tree line
-for a registration test to guard.
-
-## Phase 3: Store the Context.dev credential
-
-Context.dev API keys work with the MCP endpoint through the `Authorization`
-header. The key must live in OneCLI so the gateway injects it at the network
-boundary. Never place it in NanoClaw configuration, command arguments, an
-environment variable, a source file, or chat.
-
-If the operator does not have a Context.dev API key, ask them to create one at
-[context.dev/dashboard](https://context.dev/dashboard). Resolve the OneCLI
-dashboard URL they can reach:
+If it exists, reuse it. Otherwise, tell the operator to create an API key at
+[context.dev/dashboard](https://context.dev/dashboard), then resolve the OneCLI
+dashboard URL their browser can reach:
 
 ```bash
 docker inspect onecli --format '{{range .Config.Env}}{{println .}}{{end}}' | grep '^APP_URL='
 ```
 
-If the value is a loopback or container-bridge address (`127.0.0.1`,
-`172.17.0.1`, or `host.docker.internal`), ask which URL the operator uses to
-open OneCLI, suggesting `http://127.0.0.1:10254` as the default. A public or
-tailnet `APP_URL` needs no question.
+If `APP_URL` is a loopback or container-bridge address, ask which URL the
+operator uses to open OneCLI, suggesting `http://127.0.0.1:10254`. A public or
+tailnet URL needs no question.
 
 Confirm the custom-secret page exists:
 
@@ -99,106 +60,114 @@ Confirm the custom-secret page exists:
 curl -fs <dashboard-url>/connections/custom >/dev/null
 ```
 
-When it succeeds, ask the operator to open this URL and paste the Context.dev
-key directly into OneCLI:
+Ask the operator to open this prefilled URL and paste the key directly into
+OneCLI:
 
 ```text
 <dashboard-url>/connections/secrets?create=generic&host=mcp.context.dev&name=Context.dev&header=Authorization&format=Bearer%20%7Bvalue%7D
 ```
 
-If the custom-secret page is unavailable, ask the operator to write the key to
-a temporary permission-restricted file and run this command on the host:
+Never ask them to paste the key into chat, a shell command, an environment
+variable, or NanoClaw configuration. Verify the credential exists before
+continuing:
 
 ```bash
-onecli secrets create \
-  --name context \
-  --type generic \
-  --host-pattern mcp.context.dev \
-  --header-name Authorization \
-  --value-format 'Bearer {value}' \
-  --file <key-file>
+onecli secrets list | jq -e '.data[] | select(.name == "Context.dev")'
 ```
 
-They must delete the temporary file after OneCLI confirms the secret was
-stored. Do not ask them to paste the key into the command line or chat.
+## Phase 3: Scope the credential to selected agents
+
+NanoClaw identifies each OneCLI agent by its group ID. A group that has never
+spawned may not have an OneCLI agent yet, so create any missing entries using
+the same identifiers as NanoClaw:
+
+```bash
+GROUPS=$(ncl groups list --json)
+AGENTS=$(onecli agents list)
+printf '%s' "$GROUPS" | jq -r '.data[] | "\(.id)\t\(.name)"' |
+while IFS="$(printf '\t')" read -r group_id group_name; do
+  printf '%s' "$AGENTS" | jq -e --arg id "$group_id" \
+    '.data[] | select(.identifier == $id)' >/dev/null ||
+    onecli agents create --name "$group_name" --identifier "$group_id"
+done
+```
+
+For every selected group whose OneCLI agent uses `selective` secret mode, merge
+the Context.dev secret into its existing list. Do not call `set-secrets` for an
+agent in `all` mode because doing so would silently switch it to selective mode:
+
+```bash
+CONTEXT_SECRET_ID=$(onecli secrets list | jq -r \
+  'first(.data[] | select(.name == "Context.dev")) | .id // empty')
+test -n "$CONTEXT_SECRET_ID"
+
+ONECLI_AGENT_ID=$(onecli agents list | jq -r --arg id '<group-id>' \
+  'first(.data[] | select(.identifier == $id)) | .id // empty')
+SECRET_MODE=$(onecli agents list | jq -r --arg id '<group-id>' \
+  'first(.data[] | select(.identifier == $id)) | .secretMode // empty')
+
+if [ "$SECRET_MODE" = selective ]; then
+  SECRET_IDS=$(onecli agents secrets --id "$ONECLI_AGENT_ID" | jq -r \
+    --arg context "$CONTEXT_SECRET_ID" '[.data[], $context] | unique | join(",")')
+  onecli agents set-secrets --id "$ONECLI_AGENT_ID" --secret-ids "$SECRET_IDS"
+fi
+```
+
+Repeat only the final block for each selected group.
 
 ## Phase 4: Register Context.dev
 
-`config add-mcp-server` and `groups restart` are approval-gated. Run from
-inside a container they return `approval-pending` immediately; that is not an
-error. Wait for the admin's approval and the follow-up system message before
-verifying the installation.
+`config add-mcp-server` and `groups restart` are approval-gated. When run from
+inside an agent container they return `approval-pending`; wait for the admin's
+decision and follow-up system message before verifying.
 
-For each selected `<group-id>` using Standard access, register one server named
-`context`:
+Register the native HTTP server for each selected group:
 
 ```bash
 ncl groups config add-mcp-server \
   --id <group-id> \
   --name context \
-  --command mcp-remote \
-  --args '["https://mcp.context.dev/mcp","--transport","http-only","--enable-proxy","--header","X-Client-Name:NanoClaw","--ignore-tool","create-monitor","--ignore-tool","update-monitor","--ignore-tool","delete-monitor","--ignore-tool","run-monitor-now","--ignore-tool","submit-batch","--ignore-tool","cancel-batch","--ignore-tool","delete-batch"]' \
-  --env '{}'
+  --url https://mcp.context.dev/mcp \
+  --headers '{"X-Client-Name":"NanoClaw"}'
 ```
 
-For each selected group using Full access, omit the seven `--ignore-tool`
-pairs:
+The registration contains no credential. OneCLI adds
+`Authorization: Bearer <key>` only when traffic is sent to
+`mcp.context.dev`.
 
-```bash
-ncl groups config add-mcp-server \
-  --id <group-id> \
-  --name context \
-  --command mcp-remote \
-  --args '["https://mcp.context.dev/mcp","--transport","http-only","--enable-proxy","--header","X-Client-Name:NanoClaw"]' \
-  --env '{}'
-```
-
-Restart each selected group:
+Restart each selected group and request a read-only smoke test:
 
 ```bash
 ncl groups restart \
   --id <group-id> \
-  --message "Context.dev is installed. Search the web for the latest official NanoClaw release, return one result, cite its URL, and report the Context.dev tool name you used."
+  --message "Context.dev is installed. Use a Context.dev MCP tool to find the latest official NanoClaw release, return one result with its source URL, and report the tool name you used."
 ```
 
 ## Phase 5: Verify
 
-Confirm the stored configuration contains exactly one `context` server, uses
-`mcp-remote`, points to `https://mcp.context.dev/mcp`, and enables the proxy:
+Confirm each selected group contains exactly one `context` server with type
+`http`, the URL `https://mcp.context.dev/mcp`, and no authorization header:
 
 ```bash
 ncl groups config get --id <group-id>
 ```
 
-Check the selected agent's test response. It must use a tool in the
-`mcp__context__` namespace, return a cited URL, and report no authentication or
-transport error.
-
-For Standard access, confirm these tools are absent:
-
-- `mcp__context__create-monitor`
-- `mcp__context__update-monitor`
-- `mcp__context__delete-monitor`
-- `mcp__context__run-monitor-now`
-- `mcp__context__submit-batch`
-- `mcp__context__cancel-batch`
-- `mcp__context__delete-batch`
-
-For Full access, confirm the tools are present. Do not invoke them during the
-smoke test.
+The smoke-test response must use a tool in the `mcp__context__` namespace,
+include a cited URL, and report no authentication or transport error. Do not
+invoke monitor or batch mutation tools during verification.
 
 ## Troubleshooting
 
-- `command not found: mcp-remote`: rebuild the image, then restart the group.
 - `401`, `Missing Authorization header`, or `Invalid token`: confirm OneCLI has
-  a generic secret for `mcp.context.dev` with header `Authorization` and format
-  `Bearer {value}`, then confirm the bridge uses `--enable-proxy`.
-- Context.dev tools are absent: verify the group has one `context` MCP entry,
-  then restart it.
-- A Standard group exposes monitor or batch write tools: restore all seven
-  `--ignore-tool` pairs and restart the group.
-- The operator wants additional capabilities: re-register the server with the
-  Full arguments and restart the group.
+  the `Context.dev` generic secret for host `mcp.context.dev` with header
+  `Authorization` and format `Bearer {value}`. If the OneCLI agent is in
+  selective mode, confirm the secret ID is assigned to it.
+- Context.dev tools are absent: confirm the group has one native HTTP `context`
+  entry, then restart the group.
+- `approval-pending`: wait for the operator to approve the configuration or
+  restart request; do not submit duplicates.
+- A write-capable tool appears: this is expected for the public Context.dev MCP
+  catalog. Use it only after an explicit operator request.
 
 ## Removal
 
@@ -208,4 +177,3 @@ See [REMOVE.md](REMOVE.md) for the idempotent removal procedure.
 
 - [Context.dev documentation](https://docs.context.dev)
 - [Context.dev MCP server](https://mcp.context.dev/mcp)
-- [`mcp-remote`](https://github.com/geelen/mcp-remote)
