@@ -12,6 +12,8 @@
  * with the host caller — same code path a real approval would take.
  */
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 
 vi.mock('../../container-runner.js', () => ({
@@ -26,9 +28,21 @@ vi.mock('../../container-restart.js', () => ({
   restartAgentGroupContainers: vi.fn().mockResolvedValue(0),
 }));
 
+// The add-mount tests below drive the stored mount through the real
+// mount-security validator, which reads a module-level const for the allowlist
+// path. Expose it as a getter over hoisted state so each test can point it at
+// its own temp file.
+const mountState = vi.hoisted(() => ({ allowlistPath: '' }));
+
 vi.mock('../../config.js', async () => {
   const actual = await vi.importActual('../../config.js');
-  return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-cli-groups' };
+  return {
+    ...actual,
+    DATA_DIR: '/tmp/nanoclaw-test-cli-groups',
+    get MOUNT_ALLOWLIST_PATH() {
+      return mountState.allowlistPath;
+    },
+  };
 });
 
 const TEST_DIR = '/tmp/nanoclaw-test-cli-groups';
@@ -37,6 +51,7 @@ import { initTestDb, closeDb, runMigrations, createAgentGroup, getDb } from '../
 import { createSession } from '../../db/sessions.js';
 import { dispatch } from '../dispatch.js';
 import { ensureContainerConfig, getContainerConfig } from '../../db/container-configs.js';
+import { validateMount } from '../../modules/mount-security/index.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 // Side-effect import: registers the `groups-*` commands (including delete).
 import './groups.js';
@@ -282,12 +297,14 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
     const GID = 'ag-mount';
     await createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
     await ensureContainerConfig(GID);
-    const args = { id: GID, host: '/data/.gmail-mcp', container: '/home/node/.gmail-mcp', ro: true };
+    // Relative, as mount-security requires — an absolute container path is
+    // rejected at add time now, and was silently dropped at spawn before that.
+    const args = { id: GID, host: '/data/.gmail-mcp', container: '.gmail-mcp', ro: true };
 
     const add = await dispatch({ id: 'r1', command: 'groups-config-add-mount', args }, { caller: 'host' });
     expect(add.ok).toBe(true);
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([
-      { hostPath: '/data/.gmail-mcp', containerPath: '/home/node/.gmail-mcp', readonly: true },
+      { hostPath: '/data/.gmail-mcp', containerPath: '.gmail-mcp', readonly: true },
     ]);
 
     // idempotent: a second add does not duplicate
@@ -298,11 +315,256 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
       {
         id: 'r3',
         command: 'groups-config-remove-mount',
-        args: { id: GID, host: '/data/.gmail-mcp', container: '/home/node/.gmail-mcp' },
+        args: { id: GID, host: '/data/.gmail-mcp', container: '.gmail-mcp' },
       },
       { caller: 'host' },
     );
     expect(rm.ok).toBe(true);
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
+  });
+});
+
+/**
+ * The mount mode `add-mount` records, checked through to what the container
+ * actually gets.
+ *
+ * These assertions cross into mount-security on purpose: the bug they cover
+ * lived in the seam, not in either module. `add-mount` wrote `readonly` only
+ * when `--ro` was passed, and the validator grants read-write only for
+ * `readonly === false` — so an omitted `--ro`, which is how every skill that
+ * needs a writable mount documents it (add-gmail-tool, add-gcal-tool), left the
+ * key undefined and was silently forced read-only at spawn. Each module was
+ * self-consistent; only the pair was wrong, so only a test spanning the pair
+ * catches it.
+ */
+describe('groups config add-mount: the mount mode the operator asked for', () => {
+  const GID = 'ag-mount-mode';
+  /** A timestamp no write can produce, so "unchanged" is unambiguous. */
+  const SENTINEL = '2020-01-01T00:00:00.000Z';
+  let tmpDir: string;
+  let rootDir: string;
+  let repoDir: string;
+
+  /** An allowlist whose single root permits read-write, so the mount's own
+   *  request is the only thing that can decide the outcome. */
+  function writeAllowlist(allowReadWrite: boolean): void {
+    fs.writeFileSync(
+      mountState.allowlistPath,
+      JSON.stringify({ allowedRoots: [{ path: rootDir, allowReadWrite }], blockedPatterns: [] }),
+    );
+  }
+
+  /** The mount as stored by the CLI — the exact shape the runner hands the validator. */
+  async function stored(): Promise<Array<{ hostPath: string; containerPath: string; readonly?: boolean }>> {
+    return JSON.parse((await getContainerConfig(GID))!.additional_mounts);
+  }
+
+  async function addMount(extra: Record<string, unknown> = {}) {
+    return dispatch(
+      {
+        id: `r-${Math.random()}`,
+        command: 'groups-config-add-mount',
+        args: { id: GID, host: repoDir, container: 'repo', ...extra },
+      },
+      { caller: 'host' },
+    );
+  }
+
+  beforeEach(async () => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    await runMigrations(await initTestDb());
+    await createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'add-mount-'));
+    mountState.allowlistPath = path.join(tmpDir, 'mount-allowlist.json');
+    rootDir = path.join(tmpDir, 'projects');
+    repoDir = path.join(rootDir, 'repo');
+    fs.mkdirSync(repoDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    await closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('records an explicit read-write request when --ro is absent', async () => {
+    await addMount();
+    // Not `undefined`. The validator reads this key by identity, so "absent"
+    // and "false" are different answers to "did the operator ask for write?".
+    expect(await stored()).toEqual([{ hostPath: repoDir, containerPath: 'repo', readonly: false }]);
+  });
+
+  it('a mount added without --ro is mounted read-write', async () => {
+    writeAllowlist(true);
+    await addMount();
+    expect(validateMount((await stored())[0])).toMatchObject({ allowed: true, effectiveReadonly: false });
+  });
+
+  it('still forces read-only when the allowlist root refuses write, whatever the mount asked for', async () => {
+    // The allowlist stays the authority — this fix makes read-write reachable,
+    // not automatic.
+    writeAllowlist(false);
+    await addMount();
+    expect(validateMount((await stored())[0])).toMatchObject({ allowed: true, effectiveReadonly: true });
+  });
+
+  it('honours --ro against a root that would have permitted write', async () => {
+    writeAllowlist(true);
+    await addMount({ ro: true });
+    expect((await stored())[0].readonly).toBe(true);
+    expect(validateMount((await stored())[0])).toMatchObject({ allowed: true, effectiveReadonly: true });
+  });
+
+  it('reads an explicit --ro false as read-write, not as the truthy string "false"', async () => {
+    // `--ro` alone parses to boolean true, but `--ro false` parses to the
+    // string "false" (src/cli/client.ts), which a bare truthiness check would
+    // read as read-only — the opposite of what was typed. Same convention as
+    // src/cli/crud.ts.
+    writeAllowlist(true);
+    await addMount({ ro: 'false' });
+    expect((await stored())[0].readonly).toBe(false);
+    expect(validateMount((await stored())[0])).toMatchObject({ allowed: true, effectiveReadonly: false });
+  });
+
+  it('reads a value it does not recognise as read-write, the same as every other boolean flag', async () => {
+    // The rest of the CLI decides a boolean flag by what it recognises as true
+    // (`true` / `'true'` / `'1'` — src/cli/crud.ts, src/cli/resources/tasks.ts,
+    // src/cli/resources/wirings.ts), not by ruling out the spellings of false.
+    // Inverting that here would make this one flag read `--ro banana` as
+    // read-only while the same input is false everywhere else.
+    writeAllowlist(true);
+    await addMount({ ro: 'banana' });
+    expect((await stored())[0].readonly).toBe(false);
+  });
+
+  it('re-adding the same mount with a different mode updates it instead of keeping the stale one', async () => {
+    // The dedupe key is host+container, so without this the operator's second
+    // command is a silent no-op — and correcting a wrong mode is exactly why
+    // anyone re-runs add-mount.
+    await addMount();
+    await addMount({ ro: true });
+    expect(await stored()).toEqual([{ hostPath: repoDir, containerPath: 'repo', readonly: true }]);
+
+    await addMount();
+    expect(await stored()).toEqual([{ hostPath: repoDir, containerPath: 'repo', readonly: false }]);
+  });
+
+  it('leaves the row untouched when the re-run asks for nothing new', async () => {
+    // `updateContainerConfigJson` stamps `updated_at` on every call, so writing
+    // unconditionally makes an idempotent re-run look like a config edit that
+    // never happened. Stamped with a sentinel rather than compared against the
+    // first write's timestamp: two writes can land in the same millisecond, and
+    // that would pass while the write still happened.
+    await addMount();
+    await getDb().run('UPDATE container_configs SET updated_at = ? WHERE agent_group_id = ?', SENTINEL, GID);
+
+    await addMount();
+
+    expect((await getContainerConfig(GID))!.updated_at).toBe(SENTINEL);
+    expect(await stored()).toEqual([{ hostPath: repoDir, containerPath: 'repo', readonly: false }]);
+  });
+
+  it('records the edit when the re-run does change the mode', async () => {
+    // The other half of the same rule: skipping the no-op must not turn into
+    // skipping every re-run of an entry that already exists.
+    await addMount();
+    await getDb().run('UPDATE container_configs SET updated_at = ? WHERE agent_group_id = ?', SENTINEL, GID);
+
+    await addMount({ ro: true });
+
+    expect((await getContainerConfig(GID))!.updated_at).not.toBe(SENTINEL);
+  });
+
+  it('reports the mode it stored, so the operator does not have to re-read the config', async () => {
+    const resp = await addMount();
+    expect((resp as { ok: true; data: { added: unknown } }).data.added).toEqual({
+      hostPath: repoDir,
+      containerPath: 'repo',
+      readonly: false,
+    });
+  });
+});
+
+/**
+ * What `add-mount` promises the operator versus what the mount will do.
+ *
+ * `add-mount` does not validate. It stores the entry, answers `ok`, and returns
+ * a note telling the operator to restart "for the mount to take effect". The
+ * decision about whether the mount can take effect at all happens later, at
+ * spawn, inside `validateAdditionalMounts` — where a rejection is a `log.warn`
+ * on the host and nothing else. Nothing is written back to the config, nothing
+ * reaches the operator, and the container comes up looking healthy with the
+ * directory simply absent.
+ *
+ * Most rejection reasons are deployment facts that can legitimately be fixed
+ * after the fact — the host path may not exist yet, the allowlist may not cover
+ * it yet — so refusing them at add time would be wrong. But an absolute
+ * `--container` path is not one of those. `isValidContainerPath` rejects it
+ * unconditionally, on every host, forever; no later edit to the allowlist or
+ * the filesystem can make that mount work. Accepting it and reporting success
+ * is the verb telling the operator something that is not true.
+ *
+ * This is not hypothetical on either side. `.claude/skills/add-rtk/SKILL.md:53`
+ * documents exactly this invocation, and the "adds a mount idempotently"
+ * test above uses `--container /home/node/.gmail-mcp` as its fixture — so the
+ * suite's own canonical example of "a mount" is one that can never mount.
+ */
+describe('groups config add-mount: mounts that can never take effect', () => {
+  const GID = 'ag-mount-unmountable';
+
+  beforeEach(async () => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    await runMigrations(await initTestDb());
+    await createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+  });
+
+  afterEach(async () => {
+    await closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+  });
+
+  async function addMount(container: string) {
+    return dispatch(
+      {
+        id: `r-${container}`,
+        command: 'groups-config-add-mount',
+        args: { id: GID, host: '/data/.gmail-mcp', container },
+      },
+      { caller: 'host' },
+    );
+  }
+
+  it('refuses an absolute --container path instead of confirming it', async () => {
+    // Independently of this verb: the validator will never accept this shape.
+    expect(validateMount({ hostPath: '/data/.gmail-mcp', containerPath: '/home/node/.gmail-mcp' })).toMatchObject({
+      allowed: false,
+    });
+
+    const resp = await addMount('/home/node/.gmail-mcp');
+
+    expect(resp.ok).toBe(false);
+    expect((resp as { ok: false; error: { message: string } }).error.message).toMatch(/relative|absolute/i);
+  });
+
+  it('does not store an absolute --container path it cannot honour', async () => {
+    await addMount('/home/node/.gmail-mcp');
+    // Otherwise the config carries a permanently dead entry that every future
+    // spawn re-rejects, and `ncl groups config get` shows it as configured.
+    expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
+  });
+
+  it('still accepts the relative form the working skills document', async () => {
+    // The guard must reject the unfixable shape only — this is the invocation
+    // add-gmail-tool and add-gcal-tool document, and it has to keep working.
+    const resp = await addMount('.gmail-mcp');
+    expect(resp.ok).toBe(true);
+    expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([
+      { hostPath: '/data/.gmail-mcp', containerPath: '.gmail-mcp', readonly: false },
+    ]);
   });
 });

@@ -22,6 +22,7 @@ import {
 import { getSessionDriver } from '../../drivers/index.js';
 import { assertValidGroupFolder, groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
+import { isValidContainerPath } from '../../modules/mount-security/index.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
 import {
   formatRestampResult,
@@ -559,7 +560,9 @@ registerResource({
       description:
         "Mount a host directory into a group's containers. OPERATOR-ONLY — never runnable from " +
         'inside a container (mounting host paths is a filesystem-access boundary). Requires ' +
-        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <container-path> [--ro].',
+        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <container-path> [--ro]. ' +
+        'Without --ro the mount is read-write, which mount-security still grants only if the allowlist ' +
+        'root covering --host permits write. Re-running updates the mode of an existing entry.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -567,19 +570,51 @@ registerResource({
         const containerPath = (args.container ?? args['container-path']) as string | undefined;
         if (!hostPath || !containerPath) throw new Error('Provide --host <host-path> and --container <container-path>');
 
+        // Refuse the one rejection reason no later change can fix. A missing
+        // host path, or an allowlist that does not cover it yet, are deployment
+        // facts the operator may legitimately fix after adding the mount, so
+        // those stay deferred to spawn. A container path mount-security will
+        // never accept is not: storing it buys a permanently dead entry that
+        // `config get` shows as configured while every spawn drops it with only
+        // a log.warn on the host.
+        if (!isValidContainerPath(containerPath)) {
+          throw new Error(
+            `--container must be a relative path with no ".." or ":" — it is mounted under /workspace/extra/. ` +
+              `"${containerPath}" is rejected by mount-security on every host, so the mount could never take effect.`,
+          );
+        }
+
         const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
 
-        const mount: AdditionalMountConfig = {
-          hostPath,
-          containerPath,
-          ...(args.ro || args.readonly ? { readonly: true } : {}),
-        };
+        // `readonly` is written explicitly, never omitted. mount-security reads
+        // it by identity — `readonly === false` is what requests write — so an
+        // absent key is not a neutral default, it is a silent read-only mount.
+        // That made read-write unreachable through this verb even though the
+        // skills that need it (add-gmail-tool, add-gcal-tool) document exactly
+        // this "no --ro" invocation. Recognise true rather than rule out false,
+        // as every other boolean flag here does (crud.ts, tasks.ts, wirings.ts):
+        // `--ro` alone arrives as boolean true, `--ro false` as the string.
+        const roFlag = args.ro ?? args.readonly;
+        const readonly = roFlag === true || roFlag === 'true' || roFlag === '1';
+
+        const mount: AdditionalMountConfig = { hostPath, containerPath, readonly };
         const existing = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
-        if (!existing.some((m) => m.hostPath === hostPath && m.containerPath === containerPath)) {
-          existing.push(mount);
+        // The dedupe key is host+container, so a re-run is how an operator
+        // corrects a mode. Replace rather than skip, or that correction is a
+        // silent no-op. Only write when something actually changed, though —
+        // every write stamps `updated_at`, and a re-run that asked for nothing
+        // new should not read back as a config edit. A stored entry with no
+        // `readonly` key is not the same as an explicit `false`, so a legacy
+        // entry is corrected on re-run rather than mistaken for a no-op.
+        const at = existing.findIndex((m) => m.hostPath === hostPath && m.containerPath === containerPath);
+        const current = at === -1 ? undefined : existing[at];
+        if (!current || current.readonly !== mount.readonly) {
+          if (at === -1) existing.push(mount);
+          else existing[at] = mount;
           await updateContainerConfigJson(id, 'additional_mounts', existing);
         }
+
         return { added: mount, note: `Run \`ncl groups restart --id ${id}\` for the mount to take effect.` };
       },
     },
