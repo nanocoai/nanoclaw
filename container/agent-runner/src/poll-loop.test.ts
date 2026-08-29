@@ -568,3 +568,24 @@ describe('task-run turn wiring (real processQuery)', () => {
     // diagnostic throw above (observed consistently on CI-hosted runners).
   }, 20_000);
 });
+
+describe('"(current conversation)" destination alias', () => {
+  it('delivers a <message to="(current conversation)"> block to the triggering channel', async () => {
+    // The send_message MCP tool echoes "(current conversation)" as the
+    // resolved name of a default send; agents mirror it in <message> blocks.
+    const { query, pushes } = makeResultQuery({
+      type: 'result',
+      text: '<message to="(current conversation)">on my way!</message>',
+    });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('on my way!');
+    expect(out[0].platform_id).toBe('chan-1');
+    expect(out[0].channel_type).toBe('discord');
+    // Delivered as a real message — no re-wrap nudge.
+    expect(pushes).toHaveLength(0);
+  });
+});

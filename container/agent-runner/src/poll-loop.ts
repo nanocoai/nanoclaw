@@ -1017,6 +1017,23 @@ export async function dispatchResultText(
     }
     const dest = findByName(toName);
     if (!dest) {
+      // The send_message MCP tool echoes "(current conversation)" as the
+      // resolved name of a default (to-omitted) send, and agents mirror
+      // that label in <message> blocks. Honor it as the batch's own channel
+      // instead of dropping the reply.
+      if (toName === '(current conversation)' && routing.channelType && routing.platformId) {
+        writeMessageOut({
+          id: generateId(),
+          in_reply_to: routing.inReplyTo,
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: body }),
+        });
+        sent++;
+        continue;
+      }
       log(`Unknown destination in <message to="${toName}">, dropping block`);
       scratchpadParts.push(`[dropped: unknown destination "${toName}"] ${body}`);
       continue;
