@@ -22,6 +22,24 @@ Why gateways fall behind: the OneCLI installer's docker-compose tracks the `late
 
 The gateway runs as a Docker service in `~/.onecli`. Upgrade just that container to the pinned `onecli-gateway` version — vault data lives in named Docker volumes and survives. This upgrades only the gateway; the CLI binary is pinned separately (see below).
 
+**First, confirm the compose file actually reads `ONECLI_VERSION`.** Installers
+from older lines wrote the tag as a literal (`image: ghcr.io/onecli/onecli:1.36.0`)
+rather than a variable, and `docker compose` has no reason to complain: the
+command below then re-pulls the *old* tag and prints `Pulled` / `Running`, so the
+upgrade reads as successful while the gateway stays exactly where it was.
+
+```bash
+cd ~/.onecli && ONECLI_VERSION=<onecli-gateway pin from versions.json> docker compose config | grep 'image: ghcr.io/onecli'
+```
+
+If that does not print the pinned version, edit `~/.onecli/docker-compose.yml`
+and parameterize the tag once, so this upgrade and every later one work as
+documented:
+
+```yaml
+    image: ghcr.io/onecli/onecli:${ONECLI_VERSION:-<onecli-gateway pin from versions.json>}
+```
+
 **Local gateway (the common case):**
 
 ```bash
@@ -37,6 +55,22 @@ Host-side health is necessary but **not sufficient**:
 ```bash
 curl -s http://127.0.0.1:10254/v1/health     # must return {"status":"ok",...}
 ```
+
+**Confirm the pinned version is the one now running.** Liveness alone cannot
+tell an upgraded gateway from one that never moved — a gateway that already
+served `/v1` answered `200` before the upgrade too. Upgraded gateways report
+their version in that payload, so read it; on the gateway's own host the
+container tag is the direct check (match the container exactly — `--filter
+name=onecli` is a substring match that also catches `onecli-postgres-1`):
+
+```bash
+curl -s http://127.0.0.1:10254/v1/health | grep -o '"version":"[^"]*"'
+cd ~/.onecli && docker compose ps onecli --format '{{.Image}}'   # gateway host only
+```
+
+Both must show the `onecli-gateway` pin. For a remote gateway, run the
+container check on that host; from the NanoClaw host only the `/v1/health`
+payload is available.
 
 **Verify the bind interface (container reachability).** Agent containers reach the gateway over the docker bridge (`host.docker.internal` → e.g. `172.17.0.1`), so a server bound only to `127.0.0.1` boots clean host-side while every credentialed call from containers dies at the proxy:
 
