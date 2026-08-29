@@ -1,10 +1,40 @@
-# Core code - maintainer only
-/src/ @gavrielc @gabi-simons
-/container/ @gavrielc @gabi-simons
-/groups/ @gavrielc @gabi-simons
-/launchd/ @gavrielc @gabi-simons
-/package.json @gavrielc @gabi-simons
-/package-lock.json @gavrielc @gabi-simons
+# Ownership philosophy
+#
+# CODEOWNERS is review ROUTING today: the main ruleset does not require
+# code-owner approval, so these rules request reviews without gating merges.
+# Rules are ordered least- to most-specific; the LAST matching rule wins, and
+# a matching rule with no owner deliberately clears ownership — that is how
+# the contributor-extension paths below stay open.
+#
+# Pre-existing owners are carried over unchanged; new names are added by
+# consent, never derived from activity alone. Candidates for additional
+# coverage, pending consent (see t67):
+#   /src/ /container/ /versions.json   @amit-shafnir
+#   /.claude/skills reviews            @Koshkoshinsk
 
-# Skills - open to contributors
+# Default owner: everything not matched below routes to the active maintainer.
+* @glifocat
+
+# Repository policy and automation — the highest-risk surface: workflows run
+# with write permissions on pull_request_target, and this file governs review
+# routing itself.
+/.github/ @glifocat
+
+# Runtime core
+/src/ @gavrielc @gabi-simons @glifocat
+/container/ @gavrielc @gabi-simons @glifocat
+/launchd/ @gavrielc @gabi-simons @glifocat
+
+# Supply-chain pins and lockfiles (see CLAUDE.md "Supply Chain Security")
+/package.json @gavrielc @gabi-simons @glifocat
+/pnpm-lock.yaml @glifocat
+/pnpm-workspace.yaml @glifocat
+/container/agent-runner/package.json @glifocat
+/container/agent-runner/bun.lock @glifocat
+/versions.json @glifocat
+/repo-tokens/ @glifocat
+
+# Contributor extensions — deliberately unowned (open to contributors)
 /.claude/skills/
+/templates/
+/config-examples/
