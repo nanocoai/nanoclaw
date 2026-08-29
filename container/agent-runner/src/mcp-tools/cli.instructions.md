@@ -21,7 +21,7 @@ Run `ncl help` for the full list. Common resources:
 | Resource     | Verbs                                                                                                                                     | What it is                                              |
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
 | groups       | list, get, create, update, delete, restart, config get/update, config add-mcp-server/remove-mcp-server, config add-package/remove-package | Agent groups (workspace, personality, container config) |
-| sessions     | list, get                                                                                                                                 | Active sessions (read-only)                             |
+| sessions     | list, get, usage                                                                                                                          | Active sessions (read-only) — `usage` reports token/cost totals, per session, agent group, task, or prompt |
 | destinations | list, add, remove                                                                                                                         | Where an agent group can send messages                  |
 | members      | list, add, remove                                                                                                                         | Unprivileged access gate for an agent group             |
 | tasks        | list, get, create, update, cancel, pause, resume, delete, append-log                                                                      | Scheduled tasks for your agent group                    |
@@ -37,6 +37,7 @@ Under `group` scope, `wirings get/update` always targets the current chat. Updat
 - **Restarting your container** — `ncl groups restart` (with optional `--rebuild` and `--message`).
 - **Checking who's in your group** — `ncl members list`.
 - **Seeing your destinations** — `ncl destinations list`.
+- **Checking what you have spent** — `ncl sessions usage` reports per-session token and cost totals for your group. `--by agent` rolls them up per agent group; `--by task` per task series; `--by prompt [--limit N]` lists individual turns with the prompt each one answered. Session and agent figures come from the lifetime totals; task and prompt figures come from the per-turn ledger, which keeps a fixed recent window rather than all history, so the two can differ for a long-lived session. A `—` means the provider reported nothing for that turn — not that it was free.
 - **Scheduling work** — `ncl tasks create`, then `ncl tasks list/get/update/cancel/pause/resume/delete`; `ncl tasks run <id>` fires one extra run now (testing) without changing the schedule. Each task run auto-logs its final text to the run log; `ncl tasks append-log --msg "…"` is for extra mid-run notes (host-timestamped, not a message).
 - **Explaining or changing response behavior** — inspect `ncl wirings get`, then request an update.
 - **Answering questions about the system** — query `ncl` rather than guessing.

@@ -7,7 +7,7 @@ import {
   parseSessionRoutingRecord,
   parseStateRecord,
 } from '../model.generated.js';
-import type { Destination, OutboundWrite, SessionRouting, StateValue } from '../types.js';
+import type { Destination, OutboundWrite, SessionRouting, StateValue, UsageTurn } from '../types.js';
 
 let hasOnWake: boolean | null = null;
 
@@ -244,6 +244,63 @@ export function sqliteSetState(key: string, value: string): void {
 
 export function sqliteDeleteState(key: string): void {
   getOutboundDb().prepare('DELETE FROM session_state WHERE key = ?').run(key);
+}
+
+interface UsageTurnRow {
+  timestamp: string;
+  task_series_id: string | null;
+  prompt_preview: string;
+  prompt_chars: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_creation_tokens: number | null;
+  cost_usd: number | null;
+}
+
+export function sqliteAppendUsageTurn(turn: UsageTurn, cutoff: string): void {
+  const db = getOutboundDb();
+  db.prepare(
+    `INSERT INTO token_usage_log
+       (timestamp, task_series_id, prompt_preview, prompt_chars,
+        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    turn.timestamp,
+    turn.taskSeriesId,
+    turn.promptPreview,
+    turn.promptChars,
+    turn.inputTokens,
+    turn.outputTokens,
+    turn.cacheReadTokens,
+    turn.cacheCreationTokens,
+    turn.costUsd,
+  );
+
+  // Timestamps are ISO-8601 UTC, so string order is chronological order and
+  // the index makes this a range delete over the tail rather than a scan.
+  db.prepare('DELETE FROM token_usage_log WHERE timestamp < ?').run(cutoff);
+}
+
+export function sqliteGetUsageTurns(limit: number): UsageTurn[] {
+  const rows = getOutboundDb()
+    .prepare(
+      `SELECT timestamp, task_series_id, prompt_preview, prompt_chars,
+              input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd
+         FROM token_usage_log ORDER BY id DESC LIMIT ?`,
+    )
+    .all(limit) as UsageTurnRow[];
+  return rows.map((row) => ({
+    timestamp: sqliteTimestamp(row.timestamp),
+    taskSeriesId: row.task_series_id,
+    promptPreview: row.prompt_preview,
+    promptChars: row.prompt_chars,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cacheReadTokens: row.cache_read_tokens,
+    cacheCreationTokens: row.cache_creation_tokens,
+    costUsd: row.cost_usd,
+  }));
 }
 
 interface DestinationRow {

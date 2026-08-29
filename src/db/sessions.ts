@@ -115,6 +115,14 @@ export async function findTaskSessions(agentGroupId: string, includeClosed = fal
   );
 }
 
+/**
+ * Every session on record, closed ones included. Closed sessions still hold
+ * the tokens they spent, so anything accounting for cost must see them.
+ */
+export async function getAllSessions(): Promise<Session[]> {
+  return getDb().all<Session>('SELECT * FROM sessions');
+}
+
 export async function getActiveSessions(): Promise<Session[]> {
   return getDb().all<Session>("SELECT * FROM sessions WHERE status = 'active'");
 }

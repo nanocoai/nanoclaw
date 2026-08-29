@@ -6,6 +6,7 @@ import type {
   OutboundDelivery,
   ProcessingAckRecord,
   SessionRoutingRecord,
+  StateRecord,
   TaskRecord as CanonicalTaskRecord,
   TaskWrite,
 } from './model.js';
@@ -89,6 +90,26 @@ export interface MailboxTimelineMessage {
   content: string;
 }
 
+/**
+ * One provider turn as the runner banked it: the prompt that turn answered
+ * (clipped to a preview) and what it cost.
+ *
+ * Nulls are load-bearing. A null is the provider reporting nothing for that
+ * field, which is not the same as zero — most providers report no usage at
+ * all, and a zeroed turn would claim the turn was free.
+ */
+export interface MailboxUsageTurn {
+  timestamp: string;
+  taskSeriesId: string | null;
+  promptPreview: string;
+  promptChars: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheCreationTokens: number | null;
+  costUsd: number | null;
+}
+
 /** Host-visible inbound mailbox behavior. Storage layout and lifecycle are implementation-private. */
 export interface InboundMailbox {
   setRouting(routing: SessionRouting): void;
@@ -138,6 +159,19 @@ export interface OutboundMailbox {
   getProcessingClaims(): ProcessingClaim[];
   deleteOrphanProcessingClaims(): number;
   getContainerState(): ContainerState | null;
+  /** One runner-written state value, or undefined if the runner never wrote that key. */
+  getState(key: string): StateRecord | undefined;
+  /**
+   * The runner's per-turn usage ledger, newest turn first. Empty when the
+   * runner has banked no turns — including because it predates the ledger.
+   * The ledger keeps a recent window, not all history — a window the runner
+   * trims as it writes, so a session that has stopped running still holds
+   * whatever it last held. Lifetime totals are state, read through getState.
+   *
+   * `limit` caps how many turns are read, not only how many come back — pass
+   * it whenever the caller wants the recent ones rather than the whole ledger.
+   */
+  getUsageLog(limit?: number): MailboxUsageTurn[];
   getDueMessages(excludeIds?: ReadonlySet<string>): OutboundMessage[];
   writeDirect(message: DirectOutboundMessage): Promise<void>;
   getOutboundHistory(limit: number): MailboxHistoryMessage[];

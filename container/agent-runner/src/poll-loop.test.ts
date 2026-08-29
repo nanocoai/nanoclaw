@@ -3,7 +3,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
-import { formatMessages, extractRouting } from './formatter.js';
+import { getTokenUsage } from './db/session-state.js';
+import { getTurnLog } from './db/usage-log.js';
+import { formatMessages, extractRouting, type RoutingContext } from './formatter.js';
 import { processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 import type { AgentQuery, ProviderEvent } from './providers/types.js';
@@ -20,14 +22,22 @@ function insertMessage(
   id: string,
   kind: string,
   content: object,
-  opts?: { processAfter?: string; trigger?: 0 | 1; onWake?: 0 | 1 },
+  opts?: { processAfter?: string; trigger?: 0 | 1; onWake?: 0 | 1; seriesId?: string },
 ) {
   getInboundDb()
     .prepare(
-      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, trigger, on_wake, content)
-     VALUES (?, ?, datetime('now'), 'pending', ?, ?, ?, ?)`,
+      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, trigger, on_wake, series_id, content)
+     VALUES (?, ?, datetime('now'), 'pending', ?, ?, ?, ?, ?)`,
     )
-    .run(id, kind, opts?.processAfter ?? null, opts?.trigger ?? 1, opts?.onWake ?? 0, JSON.stringify(content));
+    .run(
+      id,
+      kind,
+      opts?.processAfter ?? null,
+      opts?.trigger ?? 1,
+      opts?.onWake ?? 0,
+      opts?.seriesId ?? id,
+      JSON.stringify(content),
+    );
 }
 
 describe('formatter', () => {
@@ -407,11 +417,17 @@ function makeResultQuery(result: ProviderEvent): { query: AgentQuery; pushes: st
   };
 }
 
-const ERR_ROUTING = {
+// Spelled out in full, and typed: an omitted field here reads as `undefined`
+// at every call site, which quietly satisfies any `?? null` assertion the
+// production code happens to have. The container tsconfig excludes tests, so
+// nothing else catches a routing literal drifting from the interface.
+const ERR_ROUTING: RoutingContext = {
   platformId: 'chan-1',
   channelType: 'discord',
   threadId: null,
   inReplyTo: 'm1',
+  taskRun: false,
+  taskSeriesId: null,
 };
 
 it('does not push accumulated-only follow-ups into an active query', async () => {
@@ -469,17 +485,164 @@ describe('error result with no <message> envelope', () => {
   });
 });
 
+describe('token usage accounting (real processQuery)', () => {
+  it('banks the turn usage the provider reported', async () => {
+    const { query } = makeResultQuery({
+      type: 'result',
+      text: '<message to="a">hi</message>',
+      usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 7, cacheCreationTokens: 3, costUsd: 0.02 },
+    });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    expect(getTokenUsage()).toMatchObject({
+      input_tokens: 100,
+      output_tokens: 20,
+      cache_read_tokens: 7,
+      cache_creation_tokens: 3,
+      cost_usd: 0.02,
+      turns: 1,
+    });
+  });
+
+  it('banks an errored turn too — it burned tokens all the same', async () => {
+    const { query } = makeResultQuery({
+      type: 'result',
+      text: 'Spending limit reached.',
+      isError: true,
+      usage: { inputTokens: 9, outputTokens: 1 },
+    });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    expect(getTokenUsage()).toMatchObject({ input_tokens: 9, output_tokens: 1, turns: 1 });
+  });
+
+  it('a provider that reports no usage leaves no total behind', async () => {
+    // Recording a zeroed turn here would claim the session was free, and
+    // every provider but Claude currently reports nothing.
+    const { query } = makeResultQuery({ type: 'result', text: '<message to="a">hi</message>' });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
+
+    expect(getTokenUsage()).toBeNull();
+  });
+
+  it('logs the prompt the turn answered, with what that turn cost', async () => {
+    const { query } = makeResultQuery({
+      type: 'result',
+      text: '<message to="a">hi</message>',
+      usage: { inputTokens: 100, outputTokens: 20, costUsd: 0.02 },
+    });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'how much have we spent', undefined);
+
+    const log = getTurnLog();
+    expect(log).toHaveLength(1);
+    expect(log[0]).toMatchObject({
+      promptPreview: 'how much have we spent',
+      inputTokens: 100,
+      outputTokens: 20,
+      costUsd: 0.02,
+      taskSeriesId: null,
+    });
+  });
+
+  it('logs the prompt of an unmeasured turn as well — it still ran', async () => {
+    const { query } = makeResultQuery({ type: 'result', text: '<message to="a">hi</message>' });
+
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'unmeasured', undefined);
+
+    const log = getTurnLog();
+    expect(log).toHaveLength(1);
+    expect(log[0].promptPreview).toBe('unmeasured');
+    expect(log[0].inputTokens).toBeNull();
+  });
+
+  it('attributes a task run to its series', async () => {
+    const { query } = makeResultQuery({
+      type: 'result',
+      text: 'run complete',
+      usage: { inputTokens: 5, costUsd: 0.001 },
+    });
+
+    await processQuery(
+      query,
+      { ...TASK_ROUTING, taskSeriesId: 'daily-briefing-a25c' },
+      ['t1'],
+      'claude',
+      undefined,
+      'Send the daily briefing',
+      undefined,
+    );
+
+    expect(getTurnLog()[0]).toMatchObject({
+      taskSeriesId: 'daily-briefing-a25c',
+      promptPreview: 'Send the daily briefing',
+      costUsd: 0.001,
+    });
+  });
+
+  it('bills a task pushed mid-stream to its own series, not the batch that opened the query', async () => {
+    // The query outlives the batch that opened it: a task landing while another
+    // turn streams gets pushed into the same query and answered as its own
+    // turn. Costing it against the routing frozen at open time bills it to
+    // whichever series happened to open the query — or to chat, which has none.
+    const pushes: string[] = [];
+
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'result', text: 'weekly digest sent', usage: { inputTokens: 10 } };
+
+      insertMessage('t2', 'task', { prompt: 'Send the daily briefing' }, { seriesId: 'daily-briefing-a25c' });
+      const deadline = Date.now() + 15_000;
+      while (!pushes.some((p) => p.includes('daily briefing')) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (!pushes.some((p) => p.includes('daily briefing'))) {
+        throw new Error(`follow-up poller never pushed the task run within 15s (${pushes.length} pushes seen)`);
+      }
+
+      yield { type: 'result', text: 'briefing sent', usage: { inputTokens: 20 } };
+    }
+
+    const query: AgentQuery = {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+
+    await processQuery(
+      query,
+      { ...TASK_ROUTING, taskSeriesId: 'weekly-digest-b1c2' },
+      ['t1'],
+      'claude',
+      undefined,
+      'Send the weekly digest',
+      undefined,
+    );
+
+    // Newest first: the pushed run against its own series, then the one that
+    // opened the query against its own.
+    expect(getTurnLog().map((r) => r.taskSeriesId)).toEqual(['daily-briefing-a25c', 'weekly-digest-b1c2']);
+  }, 30_000);
+});
+
 // --- Task-run turn wiring: the REAL processQuery path (one-door) ---
 // These drive the actual call sites (autoAppendTaskLog at result-handling,
 // shouldNudgeTaskBlocks gating, and follow-up turn reset). Deleting the wiring
 // — not just the helpers — goes red here.
 
-const TASK_ROUTING = {
+const TASK_ROUTING: RoutingContext = {
   platformId: null,
   channelType: null,
   threadId: 'system:tasks:ser-1',
   inReplyTo: 't1',
   taskRun: true,
+  taskSeriesId: null,
 };
 
 function taskLogRows(): Array<{ text: string }> {

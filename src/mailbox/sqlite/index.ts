@@ -15,6 +15,8 @@ import {
   getMessageForRetry,
   getMostRecentPeerSourceSessionId,
   getProcessingClaims,
+  getSessionState,
+  getUsageLog,
   insertMessage,
   markDelivered,
   markDeliveryFailed,
@@ -36,6 +38,7 @@ import {
   parseOutboundRecord,
   parseProcessingAckRecord,
   parseSessionRoutingRecord,
+  parseStateRecord,
   parseTaskRecord,
 } from '../model.js';
 import {
@@ -346,6 +349,23 @@ export function wrapSqliteOutbound(
         toolStartedAt: record.toolStartedAt,
       };
     },
+    getState: (key) => {
+      const row = getSessionState(readable(), key);
+      if (!row) return undefined;
+      return parseStateRecord({ key: row.key, value: row.value, updatedAt: sqliteTimestamp(row.updated_at) });
+    },
+    getUsageLog: (limit) =>
+      getUsageLog(readable(), limit).map((row) => ({
+        timestamp: sqliteTimestamp(row.timestamp),
+        taskSeriesId: row.task_series_id,
+        promptPreview: row.prompt_preview,
+        promptChars: row.prompt_chars,
+        inputTokens: row.input_tokens,
+        outputTokens: row.output_tokens,
+        cacheReadTokens: row.cache_read_tokens,
+        cacheCreationTokens: row.cache_creation_tokens,
+        costUsd: row.cost_usd,
+      })),
     getDueMessages: (excludeIds) =>
       getDueOutboundMessages(readable())
         .filter((row) => !excludeIds?.has(String(row.id)))

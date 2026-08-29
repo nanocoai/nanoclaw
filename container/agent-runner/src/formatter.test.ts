@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb } from './mailbox/sqlite/connection.js';
 import { getPendingMessages } from './db/messages-in.js';
-import { formatMessages, stripInternalTags, stripLegacyTaskContract } from './formatter.js';
+import { extractRouting, formatMessages, stripInternalTags, stripLegacyTaskContract } from './formatter.js';
 import { TIMEZONE, formatLocalTime } from './timezone.js';
 
 beforeEach(() => {
@@ -325,5 +325,42 @@ describe('app_context rendering (Slack agent mode, contract C4)', () => {
     });
     const result = formatMessages(getPendingMessages());
     expect(result).toContain('(viewing: channel C1&lt;&amp;&gt;)');
+  });
+});
+
+describe('extractRouting task series', () => {
+  /** The host stamps `series_id` on EVERY inbound row — a chat message is its
+   *  own series of one. Only a task run has a series worth costing. */
+  function insertWithSeries(id: string, kind: string, seriesId: string, content: object) {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, series_id, content)
+         VALUES (?, ?, ?, 'pending', ?, ?)`,
+      )
+      .run(id, kind, new Date().toISOString(), seriesId, JSON.stringify(content));
+  }
+
+  it('a chat turn belongs to no task series', () => {
+    insertWithSeries('m1', 'chat', 'm1', { sender: 'Alice', text: 'hello' });
+
+    expect(extractRouting(getPendingMessages()).taskSeriesId).toBeNull();
+  });
+
+  it('a task run carries its series', () => {
+    insertWithSeries('t1', 'task', 'daily-briefing-a25c', { prompt: 'Send the daily briefing' });
+
+    expect(extractRouting(getPendingMessages()).taskSeriesId).toBe('daily-briefing-a25c');
+  });
+
+  it('a task batched with chat bills neither series', () => {
+    // One-door delivery is already off for this batch; the turn answers the
+    // chat message too, so charging the whole thing to the series would
+    // overstate what the task cost.
+    insertWithSeries('t1', 'task', 'daily-briefing-a25c', { prompt: 'Send the daily briefing' });
+    insertWithSeries('m1', 'chat', 'm1', { sender: 'Alice', text: 'while you are up' });
+
+    const routing = extractRouting(getPendingMessages());
+    expect(routing.taskRun).toBe(false);
+    expect(routing.taskSeriesId).toBeNull();
   });
 });

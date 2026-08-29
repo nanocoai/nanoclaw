@@ -79,4 +79,26 @@ CREATE TABLE IF NOT EXISTS container_state (
   tool_started_at          TEXT,
   updated_at               TEXT NOT NULL
 );
+
+-- Per-turn usage ledger. The runner appends one row per provider turn: the
+-- prompt that turn answered (clipped to a preview), the tokens and cost it
+-- reported, and the task series it belonged to. The runner ages rows out on a
+-- fixed time window as it writes, so a session that stopped running keeps its
+-- last window; the lifetime totals live in session_state.
+-- Numeric columns are nullable: null means the provider reported nothing,
+-- which is not the same as zero.
+CREATE TABLE IF NOT EXISTS token_usage_log (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  timestamp             TEXT NOT NULL,
+  task_series_id        TEXT,
+  prompt_preview        TEXT NOT NULL,
+  prompt_chars          INTEGER NOT NULL,
+  input_tokens          INTEGER,
+  output_tokens         INTEGER,
+  cache_read_tokens     INTEGER,
+  cache_creation_tokens INTEGER,
+  cost_usd              REAL
+);
+CREATE INDEX IF NOT EXISTS idx_token_usage_log_timestamp
+  ON token_usage_log(timestamp);
 `;

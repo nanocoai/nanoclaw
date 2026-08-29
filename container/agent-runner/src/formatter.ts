@@ -117,6 +117,9 @@ export interface RoutingContext {
    *  delivers from a task session; final-text `<message to>` blocks are inert
    *  and the final text auto-appends to the series run log. */
   taskRun: boolean;
+  /** Task series this batch belongs to, for per-task cost accounting. Null for
+   *  chat turns, and for a task row written before series ids existed. */
+  taskSeriesId: string | null;
 }
 
 /**
@@ -129,16 +132,22 @@ export interface RoutingContext {
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
   const first = messages.find((m) => !isSessionEcho(m)) ?? messages[0];
+  // Echo rows riding along with a task must not disable one-door delivery:
+  // taskRun as long as at least one task row and no non-task/non-echo row.
+  const taskRun =
+    messages.some((m) => m.kind === 'task') && messages.every((m) => m.kind === 'task' || isSessionEcho(m));
   return {
     platformId: first?.platform_id ?? null,
     channelType: first?.channel_type ?? null,
     threadId: first?.thread_id ?? null,
     inReplyTo: first?.id ?? null,
-    // Echo rows riding along with a task must not disable one-door delivery:
-    // taskRun as long as at least one task row and no non-task/non-echo row.
-    taskRun:
-      messages.some((m) => m.kind === 'task') &&
-      messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
+    taskRun,
+    // Every inbound row carries a series id — a chat message is its own series
+    // of one — so the id alone says nothing about whether there is a task to
+    // cost. Only a batch that IS a task run has one. A task batched with chat
+    // is not: the turn answers both, and billing all of it to the series would
+    // overstate what the task cost.
+    taskSeriesId: taskRun ? (first?.series_id ?? null) : null,
   };
 }
 

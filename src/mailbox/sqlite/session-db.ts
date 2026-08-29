@@ -215,6 +215,60 @@ export function getContainerState(outDb: Database.Database): ContainerState | nu
   }
 }
 
+export interface SessionStateRow {
+  key: string;
+  value: string;
+  updated_at: string;
+}
+
+/**
+ * Read one key the runner banked in session_state. Undefined when the runner
+ * never wrote that key — including when the table doesn't exist yet (older
+ * session DB), which is the same thing from the host's side.
+ */
+export function getSessionState(outDb: Database.Database, key: string): SessionStateRow | undefined {
+  try {
+    return outDb.prepare('SELECT key, value, updated_at FROM session_state WHERE key = ?').get(key) as
+      | SessionStateRow
+      | undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export interface UsageLogRow {
+  timestamp: string;
+  task_series_id: string | null;
+  prompt_preview: string;
+  prompt_chars: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_creation_tokens: number | null;
+  cost_usd: number | null;
+}
+
+/**
+ * The runner's per-turn usage ledger, newest first. Empty when the runner has
+ * banked no turns, and when the table doesn't exist yet (older session DB) —
+ * neither is an error, and neither means the session was free.
+ *
+ * `limit` bounds the read, not just the answer: a caller listing recent turns
+ * has no business loading a session's whole retained history to throw most of
+ * it away. Aggregate callers, which have to see every turn, leave it off.
+ */
+export function getUsageLog(outDb: Database.Database, limit?: number): UsageLogRow[] {
+  const columns = `timestamp, task_series_id, prompt_preview, prompt_chars,
+                   input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd`;
+  try {
+    const sql = `SELECT ${columns} FROM token_usage_log ORDER BY id DESC${limit === undefined ? '' : ' LIMIT ?'}`;
+    const stmt = outDb.prepare(sql);
+    return (limit === undefined ? stmt.all() : stmt.all(limit)) as UsageLogRow[];
+  } catch {
+    return [];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // messages_out (read-only from host)
 // ---------------------------------------------------------------------------

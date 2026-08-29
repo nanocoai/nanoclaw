@@ -111,7 +111,7 @@ ncl help
 | roles | list, grant, revoke | Owner / admin privileges (global or scoped to an agent group) |
 | members | list, add, remove | Unprivileged access gate for an agent group |
 | destinations | list, add, remove | Where an agent group can send messages |
-| sessions | list, get | Active sessions (read-only) |
+| sessions | list, get, usage | Active sessions (read-only); `usage` = token/cost totals, `--by session\|agent\|task\|prompt` |
 | tasks | list, get, create, update, cancel, pause, resume, delete, run, append-log | Scheduled tasks for an agent group |
 | user-dms | list | Cold-DM cache (read-only) |
 | dropped-messages | list | Messages from unregistered senders (read-only) |

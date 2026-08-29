@@ -42,6 +42,23 @@ export type SessionRouting = SessionRoutingRecord;
 export type OutboundMessageDraft = OutboundWrite;
 export type StateValue = Omit<StateRecord, 'key'>;
 
+/**
+ * One turn's line in the usage ledger, as the runner reports it. Nulls are
+ * load-bearing: the provider reported nothing for that field, which is not
+ * the same as zero.
+ */
+export interface UsageTurn {
+  timestamp: string;
+  taskSeriesId: string | null;
+  promptPreview: string;
+  promptChars: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheCreationTokens: number | null;
+  costUsd: number | null;
+}
+
 export interface MailboxOperations {
   getPendingMessages(limit: number, isFirstPoll: boolean): InboundMessage[];
   markMessages(ids: string[], status: ProcessingStatus): void;
@@ -57,6 +74,14 @@ export interface MailboxOperations {
   getState(key: string): StateValue | undefined;
   setState(key: string, value: string): void;
   deleteState(key: string): void;
+  /**
+   * Append one turn to the usage ledger, and drop turns older than `cutoff`.
+   * Ageing out rides along with the append so the ledger stays bounded
+   * without a second pass over it: one write per turn, whatever the window.
+   */
+  appendUsageTurn(turn: UsageTurn, cutoff: string): void;
+  /** Most recent turns first. */
+  getUsageTurns(limit: number): UsageTurn[];
   getSessionRouting(): SessionRouting;
   getDestinations(): Destination[];
   findDestinationByName(name: string): Destination | undefined;

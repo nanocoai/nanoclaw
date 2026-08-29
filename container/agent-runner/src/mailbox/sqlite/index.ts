@@ -6,6 +6,7 @@ import {
   sqliteSetContainerToolInFlight,
 } from './connection.js';
 import {
+  sqliteAppendUsageTurn,
   sqliteDeleteState,
   sqliteFindByName,
   sqliteFindByRouting,
@@ -19,6 +20,7 @@ import {
   sqliteGetSessionRouting,
   sqliteGetState,
   sqliteGetUndeliveredMessages,
+  sqliteGetUsageTurns,
   sqliteMarkCompleted,
   sqliteMarkFailed,
   sqliteMarkProcessing,
@@ -42,6 +44,7 @@ import type {
   MailboxSessionKey,
   OutboundMessage,
   ProcessingStatus,
+  UsageTurn,
 } from '../types.js';
 
 function inboundMessage(row: MessageInRow): InboundMessage {
@@ -190,6 +193,14 @@ export class SqliteAgentMailbox implements AgentMailbox {
 
   deleteState(key: string): void {
     sqliteDeleteState(key);
+  }
+
+  appendUsageTurn(turn: UsageTurn, cutoff: string): void {
+    sqliteAppendUsageTurn(turn, cutoff);
+  }
+
+  getUsageTurns(limit: number): UsageTurn[] {
+    return sqliteGetUsageTurns(limit);
   }
 
   getSessionRouting() {

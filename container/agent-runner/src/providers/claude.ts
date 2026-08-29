@@ -5,6 +5,7 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
+import { turnUsage } from '../db/usage-baseline.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { shimCwd } from './cwd-shim.js';
@@ -15,6 +16,7 @@ import type {
   McpServerConfig,
   ProviderEvent,
   ProviderOptions,
+  ProviderUsage,
   QueryInput,
 } from './types.js';
 
@@ -29,6 +31,52 @@ export interface SdkRateLimitInfo {
   utilization?: number;
   errorCode?: string;
   overageDisabledReason?: string;
+}
+
+/**
+ * Pull the turn's token counts and cost off the SDK's `result` message.
+ *
+ * This is the only place they appear — nothing downstream can re-derive them,
+ * so whatever is dropped here is gone. Error subtypes carry usage too: a turn
+ * that failed still burned tokens and still belongs in the total.
+ *
+ * Fields that aren't finite numbers are omitted rather than coerced. A missing
+ * field means "the provider didn't report it", which is a different claim from
+ * zero, and only the caller knows which of the two it can act on.
+ */
+export function usageFromResult(message: unknown): ProviderUsage | undefined {
+  if (!message || typeof message !== 'object') return undefined;
+  const m = message as { type?: string; usage?: Record<string, unknown>; total_cost_usd?: unknown };
+  if (m.type !== 'result' || !m.usage || typeof m.usage !== 'object') return undefined;
+
+  const num = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+
+  const usage: ProviderUsage = {
+    inputTokens: num(m.usage.input_tokens),
+    outputTokens: num(m.usage.output_tokens),
+    cacheCreationTokens: num(m.usage.cache_creation_input_tokens),
+    cacheReadTokens: num(m.usage.cache_read_input_tokens),
+    costUsd: num(m.total_cost_usd),
+  };
+
+  // A usage block none of whose fields survived is still a truthy object, and
+  // callers bank on truthiness — that would count the turn as measured and
+  // free. Nothing reported means nothing to report.
+  return Object.values(usage).some((value) => value !== undefined) ? usage : undefined;
+}
+
+/**
+ * What the turn cost, which is not what the result says it cost.
+ *
+ * The SDK's figures are cumulative over its session, and one query takes
+ * several turns, so the readings have to be differenced before anything banks
+ * them. See `db/usage-baseline` for why, and for the resume case that makes it
+ * worse.
+ */
+export function turnUsageFromResult(message: unknown): ProviderUsage | undefined {
+  const sessionId = (message as { session_id?: unknown } | null)?.session_id;
+  return turnUsage(usageFromResult(message), typeof sessionId === 'string' ? sessionId : null);
 }
 
 /**
@@ -634,7 +682,7 @@ export class ClaudeProvider implements AgentProvider {
           // billing/quota notice to the user rather than dropping the turn.
           const m = message as { result?: string; is_error?: boolean; errors?: string[] };
           const text = m.result ?? (m.errors && m.errors.length > 0 ? m.errors.join('\n') : null);
-          yield { type: 'result', text, isError: m.is_error === true };
+          yield { type: 'result', text, isError: m.is_error === true, usage: turnUsageFromResult(message) };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'rate_limit_event') {

@@ -11,12 +11,14 @@ import { clearStaleProcessingAcks } from './db/container-state.js';
 import { touchHeartbeat } from './heartbeat.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import {
+  addTokenUsage,
   clearContinuation,
   clearCurrentInReplyTo,
   migrateLegacyContinuation,
   setContinuation,
   setCurrentInReplyTo,
 } from './db/session-state.js';
+import { recordTurn } from './db/usage-log.js';
 import {
   formatMessages,
   extractRouting,
@@ -390,11 +392,16 @@ export async function processQuery(
   // never re-matched. Dropped at the turn boundary: a block that never
   // closes anywhere is the wrap-nudge's job, not the buffer's.
   let midTurnTail = '';
-  // Prompt queue for the exchange hook — each result event consumes the
-  // oldest unanswered prompt, except a wrapping-retry result, which answers
-  // the same prompt again. Unused (and unmaintained) when the provider
-  // doesn't implement `onExchangeComplete`.
-  const archivePrompts: string[] = [initialPrompt];
+  // Queue of turns awaiting a result — each result event consumes the oldest
+  // unanswered one, except a wrapping-retry result, which answers the same
+  // turn again. It carries the task series alongside the prompt because the
+  // query outlives the batch that opened it: a task pushed mid-stream is
+  // answered as its own turn and must be costed against its own series, not
+  // against whatever `routing` was frozen at open time.
+  const pendingTurns: Array<{ prompt: string; taskSeriesId: string | null }> = [
+    { prompt: initialPrompt, taskSeriesId: routing.taskSeriesId },
+  ];
+  const answering = () => pendingTurns[0] ?? { prompt: initialPrompt, taskSeriesId: routing.taskSeriesId };
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -485,7 +492,7 @@ export async function processQuery(
         unwrappedNudged = false;
         taskBlockNudged = false;
         query.push(prompt);
-        archivePrompts.push(prompt);
+        pendingTurns.push({ prompt, taskSeriesId: extractRouting(keep).taskSeriesId });
         markCompleted(keptIds);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
@@ -554,6 +561,21 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        // Bank the turn's usage before anything can branch away: a turn with
+        // no text still burned tokens, so this sits above the text guard. A
+        // provider that reports nothing banks nothing — a zeroed row would
+        // claim the turn was free rather than unreported.
+        if (event.usage) addTokenUsage(event.usage);
+        // The ledger, unlike the totals, records the turn either way: what it
+        // answers is "which prompt cost what", and a prompt nobody measured is
+        // still a prompt that ran. The head of the queue is the turn this
+        // result answers — a nudge retry answers the same one again, and its
+        // extra turn earns its own row, because it cost extra tokens.
+        recordTurn({
+          prompt: answering().prompt,
+          taskSeriesId: answering().taskSeriesId,
+          usage: event.usage,
+        });
         if (event.text) {
           const { sent, hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
             midTurnSent,
@@ -584,12 +606,12 @@ export async function processQuery(
             // the failing gateway turn after turn.
             await deliverErrorResult(event.text, routing);
             notifyExchangeComplete(onExchangeComplete, {
-              prompt: archivePrompts[0] ?? initialPrompt,
+              prompt: answering().prompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
               status: 'error',
             });
-            archivePrompts.shift();
+            pendingTurns.shift();
           } else {
             // An unwrapped final text only warrants the wrap-nudge when NOTHING
             // was delivered this turn — hasUnwrapped already folds in the
@@ -599,7 +621,7 @@ export async function processQuery(
             // the scratchpad log.
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
             notifyExchangeComplete(onExchangeComplete, {
-              prompt: archivePrompts[0] ?? initialPrompt,
+              prompt: answering().prompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
               status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
@@ -625,9 +647,9 @@ export async function processQuery(
             // A retry result (wrapping or task-block nudge) answers the SAME
             // user prompt — keep it queued so the retry archives against it,
             // not the nudge text.
-            if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
+            if (!willRetryWrapping && !willRetryTaskBlocks) pendingTurns.shift();
           }
-        } else archivePrompts.shift();
+        } else pendingTurns.shift();
         // Turn boundary: reset the per-turn sent count after the result's
         // nudge decision has used it. A nudge retry re-counts via its own
         // text events before the retry result, so resetting on every result
@@ -645,7 +667,7 @@ export async function processQuery(
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     notifyExchangeComplete(onExchangeComplete, {
-      prompt: archivePrompts[0] ?? initialPrompt,
+      prompt: answering().prompt,
       result: `Error: ${errMsg}`,
       continuation: queryContinuation ?? initialContinuation,
       status: 'error',

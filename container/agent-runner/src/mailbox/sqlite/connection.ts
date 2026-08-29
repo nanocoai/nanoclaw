@@ -112,6 +112,26 @@ export function getOutboundDb(): Database {
         updated_at               TEXT NOT NULL
       );
     `);
+    // token_usage_log: one row per provider turn — the prompt it answered and
+    // what that turn cost. Forward-compat for older outbound.db files, same as
+    // the two above. Numeric columns are nullable on purpose: null means the
+    // provider reported nothing, which is not the same as zero.
+    _outbound.exec(`
+      CREATE TABLE IF NOT EXISTS token_usage_log (
+        id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp             TEXT NOT NULL,
+        task_series_id        TEXT,
+        prompt_preview        TEXT NOT NULL,
+        prompt_chars          INTEGER NOT NULL,
+        input_tokens          INTEGER,
+        output_tokens         INTEGER,
+        cache_read_tokens     INTEGER,
+        cache_creation_tokens INTEGER,
+        cost_usd              REAL
+      );
+      CREATE INDEX IF NOT EXISTS idx_token_usage_log_timestamp
+        ON token_usage_log(timestamp);
+    `);
   }
   return _outbound;
 }
@@ -233,6 +253,19 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
       tool_started_at          TEXT,
       updated_at               TEXT NOT NULL
     );
+    CREATE TABLE token_usage_log (
+      id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+      timestamp             TEXT NOT NULL,
+      task_series_id        TEXT,
+      prompt_preview        TEXT NOT NULL,
+      prompt_chars          INTEGER NOT NULL,
+      input_tokens          INTEGER,
+      output_tokens         INTEGER,
+      cache_read_tokens     INTEGER,
+      cache_creation_tokens INTEGER,
+      cost_usd              REAL
+    );
+    CREATE INDEX idx_token_usage_log_timestamp ON token_usage_log(timestamp);
   `);
 
   return { inbound: _inbound, outbound: _outbound };
