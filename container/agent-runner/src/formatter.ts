@@ -356,7 +356,7 @@ function formatAttachments(attachments: any[] | undefined): string {
   if (!Array.isArray(attachments) || attachments.length === 0) return '';
   const parts = attachments.map((a) => {
     const name = a.name || a.filename || 'attachment';
-    const type = a.type || 'file';
+    const type = escapeXml(a.type || 'file');
     const localPath = a.localPath ? `/workspace/${a.localPath}` : '';
     const url = a.url || '';
     if (localPath) {
