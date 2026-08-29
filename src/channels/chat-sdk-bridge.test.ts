@@ -488,3 +488,109 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(msg.markdown).toBe('plain hello');
   });
 });
+
+describe('createChatSdkBridge.deliver — transformOutboundText wiring', () => {
+  // transformOutboundText is the adapter-specific outbound sanitizer
+  // (e.g. sanitizeTelegramLegacyMarkdown for the Telegram channel). It must
+  // be applied on every user-visible string before it reaches the underlying
+  // Chat SDK adapter — otherwise Telegram rejects approval cards and
+  // send_card payloads with `Bad Request: can't parse entities` whenever
+  // the source text contains unbalanced markdown special chars (e.g. a
+  // single `_` in an agent name like `repo_pilot`). The text branch
+  // already runs it; these tests pin the wiring for the two card branches
+  // that previously skipped it.
+
+  const tag = (t: string) => `«${t}»`;
+
+  // CardText nodes render as { type: 'text', content: '...' } inside the
+  // Chat SDK Card tree. Walk the tree and collect every text leaf so the
+  // tests can assert sanitization regardless of where the text lives.
+  function collectCardText(node: { type?: string; content?: string; children?: unknown[] } | undefined): string[] {
+    if (!node) return [];
+    const out: string[] = [];
+    if (node.type === 'text' && typeof node.content === 'string') out.push(node.content);
+    for (const child of node.children ?? []) {
+      out.push(...collectCardText(child as { type?: string; content?: string; children?: unknown[] }));
+    }
+    return out;
+  }
+
+  it('applies to ask_question title, question, and fallbackText', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      transformOutboundText: tag,
+    });
+    await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'ask_question',
+        questionId: 'q1',
+        title: 'Approve install_packages',
+        question: 'Agent "repo_pilot" wants to install gcc',
+        options: [
+          { label: 'Approve', value: 'approve' },
+          { label: 'Reject', value: 'reject' },
+        ],
+      },
+    });
+    expect(calls).toHaveLength(1);
+    const msg = calls[0].message as {
+      card?: { title?: string; children?: unknown[] };
+      fallbackText?: string;
+    };
+    expect(msg.card?.title).toBe(tag('Approve install_packages'));
+    const cardTexts = collectCardText(msg.card as Parameters<typeof collectCardText>[0]);
+    expect(cardTexts).toContain(tag('Agent "repo_pilot" wants to install gcc'));
+    // Button labels are SDK-controlled (not user content) — fine to leave raw.
+    expect(msg.fallbackText).toContain(tag('Approve install_packages'));
+    expect(msg.fallbackText).toContain(tag('Agent "repo_pilot" wants to install gcc'));
+  });
+
+  it('applies to send_card title, description, string children, and fallbackText', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      transformOutboundText: tag,
+    });
+    await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'card',
+        card: {
+          title: 'Daily',
+          description: 'Your plate today',
+          children: ['• item one', { text: '• item two' }],
+        },
+        fallbackText: 'Daily: your plate',
+      },
+    });
+    expect(calls).toHaveLength(1);
+    const msg = calls[0].message as {
+      card?: { title?: string; children?: unknown[] };
+      fallbackText?: string;
+    };
+    expect(msg.card?.title).toBe(tag('Daily'));
+    const cardTexts = collectCardText(msg.card as Parameters<typeof collectCardText>[0]);
+    expect(cardTexts).toEqual(expect.arrayContaining([tag('Your plate today'), tag('• item one'), tag('• item two')]));
+    expect(msg.fallbackText).toBe(tag('Daily: your plate'));
+  });
+
+  it('still applies to plain markdown messages (regression guard)', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      transformOutboundText: tag,
+    });
+    await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: { text: 'hello world' },
+    });
+    expect(calls).toHaveLength(1);
+    const msg = calls[0].message as { markdown?: string };
+    expect(msg.markdown).toBe(tag('hello world'));
+  });
+});

@@ -838,10 +838,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           return;
         }
         const options: NormalizedOption[] = normalizeOptions(content.options as never);
+        const safeTitle = transformText(title);
+        const safeQuestion = transformText(question);
         const card = Card({
-          title,
+          title: safeTitle,
           children: [
-            CardText(question),
+            CardText(safeQuestion),
             Actions(
               // Encode button id/value with the option index rather than the
               // full value. Telegram caps callback_data at 64 bytes, and
@@ -856,7 +858,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         });
         const result = await adapter.postMessage(tid, {
           card,
-          fallbackText: `${title}\n\n${question}\nOptions: ${options.map((o) => o.label).join(', ')}`,
+          fallbackText: `${safeTitle}\n\n${safeQuestion}\nOptions: ${options.map((o) => o.label).join(', ')}`,
         });
         return result?.id;
       }
@@ -871,18 +873,18 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
         const cardChildren: CardChild[] = [];
         if (typeof cardSpec.description === 'string' && cardSpec.description) {
-          cardChildren.push(CardText(cardSpec.description));
+          cardChildren.push(CardText(transformText(cardSpec.description)));
         }
         if (Array.isArray(cardSpec.children)) {
           for (const child of cardSpec.children) {
             if (typeof child === 'string' && child) {
-              cardChildren.push(CardText(child));
+              cardChildren.push(CardText(transformText(child)));
             } else if (
               child &&
               typeof child === 'object' &&
               typeof (child as Record<string, unknown>).text === 'string'
             ) {
-              cardChildren.push(CardText((child as Record<string, string>).text));
+              cardChildren.push(CardText(transformText((child as Record<string, string>).text)));
             }
           }
         }
@@ -909,8 +911,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           return;
         }
 
-        const card = Card({ title, children: cardChildren });
-        const result = await adapter.postMessage(tid, { card, fallbackText });
+        const card = Card({ title: transformText(title), children: cardChildren });
+        const result = await adapter.postMessage(tid, { card, fallbackText: transformText(fallbackText) });
         return result?.id;
       }
 
