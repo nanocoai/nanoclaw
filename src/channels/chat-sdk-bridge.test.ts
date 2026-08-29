@@ -488,3 +488,67 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(msg.markdown).toBe('plain hello');
   });
 });
+
+describe('createChatSdkBridge.deliver — reactions (issue #2569 part 1)', () => {
+  // The MCP add_reaction tool now asks agents for a unicode emoji (e.g. "👍"),
+  // which is what WhatsApp / Discord / Telegram / Teams / Google Chat expect.
+  // Slack is the outlier — it expects a shortcode name. The bridge translates
+  // unicode → shortcode for the Slack adapter only; every other adapter must
+  // see the raw unicode unchanged.
+
+  function makeReactionCapture() {
+    const calls: Array<{ threadId: string; messageId: string; emoji: string }> = [];
+    const addReaction = async (threadId: string, messageId: string, emoji: string): Promise<void> => {
+      calls.push({ threadId, messageId, emoji });
+    };
+    return { calls, addReaction };
+  }
+
+  it('translates unicode → Slack shortcode for the Slack adapter', async () => {
+    const { calls, addReaction } = makeReactionCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ name: 'slack', addReaction }),
+      supportsThreads: true,
+    });
+    await bridge.deliver('slack:C123', 'slack:C123:thread', {
+      kind: 'chat-sdk',
+      content: { operation: 'reaction', messageId: 'platform-msg-1', emoji: '👍' },
+    });
+    expect(calls).toHaveLength(1);
+    // The chat SDK's defaultEmojiResolver maps "👍" → "thumbs_up" → first Slack
+    // format. Both "+1" and "thumbsup" are valid Slack names — assert against
+    // either rather than overfitting to the resolver's tie-breaker, which is
+    // an internal contract of the chat SDK and may shift between versions.
+    expect(['+1', 'thumbsup']).toContain(calls[0].emoji);
+  });
+
+  it('passes unicode through unchanged for every non-Slack adapter', async () => {
+    for (const adapterName of ['discord', 'telegram', 'whatsapp', 'teams', 'gchat']) {
+      const { calls, addReaction } = makeReactionCapture();
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({ name: adapterName, addReaction }),
+        supportsThreads: false,
+      });
+      await bridge.deliver(`${adapterName}:chan`, null, {
+        kind: 'chat-sdk',
+        content: { operation: 'reaction', messageId: 'platform-msg-1', emoji: '👍' },
+      });
+      expect(calls, `adapter ${adapterName} should pass unicode through`).toHaveLength(1);
+      expect(calls[0].emoji, `adapter ${adapterName} mangled unicode`).toBe('👍');
+    }
+  });
+
+  it('round-trips unknown emoji unchanged on Slack (resolver fallback is verbatim)', async () => {
+    const { calls, addReaction } = makeReactionCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ name: 'slack', addReaction }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('slack:C123', null, {
+      kind: 'chat-sdk',
+      content: { operation: 'reaction', messageId: 'platform-msg-1', emoji: 'custom_workspace_emoji' },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].emoji).toBe('custom_workspace_emoji');
+  });
+});
