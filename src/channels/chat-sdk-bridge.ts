@@ -1048,6 +1048,21 @@ async function handleForwardedEvent(
     return;
   }
 
+  // Drop Discord SYSTEM messages before they reach the adapter. When a user
+  // creates a thread, Discord posts a type-18 THREAD_CREATED system message
+  // in the PARENT channel whose `content` is the thread name.
+  // @chat-adapter/discord's handleForwardedMessage never checks `type`, so
+  // that system message routes as a normal user message in the parent
+  // channel and the agent replies to the thread *title* in the main channel.
+  // Keep only real user content: 0 DEFAULT, 19 REPLY.
+  if (event.type === 'GATEWAY_MESSAGE_CREATE' && event.data) {
+    const msgType = (event.data as { type?: unknown }).type;
+    if (typeof msgType === 'number' && msgType !== 0 && msgType !== 19) {
+      log.info('Dropping Discord system message', { messageType: msgType });
+      return;
+    }
+  }
+
   // Handle interaction events (button clicks) — not handled by adapter's handleForwardedGatewayEvent
   if (event.type === 'GATEWAY_INTERACTION_CREATE' && event.data) {
     const interaction = event.data;
