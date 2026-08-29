@@ -41,10 +41,19 @@ The command prints `nanoclaw-skill-refresh/v1`-shaped JSON fields with one
 result per selected skill and exits nonzero unless every selected skill was
 fully refreshed.
 
-- Continue only when `success` is `true` and every status is `refreshed`.
-- A missing skill, missing structured apply contract, unresolved input, agent
-  fallback, fetch error, or dependency error is blocking.
+- Continue only when `success` is `true` — every status `refreshed` or
+  `unmanaged`.
+- `unmanaged` marks a barrel import with no `add-<name>` skill anywhere: a
+  hand-written local adapter. Its code is left untouched and it never blocks
+  the refresh; requesting it by name with `--skills` is still an error.
+- A missing structured apply contract, unresolved input, agent fallback,
+  fetch error, or dependency error is blocking.
 - Never record a failed skill and continue toward an upgrade completion stamp.
+- Review each skill's `localDiffDiscarded`: files the refresh overwrote whose
+  local content was never shipped by the registry branch — deliberate local
+  patches included. Tell the operator exactly which files lost local edits so
+  they can re-apply (or upstream) them; do not treat a non-empty list as a
+  failure.
 - Preserve the full report in the update summary.
 
 The refresh engine overwrites skill-owned registry files and advances exact

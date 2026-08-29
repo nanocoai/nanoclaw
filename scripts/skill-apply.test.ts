@@ -109,6 +109,23 @@ describe('apply engine lifecycle', () => {
     expect(refreshed.applied.some((step) => step.startsWith('copy:'))).toBe(true);
   });
 
+  it('reports an overwritten differing payload in localDiffDiscarded, and an identical one not at all', async () => {
+    const p = headless({ token: 'sekret-123' });
+    await applySkill(skillDir, root, { resolveInput: p, exec: () => {} });
+    // The operator patched the installed copy. This root is not a registry
+    // clone, so the known-to-source probe cannot clear it — local-dir copies
+    // fail toward reporting.
+    writeFileSync(join(root, 'src/sample.ts'), 'export const sample = "locally patched";\n');
+
+    const refreshed = await applySkill(skillDir, root, { mode: 'refresh', resolveInput: p, exec: () => {} });
+    expect(refreshed.localDiffDiscarded).toEqual(['src/sample.ts']);
+    expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toContain('sample = true'); // registry bytes still win
+
+    // Identical bytes are an ordinary re-copy, not a discarded diff.
+    const again = await applySkill(skillDir, root, { mode: 'refresh', resolveInput: p, exec: () => {} });
+    expect(again.localDiffDiscarded).toEqual([]);
+  });
+
   it('refresh mode reruns an exact dependency directive even when the package name exists', async () => {
     writeFileSync(join(skillDir, 'SKILL.md'), '# dependency refresh\n\n```nc:dep\ndemo-package@2.0.0\n```\n');
     writeFileSync(

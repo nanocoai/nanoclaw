@@ -260,6 +260,12 @@ export interface ApplyResult {
   // `owner_handle` + `platform_id`, the setup flow reads them to wire the agent.
   vars: Record<string, string>;
   journal: JournalEntry[];
+  // Destinations a `copy` overwrote whose previous content differed from the
+  // incoming bytes — locally patched payload files the refresh discarded.
+  // Reporting, not policy: the copy still happens (registry bytes must
+  // advance); this is how a caller tells the operator what was dropped
+  // instead of leaving them to diff the tree afterwards.
+  localDiffDiscarded: string[];
   // The skill's author-written REFERENCE floor — its `## Alternatives`,
   // `## Optional configuration`, and `## Troubleshooting` sections, sliced
   // verbatim from the RAW markdown (see `referenceProse`). The driver surfaces
@@ -628,6 +634,29 @@ function bindCapture(
   }
 }
 
+// Did the source ref ever ship this exact file content at srcPath? Separates
+// a deliberate local patch (unknown blob → reported as discarded) from an
+// ordinary registry advance (a blob some registry commit shipped → silent).
+// Fails toward reporting: any probe failure — non-git root, an exec that
+// returns no output, missing branch history — counts as unknown. The `-w` on
+// hash-object is required (`--find-object` refuses ids absent from the odb);
+// the unreferenced loose blob it may leave behind is gc-collectable.
+async function blobKnownToRef(
+  exec: (c: string) => string | void | Promise<string | void>,
+  file: string,
+  ref: string,
+  srcPath: string,
+): Promise<boolean> {
+  try {
+    const blob = String(await exec(`git hash-object -w ${file}`)).trim();
+    if (!/^[0-9a-f]{40,64}$/.test(blob)) return false;
+    const hit = String(await exec(`git log -n 1 --format=%H --find-object=${blob} ${ref} -- ${srcPath}`)).trim();
+    return /^[0-9a-f]{40,64}$/.test(hit);
+  } catch {
+    return false;
+  }
+}
+
 // The mutating twin of selfStatus. Records what it did to the journal so remove
 // is derivable. Throws on failure → caught and bounced to an agent.
 async function applyOne(
@@ -641,16 +670,33 @@ async function applyOne(
     resolveDependencyCommand?: (request: DependencyCommandRequest) => string;
     vars: Map<string, { value: string; secret: boolean }>;
     journal: JournalEntry[];
+    localDiffDiscarded: string[];
     mode: 'install' | 'refresh';
   },
 ): Promise<void> {
   const { root, skillDir, exec, vars, journal } = ctx;
   switch (d.kind) {
-    case 'copy':
+    case 'copy': {
+      // Snapshot each destination before overwriting so a locally patched
+      // payload file can be reported (localDiffDiscarded) rather than
+      // silently replaced.
+      const before = new Map<string, string | undefined>();
+      for (const l of d.body) {
+        const dst = join(root, destOf(l));
+        before.set(destOf(l), existsSync(dst) ? readFileSync(dst, 'utf-8') : undefined);
+      }
+      // Content the registry branch shipped at some point is an ordinary
+      // upgrade being replaced, not a discarded patch. Probed per differing
+      // destination, before the overwrite destroys the evidence.
+      const knownToSource = new Map<string, boolean>();
       if (d.attrs['from-branch']) {
         const b = String(d.attrs['from-branch']);
         const remote = ctx.resolveRemote(b);
         await exec(`git fetch ${remote} ${b}`);
+        for (const l of d.body) {
+          if (before.get(destOf(l)) === undefined) continue;
+          knownToSource.set(destOf(l), await blobKnownToRef(exec, destOf(l), `${remote}/${b}`, srcOf(l)));
+        }
         for (const l of d.body) {
           // The shell redirect can't create parent directories, and the dest
           // may not exist on trunk (e.g. container skills that live only on
@@ -665,8 +711,20 @@ async function applyOne(
           copyFileSync(join(skillDir, srcOf(l)), dst);
         }
       }
-      for (const l of d.body) journal.push({ op: 'wrote', path: destOf(l) });
+      for (const l of d.body) {
+        const rel = destOf(l);
+        const prev = before.get(rel);
+        if (
+          prev !== undefined &&
+          prev !== readFileSync(join(root, rel), 'utf-8') &&
+          !(knownToSource.get(rel) ?? false)
+        ) {
+          ctx.localDiffDiscarded.push(rel);
+        }
+        journal.push({ op: 'wrote', path: rel });
+      }
       break;
+    }
     case 'append': {
       const to = String(d.attrs.to);
       const marker = typeof d.attrs.at === 'string' ? d.attrs.at : undefined;
@@ -839,6 +897,7 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
     operatorMessages: [],
     vars: {},
     journal: [],
+    localDiffDiscarded: [],
     referenceProse: referenceProse(md),
   };
   // A run-health gate: once ANY directive bounces to an agent, the skill is no
@@ -988,6 +1047,7 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
         resolveDependencyCommand: opts.resolveDependencyCommand,
         vars,
         journal: res.journal,
+        localDiffDiscarded: res.localDiffDiscarded,
         mode: opts.mode ?? 'install',
       });
       const durationMs = Date.now() - inFlight.at;
