@@ -488,3 +488,185 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(msg.markdown).toBe('plain hello');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Security regression tests — GHSA-h9g4-589h-68xv
+// Loopback webhook server must authenticate the sender via a per-instance
+// secret embedded in the URL path before processing any body.
+// ---------------------------------------------------------------------------
+describe('startLocalWebhookServer — authentication (GHSA-h9g4-589h-68xv)', () => {
+  // Spin up a gateway-capable bridge and capture the ephemeral webhook URL
+  // that startLocalWebhookServer hands to startGatewayListener. We intercept
+  // that URL by stubbing startGatewayListener on the adapter.
+
+  beforeEach(async () => {
+    const { initTestDb } = await import('../db/connection.js');
+    const { runMigrations } = await import('../db/migrations/index.js');
+    runMigrations(initTestDb());
+  });
+
+  afterEach(async () => {
+    const { closeDb } = await import('../db/connection.js');
+    closeDb();
+  });
+
+  async function startGatewayBridge(): Promise<{ webhookUrl: string; bridge: ReturnType<typeof createChatSdkBridge>; actions: Array<{ questionId: string; selectedOption: string; userId: string }> }> {
+    const actions: Array<{ questionId: string; selectedOption: string; userId: string }> = [];
+    let capturedWebhookUrl = '';
+
+    const adapter = {
+      name: 'discord',
+      initialize: async () => {},
+      channelIdFromThreadId: (id: string) => id,
+      startGatewayListener: async (
+        _opts: unknown,
+        _durationMs: unknown,
+        _signal: unknown,
+        webhookUrl: string,
+      ) => {
+        capturedWebhookUrl = webhookUrl;
+        return new Response('ok');
+      },
+      handleWebhook: async () => new Response('ok'),
+    } as unknown as import('chat').Adapter;
+
+    const bridge = createChatSdkBridge({ adapter, supportsThreads: false, botToken: 'test-token' });
+
+    await bridge.setup({
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: (questionId, selectedOption, userId) => {
+        actions.push({ questionId, selectedOption, userId });
+      },
+    });
+
+    // Wait briefly for startGatewayListener to be called and the URL captured.
+    await new Promise((r) => setTimeout(r, 50));
+
+    return { webhookUrl: capturedWebhookUrl, bridge, actions };
+  }
+
+  it('returns 200 and dispatches onAction for a valid POST to the secret URL path', async () => {
+    const { webhookUrl, bridge, actions } = await startGatewayBridge();
+    expect(webhookUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/webhook\/[0-9a-f]{64}$/);
+
+    const payload = JSON.stringify({
+      type: 'GATEWAY_INTERACTION_CREATE',
+      data: {
+        type: 3,
+        id: 'iid',
+        token: 'tok',
+        data: { custom_id: 'ncq:canary-question:approve' },
+        user: { id: 'legit-user' },
+        message: { embeds: [] },
+      },
+    });
+
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload,
+    });
+
+    expect(res.status).toBe(200);
+    // onAction may be called asynchronously; give it a tick.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(actions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ questionId: 'canary-question', selectedOption: 'approve', userId: 'legit-user' }),
+      ]),
+    );
+
+    await bridge.teardown();
+  });
+
+  it('returns 401 and dispatches no onAction for a POST to /webhook (no secret — PoC path)', async () => {
+    const { webhookUrl, bridge, actions } = await startGatewayBridge();
+    // Derive the base URL without the secret path segment — the PoC payload target.
+    const baseUrl = new URL(webhookUrl);
+    const unauthUrl = `${baseUrl.protocol}//${baseUrl.host}/webhook`;
+
+    const payload = JSON.stringify({
+      type: 'GATEWAY_INTERACTION_CREATE',
+      data: {
+        type: 3,
+        id: 'iid',
+        token: 'tok',
+        data: { custom_id: 'ncq:canary-question:approve' },
+        user: { id: 'attacker-user' },
+        message: { embeds: [] },
+      },
+    });
+
+    const res = await fetch(unauthUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload,
+    });
+
+    expect(res.status).toBe(401);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(actions).toHaveLength(0);
+
+    await bridge.teardown();
+  });
+
+  it('returns 401 and dispatches no onAction for a POST with a wrong secret', async () => {
+    const { webhookUrl, bridge, actions } = await startGatewayBridge();
+    const baseUrl = new URL(webhookUrl);
+    const wrongSecretUrl = `${baseUrl.protocol}//${baseUrl.host}/webhook/${'0'.repeat(64)}`;
+
+    const payload = JSON.stringify({
+      type: 'GATEWAY_INTERACTION_CREATE',
+      data: {
+        type: 3,
+        id: 'iid',
+        token: 'tok',
+        data: { custom_id: 'ncq:canary-question:approve' },
+        user: { id: 'attacker-user' },
+        message: { embeds: [] },
+      },
+    });
+
+    const res = await fetch(wrongSecretUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload,
+    });
+
+    expect(res.status).toBe(401);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(actions).toHaveLength(0);
+
+    await bridge.teardown();
+  });
+
+  it('returns 200 but dispatches no action for a control POST (non-ncq custom_id) to the correct path', async () => {
+    const { webhookUrl, bridge, actions } = await startGatewayBridge();
+
+    const payload = JSON.stringify({
+      type: 'GATEWAY_INTERACTION_CREATE',
+      data: {
+        type: 3,
+        id: 'iid',
+        token: 'tok',
+        data: { custom_id: 'noop' },
+        user: { id: 'some-user' },
+        message: { embeds: [] },
+      },
+    });
+
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: payload,
+    });
+
+    expect(res.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(actions).toHaveLength(0);
+
+    await bridge.teardown();
+  });
+});

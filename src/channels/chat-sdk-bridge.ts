@@ -4,6 +4,7 @@
  *
  * Used by Discord, Slack, and other Chat SDK-supported platforms.
  */
+import crypto from 'crypto';
 import http from 'http';
 
 import {
@@ -1001,14 +1002,39 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
  * This is needed because the Gateway listener in webhook-forwarding mode
  * sends ALL raw events (including INTERACTION_CREATE for button clicks)
  * to the webhookUrl, which we handle here.
+ *
+ * Security: a 256-bit cryptographically random token is generated per
+ * server instance and embedded in the URL path that is handed to
+ * startGatewayListener.  Every incoming POST must present this exact
+ * path segment; requests with a missing or wrong token are rejected
+ * with HTTP 401 before any body is read, so no unprivileged local
+ * process can forge interaction events (CWE-306 / GHSA-h9g4-589h-68xv).
  */
 function startLocalWebhookServer(
   adapter: GatewayAdapter,
   setupConfig: ChannelSetup,
   botToken?: string,
 ): Promise<string> {
+  // 32 random bytes → 64 hex chars — infeasible to guess for any local process.
+  const secret = crypto.randomBytes(32).toString('hex');
+  const expectedPath = `/webhook/${secret}`;
+
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
+      // Constant-time comparison prevents timing-oracle attacks on the secret.
+      const reqPath = req.url?.split('?')[0] ?? '';
+      const pathBuf = Buffer.from(reqPath.padEnd(expectedPath.length));
+      const expectedBuf = Buffer.from(expectedPath);
+      const pathMatches =
+        reqPath.length === expectedPath.length &&
+        crypto.timingSafeEqual(pathBuf, expectedBuf);
+
+      if (!pathMatches) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end('{"error":"unauthorized"}');
+        return;
+      }
+
       const chunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
@@ -1028,7 +1054,7 @@ function startLocalWebhookServer(
 
     server.listen(0, '127.0.0.1', () => {
       const addr = server.address() as { port: number };
-      const url = `http://127.0.0.1:${addr.port}/webhook`;
+      const url = `http://127.0.0.1:${addr.port}${expectedPath}`;
       log.info('Local webhook server started', { port: addr.port });
       resolve(url);
     });
