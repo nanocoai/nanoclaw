@@ -1,0 +1,33 @@
+{
+  "name": "hindsight-mcp",
+  "version": "0.2.0",
+  "description": "Universal MCP server for Hindsight agent memory (vectorize.io) with multi-tenant bank isolation. Ships HTTP and stdio transports.",
+  "license": "MIT",
+  "author": "carstenf",
+  "main": "dist/server.js",
+  "type": "module",
+  "bin": {
+    "hindsight-mcp-stdio": "dist/server-stdio.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/server.ts",
+    "dev:stdio": "tsx src/server-stdio.ts",
+    "start": "node dist/server.js",
+    "start:stdio": "node dist/server-stdio.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.0",
+    "express": "^4.21.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
