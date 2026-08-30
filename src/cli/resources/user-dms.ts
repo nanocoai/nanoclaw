@@ -1,3 +1,4 @@
+import { ensureUserDm } from '../../modules/permissions/user-dm.js';
 import { registerResource } from '../crud.js';
 
 registerResource({
@@ -19,4 +20,17 @@ registerResource({
     { name: 'resolved_at', type: 'string', description: 'When this DM route was last resolved.' },
   ],
   operations: { list: 'open' },
+  customOperations: {
+    ensure: {
+      access: 'approval',
+      description: 'Resolve or create the direct-message route for --user.',
+      handler: async (args) => {
+        const userId = args.user as string;
+        if (!userId) throw new Error('--user is required');
+        const messagingGroup = await ensureUserDm(userId);
+        if (!messagingGroup) throw new Error(`user is unreachable by DM: ${userId}`);
+        return messagingGroup;
+      },
+    },
+  },
 });

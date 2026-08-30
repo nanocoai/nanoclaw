@@ -10,21 +10,23 @@ const MIGRATE = path.resolve(import.meta.dirname, 'migrate.ts');
 const TSX_LOADER = path.resolve(import.meta.dirname, '../node_modules/tsx/dist/loader.mjs');
 
 describe('scripts/migrate.ts', () => {
-  it('migrates the composed SQLite central database', () => {
+  it('refuses an explicit SQLite central database with the PostgreSQL-only audit module', () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-migrate-script-'));
     try {
       const result = spawnSync(process.execPath, ['--import', TSX_LOADER, MIGRATE], {
         cwd,
         encoding: 'utf8',
+        env: {
+          ...process.env,
+          NANOCLAW_DB_URL: '',
+          NANOCLAW_DB_PASSWORD_FILE: '',
+          NANOCLAW_DB_MIGRATE_URL: '',
+          NANOCLAW_DB_MIGRATE_PASSWORD_FILE: '',
+        },
       });
 
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout).toContain('Central DB migrations are current.');
-      const dbPath = path.join(cwd, 'data', 'v2.db');
-      const db = new Database(dbPath, { readonly: true });
-      const row = db.prepare('SELECT COUNT(*) AS count FROM schema_version').get() as { count: number };
-      db.close();
-      expect(row.count).toBeGreaterThan(0);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('Host audit requires the composed central PostgreSQL driver');
     } finally {
       fs.rmSync(cwd, { recursive: true, force: true });
     }

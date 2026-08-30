@@ -28,7 +28,15 @@ export class MockProvider implements AgentProvider {
      */
     textFactory?: (prompt: string) => string[],
   ) {
-    this.responseFactory = responseFactory ?? ((prompt) => `Mock response to: ${prompt.slice(0, 100)}`);
+    this.responseFactory =
+      responseFactory ??
+      ((prompt) => {
+        // A bare-text reply is dropped by the delivery gate — wrap it and
+        // address the sender of the message that woke this turn, so a
+        // claimed child answers a chat probe out of the box.
+        const to = /\bfrom="([^"]+)"/.exec(prompt)?.[1] ?? 'local-cli';
+        return `<message to="${to}">mock reply: ${prompt.length} chars received</message>`;
+      });
     this.textFactory = textFactory;
   }
 
