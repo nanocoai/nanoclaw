@@ -17,7 +17,7 @@ import type { CallerContext } from './frame.js';
  * consumed by both dispatch enforcement and `ncl help` filtering, so the
  * agent is never shown a resource the gate would reject (or vice versa).
  */
-export const GROUP_SCOPE_RESOURCES = new Set(['groups', 'sessions', 'destinations', 'members', 'tasks']);
+export const GROUP_SCOPE_RESOURCES = new Set(['groups', 'sessions', 'destinations', 'members', 'tasks', 'envs', 'stamps']);
 
 export type Access = 'open' | 'approval' | 'hidden';
 

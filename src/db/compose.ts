@@ -1,15 +1,21 @@
 /** Open-source SQLite composition. A remote-backend skill replaces this file. */
-import Database from 'better-sqlite3';
-import fs from 'fs';
-import path from 'path';
-
 import { registerDbDriver } from './driver-registry.js';
-import { SqliteDriver } from './drivers/sqlite.js';
+import { readPostgresEnvironment, selectPostgresUrl } from './drivers/postgres/config.js';
+import { createPostgresDriver } from './drivers/postgres/index.js';
 
-registerDbDriver((config, options) => {
-  if (config.url) {
-    throw new Error('A remote central-DB target was provided, but no remote backend is installed');
-  }
+registerDbDriver(async (config, options) => {
+  const environment = readPostgresEnvironment();
+  const url = config.url || selectPostgresUrl(environment, options.role);
+  if (url) return createPostgresDriver({ ...config, url }, options, environment);
+  // SQLite is reachable but never EAGERLY loaded once PostgreSQL is composed:
+  // the release bundle rewrites `better-sqlite3` here to the SEA-only loader,
+  // so a static import is fatal in any plain-node consumer of the release tree.
+  const [{ default: Database }, { default: fs }, { default: path }, { SqliteDriver }] = await Promise.all([
+    import('better-sqlite3'),
+    import('fs'),
+    import('path'),
+    import('./drivers/sqlite.js'),
+  ]);
   if (options.readonly && !fs.existsSync(config.path)) {
     throw Object.assign(new Error(`SQLite central DB does not exist: ${config.path}`), { code: 'SQLITE_CANTOPEN' });
   }

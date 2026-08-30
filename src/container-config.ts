@@ -252,6 +252,11 @@ export interface ContainerConfig {
   /** API fast serving tier for this container; absent = the provider default. */
   fastMode?: boolean;
   timezone?: string;
+  /** D13: the group runs the code runner instead of the chat runner. Spawn-time; flip takes effect on respawn. */
+  codeMode?: boolean;
+  /** D17/T7: per-group permission posture override. Absent = follow the
+   *  deployment default (NANOCLAW_CODE_PERMISSION_MODE); group wins when set. */
+  codePermissionMode?: 'auto' | 'bypass';
   /** Session isolation tier for the group's containers; absent = the composer's default ('container'). */
   runtimeTier?: 'container' | 'vm';
 }
@@ -376,6 +381,11 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     effort: row.effort ?? undefined,
     fastMode: FAST_MODE || undefined,
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
+    codeMode: row.code_mode === 1 || undefined,
+    // A hand-edited DB value must not silently pick a posture: anything but
+    // the two known modes reads as "no override" (the timezone rule).
+    codePermissionMode:
+      row.permission_mode === 'auto' || row.permission_mode === 'bypass' ? row.permission_mode : undefined,
     runtimeTier: parseRuntimeTier(row.runtime_tier, group.name),
   };
 }
