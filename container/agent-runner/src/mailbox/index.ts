@@ -1,6 +1,6 @@
 import type { AgentMailbox, AgentMailboxFactory } from './types.js';
 
-const SESSION_CONTEXT = '/app/.nanoclaw-session.json';
+const SESSION_CONTEXT = process.env.NANOCLAW_SESSION_CONTEXT || '/app/.nanoclaw-session.json';
 
 let active: AgentMailbox | undefined;
 let factory: AgentMailboxFactory | undefined;

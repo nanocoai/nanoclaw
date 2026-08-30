@@ -27,6 +27,13 @@ import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 import { INSTANCE_KEY_RE } from './channel-registry.js';
 import { resolveQuestionRender } from './question-render-registry.js';
+import { isGatewayApprovalQuestionId } from '../nanoco/approval-question-id.js';
+import {
+  approvalCardSurface,
+  approvalCardTextChunks,
+  approvalFallbackText,
+} from '../nanoco/approval-card-render.js';
+import { routeQuestionMessage } from '../nanoco/approval-question-route.js';
 
 /** Adapter with optional gateway support (e.g., Discord). */
 interface GatewayAdapter extends Adapter {
@@ -382,7 +389,7 @@ export interface ChatSdkBridgeConfig {
  * Falls back to treating the tail as a literal value so old in-flight cards
  * (encoded before this shortening landed) still resolve.
  */
-function resolveSelectedOption(
+export function resolveSelectedOption(
   render: { options: NormalizedOption[] } | undefined,
   eventValue: string | undefined,
   tail: string | undefined,
@@ -393,6 +400,51 @@ function resolveSelectedOption(
     if (render.options[idx]) return render.options[idx].value;
   }
   return candidate;
+}
+
+interface ApprovalQuestionCard {
+  title: string;
+  question: string;
+  questionId: string;
+  options: NormalizedOption[];
+}
+
+function approvalTextChildren(text: string, muted = false): CardChild[] {
+  return approvalCardTextChunks(text).map((chunk) =>
+    muted ? CardText(chunk, { style: 'muted' }) : CardText(chunk),
+  );
+}
+
+export function buildApprovalQuestionCard({ title, question, questionId, options }: ApprovalQuestionCard) {
+  const surface = approvalCardSurface(title, question);
+  return Card({
+    title: surface.header,
+    children: [
+      ...approvalTextChildren(surface.body),
+      Actions(
+        // Encode button id/value with the option index rather than the
+        // full value. Telegram caps callback_data at 64 bytes, and
+        // long values (e.g. ISO datetimes, URLs) push the JSON payload
+        // well past that. The onAction handlers resolve the index back
+        // to the real value via resolveQuestionRender(questionId).
+        options.map((opt, idx) =>
+          Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx), style: opt.style }),
+        ),
+      ),
+    ],
+  });
+}
+
+export function approvalQuestionMessage(spec: ApprovalQuestionCard) {
+  const surface = approvalCardSurface(spec.title, spec.question);
+  return {
+    card: buildApprovalQuestionCard(spec),
+    fallbackText: approvalFallbackText({
+      title: surface.header,
+      question: surface.body,
+      tail: `Options: ${spec.options.map((option) => option.label).join(', ')}`,
+    }),
+  };
 }
 
 interface TerminalApprovalCard {
@@ -407,16 +459,18 @@ interface TerminalApprovalCard {
  * discarding the request an admin decided on.
  */
 export function buildTerminalApprovalCard({ title, question, resolution }: TerminalApprovalCard) {
-  const children: CardChild[] = [];
-  if (question) children.push(CardText(question));
-  children.push(CardText(resolution, { style: 'muted' }));
-  return Card({ title, children });
+  const surface = approvalCardSurface(title, question);
+  return Card({
+    title: surface.header,
+    children: [...approvalTextChildren(surface.body), ...approvalTextChildren(resolution, true)],
+  });
 }
 
-function terminalApprovalMessage(spec: TerminalApprovalCard) {
+export function terminalApprovalMessage(spec: TerminalApprovalCard) {
+  const surface = approvalCardSurface(spec.title, spec.question);
   return {
     card: buildTerminalApprovalCard(spec),
-    fallbackText: [spec.title, spec.question, spec.resolution].filter(Boolean).join('\n\n'),
+    fallbackText: approvalFallbackText({ title: surface.header, question: surface.body, tail: spec.resolution }),
   };
 }
 
@@ -707,11 +761,21 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
               : { markdown: `${title}\n\n${resolution}` },
           );
         } catch (err) {
-          log.warn('Failed to update card after action', { err });
+          if (isGatewayApprovalQuestionId(questionId)) {
+            log.warn('Failed to update card after action', { code: 'platform_edit_failed' });
+          } else {
+            log.warn('Failed to update card after action', { err });
+          }
         }
 
         setupConfig.onAction(questionId, selectedOption, userId);
       });
+
+      // Governance home surface: forward app_home_opened + home-surface
+      // (`home:*` / `connect-*`) block_actions to the governance service.
+      // No-op while HOME_EVENTS_URL is unset.
+      const { registerHomeSurfaceForwarding } = await import('./home-events-forward.js');
+      registerHomeSurfaceForwarding(chat);
 
       await chat.initialize();
 
@@ -838,26 +902,28 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           return;
         }
         const options: NormalizedOption[] = normalizeOptions(content.options as never);
-        const card = Card({
-          title,
-          children: [
-            CardText(question),
-            Actions(
-              // Encode button id/value with the option index rather than the
-              // full value. Telegram caps callback_data at 64 bytes, and
-              // long values (e.g. ISO datetimes, URLs) push the JSON payload
-              // well past that. The onAction handlers resolve the index back
-              // to the real value via resolveQuestionRender(questionId).
-              options.map((opt, idx) =>
-                Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx), style: opt.style }),
-              ),
-            ),
-          ],
-        });
-        const result = await adapter.postMessage(tid, {
-          card,
-          fallbackText: `${title}\n\n${question}\nOptions: ${options.map((o) => o.label).join(', ')}`,
-        });
+        const message = routeQuestionMessage(
+          questionId,
+          () => ({
+              card: Card({
+                title,
+                children: [
+                  CardText(question),
+                  Actions(
+                    // Preserve NanoClaw's generic question rendering. Only
+                    // Gateway-owned approval ids use the bounded approval
+                    // presentation machinery above.
+                    options.map((opt, idx) =>
+                      Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx), style: opt.style }),
+                    ),
+                  ),
+                ],
+              }),
+              fallbackText: `${title}\n\n${question}\nOptions: ${options.map((option) => option.label).join(', ')}`,
+            }),
+          () => approvalQuestionMessage({ title, question, questionId, options }),
+        );
+        const result = await adapter.postMessage(tid, message);
         return result?.id;
       }
 
@@ -1104,7 +1170,11 @@ async function handleForwardedEvent(
           }),
         });
       } catch (err) {
-        log.error('Failed to update interaction', { err });
+        if (questionId && isGatewayApprovalQuestionId(questionId)) {
+          log.error('Failed to update interaction', { code: 'platform_edit_failed' });
+        } else {
+          log.error('Failed to update interaction', { err });
+        }
       }
 
       // Dispatch to host

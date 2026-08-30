@@ -15,12 +15,16 @@
  *   ncl help
  *   ncl groups help
  */
+import { spawnSync } from 'child_process';
 import { randomUUID } from 'crypto';
 
+import { resolveAttachExec } from './attach-exec.js';
 import { formatResponse } from './format.js';
 import type { RequestFrame } from './frame.js';
 import { parseArgv } from './parse-argv.js';
 import { SocketTransport } from './socket-client.js';
+import { resolveApproverBindingStdin } from '../nanoco/approver-binding-stdin.js';
+import { resolveCreateSpecStdin } from './stdin.js';
 import { readStdinJsonArgs, StdinJsonInputError } from './stdin-json.js';
 import type { Transport } from './transport.js';
 import { formatTransportError } from './transport-errors.js';
@@ -34,6 +38,8 @@ async function main(): Promise<void> {
   }
 
   const { command, args, json, stdinJson } = parseArgv(argv);
+  await resolveApproverBindingStdin(command, args);
+  await resolveCreateSpecStdin(command, args);
   if (command.length === 0) {
     process.stderr.write('ncl: missing command\n');
     printUsage();
@@ -66,6 +72,15 @@ async function main(): Promise<void> {
   } catch (e) {
     process.stderr.write(formatTransportError(e));
     process.exit(2);
+  }
+
+  // Attach responses hand the terminal over instead of printing: the server
+  // decided which container and which entry (policy); this client owns the
+  // TTY, so the interactive exec has to happen here (`ncl groups attach`).
+  const attach = resolveAttachExec(res, json, process.stdin.isTTY === true);
+  if (attach) {
+    const result = spawnSync(attach.bin, attach.args, { stdio: 'inherit' });
+    process.exit(result.status ?? 1);
   }
 
   const output =

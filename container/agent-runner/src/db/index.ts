@@ -5,6 +5,7 @@ export {
   markProcessing,
   markCompleted,
   markFailed,
+  releaseProcessingClaims,
   getMessageIn,
   findQuestionResponse,
 } from './messages-in.js';

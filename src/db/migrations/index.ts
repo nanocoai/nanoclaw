@@ -20,11 +20,17 @@ import { moduleApprovalsPendingApprovals } from './module-approvals-pending-appr
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
 import { migration018 } from './018-approvals-approver-user-id.js';
 import { migration019 } from './019-wiring-threads.js';
+import { migration020 as nanocoGatewayApprovalsMigration } from './020-nanoco-gateway-approvals.js';
+import { migration022 as nanocoGatewayApprovalPresentationsMigration } from './022-nanoco-gateway-approval-presentations.js';
+import { migration019 as migrationUsersEmail } from './019-users-email.js';
+import { migration020 as migrationProvisionedUser } from './020-provisioned-user.js';
+import { migration021 as migrationUserOnecliProject } from './021-user-onecli-project.js';
 import { migration020 } from './020-container-config-timezone.js';
 import { migration021 } from './021-approval-question.js';
 import { migration022 } from './022-messaging-group-detached.js';
 import { migration023 } from './023-approvals-instance.js';
 import { migration024 } from './024-host-coordination.js';
+import { migration025 } from './025-container-config-runtime-tier.js';
 
 interface MigrationBase {
   version: number;
@@ -86,11 +92,17 @@ export const migrations: Migration[] = [
   migration015,
   migration016,
   migration019,
+  nanocoGatewayApprovalsMigration,
+  nanocoGatewayApprovalPresentationsMigration,
+  migrationUsersEmail,
+  migrationProvisionedUser,
+  migrationUserOnecliProject,
   migration020,
   migration021,
   migration022,
   migration023,
   migration024,
+  migration025,
 ];
 
 /**
