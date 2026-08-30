@@ -1,11 +1,13 @@
 import type { AgentGroup } from '../types.js';
 import { getDb } from './connection.js';
 
-export async function createAgentGroup(group: AgentGroup): Promise<void> {
+export async function createAgentGroup(
+  group: Partial<AgentGroup> & Pick<AgentGroup, 'id' | 'name' | 'folder' | 'agent_provider' | 'created_at'>,
+): Promise<void> {
   await getDb().run(
-    `INSERT INTO agent_groups (id, name, folder, agent_provider, created_at)
-     VALUES (@id, @name, @folder, @agent_provider, @created_at)`,
-    group,
+    `INSERT INTO agent_groups (id, name, folder, agent_provider, created_at, provisioned_user_id)
+     VALUES (@id, @name, @folder, @agent_provider, @created_at, @provisioned_user_id)`,
+    { provisioned_user_id: null, ...group },
   );
 }
 

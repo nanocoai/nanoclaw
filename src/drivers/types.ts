@@ -26,6 +26,11 @@ export type ContainerRole = string;
 
 export type MountClass = 'group-state' | 'install-surface' | 'identity-material' | 'allowlisted-extra';
 
+export type RuntimeVolumeSource =
+  | { kind: 'emptyDir'; name: string; medium?: 'Memory'; sizeLimit?: string }
+  | { kind: 'secret'; name: string; secretName: string; key: string; mode?: number }
+  | { kind: 'hostPath'; name: string; path: string; type: 'Directory' };
+
 export interface MountSpec {
   /**
    * Class = which pinning rule applies (and, later, what the sealed tier encrypts).
@@ -49,6 +54,10 @@ export interface MountSpec {
   mode: 'rw' | 'ro';
   /** Lets a realization — by admission or by in-code checks — pin group-state to the group subtree. */
   groupScope: string;
+  /** Driver-owned volume. When present, hostPath is provenance only and is never statted or mounted. */
+  source?: RuntimeVolumeSource;
+  /** Exact file or directory projection from the driver-owned volume. */
+  subPath?: string;
 }
 
 export interface ContainerSpec {
@@ -76,6 +85,8 @@ export interface ContainerSpec {
    * append guaranteed by Docker's last-wins rule, now stated as contract.
    */
   contributedEnv?: Record<string, string>;
+  /** Opaque bootstrap data for auxiliary containers; forbidden on the agent. */
+  sensitiveEnv?: Record<string, string>;
   /**
    * PID 1 and its arguments. Split because not every runtime can express a
    * single argv the way `docker --entrypoint X image -c Y` can: `command`
@@ -118,6 +129,8 @@ export interface SessionSpec {
   key: SessionKey;
   /** Lineage labels (channel id, container instance id, ...). Drivers stamp these onto every runtime object. */
   labels: Record<string, string>;
+  /** One provider-resolved project document; every composed session sets it. */
+  projectDocument?: import('../providers/provider-container-registry.js').ProviderProjectDocument;
   /** One session, one or more containers: ['agent'] in this tree; an overlay may compose auxiliary containers beside it. */
   containers: ContainerSpec[];
   /**
@@ -131,6 +144,14 @@ export interface SessionSpec {
   hardening: 'standard';
   resources: SessionResources;
   runtimeTier: 'container' | 'vm';
+  workspace?: {
+    groupId: string;
+    sessionId: string;
+    nodeName: string;
+    generation: number;
+    plainHostPath: string;
+    runtimeTier: 'container' | 'vm';
+  };
   /**
    * uid:gid the containers run as. Docker papers over an image/host uid mismatch
    * with `--user`; not every realization has such a default, so the identity
@@ -414,6 +435,23 @@ export function validateSpec(spec: SessionSpec, policy: MountPolicy, capabilitie
   // capabilities handle gets the floor every realization ships ('container'),
   // which keeps the two-argument form's behavior exactly.
   const tiers = capabilities?.isolationTiers ?? ['container'];
+  const projectDocument = spec.projectDocument;
+  if (!projectDocument && spec.containers.some((container) => container.role === 'workspace-composer')) {
+    throw specInvalid('stateless session is missing its provider project document');
+  }
+  if (projectDocument) {
+    const safeFileName = projectDocument.fileName !== '.' && projectDocument.fileName !== '..' &&
+      /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(projectDocument.fileName);
+    const destinationParts = projectDocument.containerPath.split('/');
+    const baseParts = projectDocument.baseDocPath.split('/');
+    if (!safeFileName || !projectDocument.containerPath.startsWith('/') ||
+        destinationParts.some((part, index) => index > 0 && (!part || part === '.' || part === '..')) ||
+        destinationParts.at(-1) !== projectDocument.fileName ||
+        projectDocument.baseDocPath.startsWith('/') || baseParts.some((part) => !part || part === '.' || part === '..') ||
+        (projectDocument.maxBytes !== undefined && (!Number.isSafeInteger(projectDocument.maxBytes) || projectDocument.maxBytes <= 0))) {
+      throw specInvalid('invalid provider project document');
+    }
+  }
   if (!tiers.includes(spec.runtimeTier)) {
     throw specInvalid(`runtimeTier '${spec.runtimeTier}' not in driver isolation tiers [${tiers.join(', ')}]`);
   }
@@ -428,7 +466,25 @@ export function validateSpec(spec: SessionSpec, policy: MountPolicy, capabilitie
   for (const container of spec.containers) {
     const seenTargets = new Set<string>();
     for (const mount of container.mounts) {
-      if (!hostPathCanonical(mount.hostPath)) {
+      if (mount.source) {
+        if (!/^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$/.test(mount.source.name)) {
+          throw specInvalid(`invalid runtime volume name ${mount.source.name}`);
+        }
+        if (mount.source.kind === 'secret') {
+          if (mount.mode !== 'ro') throw deniedByPolicy(`secret volume ${mount.source.name} must be ro`);
+          if (!mount.source.secretName || !mount.source.key || mount.source.key.includes('/')) {
+            throw specInvalid(`invalid secret volume ${mount.source.name}`);
+          }
+          if (mount.source.mode !== undefined &&
+              (!Number.isInteger(mount.source.mode) || mount.source.mode < 0 || mount.source.mode > 0o777)) {
+            throw specInvalid(`invalid secret volume mode ${mount.source.name}`);
+          }
+        }
+        if (mount.subPath && (mount.subPath.startsWith('/') || mount.subPath.split('/').some((part) => !part || part === '.' || part === '..'))) {
+          throw specInvalid(`invalid runtime volume subPath ${mount.subPath}`);
+        }
+      }
+      if (!mount.source && !hostPathCanonical(mount.hostPath)) {
         // Every class rule below is a prefix check against a trusted root, and
         // a prefix check reads `materialsRoot/../outside` as inside — the
         // runtime then normalizes it OUTSIDE the root it was judged against.
@@ -448,9 +504,10 @@ export function validateSpec(spec: SessionSpec, policy: MountPolicy, capabilitie
         throw specInvalid(`duplicate containerPath ${mount.containerPath} on ${container.role}`);
       }
       seenTargets.add(mount.containerPath);
-      const required =
-        classRequiredByPath(mount.hostPath, policy) ??
-        (pluginsRoot && underRoot(mount.hostPath, pluginsRoot) ? 'install-surface' : null);
+      const required = mount.source
+        ? null
+        : classRequiredByPath(mount.hostPath, policy) ??
+          (pluginsRoot && underRoot(mount.hostPath, pluginsRoot) ? 'install-surface' : null);
       if (required && mount.class !== required) {
         // Where a file lives decides what it IS, so the class is not the
         // composer's to choose for these roots. Without this the taxonomy is
@@ -463,16 +520,25 @@ export function validateSpec(spec: SessionSpec, policy: MountPolicy, capabilitie
         // Neither is exotic: both are a single word in a mount literal.
         throw deniedByPolicy(`mount ${mount.hostPath} must be classed ${required}, not ${mount.class}`);
       }
-      if (mount.class === 'install-surface' && mount.mode !== 'ro') {
+      if (mount.class === 'install-surface' && mount.mode !== 'ro' && container.role !== 'workspace-composer') {
         throw deniedByPolicy(`install-surface mount ${mount.hostPath} must be ro`);
       }
-      if (mount.class === 'identity-material' && (mount.mode !== 'ro' || container.role === 'agent')) {
+      if (mount.class === 'identity-material' &&
+          (container.role === 'agent' || (mount.mode !== 'ro' && !['identity-manager', 'workspace-composer-db'].includes(container.role)))) {
         // The no-credentials invariant, as a checkable rule: identity materials
         // are ro-only and never enter the agent container.
         throw deniedByPolicy(`identity-material mount ${mount.hostPath} invalid on role ${container.role}`);
       }
-      if (!mountAllowed(mount, spec, policy)) {
+      if (!mount.source && !mountAllowed(mount, spec, policy)) {
         throw deniedByPolicy(`mount ${mount.hostPath} violates class ${mount.class} scope ${mount.groupScope}`);
+      }
+    }
+    if (container.role === 'agent' && Object.keys(container.sensitiveEnv ?? {}).length > 0) {
+      throw deniedByPolicy('sensitive env is forbidden on the agent role');
+    }
+    for (const value of Object.values(container.sensitiveEnv ?? {})) {
+      if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(value)) {
+        throw deniedByPolicy('private key bytes are forbidden in sensitive env');
       }
     }
     for (const [key, value] of Object.entries(container.env)) {
@@ -563,7 +629,11 @@ export function looksLikeCredential(value: string): boolean {
  * be claimed by a path that has not earned it".
  */
 export function classRequiredByPath(hostPath: string, policy: MountPolicy): MountClass | null {
-  if (underRoot(hostPath, policy.materialsRoot)) return 'identity-material';
+  const workspace = `${policy.dataRoot}/workspace-replicas/`;
+  if (
+    underRoot(hostPath, policy.materialsRoot) ||
+    (hostPath.startsWith(workspace) && hostPath.slice(workspace.length).split('/')[1] === 'secrets')
+  ) return 'identity-material';
   if (policy.surfaceRoots.some((root) => underRoot(hostPath, root))) return 'install-surface';
   return null;
 }
@@ -612,10 +682,15 @@ function mountAllowed(mount: MountSpec, spec: SessionSpec, policy: MountPolicy):
       return pluginsRoot !== null && underRoot(mount.hostPath, pluginsRoot);
     }
     case 'identity-material':
-      return underRoot(mount.hostPath, policy.materialsRoot);
+      return (
+        underRoot(mount.hostPath, policy.materialsRoot) ||
+        (mount.groupScope === spec.key.agentGroupId &&
+          underRoot(mount.hostPath, `${policy.dataRoot}/workspace-replicas/${mount.groupScope}/secrets`))
+      );
     case 'group-state': {
       if (mount.groupScope !== spec.key.agentGroupId) return false;
       if (underRoot(mount.hostPath, `${policy.dataRoot}/v2-sessions/${mount.groupScope}`)) return true;
+      if (underRoot(mount.hostPath, `${policy.dataRoot}/workspace-replicas/${mount.groupScope}`)) return true;
       if (underRoot(mount.hostPath, policy.groupsRoot)) {
         // The groups root holds EVERY group's folder, so "under groupsRoot"
         // alone would grant a session any group's state — `groupScope` cannot

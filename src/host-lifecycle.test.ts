@@ -146,11 +146,13 @@ describe('host lifecycle orchestration', () => {
   it('aborts modules and awaits their LIFO shutdown before host cleanup', () => {
     const source = fs.readFileSync(path.join(process.cwd(), 'src', 'index.ts'), 'utf8');
     const abort = source.indexOf('hostAbortController.abort()');
+    const pollsStop = source.indexOf('await stopDeliveryPolls()');
+    const sweepStop = source.indexOf('await stopHostSweep()');
     const modulesStop = source.indexOf('await stopHostModules()');
-    const pollsStop = source.indexOf('stopDeliveryPolls()');
 
     expect(abort).toBeGreaterThan(-1);
-    expect(modulesStop).toBeGreaterThan(abort);
-    expect(pollsStop).toBeGreaterThan(modulesStop);
+    expect(pollsStop).toBeGreaterThan(abort);
+    expect(sweepStop).toBeGreaterThan(pollsStop);
+    expect(modulesStop).toBeGreaterThan(sweepStop);
   });
 });
