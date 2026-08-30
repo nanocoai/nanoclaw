@@ -14,6 +14,8 @@ import type { AgentMailbox } from '../mailbox/types.js';
 
 import { readStdinJsonArgs, StdinJsonInputError } from './stdin-json.js';
 
+import { runMailboxVerb } from './mailbox-verbs.js';
+
 // ---------------------------------------------------------------------------
 // Frame types (mirrors src/cli/frame.ts on the host)
 // ---------------------------------------------------------------------------
@@ -62,21 +64,17 @@ async function writeRequest(mailbox: AgentMailbox, req: RequestFrame): Promise<v
 async function pollResponse(mailbox: AgentMailbox, requestId: string, timeoutMs: number): Promise<ResponseFrame | null> {
   const deadline = Date.now() + timeoutMs;
 
-  while (Date.now() < deadline) {
-    const response = await mailbox.run(() => {
+  return mailbox.run(async () => {
+    while (Date.now() < deadline) {
       const row = mailbox.operations.findCliResponse(requestId);
       if (row) {
         mailbox.operations.markMessages([row.id], 'completed');
         return (JSON.parse(row.content) as { frame: ResponseFrame }).frame;
       }
-      return null;
-    });
-    if (response) return response;
-
-    await Bun.sleep(500);
-  }
-
-  return null;
+      await Bun.sleep(500);
+    }
+    return null;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -251,11 +249,20 @@ async function main(): Promise<void> {
 
   const context = await readMailboxContext();
   const mailbox = getAgentMailbox();
+  mailbox.setBackgroundSyncMode?.('during-action');
   await mailbox.start(context);
   try {
-    const requestId = generateId();
-    await writeRequest(mailbox, { id: requestId, command, args: requestArgs });
-    const resp = await pollResponse(mailbox, requestId, 30_000);
+    // FORK CARRY (D18): mailbox verbs dispatch locally — the mailbox this
+    // process already started IS the transport, so a host round-trip would
+    // add latency and no authority. Self-gating: outside a code-mode
+    // container runMailboxVerb returns null and the host round trip below is
+    // the path.
+    let resp = await runMailboxVerb(command, requestArgs);
+    if (!resp) {
+      const requestId = generateId();
+      await writeRequest(mailbox, { id: requestId, command, args: requestArgs });
+      resp = await pollResponse(mailbox, requestId, 30_000);
+    }
 
     if (!resp) {
       process.stderr.write('ncl: command timed out after 30s\n');

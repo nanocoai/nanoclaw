@@ -1,28 +1,27 @@
-/**
- * Claude provider container config — only registered when the user has
- * configured a custom Anthropic-compatible endpoint via setup. Setup
- * appends `import './claude.js'` to providers/index.ts at that point;
- * standard installs hitting api.anthropic.com don't need this file
- * loaded.
- *
- * The real auth token never enters the container. Setup creates an
- * OneCLI generic secret (host-pattern = base URL hostname, header-name
- * = Authorization, value-format = "Bearer {value}") so the proxy
- * rewrites the Authorization header on the wire. The container only
- * needs:
- *   - ANTHROPIC_BASE_URL — so the SDK knows where to call
- *   - ANTHROPIC_AUTH_TOKEN=placeholder — so the SDK adds an
- *     Authorization: Bearer header for OneCLI to overwrite
- */
 import { readEnvFile } from '../env.js';
-import { registerProviderContainerConfig } from './provider-container-registry.js';
+import { DEFAULT_PROJECT_DOCUMENT, registerProviderContainerConfig } from './provider-container-registry.js';
+
+const AGENT_APP = '/app';
+const COMPACT_COMMAND = ['bun ', AGENT_APP, '/src/compact-instructions', '.ts'].join('');
+const SETTINGS = `${JSON.stringify({
+  autoMemoryEnabled: false,
+  env: { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
+  hooks: { PreCompact: [{ hooks: [{ type: 'command', command: COMPACT_COMMAND }] }] },
+}, null, 2)}\n`;
 
 registerProviderContainerConfig('claude', () => {
   const dotenv = readEnvFile(['ANTHROPIC_BASE_URL']);
-  const env: Record<string, string> = {};
+  const env: Record<string, string> = { ANTHROPIC_API_KEY: 'nanoco-gateway-managed' };
   if (dotenv.ANTHROPIC_BASE_URL) {
     env.ANTHROPIC_BASE_URL = dotenv.ANTHROPIC_BASE_URL;
-    env.ANTHROPIC_AUTH_TOKEN = 'placeholder';
+    env.ANTHROPIC_AUTH_TOKEN = 'nanoco-gateway-managed';
+    delete env.ANTHROPIC_API_KEY;
   }
-  return { env };
-});
+  return {
+    env,
+    projectDocument: DEFAULT_PROJECT_DOCUMENT,
+    stateVolumes: [{ name: 'claude-state', containerPath: '/home/node/.claude', scope: 'group' }],
+    skillViews: [{ containerPath: '/home/node/.claude/skills', mode: 'rw' }],
+    seedFiles: [{ containerPath: '/home/node/.claude/settings.json', content: SETTINGS, owner: 'materializer', mode: 0o600 }],
+  };
+}, { requiresHostFilesystem: false });

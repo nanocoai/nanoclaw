@@ -34,6 +34,7 @@ import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { requestWake } from './request-wake.js';
 import { getSession } from './db/sessions.js';
+import { emitInboundAuditEvidence } from './audit/runtime-emitters.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
 
@@ -595,6 +596,17 @@ async function deliverToAgent(
     threadId: deliveryAddr.threadId,
     content: event.message.content,
     trigger: wake,
+  });
+
+  await emitInboundAuditEvidence({
+    actorId: userId,
+    agentId: session.agent_group_id,
+    sessionId: session.id,
+    channelType: event.channelType,
+    messagingGroupId: mg.id,
+    activityId: messageId,
+    created: wake && created,
+    sessionMode: effectiveSessionMode,
   });
 
   if (wake) {
