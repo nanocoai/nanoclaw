@@ -7,7 +7,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { AnchoredDir } from './anchored-dir.js';
-import { deriveAttachmentName } from './attachment-naming.js';
+import { deriveAttachmentName, mimeForFilename } from './attachment-naming.js';
 import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
@@ -525,7 +525,11 @@ export function readOutboxFiles(
         continue;
       }
       try {
-        files.push({ filename, data: outbox.readFile(filename) });
+        files.push({
+          filename,
+          data: outbox.readFile(filename),
+          mimeType: mimeForFilename(filename),
+        });
       } catch (err) {
         log.warn('Outbox file missing or not a regular file', { messageId, filename, err });
       }
