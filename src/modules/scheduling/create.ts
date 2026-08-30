@@ -5,6 +5,13 @@ import { TIMEZONE } from '../../config.js';
 import type { TaskRecord } from '../../mailbox/index.js';
 import { resolveTaskSession, withMailboxSession } from '../../session-manager.js';
 import { parseZonedToUtc } from '../../timezone.js';
+import {
+  DEFAULT_GRACE_WINDOW_SECONDS,
+  DEFAULT_RECURRENCE_POLICY,
+  parseGraceWindowSeconds,
+  parseRecurrencePolicy,
+  type RecurrencePolicy,
+} from './task-content.js';
 
 export const MAX_DAILY_FIRES = 4;
 
@@ -28,6 +35,10 @@ export interface PreparedScheduledTask {
   recurrence: string | null;
   script: string | null;
   processAfter: string;
+  /** Missed-run semantics; null on a one-shot, which has no periods to miss. */
+  recurrencePolicy: RecurrencePolicy | null;
+  /** How late a `skip-if-missed` run may still fire; null under any other policy. */
+  graceWindowSeconds: number | null;
 }
 
 export type ScheduledTaskRow = TaskRecord;
@@ -95,6 +106,36 @@ export function enforceRecurrenceLimit(
 }
 
 /**
+ * Missed-run semantics for a new task, rejected loudly when they can't apply:
+ * a policy needs periods (so, a recurrence), and a grace window only means
+ * anything to `skip-if-missed`.
+ */
+export function resolveMissedRunPolicy(input: {
+  recurrence: string | null;
+  recurrencePolicy?: unknown;
+  graceWindowSeconds?: unknown;
+}): { recurrencePolicy: RecurrencePolicy | null; graceWindowSeconds: number | null } {
+  const policyGiven = input.recurrencePolicy !== undefined && input.recurrencePolicy !== null;
+  const graceGiven = input.graceWindowSeconds !== undefined && input.graceWindowSeconds !== null;
+
+  if (!input.recurrence) {
+    if (policyGiven) throw new Error('--recurrence-policy applies to recurring tasks; pass --recurrence');
+    if (graceGiven) throw new Error('--grace-window-seconds applies to recurring tasks; pass --recurrence');
+    return { recurrencePolicy: null, graceWindowSeconds: null };
+  }
+
+  const recurrencePolicy = policyGiven ? parseRecurrencePolicy(input.recurrencePolicy) : DEFAULT_RECURRENCE_POLICY;
+  if (graceGiven && recurrencePolicy !== 'skip-if-missed') {
+    throw new Error('--grace-window-seconds only applies to --recurrence-policy skip-if-missed');
+  }
+  if (recurrencePolicy !== 'skip-if-missed') return { recurrencePolicy, graceWindowSeconds: null };
+  return {
+    recurrencePolicy,
+    graceWindowSeconds: graceGiven ? parseGraceWindowSeconds(input.graceWindowSeconds) : DEFAULT_GRACE_WINDOW_SECONDS,
+  };
+}
+
+/**
  * Validate task semantics and derive its first run without writing anything.
  * `timezone` grounds wall-clock interpretation (cron grid, naive
  * --process-after) — pass the owning group's effective timezone
@@ -106,6 +147,8 @@ export function prepareScheduledTask(input: {
   recurrence?: string | null;
   processAfter?: string;
   script?: string | null;
+  recurrencePolicy?: unknown;
+  graceWindowSeconds?: unknown;
   dangerouslyOverrideRecurrenceLimit?: boolean;
   timezone?: string;
 }): PreparedScheduledTask {
@@ -125,7 +168,18 @@ export function prepareScheduledTask(input: {
     processAfter = parseProcessAfter(input.processAfter, tz);
   }
 
-  return { name: input.name, prompt: input.prompt, recurrence, script, processAfter };
+  return {
+    name: input.name,
+    prompt: input.prompt,
+    recurrence,
+    script,
+    processAfter,
+    ...resolveMissedRunPolicy({
+      recurrence,
+      recurrencePolicy: input.recurrencePolicy,
+      graceWindowSeconds: input.graceWindowSeconds,
+    }),
+  };
 }
 
 /** Persist a prepared task through NanoClaw's single task/session representation. */
@@ -147,6 +201,10 @@ export async function createScheduledTask(
         prompt: task.prompt,
         script: task.script,
         originSessionId: options?.originSessionId ?? null,
+        // Only stored when they mean something: a one-shot has no missed
+        // periods, and a grace window is a skip-if-missed concept.
+        ...(task.recurrencePolicy !== null && { recurrencePolicy: task.recurrencePolicy }),
+        ...(task.graceWindowSeconds !== null && { graceWindowSeconds: task.graceWindowSeconds }),
       }),
       status: options?.status ?? 'pending',
     });

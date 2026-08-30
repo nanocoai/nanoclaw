@@ -13,7 +13,12 @@ import {
   TASKS_SYSTEM_THREAD_ID,
 } from '../../db/sessions.js';
 import type { TaskUpdate } from '../../mailbox/index.js';
-import { parseTaskContent } from '../../modules/scheduling/task-content.js';
+import { MAX_CATCH_UP_RUNS } from '../../modules/scheduling/missed-runs.js';
+import {
+  DEFAULT_GRACE_WINDOW_SECONDS,
+  parseTaskContent,
+  RECURRENCE_POLICIES,
+} from '../../modules/scheduling/task-content.js';
 import {
   createScheduledTask,
   enforceRecurrenceLimit,
@@ -21,6 +26,7 @@ import {
   MAX_DAILY_FIRES,
   parseProcessAfter,
   prepareScheduledTask,
+  resolveMissedRunPolicy,
   type ScheduledTaskRow,
   validateRecurrence,
 } from '../../modules/scheduling/create.js';
@@ -116,6 +122,8 @@ function toOutput(session: ScopedSession, row: TaskRow) {
     status: row.status,
     process_after: row.processAfter,
     recurrence: row.recurrence,
+    recurrence_policy: row.recurrence ? content.recurrencePolicy : null,
+    grace_window_seconds: content.recurrencePolicy === 'skip-if-missed' ? content.graceWindowSeconds : null,
     prompt: content.prompt.length > 120 ? content.prompt.slice(0, 117) + '...' : content.prompt,
     has_script: content.script ? 1 : 0,
     origin_session_id: content.originSessionId, // which session created the task (null for CLI-created)
@@ -151,6 +159,8 @@ async function createTask(args: Record<string, unknown>, ctx: CallerContext) {
     recurrence,
     processAfter: str(args.process_after),
     script,
+    recurrencePolicy: str(args.recurrence_policy),
+    graceWindowSeconds: args.grace_window_seconds,
     dangerouslyOverrideRecurrenceLimit: bool(args.dangerously_override_recurrence_limit),
     timezone: await resolveGroupTimezone(group),
   });
@@ -332,12 +342,22 @@ async function updateTaskCommand(args: Record<string, unknown>, ctx: CallerConte
   // recurrence-limit check.
   let ownerGroup: string | undefined;
   let currentScript: string | null = null;
-  if (args.process_after !== undefined || recurrence !== undefined) {
+  let currentRecurrence: string | null = null;
+  let currentPolicy: string | null = null;
+  if (
+    args.process_after !== undefined ||
+    recurrence !== undefined ||
+    args.recurrence_policy !== undefined ||
+    args.grace_window_seconds !== undefined
+  ) {
     for (const session of await selectedSessions(args, ctx)) {
       const row = await withInbound(session, (db) => selectTask(db, id));
       if (row) {
         ownerGroup = session.agent_group_id;
-        currentScript = parseTaskContent(row.content).script;
+        const content = parseTaskContent(row.content);
+        currentScript = content.script;
+        currentRecurrence = row.recurrence;
+        currentPolicy = content.recurrencePolicy;
         break;
       }
     }
@@ -354,6 +374,20 @@ async function updateTaskCommand(args: Record<string, unknown>, ctx: CallerConte
     update.recurrence = recurrence;
   }
   if (script !== undefined) update.script = script;
+
+  // Missed-run semantics are validated against the task AFTER this update: a
+  // policy needs a recurrence to apply to, and a grace window needs
+  // skip-if-missed — whether either arrives in this call or is already stored.
+  if (args.recurrence_policy !== undefined || args.grace_window_seconds !== undefined) {
+    const resolved = resolveMissedRunPolicy({
+      recurrence: recurrence !== undefined ? recurrence : currentRecurrence,
+      recurrencePolicy: str(args.recurrence_policy) ?? currentPolicy,
+      graceWindowSeconds: args.grace_window_seconds,
+    });
+    if (args.recurrence_policy !== undefined) update.recurrencePolicy = resolved.recurrencePolicy ?? undefined;
+    if (resolved.graceWindowSeconds !== null) update.graceWindowSeconds = resolved.graceWindowSeconds;
+  }
+
   const fields = Object.keys(update);
   if (fields.length === 0) throw new Error('nothing to update');
 
@@ -493,6 +527,7 @@ registerResource({
         `carries a --script gate (the script decides whether each fire needs you — a gated fire that\n` +
         `finds nothing costs zero tokens) or you pass --dangerously-override-recurrence-limit after\n` +
         `the user explicitly confirmed they want an ungated frequent task.\n\n` +
+        `Missed runs (recurring tasks): --recurrence-policy decides what happens to periods the host slept through — catch-up-latest (default) fires just the most recent one, catch-up-all replays every missed period oldest-first (capped at the last ${MAX_CATCH_UP_RUNS}), skip-if-missed drops a run more than --grace-window-seconds late (default ${DEFAULT_GRACE_WINDOW_SECONDS}s) and waits for the next period. Pick skip-if-missed for time-sensitive personal jobs whose output goes stale, catch-up-all for per-interval work like audits or rollups.\n\n` +
         `Failure backoff: a script that ERRORS repeatedly backs the series off (2,4,8,…60 min between fires; each errored fire counts as a failed run); after 8 consecutive failures the series is auto-paused with a note in its run log — fix the script, then \`ncl tasks resume <id>\`. A deliberate wakeAgent=false is a normal run and never backs off. \`ncl tasks get <id>\` shows failed_runs and the run log.`,
       args: [
         {
@@ -524,6 +559,20 @@ registerResource({
           description: 'Pre-task gate script (bash) — see the --script contract above.',
         },
         {
+          name: 'recurrence_policy',
+          type: 'string',
+          enum: [...RECURRENCE_POLICIES],
+          description:
+            'What happens to runs missed while the host was down/asleep (recurring tasks only). ' +
+            'catch-up-latest (default) fires only the most recent missed period; catch-up-all fires ' +
+            'every missed period oldest-first; skip-if-missed drops a run later than --grace-window-seconds.',
+        },
+        {
+          name: 'grace_window_seconds',
+          type: 'number',
+          description: `How late a skip-if-missed run may still fire, in seconds (default ${DEFAULT_GRACE_WINDOW_SECONDS}). Only valid with --recurrence-policy skip-if-missed.`,
+        },
+        {
           name: 'group',
           type: 'string',
           description: 'Agent group id (host callers; auto-filled to your own group inside a container).',
@@ -532,6 +581,7 @@ registerResource({
       examples: [
         `# Recurring — --recurrence alone is enough; the first run comes off the cron grid:\nncl tasks create --name "sales briefing" --prompt "Send the weekday sales briefing" --recurrence "0 9 * * 1-5"`,
         `# One-shot — --process-after required (UTC, offset, or naive-local in the instance TZ):\nncl tasks create --name "ping" --prompt "Remind me to call Dana" --process-after "tomorrow 18:00"`,
+        `# Time-sensitive — a review that is worthless once stale is skipped, not fired late:\nncl tasks create --name "daily review" --prompt "Write my daily review" --recurrence "30 21 * * *" \\\n  --recurrence-policy skip-if-missed --grace-window-seconds 1800`,
         `# Monitor — script gates the run; the agent wakes only when something matters:\nncl tasks create --name "alert watch" --recurrence "*/15 * * * *" \\\n  --prompt "Investigate the alerts in the script data and notify me if serious" \\\n  --script 'c=$(curl -sf https://example.com/api/alerts | jq length) || exit 0\necho "{\\"wakeAgent\\": $([ "$c" -gt 0 ] && echo true || echo false), \\"data\\": {\\"alerts\\": $c}}"'`,
       ],
       handler: async (args, ctx) => createTask(args, ctx),
@@ -579,6 +629,20 @@ registerResource({
             'Schedule more than 4 fires/day anyway. Only after the user explicitly confirmed they understand the quota/token cost and you agree it is right.',
         },
         { name: 'script', type: 'string', description: 'New pre-task script; "null"/"none" removes it.' },
+        {
+          name: 'recurrence_policy',
+          type: 'string',
+          enum: [...RECURRENCE_POLICIES],
+          description:
+            'What happens to runs missed while the host was down/asleep (recurring tasks only). ' +
+            'catch-up-latest (default) fires only the most recent missed period; catch-up-all fires ' +
+            'every missed period oldest-first; skip-if-missed drops a run later than --grace-window-seconds.',
+        },
+        {
+          name: 'grace_window_seconds',
+          type: 'number',
+          description: `How late a skip-if-missed run may still fire, in seconds (default ${DEFAULT_GRACE_WINDOW_SECONDS}). Only valid with --recurrence-policy skip-if-missed.`,
+        },
         {
           name: 'group',
           type: 'string',

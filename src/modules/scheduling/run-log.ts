@@ -12,6 +12,7 @@ import fs from 'fs';
 import { GROUPS_DIR } from '../../config.js';
 import { resolveGroupTimezone } from '../../container-config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
+import { log } from '../../log.js';
 import { formatLocalStamp } from '../../timezone.js';
 
 export async function appendRunLog(
@@ -38,4 +39,19 @@ export async function deleteRunLog(agentGroupId: string, series: string): Promis
   const ag = await getAgentGroup(agentGroupId);
   if (!ag) throw new Error(`agent group not found: ${agentGroupId}`);
   fs.rmSync(`${GROUPS_DIR}/${ag.folder}/tasks/${series}.md`, { force: true });
+}
+
+/**
+ * Host-written line in a series' run log — no agent session exists to call
+ * `ncl tasks append-log` when the sweep pauses, skips, or truncates a series on
+ * its own. appendRunLog throws on a bad series charset or a missing agent
+ * group, and the sweep must not crash over a log line, so failures are logged
+ * and swallowed.
+ */
+export async function appendHostTaskNote(agentGroupId: string, seriesId: string, note: string): Promise<void> {
+  try {
+    await appendRunLog(agentGroupId, seriesId, note);
+  } catch (err) {
+    log.warn('Could not append host task note to run log', { agentGroupId, seriesId, err });
+  }
 }

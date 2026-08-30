@@ -68,6 +68,7 @@ describe('cancelTask / pauseTask / resumeTask series matching', () => {
       id: 'task-orig',
       content: JSON.stringify({ prompt: 'noop' }),
       recurrence: '0 9 * * *',
+      process_after: null,
       series_id: 'task-orig',
     };
     insertRecurrence(db, msg, 'task-next', new Date(Date.now() + 86400000).toISOString());
@@ -222,6 +223,7 @@ describe('updateTask', () => {
       id: 'task-orig',
       content: JSON.stringify({ prompt: 'old' }),
       recurrence: '0 9 * * *',
+      process_after: null,
       series_id: 'task-orig',
     };
     insertRecurrence(db, msg, 'task-next', new Date(Date.now() + 86400000).toISOString());
@@ -294,6 +296,7 @@ describe('insertRecurrence', () => {
       id: 'task-orig',
       content: '{}',
       recurrence: '0 9 * * *',
+      process_after: null,
       series_id: 'task-orig',
     };
     insertRecurrence(db, msg, 'task-next', new Date().toISOString());

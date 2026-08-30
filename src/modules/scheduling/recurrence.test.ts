@@ -141,6 +141,49 @@ describe('handleRecurrence', () => {
     expect(follow.process_after).toMatch(/T03:30:00/);
   });
 
+  it('catch-up-all re-arms on the period that was missed, not the next one ahead', async () => {
+    const db = freshDb();
+    const ranAt = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000); // last fire, 3 days ago
+    insertTaskRow(db, {
+      id: 'task-audit',
+      seriesId: 'task-audit',
+      processAfter: ranAt.toISOString(),
+      recurrence: '0 9 * * *',
+      content: JSON.stringify({ prompt: 'daily audit', recurrencePolicy: 'catch-up-all' }),
+    });
+    db.prepare(`UPDATE messages_in SET status='completed' WHERE id='task-audit'`).run();
+
+    await handleRecurrence(wrapSqliteInbound(db), fakeSession());
+
+    const follow = db.prepare(`SELECT process_after FROM messages_in WHERE id != 'task-audit'`).get() as {
+      process_after: string;
+    };
+    // Due immediately (it is in the past), so the missed day fires on the next
+    // sweep tick and its own completion re-arms the day after — oldest first.
+    const next = new Date(follow.process_after).getTime();
+    expect(next).toBeGreaterThan(ranAt.getTime());
+    expect(next).toBeLessThan(Date.now());
+  });
+
+  it('the default policy drops the missed periods and lands ahead of now', async () => {
+    const db = freshDb();
+    insertTaskRow(db, {
+      id: 'task-briefing',
+      seriesId: 'task-briefing',
+      processAfter: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(),
+      recurrence: '0 9 * * *',
+      content: JSON.stringify({ prompt: 'morning briefing' }),
+    });
+    db.prepare(`UPDATE messages_in SET status='completed' WHERE id='task-briefing'`).run();
+
+    await handleRecurrence(wrapSqliteInbound(db), fakeSession());
+
+    const follow = db.prepare(`SELECT process_after FROM messages_in WHERE id != 'task-briefing'`).get() as {
+      process_after: string;
+    };
+    expect(new Date(follow.process_after).getTime()).toBeGreaterThan(Date.now());
+  });
+
   it('does not clone rows whose recurrence is already cleared', async () => {
     const db = freshDb();
     insertTaskRow(db, {

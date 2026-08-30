@@ -333,6 +333,90 @@ describe('tasks CLI resource', () => {
     if (!r.ok) expect(r.error.message).toContain('--process-after is required');
   });
 
+  it('create records the missed-run policy and echoes it back', async () => {
+    const r = await dispatch(
+      {
+        id: 'pol',
+        command: 'tasks-create',
+        args: {
+          prompt: 'daily review',
+          name: 'review',
+          recurrence: '30 21 * * *',
+          recurrence_policy: 'skip-if-missed',
+          grace_window_seconds: 1800,
+        },
+      },
+      agentCtx('ag-1', 'chat-1'),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const task = r.data as { session_id: string; recurrence_policy: string; grace_window_seconds: number };
+    expect(task.recurrence_policy).toBe('skip-if-missed');
+    expect(task.grace_window_seconds).toBe(1800);
+
+    const db = new Database(inboundDbPath('ag-1', task.session_id), { readonly: true });
+    const row = db.prepare("SELECT content FROM messages_in WHERE kind = 'task'").get() as { content: string };
+    db.close();
+    expect(JSON.parse(row.content)).toMatchObject({ recurrencePolicy: 'skip-if-missed', graceWindowSeconds: 1800 });
+  });
+
+  it('defaults to catch-up-latest and writes no policy key (tasks stay readable by an older host)', async () => {
+    const r = await dispatch(
+      { id: 'def', command: 'tasks-create', args: { prompt: 'x', name: 'plain', recurrence: '0 9 * * *' } },
+      agentCtx('ag-1', 'chat-1'),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const task = r.data as { session_id: string; recurrence_policy: string; grace_window_seconds: number | null };
+    expect(task.recurrence_policy).toBe('catch-up-latest');
+    expect(task.grace_window_seconds).toBeNull();
+
+    const db = new Database(inboundDbPath('ag-1', task.session_id), { readonly: true });
+    const row = db.prepare("SELECT content FROM messages_in WHERE kind = 'task'").get() as { content: string };
+    db.close();
+    expect(JSON.parse(row.content).graceWindowSeconds).toBeUndefined();
+  });
+
+  it('rejects a policy that cannot apply', async () => {
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ recurrence: '0 9 * * *', recurrence_policy: 'whenever' }, 'must be one of'],
+      [{ process_after: '2026-01-15T09:00:00Z', recurrence_policy: 'catch-up-all' }, 'applies to recurring tasks'],
+      [{ recurrence: '0 9 * * *', grace_window_seconds: 60 }, 'only applies to --recurrence-policy skip-if-missed'],
+      [
+        { recurrence: '0 9 * * *', recurrence_policy: 'skip-if-missed', grace_window_seconds: 0 },
+        'positive whole number',
+      ],
+    ];
+    for (const [args, message] of cases) {
+      const r = await dispatch(
+        { id: `bad-${message}`, command: 'tasks-create', args: { prompt: 'x', ...args } },
+        agentCtx('ag-1', 'chat-1'),
+      );
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.message).toContain(message);
+    }
+  });
+
+  it('update switches a live series onto another policy', async () => {
+    const created = await dispatch(
+      { id: 'u1', command: 'tasks-create', args: { prompt: 'x', name: 'audit', recurrence: '0 9 * * *' } },
+      agentCtx('ag-1', 'chat-1'),
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const seriesId = (created.data as { series_id: string }).series_id;
+
+    const updated = await dispatch(
+      { id: 'u2', command: 'tasks-update', args: { id: seriesId, recurrence_policy: 'catch-up-all' } },
+      agentCtx('ag-1', 'chat-1'),
+    );
+    expect(updated.ok).toBe(true);
+
+    const got = await dispatch({ id: 'u3', command: 'tasks-get', args: { id: seriesId } }, agentCtx('ag-1', 'chat-1'));
+    expect(got.ok).toBe(true);
+    if (got.ok) expect((got.data as { recurrence_policy: string }).recurrence_policy).toBe('catch-up-all');
+  });
+
   it('run queues an extra immediate occurrence without consuming the scheduled one', async () => {
     const created = await dispatch(
       {

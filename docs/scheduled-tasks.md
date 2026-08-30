@@ -141,6 +141,34 @@ For an intentionally frequent task that has no script, see the explicit
 override in `ncl tasks create --help` and confirm the token and quota cost
 before using it.
 
+## Missed runs
+
+If nothing was running when a recurring task was due — the host was asleep, the
+machine was off, NanoClaw was stopped — the run is late rather than lost. What
+happens to it is the series' `--recurrence-policy`:
+
+| Policy | Behavior |
+|--------|----------|
+| `catch-up-latest` (default) | Fire the most recent missed period once, skip the older ones. A daily briefing does not arrive three times after a weekend away. |
+| `catch-up-all` | Fire once per missed period, oldest first — one per sweep tick. For work that must happen for every interval even when late: audits, billing rolls, per-day rollups. Capped at the last 24 missed periods, with a note in the run log when older ones are dropped. |
+| `skip-if-missed` | Drop a run more than `--grace-window-seconds` late (default 600) and wait for the next period. For time-sensitive jobs whose output is misleading once stale. |
+
+```bash
+ncl tasks create \
+  --group <agent-group-id> \
+  --name "daily review" \
+  --recurrence "30 21 * * *" \
+  --recurrence-policy skip-if-missed \
+  --grace-window-seconds 1800 \
+  --prompt "Write my daily review"
+```
+
+A skipped run never wakes a container, so it costs no tokens and is not counted
+as a run in the task's history; the skip is recorded in the run log. Both flags
+apply to recurring tasks only, and `--grace-window-seconds` only to
+`skip-if-missed`. An existing series can be moved onto another policy with
+`ncl tasks update <task-id> --recurrence-policy <policy>`.
+
 ## Script failures
 
 A timeout, nonzero exit, missing decision, or invalid JSON counts as a failed

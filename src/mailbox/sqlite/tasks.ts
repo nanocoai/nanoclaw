@@ -83,6 +83,8 @@ export interface TaskUpdate {
   script?: string | null;
   recurrence?: string | null;
   processAfter?: string;
+  recurrencePolicy?: string;
+  graceWindowSeconds?: number;
 }
 
 // Merges content JSON in-place so callers can update prompt/script without
@@ -105,7 +107,11 @@ export function updateTask(db: Database.Database, taskId: string, update: TaskUp
 
   const setProcessAfter = update.processAfter !== undefined;
   const setRecurrence = update.recurrence !== undefined;
-  const mergeContent = update.prompt !== undefined || update.script !== undefined;
+  const mergeContent =
+    update.prompt !== undefined ||
+    update.script !== undefined ||
+    update.recurrencePolicy !== undefined ||
+    update.graceWindowSeconds !== undefined;
 
   const tx = db.transaction(() => {
     for (const row of rows) {
@@ -114,6 +120,8 @@ export function updateTask(db: Database.Database, taskId: string, update: TaskUp
         const parsed = JSON.parse(row.content) as Record<string, unknown>;
         if (update.prompt !== undefined) parsed.prompt = update.prompt;
         if (update.script !== undefined) parsed.script = update.script;
+        if (update.recurrencePolicy !== undefined) parsed.recurrencePolicy = update.recurrencePolicy;
+        if (update.graceWindowSeconds !== undefined) parsed.graceWindowSeconds = update.graceWindowSeconds;
         content = JSON.stringify(parsed);
       }
 
@@ -137,6 +145,20 @@ export function updateTask(db: Database.Database, taskId: string, update: TaskUp
   return rows.length;
 }
 
+/**
+ * Move ONE pending occurrence's next-run time, by row id.
+ *
+ * Deliberately not part of updateTask: that helper leaves a DUE row alone
+ * because it is already an execution candidate. This is the one caller that
+ * must move a due row — the skip-if-missed roll-forward, which drops a fire
+ * the host was too late to run and rolls the series to its next slot.
+ */
+export function rescheduleTaskRow(db: Database.Database, rowId: string, processAfter: string): number {
+  return db
+    .prepare("UPDATE messages_in SET process_after = ? WHERE id = ? AND kind = 'task' AND status = 'pending'")
+    .run(processAfter, rowId).changes;
+}
+
 // Only tasks carry a recurrence (non-task writeSessionMessage never sets one),
 // so getCompletedRecurring only ever returns task rows — the fields below are
 // all that handleRecurrence needs to clone the next occurrence.
@@ -145,6 +167,8 @@ export interface RecurringMessage {
   content: string;
   recurrence: string;
   series_id: string;
+  /** Scheduled time of this (finished) occurrence — the catch-up-all anchor. */
+  process_after: string | null;
 }
 
 // Failed occurrences (script-skip:error runs) re-arm too — a broken monitor

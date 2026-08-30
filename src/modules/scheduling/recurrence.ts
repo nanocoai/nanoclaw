@@ -6,18 +6,22 @@
  * cron-parser, insert a fresh pending row (copying series_id forward), then
  * clear the recurrence on the original so it isn't re-cloned next tick.
  *
+ * Where that next run lands is the series' missed-run policy (see
+ * ./missed-runs.ts); the `skip-if-missed` half of that policy runs earlier in
+ * the same sweep tick, before due messages are counted.
+ *
  * Called from `src/host-sweep.ts` inside `MODULE-HOOK:scheduling-recurrence`.
  * When scheduling ships inline (current state through PR #7), the hook is a
  * direct dynamic import. When scheduling moves to the modules branch in
  * PR #8, the install skill re-fills the marker on install.
  */
-import { CronExpressionParser } from 'cron-parser';
-
 import { resolveGroupTimezone } from '../../container-config.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
 import type { InboundMailbox } from '../../mailbox/index.js';
-import { appendRunLog } from './run-log.js';
+import { MAX_CATCH_UP_RUNS, planNextRun } from './missed-runs.js';
+import { appendHostTaskNote } from './run-log.js';
+import { parseTaskContent } from './task-content.js';
 
 // Consecutive pre-task-script failures (the series' trailing FAILED runs —
 // derived from occurrence rows, no stored counter) throttle a broken monitor
@@ -33,19 +37,6 @@ export function scriptBackoffMinutes(fails: number): number {
   return Math.min(2 * 2 ** (fails - 1), SCRIPT_BACKOFF_CAP_MIN);
 }
 
-/** Host-written line in the series run log — no agent session exists to call
- *  append-log when a script-gated series is auto-paused. Uses the shared
- *  appendRunLog helper (one writer format); appendRunLog throws on a bad
- *  series charset or a missing agent group, and the sweep must not crash
- *  over a log line, so failures are logged and swallowed. */
-async function appendHostTaskNote(agentGroupId: string, seriesId: string, note: string): Promise<void> {
-  try {
-    await appendRunLog(agentGroupId, seriesId, note);
-  } catch (err) {
-    log.warn('Could not append host task note to run log', { agentGroupId, seriesId, err });
-  }
-}
-
 export async function handleRecurrence(inDb: InboundMailbox, session: Session): Promise<void> {
   const recurring = inDb.getCompletedRecurring();
   // Resolved per call, not cached at module load: a group timezone change
@@ -55,12 +46,22 @@ export async function handleRecurrence(inDb: InboundMailbox, session: Session): 
 
   for (const msg of recurring) {
     try {
-      // Interpret the cron expression in the user's timezone. v1 did this
-      // (src/v1/task-scheduler.ts:20-49); without it, a task written "0 9 * * *"
-      // by an agent running in a user's local TZ fires at 09:00 UTC instead of
-      // 09:00 user-local.
-      const interval = CronExpressionParser.parse(msg.recurrence, { tz });
-      const cronNext = interval.next().toDate();
+      // planNextRun interprets the cron expression in the user's timezone. v1
+      // did this too (src/v1/task-scheduler.ts:20-49); without it, a task
+      // written "0 9 * * *" by an agent running in a user's local TZ fires at
+      // 09:00 UTC instead of 09:00 user-local. The series' missed-run policy
+      // decides which slot it lands on: ahead of now (the default), or the
+      // next period after the run that just finished, so a `catch-up-all`
+      // series walks its missed periods oldest-first instead of dropping them.
+      const policy = parseTaskContent(msg.content).recurrencePolicy;
+      const plan = planNextRun({
+        recurrence: msg.recurrence,
+        tz,
+        policy,
+        previousRun: msg.processAfter,
+        now: new Date(),
+      });
+      const cronNext = plan.next;
       const newId = `task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
       const scriptFails = inDb.trailingFailedRuns(msg.seriesId);
@@ -102,11 +103,21 @@ export async function handleRecurrence(inDb: InboundMailbox, session: Session): 
       });
       inDb.clearRecurrence(msg.id);
 
+      if (plan.truncated) {
+        await appendHostTaskNote(
+          session.agent_group_id,
+          msg.seriesId,
+          `catch-up-all: too far behind — dropped the missed runs older than the last ${MAX_CATCH_UP_RUNS} periods`,
+        );
+      }
+
       log.info('Inserted next recurrence', {
         originalId: msg.id,
         newId,
         seriesId: msg.seriesId,
         nextRun,
+        policy,
+        ...(plan.truncated && { catchUpTruncated: true }),
         ...(scriptFails > 0 && { scriptFails, backoffMin: scriptBackoffMinutes(scriptFails) }),
         sessionId: session.id,
       });

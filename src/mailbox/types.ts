@@ -61,6 +61,8 @@ export interface TaskUpdate {
   script?: string | null;
   recurrence?: string | null;
   processAfter?: string;
+  recurrencePolicy?: string;
+  graceWindowSeconds?: number;
 }
 
 export type TaskRecord = CanonicalTaskRecord;
@@ -76,6 +78,8 @@ export interface RecurringMessage {
   content: string;
   recurrence: string;
   seriesId: string;
+  /** Scheduled time of this (finished) occurrence — the catch-up-all anchor. */
+  processAfter: string | null;
 }
 
 export interface MailboxHistoryMessage {
@@ -110,6 +114,8 @@ export interface InboundMailbox {
   resumeTask(taskId: string): number;
   deleteTask(taskId: string): number;
   updateTask(taskId: string, update: TaskUpdate): number;
+  /** Move one pending occurrence's next-run time (skip-if-missed roll-forward). */
+  rescheduleTask(rowId: string, processAfter: string): number;
   listLiveTasks(status?: 'pending' | 'paused'): TaskRecord[];
   getTask(taskId: string): TaskRecord | undefined;
   getTaskStats(seriesId: string): TaskStats;

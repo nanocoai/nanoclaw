@@ -175,6 +175,15 @@ async function sweepSession(session: Session): Promise<void> {
     let shouldWake = false;
     const exists = await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
       mailbox.applyProcessingAcks(mailbox.getTerminalProcessingAcks());
+
+      // Must precede countDueMessages: a `skip-if-missed` run that is past its
+      // grace window is rolled to its next slot here, so the wake decision
+      // below never counts the fire we mean to skip.
+      // MODULE-HOOK:scheduling-missed-runs:start
+      const { applyMissedRunPolicy } = await import('./modules/scheduling/missed-runs.js');
+      await applyMissedRunPolicy(mailbox, session);
+      // MODULE-HOOK:scheduling-missed-runs:end
+
       dueCount = mailbox.countDueMessages();
       shouldWake = dueCount > 0 && !isContainerRunning(session.id);
       if (!shouldWake) {
