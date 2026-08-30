@@ -488,8 +488,14 @@ async function evaluateEngage(
       try {
         return new RegExp(pat).test(text);
       } catch {
-        // Bad regex: fail open so admin sees the agent responding + can fix.
-        return true;
+        // Bad regex: fail closed. A broken restriction silently becoming
+        // unrestricted is worse than an agent going quiet. Log so the
+        // operator can find and fix the pattern.
+        log.warn('Invalid engage_pattern — failing closed', {
+          agentGroupId: agent.agent_group_id,
+          pattern: pat,
+        });
+        return false;
       }
     }
     case 'mention':
