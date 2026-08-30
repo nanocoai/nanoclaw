@@ -37,6 +37,8 @@ Three layers comprise the system:
 
 **Ingest:** Drop new sources into the raw collection; the LLM processes them. The agent reads sources, discusses takeaways, writes summaries, updates indexes, refreshes entity and concept pages, logs entries. Single sources might touch 10-15 wiki pages. Prefer ingesting individually while staying involved, though batch ingestion with less oversight is possible.
 
+Before updating any wiki page with a new claim, check whether it contradicts existing content on that page. If a conflict is found, do not silently overwrite the prior claim. Instead, record both claims in a `wiki/contradictions.md` file with the source, date, and a brief description of the conflict, and leave the wiki page itself unchanged until the contradiction is resolved. This keeps the wiki honest as it grows: a flagged conflict is recoverable, a silent overwrite is not.
+
 **Query:** Ask questions against the wiki. The LLM searches relevant pages, synthesizes answers with citations. Answers take various forms—markdown pages, comparison tables, slide decks, charts, canvas. Good answers can be filed back into the wiki as new pages—explorations compound in the knowledge base rather than disappearing into chat history.
 
 **Lint:** Periodically health-check the wiki. Look for contradictions, stale claims superseded by newer sources, orphan pages lacking inbound links, important concepts lacking dedicated pages, missing cross-references, data gaps. The LLM suggests investigations and sources to pursue, keeping the wiki healthy as it grows.
