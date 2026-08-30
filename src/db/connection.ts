@@ -1,10 +1,7 @@
-import Database from 'better-sqlite3';
-
 import { CENTRAL_DB_PATH } from '../config.js';
 import { log } from '../log.js';
 import type { DbConfig, DbDriver, DbInitOptions } from './driver.js';
 import { createDbDriver } from './driver-registry.js';
-import { SqliteDriver } from './drivers/sqlite.js';
 import { runMigrations } from './migrations/index.js';
 
 import './compose.js';
@@ -55,6 +52,8 @@ export async function initTestDb(options: InitTestDbOptions = {}): Promise<DbDri
 /** For tests that intentionally exercise SQLite-specific migrations or pragmas. */
 export async function initSqliteTestDb(): Promise<DbDriver> {
   await closeDb();
+  const { default: Database } = await import('better-sqlite3');
+  const { SqliteDriver } = await import('./drivers/sqlite.js');
   const raw = new Database(':memory:');
   raw.pragma('foreign_keys = ON');
   _db = new SqliteDriver(raw);

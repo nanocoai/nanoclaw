@@ -6,6 +6,7 @@
  */
 import { isContainerRunning, killContainer } from './container-runner.js';
 import { requestWake } from './request-wake.js';
+import { isSplitGateway } from './modules/process-split/role.js';
 import { setStopIntent, shadowWrite } from './db/coordination.js';
 import { getSession, getSessionsByAgentGroup } from './db/sessions.js';
 import { log } from './log.js';
@@ -25,8 +26,11 @@ export async function restartAgentGroupContainers(
   reason: string,
   wakeMessage?: string,
 ): Promise<number> {
+  // The split gateway cannot see containers (the runtime registry lives on
+  // the controller plane): it targets every active session and lets the
+  // controller's stop-intent honor pass skip the ones with nothing running.
   const sessions = (await getSessionsByAgentGroup(agentGroupId)).filter(
-    (s) => s.status === 'active' && isContainerRunning(s.id),
+    (s) => s.status === 'active' && (isSplitGateway() || isContainerRunning(s.id)),
   );
 
   for (const session of sessions) {
@@ -62,19 +66,27 @@ export async function restartAgentGroupContainers(
     if (willRespawn) {
       await shadowWrite('stop-intent', () => setStopIntent(session.id, 'respawn_after_stop', new Date().toISOString()));
     }
-    killContainer(
-      session.id,
-      reason,
-      willRespawn
-        ? () => {
-            void (async () => {
-              const s = await getSession(session.id);
-              if (s) await requestWake(s, 'container-restart');
-              await shadowWrite('stop-intent-clear', () => setStopIntent(session.id, null, new Date().toISOString()));
-            })();
-          }
-        : undefined,
-    );
+    if (isSplitGateway()) {
+      // No container access on this plane. The durable respawn_after_stop
+      // intent written above is the kill+respawn order; the wake signal gets
+      // the controller's consumer to honor it promptly. The intent clears on
+      // the controller once the respawn wake succeeds.
+      if (willRespawn) await requestWake(session, 'container-restart');
+    } else {
+      killContainer(
+        session.id,
+        reason,
+        willRespawn
+          ? () => {
+              void (async () => {
+                const s = await getSession(session.id);
+                if (s) await requestWake(s, 'container-restart');
+                await shadowWrite('stop-intent-clear', () => setStopIntent(session.id, null, new Date().toISOString()));
+              })();
+            }
+          : undefined,
+      );
+    }
   }
 
   if (sessions.length > 0) {

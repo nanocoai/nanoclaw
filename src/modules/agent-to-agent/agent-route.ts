@@ -28,6 +28,7 @@ import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
 import { GuardDenyError, guard } from '../../guard/index.js';
 import { log } from '../../log.js';
+import { emitAgentHandoff } from '../../audit/runtime-emitters.js';
 import { resolveSession, sessionDir, withExistingMailboxSession, writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval, Session } from '../../types.js';
 import { requestApproval } from '../approvals/index.js';
@@ -322,7 +323,7 @@ function buildGateQuestion(sourceName: string, targetName: string, contentStr: s
  * guard decision (the approve continuation re-enters with a grant rather
  * than calling this directly).
  */
-async function performAgentRoute(
+export async function performAgentRoute(
   msg: RoutableAgentMessage,
   session: Session,
   targetAgentGroupId: string,
@@ -346,6 +347,12 @@ async function performAgentRoute(
     threadId: null,
     content: forwardedContent,
     sourceSessionId: session.id,
+  });
+  await emitAgentHandoff({
+    sourceAgentId: session.agent_group_id,
+    sourceSessionId: session.id,
+    targetAgentId: targetAgentGroupId,
+    activityId: msg.id,
   });
   log.info('Agent message routed', {
     from: session.agent_group_id,
