@@ -1528,9 +1528,17 @@ async function runAuthStep(): Promise<void> {
   }
 }
 
+function isHeadlessLinux(): boolean {
+  return process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
+}
+
 async function runSubscriptionAuth(): Promise<void> {
   p.log.step(brandBody('Opening the Claude sign-in flow…'));
-  console.log(k.dim('   (a browser will open for sign-in; this part is interactive)'));
+  if (isHeadlessLinux()) {
+    console.log(k.dim('   (headless host — copy the printed URL into a browser on another machine)'));
+  } else {
+    console.log(k.dim('   (a browser will open for sign-in; this part is interactive)'));
+  }
   console.log();
   const start = Date.now();
   const code = await runInheritScript('bash', ['setup/register-claude-token.sh']);
