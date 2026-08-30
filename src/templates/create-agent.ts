@@ -104,7 +104,14 @@ export async function createAgentFromTemplate(ref: string, opts?: CreateAgentOpt
   assertValidGroupFolder(folder);
   if (fs.existsSync(resolveGroupFolderPath(folder))) folder = `${folder}-${randomUUID().slice(0, 8)}`;
 
-  const group: AgentGroup = { id, name, folder, agent_provider: null, created_at: new Date().toISOString() };
+  const group: AgentGroup = {
+    id,
+    name,
+    folder,
+    agent_provider: null,
+    created_at: new Date().toISOString(),
+    provisioned_user_id: null,
+  };
   await createAgentGroup(group);
   await ensureContainerConfig(id);
   if (timezone) await updateContainerConfigScalars(id, { timezone });

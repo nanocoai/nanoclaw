@@ -20,7 +20,10 @@ const envConfig = readEnvFile([
   'CONTAINER_PIDS_LIMIT',
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
+  'NANOCLAW_TEMPLATES_DIR',
   'ONECLI_GATEWAY_CONTAINER',
+  'HOME_EVENTS_URL',
+  'HOME_EVENTS_SECRET',
 ]);
 
 /**
@@ -70,15 +73,17 @@ const HOME_DIR = process.env.HOME || os.homedir();
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
 export const MOUNT_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'mount-allowlist.json');
 export const SENDER_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'sender-allowlist.json');
-export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
-export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
-export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
+export const STORE_DIR = path.resolve(process.env.NANOCLAW_STORE_DIR || path.join(PROJECT_ROOT, 'store'));
+export const GROUPS_DIR = path.resolve(process.env.NANOCLAW_GROUPS_DIR || path.join(PROJECT_ROOT, 'groups'));
+export const DATA_DIR = path.resolve(process.env.NANOCLAW_DATA_DIR || path.join(PROJECT_ROOT, 'data'));
 export const CENTRAL_DB_PATH = path.join(DATA_DIR, 'v2.db');
 // Local agent-template library. Committed but ships empty (+ README). Resolved
 // once at load. Override to another LOCAL path via NANOCLAW_TEMPLATES_DIR; never
 // a remote URL, never an ncl flag, never runtime-mutable.
-export const TEMPLATES_DIR = process.env.NANOCLAW_TEMPLATES_DIR
-  ? path.resolve(process.env.NANOCLAW_TEMPLATES_DIR)
+const CONFIGURED_TEMPLATES_DIR =
+  process.env.NANOCLAW_TEMPLATES_DIR || envConfig.NANOCLAW_TEMPLATES_DIR;
+export const TEMPLATES_DIR = CONFIGURED_TEMPLATES_DIR
+  ? path.resolve(CONFIGURED_TEMPLATES_DIR)
   : path.resolve(PROJECT_ROOT, 'templates');
 
 // Per-checkout image tag so two installs on the same host don't share
@@ -112,6 +117,14 @@ export const EGRESS_NETWORK =
   process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
 export const ONECLI_GATEWAY_CONTAINER =
   process.env.ONECLI_GATEWAY_CONTAINER || envConfig.ONECLI_GATEWAY_CONTAINER || 'onecli';
+
+// Governance home surface: when set, the host forwards app_home_opened +
+// home-surface block_actions to the governance service (POST, shared
+// secret), which owns the App Home render and publish. Unset ⇒ the forward
+// is a no-op and no App Home is published anywhere — the host has no
+// in-process publisher.
+export const HOME_EVENTS_URL = process.env.HOME_EVENTS_URL || envConfig.HOME_EVENTS_URL || '';
+export const HOME_EVENTS_SECRET = process.env.HOME_EVENTS_SECRET || envConfig.HOME_EVENTS_SECRET || '';
 
 // Timezone for scheduled tasks, message formatting, etc.
 // Validates each candidate is a real IANA identifier before accepting.
