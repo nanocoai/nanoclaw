@@ -24,7 +24,7 @@ import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
-import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, OutboundFile } from './adapter.js';
 import { INSTANCE_KEY_RE } from './channel-registry.js';
 import { resolveQuestionRender } from './question-render-registry.js';
 
@@ -918,10 +918,14 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       const rawText = (content.markdown as string) || (content.text as string);
       const text = rawText ? transformText(rawText) : rawText;
       if (text) {
-        // Attach files if present (FileUpload format: { data, filename })
-        const fileUploads = message.files?.map((f: { data: Buffer; filename: string }) => ({
+        // Attach files if present (FileUpload format: { data, filename, mimeType }).
+        // mimeType must be forwarded: adapters that inline the bytes as a
+        // data URI put it in the content type, and Teams 400s on
+        // application/octet-stream — the adapter's fallback when it's absent.
+        const fileUploads = message.files?.map((f: OutboundFile) => ({
           data: f.data,
           filename: f.filename,
+          mimeType: f.mimeType,
         }));
         // Split if over the adapter's max length. Files ride on the first
         // chunk so the head of the reply still carries them.
@@ -942,9 +946,10 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         return firstId;
       } else if (message.files && message.files.length > 0) {
         // Files only, no text
-        const fileUploads = message.files.map((f: { data: Buffer; filename: string }) => ({
+        const fileUploads = message.files.map((f: OutboundFile) => ({
           data: f.data,
           filename: f.filename,
+          mimeType: f.mimeType,
         }));
         const result = await adapter.postMessage(tid, { markdown: '', files: fileUploads });
         return result?.id;

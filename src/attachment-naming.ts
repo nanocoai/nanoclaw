@@ -51,10 +51,38 @@ const TYPE_TO_EXT: Record<string, string> = {
   animation: 'mp4',
 };
 
+// The reverse direction, for files the agent sends *out*. Derived from
+// MIME_TO_EXT so the two can't drift, plus the spellings that map onto a MIME
+// already listed above but aren't its canonical extension.
+const EXT_TO_MIME: Record<string, string> = {
+  ...Object.fromEntries(Object.entries(MIME_TO_EXT).map(([mime, ext]) => [ext, mime])),
+  jpeg: 'image/jpeg',
+  htm: 'text/html',
+  html: 'text/html',
+  csv: 'text/csv',
+  md: 'text/markdown',
+  svg: 'image/svg+xml',
+};
+
 export function extForMime(mime: unknown): string {
   if (typeof mime !== 'string' || !mime) return '';
   const clean = mime.split(';')[0].trim().toLowerCase();
   return MIME_TO_EXT[clean] ?? '';
+}
+
+/**
+ * MIME type for an outbound filename, or undefined when the extension isn't
+ * one we recognize.
+ *
+ * Undefined rather than 'application/octet-stream': adapters already default
+ * to that, and a caller that can do something smarter with "unknown" should
+ * not have the guess handed to it as though it were a fact.
+ */
+export function mimeForFilename(filename: unknown): string | undefined {
+  if (typeof filename !== 'string') return undefined;
+  const dot = filename.lastIndexOf('.');
+  if (dot < 0) return undefined;
+  return EXT_TO_MIME[filename.slice(dot + 1).toLowerCase()];
 }
 
 export function deriveAttachmentName(att: Record<string, unknown>): string {
