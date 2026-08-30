@@ -29,6 +29,19 @@ registerResource({
         'Human-readable name. Shown in approval cards and logs. Often auto-populated from the channel adapter.',
       updatable: true,
     },
+    {
+      name: 'email',
+      type: 'string',
+      description: 'Corporate email supplied by an external directory/provisioner.',
+      updatable: true,
+    },
+    {
+      name: 'onecli_project_id',
+      type: 'string',
+      description:
+        "Opaque OneCLI project id for per-user credential isolation. Written by an external provisioner and used to scope the user's container gateway calls.",
+      updatable: true,
+    },
     { name: 'created_at', type: 'string', description: 'Auto-set.', generated: true },
   ],
   // Idempotent create on the user id, so re-wiring the same owner is a no-op.

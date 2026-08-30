@@ -253,38 +253,68 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         prompt,
         continuation,
         config.provider.emitsMidTurnText === true,
+        config.provider.isSessionInvalid.bind(config.provider),
       );
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
       }
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      log(`Query error: ${errMsg}`);
+      let finalError: unknown = err;
+      log(`Query error: ${err instanceof Error ? err.message : String(err)}`);
 
-      // Stale/corrupt continuation recovery: ask the provider whether
-      // this error means the stored continuation is unusable, and clear
-      // it so the next attempt starts fresh.
       if (continuation && config.provider.isSessionInvalid(err)) {
-        log(`Stale session detected (${continuation}) — clearing for next retry`);
+        log(`Stale session detected (${continuation}) — retrying fresh`);
         continuation = undefined;
         clearContinuation(config.providerName);
+
+        const retryQuery = config.provider.query({
+          prompt,
+          continuation: undefined,
+          cwd: config.cwd,
+          systemContext: config.systemContext,
+        });
+        const abortRetry = () => retryQuery.abort();
+        if (config.signal?.aborted) abortRetry();
+        else config.signal?.addEventListener('abort', abortRetry, { once: true });
+        try {
+          const retryResult = await processQuery(
+            retryQuery,
+            routing,
+            processingIds,
+            config.providerName,
+            config.provider.onExchangeComplete?.bind(config.provider),
+            prompt,
+            undefined,
+            config.provider.emitsMidTurnText === true,
+          );
+          if (retryResult.continuation) {
+            continuation = retryResult.continuation;
+            setContinuation(config.providerName, continuation);
+          }
+          finalError = undefined;
+        } catch (retryErr) {
+          finalError = retryErr;
+          continuation = undefined;
+          clearContinuation(config.providerName);
+          log(`Fresh-session retry failed: ${retryErr instanceof Error ? retryErr.message : String(retryErr)}`);
+        } finally {
+          config.signal?.removeEventListener('abort', abortRetry);
+        }
       }
 
-      // Write error response so the user knows something went wrong
-      await writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
-      });
-
-      // The batch is still acked completed below (no redelivery). Without
-      // this line the only log trace of the errored turn is "Query error"
-      // followed by a "Completed" line that reads like success.
-      log(`Errored batch will be acked completed — ${processingIds.length} message(s), no redelivery`);
+      if (finalError !== undefined) {
+        const errMsg = finalError instanceof Error ? finalError.message : String(finalError);
+        await writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        });
+        log(`Errored batch will be acked completed — ${processingIds.length} message(s), no redelivery`);
+      }
     } finally {
       clearCurrentInReplyTo();
       config.signal?.removeEventListener('abort', abortActiveQuery);
@@ -353,6 +383,7 @@ export async function processQuery(
    * delivery-inert and the final result stays the single delivery door.
    */
   emitsMidTurnText = false,
+  isSessionInvalid?: (err: unknown) => boolean,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -554,6 +585,9 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        if (event.isError === true && initialContinuation && isSessionInvalid?.(event.text)) {
+          throw new Error(event.text ?? 'Invalid provider session');
+        }
         if (event.text) {
           const { sent, hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
             midTurnSent,

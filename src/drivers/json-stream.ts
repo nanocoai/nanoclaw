@@ -1,8 +1,9 @@
 /**
  * Split a concatenated stream of pretty-printed JSON documents.
  *
- * Watch-style runtime CLIs emit one indented JSON object per event with no
- * separator, so a line-based parser cannot find the boundaries. Brace-depth scanning can, provided it ignores braces inside
+ * `kubectl get --watch --output-watch-events -o json` emits one indented JSON
+ * object per event with no separator, so a line-based parser cannot find the
+ * boundaries. Brace-depth scanning can, provided it ignores braces inside
  * strings — which is the entire subtlety here.
  */
 export class JsonDocumentStream {
