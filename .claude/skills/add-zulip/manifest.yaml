@@ -1,0 +1,20 @@
+skill: zulip
+version: 1.0.0
+description: "Zulip Bot integration via the Zulip REST API (no extra npm dependency)"
+core_version: 0.1.0
+adds:
+  - src/channels/zulip.ts
+  - src/channels/zulip.test.ts
+modifies:
+  - src/index.ts
+  - src/config.ts
+  - src/routing.test.ts
+structured:
+  env_additions:
+    - ZULIP_SITE
+    - ZULIP_BOT_EMAIL
+    - ZULIP_BOT_API_KEY
+    - ZULIP_ONLY
+conflicts: []
+depends: []
+test: "npx vitest run src/channels/zulip.test.ts"
