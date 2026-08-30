@@ -28,6 +28,8 @@ export interface VolumeMount {
   mountClass?: import('../drivers/types.js').MountClass;
   /** Agent group this mount is pinned to, for `group-state`. */
   scope?: string;
+  source?: import('../drivers/types.js').RuntimeVolumeSource;
+  subPath?: string;
 }
 
 export interface ProviderContainerContext {
@@ -52,9 +54,48 @@ export interface ProviderContainerContext {
   hostEnv: NodeJS.ProcessEnv;
 }
 
+export interface ProviderProjectDocument {
+  fileName: string;
+  baseDocPath: string;
+  containerPath: string;
+  extraSections?: { name: string; body: string }[];
+  maxBytes?: number;
+}
+
+export const DEFAULT_PROJECT_DOCUMENT: ProviderProjectDocument = {
+  fileName: 'CLAUDE.md',
+  baseDocPath: 'container/CLAUDE.md',
+  containerPath: '/workspace/agent/CLAUDE.md',
+  maxBytes: 4 * 1024 * 1024,
+};
+
+export interface ProviderStateVolume {
+  name: string;
+  containerPath: string;
+  scope: 'group' | 'session';
+  sizeLimit?: string;
+}
+
+export interface ProviderSkillView {
+  containerPath: string;
+  mode: 'ro' | 'rw';
+}
+
+export interface ProviderSeedFile {
+  containerPath: string;
+  content: string;
+  owner: 'materializer' | 'gateway';
+  mode?: number;
+}
+
 export interface ProviderContainerContribution {
   /** Extra volume mounts (merged with the default session/group/agent-runner mounts). */
   mounts?: VolumeMount[];
+  /** The provider's one composed project document and its container destination. */
+  projectDocument?: ProviderProjectDocument;
+  stateVolumes?: ProviderStateVolume[];
+  skillViews?: ProviderSkillView[];
+  seedFiles?: ProviderSeedFile[];
   /** Extra env vars to pass to the container (`-e KEY=VALUE`). */
   env?: Record<string, string>;
 }
@@ -75,6 +116,7 @@ export interface ProviderHostCapabilities {
    * this get the default surfaces, which is today's behavior.
    */
   readonly providesAgentSurfaces?: boolean;
+  readonly requiresHostFilesystem?: boolean;
 }
 
 export type ProviderContainerConfigFn = (
@@ -111,6 +153,11 @@ export function getProviderContainerConfig(name: string): ProviderContainerConfi
 export function providerProvidesAgentSurfaces(name: string | null | undefined): boolean {
   if (!name) return false;
   return registry.get(name)?.capabilities.providesAgentSurfaces === true;
+}
+
+export function providerRequiresHostFilesystem(name: string): boolean {
+  const entry = registry.get(name);
+  return !entry || entry.capabilities.requiresHostFilesystem !== false;
 }
 
 export function listProviderContainerConfigNames(): string[] {

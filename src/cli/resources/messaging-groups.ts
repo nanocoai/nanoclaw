@@ -90,6 +90,35 @@ registerResource({
     values.unknown_sender_policy = resolveUnknownSenderPolicy(channelKey, isGroup, channelType);
   },
   customOperations: {
+    'send-welcome': {
+      // Host/UI callers (an admin UI over ncl.sock) bypass approval
+      // (dispatch.ts); the level gates an agent caller from self-triggering.
+      access: 'approval',
+      description:
+        'Send the welcome (a /welcome system instruction) into a provisioned DM, attributed to the DM member. ' +
+        'Admin-triggered after provisioning. --id is the DM messaging group id.',
+      args: [
+        {
+          name: 'id',
+          type: 'string',
+          description: 'DM messaging group id (as returned by `user-dms ensure`).',
+          required: true,
+        },
+        {
+          name: 'text',
+          type: 'string',
+          description: 'Optional override for the default /welcome system instruction.',
+        },
+      ],
+      handler: async (args) => {
+        const { sendWelcome } = await import('../../send-welcome.js');
+        const res = await sendWelcome({
+          messagingGroupId: String(args.id),
+          text: args.text as string | undefined,
+        });
+        return { sent: true, message_id: res.messageId };
+      },
+    },
     send: {
       access: 'approval',
       description:

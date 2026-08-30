@@ -3,12 +3,14 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "rootDir": "./src",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "types": ["bun"]
   },
-  "include": ["src/**/*"],
+  // No rootDir: the dev-child-sync executable lives in the code-mode skill
+  // tree (bun runs it type-stripped from an RO mount), and this noEmit-only
+  // config is the one wired suite that typechecks it.
+  "include": ["src/**/*", "../code-mode/skills/dev-child-sync/child-sync.ts"],
   "exclude": ["node_modules", "dist", "src/**/*.test.ts"]
 }

@@ -23,3 +23,9 @@ export async function getUserDmsForUser(userId: string): Promise<UserDm[]> {
 export async function deleteUserDm(userId: string, channelType: string): Promise<void> {
   await getDb().run('DELETE FROM user_dms WHERE user_id = ? AND channel_type = ?', userId, channelType);
 }
+/** Reverse lookup: the user a DM messaging group belongs to. A DM group maps to
+*  one user; `LIMIT 1` is defensive. Lets delivery-side callers attribute a
+*  message in a DM group to the DM's member so it passes the access gate. */
+export async function getUserDmByMessagingGroup(messagingGroupId: string): Promise<UserDm | undefined> {
+return getDb().get<UserDm>('SELECT * FROM user_dms WHERE messaging_group_id = ? LIMIT 1', messagingGroupId);
+}
