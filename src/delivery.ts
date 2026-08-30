@@ -174,6 +174,7 @@ async function pollActive(): Promise<void> {
   try {
     const sessions = await getRunningSessions();
     for (const session of sessions) {
+      if (!activePolling) break;
       await deliverSessionMessages(session);
     }
   } catch (err) {
@@ -189,6 +190,7 @@ async function pollSweep(): Promise<void> {
   try {
     const sessions = await getActiveSessions();
     for (const session of sessions) {
+      if (!sweepPolling) break;
       await deliverSessionMessages(session);
     }
   } catch (err) {
@@ -663,7 +665,10 @@ async function handleSystemAction(content: Record<string, unknown>, session: Ses
   log.warn('Unknown system action', { action });
 }
 
-export function stopDeliveryPolls(): void {
+export async function stopDeliveryPolls(): Promise<void> {
   activePolling = false;
   sweepPolling = false;
+  while (inflightDeliveries.size > 0) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
 }

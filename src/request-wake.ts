@@ -9,7 +9,7 @@
  * MUST stay that way until the durable rows become authoritative: no
  * logging, no signal writes, no behavior.
  */
-import { wakeContainer } from './container-runner.js';
+import { requestWakeForPlane } from './modules/process-split/cross-plane.js';
 import type { Session } from './types.js';
 
 /**
@@ -27,6 +27,8 @@ export type WakeReason =
   | 'approval-response'
   | 'adoption';
 
-export async function requestWake(session: Session, _reason: WakeReason): Promise<boolean> {
-  return wakeContainer(session);
+export async function requestWake(session: Session, reason: WakeReason): Promise<boolean> {
+  // Process-split overlay: the split gateway records durable wake intent;
+  // the controller and the un-split host keep the trunk delegation verbatim.
+  return requestWakeForPlane(session, reason);
 }
