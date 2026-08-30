@@ -221,9 +221,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
+    // Scheduled-task batches must not resume a prior SDK session. The SDK
+    // surfaces the previous turn's terminal message into the new turn's stream
+    // when a session is resumed, so task B would capture task A's result text
+    // as its own output. Starting a fresh session for every task batch prevents
+    // this cross-attribution without affecting interactive chat continuity.
+    const isTaskBatch = keep.some((m) => m.kind === 'task');
     const query = config.provider.query({
       prompt,
-      continuation,
+      continuation: isTaskBatch ? undefined : continuation,
       cwd: config.cwd,
       systemContext: config.systemContext,
     });
