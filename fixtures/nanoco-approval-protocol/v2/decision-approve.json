@@ -1,0 +1,19 @@
+{
+  "version": "nanoco.approval.v2",
+  "gatewayEpoch": "gw_0123456789abcdef0123456789abcdef",
+  "approvalId": "ask_0123456789abcdef0123456789abcdef",
+  "requestDigest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "lineage": {
+    "requestId": 77,
+    "deploymentId": "deployment-1",
+    "agentId": "agent-1",
+    "sessionId": "session-1",
+    "containerInstanceId": "container-1",
+    "channelId": "channel-1"
+  },
+  "approver": {
+    "issuer": "https://idp.example.com",
+    "subject": "stable-idp-subject"
+  },
+  "decision": "approve"
+}

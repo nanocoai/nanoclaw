@@ -39,6 +39,21 @@ export async function finalizeReject(
     ? `Your ${approval.action} request was rejected by admin: "${reason}"`
     : `Your ${approval.action} request was rejected by admin.`;
 
+  // For a2a message gates, embed the target agent group in the note so
+  // read-side consumers (`ncl a2a-events`) can attribute the rejection to the
+  // exact edge instead of guessing from the policy topology. The action key is
+  // A2A_MESSAGE_GATE_ACTION (agent-route.ts) — kept as a literal here because
+  // importing agent-route would cycle approvals ↔ agent-to-agent.
+  let a2aTarget: string | undefined;
+  if (approval.action === 'a2a_message_gate') {
+    try {
+      const pid = (JSON.parse(approval.payload ?? '{}') as { platform_id?: unknown }).platform_id;
+      if (typeof pid === 'string' && pid.length > 0) a2aTarget = pid;
+    } catch {
+      /* malformed payload — note stays unattributed */
+    }
+  }
+
   await writeSessionMessage(session.agent_group_id, session.id, {
     id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: 'chat',
@@ -46,7 +61,12 @@ export async function finalizeReject(
     platformId: session.agent_group_id,
     channelType: 'agent',
     threadId: null,
-    content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
+    content: JSON.stringify({
+      text,
+      sender: 'system',
+      senderId: 'system',
+      ...(a2aTarget ? { a2a_target: a2aTarget } : {}),
+    }),
   });
 
   log.info('Approval rejected', {

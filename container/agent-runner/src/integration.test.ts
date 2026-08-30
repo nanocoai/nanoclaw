@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, afterAll } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
@@ -8,8 +8,13 @@ import { getSessionRouting } from './db/session-routing.js';
 import { MockProvider } from './providers/mock.js';
 import type { ProviderExchange } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
+import { registerAgentMailbox, resetAgentMailboxForTesting } from './mailbox/index.js';
+import { SqliteAgentMailbox } from './mailbox/sqlite/index.js';
+
+const composedMailboxFactory = resetAgentMailboxForTesting();
 
 beforeEach(() => {
+  registerAgentMailbox(() => new SqliteAgentMailbox());
   initTestSessionDb();
   // Seed a destination so output parsing can resolve "discord-test" → routing
   getInboundDb()
@@ -22,6 +27,11 @@ beforeEach(() => {
 
 afterEach(() => {
   closeSessionDb();
+  resetAgentMailboxForTesting();
+});
+
+afterAll(() => {
+  if (composedMailboxFactory) registerAgentMailbox(composedMailboxFactory);
 });
 
 function insertMessage(id: string, content: object, opts?: { platformId?: string; channelType?: string; threadId?: string }) {
@@ -439,11 +449,8 @@ describe('poll loop — provider error recovery', () => {
 });
 
 describe('poll loop — stale session recovery', () => {
-  it('clears continuation when provider reports session invalid', async () => {
-    // Pre-seed a continuation so the local variable in runPollLoop is set.
-    // Without this, the `if (continuation && isSessionInvalid)` check skips.
+  it('retries the same message immediately without the stale continuation', async () => {
     setContinuation('mock', 'pre-existing-session');
-
     insertMessage('m1', { sender: 'Alice', text: 'stale session' }, { platformId: 'chan-1', channelType: 'discord' });
 
     const provider = new InvalidSessionProvider();
@@ -453,13 +460,11 @@ describe('poll loop — stale session recovery', () => {
     await waitFor(() => getUndeliveredMessages().length > 0, 2000);
     controller.abort();
 
-    // Error was written to outbound
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toContain('Error:');
-
-    // Continuation was cleared (isSessionInvalid returned true)
-    expect(getContinuation('mock')).toBeUndefined();
+    expect(JSON.parse(out[0].content).text).toBe('recovered');
+    expect(provider.continuations).toEqual(['pre-existing-session', undefined]);
+    expect(getContinuation('mock')).toBe('fresh-session');
 
     await loopPromise.catch(() => {});
   });
@@ -529,25 +534,30 @@ class ThrowingProvider {
   }
 }
 
-/**
- * Provider that throws with an error that triggers isSessionInvalid.
- * First emits an init event (setting continuation), then throws.
- */
+/** Provider whose resumed turn returns an error result but succeeds fresh. */
 class InvalidSessionProvider {
   readonly supportsNativeSlashCommands = false;
+  readonly continuations: Array<string | undefined> = [];
 
   isSessionInvalid(): boolean {
     return true;
   }
 
-  query(_input: { prompt: string; cwd: string }) {
+  query(input: { prompt: string; cwd: string; continuation?: string }) {
+    this.continuations.push(input.continuation);
+    const stale = input.continuation !== undefined;
     return {
       push() {},
       end() {},
       abort() {},
       events: (async function* () {
-        yield { type: 'init' as const, continuation: 'doomed-session' };
-        throw new Error('session not found');
+        if (stale) {
+          yield { type: 'init' as const, continuation: 'doomed-session' };
+          yield { type: 'result' as const, text: 'No conversation found with session ID: doomed-session', isError: true };
+          return;
+        }
+        yield { type: 'init' as const, continuation: 'fresh-session' };
+        yield { type: 'result' as const, text: '<message to="discord-test">recovered</message>' };
       })(),
     };
   }

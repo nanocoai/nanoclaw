@@ -155,6 +155,7 @@ async function performCreateAgent(
     folder,
     agent_provider: null,
     created_at: now,
+    provisioned_user_id: null,
   };
   await createAgentGroup(newGroup);
   // Subagent path: a child inherits its creator's EFFECTIVE provider, NOT the
