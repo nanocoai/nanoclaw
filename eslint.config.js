@@ -40,4 +40,12 @@ export default [
       '@typescript-eslint/await-thenable': 'error',
     },
   },
+  // A channel adapter may ship a browser asset beside its TypeScript (served to
+  // the page, never imported by the host). tsconfig does not include it, so the
+  // typed rules have no program for it.
+  {
+    files: ['src/channels/*-page.js'],
+    ...tseslint.configs.disableTypeChecked,
+    languageOptions: { parserOptions: { projectService: false } },
+  },
 ]
