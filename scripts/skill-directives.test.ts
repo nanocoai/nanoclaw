@@ -70,6 +70,9 @@ describe('skill-directives parser, on the converted add-slack', () => {
       'src/channels/slack-lib.test.ts',
       'src/channels/slack-a2a-guard.ts',
       'src/channels/slack-a2a-guard.test.ts',
+      // slack.ts imports slack-raw-text directly, so it travels with the adapter.
+      'src/channels/slack-raw-text.ts',
+      'src/channels/slack-raw-text.test.ts',
       'src/channels/slack-registration.test.ts',
       'src/channels/slack-instances-registration.test.ts',
       'src/provisioning/slack-app.ts',
