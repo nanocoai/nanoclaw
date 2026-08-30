@@ -406,6 +406,18 @@ export interface MountPolicy {
   dataRoot: string;
   surfaceRoots: string[];
   materialsRoot: string;
+  /**
+   * Independent re-check for mounts classed `allowlisted-extra` (see
+   * `mountAllowed` below). Optional so any `MountPolicy` built without it —
+   * notably test fixtures — keeps today's behavior exactly. The production
+   * policy wires this to `isHostPathAllowlisted` from `mount-security/index.ts`
+   * (see `mountPolicy()` in `src/drivers/index.ts`), which re-applies the same
+   * allowlist/blocklist `validateMount` already enforces on the composition
+   * path — closing the gap where a `SessionSpec` reaching this validator by
+   * any other route (bypassing `buildMounts`) would otherwise have its
+   * `allowlisted-extra` mounts trusted unconditionally.
+   */
+  validateAllowlistedExtra?: (hostPath: string) => { allowed: boolean; reason: string };
 }
 
 export function validateSpec(spec: SessionSpec, policy: MountPolicy, capabilities?: DriverCapabilities): void {
@@ -604,8 +616,14 @@ export function stampedPluginsRoot(spec: SessionSpec, policy: MountPolicy): stri
 function mountAllowed(mount: MountSpec, spec: SessionSpec, policy: MountPolicy): boolean {
   switch (mount.class) {
     case 'allowlisted-extra':
-      // Vetted upstream by the mount-allowlist feature.
-      return true;
+      // Vetted upstream by the mount-allowlist feature on the normal
+      // composition path (buildMounts -> validateAdditionalMounts). This
+      // validator is the shared layer every SessionSpec passes through
+      // regardless of how it was composed, so when the policy supplies an
+      // independent check, apply it here too rather than trusting the class
+      // label alone.
+      if (!policy.validateAllowlistedExtra) return true;
+      return policy.validateAllowlistedExtra(mount.hostPath).allowed;
     case 'install-surface': {
       if (policy.surfaceRoots.some((root) => underRoot(mount.hostPath, root))) return true;
       const pluginsRoot = stampedPluginsRoot(spec, policy);

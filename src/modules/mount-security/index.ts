@@ -389,6 +389,66 @@ export function validateMount(mount: AdditionalMount): MountValidationResult {
 }
 
 /**
+ * Check a single host path against the mount allowlist/blocklist, independent
+ * of any container-path shaping.
+ *
+ * {@link validateMount} answers "can this whole AdditionalMount (host path +
+ * container path) be mounted", which includes checks — container path shape,
+ * `/workspace/extra/` prefixing — that only make sense for a mount still being
+ * composed from user/group config. Some mounts reach the driver layer already
+ * fully composed, with an absolute container path decided elsewhere (see
+ * `MountPolicy.validateAllowlistedExtra` in `src/drivers/types.ts`). For that
+ * case we need only the host-path safety check this function isolates: is the
+ * real, resolved host path outside the blocklist and inside an allowed root.
+ * It intentionally reuses the exact same helpers and the exact same allowlist
+ * as `validateMount`, so the two can never silently drift apart into two
+ * different definitions of "allowed."
+ */
+export function isHostPathAllowlisted(hostPath: string): { allowed: boolean; reason: string } {
+  const allowlist = loadMountAllowlist();
+
+  if (allowlist === null) {
+    return {
+      allowed: false,
+      reason: `No mount allowlist configured at ${MOUNT_ALLOWLIST_PATH}`,
+    };
+  }
+
+  const expandedPath = expandPath(hostPath);
+  const realPath = getRealPath(expandedPath);
+
+  if (realPath === null) {
+    return {
+      allowed: false,
+      reason: `Host path does not exist: "${hostPath}" (expanded: "${expandedPath}")`,
+    };
+  }
+
+  const blockedMatch = matchesBlockedPattern(realPath, allowlist.blockedPatterns);
+  if (blockedMatch !== null) {
+    return {
+      allowed: false,
+      reason: `Path matches blocked pattern "${blockedMatch}": "${realPath}"`,
+    };
+  }
+
+  const allowedRoot = findAllowedRoot(realPath, allowlist.allowedRoots);
+  if (allowedRoot === null) {
+    return {
+      allowed: false,
+      reason: `Path "${realPath}" is not under any allowed root. Allowed roots: ${allowlist.allowedRoots
+        .map((r) => expandPath(r.path))
+        .join(', ')}`,
+    };
+  }
+
+  return {
+    allowed: true,
+    reason: `Allowed under root "${allowedRoot.path}"${allowedRoot.description ? ` (${allowedRoot.description})` : ''}`,
+  };
+}
+
+/**
  * Validate all additional mounts for a group.
  * Returns array of validated mounts (only those that passed validation).
  * Logs warnings for rejected mounts.

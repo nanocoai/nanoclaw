@@ -43,6 +43,7 @@ import { DATA_DIR, GROUPS_DIR } from '../config.js';
 import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from '../egress-lockdown.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
+import { isHostPathAllowlisted } from '../modules/mount-security/index.js';
 
 import { DockerSessionDriver, agentContainerName } from './docker-driver.js';
 import {
@@ -123,6 +124,13 @@ export function mountPolicy(env: NodeJS.ProcessEnv = process.env): MountPolicy {
     // identity-material mount is denied by a policy naming a path that looks
     // correct.
     materialsRoot: readSetting('NANOCLAW_SESSION_MATERIAL_ROOT', env) || path.join(DATA_DIR, 'session-materials'),
+    // Independent re-check for `allowlisted-extra` mounts (see `mountAllowed`
+    // in `drivers/types.ts`): re-applies the exact allowlist/blocklist
+    // `validateAdditionalMounts` already enforces on the normal
+    // buildMounts() composition path, so validateSpec — the layer every
+    // SessionSpec passes through before real Docker realization, regardless
+    // of how it was composed — doesn't trust the class label alone.
+    validateAllowlistedExtra: isHostPathAllowlisted,
   };
 }
 
