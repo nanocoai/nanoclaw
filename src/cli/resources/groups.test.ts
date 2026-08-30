@@ -40,6 +40,12 @@ import { ensureContainerConfig, getContainerConfig } from '../../db/container-co
 import { restartAgentGroupContainers } from '../../container-restart.js';
 // Side-effect import: registers the `groups-*` commands (including delete).
 import './groups.js';
+// Side-effect import: the code-mode migration adds the code_mode column the
+// config get/update presentation tests read.
+import '../../code-mode/index.js';
+// The D13 flip-off release: config update calls releaseBoundTo through this
+// seam when code mode turns off.
+import { resetDevEnvService, type DevEnvService } from '../../dev-env/index.js';
 
 function now(): string {
   return new Date().toISOString();
@@ -264,6 +270,121 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
     expect(resp.ok).toBe(false);
     expect((resp as { ok: false; error: { code: string; message: string } }).error.code).toBe('handler-error');
     expect((resp as { ok: false; error: { code: string; message: string } }).error.message).toMatch(/not found/i);
+  });
+});
+
+describe('groups config get/update present code_mode', () => {
+  beforeEach(async () => {
+    await runMigrations(await initTestDb());
+  });
+  afterEach(async () => {
+    await closeDb();
+  });
+
+  it('shows code_mode as a boolean, false for a fresh config', async () => {
+    const GID = 'ag-codemode';
+    await createAgentGroup({ id: GID, name: 'cm', folder: 'cm', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+
+    const before = await dispatch({ id: 'r1', command: 'groups-config-get', args: { id: GID } }, { caller: 'host' });
+    expect(before.ok).toBe(true);
+    expect((before as { ok: true; data: { code_mode: boolean } }).data.code_mode).toBe(false);
+
+    const update = await dispatch(
+      { id: 'r2', command: 'groups-config-update', args: { id: GID, 'code-mode': 'true' } },
+      { caller: 'host' },
+    );
+    expect(update.ok).toBe(true);
+    // The update's own response must show the value it just wrote.
+    expect((update as { ok: true; data: { code_mode: boolean } }).data.code_mode).toBe(true);
+
+    const after = await dispatch({ id: 'r3', command: 'groups-config-get', args: { id: GID } }, { caller: 'host' });
+    expect((after as { ok: true; data: { code_mode: boolean } }).data.code_mode).toBe(true);
+  });
+
+  it("flipping code mode off releases the group's bound dev envs — and only the off-flip does", async () => {
+    const GID = 'ag-codemode-bound';
+    await createAgentGroup({ id: GID, name: 'cmb', folder: 'cmb', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+
+    const released: string[] = [];
+    resetDevEnvService({
+      releaseBoundTo: async (ref: string) => {
+        released.push(ref);
+      },
+    } as unknown as DevEnvService);
+    try {
+      // Flipping ON is a rise, not a fall — nothing releases.
+      const on = await dispatch(
+        { id: 'b1', command: 'groups-config-update', args: { id: GID, 'code-mode': 'true' } },
+        { caller: 'host' },
+      );
+      expect(on.ok).toBe(true);
+      expect(released).toEqual([]);
+
+      // An unrelated update while code mode stays on — nothing releases.
+      await dispatch(
+        { id: 'b2', command: 'groups-config-update', args: { id: GID, model: 'opus' } },
+        { caller: 'host' },
+      );
+      expect(released).toEqual([]);
+
+      // OFF: the group's bound envs fall with it (D13), keyed by group id —
+      // the ownerRef agents claim under.
+      const off = await dispatch(
+        { id: 'b3', command: 'groups-config-update', args: { id: GID, 'code-mode': 'false' } },
+        { caller: 'host' },
+      );
+      expect(off.ok).toBe(true);
+      expect(released).toEqual([GID]);
+    } finally {
+      resetDevEnvService(null);
+    }
+  });
+
+  it('flipping code mode off on a host with no dev-env driver is not an error', async () => {
+    const GID = 'ag-codemode-nodev';
+    await createAgentGroup({ id: GID, name: 'cmn', folder: 'cmn', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+    await dispatch(
+      { id: 'n1', command: 'groups-config-update', args: { id: GID, 'code-mode': 'true' } },
+      { caller: 'host' },
+    );
+    const off = await dispatch(
+      { id: 'n2', command: 'groups-config-update', args: { id: GID, 'code-mode': 'false' } },
+      { caller: 'host' },
+    );
+    expect(off.ok).toBe(true);
+  });
+
+  it('permission_mode is a closed pair: auto/bypass round-trip, "" clears, garbage refused', async () => {
+    const GID = 'ag-permmode';
+    await createAgentGroup({ id: GID, name: 'pm', folder: 'pm', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+
+    const before = await dispatch({ id: 'p1', command: 'groups-config-get', args: { id: GID } }, { caller: 'host' });
+    expect((before as { ok: true; data: { permission_mode: string | null } }).data.permission_mode).toBeNull();
+
+    const set = await dispatch(
+      { id: 'p2', command: 'groups-config-update', args: { id: GID, 'permission-mode': 'bypass' } },
+      { caller: 'host' },
+    );
+    expect(set.ok).toBe(true);
+    expect((set as { ok: true; data: { permission_mode: string | null } }).data.permission_mode).toBe('bypass');
+
+    // "" clears back to the deployment default (the timezone precedent).
+    const cleared = await dispatch(
+      { id: 'p3', command: 'groups-config-update', args: { id: GID, 'permission-mode': '' } },
+      { caller: 'host' },
+    );
+    expect((cleared as { ok: true; data: { permission_mode: string | null } }).data.permission_mode).toBeNull();
+
+    const bad = await dispatch(
+      { id: 'p4', command: 'groups-config-update', args: { id: GID, 'permission-mode': 'yolo' } },
+      { caller: 'host' },
+    );
+    expect(bad.ok).toBe(false);
+    expect((await getContainerConfig(GID))!.permission_mode).toBeNull();
   });
 });
 

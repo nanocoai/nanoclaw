@@ -111,3 +111,8 @@ export function findCliResponse(requestId: string): MessageInRow | undefined {
   const message = getAgentMailbox().operations.findCliResponse(requestId);
   return message && messageRow(message);
 }
+
+/** Store-neutral: whichever mailbox is composed owns the ack rows. */
+export function releaseProcessingClaims(ids: string[]): void {
+  getAgentMailbox().operations.releaseProcessingClaims(ids);
+}

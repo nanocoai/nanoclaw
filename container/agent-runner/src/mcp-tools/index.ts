@@ -20,6 +20,7 @@ function log(msg: string): void {
 
 async function main(): Promise<void> {
   const mailbox = getAgentMailbox();
+  mailbox.setBackgroundSyncMode?.('during-action');
   await mailbox.start(await readMailboxContext());
   try {
     await startMcpServer((action) => mailbox.run(action));

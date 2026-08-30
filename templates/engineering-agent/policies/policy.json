@@ -1,0 +1,26 @@
+{
+  "tools": {
+    "mcp_servers": [],
+    "cli_scope": "group"
+  },
+  "approvals": {
+    "capabilities": [
+      {
+        "action": "install_packages"
+      },
+      {
+        "action": "add_mcp_server"
+      }
+    ]
+  },
+  "network": {
+    "egress": [
+      {
+        "domain": "*.googleapis.com"
+      },
+      {
+        "domain": "api.github.com"
+      }
+    ]
+  }
+}

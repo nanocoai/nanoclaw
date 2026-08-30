@@ -32,16 +32,28 @@ import type { ContainerSpec, DriverCapabilities, MountSpec, SessionKey } from '.
  *   'agent'. Gated on the driver's `capabilities().auxiliaryContainers` before
  *   a spec is ever built.
  */
+export interface GatewaySessionLifecycle {
+  onUnavailable(callback: (error?: Error) => void): void;
+  close(reason: string): Promise<void>;
+  detach(): Promise<void>;
+}
+
 export interface GatewayContribution {
   env?: Record<string, string>;
   mounts?: MountSpec[];
   containers?: ContainerSpec[];
+  labels?: Record<string, string>;
+  lifecycle?: GatewaySessionLifecycle;
 }
 
 export interface GatewayProviderInput {
   key: SessionKey;
   /** The agent group's display name — gateway-side agent registration wants it. */
   groupName: string;
+  /** Stable runtime name selected by composition before the gateway contributes. */
+  containerName: string;
+  /** Host-minted request capability for deployment-authenticated lineage. */
+  requestCapability?: string;
   /**
    * The selected driver's capabilities. `sharedNetworkNamespace` decides the
    * proxy URL shape a contribution puts in the agent's env; a provider that
@@ -107,6 +119,10 @@ export interface GatewayProvider {
    * credentials, and it must not launch.
    */
   contribute(input: GatewayProviderInput): Promise<GatewayContribution>;
+  /** Reattach host-side lifecycle to a session that survived a host restart. */
+  adopt?(input: GatewayProviderInput): Promise<GatewaySessionLifecycle | null>;
+  /** Reap provider-owned residue after surviving sessions have been adopted. */
+  reapOrphans?(): void;
   /**
    * Manual-approvals capability. Absent when the gateway has no held-request
    * approval flow; the approvals module consumes this seam and never imports

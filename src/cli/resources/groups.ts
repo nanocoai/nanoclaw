@@ -10,8 +10,9 @@ import {
 import { buildAgentGroupImage, killContainer } from '../../container-runner.js';
 import { requestWake } from '../../request-wake.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
-import { createAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
-import { getDb, hasTable } from '../../db/connection.js';
+import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
+import { getDevEnvService } from '../../dev-env/index.js';
+import { getDb } from '../../db/connection.js';
 import { getSession } from '../../db/sessions.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import {
@@ -23,6 +24,8 @@ import { getSessionDriver } from '../../drivers/index.js';
 import { assertValidGroupFolder, groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
+import { createAgentFromSource, createAgentFromSpec } from '../../templates/create-from-spec.js';
+import { parseAgentCreateSpecJson } from '../../templates/create-spec.js';
 import {
   formatRestampResult,
   groupsCarryingPlugin,
@@ -31,7 +34,9 @@ import {
 } from '../../templates/restamp.js';
 import { isValidTimezone } from '../../timezone.js';
 import type { AgentGroup, ContainerConfigRow } from '../../types.js';
+import { resolveAttachForGroup } from '../attach-resolve.js';
 import { registerResource } from '../crud.js';
+import { cascadeDeleteGroup, purgeOperation } from './groups-purge.js';
 import { localizeIsoTimestamps } from '../format.js';
 
 /**
@@ -68,7 +73,10 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     packages_npm: JSON.parse(row.packages_npm),
     additional_mounts: JSON.parse(row.additional_mounts),
     cli_scope: row.cli_scope,
+    code_mode: row.code_mode === 1,
+    permission_mode: row.permission_mode ?? null,
     timezone: row.timezone,
+    runtime_tier: row.runtime_tier ?? null,
     updated_at: row.updated_at,
   };
 }
@@ -98,6 +106,14 @@ registerResource({
       required: true,
     },
     { name: 'created_at', type: 'string', description: 'Auto-set.', generated: true },
+    {
+      name: 'provisioned_user_id',
+      type: 'string',
+      description:
+        'Namespaced user id the group was provisioned for (set by `groups create --spec`, NULL otherwise). ' +
+        'OneCLI credential approvals route to this user first.',
+      generated: true,
+    },
   ],
   // `create` and `delete` are custom (below): create needs a `--template`
   // branch, and the generic create inserts a bare agent_groups row but never
@@ -109,6 +125,8 @@ registerResource({
       access: 'approval',
       description:
         'Create (or return the existing) agent group with its container config. Idempotent on --folder (bare creates only; --folder cannot be combined with --template). ' +
+        'External provisioners may use --spec-stdin (preferred) or --spec <json> for a digest-checked AgentCreateSpec v2. ' +
+        'A non-default plugin library may be selected with --template <ref> --source <uri>. ' +
         'With --template <ref>, stamp from a local agent plugin under templates/ (skills + MCP servers ' +
         '+ optional persona, context, and paused recurring tasks). When a group already carries the plugin, ' +
         'this instead shows the in-place update plan for it — every plugin-owned surface that would change, ' +
@@ -120,6 +138,9 @@ registerResource({
         'Optional --timezone <IANA id> sets the group timezone (template task schedules fire in it); like --name, it applies only when a group is created — both are ignored on the in-place update of an existing group.',
       handler: async (args) => {
         const timezone = parseTimezoneFlag(args.timezone) ?? undefined;
+        if (typeof args.spec === 'string' && args.spec.trim()) {
+          return createAgentFromSpec(parseAgentCreateSpecJson(args.spec));
+        }
         if (args.template) {
           // Two identity models: a bare group IS its folder; a templated group
           // IS its plugin. --folder belongs to the first and would be silently
@@ -128,6 +149,14 @@ registerResource({
             throw new Error(
               "--folder applies only to bare creates; a templated group's folder is derived from its name at first stamp and never changes on update",
             );
+          }
+          if (args.source) {
+            const { group, report } = await createAgentFromSource(String(args.template), {
+              source: String(args.source),
+              name: args.name ? String(args.name) : undefined,
+              timezone,
+            });
+            return report.length > 0 ? { ...group, templateReport: report } : group;
           }
           const ref = String(args.template);
           // Same plugin already stamped → in-place update (dry run without
@@ -180,7 +209,14 @@ registerResource({
           );
         }
         const id = `ag-${randomUUID()}`;
-        const group: AgentGroup = { id, name, folder, agent_provider: null, created_at: new Date().toISOString() };
+        const group: AgentGroup = {
+          id,
+          name,
+          folder,
+          agent_provider: null,
+          created_at: new Date().toISOString(),
+          provisioned_user_id: null,
+        };
         await createAgentGroup(group);
         // Provision the workspace folder and the `container_configs` row that
         // `getContainerConfig` and the spawn path require. Without this, a
@@ -220,78 +256,36 @@ registerResource({
         const exists = await db.get('SELECT 1 FROM agent_groups WHERE id = ? LIMIT 1', id);
         if (!exists) throw new Error(`group not found: ${id}`);
 
-        const hasAgentDestinations = await hasTable(db, 'agent_destinations');
-        const hasPendingApprovals = await hasTable(db, 'pending_approvals');
 
         // FK-ordered cascade. The async driver transaction rolls
         // back the whole thing if any statement throws (e.g. an FK constraint
         // we missed), so the central DB stays consistent. The `removed` counts
         // are sourced from each DELETE's `changes` so they describe exactly
         // what the transaction did, not a separate pre-flight snapshot.
-        const removed = await db.transaction(async () => {
-          const counts = {
-            sessions: 0,
-            pending_questions: 0,
-            pending_approvals: 0,
-            agent_destinations_owned: 0,
-            agent_destinations_pointing: 0,
-            pending_sender_approvals: 0,
-            pending_channel_approvals: 0,
-            messaging_group_agents: 0,
-            agent_group_members: 0,
-            user_roles: 0,
-            container_configs: 0,
-          };
-
-          if (hasAgentDestinations) {
-            counts.agent_destinations_owned = (
-              await db.run('DELETE FROM agent_destinations WHERE agent_group_id = ?', id)
-            ).changes;
-            counts.agent_destinations_pointing = (
-              await db.run('DELETE FROM agent_destinations WHERE target_type = ? AND target_id = ?', 'agent', id)
-            ).changes;
-          }
-          counts.pending_questions = (
-            await db.run(
-              'DELETE FROM pending_questions WHERE session_id IN (SELECT id FROM sessions WHERE agent_group_id = ?)',
-              id,
-            )
-          ).changes;
-          if (hasPendingApprovals) {
-            counts.pending_approvals = (
-              await db.run(
-                'DELETE FROM pending_approvals WHERE agent_group_id = ? OR session_id IN (SELECT id FROM sessions WHERE agent_group_id = ?)',
-                id,
-                id,
-              )
-            ).changes;
-          }
-          counts.sessions = (await db.run('DELETE FROM sessions WHERE agent_group_id = ?', id)).changes;
-          counts.pending_sender_approvals = (
-            await db.run('DELETE FROM pending_sender_approvals WHERE agent_group_id = ?', id)
-          ).changes;
-          counts.pending_channel_approvals = (
-            await db.run('DELETE FROM pending_channel_approvals WHERE agent_group_id = ?', id)
-          ).changes;
-          counts.messaging_group_agents = (
-            await db.run('DELETE FROM messaging_group_agents WHERE agent_group_id = ?', id)
-          ).changes;
-          counts.agent_group_members = (
-            await db.run('DELETE FROM agent_group_members WHERE agent_group_id = ?', id)
-          ).changes;
-          counts.user_roles = (await db.run('DELETE FROM user_roles WHERE agent_group_id = ?', id)).changes;
-          // migration-014 has ON DELETE CASCADE on container_configs.agent_group_id;
-          // the explicit delete here mirrors the other tables and surfaces the count.
-          counts.container_configs = (
-            await db.run('DELETE FROM container_configs WHERE agent_group_id = ?', id)
-          ).changes;
-          await db.run('DELETE FROM agent_groups WHERE id = ?', id);
-          return counts;
-        });
+        const removed = await cascadeDeleteGroup(db, id);
 
         return { deleted: id, removed };
       },
     },
+    attach: {
+      access: 'open',
+      hostOnly: true,
+      description:
+        "Attach this terminal to a code-mode agent's interactive session (host operators only).\n" +
+        'Usage: ncl groups attach <group-id-or-folder>. The host resolves the live session container ' +
+        'and the ncl client execs the attach client into it — every connection is host-mediated (D20). ' +
+        'Detach with Ctrl-]; the session keeps running.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('usage: ncl groups attach <group-id-or-folder>');
+        const group = (await getAgentGroup(id)) ?? (await getAgentGroupByFolder(id));
+        if (!group) throw new Error(`No agent group: ${id}`);
+        // Everything from the code-mode gate to the exec spec is shared with
+        // the sandbox door verbs — cli/attach-resolve.ts owns the policy.
+        return resolveAttachForGroup(group);
+      },
+    },
+    purge: purgeOperation,
     restart: {
       access: 'approval',
       description:
@@ -372,7 +366,9 @@ registerResource({
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
         'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
-        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
+        "--code-mode (true|false — the agent runs as an interactive coding session instead of the chat loop; takes effect on respawn, and flipping it off releases the group's bound dev envs), " +
+        '--permission-mode (auto|bypass — code-mode permission posture override: auto keeps the CLI prompting, bypass skips it because the deployment gateway is the approver; "" clears back to the deployment default; takes effect on respawn), ' +
+        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default) and --runtime-tier (container or vm).',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -390,11 +386,19 @@ registerResource({
             | 'max_messages_per_prompt'
             | 'cli_scope'
             | 'timezone'
+            | 'runtime_tier'
+            | 'code_mode'
+            | 'permission_mode'
           >
         > = {};
         if (args.provider !== undefined) updates.provider = args.provider as string;
         const timezone = parseTimezoneFlag(args.timezone);
         if (timezone !== undefined) updates.timezone = timezone;
+        if (args['runtime-tier'] !== undefined || args.runtime_tier !== undefined) {
+          const tier = (args['runtime-tier'] ?? args.runtime_tier) as string;
+          if (tier !== 'container' && tier !== 'vm') throw new Error('--runtime-tier must be container or vm');
+          updates.runtime_tier = tier;
+        }
         if (args.model !== undefined) updates.model = args.model as string;
         if (args.effort !== undefined) updates.effort = args.effort as string;
         if (args.image_tag !== undefined) updates.image_tag = args.image_tag as string;
@@ -408,14 +412,38 @@ registerResource({
           }
           updates.cli_scope = scope;
         }
+        if (args['code-mode'] !== undefined || args.code_mode !== undefined) {
+          const mode = String(args['code-mode'] ?? args.code_mode);
+          if (mode !== 'true' && mode !== 'false') {
+            throw new Error('--code-mode must be true or false');
+          }
+          updates.code_mode = mode === 'true' ? 1 : 0;
+        }
+        if (args['permission-mode'] !== undefined || args.permission_mode !== undefined) {
+          const mode = String(args['permission-mode'] ?? args.permission_mode);
+          if (mode !== 'auto' && mode !== 'bypass' && mode !== '') {
+            throw new Error('--permission-mode must be auto, bypass, or "" to follow the deployment default');
+          }
+          updates.permission_mode = mode === '' ? null : mode;
+        }
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --code-mode, --permission-mode, --timezone, --runtime-tier',
           );
         }
 
         await updateContainerConfigScalars(id, updates);
+
+        // D13: flipping code mode OFF releases the group's bound dev envs.
+        // The "sandbox" a bound env rises and falls with is the group's code
+        // mode, not any one disposable pod (D14 — pods are disposable, the
+        // group identity is durable), and the flag's help text above has
+        // promised this release since T2. Best-effort by design: a host with
+        // no dev-env driver has nothing to release.
+        if (row.code_mode === 1 && updates.code_mode === 0) {
+          await getDevEnvService()?.releaseBoundTo(id);
+        }
 
         const updated = (await getContainerConfig(id))!;
         return presentConfig(updated);
