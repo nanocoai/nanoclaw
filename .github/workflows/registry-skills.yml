@@ -47,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 8
       matrix:
         include: ${{ fromJSON(needs.discover.outputs.matrix) }}
     steps:
