@@ -116,6 +116,10 @@ function scratchRoot(): string {
   writeFileSync(join(root, 'src/providers/index.ts'), '// provider barrel\n');
   writeFileSync(join(root, 'container/agent-runner/src/providers/index.ts'), '// container provider barrel\n');
   writeFileSync(join(root, 'setup/providers/index.ts'), '// setup provider barrel\n');
+  mkdirSync(join(root, 'src/modules'), { recursive: true });
+  mkdirSync(join(root, 'container/agent-runner/src/mcp-tools'), { recursive: true });
+  writeFileSync(join(root, 'src/modules/index.ts'), '// host module barrel\n');
+  writeFileSync(join(root, 'container/agent-runner/src/mcp-tools/index.ts'), '// MCP tools barrel\n');
   writeFileSync(
     join(root, 'setup/index.ts'),
     ['const STEPS = {', '  // >>> nanoclaw:setup-steps', '  // <<< nanoclaw:setup-steps', '};', ''].join('\n'),
