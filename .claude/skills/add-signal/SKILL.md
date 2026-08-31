@@ -187,6 +187,8 @@ this channel with `/init-first-agent` (or `/manage-channels`).
 - Typing indicators — DMs only (Signal doesn't support group typing).
 - Note to Self — messages you send to your own account from another device route to the agent as inbound with `isFromMe: true`.
 - Voice attachments — detected but not transcribed by default; the agent receives a `[Voice Message]` placeholder. Run `/add-voice-transcription` for local transcription.
+- Inbound image/file attachments — forwarded to the agent the same way every other chat adapter does. See Troubleshooting below if your copy predates the fix.
+- Approval questions — `ask_question` (unknown-sender approval cards, `ask_user_question`) renders as text with `/approve`, `/reject`-style slash commands built from the option labels. Also implements `openDM`, so a cold DM to a user who's never messaged the bot (e.g. an approver being notified for the first time) resolves to the same `signal:{UUID}`-prefixed platform_id their real messages use — without it, the reply-matching card and the user's actual DM session would live in two different, unlinked messaging_groups.
 
 Not supported yet: outbound file attachments (logged and dropped), edit/delete messages, reactions.
 

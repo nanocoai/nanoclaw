@@ -14,9 +14,17 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
+import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
+
+const PENDING_QUESTIONS_MAX = 64;
+
+/** Normalize an option label to a slash command: "Approve" → "/approve" */
+function optionToCommand(option: string): string {
+  return '/' + option.toLowerCase().replace(/\s+/g, '-');
+}
 
 // ---------------------------------------------------------------------------
 // Signal CLI daemon management
@@ -550,6 +558,9 @@ export function createSignalAdapter(config: {
   let tcp: SignalTcpClient | null = null;
   let connected = false;
   const echoCache = new EchoCache();
+  // Pending questions: platformId → { questionId, options }
+  // User replies with /approve, /reject, etc. to answer
+  const pendingQuestions = new Map<string, { questionId: string; options: NormalizedOption[] }>();
   let setup: ChannelSetup | null = null;
 
   // -- inbound handling --
@@ -612,10 +623,10 @@ export function createSignalAdapter(config: {
     const text = rawText ? resolveMentions(rawText, dataMessage.mentions) : '';
 
     const audioAttachment = dataMessage.attachments?.find((a) => a.contentType?.startsWith('audio/') && a.id);
-    const imageAttachments = dataMessage.attachments?.filter((a) => a.contentType?.startsWith('image/') && a.id) ?? [];
+    const fileAttachments = dataMessage.attachments?.filter((a) => !a.contentType?.startsWith('audio/') && a.id) ?? [];
     const hasVoice = !text && !!audioAttachment;
 
-    if (!text && !hasVoice && imageAttachments.length === 0) return;
+    if (!text && !hasVoice && fileAttachments.length === 0) return;
 
     const sender = (envelope.sourceNumber ?? envelope.sourceUuid ?? envelope.source ?? '').trim();
     if (!sender) return;
@@ -630,6 +641,24 @@ export function createSignalAdapter(config: {
     const isGroup = Boolean(groupId);
 
     const platformId = isGroup ? `group:${groupId}` : sender;
+
+    // Check if this reply answers a pending question via slash command
+    const pending = pendingQuestions.get(platformId);
+    if (pending && text.startsWith('/')) {
+      const cmd = text.trim().toLowerCase();
+      const matched = pending.options.find((o) => optionToCommand(o.label) === cmd);
+      if (matched) {
+        setup.onAction(pending.questionId, matched.value, sender);
+        pendingQuestions.delete(platformId);
+        await sendText(platformId, `${matched.selectedLabel} by ${senderName}`);
+        log.info('Signal: question answered', {
+          questionId: pending.questionId,
+          value: matched.value,
+          voterName: senderName,
+        });
+        return;
+      }
+    }
 
     if (text && echoCache.isEcho(platformId, text)) {
       log.debug('Signal: skipping echo', { platformId });
@@ -670,16 +699,37 @@ export function createSignalAdapter(config: {
       }
     }
 
-    // Image attachments — emit `[Image: <path>]` lines so the agent's Read
-    // tool can pick them up, and surface the structured `attachments` array
-    // for consumers that prefer that shape. Without this, vision-capable
-    // models never see images sent over Signal.
-    const attachmentRefs: Array<{ path: string; contentType: string }> = [];
-    for (const img of imageAttachments) {
-      const imagePath = join(config.signalDataDir, 'attachments', img.id!);
-      const imageLine = `[Image: ${imagePath}]`;
-      content = content ? `${content}\n${imageLine}` : imageLine;
-      attachmentRefs.push({ path: imagePath, contentType: img.contentType || 'image/jpeg' });
+    // Non-audio attachments (images, documents, etc.) — read the bytes and
+    // hand them to the generic inbound-attachment mechanism
+    // (extractAttachmentFiles in session-manager.ts), same as every other
+    // channel. That writes the bytes into the session's inbox dir, which
+    // *is* mounted into the container, so the agent's Read tool can
+    // actually open the file. The previous approach spliced a
+    // `/workspace/extra/signal-attachments/<id>` path directly into the
+    // message text — a path that was never mounted anywhere, so it always
+    // failed, and it silently dropped any non-image, non-audio attachment
+    // (documents, text files, etc.) entirely.
+    const fileEntries: Array<{ type: string; name?: string; mimeType?: string; size?: number; data: string }> = [];
+    for (const file of fileAttachments) {
+      const hostPath = join(config.signalDataDir, 'attachments', file.id!);
+      if (!existsSync(hostPath)) {
+        log.warn('Signal: attachment file not found', { id: file.id, path: hostPath });
+        continue;
+      }
+      fileEntries.push({
+        type: file.contentType?.startsWith('image/') ? 'image' : 'file',
+        name: file.filename,
+        mimeType: file.contentType,
+        size: file.size,
+        data: readFileSync(hostPath).toString('base64'),
+      });
+    }
+
+    // All attachments failed to read (e.g. signal-cli hadn't finished
+    // downloading yet) and there's no other text — say so instead of
+    // silently delivering an empty message, mirroring the voice fallback.
+    if (!content && fileAttachments.length > 0 && fileEntries.length === 0) {
+      content = '[Attachment not found]';
     }
 
     const msg: InboundMessage = {
@@ -690,7 +740,7 @@ export function createSignalAdapter(config: {
         sender,
         senderId: `signal:${sender}`,
         senderName,
-        ...(attachmentRefs.length > 0 ? { attachments: attachmentRefs } : {}),
+        ...(fileEntries.length > 0 ? { attachments: fileEntries } : {}),
         ...(dataMessage.quote ? quoteToContent(dataMessage.quote) : {}),
       },
       isMention: computeSignalIsMention(config.account, isGroup, dataMessage.mentions),
@@ -919,6 +969,34 @@ export function createSignalAdapter(config: {
 
     async deliver(platformId: string, _threadId: string | null, message: OutboundMessage): Promise<string | undefined> {
       const content = message.content as Record<string, unknown> | string | undefined;
+
+      // Ask question → text with slash command replies
+      if (
+        content &&
+        typeof content === 'object' &&
+        content.type === 'ask_question' &&
+        content.questionId &&
+        content.options
+      ) {
+        const questionId = content.questionId as string;
+        const title = content.title as string;
+        const question = content.question as string | undefined;
+        if (!title) {
+          log.error('Signal: ask_question missing required title — skipping delivery', { questionId });
+          return undefined;
+        }
+        const options: NormalizedOption[] = normalizeOptions(content.options as never);
+        const optionLines = options.map((o) => `  ${optionToCommand(o.label)}`).join('\n');
+        const text = `*${title}*\n\n${question ?? ''}\n\nReply with:\n${optionLines}`;
+        await sendText(platformId, text);
+        pendingQuestions.set(platformId, { questionId, options });
+        if (pendingQuestions.size > PENDING_QUESTIONS_MAX) {
+          const oldest = pendingQuestions.keys().next().value!;
+          pendingQuestions.delete(oldest);
+        }
+        return undefined;
+      }
+
       let text: string | null = null;
       if (typeof content === 'string') {
         text = content;
@@ -947,6 +1025,20 @@ export function createSignalAdapter(config: {
       } catch (err) {
         log.debug('Signal: typing indicator failed', { platformId, err });
       }
+    },
+
+    /**
+     * Without this, ensureUserDm (src/modules/permissions/user-dm.ts) treats
+     * Signal as direct-addressable and uses the bare user handle (UUID/number,
+     * no prefix) as the DM's platform_id. That mismatches the `signal:`-prefixed
+     * platformId every real inbound message from that same user carries
+     * (handleEnvelope's dataMessage path), so a cold-DM'd card (e.g. an
+     * unknown-sender approval) renders fine but its pendingQuestions entry is
+     * keyed under the wrong platformId — the user's slash-command reply can
+     * never match it.
+     */
+    async openDM(userHandle: string): Promise<string> {
+      return `signal:${userHandle}`;
     },
   };
 
