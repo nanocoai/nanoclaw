@@ -551,6 +551,14 @@ export function createSignalAdapter(config: {
   let connected = false;
   const echoCache = new EchoCache();
   let setup: ChannelSetup | null = null;
+  // Outbound sends attempted while disconnected are queued here and flushed
+  // once the TCP connection to signal-cli is (re)established, instead of
+  // being silently dropped.
+  type QueuedSend =
+    | { kind: 'text'; platformId: string; text: string }
+    | { kind: 'attachments'; platformId: string; files: { filename: string; data: Buffer }[] };
+  const outgoingQueue: QueuedSend[] = [];
+  let flushingOutgoingQueue = false;
 
   // -- inbound handling --
 
@@ -643,9 +651,17 @@ export function createSignalAdapter(config: {
 
     let content = text;
 
+    // Image attachments — emit `[Image: <path>]` lines so the agent's Read
+    // tool can pick them up, and surface the structured `attachments` array
+    // for consumers that prefer that shape. Without this, vision-capable
+    // models never see images sent over Signal.
+    const attachmentRefs: Array<{ path: string; contentType: string }> = [];
+
     // Voice attachment — try transcription if WHISPER_BIN or OPENAI_API_KEY
-    // is configured; otherwise fall back to the original placeholder so
-    // operators who don't want transcription get the same UX as before.
+    // is configured; otherwise fall back to a placeholder. The raw audio is
+    // always forwarded as an attachment (when the file exists) so a human —
+    // or a future transcription pass — can still get at it when transcription
+    // is unavailable or fails, instead of losing the message content entirely.
     if (hasVoice && audioAttachment?.id) {
       const attachmentPath = join(config.signalDataDir, 'attachments', audioAttachment.id);
       if (existsSync(attachmentPath)) {
@@ -654,6 +670,7 @@ export function createSignalAdapter(config: {
           attachmentId: audioAttachment.id,
           path: attachmentPath,
         });
+        attachmentRefs.push({ path: attachmentPath, contentType: audioAttachment.contentType || 'audio/aac' });
         const transcript = await transcribeAudioOptional(attachmentPath);
         if (transcript) {
           content = `[Voice: ${transcript}]`;
@@ -670,11 +687,6 @@ export function createSignalAdapter(config: {
       }
     }
 
-    // Image attachments — emit `[Image: <path>]` lines so the agent's Read
-    // tool can pick them up, and surface the structured `attachments` array
-    // for consumers that prefer that shape. Without this, vision-capable
-    // models never see images sent over Signal.
-    const attachmentRefs: Array<{ path: string; contentType: string }> = [];
     for (const img of imageAttachments) {
       const imagePath = join(config.signalDataDir, 'attachments', img.id!);
       const imageLine = `[Image: ${imagePath}]`;
@@ -727,7 +739,16 @@ export function createSignalAdapter(config: {
   // -- send helpers --
 
   async function sendText(platformId: string, text: string): Promise<void> {
-    if (!connected || !tcp) return;
+    if (!connected || !tcp) {
+      outgoingQueue.push({ kind: 'text', platformId, text });
+      log.info('Signal disconnected, queued outbound message', { platformId, queueSize: outgoingQueue.length });
+      return;
+    }
+    await sendTextNow(platformId, text);
+  }
+
+  async function sendTextNow(platformId: string, text: string): Promise<void> {
+    if (!tcp) return;
 
     echoCache.remember(platformId, text);
 
@@ -780,8 +801,17 @@ export function createSignalAdapter(config: {
    * caption colliding with signal-cli's per-message size limits.
    */
   async function sendAttachments(platformId: string, files: { filename: string; data: Buffer }[]): Promise<void> {
-    if (!connected || !tcp) return;
     if (files.length === 0) return;
+    if (!connected || !tcp) {
+      outgoingQueue.push({ kind: 'attachments', platformId, files });
+      log.info('Signal disconnected, queued outbound attachments', { platformId, queueSize: outgoingQueue.length });
+      return;
+    }
+    await sendAttachmentsNow(platformId, files);
+  }
+
+  async function sendAttachmentsNow(platformId: string, files: { filename: string; data: Buffer }[]): Promise<void> {
+    if (!tcp || files.length === 0) return;
 
     const tempPaths: string[] = [];
     for (const file of files) {
@@ -811,6 +841,35 @@ export function createSignalAdapter(config: {
           /* best-effort cleanup */
         }
       }
+    }
+  }
+
+  async function flushOutgoingQueue(): Promise<void> {
+    if (flushingOutgoingQueue || outgoingQueue.length === 0) return;
+    flushingOutgoingQueue = true;
+    try {
+      log.info('Signal: flushing queued outbound sends', { count: outgoingQueue.length });
+      while (outgoingQueue.length > 0) {
+        if (!connected || !tcp) break;
+        const item = outgoingQueue.shift()!;
+        try {
+          if (item.kind === 'text') {
+            await sendTextNow(item.platformId, item.text);
+          } else {
+            await sendAttachmentsNow(item.platformId, item.files);
+          }
+        } catch (err) {
+          log.error('Signal: failed to flush queued send, re-queueing', {
+            kind: item.kind,
+            platformId: item.platformId,
+            err,
+          });
+          outgoingQueue.unshift(item);
+          break;
+        }
+      }
+    } finally {
+      flushingOutgoingQueue = false;
     }
   }
 
@@ -899,6 +958,7 @@ export function createSignalAdapter(config: {
         host: config.tcpHost,
         port: config.tcpPort,
       });
+      void flushOutgoingQueue();
     },
 
     async teardown(): Promise<void> {

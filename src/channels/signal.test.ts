@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 // --- Mocks ---
 
@@ -395,6 +397,52 @@ describe('SignalAdapter', () => {
       );
 
       await adapter.teardown();
+    });
+
+    it('forwards the raw audio bytes as an attachment even when transcription is unavailable', async () => {
+      const prevWhisperBin = process.env.WHISPER_BIN;
+      const prevOpenaiKey = process.env.OPENAI_API_KEY;
+      delete process.env.WHISPER_BIN;
+      delete process.env.OPENAI_API_KEY;
+      const attachmentsDir = join('/tmp/signal-cli-test-data', 'attachments');
+      mkdirSync(attachmentsDir, { recursive: true });
+      const attachmentPath = join(attachmentsDir, 'voice123');
+      writeFileSync(attachmentPath, Buffer.from('fake-audio-bytes'));
+
+      try {
+        const adapter = createAdapter();
+        const cfg = createMockSetup();
+        await adapter.setup(cfg);
+
+        pushEvent({
+          sourceNumber: '+15555550123',
+          sourceName: 'Alice',
+          dataMessage: {
+            timestamp: 1700000000000,
+            attachments: [{ id: 'voice123', contentType: 'audio/aac', size: 12345 }],
+          },
+        });
+
+        await new Promise((r) => setTimeout(r, 50));
+        expect(cfg.onInbound).toHaveBeenCalledWith(
+          '+15555550123',
+          null,
+          expect.objectContaining({
+            content: expect.objectContaining({
+              text: '[Voice Message]',
+              attachments: [expect.objectContaining({ path: attachmentPath, contentType: 'audio/aac' })],
+            }),
+          }),
+        );
+
+        await adapter.teardown();
+      } finally {
+        rmSync(attachmentsDir, { recursive: true, force: true });
+        if (prevWhisperBin === undefined) delete process.env.WHISPER_BIN;
+        else process.env.WHISPER_BIN = prevWhisperBin;
+        if (prevOpenaiKey === undefined) delete process.env.OPENAI_API_KEY;
+        else process.env.OPENAI_API_KEY = prevOpenaiKey;
+      }
     });
   });
 
@@ -943,6 +991,36 @@ describe('SignalAdapter', () => {
       await new Promise((r) => setTimeout(r, 20));
 
       expect(adapter.isConnected()).toBe(false);
+
+      await adapter.teardown();
+    });
+
+    it('queues sends made while disconnected instead of dropping them, and flushes on the next setup()', async () => {
+      const adapter = createAdapter();
+      await adapter.setup(createMockSetup());
+      expect(adapter.isConnected()).toBe(true);
+
+      // Simulate the daemon dropping the TCP connection.
+      tcpRef.fakeSocket.destroy();
+      await new Promise((r) => setTimeout(r, 20));
+      expect(adapter.isConnected()).toBe(false);
+
+      await adapter.deliver('+15555550123', null, {
+        kind: 'text',
+        content: { text: 'queued while disconnected' },
+      });
+      expect(getRpcCallsForMethod('send')).toHaveLength(0);
+
+      // This adapter has no reconnect loop (see the onClose handler comment
+      // in signal.ts) — recovery today is a service restart, which calls
+      // setup() again and flushes anything still queued.
+      await adapter.setup(createMockSetup());
+      expect(adapter.isConnected()).toBe(true);
+      await new Promise((r) => setTimeout(r, 20));
+
+      const sendCalls = getRpcCallsForMethod('send');
+      expect(sendCalls).toHaveLength(1);
+      expect(sendCalls[0].params.message).toBe('queued while disconnected');
 
       await adapter.teardown();
     });
