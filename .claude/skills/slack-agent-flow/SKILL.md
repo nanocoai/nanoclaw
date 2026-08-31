@@ -13,9 +13,10 @@ a workspace manager token), registers it as a `slack-<name>` instance,
 hot-starts the adapter in the running host, opens a DM between the new bot and
 the operator, opens a three-way MPIM (operator + originating bot + new bot)
 registered as an agent-to-agent room, and wires everything so both agents hear
-the room. The flow also adds two agent-facing room actions — `create_room`
+the room. The flow also adds three agent-facing room actions — `create_room`
 (one shared room with N agents at once, the team primitive) and `add_to_room`
-(grow a room by one agent) — and extends the base `create_agent` tool with the
+(grow a room by one agent), plus `handoff` (reliably engage one or several
+explicitly selected sibling agents in a room) — and extends the base `create_agent` tool with the
 flow's `purpose` / `allow_guests` / `room` parameters. Non-Slack sessions are
 untouched: `create_agent` from any other channel behaves exactly as upstream.
 
@@ -179,7 +180,7 @@ import './slack-agent-flow/index.js';
 ### 6. Register the container room tools
 
 Append the tool-module import to the container MCP-tools barrel (skipped if
-already present). The module registers `create_room` / `add_to_room` and
+already present). The module registers `create_room` / `add_to_room` / `handoff` and
 extends the base `create_agent` tool, so it must evaluate after the base
 agents module — import order follows document order, and appending at the end
 guarantees it:
@@ -229,9 +230,11 @@ bash setup/lib/restart.sh
   with the same guard action and precheck as the agent-to-agent module; only
   the hold question changes when the request originates from a Slack session
   (it names the Slack provisioning side effects — new app, operator DM,
-  shared room). The room actions get the same trust split: `global` cli_scope
-  groups act directly, everything else holds for the admin chain, and
-  approved replays re-enter the wrapped handlers automatically.
+  shared room). Room creation and membership changes get the same trust split:
+  `global` cli_scope groups act directly, everything else holds for the admin
+  chain, and approved replays re-enter the wrapped handlers automatically.
+  `handoff` needs no approval because it can only post through the caller's
+  existing room adapter after host-side destination and membership checks.
 - **Expected boot warning.** Because the barrel imports the flow module after
   the agent-to-agent module, every boot logs
   `Delivery action handler overwritten` for `create_agent`. That warning is
@@ -269,6 +272,11 @@ bash setup/lib/restart.sh
   `create_room` naming all of them. When a batch of creates arrives together,
   their avatar generations are prefetched in parallel, so N waits collapse to
   roughly one.
+- **Room handoffs are explicit.** `handoff({ to, text, room? })` resolves one
+  agent or an explicit list, verifies every target is wired to the shared Slack
+  surface, and posts one real mention per target through the caller's adapter
+  and thread. Private or cross-surface coordination stays on `send_message`.
+  Room creation never chooses a responder or wakes everyone by default.
 - **A2A cache staleness.** The a2a room allowlist is re-read from `.env` on a
   ≤30s cache. The room id is appended before any intro is posted, but the
   originating agent's own bridge may still miss ingesting the intro inside
