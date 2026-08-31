@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, normalizeReactionEmoji, splitForLimit } from './chat-sdk-bridge.js';
 
 vi.mock('../webhook-server.js', () => ({
   registerWebhookAdapter: vi.fn(),
@@ -486,5 +486,98 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(calls).toHaveLength(1);
     const msg = calls[0].message as { markdown?: string };
     expect(msg.markdown).toBe('plain hello');
+  });
+});
+
+describe('normalizeReactionEmoji', () => {
+  // Agents emit either unicode ("👍") or a shortcode ("thumbs_up") — the MCP
+  // schema historically asked for shortcodes, so both shapes are on the wire.
+  // Every platform except Slack expects the unicode character; Slack expects
+  // the shortcode name.
+
+  it('translates a shortcode to unicode for non-Slack platforms', () => {
+    expect(normalizeReactionEmoji('thumbs_up', 'discord')).toBe('👍');
+    expect(normalizeReactionEmoji('white_check_mark', 'telegram')).toBe('✅');
+    expect(normalizeReactionEmoji('eyes', 'teams')).toBe('👀');
+    expect(normalizeReactionEmoji('heart', 'gchat')).toBe('❤️');
+  });
+
+  it('passes unicode through unchanged for non-Slack platforms', () => {
+    expect(normalizeReactionEmoji('👍', 'discord')).toBe('👍');
+    expect(normalizeReactionEmoji('✅', 'telegram')).toBe('✅');
+    expect(normalizeReactionEmoji('🎉', 'gchat')).toBe('🎉');
+  });
+
+  it('translates unicode to the shortcode name for Slack', () => {
+    expect(normalizeReactionEmoji('👍', 'slack')).toBe('+1');
+    expect(normalizeReactionEmoji('✅', 'slack')).toBe('white_check_mark');
+    expect(normalizeReactionEmoji('❤️', 'slack')).toBe('heart');
+  });
+
+  it('canonicalizes shortcode aliases for Slack', () => {
+    // Slack's reactions.add wants "+1"; the alias "thumbs_up" is normalized.
+    expect(normalizeReactionEmoji('thumbs_up', 'slack')).toBe('+1');
+    expect(normalizeReactionEmoji('white_check_mark', 'slack')).toBe('white_check_mark');
+  });
+
+  it('passes unmapped values through verbatim (custom platform emoji keep working)', () => {
+    expect(normalizeReactionEmoji('partyparrot', 'slack')).toBe('partyparrot');
+    expect(normalizeReactionEmoji('🤡', 'discord')).toBe('🤡');
+    expect(normalizeReactionEmoji('🤡', 'slack')).toBe('🤡');
+  });
+});
+
+describe('createChatSdkBridge.deliver — reaction emoji normalization', () => {
+  interface ReactionCall {
+    threadId: string;
+    messageId: string;
+    emoji: string;
+  }
+
+  function makeReactionCapture() {
+    const calls: ReactionCall[] = [];
+    const addReaction = async (threadId: string, messageId: string, emoji: string): Promise<void> => {
+      calls.push({ threadId, messageId, emoji });
+    };
+    return { calls, addReaction };
+  }
+
+  it('delivers a shortcode as unicode on a non-Slack adapter', async () => {
+    const { calls, addReaction } = makeReactionCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ name: 'discord', addReaction }),
+      supportsThreads: true,
+    });
+    await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: { operation: 'reaction', messageId: 'msg-1', emoji: 'thumbs_up' },
+    });
+    expect(calls).toEqual([{ threadId: 'discord:guild:chan', messageId: 'msg-1', emoji: '👍' }]);
+  });
+
+  it('delivers unicode as the shortcode name on Slack', async () => {
+    const { calls, addReaction } = makeReactionCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ name: 'slack', addReaction }),
+      supportsThreads: true,
+    });
+    await bridge.deliver('slack:C1', null, {
+      kind: 'chat-sdk',
+      content: { operation: 'reaction', messageId: '1234.5678', emoji: '👀' },
+    });
+    expect(calls).toEqual([{ threadId: 'slack:C1', messageId: '1234.5678', emoji: 'eyes' }]);
+  });
+
+  it('leaves an unmapped emoji untouched', async () => {
+    const { calls, addReaction } = makeReactionCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ name: 'telegram', addReaction }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: { operation: 'reaction', messageId: '7', emoji: '🤡' },
+    });
+    expect(calls).toEqual([{ threadId: 'telegram:42', messageId: '7', emoji: '🤡' }]);
   });
 });

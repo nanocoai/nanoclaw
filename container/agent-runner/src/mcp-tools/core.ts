@@ -206,7 +206,11 @@ export const addReaction: McpToolDefinition = {
       type: 'object' as const,
       properties: {
         messageId: { type: 'integer', description: 'Message ID (the numeric id shown in messages)' },
-        emoji: { type: 'string', description: 'Emoji name (e.g., thumbs_up, heart, check)' },
+        emoji: {
+          type: 'string',
+          description:
+            'Emoji character (e.g., "👍", "✅") or shortcode name (e.g., thumbs_up, white_check_mark). Prefer the actual emoji character.',
+        },
       },
       required: ['messageId', 'emoji'],
     },
