@@ -147,7 +147,7 @@ Per-agent-group container runtime config (provider, model, packages, MCP servers
 | Value | Behavior |
 |-------|----------|
 | `disabled` | Agent never learns about ncl (instructions excluded from CLAUDE.md). Host dispatch rejects any `cli_request`. |
-| `group` (default) | Agent can access `groups`, `sessions`, `destinations`, `members`, `tasks` only, scoped to its own agent group. `--id` and group args are auto-filled. Cross-group access rejected. `cli_scope` changes blocked. |
+| `group` (default) | Agent can access `groups`, `sessions`, `destinations`, `members`, `tasks` only, scoped to its own agent group. `--id` and group args are locked to the caller's group (an explicitly passed different value is silently replaced, not honored). Cross-group access rejected — to act on another group, that group's agent must submit the request from its own CLI. `cli_scope` changes blocked. |
 | `global` | Unrestricted. Set automatically for owner agent groups via `init-first-agent`. |
 
 Key files: `src/db/container-configs.ts`, `src/container-config.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/project-doc-compose.ts` (instructions exclusion).
