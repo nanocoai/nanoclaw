@@ -146,6 +146,13 @@ export function startTypingRefresh(
       return;
     }
 
+    // startedAt === 0 marks a post-delivery entry (see
+    // pauseTypingRefreshAfterDelivery): the reply already proved the
+    // container is warm, so a momentarily stale heartbeat here just
+    // skips this tick rather than tearing the refresher down — a full
+    // teardown would silence typing for the rest of the turn with
+    // nothing to re-arm it until the next inbound message.
+    if (entry.startedAt === 0) return;
     // Out of grace AND heartbeat stale — agent is idle, stop refreshing.
     clearInterval(entry.interval);
     typingRefreshers.delete(sessionId);
@@ -173,6 +180,11 @@ export function startTypingRefresh(
 export function pauseTypingRefreshAfterDelivery(sessionId: string): void {
   const entry = typingRefreshers.get(sessionId);
   if (!entry) return;
+  // A delivered reply ends the cold-start grace — later ticks must
+  // prove ongoing work via the heartbeat instead of coasting on
+  // TYPING_GRACE_MS, otherwise a follow-up message that resets grace
+  // just before this reply lands can outlive the post-delivery pause.
+  entry.startedAt = 0;
   entry.pausedUntil = Date.now() + POST_DELIVERY_PAUSE_MS;
 }
 

@@ -14,7 +14,7 @@ vi.mock('../../config.js', async () => {
   return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-typing' };
 });
 
-import { setTypingAdapter, startTypingRefresh, stopTypingRefresh } from './index.js';
+import { pauseTypingRefreshAfterDelivery, setTypingAdapter, startTypingRefresh, stopTypingRefresh } from './index.js';
 
 type Call = { channelType: string; platformId: string; threadId: string | null; instance?: string };
 
@@ -119,5 +119,24 @@ describe('startTypingRefresh — instance forwarding', () => {
         instance: 'telegram',
       });
     }
+  });
+});
+
+describe('pauseTypingRefreshAfterDelivery', () => {
+  it('does not resume unconditional typing from grace after the delivery pause', async () => {
+    const calls = captureAdapter();
+    startTypingRefresh('sess-1', 'ag-1', 'slack', 'slack:C1', null, 'slack-tester');
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    // A quick follow-up resets grace just before the original reply lands.
+    startTypingRefresh('sess-1', 'ag-1', 'slack', 'slack:C1', null, 'slack-tester');
+    await vi.advanceTimersByTimeAsync(0);
+    pauseTypingRefreshAfterDelivery('sess-1');
+    calls.length = 0;
+
+    // Past the 10s delivery pause but still inside the reset 15s grace.
+    // With no heartbeat, typing must stay off.
+    await vi.advanceTimersByTimeAsync(11_500);
+    expect(calls).toHaveLength(0);
   });
 });

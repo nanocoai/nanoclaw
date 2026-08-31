@@ -488,3 +488,196 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(msg.markdown).toBe('plain hello');
   });
 });
+
+describe('createChatSdkBridge — typing vs. deliver ordering', () => {
+  // On Slack, adapter.startTyping paints a PERSISTENT assistant status
+  // (assistant.threads.setStatus) that only auto-clears when the app next
+  // posts to the thread. A typing tick whose HTTP call is still in flight
+  // when deliver() posts the reply can complete AFTER the post and repaint
+  // stale status — and the typing module's post-delivery pause guarantees no
+  // later tick replaces it, so it sticks until Slack's own expiry. The bridge
+  // must either order the post after the in-flight paint, or clear the
+  // status once the late paint lands.
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function typingHarness({ withStopTyping = true }: { withStopTyping?: boolean } = {}) {
+    const events: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const adapterImpl: Record<string, unknown> = {
+      startTyping: async (_threadId: string) => {
+        events.push('startTyping:begin');
+        await gate;
+        events.push('startTyping:end');
+      },
+      postMessage: async (threadId: string, _message: AdapterPostableMessage): Promise<RawMessage<unknown>> => {
+        events.push('post');
+        return { id: 'm1', threadId, raw: {} };
+      },
+    };
+    if (withStopTyping) {
+      // Not in the base Adapter contract — the bridge calls it optionally.
+      // Slack's adapter does NOT implement it (withStopTyping: false there).
+      adapterImpl.stopTyping = async (threadId: string) => {
+        events.push(`stopTyping:${threadId}`);
+      };
+    }
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter(adapterImpl as Partial<Adapter>),
+      supportsThreads: false,
+    });
+    return { bridge, events, release };
+  }
+
+  async function drainMicrotasks() {
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  }
+
+  it('without stopTyping (Slack): the post is ordered after the in-flight paint — no clear leg can save a wrong order', async () => {
+    // Slack's adapter has no stopTyping, so ordering/suppression is the ONLY
+    // effective leg there. Assert the Slack-relevant guarantee ALONE — a
+    // regression that drops the pre-await but keeps the finally straggler-
+    // clear must fail this test.
+    const { bridge, events, release } = typingHarness({ withStopTyping: false });
+
+    const tick = bridge.setTyping!('slack:C1', null);
+    const delivered = bridge.deliver('slack:C1', null, { kind: 'chat-sdk', content: { text: 'reply' } });
+    await drainMicrotasks();
+    release();
+    await tick;
+    await delivered;
+
+    const post = events.indexOf('post');
+    const paintLanded = events.indexOf('startTyping:end');
+    expect(post).toBeGreaterThan(-1);
+    // Painted-before-post (the reply auto-clears it), or never painted at all.
+    expect(paintLanded === -1 || post > paintLanded).toBe(true);
+  });
+
+  it('stopTyping-capable adapter: deliver orders the post after an in-flight startTyping, or clears the late paint', async () => {
+    const { bridge, events, release } = typingHarness();
+
+    // A typing tick fires; its HTTP call hangs in flight.
+    const tick = bridge.setTyping!('slack:C1', null);
+
+    // The reply is delivered while the tick is still in flight.
+    const delivered = bridge.deliver('slack:C1', null, { kind: 'chat-sdk', content: { text: 'reply' } });
+
+    // Give deliver every chance to (incorrectly) post ahead of the paint.
+    await drainMicrotasks();
+
+    // The tick's HTTP call now completes.
+    release();
+    await tick;
+    await delivered;
+
+    // Contract: the post came after the paint landed (auto-clear covers it),
+    // OR the bridge cleared the status after the post. The pre-fix bridge
+    // does neither — it posts immediately and never clears.
+    const post = events.indexOf('post');
+    const paintLanded = events.indexOf('startTyping:end');
+    const cleared = events.indexOf('stopTyping:slack:C1');
+    expect(post).toBeGreaterThan(-1);
+    const orderedAfterPaint = paintLanded > -1 && post > paintLanded;
+    const clearedAfterPost = cleared > post;
+    expect(orderedAfterPaint || clearedAfterPost).toBe(true);
+  });
+
+  it('bounds the wait (a hung startTyping cannot stall delivery) and clears the status when the late paint lands', async () => {
+    vi.useFakeTimers();
+    const { bridge, events, release } = typingHarness();
+
+    const tick = bridge.setTyping!('slack:C1', null);
+    const delivered = bridge.deliver('slack:C1', null, { kind: 'chat-sdk', content: { text: 'reply' } });
+
+    // The typing call hangs past the bound: deliver must post anyway.
+    await vi.advanceTimersByTimeAsync(3500);
+    await delivered;
+    expect(events).toContain('post');
+    expect(events).not.toContain('startTyping:end');
+
+    // The hung paint finally lands — after the reply. The bridge clears it.
+    release();
+    await tick;
+    await drainMicrotasks();
+    expect(events.indexOf('stopTyping:slack:C1')).toBeGreaterThan(events.indexOf('post'));
+  });
+
+  function midPostHarness() {
+    // No stopTyping (Slack shape): a paint during the postMessage roundtrip
+    // registers only after deliver()'s one-shot in-flight sample and would
+    // stick after the reply's auto-clear — the bridge must suppress it.
+    const events: string[] = [];
+    const postGates: Array<() => void> = [];
+    const adapterImpl = {
+      startTyping: async (threadId: string) => {
+        events.push(`startTyping:${threadId}`);
+      },
+      postMessage: async (threadId: string, _message: AdapterPostableMessage): Promise<RawMessage<unknown>> => {
+        events.push('post:begin');
+        await new Promise<void>((r) => postGates.push(r));
+        events.push('post:end');
+        return { id: 'm1', threadId, raw: {} };
+      },
+    };
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter(adapterImpl),
+      supportsThreads: false,
+    });
+    return { bridge, events, postGates };
+  }
+
+  it('suppresses a typing tick that arrives while a deliver for the same tid is mid-post', async () => {
+    const { bridge, events, postGates } = midPostHarness();
+
+    const delivered = bridge.deliver('slack:C1', null, { kind: 'chat-sdk', content: { text: 'reply' } });
+    await drainMicrotasks();
+    expect(events).toContain('post:begin'); // mid-post now
+
+    // Tick during the post roundtrip: must NOT reach the adapter.
+    await bridge.setTyping!('slack:C1', null);
+    expect(events).not.toContain('startTyping:slack:C1');
+
+    // A different tid is unaffected.
+    await bridge.setTyping!('slack:OTHER', null);
+    expect(events).toContain('startTyping:slack:OTHER');
+
+    postGates[0]();
+    await delivered;
+
+    // Delivery finished: suppression lifts, ticks flow again.
+    await bridge.setTyping!('slack:C1', null);
+    expect(events).toContain('startTyping:slack:C1');
+  });
+
+  it('keeps suppression until BOTH concurrent delivers to the same tid finish (counter, not boolean)', async () => {
+    // src/delivery.ts serializes per session only — two agent groups wired to
+    // the same channel can deliver to one tid concurrently. The first
+    // finisher must not clear the other deliver's suppression.
+    const { bridge, events, postGates } = midPostHarness();
+
+    const d1 = bridge.deliver('slack:C1', null, { kind: 'chat-sdk', content: { text: 'one' } });
+    await drainMicrotasks();
+    const d2 = bridge.deliver('slack:C1', null, { kind: 'chat-sdk', content: { text: 'two' } });
+    await drainMicrotasks();
+    expect(postGates.length).toBe(2); // both mid-post
+
+    postGates[0]();
+    await d1;
+
+    // d2 is still mid-post: a tick must still be suppressed.
+    await bridge.setTyping!('slack:C1', null);
+    expect(events).not.toContain('startTyping:slack:C1');
+
+    postGates[1]();
+    await d2;
+
+    await bridge.setTyping!('slack:C1', null);
+    expect(events).toContain('startTyping:slack:C1');
+  });
+});

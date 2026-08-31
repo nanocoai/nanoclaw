@@ -38,6 +38,18 @@ interface GatewayAdapter extends Adapter {
   ): Promise<Response>;
 }
 
+/** Adapter with an explicit typing/status clear. Not part of the base Chat
+ *  SDK Adapter contract — called optionally when present, as the second line
+ *  of defense in deliver()'s typing/post ordering (see typingInFlight). */
+interface StopTypingAdapter extends Adapter {
+  stopTyping?(threadId: string): Promise<void>;
+}
+
+/** How long deliver() waits for an in-flight startTyping call to settle
+ *  before posting anyway. Generous for one HTTP round trip; bounded so a
+ *  hung typing call can never stall message delivery. */
+const TYPING_SETTLE_TIMEOUT_MS = 3000;
+
 /** Reply context extracted from a platform's raw message. */
 export interface ReplyContext {
   text: string;
@@ -476,6 +488,27 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   let setupConfig: ChannelSetup;
   let gatewayAbort: AbortController | null = null;
 
+  // In-flight startTyping call per thread id. On Slack, startTyping paints a
+  // PERSISTENT assistant status (assistant.threads.setStatus) that only
+  // auto-clears when the app next posts to the thread: a typing tick whose
+  // HTTP call is still in flight when deliver() posts the reply can complete
+  // AFTER the post and repaint stale status — and the typing module's
+  // post-delivery pause guarantees no later tick replaces it, so it would sit
+  // there until Slack's own expiry. deliver() orders the reply after any
+  // in-flight call (bounded), then best-effort clears one that still lands
+  // late. Entries self-remove on settle.
+  const typingInFlight = new Map<string, Promise<void>>();
+
+  // Deliveries currently posting, per thread id. While non-zero, setTyping is
+  // suppressed for that tid: a tick firing DURING the postMessage roundtrip
+  // registers only after deliver()'s one-shot typingInFlight sample above and
+  // would paint persistent status after the reply's auto-clear — and on
+  // adapters without stopTyping (Slack) the straggler-clear leg cannot save
+  // it. A COUNTER, not a set: delivery is serialized per session only, so two
+  // agent groups wired to the same channel can deliver to one tid
+  // concurrently — the first finisher must not clear the other's suppression.
+  const deliveringCount = new Map<string, number>();
+
   async function messageToInbound(
     message: ChatMessage,
     isMention: boolean,
@@ -800,160 +833,203 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // platformId is already in the adapter's encoded format (e.g. "telegram:6037840640",
       // "discord:guildId:channelId") — use it directly as the thread ID
       const tid = threadId ?? platformId;
-      const content = message.content as Record<string, unknown>;
 
-      if (content.operation === 'edit' && content.messageId) {
-        const terminalCard = content.terminalCard as Partial<TerminalApprovalCard> | undefined;
-        if (
-          terminalCard &&
-          typeof terminalCard.title === 'string' &&
-          typeof terminalCard.question === 'string' &&
-          typeof terminalCard.resolution === 'string'
-        ) {
-          await adapter.editMessage(
-            tid,
-            content.messageId as string,
-            terminalApprovalMessage(terminalCard as TerminalApprovalCard),
-          );
-        } else {
-          await adapter.editMessage(tid, content.messageId as string, {
-            markdown: transformText((content.text as string) || (content.markdown as string) || ''),
-          });
-        }
-        return;
+      // Order the reply after any in-flight typing tick (see typingInFlight):
+      // wait — bounded — so its status paint lands BEFORE the post below and
+      // is auto-cleared by it, instead of repainting after the reply.
+      const inFlightTyping = typingInFlight.get(tid);
+      if (inFlightTyping) {
+        await Promise.race([
+          inFlightTyping,
+          new Promise<void>((resolve) => {
+            setTimeout(resolve, TYPING_SETTLE_TIMEOUT_MS).unref?.();
+          }),
+        ]);
       }
+      // From here until the finally below this tid is mid-post: suppress new
+      // typing ticks (see deliveringCount above).
+      deliveringCount.set(tid, (deliveringCount.get(tid) ?? 0) + 1);
+      try {
+        const content = message.content as Record<string, unknown>;
 
-      if (content.operation === 'reaction' && content.messageId && content.emoji) {
-        await adapter.addReaction(tid, content.messageId as string, content.emoji as string);
-        return;
-      }
-
-      // Ask question card — render as Card with buttons
-      if (content.type === 'ask_question' && content.questionId && content.options) {
-        const questionId = content.questionId as string;
-        const title = content.title as string;
-        const question = content.question as string;
-        if (!title) {
-          log.error('ask_question missing required title — skipping delivery', { questionId });
+        if (content.operation === 'edit' && content.messageId) {
+          const terminalCard = content.terminalCard as Partial<TerminalApprovalCard> | undefined;
+          if (
+            terminalCard &&
+            typeof terminalCard.title === 'string' &&
+            typeof terminalCard.question === 'string' &&
+            typeof terminalCard.resolution === 'string'
+          ) {
+            await adapter.editMessage(
+              tid,
+              content.messageId as string,
+              terminalApprovalMessage(terminalCard as TerminalApprovalCard),
+            );
+          } else {
+            await adapter.editMessage(tid, content.messageId as string, {
+              markdown: transformText((content.text as string) || (content.markdown as string) || ''),
+            });
+          }
           return;
         }
-        const options: NormalizedOption[] = normalizeOptions(content.options as never);
-        const card = Card({
-          title,
-          children: [
-            CardText(question),
-            Actions(
-              // Encode button id/value with the option index rather than the
-              // full value. Telegram caps callback_data at 64 bytes, and
-              // long values (e.g. ISO datetimes, URLs) push the JSON payload
-              // well past that. The onAction handlers resolve the index back
-              // to the real value via resolveQuestionRender(questionId).
-              options.map((opt, idx) =>
-                Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx), style: opt.style }),
-              ),
-            ),
-          ],
-        });
-        const result = await adapter.postMessage(tid, {
-          card,
-          fallbackText: `${title}\n\n${question}\nOptions: ${options.map((o) => o.label).join(', ')}`,
-        });
-        return result?.id;
-      }
 
-      // Display card (send_card MCP tool) — returns immediately, no callback flow.
-      // Non-URL actions are dropped: send_card's contract is fire-and-forget, so a
-      // callback button would have nowhere to land. URL actions render as link buttons.
-      if (content.type === 'card' && content.card && typeof content.card === 'object') {
-        const cardSpec = content.card as Record<string, unknown>;
-        const title = (cardSpec.title as string) || '';
-        const fallbackText = (content.fallbackText as string) || (cardSpec.description as string) || title || '';
-
-        const cardChildren: CardChild[] = [];
-        if (typeof cardSpec.description === 'string' && cardSpec.description) {
-          cardChildren.push(CardText(cardSpec.description));
+        if (content.operation === 'reaction' && content.messageId && content.emoji) {
+          await adapter.addReaction(tid, content.messageId as string, content.emoji as string);
+          return;
         }
-        if (Array.isArray(cardSpec.children)) {
-          for (const child of cardSpec.children) {
-            if (typeof child === 'string' && child) {
-              cardChildren.push(CardText(child));
-            } else if (
-              child &&
-              typeof child === 'object' &&
-              typeof (child as Record<string, unknown>).text === 'string'
-            ) {
-              cardChildren.push(CardText((child as Record<string, string>).text));
+
+        // Ask question card — render as Card with buttons
+        if (content.type === 'ask_question' && content.questionId && content.options) {
+          const questionId = content.questionId as string;
+          const title = content.title as string;
+          const question = content.question as string;
+          if (!title) {
+            log.error('ask_question missing required title — skipping delivery', { questionId });
+            return;
+          }
+          const options: NormalizedOption[] = normalizeOptions(content.options as never);
+          const card = Card({
+            title,
+            children: [
+              CardText(question),
+              Actions(
+                // Encode button id/value with the option index rather than the
+                // full value. Telegram caps callback_data at 64 bytes, and
+                // long values (e.g. ISO datetimes, URLs) push the JSON payload
+                // well past that. The onAction handlers resolve the index back
+                // to the real value via resolveQuestionRender(questionId).
+                options.map((opt, idx) =>
+                  Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx), style: opt.style }),
+                ),
+              ),
+            ],
+          });
+          const result = await adapter.postMessage(tid, {
+            card,
+            fallbackText: `${title}\n\n${question}\nOptions: ${options.map((o) => o.label).join(', ')}`,
+          });
+          return result?.id;
+        }
+
+        // Display card (send_card MCP tool) — returns immediately, no callback flow.
+        // Non-URL actions are dropped: send_card's contract is fire-and-forget, so a
+        // callback button would have nowhere to land. URL actions render as link buttons.
+        if (content.type === 'card' && content.card && typeof content.card === 'object') {
+          const cardSpec = content.card as Record<string, unknown>;
+          const title = (cardSpec.title as string) || '';
+          const fallbackText = (content.fallbackText as string) || (cardSpec.description as string) || title || '';
+
+          const cardChildren: CardChild[] = [];
+          if (typeof cardSpec.description === 'string' && cardSpec.description) {
+            cardChildren.push(CardText(cardSpec.description));
+          }
+          if (Array.isArray(cardSpec.children)) {
+            for (const child of cardSpec.children) {
+              if (typeof child === 'string' && child) {
+                cardChildren.push(CardText(child));
+              } else if (
+                child &&
+                typeof child === 'object' &&
+                typeof (child as Record<string, unknown>).text === 'string'
+              ) {
+                cardChildren.push(CardText((child as Record<string, string>).text));
+              }
             }
           }
-        }
-        if (Array.isArray(cardSpec.actions)) {
-          const linkButtons = (cardSpec.actions as Array<Record<string, unknown>>)
-            .filter((a) => typeof a.url === 'string' && a.url && typeof a.label === 'string' && a.label)
-            .map((a) => {
-              const style = a.style;
-              const safeStyle: 'primary' | 'danger' | 'default' | undefined =
-                style === 'primary' || style === 'danger' || style === 'default' ? style : undefined;
-              return LinkButton({
-                label: a.label as string,
-                url: a.url as string,
-                style: safeStyle,
+          if (Array.isArray(cardSpec.actions)) {
+            const linkButtons = (cardSpec.actions as Array<Record<string, unknown>>)
+              .filter((a) => typeof a.url === 'string' && a.url && typeof a.label === 'string' && a.label)
+              .map((a) => {
+                const style = a.style;
+                const safeStyle: 'primary' | 'danger' | 'default' | undefined =
+                  style === 'primary' || style === 'danger' || style === 'default' ? style : undefined;
+                return LinkButton({
+                  label: a.label as string,
+                  url: a.url as string,
+                  style: safeStyle,
+                });
               });
-            });
-          if (linkButtons.length > 0) {
-            cardChildren.push(Actions(linkButtons));
+            if (linkButtons.length > 0) {
+              cardChildren.push(Actions(linkButtons));
+            }
           }
+
+          if (cardChildren.length === 0 && !title) {
+            log.warn('send_card payload empty, skipping delivery');
+            return;
+          }
+
+          const card = Card({ title, children: cardChildren });
+          const result = await adapter.postMessage(tid, { card, fallbackText });
+          return result?.id;
         }
 
-        if (cardChildren.length === 0 && !title) {
-          log.warn('send_card payload empty, skipping delivery');
-          return;
+        // Normal message
+        const rawText = (content.markdown as string) || (content.text as string);
+        const text = rawText ? transformText(rawText) : rawText;
+        if (text) {
+          // Attach files if present (FileUpload format: { data, filename })
+          const fileUploads = message.files?.map((f: { data: Buffer; filename: string }) => ({
+            data: f.data,
+            filename: f.filename,
+          }));
+          // Split if over the adapter's max length. Files ride on the first
+          // chunk so the head of the reply still carries them.
+          const chunks =
+            config.maxTextLength && text.length > config.maxTextLength
+              ? splitForLimit(text, config.maxTextLength)
+              : [text];
+          let firstId: string | undefined;
+          for (let i = 0; i < chunks.length; i++) {
+            const chunk = chunks[i];
+            const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
+            const result = await adapter.postMessage(
+              tid,
+              attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
+            );
+            if (i === 0) firstId = result?.id;
+          }
+          return firstId;
+        } else if (message.files && message.files.length > 0) {
+          // Files only, no text
+          const fileUploads = message.files.map((f: { data: Buffer; filename: string }) => ({
+            data: f.data,
+            filename: f.filename,
+          }));
+          const result = await adapter.postMessage(tid, { markdown: '', files: fileUploads });
+          return result?.id;
         }
-
-        const card = Card({ title, children: cardChildren });
-        const result = await adapter.postMessage(tid, { card, fallbackText });
-        return result?.id;
-      }
-
-      // Normal message
-      const rawText = (content.markdown as string) || (content.text as string);
-      const text = rawText ? transformText(rawText) : rawText;
-      if (text) {
-        // Attach files if present (FileUpload format: { data, filename })
-        const fileUploads = message.files?.map((f: { data: Buffer; filename: string }) => ({
-          data: f.data,
-          filename: f.filename,
-        }));
-        // Split if over the adapter's max length. Files ride on the first
-        // chunk so the head of the reply still carries them.
-        const chunks =
-          config.maxTextLength && text.length > config.maxTextLength
-            ? splitForLimit(text, config.maxTextLength)
-            : [text];
-        let firstId: string | undefined;
-        for (let i = 0; i < chunks.length; i++) {
-          const chunk = chunks[i];
-          const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
-          const result = await adapter.postMessage(
-            tid,
-            attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
-          );
-          if (i === 0) firstId = result?.id;
+      } finally {
+        const remaining = (deliveringCount.get(tid) ?? 1) - 1;
+        if (remaining > 0) deliveringCount.set(tid, remaining);
+        else deliveringCount.delete(tid);
+        // A startTyping still unresolved here will repaint status after the
+        // reply above; clear it (best-effort) once it lands. Covers both the
+        // bounded wait above timing out and a tick racing in mid-post. No-op
+        // for adapters without an explicit clear.
+        const straggler = typingInFlight.get(tid);
+        if (straggler) {
+          void straggler.then(() => (adapter as StopTypingAdapter).stopTyping?.(tid)).catch(() => {});
         }
-        return firstId;
-      } else if (message.files && message.files.length > 0) {
-        // Files only, no text
-        const fileUploads = message.files.map((f: { data: Buffer; filename: string }) => ({
-          data: f.data,
-          filename: f.filename,
-        }));
-        const result = await adapter.postMessage(tid, { markdown: '', files: fileUploads });
-        return result?.id;
       }
     },
 
     async setTyping(platformId: string, threadId: string | null) {
       const tid = threadId ?? platformId;
-      await adapter.startTyping(tid);
+      // Mid-post for this tid: a paint now would land after the reply's
+      // auto-clear and stick — skip the tick entirely (see deliveringCount).
+      if (deliveringCount.has(tid)) return;
+      const call = adapter.startTyping(tid);
+      // Track the in-flight call so deliver() can order the reply after it
+      // (see typingInFlight above). Self-clears on settle; the guard keeps a
+      // newer call's entry from being deleted by an older call settling late.
+      const tracked: Promise<void> = call
+        .catch(() => {})
+        .finally(() => {
+          if (typingInFlight.get(tid) === tracked) typingInFlight.delete(tid);
+        });
+      typingInFlight.set(tid, tracked);
+      await call;
     },
 
     async teardown() {
