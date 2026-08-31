@@ -34,6 +34,13 @@ jobs:
           git fetch origin channels providers
           echo "channels=$(git rev-parse origin/channels)" >> "$GITHUB_OUTPUT"
           echo "providers=$(git rev-parse origin/providers)" >> "$GITHUB_OUTPUT"
+      - name: Validate all checked-in skills
+        run: pnpm exec vitest run scripts/skill-conformance.test.ts
+      - name: Validate registry skill documents
+        env:
+          REGISTRY_CHANNELS_SHA: ${{ steps.refs.outputs.channels }}
+          REGISTRY_PROVIDERS_SHA: ${{ steps.refs.outputs.providers }}
+        run: pnpm exec tsx scripts/test-registry-skills.ts --validate-docs
 
   test:
     needs: discover

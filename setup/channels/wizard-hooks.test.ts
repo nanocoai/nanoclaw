@@ -17,8 +17,9 @@ import { join } from 'node:path';
 
 import * as p from '@clack/prompts';
 
+import { registerSkillCompanions } from '../skill-compositions.js';
 import { runChannelSkill, runChannelSkillWithPreStep } from './run-channel-skill.js';
-import { registerChannelPreStep, registerCompanionSkills } from './companions.js';
+import { registerChannelPreStep } from './companions.js';
 import { BACK_TO_CHANNEL_SELECTION } from '../lib/back-nav.js';
 
 /** Write a channel install skill that resolves the wire inputs and, when the
@@ -204,7 +205,7 @@ describe('companion skills', () => {
     writeCompanionSkill(root, 'fixture-companion-a');
     writeCompanionSkill(root, 'fixture-companion-b');
     process.chdir(root);
-    registerCompanionSkills('fixturecomp', ['fixture-companion-a', 'fixture-companion-b']);
+    registerSkillCompanions('add-fixturecomp', [{ skill: 'fixture-companion-a' }, { skill: 'fixture-companion-b' }]);
 
     const cmds: string[] = [];
     await runChannelSkill('fixturecomp', 'Bob Smith', {
@@ -237,7 +238,7 @@ describe('companion skills', () => {
     writeCompanionSkill(root, 'fixture-companion-ok');
     writeCompanionSkill(root, 'fixture-companion-bad');
     process.chdir(root);
-    registerCompanionSkills('fixturedeg', ['fixture-companion-ok', 'fixture-companion-bad']);
+    registerSkillCompanions('add-fixturedeg', [{ skill: 'fixture-companion-ok' }, { skill: 'fixture-companion-bad' }]);
 
     const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
     const cmds: string[] = [];
@@ -261,7 +262,9 @@ describe('companion skills', () => {
     // and appended barrel imports before failing, and restarting could boot
     // that half-applied state. The operator is told to repair, then restart.
     expect(cmds.filter((c) => c === 'bash setup/lib/restart.sh')).toHaveLength(0);
-    const held = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('Skipping the deferred service restart'));
+    const held = warn.mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.includes('Skipping the deferred service restart'));
     expect(held).toHaveLength(1);
   });
 

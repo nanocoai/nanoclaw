@@ -423,7 +423,7 @@ export function referenceProse(md: string): string {
 // A hardcoded `origin` breaks forks where the registry branch lives on
 // `upstream`. Generic mirror of channels-remote.sh: explicit override → the
 // first remote that actually has the branch → origin.
-function defaultResolveRemote(branch: string, root: string): string {
+export function defaultResolveRemote(branch: string, root: string): string {
   const override = process.env.NANOCLAW_CHANNELS_REMOTE;
   if (override) return override;
   const cap = (cmd: string): string => {

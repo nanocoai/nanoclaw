@@ -27,11 +27,14 @@
 // milliseconds inside the normal vitest CI step.
 
 import { describe, it, expect, afterAll } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { applySkill, fullyApplied, type ApplyEvent, type ApplyResult } from './skill-apply.js';
+import { getSkillCompanions } from '../setup/skill-compositions.js';
+import { validateSkill } from '../src/templates/skills.js';
 import {
   parseDirectives,
   validate,
@@ -45,6 +48,16 @@ import {
 const ROOT = process.cwd();
 const SKILLS_DIR = join(ROOT, '.claude/skills');
 const CHAT_VERSION = resolveChatCoreVersion(ROOT);
+
+function findSkillDirs(root: string): string[] {
+  return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+    if (!entry.isDirectory()) return [];
+    const dir = join(root, entry.name);
+    return [...(existsSync(join(dir, 'SKILL.md')) ? [dir] : []), ...findSkillDirs(dir)];
+  });
+}
+
+const ALL_SKILL_DIRS = [SKILLS_DIR, join(ROOT, 'container/skills')].flatMap(findSkillDirs);
 
 // ---------------------------------------------------------------------------
 // Discovery: every skill whose SKILL.md opens an nc: fence.
@@ -163,6 +176,31 @@ const isSideEffectRun = (d: Directive | undefined): boolean =>
 // ---------------------------------------------------------------------------
 
 describe('skill discovery', () => {
+  it.each(ALL_SKILL_DIRS)('%s has valid skill anatomy', (dir) => {
+    expect(validateSkill(dir)).toBeUndefined();
+  });
+
+  it('includes every declared companion composition in the E2E list', () => {
+    const listed = JSON.parse(
+      execFileSync('pnpm', ['exec', 'tsx', 'scripts/test-registry-skills.ts', '--list'], {
+        cwd: ROOT,
+        encoding: 'utf8',
+      }),
+    ) as Array<{ skill: string }>;
+    const expected = readdirSync(SKILLS_DIR)
+      .filter((name) => name.startsWith('add-') && existsSync(join(SKILLS_DIR, name, 'SKILL.md')))
+      .map((name) => [name, ...getSkillCompanions(name).map(({ skill }) => skill)])
+      .filter((steps) => steps.length > 1)
+      .map((steps) => steps.join('+'))
+      .sort();
+    expect(
+      listed
+        .map(({ skill }) => skill)
+        .filter((skill) => skill.includes('+'))
+        .sort(),
+    ).toEqual(expected);
+  });
+
   it('finds the fence-carrying skills', () => {
     // Sanity floor: discovery walking the wrong directory (or the fence regex
     // regressing) must fail loudly, not silently skip the whole suite.
@@ -174,6 +212,12 @@ describe('skill discovery', () => {
   it('finds the prose docs', () => {
     expect(SKILL_DOCS.map((d) => d.doc)).toContain('add-slack/REMOVE.md');
     expect(SKILL_DOCS.length).toBeGreaterThanOrEqual(30);
+  });
+
+  it('finds nested skills', () => {
+    const topLevel = readdirSync(SKILLS_DIR).filter((name) => existsSync(join(SKILLS_DIR, name, 'SKILL.md')));
+    expect(ALL_SKILL_DIRS.length).toBeGreaterThan(topLevel.length);
+    expect(ALL_SKILL_DIRS).toContain(join(ROOT, 'container/skills/welcome'));
   });
 });
 

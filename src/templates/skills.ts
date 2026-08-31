@@ -43,14 +43,19 @@ export function readPluginSkills(pluginDir: string): { skills: PluginSkill[]; re
 }
 
 /** Returns a problem description, or undefined when the skill conforms. */
-function validateSkill(skillDir: string): string | undefined {
+export function validateSkill(skillDir: string): string | undefined {
   const skillMd = path.join(skillDir, 'SKILL.md');
   if (!fs.existsSync(skillMd)) return 'no SKILL.md';
   if (fs.lstatSync(skillMd).isSymbolicLink() || !fs.lstatSync(skillMd).isFile()) {
     return 'SKILL.md is not a regular file';
   }
 
-  const lines = fs.readFileSync(skillMd, 'utf-8').split(/\r?\n/);
+  return validateSkillMarkdown(fs.readFileSync(skillMd, 'utf-8'));
+}
+
+/** Returns a problem description, or undefined when SKILL.md content conforms. */
+export function validateSkillMarkdown(markdown: string): string | undefined {
+  const lines = markdown.split(/\r?\n/);
   if (lines[0] !== '---') return 'SKILL.md is missing YAML frontmatter';
   const closing = lines.indexOf('---', 1);
   if (closing === -1) return 'SKILL.md frontmatter is missing the closing ---';
