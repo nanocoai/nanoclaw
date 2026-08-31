@@ -20,6 +20,7 @@ import { readEnvFile } from '../env.js';
 import type { ChannelAdapter, ChannelContextDefaults, ChannelDefaults } from './adapter.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
+import { setSlackAuthorIsBotResolver } from './slack-a2a-guard.js';
 import { extractSlackRawText } from './slack-raw-text.js';
 
 /**
@@ -173,6 +174,10 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
     signingSecret: env[keys.signingSecret],
     appToken,
     mode: appToken ? 'socket' : 'webhook',
+  });
+  setSlackAuthorIsBotResolver(options.instanceKey ?? 'slack', async (userId) => {
+    const user = await slackAdapter.getUser(userId);
+    return user?.isBot ?? null;
   });
   const bridge = createChatSdkBridge({
     adapter: slackAdapter,
