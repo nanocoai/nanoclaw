@@ -10,16 +10,45 @@
  * Preconditions: NanoClaw host service running, an agent group wired to
  * `cli/local` via `/init-first-agent` or `/manage-channels`.
  */
+import fs from 'fs';
 import net from 'net';
 import path from 'path';
 
-import { DATA_DIR } from '../src/config.js';
+import { CENTRAL_DB_PATH, DATA_DIR } from '../src/config.js';
+import { closeDb, initDb } from '../src/db/connection.js';
+import { checkCliWiring, WIRE_HINT } from './chat-wiring.js';
 
 const SILENCE_MS = 2000; // exit after this much quiet time following the first reply
 const TOTAL_TIMEOUT_MS = 120_000; // hard stop
 
 function socketPath(): string {
   return path.join(DATA_DIR, 'cli.sock');
+}
+
+/**
+ * Fail fast when `cli/local` has no agent wired: the message would route and
+ * wake a container, but no reply can ever come back to this terminal, so the
+ * old behavior was a 120s opaque timeout (#2703). Best-effort — any error in
+ * the check itself (missing DB, schema drift) falls through to the normal
+ * chat path, which still carries its own timeout.
+ */
+async function warnIfUnwired(): Promise<boolean> {
+  // Opening a missing DB would create it as a side effect; a fresh checkout
+  // has no wiring to check anyway, and the socket-connect error path already
+  // explains a not-running service better than the wiring hint would.
+  if (!fs.existsSync(CENTRAL_DB_PATH)) return false;
+  try {
+    const db = await initDb(CENTRAL_DB_PATH, { role: 'tool' });
+    const status = await checkCliWiring(db);
+    await closeDb();
+    if (status !== 'wired') {
+      console.error(WIRE_HINT);
+      return true;
+    }
+  } catch {
+    // Preflight is advisory only — never block chat on it.
+  }
+  return false;
 }
 
 function main(): void {
@@ -98,4 +127,9 @@ function main(): void {
   });
 }
 
+// Usage errors stay first and cost no DB open; the wiring preflight runs
+// only when there is actually a message to send.
+if (process.argv.length > 2 && (await warnIfUnwired())) {
+  process.exit(4);
+}
 main();
