@@ -10,8 +10,32 @@ root="$(cd "$here/../.." && pwd)"
 # shellcheck source=/dev/null
 source "$here/install-slug.sh"
 
+# macOS: `launchctl kickstart` only operates on services that are currently
+# LOADED. If the plist was unloaded (by the user, or by peer cleanup), a bare
+# kickstart returns non-zero, the `|| true` swallows it, and this script
+# reports a restart that never happened — the host stays down and the next
+# wiring step fails on a dead CLI socket (#2583). Probe the loaded state
+# first and bootstrap the plist when it isn't.
+restart_darwin() {
+  local label domain plist
+  label="$(launchd_label)"
+  domain="gui/$(id -u)"
+  plist="$HOME/Library/LaunchAgents/${label}.plist"
+
+  if launchctl print "$domain/$label" >/dev/null 2>&1; then
+    launchctl kickstart -k "$domain/$label" 2>/dev/null || true
+  elif [ -f "$plist" ]; then
+    # Not loaded but installed — load it (bootstrap starts RunAtLoad jobs;
+    # kickstart demand-starts in case launchd leaves the job pended).
+    launchctl bootstrap "$domain" "$plist" 2>/dev/null || true
+    launchctl kickstart "$domain/$label" 2>/dev/null || true
+  fi
+  # Neither loaded nor installed: fresh setup before the service step —
+  # nothing to restart, and the socket wait below stays a fast no-op signal.
+}
+
 case "$(uname -s)" in
-  Darwin) launchctl kickstart -k "gui/$(id -u)/$(launchd_label)" 2>/dev/null || true ;;
+  Darwin) restart_darwin ;;
   Linux) systemctl --user restart "$(systemd_unit)" 2>/dev/null \
     || sudo systemctl restart "$(systemd_unit)" 2>/dev/null || true ;;
 esac
