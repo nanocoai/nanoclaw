@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
 import { parseArgv } from './parse-argv.js';
+import { stripNodeWarnings } from './stdin-json.test-utils.js';
 import { MAX_STDIN_JSON_BYTES, readStdinJsonArgs, type StdinJsonStream } from './stdin-json.js';
 
 async function* stream(...chunks: Array<string | Uint8Array>): StdinJsonStream {
@@ -87,6 +88,34 @@ describe('bounded stdin JSON', () => {
   });
 });
 
+describe('stripNodeWarnings', () => {
+  it('removes a deprecation warning and its trace hint, keeping CLI output', () => {
+    const stderr =
+      '(node:2826860) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.\n' +
+      '(Use `node --trace-deprecation ...` to show where the warning was created)\n' +
+      'ncl: --stdin-json input is not valid JSON\n';
+    expect(stripNodeWarnings(stderr)).toBe('ncl: --stdin-json input is not valid JSON\n');
+  });
+
+  it('removes multiple warnings of different categories', () => {
+    const stderr =
+      '(node:1) [DEP0205] DeprecationWarning: `module.register()` is deprecated.\n' +
+      '(node:1) ExperimentalWarning: something experimental\n' +
+      '(Use `node --trace-warnings ...` to show where the warning was created)\n';
+    expect(stripNodeWarnings(stderr)).toBe('');
+  });
+
+  it('returns real CLI stderr untouched', () => {
+    expect(stripNodeWarnings('ncl: --stdin-json input is empty\n')).toBe('ncl: --stdin-json input is empty\n');
+    expect(stripNodeWarnings('')).toBe('');
+  });
+
+  it('does not eat lines that merely mention Warning mid-text', () => {
+    const stderr = 'ncl: Warning: something the CLI itself said\n';
+    expect(stripNodeWarnings(stderr)).toBe(stderr);
+  });
+});
+
 describe('host CLI flags', () => {
   it('keeps --json as output mode while excluding --stdin-json from request args', () => {
     expect(parseArgv(['groups', 'update', '--stdin-json', '--json', '--force'])).toEqual({
@@ -110,6 +139,6 @@ describe('host CLI flags', () => {
 
     expect(result.status).toBe(2);
     expect(result.stdout).toBe('');
-    expect(result.stderr).toBe('ncl: --stdin-json input is not valid JSON\n');
+    expect(stripNodeWarnings(result.stderr)).toBe('ncl: --stdin-json input is not valid JSON\n');
   });
 });
