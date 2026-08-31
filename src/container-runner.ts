@@ -961,6 +961,28 @@ export function mergeMounts(composed: MountSpec[], contributed: MountSpec[]): Mo
  * with argv assembly removed: the host says what a session *is*, the driver
  * says how it is realized.
  */
+/**
+ * Output-token ceiling for the Claude Agent SDK. Unset, the SDK caps every
+ * turn at 32000 output tokens and destroys the turn when the model wants to
+ * write more ("Claude's response exceeded the 32000 output token maximum"),
+ * even though every current model's real ceiling is higher. Model-aware
+ * because the ceilings differ and asking above a model's ceiling is a 400:
+ * Haiku tops out at 64K while Opus/Sonnet take 128K. Unknown or custom model
+ * strings get 64K — the value every current model accepts — rather than
+ * guessing high and risking the 400. `NANOCLAW_MAX_OUTPUT_TOKENS` overrides
+ * the table for operators who want a tighter cap (e.g. to bound spend on a
+ * runaway agent). This is a ceiling, not a target: ordinary turns are
+ * unaffected, only turns that actually need the room use it.
+ */
+export function maxOutputTokensFor(model: string | null | undefined): number {
+  const override = Number(process.env.NANOCLAW_MAX_OUTPUT_TOKENS);
+  if (Number.isFinite(override) && override > 0) return Math.floor(override);
+  const m = (model ?? '').toLowerCase();
+  if (m.includes('haiku')) return 64_000;
+  if (!m || m.includes('opus') || m.includes('sonnet')) return 128_000;
+  return 64_000;
+}
+
 export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec {
   const { agentGroup, session, containerName, mounts, containerConfig, contribution, gateway, mailboxEnvironment } =
     input;
@@ -969,6 +991,12 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     TZ: containerConfig.timezone ?? TIMEZONE,
     ...mailboxEnvironment,
   };
+  // Raise the SDK's 32000 output-token default to the model's real ceiling.
+  // Claude provider only — the variable is read by the Claude Agent SDK and
+  // means nothing to other providers, whose limits are configured elsewhere.
+  if (resolveProviderName(session.agent_provider, containerConfig.provider) === 'claude') {
+    env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(maxOutputTokensFor(containerConfig.model));
+  }
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.
   // The model provider's contribution fills first, the gateway's second — a
