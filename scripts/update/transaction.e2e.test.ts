@@ -222,6 +222,84 @@ describe('update-nanoclaw transaction end to end', () => {
     expect(fs.readFileSync(path.join(fixture.install, 'nanoclaw.pid'), 'utf8')).toBe('1234\n');
   });
 
+  it('snapshots and restores symlinked mutable roots without replacing the link', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const externalRoot = temp('nanoclaw-external-data-');
+    const externalData = path.join(externalRoot, 'data');
+    const dataLink = path.join(fixture.install, 'data');
+    fs.renameSync(dataLink, externalData);
+    const relativeTarget = path.relative(fixture.install, externalData);
+    fs.symlinkSync(relativeTarget, dataLink);
+    fs.appendFileSync(path.join(fixture.install, '.git/info/exclude'), '\n/data\n');
+    const { runtime } = fakeRuntime(fixture.install);
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    state = await cutoverUpdate(fixture.install, state.id, runtime);
+
+    const snapshotData = path.join(state.transactionRoot, 'snapshot', 'data');
+    expect(fs.lstatSync(snapshotData).isDirectory()).toBe(true);
+    expect(fs.readFileSync(path.join(snapshotData, 'v2.db'), 'utf8')).toBe('old-schema');
+    expect(state.snapshot?.find((entry) => entry.relativePath === 'data')?.symlinkTarget).toBe(relativeTarget);
+
+    fs.writeFileSync(path.join(externalData, 'v2.db'), 'forward-migrated-schema');
+    state = await rollbackUpdate(fixture.install, state.id, runtime);
+
+    expect(state.phase).toBe('rolled-back');
+    expect(fs.lstatSync(dataLink).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(dataLink)).toBe(relativeTarget);
+    expect(fs.readFileSync(path.join(externalData, 'v2.db'), 'utf8')).toBe('old-schema');
+  });
+
+  it('fails closed before restore when a mutable-root symlink changed after snapshot', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const externalRoot = temp('nanoclaw-external-data-');
+    const externalData = path.join(externalRoot, 'data');
+    const replacementData = path.join(externalRoot, 'replacement');
+    const dataLink = path.join(fixture.install, 'data');
+    fs.renameSync(dataLink, externalData);
+    fs.mkdirSync(replacementData);
+    fs.symlinkSync(path.relative(fixture.install, externalData), dataLink);
+    fs.appendFileSync(path.join(fixture.install, '.git/info/exclude'), '\n/data\n');
+    const { runtime } = fakeRuntime(fixture.install);
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+    state = await cutoverUpdate(fixture.install, state.id, runtime);
+    fs.writeFileSync(path.join(fixture.install, '.env'), 'EXAMPLE=post-update\n');
+    fs.rmSync(dataLink);
+    fs.symlinkSync(path.relative(fixture.install, replacementData), dataLink);
+
+    await expect(rollbackUpdate(fixture.install, state.id, runtime)).rejects.toThrow(
+      'Mutable-state symlink changed after snapshot',
+    );
+    expect(fs.readFileSync(path.join(fixture.install, '.env'), 'utf8')).toBe('EXAMPLE=post-update\n');
+    expect(fs.readlinkSync(dataLink)).toBe(path.relative(fixture.install, replacementData));
+  });
+
+  it('fails snapshot creation for a dangling mutable-root symlink', async () => {
+    const fixture = createForkFixture();
+    previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
+    process.env.NANOCLAW_UPDATE_DIR = temp('nanoclaw-update-state-');
+    const dataLink = path.join(fixture.install, 'data');
+    fs.rmSync(dataLink, { recursive: true });
+    fs.symlinkSync('../missing-nanoclaw-data', dataLink);
+    fs.appendFileSync(path.join(fixture.install, '.git/info/exclude'), '\n/data\n');
+    const { runtime } = fakeRuntime(fixture.install);
+
+    let state = prepareUpdate({ projectRoot: fixture.install, upstreamRef: 'upstream/main' }, runtime);
+    state = await validateUpdate(fixture.install, state.id, runtime);
+
+    await expect(cutoverUpdate(fixture.install, state.id, runtime)).rejects.toThrow(/ENOENT/);
+    state = loadState(fixture.install, state.id);
+    expect(state.phase).toBe('validated');
+    expect(state.snapshot).toBeUndefined();
+  });
+
   it('prunes only older terminal transactions and keeps the selected rollback point', async () => {
     const fixture = createForkFixture();
     previousUpdateDir = process.env.NANOCLAW_UPDATE_DIR;
