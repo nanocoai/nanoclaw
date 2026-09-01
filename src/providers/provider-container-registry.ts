@@ -35,6 +35,8 @@ export interface ProviderContainerContext {
   sessionDir: string;
   /** Agent group ID, for any per-group logic. */
   agentGroupId: string;
+  /** Source model configured for this agent group. */
+  model?: string;
   /**
    * Per-group host directory: `<GROUPS_DIR>/<folder>` (mounted RW at
    * `/workspace/agent`). Exists by the time the config fn runs — group
@@ -57,6 +59,8 @@ export interface ProviderContainerContribution {
   mounts?: VolumeMount[];
   /** Extra env vars to pass to the container (`-e KEY=VALUE`). */
   env?: Record<string, string>;
+  /** Hostnames to resolve to 0.0.0.0 inside the container. */
+  blockedHosts?: string[];
 }
 
 /**

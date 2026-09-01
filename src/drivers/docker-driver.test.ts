@@ -182,6 +182,20 @@ describe('spec realization', () => {
     expect(image).toBeGreaterThan(network);
   });
 
+  it('maps blocked hosts to loopback-denied aliases', async () => {
+    const spec = fixtureSpec();
+    spec.containers[0].blockedHosts = ['api.anthropic.com'];
+    await driver().prepare(spec);
+    expect(createArgs().join(' ')).toContain('--add-host api.anthropic.com:0.0.0.0');
+  });
+
+  it('rejects malformed blocked hosts before creating a container', async () => {
+    const spec = fixtureSpec();
+    spec.containers[0].blockedHosts = ['api.anthropic.com:443'];
+    await expect(driver().prepare(spec)).rejects.toMatchObject({ kind: 'spec-invalid', retryable: false });
+    expect(cli.callMatching(/^create /)).toBeUndefined();
+  });
+
   it('emits contributed env after composed env, so the contributed value wins last-wins', async () => {
     // The contract's override rule (ContainerSpec.contributedEnv), realized in
     // Docker vocabulary: the later `-e` wins.

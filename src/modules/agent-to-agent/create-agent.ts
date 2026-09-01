@@ -18,7 +18,7 @@ import path from 'path';
 
 import { GROUPS_DIR } from '../../config.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
-import { getContainerConfig } from '../../db/container-configs.js';
+import { getContainerConfig, updateContainerConfigScalars } from '../../db/container-configs.js';
 import { getSession } from '../../db/sessions.js';
 import { requestWake } from '../../request-wake.js';
 import { groupFolderExistsOnDisk } from '../../group-folder.js';
@@ -157,15 +157,11 @@ async function performCreateAgent(
     created_at: now,
   };
   await createAgentGroup(newGroup);
-  // Subagent path: a child inherits its creator's EFFECTIVE provider, NOT the
-  // instance-wide default — so a child is never spawned on a runtime the parent
-  // can't reach (e.g. a codex-only install where claude isn't authenticated).
-  // Passing it explicitly to initGroupFilesystem pins the child's scaffold and
-  // stamps its config row in one step (a NULL parent resolves to claude). The
-  // operator can still flip a child later with `ncl groups config update
-  // --provider`.
-  const parentProvider = (await getContainerConfig(sourceGroup.id))?.provider ?? 'claude';
+  // A persistent child inherits its creator's effective provider and model.
+  const parentConfig = await getContainerConfig(sourceGroup.id);
+  const parentProvider = parentConfig?.provider ?? 'claude';
   await initGroupFilesystem(newGroup, { instructions: instructions ?? undefined, provider: parentProvider });
+  if (parentConfig?.model) await updateContainerConfigScalars(newGroup.id, { model: parentConfig.model });
 
   // Insert bidirectional destination rows (= ACL grants).
   // Creator refers to child by the name it chose; child refers to creator as "parent".

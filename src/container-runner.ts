@@ -763,6 +763,7 @@ async function resolveProviderContribution(
     ? await fn({
         sessionDir: sessionDir(agentGroup.id, session.id),
         agentGroupId: agentGroup.id,
+        model: containerConfig.model,
         groupDir: path.resolve(GROUPS_DIR, agentGroup.folder),
         selectedSkills: selectedSkillNames(containerConfig),
         hostEnv: process.env,
@@ -971,12 +972,11 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   };
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.
-  // The model provider's contribution fills first, the gateway's second — a
-  // gateway wins a key collision, the override the old raw-argv append got
-  // from Docker's last-wins rule.
+  // The gateway fills first and the model provider second, so provider-owned
+  // routing and credential blanking win a key collision.
   const contributedEnv: Record<string, string> = {
-    ...(contribution.env ?? {}),
     ...(gateway.env ?? {}),
+    ...(contribution.env ?? {}),
   };
 
   const hostUid = process.getuid?.();
@@ -1006,6 +1006,7 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     args: ['exec bun run /app/src/index.ts'],
     mounts: mergeMounts(toMountSpecs(mounts, agentGroup.id), gateway.mounts ?? []),
     contributedEnv,
+    blockedHosts: contribution.blockedHosts,
   };
 
   // The folder label (D9) rides the spec so an admission-side check can pin

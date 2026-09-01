@@ -147,6 +147,7 @@ export class DockerSessionDriver implements SessionDriver {
     args.push(...envArgs(agent.env));
     args.push(...envArgs(agent.contributedEnv ?? {}));
     args.push(...mountArgs(agent.mounts));
+    args.push(...(agent.blockedHosts ?? []).flatMap((host) => ['--add-host', `${host}:0.0.0.0`]));
     // Network topology is driver-private: injected at registration (see
     // `drivers/index.ts`), never carried on the spec. Argv-shaped input has no
     // remaining channel through composition.

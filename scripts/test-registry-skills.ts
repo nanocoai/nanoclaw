@@ -160,7 +160,7 @@ async function testSkill(
       if (event.type === 'step-start') current = byLine.get(event.line);
     },
     exec: (cmd) => {
-      if (/^git fetch skill-ci (channels|providers)$/.test(cmd)) return '';
+      if (/^git fetch skill-ci \+refs\/heads\/(channels|providers):refs\/remotes\/skill-ci\/\1$/.test(cmd)) return '';
       const stub = fixture.exec?.find((candidate) => cmd.includes(candidate.match));
       if (stub) return stub.stdout;
       if (current?.kind === 'run' && STUBBED_EFFECTS.has(String(current.attrs.effect))) {

@@ -152,16 +152,21 @@ describe('composeSessionSpec', () => {
     expect(spec.containers[0].env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
   });
 
+  it('carries provider-blocked hosts onto the agent container', () => {
+    const spec = compose({ contribution: { blockedHosts: ['api.anthropic.com'] } });
+    expect(spec.containers[0].blockedHosts).toEqual(['api.anthropic.com']);
+  });
+
   it('passes non-secret mailbox environment on the composed lane', () => {
     expect(compose().containers[0].env.NANOCLAW_MAILBOX_BACKEND).toBe('sqlite');
   });
 
-  it('the gateway contribution fills the contributed lane last and wins a collision', () => {
+  it('the provider contribution fills the contributed lane last and wins a collision', () => {
     const spec = compose({
       contribution: { env: { HTTPS_PROXY: 'http://provider:1' } },
-      gateway: { env: { HTTPS_PROXY: 'http://gateway-must-win:15001' } },
+      gateway: { env: { HTTPS_PROXY: 'http://gateway:15001' } },
     });
-    expect(spec.containers[0].contributedEnv?.HTTPS_PROXY).toBe('http://gateway-must-win:15001');
+    expect(spec.containers[0].contributedEnv?.HTTPS_PROXY).toBe('http://provider:1');
   });
 
   it('gateway mounts merge collision-free, shadowing a composed mount on the same target', () => {

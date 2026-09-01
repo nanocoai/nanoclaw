@@ -2,7 +2,12 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import {
+  query as sdkQuery,
+  type HookCallback,
+  type PreCompactHookInput,
+  type Settings,
+} from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
@@ -234,36 +239,51 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
  * script. Defense-in-depth: if SDK_DISALLOWED_TOOLS slips through somehow,
  * block the call here instead of letting the agent hang.
  */
-const preToolUseHook: HookCallback = async (input) => {
-  const i = input as { tool_name?: string; tool_input?: Record<string, unknown> };
-  const toolName = i.tool_name ?? '';
-  if (SDK_DISALLOWED_TOOLS.includes(toolName)) {
-    return {
-      decision: 'block',
-      stopReason: `Tool '${toolName}' is not available in this environment — use the nanoclaw equivalent.`,
-    } as unknown as ReturnType<HookCallback>;
-  }
-  // Bash exposes its timeout via the tool_input.timeout field (ms). Any other
-  // tool: no declared timeout.
-  const declaredTimeoutMs =
-    toolName === 'Bash' && typeof i.tool_input?.timeout === 'number' ? (i.tool_input.timeout as number) : null;
-  try {
-    setContainerToolInFlight(toolName, declaredTimeoutMs);
-  } catch (err) {
-    log(`PreToolUse: failed to record container_state: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  return { continue: true };
-};
+function createPreToolUseHook(disallowedTools: readonly string[]): HookCallback {
+  return async (input) => {
+    const i = input as { tool_name?: string; tool_input?: Record<string, unknown> };
+    const toolName = i.tool_name ?? '';
+    if (disallowedTools.includes(toolName)) {
+      return {
+        decision: 'block',
+        stopReason: `Tool '${toolName}' is not available in this environment — use the nanoclaw equivalent.`,
+      } as unknown as ReturnType<HookCallback>;
+    }
+    // Bash exposes its timeout via the tool_input.timeout field (ms). Any other
+    // tool: no declared timeout.
+    const declaredTimeoutMs =
+      toolName === 'Bash' && typeof i.tool_input?.timeout === 'number' ? (i.tool_input.timeout as number) : null;
+    try {
+      setContainerToolInFlight(toolName, declaredTimeoutMs);
+    } catch (err) {
+      log(`PreToolUse: failed to record container_state: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return { continue: true };
+  };
+}
 
-/** Clear in-flight tool on PostToolUse / PostToolUseFailure. */
-const postToolUseHook: HookCallback = async () => {
-  try {
-    clearContainerToolInFlight();
-  } catch (err) {
-    log(`PostToolUse: failed to clear container_state: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  return { continue: true };
-};
+/**
+ * Clear in-flight tool and optionally finish after an asynchronous handoff.
+ *
+ * PostToolUseFailure passes a shouldStop that always returns false: a handoff
+ * that failed produces no follow-up input, so ending the turn there would park
+ * the agent waiting for a message nobody will send.
+ */
+function createPostToolUseHook(
+  shouldStop: (toolName: string, toolInput: Record<string, unknown>) => boolean,
+): HookCallback {
+  return async (input) => {
+    try {
+      clearContainerToolInFlight();
+    } catch (err) {
+      log(`PostToolUse: failed to clear container_state: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const toolUse = input as { tool_name?: string; tool_input?: Record<string, unknown> };
+    return shouldStop(toolUse.tool_name ?? '', toolUse.tool_input ?? {})
+      ? { continue: false, stopReason: 'Asynchronous message handed off; wait for follow-up input.' }
+      : { continue: true };
+  };
+}
 
 /**
  * Read a Claude transcript .jsonl, render a markdown summary, and drop it into
@@ -460,6 +480,28 @@ const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WIN
  */
 const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
 
+/**
+ * Options specific to Claude-SDK-backed providers, beyond the provider-neutral
+ * ProviderOptions bag.
+ */
+export interface ClaudeProviderOptions extends ProviderOptions {
+  /**
+   * Claude SDK settings passed verbatim into the SDK's flag-settings layer.
+   * Note: the SDK's `Settings` type has a top-level index signature, so the
+   * type system does not catch a dropped key; providers relying on a specific
+   * key must pin it with a runtime guard test.
+   */
+  settings?: Settings;
+  /**
+   * SDK tool-name redirects. Provider subclasses use this when a built-in
+   * tool name should keep its model-facing contract but execute through a
+   * provider-owned MCP implementation instead.
+   */
+  toolAliases?: Record<string, string>;
+  /** Additional built-ins a provider must remove from the model context. */
+  disallowedTools?: string[];
+}
+
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
   /**
@@ -476,7 +518,7 @@ export class ClaudeProvider implements AgentProvider {
    * streaming door missed everything (premise violation), the poll-loop
    * fires the wrap-nudge so the model re-sends through the mid-turn door.
    */
-  readonly emitsMidTurnText = true;
+  readonly emitsMidTurnText: boolean = true;
 
   private assistantName?: string;
   private mcpServers: Record<string, McpServerConfig>;
@@ -485,9 +527,12 @@ export class ClaudeProvider implements AgentProvider {
   private model?: string;
   private effort?: string;
   private fastMode?: boolean;
+  private settings?: Settings;
+  private toolAliases: Record<string, string>;
+  private disallowedTools: string[];
   private memorySessionHook?: MemorySessionHookRegistration;
 
-  constructor(options: ProviderOptions = {}) {
+  constructor(options: ClaudeProviderOptions = {}) {
     this.assistantName = options.assistantName;
     this.mcpServers = Object.fromEntries(
       Object.entries(options.mcpServers ?? {}).map(([name, server]) => [name, shimCwd(server)]),
@@ -496,6 +541,9 @@ export class ClaudeProvider implements AgentProvider {
     this.model = options.model;
     this.effort = options.effort;
     this.fastMode = options.fastMode;
+    this.settings = options.settings;
+    this.toolAliases = options.toolAliases ?? {};
+    this.disallowedTools = [...new Set([...SDK_DISALLOWED_TOOLS, ...(options.disallowedTools ?? [])])];
     this.env = {
       ...(options.env ?? {}),
       CLAUDE_CODE_AUTO_COMPACT_WINDOW,
@@ -506,6 +554,10 @@ export class ClaudeProvider implements AgentProvider {
   registerMemorySessionHook(hook: MemorySessionHookRegistration): void {
     writeMemorySessionHook(hook);
     this.memorySessionHook = hook;
+  }
+
+  protected shouldStopAfterTool(_toolName: string, _toolInput: Record<string, unknown>): boolean {
+    return false;
   }
 
   isSessionInvalid(err: unknown): boolean {
@@ -565,8 +617,11 @@ export class ClaudeProvider implements AgentProvider {
         systemPrompt: instructions
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
           : undefined,
-        allowedTools: [...TOOL_ALLOWLIST, ...Object.keys(this.mcpServers).map(mcpAllowPattern)],
-        disallowedTools: SDK_DISALLOWED_TOOLS,
+        allowedTools: [
+          ...TOOL_ALLOWLIST.filter((tool) => !this.disallowedTools.includes(tool)),
+          ...Object.keys(this.mcpServers).map(mcpAllowPattern),
+        ],
+        disallowedTools: this.disallowedTools,
         env: this.env,
         model: this.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -574,15 +629,19 @@ export class ClaudeProvider implements AgentProvider {
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         settingSources: ['project', 'user', 'local'],
-        // Only sent when enabled, so an install that never turns it on passes
-        // exactly the options it always did. `fastMode` is a Settings member
-        // rather than a query option, which is why it rides `settings`.
-        ...(this.fastMode ? { settings: { fastMode: true } } : {}),
+        // Only send a settings overlay when either the provider supplied one
+        // or fast mode is enabled. This preserves the SDK's default path while
+        // allowing provider-specific settings and the core fast-mode toggle to
+        // coexist without one silently replacing the other.
+        ...(this.settings || this.fastMode
+          ? { settings: { ...this.settings, ...(this.fastMode ? { fastMode: true } : {}) } }
+          : {}),
+        ...(Object.keys(this.toolAliases).length > 0 ? { toolAliases: this.toolAliases } : {}),
         mcpServers: this.mcpServers,
         hooks: {
-          PreToolUse: [{ hooks: [preToolUseHook] }],
-          PostToolUse: [{ hooks: [postToolUseHook] }],
-          PostToolUseFailure: [{ hooks: [postToolUseHook] }],
+          PreToolUse: [{ hooks: [createPreToolUseHook(this.disallowedTools)] }],
+          PostToolUse: [{ hooks: [createPostToolUseHook((name, input) => this.shouldStopAfterTool(name, input))] }],
+          PostToolUseFailure: [{ hooks: [createPostToolUseHook(() => false)] }],
           PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],
         },
       },

@@ -30,6 +30,7 @@ vi.mock('../../config.js', async (importOriginal) => ({
 const {
   mockRequestApproval,
   mockGetContainerConfig,
+  mockUpdateContainerConfigScalars,
   mockCreateAgentGroup,
   mockInitGroupFilesystem,
   mockWriteDestinations,
@@ -39,6 +40,7 @@ const {
 } = vi.hoisted(() => ({
   mockRequestApproval: vi.fn().mockResolvedValue(undefined),
   mockGetContainerConfig: vi.fn(),
+  mockUpdateContainerConfigScalars: vi.fn(),
   mockCreateAgentGroup: vi.fn(),
   mockInitGroupFilesystem: vi.fn(),
   mockWriteDestinations: vi.fn(),
@@ -57,6 +59,7 @@ vi.mock('../approvals/index.js', () => ({
 vi.mock('../../db/container-configs.js', () => ({
   getContainerConfig: (...a: unknown[]) => mockGetContainerConfig(...a),
   ensureContainerConfig: () => {},
+  updateContainerConfigScalars: (...a: unknown[]) => mockUpdateContainerConfigScalars(...a),
 }));
 vi.mock('../../db/agent-groups.js', () => ({
   getAgentGroup: (id: string) => ({ id, name: id.toUpperCase(), folder: id, agent_provider: null, created_at: '' }),
@@ -152,20 +155,22 @@ describe('create_agent — guard-based authorization (wrapped delivery action)',
     expect(mockInitGroupFilesystem).toHaveBeenCalledTimes(1);
   });
 
-  it('child inherits the creator provider (codex parent → codex child)', async () => {
+  it('child inherits the creator provider and model', async () => {
     // A subagent must run on the same authenticated runtime as its creator —
-    // on a codex-only install a claude default would 401. The provider is
+    // on a provider-specific install a default could leave the selected route. The provider is
     // passed to initGroupFilesystem, which stamps the child's config row.
     // Red-on-delete: dropping the inheritance lets the child fall through to the
-    // instance default instead of codex.
-    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global', provider: 'codex' });
+    // instance default instead of the configured provider.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global', provider: 'opencode', model: 'local/qwen' });
 
     await runCreateAgent({ name: 'Scout', instructions: 'help' });
 
     expect(mockInitGroupFilesystem).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ provider: 'codex' }),
+      expect.objectContaining({ provider: 'opencode' }),
     );
+    const child = mockCreateAgentGroup.mock.calls[0][0];
+    expect(mockUpdateContainerConfigScalars).toHaveBeenCalledWith(child.id, { model: 'local/qwen' });
   });
 
   it('claude creator pins the child to claude, not the instance default', async () => {

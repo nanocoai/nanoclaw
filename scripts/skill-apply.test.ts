@@ -214,7 +214,7 @@ describe('from-branch copy apply path', () => {
     // the redirect target's parent now exists, so the exec'd `git show … > dest`
     // (mocked here) would not fail with ENOENT on a real run
     expect(existsSync(join(froot, 'container/skills/demo-formatting'))).toBe(true);
-    expect(cmds).toContain('git fetch origin channels');
+    expect(cmds).toContain('git fetch origin +refs/heads/channels:refs/remotes/origin/channels');
     expect(
       cmds.some((c) =>
         /^git show origin\/channels:container\/skills\/demo-formatting\/SKILL\.md > container\/skills\/demo-formatting\/SKILL\.md$/.test(

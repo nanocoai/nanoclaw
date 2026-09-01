@@ -5,7 +5,16 @@
  * Two patterns: native adapters (implement directly) or Chat SDK bridge (wrap a Chat SDK adapter).
  */
 
-/** Passed to the adapter at setup time. */
+/**
+ * Passed to the adapter at setup time.
+ *
+ * The host treats the identity an adapter reports through these callbacks
+ * (`content.senderId` on `onInbound`, `userId` on `onAction`) as authenticated,
+ * and only role-checks it (`isAuthorizedApprovalClick`). It cannot verify the
+ * claim. Any transport an adapter opens must therefore authenticate the caller
+ * before calling these: binding to loopback is not an authenticator, because
+ * agent containers reach host ports through `host.docker.internal`.
+ */
 export interface ChannelSetup {
   /** Called when an inbound message arrives from the platform. */
   onInbound(platformId: string, threadId: string | null, message: InboundMessage): void | Promise<void>;

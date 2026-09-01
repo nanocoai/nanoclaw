@@ -84,6 +84,8 @@ export interface ContainerSpec {
   command?: string[];
   args?: string[];
   mounts: MountSpec[];
+  /** Hostnames that this container must resolve to 0.0.0.0. */
+  blockedHosts?: string[];
   /** Stamped onto the realized object in addition to the canonical key labels. */
   labels?: Record<string, string>;
   // No raw runtime flags here, ever: network topology is driver-private (the
@@ -489,6 +491,9 @@ export function validateSpec(spec: SessionSpec, policy: MountPolicy, capabilitie
       if (looksLikeCredential(value)) {
         throw deniedByPolicy(`credential value in contributed env '${key}' on ${container.role}`);
       }
+    }
+    for (const host of container.blockedHosts ?? []) {
+      if (!/^[a-z0-9.-]+$/i.test(host)) throw specInvalid(`invalid blocked host '${host}' on ${container.role}`);
     }
   }
 }

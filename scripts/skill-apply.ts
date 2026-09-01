@@ -650,7 +650,7 @@ async function applyOne(
       if (d.attrs['from-branch']) {
         const b = String(d.attrs['from-branch']);
         const remote = ctx.resolveRemote(b);
-        await exec(`git fetch ${remote} ${b}`);
+        await exec(`git fetch ${remote} +refs/heads/${b}:refs/remotes/${remote}/${b}`);
         for (const l of d.body) {
           // The shell redirect can't create parent directories, and the dest
           // may not exist on trunk (e.g. container skills that live only on
