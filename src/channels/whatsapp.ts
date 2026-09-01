@@ -876,16 +876,23 @@ registerChannelAdapter('whatsapp', {
             // Filter bot's own messages to prevent echo loops.
             // In self-chat (user messaging their own number), all messages have
             // fromMe=true — use sentMessageCache to distinguish bot echoes from
-            // user-typed messages. For all other chats, the blanket fromMe
-            // filter is correct since the user's phone messages shouldn't wake
-            // the agent in third-party conversations.
+            // user-typed messages. In dedicated mode the blanket fromMe filter
+            // is correct for all other chats, since the user's phone messages
+            // shouldn't wake the agent in third-party conversations. In
+            // shared-number mode the OWNER'S messages are fromMe in every chat
+            // — treat all chats like self-chat (drop only known bot echoes),
+            // otherwise the owner can never address the bot outside self-chat.
             if (fromMe) {
               const isSelfChat = botPhoneJid && chatJid === botPhoneJid;
-              if (!isSelfChat) continue;
+              if (!WHATSAPP_SHARED && !isSelfChat) continue;
               if (sentMessageCache.has(msg.key.id || '')) continue;
             }
 
             const isBotMessage = WHATSAPP_SHARED ? content.startsWith(`${ASSISTANT_NAME}:`) : false;
+            // Shared-mode echo backstop: a bot-authored message that missed the
+            // sentMessageCache (e.g. redelivered after a restart) still carries
+            // the assistant-name prefix — never feed it back to the agent.
+            if (fromMe && isBotMessage) continue;
 
             // Check if this reply answers a pending question via slash command
             const pending = pendingQuestions.get(chatJid);
