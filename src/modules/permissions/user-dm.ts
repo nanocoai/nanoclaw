@@ -33,6 +33,8 @@
  * safe — worst case we round-trip redundantly.
  */
 import { getChannelAdapter, getChannelAdapterExact } from '../../channels/channel-registry.js';
+import { delegateUserDmResolution } from '../process-split/dm-delegation.js';
+import { isSplitController } from '../process-split/role.js';
 import { getMessagingGroup, getMessagingGroupByPlatform, createMessagingGroup } from '../../db/messaging-groups.js';
 import { log } from '../../log.js';
 import type { MessagingGroup, User } from '../../types.js';
@@ -88,6 +90,15 @@ export async function ensureUserDm(
     }
   }
 
+  // Process-split overlay: adapters live on the gateway plane, so a split
+  // controller cannot run the openDM round-trip a resolution-required channel
+  // needs. The ask becomes a durable row; the gateway resolves with this same
+  // function (its adapter is in-process) and this plane adopts the cache row
+  // it persists. In role 'all' the adapter is local and the trunk path below
+  // runs verbatim.
+  if (isSplitController() && !getChannelAdapter(channelType)) {
+    return delegateUserDmResolution(userId, channelType, { privacySafeLogs });
+  }
   // Cache miss: resolve the DM platform_id either via openDM or directly.
   const dmPlatformId = await resolveDmPlatformId(channelType, handle, privacySafeLogs, instance);
   if (!dmPlatformId) return null;

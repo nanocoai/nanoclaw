@@ -7,6 +7,9 @@ export interface AgentGroup {
   /** @deprecated Use container_configs.provider instead. */
   agent_provider: string | null;
   created_at: string;
+  /** Namespaced user id the group was materialized for (NULL outside
+   *  provisioning). OneCLI credential approvals route to this user first. */
+  provisioned_user_id?: string | null;
 }
 
 /** Per-agent-group container runtime config. Source of truth in the DB;
@@ -26,6 +29,11 @@ export interface ContainerConfigRow {
   additional_mounts: string; // JSON: AdditionalMountConfig[]
   cli_scope: string; // 'disabled' | 'group' | 'global'
   timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  /** 0|1. Column added by the module:code-mode migration — absent (undefined) reads as off. */
+  code_mode?: number;
+  /** 'auto' | 'bypass' | NULL. Column added by the module:code-mode permission-mode
+   *  migration — NULL/absent means "follow the deployment default" (D17/T7). */
+  permission_mode?: string | null;
   /**
    * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
    * Optional on the TS type because the trunk schema does not carry the
@@ -85,6 +93,18 @@ export interface User {
   id: string;
   kind: string; // 'phone' | 'email' | 'discord' | 'telegram' | 'matrix' | ...
   display_name: string | null;
+  /**
+   * Corporate email, set at provision time. The governance service joins its
+   * directory on it; an external provisioner persists it. NULL outside provisioning.
+   */
+  email?: string | null;
+  /**
+   * OneCLI project provisioned for this user (credential isolation: their own
+   * app connections/secrets under the host's org key). Set by an external
+   * provisioner; NULL until then. Resolved per-spawn into the container's
+   * OneCLI gateway calls; falls back to ONECLI_PROJECT_ID when unset.
+   */
+  onecli_project_id?: string | null;
   created_at: string;
 }
 

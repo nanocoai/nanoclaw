@@ -7,7 +7,6 @@
  */
 import './core.js';
 import './interactive.js';
-import './agents.js';
 import './self-mod.js';
 // Module barrel — loads registration modules, including the singular mailbox slot.
 import '../modules/index.js';
@@ -20,6 +19,7 @@ function log(msg: string): void {
 
 async function main(): Promise<void> {
   const mailbox = getAgentMailbox();
+  mailbox.setBackgroundSyncMode?.('during-action');
   await mailbox.start(await readMailboxContext());
   try {
     await startMcpServer((action) => mailbox.run(action));
@@ -32,3 +32,5 @@ main().catch((err) => {
   log(`MCP server error: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
 });
+import './canvas.js';
+import './rooms.js';

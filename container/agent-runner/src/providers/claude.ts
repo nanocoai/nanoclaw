@@ -5,6 +5,12 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
+import {
+  discardSkillCreationCandidate,
+  emitSkillCreated,
+  emitSkillUsed,
+  rememberSkillCreationCandidate,
+} from '../modules/host-audit/index.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { shimCwd } from './cwd-shim.js';
@@ -237,6 +243,7 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
 const preToolUseHook: HookCallback = async (input) => {
   const i = input as { tool_name?: string; tool_input?: Record<string, unknown> };
   const toolName = i.tool_name ?? '';
+  rememberSkillCreationCandidate(toolName, i.tool_input, (input as { tool_use_id?: string }).tool_use_id);
   if (SDK_DISALLOWED_TOOLS.includes(toolName)) {
     return {
       decision: 'block',
@@ -256,12 +263,25 @@ const preToolUseHook: HookCallback = async (input) => {
 };
 
 /** Clear in-flight tool on PostToolUse / PostToolUseFailure. */
-const postToolUseHook: HookCallback = async () => {
+const postToolUseHook: HookCallback = async (input) => {
+  const i = input as { tool_name?: string; tool_input?: Record<string, unknown>; tool_use_id?: string };
   try {
     clearContainerToolInFlight();
   } catch (err) {
     log(`PostToolUse: failed to clear container_state: ${err instanceof Error ? err.message : String(err)}`);
   }
+  if (i.tool_name === 'Skill') await emitSkillUsed(i.tool_input);
+  await emitSkillCreated(i.tool_use_id);
+  return { continue: true };
+};
+
+const postToolUseFailureHook: HookCallback = async (input) => {
+  try {
+    clearContainerToolInFlight();
+  } catch (err) {
+    log(`PostToolUseFailure: failed to clear container_state: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  discardSkillCreationCandidate((input as { tool_use_id?: string }).tool_use_id);
   return { continue: true };
 };
 
@@ -582,7 +602,7 @@ export class ClaudeProvider implements AgentProvider {
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],
           PostToolUse: [{ hooks: [postToolUseHook] }],
-          PostToolUseFailure: [{ hooks: [postToolUseHook] }],
+          PostToolUseFailure: [{ hooks: [postToolUseFailureHook] }],
           PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],
         },
       },
