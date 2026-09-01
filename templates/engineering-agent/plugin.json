@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "engineering-agent",
+  "version": "1.0.0",
+  "extensions": {
+    "ai.nanoco.nanoclaw": {
+      "agentName": "engineering-agent"
+    }
+  }
+}
