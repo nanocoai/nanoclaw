@@ -107,7 +107,7 @@ export function startHostSweep(): void {
   void sweep();
 }
 
-export function stopHostSweep(): void {
+export async function stopHostSweep(): Promise<void> {
   running = false;
   registerReconcileEnqueue(null);
   const stoppingWatch = runtimeWatch;
@@ -123,7 +123,7 @@ export function stopHostSweep(): void {
   }
   const stopping = queue;
   queue = null;
-  if (stopping) void stopping.shutdown();
+  if (stopping) await stopping.shutdown();
 }
 
 async function sweep(): Promise<void> {

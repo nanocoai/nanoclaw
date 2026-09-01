@@ -1,0 +1,13 @@
+{
+  "tools": {
+    "mcp_servers": [],
+    "cli_scope": "group"
+  },
+  "approvals": {
+    "capabilities": [
+      {
+        "action": "install_packages"
+      }
+    ]
+  }
+}

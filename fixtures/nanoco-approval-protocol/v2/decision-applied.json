@@ -1,0 +1,7 @@
+{
+  "version": "nanoco.approval.v2",
+  "gatewayEpoch": "gw_0123456789abcdef0123456789abcdef",
+  "approvalId": "ask_0123456789abcdef0123456789abcdef",
+  "status": "applied",
+  "state": "approved"
+}

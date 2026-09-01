@@ -9,7 +9,7 @@ import fs from 'fs';
 
 import type { McpServerConfig } from './providers/types.js';
 
-const CONFIG_PATH = '/workspace/agent/container.json';
+const CONFIG_PATH = process.env.NANOCLAW_CONTAINER_JSON || '/workspace/agent/container.json';
 
 export interface RunnerConfig {
   provider: string;
@@ -20,6 +20,8 @@ export interface RunnerConfig {
   mcpServers: Record<string, McpServerConfig>;
   model?: string;
   effort?: string;
+  /** D13: this group runs the code runner. Read by the code runner's selection-bug guard. */
+  codeMode?: boolean;
   /** API fast serving tier (host-configured; see the host's container-config). */
   fastMode?: boolean;
 }
@@ -51,6 +53,7 @@ export function loadConfig(): RunnerConfig {
     mcpServers: (raw.mcpServers as RunnerConfig['mcpServers']) || {},
     model: (raw.model as string) || undefined,
     effort: (raw.effort as string) || undefined,
+    codeMode: raw.codeMode === true || undefined,
     fastMode: raw.fastMode === true || undefined,
   };
 
