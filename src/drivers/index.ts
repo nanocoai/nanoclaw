@@ -60,7 +60,13 @@ import type { MountPolicy, SessionDriver, SessionSpec } from './types.js';
 
 const DEFAULT_DRIVER_KIND = 'docker';
 
-const SETTINGS = ['NANOCLAW_RUNTIME_DRIVER', 'NANOCLAW_SESSION_MATERIAL_ROOT'] as const;
+const SETTINGS = [
+  'NANOCLAW_RUNTIME_DRIVER',
+  'NANOCLAW_RUNTIME_TIER',
+  'NANOCLAW_WORKSPACE_REPLICA_ROOT',
+  'NANOCLAW_SESSION_MATERIAL_ROOT',
+  'NANOCO_SESSION_MATERIAL_ROOT',
+] as const;
 
 /** `process.env` wins, then `.env`, then the default. */
 export function readSetting(key: (typeof SETTINGS)[number], env: NodeJS.ProcessEnv = process.env): string {
@@ -90,6 +96,19 @@ registerSessionDriver(
 
 export function configuredDriverKind(env: NodeJS.ProcessEnv = process.env): DriverKind {
   return readSetting('NANOCLAW_RUNTIME_DRIVER', env).toLowerCase() || DEFAULT_DRIVER_KIND;
+}
+export function configuredRuntimeTier(env: NodeJS.ProcessEnv = process.env): 'container' | 'vm' {
+  const value = readSetting('NANOCLAW_RUNTIME_TIER', env).toLowerCase() || 'container';
+  if (value !== 'container' && value !== 'vm') {
+    throw new Error(`NANOCLAW_RUNTIME_TIER must be 'container' or 'vm', got '${value}'`);
+  }
+  return value;
+}
+
+export function configuredWorkspaceReplicaRoot(env: NodeJS.ProcessEnv = process.env): string {
+  const value = readSetting('NANOCLAW_WORKSPACE_REPLICA_ROOT', env);
+  if (!value) throw new Error('NANOCLAW_WORKSPACE_REPLICA_ROOT is required for the Kata workspace');
+  return value;
 }
 
 /**
@@ -122,7 +141,10 @@ export function mountPolicy(env: NodeJS.ProcessEnv = process.env): MountPolicy {
     // coincidence of their defaults: move it in `.env` and every
     // identity-material mount is denied by a policy naming a path that looks
     // correct.
-    materialsRoot: readSetting('NANOCLAW_SESSION_MATERIAL_ROOT', env) || path.join(DATA_DIR, 'session-materials'),
+    materialsRoot:
+      readSetting('NANOCO_SESSION_MATERIAL_ROOT', env) ||
+      readSetting('NANOCLAW_SESSION_MATERIAL_ROOT', env) ||
+      path.join(DATA_DIR, 'session-materials'),
   };
 }
 

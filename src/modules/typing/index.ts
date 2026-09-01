@@ -20,6 +20,7 @@
 import fs from 'fs';
 
 import { heartbeatPath } from '../../session-manager.js';
+import { getSessionDriver } from '../../drivers/index.js';
 
 const TYPING_REFRESH_MS = 4000;
 /**
@@ -64,6 +65,20 @@ let adapter: TypingAdapter | null = null;
 const typingRefreshers = new Map<string, TypingTarget>();
 
 /**
+ * Positive evidence that the agent is working: a heartbeat file that exists
+ * AND is recent. Absence is NOT freshness here — that distinction is the whole
+ * reason this sits beside isHeartbeatFresh instead of calling it.
+ */
+function hasLiveHeartbeatEvidence(agentGroupId: string, sessionId: string): boolean {
+  try {
+    const stat = fs.statSync(heartbeatPath(agentGroupId, sessionId));
+    return Date.now() - stat.mtimeMs < HEARTBEAT_FRESH_MS;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Bind the typing module to the channel delivery adapter so it can
  * call `setTyping`. Called once by `src/delivery.ts` inside
  * `setDeliveryAdapter`. Passing a fresh adapter replaces the prior
@@ -88,12 +103,27 @@ async function triggerTyping(
 }
 
 function isHeartbeatFresh(agentGroupId: string, sessionId: string): boolean {
+  // A driver that owns liveness never writes the Host heartbeat file, so the
+  // file's absence is silence, not idleness — the same reasoning host-sweep
+  // applies to SLA enforcement. Docker keeps the file and this returns false
+  // for it exactly as before.
+  //
+  // The driver answer is not enough on its own: typing is fired by whichever
+  // process routes the message, and on a split deployment that is the channel
+  // relay, which has no session driver at all (NANOCLAW_RUNTIME_DRIVER is
+  // unset there — it relays channels, it does not spawn sessions). So the
+  // absence of the FILE has to carry the same meaning as the absence of a
+  // driver, which the ENOENT arm below does.
+  if (getSessionDriver().delegatesLiveness) return true;
   const hbPath = heartbeatPath(agentGroupId, sessionId);
   try {
     const stat = fs.statSync(hbPath);
     return Date.now() - stat.mtimeMs < HEARTBEAT_FRESH_MS;
-  } catch {
-    return false;
+  } catch (error) {
+    // ENOENT: nothing writes this file here, so it can never answer the
+    // question. Silence, not idleness. Any other error is a real failure to
+    // read a file that should exist, and stays conservative.
+    return (error as NodeJS.ErrnoException).code === 'ENOENT';
   }
 }
 
@@ -139,6 +169,21 @@ export function startTypingRefresh(
     // interval running so we resume automatically once the pause
     // expires.
     if (entry.pausedUntil > Date.now()) return;
+
+    // The post-delivery pause has elapsed and this turn already delivered.
+    // Resume only on POSITIVE evidence that the agent is still working — a
+    // heartbeat file that exists and is recent. Asking the driver instead is
+    // not enough: typing is fired by whichever process routes the message, and
+    // on a split deployment that is the channel relay, which has no session
+    // driver at all, so a driver-shaped question answers "not delegated" there
+    // and the indicator runs until the container exits. A new inbound message
+    // calls startTypingRefresh, which clears pausedUntil and starts a fresh
+    // indicator.
+    if (entry.pausedUntil > 0 && !hasLiveHeartbeatEvidence(entry.agentGroupId, sessionId)) {
+      clearInterval(entry.interval);
+      typingRefreshers.delete(sessionId);
+      return;
+    }
 
     const withinGrace = Date.now() - entry.startedAt < TYPING_GRACE_MS;
     if (withinGrace || isHeartbeatFresh(entry.agentGroupId, sessionId)) {

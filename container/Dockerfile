@@ -3,12 +3,8 @@
 # Runs Claude Agent SDK in isolated Linux VM with browser automation.
 #
 # Runtime split:
-#   - agent-runner (our TypeScript code): Bun, mounted RO at /app/src by host
+#   - agent-runner source and dependencies are image-owned under /app
 #   - globally-installed Node CLIs (claude-code, agent-browser): pnpm + Node
-#
-# Source is never baked in — /app/src is provided by a shared read-only
-# bind mount at runtime (see src/container-runner.ts). Source-only changes
-# never require an image rebuild.
 
 FROM node:22-slim
 
@@ -21,6 +17,7 @@ ARG INSTALL_CJK_FONTS=false
 # all users. The global Node CLIs (claude-code, agent-browser) are
 # pinned in cli-tools.json so a skill can add one with a json-merge; Bun (the
 # runtime) is pinned here because it installs from a different source.
+# Floor: >= 1.3.5 — the code runner's PTY is Bun.Terminal.
 ARG BUN_VERSION=1.3.12
 
 # ---- System dependencies -----------------------------------------------------
@@ -30,6 +27,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
         chromium \
+        tmux \
+        jq \
+        ripgrep \
         fonts-liberation \
         fonts-noto-color-emoji \
         libgbm1 \
@@ -62,6 +62,26 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 # ~300MB Chromium. We've already installed the system one above.
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
+# kubectl, for a code-mode agent developing against a claimed dev-env child.
+# Pinned and checksummed to the SAME v1.35.7 the host runtime image installs:
+# one k3s version on the box means one client version, and a second pin here
+# would be a second source of truth that drifts silently.
+ARG KUBECTL_VERSION=v1.35.7
+ARG KUBECTL_SHA256_AMD64=12e97f9d23a9f6cbb87b89becd6bd291e1a858a3379a4e11e2c822c4c1530052
+ARG KUBECTL_SHA256_ARM64=5103d45b8881434d417694057b8ccb5ae79fd310a5c5c13e403c5e62e15909be
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) sha256="$KUBECTL_SHA256_AMD64" ;; \
+      arm64) sha256="$KUBECTL_SHA256_ARM64" ;; \
+      *) echo "unsupported kubectl architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLo /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${arch}/kubectl"; \
+    echo "$sha256  /usr/local/bin/kubectl" | sha256sum -c -; \
+    chmod 0755 /usr/local/bin/kubectl; \
+    kubectl version --client
+
 # ---- Bun runtime -------------------------------------------------------------
 # Install via the official script (handles multi-arch detection), then move
 # the binary to /usr/local/bin so the non-root `node` user can execute it.
@@ -70,14 +90,17 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
     rm -rf /root/.bun
 
 # ---- agent-runner deps -------------------------------------------------------
-# Deps are cached independently of CLI versions. Source is NOT baked in —
-# it's provided by the shared RO mount at runtime.
+# Dependencies and source are cached independently of the global CLI layers.
 WORKDIR /app
 
 COPY agent-runner/package.json agent-runner/bun.lock ./
 
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --frozen-lockfile
+
+COPY --chown=node:node agent-runner/src ./src
+COPY --chown=node:node skills ./skills
+COPY --chown=node:node CLAUDE.md ./CLAUDE.md
 
 # ---- pnpm + global Node CLIs -------------------------------------------------
 # Most stable first, most frequently bumped last. Bumping claude-code
@@ -118,6 +141,9 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \
     chmod +x /usr/local/bin/ncl
 
+COPY nanoclaw-agent-health /usr/local/bin/nanoclaw-agent-health
+RUN chmod 0755 /usr/local/bin/nanoclaw-agent-health
+
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
@@ -144,9 +170,7 @@ ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
 # `bun install` and the pnpm global CLIs on every existing install, for two
 # pieces of metadata. Labels have no filesystem effect, so they cost nothing here.
 #
-# Which lockfile the baked /app/node_modules came from: /app/src is mounted from
-# the host checkout at every spawn, so an image and a checkout whose lockfiles
-# disagree fail as a missing module inside a `--rm` container with no logs.
+# Which lockfile the image-owned /app/src and /app/node_modules were built from.
 # container/pull.sh checks this before retagging. build.sh passes it; a bare
 # `docker build` leaves it empty, which the pull path treats as unverifiable.
 #

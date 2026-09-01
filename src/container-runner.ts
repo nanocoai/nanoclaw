@@ -25,6 +25,15 @@ import {
   TIMEZONE,
 } from './config.js';
 import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
+import { devEnvMaterialMounts, devInstructionMounts } from './code-mode/compose.js';
+import {
+  GATEWAY_MANAGED_ENV_MARKER,
+  boundaryDecisionMounts,
+  deploymentPermissionMode,
+  managedSettingsMounts,
+  resolveCodePermissionMode,
+} from './code-mode/permissions.js';
+import { readEnvFile } from './env.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
@@ -43,23 +52,82 @@ import {
 import { getHostInstanceId } from './host-instance.js';
 import { getDb, hasTable } from './db/connection.js';
 import { getSession } from './db/sessions.js';
-import { getSessionDriver, isSessionEventsDriver } from './drivers/index.js';
+import {
+  configuredDriverKind,
+  configuredRuntimeTier,
+  configuredWorkspaceReplicaRoot,
+  getSessionDriver,
+  isSessionEventsDriver,
+} from './drivers/index.js';
+import {
+  HostWorkspaceRuntime,
+  WORKSPACE_CHECKPOINTS_DORMANT_ON_CONTAINER_TIER,
+  installWorkspaceQuiescer,
+} from './storage/workspace-runtime-factory.js';
+import {
+  ENCRYPTED_WORKSPACE_DORMANT_ON_CONTAINER_TIER,
+  workspaceMounterContainers,
+} from './workspace-mounter.js';
+
+let workspaceRuntimePromise: Promise<HostWorkspaceRuntime> | undefined;
+let workspaceDormancyAnnounced = false;
+
+/**
+ * Announce, once per host process, that the two REQUIRED workspace skills are
+ * composed into this tree and doing nothing.
+ *
+ * Deliberately an announcement and not a refusal: the container tier is a
+ * supported tier, not a misconfiguration, so throwing here would take down the
+ * running runc deployment over its own normal state. What was wrong was the
+ * silence — a skill that composes and then does nothing reads exactly like a
+ * skill that works, which is how a policy grant with no effect and a missing
+ * Slack redirect both survived until the point of use.
+ */
+function announceWorkspaceDormancy(): void {
+  if (workspaceDormancyAnnounced) return;
+  workspaceDormancyAnnounced = true;
+  log.warn('Encrypted workspace skills are composed but DORMANT on this deployment', {
+    driver: configuredDriverKind(),
+    tier: configuredRuntimeTier(),
+    'encrypted-kata-workspace': ENCRYPTED_WORKSPACE_DORMANT_ON_CONTAINER_TIER,
+    'fenced-workspace-checkpoints': WORKSPACE_CHECKPOINTS_DORMANT_ON_CONTAINER_TIER,
+  });
+}
+
+function workspaceRuntime(): Promise<HostWorkspaceRuntime> | undefined {
+  if (configuredStatelessK8sHost()) return undefined;
+  // Every spawn passes through here, on both tiers, which is what makes this
+  // the one gate that can speak for the dormant pair.
+  if (configuredDriverKind() !== 'pod' || configuredRuntimeTier() !== 'vm') {
+    announceWorkspaceDormancy();
+    return undefined;
+  }
+  return (workspaceRuntimePromise ??= HostWorkspaceRuntime.fromEnv());
+}
 import type { SupervisedHandle, SupervisedSnapshot } from './drivers/session-events.js';
 import { GROUP_FOLDER_LABEL, labelValueLegal, specInvalid } from './drivers/types.js';
 import type { ContainerSpec, MountSpec, SessionFailure, SessionSpec } from './drivers/types.js';
-import { getGatewayProvider, type GatewayContribution } from './gateway-providers/index.js';
+import {
+  getGatewayProvider,
+  type GatewayContribution,
+  type GatewaySessionLifecycle,
+} from './gateway-providers/index.js';
 import { initGroupFilesystem } from './group-init.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
+import { requestCapabilityFromContext } from './nanoco/mailbox-capability.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
 import './providers/index.js';
 import {
   getProviderContainerConfig,
+  providerRequiresHostFilesystem,
   providerProvidesAgentSurfaces,
   type ProviderContainerContribution,
+  DEFAULT_PROJECT_DOCUMENT,
+  type ProviderProjectDocument,
   type VolumeMount,
 } from './providers/provider-container-registry.js';
 import {
@@ -72,6 +140,15 @@ import {
   writeSessionRouting,
 } from './session-manager.js';
 import type { AgentGroup, Session } from './types.js';
+import {
+  configuredStatelessK8sHost,
+  loadContainerConfigWithoutMaterializing,
+  statelessAgentMounts,
+  workspaceComposerContainer,
+  workspaceComposerDbInitContainer,
+} from './stateless-k8s/runtime.js';
+import { bindWorkspaceSpec, ensureWorkspace, ensureWorkspacePaths, releaseWorkspace, type WorkspaceAssignment } from './storage/workspace-plane.js';
+import { prepareStatelessRelay } from './stateless-k8s/session-egress.js';
 
 /**
  * Docker defaults /dev/shm to 64m, which silently short-writes past that size.
@@ -92,6 +169,11 @@ interface ActiveSessionRuntime {
    */
   handle: SupervisedHandle;
   containerName: string;
+  gatewayLifecycle?: GatewaySessionLifecycle;
+  workspace?: HostWorkspaceRuntime;
+  workspaceGroupId?: string;
+  /** A failed stop may have left the runtime alive; detach instead of revoking. */
+  teardownIncomplete?: boolean;
   /**
    * When this host started tracking the runtime. Backs the sweep's ceiling
    * check when no heartbeat file exists yet (see `host-sweep.ts`): a container
@@ -116,6 +198,13 @@ interface ActiveSessionRuntime {
 }
 
 const activeContainers = new Map<string, ActiveSessionRuntime>();
+
+installWorkspaceQuiescer(async (groupId) => {
+  if ([...activeContainers.values()].some((runtime) =>
+    runtime.workspaceGroupId === groupId && !runtime.finished)) {
+    throw new Error(`workspace ${groupId} still has a live session runtime`);
+  }
+});
 
 // Claimant identity for the session_claims rows: the host's durable lease
 // instance id when the lease is running, else a process-scoped fallback
@@ -196,6 +285,11 @@ export function getContainerStartedAtMs(sessionId: string): number | undefined {
   return activeContainers.get(sessionId)?.startedAtMs;
 }
 
+/** Container name of a session's live runtime, if any — for host-mediated attach (D20/D22). */
+export function getActiveContainerName(sessionId: string): string | undefined {
+  return activeContainers.get(sessionId)?.containerName;
+}
+
 /**
  * Sessions whose running container could not be claim-fenced at adoption (the
  * store was unreachable). They are deliberately NOT in the registry — nothing
@@ -230,9 +324,25 @@ async function retryPendingAdoption(session: Session): Promise<boolean> {
       `session ${session.id} is claimed by another live host process — not adopting or spawning a duplicate`,
     );
   }
-  const runtime = registerRuntime(session.id, snapshot.handle, snapshot.handle.name, true);
+  const retryAgentGroup = await getAgentGroup(session.agent_group_id);
+  const retryGatewayLifecycle = retryAgentGroup
+    ? await getGatewayProvider().adopt?.({
+        key: snapshot.handle.key,
+        groupName: retryAgentGroup.name,
+        containerName: snapshot.handle.name,
+        capabilities: driver.capabilities(),
+      })
+    : undefined;
+  const runtime = registerRuntime(
+    session.id,
+    snapshot.handle,
+    snapshot.handle.name,
+    retryGatewayLifecycle ?? undefined,
+    true,
+  );
   runtime.claimIncarnation = claimIncarnation;
   runtime.stopReason = undefined;
+  armGatewayUnavailable(session.id, runtime);
   snapshot.handle.onTerminal((failure) => {
     void finishAndResolve(session.id, runtime, failure);
   });
@@ -297,22 +407,32 @@ async function spawnContainer(session: Session): Promise<void> {
   await writeSessionRouting(agentGroup.id, session.id);
   const mailboxKey = { agentGroupId: agentGroup.id, sessionId: session.id };
   const mailbox = getAgentMailbox();
-  writeSessionContext(agentGroup.id, session.id, await mailbox.runnerContext(mailboxKey));
+  const mailboxContext = await mailbox.runnerContext(mailboxKey);
+  const requestCapability = requestCapabilityFromContext(mailboxContext);
+  const stateless = configuredStatelessK8sHost();
+  if (!stateless) writeSessionContext(agentGroup.id, session.id, mailboxContext);
 
-  // Materialize container.json from DB — writes fresh file and returns
-  // the config object, threaded through provider resolution, buildMounts,
-  // and buildContainerArgs so we don't re-read.
-  const containerConfig = await materializeContainerJson(agentGroup.id);
+  // In stateless Kubernetes mode the Host reads configuration but writes no
+  // agent-owned file. The pod-local materializer uses the existing writers.
+  const containerConfig = stateless
+    ? await loadContainerConfigWithoutMaterializing(agentGroup)
+    : await materializeContainerJson(agentGroup.id);
 
   const providerName = resolveProviderName(session.agent_provider, containerConfig.provider);
-  await initGroupFilesystem(agentGroup, { provider: providerName });
+  if (!stateless) await initGroupFilesystem(agentGroup, { provider: providerName });
 
   // Resolve the effective provider + any host-side contribution it declares
   // (extra mounts, env passthrough). Computed once and threaded through both
   // buildMounts and buildContainerArgs so side effects (mkdir, etc.) fire once.
+  if (stateless && providerRequiresHostFilesystem(providerName)) {
+    throw new Error(`stateless Kubernetes Host cannot run provider '${providerName}' because it requires Host filesystem setup`);
+  }
   const { provider, contribution } = await resolveProviderContribution(session, agentGroup, containerConfig);
+  const projectDocument = resolveProjectDocument(provider, contribution);
 
-  const mounts = await buildMounts(agentGroup, session, containerConfig, provider, contribution);
+  const mounts = stateless
+    ? statelessAgentMounts(agentGroup, session, containerConfig, projectDocument, contribution)
+    : await buildMounts(agentGroup, session, containerConfig, provider, contribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
   const mailboxEnvironment = await mailbox.runnerEnvironment(mailboxKey);
 
@@ -323,30 +443,83 @@ async function spawnContainer(session: Session): Promise<void> {
   // as the old wiring was: contribute() throwing aborts the spawn, the inbound
   // row stays pending, and the sweep retries. Network selection is NOT here —
   // topology is driver-private (see `drivers/index.ts`).
-  const gateway = await getGatewayProvider().contribute({
-    key: { installSlug: INSTALL_SLUG, agentGroupId: agentGroup.id, sessionId: session.id },
-    groupName: agentGroup.name,
-    capabilities: driver.capabilities(),
-  });
-  if (gateway.containers?.length && !driver.capabilities().auxiliaryContainers) {
-    // Named at composition, where the error can say which side to change —
-    // not left for the driver's refusal backstop to discover.
-    throw specInvalid(
-      `gateway provider composed auxiliary containers, but driver '${driver.kind}' does not manage them ` +
-        `(capabilities().auxiliaryContainers is false)`,
-    );
+  const workspace = await workspaceRuntime();
+  if (workspace) await workspace.started(agentGroup.id);
+  let gateway: GatewayContribution;
+  try {
+    gateway = await getGatewayProvider().contribute({
+      key: { installSlug: INSTALL_SLUG, agentGroupId: agentGroup.id, sessionId: session.id },
+      groupName: agentGroup.name,
+      containerName,
+      requestCapability,
+      capabilities: driver.capabilities(),
+    });
+  } catch (error) {
+    if (workspace) await workspace.aborted(agentGroup.id);
+    throw error;
   }
-
-  const spec = composeSessionSpec({
-    agentGroup,
-    session,
-    containerName,
-    mounts,
-    containerConfig,
-    contribution,
-    gateway,
-    mailboxEnvironment,
-  });
+  let workspaceAssignment: WorkspaceAssignment | undefined;
+  if (stateless) {
+    const relay = process.env.NANOCLAW_WORKSPACE_S3_TRANSPORT === 'gateway'
+      ? await prepareStatelessRelay({
+          agentId: agentGroup.id,
+          sessionId: session.id,
+          requestCapability: requestCapability ?? '',
+        })
+      : undefined;
+    workspaceAssignment = await ensureWorkspace({
+      groupId: agentGroup.id,
+      sessionId: session.id,
+      runtimeTier: containerConfig.runtimeTier ?? configuredRuntimeTier(),
+      ...(relay ? { relay } : {}),
+    });
+  }
+  let spec: SessionSpec;
+  try {
+    if (gateway.containers?.length && !driver.capabilities().auxiliaryContainers) {
+      throw specInvalid(
+        `gateway provider composed auxiliary containers, but driver '${driver.kind}' does not manage them ` +
+          `(capabilities().auxiliaryContainers is false)`,
+      );
+    }
+    spec = composeSessionSpec({
+      agentGroup,
+      session,
+      containerName,
+      mounts,
+      containerConfig,
+      contribution,
+      projectDocument,
+      gateway,
+      mailboxEnvironment,
+    });
+    if (stateless) {
+      spec.containers.find(({ role }) => role === 'agent')!.env.NANOCLAW_SESSION_CONTEXT =
+        `/run/nanoclaw/session-context/${session.id}.json`;
+      spec.containers.push(
+        workspaceComposerDbInitContainer(spec.runAs),
+        workspaceComposerContainer({
+          agentGroup,
+          session,
+          containerConfig,
+          projectDocument,
+          contribution,
+          mailboxContext,
+        }),
+      );
+      spec.stopGraceSeconds = 10;
+      bindWorkspaceSpec(spec, workspaceAssignment!);
+      await ensureWorkspacePaths(spec, workspaceAssignment!);
+    }
+  } catch (error) {
+    try {
+      await gateway.lifecycle?.close('session-compose-failed');
+      if (workspaceAssignment) await releaseWorkspace(workspaceAssignment).catch(() => {});
+    } finally {
+      if (workspace) await workspace.aborted(agentGroup.id);
+    }
+    throw error;
+  }
 
   log.info('Spawning session', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
 
@@ -363,18 +536,28 @@ async function spawnContainer(session: Session): Promise<void> {
   // ceiling check treats a missing file as "fresh spawn, give grace". Without
   // this, the stale mtime can trigger an immediate kill before the new container
   // touches the file itself.
-  fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
+  if (!stateless) fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
 
   let handle;
   try {
     handle = await driver.prepare(spec);
   } catch (err) {
     await releaseClaimQuietly(session.id, claimIncarnation);
+    try {
+      await gateway.lifecycle?.close('session-prepare-failed');
+    } finally {
+      if (workspace) await workspace.aborted(agentGroup.id);
+    }
     throw err;
   }
 
-  const runtime = registerRuntime(session.id, handle, containerName, false);
+  const runtime = registerRuntime(session.id, handle, containerName, gateway.lifecycle, false);
+  if (workspace) {
+    runtime.workspace = workspace;
+    runtime.workspaceGroupId = agentGroup.id;
+  }
   runtime.claimIncarnation = claimIncarnation;
+  armGatewayUnavailable(session.id, runtime);
 
   try {
     await armSessionLifecycle({
@@ -388,6 +571,7 @@ async function spawnContainer(session: Session): Promise<void> {
     });
   } catch (err) {
     if (activeContainers.get(session.id) === runtime && !runtime.finished) {
+      await runtime.gatewayLifecycle?.close('session-start-failed');
       activeContainers.delete(session.id);
       runtime.resolveFinished();
       await releaseClaimQuietly(session.id, claimIncarnation);
@@ -421,6 +605,7 @@ function registerRuntime(
   sessionId: string,
   handle: SupervisedHandle,
   containerName: string,
+  gatewayLifecycle: GatewaySessionLifecycle | undefined,
   adopted: boolean,
 ): ActiveSessionRuntime {
   let resolveFinished!: () => void;
@@ -431,6 +616,7 @@ function registerRuntime(
     handle,
     containerName,
     startedAtMs: Date.now(),
+    gatewayLifecycle,
     adopted,
     exitCallbacks: [],
     finished: false,
@@ -439,6 +625,18 @@ function registerRuntime(
   };
   activeContainers.set(sessionId, runtime);
   return runtime;
+}
+
+function armGatewayUnavailable(sessionId: string, runtime: ActiveSessionRuntime): void {
+  runtime.gatewayLifecycle?.onUnavailable((error) => {
+    if (runtime.finished) return;
+    log.warn('Session gateway became unavailable; stopping agent', {
+      sessionId,
+      containerName: runtime.containerName,
+      error: error?.message,
+    });
+    killContainer(sessionId, 'session-gateway-unavailable');
+  });
 }
 
 /**
@@ -466,6 +664,14 @@ async function finishAndResolve(
   try {
     await finish(sessionId, runtime, failure);
   } finally {
+    if (runtime.workspace && runtime.workspaceGroupId) {
+      try {
+        if (runtime.teardownIncomplete) await runtime.workspace.uncertain(runtime.workspaceGroupId);
+        else await runtime.workspace.stopped(runtime.workspaceGroupId);
+      } catch (error) {
+        log.error('Workspace finalization failed after session finish', { sessionId, error });
+      }
+    }
     runtime.resolveFinished();
   }
 }
@@ -556,6 +762,12 @@ async function finish(sessionId: string, runtime: ActiveSessionRuntime, failure?
   } catch (err) {
     log.error('Failed to stop typing refresh', { sessionId, containerName, err });
   }
+  try {
+    if (runtime.teardownIncomplete) await runtime.gatewayLifecycle?.detach();
+    else await runtime.gatewayLifecycle?.close(runtime.stopReason ?? 'session-ended');
+  } catch (err) {
+    log.error('Session gateway cleanup failed', { sessionId, containerName, err });
+  }
 
   if (failure && failure.kind !== 'started-then-died') {
     log.error('Session failed', { sessionId, containerName, kind: failure.kind, retryable: failure.retryable });
@@ -602,8 +814,22 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
     },
     (err: unknown) => {
       log.error('Failed to stop session', { sessionId, reason, err });
+      entry.teardownIncomplete = true;
       if (!entry.finished) void finishAndResolve(sessionId, entry, undefined);
     },
+  );
+}
+
+/** Detach gateway supervision without stopping sessions that a successor adopts. */
+export async function detachGatewaySessions(): Promise<void> {
+  await Promise.all(
+    [...activeContainers.values()].map(async (runtime) => {
+      try {
+        await runtime.gatewayLifecycle?.detach();
+      } catch (err) {
+        log.error('Session gateway detach failed', { containerName: runtime.containerName, err });
+      }
+    }),
   );
 }
 
@@ -664,9 +890,25 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
       continue;
     }
     pendingAdoptions.delete(session.id);
-    const runtime = registerRuntime(session.id, handle, handle.name, true);
+    const agentGroup = await getAgentGroup(session.agent_group_id);
+    const gatewayLifecycle = agentGroup
+      ? await getGatewayProvider().adopt?.({
+          key: handle.key,
+          groupName: agentGroup.name,
+          containerName: handle.name,
+          capabilities: driver.capabilities(),
+        })
+      : undefined;
+    const workspace = await workspaceRuntime();
+    if (agentGroup && workspace) await workspace.adopted(agentGroup.id);
+    const runtime = registerRuntime(session.id, handle, handle.name, gatewayLifecycle ?? undefined, true);
+    if (agentGroup && workspace) {
+      runtime.workspace = workspace;
+      runtime.workspaceGroupId = agentGroup.id;
+    }
     runtime.claimIncarnation = claimIncarnation;
     runtime.stopReason = undefined;
+    armGatewayUnavailable(session.id, runtime);
     handle.onTerminal((failure) => {
       void finishAndResolve(session.id, runtime, failure);
     });
@@ -752,6 +994,17 @@ export function resolveProviderName(
   return (sessionProvider || containerConfigProvider || 'claude').toLowerCase();
 }
 
+export function resolveProjectDocument(
+  provider: string,
+  contribution: ProviderContainerContribution,
+): ProviderProjectDocument {
+  if (contribution.projectDocument) return contribution.projectDocument;
+  if (providerProvidesAgentSurfaces(provider)) {
+    throw new Error(`provider '${provider}' owns agent surfaces but supplied no project document`);
+  }
+  return DEFAULT_PROJECT_DOCUMENT;
+}
+
 async function resolveProviderContribution(
   session: Session,
   agentGroup: AgentGroup,
@@ -783,10 +1036,15 @@ export async function buildMounts(
   // Default agent surfaces (composed project doc, skill links, provider state
   // dir) apply unless the provider's registration declares it provides its own.
   const defaultSurfaces = !providerProvidesAgentSurfaces(provider);
+  // D16: code mode strips chat COMPOSITION, not capabilities — the composed
+  // instructions, fragments, shared CLAUDE.md, chat skills and stamped plugin
+  // surfaces stay host-side; provider state (~/.claude: settings, credentials
+  // state) still mounts, because the coding agent is still a Claude session.
+  const chatSurfaces = defaultSurfaces && !containerConfig.codeMode;
 
   const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
   const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
-  if (defaultSurfaces) {
+  if (chatSurfaces) {
     syncSkillSymlinks(claudeDir, containerConfig);
 
     // Compose CLAUDE.md fresh every spawn: every instruction source inlined
@@ -817,15 +1075,14 @@ export async function buildMounts(
     scope,
   });
 
-  // container.json — nested RO mount on top of RW group dir so the agent can
-  // read its config but cannot modify it. Composed per group, so 'group-state'
-  // read-only rather than 'install-surface': the install-surface rule is an
-  // enumerated release-surface allowlist, and this path is under the group.
+  // Kata-safe container config projection. A file hostPath nested over the RW
+  // group directory reads as empty inside the guest, including with subPath.
+  // Reuse the group directory at a non-overlapping RO path instead.
   const containerJsonPath = path.join(groupDir, 'container.json');
   if (fs.existsSync(containerJsonPath)) {
     mounts.push({
-      hostPath: containerJsonPath,
-      containerPath: '/workspace/agent/container.json',
+      hostPath: groupDir,
+      containerPath: '/run/nanoclaw/group-config',
       readonly: true,
       mountClass: 'group-state',
       scope,
@@ -842,19 +1099,26 @@ export async function buildMounts(
   // whose read-only rule is enforced instead of chosen. It lives under the
   // group folder rather than an install root, so the mount policy pins it
   // through the group-folder label — see `stampedPluginsRoot`.
-  mounts.push({
-    hostPath: path.join(groupDir, 'plugins'),
-    containerPath: CONTAINER_PLUGINS_DIR,
-    readonly: true,
-    mountClass: 'install-surface',
-    scope,
-  });
+  //
+  // Gated on chatSurfaces (D16): stamped plugins are chat-agent composition
+  // (skills, MCP servers, persona) — code mode strips them with the rest of
+  // the composed surface; plugin-data/ stays reachable through the group
+  // mount either way.
+  if (chatSurfaces) {
+    mounts.push({
+      hostPath: path.join(groupDir, 'plugins'),
+      containerPath: CONTAINER_PLUGINS_DIR,
+      readonly: true,
+      mountClass: 'install-surface',
+      scope,
+    });
+  }
 
   // The composed project document — one nested RO mount on top of the RW group
   // dir, holding the full text of every instruction source. `container/CLAUDE.md`
   // is read on the host at compose time, so nothing needs it inside the container.
   const composedClaudeMd = path.join(groupDir, 'CLAUDE.md');
-  if (defaultSurfaces && fs.existsSync(composedClaudeMd)) {
+  if (chatSurfaces && fs.existsSync(composedClaudeMd)) {
     mounts.push({
       hostPath: composedClaudeMd,
       containerPath: '/workspace/agent/CLAUDE.md',
@@ -862,6 +1126,32 @@ export async function buildMounts(
       mountClass: 'group-state',
       scope,
     });
+  }
+
+  // Code-mode operating manual — the code runner starts the interactive CLI
+  // at /workspace/group, whose CLAUDE.md is the one instruction surface the
+  // D16 strip leaves. Host-stamped from the install tree and nested-RO-mounted
+  // over the RW session workspace (the container.json pattern), so the agent
+  // reads it but cannot edit it; the helper also creates the backing dir the
+  // runner's cwd needs (nothing else makes it exist host-side).
+  if (containerConfig.codeMode) {
+    mounts.push(...devInstructionMounts(sessDir, scope));
+    // Host-owned permission posture (D17/T7) — stamped per spawn, RO-mounted
+    // at the CLI's admin policy tier; group override wins over the deployment.
+    mounts.push(
+      ...managedSettingsMounts(
+        sessDir,
+        scope,
+        resolveCodePermissionMode(containerConfig.codePermissionMode, deploymentPermissionMode()),
+      ),
+    );
+    // D17 decision channel — host-writes-only by nested RO mount, so the
+    // boundary hook polls a dir the agent cannot forge into.
+    mounts.push(...boundaryDecisionMounts(sessDir, scope));
+    // Dev-env access materials — this group's slice only, at the same absolute
+    // path host-side and container-side, so the kubeconfig `ncl envs get`
+    // names is one an agent in here can actually open. Empty when dev-env is off.
+    mounts.push(...devEnvMaterialMounts(scope));
   }
 
   // Per-group .claude-shared at /home/node/.claude (provider state, settings,
@@ -887,8 +1177,10 @@ export async function buildMounts(
   });
 
   // Shared skills — read-only, symlinks in .claude-shared/skills/ point here.
+  // Chat skills are composition, not capability (D16): code mode doesn't mount
+  // them — dev skills arrive workspace-installed by their own route (D22).
   const skillsSrc = path.join(projectRoot, 'container', 'skills');
-  if (fs.existsSync(skillsSrc)) {
+  if (chatSurfaces && fs.existsSync(skillsSrc)) {
     mounts.push({
       hostPath: skillsSrc,
       containerPath: '/app/skills',
@@ -923,6 +1215,8 @@ export function toMountSpecs(mounts: readonly VolumeMount[], defaultScope: strin
     containerPath: mount.containerPath,
     mode: mount.readonly ? ('ro' as const) : ('rw' as const),
     groupScope: mount.scope ?? defaultScope,
+    ...(mount.source ? { source: mount.source } : {}),
+    ...(mount.subPath ? { subPath: mount.subPath } : {}),
   }));
 }
 
@@ -933,6 +1227,7 @@ export interface ComposeSessionSpecInput {
   mounts: VolumeMount[];
   containerConfig: import('./container-config.js').ContainerConfig;
   contribution: ProviderContainerContribution;
+  projectDocument?: ProviderProjectDocument;
   /**
    * The gateway provider's typed per-session contribution. No argv-shaped
    * input reaches composition anymore: network selection is driver-private,
@@ -962,7 +1257,7 @@ export function mergeMounts(composed: MountSpec[], contributed: MountSpec[]): Mo
  * says how it is realized.
  */
 export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec {
-  const { agentGroup, session, containerName, mounts, containerConfig, contribution, gateway, mailboxEnvironment } =
+  const { agentGroup, session, containerName, mounts, containerConfig, contribution, projectDocument, gateway, mailboxEnvironment } =
     input;
 
   const env: Record<string, string> = {
@@ -978,6 +1273,93 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     ...(contribution.env ?? {}),
     ...(gateway.env ?? {}),
   };
+
+  // Trusted runners read the host-authored config through the non-overlapping
+  // read-only alias above, never through the agent-writable group path.
+  env.NANOCLAW_CONTAINER_JSON = '/run/nanoclaw/group-config/container.json';
+
+  // Code-mode knobs the RUNNER reads from its own process env, which only
+  // composition can put there — an operator setting them host-side
+  // (process.env or .env, the standard precedence) would otherwise configure
+  // nothing, silently. NANOCLAW_CODE_IDLE_TTL_MS and its attach sibling are
+  // D14's two lease windows (the activity TTL and the connected-client TTL);
+  // NANOCLAW_CODE_ENV is a JSON object forwarded verbatim, which is how a
+  // governed deployment supplies the agent CLI's posture — measured on the
+  // POC: telemetry (`/api/event_logging/v2/batch`) is an unclassified
+  // operation at the gateway and its 403 is FATAL to the CLI, so a governed
+  // sandbox sets CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 and the
+  // gateway-managed API-key sentinel here rather than baking either in.
+  if (containerConfig.codeMode) {
+    const settings = [
+      'NANOCLAW_CODE_IDLE_TTL_MS',
+      'NANOCLAW_CODE_ATTACH_IDLE_TTL_MS',
+      'NANOCLAW_CODE_ENV',
+      // D17 posture: 'auto' (the CLI prompts) or 'bypass' (it does not,
+      // because the gateway is the approver). Whether anything governs the
+      // agent's requests is a property of the deployment; a group whose
+      // container_configs row sets permission_mode overrides it (T7) — the
+      // same value also selects the managed-settings policy buildMounts stamps.
+      'NANOCLAW_CODE_PERMISSION_MODE',
+    ] as const;
+    const fromFile = readEnvFile([...settings]);
+    const setting = (name: (typeof settings)[number]): string | undefined =>
+      process.env[name]?.trim() || fromFile[name]?.trim() || undefined;
+
+    const idleTtl = setting('NANOCLAW_CODE_IDLE_TTL_MS');
+    if (idleTtl) env.NANOCLAW_CODE_IDLE_TTL_MS = idleTtl;
+
+    const attachIdleTtl = setting('NANOCLAW_CODE_ATTACH_IDLE_TTL_MS');
+    if (attachIdleTtl) env.NANOCLAW_CODE_ATTACH_IDLE_TTL_MS = attachIdleTtl;
+
+    const permissionMode = containerConfig.codePermissionMode ?? setting('NANOCLAW_CODE_PERMISSION_MODE');
+    if (permissionMode) env.NANOCLAW_CODE_PERMISSION_MODE = permissionMode;
+
+    const extra = setting('NANOCLAW_CODE_ENV');
+    if (extra) {
+      try {
+        const parsed = JSON.parse(extra) as Record<string, unknown>;
+        for (const [key, value] of Object.entries(parsed)) {
+          if (typeof value !== 'string') continue;
+          if (/(_KEY|_TOKEN|_SECRET|PASSWORD)$/i.test(key)) {
+            // Credential-NAMED knobs (the governed POC sets the API-key
+            // sentinel this way) ride the contributed lane: the composed
+            // lane's key-name check would deny the whole spawn. The lane's
+            // value check still applies — a real credential refuses; the
+            // public marker passes. Earlier lane entries win: a knob must
+            // never shadow the gateway's own contribution.
+            if (!(key in contributedEnv)) contributedEnv[key] = value;
+          } else if (!(key in env)) {
+            // Composed values win: a knob must never shadow TZ or the mailbox
+            // environment — and the contributed lane still wins over BOTH at
+            // realization, so a knob can never shadow the gateway either.
+            env[key] = value;
+          }
+        }
+      } catch (error) {
+        log.warn('NANOCLAW_CODE_ENV is not a JSON object of strings — ignored', { error: String(error) });
+      }
+    }
+
+    // The gateway-managed sentinel, DEFAULTED rather than remembered. On a
+    // governed deployment (NANOCO_GATEWAY_ADDRESS present host-side) the CLI
+    // must boot in API-key mode carrying the fixed public marker the policy
+    // layer exempts; the gateway swaps the header on policy Allow, so the
+    // runtime never holds a credential. Measured 2026-08-17: the marker lived
+    // only in a manual restart's process env — the first clean systemd
+    // restart dropped it from every new pod and the CLI died at
+    // "apiKeyHelper failed: did not return a value". Rides the CONTRIBUTED
+    // lane: the key name is credential-shaped by necessity (the CLI looks it
+    // up by name), and that lane is the sanctioned channel for exactly this —
+    // the marker value itself is public and passes the value check anywhere.
+    // Anything the deployment set above (NANOCLAW_CODE_ENV or a provider
+    // contribution) wins.
+    const gatewayAddress =
+      process.env.NANOCO_GATEWAY_ADDRESS?.trim() ||
+      readEnvFile(['NANOCO_GATEWAY_ADDRESS']).NANOCO_GATEWAY_ADDRESS?.trim();
+    if (gatewayAddress && !('ANTHROPIC_API_KEY' in env) && !('ANTHROPIC_API_KEY' in contributedEnv)) {
+      contributedEnv.ANTHROPIC_API_KEY = GATEWAY_MANAGED_ENV_MARKER;
+    }
+  }
 
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
@@ -1002,10 +1384,14 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     env,
     // Run the v2 entry point directly (no tsc, no stdin). The driver maps the
     // 'standard' posture's PID-1 requirement onto this: Docker adds `--init`.
+    // Runner-type selection happens HERE and nowhere else (D22): both runners
+    // ride the same image and the same /app/src mount; a code-mode group gets
+    // the code runner's entrypoint, the chat runner stays untouched.
     command: ['bash', '-c'],
-    args: ['exec bun run /app/src/index.ts'],
+    args: [containerConfig.codeMode ? 'exec bun run /app/src/code-runner/index.ts' : 'exec bun run /app/src/index.ts'],
     mounts: mergeMounts(toMountSpecs(mounts, agentGroup.id), gateway.mounts ?? []),
     contributedEnv,
+    labels: { ...(gateway.labels ?? {}) },
   };
 
   // The folder label (D9) rides the spec so an admission-side check can pin
@@ -1029,12 +1415,21 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     );
   }
 
+  const workspaceContainers =
+    !configuredStatelessK8sHost() && configuredDriverKind() === 'pod' && configuredRuntimeTier() === 'vm'
+      ? workspaceMounterContainers({
+          groupId: agentGroup.id,
+          replicaRoot: configuredWorkspaceReplicaRoot(),
+          image: agent.image,
+        })
+      : [];
   return {
     key: { installSlug: INSTALL_SLUG, agentGroupId: agentGroup.id, sessionId: session.id },
     labels: { 'nanoclaw-container-name': containerName, [GROUP_FOLDER_LABEL]: agentGroup.folder },
+    projectDocument: projectDocument ?? DEFAULT_PROJECT_DOCUMENT,
     // The gateway's auxiliary containers ride beside the agent; capability-
     // gated in the spawn path before composition ever runs.
-    containers: [agent, ...(gateway.containers ?? [])],
+    containers: [agent, ...(gateway.containers ?? []), ...workspaceContainers],
     network: 'shared-private',
     hardening: 'standard',
     resources: {
@@ -1045,7 +1440,7 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     },
     // The group's configured tier; the driver refuses one it cannot realize
     // (validateSpec, against capabilities().isolationTiers).
-    runtimeTier: containerConfig.runtimeTier ?? 'container',
+    runtimeTier: containerConfig.runtimeTier ?? configuredRuntimeTier(),
     runAs,
     stopGraceSeconds: STOP_GRACE_SECONDS,
   };

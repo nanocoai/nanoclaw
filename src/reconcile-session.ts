@@ -35,6 +35,7 @@ import { getSessionClaim } from './db/coordination.js';
 import { getSession, isTaskThread, updateSession } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { log } from './log.js';
+import { applyTerminalTaskEvidence } from './audit/task-evidence.js';
 import { heartbeatPath, withExistingMailboxSession } from './session-manager.js';
 import { getContainerStartedAtMs, isContainerRunning, killContainer } from './container-runner.js';
 import { requestWake } from './request-wake.js';
@@ -133,7 +134,7 @@ async function reconcileActiveSession(session: Session): Promise<void> {
     let dueCount = 0;
     let shouldWake = false;
     const exists = await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
-      mailbox.applyProcessingAcks(mailbox.getTerminalProcessingAcks());
+      await applyTerminalTaskEvidence(mailbox, session);
       dueCount = mailbox.countDueMessages();
       shouldWake = dueCount > 0 && !isContainerRunning(session.id);
       if (!shouldWake) {
@@ -180,6 +181,12 @@ async function maintainSessionMailbox(
   const { handleRecurrence } = await import('./modules/scheduling/recurrence.js');
   await handleRecurrence(mailbox, session);
   // MODULE-HOOK:scheduling-recurrence:end
+  // MODULE-HOOK:session-idle-reap:start
+  {
+    const { reapIdleSession } = await import('./session-idle-reap.js');
+    reapIdleSession(mailbox, session, agentGroupId);
+  }
+  // MODULE-HOOK:session-idle-reap:end
 
   if (isTaskThread(session.thread_id)) {
     const liveTasks = mailbox.countLiveTasks();

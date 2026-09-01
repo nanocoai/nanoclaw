@@ -64,12 +64,22 @@ export interface MailboxOperations {
   setContainerToolInFlight(tool: string, declaredTimeoutMs: number | null): void;
   clearContainerToolInFlight(): void;
   clearStaleProcessingAcks(): void;
+  /**
+   * Give 'processing' claims back so the rows become fetchable again — the
+   * contract-correct retry at a life boundary. Deliberately NOT
+   * markMessages(ids, 'failed'): the host maps a container 'failed' ack
+   * through its complete statement to a TERMINAL 'completed', which drops
+   * mail instead of retrying it.
+   */
+  releaseProcessingClaims(ids: string[]): void;
 }
 
 export interface AgentMailbox {
   readonly operations: MailboxOperations;
   /** True when repeated read failures require a fresh runner process. */
   shouldRestartAfter?(error: unknown): boolean;
+  /** Auxiliary processes may watch only while one action is active. */
+  setBackgroundSyncMode?(mode: 'always' | 'during-action'): void;
   /** Null only during runner-before-host upgrades; implementations that need context must reject it explicitly. */
   start(key: MailboxSessionKey | null): Promise<void>;
   run<T>(action: () => T | Promise<T>): Promise<T>;

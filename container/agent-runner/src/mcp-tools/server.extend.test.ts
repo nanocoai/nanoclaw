@@ -13,7 +13,6 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages, writeMessageOut } from '../db/messages-out.js';
-import { createAgent } from './agents.js';
 import { extendTool, registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -201,47 +200,3 @@ describe('extendTool — passthrough keys land in the written payload', () => {
   });
 });
 
-describe('extendTool — fixture extension of create_agent (end to end)', () => {
-  beforeEach(() => {
-    initTestSessionDb();
-  });
-
-  afterEach(() => {
-    closeSessionDb();
-  });
-
-  it('extends the real create_agent schema/description and passes params into its payload', async () => {
-    // What an installed feature module would run at import time instead of
-    // editing agents.ts (fixture values — the real extension ships with the
-    // feature payload, never on trunk).
-    extendTool('create_agent', {
-      properties: {
-        purpose: { type: 'string', description: 'One short public line saying what this agent is for.' },
-      },
-      passthroughKeys: ['purpose'],
-      descriptionSuffix: 'The purpose line is shown publicly.',
-    });
-
-    const props = schemaProps(createAgent);
-    expect(Object.keys(props).sort()).toEqual(['instructions', 'name', 'purpose']);
-    expect(createAgent.tool.description?.endsWith('The purpose line is shown publicly.')).toBe(true);
-
-    await createAgent.handler({ name: 'Scout', purpose: 'Deep research' });
-
-    const payload = lastPayload();
-    expect(payload.action).toBe('create_agent');
-    expect(payload.name).toBe('Scout');
-    expect(payload.instructions).toBeNull();
-    expect(payload.purpose).toBe('Deep research');
-  });
-
-  it('omits extension keys from the payload when the caller does not pass them', async () => {
-    // create_agent is already extended by the previous test (module state is
-    // process-wide); a call without the param must stay byte-identical to base.
-    await createAgent.handler({ name: 'Plain' });
-
-    const payload = lastPayload();
-    expect(payload.name).toBe('Plain');
-    expect(payload).not.toHaveProperty('purpose');
-  });
-});

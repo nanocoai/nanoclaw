@@ -24,6 +24,7 @@ import { localizeIsoTimestamps } from './format.js';
 import { getResource } from './crud.js';
 import { listVerbs, renderVerbHelp } from './help-render.js';
 import { commandGuard, listCommands, lookup } from './registry.js';
+import { withAudit } from './dispatch.audit.js';
 
 type DispatchOptions = {
   /** Verified approval row when a command is replayed after approval. */
@@ -36,7 +37,7 @@ function actorFor(ctx: CallerContext): GuardActor {
     : { kind: 'agent', agentGroupId: ctx.agentGroupId, sessionId: ctx.sessionId };
 }
 
-export async function dispatch(
+async function dispatchInner(
   req: RequestFrame,
   ctx: CallerContext,
   opts: DispatchOptions = {},
@@ -228,6 +229,9 @@ export async function dispatch(
     return err(req.id, 'handler-error', errMsg(e));
   }
 }
+
+// Audit middleware: every transport and approved replay passes this composition.
+export const dispatch = withAudit(dispatchInner);
 
 registerApprovalHandler('cli_command', async ({ payload, approval, notify }) => {
   const frame = payload.frame as RequestFrame;

@@ -6,6 +6,8 @@
  * the command and write the response back to its inbound mailbox.
  */
 import { registerDeliveryAction } from '../delivery.js';
+import { deferCliRequestToController, isControllerOwnedCommand } from '../modules/process-split/cli-delegation.js';
+import { isSplitGateway } from '../modules/process-split/role.js';
 import { unguarded } from '../guard/index.js';
 import { log } from '../log.js';
 import { writeSessionMessage } from '../session-manager.js';
@@ -31,6 +33,20 @@ registerDeliveryAction(
       agentGroupId: session.agent_group_id,
       messagingGroupId: session.messaging_group_id ?? '',
     };
+
+    // Process-split overlay: controller-owned surfaces (the dev-env driver,
+    // the container and door runtime) exist only on the controller plane,
+    // while the delivery poll that picks CLI frames up runs on the gateway.
+    // Their dispatch becomes a durable row the controller's consumer serves;
+    // the response frame it writes is byte-identical, so the in-container
+    // client cannot tell the planes apart. Everything else keeps the local
+    // dispatch this handler always did — role 'all' is byte-identical
+    // throughout.
+    if (isSplitGateway() && isControllerOwnedCommand(command)) {
+      await deferCliRequestToController(req, ctx);
+      log.info('CLI request deferred to the controller plane', { requestId, command, sessionId: session.id });
+      return;
+    }
 
     log.info('CLI request from agent', { requestId, command, sessionId: session.id });
 

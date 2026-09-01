@@ -14,6 +14,7 @@ import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import { isUniqueViolation } from './db/errors.js';
 import {
+  DOOR_SYSTEM_THREAD_ID,
   createSession,
   findSystemSession,
   findSessionByAgentGroup,
@@ -198,6 +199,37 @@ export async function resolveTaskSession(
   });
 }
 
+/**
+ * Find or create a group's ssh-door session (thread `system:door`) — the
+ * session `ncl sandboxes new` lands in. Mirrors resolveTaskSession:
+ * messaging_group_id NULL keeps it invisible to chat routing
+ * (findSessionByAgentGroup filters system threads), and the explicit thread
+ * id keeps it from ever being adopted as an agent-shared channel session.
+ */
+export async function resolveDoorSession(agentGroupId: string): Promise<{ session: Session; created: boolean }> {
+  const existing = await findSystemSession(agentGroupId, DOOR_SYSTEM_THREAD_ID);
+  if (existing) return { session: existing, created: false };
+
+  const id = generateId();
+  const session: Session = {
+    id,
+    agent_group_id: agentGroupId,
+    messaging_group_id: null,
+    thread_id: DOOR_SYSTEM_THREAD_ID,
+    agent_provider: null,
+    status: 'active',
+    container_status: 'stopped',
+    last_active: null,
+    created_at: new Date().toISOString(),
+  };
+
+  await createSession(session);
+  await initSessionFolder(agentGroupId, id);
+  log.info('Door session created', { id, agentGroupId });
+
+  return { session, created: true };
+}
+
 /** Create the workspace folders and synchronously prepare the registered mailbox. */
 export function initSessionFolder(agentGroupId: string, sessionId: string): void {
   const dir = sessionDir(agentGroupId, sessionId);
@@ -291,8 +323,12 @@ export async function writeSessionMessage(
   // documented reset actually re-provisions instead of killing the chat.
   initSessionFolder(agentGroupId, sessionId);
 
-  // Extract base64 attachment data, save to inbox, replace with file paths
-  const content = extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
+  const mailboxStore = getAgentMailbox();
+  const content = await mailboxStore.stageInboundAttachments?.(
+    { agentGroupId, sessionId },
+    message.id,
+    message.content,
+  ) ?? extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
 
   await withMailboxSession(agentGroupId, sessionId, async (mailbox) => {
     await mailbox.insertMessage({
