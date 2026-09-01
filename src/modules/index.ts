@@ -24,3 +24,12 @@ import './interactive/index.js';
 import './permissions/index.js';
 import './agent-to-agent/index.js';
 import './self-mod/index.js';
+import '../nanoco/approval-runtime.js';
+import './slack-room-membership/index.js';
+import './canvas-actions/index.js';
+import './slack-onboarding/index.js';
+import './slack-agent-flow/index.js';
+import './host-audit/index.js';
+// Workspace plane — the controller runs in this process unless
+// NANOCO_WORKSPACE_CONTROLLER_URL selects a separately deployed one.
+import '../storage/workspace-controller-module.js';

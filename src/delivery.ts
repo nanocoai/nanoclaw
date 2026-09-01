@@ -26,6 +26,7 @@ import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
+import { platformTargetContent } from './modules/platform-target/index.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
 import type { OutboundMessage } from './mailbox/index.js';
@@ -174,6 +175,7 @@ async function pollActive(): Promise<void> {
   try {
     const sessions = await getRunningSessions();
     for (const session of sessions) {
+      if (!activePolling) break;
       await deliverSessionMessages(session);
     }
   } catch (err) {
@@ -189,6 +191,7 @@ async function pollSweep(): Promise<void> {
   try {
     const sessions = await getActiveSessions();
     for (const session of sessions) {
+      if (!sweepPolling) break;
       await deliverSessionMessages(session);
     }
   } catch (err) {
@@ -490,12 +493,16 @@ async function deliverMessage(
       ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
       : undefined;
 
+  // A platform-addressed operation (a reaction) carries the namespaced id the
+  // agent was given. Translate it back before it leaves for the adapter, which
+  // has no session context and cannot know which namespace to strip.
+  const outboundContent = platformTargetContent(msg.content, session.agent_group_id);
   const platformMsgId = await deliveryAdapter.deliver(
     msg.channelType,
     msg.platformId,
     msg.threadId,
     msg.kind,
-    msg.content,
+    outboundContent,
     files,
     deliverInstance,
   );
@@ -663,7 +670,10 @@ async function handleSystemAction(content: Record<string, unknown>, session: Ses
   log.warn('Unknown system action', { action });
 }
 
-export function stopDeliveryPolls(): void {
+export async function stopDeliveryPolls(): Promise<void> {
   activePolling = false;
   sweepPolling = false;
+  while (inflightDeliveries.size > 0) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
 }

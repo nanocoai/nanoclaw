@@ -99,7 +99,13 @@ export function registerResourceHelpCommands(): void {
 
           lines.push(`${res.plural}: ${res.description}`);
 
-          if (cliScope === 'group' && GROUP_SCOPE_RESOURCES.has(res.plural)) {
+          // Only the resources dispatch actually auto-fills may claim it:
+          // --id fills on groups/destinations, group args fill where a column
+          // carries them. A resource with neither (envs — ids are row ids,
+          // scoping is in-handler) must not promise auto-fill it doesn't have.
+          const idAutoFilled = cliScope === 'group' && (res.plural === 'groups' || res.plural === 'destinations');
+          const hasGroupArgCols = res.columns.some((c) => ['id', 'agent_group_id', 'group'].includes(c.name));
+          if (cliScope === 'group' && GROUP_SCOPE_RESOURCES.has(res.plural) && (idAutoFilled || hasGroupArgCols)) {
             lines.push('');
             lines.push('Note: --id and group args are auto-filled to your agent group. You do not need to pass them.');
           }
@@ -108,7 +114,6 @@ export function registerResourceHelpCommands(): void {
 
           // Verbs — one summary line each; deep help is a verb away. Only the
           // exceptional access levels are tagged: `open` is the unmarked default.
-          const idAutoFilled = cliScope === 'group' && (res.plural === 'groups' || res.plural === 'destinations');
           const idHint = idAutoFilled ? '' : ' <id>';
           const tag = (access: string | undefined) => (!access || access === 'open' ? '' : ` [${access}]`);
           const verbs: string[] = [];

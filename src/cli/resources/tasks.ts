@@ -486,7 +486,7 @@ registerResource({
         `Create a scheduled task (recurring or one-shot) in the agent group system session.\n\n` +
         `Requires --prompt plus EITHER --recurrence (recurring; first run derived from the cron grid) OR --process-after (one-shot, ISO 8601 or naive local). Always pass --name for a readable id.\n\n` +
         `--script contract (pre-task gate, runs BEFORE the agent wakes):\n` +
-        `  bash, 30s timeout, 1MB output cap. Its LAST stdout line must be JSON:\n` +
+        `  bash, 10 min timeout, 1MB output cap. Its LAST stdout line must be JSON:\n` +
         `    {"wakeAgent": <bool>, "data": {...}}\n` +
         `  wakeAgent=false marks the run handled without waking the agent (zero tokens);\n` +
         `  wakeAgent=true wakes the agent with data attached to the prompt.\n` +

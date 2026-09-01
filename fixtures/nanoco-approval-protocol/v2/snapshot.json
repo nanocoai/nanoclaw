@@ -1,0 +1,47 @@
+{
+  "version": "nanoco.approval.v2",
+  "gatewayEpoch": "gw_0123456789abcdef0123456789abcdef",
+  "cursor": 41,
+  "approvals": [
+    {
+      "approvalId": "ask_0123456789abcdef0123456789abcdef",
+      "requestDigest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "deadline": "2026-07-23T00:00:00.000Z",
+      "lineage": {
+        "requestId": 77,
+        "deploymentId": "deployment-1",
+        "agentId": "agent-1",
+        "sessionId": "session-1",
+        "containerInstanceId": "container-1",
+        "channelId": "channel-1"
+      },
+      "approver": {
+        "issuer": "https://idp.example.com",
+        "subject": "stable-idp-subject"
+      },
+      "policy": {
+        "policyVersion": "policy-v7",
+        "matchedPolicyIds": ["ask-production"]
+      },
+      "summary": {
+        "method": "POST",
+        "origin": "https://gmail.googleapis.com:443",
+        "path": "/gmail/v1/users/me/messages/send"
+    },
+    "presentation": {
+      "appId": "gmail",
+      "appLabel": "Gmail",
+      "operationId": "gmail:send-email",
+      "title": "Send email",
+      "description": "Send a new email on the user's behalf.",
+      "class": "write",
+      "fields": [
+        { "label": "To", "kind": "list", "value": ["Alice <alice@example.com>"] },
+        { "label": "Cc", "kind": "list", "value": ["team@example.com"] },
+        { "label": "Subject", "kind": "text", "value": "Quarterly plan" },
+        { "label": "Message", "kind": "long_text", "value": "Ship the small version." }
+      ]
+    }
+    }
+  ]
+}

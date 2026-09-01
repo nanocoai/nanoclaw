@@ -5,6 +5,14 @@ import { getDb, hasTable } from './connection.js';
 
 export const TASKS_SYSTEM_THREAD_ID = 'system:tasks';
 
+/**
+ * Thread id of a group's ssh-door session (`ncl sandboxes new`). An explicit
+ * system thread, not a NULL/NULL row: a NULL/NULL session would silently
+ * become the group's agent-shared channel session if the group were later
+ * wired to a channel — the door session must stay invisible to chat routing.
+ */
+export const DOOR_SYSTEM_THREAD_ID = 'system:door';
+
 export async function createSession(session: Session): Promise<void> {
   await getDb().run(
     `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, agent_provider, status, container_status, last_active, created_at)
@@ -57,6 +65,42 @@ export async function findSessionForAgent(
     agentGroupId,
     messagingGroupId,
   );
+}
+
+/**
+ * All active sessions for an agent group (excluding system task threads),
+ * newest first. A group can hold several — one per wired messaging
+ * group/thread — and callers that need "the one with a live container"
+ * (groups attach) must scan them all, not just the newest.
+ */
+export async function findActiveSessionsByAgentGroup(agentGroupId: string): Promise<Session[]> {
+  return getDb().all<Session>(
+    `SELECT * FROM sessions
+     WHERE agent_group_id = ?
+       AND status = 'active'
+       AND NOT (messaging_group_id IS NULL AND thread_id IS NOT NULL AND thread_id LIKE 'system:%')
+     ORDER BY created_at DESC`,
+    agentGroupId,
+  );
+}
+
+/**
+ * The attach view of a group's active sessions: channel-wired sessions
+ * first (newest first), then system task sessions (newest first), then the
+ * door session. On a box whose only sessions are task-created (headless,
+ * schedule-driven) or door-created (`sandboxes new`), attach must still
+ * have a door — but when a channel-wired session exists it is the one an
+ * operator means, so it wins the wake choice (attach wakes index 0).
+ * Composed from the scoped queries rather than relaxing any of them:
+ * resolveSession's agent-shared mode rides findSessionByAgentGroup and must
+ * keep never seeing system threads.
+ */
+export async function findAttachableSessions(agentGroupId: string): Promise<Session[]> {
+  return [
+    ...(await findActiveSessionsByAgentGroup(agentGroupId)),
+    ...(await findTaskSessions(agentGroupId)),
+    ...(await findDoorSessions(agentGroupId)),
+  ];
 }
 
 /** Find an active session scoped to an agent group (ignoring messaging group). */
@@ -112,6 +156,20 @@ export async function findTaskSessions(agentGroupId: string, includeClosed = fal
     agentGroupId,
     TASKS_SYSTEM_THREAD_ID,
     `${TASKS_SYSTEM_THREAD_ID}:%`,
+  );
+}
+
+/** All active door sessions for a group — `sandboxes new` creates at most one (thread `system:door`). */
+export async function findDoorSessions(agentGroupId: string): Promise<Session[]> {
+  return getDb().all<Session>(
+    `SELECT * FROM sessions
+     WHERE agent_group_id = ?
+       AND messaging_group_id IS NULL
+       AND status = 'active'
+       AND thread_id = ?
+     ORDER BY created_at DESC`,
+    agentGroupId,
+    DOOR_SYSTEM_THREAD_ID,
   );
 }
 
@@ -320,4 +378,12 @@ export async function getAskQuestionRender(id: string): Promise<
   }
 
   return undefined;
+}
+
+/** FORK CARRY (code boundary): move an approval row between hold states. */
+export async function updatePendingApprovalStatus(
+  approvalId: string,
+  status: PendingApproval['status'],
+): Promise<void> {
+  await getDb().run('UPDATE pending_approvals SET status = ? WHERE approval_id = ?', status, approvalId);
 }

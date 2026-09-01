@@ -155,6 +155,8 @@ export interface AgentMailbox {
   runnerContext(key: MailboxSessionKey): Promise<unknown>;
   /** Non-secret runner configuration only; never credentials, authorization material, or identity. */
   runnerEnvironment(key: MailboxSessionKey): Promise<Record<string, string>>;
+  /** Optional non-POSIX attachment staging hook. */
+  stageInboundAttachments?(key: MailboxSessionKey, messageId: string, content: string): Promise<string>;
   /**
    * Run one logical operation against a session's mailbox.
    *
