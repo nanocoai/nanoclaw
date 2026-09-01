@@ -2,6 +2,12 @@
 
 Use `ncl tasks` for one-shot and recurring tasks. Each task runs in its own isolated session. Its runtime prompt supplies the task-only delivery and run-log contract.
 
+Only tell the user a task was created, saved, updated, paused, or resumed after
+the corresponding `ncl tasks` command succeeds. If the command is unavailable
+or returns an error, say explicitly that the schedule was not changed and share
+the actionable blocker. Never promise to run a task "when active" as a fallback
+for a scheduler entry that does not exist.
+
 Pass `--name "<short label>"` on create to get a readable task id (e.g. `--name "sales briefing"` → `sales-briefing-a25c`); without it ids are `t-<hex>`.
 
 Common commands:
