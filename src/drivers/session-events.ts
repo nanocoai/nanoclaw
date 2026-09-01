@@ -251,6 +251,8 @@ export function withSessionEvents(driver: SessionDriver): SessionEventsDriver {
     resync: (installSlug) => hub.resync(installSlug),
   };
   if (driver.ensureReady) wrapped.ensureReady = (): Promise<void> => driver.ensureReady!();
+  if (driver.activityStatus) wrapped.activityStatus = (key) => driver.activityStatus!(key);
+  if (driver.delegatesLiveness !== undefined) wrapped.delegatesLiveness = driver.delegatesLiveness;
   if (driver.reapResidue) wrapped.reapResidue = (installSlug): Promise<void> => driver.reapResidue!(installSlug);
   return wrapped;
 }

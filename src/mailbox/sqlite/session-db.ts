@@ -255,6 +255,11 @@ export function getDeliveredIds(db: Database.Database): Set<string> {
   );
 }
 
+// delivered_at is millisecond ISO-8601 UTC (host-owned table — the container
+// never writes it). Second-resolution `datetime('now')` made same-second
+// events invisible to strict `ts > cursor` tailing in `ncl a2a-events`;
+// pre-migration rows in the old 'YYYY-MM-DD HH:MM:SS' shape still exist and
+// readers must normalize (see a2a-events.ts toIso()).
 export function markDelivered(db: Database.Database, messageOutId: string, platformMessageId: string | null): void {
   db.prepare(
     "INSERT OR IGNORE INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES (?, ?, 'delivered', ?)",

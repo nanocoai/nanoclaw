@@ -4,7 +4,11 @@ import path from 'node:path';
 import type { MessageInRow } from '../db/messages-in.js';
 import { touchHeartbeat } from '../heartbeat.js';
 
-const SCRIPT_TIMEOUT_MS = 30_000;
+// Default 10 min: long mechanical jobs (e.g. source pulls) run as gated task
+// scripts without waking the agent. Scripts run in the task session's own
+// container, so a long run blocks only that series. TASK_SCRIPT_TIMEOUT_MS
+// (milliseconds) overrides. TODO: make this a container.json field instead.
+const SCRIPT_TIMEOUT_MS = Number(process.env.TASK_SCRIPT_TIMEOUT_MS || 600_000);
 const SCRIPT_MAX_BUFFER = 1024 * 1024;
 
 export interface ScriptResult {

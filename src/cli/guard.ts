@@ -62,6 +62,13 @@ async function commandDecide(cmd: CommandDef, input: GuardInput) {
   const cliScope = (await getContainerConfig(actor.agentGroupId))?.cli_scope ?? 'group';
 
   if (cliScope === 'disabled') {
+    if (cmd.resource === 'tasks') {
+      return DENY(
+        'Task access is disabled for this agent group. No task was scheduled or changed. ' +
+          'Tell the user scheduling is unavailable; do not claim the task was saved. ' +
+          'An owner or operator must grant group-scoped CLI access before retrying.',
+      );
+    }
     return DENY('CLI access is disabled for this agent group.');
   }
 

@@ -1,0 +1,27 @@
+{
+  "tools": {
+    "mcp_servers": [],
+    "cli_scope": "group"
+  },
+  "approvals": {
+    "capabilities": [
+      {
+        "action": "install_packages"
+      },
+      {
+        "action": "add_mcp_server"
+      }
+    ]
+  },
+  "network": {
+    "egress": [
+      { "domain": "team-metabase.tailc2ca02.ts.net" },
+      {
+        "domain": "*.googleapis.com"
+      },
+      {
+        "domain": "api.github.com"
+      }
+    ]
+  }
+}

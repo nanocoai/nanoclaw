@@ -20,6 +20,7 @@
 import fs from 'fs';
 
 import { heartbeatPath } from '../../session-manager.js';
+import { getSessionDriver } from '../../drivers/index.js';
 
 const TYPING_REFRESH_MS = 4000;
 /**
@@ -88,12 +89,27 @@ async function triggerTyping(
 }
 
 function isHeartbeatFresh(agentGroupId: string, sessionId: string): boolean {
+  // A driver that owns liveness never writes the Host heartbeat file, so the
+  // file's absence is silence, not idleness — the same reasoning host-sweep
+  // applies to SLA enforcement. Docker keeps the file and this returns false
+  // for it exactly as before.
+  //
+  // The driver answer is not enough on its own: typing is fired by whichever
+  // process routes the message, and on a split deployment that is the channel
+  // relay, which has no session driver at all (NANOCLAW_RUNTIME_DRIVER is
+  // unset there — it relays channels, it does not spawn sessions). So the
+  // absence of the FILE has to carry the same meaning as the absence of a
+  // driver, which the ENOENT arm below does.
+  if (getSessionDriver().delegatesLiveness) return true;
   const hbPath = heartbeatPath(agentGroupId, sessionId);
   try {
     const stat = fs.statSync(hbPath);
     return Date.now() - stat.mtimeMs < HEARTBEAT_FRESH_MS;
-  } catch {
-    return false;
+  } catch (error) {
+    // ENOENT: nothing writes this file here, so it can never answer the
+    // question. Silence, not idleness. Any other error is a real failure to
+    // read a file that should exist, and stays conservative.
+    return (error as NodeJS.ErrnoException).code === 'ENOENT';
   }
 }
 
