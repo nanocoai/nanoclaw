@@ -716,7 +716,10 @@ async function deliverErrorResult(text: string, routing: RoutingContext): Promis
  * (including <internal>...</internal>) is scratchpad — logged but not sent.
  *
  * The agent must always wrap output in <message to="name">...</message>
- * blocks, even with a single destination. Bare text is scratchpad only.
+ * blocks. For multi-destination groups, unwrapped text is scratchpad only.
+ * For single-destination groups, unwrapped text falls back to the sole
+ * destination — routing is unambiguous and silent drops cost the user
+ * conversation continuity (see qwibitai/nanoclaw#2325).
  */
 export interface TaskMessageBlock {
   to: string;
@@ -978,6 +981,8 @@ export async function dispatchResultText(
   // the scratchpad already), so nudge/scratchpad semantics are unchanged.
   text = text.replace(INTERNAL_SPAN_RE, '');
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
+  const ORPHAN_OPEN_RE = /<message\s+to="[^"]*"\s*>/g;
+  const ORPHAN_CLOSE_RE = /<\/message>/g;
 
   let match: RegExpExecArray | null;
   // Blocks delivered mid-turn count toward this turn's sent total — a final
@@ -1054,7 +1059,26 @@ export async function dispatchResultText(
     scratchpadParts.push(text.slice(lastIndex));
   }
 
-  const scratchpad = stripInternalTags(scratchpadParts.join(''));
+  let scratchpad = stripInternalTags(scratchpadParts.join(''));
+
+  // Single-destination fallback: when no valid <message to="…">…</message>
+  // block matched (typically because the model emitted an opening tag
+  // without ever closing it, a known post-compaction failure mode), still
+  // deliver the text to the sole destination. Orphan open/close tags are
+  // stripped so the user never sees the wrapper. Multi-destination groups
+  // intentionally have no fallback — routing is ambiguous there.
+  if (sent === 0 && scratchpad) {
+    const destinations = getAllDestinations();
+    if (destinations.length === 1) {
+      const cleaned = scratchpad.replace(ORPHAN_OPEN_RE, '').replace(ORPHAN_CLOSE_RE, '').trim();
+      if (cleaned) {
+        log(`Single-destination fallback: routing unwrapped output to "${destinations[0].name}"`);
+        sendToDestination(destinations[0], cleaned, routing);
+        sent++;
+        scratchpad = '';
+      }
+    }
+  }
 
   if (scratchpad) {
     log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
