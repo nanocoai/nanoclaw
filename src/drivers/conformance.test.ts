@@ -311,6 +311,32 @@ describe('conformance: allowlisted-extra mounts get an independent re-check when
     expect(() => validateSpec(fixtureSpecWithAux(), policy)).toThrow(/denied-by-policy/);
   });
 
+  // The regression this exemption exists for: a gateway or model-provider's
+  // own contributed mount (onecli.ts's contributionFromArgs; container-runner
+  // .ts's provider-contributed-mounts branch of buildMounts) was vetted by its
+  // own in-tree registration, never by the operator's mount-allowlist.json —
+  // there is no reason to expect it under any allowed root there, and a check
+  // that denies everything not listed must not also deny this. Before this
+  // exemption existed, wiring `validateAllowlistedExtra` into production would
+  // have denied every OneCLI-gated session outright on a fresh install (see
+  // the ADR/PR discussion this commit follows up on).
+  it("exempts a provider-contributed mount (origin: 'provider') from the independent re-check, even when the check would deny it", () => {
+    const spec = fixtureSpec();
+    spec.containers[0].mounts.push({
+      class: 'allowlisted-extra',
+      hostPath: '/tmp/onecli/stub.json',
+      containerPath: '/workspace/.config/creds.json',
+      mode: 'ro',
+      groupScope: 'g1',
+      origin: 'provider',
+    });
+    const policy = {
+      ...FIXTURE_POLICY,
+      validateAllowlistedExtra: (_hostPath: string) => ({ allowed: false, reason: 'stub: never allowed' }),
+    };
+    expect(() => validateSpec(spec, policy)).not.toThrow();
+  });
+
   it("accepts the spec when the policy's check allows the allowlisted-extra host path", () => {
     const policy = {
       ...FIXTURE_POLICY,

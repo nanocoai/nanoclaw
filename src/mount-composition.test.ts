@@ -173,6 +173,30 @@ describe('buildMounts against the policy the drivers enforce', () => {
     expect(specs.some((m) => m.class === 'identity-material')).toBe(false);
   });
 
+  // The regression this test exists to catch: `mountPolicy()` here is the
+  // real production policy, wired to the real `isHostPathAllowlisted` — and
+  // this machine's own ~/.config/nanoclaw/mount-allowlist.json is not expected
+  // to exist, so that check fails closed with no config at all. A
+  // provider-contributed mount (buildMounts's providerContribution.mounts
+  // branch — e.g. a gateway's own credential-stub file) was never operator
+  // configured, so it was never going to be on that list; without the
+  // `origin: 'provider'` stamp this test proves buildMounts applies, the spec
+  // below would be denied outright, exactly the failure mode found while
+  // porting this validator to a second host implementation.
+  it('does not let the operator-facing mount-allowlist deny a provider-contributed mount', async () => {
+    const mounts = await buildMounts(agentGroup, session, containerConfig, 'claude', {
+      mounts: [
+        {
+          hostPath: '/tmp/some-provider-contributed-path',
+          containerPath: '/workspace/extra/provider-thing',
+          readonly: true,
+        },
+      ],
+    });
+    const spec = specFrom(mounts);
+    expect(() => validateSpec(spec, mountPolicy())).not.toThrow();
+  });
+
   // Negative controls, so the acceptance case above cannot pass by validating
   // nothing. Each is a real mistake someone could make in composition.
   it('refuses a session directory belonging to another group', async () => {

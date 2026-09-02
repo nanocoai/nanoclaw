@@ -34,6 +34,7 @@ describe('contributionFromArgs', () => {
         containerPath: '/usr/local/share/ca.pem',
         mode: 'ro',
         groupScope: 'g1',
+        origin: 'provider',
       },
       {
         class: 'allowlisted-extra',
@@ -41,6 +42,7 @@ describe('contributionFromArgs', () => {
         containerPath: '/workspace/.config/creds.json',
         mode: 'ro',
         groupScope: 'g1',
+        origin: 'provider',
       },
     ]);
   });

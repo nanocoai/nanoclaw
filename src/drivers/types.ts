@@ -49,6 +49,31 @@ export interface MountSpec {
   mode: 'rw' | 'ro';
   /** Lets a realization — by admission or by in-code checks — pin group-state to the group subtree. */
   groupScope: string;
+  /**
+   * Who composed this mount. Meaningful only for `class: 'allowlisted-extra'`
+   * (see `mountAllowed` below) — every other class already has its own fixed
+   * pinning rule and ignores this field entirely.
+   *
+   * Undefined (the default) means an operator named this host path via
+   * container-config `additionalMounts`, vetted by `mount-security/index.ts`'s
+   * allowlist at composition time and re-checked here whenever
+   * `MountPolicy.validateAllowlistedExtra` is wired in — this is every
+   * existing composition path unless a call site opts out below.
+   *
+   * `'provider'` means a REGISTERED provider (a gateway's own contribution —
+   * `onecli.ts`'s `contributionFromArgs` — or a model-provider container
+   * config's — `container-runner.ts`'s provider-contributed-mounts branch of
+   * `buildMounts`) constructed this mount itself, from its own vetted in-tree
+   * registration, never from operator-authored config. There is therefore no
+   * operator-facing allowlist entry to expect for it, and the independent
+   * re-check does not apply — see `mountAllowed`'s `'allowlisted-extra'` case.
+   *
+   * Set this only at the exact call site that owns a provider's own
+   * contributed mount, never as a default anywhere composing from operator or
+   * external input — a mislabeled mount here bypasses the operator allowlist
+   * entirely.
+   */
+  origin?: 'operator' | 'provider';
 }
 
 export interface ContainerSpec {
@@ -416,6 +441,11 @@ export interface MountPolicy {
    * path — closing the gap where a `SessionSpec` reaching this validator by
    * any other route (bypassing `buildMounts`) would otherwise have its
    * `allowlisted-extra` mounts trusted unconditionally.
+   *
+   * Does not apply to a mount whose `origin` is `'provider'` — see
+   * `MountSpec.origin` and `mountAllowed`'s `'allowlisted-extra'` case. A
+   * provider's own contributed mount was never operator-configured, so this
+   * operator-facing file was never going to list it.
    */
   validateAllowlistedExtra?: (hostPath: string) => { allowed: boolean; reason: string };
 }
@@ -616,6 +646,14 @@ export function stampedPluginsRoot(spec: SessionSpec, policy: MountPolicy): stri
 function mountAllowed(mount: MountSpec, spec: SessionSpec, policy: MountPolicy): boolean {
   switch (mount.class) {
     case 'allowlisted-extra':
+      // A provider-contributed mount (see `MountSpec.origin`) was vetted by
+      // its own in-tree registration, never by operator-authored config —
+      // there is no operator-facing allowlist entry to expect for it, so the
+      // independent re-check below is for operator-configured paths only.
+      // Checked first and unconditionally: this exemption must hold even when
+      // no `validateAllowlistedExtra` is wired, for the same reason the
+      // vetted-upstream comment below already applied to unconditionally.
+      if (mount.origin === 'provider') return true;
       // Vetted upstream by the mount-allowlist feature on the normal
       // composition path (buildMounts -> validateAdditionalMounts). This
       // validator is the shared layer every SessionSpec passes through
