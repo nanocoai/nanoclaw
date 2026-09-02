@@ -50,4 +50,15 @@ describe('companions registry wiring', () => {
     // agents install rides on this boot-time declaration.
     expect(companions.getCompanionSkills('slack')).toEqual(['slack-a2a-rooms', 'slack-agent-flow']);
   });
+
+  it('every declared companion ships in-tree — the wizard applies it from the checkout', async () => {
+    // The canonical companion documents live on main and there is no fetch
+    // fallback: a companion declared here but absent from .claude/skills/
+    // would be warned about and skipped at setup time. A deleted or renamed
+    // skill directory fails HERE, not in a fresh install's setup log.
+    const { companionSkillPresent } = await import('./run-channel-skill.js');
+    for (const skill of SLACK_AGENTS_COMPANION_SKILLS) {
+      expect(companionSkillPresent(skill, process.cwd())).toBe(true);
+    }
+  });
 });

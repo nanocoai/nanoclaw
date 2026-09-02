@@ -15,9 +15,8 @@
  * So the wire lives in exactly one place (init-first-agent) and is never
  * duplicated across channel skills.
  */
-import { execSync } from 'node:child_process';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import * as p from '@clack/prompts';
 
@@ -26,59 +25,25 @@ import * as setupLog from '../logs.js';
 import { BACK_TO_CHANNEL_SELECTION, backGate, type ChannelFlowResult } from '../lib/back-nav.js';
 import { askOperatorRole, type OperatorRole } from '../lib/role-prompt.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
-import { channelsRemote, hostExec, runSkill, type RunSkillOptions } from '../lib/skill-driver.js';
+import { hostExec, runSkill, type RunSkillOptions } from '../lib/skill-driver.js';
 import { clearTemplatePick } from '../templates.js';
 import { getChannelPreStep, getCompanionSkills } from './companions.js';
 
 const DEFAULT_AGENT_NAME = 'Nano';
 
-const CHANNELS_BRANCH = 'channels';
-
 /**
- * Trunk ships no channel payloads, and that includes companion skill
- * directories — a declared companion may exist only on the channels registry
- * branch (e.g. the flag-gated Slack agents skills). Materialize an absent
- * directory from there — the same remote resolution and fetch/show mechanics
- * the skill engine uses for `from-branch` payload copies — so runSkill has a
- * document to apply. A directory already in the checkout short-circuits with
- * no git traffic. Returns false when the skill can't be produced; the caller
- * warns and skips it.
+ * Companion skill directories ship in-tree — `.claude/skills/<name>` on trunk
+ * is their canonical home, and the wizard code that declares a companion
+ * travels in the same tree as the skill it names, so a checkout that carries
+ * this code carries the directory too. There is deliberately no branch-fetch
+ * fallback: the only way to reach false is a tree someone trimmed by hand,
+ * and quietly installing a substitute from elsewhere would paper over exactly
+ * that. The caller warns and skips.
  */
-export function materializeCompanionSkill(
-  skill: string,
-  projectRoot: string,
-  deps: { exec?: (command: string) => string; resolveRemote?: () => string } = {},
-): boolean {
-  const dir = `.claude/skills/${skill}`;
-  // Key the short-circuit on SKILL.md, not the directory: a directory left by
-  // an interrupted materialization would otherwise read as installed, and a
-  // missing SKILL.md parses as zero directives — "fully applied" while the
-  // feature is absent.
-  if (existsSync(join(projectRoot, dir, 'SKILL.md'))) return true;
-  const exec =
-    deps.exec ??
-    ((command: string) =>
-      execSync(command, { cwd: projectRoot, stdio: ['ignore', 'pipe', 'pipe'] }).toString());
-  try {
-    const remote = (deps.resolveRemote ?? channelsRemote(projectRoot))();
-    exec(`git fetch ${remote} ${CHANNELS_BRANCH}`);
-    const files = exec(`git ls-tree -r --name-only '${remote}/${CHANNELS_BRANCH}' -- '${dir}'`)
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (files.length === 0) return false;
-    for (const file of files) {
-      mkdirSync(dirname(join(projectRoot, file)), { recursive: true });
-      exec(`git show '${remote}/${CHANNELS_BRANCH}:${file}' > '${file}'`);
-    }
-    return true;
-  } catch {
-    // Leave no partial directory behind — the SKILL.md short-circuit above
-    // makes a leftover half-fetched dir permanent on the next run. Deleting
-    // is safe here: this path only runs when the skill was absent on entry.
-    rmSync(join(projectRoot, dir), { recursive: true, force: true });
-    return false;
-  }
+export function companionSkillPresent(skill: string, projectRoot: string): boolean {
+  // Key presence on SKILL.md, not the directory: a directory without one
+  // parses as zero directives — "fully applied" while the feature is absent.
+  return existsSync(join(projectRoot, `.claude/skills/${skill}`, 'SKILL.md'));
 }
 
 /**
@@ -109,12 +74,12 @@ async function applyCompanionSkills(
   let applied = false;
   let degraded = false;
   for (const skill of companions) {
-    if (!materializeCompanionSkill(skill, projectRoot)) {
+    if (!companionSkillPresent(skill, projectRoot)) {
       degraded = true;
       p.log.warn(
-        `Companion skill ${skill} is not in this checkout and could not be fetched from the ` +
-          `${CHANNELS_BRANCH} branch. The ${channel} channel works, but the capability that ` +
-          `skill adds is missing until you fetch and apply it: ` +
+        `Companion skill ${skill} is missing from this checkout (.claude/skills/${skill}/SKILL.md). ` +
+          `The ${channel} channel works, but the capability that skill adds is missing until you ` +
+          `restore the directory (git checkout — it ships with this repo) and apply it: ` +
           `pnpm exec tsx setup/lib/skill-driver.ts .claude/skills/${skill}`,
       );
       continue;

@@ -14,8 +14,10 @@ directives); all idempotent.
 This is the base Slack experience: one bot, DM and channel chat. The Slack
 **agents** feature — child bots provisioned from `create_agent`, shared rooms,
 canvases, DM onboarding — ships separately in `/slack-a2a-rooms` +
-`/slack-agent-flow`; the setup wizard applies them automatically, and they can be applied on top
-of this install at any time.
+`/slack-agent-flow`, in-tree under `.claude/skills/` (their canonical home;
+the channels branch keeps a compatibility copy for older checkouts). The
+setup wizard applies them automatically, and they can be applied on top of
+this install at any time.
 Existing classic installs that want the Slack agents experience should use
 `/migrate-slack-agents` rather than re-running this skill (classic keeps
 working; that migration is optional).
@@ -187,8 +189,8 @@ bash setup/lib/restart.sh
 
 Mid-`/setup`: return to the setup flow. Otherwise wire the channel with `/init-first-agent`
 (or `/manage-channels`). For the Slack agents feature (child bots from
-`create_agent`, shared rooms, canvases), apply `/slack-a2a-rooms` then
-`/slack-agent-flow` — the setup wizard does both automatically by default.
+`create_agent`, shared rooms, canvases), apply the in-tree `/slack-a2a-rooms`
+then `/slack-agent-flow` — the setup wizard does both automatically by default.
 
 ## Channel Info
 
