@@ -10,6 +10,45 @@
 # bind mount at runtime (see src/container-runner.ts). Source-only changes
 # never require an image rebuild.
 
+# ---- Stage 1: build whisper.cpp ---------------------------------------------
+# whisper.cpp is built from source so we get the actual whisper-cli binary
+# (the npm package "whisper-cli" is unrelated — it wraps OpenAI's API and
+# defeats sovereignty). RPATH=$ORIGIN/../lib lets the binary find its sibling
+# libs without LD_LIBRARY_PATH gymnastics in the runtime stage.
+FROM debian:bookworm-slim AS whisper-builder
+ARG WHISPER_CPP_VERSION=v1.8.3
+# Multilingual, not `ggml-base.en.bin` — an English-only default silently
+# produces garbage transcripts for non-English voice notes, which reads as
+# "the feature is broken" rather than "wrong model" to affected users. Same
+# file size (~141MB either way) and auto-detects language, so English
+# transcription isn't worse for it.
+ARG WHISPER_MODEL_FILE=ggml-base.bin
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake \
+        build-essential \
+        libssl-dev \
+        pkg-config \
+        git \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --branch ${WHISPER_CPP_VERSION} \
+        https://github.com/ggerganov/whisper.cpp.git /src/whisper.cpp
+RUN cd /src/whisper.cpp && \
+    cmake -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=ON \
+        -DCMAKE_INSTALL_PREFIX=/whisper-install \
+        -DCMAKE_INSTALL_RPATH='$ORIGIN/../lib' \
+        -DCMAKE_BUILD_WITH_INSTALL_RPATH=TRUE && \
+    cmake --build build -j --config Release && \
+    cmake --install build
+RUN mkdir -p /whisper-install/share && \
+    curl -fsSL --retry 5 --retry-delay 2 --retry-max-time 300 -C - \
+        -o /whisper-install/share/${WHISPER_MODEL_FILE} \
+        https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${WHISPER_MODEL_FILE}
+
+# ---- Stage 2: runtime --------------------------------------------------------
 FROM node:22-slim
 
 # ---- Build-time arguments ----------------------------------------------------
@@ -22,6 +61,10 @@ ARG INSTALL_CJK_FONTS=false
 # pinned in cli-tools.json so a skill can add one with a json-merge; Bun (the
 # runtime) is pinned here because it installs from a different source.
 ARG BUN_VERSION=1.4.0
+# Re-declared here (also set in the whisper-builder stage above) because
+# Docker ARGs are scoped per stage — the COPY below that reads it needs its
+# own declaration.
+ARG WHISPER_MODEL_FILE=ggml-base.bin
 
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
@@ -47,6 +90,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libxshmfence1 \
         ca-certificates \
         curl \
+        ffmpeg \
         git \
         tini \
         unzip \
@@ -117,6 +161,16 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 # Actual script lives in the mounted source at /app/src/cli/ncl.ts.
 RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \
     chmod +x /usr/local/bin/ncl
+
+# ---- whisper.cpp from builder stage -----------------------------------------
+# Container-side voice transcription, sovereign by default. Audio attachments
+# get transcribed inside the container via local Whisper; OpenAI fallback is
+# off unless explicitly enabled (WHISPER_OPENAI_FALLBACK=true).
+COPY --from=whisper-builder /whisper-install/bin/whisper-cli /usr/local/bin/whisper-cli
+COPY --from=whisper-builder /whisper-install/lib/ /usr/local/lib/
+COPY --from=whisper-builder /whisper-install/share/${WHISPER_MODEL_FILE} /whisper/model.bin
+RUN ldconfig
+ENV WHISPER_MODEL_PATH=/whisper/model.bin
 
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh

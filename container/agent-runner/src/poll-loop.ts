@@ -215,6 +215,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
+    // Auto-transcribe: any audio attachments get inlined as
+    // `[Voice (source): "..."]` so the agent sees text. Source label is
+    // mandatory so the agent can disclose to the user when audio was
+    // processed remotely. Sovereign default is local-only — see
+    // transcription.ts.
+    const { autoTranscribeMessages } = await import('./auto-transcribe.js');
+    keep = await autoTranscribeMessages(keep);
+
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
     const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
@@ -478,6 +486,12 @@ export async function processQuery(
         // was awaited. Pushing into a closed stream is wasted work; the
         // claimed messages get released by the host's processing-claim sweep.
         if (done) return;
+
+        // Inline transcription on follow-ups too — voice notes can arrive
+        // mid-conversation, not just on the initial batch. See the matching
+        // call on the initial-batch path above for the sovereignty note.
+        const { autoTranscribeMessages } = await import('./auto-transcribe.js');
+        keep = await autoTranscribeMessages(keep);
 
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
