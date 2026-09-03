@@ -359,6 +359,34 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   const parsed = safeParseContent(event.message.content);
   const messageText = parsed.text ?? '';
 
+  // Deferred delivery content (adapter.ts: InboundMessage.resolveContent).
+  // `event.message.content` is the routing view and drives every decision
+  // below; the expensive view is pulled at most once, and only from
+  // deliverToAgent — i.e. only once some agent is actually going to persist
+  // this message. A chat with no wiring, or a message that fails every
+  // engage test, never pays for it. Memoized on the promise, not the value,
+  // so a second caller during an in-flight fetch joins it instead of
+  // starting a second download.
+  let deliveryContent: Promise<string> | undefined;
+  const resolveDeliveryContent = (): Promise<string> => {
+    if (!deliveryContent) {
+      deliveryContent = event.message.resolveContent
+        ? event.message.resolveContent().catch((err) => {
+            // Losing the resolved view costs the attachment bytes, not the
+            // message: fall back to the routing content so the agent still
+            // sees the text and the metadata rather than nothing at all.
+            log.warn('Deferred content resolution failed, delivering routing content', {
+              channelType: event.channelType,
+              platformId: event.platformId,
+              err,
+            });
+            return event.message.content;
+          })
+        : Promise.resolve(event.message.content);
+    }
+    return deliveryContent;
+  };
+
   // Per-wiring thread policy inputs, resolved once per event. Each wiring's
   // threads override (NULL = inherit) resolves against the channel's declared
   // defaults, hard-bounded by the live adapter's raw capability. Undeclared
@@ -396,7 +424,17 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const scopeOk = engages && (!senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed);
 
     if (engages && accessOk && scopeOk) {
-      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true);
+      await deliverToAgent(
+        agent,
+        agentGroup,
+        mg,
+        event,
+        userId,
+        threadsEnabled,
+        effectiveThreadId,
+        true,
+        resolveDeliveryContent,
+      );
       engagedCount++;
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
@@ -428,7 +466,17 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       // message (which also stages their attachments to disk via
       // writeSessionMessage → extractAttachmentFiles) is exactly what the
       // gate is meant to prevent.
-      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, false);
+      await deliverToAgent(
+        agent,
+        agentGroup,
+        mg,
+        event,
+        userId,
+        threadsEnabled,
+        effectiveThreadId,
+        false,
+        resolveDeliveryContent,
+      );
       accumulatedCount++;
     } else {
       log.debug('Message not engaged for agent (drop policy)', {
@@ -523,6 +571,7 @@ async function deliverToAgent(
   threadsEnabled: boolean,
   effectiveThreadId: string | null,
   wake: boolean,
+  resolveDeliveryContent: () => Promise<string>,
 ): Promise<void> {
   // Apply the resolved thread policy (wiring override AND channel declaration
   // AND adapter capability — resolveThreadPolicy at fanout): thread-enabled
@@ -585,6 +634,15 @@ async function deliverToAgent(
     await backfillNewSession(agentGroup, session, mg);
   }
 
+  // Past every gate — this message is being persisted, so the expensive
+  // content is now worth fetching. Deliberately after the command gate: a
+  // filtered or denied slash command shouldn't pull attachment bytes, and
+  // the gate only ever reads text, which both views share. Kept after the
+  // backfill too — that reads sibling sessions, never this message's
+  // content, so the download stays behind everything that can still abort
+  // the write.
+  const content = await resolveDeliveryContent();
+
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
   await writeSessionMessage(session.agent_group_id, session.id, {
     id: messageId,
@@ -593,7 +651,7 @@ async function deliverToAgent(
     platformId: deliveryAddr.platformId,
     channelType: deliveryAddr.channelType,
     threadId: deliveryAddr.threadId,
-    content: event.message.content,
+    content,
     trigger: wake,
   });
 
