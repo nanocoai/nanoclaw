@@ -1,3 +1,4 @@
+import { evaluateAdmission } from './admission-gate.js';
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import {
   getPendingMessages,
@@ -108,6 +109,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   let isFirstPoll = true;
   while (true) {
     if (config.signal?.aborted) return;
+    // Provider-idle admission boundary: registered gates decide whether this
+    // container may start a turn. The loop itself knows nothing about them —
+    // see admission-gate.ts.
+    if (evaluateAdmission()) {
+      await sleep(POLL_INTERVAL_MS);
+      continue;
+    }
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
     const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
     isFirstPoll = false;
