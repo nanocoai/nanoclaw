@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { GROUPS_DIR } from './config.js';
+import { isDeliveryMode } from './container-config.js';
 import type { McpServerConfig, AdditionalMountConfig } from './container-config.js';
 import { getAllAgentGroups } from './db/agent-groups.js';
 import { getContainerConfig, createContainerConfig } from './db/container-configs.js';
@@ -24,6 +25,7 @@ interface LegacyContainerJson {
   provider?: string;
   assistantName?: string;
   maxMessagesPerPrompt?: number;
+  deliveryMode?: string;
 }
 
 export async function backfillContainerConfigs(): Promise<void> {
@@ -65,6 +67,11 @@ export async function backfillContainerConfigs(): Promise<void> {
       packages_npm: JSON.stringify(legacy.packages?.npm ?? []),
       additional_mounts: JSON.stringify(legacy.additionalMounts ?? []),
       cli_scope: 'group',
+      // container.json is the only surviving record of this group's delivery
+      // contract when its row is gone, so recover it here rather than
+      // resetting a tools-only group to the wider envelope contract behind
+      // the operator's back. Anything unrecognized still resolves to NULL.
+      delivery_mode: isDeliveryMode(legacy.deliveryMode) ? legacy.deliveryMode : null,
       timezone: null,
       updated_at: new Date().toISOString(),
     };

@@ -235,6 +235,19 @@ export interface AdditionalMountConfig {
   readonly?: boolean;
 }
 
+/**
+ * How the agent in a group reaches a destination.
+ *
+ * `envelope`: final-text `<message to="…">` blocks deliver, alongside the
+ * outbound tools. `tools-only`: only an explicit outbound tool call delivers
+ * and everything else the agent writes stays private. Absent means `envelope`.
+ *
+ * Recorded here and carried to the container, but not yet acted on: the
+ * runner enforces `tools-only` in a separate change, so today every group
+ * delivers as `envelope` whatever this says.
+ */
+export type DeliveryMode = 'envelope' | 'tools-only';
+
 /** Shape of the materialized `container.json` file read by the container runner. */
 export interface ContainerConfig {
   mcpServers: Record<string, McpServerConfig>;
@@ -252,6 +265,7 @@ export interface ContainerConfig {
   /** API fast serving tier for this container; absent = the provider default. */
   fastMode?: boolean;
   timezone?: string;
+  deliveryMode?: DeliveryMode;
   /** Session isolation tier for the group's containers; absent = the composer's default ('container'). */
   runtimeTier?: 'container' | 'vm';
 }
@@ -377,7 +391,14 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     fastMode: FAST_MODE || undefined,
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
     runtimeTier: parseRuntimeTier(row.runtime_tier, group.name),
+    // Anything the column doesn't recognize resolves to the default rather
+    // than reaching the runner: an unreadable mode must never widen delivery.
+    deliveryMode: isDeliveryMode(row.delivery_mode) ? row.delivery_mode : undefined,
   };
+}
+
+export function isDeliveryMode(value: unknown): value is DeliveryMode {
+  return value === 'envelope' || value === 'tools-only';
 }
 
 /**

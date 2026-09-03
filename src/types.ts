@@ -26,6 +26,7 @@ export interface ContainerConfigRow {
   additional_mounts: string; // JSON: AdditionalMountConfig[]
   cli_scope: string; // 'disabled' | 'group' | 'global'
   timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  delivery_mode: string | null; // NULL (= 'envelope') | 'envelope' | 'tools-only'
   /**
    * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
    * Optional on the TS type because the trunk schema does not carry the

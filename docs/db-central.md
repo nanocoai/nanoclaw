@@ -327,9 +327,12 @@ CREATE TABLE container_configs (
   additional_mounts      TEXT NOT NULL DEFAULT '[]',
   cli_scope              TEXT NOT NULL DEFAULT 'group',   -- disabled | group | global
   timezone               TEXT,                            -- IANA id; NULL = install-global TZ (added by migration 20)
+  delivery_mode          TEXT,                            -- envelope | tools-only; NULL = envelope (added by migration 25)
   updated_at             TEXT NOT NULL
 );
 ```
+
+`delivery_mode` picks the container's delivery contract for chat turns: `envelope` (default, `<message to>` blocks in the final text) or `tools-only` (only outbound tool calls deliver). Set via `ncl groups config update --delivery-mode <mode>`; an unreadable value resolves to `envelope` so a bad row never widens delivery. The column and its plumbing land first; the runner-side enforcement of `tools-only` follows in a separate change, so until then every group delivers as `envelope` whatever the column says.
 
 `timezone` overrides the install-global timezone for one agent group: host-side scheduling (cron interpretation, `--process-after`, run-log stamps) resolves it live via `resolveGroupTimezone` (`src/container-config.ts`); the container gets it as its `TZ` env on next respawn. Set via `ncl groups config update --timezone <IANA>` (`""` clears back to NULL) or `ncl groups create --timezone`.
 
@@ -440,6 +443,9 @@ Several early migrations were later renamed/retired and replaced by "module" fil
 | 20 | `container-config-timezone` | `020-container-config-timezone.ts` | `container_configs.timezone` — per-agent-group timezone override (NULL = install-global) |
 | 21 | `approval-question-render-metadata` | `021-approval-question.ts` | `question` card-body column on all three approval tables so terminal edits retain the original request |
 | 22 | `messaging-group-detached-at` | `022-messaging-group-detached.ts` | `messaging_groups.detached_at` — records when the bot left a channel without deleting its wiring |
+| 23 | `approvals-instance` | `023-approvals-instance.ts` | `pending_approvals.instance` — the adapter instance an approval card was delivered through (NULL = default instance) |
+| 24 | `host-coordination` | `024-host-coordination.ts` | `host_instances`, `session_claims`, `delivery_attempts`, `wake_signals` — durable host-coordination state (schema only; in-memory maps stay authoritative until a follow-up) |
+| 25 | `delivery-mode` | `025-delivery-mode.ts` | `container_configs.delivery_mode` — per-agent-group delivery contract (NULL = envelope) |
 
 Numbers 5 and 6 are intentionally absent — migrations were renumbered during early development.
 
