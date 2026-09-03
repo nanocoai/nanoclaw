@@ -157,6 +157,13 @@ ncl tasks resume <task-id> --group <agent-group-id>
 A valid `wakeAgent: false` decision is a successful run. It does not trigger
 failure backoff.
 
+## Seeded memory-maintenance tasks
+
+A new agent group is seeded with one paused series that maintains its own memory
+tree — a weekly hygiene audit. It is created paused for the same reason template
+tasks are, and it never reappears once deleted. See
+[Periodic maintenance](memory.md#periodic-maintenance).
+
 ## Template tasks
 
 Agent templates can include recurring tasks and optional script gates. Template
