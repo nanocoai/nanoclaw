@@ -333,7 +333,7 @@ function createPreCompactHook(assistantName?: string): HookCallback {
 
 /**
  * Resume cost is dominated by transcript size. Past this many bytes a fresh
- * cold container can't reload the .jsonl before the host's 30-min idle ceiling
+ * cold container can't reload the .jsonl before the host's idle timeout
  * fires, so the session is dropped and started clean. Operator-overridable.
  */
 function transcriptRotateBytes(): number {

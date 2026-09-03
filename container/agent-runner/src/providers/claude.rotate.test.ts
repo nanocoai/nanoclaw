@@ -7,7 +7,7 @@ import { ClaudeProvider } from './claude.js';
 
 // maybeRotateContinuation guards the cold-resume failure mode: a long-lived
 // session whose on-disk transcript has grown so large (or old) that the SDK
-// can't reload it before the host's idle ceiling kills the container.
+// can't reload it before the host's idle timeout kills the container.
 
 let tmp: string;
 let prevHome: string | undefined;

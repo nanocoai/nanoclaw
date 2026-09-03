@@ -7,8 +7,8 @@ import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 
 import {
-  ABSOLUTE_CEILING_MS,
   CLAIM_STUCK_MS,
+  IDLE_TIMEOUT_MS,
   _resetStuckProcessingRowsForTesting,
   decideStuckAction,
   shouldCloseTaskSession,
@@ -18,40 +18,40 @@ import { parseIsoTimestamp } from './mailbox/model.js';
 import { wrapSqliteInbound, wrapSqliteOutbound } from './mailbox/sqlite/index.js';
 
 const BASE = Date.parse('2026-04-20T12:00:00.000Z');
-const JUST_WITHIN_CEILING_MS = ABSOLUTE_CEILING_MS - 1;
-const JUST_OVER_CEILING_MS = ABSOLUTE_CEILING_MS + 1;
+const JUST_WITHIN_IDLE_TIMEOUT_MS = IDLE_TIMEOUT_MS - 1;
+const JUST_OVER_IDLE_TIMEOUT_MS = IDLE_TIMEOUT_MS + 1;
 
 function claim(id: string, offsetMs: number) {
   return { messageId: id, statusChanged: new Date(BASE - offsetMs).toISOString() };
 }
 
 describe('decideStuckAction', () => {
-  it('returns ok when heartbeat is within the absolute ceiling', () => {
+  it('returns ok when heartbeat is within the idle timeout', () => {
     expect(
       decideStuckAction({
         now: BASE,
-        heartbeatMtimeMs: BASE - JUST_WITHIN_CEILING_MS,
+        heartbeatMtimeMs: BASE - JUST_WITHIN_IDLE_TIMEOUT_MS,
         containerState: null,
         claims: [],
       }),
     ).toEqual({ action: 'ok' });
   });
 
-  it('returns kill-ceiling when heartbeat exceeds the absolute ceiling', () => {
+  it('returns kill-idle-timeout when heartbeat exceeds the idle timeout', () => {
     const res = decideStuckAction({
       now: BASE,
-      heartbeatMtimeMs: BASE - JUST_OVER_CEILING_MS,
+      heartbeatMtimeMs: BASE - JUST_OVER_IDLE_TIMEOUT_MS,
       containerState: null,
       claims: [],
     });
     expect(res).toEqual({
-      action: 'kill-ceiling',
-      heartbeatAgeMs: JUST_OVER_CEILING_MS,
-      ceilingMs: ABSOLUTE_CEILING_MS,
+      action: 'kill-idle-timeout',
+      heartbeatAgeMs: JUST_OVER_IDLE_TIMEOUT_MS,
+      idleTimeoutMs: IDLE_TIMEOUT_MS,
     });
   });
 
-  it('skips the ceiling check when no heartbeat file exists and no fallback is known', () => {
+  it('skips the idle-timeout check when no heartbeat file exists and no fallback is known', () => {
     // A freshly-spawned container hasn't produced any SDK events yet, so no
     // heartbeat. Prior behavior treated this as infinitely stale and killed
     // every container within seconds of spawn. With no claims either, we
@@ -65,40 +65,40 @@ describe('decideStuckAction', () => {
     expect(res.action).toBe('ok');
   });
 
-  it('does not kill a spawn within the absolute ceiling when heartbeat is absent', () => {
+  it('does not kill a spawn within the idle timeout when heartbeat is absent', () => {
     const res = decideStuckAction({
       now: BASE,
       heartbeatMtimeMs: 0,
-      containerStartedAtMs: BASE - JUST_WITHIN_CEILING_MS,
+      containerStartedAtMs: BASE - JUST_WITHIN_IDLE_TIMEOUT_MS,
       containerState: null,
       claims: [],
     });
     expect(res.action).toBe('ok');
   });
 
-  it('kills on ceiling using container spawn time when heartbeat never ticked', () => {
+  it('kills on idle timeout using container spawn time when heartbeat never ticked', () => {
     // Regression: a container spawns, finds nothing that warrants an SDK
     // event, and sits idle indefinitely with no heartbeat file ever created.
-    // Prior behavior exempted it from the ceiling check forever.
+    // Prior behavior exempted it from the idle-timeout check forever.
     const res = decideStuckAction({
       now: BASE,
       heartbeatMtimeMs: 0,
-      containerStartedAtMs: BASE - JUST_OVER_CEILING_MS,
+      containerStartedAtMs: BASE - JUST_OVER_IDLE_TIMEOUT_MS,
       containerState: null,
       claims: [],
     });
     expect(res).toEqual({
-      action: 'kill-ceiling',
-      heartbeatAgeMs: JUST_OVER_CEILING_MS,
-      ceilingMs: ABSOLUTE_CEILING_MS,
+      action: 'kill-idle-timeout',
+      heartbeatAgeMs: JUST_OVER_IDLE_TIMEOUT_MS,
+      idleTimeoutMs: IDLE_TIMEOUT_MS,
     });
   });
 
   it('prefers a heartbeat over the container spawn time', () => {
     const res = decideStuckAction({
       now: BASE,
-      heartbeatMtimeMs: BASE - JUST_WITHIN_CEILING_MS,
-      containerStartedAtMs: BASE - JUST_OVER_CEILING_MS,
+      heartbeatMtimeMs: BASE - JUST_WITHIN_IDLE_TIMEOUT_MS,
+      containerStartedAtMs: BASE - JUST_OVER_IDLE_TIMEOUT_MS,
       containerState: null,
       claims: [],
     });
@@ -108,7 +108,7 @@ describe('decideStuckAction', () => {
   it('kills on claim-stuck when heartbeat is absent AND a claim has aged past tolerance', () => {
     // Hanging fresh container: spawned, picked up a message (claim recorded
     // in processing_ack), but never wrote a heartbeat. Falls through the
-    // skipped ceiling check into claim-stuck — which correctly fires.
+    // skipped idle-timeout check into claim-stuck — which correctly fires.
     const claimedAgeMs = CLAIM_STUCK_MS + 5_000;
     const res = decideStuckAction({
       now: BASE,
@@ -119,11 +119,11 @@ describe('decideStuckAction', () => {
     expect(res.action).toBe('kill-claim');
   });
 
-  it('extends the ceiling when Bash has a declared timeout longer than 30 min', () => {
+  it('extends the idle timeout when Bash has a declared timeout longer than 30 min', () => {
     const twoHrMs = 2 * 60 * 60 * 1000;
     const res = decideStuckAction({
       now: BASE,
-      // 45 min — over the default ceiling, but under the Bash timeout
+      // 45 min — over the default idle timeout, but under the Bash timeout
       heartbeatMtimeMs: BASE - 45 * 60 * 1000,
       containerState: {
         currentTool: 'Bash',
@@ -202,7 +202,7 @@ describe('decideStuckAction', () => {
 //
 // Repro of the production bug seen 2026-04-30: container A claimed message M
 // (writes processing_ack row with status='processing'). Host kills A by
-// absolute-ceiling. Old behavior: messages_in.M was reset to pending but
+// idle-timeout. Old behavior: messages_in.M was reset to pending but
 // processing_ack.M survived. On the next sweep tick, wakeContainer spawned B,
 // the same-tick SLA check saw M's stale claim age (hours), and SIGKILL'd B
 // before agent-runner could run clearStaleProcessingAcks(). Loop. The fix
@@ -300,7 +300,7 @@ describe('resetStuckProcessingRows — orphan claim cleanup', () => {
     // Sanity: the orphan claim is what would trip claim-stuck.
     expect(outDb.getProcessingClaims()).toHaveLength(1);
 
-    _resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'absolute-ceiling');
+    _resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'idle-timeout');
 
     // Regression assertion: orphan claim is gone — next sweep tick will see
     // an empty claims list and not kill the freshly respawned container.

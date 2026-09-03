@@ -93,13 +93,13 @@ interface ActiveSessionRuntime {
   handle: SupervisedHandle;
   containerName: string;
   /**
-   * When this host started tracking the runtime. Backs the sweep's ceiling
+   * When this host started tracking the runtime. Backs the sweep's idle-timeout
    * check when no heartbeat file exists yet (see `host-sweep.ts`): a container
    * that finishes its turn without ever reaching an SDK event never writes one,
    * and without this it would sit alive-but-idle forever, immune to the check.
    * An adopted runtime records the adoption, which is the honest answer — this
    * host has no spawn time for a container a previous host started, and leaving
-   * it unset would exempt every adopted session from the ceiling.
+   * it unset would exempt every adopted session from the idle timeout.
    */
   startedAtMs: number;
   /** True when this runtime was adopted at startup rather than spawned here. */
@@ -360,7 +360,7 @@ async function spawnContainer(session: Session): Promise<void> {
   }
 
   // Clear any orphan heartbeat from a previous container instance — the sweep's
-  // ceiling check treats a missing file as "fresh spawn, give grace". Without
+  // idle-timeout check treats a missing file as "fresh spawn, give grace". Without
   // this, the stale mtime can trigger an immediate kill before the new container
   // touches the file itself.
   fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });

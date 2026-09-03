@@ -84,7 +84,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   let continuation: string | undefined = migrateLegacyContinuation(config.providerName);
 
   // Before resuming, drop a session whose on-disk transcript has grown too
-  // large/old to cold-resume within the host's idle ceiling. Without this a
+  // large/old to cold-resume within the host's idle timeout. Without this a
   // long-lived hub keeps trying to reload an ever-growing .jsonl, hangs the
   // first turn, and gets killed before it can reply (then repeats forever).
   if (continuation) {

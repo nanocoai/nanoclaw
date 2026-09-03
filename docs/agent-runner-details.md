@@ -42,7 +42,7 @@ interface AgentProvider {
 
   /** Optional pre-resume maintenance: given the stored continuation, return a
    *  reason string to drop it and start fresh (e.g. transcript too large/old to
-   *  cold-resume before the host idle ceiling), or null to keep resuming. */
+   *  cold-resume before the host idle timeout), or null to keep resuming. */
   maybeRotateContinuation?(continuation: string, cwd: string): string | null;
 }
 
@@ -196,7 +196,7 @@ SDK message (so the idle timer stays honest) and maps recognized messages to `Pr
 - **PreToolUse hook** records the current tool + its declared timeout to `container_state` (so the host sweep widens its stuck tolerance while a long Bash runs) and, as defense-in-depth, blocks any `SDK_DISALLOWED_TOOLS` call that slips through. It does **not** sanitize bash env vars — there is no such hook.
 - **PostToolUse / PostToolUseFailure** hooks clear the in-flight tool
 - **PreCompact** hook archives the transcript to `conversations/` before compaction
-- `maybeRotateContinuation` drops an oversized/aged transcript (default caps 12 MB / 14 days, both operator-overridable) so a cold container isn't killed reloading days of `.jsonl` before the host idle ceiling; `isSessionInvalid` clears a continuation whose transcript is gone
+- `maybeRotateContinuation` drops an oversized/aged transcript (default caps 12 MB / 14 days, both operator-overridable) so a cold container isn't killed reloading days of `.jsonl` before the host idle timeout; `isSessionInvalid` clears a continuation whose transcript is gone
 - `additionalDirectories` for multi-directory access
 
 ### Codex Provider

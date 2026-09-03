@@ -184,6 +184,11 @@ agent is not throttled unless the operator configures a limit:
 | --- | --- | --- |
 | `CONTAINER_CPU_LIMIT` | *(empty — unbounded)* | Passed to `--cpus` when set (e.g. `2`). |
 | `CONTAINER_MEMORY_LIMIT` | *(empty — unbounded)* | Passed to `--memory` when set (e.g. `8g`). |
+| `NANOCLAW_IDLE_TIMEOUT_MS` | `1800000` (30 min) | How long a container may emit no output and make no tool calls before the sweep kills it. Raise it for a slow local-model backend. Accepted range is 2 min to 24 h; anything else is refused with a warning and the default is used. |
+
+Unlike the two caps above, the idle timeout is a backstop that is always on:
+raising it widens the window in which a hung container keeps holding its session
+and its resources, which is why it cannot be set arbitrarily high or disabled.
 
 Only `--memory` is a container-level cap; whether it's a *hard* cap depends on
 the host having no swap (a deployment concern). On a swapless host a runaway is

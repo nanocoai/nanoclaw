@@ -10,7 +10,9 @@
  * can never be lost to a concurrent sweep. The re-exports below keep the
  * long-standing import surface of this module stable.
  */
-import { INSTALL_SLUG } from './config.js';
+import { IDLE_TIMEOUT_MS_RAW, INSTALL_SLUG } from './config.js';
+import { MAX_IDLE_TIMEOUT_MS, MIN_IDLE_TIMEOUT_MS } from './idle-timeout.js';
+import { IDLE_TIMEOUT_MS, IDLE_TIMEOUT_OVERRIDE_MS } from './reconcile-session.js';
 import { ensureEgressNetwork } from './egress-lockdown.js';
 import { getActiveSessions } from './db/sessions.js';
 import { peekSessionDriver } from './drivers/index.js';
@@ -22,8 +24,9 @@ import { reconcileSession } from './reconcile-session.js';
 import { sessionKey } from './reconcile.js';
 
 export {
-  ABSOLUTE_CEILING_MS,
   CLAIM_STUCK_MS,
+  IDLE_TIMEOUT_MS,
+  IDLE_TIMEOUT_OVERRIDE_MS,
   _resetStuckProcessingRowsForTesting,
   decideStuckAction,
   shouldCloseTaskSession,
@@ -69,6 +72,18 @@ function armRuntimeWatch(): void {
 export function startHostSweep(): void {
   if (running) return;
   running = true;
+  // Say so when an operator set the var and we threw their value away. Falling
+  // back silently is the safe behaviour, but a bad value otherwise looks
+  // identical to no value: containers keep dying at 30 minutes and nothing in
+  // the log explains why. Warned here rather than at module scope so importing
+  // the sweep stays side-effect-free.
+  if (IDLE_TIMEOUT_MS_RAW && IDLE_TIMEOUT_OVERRIDE_MS === undefined) {
+    log.warn('Ignoring invalid NANOCLAW_IDLE_TIMEOUT_MS', {
+      value: IDLE_TIMEOUT_MS_RAW,
+      usingMs: IDLE_TIMEOUT_MS,
+      allowedRangeMs: [MIN_IDLE_TIMEOUT_MS, MAX_IDLE_TIMEOUT_MS],
+    });
+  }
   queue = createReconcileQueue({
     reconcile: reconcileSession,
     singletons: {
