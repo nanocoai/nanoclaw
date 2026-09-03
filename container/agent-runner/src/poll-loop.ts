@@ -138,6 +138,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     const ids = messages.map((m) => m.id);
     markProcessing(ids);
+    // Cover the gap between claim and the first SDK stream event — cold
+    // resume + auto-compaction on a large transcript can take a while before
+    // query.events yields anything, and host-sweep's claim-stuck watchdog
+    // (src/host-sweep.ts) has no other signal during that window. Without
+    // this, a legitimately busy (not stuck) turn on a big session gets
+    // killed and retried forever, since retrying just repeats the same slow
+    // resume.
+    touchHeartbeat();
 
     const routing = extractRouting(messages);
 
