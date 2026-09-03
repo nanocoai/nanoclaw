@@ -17,7 +17,12 @@
 # libs without LD_LIBRARY_PATH gymnastics in the runtime stage.
 FROM debian:bookworm-slim AS whisper-builder
 ARG WHISPER_CPP_VERSION=v1.8.3
-ARG WHISPER_MODEL_FILE=ggml-base.en.bin
+# Multilingual, not `ggml-base.en.bin` — an English-only default silently
+# produces garbage transcripts for non-English voice notes, which reads as
+# "the feature is broken" rather than "wrong model" to affected users. Same
+# file size (~141MB either way) and auto-detects language, so English
+# transcription isn't worse for it.
+ARG WHISPER_MODEL_FILE=ggml-base.bin
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake \
         build-essential \
@@ -59,7 +64,7 @@ ARG BUN_VERSION=1.4.0
 # Re-declared here (also set in the whisper-builder stage above) because
 # Docker ARGs are scoped per stage — the COPY below that reads it needs its
 # own declaration.
-ARG WHISPER_MODEL_FILE=ggml-base.en.bin
+ARG WHISPER_MODEL_FILE=ggml-base.bin
 
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on
