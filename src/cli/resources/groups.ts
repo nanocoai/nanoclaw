@@ -117,7 +117,8 @@ registerResource({
         '--id <group-id> to pick among several stamped groups, or --new to stamp another agent regardless. ' +
         'Without --template, use --folder <slug> (required) and --name <display name>; with --template the ' +
         "folder derives from the agent name (--name overrides the template's own). " +
-        'Optional --timezone <IANA id> sets the group timezone (template task schedules fire in it); like --name, it applies only when a group is created — both are ignored on the in-place update of an existing group.',
+        'Optional --timezone <IANA id> sets the group timezone (template task schedules fire in it); like --name, it applies only when a group is created — both are ignored on the in-place update of an existing group. ' +
+        'Discover template refs with `ncl templates list` (--registry for the public library).',
       handler: async (args) => {
         const timezone = parseTimezoneFlag(args.timezone) ?? undefined;
         if (args.template) {

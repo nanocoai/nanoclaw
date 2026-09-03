@@ -33,10 +33,16 @@ export const A2A_MESSAGE_GATE_ACTION = 'a2a_message_gate';
 export const agentsCreate = defineGuardedAction({
   action: 'agents.create',
   grantActionName: 'create_agent',
-  // Bind a create_agent grant to the name that was approved.
+  // Bind a create_agent grant to the name AND template that were approved — a
+  // grant for a plain create (or another template) never covers a templated
+  // request, and vice versa.
   grantCoversRequest: (grant, input) => {
     try {
-      return (JSON.parse(grant.payload) as { name?: string }).name === input.payload.name;
+      const approved = JSON.parse(grant.payload) as { name?: string; template?: string };
+      const norm = (x: unknown): string | null => (typeof x === 'string' ? x : null);
+      return (
+        norm(approved.name) === norm(input.payload.name) && norm(approved.template) === norm(input.payload.template)
+      );
     } catch {
       return false;
     }

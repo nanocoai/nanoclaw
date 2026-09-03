@@ -1014,7 +1014,7 @@ async function pickLibraryTemplate(): Promise<string | undefined> {
   spinner.start('Fetching the template library…');
   let registry: ClonedRegistry;
   try {
-    registry = cloneRegistry();
+    registry = await cloneRegistry();
   } catch (err) {
     spinner.stop('Could not reach the template library.');
     const message = err instanceof Error ? err.message : String(err);
