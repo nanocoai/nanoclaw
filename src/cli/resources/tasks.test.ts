@@ -32,6 +32,7 @@ import {
 } from '../../db/sessions.js';
 import { initSessionFolder, sessionDir, withMailboxSession } from '../../session-manager.js';
 import { inboundDbPath, outboundDbPath } from '../../mailbox/sqlite/paths.js';
+import { registerReconcileEnqueue } from '../../reconcile-feeds.js';
 import { dispatch } from '../dispatch.js';
 import { formatTasksTable } from '../format-tasks.js';
 import type { CallerContext } from '../frame.js';
@@ -388,6 +389,26 @@ describe('tasks CLI resource', () => {
     const runRow = pending.find((p) => p.id === fired.row_id);
     expect(runRow?.recurrence).toBeNull(); // never re-armed into a phantom series
     expect(new Date(runRow!.process_after).getTime()).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('run asks for a prompt reconcile of the task session, as an inbound message does', async () => {
+    const created = await dispatch(
+      { id: 'c', command: 'tasks-create', args: { prompt: 'x', name: 'promptly', process_after: '2999-01-01T00:00:00Z' } },
+      agentCtx('ag-1', 'chat-1'),
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const { series_id, session_id } = created.data as { series_id: string; session_id: string };
+
+    const enqueue = vi.fn();
+    registerReconcileEnqueue(enqueue);
+    try {
+      const run = await dispatch({ id: 'r', command: 'tasks-run', args: { id: series_id } }, agentCtx('ag-1', 'chat-1'));
+      expect(run.ok).toBe(true);
+      expect(enqueue).toHaveBeenCalledWith(session_id);
+    } finally {
+      registerReconcileEnqueue(null);
+    }
   });
 
   it('run snapshots the updated schedule instead of an older in-flight occurrence', async () => {
