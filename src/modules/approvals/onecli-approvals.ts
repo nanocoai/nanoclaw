@@ -88,6 +88,19 @@ export async function resolveOneCLIApproval(approvalId: string, selectedOption: 
   const row = await getPendingApproval(approvalId);
   if (!row || row.action !== ONECLI_ACTION) return false;
 
+  // A value other than 'approve'/'reject' means resolveSelectedOption()
+  // couldn't map the button click back to its real option (see
+  // chat-sdk-bridge.ts) — treated as a deny below, but surfaced here so a
+  // silent-rejection pattern is diagnosable instead of looking identical to
+  // an intentional decline.
+  if (selectedOption !== 'approve' && selectedOption !== 'reject') {
+    log.warn('Unexpected approval option value — render metadata may have been missing', {
+      approvalId,
+      selectedOption,
+      expectedValues: ['approve', 'reject'],
+    });
+  }
+
   const decision: Decision = selectedOption === 'approve' ? 'approve' : 'deny';
   const claimed = await transitionPendingApprovalStatus(
     approvalId,
