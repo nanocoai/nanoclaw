@@ -111,3 +111,22 @@ export function getCurrentInReplyTo(): string | null {
   if (!Number.isFinite(age) || age > IN_REPLY_TO_MAX_AGE_MS) return null;
   return row.value;
 }
+
+/**
+ * Outbound seq high-water mark at the start of the current turn. In-memory
+ * only (not DB-persisted, unlike the fields above) — a turn never spans a
+ * container restart, and this is read on every MCP send_message call, so
+ * avoiding a DB round-trip here matters. Lets send_message apply the same
+ * same-turn echo guard deliverMidTurnBlocks already uses for <message>
+ * blocks, closing the one-directional gap where a tool-sent message wasn't
+ * protected against a matching block also going out (or vice versa).
+ */
+let turnStartSeq: number | undefined;
+
+export function setTurnStartSeq(seq: number | undefined): void {
+  turnStartSeq = seq;
+}
+
+export function getTurnStartSeq(): number | undefined {
+  return turnStartSeq;
+}

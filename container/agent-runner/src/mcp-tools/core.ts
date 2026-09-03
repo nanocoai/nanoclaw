@@ -10,8 +10,8 @@ import fs from 'fs';
 import path from 'path';
 
 import { findByName, getAllDestinations } from '../destinations.js';
-import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
-import { getCurrentInReplyTo } from '../db/session-state.js';
+import { getMessageIdBySeq, getRoutingBySeq, getUndeliveredMessages, writeMessageOut } from '../db/messages-out.js';
+import { getCurrentInReplyTo, getTurnStartSeq } from '../db/session-state.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -67,6 +67,28 @@ function resolveRouting(
   return { channel_type: 'agent', platform_id: dest.agentGroupId!, thread_id: null, resolvedName: to };
 }
 
+/**
+ * Has identical content already been written to outbound.db, to the same
+ * destination, since the current turn started? Same shape as poll-loop.ts's
+ * wasWrittenInSeqWindow — durable DB check, not an in-process ledger, so it
+ * also catches a matching <message to="..."> block the streaming door
+ * already delivered this turn. undefined turnStartSeq (no turn in progress,
+ * e.g. a task-script context) fails open: nothing to compare against.
+ */
+function wasAlreadySentThisTurn(platformId: string, channelType: string, text: string): boolean {
+  const afterSeq = getTurnStartSeq();
+  if (afterSeq === undefined) return false;
+  const content = JSON.stringify({ text });
+  return getUndeliveredMessages().some(
+    (message) =>
+      (message.seq ?? 0) > afterSeq &&
+      message.kind === 'chat' &&
+      message.platform_id === platformId &&
+      message.channel_type === channelType &&
+      message.content === content,
+  );
+}
+
 export const sendMessage: McpToolDefinition = {
   tool: {
     name: 'send_message',
@@ -91,6 +113,17 @@ export const sendMessage: McpToolDefinition = {
 
     const routing = resolveRouting(to);
     if ('error' in routing) return err(routing.error);
+
+    // Same-turn echo guard, mirroring deliverMidTurnBlocks' DB-backed check
+    // in poll-loop.ts: without this, a call to send_message with text that
+    // was already emitted as a <message to="..."> block earlier this turn
+    // (or vice versa — a matching block arriving after this call) has no
+    // protection in this direction, since the block door only guards against
+    // re-delivering what IT already sent, not what a tool call already sent.
+    if (wasAlreadySentThisTurn(routing.platform_id, routing.channel_type, text)) {
+      log(`send_message: identical content to "${to}" already sent this turn — skipped`);
+      return ok(`Skipped — identical message to ${routing.resolvedName} was already sent this turn.`);
+    }
 
     const id = generateId();
     const seq = await writeMessageOut({

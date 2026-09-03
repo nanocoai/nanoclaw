@@ -16,6 +16,7 @@ import {
   migrateLegacyContinuation,
   setContinuation,
   setCurrentInReplyTo,
+  setTurnStartSeq,
 } from './db/session-state.js';
 import {
   formatMessages,
@@ -380,6 +381,7 @@ export async function processQuery(
   // this?" truth lives in the outbound DB the door already writes to — no
   // in-process delivery ledger. Reset alongside midTurnSent at each result.
   let turnStartSeq = maxOutboundSeq();
+  setTurnStartSeq(turnStartSeq);
   // Cross-segment assembly buffer: the unresolved TAIL of the previous text
   // event — an unclosed <message …> block (or a bare open-tag prefix like
   // "<mess" literally split mid-token), or an unclosed <internal span. Frame-
@@ -639,6 +641,7 @@ export async function processQuery(
         // carried into the next turn — the wrap-nudge owns that case.
         midTurnSent = 0;
         turnStartSeq = maxOutboundSeq();
+        setTurnStartSeq(turnStartSeq);
         midTurnTail = '';
       }
     }
