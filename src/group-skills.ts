@@ -44,7 +44,11 @@ export function materializeTemplateSkills(agentGroupId: string, destSkillsDir: s
 
   fs.mkdirSync(destSkillsDir, { recursive: true });
   for (const name of fs.readdirSync(src)) {
-    if (!fs.statSync(path.join(src, name)).isDirectory()) continue;
+    // lstat: the Claude plane plants shared-skill symlinks in this store whose
+    // targets only resolve inside the container, so following them host-side
+    // throws ENOENT and bricks every spawn after a claude→codex switch.
+    // Template skills are always real directories; links are never ours.
+    if (!fs.lstatSync(path.join(src, name)).isDirectory()) continue;
     const dest = path.join(destSkillsDir, name);
     fs.rmSync(dest, { recursive: true, force: true });
     fs.cpSync(path.join(src, name), dest, { recursive: true });

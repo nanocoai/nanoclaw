@@ -19,10 +19,7 @@ export interface VaultAgent {
   name: string;
 }
 
-export type RunCommand = (
-  cmd: string,
-  args: string[],
-) => { status: number | null; stdout: string };
+export type RunCommand = (cmd: string, args: string[]) => { status: number | null; stdout: string };
 
 /**
  * List non-default vault agents via `onecli agents list`. `available: false`
@@ -49,9 +46,7 @@ export function listVaultAgents(run: RunCommand): {
   }
 
   const data =
-    parsed !== null && typeof parsed === 'object' && 'data' in parsed
-      ? (parsed as { data: unknown }).data
-      : null;
+    parsed !== null && typeof parsed === 'object' && 'data' in parsed ? (parsed as { data: unknown }).data : null;
   if (!Array.isArray(data)) return { available: false, agents: [] };
 
   const agents: VaultAgent[] = [];

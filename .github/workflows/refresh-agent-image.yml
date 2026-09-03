@@ -1,0 +1,197 @@
+# Opens the versions.json bump PR after the AWS worker promotes a new agent image.
+#
+# The split is deliberate and is about which side holds which credential:
+#
+#   AWS   warms the Echo pull-through cache, verifies the image, and promotes it
+#         into nanoclaw/agent. It can push images; it cannot write this repo
+#         beyond firing the dispatch below.
+#   here  reads the registry read-only and opens a pull request. It can write
+#         this repo; it cannot push an image.
+#
+# So neither side can complete a bump alone, and the copy never leaves AWS —
+# a ~1.2 GB round trip through a runner would buy nothing.
+#
+# What arrives in client_payload is used for PROSE ONLY. Every decision this
+# workflow makes is re-derived from the registry, because a dispatch payload is
+# attacker-supplied the moment that token leaks. Payload values are passed
+# through env: rather than inlined into run: blocks, for the same reason.
+name: refresh-agent-image
+
+on:
+  repository_dispatch:
+    types: [agent-image-promoted]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  open-bump-pr:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the bump branch
+      pull-requests: write # open the bump PR
+      id-token: write # OIDC for the read-only ECR role
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume the read-only role
+        id: aws
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AGENT_IMAGE_CI_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Find the newest promoted image
+        id: candidate
+        env:
+          REPO_NAME: nanoclaw/agent
+        run: |
+          set -euo pipefail
+
+          # Newest image carrying a hardened-* tag. Read from the registry rather
+          # than from the dispatch payload: the payload says "go look", it does
+          # not get to say what we found.
+          aws ecr describe-images --repository-name "$REPO_NAME" --region us-east-1 \
+            --query 'imageDetails[?imageTags]|[?length(imageTags[?starts_with(@,`hardened-`)])>`0`]' \
+            --output json > /tmp/candidates.json
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, re
+
+          imgs = json.load(open('/tmp/candidates.json'))
+          if not imgs:
+              print('found=false')
+              raise SystemExit(0)
+
+          imgs.sort(key=lambda i: i['imagePushedAt'])
+          newest = imgs[-1]
+          tag = sorted(t for t in newest['imageTags'] if t.startswith('hardened-'))[-1]
+
+          pin = json.load(open('versions.json')).get('agent-image', '')
+          if not isinstance(pin, str):
+              # A per-platform pin is a deliberate, hand-reviewed shape. Never
+              # rewrite one automatically — the entries must move together.
+              print('found=false')
+              print('reason=per-platform pin, needs a human')
+              raise SystemExit(0)
+
+          pinned_digest = pin.rsplit('@', 1)[-1] if '@' in pin else ''
+          if newest['imageDigest'] == pinned_digest:
+              print('found=false')
+              print('reason=already pinned')
+              raise SystemExit(0)
+
+          # Only ever move forward. If someone hand-pinned something newer than
+          # the newest hardened-* tag, proposing this would be a silent rollback.
+          pushed = {i['imageDigest']: i['imagePushedAt'] for i in imgs}
+          if pinned_digest in pushed and pushed[pinned_digest] >= newest['imagePushedAt']:
+              print('found=false')
+              print('reason=pinned image is not older than the candidate')
+              raise SystemExit(0)
+
+          if not re.fullmatch(r'[a-z0-9][a-z0-9.-]{0,60}', tag):
+              print('found=false')
+              print('reason=refusing an unexpected tag shape')
+              raise SystemExit(0)
+
+          # The registry host comes from the pin already in the file, so this
+          # workflow can never redirect the pin at a different registry. With no
+          # usable host there is nothing safe to synthesize — an empty one would
+          # commit "/nanoclaw/agent@sha256:…", which resolves nowhere.
+          registry = pin.split('/', 1)[0] if '/' in pin else ''
+          if '.' not in registry:
+              print('found=false')
+              print('reason=no registry host in the existing pin')
+              raise SystemExit(0)
+
+          print('found=true')
+          print(f'tag={tag}')
+          print(f'digest={newest["imageDigest"]}')
+          print(f'ref={registry}/{os.environ["REPO_NAME"]}@{newest["imageDigest"]}')
+          print(f'branch=chore/repin-{tag}')
+          PY
+
+      - name: Skip when there is nothing to propose
+        if: steps.candidate.outputs.found != 'true'
+        run: |
+          echo "::notice::No bump to open — ${{ steps.candidate.outputs.reason || 'no hardened-* image found' }}."
+
+      # Deterministic branch name per image, so a duplicate dispatch finds the
+      # existing PR instead of opening a second one.
+      - name: Check whether this bump is already open
+        id: existing
+        if: steps.candidate.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.candidate.outputs.branch }}
+        run: |
+          set -euo pipefail
+          if gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' | grep -q '[0-9]'; then
+            echo "open=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::A PR for $BRANCH is already open."
+          else
+            echo "open=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open the bump PR
+        if: steps.candidate.outputs.found == 'true' && steps.existing.outputs.open == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.candidate.outputs.tag }}
+          REF: ${{ steps.candidate.outputs.ref }}
+          BRANCH: ${{ steps.candidate.outputs.branch }}
+          # Prose only — never a decision input. See the header.
+          PAYLOAD_CREATED: ${{ github.event.client_payload.created }}
+          PAYLOAD_UPSTREAM: ${{ github.event.client_payload.upstream_digest }}
+          PAYLOAD_LOCK: ${{ github.event.client_payload.lock_sha256 }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          v = json.load(open('versions.json'))
+          v['agent-image'] = os.environ['REF']
+          with open('versions.json', 'w') as f:
+              json.dump(v, f, indent=2)
+              f.write('\n')
+          PY
+          git diff --stat
+
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch -c "$BRANCH"
+          git add versions.json
+          git commit -m "versions: repin the agent image to ${TAG}"
+          git push -u origin "$BRANCH"
+
+          {
+            echo "Repins the agent image to \`${TAG}\`."
+            echo
+            echo '```'
+            echo "${REF}"
+            echo '```'
+            echo
+            if [ -n "${PAYLOAD_CREATED:-}" ]; then
+              echo "Built \`${PAYLOAD_CREATED}\`."
+            fi
+            if [ -n "${PAYLOAD_UPSTREAM:-}" ]; then
+              echo "Upstream digest \`${PAYLOAD_UPSTREAM}\` — compare against the current pin's to see"
+              echo "whether the NanoClaw content changed or only the hardened base underneath it."
+            fi
+            if [ -n "${PAYLOAD_LOCK:-}" ]; then
+              echo "Agent-runner lock label \`${PAYLOAD_LOCK}\`."
+            fi
+            echo
+            echo "Promoted into \`nanoclaw/agent\` by the AWS refresh worker, which verified the"
+            echo "index shape, both platforms, the provenance label and the lock label before"
+            echo "copying. Those figures come from the dispatch payload and are here to read, not"
+            echo "to trust — \`verify-agent-image\` re-derives all of them on this PR from the"
+            echo "registry, under a different role, and is a required check."
+            echo
+            echo "Opened automatically. A human still merges."
+          } > /tmp/pr-body.md
+
+          gh pr create \
+            --base main --head "$BRANCH" \
+            --title "versions: repin the agent image to ${TAG}" \
+            --body-file /tmp/pr-body.md

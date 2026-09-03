@@ -5,43 +5,49 @@
  * After /add-wechat installs the adapter and the user scans the QR login,
  * the first inbound message from another WeChat account auto-creates a
  * `messaging_groups` row. This script finds that row, asks the operator
- * which agent group to wire it to, and inserts the `messaging_group_agents`
- * join row with sensible defaults — the "post-login wiring" step /add-wechat
- * otherwise requires manual SQL for.
+ * which agent group to wire it to, and creates the wiring via
+ * `ncl wirings create` — engage mode/pattern and priority come from the
+ * WeChat adapter's declared channel defaults, not from SQL baked into this
+ * script, so it can't drift against schema migrations.
  *
- * Usage:
+ * PREREQUISITE: the NanoClaw host service must be RUNNING — `ncl` talks to
+ * it over a Unix socket and has no offline mode.
+ *
+ * Usage (from the project root):
  *   pnpm exec tsx .claude/skills/add-wechat/scripts/wire-dm.ts
  *
  * Flags:
  *   --platform-id <id>      Wire a specific messaging group (default: most recent unwired)
- *   --agent-group <id>      Target agent group (default: interactive pick; or solo admin group)
- *   --sender-policy <p>     public | strict (default: public)
+ *   --agent-group <id>      Target agent group (default: interactive pick; auto-picked when only one exists)
+ *   --sender-policy <p>     public | strict | request_approval — overrides the
+ *                           channel-declared unknown_sender_policy on the
+ *                           messaging group (default: leave as the adapter declared)
  *   --session-mode <m>      shared | per-thread (default: shared)
  *   --non-interactive       Fail instead of prompting
  */
-import Database from 'better-sqlite3';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import readline from 'node:readline';
+import { fileURLToPath } from 'node:url';
 
-const DB_PATH = process.env.NANOCLAW_DB_PATH ?? path.join(process.cwd(), 'data', 'v2.db');
+// <root>/.claude/skills/add-wechat/scripts/wire-dm.ts → <root>
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
 
 type SenderPolicy = 'public' | 'strict' | 'request_approval';
 
 interface Args {
   platformId?: string;
   agentGroupId?: string;
-  senderPolicy: SenderPolicy;
+  senderPolicy?: SenderPolicy;
   sessionMode: 'shared' | 'per-thread';
   interactive: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
   const args: Args = {
-    // Default matches the router's auto-create (`request_approval`) so the
-    // admin gets an approval card on the next unknown-sender DM rather than
-    // a silent allow. Pass `--sender-policy public` to open the channel to
-    // anyone, or `strict` to require explicit membership.
-    senderPolicy: 'request_approval',
+    // No --sender-policy default: the router already stamped the policy the
+    // WeChat adapter declares when it auto-created the messaging group.
+    // Only an explicit flag overrides it.
     sessionMode: 'shared',
     interactive: true,
   };
@@ -68,72 +74,90 @@ function parseArgs(argv: string[]): Args {
   return args;
 }
 
+/** Run one ncl command against the running host and return its parsed data. */
+function ncl(...cliArgs: string[]): unknown {
+  const res = spawnSync('pnpm', ['exec', 'tsx', 'src/cli/client.ts', ...cliArgs, '--json'], {
+    cwd: PROJECT_ROOT,
+    encoding: 'utf-8',
+  });
+  if (res.error) throw res.error;
+  let frame: { ok: boolean; data?: unknown; error?: { message: string } } | undefined;
+  try {
+    frame = JSON.parse(res.stdout);
+  } catch {
+    // No frame — transport-level failure (host not running), reported on stderr.
+  }
+  if (frame && !frame.ok) throw new Error(`ncl ${cliArgs.join(' ')} failed: ${frame.error?.message}`);
+  if (!frame || res.status !== 0) {
+    const detail = (res.stderr || res.stdout || '').trim();
+    throw new Error(
+      `ncl ${cliArgs.join(' ')} failed:\n${detail}\n\n` +
+      'Is the NanoClaw host service running? ncl connects to it over a Unix socket.',
+    );
+  }
+  return frame.data;
+}
+
 async function prompt(q: string): Promise<string> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   return new Promise((resolve) => rl.question(q, (a) => { rl.close(); resolve(a.trim()); }));
 }
 
-function generateId(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
+interface MgRow { id: string; platform_id: string; name: string | null; is_group: number; created_at: string }
+interface AgRow { id: string; name: string; created_at: string }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const db = new Database(DB_PATH);
-  db.pragma('journal_mode = WAL');
+
+  const mgs = ncl('messaging-groups', 'list', '--channel-type', 'wechat') as MgRow[];
+  const wirings = ncl('wirings', 'list', '--limit', '10000') as Array<{ messaging_group_id: string }>;
+  const wiredMgIds = new Set(wirings.map((w) => w.messaging_group_id));
 
   // 1. Pick the messaging group
-  let platformId = args.platformId;
-  if (!platformId) {
-    const rows = db.prepare(`
-      SELECT mg.id, mg.platform_id, mg.name, mg.is_group, mg.created_at
-      FROM messaging_groups mg
-      LEFT JOIN messaging_group_agents mga ON mga.messaging_group_id = mg.id
-      WHERE mg.channel_type = 'wechat' AND mga.id IS NULL
-      ORDER BY mg.created_at DESC
-    `).all() as Array<{ id: string; platform_id: string; name: string | null; is_group: number; created_at: string }>;
+  let mg: MgRow | undefined;
+  if (args.platformId) {
+    mg = mgs.find((r) => r.platform_id === args.platformId);
+    if (!mg) throw new Error(`no wechat messaging_group with platform_id = ${args.platformId}`);
+  } else {
+    const unwired = mgs
+      .filter((r) => !wiredMgIds.has(r.id))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
 
-    if (rows.length === 0) {
+    if (unwired.length === 0) {
       console.error('No unwired WeChat messaging groups found.');
       console.error('Send a message to the bot first (from another WeChat account), then re-run.');
       process.exit(1);
     }
 
-    if (rows.length === 1 || !args.interactive) {
-      platformId = rows[0].platform_id;
-      console.log(`Using most recent unwired group: ${platformId} (${rows[0].is_group ? 'group' : 'DM'})`);
+    if (unwired.length === 1 || !args.interactive) {
+      mg = unwired[0];
+      console.log(`Using most recent unwired group: ${mg.platform_id} (${mg.is_group ? 'group' : 'DM'})`);
     } else {
       console.log('Unwired WeChat messaging groups:');
-      rows.forEach((r, i) => {
+      unwired.forEach((r, i) => {
         console.log(`  ${i + 1}. ${r.platform_id}  (${r.is_group ? 'group' : 'DM'}, ${r.created_at})`);
       });
       const pick = await prompt('Pick one [1]: ');
       const idx = pick === '' ? 0 : parseInt(pick, 10) - 1;
-      if (Number.isNaN(idx) || idx < 0 || idx >= rows.length) throw new Error('invalid choice');
-      platformId = rows[idx].platform_id;
+      if (Number.isNaN(idx) || idx < 0 || idx >= unwired.length) throw new Error('invalid choice');
+      mg = unwired[idx];
     }
   }
-
-  const mg = db.prepare(
-    'SELECT id, platform_id, is_group FROM messaging_groups WHERE channel_type = ? AND platform_id = ?'
-  ).get('wechat', platformId) as { id: string; platform_id: string; is_group: number } | undefined;
-  if (!mg) throw new Error(`no wechat messaging_group with platform_id = ${platformId}`);
 
   // 2. Pick the agent group
   let agentGroupId = args.agentGroupId;
   if (!agentGroupId) {
-    const agents = db.prepare('SELECT id, name, is_admin FROM agent_groups ORDER BY is_admin DESC, created_at ASC')
-      .all() as Array<{ id: string; name: string; is_admin: number }>;
+    const agents = (ncl('groups', 'list') as AgRow[])
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
     if (agents.length === 0) throw new Error('no agent groups exist — create one first');
 
-    const adminAgents = agents.filter((a) => a.is_admin === 1);
-    if (adminAgents.length === 1 && !args.interactive) {
-      agentGroupId = adminAgents[0].id;
-      console.log(`Auto-selected sole admin agent group: ${adminAgents[0].name} (${agentGroupId})`);
+    if (agents.length === 1) {
+      agentGroupId = agents[0].id;
+      console.log(`Auto-selected sole agent group: ${agents[0].name} (${agentGroupId})`);
     } else if (args.interactive) {
       console.log('Agent groups:');
       agents.forEach((a, i) => {
-        console.log(`  ${i + 1}. ${a.name} (${a.id})${a.is_admin ? ' [admin]' : ''}`);
+        console.log(`  ${i + 1}. ${a.name} (${a.id})`);
       });
       const pick = await prompt('Pick one [1]: ');
       const idx = pick === '' ? 0 : parseInt(pick, 10) - 1;
@@ -144,26 +168,29 @@ async function main(): Promise<void> {
     }
   }
 
-  const ag = db.prepare('SELECT id, name FROM agent_groups WHERE id = ?').get(agentGroupId) as
-    { id: string; name: string } | undefined;
+  const ag = (ncl('groups', 'list') as AgRow[]).find((a) => a.id === agentGroupId);
   if (!ag) throw new Error(`no agent_group with id = ${agentGroupId}`);
 
-  // 3. Update sender policy + wire
-  const tx = db.transaction(() => {
-    db.prepare('UPDATE messaging_groups SET unknown_sender_policy = ? WHERE id = ?')
-      .run(args.senderPolicy, mg.id);
-
-    db.prepare(`
-      INSERT INTO messaging_group_agents
-        (id, messaging_group_id, agent_group_id, trigger_rules, response_scope, session_mode, priority, created_at)
-      VALUES (?, ?, ?, '', 'all', ?, 10, datetime('now'))
-    `).run(generateId('mga'), mg.id, ag.id, args.sessionMode);
-  });
-  tx();
+  // 3. Wire, then apply the optional policy override. Engage mode/pattern and
+  //    priority are filled by the wirings resolveDefaults hook from the WeChat
+  //    adapter's declared channel defaults. Policy update runs second so a
+  //    failed create (e.g. already wired) leaves the mg row untouched.
+  const wiring = ncl(
+    'wirings', 'create',
+    '--messaging-group-id', mg.id,
+    '--agent-group-id', ag.id,
+    '--session-mode', args.sessionMode,
+  ) as { engage_mode: string; engage_pattern: string | null };
+  if (args.senderPolicy) {
+    ncl('messaging-groups', 'update', mg.id, '--unknown-sender-policy', args.senderPolicy);
+  }
 
   console.log('');
-  console.log(`WIRED platform_id=${mg.platform_id} agent_group=${ag.name} policy=${args.senderPolicy} mode=${args.sessionMode}`);
-  db.close();
+  console.log(
+    `WIRED platform_id=${mg.platform_id} agent_group=${ag.name} ` +
+    `engage=${wiring.engage_mode}${wiring.engage_pattern ? `(${wiring.engage_pattern})` : ''} ` +
+    `policy=${args.senderPolicy ?? '(channel default)'} mode=${args.sessionMode}`,
+  );
 }
 
 main().catch((err) => {

@@ -44,6 +44,23 @@ describe('materializeTemplateSkills', () => {
     expect(fs.existsSync(dest)).toBe(false);
   });
 
+  it('skips dangling symlinks the Claude plane planted (claude→codex switch)', () => {
+    // Regression: shared-skill symlinks in the store resolve only inside the
+    // container; statSync followed them host-side, threw ENOENT, and bricked
+    // every spawn after a provider switch.
+    templateSkill('g5', 'real-skill', 'SKILL.md', 'real');
+    fs.symlinkSync(
+      '/container/only/path/agent-browser',
+      path.join(DATA_DIR, 'v2-sessions', 'g5', '.claude-shared', 'skills', 'agent-browser'),
+    );
+    const dest = path.join(TEST_ROOT, 'grp5', '.agents', 'skills');
+
+    materializeTemplateSkills('g5', dest);
+
+    expect(fs.readFileSync(path.join(dest, 'real-skill', 'SKILL.md'), 'utf-8')).toBe('real');
+    expect(fs.existsSync(path.join(dest, 'agent-browser'))).toBe(false);
+  });
+
   it('overwrites its own skill dirs but leaves other destination entries intact', () => {
     templateSkill('g3', 'widget', 'SKILL.md', 'new');
     const dest = path.join(TEST_ROOT, 'grp3', '.agents', 'skills');

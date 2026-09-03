@@ -1,5 +1,23 @@
-export { initDb, initTestDb, getDb, closeDb } from './connection.js';
+export { initDb, initTestDb, initSqliteTestDb, getDb, closeDb } from './connection.js';
+export type { DbConfig, DbDriver, DbDialect, DbInitOptions, DbRole, RunResult } from './driver.js';
 export { runMigrations } from './migrations/index.js';
+
+export {
+  registerHostInstance,
+  renewHostInstanceLease,
+  markHostInstanceStopped,
+  listLiveHostInstances,
+  getSessionClaim,
+  tryClaimSession,
+  releaseSessionClaim,
+  setStopIntent,
+  recordDeliveryAttempt,
+  getDeliveryAttempt,
+  clearDeliveryAttempt,
+  writeWakeSignal,
+  takeWakeSignals,
+} from './coordination.js';
+export type { MigrationMode, MigrationRunOptions } from './migrations/index.js';
 export {
   createAgentGroup,
   getAgentGroup,
@@ -38,7 +56,7 @@ export {
   deletePendingQuestion,
   createPendingApproval,
   getPendingApproval,
-  updatePendingApprovalStatus,
+  transitionPendingApprovalStatus,
   deletePendingApproval,
   getPendingApprovalsByAction,
 } from './sessions.js';

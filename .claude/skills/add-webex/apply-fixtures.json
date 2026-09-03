@@ -1,0 +1,12 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials.",
+  "scenarios": [
+    {
+      "name": "bot",
+      "inputs": {
+        "bot_token": "fake-webex-bot-token",
+        "webhook_secret": "fake-webex-webhook-secret"
+      }
+    }
+  ]
+}

@@ -157,8 +157,7 @@ export function spawnStep(
 
     child.on('close', (code) => {
       raw.end();
-      const terminal =
-        [...stream.blocks].reverse().find((b) => b.fields.STATUS) ?? null;
+      const terminal = [...stream.blocks].reverse().find((b) => b.fields.STATUS) ?? null;
       const status = terminal?.fields.STATUS;
       const ok = code === 0 && (status === 'success' || status === 'skipped');
       resolve({
@@ -200,8 +199,7 @@ export function spawnQuiet(
     });
     child.on('close', (code) => {
       raw.end();
-      const terminal =
-        [...blocks].reverse().find((b) => b.fields.STATUS) ?? null;
+      const terminal = [...blocks].reverse().find((b) => b.fields.STATUS) ?? null;
       resolve({ ok: code === 0, exitCode: code ?? 1, transcript, terminal, blocks });
     });
   });
@@ -216,9 +214,7 @@ export async function runQuietStep(
   const rawLog = setupLog.stepRawLog(stepName);
   const start = Date.now();
   phEmit('step_started', { step: stepName });
-  const result = await runUnderSpinner(labels, () =>
-    spawnStep(stepName, extra, () => {}, rawLog),
-  );
+  const result = await runUnderSpinner(labels, () => spawnStep(stepName, extra, () => {}, rawLog));
   const durationMs = Date.now() - start;
   writeStepEntry(stepName, result, durationMs, rawLog);
   phEmit('step_completed', {
@@ -245,9 +241,7 @@ export async function runQuietChild(
   const rawLog = setupLog.stepRawLog(logName);
   const start = Date.now();
   phEmit('step_started', { step: logName });
-  const result = await runUnderSpinner(labels, () =>
-    spawnQuiet(cmd, args, rawLog, opts?.env),
-  );
+  const result = await runUnderSpinner(labels, () => spawnQuiet(cmd, args, rawLog, opts?.env));
   const durationMs = Date.now() - start;
 
   const blockFields = summariseTerminalFields(result.terminal);
@@ -271,12 +265,7 @@ function outcomeStatus(result: StepResult): 'success' | 'skipped' | 'failed' {
 }
 
 /** Turn a step's terminal-block fields into a concise progression-log entry. */
-export function writeStepEntry(
-  stepName: string,
-  result: StepResult,
-  durationMs: number,
-  rawLog: string,
-): void {
+export function writeStepEntry(stepName: string, result: StepResult, durationMs: number, rawLog: string): void {
   const rawStatus = result.terminal?.fields.STATUS;
   const logStatus: 'success' | 'skipped' | 'failed' = !result.ok
     ? 'failed'
@@ -299,12 +288,21 @@ export function summariseTerminalFields(block: Block | null): Record<string, str
   return out;
 }
 
-async function runUnderSpinner<
-  T extends { ok: boolean; transcript: string; terminal?: Block | null },
->(
-  labels: SpinnerLabels,
-  work: () => Promise<T>,
-): Promise<T> {
+/**
+ * A live clack spinner with an elapsed-time ticker — the brand-styled,
+ * width-fit rendering primitive behind `runUnderSpinner`, exposed so a caller
+ * that doesn't have a single `work()` promise to await can drive it itself.
+ * The apply engine (scripts/skill-apply.ts) fires stepStart/stepEnd *events*
+ * around each step, so the skill driver's per-step reporter starts the spinner
+ * on stepStart and calls the returned `.stop(...)` on stepEnd.
+ *
+ * `stop({ ok, skipped, transcript })` clears the ticker and renders the
+ * done/skipped/failed headline (bold) with the elapsed time (dim); on a failure
+ * it also dumps the transcript tail when one is supplied.
+ */
+export function startSpinner(labels: SpinnerLabels): {
+  stop: (outcome: { ok: boolean; skipped?: boolean; transcript?: string }) => void;
+} {
   const s = p.spinner();
   const start = Date.now();
   s.start(fitToWidth(labels.running, ' (99m 59s)'));
@@ -312,22 +310,35 @@ async function runUnderSpinner<
     const suffix = ` (${fmtDuration(Date.now() - start)})`;
     s.message(`${fitToWidth(labels.running, suffix)}${k.dim(suffix)}`);
   }, 1000);
+  return {
+    stop({ ok, skipped, transcript }) {
+      clearInterval(tick);
+      const suffix = ` (${fmtDuration(Date.now() - start)})`;
+      if (ok) {
+        const msg = skipped && labels.skipped ? labels.skipped : labels.done;
+        // Bold the outcome so the step's headline reads stronger than the prose
+        // body copy around it. The trailing `(Ns)` timing stays dim.
+        s.stop(`${k.bold(fitToWidth(msg, suffix))}${k.dim(suffix)}`);
+      } else {
+        const failMsg = labels.failed ?? labels.running.replace(/…$/, ' failed');
+        s.stop(`${k.bold(fitToWidth(failMsg, suffix))}${k.dim(suffix)}`, 1);
+        if (transcript) dumpTranscriptOnFailure(transcript);
+      }
+    },
+  };
+}
 
+async function runUnderSpinner<T extends { ok: boolean; transcript: string; terminal?: Block | null }>(
+  labels: SpinnerLabels,
+  work: () => Promise<T>,
+): Promise<T> {
+  const spinner = startSpinner(labels);
   const result = await work();
-
-  clearInterval(tick);
-  const suffix = ` (${fmtDuration(Date.now() - start)})`;
-  if (result.ok) {
-    const isSkipped = result.terminal?.fields.STATUS === 'skipped';
-    const msg = isSkipped && labels.skipped ? labels.skipped : labels.done;
-    // Bold the outcome so the step's headline reads stronger than the prose
-    // body copy around it. The trailing `(Ns)` timing stays dim.
-    s.stop(`${k.bold(fitToWidth(msg, suffix))}${k.dim(suffix)}`);
-  } else {
-    const failMsg = labels.failed ?? labels.running.replace(/…$/, ' failed');
-    s.stop(`${k.bold(fitToWidth(failMsg, suffix))}${k.dim(suffix)}`, 1);
-    dumpTranscriptOnFailure(result.transcript);
-  }
+  spinner.stop({
+    ok: result.ok,
+    skipped: result.terminal?.fields.STATUS === 'skipped',
+    transcript: result.transcript,
+  });
   return result;
 }
 
@@ -355,12 +366,7 @@ export function dumpTranscriptOnFailure(transcript: string): void {
  * process.exit. The return type is `Promise<never>`; control-flow
  * narrowing still works after `await`.
  */
-export async function fail(
-  stepName: string,
-  msg: string,
-  hint?: string,
-  rawLogPath?: string,
-): Promise<never> {
+export async function fail(stepName: string, msg: string, hint?: string, rawLogPath?: string): Promise<never> {
   setupLog.abort(stepName, msg);
   phEmit('setup_aborted', { step: stepName, reason: msg });
   p.log.error(msg);
@@ -385,9 +391,7 @@ export async function fail(
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
-      const skipList = [
-        ...new Set([...existingSkip, ...setupLog.completedStepNames()]),
-      ].join(',');
+      const skipList = [...new Set([...existingSkip, ...setupLog.completedStepNames()])].join(',');
       p.log.step(brandBody(`Retrying from ${stepName}…`));
       const result = spawnSync('pnpm', ['--silent', 'run', 'setup:auto'], {
         stdio: 'inherit',

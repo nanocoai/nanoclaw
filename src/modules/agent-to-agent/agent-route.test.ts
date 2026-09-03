@@ -8,7 +8,8 @@ import { log } from '../../log.js';
 import { createDestination } from './db/agent-destinations.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
 import { createSession, updateSession } from '../../db/sessions.js';
-import { initSessionFolder, inboundDbPath, sessionDir, writeSessionMessage } from '../../session-manager.js';
+import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
+import { initSessionFolder, sessionDir, writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 
 vi.mock('../../container-runner.js', () => ({
@@ -94,22 +95,22 @@ describe('routeAgentMessage return-path', () => {
   let S2: Session;
   let SB: Session;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
     fs.mkdirSync(TEST_DIR, { recursive: true });
 
-    const db = initTestDb();
-    runMigrations(db);
+    const db = await initTestDb();
+    await runMigrations(db);
 
-    createAgentGroup({ id: A, name: 'A', folder: 'a', agent_provider: null, created_at: now() });
-    createAgentGroup({ id: B, name: 'B', folder: 'b', agent_provider: null, created_at: now() });
+    await createAgentGroup({ id: A, name: 'A', folder: 'a', agent_provider: null, created_at: now() });
+    await createAgentGroup({ id: B, name: 'B', folder: 'b', agent_provider: null, created_at: now() });
 
     // S1 (older), S2 (newer) — both active sessions on A.
     S1 = {
       id: 'sess-A-old',
       agent_group_id: A,
       messaging_group_id: null,
-      thread_id: null,
+      thread_id: 'test:old',
       agent_provider: null,
       status: 'active',
       container_status: 'stopped',
@@ -120,7 +121,7 @@ describe('routeAgentMessage return-path', () => {
       id: 'sess-A-new',
       agent_group_id: A,
       messaging_group_id: null,
-      thread_id: null,
+      thread_id: 'test:new',
       agent_provider: null,
       status: 'active',
       container_status: 'stopped',
@@ -138,21 +139,21 @@ describe('routeAgentMessage return-path', () => {
       last_active: null,
       created_at: '2026-01-15T00:00:00.000Z',
     };
-    createSession(S1);
-    createSession(S2);
-    createSession(SB);
+    await createSession(S1);
+    await createSession(S2);
+    await createSession(SB);
     initSessionFolder(A, S1.id);
     initSessionFolder(A, S2.id);
     initSessionFolder(B, SB.id);
 
-    createDestination({
+    await createDestination({
       agent_group_id: A,
       local_name: 'b',
       target_type: 'agent',
       target_id: B,
       created_at: now(),
     });
-    createDestination({
+    await createDestination({
       agent_group_id: B,
       local_name: 'a',
       target_type: 'agent',
@@ -161,8 +162,8 @@ describe('routeAgentMessage return-path', () => {
     });
   });
 
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 
@@ -286,7 +287,7 @@ describe('routeAgentMessage return-path', () => {
     const inboundId = bRows[0].id;
 
     // Close S1 — simulates session cleanup or channel disconnect.
-    updateSession(S1.id, { status: 'closed' });
+    await updateSession(S1.id, { status: 'closed' });
 
     // B replies. origin points to S1 (closed), should fall through to S2.
     await routeAgentMessage(
@@ -303,7 +304,7 @@ describe('routeAgentMessage return-path', () => {
   it('cross-agent-group guard: origin session belonging to wrong agent group is rejected', async () => {
     // Third agent group C sends to B, stamping source_session_id = SC on B's inbound.
     const C = 'ag-C';
-    createAgentGroup({ id: C, name: 'C', folder: 'c', agent_provider: null, created_at: now() });
+    await createAgentGroup({ id: C, name: 'C', folder: 'c', agent_provider: null, created_at: now() });
     const SC: Session = {
       id: 'sess-C',
       agent_group_id: C,
@@ -315,9 +316,15 @@ describe('routeAgentMessage return-path', () => {
       last_active: null,
       created_at: '2026-03-01T00:00:00.000Z',
     };
-    createSession(SC);
+    await createSession(SC);
     initSessionFolder(C, SC.id);
-    createDestination({ agent_group_id: C, local_name: 'b', target_type: 'agent', target_id: B, created_at: now() });
+    await createDestination({
+      agent_group_id: C,
+      local_name: 'b',
+      target_type: 'agent',
+      target_id: B,
+      created_at: now(),
+    });
 
     await routeAgentMessage(
       { id: 'msg-from-C', platform_id: B, content: JSON.stringify({ text: 'from C' }), in_reply_to: null },
@@ -346,7 +353,7 @@ describe('routeAgentMessage return-path', () => {
 
   it('in_reply_to referencing a non-a2a row falls through to newest session', async () => {
     // Write a channel message into B's inbound (no source_session_id).
-    writeSessionMessage(B, SB.id, {
+    await writeSessionMessage(B, SB.id, {
       id: 'channel-msg-1',
       kind: 'chat',
       timestamp: now(),

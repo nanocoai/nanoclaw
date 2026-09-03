@@ -1,0 +1,11 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials.",
+  "scenarios": [
+    {
+      "name": "service-account",
+      "inputs": {
+        "gchat_credentials": "fake-service-account-json-blob"
+      }
+    }
+  ]
+}

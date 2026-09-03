@@ -1,0 +1,16 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. All prompts in this skill are unguarded (the login-method legs are prose alternatives, not when:-branches), so a fully-programmatic apply must answer every one — username/password AND access_token.",
+  "scenarios": [
+    {
+      "name": "homeserver",
+      "inputs": {
+        "base_url": "https://matrix.example.com",
+        "user_id": "@nanoclaw:example.com",
+        "bot_username": "nanoclaw",
+        "username": "nanoclaw",
+        "password": "fake-password",
+        "access_token": "syt_fake_access_token"
+      }
+    }
+  ]
+}

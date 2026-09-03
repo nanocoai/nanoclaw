@@ -18,12 +18,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import {
-  getContainerImageBase,
-  getInstallSlug,
-  getLaunchdLabel,
-  getSystemdUnit,
-} from '../../src/install-slug.js';
+import { getContainerImageBase, getInstallSlug, getLaunchdLabel, getSystemdUnit } from '../../src/install-slug.js';
 import {
   listVaultAgents,
   readAgentGroupIds,
@@ -102,6 +97,14 @@ export function scanInstall(deps: ScanDeps): Inventory {
     { rel: 'start-nanoclaw.sh', what: 'Start script', where: 'start-nanoclaw.sh' },
     { rel: 'nanoclaw.pid', what: 'PID file', where: 'nanoclaw.pid' },
   ]);
+  const updates = path.join(path.dirname(projectRoot), '.nanoclaw-updates', slug);
+  if (fs.existsSync(updates)) {
+    data.push({
+      what: 'Update rollback snapshots',
+      where: `${tilde(updates, home)}/`,
+      path: updates,
+    });
+  }
 
   const runtime = existingItems(projectRoot, home, [
     { rel: 'dist', what: 'Build output' },
@@ -136,9 +139,7 @@ export function detectExistingInstall(projectRoot: string): boolean {
   if (fs.existsSync(path.join(projectRoot, 'data', 'v2.db'))) return true;
   const home = os.homedir();
   if (process.platform === 'darwin') {
-    return fs.existsSync(
-      path.join(home, 'Library', 'LaunchAgents', `${getLaunchdLabel(projectRoot)}.plist`),
-    );
+    return fs.existsSync(path.join(home, 'Library', 'LaunchAgents', `${getLaunchdLabel(projectRoot)}.plist`));
   }
   if (process.platform === 'linux') {
     const unit = getSystemdUnit(projectRoot);
@@ -150,22 +151,12 @@ export function detectExistingInstall(projectRoot: string): boolean {
   return false;
 }
 
-function scanService(
-  deps: ScanDeps,
-  slug: string,
-  containerRuntime: string,
-  notes: string[],
-): ServiceInventory {
+function scanService(deps: ScanDeps, slug: string, containerRuntime: string, notes: string[]): ServiceInventory {
   const { projectRoot, home, platform, runCommand } = deps;
   const service: ServiceInventory = { containerIds: [] };
 
   if (platform === 'darwin') {
-    const plist = path.join(
-      home,
-      'Library',
-      'LaunchAgents',
-      `${getLaunchdLabel(projectRoot)}.plist`,
-    );
+    const plist = path.join(home, 'Library', 'LaunchAgents', `${getLaunchdLabel(projectRoot)}.plist`);
     if (fs.existsSync(plist)) service.launchdPlist = plist;
   } else if (platform === 'linux') {
     const unit = getSystemdUnit(projectRoot);
@@ -182,12 +173,7 @@ function scanService(
   const image = `${getContainerImageBase(projectRoot)}:latest`;
   let runtimeOk = true;
   try {
-    const ps = runCommand(containerRuntime, [
-      'ps',
-      '-aq',
-      '--filter',
-      `label=${installLabel}`,
-    ]);
+    const ps = runCommand(containerRuntime, ['ps', '-aq', '--filter', `label=${installLabel}`]);
     if (ps.status === 0) {
       service.containerIds = ps.stdout
         .split('\n')
@@ -230,20 +216,14 @@ function scanService(
     if (path.resolve(target) === path.join(projectRoot, 'bin', 'ncl')) {
       service.nclSymlink = link;
     } else {
-      notes.push(
-        `ncl command ${tilde(link, home)} points to another NanoClaw copy; left untouched.`,
-      );
+      notes.push(`ncl command ${tilde(link, home)} points to another NanoClaw copy; left untouched.`);
     }
   }
 
   return service;
 }
 
-function scanOnecli(
-  projectRoot: string,
-  runCommand: RunCommand,
-  notes: string[],
-): OnecliInventory {
+function scanOnecli(projectRoot: string, runCommand: RunCommand, notes: string[]): OnecliInventory {
   const vault = listVaultAgents(runCommand);
   if (!vault.available || vault.agents.length === 0) {
     return { mine: [], orphans: [], idsKnown: false };

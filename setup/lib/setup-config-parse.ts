@@ -13,13 +13,7 @@
  *   --key            booleans only (sets true)
  *   --no-key         booleans only (sets false)
  */
-import {
-  CONFIG,
-  envVarFor,
-  flagFor,
-  findByFlag,
-  type Entry,
-} from './setup-config.js';
+import { CONFIG, envVarFor, flagFor, findByFlag, type Entry } from './setup-config.js';
 
 export type ConfigValues = Record<string, string | boolean | number>;
 
@@ -132,15 +126,11 @@ export function parseFlags(argv: string[]): FlagParseResult {
   return { values, rest, help, errors };
 }
 
-export function applyToEnv(
-  values: ConfigValues,
-  env: NodeJS.ProcessEnv = process.env,
-): void {
+export function applyToEnv(values: ConfigValues, env: NodeJS.ProcessEnv = process.env): void {
   for (const e of CONFIG) {
     if (!(e.key in values)) continue;
     const v = values[e.key];
-    env[envVarFor(e)] =
-      typeof v === 'boolean' ? (v ? 'true' : 'false') : String(v);
+    env[envVarFor(e)] = typeof v === 'boolean' ? (v ? 'true' : 'false') : String(v);
   }
 }
 

@@ -92,6 +92,41 @@ agent-browser wait --url "**/dashboard"    # Wait for URL pattern
 agent-browser wait --load networkidle      # Wait for network idle
 ```
 
+### Waiting for a custom condition — ALWAYS bound it
+
+Prefer the built-in `wait` subcommands above. Only fall back to `eval`-polling
+when you must wait on a custom JS condition (e.g. a spinner disappearing or a
+"Send" button re-enabling in a chat UI).
+
+**Never write an unbounded wait loop.** A bare `until … do sleep; done` that
+polls a page condition will loop *forever* if the condition never becomes true
+(page failed to load, selector changed, network stalled). That does not just
+fail the command — it wedges the entire agent turn: the runner keeps the model
+stream open, later messages get silently swallowed, and the container can hang
+for hours without the host's stuck-detection firing.
+
+Always cap the wait with BOTH a wall-clock `timeout` and a max-attempts counter,
+and always exit the loop (never leave a `sleep` loop as the last thing running):
+
+```bash
+# Bounded wait: succeeds when the condition is met, gives up after ~90s.
+timeout 90 bash -c '
+  for i in $(seq 1 30); do
+    if agent-browser eval "document.querySelector(\".loading\") === null" 2>/dev/null | grep -q true; then
+      echo READY; exit 0
+    fi
+    sleep 3
+  done
+  echo TIMEOUT; exit 1
+'
+# Check the exit status / output: on TIMEOUT, snapshot the page and decide —
+# do NOT re-enter another unbounded wait.
+```
+
+If the wait times out, treat it as a real failure: take a `snapshot -i` or
+`screenshot` to see the actual page state, report what you found, and move on.
+Retrying the same unbounded wait is what causes the hang.
+
 ### Semantic locators (alternative to refs)
 
 ```bash

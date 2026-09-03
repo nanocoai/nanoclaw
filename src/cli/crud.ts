@@ -9,6 +9,8 @@
 import { randomUUID } from 'crypto';
 
 import { getDb } from '../db/connection.js';
+import { isUniqueViolation } from '../db/errors.js';
+import { renderVerbHelp } from './help-render.js';
 import { register } from './registry.js';
 import type { Access } from './registry.js';
 import type { CallerContext } from './frame.js';
@@ -37,9 +39,23 @@ export interface ColumnDef {
 
 export interface CustomOperation {
   access: Access;
+  /** First line = one-line summary (resource help). Full text renders in the
+   *  per-verb deep help (`ncl <resource> help <verb>` / `--help`). */
   description: string;
+  /**
+   * Declaring args opts this verb into strict validation: required/enum/type
+   * checks plus unknown-flag rejection, with the verb's generated usage block
+   * appended to every failure. Omit to keep the legacy lenient behavior
+   * (handler validates by hand, stray flags ignored).
+   */
   args?: ColumnDef[];
+  /** Ready-to-paste invocations, rendered under EXAMPLES in deep help. */
+  examples?: string[];
+  /** Operator-only: never runnable from inside a container (see CommandDef.hostOnly). */
+  hostOnly?: boolean;
   handler: (args: Record<string, unknown>, ctx: CallerContext) => Promise<unknown>;
+  /** Presentational renderer for human mode — see CommandDef.formatHuman. */
+  formatHuman?: (data: unknown) => string;
 }
 
 export interface ResourceDef {
@@ -68,8 +84,63 @@ export interface ResourceDef {
     update?: Access;
     delete?: Access;
   };
+  /** Portable ORDER BY expression for list. Defaults to the first timestamp
+   * column descending, then the resource id for deterministic ties. */
+  listOrder?: string;
+  /**
+   * Columns forming a natural unique key. When set, generic `create` is
+   * idempotent: if a row already matches on these columns it is returned
+   * instead of re-inserted (so a skill that wires via `ncl ... create` is
+   * safe to re-apply).
+   */
+  naturalKey?: string[];
   /** Non-standard verbs (grant, revoke, add, remove, restart, etc.). */
   customOperations?: Record<string, CustomOperation>;
+  /**
+   * Runs on `create` between explicit-arg collection and static column
+   * defaults (two-pass create): fills omitted columns with context-aware
+   * values (e.g. channel adapter declarations) and cross-validates the
+   * combination, throwing an actionable Error to reject. Mutates `values`
+   * in place. Explicit caller args are already present and must win — only
+   * fill what's still undefined. Static `col.default` / `defaultFrom` apply
+   * afterwards, only to columns the hook left unset, so a static default can
+   * never pre-empt context-aware resolution.
+   */
+  resolveDefaults?: (values: Record<string, unknown>) => void;
+  /**
+   * Runs on `update` after the update set is built, before the UPDATE
+   * executes. `current` is the existing row; `updates` holds only the
+   * changed columns and is mutable (coercions land here). Throw to reject.
+   * Mirror of the create-side validation in `resolveDefaults` for resources
+   * whose column combinations need cross-checks — a partial update must not
+   * be able to produce a combination `create` would have rejected.
+   */
+  preUpdate?: (updates: Record<string, unknown>, current: Record<string, unknown>) => void | Promise<void>;
+  /**
+   * Runs after a successful `create` INSERT, with the row that was just
+   * written. Used to wire in side effects that the central row alone
+   * doesn't trigger — e.g. creating a `container_configs` row when a new
+   * agent group is added, or the companion `agent_destinations` row when a
+   * wiring is added. The hook receives the same `values` object that was
+   * inserted, so generated fields like `id` and `created_at` are populated.
+   */
+  postCreate?: (row: Record<string, unknown>) => void | Promise<void>;
+  /**
+   * Runs AFTER the create transaction has committed, with the row that was
+   * written. Use this — not `postCreate` — for side effects that live
+   * OUTSIDE the central DB (filesystem writes, projecting rows into a
+   * running agent's session `inbound.db`) or that are async: those must not
+   * sit inside the better-sqlite3 transaction, which only covers central-DB
+   * statements and is synchronous.
+   *
+   * The canonical case is live-refresh parity with `ncl destinations add`:
+   * after `ncl wirings create` writes the companion `agent_destinations`
+   * row, the change has to be projected into any running container's session
+   * DB or the agent won't see the new delivery target until its next spawn
+   * (#2389). Runs only if the transaction succeeds, so it never observes a
+   * rolled-back row.
+   */
+  postCommit?: (row: Record<string, unknown>) => void | Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -94,25 +165,51 @@ function visibleColumns(def: ResourceDef): string[] {
   return def.columns.map((c) => c.name);
 }
 
+function coerceListFilter(column: ColumnDef, value: unknown): unknown {
+  switch (column.type) {
+    case 'number': {
+      const number = Number(value);
+      if (Number.isNaN(number)) throw new Error(`--${column.name.replace(/_/g, '-')} must be a number`);
+      return number;
+    }
+    case 'boolean':
+      if (value === true || value === 'true' || value === '1' || value === 1) return 1;
+      if (value === false || value === 'false' || value === '0' || value === 0) return 0;
+      throw new Error(`--${column.name.replace(/_/g, '-')} must be true or false`);
+    case 'json':
+      return typeof value === 'string' ? value : JSON.stringify(value);
+    case 'string':
+      return String(value);
+  }
+}
+
+function listOrder(def: ResourceDef): string {
+  if (def.listOrder) return def.listOrder;
+  const timestamp = def.columns.find((column) => column.name.endsWith('_at'))?.name;
+  return timestamp ? `${timestamp} DESC, ${def.idColumn}` : def.idColumn;
+}
+
 function genericList(def: ResourceDef) {
   const cols = visibleColumns(def).join(', ');
-  const filterableNames = new Set(def.columns.filter((c) => !c.generated).map((c) => c.name));
+  const filterableColumns = new Map(def.columns.filter((c) => !c.generated).map((c) => [c.name, c]));
   return async (args: Record<string, unknown>) => {
     const limit = args.limit !== undefined ? Math.max(1, Number(args.limit)) : 200;
     const filters: string[] = [];
     const params: unknown[] = [];
     for (const [k, v] of Object.entries(args)) {
       if (k === 'id' || k === 'limit') continue;
-      if (filterableNames.has(k)) {
+      const column = filterableColumns.get(k);
+      if (column) {
         filters.push(`${k} = ?`);
-        params.push(v);
+        params.push(coerceListFilter(column, v));
       }
     }
     const where = filters.length > 0 ? ` WHERE ${filters.join(' AND ')}` : '';
     params.push(limit);
-    return getDb()
-      .prepare(`SELECT ${cols} FROM ${def.table}${where} LIMIT ?`)
-      .all(...params);
+    // Newest first: without an ORDER BY the LIMIT silently hides the most
+    // recently inserted rows once a table outgrows it (bit `sessions list`
+    // past 200 sessions — a just-created session was invisible).
+    return getDb().all(`SELECT ${cols} FROM ${def.table}${where} ORDER BY ${listOrder(def)} LIMIT ?`, ...params);
   };
 }
 
@@ -121,7 +218,7 @@ function genericGet(def: ResourceDef) {
   return async (args: Record<string, unknown>) => {
     const id = args.id as string;
     if (!id) throw new Error(`${def.name} id is required`);
-    const row = getDb().prepare(`SELECT ${cols} FROM ${def.table} WHERE ${def.idColumn} = ?`).get(id);
+    const row = await getDb().get(`SELECT ${cols} FROM ${def.table} WHERE ${def.idColumn} = ?`, id);
     if (!row) throw new Error(`${def.name} not found: ${id}`);
     return row;
   };
@@ -131,6 +228,10 @@ function genericCreate(def: ResourceDef) {
   return async (args: Record<string, unknown>) => {
     const values: Record<string, unknown> = {};
 
+    // Pass 1: generated columns + explicit caller args only. Static defaults
+    // wait until after resolveDefaults so the hook sees exactly what the
+    // caller provided and a static default never pre-empts context-aware
+    // resolution.
     for (const col of def.columns) {
       if (col.generated) {
         if (col.name === def.idColumn) {
@@ -149,24 +250,65 @@ function genericCreate(def: ResourceDef) {
         values[col.name] = col.type === 'number' ? Number(v) : v;
       } else if (col.required) {
         throw new Error(`--${col.name.replace(/_/g, '-')} is required`);
-      } else if (col.default !== undefined) {
+      }
+    }
+
+    // Pass 2: context-aware defaults + cross-column validation.
+    if (def.resolveDefaults) def.resolveDefaults(values);
+
+    // Pass 3: static defaults for whatever is still unset.
+    for (const col of def.columns) {
+      if (col.generated || values[col.name] !== undefined) continue;
+      if (col.default !== undefined) {
         values[col.name] = col.default;
       } else if (col.defaultFrom !== undefined && values[col.defaultFrom] !== undefined) {
         values[col.name] = values[col.defaultFrom];
       }
     }
 
+    // Idempotent create: if a row already matches the natural key, return it
+    // rather than hitting a UNIQUE violation. Lets a skill re-run `ncl … create`.
+    // Runs after pass 3 so defaultFrom-filled columns (e.g. messaging-groups'
+    // `instance`) participate in the match. No new row means postCreate /
+    // postCommit are correctly skipped — no new companion rows to create.
+    const findNaturalKeyRow = async (): Promise<unknown | undefined> => {
+      if (!def.naturalKey || def.naturalKey.length === 0) return undefined;
+      const where = def.naturalKey.map((c) => `${c} IS NOT DISTINCT FROM ?`).join(' AND ');
+      const params = def.naturalKey.map((c) => values[c]);
+      return getDb().get(`SELECT ${visibleColumns(def).join(', ')} FROM ${def.table} WHERE ${where}`, ...params);
+    };
+    if (def.naturalKey && def.naturalKey.length > 0) {
+      const existing = await findNaturalKeyRow();
+      if (existing) return existing;
+    }
+
     const colNames = Object.keys(values);
     const placeholders = colNames.map((c) => `@${c}`);
-    getDb()
-      .prepare(`INSERT INTO ${def.table} (${colNames.join(', ')}) VALUES (${placeholders.join(', ')})`)
-      .run(values);
+    // Single transaction so a postCreate throw rolls back the parent INSERT —
+    // closes the partial-state class this PR exists to fix (#2415, #2389).
+    // `postCreate` may await central-DB work only. Anything outside the
+    // central DB — filesystem, mailbox projection, adapters, containers, or
+    // network — belongs in `postCommit`, which runs after commit below.
+    const db = getDb();
+    try {
+      await db.transaction(async () => {
+        await db.run(`INSERT INTO ${def.table} (${colNames.join(', ')}) VALUES (${placeholders.join(', ')})`, values);
+        if (def.postCreate) await def.postCreate(values);
+      });
+    } catch (error) {
+      if (!isUniqueViolation(error) || !def.naturalKey?.length) throw error;
+      const raced = await findNaturalKeyRow();
+      if (!raced) throw error;
+      return raced;
+    }
+    if (def.postCommit) await def.postCommit(values);
     return values;
   };
 }
 
 function genericUpdate(def: ResourceDef) {
   const updatableCols = def.columns.filter((c) => c.updatable);
+  const cols = visibleColumns(def).join(', ');
   return async (args: Record<string, unknown>) => {
     const id = args.id as string;
     if (!id) throw new Error(`${def.name} id is required`);
@@ -187,16 +329,25 @@ function genericUpdate(def: ResourceDef) {
       );
     }
 
+    if (def.preUpdate) {
+      const current = await getDb().get<Record<string, unknown>>(
+        `SELECT ${cols} FROM ${def.table} WHERE ${def.idColumn} = ?`,
+        id,
+      );
+      if (!current) throw new Error(`${def.name} not found: ${id}`);
+      await def.preUpdate(updates, current);
+    }
+
     const setClause = Object.keys(updates)
       .map((k) => `${k} = @${k}`)
       .join(', ');
-    const result = getDb()
-      .prepare(`UPDATE ${def.table} SET ${setClause} WHERE ${def.idColumn} = @_id`)
-      .run({ ...updates, _id: id });
+    const result = await getDb().run(`UPDATE ${def.table} SET ${setClause} WHERE ${def.idColumn} = @_id`, {
+      ...updates,
+      _id: id,
+    });
     if (result.changes === 0) throw new Error(`${def.name} not found: ${id}`);
 
-    const cols = visibleColumns(def).join(', ');
-    return getDb().prepare(`SELECT ${cols} FROM ${def.table} WHERE ${def.idColumn} = ?`).get(id);
+    return getDb().get(`SELECT ${cols} FROM ${def.table} WHERE ${def.idColumn} = ?`, id);
   };
 }
 
@@ -204,7 +355,7 @@ function genericDelete(def: ResourceDef) {
   return async (args: Record<string, unknown>) => {
     const id = args.id as string;
     if (!id) throw new Error(`${def.name} id is required`);
-    const result = getDb().prepare(`DELETE FROM ${def.table} WHERE ${def.idColumn} = ?`).run(id);
+    const result = await getDb().run(`DELETE FROM ${def.table} WHERE ${def.idColumn} = ?`, id);
     if (result.changes === 0) throw new Error(`${def.name} not found: ${id}`);
     return { deleted: id };
   };
@@ -223,6 +374,85 @@ function normalizeArgs(raw: Record<string, unknown>): Record<string, unknown> {
 }
 
 // ---------------------------------------------------------------------------
+// Strict arg validation (opt-in via CustomOperation.args)
+// ---------------------------------------------------------------------------
+
+/**
+ * Keys the dispatcher may inject into `req.args` before parseArgs runs
+ * (group-scope auto-fill). Strict validation must tolerate them even when a
+ * verb doesn't declare them, or every scoped agent call breaks.
+ */
+const DISPATCH_INJECTED_KEYS = ['id', 'agent_group_id', 'group'] as const;
+
+/**
+ * Validate `args` (already underscore-normalized) against a ColumnDef list:
+ * unknown-flag rejection, required, enum, and type coercion per the declared
+ * type. Returns a coerced copy; throws with a focused message on the first
+ * problem. Works from any ColumnDef list so generic CRUD resources can opt
+ * into the same strictness later without a second validator.
+ */
+export function validateArgs(
+  defs: ColumnDef[],
+  args: Record<string, unknown>,
+  opts: { allowExtra?: readonly string[] } = {},
+): Record<string, unknown> {
+  const declared = new Map(defs.map((d) => [d.name, d]));
+  const allowed = new Set<string>([...declared.keys(), ...(opts.allowExtra ?? DISPATCH_INJECTED_KEYS)]);
+
+  for (const key of Object.keys(args)) {
+    if (!allowed.has(key)) {
+      throw new Error(`unknown flag --${key.replace(/_/g, '-')}`);
+    }
+  }
+
+  const out: Record<string, unknown> = { ...args };
+  for (const def of defs) {
+    const flag = `--${def.name.replace(/_/g, '-')}`;
+    const v = args[def.name];
+    if (v === undefined) {
+      if (def.required) throw new Error(`${flag} is required`);
+      if (def.default !== undefined) out[def.name] = def.default;
+      continue;
+    }
+    // The client parses a value-less `--flag` as boolean true.
+    if (v === true && def.type !== 'boolean') {
+      throw new Error(`${flag} requires a value`);
+    }
+    switch (def.type) {
+      case 'number': {
+        const n = Number(v);
+        if (Number.isNaN(n)) throw new Error(`${flag} must be a number, got "${v}"`);
+        out[def.name] = n;
+        break;
+      }
+      case 'boolean': {
+        if (v === true || v === 'true' || v === '1') out[def.name] = true;
+        else if (v === false || v === 'false' || v === '0') out[def.name] = false;
+        else throw new Error(`${flag} must be true or false, got "${v}"`);
+        break;
+      }
+      case 'json': {
+        if (typeof v === 'string') {
+          try {
+            out[def.name] = JSON.parse(v);
+          } catch (err) {
+            throw new Error(`${flag} must be valid JSON`, { cause: err });
+          }
+        }
+        break;
+      }
+      case 'string':
+        out[def.name] = String(v);
+        break;
+    }
+    if (def.enum && !def.enum.includes(String(out[def.name]))) {
+      throw new Error(`${flag} must be one of: ${def.enum.join(', ')}`);
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // registerResource
 // ---------------------------------------------------------------------------
 
@@ -232,6 +462,7 @@ export function registerResource(def: ResourceDef): void {
   if (def.operations.list) {
     register({
       name: `${def.plural}-list`,
+      action: `${def.plural}.list`,
       description: `List all ${def.plural}.`,
       access: def.operations.list,
       resource: def.plural,
@@ -244,6 +475,7 @@ export function registerResource(def: ResourceDef): void {
   if (def.operations.get) {
     register({
       name: `${def.plural}-get`,
+      action: `${def.plural}.get`,
       description: `Get a ${def.name} by ID.`,
       access: def.operations.get,
       resource: def.plural,
@@ -256,6 +488,7 @@ export function registerResource(def: ResourceDef): void {
   if (def.operations.create) {
     register({
       name: `${def.plural}-create`,
+      action: `${def.plural}.create`,
       description: `Create a new ${def.name}.`,
       access: def.operations.create,
       resource: def.plural,
@@ -267,6 +500,7 @@ export function registerResource(def: ResourceDef): void {
   if (def.operations.update) {
     register({
       name: `${def.plural}-update`,
+      action: `${def.plural}.update`,
       description: `Update a ${def.name}.`,
       access: def.operations.update,
       resource: def.plural,
@@ -278,6 +512,7 @@ export function registerResource(def: ResourceDef): void {
   if (def.operations.delete) {
     register({
       name: `${def.plural}-delete`,
+      action: `${def.plural}.delete`,
       description: `Delete a ${def.name}.`,
       access: def.operations.delete,
       resource: def.plural,
@@ -286,16 +521,32 @@ export function registerResource(def: ResourceDef): void {
     });
   }
 
-  // Custom operations
+  // Custom operations. Declaring `args` opts the verb into strict validation;
+  // every failure carries the verb's usage block so a caller (human or agent)
+  // can fix the invocation without a second help round-trip.
   if (def.customOperations) {
     for (const [verb, op] of Object.entries(def.customOperations)) {
+      const declared = op.args;
       register({
         name: `${def.plural}-${verb.replace(/ /g, '-')}`,
+        action: `${def.plural}.${verb.replace(/ /g, '.')}`,
         description: op.description,
         access: op.access,
+        hostOnly: op.hostOnly,
         resource: def.plural,
-        parseArgs: (raw) => normalizeArgs(raw),
+        parseArgs: declared
+          ? (raw) => {
+              try {
+                return validateArgs(declared, normalizeArgs(raw));
+              } catch (e) {
+                const usage = renderVerbHelp(def, verb);
+                const msg = e instanceof Error ? e.message : String(e);
+                throw new Error(usage ? `${msg}\n\n${usage}` : msg, { cause: e });
+              }
+            }
+          : (raw) => normalizeArgs(raw),
         handler: async (args, ctx) => op.handler(args as Record<string, unknown>, ctx),
+        formatHuman: op.formatHuman,
       });
     }
   }

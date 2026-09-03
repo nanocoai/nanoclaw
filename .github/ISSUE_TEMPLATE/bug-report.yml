@@ -1,0 +1,167 @@
+name: "🐛 Bug report"
+description: Report something in NanoClaw that is not working as expected.
+title: "[bug] "
+labels:
+  - kind/bug
+  - triage/unresolved
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues before opening a new report.
+
+        For setup or usage problems, start with [Troubleshooting](https://docs.nanoclaw.dev/operate/troubleshooting) or ask in [GitHub Discussions](https://github.com/nanocoai/nanoclaw/discussions).
+
+        If this could be an exploitable vulnerability, [report it privately](https://github.com/nanocoai/nanoclaw/security/advisories/new).
+
+        ### Required information
+
+  - type: input
+    id: version
+    attributes:
+      label: Affected NanoClaw version or commit
+      description: Use the exact release or commit SHA you tested.
+      placeholder: v2.3.0 or 294ef2ae
+    validations:
+      required: true
+
+  - type: dropdown
+    id: host-platform
+    attributes:
+      label: Host platform
+      description: Choose where the problem happens.
+      options:
+        - macOS
+        - Linux
+        - WSL2
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed-behavior
+    attributes:
+      label: What happened?
+      description: Tell us what you saw.
+      placeholder: The agent receives the message, but no reply is sent.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: What did you expect?
+      description: Tell us what should have happened.
+      placeholder: The agent should reply in the same channel.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How can we reproduce it?
+      description: Give us the shortest command or message sequence that shows the problem. Start from a clean checkout when possible.
+      placeholder: |
+        1. Clone ...
+        2. Run ...
+        3. Send ...
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ### Optional context
+
+        The remaining fields are optional. Fill in only what applies.
+
+        Setup or update problem? See [Installation](https://docs.nanoclaw.dev/installation) or [Upgrading](https://docs.nanoclaw.dev/operate/upgrading). Channel or provider problem? See [Channels](https://docs.nanoclaw.dev/channels/overview) or [Agent providers](https://docs.nanoclaw.dev/extend/providers).
+
+  - type: input
+    id: os-details
+    attributes:
+      label: OS version and CPU architecture
+      placeholder: Ubuntu 24.04, x86_64
+
+  - type: dropdown
+    id: install-path
+    attributes:
+      label: Install or update path
+      options:
+        - Standard setup with nanoclaw.sh
+        - Advanced setup with nanoclaw.sh
+        - Manual source install with setup:auto
+        - Upgrade or migration from v1
+        - Development checkout
+        - Something else
+
+  - type: input
+    id: docker-version
+    attributes:
+      label: Docker version
+      placeholder: Docker 28.3.3
+
+  - type: dropdown
+    id: channel-interface
+    attributes:
+      label: Channel or interface
+      description: Choose where this happens when the channel matters.
+      options:
+        - CLI / terminal
+        - WhatsApp
+        - WhatsApp Cloud
+        - Telegram
+        - Discord
+        - Dial
+        - Slack
+        - Signal
+        - iMessage
+        - Microsoft Teams
+        - Google Chat
+        - GitHub
+        - Linear
+        - Matrix
+        - Mattermost
+        - Webex
+        - WeChat
+        - Delta Chat
+        - Emacs
+        - Email (Resend)
+        - Other channel
+        - Not channel-specific
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Agent provider
+      description: Choose the provider when it matters to the problem.
+      options:
+        - Claude
+        - OpenCode
+        - Codex
+        - Ollama
+        - Other provider
+        - Not provider-specific
+
+  - type: input
+    id: model
+    attributes:
+      label: Agent model
+      description: Name the model when it matters to the problem.
+      placeholder: claude-opus-4-1, gpt-5, or qwen3
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant redacted logs
+      description: Paste only the lines that help show the problem. Remove tokens, credentials, private messages, and personal data.
+      placeholder: Paste the smallest relevant log excerpt here.
+      render: shell
+
+  - type: input
+    id: regression
+    attributes:
+      label: Last version that worked
+      description: If this worked before, tell us the last version or commit where it worked.
+      placeholder: Worked on v2.2.9; fails on v2.3.0.

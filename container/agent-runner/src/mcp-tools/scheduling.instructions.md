@@ -1,40 +1,25 @@
-## Task scheduling (`schedule_task`)
+## Task scheduling (`ncl tasks`)
 
-For any recurring task, use `schedule_task`. This is the scheduling path — tasks persist across sessions and restarts, and support the pre-task `script` hook described below.
+Use `ncl tasks` for one-shot and recurring tasks. Each task runs in its own isolated session. Its runtime prompt supplies the task-only delivery and run-log contract.
 
-To inspect or change existing tasks, use `list_tasks` (returns one row per series with the stable id) and `update_task` / `cancel_task` / `pause_task` / `resume_task`. Prefer `update_task` over cancel + reschedule.
+Pass `--name "<short label>"` on create to get a readable task id (e.g. `--name "sales briefing"` → `sales-briefing-a25c`); without it ids are `t-<hex>`.
 
-Frequent recurring scheduled tasks — more than a few times a day — consume API credits and can risk account restrictions. You can add a `script` that runs first, and you will only be called when the check passes.
-
-### How it works
-
-1. Provide a bash `script` alongside the `prompt` when scheduling
-2. When the task fires, the script runs first
-3. Script returns: `{ "wakeAgent": true/false, "data": {...} }`
-4. If `wakeAgent: false` — nothing happens, task waits for next run
-5. If `wakeAgent: true` — claude receives the script's data + prompt and handles
-
-### Always test your script first
-
-Before scheduling, run the script directly to verify it works:
+Common commands:
 
 ```bash
-bash -c 'node --input-type=module -e "
-  const r = await fetch(\"https://api.github.com/repos/owner/repo/pulls?state=open\");
-  const prs = await r.json();
-  console.log(JSON.stringify({ wakeAgent: prs.length > 0, data: prs.slice(0, 5) }));
-"'
+ncl tasks create --name "ping" --prompt "Remind the user to call Dana" --process-after "tomorrow 18:00"
+ncl tasks list
+ncl tasks get ping-a25c        # includes run count, failures, and recent run-log lines
+ncl tasks run ping-a25c         # fire once now without changing the schedule (testing)
+ncl tasks update ping-a25c --prompt "New instructions"
+ncl tasks pause ping-a25c
+ncl tasks resume ping-a25c
+ncl tasks cancel ping-a25c      # or --all as a kill switch
+ncl tasks delete ping-a25c
 ```
 
-### When NOT to use scripts
+Use good judgement on whether it's appropriate to check in with the user about the task prompt before task creation, and if so, whether to share verbatim or a description of it.
 
-If a task requires your judgment every time (daily briefings, reminders, reports), skip the script — just use a regular prompt. Do not attempt to do things like sentiment analysis or advanced nlp in scripts.
+`--process-after` accepts UTC timestamps or naive local timestamps interpreted in the instance timezone (shown in the `<context timezone="..."/>` header).
 
-### Frequent task guidance
-
-If a user wants a task to run more than a few times a day and a script can't be used:
-
-- Explain that each time the task fires it uses API credits and risks rate limits
-- Suggest adjusting the task requirements in a way that will allow you to use a script
-- If the user needs an LLM to evaluate data, suggest using an API key with direct Anthropic API calls inside the script
-- Help the user find the minimum viable frequency
+Run `ncl tasks create --help` for schedules, options, and pre-task gate scripts (checks that run before you wake).

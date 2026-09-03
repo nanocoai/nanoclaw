@@ -18,8 +18,8 @@
  *      so it can be re-routed on connect/create.
  *
  * On connect (handler in index.ts):
- *   - Create `messaging_group_agents` with defaults
- *     (mention-sticky for groups / pattern='.' for DMs,
+ *   - Create `messaging_group_agents` with the channel's declared engage
+ *     defaults (resolveWiringDefaults, DM vs group context;
  *      sender_scope='known', ignored_message_policy='accumulate')
  *   - Add the triggering sender to `agent_group_members` so sender_scope
  *     doesn't bounce the replayed message into a sender-approval cascade
@@ -45,14 +45,16 @@
  *   - Delivery adapter missing.
  */
 import { normalizeOptions, type NormalizedOption, type RawOption } from '../../channels/ask-question.js';
+import { resolveWiringDefaults } from '../../channels/channel-defaults.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder, getAllAgentGroups } from '../../db/agent-groups.js';
 import { getChannelAdapter } from '../../channels/channel-registry.js';
 import { getMessagingGroup, updateMessagingGroup } from '../../db/messaging-groups.js';
 import { getDeliveryAdapter } from '../../delivery.js';
+import { groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import { log } from '../../log.js';
-import type { InboundEvent } from '../../channels/adapter.js';
-import type { AgentGroup } from '../../types.js';
+import type { InboundEvent, ResolvedConversation } from '../../channels/adapter.js';
+import type { AgentGroup, MessagingGroup } from '../../types.js';
 import { pickApprovalDelivery, pickApprover } from '../approvals/primitive.js';
 import { createPendingChannelApproval, hasInFlightChannelApproval } from './db/pending-channel-approvals.js';
 import { hasAdminPrivilege } from './db/user-roles.js';
@@ -63,6 +65,33 @@ export const CONNECT_PREFIX = 'connect:';
 export const NEW_AGENT_VALUE = 'new_agent';
 export const CHOOSE_EXISTING_VALUE = 'choose_existing';
 export const REJECT_VALUE = 'reject';
+// This deliberately does not claim "the same authority as you": approved members cannot run admin commands,
+// which command-gate.ts gates on hasAdminPrivilege, but it names the real shared context, workspace, memory, and tool blast radius.
+export const AGENT_ACCESS_SCOPE_WARNING =
+  "Anyone approved here can interact with the agent and potentially access anything the agent can access, including other conversations' context, its workspace files and memory, and any connected tools.";
+
+// ── Channel-card interceptor seam (B2/D24) ──
+// A channel module can claim the escalation for its own channel type before
+// a registration card goes out — e.g. the slack-room-membership module's
+// owner-presence rule (owner in the room → auto-wire, no card) and its
+// Slackbot shadow-channel backstop. The seam is deliberately generic: this
+// module registers/consults by channel_type only and never imports channel
+// code. 'handled' = the interceptor consumed the escalation (wired, declined,
+// or deliberately ignored it); 'card' = proceed with today's card flow.
+// Interceptor errors fall back to the card — a broken module must never make
+// escalations silently vanish.
+
+export type ChannelCardDecision = 'card' | 'handled';
+export type ChannelCardInterceptor = (mg: MessagingGroup, event: InboundEvent) => Promise<ChannelCardDecision>;
+
+const channelCardInterceptors = new Map<string, ChannelCardInterceptor>();
+
+export function registerChannelCardInterceptor(channelType: string, fn: ChannelCardInterceptor): void {
+  if (channelCardInterceptors.has(channelType)) {
+    log.warn('Channel-card interceptor overwritten', { channelType });
+  }
+  channelCardInterceptors.set(channelType, fn);
+}
 
 // ── Utilities ──
 
@@ -77,16 +106,20 @@ function toFolder(name: string): string {
 
 // ── Card builders ──
 
-function visibleAgentGroupsForApprover(
+async function visibleAgentGroupsForApprover(
   agentGroups: AgentGroup[],
   approverUserId: string | null | undefined,
-): AgentGroup[] {
+): Promise<AgentGroup[]> {
   if (!approverUserId) return agentGroups;
-  return agentGroups.filter((agentGroup) => hasAdminPrivilege(approverUserId, agentGroup.id));
+  const visible: AgentGroup[] = [];
+  for (const agentGroup of agentGroups) {
+    if (await hasAdminPrivilege(approverUserId, agentGroup.id)) visible.push(agentGroup);
+  }
+  return visible;
 }
 
-function buildApprovalOptions(agentGroups: AgentGroup[], approverUserId?: string | null): RawOption[] {
-  const visibleAgentGroups = visibleAgentGroupsForApprover(agentGroups, approverUserId);
+async function buildApprovalOptions(agentGroups: AgentGroup[], approverUserId?: string | null): Promise<RawOption[]> {
+  const visibleAgentGroups = await visibleAgentGroupsForApprover(agentGroups, approverUserId);
   const options: RawOption[] = [];
   if (visibleAgentGroups.length === 1) {
     options.push({
@@ -117,17 +150,62 @@ function buildApprovalOptions(agentGroups: AgentGroup[], approverUserId?: string
 }
 
 function buildQuestionText(
-  isGroup: boolean,
+  conversationType: ResolvedConversation['type'],
   senderName: string | undefined,
+  senderId: string | undefined,
   channelName: string | null,
   channelType: string,
+  ruleNote: string | null,
+  resolvedConversation: ResolvedConversation | null,
 ): string {
   const who = senderName ?? 'Someone';
-  if (isGroup) {
+  const note = ruleNote ? ` If connected, the agent ${ruleNote}.` : '';
+  if (conversationType === 'channel') {
     const where = channelName ? `${channelName} on ${channelType}` : `a ${channelType} channel`;
-    return `${who} mentioned your bot in ${where}. How would you like to handle this channel?`;
+    return `${who} mentioned your bot in ${where}.${note} ${AGENT_ACCESS_SCOPE_WARNING} How would you like to handle this channel?`;
   }
-  return `${who} sent your bot a DM on ${channelType}. How would you like to handle it?`;
+  if (conversationType === 'group_dm') {
+    const participantNames = resolvedConversation?.participantNames ?? [];
+    const participantIds = resolvedConversation?.participantIds;
+    const useParticipantIds = Boolean(senderId) && participantIds?.length === participantNames.length;
+    const otherParticipants = participantNames.filter((name, index) =>
+      useParticipantIds ? participantIds![index] !== senderId : name.toLowerCase() !== senderName?.toLowerCase(),
+    );
+    const participants = formatParticipantList(otherParticipants);
+    const withParticipants = participants ? ` with ${participants}` : '';
+    return `${who} mentioned your bot in a group chat${withParticipants} on ${channelType}.${note} ${AGENT_ACCESS_SCOPE_WARNING} How would you like to handle this group chat?`;
+  }
+  return `${who} sent your bot a DM on ${channelType}.${note} ${AGENT_ACCESS_SCOPE_WARNING} How would you like to handle it?`;
+}
+
+function formatParticipantList(names: string[]): string {
+  if (names.length < 2) return names[0] ?? '';
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(', ')}, and ${names.at(-1)}`;
+}
+
+/**
+ * Human summary of the engage rule an approval would create, from the same
+ * resolution the wire step uses. Null when the declaration is unresolvable
+ * (mis-declared pattern mode) — the card still works without the preview.
+ */
+function describeResolvedRule(
+  channelKey: string,
+  isGroup: boolean,
+  agentGroupName: string,
+  channelType: string,
+): string | null {
+  try {
+    const engage = resolveWiringDefaults(channelKey, isGroup, agentGroupName, channelType);
+    if (engage.engage_mode !== 'pattern') {
+      return isGroup ? 'will respond to @-mentions in this group' : 'will respond to @-mentions';
+    }
+    return engage.engage_pattern === '.'
+      ? 'will respond to all messages'
+      : `will respond to messages matching ${engage.engage_pattern}`;
+  } catch {
+    return null;
+  }
 }
 
 // ── Main flow ──
@@ -140,12 +218,33 @@ export interface RequestChannelApprovalInput {
 export async function requestChannelApproval(input: RequestChannelApprovalInput): Promise<void> {
   const { messagingGroupId, event } = input;
 
-  if (hasInFlightChannelApproval(messagingGroupId)) {
+  if (await hasInFlightChannelApproval(messagingGroupId)) {
     log.debug('Channel registration already in flight — dropping retry', { messagingGroupId });
     return;
   }
 
-  const agentGroups = getAllAgentGroups();
+  const originMg = await getMessagingGroup(messagingGroupId);
+
+  // Channel-module interceptor: consulted before any card work so a module
+  // can auto-wire / decline / suppress for its own channel type. Runs after
+  // the in-flight dedupe (a pending card already owns this channel) and
+  // before the approver checks (an auto-wire needs no reachable approver).
+  const interceptor = originMg ? channelCardInterceptors.get(originMg.channel_type) : undefined;
+  if (originMg && interceptor) {
+    try {
+      if ((await interceptor(originMg, event)) === 'handled') {
+        log.debug('Channel registration handled by interceptor — no card', {
+          messagingGroupId,
+          channelType: originMg.channel_type,
+        });
+        return;
+      }
+    } catch (err) {
+      log.warn('Channel-card interceptor threw — falling back to the card', { messagingGroupId, err });
+    }
+  }
+
+  const agentGroups = await getAllAgentGroups();
   if (agentGroups.length === 0) {
     log.warn('Channel registration skipped — no agent groups configured. Run /init-first-agent.', {
       messagingGroupId,
@@ -156,7 +255,7 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
   // are returned regardless of which group we pass.
   const referenceGroup = agentGroups[0];
 
-  const approvers = pickApprover(referenceGroup.id);
+  const approvers = await pickApprover(referenceGroup.id);
   if (approvers.length === 0) {
     log.warn('Channel registration skipped — no owner or admin configured', {
       messagingGroupId,
@@ -165,17 +264,29 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
     return;
   }
 
-  const originMg = getMessagingGroup(messagingGroupId);
   const originChannelType = originMg?.channel_type ?? '';
 
-  // Resolve channel name if not yet persisted.
-  if (originMg && !originMg.name) {
-    const channelAdapter = getChannelAdapter(originChannelType);
-    if (channelAdapter?.resolveChannelName) {
+  // Resolve conversation metadata and, when needed, its legacy name. Key by
+  // instance so a named instance's own adapter (and bot identity) does the lookup.
+  let resolvedConversation: ResolvedConversation | null = null;
+  if (originMg) {
+    const channelAdapter = getChannelAdapter(originMg.instance ?? originMg.channel_type);
+    if (channelAdapter?.resolveConversation) {
+      try {
+        resolvedConversation = await channelAdapter.resolveConversation(originMg.platform_id);
+        if (resolvedConversation?.name && !originMg.name) {
+          await updateMessagingGroup(originMg.id, { name: resolvedConversation.name });
+          originMg.name = resolvedConversation.name;
+        }
+      } catch {
+        /* non-critical */
+      }
+    }
+    if (!originMg.name && channelAdapter?.resolveChannelName) {
       try {
         const name = await channelAdapter.resolveChannelName(originMg.platform_id);
         if (name) {
-          updateMessagingGroup(originMg.id, { name });
+          await updateMessagingGroup(originMg.id, { name });
           originMg.name = name;
         }
       } catch {
@@ -184,7 +295,7 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
     }
   }
 
-  const delivery = await pickApprovalDelivery(approvers, originChannelType);
+  const delivery = await pickApprovalDelivery(approvers, originChannelType, originMg?.instance);
   if (!delivery) {
     log.warn('Channel registration skipped — no DM channel for any approver', {
       messagingGroupId,
@@ -196,25 +307,51 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
   const isGroup = event.message?.isGroup ?? originMg?.is_group === 1;
 
   let senderName: string | undefined;
+  let senderId: string | undefined;
   try {
     const parsed = JSON.parse(event.message.content) as Record<string, unknown>;
     senderName = (parsed.senderName ?? parsed.sender) as string | undefined;
+    senderId = parsed.senderId as string | undefined;
   } catch {
     // non-critical
   }
 
+  const conversationType = resolvedConversation?.type ?? (isGroup ? 'channel' : 'direct');
   const channelName = originMg?.name ?? null;
-  const title = isGroup ? '📣 Bot mentioned in new channel' : '💬 New direct message';
-  const question = buildQuestionText(isGroup, senderName, channelName, originChannelType);
-  const options = normalizeOptions(buildApprovalOptions(agentGroups, delivery.userId));
+  const title =
+    conversationType === 'channel'
+      ? '📣 Bot mentioned in new channel'
+      : conversationType === 'group_dm'
+        ? '👥 Bot mentioned in new group chat'
+        : '💬 New direct message';
+  // Preview the engage rule an approval would create. The reference group's
+  // name only feeds {name} pattern substitution — a best-effort preview when
+  // the approver ends up picking a different agent.
+  const ruleNote = describeResolvedRule(
+    originMg?.instance ?? originChannelType,
+    isGroup,
+    referenceGroup.name,
+    originChannelType,
+  );
+  const question = buildQuestionText(
+    conversationType,
+    senderName,
+    senderId,
+    channelName,
+    originChannelType,
+    ruleNote,
+    resolvedConversation,
+  );
+  const options = normalizeOptions(await buildApprovalOptions(agentGroups, delivery.userId));
 
-  createPendingChannelApproval({
+  await createPendingChannelApproval({
     messaging_group_id: messagingGroupId,
     agent_group_id: referenceGroup.id,
     original_message: JSON.stringify(event),
     approver_user_id: delivery.userId,
     created_at: new Date().toISOString(),
     title,
+    question,
     options_json: JSON.stringify(options),
   });
 
@@ -237,6 +374,8 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
         question,
         options,
       }),
+      undefined,
+      delivery.messagingGroup.instance,
     );
     log.info('Channel registration card delivered', {
       messagingGroupId,
@@ -253,11 +392,11 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
 /**
  * Build normalized options for the agent-selection follow-up card.
  */
-export function buildAgentSelectionOptions(
+export async function buildAgentSelectionOptions(
   agentGroups: AgentGroup[],
   approverUserId?: string | null,
-): NormalizedOption[] {
-  const visibleAgentGroups = visibleAgentGroupsForApprover(agentGroups, approverUserId);
+): Promise<NormalizedOption[]> {
+  const visibleAgentGroups = await visibleAgentGroupsForApprover(agentGroups, approverUserId);
   const options: RawOption[] = visibleAgentGroups.map((ag) => ({
     label: ag.name,
     selectedLabel: `✅ Connected to ${ag.name}`,
@@ -275,17 +414,21 @@ export function buildAgentSelectionOptions(
  * Create a new agent group and initialize its filesystem. Handles
  * folder-name collisions with numeric suffixes.
  */
-export function createNewAgentGroup(name: string): AgentGroup {
+export async function createNewAgentGroup(name: string): Promise<AgentGroup> {
   let folder = toFolder(name);
   const baseFolder = folder;
   let suffix = 2;
-  while (getAgentGroupByFolder(folder)) {
+  // Disk-aware dedupe (A4): a folder present on disk with no claiming DB row
+  // is deleted-group residue — adopting it would silently re-scope the old
+  // group's data under the new agent's identity. Skip to the next suffix
+  // instead (templates/create-agent.ts precedent).
+  while ((await getAgentGroupByFolder(folder)) || groupFolderExistsOnDisk(folder)) {
     folder = `${baseFolder}-${suffix}`;
     suffix++;
   }
 
   const agId = `ag-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  createAgentGroup({
+  await createAgentGroup({
     id: agId,
     name,
     folder,
@@ -293,9 +436,11 @@ export function createNewAgentGroup(name: string): AgentGroup {
     created_at: new Date().toISOString(),
   });
 
-  const ag = getAgentGroup(agId)!;
-  // Channel-approved groups get the built-in default provider (claude); the
-  // operator flips a group with `ncl groups config update --provider`.
-  initGroupFilesystem(ag);
+  const ag = (await getAgentGroup(agId))!;
+  // Channel-approved groups are created on the instance default provider
+  // (DEFAULT_AGENT_PROVIDER, or claude when unset) — initGroupFilesystem stamps
+  // it onto the fresh config row. The operator flips a group afterward with
+  // `ncl groups config update --provider`.
+  await initGroupFilesystem(ag);
   return ag;
 }

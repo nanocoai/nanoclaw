@@ -18,6 +18,12 @@ function normTs(ts) {
   return `${ts.replace(' ', 'T')}Z`;
 }
 
+// Local calendar day "YYYY-MM-DD" — chart labels are read by a human, so
+// bucket by the server's local day, not the UTC date prefix.
+function localDay(date) {
+  return date.toLocaleDateString('sv-SE');
+}
+
 function readTable(dbPath, table) {
   let db;
   try {
@@ -28,7 +34,7 @@ function readTable(dbPath, table) {
     for (const r of rows) {
       const ts = normTs(r.timestamp);
       if (!ts) continue;
-      const day = ts.slice(0, 10); // ISO date prefix
+      const day = localDay(new Date(ts));
       byDay.set(day, (byDay.get(day) ?? 0) + 1);
       if (last === null || ts > last) last = ts;
     }
@@ -52,12 +58,12 @@ function listDirs(path) {
  * Aggregate message activity across all session DBs under `sessionsRoot`.
  * @returns {{ sessions: Array, series: Array<{date,in,out}> }}
  *   sessions — per session: { agent_group_id, session_id, in, out, lastActivity }
- *   series   — one bucket per day for the last `days` days (UTC, newest last)
+ *   series   — one bucket per day for the last `days` days (local time, newest last)
  */
 export function collectActivity(sessionsRoot, days, now) {
   const dates = [];
   for (let i = days - 1; i >= 0; i--) {
-    dates.push(new Date(now.getTime() - i * 86_400_000).toISOString().slice(0, 10));
+    dates.push(localDay(new Date(now.getTime() - i * 86_400_000)));
   }
   const series = new Map(dates.map((d) => [d, { date: d, in: 0, out: 0 }]));
   const sessions = [];

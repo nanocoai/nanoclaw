@@ -9,48 +9,36 @@ The adapter drives the `@deltachat/stdio-rpc-server` JSON-RPC subprocess directl
 
 ## Install
 
-### Pre-flight (idempotent)
+### 1. Copy the adapter and its registration test
 
-Skip to **Credentials** if all of these are already in place:
+Fetch the `channels` branch from the configured remote that carries it, then
+overwrite the skill-owned files with the canonical registry copies:
 
-- `src/channels/deltachat.ts` exists
-- `src/channels/deltachat-registration.test.ts` exists
-- `src/channels/index.ts` contains `import './deltachat.js';`
-- `@deltachat/stdio-rpc-server` is listed in `package.json` dependencies
-
-Otherwise continue. Every step below is safe to re-run.
-
-### 1. Fetch the channels branch
-
-```bash
-git fetch origin channels
+```nc:copy from-branch:channels
+src/channels/deltachat.ts
+src/channels/deltachat-registration.test.ts
 ```
 
-### 2. Copy the adapter and its registration test
-
-```bash
-git show origin/channels:src/channels/deltachat.ts                 > src/channels/deltachat.ts
-git show origin/channels:src/channels/deltachat-registration.test.ts > src/channels/deltachat-registration.test.ts
-```
-
-### 3. Append the self-registration import
+### 2. Append the self-registration import
 
 Append to `src/channels/index.ts` (skip if already present):
 
-```typescript
+```nc:append to:src/channels/index.ts
 import './deltachat.js';
 ```
 
-### 4. Install the adapter package (pinned)
+### 3. Install the adapter package (pinned)
 
-```bash
-pnpm install @deltachat/stdio-rpc-server@2.49.0
+```nc:dep
+@deltachat/stdio-rpc-server@2.49.0
 ```
 
-### 5. Build and validate
+### 4. Build and validate
 
-```bash
+```nc:run effect:build
 pnpm run build
+```
+```nc:run effect:test
 pnpm exec vitest run src/channels/deltachat-registration.test.ts
 ```
 
@@ -89,7 +77,6 @@ DC_SMTP_SECURITY=2        # 2=STARTTLS (default), 1=SSL/TLS, 3=plain
 
 Security settings are applied on every startup, so changing them in `.env` and restarting takes effect without wiping the account.
 
-Sync to container: `mkdir -p data/env && cp .env data/env/env`
 
 ### Optional settings
 
@@ -167,7 +154,14 @@ pnpm exec tsx scripts/init-first-agent.ts \
 
 ### Groups
 
-Add the bot email to a DeltaChat group. When any member sends a message, the router creates a `messaging_groups` row with `is_group = 1`. Run `/manage-channels` to wire it to an agent group.
+Add the bot email to a DeltaChat group. When any member sends a message, the router creates a `messaging_groups` row with `is_group = 1`. Run `/manage-channels` to wire it to an agent group, or wire it directly with `ncl` — **the host service must be running** (`ncl` connects to it over a Unix socket):
+
+```bash
+# Engage mode/pattern default to the DeltaChat adapter's declared channel
+# defaults — for DeltaChat groups that's a name pattern (the platform has no
+# mention metadata), so the agent responds when addressed by name.
+ncl wirings create --messaging-group-id <mg-id> --agent-group-id <ag-id>
+```
 
 ## Next Steps
 
@@ -184,7 +178,7 @@ Otherwise, run `/init-first-agent` to create an agent and wire it to your DeltaC
 - **user-id-format**: `deltachat:{email}` — the contact's email address
 - **how-to-find-id**: Send a message from DeltaChat to the bot email, then query `messaging_groups` as shown above
 - **typical-use**: Personal assistant over DeltaChat DMs; small groups where participants use DeltaChat
-- **default-isolation**: One agent per bot identity. Multiple chats with the same operator can share an agent group; groups with other people should typically use `isolated` session mode
+- **default-isolation**: One agent per bot identity. Multiple chats with the same operator can share an agent group; groups with other people should typically get their own agent group (the default `shared` session mode already gives each messaging group its own session)
 
 ### Features
 

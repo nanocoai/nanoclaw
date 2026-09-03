@@ -50,7 +50,7 @@ export const createAgent: McpToolDefinition = {
     if (!name) return err('name is required');
 
     const requestId = generateId();
-    writeMessageOut({
+    await writeMessageOut({
       id: requestId,
       kind: 'system',
       content: JSON.stringify({

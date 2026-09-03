@@ -18,11 +18,7 @@ rm -f src/channels/wechat.ts src/channels/wechat-registration.test.ts
 
 ## 2. Remove credentials
 
-Remove `WECHAT_ENABLED` from `.env`, then re-sync to the container:
-
-```bash
-mkdir -p data/env && cp .env data/env/env
-```
+Remove `WECHAT_ENABLED` from `.env`.
 
 ## 3. Remove the package
 
@@ -36,16 +32,12 @@ pnpm uninstall wechat-ilink-client
 rm -rf data/wechat
 ```
 
-## 5. Remove DB wiring
+The channel's messaging groups, wirings, and conversation history are **left
+intact** — you created those at runtime (wiring + use), not this skill's install,
+so removal doesn't touch them. To purge them deliberately, delete them yourself
+with `ncl messaging-groups delete <id>`.
 
-```sql
--- Remove any sessions first (foreign key)
-DELETE FROM sessions WHERE messaging_group_id IN (SELECT id FROM messaging_groups WHERE channel_type = 'wechat');
-DELETE FROM messaging_group_agents WHERE messaging_group_id IN (SELECT id FROM messaging_groups WHERE channel_type = 'wechat');
-DELETE FROM messaging_groups WHERE channel_type = 'wechat';
-```
-
-## 6. Rebuild and restart
+## 5. Rebuild and restart
 
 Run from your NanoClaw project root:
 

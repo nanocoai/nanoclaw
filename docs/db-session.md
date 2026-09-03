@@ -10,12 +10,14 @@ Schemas live in `src/db/schema.ts` as the `INBOUND_SCHEMA` and `OUTBOUND_SCHEMA`
 
 ```
 data/v2-sessions/<agent_group_id>/<session_id>/
-  inbound.db              ← host writes, container reads (read-only mount)
+  inbound.db              ← host writes, container reads (read-only open)
   outbound.db             ← container writes, host reads (read-only open)
   .heartbeat              ← mtime touched by container (not a DB write)
   inbox/<message_id>/     ← user attachments, decoded from inbound message content
   outbox/<message_id>/    ← attachments the agent produced
 ```
+
+The session directory itself is mounted read-write into the container (`src/container-runner.ts`) — read-only is *not* a mount property. The SQLite driver opens `inbound.db` with `{ readonly: true }` in `container/agent-runner/src/mailbox/sqlite/connection.ts`.
 
 One session = one folder = one pair of DBs. The `agent_group_id` parent directory also holds per-group state (`.claude-shared/`) that is shared across every session of that agent group. (The agent-runner source is not copied per group — it's a shared read-only mount from `container/agent-runner/src` into every container; see `src/container-runner.ts`.)
 
@@ -55,7 +57,7 @@ CREATE INDEX idx_messages_in_series ON messages_in(series_id);
 
 Content shapes: see [api-details.md §Session DB Schema Details](api-details.md#session-db-schema-details).
 
-**Writers (host):** `insertMessage()` (and `nextEvenSeq()`) in `src/db/session-db.ts`; `insertTask()` and `insertRecurrence()` in `src/modules/scheduling/db.ts`. Each calls `nextEvenSeq()`.
+**Writers (host):** the SQLite mailbox implementation in `src/mailbox/sqlite/`; sequence allocation and task SQL remain private to that driver.
 **Reader (container):** `container/agent-runner/src/db/messages-in.ts` — polls `status='pending' AND (process_after IS NULL OR process_after <= now)`.
 
 ### 2.2 `delivered`
@@ -71,7 +73,7 @@ CREATE TABLE delivered (
 );
 ```
 
-Writer: `markDelivered()` / `markDeliveryFailed()` in `src/db/session-db.ts`. Older session DBs are brought up to schema lazily by `migrateDeliveredTable()`.
+Writer: `markDelivered()` / `markDeliveryFailed()` in `src/mailbox/sqlite/session-db.ts`. Older session DBs are brought up to schema lazily by `migrateDeliveredTable()`.
 
 ### 2.3 `destinations`
 
@@ -111,7 +113,7 @@ Written by `writeSessionRouting()` on every container wake, derived from `sessio
 
 Every message (in or out) gets a monotonic integer `seq`, unique *within the session* across both tables.
 
-- **Host writes even seq** (2, 4, 6, …) to `messages_in` — `nextEvenSeq()` at `src/db/session-db.ts:75`.
+- **Host writes even seq** (2, 4, 6, …) to `messages_in` — `nextEvenSeq()` in `src/mailbox/sqlite/session-db.ts`.
 - **Container writes odd seq** (1, 3, 5, …) to `messages_out` — logic at `container/agent-runner/src/db/messages-out.ts:54` (`max % 2 === 0 ? max + 1 : max + 2`), reading `MAX(seq)` across *both* tables to preserve global ordering.
 
 Why disjoint? `seq` is the agent-facing message ID. When the agent calls `edit_message(seq=5)` or `add_reaction(seq=6)`, `getMessageIdBySeq()` uses the parity to route the lookup: odd → `messages_out`, even → `messages_in`. The parity alone disambiguates without a join. Collisions would break editing.
@@ -177,10 +179,28 @@ CREATE TABLE session_state (
 
 Access: `container/agent-runner/src/db/session-state.ts`.
 
+### 4.4 `container_state`
+
+Single-row (`id=1`) tool-in-flight tracker. The container records the currently-running tool on `PreToolUse` and clears it on `PostToolUse`/`PostToolUseFailure`; the host reads it during the stale-container sweep to widen its stuck-tolerance window when `Bash` is running with a user-declared `timeout` over the normal threshold, so long-running scripts aren't killed as "stuck".
+
+```sql
+CREATE TABLE container_state (
+  id                       INTEGER PRIMARY KEY CHECK (id = 1),
+  current_tool             TEXT,
+  tool_declared_timeout_ms INTEGER,
+  tool_started_at          TEXT,
+  updated_at               TEXT NOT NULL
+);
+```
+
+- **Writer (container):** the SQLite mailbox driver records tool state in `container/agent-runner/src/mailbox/sqlite/connection.ts`.
+- **Reader (host):** `getContainerState()` in `src/mailbox/sqlite/session-db.ts`; consumed through the mailbox contract by the sweep.
+- `CREATE TABLE IF NOT EXISTS` — forward-compatible with `outbound.db` files created before this table existed; `getContainerState()` returns `null` if the table or row is absent.
+
 ---
 
 ## 5. Schema evolution
 
-Unlike the central DB, session DBs do **not** go through numbered migrations. Both `INBOUND_SCHEMA` and `OUTBOUND_SCHEMA` use `CREATE TABLE IF NOT EXISTS`, so a fresh session always gets the current shape. For session folders created under older builds, column-level gaps are patched lazily on open — e.g. `migrateDeliveredTable()` in `src/db/session-db.ts` adds `platform_message_id` and `status` to the `delivered` table if missing.
+Unlike the central DB, session DBs do **not** go through numbered migrations. Both schemas in `src/mailbox/sqlite/schema.ts` use `CREATE TABLE IF NOT EXISTS`; older files are patched lazily by the SQLite driver.
 
 If you add a column to either schema, add a matching lazy migration for existing session folders, and prefer nullable columns or defaulted values so no data backfill is required.

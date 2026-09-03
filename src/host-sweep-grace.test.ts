@@ -4,14 +4,17 @@
  * Drives the real sweep loop (startHostSweep) against a real central DB and
  * real on-disk session DBs, mocking only the container runner. Scenario: a
  * session has a due inbound message AND a stale processing_ack claim left
- * over from a crashed container. The sweep tick that wakes a fresh container
- * must NOT kill it in the same tick — the freshly-woken container hasn't had
- * a chance to clear the stale claim yet (clearStaleProcessingAcks runs on
- * agent-runner startup). A later tick where the claim is still stale must
- * kill (claim-stuck). Goes red if the justWoke grace gate
- * (`if (alive && outDb && !justWoke)`) is removed.
+ * over from a crashed container. Evidence that predates the fresh
+ * container's durable claim time must not kill it — the freshly-woken
+ * container hasn't had a chance to clear the stale claim yet
+ * (clearStaleProcessingAcks runs on agent-runner startup), so the inherited
+ * claim's age is measured from the incarnation's start, giving it the full
+ * tolerance window. Once that window elapses with no sign of life, a later
+ * tick must kill (claim-stuck). Goes red if the incarnation gate in
+ * enforceRunningContainerSla stops reading the session_claims row.
  */
 import fs from 'fs';
+import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Override DATA_DIR for tests
@@ -22,6 +25,7 @@ vi.mock('./config.js', async () => {
 
 // Mock container runner to prevent actual Docker spawning
 vi.mock('./container-runner.js', () => ({
+  getContainerStartedAtMs: vi.fn(() => Date.now()),
   isContainerRunning: vi.fn().mockReturnValue(false),
   wakeContainer: vi.fn().mockResolvedValue(true),
   killContainer: vi.fn(),
@@ -31,7 +35,10 @@ import { initTestDb, closeDb, runMigrations, createAgentGroup } from './db/index
 import { createSession } from './db/sessions.js';
 import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
-import { initSessionFolder, openOutboundDbRw, writeSessionMessage } from './session-manager.js';
+import { log } from './log.js';
+import { getAgentMailbox } from './mailbox/index.js';
+import { outboundDbPath } from './mailbox/sqlite/paths.js';
+import { initSessionFolder, writeSessionMessage } from './session-manager.js';
 
 const TEST_DIR = '/tmp/nanoclaw-test-host-sweep-grace';
 const AG = 'ag-test';
@@ -45,16 +52,12 @@ function now(): string {
 }
 
 function seedStaleClaim(messageId: string, ageMs: number): void {
-  const db = openOutboundDbRw(AG, SESS);
-  try {
-    db.prepare('INSERT INTO processing_ack (message_id, status, status_changed) VALUES (?, ?, ?)').run(
-      messageId,
-      'processing',
-      new Date(Date.now() - ageMs).toISOString(),
-    );
-  } finally {
-    db.close();
-  }
+  const db = new Database(outboundDbPath(AG, SESS));
+  db.prepare("INSERT INTO processing_ack (message_id, status, status_changed) VALUES (?, 'processing', ?)").run(
+    messageId,
+    new Date(Date.now() - ageMs).toISOString(),
+  );
+  db.close();
 }
 
 /**
@@ -81,13 +84,23 @@ async function runSweepTick(): Promise<void> {
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.mocked(isContainerRunning).mockReset().mockReturnValue(false);
   vi.mocked(killContainer).mockReset();
   vi.mocked(wakeContainer)
     .mockReset()
-    // Simulate a successful spawn: after wake, the container reports running.
+    // Simulate a successful spawn honoring the runner's claim-first contract:
+    // a wake claims the session at a fresh incarnation (claimed_at = now),
+    // then the container reports running.
     .mockImplementation(async () => {
+      const { getSessionClaim, tryClaimSession } = await import('./db/coordination.js');
+      const current = await getSessionClaim(SESS);
+      await tryClaimSession({
+        sessionId: SESS,
+        instanceId: 'sweep-test-host',
+        expectedIncarnation: current?.incarnation ?? 0,
+        now: new Date().toISOString(),
+      });
       vi.mocked(isContainerRunning).mockReturnValue(true);
       return true;
     });
@@ -104,10 +117,10 @@ beforeEach(() => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
 
-  const db = initTestDb();
-  runMigrations(db);
-  createAgentGroup({ id: AG, name: 'Test Agent', folder: 'test-agent', agent_provider: null, created_at: now() });
-  createSession({
+  const db = await initTestDb();
+  await runMigrations(db);
+  await createAgentGroup({ id: AG, name: 'Test Agent', folder: 'test-agent', agent_provider: null, created_at: now() });
+  await createSession({
     id: SESS,
     agent_group_id: AG,
     messaging_group_id: null,
@@ -122,29 +135,77 @@ beforeEach(() => {
 
   // A due message (wakes the container) + a stale claim from a previous crash
   // (would trip claim-stuck if the SLA check ran on the wake tick).
-  writeSessionMessage(AG, SESS, { id: 'm-1', kind: 'chat', timestamp: now(), content: '{"text":"hi"}' });
+  await writeSessionMessage(AG, SESS, { id: 'm-1', kind: 'chat', timestamp: now(), content: '{"text":"hi"}' });
   seedStaleClaim('m-1', 2 * 60 * 60 * 1000); // claimed 2h ago
 });
 
-afterEach(() => {
+afterEach(async () => {
   stopHostSweep();
   setTimeoutSpy.mockRestore();
-  closeDb();
+  await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
-describe('host sweep justWoke grace period', () => {
-  it('does not kill the container on the tick that woke it, kills on a later tick if the claim is still stale', async () => {
-    // Tick 1: due message + no running container → wake. The stale claim is
-    // still in outbound.db, but the grace period must skip the SLA check.
+describe('host sweep incarnation-gated grace period', () => {
+  it('uses one mailbox session when no wake is needed', async () => {
+    vi.mocked(isContainerRunning).mockReturnValue(true);
+    const sessionSpy = vi.spyOn(getAgentMailbox(), 'session');
+
+    try {
+      await runSweepTick();
+      expect(wakeContainer).not.toHaveBeenCalled();
+      expect(sessionSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      sessionSpy.mockRestore();
+    }
+  });
+
+  it('logs mailbox failures with session context and retries on a later tick', async () => {
+    const err = new Error('mailbox unavailable');
+    const sessionSpy = vi.spyOn(getAgentMailbox(), 'session').mockRejectedValueOnce(err);
+    const logSpy = vi.spyOn(log, 'error').mockImplementation(() => {});
+
+    try {
+      await runSweepTick();
+      expect(logSpy).toHaveBeenCalledWith('Session mailbox sweep failed', {
+        agentGroupId: AG,
+        sessionId: SESS,
+        err,
+      });
+
+      await runSweepTick();
+      // Failed preflight on tick 1, then preflight + maintenance on tick 2.
+      expect(sessionSpy).toHaveBeenCalledTimes(3);
+    } finally {
+      sessionSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+
+  it('gives a fresh container its tolerance window against inherited stale claims, then kills', async () => {
+    // Tick 1: due message + no running container → wake. The 2h-old claim is
+    // still in outbound.db, but it predates the fresh incarnation's claim
+    // time — not evidence against this container.
     await runSweepTick();
     expect(wakeContainer).toHaveBeenCalledTimes(1);
     expect(killContainer).not.toHaveBeenCalled();
 
-    // Tick 2: container is running (no fresh wake → no grace), the claim is
-    // still stale because our simulated container never cleared it → kill.
+    // Tick 2, moments later: the inherited claim's age is measured from the
+    // incarnation start, so it is still inside the tolerance window — no kill.
     await runSweepTick();
     expect(wakeContainer).toHaveBeenCalledTimes(1); // no second wake
+    expect(killContainer).not.toHaveBeenCalled();
+
+    // The tolerance window elapses (backdate the incarnation's claim time)
+    // with no sign of life — now the stale claim is this container's own
+    // silence → kill.
+    const { getDb } = await import('./db/index.js');
+    await getDb().run(
+      'UPDATE session_claims SET claimed_at = ? WHERE session_id = ?',
+      new Date(Date.now() - 2 * 60 * 1000).toISOString(),
+      SESS,
+    );
+    await runSweepTick();
     expect(killContainer).toHaveBeenCalledTimes(1);
     expect(killContainer).toHaveBeenCalledWith(SESS, 'claim-stuck');
   });

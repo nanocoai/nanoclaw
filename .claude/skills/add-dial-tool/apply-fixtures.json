@@ -1,0 +1,47 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. Two scenarios cover the sign-in branches: (1) host already signed in (connected_email read from `dial doctor`), (2) not signed in → email + OTP. The `package.json` stub answers dial_ua; the `(.data|length)==0` stub (the agent-list capture's jq) answers agent_groups; `dial doctor` answers signed_in/connected_email. The scoping wires and the credential upsert run against the stubbed exec and capture nothing.",
+  "scenarios": [
+    {
+      "name": "signed-in-pick-one",
+      "inputs": {
+        "dial_agents": "ag-11111111-1111-1111-1111-111111111111"
+      },
+      "exec": [
+        {
+          "match": "package.json",
+          "stdout": "nanoclaw/2.2.0"
+        },
+        {
+          "match": "(.data|length)==0",
+          "stdout": "ag-11111111-1111-1111-1111-111111111111 (Sales), ag-22222222-2222-2222-2222-222222222222 (Support)"
+        },
+        {
+          "match": "dial doctor",
+          "stdout": "{\"auth\":{\"signedIn\":true,\"email\":\"operator@example.com\"}}"
+        }
+      ]
+    },
+    {
+      "name": "fresh-signup-all",
+      "inputs": {
+        "dial_agents": "all",
+        "owner_email": "operator@example.com",
+        "otp": "123456"
+      },
+      "exec": [
+        {
+          "match": "package.json",
+          "stdout": "nanoclaw/2.2.0"
+        },
+        {
+          "match": "(.data|length)==0",
+          "stdout": "ag-11111111-1111-1111-1111-111111111111 (Sales)"
+        },
+        {
+          "match": "dial doctor",
+          "stdout": "{\"auth\":{\"signedIn\":false}}"
+        }
+      ]
+    }
+  ]
+}

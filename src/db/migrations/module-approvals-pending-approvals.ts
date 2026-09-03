@@ -18,6 +18,7 @@ import type { Migration } from './index.js';
 export const moduleApprovalsPendingApprovals: Migration = {
   version: 3,
   name: 'pending-approvals',
+  sqliteOnly: true,
   up(db) {
     db.exec(`
       CREATE TABLE pending_approvals (

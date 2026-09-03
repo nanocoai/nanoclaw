@@ -10,11 +10,11 @@ Find out what is running and what is required:
 
 ```bash
 cat versions.json                                   # the sanctioned pin
-curl -s http://127.0.0.1:10254/api/health           # reports the running gateway version
+curl -s http://127.0.0.1:10254/api/health           # liveness check; `version` field is typically "unknown", not the gateway version
 curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:10254/v1/health
 ```
 
-If the last command prints `404`, the server predates the `/v1` API that `@onecli-sh/sdk` 2.x requires — every SDK call will fail with 404s that look transient but are permanent. If your gateway is remote, substitute its host for `127.0.0.1` (it's in `.env` as `ONECLI_URL` / `NANOCLAW_ONECLI_API_HOST`).
+If the last command prints `404`, the server predates the `/v1` API that `@onecli-sh/sdk` 2.x requires — every SDK call will fail with 404s that look transient but are permanent. If your gateway is remote, substitute its host for `127.0.0.1` (it's `ONECLI_URL` in `.env`; `NANOCLAW_ONECLI_API_HOST` is a setup-time override only, not persisted to `.env`).
 
 Why gateways fall behind: the OneCLI installer's docker-compose tracks the `latest` image tag, but Docker never re-pulls a tag — the server freezes at whatever `latest` meant on install day.
 
@@ -25,7 +25,7 @@ The gateway runs as a Docker service in `~/.onecli`. Upgrade just that container
 **Local gateway (the common case):**
 
 ```bash
-cd ~/.onecli && ONECLI_VERSION=<onecli-gateway pin from versions.json> docker compose pull onecli && docker compose up -d
+cd ~/.onecli && ONECLI_VERSION=<onecli-gateway pin from versions.json> docker compose pull onecli && ONECLI_VERSION=<onecli-gateway pin from versions.json> docker compose up -d
 ```
 
 **Remote gateway** — run the same command on the gateway's host (NanoClaw can't reach it over SSH).
@@ -45,7 +45,7 @@ docker run --rm --add-host=host.docker.internal:host-gateway \
   curlimages/curl -s -o /dev/null -w '%{http_code}' http://host.docker.internal:10254/v1/health
 ```
 
-This must print `200`. If it can't connect while the host-side check passed, set the bind address in `~/.onecli/.env` to the docker-bridge IP (or `0.0.0.0` on a host with a closed firewall) and `cd ~/.onecli && docker compose up -d`. Symptom if skipped: host log clean, agents fail all API calls.
+This must print `200`. If it can't connect while the host-side check passed, set the bind address in `~/.onecli/.env` to the docker-bridge IP (or `0.0.0.0` on a host with a closed firewall) and `cd ~/.onecli && ONECLI_VERSION=<onecli-gateway pin from versions.json> docker compose up -d`. Symptom if skipped: host log clean, agents fail all API calls.
 
 Finally, restart the NanoClaw service (per-install names — derive with `setup/lib/install-slug.sh`):
 

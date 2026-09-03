@@ -18,11 +18,7 @@ rm -f src/channels/webex.ts src/channels/webex-registration.test.ts
 
 ## 2. Remove credentials
 
-Remove `WEBEX_BOT_TOKEN` and `WEBEX_WEBHOOK_SECRET` from `.env`, then re-sync to the container:
-
-```bash
-mkdir -p data/env && cp .env data/env/env
-```
+Remove `WEBEX_BOT_TOKEN` and `WEBEX_WEBHOOK_SECRET` from `.env`.
 
 ## 3. Remove the package
 

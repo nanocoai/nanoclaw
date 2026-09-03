@@ -20,7 +20,7 @@ const ADMIN_COMMANDS = new Set(['/clear', '/compact', '/context', '/cost', '/fil
  * 'filter' for silently-dropped commands, 'deny' for unauthorized
  * admin commands.
  */
-export function gateCommand(content: string, userId: string | null, agentGroupId: string): GateResult {
+export async function gateCommand(content: string, userId: string | null, agentGroupId: string): Promise<GateResult> {
   let text: string;
   try {
     const parsed = JSON.parse(content);
@@ -36,7 +36,7 @@ export function gateCommand(content: string, userId: string | null, agentGroupId
   if (FILTERED_COMMANDS.has(command)) return { action: 'filter' };
 
   if (ADMIN_COMMANDS.has(command)) {
-    if (isAdmin(userId, agentGroupId)) {
+    if (await isAdmin(userId, agentGroupId)) {
       return { action: 'pass' };
     }
     return { action: 'deny', command };
@@ -46,7 +46,7 @@ export function gateCommand(content: string, userId: string | null, agentGroupId
   return { action: 'pass' };
 }
 
-function isAdmin(userId: string | null, agentGroupId: string): boolean {
+async function isAdmin(userId: string | null, agentGroupId: string): Promise<boolean> {
   if (!userId) return false;
   return hasAdminPrivilege(userId, agentGroupId);
 }

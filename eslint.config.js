@@ -6,7 +6,15 @@ import noCatchAll from 'eslint-plugin-no-catch-all'
 export default [
   { ignores: ['node_modules/', 'dist/', 'container/', 'groups/'] },
   { files: ['src/**/*.{js,ts}'] },
-  { languageOptions: { globals: globals.node } },
+  {
+    languageOptions: {
+      globals: globals.node,
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+  },
   pluginJs.configs.recommended,
   ...tseslint.configs.recommended,
   {
@@ -27,6 +35,9 @@ export default [
       ],
       'no-catch-all/no-catch-all': 'warn',
       '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-misused-promises': 'error',
+      '@typescript-eslint/await-thenable': 'error',
     },
   },
 ]

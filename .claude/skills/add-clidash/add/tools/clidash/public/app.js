@@ -71,6 +71,14 @@ function icon(name) {
 
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
 
+// Local wall time "YYYY-MM-DD HH:mm" — the raw ISO string is UTC; slicing it
+// would display UTC wall time with no marker, masquerading as local.
+function absTime(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString('sv-SE', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
 function relTime(iso) {
   const ms = Date.now() - new Date(iso).getTime();
   if (Number.isNaN(ms)) return iso;
@@ -127,7 +135,7 @@ function cellFor(value) {
   if (f.cls === 'null') return el('td', { class: 'null' }, 'null');
   if (f.iso) {
     return el('td', {}, el('span', { class: 'reltime', title: f.iso }, [
-      relTime(f.iso), el('span', { class: 'abs' }, f.iso.slice(0, 16).replace('T', ' ')),
+      relTime(f.iso), el('span', { class: 'abs' }, absTime(f.iso)),
     ]));
   }
   if (f.text.length > 42) {
@@ -142,7 +150,7 @@ function kvRows(obj) {
   return Object.entries(obj ?? {}).map(([k, v]) => {
     let valEl;
     if (v && typeof v === 'object') valEl = el('pre', { class: 'kv-json' }, JSON.stringify(v, null, 2));
-    else if (typeof v === 'string' && ISO_RE.test(v)) valEl = el('span', { class: 'reltime', title: v }, `${relTime(v)}  (${v.slice(0, 16).replace('T', ' ')})`);
+    else if (typeof v === 'string' && ISO_RE.test(v)) valEl = el('span', { class: 'reltime', title: v }, `${relTime(v)}  (${absTime(v)})`);
     else if (v === null || v === undefined) valEl = el('span', { class: 'null' }, 'null');
     else valEl = el('span', {}, String(v));
     return el('div', { class: 'kv-row' }, [el('span', { class: 'kv-key' }, k), valEl]);

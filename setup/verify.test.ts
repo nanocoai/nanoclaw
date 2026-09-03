@@ -22,6 +22,37 @@ describe('determineVerifyStatus', () => {
     ).toBe('failed');
   });
 
+  // Deferred wire (Teams): configured but zero groups is pending operator
+  // action (first DM), not a broken install — success, not failed.
+  it('accepts zero groups when wiring is pending a first DM', () => {
+    expect(
+      determineVerifyStatus({
+        ...healthyBase,
+        registeredGroups: 0,
+        wiringPending: true,
+      }),
+    ).toBe('success');
+  });
+
+  it('pending wiring never rescues a stopped service or missing credentials', () => {
+    expect(
+      determineVerifyStatus({
+        ...healthyBase,
+        registeredGroups: 0,
+        wiringPending: true,
+        service: 'stopped',
+      }),
+    ).toBe('failed');
+    expect(
+      determineVerifyStatus({
+        ...healthyBase,
+        registeredGroups: 0,
+        wiringPending: true,
+        credentials: 'missing',
+      }),
+    ).toBe('failed');
+  });
+
   it('fails when the service is not running', () => {
     expect(
       determineVerifyStatus({

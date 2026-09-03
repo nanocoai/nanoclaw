@@ -5,7 +5,7 @@
  * formats the response, exits non-zero on error.
  *
  * Usage:
- *   ncl <resource> <verb> [target] [--key value ...] [--json]
+ *   ncl <resource> <verb> [target] [--key value ...] [--stdin-json] [--json]
  *
  * Examples:
  *   ncl groups list
@@ -19,7 +19,9 @@ import { randomUUID } from 'crypto';
 
 import { formatResponse } from './format.js';
 import type { RequestFrame } from './frame.js';
+import { parseArgv } from './parse-argv.js';
 import { SocketTransport } from './socket-client.js';
+import { readStdinJsonArgs, StdinJsonInputError } from './stdin-json.js';
 import type { Transport } from './transport.js';
 import { formatTransportError } from './transport-errors.js';
 
@@ -31,8 +33,31 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  const { command, args, json } = parseArgv(argv);
-  const req: RequestFrame = { id: randomUUID(), command, args };
+  const { command, args, json, stdinJson } = parseArgv(argv);
+  if (command.length === 0) {
+    process.stderr.write('ncl: missing command\n');
+    printUsage();
+    process.exit(2);
+  }
+
+  let requestArgs = args;
+  if (stdinJson) {
+    if (process.stdin.isTTY) {
+      // Reading a TTY would silently block until the user types Ctrl-D.
+      process.stderr.write('ncl: --stdin-json requires piped stdin (e.g. `echo {...} | ncl ...`)\n');
+      process.exit(2);
+    }
+    try {
+      requestArgs = await readStdinJsonArgs(process.stdin, args);
+    } catch (err) {
+      if (!(err instanceof StdinJsonInputError)) throw err;
+      process.stderr.write(`ncl: ${err.message}\n`);
+      process.exit(2);
+    }
+  }
+  // Stdin is only a client-side encoding for args. The daemon receives the
+  // same stable request frame it would receive if every value came from argv.
+  const req: RequestFrame = { id: randomUUID(), command, args: requestArgs };
   const transport: Transport = pickTransport();
 
   let res;
@@ -43,62 +68,26 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  process.stdout.write(formatResponse(res, json ? 'json' : 'human'));
-  process.exit(res.ok ? 0 : 1);
+  const output =
+    !json && res.ok && res.human !== undefined
+      ? res.human + '\n' // server-rendered view — print verbatim
+      : formatResponse(res, json ? 'json' : 'human');
+  // Exit only after stdout drains: process.exit() discards buffered pipe
+  // writes, silently truncating any response past the 64KB pipe buffer
+  // (bit `ncl sessions list --json` at scale).
+  process.stdout.write(output, () => process.exit(res.ok ? 0 : 1));
 }
 
 function pickTransport(): Transport {
   return new SocketTransport();
 }
 
-function parseArgv(argv: string[]): {
-  command: string;
-  args: Record<string, unknown>;
-  json: boolean;
-} {
-  const positional: string[] = [];
-  const args: Record<string, unknown> = {};
-  let json = false;
-
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--json') {
-      json = true;
-      continue;
-    }
-    if (a.startsWith('--')) {
-      const key = a.slice(2);
-      const next = argv[i + 1];
-      if (next === undefined || next.startsWith('--')) {
-        args[key] = true;
-      } else {
-        args[key] = next;
-        i++;
-      }
-      continue;
-    }
-    positional.push(a);
-  }
-
-  if (positional.length === 0) {
-    process.stderr.write('ncl: missing command\n');
-    printUsage();
-    process.exit(2);
-  }
-
-  // Join all positionals with dashes to form the command name.
-  // If the full name isn't a command, the dispatcher will try trimming
-  // the last segment and using it as the target ID (e.g. `groups get abc`
-  // → command "groups-get", id "abc").
-  const command = positional.join('-');
-
-  return { command, args, json };
-}
-
 function printUsage(): void {
   process.stdout.write(
     [
-      'Usage: ncl <resource> <verb> [target] [--key value ...] [--json]',
+      'Usage: ncl <resource> <verb> [target] [--key value ...] [--stdin-json] [--json]',
+      '',
+      '  --stdin-json  Read one bounded JSON object from stdin and merge it with argv flags.',
       '',
       'Run `ncl help` to list available resources and commands.',
       '',

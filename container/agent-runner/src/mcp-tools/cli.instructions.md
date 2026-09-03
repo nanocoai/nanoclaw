@@ -18,14 +18,18 @@ Your CLI access may be scoped. Run `ncl help` to see which resources are availab
 
 Run `ncl help` for the full list. Common resources:
 
-| Resource | Verbs | What it is |
-|----------|-------|------------|
-| groups | list, get, create, update, delete, restart, config get/update, config add-mcp-server/remove-mcp-server, config add-package/remove-package | Agent groups (workspace, personality, container config) |
-| sessions | list, get | Active sessions (read-only) |
-| destinations | list, add, remove | Where an agent group can send messages |
-| members | list, add, remove | Unprivileged access gate for an agent group |
+| Resource     | Verbs                                                                                                                                     | What it is                                              |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| groups       | list, get, create, update, delete, restart, config get/update, config add-mcp-server/remove-mcp-server, config add-package/remove-package | Agent groups (workspace, personality, container config) |
+| sessions     | list, get                                                                                                                                 | Active sessions (read-only)                             |
+| destinations | list, add, remove                                                                                                                         | Where an agent group can send messages                  |
+| members      | list, add, remove                                                                                                                         | Unprivileged access gate for an agent group             |
+| tasks        | list, get, create, update, cancel, pause, resume, delete, append-log                                                                      | Scheduled tasks for your agent group                    |
+| wirings      | get, update                                                                                                                               | Response policy for the current chat                    |
 
-Additional resources (available under `global` scope only): messaging-groups, wirings, users, roles, user-dms, dropped-messages, approvals.
+Additional resources (available under `global` scope only): messaging-groups, users, roles, user-dms, dropped-messages, approvals.
+
+Under `group` scope, `wirings get/update` always targets the current chat. Updates may only change `engage_mode` and `engage_pattern` and require human approval.
 
 ### When to use
 
@@ -33,11 +37,13 @@ Additional resources (available under `global` scope only): messaging-groups, wi
 - **Restarting your container** — `ncl groups restart` (with optional `--rebuild` and `--message`).
 - **Checking who's in your group** — `ncl members list`.
 - **Seeing your destinations** — `ncl destinations list`.
+- **Scheduling work** — `ncl tasks create`, then `ncl tasks list/get/update/cancel/pause/resume/delete`; `ncl tasks run <id>` fires one extra run now (testing) without changing the schedule. Each task run auto-logs its final text to the run log; `ncl tasks append-log --msg "…"` is for extra mid-run notes (host-timestamped, not a message).
+- **Explaining or changing response behavior** — inspect `ncl wirings get`, then request an update.
 - **Answering questions about the system** — query `ncl` rather than guessing.
 
 ### Access rules
 
-Read commands (list, get) are open. Write commands (create, update, delete, restart, config update, add, remove) require admin approval — the request is held until an admin approves it.
+Read commands (list, get) are open. Most write commands (create, update, delete, restart, config update, add, remove) require admin approval — the request is held until an admin approves it. `ncl tasks` is the exception: an agent can manage its own group tasks without approval.
 
 ### Approval flow
 
@@ -61,14 +67,24 @@ ncl groups config get
 ncl sessions list
 ncl destinations list
 ncl members list
+ncl tasks list
+ncl wirings get
+# Always pass a short descriptive --name so the task id is readable (e.g. daily-briefing-a25c, not a long uuid).
+# For a recurring task, --recurrence alone sets the schedule (first run derived from it); add --process-after only for one-shots.
+ncl tasks create --name "daily briefing" --prompt "Send the daily briefing" --recurrence "0 9 * * *"
+# Add an optional progress note during a task run. The final response is logged automatically; the host stamps the local time.
+# This is a LOG ENTRY, not a message: it sends nothing to anyone. Inside a task run --id is auto-derived.
+ncl tasks append-log --msg "one feed returned 403; continuing with the remaining feeds"
 
 # Write commands (approval required)
 ncl groups restart
 ncl groups restart --rebuild --message "Config updated."
 ncl groups config update --model claude-sonnet-4-5-20250514
 ncl groups config add-mcp-server --name rss --command npx --args '["some-rss-mcp"]'
+ncl groups config add-mcp-server --name remote --url https://example.com/mcp
 ncl groups config add-package --npm some-package
 ncl members add --user telegram:jane
+ncl wirings update --engage-mode pattern --engage-pattern "."
 ```
 
 ### Important

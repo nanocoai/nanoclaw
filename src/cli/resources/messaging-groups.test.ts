@@ -24,21 +24,32 @@ vi.mock('../../config.js', async () => {
 
 const TEST_DIR = '/tmp/nanoclaw-test-cli-msggroups';
 
+import type { ChannelDefaults } from '../../channels/adapter.js';
+import { registerChannelAdapter } from '../../channels/channel-registry.js';
 import { initTestDb, closeDb, runMigrations } from '../../db/index.js';
 import { getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { dispatch } from '../dispatch.js';
 // Side-effect import: registers the `messaging-groups-create` command.
 import './messaging-groups.js';
 
+// Registration-tier declaration (no live adapter) — the environment `ncl`
+// sees for offline instances and setup scripts.
+const declared: ChannelDefaults = {
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'public' },
+  group: { engageMode: 'mention', threads: false, unknownSenderPolicy: 'request_approval' },
+  mentions: 'platform',
+};
+registerChannelAdapter('declchan-mg', { factory: () => null, defaults: declared });
+
 describe('messaging-groups CLI create defaults instance to channel_type', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
     fs.mkdirSync(TEST_DIR, { recursive: true });
-    runMigrations(initTestDb());
+    await runMigrations(await initTestDb());
   });
 
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 
@@ -54,7 +65,7 @@ describe('messaging-groups CLI create defaults instance to channel_type', () => 
     );
 
     expect(resp.ok).toBe(true);
-    const row = getMessagingGroupByPlatform('telegram', '12345');
+    const row = await getMessagingGroupByPlatform('telegram', '12345');
     expect(row).toBeDefined();
     expect(row?.instance).toBe('telegram');
   });
@@ -70,6 +81,49 @@ describe('messaging-groups CLI create defaults instance to channel_type', () => 
     );
 
     expect(resp.ok).toBe(true);
-    expect(getMessagingGroupByPlatform('telegram', '67890', 'work')?.instance).toBe('work');
+    expect((await getMessagingGroupByPlatform('telegram', '67890', 'work'))?.instance).toBe('work');
+  });
+});
+
+describe('messaging-groups CLI create resolves unknown_sender_policy from the channel declaration', () => {
+  beforeEach(async () => {
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+    fs.mkdirSync(TEST_DIR, { recursive: true });
+    await runMigrations(await initTestDb());
+  });
+
+  afterEach(async () => {
+    await closeDb();
+    if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+  });
+
+  const create = (args: Record<string, unknown>, id: string) =>
+    dispatch({ id, command: 'messaging-groups-create', args }, { caller: 'host' });
+
+  it('DM context takes the declared dm policy', async () => {
+    const resp = await create({ channel_type: 'declchan-mg', platform_id: 'dm-1' }, 'req-d1');
+    expect(resp.ok).toBe(true);
+    expect((await getMessagingGroupByPlatform('declchan-mg', 'dm-1'))?.unknown_sender_policy).toBe('public');
+  });
+
+  it('group context takes the declared group policy', async () => {
+    const resp = await create({ channel_type: 'declchan-mg', platform_id: 'g-1', is_group: '1' }, 'req-d2');
+    expect(resp.ok).toBe(true);
+    expect((await getMessagingGroupByPlatform('declchan-mg', 'g-1'))?.unknown_sender_policy).toBe('request_approval');
+  });
+
+  it('explicit --unknown-sender-policy wins over the declaration', async () => {
+    const resp = await create(
+      { channel_type: 'declchan-mg', platform_id: 'dm-2', unknown_sender_policy: 'strict' },
+      'req-d3',
+    );
+    expect(resp.ok).toBe(true);
+    expect((await getMessagingGroupByPlatform('declchan-mg', 'dm-2'))?.unknown_sender_policy).toBe('strict');
+  });
+
+  it("undeclared channels keep the legacy static 'strict' default (back-compat)", async () => {
+    const resp = await create({ channel_type: 'stalechan-mg', platform_id: 's-1' }, 'req-d4');
+    expect(resp.ok).toBe(true);
+    expect((await getMessagingGroupByPlatform('stalechan-mg', 's-1'))?.unknown_sender_policy).toBe('strict');
   });
 });

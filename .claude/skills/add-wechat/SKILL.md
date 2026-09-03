@@ -24,48 +24,36 @@ Adds WeChat support via **iLink Bot API** — the first-party Tencent API for pe
 
 NanoClaw doesn't ship channels in trunk. This skill copies the WeChat adapter in from the `channels` branch.
 
-### Pre-flight (idempotent)
+### 1. Copy the adapter and its registration test
 
-Skip to **Credentials** if all of these are already in place:
+Fetch the `channels` branch from the configured remote that carries it, then
+overwrite the skill-owned files with the canonical registry copies:
 
-- `src/channels/wechat.ts` exists
-- `src/channels/wechat-registration.test.ts` exists
-- `src/channels/index.ts` contains `import './wechat.js';`
-- `wechat-ilink-client` is listed in `package.json` dependencies
-
-Otherwise continue. Every step below is safe to re-run.
-
-### 1. Fetch the channels branch
-
-```bash
-git fetch origin channels
+```nc:copy from-branch:channels
+src/channels/wechat.ts
+src/channels/wechat-registration.test.ts
 ```
 
-### 2. Copy the adapter and its registration test
-
-```bash
-git show origin/channels:src/channels/wechat.ts                 > src/channels/wechat.ts
-git show origin/channels:src/channels/wechat-registration.test.ts > src/channels/wechat-registration.test.ts
-```
-
-### 3. Append the self-registration import
+### 2. Append the self-registration import
 
 Append to `src/channels/index.ts` (skip if the line is already present):
 
-```typescript
+```nc:append to:src/channels/index.ts
 import './wechat.js';
 ```
 
-### 4. Install the library (pinned)
+### 3. Install the library (pinned)
 
-```bash
-pnpm install wechat-ilink-client@0.1.0
+```nc:dep
+wechat-ilink-client@0.1.0
 ```
 
-### 5. Build and validate
+### 4. Build and validate
 
-```bash
+```nc:run effect:build
 pnpm run build
+```
+```nc:run effect:test
 pnpm exec vitest run src/channels/wechat-registration.test.ts
 ```
 
@@ -85,7 +73,6 @@ Add to `.env`:
 WECHAT_ENABLED=true
 ```
 
-Sync to container: `mkdir -p data/env && cp .env data/env/env`
 
 ### 2. Start the service and scan the QR
 
@@ -121,9 +108,11 @@ The bot is now connected as your WeChat account.
 
 A successful QR login alone isn't enough — the adapter still needs to be wired to an agent group before it can respond.
 
+**Prerequisite: the host service must be running.** The wire script creates the wiring through `ncl`, which talks to the running host over a Unix socket — there is no offline mode.
+
 ### 1. Trigger the first inbound message
 
-Have a different WeChat account send a message to the bot account. This auto-creates a `messaging_groups` row with the sender's `platform_id`.
+Have a different WeChat account send a message to the bot account. This auto-creates a `messaging_groups` row with the sender's `platform_id` and the `unknown_sender_policy` the WeChat adapter declares.
 
 ### 2. Run the wire script
 
@@ -131,9 +120,9 @@ Have a different WeChat account send a message to the bot account. This auto-cre
 pnpm exec tsx .claude/skills/add-wechat/scripts/wire-dm.ts
 ```
 
-Interactive flow: the script lists all unwired WeChat messaging groups, asks which agent group to wire it to, and creates the `messaging_group_agents` row with sensible defaults (sender policy `request_approval`, session mode `shared`).
+Interactive flow: the script lists all unwired WeChat messaging groups, asks which agent group to wire it to, and runs `ncl wirings create` — engage mode/pattern and priority come from the WeChat adapter's declared channel defaults, so a wiring created here matches one created by `/manage-channels` or the approval-card flow.
 
-With `request_approval`, the next DM from the stranger fires an approval card to the admin — admin taps Approve/Deny, approved users are added as members and their queued message replays through the agent.
+With `request_approval` as the sender policy, the next DM from a stranger fires an approval card to the admin — admin taps Approve/Deny, approved users are added as members and their queued message replays through the agent.
 
 Non-interactive:
 
@@ -147,9 +136,15 @@ pnpm exec tsx .claude/skills/add-wechat/scripts/wire-dm.ts \
 Flags:
 
 - `--platform-id <id>` — wire a specific messaging group (default: most recent unwired)
-- `--agent-group <id>` — target agent group (default: prompt; or solo admin group in non-interactive)
-- `--sender-policy public|strict|request_approval` — default `request_approval` (fires an admin approval card on unknown-sender DMs)
+- `--agent-group <id>` — target agent group (default: prompt; auto-picked when only one exists)
+- `--sender-policy public|strict|request_approval` — override the messaging group's `unknown_sender_policy` (default: leave whatever the WeChat adapter declared when the row was auto-created)
 - `--session-mode shared|per-thread` — default `shared`
+
+Equivalent raw `ncl` invocation (host must be running):
+
+```bash
+ncl wirings create --messaging-group-id <mg-id> --agent-group-id <ag-id> --session-mode shared
+```
 
 ### 3. Test
 

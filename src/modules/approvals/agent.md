@@ -20,14 +20,21 @@ install_packages({
 
 ### add_mcp_server
 
-Wire an EXISTING third-party MCP server into your runtime config. You must already know the exact `command` and `args`.
+Wire an EXISTING third-party MCP server into your runtime config. Use either a local `command` with optional `args`/`env`, or a remote HTTPS Streamable HTTP `url`.
 
 ```
 add_mcp_server({
   name: "github",
   command: "npx",
   args: ["@modelcontextprotocol/server-github"],
-  env: { GITHUB_TOKEN: "..." }
+  env: { GITHUB_TOKEN: "onecli-managed" }
+})
+```
+
+```
+add_mcp_server({
+  name: "remote",
+  url: "https://example.com/mcp"
 })
 ```
 

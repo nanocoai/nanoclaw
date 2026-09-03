@@ -91,28 +91,19 @@ export function step(
 export function userInput(key: string, value: string): void {
   fs.mkdirSync(LOGS_DIR, { recursive: true });
   const ts = new Date().toISOString();
-  fs.appendFileSync(
-    PROGRESS_LOG,
-    `=== [${ts}] user-input → ${key} ===\n  value: ${value}\n\n`,
-  );
+  fs.appendFileSync(PROGRESS_LOG, `=== [${ts}] user-input → ${key} ===\n  value: ${value}\n\n`);
 }
 
 /** Append the success footer. */
 export function complete(totalMs: number): void {
   const ts = new Date().toISOString();
-  fs.appendFileSync(
-    PROGRESS_LOG,
-    `## ${ts} · completed (total ${formatDurationTotal(totalMs)})\n`,
-  );
+  fs.appendFileSync(PROGRESS_LOG, `## ${ts} · completed (total ${formatDurationTotal(totalMs)})\n`);
 }
 
 /** Append the failure footer. Keep error short — full context lives in the failing step's raw log. */
 export function abort(stepName: string, error: string): void {
   const ts = new Date().toISOString();
-  fs.appendFileSync(
-    PROGRESS_LOG,
-    `## ${ts} · aborted at ${stepName} (${error})\n`,
-  );
+  fs.appendFileSync(PROGRESS_LOG, `## ${ts} · aborted at ${stepName} (${error})\n`);
 }
 
 /**
@@ -123,9 +114,7 @@ export function abort(stepName: string, error: string): void {
  */
 export function stepRawLog(name: string): string {
   fs.mkdirSync(STEPS_DIR, { recursive: true });
-  const existing = fs
-    .readdirSync(STEPS_DIR)
-    .filter((n) => /^\d+-.+\.log$/.test(n));
+  const existing = fs.readdirSync(STEPS_DIR).filter((n) => /^\d+-.+\.log$/.test(n));
   const nextIdx = existing.length + 1;
   const num = String(nextIdx).padStart(2, '0');
   const safeName = name.replace(/[^a-z0-9-]/gi, '-').toLowerCase();

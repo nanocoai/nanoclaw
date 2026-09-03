@@ -12,7 +12,7 @@ inputs:
   context-window:
     description: 'Context window size for percentage calculation'
     required: false
-    default: '200000'
+    default: '1000000'
   readme:
     description: 'Path to README file'
     required: false

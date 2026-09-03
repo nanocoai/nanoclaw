@@ -45,20 +45,30 @@ test('collectActivity: per-session in/out totals + last activity', () => {
   assert.equal(s2.out, 0);
 });
 
+// Buckets are LOCAL calendar days — derive expectations with the same
+// mapping so the assertions hold in any machine timezone.
+const day = (t) => new Date(t).toLocaleDateString('sv-SE');
+
 test('collectActivity: series has one bucket per day for `days`, newest last', () => {
   const { series } = collectActivity(root, 14, NOW);
   assert.equal(series.length, 14);
-  assert.equal(series[0].date, '2026-06-01');
-  assert.equal(series[13].date, '2026-06-14');
+  assert.equal(series[0].date, day(new Date(NOW.getTime() - 13 * 86_400_000)));
+  assert.equal(series[13].date, day(NOW));
 });
 
 test('collectActivity: counts land in the right day buckets', () => {
   const { series } = collectActivity(root, 14, NOW);
   const byDate = Object.fromEntries(series.map((d) => [d.date, d]));
-  assert.equal(byDate['2026-06-14'].in, 2);
-  assert.equal(byDate['2026-06-14'].out, 2);
-  assert.equal(byDate['2026-06-13'].in, 1);
-  assert.equal(byDate['2026-06-13'].out, 0);
+  const expIn = {};
+  const expOut = {};
+  for (const t of ['2026-06-14T09:01:23Z', '2026-06-14T10:00:00Z', '2026-06-13T08:00:00Z']) {
+    expIn[day(t)] = (expIn[day(t)] ?? 0) + 1;
+  }
+  for (const t of ['2026-06-14T09:05:00Z', '2026-06-14T10:05:00Z']) {
+    expOut[day(t)] = (expOut[day(t)] ?? 0) + 1;
+  }
+  for (const [d, n] of Object.entries(expIn)) assert.equal(byDate[d].in, n);
+  for (const [d, n] of Object.entries(expOut)) assert.equal(byDate[d].out, n);
 });
 
 test('collectActivity: messages outside the window are counted in totals but not the series', () => {

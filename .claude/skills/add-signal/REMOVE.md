@@ -29,12 +29,6 @@ SIGNAL_MANAGE_DAEMON
 SIGNAL_DATA_DIR
 ```
 
-Then re-sync to the container:
-
-```bash
-mkdir -p data/env && cp .env data/env/env
-```
-
 ## 3. Rebuild and restart
 
 Run from your NanoClaw project root:

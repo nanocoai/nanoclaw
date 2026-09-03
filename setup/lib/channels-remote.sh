@@ -20,10 +20,14 @@ resolve_channels_remote() {
     return 0
   fi
 
+  # Anchor the repo-name tail: the pattern must match the nanoclaw repo itself,
+  # never a sibling channel repo like qwibitai/nanoclaw-discord (which carries
+  # no channels branch — an unanchored `*nanoclaw*` glob picked those on
+  # multi-remote machines and broke every from-branch copy).
   local remote url
   while IFS=$'\t' read -r remote url; do
     case "$url" in
-      *qwibitai/nanoclaw*|*nanocoai/nanoclaw*)
+      *qwibitai/nanoclaw|*qwibitai/nanoclaw.git|*nanocoai/nanoclaw|*nanocoai/nanoclaw.git)
         printf '%s' "$remote"
         return 0
         ;;

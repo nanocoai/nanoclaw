@@ -37,13 +37,16 @@ import path from 'path';
 import * as p from '@clack/prompts';
 import k from 'kleur';
 
+import { getSetupProvider } from '../providers/registry.js';
 import {
   type AssistContext,
   BIG_PICTURE_FILES,
   ensureClaudeReady,
+  isClaudeReady,
   offerClaudeAssist,
   STEP_FILES,
 } from './claude-assist.js';
+import { getPickedProvider } from './picked-provider.js';
 import { ensureAnswer } from './runner.js';
 import { brandBody, note } from './theme.js';
 
@@ -81,17 +84,15 @@ export interface HandoffContext {
  */
 export async function offerClaudeHandoff(ctx: HandoffContext): Promise<boolean> {
   if (!isClaudeUsable()) {
-    p.log.warn(
-      brandBody("Claude isn't installed yet — can't hand you off here. Finish setup first, then retry."),
-    );
+    p.log.warn(brandBody("Claude isn't installed yet — can't hand you off here. Finish setup first, then retry."));
     return false;
   }
 
   note(
     [
       "I'm handing you off to Claude in interactive mode.",
-      "It has the context of where you are in setup.",
-      "",
+      'It has the context of where you are in setup.',
+      '',
       k.dim("Type /exit (or press Ctrl-D) when you're ready to come back to setup."),
     ].join('\n'),
     'Handing off to Claude',
@@ -114,20 +115,9 @@ let handoffSessionStarted = false;
  * the setup driver.
  */
 function spawnInteractiveClaude(prompt: string): Promise<boolean> {
-  const sessionArgs = handoffSessionStarted
-    ? ['--resume', handoffSessionId]
-    : ['--session-id', handoffSessionId];
+  const sessionArgs = handoffSessionStarted ? ['--resume', handoffSessionId] : ['--session-id', handoffSessionId];
   return new Promise<boolean>((resolve) => {
-    const child = spawn(
-      'claude',
-      [
-        prompt,
-        '--permission-mode',
-        'auto',
-        ...sessionArgs,
-      ],
-      { stdio: 'inherit' },
-    );
+    const child = spawn('claude', [prompt, '--permission-mode', 'auto', ...sessionArgs], { stdio: 'inherit' });
     child.on('close', () => {
       handoffSessionStarted = true;
       p.log.success(brandBody("Back from Claude. Let's continue."));
@@ -222,8 +212,9 @@ function buildHandoffPrompt(ctx: HandoffContext): string {
     ...(ctx.files ?? []),
     'logs/setup.log',
     'logs/setup-steps/',
+    // The bespoke `setup/channels/<channel>.ts` flows are deleted — point the
+    // agent at the channel's SKILL.md, which now owns the whole procedure.
     `.claude/skills/add-${ctx.channel}/SKILL.md`,
-    `setup/channels/${ctx.channel}.ts`,
   ].filter((v, i, a) => a.indexOf(v) === i);
 
   lines.push('Relevant files (read as needed with the Read tool):');
@@ -233,15 +224,43 @@ function buildHandoffPrompt(ctx: HandoffContext): string {
 }
 
 /**
- * Dispatcher: checks NANOCLAW_SETUP_ASSIST_MODE and delegates to either
- * the interactive failure handoff (default) or the non-interactive assist.
+ * Dispatcher for every setup-failure assist offer.
+ *
+ * On a non-claude install (the operator picked codex/opencode/… this run),
+ * the picked provider owns failure assist: its registered
+ * `offerFailureAssist` hook runs first, and Claude is only a fallback —
+ * a guarded one, offered when already installed and signed in, never
+ * installed or signed in on the spot.
+ *
+ * On a claude install (no pick), behavior is unchanged: checks
+ * NANOCLAW_SETUP_ASSIST_MODE and delegates to either the interactive
+ * failure handoff (default) or the non-interactive assist.
  *
  * Drop-in replacement for `offerClaudeAssist` at failure call sites.
  */
-export async function offerClaudeOnFailure(
-  ctx: AssistContext,
-  projectRoot: string = process.cwd(),
-): Promise<boolean> {
+export async function offerClaudeOnFailure(ctx: AssistContext, projectRoot: string = process.cwd()): Promise<boolean> {
+  if (process.env.NANOCLAW_SKIP_CLAUDE_ASSIST === '1') return false;
+
+  const provider = getPickedProvider();
+  if (provider) {
+    const assist = getSetupProvider(provider)?.offerFailureAssist;
+    if (assist) {
+      const outcome = await assist(ctx, projectRoot);
+      if (outcome === 'launched') return true;
+      if (outcome === 'declined') return false;
+      // 'unavailable': the provider's own debugger can't run here — fall
+      // through to the guarded Claude offer.
+    }
+    if (!isClaudeReady()) {
+      p.log.warn(
+        brandBody(
+          `Skipping the Claude debug offer — this install uses ${provider} and Claude isn't set up here. The failure details are in logs/setup.log.`,
+        ),
+      );
+      return false;
+    }
+  }
+
   if (process.env.NANOCLAW_SETUP_ASSIST_MODE === 'true' || process.env.NANOCLAW_SETUP_ASSIST_MODE === '1') {
     return offerClaudeAssist(ctx, projectRoot);
   }
@@ -256,10 +275,7 @@ export async function offerClaudeOnFailure(
  * Returns `true` if Claude was launched (the user may have fixed
  * things during the session), `false` if skipped/declined/unavailable.
  */
-async function offerFailureHandoff(
-  ctx: AssistContext,
-  projectRoot: string,
-): Promise<boolean> {
+async function offerFailureHandoff(ctx: AssistContext, projectRoot: string): Promise<boolean> {
   if (process.env.NANOCLAW_SKIP_CLAUDE_ASSIST === '1') return false;
   if (!(await ensureClaudeReady(projectRoot))) return false;
 
@@ -273,9 +289,9 @@ async function offerFailureHandoff(
 
   note(
     [
-      "Launching Claude to help debug this failure.",
-      "It has the context of what went wrong.",
-      "",
+      'Launching Claude to help debug this failure.',
+      'It has the context of what went wrong.',
+      '',
       k.dim("Type /exit (or press Ctrl-D) when you're ready to come back to setup."),
     ].join('\n'),
     'Handing off to Claude',
@@ -290,9 +306,7 @@ function buildFailurePrompt(ctx: AssistContext, projectRoot: string): string {
     ...BIG_PICTURE_FILES,
     ...stepRefs,
     'logs/setup.log',
-    ctx.rawLogPath
-      ? path.relative(projectRoot, ctx.rawLogPath)
-      : 'logs/setup-steps/',
+    ctx.rawLogPath ? path.relative(projectRoot, ctx.rawLogPath) : 'logs/setup-steps/',
   ].filter((v, i, a) => a.indexOf(v) === i);
 
   const lines: string[] = [

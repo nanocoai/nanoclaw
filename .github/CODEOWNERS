@@ -1,10 +1,10 @@
 # Core code - maintainer only
-/src/ @gavrielc @gabi-simons
-/container/ @gavrielc @gabi-simons
-/groups/ @gavrielc @gabi-simons
-/launchd/ @gavrielc @gabi-simons
-/package.json @gavrielc @gabi-simons
-/package-lock.json @gavrielc @gabi-simons
+/src/ @gavrielc @gabi-simons @omri-maya @moshe-nanoco
+/container/ @gavrielc @gabi-simons @omri-maya @moshe-nanoco
+/groups/ @gavrielc @gabi-simons @omri-maya @moshe-nanoco
+/launchd/ @gavrielc @gabi-simons @omri-maya @moshe-nanoco
+/package.json @gavrielc @gabi-simons @omri-maya @moshe-nanoco
+/package-lock.json @gavrielc @gabi-simons @omri-maya @moshe-nanoco
 
 # Skills - open to contributors
 /.claude/skills/

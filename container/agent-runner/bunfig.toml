@@ -1,0 +1,2 @@
+[test]
+preload = ["./src/modules/index.ts"]

@@ -26,13 +26,13 @@ interface LegacyContainerJson {
   maxMessagesPerPrompt?: number;
 }
 
-export function backfillContainerConfigs(): void {
-  const groups = getAllAgentGroups();
+export async function backfillContainerConfigs(): Promise<void> {
+  const groups = await getAllAgentGroups();
   let backfilled = 0;
 
   for (const group of groups) {
     // Skip if already has a config row
-    if (getContainerConfig(group.id)) continue;
+    if (await getContainerConfig(group.id)) continue;
 
     // Read legacy container.json from disk
     const filePath = path.join(GROUPS_DIR, group.folder, 'container.json');
@@ -65,10 +65,11 @@ export function backfillContainerConfigs(): void {
       packages_npm: JSON.stringify(legacy.packages?.npm ?? []),
       additional_mounts: JSON.stringify(legacy.additionalMounts ?? []),
       cli_scope: 'group',
+      timezone: null,
       updated_at: new Date().toISOString(),
     };
 
-    createContainerConfig(row);
+    await createContainerConfig(row);
     backfilled++;
   }
 

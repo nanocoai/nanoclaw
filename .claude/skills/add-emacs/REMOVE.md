@@ -54,10 +54,8 @@ Remove the NanoClaw block from your Emacs config (`config.el`, `~/.spacemacs`, o
 
 Reload your config or restart Emacs.
 
-## 5. Remove the messaging group (optional)
+## 5. Messaging group (left intact)
 
-To clean up the wired messaging group:
-
-```bash
-pnpm exec tsx scripts/q.ts data/v2.db "DELETE FROM messaging_group_agents WHERE messaging_group_id IN (SELECT id FROM messaging_groups WHERE channel_type='emacs'); DELETE FROM messaging_groups WHERE channel_type='emacs';"
-```
+Your wired messaging group and conversation history are **not** removed — you
+created them at runtime, not this skill's install. To purge them deliberately,
+delete them yourself with `ncl messaging-groups delete <id>`.

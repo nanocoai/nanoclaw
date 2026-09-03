@@ -11,9 +11,14 @@ before(() => {
   root = mkdtempSync(join(tmpdir(), 'clidash-actsrv-'));
   mkdirSync(join(root, 'ag-1', 'sess-1'), { recursive: true });
   const mk = (p, t, ts) => { const db = new DatabaseSync(p); db.exec(`CREATE TABLE ${t}(id TEXT, timestamp TEXT)`); const i = db.prepare(`INSERT INTO ${t} VALUES (?,?)`); ts.forEach((x, n) => i.run(String(n), x)); db.close(); };
-  const today = new Date().toISOString().slice(0, 10);
-  mk(join(root, 'ag-1', 'sess-1', 'inbound.db'), 'messages_in', [`${today} 09:00:00`, `${today} 10:00:00`]);
-  mk(join(root, 'ag-1', 'sess-1', 'outbound.db'), 'messages_out', [`${today} 09:05:00`]);
+  // Seed with instants moments ago: they land in the LOCAL-today bucket
+  // (series.at(-1)) regardless of the machine's timezone.
+  const now = Date.now();
+  mk(join(root, 'ag-1', 'sess-1', 'inbound.db'), 'messages_in', [
+    new Date(now - 120_000).toISOString(),
+    new Date(now - 60_000).toISOString(),
+  ]);
+  mk(join(root, 'ag-1', 'sess-1', 'outbound.db'), 'messages_out', [new Date(now - 90_000).toISOString()]);
 });
 after(() => rmSync(root, { recursive: true, force: true }));
 

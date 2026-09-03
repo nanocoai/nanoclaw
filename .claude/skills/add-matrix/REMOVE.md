@@ -18,31 +18,14 @@ rm -f src/channels/matrix.ts src/channels/matrix-registration.test.ts
 
 ## 2. Remove credentials
 
-Remove the `MATRIX_*` lines from `.env`:
-
-```bash
-MATRIX_BASE_URL
-MATRIX_USERNAME
-MATRIX_PASSWORD
-MATRIX_USER_ID
-MATRIX_BOT_USERNAME
-MATRIX_ACCESS_TOKEN
-MATRIX_INVITE_AUTOJOIN
-MATRIX_INVITE_AUTOJOIN_ALLOWLIST
-MATRIX_RECOVERY_KEY
-MATRIX_DEVICE_ID
-```
-
-Then re-sync to the container:
-
-```bash
-mkdir -p data/env && cp .env data/env/env
-```
+Remove the Matrix env vars apply set — `MATRIX_BASE_URL`, `MATRIX_USER_ID`, `MATRIX_BOT_USERNAME`, and whichever auth path you chose (`MATRIX_USERNAME` + `MATRIX_PASSWORD`, or `MATRIX_ACCESS_TOKEN`) — from `.env`.
 
 ## 3. Remove the package
 
 ```bash
+pnpm pkg delete 'pnpm.patchedDependencies[@beeper/chat-adapter-matrix@0.2.0]'
 pnpm uninstall @beeper/chat-adapter-matrix
+rm -f patches/@beeper__chat-adapter-matrix@0.2.0.patch
 ```
 
 ## 4. Rebuild and restart

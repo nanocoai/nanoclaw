@@ -7,6 +7,7 @@ registerResource({
   description:
     "Dropped message log — tracks messages that were dropped by the router or access gate. Aggregates by (channel_type, platform_id) with a running count. Reasons include: no_agent_wired (no wiring exists), no_agent_engaged (wiring exists but engage rules didn't fire), unknown_sender_strict (sender not recognized, strict policy), unknown_sender_request_approval (sender not recognized, approval requested).",
   idColumn: 'channel_type',
+  listOrder: 'last_seen DESC, channel_type, platform_id',
   columns: [
     { name: 'channel_type', type: 'string', description: 'Channel adapter type of the dropped message.' },
     { name: 'platform_id', type: 'string', description: 'Platform chat ID where the message was dropped.' },

@@ -9,6 +9,7 @@ const approvalState = vi.hoisted(() => ({
     | ((args: {
         session: unknown;
         payload: Record<string, unknown>;
+        approval: Record<string, unknown>;
         userId: string;
         notify: (text: string) => void;
       }) => Promise<void>),
@@ -18,6 +19,7 @@ const approvalState = vi.hoisted(() => ({
       handler: (args: {
         session: unknown;
         payload: Record<string, unknown>;
+        approval: Record<string, unknown>;
         userId: string;
         notify: (text: string) => void;
       }) => Promise<void>,
@@ -26,6 +28,7 @@ const approvalState = vi.hoisted(() => ({
     },
   ),
   observedContexts: [] as CallerContext[],
+  wiringUpdates: [] as Record<string, unknown>[],
 }));
 
 vi.mock('../log.js', () => ({
@@ -43,8 +46,16 @@ vi.mock('../db/agent-groups.js', () => ({
 }));
 
 const mockGetSession = vi.fn();
+// The guard's grant check re-fetches the approval row to prove it's live.
+const mockGetPendingApproval = vi.fn();
 vi.mock('../db/sessions.js', () => ({
   getSession: (...args: unknown[]) => mockGetSession(...args),
+  getPendingApproval: (...args: unknown[]) => mockGetPendingApproval(...args),
+}));
+
+const mockGetMessagingGroupAgentByPair = vi.fn();
+vi.mock('../db/messaging-groups.js', () => ({
+  getMessagingGroupAgentByPair: (...args: unknown[]) => mockGetMessagingGroupAgentByPair(...args),
 }));
 
 // dispatch's post-handler looks up the resource's `scopeField` via getResource.
@@ -116,10 +127,51 @@ register({
 });
 
 register({
+  name: 'tasks-list',
+  description: 'test command (tasks resource)',
+  resource: 'tasks',
+  access: 'open',
+  parseArgs: (raw) => raw,
+  handler: async (args) => ({ echo: args }),
+});
+
+register({
   name: 'wirings-list',
   description: 'test command (wirings resource — not allowed)',
   resource: 'wirings',
   access: 'open',
+  parseArgs: (raw) => raw,
+  handler: async (args) => ({ echo: args }),
+});
+
+register({
+  name: 'wirings-get',
+  description: 'test command (wirings get)',
+  resource: 'wirings',
+  access: 'open',
+  generic: 'get',
+  parseArgs: (raw) => raw,
+  handler: async (args) => ({ id: (args as Record<string, unknown>).id, agent_group_id: 'g1' }),
+});
+
+register({
+  name: 'wirings-update',
+  description: 'test command (wirings update)',
+  resource: 'wirings',
+  access: 'approval',
+  parseArgs: (raw) => raw,
+  handler: async (args) => {
+    approvalState.wiringUpdates.push(args as Record<string, unknown>);
+    return args;
+  },
+});
+
+register({
+  name: 'host-only-cmd',
+  description: 'test command (operator-only, like add-mount)',
+  resource: 'groups',
+  access: 'approval',
+  hostOnly: true,
   parseArgs: (raw) => raw,
   handler: async (args) => ({ echo: args }),
 });
@@ -174,6 +226,17 @@ register({
   handler: async () => ({ agent_group_id: 'g1', model: 'opus' }),
 });
 
+// A dash-joined command whose custom-operation key contains spaces
+// ('config update') — used by the --help space/dash bridging test.
+register({
+  name: 'groups-config-update',
+  description: 'bare registry description (should not be the help answer)',
+  resource: 'groups',
+  access: 'open',
+  parseArgs: (raw) => raw,
+  handler: async (args) => ({ echo: args }),
+});
+
 // The real `sessions-get` name — triggers the pre-handler ownership check.
 register({
   name: 'sessions-get',
@@ -183,6 +246,16 @@ register({
   generic: 'get',
   parseArgs: (raw) => raw,
   handler: async (args) => ({ id: (args as Record<string, unknown>).id, agent_group_id: 'g1' }),
+});
+
+// The real `sessions-history` name — the same pre-handler check covers it.
+register({
+  name: 'sessions-history',
+  description: 'sessions history custom op',
+  resource: 'sessions',
+  access: 'open',
+  parseArgs: (raw) => raw,
+  handler: async (args) => [{ id: (args as Record<string, unknown>).id }],
 });
 
 // Echoes args back — used to assert dash-joined positional id resolution.
@@ -201,12 +274,16 @@ import type { CallerContext } from './frame.js';
 beforeEach(() => {
   vi.clearAllMocks();
   approvalState.observedContexts.length = 0;
-  // Default: the four CLI-whitelisted resources with their real scopeFields.
+  approvalState.wiringUpdates.length = 0;
+  mockGetMessagingGroupAgentByPair.mockReturnValue({ id: 'w-current', agent_group_id: 'g1' });
+  // Default: CLI-whitelisted resources with their real scopeFields.
   const scopeFields: Record<string, string> = {
     groups: 'id',
     sessions: 'agent_group_id',
     destinations: 'agent_group_id',
     members: 'agent_group_id',
+    tasks: 'agent_group_id',
+    wirings: 'agent_group_id',
   };
   mockGetResource.mockImplementation((plural: string) =>
     scopeFields[plural] ? { scopeField: scopeFields[plural] } : undefined,
@@ -226,6 +303,24 @@ function agentCtx(overrides?: Partial<Extract<CallerContext, { caller: 'agent' }
 }
 
 // --- Tests ---
+
+describe('host-only commands (operator-only)', () => {
+  it('rejects an agent caller even at global scope', async () => {
+    // global scope is otherwise unrestricted — hostOnly must still reject.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+    const resp = await dispatch({ id: '1', command: 'host-only-cmd', args: {} }, agentCtx());
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.error.code).toBe('forbidden');
+      expect(resp.error.message).toContain('operator-only');
+    }
+  });
+
+  it('passes the gate for a host (operator) caller', async () => {
+    const resp = await dispatch({ id: '1', command: 'host-only-cmd', args: { x: 1 } }, { caller: 'host' });
+    expect(resp.ok).toBe(true);
+  });
+});
 
 describe('CLI scope enforcement', () => {
   it('disabled: rejects all CLI requests from agent', async () => {
@@ -353,16 +448,77 @@ describe('CLI scope enforcement', () => {
     }
   });
 
-  it('group: blocks non-whitelisted resources (wirings)', async () => {
+  it('group: allows tasks, auto-fills --group', async () => {
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
 
-    const resp = await dispatch({ id: '1', command: 'wirings-list', args: {} }, agentCtx());
+    const resp = await dispatch({ id: '1', command: 'tasks-list', args: {} }, agentCtx());
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) {
+      const data = resp.data as { echo: Record<string, unknown> };
+      expect(data.echo.group).toBe('g1');
+      expect(data.echo.id).toBeUndefined();
+    }
+  });
+
+  it('group: resolves wiring reads from the current conversation, ignoring caller ids', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+
+    const resp = await dispatch({ id: '1', command: 'wirings-get', args: { id: 'w-foreign' } }, agentCtx());
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) expect(resp.data).toMatchObject({ id: 'w-current', agent_group_id: 'g1' });
+    expect(mockGetMessagingGroupAgentByPair).toHaveBeenCalledWith('mg1', 'g1');
+  });
+
+  it.each([
+    ['wirings-update', { sender_scope: 'known' }],
+    ['wirings-update', { ignored_message_policy: 'accumulate' }],
+    ['wirings-list', {}],
+  ])('group: denies %s with out-of-scope args', async (command, args) => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+
+    const resp = await dispatch({ id: '1', command, args }, agentCtx());
 
     expect(resp.ok).toBe(false);
-    if (!resp.ok) {
-      expect(resp.error.code).toBe('forbidden');
-      expect(resp.error.message).toContain('wirings');
-    }
+    if (!resp.ok) expect(resp.error.code).toBe('forbidden');
+    expect(approvalState.requestApproval).not.toHaveBeenCalled();
+  });
+
+  it.each(['current', 'missing'])('group: re-resolves a %s conversation wiring on approved replay', async (state) => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockGetSession.mockReturnValue({ id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' });
+    mockGetAgentGroup.mockReturnValue({ id: 'g1', name: 'Group One' });
+
+    const resp = await dispatch(
+      {
+        id: '1',
+        command: 'wirings-update',
+        args: { engage_mode: 'pattern', engage_pattern: '.' },
+      },
+      agentCtx(),
+    );
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) expect(resp.error.code).toBe('approval-pending');
+
+    const request = approvalState.requestApproval.mock.calls[0][0] as { payload: Record<string, unknown> };
+    const grant = { approval_id: `appr-${state}`, action: 'cli_command', payload: JSON.stringify(request.payload) };
+    mockGetPendingApproval.mockReturnValue(grant);
+    if (state === 'missing') mockGetMessagingGroupAgentByPair.mockReturnValue(undefined);
+    const notify = vi.fn();
+
+    await approvalState.approvalHandler!({
+      session: { id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' },
+      payload: request.payload,
+      approval: grant,
+      userId: 'telegram:admin',
+      notify,
+    });
+
+    expect(approvalState.wiringUpdates).toHaveLength(state === 'current' ? 1 : 0);
+    expect(notify).toHaveBeenCalledWith(
+      expect.stringContaining(state === 'current' ? 'approved and executed' : 'failed'),
+    );
   });
 
   it('group: rejects cross-group --agent_group_id', async () => {
@@ -461,16 +617,93 @@ describe('CLI scope enforcement', () => {
       callerContext: ctx,
     });
 
+    // The approve path hands the handler the live approval row — the grant
+    // the replay carries back into dispatch.
+    const grantRow = {
+      approval_id: 'appr-t1',
+      action: 'cli_command',
+      payload: JSON.stringify(approval.payload),
+    };
+    mockGetPendingApproval.mockReturnValue(grantRow);
+
     expect(approvalState.approvalHandler).toBeTypeOf('function');
     await approvalState.approvalHandler!({
       session: { id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' },
       payload: approval.payload,
+      approval: grantRow,
       userId: 'telegram:admin',
       notify: vi.fn(),
     });
 
     expect(approvalState.observedContexts).toEqual([ctx]);
     expect(approvalState.requestApproval).toHaveBeenCalledTimes(1);
+  });
+
+  // --- Grant-carrying replay (the `approved: true` boolean no longer exists) ---
+
+  it('replay with a dead grant (row deleted) refuses instead of re-holding', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockGetSession.mockReturnValue({ id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' });
+    mockGetAgentGroup.mockReturnValue({ id: 'g1', name: 'Group One' });
+
+    const ctx = agentCtx();
+    await dispatch({ id: '1', command: 'approval-context-command', args: {} }, ctx);
+    const approval = approvalState.requestApproval.mock.calls[0][0] as { payload: Record<string, unknown> };
+
+    mockGetPendingApproval.mockReturnValue(undefined); // resolution already deleted the row
+    const notify = vi.fn();
+    await approvalState.approvalHandler!({
+      session: { id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' },
+      payload: approval.payload,
+      approval: { approval_id: 'appr-dead', action: 'cli_command', payload: JSON.stringify(approval.payload) },
+      userId: 'telegram:admin',
+      notify,
+    });
+
+    expect(approvalState.observedContexts).toHaveLength(0); // handler never ran
+    expect(approvalState.requestApproval).toHaveBeenCalledTimes(1); // no second card
+    expect(notify.mock.calls[0][0]).toContain('failed');
+  });
+
+  it("a grant approved for one command doesn't transfer to another", async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+
+    // A live cli_command row, but held for a DIFFERENT command.
+    const grantRow = {
+      approval_id: 'appr-other',
+      action: 'cli_command',
+      payload: JSON.stringify({ frame: { command: 'members-add' } }),
+    };
+    mockGetPendingApproval.mockReturnValue(grantRow);
+
+    const resp = await dispatch({ id: '1', command: 'approval-context-command', args: {} }, agentCtx(), {
+      grant: grantRow as never,
+    });
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.error.code).toBe('forbidden');
+      expect(resp.error.message).toContain('grant');
+    }
+    expect(approvalState.observedContexts).toHaveLength(0);
+  });
+
+  it('a fabricated grant object without a live row is refused', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockGetPendingApproval.mockReturnValue(undefined);
+
+    const forged = {
+      approval_id: 'appr-forged',
+      action: 'cli_command',
+      payload: JSON.stringify({ frame: { command: 'approval-context-command' } }),
+    };
+    const resp = await dispatch({ id: '1', command: 'approval-context-command', args: {} }, agentCtx(), {
+      grant: forged as never,
+    });
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) expect(resp.error.code).toBe('forbidden');
+    expect(approvalState.requestApproval).not.toHaveBeenCalled(); // refusal, not a fresh hold
   });
 
   // --- Post-handler filtering ---
@@ -570,6 +803,19 @@ describe('CLI scope enforcement', () => {
     }
   });
 
+  it('group: sessions-history gets the same "session not found" for a foreign session UUID', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockGetSession.mockReturnValue({ id: 's-x', agent_group_id: 'other-group' });
+
+    const resp = await dispatch({ id: '1', command: 'sessions-history', args: { id: 's-x' } }, agentCtx());
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.error.code).toBe('handler-error');
+      expect(resp.error.message).toContain('session not found');
+    }
+  });
+
   it('group: sessions-get allows the caller’s own session', async () => {
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
     mockGetSession.mockReturnValue({ id: 's-mine', agent_group_id: 'g1' });
@@ -595,18 +841,261 @@ describe('CLI scope enforcement', () => {
   });
 });
 
-// --- Dash-joined positional id resolution (generated ids contain dashes) ---
+// Multi-segment command, to prove the longest-prefix match (verb itself has dashes).
+register({
+  name: 'groups-cfg-get',
+  description: 'test multi-segment command',
+  resource: 'groups',
+  access: 'open',
+  parseArgs: (raw) => raw,
+  handler: async (args) => ({ echo: args }),
+});
 
-describe('dash-joined positional id resolution', () => {
-  it('resolves `groups-get-<uuid-with-dashes>` to (groups get, id=<uuid>)', async () => {
-    const uuid = '550e8400-e29b-41d4-a716-446655440000';
+describe('positional dashed-id resolution', () => {
+  const host = { caller: 'host' as const };
 
-    const resp = await dispatch({ id: '1', command: `groups-get-${uuid}`, args: {} }, { caller: 'host' });
+  it('resolves a long dashed id to command + intact id (no shredding)', async () => {
+    const id = 'task-374f0630-d3e0-4965-81da-fe4bf7a6a442';
+    const resp = await dispatch({ id: '1', command: `groups-test-${id}`, args: {} }, host);
+    expect(resp.ok).toBe(true);
+    if (resp.ok) expect(resp.data).toEqual({ echo: { id } });
+  });
+
+  it('matches the LONGEST command prefix when the verb itself has dashes', async () => {
+    const resp = await dispatch({ id: '2', command: 'groups-cfg-get-abc-123', args: {} }, host);
+    expect(resp.ok).toBe(true);
+    if (resp.ok) expect(resp.data).toEqual({ echo: { id: 'abc-123' } });
+  });
+
+  it('leaves a registered no-id command alone', async () => {
+    const resp = await dispatch({ id: '3', command: 'groups-test', args: {} }, host);
+    expect(resp.ok).toBe(true);
+    if (resp.ok) expect(resp.data).toEqual({ echo: {} });
+  });
+
+  it('does not override an explicit --id', async () => {
+    const resp = await dispatch({ id: '4', command: 'groups-test-tail', args: { id: 'explicit' } }, host);
+    expect(resp.ok).toBe(true);
+    if (resp.ok) expect(resp.data).toEqual({ echo: { id: 'explicit' } });
+  });
+});
+
+// --- `--help` interception: answer with generated help, execute nothing ---
+
+describe('--help interception', () => {
+  it('returns command help instead of executing (open command)', async () => {
+    const resp = await dispatch({ id: '1', command: 'test-cmd', args: { help: true } }, { caller: 'host' });
 
     expect(resp.ok).toBe(true);
     if (resp.ok) {
-      const data = resp.data as { echo: Record<string, unknown> };
-      expect(data.echo.id).toBe(uuid);
+      // No deep resource def for 'test' → falls back to the description.
+      expect(resp.data).toBe('test command (non-group resource)');
     }
+  });
+
+  it('carries the help text in `human` so clients print it verbatim', async () => {
+    const resp = await dispatch({ id: '1', command: 'test-cmd', args: { help: true } }, { caller: 'host' });
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) {
+      expect(typeof resp.data).toBe('string');
+      expect(resp.human).toBe(resp.data);
+    }
+  });
+
+  it('never mints an approval card for --help on an approval-gated command', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockGetSession.mockReturnValue({ id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' });
+
+    const resp = await dispatch({ id: '1', command: 'approval-context-command', args: { help: true } }, agentCtx());
+
+    expect(resp.ok).toBe(true);
+    expect(approvalState.requestApproval).not.toHaveBeenCalled();
+    expect(approvalState.observedContexts).toHaveLength(0); // handler never ran
+  });
+
+  it('renders deep verb help when the resource def is available', async () => {
+    mockGetResource.mockImplementation((plural: string) =>
+      plural === 'groups'
+        ? {
+            name: 'group',
+            plural: 'groups',
+            table: 'agent_groups',
+            description: 'Agent groups.',
+            idColumn: 'id',
+            scopeField: 'id',
+            columns: [],
+            operations: {},
+            customOperations: {
+              test: {
+                access: 'open',
+                description: 'Deep test op.',
+                args: [{ name: 'foo', type: 'string', description: 'A foo.', required: true }],
+                handler: async () => ({}),
+              },
+            },
+          }
+        : undefined,
+    );
+
+    const resp = await dispatch({ id: '1', command: 'groups-test', args: { help: true } }, { caller: 'host' });
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) {
+      expect(resp.data).toContain('ncl groups test');
+      expect(resp.data).toContain('--foo');
+      expect(resp.data).toContain('(required)');
+    }
+  });
+
+  it('renders deep verb help for a multi-word custom-operation key (spaces vs dashes)', async () => {
+    // registerResource stores the op under 'config update' but registers the
+    // command as 'groups-config-update'; help must bridge the two.
+    mockGetResource.mockImplementation((plural: string) =>
+      plural === 'groups'
+        ? {
+            name: 'group',
+            plural: 'groups',
+            table: 'agent_groups',
+            description: 'Agent groups.',
+            idColumn: 'id',
+            scopeField: 'id',
+            columns: [],
+            operations: {},
+            customOperations: {
+              'config update': {
+                access: 'open',
+                description: 'Update container config.',
+                args: [{ name: 'model', type: 'string', description: 'Model override.' }],
+                handler: async () => ({}),
+              },
+            },
+          }
+        : undefined,
+    );
+
+    const resp = await dispatch({ id: '1', command: 'groups-config-update', args: { help: true } }, { caller: 'host' });
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) {
+      expect(resp.data).toContain('ncl groups config update');
+      expect(resp.data).toContain('--model');
+      // Not the bare registry description fallback:
+      expect(resp.data).not.toBe('bare registry description (should not be the help answer)');
+    }
+  });
+
+  it.each(['wirings-get', 'wirings-update'])('answers %s --help in group scope', async (command) => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockGetResource.mockReturnValue(undefined);
+
+    const resp = await dispatch({ id: '1', command, args: { help: true } }, agentCtx());
+
+    expect(resp.ok).toBe(true);
+    expect(approvalState.requestApproval).not.toHaveBeenCalled();
+  });
+});
+
+// --- Unknown-command errors carry their fix ---
+
+describe('unknown-command errors', () => {
+  it('lists the resource verbs when the command names a known resource', async () => {
+    mockGetResource.mockImplementation((plural: string) =>
+      plural === 'groups'
+        ? {
+            name: 'group',
+            plural: 'groups',
+            table: 'agent_groups',
+            description: 'Agent groups.',
+            idColumn: 'id',
+            columns: [],
+            operations: { list: 'open', get: 'open' },
+            customOperations: {
+              restart: { access: 'approval', description: 'Restart.', handler: async () => ({}) },
+            },
+          }
+        : undefined,
+    );
+
+    const resp = await dispatch({ id: '1', command: 'groups-restrat', args: {} }, { caller: 'host' });
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.error.code).toBe('unknown-command');
+      expect(resp.error.message).toContain('verbs for groups: list, get, restart');
+      expect(resp.error.message).toContain('ncl groups help');
+    }
+  });
+
+  it('suggests the closest command name for near-miss typos', async () => {
+    const resp = await dispatch({ id: '1', command: 'test-cm', args: {} }, { caller: 'host' });
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.error.code).toBe('unknown-command');
+      expect(resp.error.message).toContain('did you mean "test-cmd"?');
+    }
+  });
+
+  it('falls back to a plain pointer when nothing is close', async () => {
+    const resp = await dispatch({ id: '1', command: 'zzz-qqq-vvv', args: {} }, { caller: 'host' });
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.error.message).toContain('no command "zzz-qqq-vvv"');
+      expect(resp.error.message).toContain('ncl help');
+      expect(resp.error.message).not.toContain('did you mean');
+    }
+  });
+});
+
+// --- formatHuman hook: server-rendered human view on the frame ---
+
+describe('formatHuman hook', () => {
+  register({
+    name: 'render-cmd',
+    description: 'command with a human renderer',
+    access: 'open',
+    parseArgs: (raw) => raw,
+    handler: async () => [{ id: 'x1', status: 'live' }],
+    formatHuman: (rows) => `TABLE(${(rows as { id: string }[]).map((r) => r.id).join(',')})`,
+  });
+
+  register({
+    name: 'render-throws',
+    description: 'command whose renderer throws',
+    access: 'open',
+    parseArgs: (raw) => raw,
+    handler: async () => ({ fine: true }),
+    formatHuman: () => {
+      throw new Error('renderer bug');
+    },
+  });
+
+  it('attaches human alongside data', async () => {
+    const resp = await dispatch({ id: '1', command: 'render-cmd', args: {} }, { caller: 'host' });
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) {
+      expect(resp.human).toBe('TABLE(x1)');
+      expect(resp.data).toEqual([{ id: 'x1', status: 'live' }]); // machine contract intact
+    }
+  });
+
+  it('a throwing renderer degrades to a plain frame, never an error', async () => {
+    const resp = await dispatch({ id: '1', command: 'render-throws', args: {} }, { caller: 'host' });
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) {
+      expect(resp.human).toBeUndefined();
+      expect(resp.data).toEqual({ fine: true });
+    }
+  });
+
+  it('commands without a renderer stay human-less', async () => {
+    const resp = await dispatch({ id: '1', command: 'test-cmd', args: {} }, { caller: 'host' });
+
+    expect(resp.ok).toBe(true);
+    if (resp.ok) expect(resp.human).toBeUndefined();
   });
 });

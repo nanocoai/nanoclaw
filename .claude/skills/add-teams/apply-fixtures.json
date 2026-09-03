@@ -1,0 +1,75 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. Four scenarios: existing-creds drop-through (the have_creds probe answers 'yes'); a fresh create wiring the logged-in owner directly; a fresh create wiring a DIFFERENT account (wire_target=other-account); and a fresh create re-confirming via the logged-in account (wire_target=logged-in-account). The `app create` stub answers the five-field JSON capture; `status --json` answers owner_upn/owner_aad_id; the smba stubs answer the DM-open chain. Guards driven by CAPTURES (have_creds) are selected by exec stdout, not inputs.",
+  "coverageExclude": [
+    "wire_owner=no"
+  ],
+  "coverageExcludeReason": "wire_owner=no is exercised at runtime by the other-account and logged-in-account scenarios (their wire_target prompts only run under it), but BOTH of those legs deliberately re-bind wire_owner to 'yes' via capture (SKILL.md ~L257/L261) before the run ends, so no scenario can finish with vars.wire_owner='no'. Final-vars coverage is impossible by design, not missing.",
+  "scenarios": [
+    {
+      "name": "existing-creds",
+      "inputs": {},
+      "exec": [
+        { "match": "TEAMS_APP_ID=.", "stdout": "yes" }
+      ]
+    },
+    {
+      "name": "create-wire-owner",
+      "inputs": {
+        "public_url": "https://nc.example.com",
+        "app_name": "NanoClaw Bot",
+        "wire_owner": "yes",
+        "signout": "yes"
+      },
+      "exec": [
+        { "match": "TEAMS_APP_ID=.", "stdout": "no" },
+        { "match": "app create", "stdout": "{\"credentials\":{\"CLIENT_ID\":\"11111111-2222-3333-4444-555555555555\",\"CLIENT_SECRET\":\"fake-client-secret\",\"TENANT_ID\":\"99999999-8888-7777-6666-555555555555\"},\"teamsAppId\":\"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\",\"installLink\":\"https://teams.microsoft.com/l/app/fake\"}" },
+        { "match": "status --json", "stdout": "{\"username\":\"owner@contoso.com\",\"userObjectId\":\"12345678-1234-1234-1234-123456789abc\"}" },
+        { "match": "oauth2/v2.0/token", "stdout": "eyJhbGciOiJIUzI1NiJ9.fake.sig" },
+        { "match": "/members", "stdout": "{\"id\":\"29:1fakeownerid\",\"name\":\"Owner\"}" },
+        { "match": "v3/conversations\"", "stdout": "a:1fakeconversationid" },
+        { "match": "base64url", "stdout": "teams:YTpmYWtl:aHR0cHM6Ly9zbWJh" }
+      ]
+    },
+    {
+      "name": "create-wire-other-account",
+      "inputs": {
+        "public_url": "https://nc.example.com",
+        "app_name": "NanoClaw Bot",
+        "wire_owner": "no",
+        "wire_target": "other-account",
+        "target_aad_id": "12345678-1234-1234-1234-123456789abc",
+        "signout": "no"
+      },
+      "exec": [
+        { "match": "TEAMS_APP_ID=.", "stdout": "no" },
+        { "match": "app create", "stdout": "{\"credentials\":{\"CLIENT_ID\":\"11111111-2222-3333-4444-555555555555\",\"CLIENT_SECRET\":\"fake-client-secret\",\"TENANT_ID\":\"99999999-8888-7777-6666-555555555555\"},\"teamsAppId\":\"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\",\"installLink\":\"https://teams.microsoft.com/l/app/fake\"}" },
+        { "match": "status --json", "stdout": "{\"username\":\"owner@contoso.com\",\"userObjectId\":\"12345678-1234-1234-1234-123456789abc\"}" },
+        { "match": "printf '{\"aad\"", "stdout": "{\"aad\":\"12345678-1234-1234-1234-123456789abc\",\"wire\":\"yes\"}" },
+        { "match": "oauth2/v2.0/token", "stdout": "eyJhbGciOiJIUzI1NiJ9.fake.sig" },
+        { "match": "/members", "stdout": "{\"id\":\"29:1faketargetid\",\"name\":\"Target user\"}" },
+        { "match": "v3/conversations\"", "stdout": "a:1fakeconversationid" },
+        { "match": "base64url", "stdout": "teams:YTpmYWtl:aHR0cHM6Ly9zbWJh" }
+      ]
+    },
+    {
+      "name": "create-wire-logged-in-account",
+      "inputs": {
+        "public_url": "https://nc.example.com",
+        "app_name": "NanoClaw Bot",
+        "wire_owner": "no",
+        "wire_target": "logged-in-account",
+        "signout": "no"
+      },
+      "exec": [
+        { "match": "TEAMS_APP_ID=.", "stdout": "no" },
+        { "match": "app create", "stdout": "{\"credentials\":{\"CLIENT_ID\":\"11111111-2222-3333-4444-555555555555\",\"CLIENT_SECRET\":\"fake-client-secret\",\"TENANT_ID\":\"99999999-8888-7777-6666-555555555555\"},\"teamsAppId\":\"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\",\"installLink\":\"https://teams.microsoft.com/l/app/fake\"}" },
+        { "match": "status --json", "stdout": "{\"username\":\"owner@contoso.com\",\"userObjectId\":\"12345678-1234-1234-1234-123456789abc\"}" },
+        { "match": "echo yes", "stdout": "yes" },
+        { "match": "oauth2/v2.0/token", "stdout": "eyJhbGciOiJIUzI1NiJ9.fake.sig" },
+        { "match": "/members", "stdout": "{\"id\":\"29:1fakeownerid\",\"name\":\"Owner\"}" },
+        { "match": "v3/conversations\"", "stdout": "a:1fakeconversationid" },
+        { "match": "base64url", "stdout": "teams:YTpmYWtl:aHR0cHM6Ly9zbWJh" }
+      ]
+    }
+  ]
+}

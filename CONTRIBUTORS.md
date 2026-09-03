@@ -25,3 +25,4 @@ Thanks to everyone who has contributed to NanoClaw!
 - [lbsnrs](https://github.com/lbsnrs) — Andreas Liebschner
 - [spencer-whitman](https://github.com/spencer-whitman)
 - [lazure-ocean](https://github.com/lazure-ocean) — Cyril Ionov
+- [joel-nanoco](https://github.com/joel-nanoco) — Joel

@@ -20,6 +20,14 @@ export interface VolumeMount {
   hostPath: string;
   containerPath: string;
   readonly: boolean;
+  /**
+   * Which pinning rule this mount is subject to (see `src/drivers/types.ts`).
+   * Optional here because provider contributions are vetted by their in-tree
+   * registration; composition classes those as `allowlisted-extra`.
+   */
+  mountClass?: import('../drivers/types.js').MountClass;
+  /** Agent group this mount is pinned to, for `group-state`. */
+  scope?: string;
 }
 
 export interface ProviderContainerContext {
@@ -60,16 +68,18 @@ export interface ProviderHostCapabilities {
   /**
    * Optional. When true, this provider owns its agent-facing surfaces — the
    * composed project doc, skill-discovery links, and provider state dir —
-   * and the host must NOT compose or mount the default ones (composed
-   * CLAUDE.md, `.claude-fragments`, `/app/CLAUDE.md`, `/home/node/.claude`,
-   * `CLAUDE.local.md` seeding). The provider's config fn does its own
-   * composing and returns its own mounts. Default off — providers that omit
+   * and the host must NOT compose or mount the default ones (the composed
+   * project document at `/workspace/agent/CLAUDE.md`, skill-discovery links,
+   * `/home/node/.claude`). The provider's config fn does its own composing and
+   * returns its own mounts. Default off — providers that omit
    * this get the default surfaces, which is today's behavior.
    */
   readonly providesAgentSurfaces?: boolean;
 }
 
-export type ProviderContainerConfigFn = (ctx: ProviderContainerContext) => ProviderContainerContribution;
+export type ProviderContainerConfigFn = (
+  ctx: ProviderContainerContext,
+) => ProviderContainerContribution | Promise<ProviderContainerContribution>;
 
 interface RegistryEntry {
   fn: ProviderContainerConfigFn;

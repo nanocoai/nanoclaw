@@ -11,7 +11,10 @@ only with admin approval.
   Package names are validated strictly (`[a-z0-9._+-]` for apt, standard
   npm naming with optional scope). Max 20 packages per request.
 
-- `add_mcp_server({ name, command, args?, env? })` — adds a new MCP server
+- `add_mcp_server({ name, command, args?, env? })` or
+  `add_mcp_server({ name, url })` — adds a local stdio or remote
+  Streamable HTTP MCP server (HTTPS, or plain HTTP for
+  localhost / host.docker.internal)
   to your container config and restarts the container so the new server
   is wired up on the next message. No image rebuild is required (bun runs
   TS directly).

@@ -23,11 +23,7 @@ import k from 'kleur';
 import { emit as phEmit } from '../lib/diagnostics.js';
 import { note } from '../lib/theme.js';
 import * as setupLog from '../logs.js';
-import {
-  resolveOnecliDeletions,
-  type RunCommand,
-  type VaultAgent,
-} from './onecli-agents.js';
+import { resolveOnecliDeletions, type RunCommand, type VaultAgent } from './onecli-agents.js';
 import { buildRemovalPlan, type Decisions } from './plan.js';
 import { executePlan, type ExecDeps } from './remove.js';
 import { scanInstall, tilde, type Inventory } from './scan.js';
@@ -96,11 +92,7 @@ export async function runUninstallFlow(opts: {
   const dataRows = [...inv.data, ...inv.runtime].map(({ what, where }) => ({ what, where }));
   const userRows = inv.user.map(({ what, where }) => ({ what, where }));
   const totalFound =
-    svcRows.length +
-    dataRows.length +
-    userRows.length +
-    inv.onecli.mine.length +
-    inv.onecli.orphans.length;
+    svcRows.length + dataRows.length + userRows.length + inv.onecli.mine.length + inv.onecli.orphans.length;
 
   if (totalFound === 0) {
     p.outro(
@@ -111,9 +103,7 @@ export async function runUninstallFlow(opts: {
   }
 
   if (dryRun) {
-    p.log.message(
-      k.cyan('PREVIEW ONLY — this shows what would be deleted and changes nothing.'),
-    );
+    p.log.message(k.cyan('PREVIEW ONLY — this shows what would be deleted and changes nothing.'));
     if (svcRows.length > 0) note(groupBody(GROUPS.service.desc, svcRows), GROUPS.service.title);
     if (dataRows.length > 0) note(groupBody(GROUPS.data.desc, dataRows), GROUPS.data.title);
     if (userRows.length > 0) note(groupBody(GROUPS.user.desc, userRows), GROUPS.user.title);
@@ -257,11 +247,7 @@ async function confirmGroup(prompt: string, yes: boolean): Promise<boolean> {
  * (enforced in resolveOnecliDeletions); anything kept is reported with
  * the exact manual delete command (by vault uuid).
  */
-async function decideOnecli(
-  inv: Inventory,
-  yes: boolean,
-  keptNotes: string[],
-): Promise<VaultAgent[]> {
+async function decideOnecli(inv: Inventory, yes: boolean, keptNotes: string[]): Promise<VaultAgent[]> {
   const { mine, orphans } = inv.onecli;
   if (mine.length === 0 && orphans.length === 0) return [];
 
@@ -292,14 +278,10 @@ async function decideOnecli(
       p.log.warn(
         `Found ${orphans.length} other NanoClaw-style agent(s) in the vault not linked to this copy —\nthey may belong to ANOTHER NanoClaw copy on this machine.`,
       );
-      deleteOrphans = answered(
-        await p.confirm({ message: 'Delete them too?', initialValue: false }),
-      );
+      deleteOrphans = answered(await p.confirm({ message: 'Delete them too?', initialValue: false }));
     }
     if (yes || !deleteOrphans) {
-      keptNotes.push(
-        `OneCLI orphan agents (${orphans.length}): left in place — remove manually if they're yours:`,
-      );
+      keptNotes.push(`OneCLI orphan agents (${orphans.length}): left in place — remove manually if they're yours:`);
       for (const a of orphans) {
         keptNotes.push(`  onecli agents delete --id ${a.uuid}   # ${a.name} — ${a.identifier}`);
       }
@@ -337,12 +319,7 @@ function groupBody(desc: string, rows: { what: string; where: string }[]): strin
   return lines.join('\n');
 }
 
-function emptyGroupTitles(
-  svcCount: number,
-  dataCount: number,
-  userCount: number,
-  inv: Inventory,
-): string[] {
+function emptyGroupTitles(svcCount: number, dataCount: number, userCount: number, inv: Inventory): string[] {
   const empty: string[] = [];
   if (svcCount === 0) empty.push(GROUPS.service.title);
   if (dataCount === 0) empty.push(GROUPS.data.title);

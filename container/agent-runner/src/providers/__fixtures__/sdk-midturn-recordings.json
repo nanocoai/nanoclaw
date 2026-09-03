@@ -1,0 +1,749 @@
+{
+  "s02-single-block": {
+    "gist": "single block then end",
+    "capturedAt": "2026-08-16T18:24:14.800Z",
+    "messages": [
+      {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "74f4dc2b-5571-47ca-a08c-66597bf46c4b"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "<message to=\"discord-main\">Hey there! 👋 TestBot here, ready to help.</message>"
+            }
+          ]
+        }
+      },
+      {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+          "status": "allowed",
+          "resetsAt": 1786921200,
+          "rateLimitType": "five_hour",
+          "overageStatus": "allowed",
+          "overageResetsAt": 1788220800,
+          "isUsingOverage": false
+        }
+      },
+      {
+        "type": "result",
+        "subtype": "success",
+        "result": "<message to=\"discord-main\">Hey there! 👋 TestBot here, ready to help.</message>",
+        "is_error": false
+      }
+    ]
+  },
+  "s03-block-then-tool": {
+    "gist": "block, THEN a tool call after it (SAF shape)",
+    "capturedAt": "2026-08-16T18:24:17.060Z",
+    "messages": [
+      {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "cb26b0cc-d02e-4e42-9a0e-932a0b623d6a"
+      },
+      {
+        "type": "system",
+        "subtype": "thinking_tokens"
+      },
+      {
+        "type": "system",
+        "subtype": "thinking_tokens"
+      },
+      {
+        "type": "system",
+        "subtype": "thinking_tokens"
+      },
+      {
+        "type": "system",
+        "subtype": "thinking_tokens"
+      },
+      {
+        "type": "system",
+        "subtype": "thinking_tokens"
+      },
+      {
+        "type": "system",
+        "subtype": "thinking_tokens"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "thinking"
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "<message to=\"discord-main\">✅ Deploy is done.</message>"
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "tool_use",
+              "name": "Bash"
+            }
+          ]
+        }
+      },
+      {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+          "status": "allowed",
+          "resetsAt": 1786921200,
+          "rateLimitType": "five_hour",
+          "overageStatus": "allowed",
+          "overageResetsAt": 1788220800,
+          "isUsingOverage": false
+        }
+      },
+      {
+        "type": "user"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "thinking"
+            }
+          ]
+        }
+      },
+      {
+        "type": "user"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "<message to=\"discord-main\">✅ Deploy is done.</message>"
+            }
+          ]
+        }
+      },
+      {
+        "type": "result",
+        "subtype": "success",
+        "result": "<message to=\"discord-main\">✅ Deploy is done.</message>",
+        "is_error": false
+      }
+    ]
+  },
+  "s04b-tool-inside-block": {
+    "gist": "half-message, phrasing 2 (explicit interleave)",
+    "capturedAt": "2026-08-16T18:24:45.366Z",
+    "messages": [
+      {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "610bdeb5-da2f-4f1a-99e9-2867962e88e7"
+      },
+      {
+        "type": "system",
+        "subtype": "thinking_tokens"
+      },
+      {
+        "type": "system",
+        "subtype": "thinking_tokens"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "thinking"
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "<message to=\"discord-main\">part one"
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "tool_use",
+              "name": "Bash"
+            }
+          ]
+        }
+      },
+      {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+          "status": "allowed",
+          "resetsAt": 1786921200,
+          "rateLimitType": "five_hour",
+          "overageStatus": "allowed",
+          "overageResetsAt": 1788220800,
+          "isUsingOverage": false
+        }
+      },
+      {
+        "type": "user"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "part two</message>"
+            }
+          ]
+        }
+      },
+      {
+        "type": "result",
+        "subtype": "success",
+        "result": "part two</message>",
+        "is_error": false
+      }
+    ]
+  },
+  "s06-only-final": {
+    "gist": "tool first, block only in the very last text",
+    "capturedAt": "2026-08-16T18:25:02.900Z",
+    "messages": [
+      {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "76115fe1-81aa-46e9-968a-13260bb7dc11"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "thinking"
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "tool_use",
+              "name": "Bash"
+            }
+          ]
+        }
+      },
+      {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+          "status": "allowed",
+          "resetsAt": 1786921200,
+          "rateLimitType": "five_hour",
+          "overageStatus": "allowed",
+          "overageResetsAt": 1788220800,
+          "isUsingOverage": false
+        }
+      },
+      {
+        "type": "user"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "<message to=\"discord-main\">hi</message>"
+            }
+          ]
+        }
+      },
+      {
+        "type": "result",
+        "subtype": "success",
+        "result": "<message to=\"discord-main\">hi</message>",
+        "is_error": false
+      }
+    ]
+  },
+  "s08-long-block": {
+    "gist": "long multi-paragraph block (chunking)",
+    "capturedAt": "2026-08-16T18:25:14.085Z",
+    "messages": [
+      {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "aedbe388-1459-4655-89ee-6fbbba188ef5"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Here's the update.\n\n<message to=\"discord-main\">\n**Orion Deploy Update — 2026-08-16**\n\nRollout of orion v2.4.0 kicked off at 09:00 UTC using our standard progressive strategy. We started at 5% of traffic, held for 20 minutes to bake, then stepped through 25%, 50%, and full 100% by 11:15 UTC. All three regions (us-east, eu-west, ap-south) picked up the new build cleanly, and canary health checks stayed green throughout each stage.\n\nMetrics look solid post-rollout. P50 latency held at 42ms and P99 came in at 210ms, slightly better than the previous release's 235ms. Error rate settled at 0.03%, well under our 0.1% SLO, and throughput sustained ~14k requests/second at peak with no saturation on CPU or memory.\n\nWe did hit one incident: at 10:20 UTC, a stale connection pool in eu-west caused a brief spike in 503s (roughly 90 seconds, ~0.8% of regional traffic). Auto-remediation recycled the pool and traffic recovered before paging escalated. Root cause was a misconfigured idle timeout that we've since patched.\n\nNext steps: ship the idle-timeout fix in v2.4.1 this week, add a canary alert for connection-pool health, and schedule a brief retro on Thursday to close out the incident action items.\n</message>"
+            }
+          ]
+        }
+      },
+      {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+          "status": "allowed",
+          "resetsAt": 1786921200,
+          "rateLimitType": "five_hour",
+          "overageStatus": "allowed",
+          "overageResetsAt": 1788220800,
+          "isUsingOverage": false
+        }
+      },
+      {
+        "type": "result",
+        "subtype": "success",
+        "result": "Here's the update.\n\n<message to=\"discord-main\">\n**Orion Deploy Update — 2026-08-16**\n\nRollout of orion v2.4.0 kicked off at 09:00 UTC using our standard progressive strategy. We started at 5% of traffic, held for 20 minutes to bake, then stepped through 25%, 50%, and full 100% by 11:15 UTC. All three regions (us-east, eu-west, ap-south) picked up the new build cleanly, and canary health checks stayed green throughout each stage.\n\nMetrics look solid post-rollout. P50 latency held at 42ms and P99 came in at 210ms, slightly better than the previous release's 235ms. Error rate settled at 0.03%, well under our 0.1% SLO, and throughput sustained ~14k requests/second at peak with no saturation on CPU or memory.\n\nWe did hit one incident: at 10:20 UTC, a stale connection pool in eu-west caused a brief spike in 503s (roughly 90 seconds, ~0.8% of regional traffic). Auto-remediation recycled the pool and traffic recovered before paging escalated. Root cause was a misconfigured idle timeout that we've since patched.\n\nNext steps: ship the idle-timeout fix in v2.4.1 this week, add a canary alert for connection-pool health, and schedule a brief retro on Thursday to close out the incident action items.\n</message>",
+        "is_error": false
+      }
+    ]
+  },
+  "s09-repeat-in-summary": {
+    "gist": "instructed to repeat block verbatim in final text",
+    "capturedAt": "2026-08-16T18:25:23.711Z",
+    "messages": [
+      {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "ce90c178-2936-4d45-b102-bba4fe459070"
+      },
+      {
+        "type": "system",
+        "subtype": "thinking_tokens"
+      },
+      {
+        "type": "system",
+        "subtype": "thinking_tokens"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "thinking"
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "tool_use",
+              "name": "Bash"
+            }
+          ]
+        }
+      },
+      {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+          "status": "allowed",
+          "resetsAt": 1786921200,
+          "rateLimitType": "five_hour",
+          "overageStatus": "allowed",
+          "overageResetsAt": 1788220800,
+          "isUsingOverage": false
+        }
+      },
+      {
+        "type": "user"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "<message to=\"discord-main\">backup finished</message>\n\n<message to=\"discord-main\">backup finished</message>"
+            }
+          ]
+        }
+      },
+      {
+        "type": "result",
+        "subtype": "success",
+        "result": "<message to=\"discord-main\">backup finished</message>\n\n<message to=\"discord-main\">backup finished</message>",
+        "is_error": false
+      }
+    ]
+  },
+  "s10-summarize-no-repeat": {
+    "gist": "summary WITHOUT repeating the block",
+    "capturedAt": "2026-08-16T18:25:30.010Z",
+    "messages": [
+      {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "866466ad-7de7-4964-a1e3-829b05548398"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "thinking"
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "tool_use",
+              "name": "Bash"
+            }
+          ]
+        }
+      },
+      {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+          "status": "allowed",
+          "resetsAt": 1786921200,
+          "rateLimitType": "five_hour",
+          "overageStatus": "allowed",
+          "overageResetsAt": 1788220800,
+          "isUsingOverage": false
+        }
+      },
+      {
+        "type": "user"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "<message to=\"discord-main\">backup finished</message>\n\nSent the \"backup finished\" message and ran `echo logged`, which output `logged`."
+            }
+          ]
+        }
+      },
+      {
+        "type": "result",
+        "subtype": "success",
+        "result": "<message to=\"discord-main\">backup finished</message>\n\nSent the \"backup finished\" message and ran `echo logged`, which output `logged`.",
+        "is_error": false
+      }
+    ]
+  },
+  "s12-abort-midstream": {
+    "gist": "abort during the tool call",
+    "capturedAt": "2026-08-16T18:25:40.091Z",
+    "messages": [
+      {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "16bcd134-df8e-4a1b-bb13-f8c34f094980"
+      },
+      {
+        "type": "system",
+        "subtype": "thinking_tokens"
+      },
+      {
+        "type": "system",
+        "subtype": "thinking_tokens"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "thinking"
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "<message to=\"discord-main\">starting the slow job</message>"
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "tool_use",
+              "name": "Bash"
+            }
+          ]
+        }
+      },
+      {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+          "status": "allowed",
+          "resetsAt": 1786921200,
+          "rateLimitType": "five_hour",
+          "overageStatus": "allowed",
+          "overageResetsAt": 1788220800,
+          "isUsingOverage": false
+        }
+      }
+    ]
+  },
+  "s13-internal-draft": {
+    "gist": "internal-wrapped draft plus a real block",
+    "capturedAt": "2026-08-16T18:25:46.200Z",
+    "messages": [
+      {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "3dd54719-79f4-41b3-bfe1-1162eb876f5e"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "thinking"
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "<internal>\nBlunt draft (NOT sent):\n`<message to=\"discord-main\">Your report is late. Again. You said it'd be done, it isn't, and now everyone's waiting on you. Get it in.</message>`\n</internal>\n\n<message to=\"discord-main\">Hi! Just a friendly nudge — the report seems to be past its expected due date. No worries at all if something came up; could you let me know a rough ETA or if you need a hand with anything to get it wrapped up? Thanks so much!</message>"
+            }
+          ]
+        }
+      },
+      {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+          "status": "allowed",
+          "resetsAt": 1786921200,
+          "rateLimitType": "five_hour",
+          "overageStatus": "allowed",
+          "overageResetsAt": 1788220800,
+          "isUsingOverage": false
+        }
+      },
+      {
+        "type": "result",
+        "subtype": "success",
+        "result": "<internal>\nBlunt draft (NOT sent):\n`<message to=\"discord-main\">Your report is late. Again. You said it'd be done, it isn't, and now everyone's waiting on you. Get it in.</message>`\n</internal>\n\n<message to=\"discord-main\">Hi! Just a friendly nudge — the report seems to be past its expected due date. No worries at all if something came up; could you let me know a rough ETA or if you need a hand with anything to get it wrapped up? Thanks so much!</message>",
+        "is_error": false
+      }
+    ]
+  },
+  "s14-two-turns-stream": {
+    "gist": "streaming input: follow-up push after first result",
+    "capturedAt": "2026-08-16T18:25:51.160Z",
+    "messages": [
+      {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "a32468a4-e628-40ae-9c5d-54015df32f28"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "<message to=\"discord-main\">turn one</message>"
+            }
+          ]
+        }
+      },
+      {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+          "status": "allowed",
+          "resetsAt": 1786921200,
+          "rateLimitType": "five_hour",
+          "overageStatus": "allowed",
+          "overageResetsAt": 1788220800,
+          "isUsingOverage": false
+        }
+      },
+      {
+        "type": "result",
+        "subtype": "success",
+        "result": "<message to=\"discord-main\">turn one</message>",
+        "is_error": false
+      },
+      {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "a32468a4-e628-40ae-9c5d-54015df32f28"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "<message to=\"discord-main\">turn two</message>"
+            }
+          ]
+        }
+      },
+      {
+        "type": "result",
+        "subtype": "success",
+        "result": "<message to=\"discord-main\">turn two</message>",
+        "is_error": false
+      }
+    ]
+  },
+  "s16-three-way-split": {
+    "gist": "block spread across three assistant messages with two tool calls between",
+    "capturedAt": "2026-08-16T19:29:32.559Z",
+    "messages": [
+      {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "ce8f9e9e-a723-4c8a-aedc-3e877f7e7816"
+      },
+      {
+        "type": "system",
+        "subtype": "thinking_tokens"
+      },
+      {
+        "type": "system",
+        "subtype": "thinking_tokens"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "thinking"
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "<message to=\"discord-main\">alpha "
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "tool_use",
+              "name": "Bash"
+            }
+          ]
+        }
+      },
+      {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+          "status": "allowed",
+          "resetsAt": 1786921200,
+          "rateLimitType": "five_hour",
+          "overageStatus": "allowed",
+          "overageResetsAt": 1788220800,
+          "isUsingOverage": false
+        }
+      },
+      {
+        "type": "user"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "beta "
+            }
+          ]
+        }
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "tool_use",
+              "name": "Bash"
+            }
+          ]
+        }
+      },
+      {
+        "type": "user"
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "text",
+              "text": "gamma</message>"
+            }
+          ]
+        }
+      },
+      {
+        "type": "result",
+        "subtype": "success",
+        "result": "gamma</message>",
+        "is_error": false
+      }
+    ]
+  }
+}

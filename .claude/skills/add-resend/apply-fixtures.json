@@ -1,0 +1,16 @@
+{
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. The effect:wire ncl runs carry no capture, so the exec stub's no-op answer is fine.",
+  "scenarios": [
+    {
+      "name": "email",
+      "inputs": {
+        "api_key": "re_fake_api_key",
+        "webhook_secret": "whsec_fake",
+        "from_address": "assistant@mail.example.com",
+        "from_name": "NanoClaw",
+        "owner_email": "owner@example.com",
+        "agent_folder": "main"
+      }
+    }
+  ]
+}

@@ -1,0 +1,221 @@
+# Turns a verified publisher signature into the approving review on a pin bump.
+#
+# WHY THIS IS A SEPARATE WORKFLOW, AND WHY workflow_run:
+#
+# `verify-agent-image` runs on `pull_request`, which means GitHub takes ITS
+# workflow file from the pull request's own merge ref. A pull request can
+# therefore rewrite what that job does — including making it succeed. Its
+# conclusion is an attacker-influenced value and nothing may be built on it.
+#
+# Under `workflow_run`, GitHub takes the workflow file from the DEFAULT BRANCH.
+# This file is not editable by the pull request it is judging. That is the only
+# reason it is safe for a machine to approve anything here.
+#
+# Two rules follow from that, and both are load-bearing:
+#
+#   1. This job NEVER checks out or executes pull-request code. It reads the
+#      diff and the pinned reference through the API, as data.
+#   2. This job RE-DERIVES every fact for itself — the diff scope and the
+#      signature — rather than trusting that the triggering run checked them.
+#      The triggering run's success is treated as "something finished", not as
+#      evidence.
+#
+# What a machine approval is worth here: human review of a digest bump is close
+# to ceremony, because nobody can look at sha256:ccde3d9c… and know whether it
+# is the right image. A Sigstore proof that a named publisher's build workflow
+# produced exactly these bytes is a stronger claim than a click. That trade is
+# only sound while the approval is gated on the signature and on the diff
+# containing nothing else.
+name: approve-agent-image
+
+on:
+  workflow_run:
+    workflows: [verify-agent-image]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  approve:
+    runs-on: ubuntu-latest
+    # Off unless deliberately enabled. Without this it reports what it would
+    # have done and stops, so the whole path can be watched before it is armed.
+    if: github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: read
+      id-token: write # OIDC for the read-only ECR role
+    steps:
+      - name: Locate the pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          # Resolved by head SHA rather than from the event payload:
+          # workflow_run.pull_requests is empty for fork pull requests, and an
+          # empty list must not read as "nothing to do".
+          gh api "repos/${{ github.repository }}/commits/$HEAD_SHA/pulls" \
+            --jq '[.[] | select(.state=="open" and .base.ref=="main")][0]' > /tmp/pr.json
+          if [ "$(jq -r 'if . == null then "null" else "ok" end' /tmp/pr.json)" != "ok" ]; then
+            echo "::notice::No open pull request against main for $HEAD_SHA."
+            echo "found=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          {
+            echo "found=true"
+            echo "number=$(jq -r .number /tmp/pr.json)"
+            echo "author=$(jq -r .user.login /tmp/pr.json)"
+            echo "head=$(jq -r .head.sha /tmp/pr.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      # The diff must contain the pin change and NOTHING else. Without this a
+      # pull request could bump the pin correctly and edit anything it liked
+      # alongside it, and collect an approval for the lot.
+      - name: The diff is only the pin
+        id: scope
+        continue-on-error: true # declining is a normal outcome, not a failure
+        if: steps.pr.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${{ github.repository }}/pulls/$PR/files" --paginate > /tmp/files.json
+
+          python3 - <<'PY'
+          import json, re, sys
+          files = json.load(open('/tmp/files.json'))
+          names = [f['filename'] for f in files]
+          if names != ['versions.json']:
+              print(f"::notice::Touches {names}, not versions.json alone — a human reviews this.")
+              sys.exit(1)
+
+          patch = files[0].get('patch', '')
+          changed = [l for l in patch.splitlines()
+                     if l.startswith(('+', '-')) and not l.startswith(('+++', '---'))]
+          # Exactly one line out, one line in, and both must be the agent-image
+          # pin. Anything else in this file is still a change nobody reviewed.
+          if len(changed) != 2:
+              print(f"::notice::{len(changed)} changed lines in versions.json, expected 2.")
+              sys.exit(1)
+          if not all(re.match(r'^[+-]\s*"agent-image"\s*:', l) for l in changed):
+              print("::notice::The changed lines are not both the agent-image pin.")
+              sys.exit(1)
+          added = [l for l in changed if l.startswith('+')][0]
+          if '@sha256:' not in added:
+              print("::notice::The new pin is not digest-pinned.")
+              sys.exit(1)
+          print("  diff is exactly the agent-image pin")
+          PY
+
+      - name: Read the proposed pin
+        id: pin
+        continue-on-error: true # declining is a normal outcome, not a failure
+        if: steps.scope.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD: ${{ steps.pr.outputs.head }}
+        run: |
+          set -euo pipefail
+          # Fetched as data at the head commit. Nothing from the pull request is
+          # checked out and nothing from it is executed.
+          gh api "repos/${{ github.repository }}/contents/versions.json?ref=$HEAD" \
+            --jq '.content' | base64 -d > /tmp/versions.json
+          REF="$(python3 -c "import json; print(json.load(open('/tmp/versions.json'))['agent-image'])")"
+          case "$REF" in
+            *@sha256:*) ;;
+            *) echo "::notice::Pin is not a digest reference."; exit 1 ;;
+          esac
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+      - name: Assume the read-only role
+        if: steps.pin.outcome == 'success'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AGENT_IMAGE_CI_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Verify the publisher signature, independently
+        id: sig
+        continue-on-error: true # declining is a normal outcome, not a failure
+        if: steps.pin.outcome == 'success'
+        env:
+          REF: ${{ steps.pin.outputs.ref }}
+          IDENTITY: ${{ vars.AGENT_IMAGE_SIGNER_IDENTITY }}
+          ISSUER: ${{ vars.AGENT_IMAGE_SIGNER_ISSUER }}
+        run: |
+          set -euo pipefail
+          if [ -z "$IDENTITY" ] || [ -z "$ISSUER" ]; then
+            echo "::notice::No signer configured — nothing here may approve."
+            exit 1
+          fi
+          aws ecr get-login-password --region us-east-1 \
+            | docker login --username AWS --password-stdin "${REF%%/*}"
+          curl -fsSL https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 -o /usr/local/bin/cosign
+          chmod +x /usr/local/bin/cosign
+          # Deliberately re-run here rather than trusting the triggering job:
+          # that job's definition came from the pull request.
+          cosign verify \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer "$ISSUER" \
+            "$REF" > /dev/null
+          echo "  signature verified for $REF"
+
+      # Minted per run, never stored. A GitHub App installation token lives one
+      # hour, so a token pasted into a repository secret would approve once and
+      # then fail quietly for good — the failure mode being "no approval", which
+      # looks identical to "not armed yet". The App id and key are what is held.
+      - name: Mint the approver token
+        id: approver
+        if: steps.sig.outcome == 'success'
+        continue-on-error: true
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.AGENT_IMAGE_APPROVER_APP_ID }}
+          private-key: ${{ secrets.AGENT_IMAGE_APPROVER_PRIVATE_KEY }}
+
+      - name: Approve
+        if: steps.sig.outcome == 'success'
+        env:
+          # The App, not GITHUB_TOKEN: the pull request is opened by
+          # github-actions[bot], and GitHub refuses a review from the identity
+          # that authored it. Two identities is what makes this a review at all.
+          GH_TOKEN: ${{ steps.approver.outputs.token }}
+          PR: ${{ steps.pr.outputs.number }}
+          ARMED: ${{ vars.AGENT_IMAGE_AUTO_APPROVE }}
+          REF: ${{ steps.pin.outputs.ref }}
+        run: |
+          set -euo pipefail
+          BODY="Publisher signature verified independently of the pull request.
+
+          \`\`\`
+          ${REF}
+          \`\`\`
+
+          Checked from the default branch, so this workflow is not editable by the
+          pull request it is judging: the diff is the \`agent-image\` pin and nothing
+          else, and \`cosign verify\` confirms the certificate identity, issuer and
+          transparency-log entry for these exact bytes.
+
+          Approving on that basis rather than on the triggering job's conclusion,
+          which came from a workflow definition the pull request could have changed."
+
+          if [ "$ARMED" != "true" ]; then
+            echo "::notice::Would approve #$PR. Set AGENT_IMAGE_AUTO_APPROVE=true to arm."
+            echo "$BODY"
+            exit 0
+          fi
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::notice::Armed, but no approver token could be minted — a human reviews."
+            echo "Check AGENT_IMAGE_APPROVER_APP_ID / _PRIVATE_KEY, and that the App"
+            echo "has pull_requests: write and is installed on this repository."
+            exit 0
+          fi
+          gh pr review "$PR" --repo "${{ github.repository }}" --approve --body "$BODY"
+          echo "approved #$PR"
+
+      - name: Say why a human is still needed
+        if: always() && steps.pr.outputs.found == 'true' && steps.sig.outcome != 'success'
+        run: |
+          echo "::notice::Not approved automatically — this pull request needs a person."

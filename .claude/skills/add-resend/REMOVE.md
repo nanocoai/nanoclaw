@@ -18,11 +18,7 @@ rm -f src/channels/resend.ts src/channels/resend-registration.test.ts
 
 ## 2. Remove credentials
 
-Remove `RESEND_API_KEY`, `RESEND_FROM_ADDRESS`, `RESEND_FROM_NAME`, and `RESEND_WEBHOOK_SECRET` from `.env`, then re-sync to the container:
-
-```bash
-mkdir -p data/env && cp .env data/env/env
-```
+Remove `RESEND_API_KEY`, `RESEND_FROM_ADDRESS`, `RESEND_FROM_NAME`, and `RESEND_WEBHOOK_SECRET` from `.env`.
 
 ## 3. Remove the package
 

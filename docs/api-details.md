@@ -13,6 +13,8 @@ interface ChannelSetup {
 
   // Host callbacks
   onInbound(platformId: string, threadId: string | null, message: InboundMessage): void;
+  // Admin-transport adapters (e.g. CLI) route to an arbitrary channel via this instead of onInbound
+  onInboundEvent(event: InboundEvent): void;
   onMetadata(platformId: string, name?: string, isGroup?: boolean): void;
 }
 
@@ -34,7 +36,7 @@ interface ChannelAdapter {
   isConnected(): boolean;
 
   // Outbound delivery
-  deliver(platformId: string, threadId: string | null, message: OutboundMessage): Promise<void>;
+  deliver(platformId: string, threadId: string | null, message: OutboundMessage): Promise<string | undefined>;
 
   // Optional
   setTyping?(platformId: string, threadId: string | null): Promise<void>;
@@ -56,6 +58,52 @@ interface OutboundMessage {
   content: unknown;       // JSON blob — matches the kind
 }
 ```
+
+### Channel Defaults
+
+Each adapter can declare static wiring-time defaults. There are exactly two levels: the adapter declaration, and the per-wiring/per-messaging-group values chosen at creation. There is no DB config table for defaults — install-wide changes mean editing the adapter copy (skill-installed, user-owned).
+
+```typescript
+// src/channels/adapter.ts
+interface ChannelContextDefaults {
+  engageMode: 'pattern' | 'mention' | 'mention-sticky';
+  engagePattern?: string;   // required iff engageMode='pattern'; may contain the
+                            // literal token {name} — creation helpers substitute the
+                            // regex-escaped agent_group name
+  threads: boolean;         // whether thread ids are honored in this context by default;
+                            // must be false when the adapter's supportsThreads is false
+  unknownSenderPolicy: 'strict' | 'request_approval' | 'public';
+}
+
+interface ChannelDefaults {
+  dm: ChannelContextDefaults;
+  group: ChannelContextDefaults;
+  mentions: 'platform' | 'dm-only' | 'never';
+  // 'platform' — platform-confirmed mentions in groups, DMs flagged too
+  // 'dm-only'  — only DMs flagged (no group mention metadata)
+  // 'never'    — isMention never set: no auto-create card, mention wirings never engage
+}
+
+// ChannelAdapter and ChannelRegistration both carry an optional `defaults` field.
+// The registration-level copy lets offline creation paths (setup/register.ts,
+// scripts/init-first-agent.ts) resolve declarations without instantiating the
+// adapter. ChatSdkBridgeConfig.defaults is copied verbatim onto the bridged
+// adapter, like supportsThreads.
+```
+
+**Resolution chain** (`getChannelDefaults(key, channelType?)` in `src/channels/channel-registry.ts`, key = `mg.instance ?? mg.channel_type`, same discipline as `getChannelAdapter`):
+
+1. Live adapter's `defaults`, instance-exact (lets an instance carry env-computed declarations, e.g. WhatsApp shared-number mode)
+2. Live adapter of that channelType
+3. Registration entry under the key
+4. Registration entry under the channelType (from the live adapter's channelType, else the caller-supplied hint)
+5. `fallbackChannelDefaults(supportsThreads)` — behavior-faithful to the pre-declaration router: dm `{ pattern '.', threads: supportsThreads, request_approval }`, group `{ mention-sticky, threads: supportsThreads, request_approval }`, mentions `'platform'`. `supportsThreads` is `false` when no adapter is live.
+
+Never returns undefined. `hasDeclaredChannelDefaults()` reports whether tiers 1–4 hit; manual creation surfaces (`ncl`) gate declaration-derived defaults on it so stale (undeclared) adapters keep the legacy static schema defaults — a trunk update alone changes no behavior.
+
+**Creation helpers** (`src/channels/channel-defaults.ts`): every wiring-creation path calls `resolveWiringDefaults(channelKey, isGroup, agentGroupName)` — it picks `decl.group` vs `decl.dm` by `isGroup = event.message.isGroup ?? (mg.is_group === 1)` (never `threadId !== null`), substitutes `{name}`, and downgrades `mention-sticky` → `mention` when the context's resolved threads value is false. `resolveUnknownSenderPolicy` does the same for auto-created messaging_groups rows.
+
+**Runtime thread policy**: engage mode and sender policy are creation-time snapshots; threading is the one setting consulted live. `messaging_group_agents.threads` (migration 019) is the per-wiring override: `NULL` = inherit the adapter declaration for the wiring's context, `1`/`0` = explicit. `resolveThreadPolicy(wiring.threads, decl, isGroup, supportsThreads)` hard-ANDs the result with the adapter's raw capability — a wiring can opt out of threads on a threaded platform, never opt in on a non-threaded one. When the policy is off, event-derived thread ids are nulled at router fanout (sessions collapse, replies land top-level); `event.replyTo` is operator intent from the CLI transport and is never nulled.
 
 ### Chat SDK Bridge
 
@@ -307,7 +355,7 @@ function createWhatsAppChannel(): ChannelAdapter {
 **Ask user question:**
 ```json
 {
-  "operation": "ask_question",
+  "type": "ask_question",
   "questionId": "q-123",
   "title": "Failing Test",
   "question": "How should we handle the failing test?",

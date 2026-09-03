@@ -1,0 +1,36 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.16",
+  "version": "1.0.0",
+  "id": "00000000-0000-0000-0000-000000000000",
+  "packageName": "com.nanoclaw.bot",
+  "developer": {
+    "name": "NanoClaw",
+    "websiteUrl": "https://nanoclaw.invalid",
+    "privacyUrl": "https://nanoclaw.invalid",
+    "termsOfUseUrl": "https://nanoclaw.invalid"
+  },
+  "name": {
+    "short": "NanoClaw",
+    "full": "NanoClaw Assistant"
+  },
+  "description": {
+    "short": "Your personal assistant in Teams.",
+    "full": "NanoClaw personal assistant."
+  },
+  "icons": {
+    "outline": "outline.png",
+    "color": "color.png"
+  },
+  "accentColor": "#4A90D9",
+  "bots": [
+    {
+      "botId": "00000000-0000-0000-0000-000000000000",
+      "scopes": ["personal", "team", "groupchat"],
+      "supportsFiles": false,
+      "isNotificationOnly": false
+    }
+  ],
+  "permissions": ["identity", "messageTeamMembers"],
+  "validDomains": ["nanoclaw.invalid"]
+}

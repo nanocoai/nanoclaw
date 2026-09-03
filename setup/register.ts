@@ -7,7 +7,17 @@
 import fs from 'fs';
 import path from 'path';
 
-import { DATA_DIR } from '../src/config.js';
+// Registration-only barrel import: each channel module calls
+// registerChannelAdapter() at module scope (factories are NOT invoked, no
+// adapter connects), so declared channel defaults resolve without the service.
+import '../src/channels/index.js';
+import {
+  resolveUnknownSenderPolicy,
+  resolveWiringDefaults,
+  validateEngageAgainstChannel,
+} from '../src/channels/channel-defaults.js';
+import { hasDeclaredChannelDefaults } from '../src/channels/channel-registry.js';
+import { CENTRAL_DB_PATH } from '../src/config.js';
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
@@ -20,6 +30,7 @@ import {
 } from '../src/db/messaging-groups.js';
 import { isValidGroupFolder } from '../src/group-folder.js';
 import { log } from '../src/log.js';
+import '../src/mailbox/compose.js';
 import { namespacedPlatformId } from '../src/platform-id.js';
 import { resolveSession, writeSessionMessage } from '../src/session-manager.js';
 import { emitStatus } from './status.js';
@@ -33,7 +44,7 @@ interface RegisterArgs {
   trigger: string;
   /** Agent group folder name */
   folder: string;
-  /** Channel type (discord, slack, telegram, etc.) */
+  /** Channel type (discord, slack, telegram, etc.) — required */
   channel: string;
   /** Whether messages require the trigger pattern to activate */
   requiresTrigger: boolean;
@@ -41,7 +52,16 @@ interface RegisterArgs {
   assistantName: string;
   /** Session mode: 'shared' (one session per channel) or 'per-thread' */
   sessionMode: string;
+  /** Whether the messaging group is a multi-user chat (default: true) */
+  isGroup: boolean;
+  /** Explicit engage mode override; omitted = channel declaration / heuristic */
+  engageMode?: 'pattern' | 'mention' | 'mention-sticky';
+  /** Explicit unknown_sender_policy override; omitted = channel declaration / 'strict' */
+  unknownSenderPolicy?: 'strict' | 'request_approval' | 'decline_notify' | 'public';
 }
+
+const ENGAGE_MODES = ['pattern', 'mention', 'mention-sticky'] as const;
+const SENDER_POLICIES = ['strict', 'request_approval', 'decline_notify', 'public'] as const;
 
 function parseArgs(args: string[]): RegisterArgs {
   const result: RegisterArgs = {
@@ -49,10 +69,11 @@ function parseArgs(args: string[]): RegisterArgs {
     name: '',
     trigger: '',
     folder: '',
-    channel: 'discord',
+    channel: '',
     requiresTrigger: false,
     assistantName: 'Andy',
     sessionMode: 'shared',
+    isGroup: true,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -81,6 +102,30 @@ function parseArgs(args: string[]): RegisterArgs {
       case '--session-mode':
         result.sessionMode = args[++i] || 'shared';
         break;
+      case '--is-group': {
+        const raw = (args[++i] || '').toLowerCase();
+        if (!['true', 'false', '1', '0'].includes(raw)) {
+          throw new Error(`--is-group must be true or false, got "${raw}"`);
+        }
+        result.isGroup = raw === 'true' || raw === '1';
+        break;
+      }
+      case '--engage-mode': {
+        const raw = (args[++i] || '').toLowerCase() as RegisterArgs['engageMode'];
+        if (!raw || !ENGAGE_MODES.includes(raw)) {
+          throw new Error(`--engage-mode must be one of ${ENGAGE_MODES.join('|')}, got "${raw}"`);
+        }
+        result.engageMode = raw;
+        break;
+      }
+      case '--unknown-sender-policy': {
+        const raw = (args[++i] || '').toLowerCase() as RegisterArgs['unknownSenderPolicy'];
+        if (!raw || !SENDER_POLICIES.includes(raw)) {
+          throw new Error(`--unknown-sender-policy must be one of ${SENDER_POLICIES.join('|')}, got "${raw}"`);
+        }
+        result.unknownSenderPolicy = raw;
+        break;
+      }
     }
   }
 
@@ -94,6 +139,19 @@ function generateId(prefix: string): string {
 export async function run(args: string[]): Promise<void> {
   const projectRoot = process.cwd();
   const parsed = parseArgs(args);
+
+  if (!parsed.channel) {
+    // No silent platform default: the channel decides platform-id namespacing
+    // and the wiring/policy defaults below, so guessing one wires the chat to
+    // the wrong adapter.
+    emitStatus('REGISTER_CHANNEL', {
+      STATUS: 'failed',
+      ERROR: 'missing_channel',
+      MESSAGE: '--channel is required (the channel type this chat lives on, e.g. discord, slack, telegram, whatsapp)',
+      LOG: 'logs/setup.log',
+    });
+    process.exit(4);
+  }
 
   if (!parsed.platformId || !parsed.name || !parsed.folder) {
     emitStatus('REGISTER_CHANNEL', {
@@ -122,67 +180,96 @@ export async function run(args: string[]): Promise<void> {
 
   // Init v2 central DB
   fs.mkdirSync(path.join(projectRoot, 'data'), { recursive: true });
-  const dbPath = path.join(DATA_DIR, 'v2.db');
-  const db = initDb(dbPath);
-  runMigrations(db);
+  const db = await initDb(CENTRAL_DB_PATH);
+  await runMigrations(db);
 
-  // 1. Create or find agent group. Provider-agnostic: provider is a DB
-  // property set via `ncl groups config update --provider`, not a creation
-  // flag. The workspace is scaffolded at the first spawn (group-init), where
-  // the DB-resolved provider is known; here we only ensure the config row
-  // exists so that update has a row to write.
-  let agentGroup = getAgentGroupByFolder(parsed.folder);
+  // 1. Create or find agent group. The workspace is scaffolded at the first
+  // spawn (group-init), where the DB-resolved provider is known; here we only
+  // seed the config row — stamped with the instance default so a newly wired
+  // channel group is created on the operator's chosen provider (per-group
+  // `ncl groups config update --provider` still overrides). A reused group
+  // keeps its existing provider (INSERT OR IGNORE).
+  let agentGroup = await getAgentGroupByFolder(parsed.folder);
   if (!agentGroup) {
     const agId = generateId('ag');
-    createAgentGroup({
+    await createAgentGroup({
       id: agId,
       name: parsed.assistantName,
       folder: parsed.folder,
       agent_provider: null,
       created_at: new Date().toISOString(),
     });
-    agentGroup = getAgentGroupByFolder(parsed.folder)!;
+    agentGroup = (await getAgentGroupByFolder(parsed.folder))!;
     log.info('Created agent group', { id: agId, folder: parsed.folder });
   }
-  ensureContainerConfig(agentGroup.id);
+  await ensureContainerConfig(agentGroup.id);
 
   // 2. Create or find messaging group
-  let messagingGroup = getMessagingGroupByPlatform(parsed.channel, parsed.platformId);
+  let messagingGroup = await getMessagingGroupByPlatform(parsed.channel, parsed.platformId);
   if (!messagingGroup) {
     const mgId = generateId('mg');
-    createMessagingGroup({
+    // Policy: explicit flag → channel declaration → legacy 'strict' (stale
+    // adapters without a declaration must keep pre-declaration behavior).
+    const unknownSenderPolicy =
+      parsed.unknownSenderPolicy ??
+      (hasDeclaredChannelDefaults(parsed.channel)
+        ? resolveUnknownSenderPolicy(parsed.channel, parsed.isGroup)
+        : 'strict');
+    await createMessagingGroup({
       id: mgId,
       channel_type: parsed.channel,
       platform_id: parsed.platformId,
       name: parsed.name,
-      is_group: 1,
-      unknown_sender_policy: 'strict',
+      is_group: parsed.isGroup ? 1 : 0,
+      unknown_sender_policy: unknownSenderPolicy,
       created_at: new Date().toISOString(),
     });
-    messagingGroup = getMessagingGroupByPlatform(parsed.channel, parsed.platformId)!;
+    messagingGroup = (await getMessagingGroupByPlatform(parsed.channel, parsed.platformId))!;
     log.info('Created messaging group', { id: mgId, channel: parsed.channel, platformId: parsed.platformId });
   }
 
   // 3. Wire agent to messaging group — createMessagingGroupAgent auto-creates
   // the companion agent_destinations row so delivery's ACL admits this target.
   let newlyWired = false;
-  const existing = getMessagingGroupAgentByPair(messagingGroup.id, agentGroup.id);
+  const existing = await getMessagingGroupAgentByPair(messagingGroup.id, agentGroup.id);
   if (!existing) {
     newlyWired = true;
     const mgaId = generateId('mga');
-    // Mirrors scripts/init-first-agent.ts:wireIfMissing so both setup paths
-    // create rows with the same shape. Groups default to 'mention' (bot only
-    // responds when addressed); DMs default to 'pattern'/'.' (respond to
-    // every message). An explicit --trigger overrides the pattern regex.
+    // Engage defaults, first hit wins: explicit --engage-mode → explicit
+    // --trigger (pattern regex, the historical override) → the channel's
+    // declared defaults → the legacy heuristic for stale (undeclared)
+    // adapters, so a trunk update alone changes nothing for them: groups get
+    // 'mention' (respond when addressed), DMs 'pattern'/'.' (every message).
     const isGroup = messagingGroup.is_group === 1;
-    const engageMode: 'pattern' | 'mention' = isGroup && !parsed.trigger ? 'mention' : 'pattern';
-    const engagePattern: string | null = engageMode === 'pattern' ? parsed.trigger || '.' : null;
-    createMessagingGroupAgent({
+    const channelKey = messagingGroup.instance ?? messagingGroup.channel_type;
+    let engage: { engage_mode: 'pattern' | 'mention' | 'mention-sticky'; engage_pattern: string | null };
+    if (parsed.engageMode) {
+      if (parsed.engageMode === 'pattern' && !parsed.trigger) {
+        throw new Error(`--engage-mode pattern requires --trigger (use "." to match every message)`);
+      }
+      engage = {
+        engage_mode: parsed.engageMode,
+        engage_pattern: parsed.engageMode === 'pattern' ? parsed.trigger : null,
+      };
+    } else if (parsed.trigger) {
+      engage = { engage_mode: 'pattern', engage_pattern: parsed.trigger };
+    } else if (hasDeclaredChannelDefaults(channelKey, messagingGroup.channel_type)) {
+      engage = resolveWiringDefaults(channelKey, isGroup, agentGroup.name, messagingGroup.channel_type);
+    } else {
+      engage = isGroup
+        ? { engage_mode: 'mention', engage_pattern: null }
+        : { engage_mode: 'pattern', engage_pattern: '.' };
+    }
+    // Same cross-checks as `ncl wirings create`: rejects mention modes on
+    // channels declaring mentions:'never'; coerces mention-sticky→mention
+    // when the channel context has no thread ids.
+    validateEngageAgainstChannel(engage, messagingGroup);
+    await createMessagingGroupAgent({
       id: mgaId,
       messaging_group_id: messagingGroup.id,
       agent_group_id: agentGroup.id,
-      engage_mode: engageMode,
-      engage_pattern: engagePattern,
+      engage_mode: engage.engage_mode,
+      engage_pattern: engage.engage_pattern,
       sender_scope: 'all',
       ignored_message_policy: 'drop',
       session_mode: parsed.sessionMode as 'shared' | 'per-thread' | 'agent-shared',
@@ -198,13 +285,13 @@ export async function run(args: string[]): Promise<void> {
 
   // 4. Send onboarding message — only on first wiring, not re-registration
   if (newlyWired) {
-    const { session } = resolveSession(
+    const { session } = await resolveSession(
       agentGroup.id,
       messagingGroup.id,
       null,
       parsed.sessionMode as 'shared' | 'per-thread' | 'agent-shared',
     );
-    writeSessionMessage(agentGroup.id, session.id, {
+    await writeSessionMessage(agentGroup.id, session.id, {
       id: generateId('onboard'),
       kind: 'task',
       timestamp: new Date().toISOString(),
