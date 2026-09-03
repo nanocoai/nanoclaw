@@ -329,6 +329,86 @@ export function rewriteBotLidMention(
 }
 
 /**
+ * The text an inbound message carries, wherever WhatsApp put it.
+ *
+ * One reviewable list of the caption-bearing types, because a type missing
+ * here does not degrade gracefully: the message reaches the router with empty
+ * text, so a pattern-engage wiring cannot match it and the whole message —
+ * attachment included — is dropped as `no_agent_engaged`. `documentMessage`
+ * was missing exactly that way, so a PDF captioned "@Bot read this" vanished
+ * while the same words typed alone routed fine.
+ *
+ * Keep in sync with INBOUND_MEDIA_TYPES below: every media type that can
+ * carry a caption belongs in both.
+ */
+export function extractMessageText(normalized: {
+  conversation?: string | null;
+  extendedTextMessage?: { text?: string | null } | null;
+  imageMessage?: { caption?: string | null } | null;
+  videoMessage?: { caption?: string | null } | null;
+  documentMessage?: { caption?: string | null } | null;
+}): string {
+  return (
+    normalized.conversation ||
+    normalized.extendedTextMessage?.text ||
+    normalized.imageMessage?.caption ||
+    normalized.videoMessage?.caption ||
+    normalized.documentMessage?.caption ||
+    ''
+  );
+}
+
+/**
+ * Media-bearing message types, in the order attachments are listed. `ext` only
+ * builds a fallback filename when the sender supplied none (or an unsafe one).
+ */
+const INBOUND_MEDIA_TYPES: Array<{ key: string; type: string; ext: string }> = [
+  { key: 'imageMessage', type: 'image', ext: '.jpg' },
+  { key: 'videoMessage', type: 'video', ext: '.mp4' },
+  { key: 'audioMessage', type: 'audio', ext: '.ogg' },
+  { key: 'documentMessage', type: 'document', ext: '' },
+];
+
+/** One attachment the message carries, named without fetching it. */
+export interface InboundMediaRef {
+  key: string;
+  type: string;
+  name: string;
+}
+
+/**
+ * Name the attachments an inbound message carries, from the envelope alone —
+ * no network. This is what answers "does this message have media?" for the
+ * empty-protocol-message guard, so that guard no longer depends on a
+ * successful download, and it is what the routing view lists as metadata.
+ *
+ * The traversal guard lives here because the filename is decided here.
+ */
+export function detectInboundMedia(normalized: object, now: number = Date.now()): InboundMediaRef[] {
+  // Baileys' IMessage has no index signature; the media keys we care about
+  // all share the one field this function reads.
+  const src = normalized as Record<string, { fileName?: string | null } | undefined>;
+  const refs: InboundMediaRef[] = [];
+  for (const { key, type, ext } of INBOUND_MEDIA_TYPES) {
+    if (!src[key]) continue;
+    // documentMessage.fileName is attacker-controlled and rides through
+    // WhatsApp's E2E channel — Meta can't sanitize it server-side. Without
+    // this guard, a `..`-laden fileName escapes attachDir on path.join.
+    const rawFilename = src[key]?.fileName;
+    const fallback = `${type}-${now}${ext}`;
+    const name = rawFilename && isSafeAttachmentName(rawFilename) ? rawFilename : fallback;
+    if (rawFilename && name !== rawFilename) {
+      log.warn('Refused unsafe attachment filename — would escape attachments dir', {
+        rawFilename,
+        replacement: name,
+      });
+    }
+    refs.push({ key, type, name });
+  }
+  return refs;
+}
+
+/**
  * Append a visible note for media that failed to download, so the agent knows
  * something was sent rather than silently losing the attachment — or the whole
  * message, when an uncaptioned image would otherwise be dropped by the
@@ -567,25 +647,23 @@ registerChannelAdapter('whatsapp', {
       }
     }
 
-    /** Download media from an inbound message, save to /workspace/attachments/. */
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async function downloadInboundMedia(
+    /**
+     * Fetch the bytes for already-detected media and save them under
+     * DATA_DIR/attachments. Deliberately takes the refs detectInboundMedia
+     * produced rather than the raw envelope: naming (and its traversal guard)
+     * is decided before routing, this is only the network part, and it runs
+     * only once an agent is committed to receiving the message.
+     */
+    async function fetchInboundMedia(
       msg: WAMessage,
-      normalized: any,
+      refs: InboundMediaRef[],
     ): Promise<{
       attachments: Array<{ type: string; name: string; localPath: string }>;
       failures: string[];
     }> {
-      const mediaTypes: Array<{ key: string; type: string; ext: string }> = [
-        { key: 'imageMessage', type: 'image', ext: '.jpg' },
-        { key: 'videoMessage', type: 'video', ext: '.mp4' },
-        { key: 'audioMessage', type: 'audio', ext: '.ogg' },
-        { key: 'documentMessage', type: 'document', ext: '' },
-      ];
       const results: Array<{ type: string; name: string; localPath: string }> = [];
       const failures: string[] = [];
-      for (const { key, type, ext } of mediaTypes) {
-        if (!normalized[key]) continue;
+      for (const { type, name: filename } of refs) {
         try {
           // Pass reuploadRequest so Baileys can ask WhatsApp to re-upload the
           // media when the direct CDN fetch fails or the media URL has expired
@@ -597,18 +675,6 @@ registerChannelAdapter('whatsapp', {
             {},
             { reuploadRequest: sock.updateMediaMessage, logger: baileysLogger },
           );
-          // documentMessage.fileName is attacker-controlled and rides through
-          // WhatsApp's E2E channel — Meta can't sanitize it server-side. Without
-          // this guard, a `..`-laden fileName escapes attachDir on path.join.
-          const rawFilename = normalized[key].fileName;
-          const fallback = `${type}-${Date.now()}${ext}`;
-          const filename = isSafeAttachmentName(rawFilename) ? rawFilename : fallback;
-          if (rawFilename && filename !== rawFilename) {
-            log.warn('Refused unsafe attachment filename — would escape attachments dir', {
-              rawFilename,
-              replacement: filename,
-            });
-          }
           const attachDir = path.join(DATA_DIR, 'attachments');
           fs.mkdirSync(attachDir, { recursive: true });
           const filePath = path.join(attachDir, filename);
@@ -844,27 +910,21 @@ registerChannelAdapter('whatsapp', {
             // Notify metadata for group discovery
             setupConfig.onMetadata(chatJid, undefined, isGroup);
 
-            let content =
-              normalized.conversation ||
-              normalized.extendedTextMessage?.text ||
-              normalized.imageMessage?.caption ||
-              normalized.videoMessage?.caption ||
-              '';
+            let content = extractMessageText(normalized);
 
             // Normalize bot LID mention → assistant name for trigger matching
             // (dedicated mode only — see rewriteBotLidMention)
             content = rewriteBotLidMention(content, WHATSAPP_SHARED, botLidUser, ASSISTANT_NAME);
 
-            // Download media attachments (images, video, audio, documents)
-            const { attachments, failures } = await downloadInboundMedia(msg, normalized);
-
-            // Surface failed downloads as text so the agent knows media was
-            // sent even when it couldn't be fetched — instead of silently
-            // dropping the attachment (or the whole message, if uncaptioned).
-            content = appendMediaFailureNote(content, failures);
+            // Name the attachments without fetching them. Everything below —
+            // the empty-message guard, the engage test the router runs, the
+            // command matching — decides on this metadata; the bytes are
+            // pulled later, and only if some agent is actually going to
+            // receive the message (see resolveContent on the inbound below).
+            const mediaRefs = detectInboundMedia(normalized);
 
             // Skip empty protocol messages (no text and no attachments)
-            if (!content && attachments.length === 0) continue;
+            if (!content && mediaRefs.length === 0) continue;
 
             // Resolve sender: in groups, participant may be LID — use participantAlt
             const rawSender = msg.key.participant || msg.key.remoteJid || '';
@@ -934,12 +994,38 @@ registerChannelAdapter('whatsapp', {
                 text: content,
                 sender,
                 senderName,
-                ...(attachments.length > 0 && { attachments }),
+                // Routing view: attachment metadata only, no bytes.
+                ...(mediaRefs.length > 0 && {
+                  attachments: mediaRefs.map(({ type, name }) => ({ type, name })),
+                }),
                 fromMe,
                 isBotMessage,
                 isGroup,
                 chatJid,
               },
+              // Delivery view: the same object with the bytes fetched. The
+              // router calls this at most once per message and only once an
+              // agent is committed to persisting it, so an unwired chat — or
+              // one that fails its engage test — costs no CDN traffic at all.
+              //
+              // appendMediaFailureNote belongs here, not above: it used to run
+              // before routing, where a failed download could change the text
+              // the engage pattern matched against.
+              ...(mediaRefs.length > 0 && {
+                resolveContent: async () => {
+                  const { attachments, failures } = await fetchInboundMedia(msg, mediaRefs);
+                  return {
+                    text: appendMediaFailureNote(content, failures),
+                    sender,
+                    senderName,
+                    ...(attachments.length > 0 && { attachments }),
+                    fromMe,
+                    isBotMessage,
+                    isGroup,
+                    chatJid,
+                  };
+                },
+              }),
               timestamp,
             };
 
