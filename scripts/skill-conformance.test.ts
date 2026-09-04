@@ -22,6 +22,8 @@
 //   6. fixture hygiene: scenario input keys ⊆ the skill's prompt vars, every
 //      unguarded prompt answered by every scenario, and a skill with prompts
 //      MUST ship a fixture file (actionable failure otherwise).
+//   7. install skills are user-invoked: `disable-model-invocation: true` plus
+//      agents/openai.yaml with policy.allow_implicit_invocation: false (Codex).
 //
 // Everything is stubbed — no network, no git, no pnpm add — so this runs in
 // milliseconds inside the normal vitest CI step.
@@ -30,6 +32,7 @@ import { describe, it, expect, afterAll } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 
 import { applySkill, fullyApplied, type ApplyEvent, type ApplyResult } from './skill-apply.js';
 import {
@@ -404,5 +407,61 @@ describe.each(SKILLS)('%s', (name) => {
       }
       return; // one sabotaged scenario per skill is enough
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Install skills (every `add-*` skill and every fence-carrying skill) are
+// user-invoked: `disable-model-invocation: true` keeps them out of Claude's
+// context, and agents/openai.yaml with policy.allow_implicit_invocation: false
+// does the same for Codex. Operational skills stay model-invocable. Rule
+// documented in CLAUDE.md → Skills.
+// ---------------------------------------------------------------------------
+
+const INSTALL_SKILLS = SKILL_DOCS.filter(({ doc }) => doc.endsWith('/SKILL.md'))
+  .map(({ doc }) => doc.slice(0, -'/SKILL.md'.length))
+  .filter((n) => n.startsWith('add-') || SKILLS.includes(n));
+
+const skillText = (name: string): string => SKILL_DOCS.find(({ doc }) => doc === `${name}/SKILL.md`)!.text;
+
+/** The parsed YAML frontmatter of a SKILL.md, or undefined when there is none. */
+function frontmatterOf(md: string): Record<string, unknown> | undefined {
+  const lines = md.split('\n');
+  if (lines[0] !== '---') return undefined;
+  const close = lines.indexOf('---', 1);
+  if (close === -1) return undefined;
+  const parsed: unknown = parseYaml(lines.slice(1, close).join('\n'));
+  return parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : undefined;
+}
+
+describe('install skills are user-invoked', () => {
+  it('finds the install skills', () => {
+    expect(INSTALL_SKILLS).toContain('add-slack');
+    expect(INSTALL_SKILLS).toContain('slack-agent-flow');
+    expect(INSTALL_SKILLS.length).toBeGreaterThanOrEqual(30);
+  });
+
+  it.each(INSTALL_SKILLS)('%s declares disable-model-invocation: true', (name) => {
+    const fm = frontmatterOf(skillText(name));
+    expect(fm, `${name}/SKILL.md has no parseable YAML frontmatter`).toBeDefined();
+    // The YAML value must be the boolean true — `disable-model-invocation:true`
+    // (no space) parses as a scalar, not a key, and Claude Code would ignore it.
+    expect(
+      fm!['disable-model-invocation'],
+      `${name}/SKILL.md frontmatter must carry \`disable-model-invocation: true\` — install skills are applied on demand by the operator, never picked by the model (see CLAUDE.md → Skills)`,
+    ).toBe(true);
+  });
+
+  it.each(INSTALL_SKILLS)('%s ships agents/openai.yaml with allow_implicit_invocation: false', (name) => {
+    const p = join(SKILLS_DIR, name, 'agents', 'openai.yaml');
+    expect(
+      existsSync(p),
+      `${name}/agents/openai.yaml is missing — Codex reads the same skill directory and hides an install skill from its prompt only through policy.allow_implicit_invocation: false`,
+    ).toBe(true);
+    const parsed = parseYaml(readFileSync(p, 'utf8')) as { policy?: { allow_implicit_invocation?: unknown } };
+    expect(
+      parsed?.policy?.allow_implicit_invocation,
+      `${name}/agents/openai.yaml must set policy.allow_implicit_invocation: false`,
+    ).toBe(false);
   });
 });

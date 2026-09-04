@@ -1,6 +1,7 @@
 ---
 name: add-matrix
 description: Add Matrix channel integration via Chat SDK. Works with any Matrix homeserver.
+disable-model-invocation: true
 ---
 
 # Add Matrix Channel

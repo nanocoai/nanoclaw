@@ -1,6 +1,7 @@
 ---
 name: add-telegram
 description: Add Telegram channel integration via Chat SDK.
+disable-model-invocation: true
 ---
 
 # Add Telegram Channel

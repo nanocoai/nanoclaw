@@ -1,6 +1,7 @@
 ---
 name: add-linear
 description: Add Linear channel integration via Chat SDK. Issue comment threads as conversations.
+disable-model-invocation: true
 ---
 
 # Add Linear Channel

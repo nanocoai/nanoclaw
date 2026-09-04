@@ -7,10 +7,12 @@ description: Add new capabilities or modify NanoClaw behavior. Use when user wan
 
 This skill helps users add capabilities or modify behavior. Use AskUserQuestion to understand what they want before making changes.
 
+Source installation through `ncl skills apply` is disabled unless the operator enables it for this checkout. Respect a deployment refusal; use its release workflow instead of retrying through a script or manual source edits. If apply reports `needs-setup`, relay the pending steps to the operator and stop before wiring or restarting. Credentials stay on the host.
+
 ## Workflow
 
 1. **Understand the request** — Ask clarifying questions.
-2. **Prefer a dedicated skill** — If a skill covers the request, invoke it instead of editing core by hand:
+2. **Prefer a dedicated skill** — If a skill covers the request, use it instead of editing core by hand. Install skills are not loaded implicitly; apply them with `bin/ncl skills plan <name>` then `bin/ncl skills apply <name>` (`--restart` reloads the service, `--inputs '{"var":"value"}'` answers non-secret prompts) and continue once it reports `applied`.
    - Channels: `/add-telegram`, `/add-slack`, `/add-discord`, `/add-whatsapp`, `/add-signal`, `/add-imessage`, and the rest of the `/add-<channel>` family.
    - Wiring channels to agents and isolation levels: `/manage-channels`.
    - Container directory access: `/manage-mounts`.
@@ -52,7 +54,7 @@ Questions to ask:
 - Same trigger rules as other channels on that agent group, or different?
 
 Implementation:
-1. Run the matching install skill (`/add-telegram`, `/add-slack`, …). It fetches the adapter from the `channels` branch, wires the registration import, installs the pinned package, and builds.
+1. Apply the matching install skill with `bin/ncl skills apply add-telegram` (`add-slack`, …). It fetches the adapter from the `channels` branch, wires the registration import, installs the pinned package, and builds.
 2. Run `/manage-channels` (or use `ncl messaging-groups` + `ncl wirings`) to create the messaging group, choose the isolation level, and wire it to an agent group with a session mode and trigger rules.
 
 ### Adding a New MCP Integration
@@ -63,7 +65,7 @@ Questions to ask:
 - Which agent group should have access?
 
 Implementation:
-- If a dedicated `/add-<service>-tool` skill exists, run it — it wires the MCP server and routes credentials through OneCLI so no raw keys reach the container.
+- If a dedicated `/add-<service>-tool` skill exists, apply it with `bin/ncl skills apply add-<service>-tool` — it wires the MCP server and routes credentials through OneCLI so no raw keys reach the container.
 - Otherwise wire the MCP server into the agent group's container config with either `--command <cmd> [--args <json-array>] [--env <json-object>]` for stdio or `--url <url>` for Streamable HTTP (HTTPS, or plain HTTP for localhost / host.docker.internal): `ncl groups config add-mcp-server --id <group-id> --name <name> ...`. Then run `ncl groups restart --id <group-id>` to take effect. From inside a container the agent uses the `add_mcp_server` self-mod tool, which requires one admin approval.
 
 ### Changing Assistant Behavior
@@ -100,7 +102,7 @@ Implementation:
 
 ## After Changes
 
-Always tell the user.
+After a completed change, tell the user. Run the rebuild/restart steps below only for a source checkout with completed setup; a refusal, failure, or `needs-setup` stops this workflow.
 
 Run from your NanoClaw project root:
 
@@ -119,7 +121,7 @@ launchctl load ~/Library/LaunchAgents/$(launchd_label).plist
 
 User: "Add Telegram as an input channel"
 
-1. Run `/add-telegram` to install the adapter, wire its registration, and build.
+1. Run `bin/ncl skills apply add-telegram`; it installs the adapter, wires its registration, and builds.
 2. Ask: "Should Telegram reach an existing agent group, or a new one?"
 3. Ask: "Share an agent group with your other channels, or keep Telegram separate?"
 4. Run `/manage-channels` (or `ncl messaging-groups create` + `ncl wirings create`) to create the messaging group and wire it to the chosen agent group with a session mode and trigger rules.

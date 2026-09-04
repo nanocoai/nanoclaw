@@ -1,6 +1,7 @@
 ---
 name: add-discord
 description: Add Discord bot channel integration via Chat SDK.
+disable-model-invocation: true
 ---
 
 # Add Discord Channel

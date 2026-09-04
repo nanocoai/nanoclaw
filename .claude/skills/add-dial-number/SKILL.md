@@ -1,6 +1,7 @@
 ---
 name: add-dial-number
 description: Add another phone number to an existing Dial channel — a second (or third) public line for the agent, so one NanoClaw install answers SMS and AI voice calls on multiple numbers. Use when Dial is already installed and the operator wants an additional number (e.g. a personal line plus a support line). Requires the Dial channel to already be installed (see /add-dial).
+disable-model-invocation: true
 ---
 
 # Add another Dial number

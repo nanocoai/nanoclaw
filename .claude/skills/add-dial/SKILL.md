@@ -1,6 +1,7 @@
 ---
 name: add-dial
 description: Add Dial channel integration — a real phone number for SMS and AI voice calls via the Dial platform (getdial.ai). Native adapter — no Chat SDK bridge.
+disable-model-invocation: true
 ---
 
 # Add Dial Channel

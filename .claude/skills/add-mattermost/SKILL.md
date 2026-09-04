@@ -1,6 +1,7 @@
 ---
 name: add-mattermost
 description: Add a self-hosted or cloud Mattermost bot channel through the Chat SDK bridge, reusing a local server when available and offering an evaluation server when none exists.
+disable-model-invocation: true
 ---
 
 # Add Mattermost Channel

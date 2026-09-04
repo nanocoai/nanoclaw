@@ -1,6 +1,7 @@
 ---
 name: add-tavily-tool
 description: Add Tavily Search and Extract as keyless remote MCP tools for selected NanoClaw agent groups. Use when installing Tavily web search or URL extraction without an API key.
+disable-model-invocation: true
 ---
 
 # Add Tavily Tool

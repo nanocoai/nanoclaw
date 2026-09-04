@@ -1,0 +1,4 @@
+# Codex counterpart of `disable-model-invocation: true` in SKILL.md: keep this
+# install skill out of the model's prompt. The user invokes it explicitly.
+policy:
+  allow_implicit_invocation: false

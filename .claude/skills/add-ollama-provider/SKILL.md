@@ -1,6 +1,7 @@
 ---
 name: add-ollama-provider
 description: Route a NanoClaw agent group to a local Ollama model instead of the Anthropic API. Ollama speaks the Anthropic API natively (v1/messages), so no provider code changes are needed — just env var overrides and a model setting. Use when the user wants to run their agent locally, cut API costs, or experiment with open-weight models. See docs/ollama.md for background.
+disable-model-invocation: true
 ---
 
 # Add Ollama Provider

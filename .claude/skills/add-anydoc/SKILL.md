@@ -1,6 +1,7 @@
 ---
 name: add-anydoc
 description: Add local office-document-to-Markdown conversion to NanoClaw agent containers with the pinned Firecrawl AnyDoc CLI. Use when agents need to read attached Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, or text-based PDF files without uploading them to a hosted parser.
+disable-model-invocation: true
 ---
 
 # Add AnyDoc
