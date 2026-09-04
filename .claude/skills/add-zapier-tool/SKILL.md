@@ -7,7 +7,8 @@ description: Add Zapier's hosted Streamable HTTP MCP server to selected NanoClaw
 
 Connect selected NanoClaw agent groups to Zapier's hosted MCP server. Zapier
 supplies tool descriptions, dynamic discovery, and onboarding instructions at
-runtime, so this installer does not add an adapter, package, or container skill.
+runtime. This installer also adds a focused container skill that teaches agents
+how to use those changing tools safely without duplicating their schemas.
 
 The connection token is a password: it can run the server's tools and read the
 data they return. Never ask the operator to paste a token or a token-bearing URL
@@ -16,12 +17,11 @@ log, or repository file, and never print one. Use the OneCLI dashboard's secret
 value field. Register only Zapier's public, credential-free endpoint:
 `https://mcp.zapier.com/api/v1/connect`.
 
-Every step is safe to re-run. The only functional integration is runtime state
-written through `ncl groups config` and OneCLI; there is no source-level
-integration point for an in-tree test to guard. Do not invent a structural test
-for a line this skill never adds. This directive-bearing workflow does have an
-`apply-fixtures.json` conformance fixture, as required by NanoClaw's skill
-guidelines.
+Every step is safe to re-run. Runtime access is written through
+`ncl groups config` and OneCLI. A focused manager test covers per-group guidance
+installation, collision refusal, idempotence, partial-install cleanup, and
+provider-materialized rollback. The directive-bearing workflow also has an
+`apply-fixtures.json` conformance fixture.
 
 ## Pre-flight
 
@@ -60,6 +60,27 @@ Validate every selected id. A typo must not broaden or silently remove access:
 
 ```nc:run effect:check
 for gid in $(printf '%s' '{{zapier_agents}}' | tr ',' ' '); do ncl groups list --json | jq -e --arg id "$gid" '.data[] | select(.id==$id)' >/dev/null || { echo "unknown agent group '$gid' — see: ncl groups list" >&2; exit 1; }; done
+```
+
+## Install agent guidance
+
+Install the bundled runtime skill only for the selected groups. Its dedicated
+manager refuses an existing unowned skill with the same name. The skill contains
+no credentials or static Zapier schemas. NanoClaw materializes real per-group
+skills for each provider when the group starts:
+
+```nc:run effect:wire
+project_root=$(git rev-parse --show-toplevel) || exit 1; skill_dir="${CLAUDE_SKILL_DIR:-$project_root/.claude/skills/add-zapier-tool}"; bash "$skill_dir/scripts/manage-zapier-skill.sh" install "$project_root" "$skill_dir/container-skills/zapier-tools/SKILL.md" '{{zapier_agents}}'
+```
+
+Copy and run the focused behavior test:
+
+```nc:copy
+zapier-skill-manager.test.ts -> src/zapier-skill-manager.test.ts
+```
+
+```nc:run effect:test
+project_root=$(git rev-parse --show-toplevel) || exit 1; skill_dir="${CLAUDE_SKILL_DIR:-$project_root/.claude/skills/add-zapier-tool}"; ZAPIER_SKILL_DIR="$skill_dir" pnpm exec vitest run src/zapier-skill-manager.test.ts
 ```
 
 ## Create or select the Zapier MCP server
@@ -159,7 +180,7 @@ Restart the selected groups and ask each fresh container to report discovery
 without executing any Zapier action:
 
 ```nc:run effect:restart
-for gid in $(printf '%s' '{{zapier_agents}}' | tr ',' ' '); do ncl groups restart --id "$gid" --message "Zapier MCP is configured. List the discovered Zapier MCP tool names only. Do not invoke any Zapier tool, enable an action, or change external state." >/dev/null || exit 1; done
+for gid in $(printf '%s' '{{zapier_agents}}' | tr ',' ' '); do ncl groups restart --id "$gid" --message "Zapier MCP is configured. Read the zapier-tools skill, then list the discovered Zapier MCP tool names only. Do not invoke any Zapier tool, enable an action, or change external state." >/dev/null || exit 1; done
 ```
 
 ## Verify safely
