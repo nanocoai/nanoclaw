@@ -9,8 +9,8 @@ disable-model-invocation: true
 Adds Slack support via the Chat SDK bridge. Trunk ships no channels — this skill
 copies the Slack channel layer (adapter, shared lib, bot-inbound guard,
 provisioning core, container skills) in from the `channels` branch. The **Apply**
-steps carry `nc:` directive fences (an agent applies the prose, a parser the
-directives); all idempotent.
+steps carry `nc:` directive fences (the setup wizard and `ncl skills apply` run
+them); all idempotent.
 
 This is the base Slack experience: one bot, DM and channel chat. The Slack
 **agents** feature — child bots provisioned from `create_agent`, shared rooms,

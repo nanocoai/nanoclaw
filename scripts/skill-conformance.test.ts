@@ -22,11 +22,8 @@
 //   6. fixture hygiene: scenario input keys ⊆ the skill's prompt vars, every
 //      unguarded prompt answered by every scenario, and a skill with prompts
 //      MUST ship a fixture file (actionable failure otherwise).
-//   7. install skills are user-invoked: every add-* skill and every fence-carrying
-//      skill declares `disable-model-invocation: true` — the operator types
-//      /<name>; the model never picks an install from its context. Codex reads
-//      the same directories and needs its own switch, agents/openai.yaml with
-//      policy.allow_implicit_invocation: false, which hides the skill from its prompt.
+//   7. install skills are user-invoked: `disable-model-invocation: true` plus
+//      agents/openai.yaml with policy.allow_implicit_invocation: false (Codex).
 //
 // Everything is stubbed — no network, no git, no pnpm add — so this runs in
 // milliseconds inside the normal vitest CI step.
@@ -414,22 +411,18 @@ describe.each(SKILLS)('%s', (name) => {
 });
 
 // ---------------------------------------------------------------------------
-// Install skills are user-invoked. A capability install — every `add-*` skill,
-// and any skill carrying nc: fences — runs when the operator types `/<name>`,
-// never because the model picked it from its context. `disable-model-invocation:
-// true` keeps the description out of every coding-agent session and blocks model
-// invocation; the setup wizard and /update-skills apply skills through the
-// engine and are unaffected. Codex reads the same directories through the
-// .agents/skills symlink and has its own switch: agents/openai.yaml with
-// policy.allow_implicit_invocation: false hides the skill from its prompt until the
-// user mentions $<name>. Operational and meta skills stay model-invocable and are
-// not checked here. Rule documented in CLAUDE.md → Skills.
+// Install skills (every `add-*` skill and every fence-carrying skill) are
+// user-invoked: `disable-model-invocation: true` keeps them out of Claude's
+// context, and agents/openai.yaml with policy.allow_implicit_invocation: false
+// does the same for Codex. Operational skills stay model-invocable. Rule
+// documented in CLAUDE.md → Skills.
 // ---------------------------------------------------------------------------
 
-const INSTALL_SKILLS = readdirSync(SKILLS_DIR).filter((n) => {
-  const p = join(SKILLS_DIR, n, 'SKILL.md');
-  return existsSync(p) && (n.startsWith('add-') || SKILLS.includes(n));
-});
+const INSTALL_SKILLS = SKILL_DOCS.filter(({ doc }) => doc.endsWith('/SKILL.md'))
+  .map(({ doc }) => doc.slice(0, -'/SKILL.md'.length))
+  .filter((n) => n.startsWith('add-') || SKILLS.includes(n));
+
+const skillText = (name: string): string => SKILL_DOCS.find(({ doc }) => doc === `${name}/SKILL.md`)!.text;
 
 /** The parsed YAML frontmatter of a SKILL.md, or undefined when there is none. */
 function frontmatterOf(md: string): Record<string, unknown> | undefined {
@@ -449,7 +442,7 @@ describe('install skills are user-invoked', () => {
   });
 
   it.each(INSTALL_SKILLS)('%s declares disable-model-invocation: true', (name) => {
-    const fm = frontmatterOf(readFileSync(join(SKILLS_DIR, name, 'SKILL.md'), 'utf8'));
+    const fm = frontmatterOf(skillText(name));
     expect(fm, `${name}/SKILL.md has no parseable YAML frontmatter`).toBeDefined();
     // The YAML value must be the boolean true — `disable-model-invocation:true`
     // (no space) parses as a scalar, not a key, and Claude Code would ignore it.

@@ -122,23 +122,15 @@ structured result to report `success: true` and `refreshed`. That refreshes the
 barrel-registered `/add-slack` payload; it deliberately does not install
 companion skills, credentials, wirings, or restarts.
 
-The two companion skills ship in-tree: `.claude/skills/slack-a2a-rooms/` and
-`.claude/skills/slack-agent-flow/` on `main` are their canonical source, and the
-copies on the `channels` branch are only a compatibility mirror for older
-checkouts. Never fetch them from the branch over the in-tree copies. If either
-directory is missing, stop and run `/update-nanoclaw` first.
-
-Apply each in-tree skill through `ncl skills apply`, in that order — they are
-user-invoked install skills, so do not paraphrase their Apply steps. The order is
-load-bearing and mirrors `setup/channels/companions.ts`:
+The companion skills live in-tree at `.claude/skills/slack-a2a-rooms/` and
+`.claude/skills/slack-agent-flow/` (never the copies on the `channels` branch); if
+either is missing, stop and run `/update-nanoclaw` first. Apply them in this
+order — it mirrors `setup/channels/companions.ts`:
 
 ```bash
 bin/ncl skills apply slack-a2a-rooms
 bin/ncl skills apply slack-agent-flow
 ```
-
-If the host is not running, `pnpm exec tsx scripts/skill-headless.ts apply <name>`
-runs the same engine directly.
 
 Do not continue unless both report fully applied and their own build/tests
 pass. Source contracts: `.claude/skills/add-slack/SKILL.md`,

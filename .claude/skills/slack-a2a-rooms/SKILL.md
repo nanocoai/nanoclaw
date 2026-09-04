@@ -67,7 +67,7 @@ the channels branch with `bin/ncl skills apply add-slack --refresh` (or `/update
 then re-run this skill.
 
 ```nc:run effect:check
-grep -sq 'export function setBotInboundPolicy' src/channels/slack-a2a-guard.ts || { echo 'slack-a2a-rooms: src/channels/slack-a2a-guard.ts is missing or does not export setBotInboundPolicy. Installing anyway would break the channel barrel and take down every channel adapter. Update the installed Slack channel first (re-run /add-slack from a channels branch that ships the bot-inbound guard), then re-apply this skill.' >&2; exit 1; }
+grep -sq 'export function setBotInboundPolicy' src/channels/slack-a2a-guard.ts || { echo 'slack-a2a-rooms: src/channels/slack-a2a-guard.ts is missing or does not export setBotInboundPolicy. Installing anyway would break the channel barrel and take down every channel adapter. Update the installed Slack channel first (bin/ncl skills apply add-slack --refresh), then re-apply this skill.' >&2; exit 1; }
 ```
 
 ### 2. Copy the policy module, its guard test, and the room-opener script

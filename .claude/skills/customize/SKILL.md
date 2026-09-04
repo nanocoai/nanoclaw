@@ -10,7 +10,7 @@ This skill helps users add capabilities or modify behavior. Use AskUserQuestion 
 ## Workflow
 
 1. **Understand the request** — Ask clarifying questions.
-2. **Prefer a dedicated skill** — If a skill covers the request, use it instead of editing core by hand. Install skills (`/add-*`) are user-invoked and never loaded into your context, so do not paraphrase their steps: preview with `bin/ncl skills plan <name>`, apply with `bin/ncl skills apply <name>` (`--restart` reloads the service; answer prompts with `--inputs '{"var":"value"}'`), and continue once it reports `applied`. If the host is not running, `pnpm exec tsx scripts/skill-headless.ts apply <name>` runs the same engine directly. Only a skill the engine refuses as prose-only needs the user to type `/<name>` themselves.
+2. **Prefer a dedicated skill** — If a skill covers the request, use it instead of editing core by hand. Install skills are not in your context; apply them with `bin/ncl skills plan <name>` then `bin/ncl skills apply <name>` (`--restart` reloads the service, `--inputs '{"var":"value"}'` answers prompts) and continue once it reports `applied`.
    - Channels: `/add-telegram`, `/add-slack`, `/add-discord`, `/add-whatsapp`, `/add-signal`, `/add-imessage`, and the rest of the `/add-<channel>` family.
    - Wiring channels to agents and isolation levels: `/manage-channels`.
    - Container directory access: `/manage-mounts`.
