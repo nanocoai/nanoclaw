@@ -23,16 +23,13 @@ export const GROUP_SCOPE_RESOURCES = new Set(['groups', 'sessions', 'destination
 export type Access = 'open' | 'approval' | 'hidden';
 
 /**
- * What a handler receives: the caller's identity plus `defer`, for work that
- * must wait until the reply has left the host (a service restart would kill
- * the reply). Dispatch supplies `defer` and hands the collected work back with
- * the response, so the transport that carries the reply runs it after its own
- * egress — per request, never on another caller's reply. Absent only when a
- * handler is invoked outside dispatch (tests).
+ * What a handler receives: the caller's identity plus `defer(run)` for work
+ * that must wait until the reply has left the host — a service restart would
+ * kill the reply. Dispatch collects the deferred work and returns it with the
+ * response as `afterReply`; the transport that carried the reply runs it after
+ * its own egress, and the approval flow runs it once the approval is resolved.
  */
-export type HandlerContext = CallerContext & {
-  defer?: (label: string, run: () => void) => void;
-};
+export type HandlerContext = CallerContext & { defer: (run: () => void) => void };
 
 export type CommandDef<TArgs = unknown, TData = unknown> = {
   name: string;
@@ -68,16 +65,16 @@ export type CommandDef<TArgs = unknown, TData = unknown> = {
    */
   generic?: 'list' | 'get';
   /**
-   * Per-command refusal, consulted for agent callers after the scope checks
-   * and before a hold: return a reason to DENY the request outright (nothing
-   * is carded or stored), or undefined to let the standard open/approval
-   * decision proceed. Runs again on an approved replay, so it also covers
-   * state that changed between card and approval. Runs inside the guard
-   * decision — unlike `DeliveryGuardSpec.precheck`, a boolean gate that runs
-   * before the guard — so a throw here fails closed as a guard error; return
-   * a reason instead of throwing.
+   * Agent callers only, consulted before a hold: return a reason to deny the
+   * request outright (nothing is carded), or undefined to proceed. Runs again
+   * on the approved replay (`replay: true`). Return a reason rather than
+   * throwing — a throw fails closed as an opaque guard error.
    */
-  refuse?: (args: Record<string, unknown>, actor: GuardActor) => Promise<string | undefined> | string | undefined;
+  refuse?: (
+    args: Record<string, unknown>,
+    actor: GuardActor,
+    ctx: { replay: boolean },
+  ) => Promise<string | undefined> | string | undefined;
   /** Validates `frame.args` and produces the typed handler input. Throws on invalid. */
   parseArgs: (raw: Record<string, unknown>) => TArgs;
   handler: (args: TArgs, ctx: HandlerContext) => Promise<TData>;

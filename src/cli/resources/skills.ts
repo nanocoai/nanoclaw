@@ -15,10 +15,10 @@
  * `secret` prompt is refused by the guard before any approval card or row
  * exists, and the engine refuses it again as defense in depth.
  */
-import { registerResource } from '../crud.js';
+import { registerResource, validateArgs, type ColumnDef } from '../crud.js';
 import {
-  SKILL_NAME_RE,
   assertSkillName,
+  errorMessage,
   isPlainObject,
   needsRestart,
   type SkillApplyReport,
@@ -27,8 +27,6 @@ import {
 } from '../skill-report.js';
 import { hostServiceDefined, restartHost, runSkillHeadless } from '../skill-runner.js';
 
-const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
-
 /** The skill directory name — the trailing positional, which the dispatcher hands over as `id`. */
 function skillId(args: Record<string, unknown>): string {
   const id = String(args.id ?? '');
@@ -36,20 +34,22 @@ function skillId(args: Record<string, unknown>): string {
   return id;
 }
 
-/** `--inputs` as the caller sent it: a JSON string from the CLI, or an already parsed object. Throws when malformed. */
-function parseInputs(raw: unknown): Record<string, unknown> | undefined {
-  if (raw === undefined) return undefined;
-  let value: unknown = raw;
-  if (typeof raw === 'string') {
-    try {
-      value = JSON.parse(raw);
-    } catch {
-      throw new Error('--inputs must be valid JSON');
-    }
-  }
-  if (!isPlainObject(value)) throw new Error('--inputs must be a JSON object of prompt var → answer');
-  return value;
-}
+const APPLY_ARGS: ColumnDef[] = [
+  { name: 'id', type: 'string', description: 'Skill directory name, e.g. add-codex.', required: true },
+  { name: 'inputs', type: 'json', description: 'JSON object of prompt var → answer.' },
+  {
+    name: 'refresh',
+    type: 'boolean',
+    description: 'Re-copy payload files and re-pin dependencies even when present (clean tree required).',
+    default: false,
+  },
+  {
+    name: 'restart',
+    type: 'boolean',
+    description: 'Restart the host service after a successful apply.',
+    default: false,
+  },
+];
 
 type RestartOutcome =
   | 'requested' // deferred until this reply has left; runs setup/lib/restart.sh
@@ -139,67 +139,47 @@ registerResource({
         'ncl skills apply add-codex --restart',
         'ncl skills apply add-telegram --inputs \'{"owner_handle":"12345678"}\'',
       ],
-      args: [
-        { name: 'id', type: 'string', description: 'Skill directory name, e.g. add-codex.', required: true },
-        { name: 'inputs', type: 'json', description: 'JSON object of prompt var → answer.' },
-        {
-          name: 'refresh',
-          type: 'boolean',
-          description: 'Re-copy payload files and re-pin dependencies even when present (clean tree required).',
-          default: false,
-        },
-        {
-          name: 'restart',
-          type: 'boolean',
-          description: 'Restart the host service after a successful apply.',
-          default: false,
-        },
-      ],
-      // Decided before the hold, so nothing malformed is carded and a
-      // credential never reaches an approval card or the pending_approvals
-      // row: an agent's inputs may answer the skill's plain prompts, never
-      // its secret ones. Host callers are not consulted (the guard allows
-      // them before this runs). It runs again on the approved replay, so an
-      // engine failure there answers with its own message rather than the
-      // guard's opaque fail-closed error.
-      refuse: async (args) => {
-        const id = String(args.id ?? '');
-        if (!SKILL_NAME_RE.test(id))
-          return `"${id}" is not a skill directory name (lowercase letters, digits, hyphens)`;
-        let inputs: Record<string, unknown> | undefined;
+      args: APPLY_ARGS,
+      // Before the hold, so nothing malformed is carded and a credential never
+      // reaches a card or the pending_approvals row: an agent's inputs may
+      // answer plain prompts, never secret ones. The approved replay skips the
+      // prompt check — the engine refuses secrets itself on the agent path.
+      refuse: async (args, _actor, { replay }) => {
+        let inputs: unknown;
         try {
-          inputs = parseInputs(args.inputs);
+          skillId(args);
+          inputs = validateArgs(APPLY_ARGS, args).inputs;
         } catch (e) {
-          return errMsg(e);
+          return errorMessage(e);
         }
+        if (inputs !== undefined && !isPlainObject(inputs))
+          return '--inputs must be a JSON object of prompt var → answer';
         const keys = Object.keys(inputs ?? {});
-        if (keys.length === 0) return undefined;
+        if (replay || keys.length === 0) return undefined;
         let plan: SkillPlan;
         try {
-          plan = await runSkillHeadless<SkillPlan>(['plan', id]);
+          plan = await runSkillHeadless<SkillPlan>(['plan', skillId(args)]);
         } catch (e) {
-          return `cannot check the inputs for ${id}: ${errMsg(e)}`;
+          return `cannot check the inputs for ${String(args.id)}: ${errorMessage(e)}`;
         }
         const secret = plan.prompts.filter((p) => p.secret && keys.includes(p.var)).map((p) => p.var);
         if (secret.length === 0) return undefined;
         return `--inputs answers secret prompt(s) ${secret.join(', ')}: credentials are entered by the operator on the host, never relayed through chat`;
       },
       handler: async (args, ctx): Promise<SkillApplyResponse> => {
-        const id = skillId(args);
-        const argv = ['apply', id];
-        const inputs = parseInputs(args.inputs);
-        if (inputs) argv.push('--inputs', JSON.stringify(inputs));
+        const argv = ['apply', skillId(args)];
+        if (args.inputs !== undefined) {
+          if (!isPlainObject(args.inputs)) throw new Error('--inputs must be a JSON object of prompt var → answer');
+          argv.push('--inputs', JSON.stringify(args.inputs));
+        }
         if (args.refresh === true) argv.push('--refresh');
         if (ctx.caller === 'agent') argv.push('--no-secret-inputs');
-        const report = await runSkillHeadless<SkillApplyReport>(argv, { exclusive: true });
+        const report = await runSkillHeadless<SkillApplyReport>(argv);
 
         let restart: RestartOutcome = 'not-requested';
         if (report.status === 'applied' && args.restart === true) {
           if (hostServiceDefined()) {
-            // After this reply has left — the restart would otherwise kill it.
-            // Outside dispatch there is no reply to protect; run it now.
-            const defer = ctx.defer ?? ((_label: string, run: () => void) => run());
-            defer('host restart after skill apply', () => restartHost());
+            ctx.defer(restartHost); // after the reply has left (HandlerContext.defer)
             restart = 'requested';
           } else {
             restart = 'unmanaged';

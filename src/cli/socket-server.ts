@@ -131,8 +131,7 @@ async function handleFrame(conn: net.Socket, line: string): Promise<void> {
 function write(conn: net.Socket, frame: ResponseFrame, afterReply?: () => void): void {
   try {
     conn.write(JSON.stringify(frame) + '\n');
-    // Once the frame is flushed the reply has left; work this request's
-    // handler deferred until then (a host restart) may run.
+    // The reply has left once the frame is flushed (HandlerContext.defer).
     conn.end(afterReply);
   } catch (err) {
     log.warn('Failed to write ncl CLI response', { err });

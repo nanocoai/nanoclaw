@@ -27,7 +27,7 @@ Run `ncl help` for the full list. Common resources:
 | tasks        | list, get, create, update, cancel, pause, resume, delete, append-log                                                                      | Scheduled tasks for your agent group                    |
 | wirings      | get, update                                                                                                                               | Response policy for the current chat                    |
 
-Additional resources (available under `global` scope only): messaging-groups, users, roles, user-dms, dropped-messages, approvals, and skills (list, plan, apply — see "Installing a capability" below).
+Additional resources (available under `global` scope only): messaging-groups, users, roles, user-dms, dropped-messages, approvals, skills (see below).
 
 Under `group` scope, `wirings get/update` always targets the current chat. Updates may only change `engage_mode` and `engage_pattern` and require human approval.
 
@@ -89,7 +89,13 @@ ncl wirings update --engage-mode pattern --engage-pattern "."
 
 ### Installing a capability (global scope only)
 
-When the user asks for a new channel, provider, or tool, do not edit source or ask them to run a command in a terminal. Find the install skill with `ncl skills list`, preview it with `ncl skills plan <name>`, then request it: `ncl skills apply <name> --restart`. The request is held for an admin's approval like any write command; on approval the host applies the skill to its own checkout (files, registration, pinned dependencies, build, tests) and restarts when it runs as a launchd or systemd service — otherwise the result says the operator must restart it by hand. Answer non-secret prompts with `--inputs '{"var":"value"}'`. Never pass tokens or passwords: inputs for secret prompts are refused, and the result names the steps the operator must finish on the host (credentials, interactive pairing, wiring).
+When the user asks for a new channel, provider, or tool, do not edit source or send them to a terminal:
+
+1. `ncl skills list` — find the install skill.
+2. `ncl skills plan <name>` — preview its steps and inputs.
+3. `ncl skills apply <name> --restart` — request the install (approval-gated, like any write). Answer non-secret prompts with `--inputs '{"var":"value"}'`.
+
+Never pass tokens or passwords — secret inputs are refused. The result lists what the operator must finish on the host (credentials, pairing, wiring, or a manual restart when no service is defined).
 
 ### Important
 

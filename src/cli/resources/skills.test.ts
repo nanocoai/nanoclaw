@@ -103,6 +103,7 @@ const cli = (...words: string[]) => {
 };
 
 const dataOf = (res: Awaited<ReturnType<typeof dispatch>>) => (res.ok ? (res.data as { restart: string }) : undefined);
+const planCalls = () => engine.runSkillHeadless.mock.calls.filter((c) => (c[0] as string[])[0] === 'plan');
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -137,18 +138,16 @@ describe('host caller', () => {
 
     const applied = await dispatch(cli('skills', 'apply', 'add-codex', '--restart'), HOST);
     expect(applied.ok).toBe(true);
-    expect(engine.runSkillHeadless).toHaveBeenLastCalledWith(['apply', 'add-codex'], { exclusive: true });
+    expect(engine.runSkillHeadless).toHaveBeenLastCalledWith(['apply', 'add-codex']);
   });
 
-  it('applies exclusively and defers the restart until the reply has left', async () => {
+  it('applies and defers the restart until the reply has left', async () => {
     const res = await dispatch(
       cli('skills', 'apply', 'add-slack', '--inputs', '{"owner_handle":"U1"}', '--restart'),
       HOST,
     );
     expect(res.ok).toBe(true);
-    expect(engine.runSkillHeadless).toHaveBeenCalledWith(['apply', 'add-slack', '--inputs', '{"owner_handle":"U1"}'], {
-      exclusive: true,
-    });
+    expect(engine.runSkillHeadless).toHaveBeenCalledWith(['apply', 'add-slack', '--inputs', '{"owner_handle":"U1"}']);
     expect(dataOf(res)?.restart).toBe('requested');
     // Not yet — the transport runs it after its own egress.
     expect(engine.restartHost).not.toHaveBeenCalled();
@@ -172,6 +171,7 @@ describe('host caller', () => {
     expect(res.ok).toBe(true);
     const argv = engine.runSkillHeadless.mock.calls.at(-1)?.[0] as string[];
     expect(argv).not.toContain('--no-secret-inputs');
+    expect(planCalls()).toHaveLength(0); // host callers are not refused, so nothing is checked
   });
 
   it('does not request a restart after a rolled-back apply', async () => {
@@ -217,18 +217,20 @@ describe('agent caller', () => {
     expect(approvalState.requestApproval).not.toHaveBeenCalled();
     // The refusal consulted the skill's declared prompts; nothing was applied.
     expect(engine.runSkillHeadless).toHaveBeenCalledWith(['plan', 'add-slack']);
-    expect(engine.runSkillHeadless).not.toHaveBeenCalledWith(expect.arrayContaining(['apply']), expect.anything());
+    expect(engine.runSkillHeadless).not.toHaveBeenCalledWith(expect.arrayContaining(['apply']));
   });
 
   it('is refused before any card when the request is malformed', async () => {
     const badName = await dispatch(cli('skills', 'apply', 'Add_Slack'), AGENT);
-    expect(badName.ok).toBe(false);
-    if (!badName.ok) expect(badName.error.message).toMatch(/not a skill directory name/);
-
+    if (!badName.ok) expect(badName.error.message).toMatch(/invalid skill name/);
     const badJson = await dispatch(cli('skills', 'apply', 'add-slack', '--inputs', '{not json'), AGENT);
-    expect(badJson.ok).toBe(false);
     if (!badJson.ok) expect(badJson.error.message).toMatch(/valid JSON/);
+    const badShape = await dispatch(cli('skills', 'apply', 'add-slack', '--inputs', '[1]'), AGENT);
+    if (!badShape.ok) expect(badShape.error.message).toMatch(/JSON object/);
+    const badFlag = await dispatch(cli('skills', 'apply', 'add-slack', '--bogus', 'x'), AGENT);
+    if (!badFlag.ok) expect(badFlag.error.message).toMatch(/unknown flag --bogus/);
 
+    for (const res of [badName, badJson, badShape, badFlag]) expect(res.ok).toBe(false);
     expect(approvalState.requestApproval).not.toHaveBeenCalled();
     expect(engine.runSkillHeadless).not.toHaveBeenCalled();
   });
@@ -267,10 +269,15 @@ describe('agent caller', () => {
       afterResolved?: () => void;
     };
 
-    expect(engine.runSkillHeadless).toHaveBeenCalledWith(
-      ['apply', 'add-slack', '--inputs', '{"owner_handle":"U1"}', '--no-secret-inputs'],
-      { exclusive: true },
-    );
+    expect(engine.runSkillHeadless).toHaveBeenCalledWith([
+      'apply',
+      'add-slack',
+      '--inputs',
+      '{"owner_handle":"U1"}',
+      '--no-secret-inputs',
+    ]);
+    // The prompt check ran once, at card time; the replay leaves secrets to the engine.
+    expect(planCalls()).toHaveLength(1);
     expect(notify).toHaveBeenCalledWith(expect.stringContaining('approved and executed'));
     // The restart is handed back to the approval flow, which runs it once the
     // approval is fully resolved — never inside the handler.

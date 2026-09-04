@@ -374,7 +374,7 @@ export function validate(directives: Directive[], ctx?: { chatVersion?: string }
 export function lintReferenceFloor(markdown: string): Problem[] {
   const directives = parseDirectives(markdown);
   const isFloorBearing = (d: Directive): boolean =>
-    (d.kind === 'prompt' && d.args.includes('secret')) || (d.kind === 'run' && d.attrs.effect === 'step');
+    isSecretPrompt(d) || (d.kind === 'run' && d.attrs.effect === 'step');
   const anchor = directives.find(isFloorBearing);
   if (!anchor) return []; // no credential / interactive step ⇒ no floor expected
   const hasTroubleshooting = markdown.split('\n').some((l) => /^##\s+Troubleshooting\s*$/.test(l.trim()));

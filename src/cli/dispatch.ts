@@ -33,24 +33,21 @@ type DispatchOptions = {
 
 /**
  * A response frame plus the work its handler deferred until the reply has
- * left (see HandlerContext.defer). `afterReply` is a function, so it never
- * reaches the wire — JSON.stringify drops it; the transport that carried the
- * frame calls it after its own egress.
+ * left (HandlerContext.defer). `afterReply` is a function, so JSON.stringify
+ * keeps it off the wire.
  */
 export type DispatchResult = ResponseFrame & { afterReply?: () => void };
 
-type Deferred = { label: string; run: () => void };
-
-function withDeferred(frame: ResponseFrame, deferred: Deferred[]): DispatchResult {
+function withDeferred(frame: ResponseFrame, deferred: Array<() => void>, command: string): DispatchResult {
   if (deferred.length === 0) return frame;
   return {
     ...frame,
     afterReply: () => {
-      for (const { label, run } of deferred) {
+      for (const run of deferred) {
         try {
           run();
         } catch (err) {
-          log.error('Deferred post-reply work failed', { label, err });
+          log.error('Deferred post-reply work failed', { command, err });
         }
       }
     },
@@ -199,8 +196,8 @@ export async function dispatch(
     return err(req.id, 'invalid-args', errMsg(e));
   }
 
-  const deferred: Deferred[] = [];
-  const handlerCtx: HandlerContext = { ...ctx, defer: (label, run) => deferred.push({ label, run }) };
+  const deferred: Array<() => void> = [];
+  const handlerCtx: HandlerContext = { ...ctx, defer: (run) => deferred.push(run) };
   try {
     let data = await cmd.handler(parsed, handlerCtx);
 
@@ -247,12 +244,12 @@ export async function dispatch(
     // formatter degrades to plain `data`, never fails the response.
     if (cmd.formatHuman) {
       try {
-        return withDeferred({ id: req.id, ok: true, data, human: cmd.formatHuman(data) }, deferred);
+        return withDeferred({ id: req.id, ok: true, data, human: cmd.formatHuman(data) }, deferred, cmd.name);
       } catch {
         // fall through to the plain frame
       }
     }
-    return withDeferred({ id: req.id, ok: true, data }, deferred);
+    return withDeferred({ id: req.id, ok: true, data }, deferred, cmd.name);
   } catch (e) {
     return err(req.id, 'handler-error', errMsg(e));
   }
@@ -270,9 +267,7 @@ registerApprovalHandler('cli_command', async ({ payload, approval, notify }) => 
   } else {
     await notify(`Your \`ncl ${frame.command}\` request was approved but failed: ${response.error.message}`);
   }
-  // Work the handler deferred (a host restart) runs once the approval is fully
-  // resolved — row deleted, resolution announced, wake requested — not merely
-  // once this notify is out.
+  // Deferred work runs once the approval is fully resolved (HandlerContext.defer).
   return { afterResolved: response.afterReply };
 });
 

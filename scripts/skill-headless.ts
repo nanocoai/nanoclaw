@@ -6,13 +6,13 @@
 // pipelines. The prose in each SKILL.md stays authoritative: anything the
 // engine cannot do deterministically is reported as an agent task, never
 // improvised, and an install that does not fully apply is rolled back through
-// the engine's journal unless the caller asks to keep the partial state.
+// the engine's journal.
 //
 // Usage (always prints one JSON document to stdout):
 //   pnpm exec tsx scripts/skill-headless.ts list [--root <dir>]
 //   pnpm exec tsx scripts/skill-headless.ts plan <skill> [--root <dir>]
 //   pnpm exec tsx scripts/skill-headless.ts apply <skill> [--root <dir>] [--inputs <json>]
-//        [--refresh] [--no-secret-inputs] [--keep-partial] [--allow-dirty]
+//        [--refresh] [--no-secret-inputs]
 //
 // Exit code 0 when the request succeeded (list, plan, or a fully applied skill);
 // 1 otherwise — the JSON carries the reason.
@@ -23,13 +23,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { parse as parseYaml } from 'yaml';
-
 import {
   CALLER_OWNED_EFFECTS,
   SKILL_APPLY_SCHEMA,
   assertSkillName,
+  errorMessage,
   isPlainObject,
+  parseFrontmatter,
   type SkillApplyReport,
   type SkillKind,
   type SkillPlan,
@@ -62,16 +62,11 @@ export interface ApplyHeadlessOptions {
   refresh?: boolean;
   /** Refuse inputs that answer a `secret` prompt (an agent caller must never carry a credential). */
   noSecretInputs?: boolean;
-  /** Leave a partially applied install in place instead of rolling the journal back. */
-  keepPartial?: boolean;
-  /** Skip the clean-working-tree precondition a refresh has (tests, scratch roots). */
-  allowDirty?: boolean;
   /** Command runner; defaults to a shell in `root`. */
   exec?: ApplyOptions['exec'];
 }
 
 const skillsRoot = (root: string) => path.join(root, '.claude', 'skills');
-const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 function readSkillMarkdown(root: string, name: string): { dir: string; md: string } {
   assertSkillName(name);
@@ -81,21 +76,10 @@ function readSkillMarkdown(root: string, name: string): { dir: string; md: strin
   return { dir, md: readFileSync(file, 'utf8') };
 }
 
-/**
- * The frontmatter `description`, read with the YAML parser. Empty when absent
- * or unparseable — one hand-edited skill must not hide the whole catalog.
- */
+/** The frontmatter `description`; empty when absent or unparseable — one hand-edited skill must not hide the catalog. */
 function frontmatterDescription(md: string): string {
-  const lines = md.split(/\r?\n/);
-  if (lines[0] !== '---') return '';
-  const close = lines.indexOf('---', 1);
-  if (close === -1) return '';
-  try {
-    const parsed: unknown = parseYaml(lines.slice(1, close).join('\n'));
-    return isPlainObject(parsed) && typeof parsed.description === 'string' ? parsed.description.trim() : '';
-  } catch {
-    return '';
-  }
+  const description = parseFrontmatter(md)?.description;
+  return typeof description === 'string' ? description.trim() : '';
 }
 
 const isPrompt = (d: Directive) => d.kind === 'prompt';
@@ -174,12 +158,13 @@ function porcelain(root: string): string | null {
 }
 
 /**
- * One apply per checkout, across processes. The setup wizard, /update-skills,
- * a terminal run, and `ncl skills apply` all write the same tree, and two
- * engines at once would build twice and roll back each other's journals. The
- * lock is a file in the OS temp dir named for the checkout — never inside the
- * tree, so it cannot dirty it — holding the owner's pid; a lock whose owner is
- * gone is stale and taken over.
+ * One headless apply per checkout at a time, across processes — `ncl skills
+ * apply`, pipelines, terminal runs of this script. Two engines at once would
+ * build twice and roll back each other's journals. (The setup wizard and
+ * /update-skills call the engine directly and are not covered.) The lock is a
+ * file in the OS temp dir named for the checkout — never inside the tree, so
+ * it cannot dirty it — holding the owner's pid; a lock whose owner is gone is
+ * stale and taken over.
  */
 export function applyLockPath(root: string): string {
   const key = createHash('sha1').update(path.resolve(root)).digest('hex').slice(0, 12);
@@ -258,10 +243,10 @@ const failed = (skill: string, error: string): SkillApplyReport => report(skill,
  * Apply one skill headlessly. Preconditions (a structured skill, no secret
  * inputs when forbidden, a clean tree for a refresh, no other apply on this
  * checkout) fail before any write. An install that does not fully apply is
- * rolled back through the engine's journal unless `keepPartial` is set, so the
- * tree is never left half-installed by accident. A refresh is never rolled
- * back: its journal records overwrites of files that were already installed,
- * and undoing those would delete them.
+ * rolled back through the engine's journal, so the tree is never left
+ * half-installed. A refresh is never rolled back: its journal records
+ * overwrites of files that were already installed, and undoing those would
+ * delete them.
  */
 export async function applyHeadless(
   root: string,
@@ -274,9 +259,10 @@ export async function applyHeadless(
     return failed(name, 'skill has no structured apply directives — it needs a coding agent to apply its prose');
   }
 
-  if (opts.refresh && !opts.allowDirty) {
+  if (opts.refresh) {
     const status = porcelain(root);
-    if (status === null) return failed(name, `${root} is not a git work tree; pass --allow-dirty to refresh anyway`);
+    if (status === null)
+      return failed(name, `${root} is not a git work tree — a refresh needs one to protect uncommitted edits`);
     if (status) {
       return failed(
         name,
@@ -327,7 +313,6 @@ export async function applyHeadless(
         'the refresh stopped part-way; files re-copied so far were left in place (a refresh is never rolled back)',
       );
     }
-    if (opts.keepPartial) return report(name, 'failed', res);
     try {
       await removeSkill(root, res.journal, async (cmd) => void (await exec(cmd)));
     } catch (err) {
@@ -335,7 +320,7 @@ export async function applyHeadless(
         name,
         'failed',
         res,
-        `rollback failed: ${errMsg(err)} — the tree may be partially undone; inspect it before retrying`,
+        `rollback failed: ${errorMessage(err)} — the tree may be partially undone; inspect it before retrying`,
       );
     }
     return report(name, 'rolled-back', res);
@@ -376,12 +361,6 @@ export function parseCli(argv: string[]): Cli {
       case '--no-secret-inputs':
         cli.noSecretInputs = true;
         break;
-      case '--keep-partial':
-        cli.keepPartial = true;
-        break;
-      case '--allow-dirty':
-        cli.allowDirty = true;
-        break;
       default:
         if (a.startsWith('--')) throw new Error(`unknown flag ${a}`);
         if (cli.skill !== undefined) throw new Error(`unexpected argument ${a}`);
@@ -419,7 +398,7 @@ async function main(): Promise<void> {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   main().catch((err) => {
-    process.stdout.write(`${JSON.stringify({ schema: SKILL_APPLY_SCHEMA, error: errMsg(err) })}\n`);
+    process.stdout.write(`${JSON.stringify({ schema: SKILL_APPLY_SCHEMA, error: errorMessage(err) })}\n`);
     process.exitCode = 1;
   });
 }

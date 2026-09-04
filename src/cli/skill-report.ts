@@ -7,6 +7,7 @@
  * script and parses the one JSON document it prints. Scripts do import from
  * `src/`, so the constants and types both sides share live here, once.
  */
+import { parse as parseYaml } from 'yaml';
 
 export const SKILL_APPLY_SCHEMA = 'nanoclaw-skill-apply/v1';
 
@@ -31,6 +32,22 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+export const errorMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/** A markdown document's YAML frontmatter as a mapping; undefined when absent, unparseable, or not a mapping. */
+export function parseFrontmatter(md: string): Record<string, unknown> | undefined {
+  const lines = md.split(/\r?\n/);
+  if (lines[0] !== '---') return undefined;
+  const close = lines.indexOf('---', 1);
+  if (close === -1) return undefined;
+  try {
+    const parsed: unknown = parseYaml(lines.slice(1, close).join('\n'));
+    return isPlainObject(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export type SkillKind = 'channel' | 'provider' | 'other';
 
 export interface SkillSummary {
@@ -45,16 +62,22 @@ export interface SkillSummary {
   callerOwnedEffects: string[];
 }
 
-/** A skill's declared input, as the engine's own prompt semantics describe it. */
-export interface SkillPromptSummary {
-  var: string;
-  question: string;
-  secret: boolean;
-  validate?: string;
-  flags?: string;
-  normalize?: string;
+/** What an `nc:prompt` declares about the value it needs — the engine's own prompt semantics. */
+export interface InputMeta {
+  question: string; // the prompt body (verbatim)
+  secret: boolean; // consumer must mask
+  validate?: string; // regex source (nc:prompt validate:<re>)
+  flags?: string; // regex flags   (nc:prompt flags:<f>)
+  normalize?: 'trim' | 'rstrip-slash' | 'lower'; // applied by the ENGINE at bind
+  // Interactive select options, `|`-separated (nc:prompt choices:a|b). When a
+  // value is legal only via pre-bound inputs (e.g. slack's `provisioned`
+  // connection), validate stays wider than the offered set — so a consumer
+  // must prefer this over options derived from the validate alternation.
   choices?: string;
 }
+
+/** A skill's declared input, named. */
+export type SkillPromptSummary = { var: string } & InputMeta;
 
 export interface SkillPlan {
   skill: string;

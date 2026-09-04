@@ -100,7 +100,7 @@ async function commandDecide(cmd: CommandDef, input: GuardInput) {
   }
 
   if (cmd.refuse) {
-    const reason = await cmd.refuse(args, actor);
+    const reason = await cmd.refuse(args, actor, { replay: input.grant != null });
     if (reason) return DENY(reason);
   }
 

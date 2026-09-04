@@ -25,26 +25,15 @@
 import { execSync } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, appendFileSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { CALLER_OWNED_EFFECTS } from '../src/cli/skill-report.js';
-import { parseDirectives, promptVar, type Directive } from './skill-directives.js';
+import { CALLER_OWNED_EFFECTS, type InputMeta } from '../src/cli/skill-report.js';
+
+export type { InputMeta };
+import { parseDirectives, promptVar, type Directive, isSecretPrompt } from './skill-directives.js';
 
 // What an `nc:prompt` DECLARES about the value it needs — the core seam's input
 // contract, passed to `resolveInput` so a consumer can run its OWN re-ask loop
 // (clack validate, a chat exchange). Declaration only: how the value is
 // ACQUIRED (a masked TTY prompt, a chat message) is the consumer's business.
-export interface InputMeta {
-  question: string; // the prompt body (verbatim)
-  secret: boolean; // consumer must mask
-  validate?: string; // regex source (nc:prompt validate:<re>)
-  flags?: string; // regex flags   (nc:prompt flags:<f>)
-  normalize?: 'trim' | 'rstrip-slash' | 'lower'; // applied by the ENGINE at bind
-  // Interactive select options, `|`-separated (nc:prompt choices:a|b). When a
-  // value is legal only via pre-bound inputs (e.g. slack's `provisioned`
-  // connection), validate stays wider than the offered set — so a consumer
-  // must prefer this over options derived from the validate alternation.
-  choices?: string;
-}
-
 // Everything the engine EMITS — the core seam's output contract. Every
 // `onEvent` call is AWAITED before the engine proceeds; that ordering guarantee
 // is what lets a consumer implement gating (hold the operator event until the
@@ -217,7 +206,7 @@ export function planSkill(
   const steps: PlanStep[] = self.map(({ d, status, detail }, i) => {
     if (d.kind !== 'prompt') return { n: i + 1, kind: d.kind, line: d.line, status, detail };
     const v = promptVar(d) ?? '?';
-    const tag = `${v}${d.args.includes('secret') ? ' (secret)' : ''}`;
+    const tag = `${v}${isSecretPrompt(d) ? ' (secret)' : ''}`;
     const cons = consumers.get(v) ?? [];
     const satisfied = cons.length > 0 && cons.every((j) => self[j].status === 'skip');
     return satisfied
@@ -558,7 +547,7 @@ const NORMALIZE_KINDS: ReadonlySet<string> = new Set(['trim', 'rstrip-slash', 'l
 // along with the fence when a skill degrades to prose — invisible to the agent.
 /** The declared input semantics of a `prompt` directive — what any consumer asking for its value must know. */
 export function promptMeta(d: Directive): InputMeta {
-  return inputMetaOf(d, d.args.includes('secret'), typeof d.attrs.validate === 'string' ? d.attrs.validate : undefined);
+  return inputMetaOf(d, isSecretPrompt(d), typeof d.attrs.validate === 'string' ? d.attrs.validate : undefined);
 }
 
 function inputMetaOf(d: Directive, secret: boolean, validate: string | undefined): InputMeta {
@@ -897,7 +886,7 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
       }
       if (d.kind === 'prompt') {
         const v = promptVar(d)!;
-        const secret = d.args.includes('secret');
+        const secret = isSecretPrompt(d);
         const validate = typeof d.attrs.validate === 'string' ? d.attrs.validate : undefined;
         const flags = typeof d.attrs.flags === 'string' ? d.attrs.flags : undefined;
         const normalize = typeof d.attrs.normalize === 'string' ? d.attrs.normalize : undefined;
