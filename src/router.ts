@@ -202,7 +202,12 @@ function dispatchSessionCreated(event: SessionCreatedEvent): void {
 
 function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string } {
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    // JSON.parse on a primitive ("5", "true", "\"hi\"") succeeds but returns a
+    // non-object; callers read .text/.sender off the result, so anything that
+    // isn't a plain object must fall back to treating raw as the text body.
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    return { text: raw };
   } catch {
     return { text: raw };
   }
@@ -483,10 +488,17 @@ async function evaluateEngage(
 ): Promise<boolean> {
   switch (agent.engage_mode) {
     case 'pattern': {
-      const pat = agent.engage_pattern ?? '.';
+      // `?? '.'` left an empty or whitespace-only pattern intact, so a blank
+      // engage_pattern compiled to `new RegExp('')` / `new RegExp('   ')` and
+      // matched (nearly) every message. Normalize blank/whitespace to the
+      // explicit always-engage sentinel instead.
+      const pat = agent.engage_pattern?.trim() || '.';
       if (pat === '.') return true;
       try {
-        return new RegExp(pat).test(text);
+        // Bound the input a (possibly mistyped, catastrophic-backtracking) regex
+        // tests against, so a huge inbound message can't drive a ReDoS hang.
+        const probe = text.length > 8192 ? text.slice(0, 8192) : text;
+        return new RegExp(pat).test(probe);
       } catch {
         // Bad regex: fail open so admin sees the agent responding + can fix.
         return true;
