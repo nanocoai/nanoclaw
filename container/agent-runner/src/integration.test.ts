@@ -499,6 +499,35 @@ describe('poll loop — /clear command', () => {
 
     await loopPromise.catch(() => {});
   });
+
+  it('delivers /clear from an agent row as text without clearing the session', async () => {
+    setContinuation('mock', 'existing-session-id');
+    insertMessage(
+      'm-agent-clear',
+      { sender: 'Helper', senderId: 'agent:ag-helper', text: '/clear' },
+      { platformId: 'ag-helper', channelType: 'agent' },
+    );
+
+    let receivedPrompt = '';
+    const provider = new MockProvider({}, (prompt) => {
+      receivedPrompt = prompt;
+      return '<message to="discord-test">agent text received</message>';
+    });
+    Object.defineProperty(provider, 'supportsNativeSlashCommands', { value: true });
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+    await loopPromise.catch(() => {});
+
+    expect(receivedPrompt).toContain('<message');
+    expect(receivedPrompt).toContain('>/clear</message>');
+    expect(getContinuation('mock')).toBeDefined();
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('agent text received');
+  });
 });
 
 /**

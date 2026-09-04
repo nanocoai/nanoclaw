@@ -335,7 +335,15 @@ async function performAgentRoute(
   // agent can actually see and re-send them. Without this, agent-to-agent
   // file attachments look like they arrive but the target has no way to
   // read the bytes — they live in a session dir it doesn't mount.
-  const forwardedContent = forwardFileAttachments(msg, a2aMsgId, session, targetAgentGroupId, targetSession.id);
+  const sourceName = (await getAgentGroup(session.agent_group_id))?.name ?? session.agent_group_id;
+  const forwardedContent = prepareForwardedContent(
+    msg,
+    sourceName,
+    a2aMsgId,
+    session,
+    targetAgentGroupId,
+    targetSession.id,
+  );
 
   await writeSessionMessage(targetAgentGroupId, targetSession.id, {
     id: a2aMsgId,
@@ -359,30 +367,39 @@ async function performAgentRoute(
 }
 
 /**
- * Parse source content, copy any referenced `files` from source outbox to
- * target inbox, and return a JSON string with an `attachments` array added
- * (formatter.ts:223 already knows how to render this shape).
+ * Stamp the runtime-authenticated sender identity, copy any referenced `files`
+ * from source outbox to target inbox, and return the prepared JSON payload.
  *
- * If the source content isn't JSON or has no files, returns the original
- * content string unchanged — this is safe to call on every route.
+ * Sender identity is overwritten at this trusted boundary: an agent cannot
+ * claim to be another agent by writing its own fields into the outbound DB.
  */
-function forwardFileAttachments(
+function prepareForwardedContent(
   msg: RoutableAgentMessage,
+  sourceName: string,
   a2aMsgId: string,
   sourceSession: Session,
   targetAgentGroupId: string,
   targetSessionId: string,
 ): string {
-  let parsed: Record<string, unknown>;
+  let parsed: Record<string, unknown> = { text: msg.content };
   try {
-    parsed = JSON.parse(msg.content);
+    const content: unknown = JSON.parse(msg.content);
+    if (typeof content === 'object' && content !== null && !Array.isArray(content)) {
+      parsed = content as Record<string, unknown>;
+    }
   } catch {
-    return msg.content;
+    // Preserve malformed legacy content as text while still authenticating it.
   }
+  if (typeof parsed.text !== 'string') {
+    parsed.text = parsed.text == null ? '' : JSON.stringify(parsed.text);
+  }
+  parsed.sender = sourceName;
+  parsed.senderId = `agent:${sourceSession.agent_group_id}`;
+
   const files = parsed.files as unknown;
-  if (!Array.isArray(files) || files.length === 0) return msg.content;
+  if (!Array.isArray(files) || files.length === 0) return JSON.stringify(parsed);
   const filenames = files.filter((f): f is string => typeof f === 'string');
-  if (filenames.length === 0) return msg.content;
+  if (filenames.length === 0) return JSON.stringify(parsed);
 
   const attachments = forwardAttachedFiles(
     {

@@ -5,7 +5,7 @@ import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 
 import { forwardAttachedFiles, isSafeAttachmentName, routeAgentMessage } from './agent-route.js';
 import { log } from '../../log.js';
-import { createDestination } from './db/agent-destinations.js';
+import { createDestination, deleteDestination } from './db/agent-destinations.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
 import { createSession, updateSession } from '../../db/sessions.js';
 import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
@@ -173,7 +173,7 @@ describe('routeAgentMessage return-path', () => {
       {
         id: 'msg-from-A-S1',
         platform_id: B,
-        content: JSON.stringify({ text: 'hello B' }),
+        content: JSON.stringify({ text: 'hello B', sender: 'spoofed', senderId: 'agent:pretender' }),
         in_reply_to: null,
       },
       S1,
@@ -183,6 +183,49 @@ describe('routeAgentMessage return-path', () => {
     expect(bRows).toHaveLength(1);
     expect(bRows[0].platform_id).toBe(A);
     expect(bRows[0].source_session_id).toBe(S1.id); // <- the return address
+    expect(JSON.parse(bRows[0].content).sender).toBe('A');
+    expect(JSON.parse(bRows[0].content).senderId).toBe(`agent:${A}`);
+  });
+
+  it('stores the exact trusted fixture for an authorized one-way agent message', async () => {
+    await deleteDestination(B, 'a');
+
+    await routeAgentMessage(
+      {
+        id: 'one-way-trusted-fixture',
+        platform_id: B,
+        content: JSON.stringify({ text: 'status update', sender: 'Pretender', senderId: 'agent:pretender' }),
+        in_reply_to: null,
+      },
+      S1,
+    );
+
+    // Counterpart: container/agent-runner/src/poll-loop.test.ts formats this exact stored row shape.
+    expect(readInbound(B, SB.id)).toEqual([
+      {
+        id: expect.stringMatching(/^a2a-/),
+        platform_id: A,
+        channel_type: 'agent',
+        content: JSON.stringify({ text: 'status update', sender: 'A', senderId: `agent:${A}` }),
+        source_session_id: S1.id,
+      },
+    ]);
+  });
+
+  it('normalizes structured message text to a string at the trusted boundary', async () => {
+    await routeAgentMessage(
+      {
+        id: 'msg-with-structured-text',
+        platform_id: B,
+        content: JSON.stringify({ text: { status: 'ready' } }),
+        in_reply_to: null,
+      },
+      S1,
+    );
+
+    const content = JSON.parse(readInbound(B, SB.id)[0].content) as { text: unknown };
+    expect(content.text).toBe('{"status":"ready"}');
+    expect(typeof content.text).toBe('string');
   });
 
   it('reply direction: routes back to the originating session, not the newest', async () => {
@@ -219,7 +262,7 @@ describe('routeAgentMessage return-path', () => {
     // The reply lands in S1 (originator) even though S2 is newer.
     expect(s1Rows).toHaveLength(1);
     expect(s1Rows[0].platform_id).toBe(B);
-    expect(JSON.parse(s1Rows[0].content).text).toBe('pong');
+    expect(JSON.parse(s1Rows[0].content)).toMatchObject({ text: 'pong', sender: 'B' });
     expect(s2Rows).toHaveLength(0);
   });
 
@@ -443,6 +486,7 @@ describe('routeAgentMessage return-path', () => {
     expect(bRows).toHaveLength(1);
     const parsed = JSON.parse(bRows[0].content);
     expect(parsed.attachments).toHaveLength(1);
+    expect(parsed.sender).toBe('A');
     expect(parsed.attachments[0].name).toBe('report.pdf');
     expect(parsed.attachments[0].type).toBe('file');
 
