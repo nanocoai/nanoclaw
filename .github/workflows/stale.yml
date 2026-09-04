@@ -1,0 +1,152 @@
+# Stale policy, lane A: author-blocked items only.
+#
+# This workflow never examines the backlog at large. It looks at exactly two
+# populations, both of which mean a human already read the item and asked its
+# author for something:
+#
+#   issues  carrying  triage/needs-repro   (we asked for a reproduction)
+#   PRs     carrying  triage/needs-author  (a maintainer requested changes)
+#
+# Everything else is invisible to it. An item waiting on us for review, for
+# triage, or for a decision is never marked and never closed, because the
+# absence of those labels is what "the ball is ours" looks like in this repo.
+# The rule the policy is built on: a bot may close an item only when the ball
+# is demonstrably in the author's court, and only after the bot said so out
+# loud and gave a deadline.
+#
+# Timings: 21 days of silence marks an item stale. A stale issue closes 14 days
+# later (35 total), a stale PR 21 days later (42 total). remove-stale-when-
+# updated is on, so any reply, commit, or comment clears the label and restarts
+# the clock. Closes use the not_planned reason, which renders as "not planned"
+# rather than "completed" and keeps these out of resolved metrics.
+#
+# Escape hatches, in order of how often they should be reached for:
+#   - reply to the item                -> label comes off automatically
+#   - remove the triage/* label        -> item leaves the population entirely
+#   - add triage/keep                  -> permanent exemption, no argument
+#
+# ---------------------------------------------------------------------------
+# DRY RUN. debug-only is true. ARMING IS DUE 2026-09-12.
+#
+# Until that date this workflow performs NO writes. It logs what it would have
+# marked and closed and stops there: no labels, no comments, no closes, no
+# notifications to anyone. The two weeks exist so a mis-scoped label filter is
+# caught by reading a log rather than by several hundred contributors reading a
+# bot comment.
+#
+# Flipping debug-only to false is the arming step and it is not reversible for
+# anything already sent. Before flipping, on 2026-09-12 or later:
+#   1. Read the most recent run's log and confirm every item it lists is
+#      genuinely author-blocked.
+#   2. Confirm the "stale" label exists on the repo. It does not today; GitHub
+#      would auto-create it with a default colour on the first armed run, which
+#      is not how the rest of this taxonomy was made.
+#   3. Confirm triage/keep is on anything a maintainer wants frozen, so the
+#      escape hatch is in place on day one rather than after the first
+#      complaint.
+# Day-1 blast radius when this shipped was zero items, because neither trigger
+# label was applied to anything yet. Volume can only grow as fast as triage
+# applies those labels, which is to say never faster than a human reading the
+# item first.
+# ---------------------------------------------------------------------------
+#
+# Lane B (a slow, forward-dated general-inactivity lane) is deliberately not
+# here. It is a separate decision and a separate change.
+
+name: Stale
+
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      # actions/stale v11.0.0, pinned to the commit the tag resolves to.
+      - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93
+        with:
+          # DRY RUN. See the arming note above. Due 2026-09-12.
+          debug-only: true
+
+          # The population. Nothing outside these two label sets is examined.
+          any-of-issue-labels: 'triage/needs-repro'
+          any-of-pr-labels: 'triage/needs-author'
+
+          days-before-issue-stale: 21
+          days-before-issue-close: 14
+          days-before-pr-stale: 21
+          days-before-pr-close: 21
+
+          stale-issue-label: 'stale'
+          stale-pr-label: 'stale'
+          remove-stale-when-updated: true
+          close-issue-reason: 'not_planned'
+
+          # Never touch a contributor's branch. This is also the default; it is
+          # set explicitly so a later edit has to be deliberate.
+          delete-branch: false
+
+          # Exemptions. Every entry is a label or a piece of metadata, so none
+          # of this is a judgment call at runtime.
+          #
+          #   kind/security, kind/hardening  an unfixed vulnerability does not
+          #                                  stop being one because nobody
+          #                                  commented
+          #   priority/critical, /high       maintainer-set; if we said it
+          #                                  matters, the bot gets no vote
+          #   good first issue, help wanted  parked on purpose, for newcomers;
+          #                                  idleness is the intended state
+          #                                  ("help wanted" does not exist on
+          #                                  this repo today, so it is listed
+          #                                  as forward protection)
+          #   core-team                      our own work; nudge a colleague,
+          #                                  never close their branch
+          #   triage/keep                    the manual freeze, permanent
+          exempt-issue-labels: 'kind/security,kind/hardening,priority/critical,priority/high,good first issue,help wanted,core-team,triage/keep'
+          exempt-pr-labels: 'kind/security,kind/hardening,priority/critical,priority/high,good first issue,help wanted,core-team,triage/keep'
+
+          # Free insurance: no milestones exist today, so this costs nothing
+          # now and protects any release milestone created later. An assignee
+          # means a human took it, which means it is waiting on us.
+          exempt-all-milestones: true
+          exempt-all-assignees: true
+
+          # A draft is a work in progress by definition.
+          exempt-draft-pr: true
+
+          # Lane A alone can never produce a large sweep, so the rate-limit
+          # ceiling is set for headroom rather than for backlog scale.
+          operations-per-run: 100
+
+          stale-pr-message: >-
+            **This PR is waiting on a change from you.** A maintainer asked for something above and
+            we have not heard back, so it is now labelled `stale`. Push a commit, leave a comment,
+            or tell us you need more time. Any of those removes the label automatically. If nothing
+            arrives in 21 days we will close it, so the open queue stays an honest picture of what
+            is moving. A close here is bookkeeping, not a verdict on your work. Thank you for the
+            contribution.
+
+          close-pr-message: >-
+            **Closing this for now.** Nothing came back on the request above, so we are closing to
+            keep the review queue matched to what is actually moving. This is not a rejection and
+            it is not permanent. Reopen this PR whenever you pick it back up, or open a fresh one
+            against current `main`. Either way it gets a first response within 7 days, like any new
+            contribution. Thank you for the work you put into it.
+
+          stale-issue-message: >-
+            **We still need a reproduction before this can move.** We asked above and have not heard
+            back, so this is now labelled `stale`. Add the steps, your NanoClaw version, and the
+            relevant lines from `logs/nanoclaw.error.log`. That removes the label automatically.
+            Without a reproduction we will close in 14 days, because we cannot fix behaviour we
+            cannot see. Reply with the details at any point and we will reopen.
+
+          close-issue-message: >-
+            **Closing this for now, because we could not reproduce it.** That is a limit on what we
+            can see from here, not a judgment on the report. Reply with steps, a version, and logs
+            at any time and we will reopen this issue and pick it up. Thank you for taking the time
+            to file it.
