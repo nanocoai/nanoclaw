@@ -34,7 +34,7 @@ registerResource({
   plural: 'destinations',
   table: 'agent_destinations',
   description:
-    'Agent destination — per-agent routing entry and ACL. Each row authorizes an agent to send messages to a target (channel or another agent) and assigns a local name the agent uses to address it. Names are scoped to the source agent — two agents can have different local names for the same target. Created automatically when wiring channels or when agents create child agents.',
+    'Agent destination — per-agent routing entry and ACL. Each row authorizes an agent to send messages to a target (channel or another agent) and assigns a local name the agent uses to address it. Agent-to-agent destinations are one-way: two-way messaging requires one destination in each direction. Names are scoped to the source agent — two agents can have different local names for the same target. Created automatically when wiring channels or when agents create child agents.',
   idColumn: 'agent_group_id',
   scopeField: 'agent_group_id',
   columns: [
@@ -94,7 +94,8 @@ registerResource({
     },
     add: {
       access: 'approval',
-      description: 'Add a destination for an agent. Use --agent-group-id, --local-name, --target-type, --target-id.',
+      description:
+        'Add a one-way destination for an agent. For two-way agent messaging, add each agent as a destination of the other. Use --agent-group-id, --local-name, --target-type, --target-id.',
       handler: async (args) => {
         const agentGroupId = args.agent_group_id as string;
         const localName = args.local_name as string;
