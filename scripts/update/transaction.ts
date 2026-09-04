@@ -31,6 +31,7 @@ export interface UpdateRequirement {
 export interface SnapshotEntry {
   relativePath: string;
   existed: boolean;
+  symlinkTarget?: string;
 }
 
 export interface UpdateState {
@@ -373,8 +374,18 @@ export async function validateUpdate(
 
 const MUTABLE_PATHS = ['.env', 'data', 'groups', 'store', 'start-nanoclaw.sh', 'nanoclaw.pid'];
 
-function copyEntry(source: string, destination: string): void {
-  const stat = fs.lstatSync(source);
+function lstatIfExists(source: string): fs.Stats | undefined {
+  try {
+    return fs.lstatSync(source);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw err;
+  }
+}
+
+function copyEntry(source: string, destination: string, dereferenceRoot = false): void {
+  const linkStat = fs.lstatSync(source);
+  const stat = dereferenceRoot && linkStat.isSymbolicLink() ? fs.statSync(source) : linkStat;
   if (stat.isDirectory()) {
     fs.mkdirSync(destination, { recursive: true, mode: stat.mode });
     for (const entry of fs.readdirSync(source)) copyEntry(path.join(source, entry), path.join(destination, entry));
@@ -415,7 +426,7 @@ function createSnapshot(state: UpdateState): SnapshotEntry[] {
   fs.mkdirSync(buildRoot, { recursive: true, mode: 0o700 });
   const bytesNeeded = MUTABLE_PATHS.reduce((total, relativePath) => {
     const source = path.join(state.projectRoot, relativePath);
-    return total + (fs.existsSync(source) ? entrySize(source) : 0);
+    return total + (lstatIfExists(source) ? entrySize(source, true) : 0);
   }, 0);
   const disk = fs.statfsSync(buildRoot);
   const bytesAvailable = Number(disk.bavail) * Number(disk.bsize);
@@ -427,9 +438,11 @@ function createSnapshot(state: UpdateState): SnapshotEntry[] {
   }
   const entries = MUTABLE_PATHS.map((relativePath) => {
     const source = path.join(state.projectRoot, relativePath);
-    const existed = fs.existsSync(source);
-    if (existed) copyEntry(source, path.join(buildRoot, relativePath));
-    return { relativePath, existed };
+    const sourceStat = lstatIfExists(source);
+    const existed = sourceStat !== undefined;
+    const symlinkTarget = sourceStat?.isSymbolicLink() ? fs.readlinkSync(source) : undefined;
+    if (existed) copyEntry(source, path.join(buildRoot, relativePath), true);
+    return { relativePath, existed, ...(symlinkTarget === undefined ? {} : { symlinkTarget }) };
   });
   if (fs.existsSync(snapshotRoot)) fs.renameSync(snapshotRoot, supersededRoot);
   fs.renameSync(buildRoot, snapshotRoot);
@@ -437,8 +450,9 @@ function createSnapshot(state: UpdateState): SnapshotEntry[] {
   return entries;
 }
 
-function entrySize(source: string): number {
-  const stat = fs.lstatSync(source);
+function entrySize(source: string, dereferenceRoot = false): number {
+  const linkStat = fs.lstatSync(source);
+  const stat = dereferenceRoot && linkStat.isSymbolicLink() ? fs.statSync(source) : linkStat;
   if (stat.isFile()) return stat.size;
   if (!stat.isDirectory()) return 0;
   return fs.readdirSync(source).reduce((total, entry) => total + entrySize(path.join(source, entry)), 0);
@@ -451,9 +465,19 @@ function restoreSnapshot(state: UpdateState): void {
   // it entry-by-entry would delete live targets and then fail anyway.
   if (!fs.existsSync(snapshotRoot)) throw new Error(`Mutable-state snapshot missing: ${snapshotRoot}`);
   for (const entry of state.snapshot) {
+    if (entry.symlinkTarget === undefined) continue;
     const target = path.join(state.projectRoot, entry.relativePath);
-    fs.rmSync(target, { recursive: true, force: true });
-    if (entry.existed) copyEntry(path.join(snapshotRoot, entry.relativePath), target);
+    const stat = fs.lstatSync(target);
+    if (!stat.isSymbolicLink() || fs.readlinkSync(target) !== entry.symlinkTarget) {
+      throw new Error(`Mutable-state symlink changed after snapshot: ${target}`);
+    }
+  }
+  for (const entry of state.snapshot) {
+    const target = path.join(state.projectRoot, entry.relativePath);
+    const restoreTarget =
+      entry.symlinkTarget === undefined ? target : realResolve(path.resolve(path.dirname(target), entry.symlinkTarget));
+    fs.rmSync(restoreTarget, { recursive: true, force: true });
+    if (entry.existed) copyEntry(path.join(snapshotRoot, entry.relativePath), restoreTarget);
   }
 }
 
