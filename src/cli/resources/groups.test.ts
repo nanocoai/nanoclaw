@@ -305,4 +305,40 @@ describe('groups config add-mount / remove-mount (host-only)', () => {
     expect(rm.ok).toBe(true);
     expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([]);
   });
+
+  it('adds a mount with --rw, still subject to the allowlist at spawn time', async () => {
+    const GID = 'ag-mount-rw';
+    await createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+
+    const add = await dispatch(
+      {
+        id: 'r1',
+        command: 'groups-config-add-mount',
+        args: { id: GID, host: '/data/shared', container: '/home/node/shared', rw: true },
+      },
+      { caller: 'host' },
+    );
+    expect(add.ok).toBe(true);
+    expect(JSON.parse((await getContainerConfig(GID))!.additional_mounts)).toEqual([
+      { hostPath: '/data/shared', containerPath: '/home/node/shared', readonly: false },
+    ]);
+  });
+
+  it('rejects --ro and --rw together', async () => {
+    const GID = 'ag-mount-conflict';
+    await createAgentGroup({ id: GID, name: 'm', folder: 'm', agent_provider: null, created_at: now() });
+    await ensureContainerConfig(GID);
+
+    const add = await dispatch(
+      {
+        id: 'r1',
+        command: 'groups-config-add-mount',
+        args: { id: GID, host: '/data/shared', container: '/home/node/shared', ro: true, rw: true },
+      },
+      { caller: 'host' },
+    );
+    expect(add.ok).toBe(false);
+    expect((add as { ok: false; error: { message: string } }).error.message).toMatch(/--ro or --rw, not both/);
+  });
 });

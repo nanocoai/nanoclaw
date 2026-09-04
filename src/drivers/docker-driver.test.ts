@@ -10,7 +10,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { DockerSessionDriver, dockerEventToSessionEvent, ensureDockerRunning } from './docker-driver.js';
+import { DockerSessionDriver, dockerEventToSessionEvent, ensureDockerRunning, groupAddArgs } from './docker-driver.js';
 import { FakeCli } from './fake-cli.js';
 import { withSessionEvents } from './session-events.js';
 import { FIXTURE_POLICY, fixtureSpec } from './spec-fixture.js';
@@ -84,6 +84,42 @@ describe('spec realization', () => {
     // SIGKILL after the full grace period.
     expect(args).toContain('--init');
     expect(args.join(' ')).toContain('--pids-limit 2048');
+  });
+
+  it('disables SELinux type enforcement so unlabeled bind mounts are not denied', async () => {
+    // Bind mounts here carry no :z/:Z relabeling, so an enforcing host (e.g.
+    // Fedora) denies the mapped-uid process access to arbitrary host paths
+    // regardless of the --user/cap-drop posture. This only removes that
+    // additional MAC layer; --user, --cap-drop and the rest are unaffected.
+    await driver().prepare(fixtureSpec());
+    const args = createArgs();
+
+    expect(args.join(' ')).toContain('--security-opt label=disable');
+    expect(args).toContain('--cap-drop=ALL');
+  });
+
+  it('grants supplementary group access for a groupId-bearing rw mount', async () => {
+    const spec = fixtureSpec();
+    spec.containers[0].mounts.push({
+      class: 'allowlisted-extra',
+      hostPath: '/pki/shared-writable',
+      containerPath: '/workspace/extra/shared',
+      mode: 'rw',
+      groupScope: 'g1',
+      groupId: 1004,
+    });
+    await driver().prepare(spec);
+    const args = createArgs();
+
+    expect(args).toContain('--group-add');
+    expect(args[args.indexOf('--group-add') + 1]).toBe('1004');
+  });
+
+  it('omits --group-add entirely when no mount carries a groupId', async () => {
+    await driver().prepare(fixtureSpec());
+    const args = createArgs();
+
+    expect(args).not.toContain('--group-add');
   });
 
   it('omits the pids limit for 0, negatives and absent values', async () => {
@@ -670,5 +706,37 @@ describe('ensureDockerRunning', () => {
     cli.responses = [{ match: /^info$/, throws: new Error('Cannot connect to the Docker daemon') }];
     expect(() => ensureDockerRunning(cli)).toThrow('Container runtime is required but failed to start');
     expect(log.error).toHaveBeenCalled();
+  });
+});
+
+describe('groupAddArgs', () => {
+  const mount = (groupId: number | undefined) => ({
+    class: 'allowlisted-extra' as const,
+    hostPath: '/h',
+    containerPath: '/c',
+    mode: 'rw' as const,
+    groupScope: 'g1',
+    groupId,
+  });
+
+  it('emits one --group-add pair per distinct gid', () => {
+    expect(groupAddArgs([mount(1004), mount(1005)])).toEqual(['--group-add', '1004', '--group-add', '1005']);
+  });
+
+  it('dedupes a gid shared by multiple mounts', () => {
+    expect(groupAddArgs([mount(1004), mount(1004)])).toEqual(['--group-add', '1004']);
+  });
+
+  it('sorts numerically so the argv is deterministic', () => {
+    expect(groupAddArgs([mount(2000), mount(100)])).toEqual(['--group-add', '100', '--group-add', '2000']);
+  });
+
+  it('skips mounts with no groupId', () => {
+    expect(groupAddArgs([mount(undefined), mount(1004)])).toEqual(['--group-add', '1004']);
+  });
+
+  it('returns an empty array when nothing needs a supplementary group', () => {
+    expect(groupAddArgs([mount(undefined)])).toEqual([]);
+    expect(groupAddArgs([])).toEqual([]);
   });
 });

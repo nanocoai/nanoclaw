@@ -923,6 +923,7 @@ export function toMountSpecs(mounts: readonly VolumeMount[], defaultScope: strin
     containerPath: mount.containerPath,
     mode: mount.readonly ? ('ro' as const) : ('rw' as const),
     groupScope: mount.scope ?? defaultScope,
+    groupId: mount.groupId,
   }));
 }
 

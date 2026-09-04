@@ -147,6 +147,7 @@ export class DockerSessionDriver implements SessionDriver {
     args.push(...envArgs(agent.env));
     args.push(...envArgs(agent.contributedEnv ?? {}));
     args.push(...mountArgs(agent.mounts));
+    args.push(...groupAddArgs(agent.mounts));
     // Network topology is driver-private: injected at registration (see
     // `drivers/index.ts`), never carried on the spec. Argv-shaped input has no
     // remaining channel through composition.
@@ -612,7 +613,7 @@ export function dockerEventToSessionEvent(doc: unknown, installSlug: string): Se
 export function agentContainerName(spec: SessionSpec): string {
   const raw = `${spec.key.installSlug}-${spec.key.sessionId}`.replaceAll(/[^a-zA-Z0-9_.-]/g, '-');
   if (raw.length <= 48) return `ncl-${raw}`;
-  const hash = createHash('sha256').update(`${spec.key.installSlug} ${spec.key.sessionId}`).digest('hex').slice(0, 8);
+  const hash = createHash('sha256').update(`${spec.key.installSlug} ${spec.key.sessionId}`).digest('hex').slice(0, 8);
   return `ncl-${raw.slice(0, 39)}-${hash}`;
 }
 
@@ -626,9 +627,17 @@ export function agentContainerName(spec: SessionSpec): string {
  * leaving the runtime as PID 1 with no signal handler, and Linux discards
  * default-action signals to PID 1. Without docker-init, SIGTERM is ignored and
  * every stop ends in SIGKILL after the full grace period.
+ *
+ * `label=disable` opts the container out of SELinux type enforcement on a host
+ * that has it enabled (e.g. Fedora). Bind mounts here (`mountArgs`) carry no
+ * `:z`/`:Z` relabeling, so an enforcing host denies the mapped-UID process
+ * access to arbitrary host paths regardless of the `--user`/cap-drop posture
+ * above. The actual containment this project relies on — non-root UID,
+ * dropped capabilities, no docker.sock, egress-locked network — is unaffected;
+ * this only removes the additional MAC layer SELinux would otherwise apply.
  */
 export function hardeningArgs(spec: SessionSpec): string[] {
-  const args = ['--cap-drop=ALL', '--security-opt', 'no-new-privileges', '--init'];
+  const args = ['--cap-drop=ALL', '--security-opt', 'no-new-privileges', '--security-opt', 'label=disable', '--init'];
   // Test >0, not truthiness: cgroups v2 rejects `--pids-limit 0` with EINVAL.
   const pids = spec.resources.pidsLimit;
   if (typeof pids === 'number' && Number.isFinite(pids) && pids > 0) {
@@ -661,6 +670,20 @@ export function mountArgs(mounts: readonly MountSpec[]): string[] {
     '-v',
     m.mode === 'ro' ? `${m.hostPath}:${m.containerPath}:ro` : `${m.hostPath}:${m.containerPath}`,
   ]);
+}
+
+/**
+ * Supplementary groups for mounts whose host directory is writable only via
+ * group membership — see `MountSpec.groupId`. `--user uid:gid` sets a primary
+ * group only, so without this a `mode: 'rw'` mount on such a directory would
+ * validate as writable but fail with EACCES in practice. Deduplicated and
+ * sorted so the resulting argv is deterministic.
+ */
+export function groupAddArgs(mounts: readonly MountSpec[]): string[] {
+  const gids = [...new Set(mounts.map((m) => m.groupId).filter((gid): gid is number => gid !== undefined))].sort(
+    (a, b) => a - b,
+  );
+  return gids.flatMap((gid) => ['--group-add', String(gid)]);
 }
 
 export function envArgs(env: Record<string, string>): string[] {

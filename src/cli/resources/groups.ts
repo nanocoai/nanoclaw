@@ -559,13 +559,18 @@ registerResource({
       description:
         "Mount a host directory into a group's containers. OPERATOR-ONLY — never runnable from " +
         'inside a container (mounting host paths is a filesystem-access boundary). Requires ' +
-        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <container-path> [--ro].',
+        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <container-path> ' +
+        '[--ro | --rw]. Neither flag defaults to read-only (mount-security fail-safe); --rw explicitly requests ' +
+        'read-write, which still only takes effect if the matching allowlist root permits it.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
         const hostPath = (args.host ?? args['host-path']) as string | undefined;
         const containerPath = (args.container ?? args['container-path']) as string | undefined;
         if (!hostPath || !containerPath) throw new Error('Provide --host <host-path> and --container <container-path>');
+        if ((args.ro || args.readonly) && args.rw) {
+          throw new Error('Provide --ro or --rw, not both');
+        }
 
         const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
@@ -573,7 +578,7 @@ registerResource({
         const mount: AdditionalMountConfig = {
           hostPath,
           containerPath,
-          ...(args.ro || args.readonly ? { readonly: true } : {}),
+          ...(args.rw ? { readonly: false } : args.ro || args.readonly ? { readonly: true } : {}),
         };
         const existing = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
         if (!existing.some((m) => m.hostPath === hostPath && m.containerPath === containerPath)) {

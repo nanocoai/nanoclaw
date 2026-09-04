@@ -49,6 +49,15 @@ export interface MountSpec {
   mode: 'rw' | 'ro';
   /** Lets a realization — by admission or by in-code checks — pin group-state to the group subtree. */
   groupScope: string;
+  /**
+   * Host GID a realization should grant the agent process as a supplementary
+   * group (Docker's `--group-add`), so a `mode: 'rw'` mount whose host
+   * directory is only group-writable is actually writable — `--user uid:gid`
+   * sets a primary GID only and drops supplementary groups otherwise. Set for
+   * 'allowlisted-extra' rw mounts by `validateAdditionalMounts`, from the
+   * mount root's owning gid; absent when the mount doesn't need it.
+   */
+  groupId?: number;
 }
 
 export interface ContainerSpec {
