@@ -114,14 +114,14 @@ This host is signed in to Dial as {{connected_email}}; the agents you chose will
 
 If it is **not**, verify an email with a one-time code. Collect the email:
 
-```nc:prompt owner_email validate:^[^@\s]+@[^@\s]+\.[^@\s]+$ when:signed_in=false
+```nc:prompt owner_email validate:^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ when:signed_in=false
 What's your email? Dial sends a one-time code to verify it. By continuing you create a Dial account and agree to Dial's Terms of Service (https://getdial.ai/terms) and Privacy Policy (https://getdial.ai/privacy).
 ```
 
 Send the code (`--force` re-sends even if a prior code is pending):
 
 ```nc:run effect:external when:signed_in=false
-DIAL_USER_AGENT={{dial_ua}} dial auth login {{owner_email}} --force
+DIAL_USER_AGENT={{dial_ua}} dial auth login '{{owner_email}}' --force
 ```
 
 ### Verify the code
