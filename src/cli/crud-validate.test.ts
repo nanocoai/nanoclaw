@@ -8,7 +8,7 @@ vi.mock('../db/container-configs.js', () => ({
 import { registerResource, validateArgs } from './crud.js';
 import { registerResourceHelpCommands } from './commands/help.js';
 import { lookup } from './registry.js';
-import type { CallerContext } from './frame.js';
+import type { HandlerContext } from './registry.js';
 
 // --- validateArgs unit ---
 
@@ -136,12 +136,13 @@ describe('lenient ops (no declared args) keep legacy behavior', () => {
 
 describe('resource help command', () => {
   const helpCmd = lookup('widgets-help')!;
-  const host: CallerContext = { caller: 'host' };
-  const agent: CallerContext = {
+  const host: HandlerContext = { caller: 'host', defer: (run) => run() };
+  const agent: HandlerContext = {
     caller: 'agent',
     sessionId: 'sess-1',
     agentGroupId: 'ag-1',
     messagingGroupId: 'mg-1',
+    defer: (run) => run(),
   };
 
   it('renders the resource overview with verb summaries', async () => {

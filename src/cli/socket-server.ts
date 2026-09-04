@@ -125,13 +125,14 @@ async function handleFrame(conn: net.Socket, line: string): Promise<void> {
   // itself as the auth boundary.
   const ctx: CallerContext = { caller: 'host' };
   const res = await dispatch(req, ctx);
-  write(conn, res);
+  write(conn, res, res.afterReply);
 }
 
-function write(conn: net.Socket, frame: ResponseFrame): void {
+function write(conn: net.Socket, frame: ResponseFrame, afterReply?: () => void): void {
   try {
     conn.write(JSON.stringify(frame) + '\n');
-    conn.end();
+    // The reply has left once the frame is flushed (HandlerContext.defer).
+    conn.end(afterReply);
   } catch (err) {
     log.warn('Failed to write ncl CLI response', { err });
   }

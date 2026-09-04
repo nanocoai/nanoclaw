@@ -53,6 +53,8 @@ registerDeliveryAction(
     });
 
     log.info('CLI response written', { requestId, ok: response.ok, sessionId: session.id });
+    // The reply is in the mailbox; work the handler deferred until then may run.
+    response.afterReply?.();
   },
   unguarded('transport envelope — every inner command is guarded at dispatch'),
 );

@@ -38,7 +38,7 @@ interface RefreshOptions {
   exec?: (command: string, cwd: string) => string | void | Promise<string | void>;
 }
 
-function commandAvailable(command: string, cwd: string): boolean {
+export function commandAvailable(command: string, cwd: string): boolean {
   try {
     execFileSync(command, ['--version'], {
       cwd,
@@ -65,12 +65,18 @@ export function portableDependencyCommand(root: string, bunOnHost: boolean, requ
   return `${prefix}${manager} ${request.action} ${request.packages.join(' ')}`;
 }
 
-function git(root: string, args: string[]): string {
+/** Run git in `root`; throws when git fails (including: not a work tree). */
+export function git(root: string, args: string[]): string {
   return execFileSync('git', args, {
     cwd: root,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
+}
+
+/** The engine's default command runner on the host: a shell in `root`, stdout captured, stderr passed to the error. */
+export function hostShellExec(root: string): (command: string) => string {
+  return (command) => execSync(command, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 function tryGit(root: string, args: string[]): string {
@@ -172,14 +178,7 @@ export async function refreshInstalledSkills(
     try {
       const result = await applySkill(skillDir, root, {
         mode: 'refresh',
-        exec: (command) => {
-          if (options.exec) return options.exec(command, root);
-          return execSync(command, {
-            cwd: root,
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'pipe'],
-          });
-        },
+        exec: (command) => (options.exec ? options.exec(command, root) : hostShellExec(root)(command)),
         resolveDependencyCommand: (request) => portableDependencyCommand(root, bunOnHost, request),
         resolveRemote: (branch) => {
           const remote = remotes[branch] ?? resolveRegistryRemote(root, branch);

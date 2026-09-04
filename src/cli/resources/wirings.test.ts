@@ -26,7 +26,7 @@ import { lookup } from '../registry.js';
 // Side-effect import: registers wirings-create / wirings-update.
 import './wirings.js';
 
-const hostCtx = { caller: 'host' as const };
+const hostCtx = { caller: 'host' as const, defer: (run: () => void) => run() };
 const now = () => new Date().toISOString();
 
 // Registration-tier declarations only — no adapter is live, which is exactly

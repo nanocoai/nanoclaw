@@ -23,27 +23,18 @@
 // Usage: pnpm exec tsx scripts/skill-apply.ts <skillDir>     # plan (no writes)
 
 import { execSync } from 'node:child_process';
-import { readFileSync, existsSync, writeFileSync, appendFileSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, appendFileSync, copyFileSync, mkdirSync, rmSync, lstatSync, chmodSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { parseDirectives, promptVar, type Directive } from './skill-directives.js';
+import { withApplyLock } from './skill-lock.js';
+import { CALLER_OWNED_EFFECTS, type InputMeta } from '../src/cli/skill-report.js';
+
+export type { InputMeta };
+import { parseDirectives, promptVar, type Directive, isSecretPrompt } from './skill-directives.js';
 
 // What an `nc:prompt` DECLARES about the value it needs — the core seam's input
 // contract, passed to `resolveInput` so a consumer can run its OWN re-ask loop
 // (clack validate, a chat exchange). Declaration only: how the value is
 // ACQUIRED (a masked TTY prompt, a chat message) is the consumer's business.
-export interface InputMeta {
-  question: string; // the prompt body (verbatim)
-  secret: boolean; // consumer must mask
-  validate?: string; // regex source (nc:prompt validate:<re>)
-  flags?: string; // regex flags   (nc:prompt flags:<f>)
-  normalize?: 'trim' | 'rstrip-slash' | 'lower'; // applied by the ENGINE at bind
-  // Interactive select options, `|`-separated (nc:prompt choices:a|b). When a
-  // value is legal only via pre-bound inputs (e.g. slack's `provisioned`
-  // connection), validate stays wider than the offered set — so a consumer
-  // must prefer this over options derived from the validate alternation.
-  choices?: string;
-}
-
 // Everything the engine EMITS — the core seam's output contract. Every
 // `onEvent` call is AWAITED before the engine proceeds; that ordering guarantee
 // is what lets a consumer implement gating (hold the operator event until the
@@ -216,7 +207,7 @@ export function planSkill(
   const steps: PlanStep[] = self.map(({ d, status, detail }, i) => {
     if (d.kind !== 'prompt') return { n: i + 1, kind: d.kind, line: d.line, status, detail };
     const v = promptVar(d) ?? '?';
-    const tag = `${v}${d.args.includes('secret') ? ' (secret)' : ''}`;
+    const tag = `${v}${isSecretPrompt(d) ? ' (secret)' : ''}`;
     const cons = consumers.get(v) ?? [];
     const satisfied = cons.length > 0 && cons.every((j) => self[j].status === 'skip');
     return satisfied
@@ -235,12 +226,14 @@ export function planSkill(
 // Apply (phases 3–5) + journal-derived remove.
 // ---------------------------------------------------------------------------
 
+type FileSnapshot = { path: string; before?: { data: Buffer; mode: number } };
+
 export type JournalEntry =
-  | { op: 'wrote'; path: string }
-  | { op: 'appended'; path: string; line: string }
-  | { op: 'set-env'; key: string }
-  | { op: 'json-merge'; path: string; key: string; value: unknown; previous?: unknown }
-  | { op: 'ran'; cmd: string; undo?: string };
+  | ({ op: 'wrote' } & FileSnapshot)
+  | ({ op: 'appended'; line: string } & FileSnapshot)
+  | { op: 'set-env'; key: string; snapshot: FileSnapshot }
+  | { op: 'json-merge'; path: string; key: string; value: unknown; previous?: unknown; snapshot: FileSnapshot }
+  | { op: 'ran'; cmd: string; undo?: string; files?: FileSnapshot[] };
 
 export interface AgentTask {
   kind: string;
@@ -260,6 +253,11 @@ export interface ApplyResult {
   // `owner_handle` + `platform_id`, the setup flow reads them to wire the agent.
   vars: Record<string, string>;
   journal: JournalEntry[];
+  rollback?: { error?: string };
+  // Runs the caller declared it owns (`skipEffects`) and the engine therefore did
+  // not execute — the structured twin of the `skipped` line, so the caller can
+  // perform them (a restart, an interactive step, a wire) with line and command.
+  callerOwned: Array<{ effect: string; line: number; command: string }>;
   // The skill's author-written REFERENCE floor — its `## Alternatives`,
   // `## Optional configuration`, and `## Troubleshooting` sections, sliced
   // verbatim from the RAW markdown (see `referenceProse`). The driver surfaces
@@ -270,6 +268,8 @@ export interface ApplyResult {
 }
 
 export interface ApplyOptions {
+  // Restore journaled changes before releasing the checkout lock on failure.
+  rollbackOnFailure?: boolean;
   // Install skips already-present payloads. Refresh deliberately reapplies
   // copy and dependency directives so registry bytes and exact pins advance.
   mode?: 'install' | 'refresh';
@@ -318,7 +318,7 @@ export interface ApplyOptions {
 export interface DependencyCommandRequest {
   manager: string;
   cwd: string;
-  action: 'add' | 'remove';
+  action: 'add' | 'remove' | 'install';
   packages: string[];
 }
 
@@ -551,6 +551,11 @@ const NORMALIZE_KINDS: ReadonlySet<string> = new Set(['trim', 'rstrip-slash', 'l
 // consumer can run its own re-ask loop against the same semantics the engine
 // enforces at bind. The attrs live on the directive fence, so they're stripped
 // along with the fence when a skill degrades to prose — invisible to the agent.
+/** The declared input semantics of a `prompt` directive — what any consumer asking for its value must know. */
+export function promptMeta(d: Directive): InputMeta {
+  return inputMetaOf(d, isSecretPrompt(d), typeof d.attrs.validate === 'string' ? d.attrs.validate : undefined);
+}
+
 function inputMetaOf(d: Directive, secret: boolean, validate: string | undefined): InputMeta {
   const meta: InputMeta = { question: d.body.join('\n'), secret };
   if (validate !== undefined) meta.validate = validate;
@@ -628,6 +633,26 @@ function bindCapture(
   }
 }
 
+// Before-images stay in memory and never enter the public apply report.
+function snapshotFile(root: string, path: string): FileSnapshot {
+  try {
+    const stat = lstatSync(join(root, path));
+    if (!stat.isFile()) throw new Error(`mutation target is not a regular file: ${path}`);
+    return { path, before: { data: readFileSync(join(root, path)), mode: stat.mode } };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    return { path };
+  }
+}
+
+function restoreFile(root: string, snapshot: FileSnapshot): void {
+  const target = join(root, snapshot.path);
+  if (snapshot.before) {
+    writeFileSync(target, snapshot.before.data);
+    chmodSync(target, snapshot.before.mode);
+  } else rmSync(target, { force: true });
+}
+
 // The mutating twin of selfStatus. Records what it did to the journal so remove
 // is derivable. Throws on failure → caught and bounced to an agent.
 async function applyOne(
@@ -646,7 +671,8 @@ async function applyOne(
 ): Promise<void> {
   const { root, skillDir, exec, vars, journal } = ctx;
   switch (d.kind) {
-    case 'copy':
+    case 'copy': {
+      const save = (line: string) => journal.push({ op: 'wrote', ...snapshotFile(root, destOf(line)) });
       if (d.attrs['from-branch']) {
         const b = String(d.attrs['from-branch']);
         const remote = ctx.resolveRemote(b);
@@ -656,25 +682,26 @@ async function applyOne(
           // may not exist on trunk (e.g. container skills that live only on
           // the channels branch). Mirror the local-copy path's mkdir.
           mkdirSync(dirname(join(root, destOf(l))), { recursive: true });
+          save(l);
           await exec(`git show ${remote}/${b}:${srcOf(l)} > ${destOf(l)}`);
         }
       } else {
         for (const l of d.body) {
           const dst = join(root, destOf(l));
           mkdirSync(dirname(dst), { recursive: true });
+          save(l);
           copyFileSync(join(skillDir, srcOf(l)), dst);
         }
       }
-      for (const l of d.body) journal.push({ op: 'wrote', path: destOf(l) });
       break;
+    }
     case 'append': {
       const to = String(d.attrs.to);
       const marker = typeof d.attrs.at === 'string' ? d.attrs.at : undefined;
       const target = join(root, to);
       if (marker) {
         // Insert before the `// <<< <marker>` closing line of a dormant marker
-        // region, matching that line's indentation. removeSkill still deletes
-        // by line (position-agnostic), so the journal entry is unchanged.
+        // region, matching that line's indentation. Rollback restores its bytes.
         const close = `<<< ${marker}`;
         for (const line of d.body) {
           const lines = read(target).split('\n');
@@ -682,13 +709,13 @@ async function applyOne(
           if (idx === -1) throw new Error(`append marker "${marker}" not found in ${to}`);
           const indent = lines[idx].match(/^\s*/)?.[0] ?? '';
           lines.splice(idx, 0, indent + line);
+          journal.push({ op: 'appended', line, ...snapshotFile(root, to) });
           writeFileSync(target, lines.join('\n'));
-          journal.push({ op: 'appended', path: to, line });
         }
       } else {
         for (const line of d.body) {
+          journal.push({ op: 'appended', line, ...snapshotFile(root, to) });
           appendFileSync(target, (read(target).endsWith('\n') || read(target) === '' ? '' : '\n') + line + '\n');
-          journal.push({ op: 'appended', path: to, line });
         }
       }
       break;
@@ -697,19 +724,19 @@ async function applyOne(
       const manager = typeof d.attrs.manager === 'string' ? d.attrs.manager : 'pnpm';
       const cwd = typeof d.attrs.cwd === 'string' ? d.attrs.cwd : '';
       const prefix = cwd ? `cd ${cwd} && ` : '';
-      const names = d.body.map((s) => s.slice(0, s.lastIndexOf('@'))).join(' ');
       const add =
         ctx.resolveDependencyCommand?.({ manager, cwd, action: 'add', packages: d.body }) ??
         `${prefix}${manager} add ${d.body.join(' ')}`;
-      const remove =
-        ctx.resolveDependencyCommand?.({ manager, cwd, action: 'remove', packages: names.split(' ') }) ??
-        `${prefix}${manager} remove ${names}`;
+      // Restore exact manifests/lockfiles, then reconcile dependencies. Removing
+      // package names would delete dependencies that existed before this apply.
+      const lockfiles = ['pnpm-lock.yaml', 'bun.lock', 'bun.lockb', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock'];
+      const files = [...new Set(['', cwd].flatMap((dir) => ['package.json', ...lockfiles].map((file) => join(dir, file))))]
+        .map((file) => snapshotFile(root, file));
+      const flags = manager === 'npm' ? [] : ['--frozen-lockfile'];
+      const undo = ctx.resolveDependencyCommand?.({ manager, cwd, action: 'install', packages: flags }) ??
+        `${prefix}${manager} install ${flags.join(' ')}`.trim();
+      journal.push({ op: 'ran', cmd: add, undo, files });
       await exec(add);
-      journal.push({
-        op: 'ran',
-        cmd: add,
-        undo: remove,
-      });
       break;
     }
     case 'run': {
@@ -781,11 +808,11 @@ async function applyOne(
         const key = entry.slice(0, eq).trim();
         const value = substitute(entry.slice(eq + 1).trim(), vars); // throws if a {{var}} is unresolved
         if (!envKeySet(root, key)) {
+          journal.push({ op: 'set-env', key, snapshot: snapshotFile(root, '.env') });
           appendFileSync(
             envPath,
             (read(envPath).endsWith('\n') || read(envPath) === '' ? '' : '\n') + `${key}=${value}\n`,
           );
-          journal.push({ op: 'set-env', key });
         }
       }
       break;
@@ -803,13 +830,13 @@ async function applyOne(
       );
       if (existingIndex === -1) {
         arr.push(obj);
+        journal.push({ op: 'json-merge', path: into, key, value, snapshot: snapshotFile(root, into) });
         writeFileSync(target, JSON.stringify(arr, null, 2) + '\n');
-        journal.push({ op: 'json-merge', path: into, key, value });
       } else if (ctx.mode === 'refresh' && JSON.stringify(arr[existingIndex]) !== JSON.stringify(obj)) {
         const previous = arr[existingIndex];
         arr[existingIndex] = obj;
+        journal.push({ op: 'json-merge', path: into, key, value, previous, snapshot: snapshotFile(root, into) });
         writeFileSync(target, JSON.stringify(arr, null, 2) + '\n');
-        journal.push({ op: 'json-merge', path: into, key, value, previous });
       }
       break;
     }
@@ -819,6 +846,21 @@ async function applyOne(
 }
 
 export async function applySkill(skillDir: string, root: string, opts: ApplyOptions): Promise<ApplyResult> {
+  return withApplyLock(root, async () => {
+    const res = await applyUnlocked(skillDir, root, opts);
+    if (opts.rollbackOnFailure && res.agentTasks.length > 0) {
+      res.rollback = {};
+      try {
+        await removeUnlocked(root, res.journal, opts.exec ? async (cmd) => { await opts.exec!(cmd); } : undefined);
+      } catch (error) {
+        res.rollback.error = error instanceof Error ? error.message : String(error);
+      }
+    }
+    return res;
+  });
+}
+
+async function applyUnlocked(skillDir: string, root: string, opts: ApplyOptions): Promise<ApplyResult> {
   // Lint (validate()) is the authoring/CI gate, run before a skill ships — NOT
   // here. Apply is best-effort: an unknown directive (a typo lint should have
   // caught, or one newer than this engine) bounces to an agent, never blocks.
@@ -839,6 +881,7 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
     operatorMessages: [],
     vars: {},
     journal: [],
+    callerOwned: [],
     referenceProse: referenceProse(md),
   };
   // A run-health gate: once ANY directive bounces to an agent, the skill is no
@@ -851,7 +894,7 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
   // prompt (headless rebuild, no answer) is not a failure — it never bounces, so
   // `blocked` stays false and a later restart remains runnable.
   let blocked = false;
-  const SIDE_EFFECTS = new Set(['restart', 'step', 'wire']);
+  const SIDE_EFFECTS = new Set(CALLER_OWNED_EFFECTS);
   const bounce = (d: Directive, reason: string) => {
     blocked = true;
     res.agentTasks.push({ kind: d.kind, line: d.line, reason, prose: proseFor(md, d.line) });
@@ -886,7 +929,7 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
       }
       if (d.kind === 'prompt') {
         const v = promptVar(d)!;
-        const secret = d.args.includes('secret');
+        const secret = isSecretPrompt(d);
         const validate = typeof d.attrs.validate === 'string' ? d.attrs.validate : undefined;
         const flags = typeof d.attrs.flags === 'string' ? d.attrs.flags : undefined;
         const normalize = typeof d.attrs.normalize === 'string' ? d.attrs.normalize : undefined;
@@ -951,6 +994,7 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
       // A run whose effect the caller owns (e.g. restart) is skipped here.
       if (d.kind === 'run' && typeof d.attrs.effect === 'string' && opts.skipEffects?.includes(d.attrs.effect)) {
         res.skipped.push(`run ${d.attrs.effect}: owned by the caller`);
+        res.callerOwned.push({ effect: d.attrs.effect, line: d.line, command: d.body.join('\n') });
         continue;
       }
       // Run-health gate: after an earlier bounce, never fire a dangerous side
@@ -1033,41 +1077,32 @@ export async function removeSkill(
   journal: JournalEntry[],
   exec?: (c: string) => void | Promise<void>,
 ): Promise<void> {
+  return withApplyLock(root, () => removeUnlocked(root, journal, exec));
+}
+
+async function removeUnlocked(root: string, journal: JournalEntry[], exec?: (c: string) => void | Promise<void>): Promise<void> {
+  const errors: string[] = [];
   for (const e of [...journal].reverse()) {
-    if (e.op === 'wrote') rmSync(join(root, e.path), { force: true });
-    else if (e.op === 'appended') {
-      const p = join(root, e.path);
-      writeFileSync(
-        p,
-        read(p)
-          .split('\n')
-          .filter((l) => l.trim() !== e.line.trim())
-          .join('\n'),
-      );
-    } else if (e.op === 'set-env') {
-      const p = join(root, '.env');
-      writeFileSync(
-        p,
-        read(p)
-          .split('\n')
-          .filter((l) => !l.startsWith(`${e.key}=`))
-          .join('\n'),
-      );
-    } else if (e.op === 'json-merge') {
-      const p = join(root, e.path);
-      const arr = JSON.parse(read(p) || '[]') as unknown[];
-      if (Array.isArray(arr)) {
-        const index = arr.findIndex(
-          (el) => el !== null && typeof el === 'object' && (el as Record<string, unknown>)[e.key] === e.value,
-        );
-        if (e.previous !== undefined && index >= 0) arr[index] = e.previous;
-        else if (index >= 0) arr.splice(index, 1);
-        writeFileSync(p, JSON.stringify(arr, null, 2) + '\n');
+    try {
+      if (e.op === 'wrote' || e.op === 'appended') restoreFile(root, e);
+      else if (e.op === 'set-env' || e.op === 'json-merge') {
+        restoreFile(root, e.snapshot);
+      } else if (e.op === 'ran' && e.undo) {
+        for (const file of e.files ?? []) restoreFile(root, file);
+        try {
+          if (!exec) throw new Error('rollback requires a command runner');
+          await exec(e.undo);
+        } finally {
+          // A failed reinstall must not leave manifests changed by that attempt.
+          for (const file of e.files ?? []) restoreFile(root, file);
+        }
       }
-    } else if (e.op === 'ran' && e.undo && exec) {
-      await exec(e.undo);
+    } catch (error) {
+      // Keep restoring independent files even if dependency recovery fails.
+      errors.push(error instanceof Error ? error.message : String(error));
     }
   }
+  if (errors.length) throw new Error(errors.join('; '));
 }
 
 // CLI — the planner (no writes)
