@@ -127,6 +127,47 @@ describe('approval response authorization', () => {
     expect(await getPendingApproval('appr-2')).toBeUndefined();
   });
 
+  it("runs a handler's afterResolved work once, after the approval is resolved", async () => {
+    await upsertUser({ id: 'telegram:owner-after', kind: 'telegram', display_name: 'Owner', created_at: now() });
+    await grantRole({
+      user_id: 'telegram:owner-after',
+      role: 'owner',
+      agent_group_id: null,
+      granted_by: null,
+      granted_at: now(),
+    });
+
+    const { registerApprovalHandler } = await import('./primitive.js');
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    const afterResolved = vi.fn();
+    const handler = vi.fn(async () => ({ afterResolved }));
+    registerApprovalHandler('after_resolved_action', handler);
+
+    await createPendingApproval({
+      approval_id: 'appr-after',
+      session_id: 'sess-1',
+      request_id: 'appr-after',
+      action: 'after_resolved_action',
+      payload: JSON.stringify({}),
+      created_at: now(),
+      title: 'Deferred work',
+      options_json: JSON.stringify([]),
+    });
+
+    await handleApprovalsResponse({
+      questionId: 'appr-after',
+      value: 'approve',
+      userId: 'owner-after',
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+    });
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(afterResolved).toHaveBeenCalledTimes(1);
+    expect(await getPendingApproval('appr-after')).toBeUndefined();
+  });
+
   it('lets only one concurrent approval response run the action handler', async () => {
     await upsertUser({ id: 'telegram:owner-race', kind: 'telegram', display_name: 'Owner', created_at: now() });
     await grantRole({

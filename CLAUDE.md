@@ -116,8 +116,9 @@ ncl help
 | user-dms | list | Cold-DM cache (read-only) |
 | dropped-messages | list | Messages from unregistered senders (read-only) |
 | approvals | list, get | Pending approval requests (read-only) |
+| skills | list, plan, apply | Capability install skills. `apply` runs a skill's `nc:` steps on the host checkout (copy, register, pin deps, build, test); restarts, interactive steps, and wiring are reported, not run. Global scope only; held for admin approval from a container; secret inputs refused from agents |
 
-Key files: `src/cli/dispatch.ts` (dispatcher + approval handler), `src/cli/crud.ts` (generic CRUD registration), `src/cli/resources/` (per-resource definitions).
+Key files: `src/cli/dispatch.ts` (dispatcher + approval handler), `src/cli/crud.ts` (generic CRUD registration), `src/cli/resources/` (per-resource definitions). `ncl skills` fronts the headless skill engine, `scripts/skill-headless.ts` (list / plan / apply as JSON, journal rollback on a failed install, one apply per checkout via a lock file in the OS temp dir), through `src/cli/skill-runner.ts`, which spawns it with the host's own node binary because a service host's PATH has none.
 
 ## Channels and Providers (skill-installed)
 

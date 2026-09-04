@@ -1,0 +1,213 @@
+/**
+ * `ncl skills` — the install path for capability skills, exposed to agents
+ * with admin approval.
+ *
+ * Trunk ships channels, providers, and other capabilities as install skills
+ * whose mechanical steps are `nc:` directive fences. The setup wizard applies
+ * them through the directive engine; this resource gives the same engine an
+ * `ncl` surface, so a NanoClaw agent can request an install from chat (held
+ * for an admin's approval like every other write verb), an operator can run
+ * one from a terminal, and a pipeline can script it. The host applies the
+ * skill to its own checkout; the caller-owned effects — the service restart,
+ * interactive steps, wiring — are reported back instead of executed.
+ *
+ * Credentials never ride this path from an agent: an input that answers a
+ * `secret` prompt is refused by the guard before any approval card or row
+ * exists, and the engine refuses it again as defense in depth.
+ */
+import { registerResource } from '../crud.js';
+import {
+  SKILL_NAME_RE,
+  assertSkillName,
+  isPlainObject,
+  needsRestart,
+  type SkillApplyReport,
+  type SkillPlan,
+  type SkillSummary,
+} from '../skill-report.js';
+import { hostServiceDefined, restartHost, runSkillHeadless } from '../skill-runner.js';
+
+const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/** The skill directory name — the trailing positional, which the dispatcher hands over as `id`. */
+function skillId(args: Record<string, unknown>): string {
+  const id = String(args.id ?? '');
+  assertSkillName(id);
+  return id;
+}
+
+/** `--inputs` as the caller sent it: a JSON string from the CLI, or an already parsed object. Throws when malformed. */
+function parseInputs(raw: unknown): Record<string, unknown> | undefined {
+  if (raw === undefined) return undefined;
+  let value: unknown = raw;
+  if (typeof raw === 'string') {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      throw new Error('--inputs must be valid JSON');
+    }
+  }
+  if (!isPlainObject(value)) throw new Error('--inputs must be a JSON object of prompt var → answer');
+  return value;
+}
+
+type RestartOutcome =
+  | 'requested' // deferred until this reply has left; runs setup/lib/restart.sh
+  | 'unmanaged' // asked for, but no launchd/systemd definition exists for this checkout
+  | 'not-requested';
+
+type SkillApplyResponse = SkillApplyReport & { restart: RestartOutcome };
+
+function formatPlan(data: unknown): string {
+  const plan = data as SkillPlan;
+  const lines = plan.steps.map(
+    (s) => `${String(s.n).padStart(2)}. ${s.status.padEnd(11)} ${s.kind.padEnd(9)} ${s.detail}`,
+  );
+  if (plan.prompts.length > 0) {
+    lines.push('', 'Inputs:');
+    for (const p of plan.prompts) lines.push(`  ${p.var}${p.secret ? ' (secret — operator only)' : ''}: ${p.question}`);
+  }
+  const effects = plan.callerOwnedEffects;
+  if (effects.length > 0) lines.push('');
+  if (effects.includes('restart')) lines.push('Requires a host restart after apply (--restart).');
+  if (effects.includes('step')) lines.push('Has an interactive step — finish it with the setup wizard.');
+  if (effects.includes('wire')) lines.push('Wires a chat to an agent — the wiring is reported, not run.');
+  return lines.join('\n');
+}
+
+function formatApply(data: unknown): string {
+  const r = data as SkillApplyResponse;
+  const lines = [`${r.skill}: ${r.status}`];
+  if (r.error) lines.push(`  ${r.error}`);
+  if (r.failure) {
+    lines.push(`  failed at: ${r.failure.headline}`);
+    // The hint opens with the section heading again; show its first line of substance.
+    const detail = r.failure.hint.split('\n').find((l) => l.trim() && !l.startsWith('#') && l !== r.failure?.headline);
+    if (detail) lines.push(`  ${detail}`);
+  }
+  if (r.applied.length) lines.push(`  applied ${r.applied.length} step(s), skipped ${r.skipped.length}`);
+  if (r.deferred.length) lines.push(`  waiting for input: ${r.deferred.join('; ')}`);
+  for (const t of r.agentTasks) lines.push(`  needs an agent (line ${t.line}): ${t.reason}`);
+  for (const p of r.pendingEffects) lines.push(`  not run (${p.effect}): ${p.command.split('\n')[0]}`);
+  if (r.restart === 'requested') lines.push('  host restart requested');
+  else if (r.restart === 'unmanaged') {
+    lines.push('  no launchd/systemd service is defined for this checkout — restart the host by hand to load it');
+  } else if (r.status === 'applied' && needsRestart(r)) lines.push('  restart the host to load it (or pass --restart)');
+  return lines.join('\n');
+}
+
+registerResource({
+  name: 'skill',
+  plural: 'skills',
+  description:
+    'Capability install skills (channels, providers, tools) and the engine that applies them. ' +
+    "`apply` runs a skill's structured steps on the host: copy its files, wire its registration, install its pinned " +
+    'dependencies, build, and run its tests. Restarts, interactive steps, and wiring are reported back, not run. ' +
+    'From a container, apply is held for admin approval and credential inputs are refused; those are entered on the host.',
+  columns: [],
+  operations: {},
+  customOperations: {
+    list: {
+      access: 'open',
+      description:
+        'List the install skills the engine can apply, with whether each is already installed.\n\n' +
+        'Only skills with structured (nc:) steps appear — a prose-only skill needs a coding agent.',
+      examples: ['ncl skills list'],
+      args: [],
+      handler: async () => await runSkillHeadless<SkillSummary[]>(['list']),
+    },
+    plan: {
+      access: 'open',
+      description:
+        'Show what applying a skill would do, without writing anything: each step and whether it is already ' +
+        'satisfied, the inputs it asks for (secret ones are operator-only), and whether a restart follows.',
+      examples: ['ncl skills plan add-telegram'],
+      args: [{ name: 'id', type: 'string', description: 'Skill directory name, e.g. add-telegram.', required: true }],
+      handler: async (args) => await runSkillHeadless<SkillPlan>(['plan', skillId(args)]),
+      formatHuman: formatPlan,
+    },
+    apply: {
+      access: 'approval',
+      description:
+        'Apply an install skill to this NanoClaw checkout: copy files, append registrations, install pinned ' +
+        'dependencies, build, test. A step that fails rolls the whole install back. Restarts, interactive steps, ' +
+        'and wiring are reported, not run; pass --restart to restart the host afterwards (needs a launchd or ' +
+        "systemd service). --inputs answers the skill's prompts as a JSON object; from a container, inputs for " +
+        'secret prompts are refused — the operator enters credentials on the host. --refresh re-copies an installed ' +
+        "skill's files and re-pins its dependencies; it needs a clean working tree and is never rolled back.",
+      examples: [
+        'ncl skills apply add-codex --restart',
+        'ncl skills apply add-telegram --inputs \'{"owner_handle":"12345678"}\'',
+      ],
+      args: [
+        { name: 'id', type: 'string', description: 'Skill directory name, e.g. add-codex.', required: true },
+        { name: 'inputs', type: 'json', description: 'JSON object of prompt var → answer.' },
+        {
+          name: 'refresh',
+          type: 'boolean',
+          description: 'Re-copy payload files and re-pin dependencies even when present (clean tree required).',
+          default: false,
+        },
+        {
+          name: 'restart',
+          type: 'boolean',
+          description: 'Restart the host service after a successful apply.',
+          default: false,
+        },
+      ],
+      // Decided before the hold, so nothing malformed is carded and a
+      // credential never reaches an approval card or the pending_approvals
+      // row: an agent's inputs may answer the skill's plain prompts, never
+      // its secret ones. Host callers are not consulted (the guard allows
+      // them before this runs). It runs again on the approved replay, so an
+      // engine failure there answers with its own message rather than the
+      // guard's opaque fail-closed error.
+      refuse: async (args) => {
+        const id = String(args.id ?? '');
+        if (!SKILL_NAME_RE.test(id))
+          return `"${id}" is not a skill directory name (lowercase letters, digits, hyphens)`;
+        let inputs: Record<string, unknown> | undefined;
+        try {
+          inputs = parseInputs(args.inputs);
+        } catch (e) {
+          return errMsg(e);
+        }
+        const keys = Object.keys(inputs ?? {});
+        if (keys.length === 0) return undefined;
+        let plan: SkillPlan;
+        try {
+          plan = await runSkillHeadless<SkillPlan>(['plan', id]);
+        } catch (e) {
+          return `cannot check the inputs for ${id}: ${errMsg(e)}`;
+        }
+        const secret = plan.prompts.filter((p) => p.secret && keys.includes(p.var)).map((p) => p.var);
+        if (secret.length === 0) return undefined;
+        return `--inputs answers secret prompt(s) ${secret.join(', ')}: credentials are entered by the operator on the host, never relayed through chat`;
+      },
+      handler: async (args, ctx): Promise<SkillApplyResponse> => {
+        const id = skillId(args);
+        const argv = ['apply', id];
+        const inputs = parseInputs(args.inputs);
+        if (inputs) argv.push('--inputs', JSON.stringify(inputs));
+        if (args.refresh === true) argv.push('--refresh');
+        if (ctx.caller === 'agent') argv.push('--no-secret-inputs');
+        const report = await runSkillHeadless<SkillApplyReport>(argv, { exclusive: true });
+
+        let restart: RestartOutcome = 'not-requested';
+        if (report.status === 'applied' && args.restart === true) {
+          if (hostServiceDefined()) {
+            // After this reply has left — the restart would otherwise kill it.
+            // Outside dispatch there is no reply to protect; run it now.
+            const defer = ctx.defer ?? ((_label: string, run: () => void) => run());
+            defer('host restart after skill apply', () => restartHost());
+            restart = 'requested';
+          } else {
+            restart = 'unmanaged';
+          }
+        }
+        return { ...report, restart };
+      },
+      formatHuman: formatApply,
+    },
+  },
+});

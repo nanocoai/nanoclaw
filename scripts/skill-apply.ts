@@ -25,6 +25,7 @@
 import { execSync } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, appendFileSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { CALLER_OWNED_EFFECTS } from '../src/cli/skill-report.js';
 import { parseDirectives, promptVar, type Directive } from './skill-directives.js';
 
 // What an `nc:prompt` DECLARES about the value it needs — the core seam's input
@@ -260,6 +261,10 @@ export interface ApplyResult {
   // `owner_handle` + `platform_id`, the setup flow reads them to wire the agent.
   vars: Record<string, string>;
   journal: JournalEntry[];
+  // Runs the caller declared it owns (`skipEffects`) and the engine therefore did
+  // not execute — the structured twin of the `skipped` line, so the caller can
+  // perform them (a restart, an interactive step, a wire) with line and command.
+  callerOwned: Array<{ effect: string; line: number; command: string }>;
   // The skill's author-written REFERENCE floor — its `## Alternatives`,
   // `## Optional configuration`, and `## Troubleshooting` sections, sliced
   // verbatim from the RAW markdown (see `referenceProse`). The driver surfaces
@@ -551,6 +556,11 @@ const NORMALIZE_KINDS: ReadonlySet<string> = new Set(['trim', 'rstrip-slash', 'l
 // consumer can run its own re-ask loop against the same semantics the engine
 // enforces at bind. The attrs live on the directive fence, so they're stripped
 // along with the fence when a skill degrades to prose — invisible to the agent.
+/** The declared input semantics of a `prompt` directive — what any consumer asking for its value must know. */
+export function promptMeta(d: Directive): InputMeta {
+  return inputMetaOf(d, d.args.includes('secret'), typeof d.attrs.validate === 'string' ? d.attrs.validate : undefined);
+}
+
 function inputMetaOf(d: Directive, secret: boolean, validate: string | undefined): InputMeta {
   const meta: InputMeta = { question: d.body.join('\n'), secret };
   if (validate !== undefined) meta.validate = validate;
@@ -839,6 +849,7 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
     operatorMessages: [],
     vars: {},
     journal: [],
+    callerOwned: [],
     referenceProse: referenceProse(md),
   };
   // A run-health gate: once ANY directive bounces to an agent, the skill is no
@@ -851,7 +862,7 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
   // prompt (headless rebuild, no answer) is not a failure — it never bounces, so
   // `blocked` stays false and a later restart remains runnable.
   let blocked = false;
-  const SIDE_EFFECTS = new Set(['restart', 'step', 'wire']);
+  const SIDE_EFFECTS = new Set(CALLER_OWNED_EFFECTS);
   const bounce = (d: Directive, reason: string) => {
     blocked = true;
     res.agentTasks.push({ kind: d.kind, line: d.line, reason, prose: proseFor(md, d.line) });
@@ -951,6 +962,7 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
       // A run whose effect the caller owns (e.g. restart) is skipped here.
       if (d.kind === 'run' && typeof d.attrs.effect === 'string' && opts.skipEffects?.includes(d.attrs.effect)) {
         res.skipped.push(`run ${d.attrs.effect}: owned by the caller`);
+        res.callerOwned.push({ effect: d.attrs.effect, line: d.line, command: d.body.join('\n') });
         continue;
       }
       // Run-health gate: after an earlier bounce, never fire a dangerous side

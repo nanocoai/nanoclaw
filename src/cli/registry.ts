@@ -10,6 +10,7 @@
  */
 import { defineGuardedAction, type GuardedAction } from '../guard/index.js';
 import { commandGuardSpec } from './guard.js';
+import type { GuardActor } from '../guard/index.js';
 import type { CallerContext } from './frame.js';
 
 /**
@@ -20,6 +21,18 @@ import type { CallerContext } from './frame.js';
 export const GROUP_SCOPE_RESOURCES = new Set(['groups', 'sessions', 'destinations', 'members', 'tasks']);
 
 export type Access = 'open' | 'approval' | 'hidden';
+
+/**
+ * What a handler receives: the caller's identity plus `defer`, for work that
+ * must wait until the reply has left the host (a service restart would kill
+ * the reply). Dispatch supplies `defer` and hands the collected work back with
+ * the response, so the transport that carries the reply runs it after its own
+ * egress — per request, never on another caller's reply. Absent only when a
+ * handler is invoked outside dispatch (tests).
+ */
+export type HandlerContext = CallerContext & {
+  defer?: (label: string, run: () => void) => void;
+};
 
 export type CommandDef<TArgs = unknown, TData = unknown> = {
   name: string;
@@ -54,9 +67,20 @@ export type CommandDef<TArgs = unknown, TData = unknown> = {
    * Custom operations return ad-hoc shapes and leave this undefined.
    */
   generic?: 'list' | 'get';
+  /**
+   * Per-command refusal, consulted for agent callers after the scope checks
+   * and before a hold: return a reason to DENY the request outright (nothing
+   * is carded or stored), or undefined to let the standard open/approval
+   * decision proceed. Runs again on an approved replay, so it also covers
+   * state that changed between card and approval. Runs inside the guard
+   * decision — unlike `DeliveryGuardSpec.precheck`, a boolean gate that runs
+   * before the guard — so a throw here fails closed as a guard error; return
+   * a reason instead of throwing.
+   */
+  refuse?: (args: Record<string, unknown>, actor: GuardActor) => Promise<string | undefined> | string | undefined;
   /** Validates `frame.args` and produces the typed handler input. Throws on invalid. */
   parseArgs: (raw: Record<string, unknown>) => TArgs;
-  handler: (args: TArgs, ctx: CallerContext) => Promise<TData>;
+  handler: (args: TArgs, ctx: HandlerContext) => Promise<TData>;
   /**
    * Optional presentational renderer. When set, dispatch attaches its output
    * as the response frame's `human` field (server-rendered once, printed

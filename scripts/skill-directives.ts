@@ -166,6 +166,22 @@ export function promptVar(d: Directive): string | undefined {
   return d.args.find((a) => !PROMPT_FLAGS.has(a));
 }
 
+/** A `prompt` whose answer is a credential — never shown, never relayed through an agent. */
+export function isSecretPrompt(d: Directive): boolean {
+  return d.kind === 'prompt' && d.args.includes('secret');
+}
+
+/** The registry branches a skill's `copy from-branch:` fences draw from, sorted and unique. */
+export function registryBranches(directives: Directive[]): string[] {
+  return [
+    ...new Set(
+      directives
+        .filter((d) => d.kind === 'copy' && typeof d.attrs['from-branch'] === 'string')
+        .map((d) => String(d.attrs['from-branch'])),
+    ),
+  ].sort();
+}
+
 /**
  * The variable name(s) a `run capture:<spec>` binds. `capture:dm_channel` →
  * `['dm_channel']` (stdout form); `capture:platform_id=PLATFORM_ID,owner=ACCOUNT`
