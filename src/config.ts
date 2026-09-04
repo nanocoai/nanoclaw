@@ -21,6 +21,7 @@ const envConfig = readEnvFile([
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'ONECLI_GATEWAY_CONTAINER',
+  'NANOCLAW_STREAM_KEEPALIVE_MS',
 ]);
 
 /**
@@ -112,6 +113,11 @@ export const EGRESS_NETWORK =
   process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
 export const ONECLI_GATEWAY_CONTAINER =
   process.env.ONECLI_GATEWAY_CONTAINER || envConfig.ONECLI_GATEWAY_CONTAINER || 'onecli';
+// Opt-in stream keep-alive cap for agent containers, in ms. Raw string here;
+// parsed + validated in the container (stream-keepalive.ts) so an invalid
+// value degrades to keep-alive-off rather than surprising behavior.
+export const STREAM_KEEPALIVE_MS_RAW =
+  process.env.NANOCLAW_STREAM_KEEPALIVE_MS || envConfig.NANOCLAW_STREAM_KEEPALIVE_MS || '';
 
 // Timezone for scheduled tasks, message formatting, etc.
 // Validates each candidate is a real IANA identifier before accepting.

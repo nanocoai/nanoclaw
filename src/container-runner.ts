@@ -22,6 +22,7 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   INSTALL_SLUG,
+  STREAM_KEEPALIVE_MS_RAW,
   TIMEZONE,
 } from './config.js';
 import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-config.js';
@@ -969,6 +970,9 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     TZ: containerConfig.timezone ?? TIMEZONE,
     ...mailboxEnvironment,
   };
+  // Opt-in stream keep-alive (see container/agent-runner/src/stream-keepalive.ts).
+  // Unset = absent from the container = keep-alive off, today's behavior.
+  if (STREAM_KEEPALIVE_MS_RAW) env.NANOCLAW_STREAM_KEEPALIVE_MS = STREAM_KEEPALIVE_MS_RAW;
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.
   // The model provider's contribution fills first, the gateway's second — a
