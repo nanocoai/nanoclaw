@@ -3,12 +3,22 @@
 Idempotent — safe to run even if some steps were never applied. Reverses both
 provider trees, the agent-runner dependency, and the global CLI manifest entry.
 
+Before deleting the payload, switch every OpenCode group back to Claude:
+
+```bash
+ncl groups list
+ncl groups config update --id <group-id> --provider claude
+ncl groups restart --id <group-id>
+```
+
 ## 1. Delete the barrel import lines (both trees)
 
 Delete (do not comment out) the `import './opencode.js';` line from each barrel:
 
 - `src/providers/index.ts`
+- `src/provider-contracts/index.ts`
 - `container/agent-runner/src/providers/index.ts`
+- `container/agent-runner/src/provider-contracts/index.ts`
 
 This unregisters the provider from both `listProviderContainerConfigNames()` (host) and `listProviderNames()` (container).
 
@@ -17,6 +27,7 @@ This unregisters the provider from both `listProviderContainerConfigNames()` (ho
 ```bash
 rm -f src/providers/opencode.ts \
       src/providers/opencode-registration.test.ts \
+      src/provider-contracts/opencode.ts \
       src/opencode-cli-tools.test.ts \
       container/agent-runner/src/providers/opencode.ts \
       container/agent-runner/src/providers/mcp-to-opencode.ts \
@@ -25,9 +36,12 @@ rm -f src/providers/opencode.ts \
       container/agent-runner/src/providers/opencode.compaction.test.ts \
       container/agent-runner/src/providers/opencode.config.test.ts \
       container/agent-runner/src/providers/opencode.factory.test.ts \
+      container/agent-runner/src/providers/opencode.empty-resume.test.ts \
       container/agent-runner/src/providers/opencode.memory.test.ts \
       container/agent-runner/src/providers/opencode.question.test.ts \
-      container/agent-runner/src/providers/opencode-registration.test.ts
+      container/agent-runner/src/providers/opencode-registration.test.ts \
+      container/agent-runner/src/providers/opencode.conformance.test.ts \
+      container/agent-runner/src/provider-contracts/opencode.ts
 ```
 
 ## 3. Remove the agent-runner dependency
@@ -46,8 +60,6 @@ Delete the object whose `name` is `opencode-ai` from
 ## 5. Unset OpenCode env vars
 
 Remove any OpenCode-specific lines you added to `.env` (`OPENCODE_PROVIDER`, `OPENCODE_MODEL`, `OPENCODE_SMALL_MODEL`, and `ANTHROPIC_BASE_URL` if no other integration uses it) if no other integration needs them.
-
-Switch any group still on OpenCode back to the default provider — set `"provider": "claude"` in `groups/<folder>/container.json` and clear `agent_provider` on the group/session in the DB.
 
 ## 6. Rebuild and restart
 
@@ -72,8 +84,8 @@ After removal, the registration guards no longer apply (their files are gone). C
 
 ```bash
 grep -R "opencode.js" src/providers/index.ts container/agent-runner/src/providers/index.ts   # no output
+grep -R "opencode.js" src/provider-contracts/index.ts container/agent-runner/src/provider-contracts/index.ts   # no output
 grep "@opencode-ai/sdk" container/agent-runner/package.json                                   # no output
 grep '"opencode-ai"' container/cli-tools.json                                                  # no output
+pnpm exec tsx scripts/provider-contract-verifier.ts
 ```
-
-In a wired agent, requesting `agent_provider = 'opencode'` should fall back to the default provider since `opencode` is no longer in the registry.
