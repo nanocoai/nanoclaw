@@ -71,7 +71,12 @@ export interface ApprovalHandlerContext {
   notify: (text: string) => Promise<void>;
 }
 
-export type ApprovalHandler = (ctx: ApprovalHandlerContext) => Promise<void>;
+/** What a handler may hand back: work to run once the approval is fully resolved (row deleted, resolution announced, wake requested). */
+export interface ApprovalHandlerResult {
+  afterResolved?: () => void;
+}
+
+export type ApprovalHandler = (ctx: ApprovalHandlerContext) => Promise<void | ApprovalHandlerResult>;
 
 const approvalHandlers = new Map<string, ApprovalHandler>();
 
