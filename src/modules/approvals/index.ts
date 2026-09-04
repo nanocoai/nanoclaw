@@ -29,8 +29,14 @@ import { handleApprovalsResponse } from './response-handler.js';
 import { startOneCLIApprovalHandler, stopOneCLIApprovalHandler } from './onecli-approvals.js';
 
 // Public API re-exports so consumers import from the module root.
-export { requestApproval, registerApprovalHandler, notifyAgent } from './primitive.js';
-export type { ApprovalHandler, ApprovalHandlerContext, RequestApprovalOptions } from './primitive.js';
+export { requestApproval, registerApprovalHandler, registerApprovalResolvedHandler, notifyAgent } from './primitive.js';
+export type {
+  ApprovalHandler,
+  ApprovalHandlerContext,
+  ApprovalRequestResult,
+  ApprovalResolvedHandler,
+  RequestApprovalOptions,
+} from './primitive.js';
 // Host-sweep hook for ghosted "Reject with reason…" holds. The re-export also
 // loads reason-capture.js, registering its message-interceptor on import.
 export { sweepAwaitingReasonRejects } from './reason-capture.js';

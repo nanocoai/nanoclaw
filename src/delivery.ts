@@ -297,6 +297,23 @@ async function drainSession(session: Session): Promise<void> {
         try {
           await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => mailbox.markDeliveryFailed(msg.id));
           await clearAttemptRow(msg.id);
+          if (msg.channelType === 'agent') {
+            try {
+              const target = msg.platformId ? await getAgentGroup(msg.platformId) : undefined;
+              const targetName = target?.name ?? msg.platformId ?? 'an unknown target';
+              const { notifySource } = await import('./modules/agent-to-agent/notify-source.js');
+              await notifySource(
+                session.id,
+                `A message from ${agentGroup.name} to ${targetName} could not be delivered after several attempts. Check the host logs for details.`,
+              );
+            } catch (notifyErr) {
+              log.warn('Could not notify source about permanent agent-message delivery failure', {
+                messageId: msg.id,
+                sessionId: session.id,
+                err: notifyErr,
+              });
+            }
+          }
         } catch (markErr) {
           log.error('Failed to record permanent delivery failure', {
             messageId: msg.id,
@@ -335,6 +352,25 @@ async function deliverMessage(
     return;
   }
 
+  // Agent messages are normalized and authenticated by prepareForwardedContent.
+  // Let that boundary wrap malformed legacy payloads instead of retrying here.
+  if (msg.channelType === 'agent') {
+    if (!(await hasTable(getDb(), 'agent_destinations'))) {
+      throw new Error(`agent-to-agent module not installed — cannot route message ${msg.id}`);
+    }
+    const { routeAgentMessage } = await import('./modules/agent-to-agent/agent-route.js');
+    await routeAgentMessage(
+      {
+        id: msg.id,
+        platform_id: msg.platformId,
+        content: msg.content,
+        in_reply_to: msg.inReplyTo,
+      },
+      session,
+    );
+    return;
+  }
+
   const content = JSON.parse(msg.content);
 
   // System actions — handle internally (cli_request, etc.)
@@ -358,27 +394,6 @@ async function deliverMessage(
     } else {
       log.warn('task_log row outside a task session — ignoring', { id: msg.id, sessionId: session.id });
     }
-    return;
-  }
-
-  // Agent-to-agent — route to target session via the agent-to-agent module.
-  // Guarded by the channel_type check. If the module isn't installed the
-  // `agent_destinations` table won't exist and `routeAgentMessage`'s permission
-  // check will throw, which falls into the normal retry → mark-failed path.
-  if (msg.channelType === 'agent') {
-    if (!(await hasTable(getDb(), 'agent_destinations'))) {
-      throw new Error(`agent-to-agent module not installed — cannot route message ${msg.id}`);
-    }
-    const { routeAgentMessage } = await import('./modules/agent-to-agent/agent-route.js');
-    await routeAgentMessage(
-      {
-        id: msg.id,
-        platform_id: msg.platformId,
-        content: msg.content,
-        in_reply_to: msg.inReplyTo,
-      },
-      session,
-    );
     return;
   }
 
