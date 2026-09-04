@@ -15,7 +15,17 @@ import { deletePendingApproval, transitionPendingApprovalStatus } from '../../db
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval, Session } from '../../types.js';
+import { getUserRoles } from '../permissions/db/user-roles.js';
+import { getUser } from '../permissions/db/users.js';
 import { notifyApprovalResolved } from './primitive.js';
+
+async function approverLabel(userId: string): Promise<string> {
+  const displayName = (await getUser(userId))?.display_name?.trim();
+  if (displayName) return displayName;
+  const roles = await getUserRoles(userId);
+  if (roles.some((role) => role.role === 'owner')) return 'An owner';
+  return 'An admin';
+}
 
 /**
  * Notify the requesting agent that its action was rejected, drop the pending
@@ -48,6 +58,27 @@ export async function finalizeReject(
     threadId: null,
     content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
   });
+
+  if (approval.action === 'a2a_message_gate') {
+    try {
+      const payload = JSON.parse(approval.payload) as Record<string, unknown>;
+      const sourceName = typeof payload.source_name === 'string' ? payload.source_name : session.agent_group_id;
+      const targetName =
+        typeof payload.target_name === 'string'
+          ? payload.target_name
+          : typeof payload.platform_id === 'string'
+            ? payload.platform_id
+            : 'the target agent';
+      const noticeText = `${await approverLabel(userId)} rejected ${sourceName}'s message to ${targetName}.${reason !== undefined ? ` Reason: ${reason}` : ''}`;
+      const { notifySource } = await import('../agent-to-agent/notify-source.js');
+      await notifySource(session.id, noticeText);
+    } catch (err) {
+      log.warn('Could not notify source about rejected agent message', {
+        approvalId: approval.approval_id,
+        err,
+      });
+    }
+  }
 
   log.info('Approval rejected', {
     approvalId: approval.approval_id,

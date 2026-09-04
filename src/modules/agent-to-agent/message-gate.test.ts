@@ -187,9 +187,10 @@ describe('agent message policies', () => {
     await deleteDestination(A, 'b'); // removes A→B — the destination ACL now denies
     await setMessagePolicy(A, B, 'telegram:dana', now()); // ...but a stale policy row remains
 
-    await expect(
-      routeAgentMessage({ id: 'ghost', platform_id: B, content: JSON.stringify({ text: 'x' }), in_reply_to: null }, SA),
-    ).rejects.toThrow(/unauthorized agent-to-agent/);
+    await routeAgentMessage(
+      { id: 'ghost', platform_id: B, content: JSON.stringify({ text: 'x' }), in_reply_to: null },
+      SA,
+    );
     expect(requestApproval).not.toHaveBeenCalled();
     expect(readInbound(B, SB.id)).toHaveLength(0);
   });

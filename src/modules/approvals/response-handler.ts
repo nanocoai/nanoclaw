@@ -92,8 +92,8 @@ async function handleRegisteredApproval(
   if (!(await transitionPendingApprovalStatus(approval.approval_id, 'pending', 'approved'))) return;
 
   // Approved — dispatch to the module that registered for this action.
-  const notify = (text: string): Promise<void> =>
-    writeSessionMessage(session.agent_group_id, session.id, {
+  const notify = async (text: string): Promise<void> => {
+    await writeSessionMessage(session.agent_group_id, session.id, {
       id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       kind: 'chat',
       timestamp: new Date().toISOString(),
@@ -102,6 +102,15 @@ async function handleRegisteredApproval(
       threadId: null,
       content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
     });
+    if (approval.action === 'a2a_message_gate') {
+      try {
+        const { notifySource } = await import('../agent-to-agent/notify-source.js');
+        await notifySource(session.id, text);
+      } catch (err) {
+        log.warn('Could not notify source about agent-message replay failure', { approvalId: approval.approval_id, err });
+      }
+    }
+  };
 
   const handler = getApprovalHandler(approval.action);
   if (!handler) {
@@ -109,7 +118,8 @@ async function handleRegisteredApproval(
       approvalId: approval.approval_id,
       action: approval.action,
     });
-    await notify(`Your ${approval.action} was approved, but no handler is installed to apply it.`);
+    const text = `Your ${approval.action} was approved, but no handler is installed to apply it.`;
+    await notify(text);
     await deletePendingApproval(approval.approval_id);
     await notifyApprovalResolved({ approval, session, outcome: 'approve', userId });
     await requestWake(session, 'approval-response');
@@ -122,9 +132,8 @@ async function handleRegisteredApproval(
     log.info('Approval handled', { approvalId: approval.approval_id, action: approval.action, userId });
   } catch (err) {
     log.error('Approval handler threw', { approvalId: approval.approval_id, action: approval.action, err });
-    await notify(
-      `Your ${approval.action} was approved, but applying it failed: ${err instanceof Error ? err.message : String(err)}.`,
-    );
+    const text = `Your ${approval.action} was approved, but applying it failed: ${err instanceof Error ? err.message : String(err)}.`;
+    await notify(text);
   }
 
   await deletePendingApproval(approval.approval_id);
