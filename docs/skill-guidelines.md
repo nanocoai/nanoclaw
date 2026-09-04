@@ -47,7 +47,7 @@ A skill carries everything it needs:
 - **Apply**: the steps in `SKILL.md`, written as prose an agent can run. Apply must be safe to re-run: upgrades re-run it, and a skill that half-applies twice is a bug.
 - **Remove**: a separate `REMOVE.md` that reverses *every* change apply made: barrel lines deleted (not commented out), every copied file removed including tests, dependencies uninstalled, Dockerfile edits reverted, env lines removed. **REMOVE.md is required exactly when apply leaves anything behind.** A pure instruction-only skill that copies nothing needs none, and an empty one is noise.
 - **Tests**: files that ship with the skill and are copied into the project's test tree on apply, so they run against the *composed* system.
-- **Recipe entry**: how it composes with the fork's other skills (ordering, dependencies).
+- **Recipe entry**: how it composes with the fork's other skills (ordering, dependencies). A recipe published upstream ships its components inside its own folder (`.claude/skills/recipes/<name>/skills/<component>/`), each held to this checklist individually.
 
 ---
 
