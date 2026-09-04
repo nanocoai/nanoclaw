@@ -208,8 +208,12 @@ function formatSingleChat(msg: MessageInRow): string {
   const appContextSuffix = formatAppContext(content.app_context);
 
   const fromAttr = originAttr(msg);
+  const senderIdAttr =
+    msg.channel_type === 'agent' && content.senderId
+      ? ` sender_id="${escapeXml(String(content.senderId))}"`
+      : '';
 
-  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${linksSuffix}${attachmentsSuffix}${appContextSuffix}</message>`;
+  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}"${senderIdAttr} time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${linksSuffix}${attachmentsSuffix}${appContextSuffix}</message>`;
 }
 
 /**
@@ -238,12 +242,13 @@ function formatEchoMessage(msg: MessageInRow): string {
 
 /**
  * Build a ` from="destination_name"` attribute string from a message's routing
- * fields. Shared by all formatters so the agent always knows where a message
- * originated — critical for explicit addressing.
+ * fields. Agent messages omit unresolved reverse routes because they are
+ * authenticated but not replyable; other channels keep the raw-route fallback.
  */
 function originAttr(msg: MessageInRow): string {
   const fromDest = findByRouting(msg.channel_type, msg.platform_id);
   if (fromDest) return ` from="${escapeXml(fromDest.name)}"`;
+  if (msg.channel_type === 'agent') return '';
   if (msg.channel_type || msg.platform_id) {
     return ` from="unknown:${escapeXml(msg.channel_type || '')}:${escapeXml(msg.platform_id || '')}"`;
   }

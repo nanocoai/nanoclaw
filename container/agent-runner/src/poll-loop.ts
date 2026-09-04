@@ -45,6 +45,11 @@ function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function isRunnerCommandEligible(msg: MessageInRow): boolean {
+  // Sibling-agent content is never trusted as runner control input.
+  return msg.channel_type !== 'agent';
+}
+
 export interface PollLoopConfig {
   provider: AgentProvider;
   /**
@@ -148,7 +153,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const commandIds: string[] = [];
 
     for (const msg of messages) {
-      if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isClearCommand(msg)) {
+      if (isRunnerCommandEligible(msg) && (msg.kind === 'chat' || msg.kind === 'chat-sdk') && isClearCommand(msg)) {
         log('Clearing session (resetting continuation)');
         continuation = undefined;
         clearContinuation(config.providerName);
@@ -165,7 +170,12 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       }
       // isSessionEcho guard: a copied "/upload-trace" from another session is
       // ambient context, never a runner command (isClearCommand self-guards).
-      if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && !isSessionEcho(msg) && isUploadTraceCommand(msg)) {
+      if (
+        isRunnerCommandEligible(msg) &&
+        (msg.kind === 'chat' || msg.kind === 'chat-sdk') &&
+        !isSessionEcho(msg) &&
+        isUploadTraceCommand(msg)
+      ) {
         log('Uploading session trace to Hugging Face');
         await writeMessageOut({
           id: generateId(),
@@ -308,7 +318,7 @@ function formatMessagesWithCommands(messages: MessageInRow[], nativeSlashCommand
   const normalBatch: MessageInRow[] = [];
 
   for (const msg of messages) {
-    if (nativeSlashCommands && (msg.kind === 'chat' || msg.kind === 'chat-sdk')) {
+    if (nativeSlashCommands && isRunnerCommandEligible(msg) && (msg.kind === 'chat' || msg.kind === 'chat-sdk')) {
       const cmdInfo = categorizeMessage(msg);
       if (cmdInfo.category === 'passthrough' || cmdInfo.category === 'admin') {
         // Flush normal batch first
@@ -426,7 +436,7 @@ export async function processQuery(
         // not end: end() lets an in-flight turn run to completion, which
         // can block the command (e.g. /clear during a long task) for as
         // long as the turn takes.
-        if (pending.some((m) => isRunnerCommand(m))) {
+        if (pending.some((m) => isRunnerCommandEligible(m) && isRunnerCommand(m))) {
           log('Pending slash command — aborting active stream so outer loop can process');
           endedForCommand = true;
           query.abort();

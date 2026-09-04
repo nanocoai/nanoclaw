@@ -220,6 +220,15 @@ describe('origin metadata (from= attribute)', () => {
       .run(name, name, channelType, platformId);
   }
 
+  function seedAgentDestination(name: string, agentGroupId: string): void {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES (?, ?, 'agent', NULL, NULL, ?)`,
+      )
+      .run(name, name, agentGroupId);
+  }
+
   function insertWithRouting(id: string, kind: string, content: object, channelType: string | null, platformId: string | null): void {
     getInboundDb()
       .prepare(
@@ -237,9 +246,41 @@ describe('origin metadata (from= attribute)', () => {
   });
 
   it('chat message falls back to raw routing when no destination matches', () => {
-    insertWithRouting('m1', 'chat', { sender: 'Alice', text: 'hi' }, 'telegram', 'chat-999');
+    insertWithRouting(
+      'm1',
+      'chat',
+      { sender: 'Helper', senderId: 'telegram:user-1', text: 'hi' },
+      'telegram',
+      'chat-999',
+    );
     const prompt = formatMessages(getPendingMessages());
     expect(prompt).toContain('from="unknown:telegram:chat-999"');
+    expect(prompt).not.toContain('sender_id=');
+  });
+
+  it('one-way agent message renders verified identity without an unresolved from=', () => {
+    // Counterpart: src/modules/agent-to-agent/agent-route.test.ts stores this exact host-authenticated fixture.
+    insertWithRouting('m1', 'chat', { text: 'status update', sender: 'A', senderId: 'agent:ag-A' }, 'agent', 'ag-A');
+    const prompt = formatMessages(getPendingMessages());
+    expect(prompt).toContain('sender="A"');
+    expect(prompt).toContain('sender_id="agent:ag-A"');
+    expect(prompt).not.toContain('from=');
+    expect(prompt).not.toContain('unknown');
+  });
+
+  it('two-way agent message renders the reverse destination as from=', () => {
+    seedAgentDestination('helper', 'ag-helper');
+    insertWithRouting(
+      'm1',
+      'chat',
+      { sender: 'Helper', senderId: 'agent:ag-helper', text: 'status update' },
+      'agent',
+      'ag-helper',
+    );
+    const prompt = formatMessages(getPendingMessages());
+    expect(prompt).toContain('from="helper"');
+    expect(prompt).toContain('sender="Helper"');
+    expect(prompt).toContain('sender_id="agent:ag-helper"');
   });
 
   it('chat message omits from= when routing is null', () => {
