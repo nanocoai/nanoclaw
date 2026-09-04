@@ -288,6 +288,77 @@ describe('conformance: the multi-container contract (validateSpec is the shared 
   });
 });
 
+describe('conformance: allowlisted-extra mounts get an independent re-check when the policy provides one', () => {
+  // The fixture's own allowlisted-extra mount (`/pki/upstream-ca.pem`, added
+  // by fixtureAuxContainer) never existed on any real filesystem — it exists
+  // to exercise the class, not to be resolved. That is exactly why FIXTURE_POLICY
+  // carries no `validateAllowlistedExtra`: with the field absent, `mountAllowed`
+  // must keep trusting the class label unconditionally, so this synthetic mount
+  // keeps passing exactly as it does today.
+  it("preserves today's behavior when the policy has no validateAllowlistedExtra", () => {
+    expect(FIXTURE_POLICY.validateAllowlistedExtra).toBeUndefined();
+    expect(() => validateSpec(fixtureSpecWithAux(), FIXTURE_POLICY)).not.toThrow();
+  });
+
+  it("denies the spec when the policy's check rejects the allowlisted-extra host path", () => {
+    const policy = {
+      ...FIXTURE_POLICY,
+      validateAllowlistedExtra: (hostPath: string) => ({
+        allowed: false,
+        reason: `stub: ${hostPath} is not on the allowlist`,
+      }),
+    };
+    expect(() => validateSpec(fixtureSpecWithAux(), policy)).toThrow(/denied-by-policy/);
+  });
+
+  // The regression this exemption exists for: a gateway or model-provider's
+  // own contributed mount (onecli.ts's contributionFromArgs; container-runner
+  // .ts's provider-contributed-mounts branch of buildMounts) was vetted by its
+  // own in-tree registration, never by the operator's mount-allowlist.json —
+  // there is no reason to expect it under any allowed root there, and a check
+  // that denies everything not listed must not also deny this. Before this
+  // exemption existed, wiring `validateAllowlistedExtra` into production would
+  // have denied every OneCLI-gated session outright on a fresh install (see
+  // the ADR/PR discussion this commit follows up on).
+  it("exempts a provider-contributed mount (origin: 'provider') from the independent re-check, even when the check would deny it", () => {
+    const spec = fixtureSpec();
+    spec.containers[0].mounts.push({
+      class: 'allowlisted-extra',
+      hostPath: '/tmp/onecli/stub.json',
+      containerPath: '/workspace/.config/creds.json',
+      mode: 'ro',
+      groupScope: 'g1',
+      origin: 'provider',
+    });
+    const policy = {
+      ...FIXTURE_POLICY,
+      validateAllowlistedExtra: (_hostPath: string) => ({ allowed: false, reason: 'stub: never allowed' }),
+    };
+    expect(() => validateSpec(spec, policy)).not.toThrow();
+  });
+
+  it("accepts the spec when the policy's check allows the allowlisted-extra host path", () => {
+    const policy = {
+      ...FIXTURE_POLICY,
+      validateAllowlistedExtra: (_hostPath: string) => ({ allowed: true, reason: 'stub: allowed' }),
+    };
+    expect(() => validateSpec(fixtureSpecWithAux(), policy)).not.toThrow();
+  });
+
+  it("calls the policy check with the mount's host path, not some derived path", () => {
+    const seen: string[] = [];
+    const policy = {
+      ...FIXTURE_POLICY,
+      validateAllowlistedExtra: (hostPath: string) => {
+        seen.push(hostPath);
+        return { allowed: true, reason: 'stub: allowed' };
+      },
+    };
+    validateSpec(fixtureSpecWithAux(), policy);
+    expect(seen).toContain('/pki/upstream-ca.pem');
+  });
+});
+
 describe('conformance: the isolation-tier rule (validateSpec is the shared layer)', () => {
   const capabilities = (tiers: ('container' | 'vm')[]): DriverCapabilities => ({
     isolationTiers: tiers,

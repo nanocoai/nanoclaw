@@ -28,6 +28,14 @@ export interface VolumeMount {
   mountClass?: import('../drivers/types.js').MountClass;
   /** Agent group this mount is pinned to, for `group-state`. */
   scope?: string;
+  /**
+   * Set by `buildMounts` when it stamps this mount in, never by a provider's
+   * own config fn — see `MountSpec.origin` in `src/drivers/types.js`. A
+   * provider-contributed mount is vetted by its own in-tree registration, so
+   * `buildMounts` marks it `'provider'`, exempting it from the operator-facing
+   * mount-allowlist re-check that applies to `additionalMounts`.
+   */
+  origin?: 'operator' | 'provider';
 }
 
 export interface ProviderContainerContext {

@@ -51,6 +51,12 @@ export function contributionFromArgs(args: readonly string[], groupScope: string
           containerPath: parts[1],
           mode: parts[2] === 'ro' ? 'ro' : 'rw',
           groupScope,
+          // This SDK's own CA-certificate and credential-stub files, never an
+          // operator-named path — there is no reason to expect either in the
+          // operator's mount-allowlist.json, and there should not be: an
+          // independent re-check of a fixed, vetted, in-tree contribution adds
+          // nothing an operator could act on. See `MountSpec.origin`.
+          origin: 'provider',
         });
         continue;
       }

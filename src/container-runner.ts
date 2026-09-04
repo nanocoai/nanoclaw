@@ -907,9 +907,19 @@ export async function buildMounts(
   // Provider-contributed mounts (e.g. opencode-xdg). Vetted upstream by the
   // in-tree provider registration, which is exactly the 'allowlisted-extra'
   // contract — classing them group-state would deny any provider whose state
-  // root sits outside the group subtree.
+  // root sits outside the group subtree. Stamped `origin: 'provider'` (see
+  // `MountSpec.origin`) so the operator-facing mount-allowlist re-check that
+  // `mountAllowed` applies to `allowlisted-extra` mounts, when wired, does not
+  // also deny a host path no operator ever configured.
   if (providerContribution.mounts) {
-    mounts.push(...providerContribution.mounts.map((m) => ({ ...m, mountClass: 'allowlisted-extra' as const, scope })));
+    mounts.push(
+      ...providerContribution.mounts.map((m) => ({
+        ...m,
+        mountClass: 'allowlisted-extra' as const,
+        scope,
+        origin: 'provider' as const,
+      })),
+    );
   }
 
   return mounts;
@@ -923,6 +933,7 @@ export function toMountSpecs(mounts: readonly VolumeMount[], defaultScope: strin
     containerPath: mount.containerPath,
     mode: mount.readonly ? ('ro' as const) : ('rw' as const),
     groupScope: mount.scope ?? defaultScope,
+    origin: mount.origin,
   }));
 }
 
