@@ -11,6 +11,7 @@ import { createSession, updateSession } from '../../db/sessions.js';
 import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
 import { initSessionFolder, sessionDir, writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
+import { notifySource } from './notify-source.js';
 
 vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
@@ -22,6 +23,11 @@ vi.mock('../../container-runner.js', () => ({
 vi.mock('../../config.js', async () => {
   const actual = await vi.importActual('../../config.js');
   return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-a2a-route' };
+});
+
+vi.mock('./notify-source.js', async (importActual) => {
+  const actual = await importActual<typeof import('./notify-source.js')>();
+  return { ...actual, notifySource: vi.fn().mockResolvedValue(true) };
 });
 
 const TEST_DIR = '/tmp/nanoclaw-test-a2a-route';
@@ -101,6 +107,7 @@ describe('routeAgentMessage return-path', () => {
 
     const db = await initTestDb();
     await runMigrations(db);
+    vi.mocked(notifySource).mockReset().mockResolvedValue(true);
 
     await createAgentGroup({ id: A, name: 'A', folder: 'a', agent_provider: null, created_at: now() });
     await createAgentGroup({ id: B, name: 'B', folder: 'b', agent_provider: null, created_at: now() });
@@ -226,6 +233,17 @@ describe('routeAgentMessage return-path', () => {
     const content = JSON.parse(readInbound(B, SB.id)[0].content) as { text: unknown };
     expect(content.text).toBe('{"status":"ready"}');
     expect(typeof content.text).toBe('string');
+  });
+
+  it('retries a failed one-way notice and dedupes only after notification succeeds', async () => {
+    await deleteDestination(B, 'a');
+    vi.mocked(notifySource).mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+
+    for (const id of ['notice-1', 'notice-2', 'notice-3']) {
+      await routeAgentMessage({ id, platform_id: B, content: JSON.stringify({ text: id }), in_reply_to: null }, S2);
+    }
+
+    expect(notifySource).toHaveBeenCalledTimes(2);
   });
 
   it('reply direction: routes back to the originating session, not the newest', async () => {

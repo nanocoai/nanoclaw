@@ -30,8 +30,10 @@ import { GuardDenyError, guard } from '../../guard/index.js';
 import { log } from '../../log.js';
 import { resolveSession, sessionDir, withExistingMailboxSession, writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval, Session } from '../../types.js';
-import { requestApproval } from '../approvals/index.js';
+import { notifyAgent, requestApproval } from '../approvals/index.js';
+import { hasDestination, normalizeName } from './db/agent-destinations.js';
 import { A2A_MESSAGE_GATE_ACTION, a2aSend } from './guard.js';
+import { buildAddAgentDestinationCommand, notifySource } from './notify-source.js';
 
 export { isSafeAttachmentName };
 export { A2A_MESSAGE_GATE_ACTION } from './guard.js';
@@ -240,11 +242,15 @@ export async function routeAgentMessage(
   const sourceAgentGroupId = session.agent_group_id;
   const targetAgentGroupId = msg.platform_id;
   if (!targetAgentGroupId) {
-    throw new Error(`agent-to-agent message ${msg.id} is missing a target agent group id`);
+    const sourceName = (await getAgentGroup(sourceAgentGroupId))?.name ?? sourceAgentGroupId;
+    const text = `${sourceName} tried to send an agent message, but it had no target agent ID, so nothing was delivered.`;
+    log.warn('Agent message has no target agent group id', { from: sourceAgentGroupId, msgId: msg.id });
+    await notifySource(session.id, text);
+    return;
   }
 
-  // The a2a.send decision (guard.ts) carries the checks verbatim in their
-  // original order: destination ACL deny, target-exists deny, self-send
+  // The a2a.send decision (guard.ts) carries the structural checks: target
+  // existence, destination ACL deny, self-send
   // allow, agent_message_policies hold. An approved replay carries the
   // grant — the hold is satisfied but the structure is re-checked live, so
   // revoking a destination between hold and approve blocks delivery.
@@ -256,7 +262,37 @@ export async function routeAgentMessage(
   });
 
   if (decision.effect === 'deny') {
-    throw new GuardDenyError(decision.reason);
+    log.warn('Agent message denied by guard', {
+      from: sourceAgentGroupId,
+      to: targetAgentGroupId,
+      msgId: msg.id,
+      reason: decision.reason,
+    });
+    if (opts.grant) throw new GuardDenyError(decision.reason);
+
+    const sourceName = (await getAgentGroup(sourceAgentGroupId))?.name ?? sourceAgentGroupId;
+    const target = await getAgentGroup(targetAgentGroupId);
+    let text: string;
+    if (!target) {
+      text = `${sourceName} tried to send a message to "${targetAgentGroupId}", but no agent with that ID exists, so nothing was delivered.`;
+    } else {
+      const command = buildAddAgentDestinationCommand(
+        sourceAgentGroupId,
+        normalizeName(target.name),
+        targetAgentGroupId,
+      );
+      const remediation = command
+        ? `To allow this, an admin can run: ${command}.`
+        : `To allow this, an admin can add ${target.name} as a destination for ${sourceName}.`;
+      text = `${sourceName} tried to send a message to "${target.name}", but it was blocked: ${sourceName} does not have "${target.name}" in its destinations. ${remediation} After that, ask ${sourceName} to resend.`;
+    }
+    try {
+      await notifyAgent(session, text);
+    } catch (err) {
+      log.warn('Could not notify source agent about denied message', { sessionId: session.id, err });
+    }
+    await notifySource(session.id, text);
+    return;
   }
 
   // Gated edge: hold the message and return (not throw) so the delivery loop
@@ -277,6 +313,8 @@ export async function routeAgentMessage(
         platform_id: targetAgentGroupId,
         content: msg.content,
         in_reply_to: msg.in_reply_to,
+        source_name: sourceName,
+        target_name: targetName,
       },
     });
     log.info('Agent message held for approval', {
@@ -291,6 +329,8 @@ export async function routeAgentMessage(
 }
 
 const GATE_CARD_BODY_MAX = 1500;
+const ONE_WAY_NOTICE_KEY_LIMIT = 4096;
+const oneWayNoticeKeys = new Set<string>();
 
 function parseMessageContent(contentStr: string): { text: string; files: string[] } {
   try {
@@ -336,6 +376,8 @@ async function performAgentRoute(
   // file attachments look like they arrive but the target has no way to
   // read the bytes — they live in a session dir it doesn't mount.
   const sourceName = (await getAgentGroup(session.agent_group_id))?.name ?? session.agent_group_id;
+  const targetName = (await getAgentGroup(targetAgentGroupId))?.name ?? targetAgentGroupId;
+  const targetCanReply = await hasDestination(targetAgentGroupId, 'agent', session.agent_group_id);
   const forwardedContent = prepareForwardedContent(
     msg,
     sourceName,
@@ -364,6 +406,27 @@ async function performAgentRoute(
   });
   const fresh = await getSession(targetSession.id);
   if (fresh) await requestWake(fresh, 'inbound-message');
+
+  const noticeKey = `${session.id}\0${targetAgentGroupId}`;
+  if (targetAgentGroupId !== session.agent_group_id && !targetCanReply && !oneWayNoticeKeys.has(noticeKey)) {
+    const command = buildAddAgentDestinationCommand(
+      targetAgentGroupId,
+      normalizeName(sourceName),
+      session.agent_group_id,
+    );
+    const remediation = command
+      ? `To enable replies, an admin can run: ${command}.`
+      : `To enable replies, an admin can add ${sourceName} as a destination for ${targetName}.`;
+    const notified = await notifySource(
+      session.id,
+      `Delivered to ${targetName}. Note: ${targetName} cannot reply — it does not have ${sourceName} in its destinations. ${remediation}`,
+    );
+    if (notified) {
+      // Bound memory at 4,096 keys; clearing can repeat earlier notices.
+      if (oneWayNoticeKeys.size >= ONE_WAY_NOTICE_KEY_LIMIT) oneWayNoticeKeys.clear();
+      oneWayNoticeKeys.add(noticeKey);
+    }
+  }
 }
 
 /**

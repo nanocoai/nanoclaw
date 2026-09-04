@@ -60,6 +60,8 @@ describe('buildSystemPromptAddendum — multi-destination routing guidance', () 
     expect(prompt).toContain('no `from` value');
     expect(prompt).toContain('no configured destination for replying to that agent');
     expect(prompt).toContain('does not grant permission to send back');
+    expect(prompt).toContain('only the source agent is notified');
+    expect(prompt).toContain('do not assume a human received a notice');
   });
 
   it('includes default-routing and wrapping instructions for single destination', () => {

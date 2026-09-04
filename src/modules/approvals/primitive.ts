@@ -67,7 +67,7 @@ export interface ApprovalHandlerContext {
   approval: PendingApproval;
   /** User ID of the admin who approved. Empty string if unknown. */
   userId: string;
-  /** Send a system chat message to the requesting agent's session. */
+  /** Notify the requesting agent; A2A notices also reach its attached source chat. */
   notify: (text: string) => Promise<void>;
 }
 
@@ -228,10 +228,38 @@ export interface RequestApprovalOptions {
  */
 export async function requestApproval(opts: RequestApprovalOptions): Promise<void> {
   const { session, action, payload, title, question, agentName, approverUserId } = opts;
+  const a2aTargetName =
+    action === 'a2a_message_gate'
+      ? typeof payload.target_name === 'string'
+        ? payload.target_name
+        : typeof payload.platform_id === 'string'
+          ? payload.platform_id
+          : 'the target agent'
+      : null;
+  const notifyA2aSource = async (text: string): Promise<void> => {
+    if (a2aTargetName === null) return;
+    try {
+      const { notifySource } = await import('../agent-to-agent/notify-source.js');
+      await notifySource(session.id, text);
+    } catch (err) {
+      log.warn('Could not notify source about agent-message approval', { sessionId: session.id, err });
+    }
+  };
+  const fail = async (reason: string): Promise<void> => {
+    try {
+      await notifyAgent(session, `${action} failed: ${reason}.`);
+    } catch (err) {
+      if (a2aTargetName === null) throw err;
+      log.warn('Could not notify source agent about agent-message approval', { sessionId: session.id, err });
+    }
+    await notifyA2aSource(
+      `${agentName}'s message to ${a2aTargetName} needs approval, but I couldn't reach an approver (${reason}). The message was not delivered.`,
+    );
+  };
 
   const approvers = approverUserId ? [approverUserId] : await pickApprover(session.agent_group_id);
   if (approvers.length === 0) {
-    await notifyAgent(session, `${action} failed: no owner or admin configured to approve.`);
+    await fail('no owner or admin configured to approve');
     return;
   }
 
@@ -240,7 +268,7 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
 
   const target = await pickApprovalDelivery(approvers, originChannelType, origin?.instance);
   if (!target) {
-    await notifyAgent(session, `${action} failed: no DM channel found for any eligible approver.`);
+    await fail('no DM channel found for any eligible approver');
     return;
   }
 
@@ -287,10 +315,13 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
       // The single delivery target never saw the card — remove the row so it
       // can't linger as a pending approval nobody can act on.
       await deletePendingApproval(approvalId);
-      await notifyAgent(session, `${action} failed: could not deliver approval request to ${target.userId}.`);
+      await fail(`could not deliver approval request to ${target.userId}`);
       return;
     }
   }
 
   log.info('Approval requested', { action, approvalId, agentName, approver: target.userId });
+  await notifyA2aSource(
+    `${agentName}'s message to ${a2aTargetName} is waiting for approval from ${target.userId}. It will be delivered if approved.`,
+  );
 }

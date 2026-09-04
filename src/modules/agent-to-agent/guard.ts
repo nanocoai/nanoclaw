@@ -9,12 +9,12 @@
  * the requesting group's admin chain.
  *
  * a2a.send — the decision moved verbatim out of routeAgentMessage, in its
- * original check order: a missing destination row denies; a missing target
- * group denies; self-sends allow without a destination row; an
+ * original checks: a missing target group denies; a missing destination row
+ * denies; self-sends allow without a destination row; an
  * agent_message_policies row for the (from, to) pair holds for the row's
  * named approver. The ghost-policy edge (policy row with no destination row)
- * denies — the destination check precedes the policy check, exactly today's
- * outcome. Policy rows can only tighten (hold), never allow: absence of a
+ * denies — the destination check precedes the policy check. Policy rows can
+ * only tighten (hold), never allow: absence of a
  * row falls through to the structural checks.
  */
 import { getAgentGroup } from '../../db/agent-groups.js';
@@ -72,11 +72,11 @@ export const a2aSend = defineGuardedAction({
     const from = input.actor.agentGroupId;
     const to = input.resource?.to ?? '';
     const isSelf = to === from;
-    if (!isSelf && !(await hasDestination(from, 'agent', to))) {
-      return DENY(`unauthorized agent-to-agent: ${from} has no destination for ${to}`);
-    }
     if (!(await getAgentGroup(to))) {
       return DENY(`target agent group ${to} not found for message ${String(input.payload.id)}`);
+    }
+    if (!isSelf && !(await hasDestination(from, 'agent', to))) {
+      return DENY(`unauthorized agent-to-agent: ${from} has no destination for ${to}`);
     }
     if (isSelf) return ALLOW('self-send');
     const policy = await getMessagePolicy(from, to);
