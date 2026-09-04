@@ -1,6 +1,7 @@
 ---
 name: add-signal
 description: Add Signal channel integration via signal-cli device-link. Native adapter — no Chat SDK bridge.
+disable-model-invocation: true
 ---
 
 # Add Signal Channel

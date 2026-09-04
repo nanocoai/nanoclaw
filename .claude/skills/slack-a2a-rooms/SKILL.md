@@ -1,6 +1,7 @@
 ---
 name: slack-a2a-rooms
 description: Agent-to-agent Slack rooms — a group DM (MPIM) holding a human plus two or more NanoClaw sibling bots, where each bot hears the room over its own Socket Mode connection. Registers the admission policy on the Slack channel's bot-inbound guard so bot-authored inbound is admitted only for rooms allowlisted in SLACK_A2A_ROOMS (re-attributed as slack:bot:<bot_id>, hop-limited via SLACK_A2A_MAX_HOPS), plus scripts/open-a2a-room.ts to open a room and register it.
+disable-model-invocation: true
 ---
 
 # Slack agent-to-agent rooms (SLACK_A2A_ROOMS)
@@ -61,11 +62,12 @@ per bot identity and per room; any human message resets it.
 The policy module copied next imports `setBotInboundPolicy` from the installed
 `src/channels/slack-a2a-guard.ts`. On a Slack payload that predates the guard,
 that import takes down the channel barrel — and with it **every** adapter — so
-verify the seam first. If the check fails, **stop**: re-run `/add-slack` from a
-channels branch that ships the guard, then re-apply this skill.
+verify the seam first. If the check fails, **stop**: refresh the Slack payload from
+the channels branch with `bin/ncl skills apply add-slack --refresh` (or `/update-skills`),
+then re-run this skill.
 
 ```nc:run effect:check
-grep -sq 'export function setBotInboundPolicy' src/channels/slack-a2a-guard.ts || { echo 'slack-a2a-rooms: src/channels/slack-a2a-guard.ts is missing or does not export setBotInboundPolicy. Installing anyway would break the channel barrel and take down every channel adapter. Update the installed Slack channel first (re-run /add-slack from a channels branch that ships the bot-inbound guard), then re-apply this skill.' >&2; exit 1; }
+grep -sq 'export function setBotInboundPolicy' src/channels/slack-a2a-guard.ts || { echo 'slack-a2a-rooms: src/channels/slack-a2a-guard.ts is missing or does not export setBotInboundPolicy. Installing anyway would break the channel barrel and take down every channel adapter. Update the installed Slack channel first (bin/ncl skills apply add-slack --refresh), then re-apply this skill.' >&2; exit 1; }
 ```
 
 ### 2. Copy the policy module, its guard test, and the room-opener script

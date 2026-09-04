@@ -1,6 +1,7 @@
 ---
 name: add-whatsapp-cloud
 description: Add WhatsApp Business Cloud API channel via Chat SDK. Official Meta API.
+disable-model-invocation: true
 ---
 
 # Add WhatsApp Cloud API Channel

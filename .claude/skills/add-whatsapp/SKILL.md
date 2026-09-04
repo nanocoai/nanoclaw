@@ -1,6 +1,7 @@
 ---
 name: add-whatsapp
 description: Add WhatsApp channel via native Baileys adapter. Direct connection — no Chat SDK bridge. Uses QR code or pairing code for authentication.
+disable-model-invocation: true
 ---
 
 # Add WhatsApp Channel

@@ -1,6 +1,7 @@
 ---
 name: add-mnemon
 description: Add persistent graph-based memory via mnemon. Agents recall past context before responding and remember insights after each turn.
+disable-model-invocation: true
 ---
 
 # Add Mnemon — Persistent Memory

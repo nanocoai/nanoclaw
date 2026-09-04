@@ -8,7 +8,7 @@ Engineering source of truth: the header comment in [`scripts/skill-directives.ts
 
 ## Two readers, one document
 
-A fenced code block whose info-string starts with `nc:` is a load-bearing directive; every other fence, and all prose, is the human floor the parser ignores. An agent applies the prose; a tool applies the directives; the two describe the same install.
+A fenced code block whose info-string starts with `nc:` is a load-bearing directive; every other fence, and all prose, is the human floor the parser ignores. Tools apply the directives (the setup wizard, `ncl skills apply`); people read the prose; the two describe the same install.
 
 Two invariants follow, and both are non-negotiable:
 

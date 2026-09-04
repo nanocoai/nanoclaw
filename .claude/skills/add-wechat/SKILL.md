@@ -1,6 +1,7 @@
 ---
 name: add-wechat
 description: Add WeChat (personal) channel integration via Tencent's official iLink Bot API. Uses long-polling and QR scan — no webhook, no ToS risk, no paid token.
+disable-model-invocation: true
 ---
 
 # Add WeChat Channel

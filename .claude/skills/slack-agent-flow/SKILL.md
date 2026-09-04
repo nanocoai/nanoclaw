@@ -1,6 +1,7 @@
 ---
 name: slack-agent-flow
 description: Let an existing Slack agent create new agents that arrive as their own Slack bots — provisioned app, operator DM, and a shared three-way room, hot-started without a host restart.
+disable-model-invocation: true
 ---
 
 # Slack agent flow (create_agent → provisioned Slack bot)

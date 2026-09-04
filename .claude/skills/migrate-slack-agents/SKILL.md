@@ -23,6 +23,8 @@ Hard invariants:
 - Keep classic rows, credentials, and the shared Slack app available for
   rollback until the operator explicitly approves cutover.
 
+Source installation through `ncl skills apply` is disabled unless the operator enables it for this checkout. Respect a deployment refusal; use its release workflow instead of retrying through a script or manual source edits. If apply reports `needs-setup`, relay the pending steps to the operator and stop before wiring or restarting. Credentials stay on the host.
+
 ## Phase 1: Detect classic state
 
 Run from the NanoClaw project root. Read the central DB only through the
@@ -122,30 +124,19 @@ structured result to report `success: true` and `refreshed`. That refreshes the
 barrel-registered `/add-slack` payload; it deliberately does not install
 companion skills, credentials, wirings, or restarts.
 
-Resolve the remote that points at `nanocoai/nanoclaw` the same fork-aware way
-`/update-skills` does; do not assume it is `origin`. Fetch, but never merge:
+The companion skills live in-tree at `.claude/skills/slack-a2a-rooms/` and
+`.claude/skills/slack-agent-flow/` (never the copies on the `channels` branch); if
+either is missing, stop and run `/update-nanoclaw` first. Apply them in this
+order — it mirrors `setup/channels/companions.ts`:
 
 ```bash
-source setup/lib/channels-remote.sh
-channels_remote="$(resolve_channels_remote)"
-git fetch "$channels_remote" channels
-```
-
-From `$channels_remote/channels`, materialize every file under
-`.claude/skills/slack-a2a-rooms/` and then every file under
-`.claude/skills/slack-agent-flow/` with `git ls-tree` + `git show`. Read each
-new `SKILL.md` completely and apply its own Apply steps, in that order. The
-order is load-bearing and mirrors `setup/channels/companions.ts`. The standard
-driver may apply each document:
-
-```bash
-pnpm exec tsx setup/lib/skill-driver.ts .claude/skills/slack-a2a-rooms
-pnpm exec tsx setup/lib/skill-driver.ts .claude/skills/slack-agent-flow
+bin/ncl skills apply slack-a2a-rooms
+bin/ncl skills apply slack-agent-flow
 ```
 
 Do not continue unless both report fully applied and their own build/tests
 pass. Source contracts: `.claude/skills/add-slack/SKILL.md`,
-`setup/channels/companions.ts`, and the two fetched companion `SKILL.md` files.
+`setup/channels/companions.ts`, and the two in-tree companion `SKILL.md` files.
 
 ## Phase 4: Get provisioning authority
 

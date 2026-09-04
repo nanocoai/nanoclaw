@@ -1,6 +1,7 @@
 ---
 name: add-slack
 description: Add Slack channel integration via Chat SDK.
+disable-model-invocation: true
 ---
 
 # Add Slack Channel
@@ -8,8 +9,8 @@ description: Add Slack channel integration via Chat SDK.
 Adds Slack support via the Chat SDK bridge. Trunk ships no channels — this skill
 copies the Slack channel layer (adapter, shared lib, bot-inbound guard,
 provisioning core, container skills) in from the `channels` branch. The **Apply**
-steps carry `nc:` directive fences (an agent applies the prose, a parser the
-directives); all idempotent.
+steps carry `nc:` directive fences (the setup wizard and `ncl skills apply` run
+them); all idempotent.
 
 This is the base Slack experience: one bot, DM and channel chat. The Slack
 **agents** feature — child bots provisioned from `create_agent`, shared rooms,
@@ -189,8 +190,8 @@ bash setup/lib/restart.sh
 
 Mid-`/setup`: return to the setup flow. Otherwise wire the channel with `/init-first-agent`
 (or `/manage-channels`). For the Slack agents feature (child bots from
-`create_agent`, shared rooms, canvases), apply the in-tree `/slack-a2a-rooms`
-then `/slack-agent-flow` — the setup wizard does both automatically by default.
+`create_agent`, shared rooms, canvases), apply `slack-a2a-rooms` then
+`slack-agent-flow` with `bin/ncl skills apply <name>` — the setup wizard does both automatically by default.
 
 ## Channel Info
 

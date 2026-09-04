@@ -1,6 +1,7 @@
 ---
 name: add-gchat
 description: Add Google Chat channel integration via Chat SDK.
+disable-model-invocation: true
 ---
 
 # Add Google Chat Channel

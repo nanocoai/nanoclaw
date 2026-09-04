@@ -1,6 +1,7 @@
 ---
 name: add-ollama-tool
 description: Add Ollama MCP server so the container agent can call local models and optionally manage the Ollama model library.
+disable-model-invocation: true
 ---
 
 # Add Ollama Integration

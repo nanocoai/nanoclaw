@@ -1,6 +1,7 @@
 ---
 name: add-resend
 description: Add Resend (email) channel integration via Chat SDK.
+disable-model-invocation: true
 ---
 
 # Add Resend Email Channel

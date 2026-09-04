@@ -1,6 +1,7 @@
 ---
 name: add-deltachat
 description: Add DeltaChat channel integration via @deltachat/stdio-rpc-server. Native adapter — no Chat SDK bridge. Email-based messaging with end-to-end encryption.
+disable-model-invocation: true
 ---
 
 # Add DeltaChat Channel

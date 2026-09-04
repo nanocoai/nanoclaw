@@ -1,6 +1,7 @@
 ---
 name: add-atomic-chat-tool
 description: Add Atomic Chat MCP server so the container agent can call local models served by the Atomic Chat desktop app via its OpenAI-compatible API.
+disable-model-invocation: true
 ---
 
 # Add Atomic Chat Integration

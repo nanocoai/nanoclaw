@@ -1,6 +1,7 @@
 ---
 name: add-github
 description: Add GitHub channel integration via Chat SDK. PR and issue comment threads as conversations.
+disable-model-invocation: true
 ---
 
 # Add GitHub Channel

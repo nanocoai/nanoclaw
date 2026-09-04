@@ -1,6 +1,7 @@
 ---
 name: add-webex
 description: Add Webex channel integration via Chat SDK.
+disable-model-invocation: true
 ---
 
 # Add Webex Channel

@@ -76,7 +76,7 @@ Add a messaging channel or an agent provider. The SKILL.md contains the install 
 **Contributing a channel or provider skill:**
 1. Fork `nanocoai/nanoclaw` and branch from `main`
 2. Build the adapter following [docs/skill-guidelines.md](docs/skill-guidelines.md): a self-registering module, one appended barrel import, and a registration test that imports the real barrel
-3. Add a SKILL.md in `.claude/skills/<name>/` with the fetch-and-copy steps, and a REMOVE.md that reverses every change. Plain prose steps are all that's required. A skill with a credential prompt or an interactive step should include a `## Troubleshooting` section.
+3. Add a SKILL.md in `.claude/skills/<name>/` with the fetch-and-copy steps, and a REMOVE.md that reverses every change. Plain prose steps are the minimum; `nc:` fences let the wizard and operator-enabled `ncl skills apply` execute their code steps. Credentials and interactive setup may remain pending; callers must handle `needs-setup` before wiring or restarting. A skill with a credential prompt or an interactive step should include a `## Troubleshooting` section. Install skills are user-invoked — set `disable-model-invocation: true` and ship `agents/openai.yaml` with `policy.allow_implicit_invocation: false`; the conformance test checks both (see CLAUDE.md → Skills).
 4. Open a PR. We'll land the code on the registry branch from your work
 
 See `/add-slack` for a good example. See [docs/skills-model.md](docs/skills-model.md) for why install is a fetch, never a merge.
@@ -144,7 +144,7 @@ Instructions here...
 **Rules:**
 - Keep SKILL.md **under 500 lines** — move detail to separate reference files
 - `name`: lowercase, alphanumeric + hyphens, max 64 chars
-- `description`: required — Claude uses this to decide when to invoke the skill
+- `description`: required — Claude uses this to decide when to invoke the skill (install skills opt out with `disable-model-invocation: true`; see CLAUDE.md → Skills)
 - Put code in separate files, not inline in the markdown
 - See the [skills standard](https://code.claude.com/docs/en/skills) for all available frontmatter fields
 

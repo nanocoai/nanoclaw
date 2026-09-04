@@ -1,6 +1,7 @@
 ---
 name: add-teams
 description: Add Microsoft Teams channel integration via Chat SDK.
+disable-model-invocation: true
 ---
 
 # Add Microsoft Teams Channel
