@@ -261,9 +261,9 @@ function formatTaskMessage(msg: MessageInRow): string {
   });
   const parts: string[] = [];
   if (content.scriptOutput) {
-    parts.push('Script output:', JSON.stringify(content.scriptOutput, null, 2), '');
+    parts.push('Script output:', escapeXml(JSON.stringify(content.scriptOutput, null, 2)), '');
   }
-  parts.push('Instructions:', stripLegacyTaskContract(content.prompt || ''));
+  parts.push('Instructions:', escapeXml(stripLegacyTaskContract(content.prompt || '')));
   return `<task${from} time="${escapeXml(time)}" current_time="${escapeXml(currentTime)}">${parts.join('\n')}</task>`;
 }
 
@@ -293,13 +293,13 @@ function formatWebhookMessage(msg: MessageInRow): string {
   const source = content.source || 'unknown';
   const event = content.event || 'unknown';
   const from = originAttr(msg);
-  return `<webhook${from} source="${escapeXml(source)}" event="${escapeXml(event)}">${JSON.stringify(content.payload || content, null, 2)}</webhook>`;
+  return `<webhook${from} source="${escapeXml(source)}" event="${escapeXml(event)}">${escapeXml(JSON.stringify(content.payload || content, null, 2))}</webhook>`;
 }
 
 function formatSystemMessage(msg: MessageInRow): string {
   const content = parseContent(msg.content);
   const from = originAttr(msg);
-  return `<system_response${from} action="${escapeXml(content.action || 'unknown')}" status="${escapeXml(content.status || 'unknown')}">${JSON.stringify(content.result || null)}</system_response>`;
+  return `<system_response${from} action="${escapeXml(content.action || 'unknown')}" status="${escapeXml(content.status || 'unknown')}">${escapeXml(JSON.stringify(content.result || null))}</system_response>`;
 }
 
 /**
