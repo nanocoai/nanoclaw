@@ -62,8 +62,9 @@ per bot identity and per room; any human message resets it.
 The policy module copied next imports `setBotInboundPolicy` from the installed
 `src/channels/slack-a2a-guard.ts`. On a Slack payload that predates the guard,
 that import takes down the channel barrel — and with it **every** adapter — so
-verify the seam first. If the check fails, **stop**: ask the operator to re-run
-`/add-slack` from a channels branch that ships the guard, then to re-run this skill.
+verify the seam first. If the check fails, **stop**: refresh the Slack payload from
+the channels branch with `bin/ncl skills apply add-slack --refresh` (or `/update-skills`),
+then re-run this skill.
 
 ```nc:run effect:check
 grep -sq 'export function setBotInboundPolicy' src/channels/slack-a2a-guard.ts || { echo 'slack-a2a-rooms: src/channels/slack-a2a-guard.ts is missing or does not export setBotInboundPolicy. Installing anyway would break the channel barrel and take down every channel adapter. Update the installed Slack channel first (re-run /add-slack from a channels branch that ships the bot-inbound guard), then re-apply this skill.' >&2; exit 1; }

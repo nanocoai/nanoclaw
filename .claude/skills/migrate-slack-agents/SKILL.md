@@ -128,14 +128,17 @@ copies on the `channels` branch are only a compatibility mirror for older
 checkouts. Never fetch them from the branch over the in-tree copies. If either
 directory is missing, stop and run `/update-nanoclaw` first.
 
-Apply each in-tree skill through the standard driver, in that order — they are
+Apply each in-tree skill through `ncl skills apply`, in that order — they are
 user-invoked install skills, so do not paraphrase their Apply steps. The order is
 load-bearing and mirrors `setup/channels/companions.ts`:
 
 ```bash
-pnpm exec tsx setup/lib/skill-driver.ts .claude/skills/slack-a2a-rooms
-pnpm exec tsx setup/lib/skill-driver.ts .claude/skills/slack-agent-flow
+bin/ncl skills apply slack-a2a-rooms
+bin/ncl skills apply slack-agent-flow
 ```
+
+If the host is not running, `pnpm exec tsx scripts/skill-headless.ts apply <name>`
+runs the same engine directly.
 
 Do not continue unless both report fully applied and their own build/tests
 pass. Source contracts: `.claude/skills/add-slack/SKILL.md`,

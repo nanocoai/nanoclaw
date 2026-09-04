@@ -190,8 +190,8 @@ bash setup/lib/restart.sh
 
 Mid-`/setup`: return to the setup flow. Otherwise wire the channel with `/init-first-agent`
 (or `/manage-channels`). For the Slack agents feature (child bots from
-`create_agent`, shared rooms, canvases), ask the operator to run `/slack-a2a-rooms`
-then `/slack-agent-flow` (or apply each with `pnpm exec tsx setup/lib/skill-driver.ts .claude/skills/<name>`) — the setup wizard does both automatically by default.
+`create_agent`, shared rooms, canvases), apply `slack-a2a-rooms` then
+`slack-agent-flow` with `bin/ncl skills apply <name>` — the setup wizard does both automatically by default.
 
 ## Channel Info
 

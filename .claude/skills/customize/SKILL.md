@@ -10,7 +10,7 @@ This skill helps users add capabilities or modify behavior. Use AskUserQuestion 
 ## Workflow
 
 1. **Understand the request** — Ask clarifying questions.
-2. **Prefer a dedicated skill** — If a skill covers the request, use it instead of editing core by hand. Install skills (`/add-*`) are user-invoked: ask the user to run the command in this session, then continue once it has finished.
+2. **Prefer a dedicated skill** — If a skill covers the request, use it instead of editing core by hand. Install skills (`/add-*`) are user-invoked and never loaded into your context, so do not paraphrase their steps: preview with `bin/ncl skills plan <name>`, apply with `bin/ncl skills apply <name>` (`--restart` reloads the service; answer prompts with `--inputs '{"var":"value"}'`), and continue once it reports `applied`. If the host is not running, `pnpm exec tsx scripts/skill-headless.ts apply <name>` runs the same engine directly. Only a skill the engine refuses as prose-only needs the user to type `/<name>` themselves.
    - Channels: `/add-telegram`, `/add-slack`, `/add-discord`, `/add-whatsapp`, `/add-signal`, `/add-imessage`, and the rest of the `/add-<channel>` family.
    - Wiring channels to agents and isolation levels: `/manage-channels`.
    - Container directory access: `/manage-mounts`.
@@ -52,7 +52,7 @@ Questions to ask:
 - Same trigger rules as other channels on that agent group, or different?
 
 Implementation:
-1. Ask the user to run the matching install skill (`/add-telegram`, `/add-slack`, …). It fetches the adapter from the `channels` branch, wires the registration import, installs the pinned package, and builds.
+1. Apply the matching install skill with `bin/ncl skills apply add-telegram` (`add-slack`, …). It fetches the adapter from the `channels` branch, wires the registration import, installs the pinned package, and builds.
 2. Run `/manage-channels` (or use `ncl messaging-groups` + `ncl wirings`) to create the messaging group, choose the isolation level, and wire it to an agent group with a session mode and trigger rules.
 
 ### Adding a New MCP Integration
@@ -63,7 +63,7 @@ Questions to ask:
 - Which agent group should have access?
 
 Implementation:
-- If a dedicated `/add-<service>-tool` skill exists, ask the user to run it — it wires the MCP server and routes credentials through OneCLI so no raw keys reach the container.
+- If a dedicated `/add-<service>-tool` skill exists, apply it with `bin/ncl skills apply add-<service>-tool` — it wires the MCP server and routes credentials through OneCLI so no raw keys reach the container.
 - Otherwise wire the MCP server into the agent group's container config with either `--command <cmd> [--args <json-array>] [--env <json-object>]` for stdio or `--url <url>` for Streamable HTTP (HTTPS, or plain HTTP for localhost / host.docker.internal): `ncl groups config add-mcp-server --id <group-id> --name <name> ...`. Then run `ncl groups restart --id <group-id>` to take effect. From inside a container the agent uses the `add_mcp_server` self-mod tool, which requires one admin approval.
 
 ### Changing Assistant Behavior
@@ -119,7 +119,7 @@ launchctl load ~/Library/LaunchAgents/$(launchd_label).plist
 
 User: "Add Telegram as an input channel"
 
-1. Ask the user to run `/add-telegram`; it installs the adapter, wires its registration, and builds.
+1. Run `bin/ncl skills apply add-telegram`; it installs the adapter, wires its registration, and builds.
 2. Ask: "Should Telegram reach an existing agent group, or a new one?"
 3. Ask: "Share an agent group with your other channels, or keep Telegram separate?"
 4. Run `/manage-channels` (or `ncl messaging-groups create` + `ncl wirings create`) to create the messaging group and wire it to the chosen agent group with a session mode and trigger rules.

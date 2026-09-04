@@ -76,7 +76,7 @@ Add a messaging channel or an agent provider. The SKILL.md contains the install 
 **Contributing a channel or provider skill:**
 1. Fork `nanocoai/nanoclaw` and branch from `main`
 2. Build the adapter following [docs/skill-guidelines.md](docs/skill-guidelines.md): a self-registering module, one appended barrel import, and a registration test that imports the real barrel
-3. Add a SKILL.md in `.claude/skills/<name>/` with the fetch-and-copy steps, and a REMOVE.md that reverses every change. Plain prose steps are all that's required. A skill with a credential prompt or an interactive step should include a `## Troubleshooting` section. Install skills are user-invoked: set `disable-model-invocation: true` in the frontmatter and ship `agents/openai.yaml` with `policy.allow_implicit_invocation: false` for Codex (the conformance test enforces both for every `add-*` skill and every skill carrying `nc:` fences).
+3. Add a SKILL.md in `.claude/skills/<name>/` with the fetch-and-copy steps, and a REMOVE.md that reverses every change. Plain prose steps are all that's required. A skill with a credential prompt or an interactive step should include a `## Troubleshooting` section. Install skills are user-invoked: set `disable-model-invocation: true` in the frontmatter and ship `agents/openai.yaml` with `policy.allow_implicit_invocation: false` for Codex (the conformance test enforces both for every `add-*` skill and every skill carrying `nc:` fences). A coding agent applies an install skill with `ncl skills apply <name>`, not by reading its steps, so keep the mechanical steps in `nc:` fences.
 4. Open a PR. We'll land the code on the registry branch from your work
 
 See `/add-slack` for a good example. See [docs/skills-model.md](docs/skills-model.md) for why install is a fetch, never a merge.
@@ -144,7 +144,7 @@ Instructions here...
 **Rules:**
 - Keep SKILL.md **under 500 lines** — move detail to separate reference files
 - `name`: lowercase, alphanumeric + hyphens, max 64 chars
-- `description`: required — for a model-invocable skill Claude reads it to decide when to invoke the skill; an install skill also sets `disable-model-invocation: true`, so it loads only when the user types `/<name>` (plus `agents/openai.yaml` with `policy.allow_implicit_invocation: false` for Codex)
+- `description`: required — for a model-invocable skill Claude reads it to decide when to invoke the skill; an install skill also sets `disable-model-invocation: true`, so it loads only when the user types `/<name>` or an agent applies it with `ncl skills apply <name>` (plus `agents/openai.yaml` with `policy.allow_implicit_invocation: false` for Codex)
 - Put code in separate files, not inline in the markdown
 - See the [skills standard](https://code.claude.com/docs/en/skills) for all available frontmatter fields
 
