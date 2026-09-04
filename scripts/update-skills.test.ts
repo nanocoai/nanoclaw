@@ -5,6 +5,7 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { FIXTURE_GIT_FLAGS, isolateFixtureRepo } from './git-fixture.js';
 import { detectInstalledSkills, refreshInstalledSkills } from './update-skills.js';
 
 const tempRoots: string[] = [];
@@ -29,9 +30,11 @@ function write(root: string, rel: string, content: string): void {
   fs.writeFileSync(target, content);
 }
 
+// Identity comes from the repo's own config (isolateFixtureRepo), so it applies
+// to the git commands the code under test runs too, not just these.
 function commit(root: string, message: string): void {
   run(root, 'git', ['add', '.']);
-  run(root, 'git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', message]);
+  run(root, 'git', ['commit', '-m', message]);
 }
 
 afterEach(() => {
@@ -81,7 +84,8 @@ describe('registry refresh end to end', () => {
 
   it('refreshes from official upstream when the user fork origin has no registry branch', async () => {
     const seed = temp('nanoclaw-skills-seed-');
-    run(seed, 'git', ['init', '-b', 'main']);
+    run(seed, 'git', [...FIXTURE_GIT_FLAGS, 'init', '-b', 'main']);
+    isolateFixtureRepo(seed);
     write(seed, 'src/channels/index.ts', "import './cli.js';\n");
     write(
       seed,
@@ -108,15 +112,18 @@ describe('registry refresh end to end', () => {
 
     const official = temp('nanoclaw-skills-official-');
     fs.rmSync(official, { recursive: true });
-    run(path.dirname(official), 'git', ['clone', '--bare', seed, official]);
+    run(path.dirname(official), 'git', [...FIXTURE_GIT_FLAGS, 'clone', '--bare', seed, official]);
+    isolateFixtureRepo(official);
     const fork = temp('nanoclaw-skills-fork-');
     fs.rmSync(fork, { recursive: true });
-    run(path.dirname(fork), 'git', ['clone', '--bare', official, fork]);
+    run(path.dirname(fork), 'git', [...FIXTURE_GIT_FLAGS, 'clone', '--bare', official, fork]);
+    isolateFixtureRepo(fork);
     run(fork, 'git', ['update-ref', '-d', 'refs/heads/channels']);
 
     const install = temp('nanoclaw-skills-install-');
     fs.rmSync(install, { recursive: true });
-    run(path.dirname(install), 'git', ['clone', fork, install]);
+    run(path.dirname(install), 'git', [...FIXTURE_GIT_FLAGS, 'clone', fork, install]);
+    isolateFixtureRepo(install);
     run(install, 'git', ['remote', 'add', 'upstream', official]);
     write(install, 'src/channels/demo.ts', 'export const payload = "installed-old";\n');
     fs.appendFileSync(path.join(install, 'src/channels/index.ts'), "import './demo.js';\n");

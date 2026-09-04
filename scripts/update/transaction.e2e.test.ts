@@ -17,6 +17,7 @@ import {
   validateUpdate,
   type UpdateRuntime,
 } from './transaction.js';
+import { FIXTURE_GIT_FLAGS, isolateFixtureRepo } from '../git-fixture.js';
 import { stopService } from './service.js';
 import type { CommandRunner, ServiceHandle } from './service.js';
 
@@ -43,9 +44,11 @@ function write(root: string, rel: string, content: string): void {
   fs.writeFileSync(target, content);
 }
 
+// Identity comes from the repo's own config (isolateFixtureRepo), so it applies
+// to the git commands the code under test runs too, not just these.
 function commit(root: string, message: string): string {
   exec(root, 'git', ['add', '.']);
-  exec(root, 'git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', message]);
+  exec(root, 'git', ['commit', '-m', message]);
   return exec(root, 'git', ['rev-parse', 'HEAD']);
 }
 
@@ -57,7 +60,8 @@ interface Fixture {
 
 function createForkFixture(options: { breaking?: boolean; externalPinMove?: boolean } = {}): Fixture {
   const seed = temp('nanoclaw-update-seed-');
-  exec(seed, 'git', ['init', '-b', 'main']);
+  exec(seed, 'git', [...FIXTURE_GIT_FLAGS, 'init', '-b', 'main']);
+  isolateFixtureRepo(seed);
   write(seed, 'package.json', '{"name":"nanoclaw-test","version":"2.1.54"}\n');
   write(seed, '.gitignore', 'data/\n.env\nstart-nanoclaw.sh\nnanoclaw.pid\n');
   write(seed, 'pnpm-lock.yaml', 'lockfileVersion: 9\n');
@@ -71,10 +75,12 @@ function createForkFixture(options: { breaking?: boolean; externalPinMove?: bool
 
   const official = temp('nanoclaw-update-official-');
   fs.rmSync(official, { recursive: true });
-  exec(path.dirname(official), 'git', ['clone', '--bare', seed, official]);
+  exec(path.dirname(official), 'git', [...FIXTURE_GIT_FLAGS, 'clone', '--bare', seed, official]);
+  isolateFixtureRepo(official);
   const fork = temp('nanoclaw-update-fork-');
   fs.rmSync(fork, { recursive: true });
-  exec(path.dirname(fork), 'git', ['clone', '--bare', official, fork]);
+  exec(path.dirname(fork), 'git', [...FIXTURE_GIT_FLAGS, 'clone', '--bare', official, fork]);
+  isolateFixtureRepo(fork);
 
   write(seed, 'src/value.ts', 'export const value = "new";\n');
   if (options.breaking) {
@@ -93,9 +99,8 @@ function createForkFixture(options: { breaking?: boolean; externalPinMove?: bool
 
   const install = temp('nanoclaw-update-install-');
   fs.rmSync(install, { recursive: true });
-  exec(path.dirname(install), 'git', ['clone', fork, install]);
-  exec(install, 'git', ['config', 'user.name', 'Test']);
-  exec(install, 'git', ['config', 'user.email', 'test@example.com']);
+  exec(path.dirname(install), 'git', [...FIXTURE_GIT_FLAGS, 'clone', fork, install]);
+  isolateFixtureRepo(install);
   exec(install, 'git', ['remote', 'add', 'upstream', official]);
   exec(install, 'git', ['fetch', 'upstream']);
   write(install, 'local-customization.txt', 'keep me\n');
