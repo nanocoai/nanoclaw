@@ -921,7 +921,7 @@ See [agent-runner-details.md](agent-runner-details.md) for full MCP tool paramet
 
 ### Cards
 
-**Agent-initiated (outbound):** Tool-based. Agent calls `ask_user_question` (interactive card with options) or `send_card` (structured card). Agent-runner writes the card structure to messages_out. Host/adapter handles platform-specific rendering (Slack Block Kit, Discord embeds, Telegram inline keyboard, text fallback).
+**Agent-initiated (outbound):** Tool-based. Agent calls `ask_user_question` for an interactive card with callback options, or `send_card` for a display card with optional URL link buttons. Agent-runner writes the card structure to messages_out. The host/adapter handles platform-specific rendering. `send_card` does not support callback buttons or nested action blocks; each top-level link action requires a non-empty label and a web (http or https) URL. Use `ask_user_question` when a selection must return to the agent.
 
 **Host-initiated (approval cards):** When an action requires approval, the host generates a standardized approval card and sends it to the admin's DM. These are not agent-initiated — the agent doesn't know about the approval step. The card format is fixed (action description + approve/deny buttons).
 

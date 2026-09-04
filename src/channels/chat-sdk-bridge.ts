@@ -864,6 +864,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // Display card (send_card MCP tool) — returns immediately, no callback flow.
       // Non-URL actions are dropped: send_card's contract is fire-and-forget, so a
       // callback button would have nowhere to land. URL actions render as link buttons.
+      // The runner filters these against LINK_ACTION_SCHEMA before writing the row;
+      // the checks below still stand because any producer can write this payload.
       if (content.type === 'card' && content.card && typeof content.card === 'object') {
         const cardSpec = content.card as Record<string, unknown>;
         const title = (cardSpec.title as string) || '';
@@ -887,8 +889,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           }
         }
         if (Array.isArray(cardSpec.actions)) {
-          const linkButtons = (cardSpec.actions as Array<Record<string, unknown>>)
-            .filter((a) => typeof a.url === 'string' && a.url && typeof a.label === 'string' && a.label)
+          const linkButtons = (cardSpec.actions as Array<Record<string, unknown> | null | undefined>)
+            .filter(
+              (a): a is Record<string, unknown> =>
+                !!a &&
+                typeof a === 'object' &&
+                typeof a.url === 'string' &&
+                !!a.url &&
+                typeof a.label === 'string' &&
+                !!a.label,
+            )
             .map((a) => {
               const style = a.style;
               const safeStyle: 'primary' | 'danger' | 'default' | undefined =

@@ -459,6 +459,60 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(buttons[0].url).toBe('https://example.com');
   });
 
+  it('survives a null action instead of throwing on a property read', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'card',
+        card: {
+          title: 'Docs',
+          actions: [null, { label: 'Open', url: 'https://example.com' }],
+        },
+      },
+    });
+    const msg = calls[0].message as {
+      card?: { children?: Array<{ type?: string; children?: Array<{ type?: string; url?: string }> }> };
+    };
+    const buttons = msg.card?.children?.find((c) => c.type === 'actions')?.children ?? [];
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0].url).toBe('https://example.com');
+  });
+
+  it('renders an unknown style as the default button style rather than dropping the action', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: {
+        type: 'card',
+        card: {
+          title: 'Docs',
+          actions: [
+            { label: 'Open', url: 'https://example.com', style: 'chartreuse' },
+            { label: 'Also', url: 'https://example.org', style: null },
+          ],
+        },
+      },
+    });
+    const msg = calls[0].message as {
+      card?: {
+        children?: Array<{ type?: string; children?: Array<{ type?: string; url?: string; style?: string }> }>;
+      };
+    };
+    const buttons = msg.card?.children?.find((c) => c.type === 'actions')?.children ?? [];
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].style).toBeUndefined();
+    expect(buttons[1].style).toBeUndefined();
+  });
+
   it('skips delivery when the card has neither title nor body content', async () => {
     const { calls, postMessage } = makePostCapture();
     const bridge = createChatSdkBridge({
