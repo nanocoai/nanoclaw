@@ -82,10 +82,7 @@ describe('skill-directives parser, on the converted add-slack', () => {
 
   it('reads the barrel appends: adapter and guard only', () => {
     const appends = directives.filter((d) => d.kind === 'append');
-    expect(appends.map((d) => d.attrs.to)).toEqual([
-      'src/channels/index.ts',
-      'src/channels/index.ts',
-    ]);
+    expect(appends.map((d) => d.attrs.to)).toEqual(['src/channels/index.ts', 'src/channels/index.ts']);
     // The adapter and the guard are SEPARATE fences (idempotency is keyed on a
     // fence's first line): an install that already has `import './slack.js';`
     // from the pre-payload skill still gains the guard on a re-run.
@@ -113,7 +110,14 @@ describe('skill-directives parser, on the converted add-slack', () => {
 
   it('captures prompts into named vars — credentials secret, the mode and handle not', () => {
     const prompts = directives.filter((d) => d.kind === 'prompt');
-    expect(prompts.map(promptVar)).toEqual(['connection', 'bot_token', 'app_token', 'app_token', 'signing_secret', 'owner_handle']);
+    expect(prompts.map(promptVar)).toEqual([
+      'connection',
+      'bot_token',
+      'app_token',
+      'app_token',
+      'signing_secret',
+      'owner_handle',
+    ]);
     expect(prompts[0].args).not.toContain('secret'); // connection — a mode choice, not a secret
     // The interactive select offers two modes; validate stays wider because
     // `provisioned` arrives only via pre-bound inputs (the --slack-agents pre-step).
@@ -129,6 +133,53 @@ describe('skill-directives parser, on the converted add-slack', () => {
     expect(prompts[4].attrs.when).toBe('connection=webhook');
     // The prompt body is the question; it does not mention env at all.
     expect(prompts[1].body.join(' ')).toMatch(/Bot User OAuth Token/);
+  });
+
+  it('accepts multiselect prompts with declared choices and excludes the flag from the variable name', () => {
+    const markdown = '```nc:prompt groups multiselect choices:ag-one|ag-two\nWhich groups?\n```';
+    const [prompt] = parseDirectives(markdown);
+    expect(promptVar(prompt)).toBe('groups');
+    expect(validate([prompt])).toEqual([]);
+  });
+
+  it('rejects a multiselect prompt without choices', () => {
+    const markdown = '```nc:prompt groups multiselect\nWhich groups?\n```';
+    expect(validate(parseDirectives(markdown)).map((problem) => problem.message)).toContain(
+      'prompt multiselect requires choices:<value>|<value>...',
+    );
+  });
+
+  it('rejects a secret multiselect prompt', () => {
+    const markdown = '```nc:prompt groups secret multiselect choices:a|b\nWhich groups?\n```';
+    expect(validate(parseDirectives(markdown)).map((problem) => problem.message)).toContain(
+      'prompt multiselect cannot be secret',
+    );
+  });
+
+  it('rejects undefined and secret dynamic choice references', () => {
+    const undefinedRef = '```nc:prompt groups multiselect choices:{{typo}}\nWhich groups?\n```';
+    expect(validate(parseDirectives(undefinedRef)).map((problem) => problem.message)).toContain(
+      'choices references {{typo}} but no earlier nc:prompt or nc:run capture defined it',
+    );
+
+    const secretRef = [
+      '```nc:prompt token secret',
+      'Token?',
+      '```',
+      '```nc:prompt groups multiselect choices:{{token}}',
+      'Which groups?',
+      '```',
+    ].join('\n');
+    expect(validate(parseDirectives(secretRef)).map((problem) => problem.message)).toContain(
+      'choices must not reference secret variable {{token}}',
+    );
+  });
+
+  it('rejects empty, degenerate, and duplicate literal multiselect choices', () => {
+    for (const choices of ['', 'a||b', 'a|a']) {
+      const markdown = `\`\`\`nc:prompt groups multiselect choices:${choices}\nWhich groups?\n\`\`\``;
+      expect(validate(parseDirectives(markdown))).not.toEqual([]);
+    }
   });
 
   it('resolves the conversation address into capture:platform_id (the wire input)', () => {

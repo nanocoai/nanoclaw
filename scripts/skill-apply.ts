@@ -42,6 +42,8 @@ export interface InputMeta {
   // connection), validate stays wider than the offered set — so a consumer
   // must prefer this over options derived from the validate alternation.
   choices?: string;
+  /** Render declared choices as a toggleable multi-select; bind comma-separated values. */
+  multiple?: boolean;
 }
 
 // Everything the engine EMITS — the core seam's output contract. Every
@@ -551,14 +553,20 @@ const NORMALIZE_KINDS: ReadonlySet<string> = new Set(['trim', 'rstrip-slash', 'l
 // consumer can run its own re-ask loop against the same semantics the engine
 // enforces at bind. The attrs live on the directive fence, so they're stripped
 // along with the fence when a skill degrades to prose — invisible to the agent.
-function inputMetaOf(d: Directive, secret: boolean, validate: string | undefined): InputMeta {
+function inputMetaOf(
+  d: Directive,
+  secret: boolean,
+  validate: string | undefined,
+  vars: Map<string, { value: string; secret: boolean }>,
+): InputMeta {
   const meta: InputMeta = { question: d.body.join('\n'), secret };
   if (validate !== undefined) meta.validate = validate;
   if (typeof d.attrs.flags === 'string') meta.flags = d.attrs.flags;
   if (typeof d.attrs.normalize === 'string' && NORMALIZE_KINDS.has(d.attrs.normalize)) {
     meta.normalize = d.attrs.normalize as InputMeta['normalize'];
   }
-  if (typeof d.attrs.choices === 'string') meta.choices = d.attrs.choices;
+  if (typeof d.attrs.choices === 'string') meta.choices = substitute(d.attrs.choices, vars);
+  if (d.args.includes('multiselect')) meta.multiple = true;
   return meta;
 }
 
@@ -885,6 +893,10 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
         continue;
       }
       if (d.kind === 'prompt') {
+        if (blocked) {
+          res.skipped.push('prompt: skipped after an earlier failure');
+          continue;
+        }
         const v = promptVar(d)!;
         const secret = d.args.includes('secret');
         const validate = typeof d.attrs.validate === 'string' ? d.attrs.validate : undefined;
@@ -895,7 +907,7 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
         // path (validation below rejects it loudly instead). Otherwise resolve
         // via `resolveInput`; still undefined ⇒ defer (headless, no answer).
         let val = opts.inputs?.[v];
-        if (val === undefined) val = await opts.resolveInput?.(v, inputMetaOf(d, secret, validate));
+        if (val === undefined) val = await opts.resolveInput?.(v, inputMetaOf(d, secret, validate, vars));
         if (val === undefined) {
           res.deferred.push(v);
           continue;

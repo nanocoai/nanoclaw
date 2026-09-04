@@ -28,7 +28,7 @@ Two invariants follow, and both are non-negotiable:
 - `key:value` tokens are attributes.
 - The body's meaning is per-kind.
 
-`prompt` only *acquires* a value and binds it to a name; a separate directive *applies* it, referenced as `{{name}}`. That keeps "ask the human" decoupled from "what you do with the answer" (env, `ncl`, the OneCLI vault, a file).
+`prompt` only _acquires_ a value and binds it to a name; a separate directive _applies_ it, referenced as `{{name}}`. That keeps "ask the human" decoupled from "what you do with the answer" (env, `ncl`, the OneCLI vault, a file).
 
 ## The eight kinds
 
@@ -54,17 +54,17 @@ Body: shell command(s), with `{{vars}}` substituted in. **Idempotency: the comma
 
 `effect:` classifies the command so consumers can reason about it:
 
-| Effect | Meaning |
-|---|---|
-| `build` | Compile step (e.g. `pnpm run build`) |
-| `test` | Verification run (e.g. the registration test) |
-| `fetch` | Network read that resolves data (e.g. an API call resolving an id) |
-| `external` | Invokes an external helper/tool outside the tree |
-| `wire` | Runs `ncl …` to wire collected input. No undo — the rows it creates are user runtime data, not reversed on skill remove |
-| `restart` | Restarts the service so following `ncl` runs reach it. A caller that owns the restart (a rebuild, or a setup that restarts once) skips it via `ApplyOptions.skipEffects` |
-| `step` | A long-running, operator-interactive step (a pairing code, a QR device-link) run through the streaming exec: its `=== NANOCLAW SETUP: … ===` status blocks render to the operator live. Degrades to an agent when no streaming exec is wired |
-| `check` | A shell **predicate** (a precondition gate): mutates nothing — no journal, no capture. Zero exit passes silently; non-zero bounces to an agent (degrade, not crash) and, via the run-health gate, blocks the dangerous side effects that follow it (a restart, a pairing/QR step, a wire). An unresolved `{{var}}` defers |
-| `refresh` | A non-interactive, idempotent maintenance command that is safe to run while refreshing installed skill code. Refresh mode skips every other run effect, plus prompts, operator steps, environment writes, and wiring |
+| Effect     | Meaning                                                                                                                                                                                                                                                                                                                   |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `build`    | Compile step (e.g. `pnpm run build`)                                                                                                                                                                                                                                                                                      |
+| `test`     | Verification run (e.g. the registration test)                                                                                                                                                                                                                                                                             |
+| `fetch`    | Network read that resolves data (e.g. an API call resolving an id)                                                                                                                                                                                                                                                        |
+| `external` | Invokes an external helper/tool outside the tree                                                                                                                                                                                                                                                                          |
+| `wire`     | Runs `ncl …` to wire collected input. No undo — the rows it creates are user runtime data, not reversed on skill remove                                                                                                                                                                                                   |
+| `restart`  | Restarts the service so following `ncl` runs reach it. A caller that owns the restart (a rebuild, or a setup that restarts once) skips it via `ApplyOptions.skipEffects`                                                                                                                                                  |
+| `step`     | A long-running, operator-interactive step (a pairing code, a QR device-link) run through the streaming exec: its `=== NANOCLAW SETUP: … ===` status blocks render to the operator live. Degrades to an agent when no streaming exec is wired                                                                              |
+| `check`    | A shell **predicate** (a precondition gate): mutates nothing — no journal, no capture. Zero exit passes silently; non-zero bounces to an agent (degrade, not crash) and, via the run-health gate, blocks the dangerous side effects that follow it (a restart, a pairing/QR step, a wire). An unresolved `{{var}}` defers |
+| `refresh`  | A non-interactive, idempotent maintenance command that is safe to run while refreshing installed skill code. Refresh mode skips every other run effect, plus prompts, operator steps, environment writes, and wiring                                                                                                      |
 
 `capture:` binds command output into vars (the twin of `prompt`):
 
@@ -74,21 +74,28 @@ Body: shell command(s), with `{{vars}}` substituted in. **Idempotency: the comma
 
 `validate:<re>` shape-guards each captured value (e.g. `validate:^discord:`); a mismatch bounces to an agent — a command's output has no human to re-prompt, unlike `prompt`.
 
-### `prompt <var> [secret] [validate:<re>] [flags:<re-flags>] [normalize:<how>] [reuse:<ENV_KEY>]`
+### `prompt <var> [secret] [multiselect] [validate:<re>] [flags:<re-flags>] [normalize:<how>] [reuse:<ENV_KEY>] [choices:<value>|<value>...]`
 
 Body: the question to ask. Binds the answer to `{{var}}`. **Idempotency: skip if the var is already satisfied** (via `inputs` or an earlier bind).
 
 - `secret` — consumers must mask the value.
+- `choices:<value>|<value>...` — offers explicit values through an interactive
+  choice control. The attribute may reference an earlier non-secret capture,
+  such as `choices:{{agent_group_choices}}`; headless consumers still supply the
+  final bound value through `inputs`.
+- `multiselect` — renders declared `choices:` as toggleable options and binds
+  the selected values as one comma-separated string in display order. It
+  requires `choices:` and is not valid for a secret prompt.
 - `validate:<re>` — a regex enforced **at bind** for **every** value, programmatic `inputs` and interactive answers alike (e.g. `validate:^xoxb-` to require a Slack bot token). A mismatch leaves the var unbound and records a deferred entry — a pipeline passing a malformed value fails loudly. Encode minimum lengths in the regex (`validate:^.{20,}$`).
 - `flags:<re-flags>` — regex flags for `validate` (e.g. `flags:i`).
-- `normalize:trim|rstrip-slash|lower` — a deterministic transform applied at bind, *before* validate, for both `inputs` and interactive answers.
+- `normalize:trim|rstrip-slash|lower` — a deterministic transform applied at bind, _before_ validate, for both `inputs` and interactive answers.
 - `reuse:<ENV_KEY>` — lets a re-run offer an existing `.env` value for a credential a **helper script** owns (written by an `effect:external`, not by `nc:env-set`) — the masked reuse offer that the usual `env-set`→ENV_KEY inference can't see. Consumed by interactive drivers only.
 
 ### `operator`
 
 Body: instructions for the human operator. **Output-only** — it mutates nothing.
 
-The SKILL.md is addressed to the coding agent; `operator` delineates the parts meant for the *human* (e.g. clicking through the Slack admin UI). Lead into it with agent-facing prose like "Tell the user:" so an agent relays it; a tool renders the body to the operator with `{{vars}}` substituted in.
+The SKILL.md is addressed to the coding agent; `operator` delineates the parts meant for the _human_ (e.g. clicking through the Slack admin UI). Lead into it with agent-facing prose like "Tell the user:" so an agent relays it; a tool renders the body to the operator with `{{vars}}` substituted in.
 
 The block carries **no presentation attributes**. A URL to visit lives in the body prose (a consumer may offer to open it), and whether a consumer pauses for confirmation before the next side effect is derived from document structure (`scripts/skill-policy.ts`) — never authored here.
 
@@ -112,15 +119,15 @@ Any directive may carry `when:<var>=<value>` — a guard evaluated against an ea
 
 These were removed deliberately; authoring them is a **lint error**, so stale skills fail loudly instead of silently no-oping:
 
-| Retired | Where its job went |
-|---|---|
-| `prompt min:<n>` | Encode in the regex: `validate:^.{20,}$` |
-| `prompt error:<msg>` | The miss message derives from the question prose — write questions that describe the expected shape |
-| `operator open:<url>` | Put the URL in the body prose; consumers offer to open it |
-| `operator gate` | Whether to pause is derived from document structure (`scripts/skill-policy.ts`) |
-| `label:<word>` (any directive) | Step labels derive from the preceding heading |
-| `on-fail:<hint>` (any directive) | The failure hint is always the surrounding prose |
-| `nc:env-sync` (whole kind) | Retired — nothing read the mirror it wrote (and it copied live tokens); adapters read `.env` directly |
+| Retired                          | Where its job went                                                                                    |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `prompt min:<n>`                 | Encode in the regex: `validate:^.{20,}$`                                                              |
+| `prompt error:<msg>`             | The miss message derives from the question prose — write questions that describe the expected shape   |
+| `operator open:<url>`            | Put the URL in the body prose; consumers offer to open it                                             |
+| `operator gate`                  | Whether to pause is derived from document structure (`scripts/skill-policy.ts`)                       |
+| `label:<word>` (any directive)   | Step labels derive from the preceding heading                                                         |
+| `on-fail:<hint>` (any directive) | The failure hint is always the surrounding prose                                                      |
+| `nc:env-sync` (whole kind)       | Retired — nothing read the mirror it wrote (and it copied live tokens); adapters read `.env` directly |
 
 ## Lint
 

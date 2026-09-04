@@ -991,6 +991,26 @@ describe('run-health gate (a bounce blocks later side effects)', () => {
     expect(res.agentTasks.some((t) => /an earlier step did not complete/.test(t.reason))).toBe(true); // step still gated
   });
 
+  it('a failed check skips a later prompt instead of presenting an invalid workflow', async () => {
+    writeFileSync(
+      join(gskill, 'SKILL.md'),
+      ['# gated prompt', '```nc:run effect:check', 'false', '```', '```nc:prompt choice', 'Choice?', '```'].join('\n'),
+    );
+    let prompted = false;
+    const resolveInput = async () => {
+      prompted = true;
+      return 'value';
+    };
+    const res = await applySkill(gskill, groot, {
+      exec: () => {
+        throw new Error('check failed');
+      },
+      resolveInput,
+    });
+    expect(prompted).toBe(false);
+    expect(res.skipped).toContain('prompt: skipped after an earlier failure');
+  });
+
   it('a deferred prompt does NOT block a later restart (headless rebuild stays runnable)', async () => {
     writeFileSync(join(gskill, 'SKILL.md'), DEFER_THEN_RESTART_SKILL);
     const cmds: string[] = [];
@@ -1413,6 +1433,31 @@ describe('nc:prompt normalize at bind + InputMeta declaration', () => {
 // semantics (InputMeta) so a consumer can run its own re-ask loop (clack
 // validate, a chat exchange); returning undefined defers. `inputs` win over it.
 describe('resolveInput (core input seam)', () => {
+  it('resolves dynamic choices from an earlier capture and declares multi-select semantics', async () => {
+    writeFileSync(
+      join(skillDir, 'SKILL.md'),
+      [
+        '# groups',
+        '```nc:run capture:group_choices',
+        'printf ag-one\\|ag-two',
+        '```',
+        '```nc:prompt groups multiselect choices:{{group_choices}} validate:^ag-[a-z]+(,ag-[a-z]+)*$',
+        'Which groups?',
+        '```',
+      ].join('\n'),
+    );
+    let seen: InputMeta | undefined;
+    const res = await applySkill(skillDir, root, {
+      exec: () => 'ag-one|ag-two',
+      resolveInput: async (_name, meta) => {
+        seen = meta;
+        return 'ag-one,ag-two';
+      },
+    });
+    expect(seen).toMatchObject({ choices: 'ag-one|ag-two', multiple: true });
+    expect(res.vars.groups).toBe('ag-one,ag-two');
+  });
+
   let iroot: string;
   let iskill: string;
   beforeEach(() => {

@@ -36,17 +36,24 @@ cannot list groups, start the NanoClaw service before continuing.
 
 List the groups:
 
-```nc:run capture:agent_groups effect:fetch
-ncl groups list --json | jq -r 'if (.data|length)==0 then "no agent groups yet" else [.data[] | "\(.id) (\(.name))"] | join(", ") end'
+```nc:run capture:agent_groups=.display,agent_group_choices=.choices effect:fetch
+ncl groups list --json | jq -c 'if (.data|length)==0 then {display:"no agent groups yet",choices:""} else {display:([.data[] | "\(.id) (\(.name))"] | join(", ")),choices:([.data[].id] | join("|"))} end'
 ```
 
-Stop if there are no groups. Ask which groups should receive Zapier:
+Stop if there are no groups:
+
+```nc:run effect:check
+[ -n '{{agent_group_choices}}' ] || { echo "No agent groups exist yet. Create one before adding Zapier." >&2; exit 1; }
+```
+
+Ask which groups should receive Zapier:
 
 ```nc:operator
 Agents on this install: {{agent_groups}}. A selected agent can use every action its Zapier MCP server exposes. Prefer a dedicated Zapier server in manual mode with only the actions this agent needs. Unselected existing agents will be blocked from the Zapier MCP host at the OneCLI gateway.
 ```
-```nc:prompt zapier_agents validate:^ag-[A-Za-z0-9-]+(,ag-[A-Za-z0-9-]+)*$ normalize:trim
-Which agents should receive Zapier? Enter one or more agent ids separated by commas with no spaces (the `ag-...` values shown above).
+
+```nc:prompt zapier_agents multiselect choices:{{agent_group_choices}} validate:^ag-[A-Za-z0-9-]+(,ag-[A-Za-z0-9-]+)*$ normalize:trim
+Which agents should receive Zapier? Toggle one or more groups, then confirm.
 ```
 
 Validate every selected id. A typo must not broaden or silently remove access:

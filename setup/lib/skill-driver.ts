@@ -115,9 +115,16 @@ export function clackResolveInput(
     // re-ask loop and no `?` help-escape there: every choice is valid and
     // self-describing.
     const declared = meta.choices?.split('|').filter(Boolean);
+    if (meta.multiple && !declared?.length) return undefined;
     const choices = meta.secret ? null : declared?.length ? declared : literalChoices(meta.validate);
     const ans = choices
-      ? await p.select({ message: meta.question, options: choices.map((c) => ({ value: c, label: c })) })
+      ? meta.multiple
+        ? await p.multiselect({
+            message: meta.question,
+            options: choices.map((c) => ({ value: c, label: c })),
+            required: true,
+          })
+        : await p.select({ message: meta.question, options: choices.map((c) => ({ value: c, label: c })) })
       : meta.secret
         ? await p.password({ message: meta.question, validate: guarded, clearOnError: true })
         : await p.text({ message: meta.question, validate: guarded });
@@ -133,7 +140,7 @@ export function clackResolveInput(
       });
       return ask(name, meta);
     }
-    const v = String(ans).trim();
+    const v = (Array.isArray(ans) ? choices?.filter((choice) => ans.includes(choice)).join(',') : String(ans)).trim();
     return v.length ? v : undefined;
   }
   return ask;
