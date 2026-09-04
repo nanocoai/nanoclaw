@@ -39,6 +39,7 @@ const taskRouting: RoutingContext = {
   threadId: 'system:tasks:daily-digest-a1b2',
   inReplyTo: 'run-1',
   taskRun: true,
+  taskSeriesId: 'daily-digest-a1b2',
 };
 
 beforeEach(() => {
@@ -194,6 +195,24 @@ describe('automatic task run summary', () => {
     }[];
     expect(rows).toHaveLength(1);
     expect(JSON.parse(rows[0].content).text).toBe('Checked the feeds — nothing new.');
+  });
+
+  it('stamps the series into the row so a chat-session fire keeps its run log (#3301)', async () => {
+    await autoAppendTaskLog('Reminder sent.', 'water-plants-9f3c');
+
+    const row = getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log'").get() as {
+      content: string;
+    };
+    expect(JSON.parse(row.content)).toEqual({ text: 'Reminder sent.', series: 'water-plants-9f3c' });
+  });
+
+  it('keeps the exact { text } shape when no series is known', async () => {
+    await autoAppendTaskLog('Done.', null);
+
+    const row = getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log'").get() as {
+      content: string;
+    };
+    expect(JSON.parse(row.content)).toEqual({ text: 'Done.' });
   });
 
   it('marks legacy final-output blocks undelivered and never stores raw XML', async () => {

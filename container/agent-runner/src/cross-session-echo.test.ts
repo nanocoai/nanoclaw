@@ -184,6 +184,32 @@ describe('routing (extractRouting)', () => {
 
     expect(extractRouting(getPendingMessages()).taskRun).toBe(false);
   });
+
+  it('carries the task series id so the run log survives a chat-session fire (#3301)', () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, seq, kind, timestamp, status, "trigger", series_id, content)
+         VALUES ('t1', 2, 'task', datetime('now'), 'pending', 1, 'water-plants-9f3c', ?)`,
+      )
+      .run(JSON.stringify({ prompt: 'water the plants' }));
+
+    expect(extractRouting(getPendingMessages()).taskSeriesId).toBe('water-plants-9f3c');
+  });
+
+  it('taskSeriesId is null when the task row carries no series', () => {
+    // The host's own writers stamp series_id on every row, but the mailbox
+    // contract allows NULL — an absent series must stay absent, never be
+    // invented from the row id.
+    insertMessage('task-abc', 'task', { prompt: 'one-shot' }, { seq: 2 });
+
+    expect(extractRouting(getPendingMessages()).taskSeriesId).toBeNull();
+  });
+
+  it('taskSeriesId is null for non-task batches', () => {
+    insertMessage('m1', 'chat', { sender: 'Alice', text: 'hi' }, { seq: 2 });
+
+    expect(extractRouting(getPendingMessages()).taskSeriesId).toBeNull();
+  });
 });
 
 describe('command classification', () => {

@@ -117,6 +117,13 @@ export interface RoutingContext {
    *  delivers from a task session; final-text `<message to>` blocks are inert
    *  and the final text auto-appends to the series run log. */
   taskRun: boolean;
+  /** Series id of the triggering task row, stamped into task_log rows so the
+   *  host can append the run log even when the task fired outside a
+   *  system:tasks:<series> session (#3301). Null when the batch is not a
+   *  task run, or when the row carries no series — the host's writers stamp
+   *  one on every row, but the mailbox contract allows NULL, and an absent
+   *  series must stay absent, never invented from the row id. */
+  taskSeriesId: string | null;
 }
 
 /**
@@ -139,6 +146,11 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     taskRun:
       messages.some((m) => m.kind === 'task') &&
       messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
+    // First task row's series wins. A chat-session batch can in principle
+    // carry rows from two legacy series; the single run summary cannot be
+    // split, so it lands in the first series' log — still better than the
+    // pre-stamp behavior of dropping it entirely.
+    taskSeriesId: messages.find((m) => m.kind === 'task')?.series_id ?? null,
   };
 }
 
