@@ -1,4 +1,4 @@
-import { DEFAULT_AGENT_PROVIDER } from '../config.js';
+import { CONTAINER_IMAGE, CONTAINER_IMAGE_BASE, DEFAULT_AGENT_PROVIDER } from '../config.js';
 import type { ContainerConfigRow } from '../types.js';
 import { getDb } from './connection.js';
 
@@ -72,6 +72,56 @@ export async function ensureContainerConfig(agentGroupId: string, provider?: str
   );
 }
 
+/**
+ * Docker tag component grammar (`[A-Za-z0-9_][A-Za-z0-9._-]{0,127}`). Applied to
+ * the agent group id before it is spliced into an image reference — every id
+ * generator in the tree produces `ag-<uuid>`-shaped ids, so this only ever fires
+ * on a hand-edited or imported row, but `buildAgentGroupImage` interpolates the
+ * resulting tag into a shell command string (`container-runner.ts`), so the
+ * assumption is enforced rather than trusted.
+ */
+const DOCKER_TAG_COMPONENT = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * `image_tag` is consumed unchecked as the `docker run` image argument
+ * (`buildContainerArgs` — `containerConfig.imageTag || CONTAINER_IMAGE`),
+ * so whatever lands in this column picks the image every container in the group
+ * runs. The one CLI verb that writes it is registered `access:'approval'`
+ * (`cli/resources/groups.ts`), so an agent gets a hold and an admin approval
+ * card rather than a silent write — this check is defense in depth at the write
+ * seam, which is also what covers `groups create`, host-side callers, and any
+ * future write path.
+ *
+ * Exactly two values are ever legitimate, and both are derived from this
+ * install's own image names: the base image itself, and the per-group image
+ * `buildAgentGroupImage` builds as `${CONTAINER_IMAGE_BASE}:${agentGroupId}`.
+ * Anything else — a foreign registry, another install's slug, another group's
+ * derived image — is rejected.
+ *
+ * The allowlist is built at call time instead of baked into a module-level
+ * pattern because both names are env-overridable in `config.ts`; a hardcoded
+ * `nanoclaw-agent-v2-…` regex would silently reject a legitimate
+ * `CONTAINER_IMAGE_BASE` override.
+ *
+ * NULL and '' are allowed and mean "inherit the base image" — `imageTag ||
+ * CONTAINER_IMAGE` treats them identically, and clearing the column is how a
+ * derived image is retired.
+ */
+function assertAllowedImageTag(agentGroupId: string, value: unknown): void {
+  if (value === null || value === '') return;
+  // A group id that isn't a valid tag component gets no derived-image option at
+  // all, rather than one we'd hand to `docker run` / `docker build` unexamined.
+  const derived = DOCKER_TAG_COMPONENT.test(agentGroupId) ? `${CONTAINER_IMAGE_BASE}:${agentGroupId}` : null;
+  if (value === CONTAINER_IMAGE || (derived !== null && value === derived)) return;
+
+  const allowed = [`"${CONTAINER_IMAGE}" (base image)`];
+  if (derived) allowed.push(`"${derived}" (this group's built image)`);
+  throw new Error(
+    `Invalid image_tag ${JSON.stringify(value)} for ${agentGroupId}: must be ` +
+      `${allowed.join(' or ')}, or empty to inherit the base image.`,
+  );
+}
+
 /** Update scalar fields on a config row. Only touches fields present in `updates`. */
 export async function updateContainerConfigScalars(
   agentGroupId: string,
@@ -95,6 +145,9 @@ export async function updateContainerConfigScalars(
   for (const [key, value] of Object.entries(updates)) {
     if (value !== undefined) {
       if (!SCALAR_COLUMNS.has(key)) throw new Error(`Invalid scalar column: ${key}`);
+      // Throws before the UPDATE is prepared, so a rejected image_tag aborts the
+      // whole call rather than half-applying the other fields alongside it.
+      if (key === 'image_tag') assertAllowedImageTag(agentGroupId, value);
       fields.push(`${key} = @${key}`);
       values[key] = value;
     }

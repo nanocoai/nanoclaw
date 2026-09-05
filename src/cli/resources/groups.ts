@@ -397,7 +397,15 @@ registerResource({
         if (timezone !== undefined) updates.timezone = timezone;
         if (args.model !== undefined) updates.model = args.model as string;
         if (args.effort !== undefined) updates.effort = args.effort as string;
-        if (args.image_tag !== undefined) updates.image_tag = args.image_tag as string;
+        // `--image-tag` is the documented spelling, but neither argv parser
+        // rewrites dashes to underscores (same reason `--cli-scope` is read both
+        // ways below), so accept either. The value is validated at the DB write
+        // seam in `updateContainerConfigScalars` — it becomes the `docker run`
+        // image argument, so only this install's base image or this group's own
+        // built image are accepted, and an out-of-allowlist value throws here.
+        if (args['image-tag'] !== undefined || args.image_tag !== undefined) {
+          updates.image_tag = (args['image-tag'] ?? args.image_tag) as string;
+        }
         if (args.assistant_name !== undefined) updates.assistant_name = args.assistant_name as string;
         if (args.max_messages_per_prompt !== undefined)
           updates.max_messages_per_prompt = Number(args.max_messages_per_prompt);
