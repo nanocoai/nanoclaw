@@ -45,6 +45,13 @@ export type StateValue = Omit<StateRecord, 'key'>;
 export interface MailboxOperations {
   getPendingMessages(limit: number, isFirstPoll: boolean): InboundMessage[];
   markMessages(ids: string[], status: ProcessingStatus): void;
+  /**
+   * Mark one message failed. Monotonic — only demotes a live `processing`
+   * claim; returns whether a row was actually demoted so callers can tell a
+   * real failure from post-run noise (a provider error after the batch
+   * already settled).
+   */
+  markFailed(id: string): boolean;
   markScriptSkipped(skips: Array<{ id: string; reason: string }>): void;
   getMessageIn(id: string): InboundMessage | undefined;
   findQuestionResponse(questionId: string): InboundMessage | undefined;

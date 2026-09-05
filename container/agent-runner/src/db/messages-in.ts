@@ -93,8 +93,9 @@ export function markScriptSkipped(skips: Array<{ id: string; reason: string }>):
   getAgentMailbox().operations.markScriptSkipped(skips);
 }
 
-export function markFailed(id: string): void {
-  getAgentMailbox().operations.markMessages([id], 'failed');
+/** Monotonic failed-demotion; see MailboxOperations.markFailed. */
+export function markFailed(id: string): boolean {
+  return getAgentMailbox().operations.markFailed(id);
 }
 
 export function getMessageIn(id: string): MessageInRow | undefined {

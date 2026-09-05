@@ -153,4 +153,17 @@ describe('syncProcessingAcks — script-skip counter', () => {
 
     expect(status(inDb, 't1')).toBe('completed');
   });
+
+  it("a 'failed' ack (errored task turn) lands the row as a FAILED run, not completed", () => {
+    // The runner's errored-task-turn path acks 'failed' (markFailed) so the
+    // failure shows in run history and feeds the recurrence backoff streak —
+    // mapping it to completed would hide the errored run entirely.
+    const { inDb, outDb } = freshPair();
+    seedTask(inDb, 't1', { prompt: 'p' });
+    ack(outDb, 't1', 'failed');
+
+    syncProcessingAcks(inDb, outDb);
+
+    expect(status(inDb, 't1')).toBe('failed');
+  });
 });

@@ -70,12 +70,37 @@ export function sqliteMarkProcessing(ids: string[]): void {
   mark(ids, 'processing');
 }
 
+/**
+ * `failed` is terminal: a completed ack never resurrects a row an errored
+ * task turn already demoted (mirrors the host's settled-row-is-terminal
+ * rule in syncProcessingAcks).
+ */
 export function sqliteMarkCompleted(ids: string[]): void {
-  mark(ids, 'completed');
+  if (ids.length === 0) return;
+  const statement = getOutboundDb().prepare(
+    `INSERT INTO processing_ack (message_id, status, status_changed) VALUES (?, 'completed', ?)
+     ON CONFLICT(message_id) DO UPDATE SET status = 'completed', status_changed = excluded.status_changed
+       WHERE processing_ack.status != 'failed'`,
+  );
+  getOutboundDb().transaction(() => {
+    for (const id of ids) statement.run(id, new Date().toISOString());
+  })();
 }
 
-export function sqliteMarkFailed(id: string): void {
-  mark([id], 'failed');
+/**
+ * Monotonic: only demotes a live `processing` claim (markProcessing writes
+ * one at batch claim time), so a provider error arriving AFTER a result
+ * event settled the batch cannot flip a genuinely completed run to failed.
+ * Returns whether a row was demoted — callers use this to decide if the
+ * failure is real or post-run noise.
+ */
+export function sqliteMarkFailed(id: string): boolean {
+  const res = getOutboundDb()
+    .prepare(
+      "UPDATE processing_ack SET status = 'failed', status_changed = ? WHERE message_id = ? AND status = 'processing'",
+    )
+    .run(new Date().toISOString(), id);
+  return res.changes > 0;
 }
 
 export function sqliteMarkScriptSkipped(skips: Array<{ id: string; reason: string }>): void {

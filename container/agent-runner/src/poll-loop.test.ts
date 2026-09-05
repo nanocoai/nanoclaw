@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
-import { getPendingMessages, markCompleted } from './db/messages-in.js';
+import { getPendingMessages, markCompleted, markFailed, markProcessing } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { processQuery } from './poll-loop.js';
+import { isCorruptionError, processQuery, handleTurnError } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 import type { AgentQuery, ProviderEvent } from './providers/types.js';
 
@@ -567,4 +567,120 @@ describe('task-run turn wiring (real processQuery)', () => {
     // slow runners the test died as a mute timeout instead of reaching the
     // diagnostic throw above (observed consistently on CI-hosted runners).
   }, 20_000);
+});
+
+// --- Errored-turn ack routing: task turns must not vanish ---
+// An errored TASK turn has no chat routing (platform/channel are null by
+// design), so the legacy error-chat write produced an unroutable row the host
+// dropped, and the clean `completed` ack hid the failure from run history.
+// handleTurnError is the extracted catch-path: task turns append the error to
+// the task run log and ack `failed`; chat turns keep the legacy behavior.
+
+describe('handleTurnError (errored-turn ack routing)', () => {
+  const CHAT_ROUTING = {
+    platformId: 'telegram:111',
+    channelType: 'telegram',
+    threadId: null,
+    inReplyTo: 'm1',
+    taskRun: false,
+  };
+
+  function ackRows(): Array<{ message_id: string; status: string }> {
+    return getOutboundDb()
+      .prepare('SELECT message_id, status FROM processing_ack ORDER BY message_id')
+      .all() as Array<{ message_id: string; status: string }>;
+  }
+
+  it('task turn: appends error to task run log, acks failed, writes no chat', async () => {
+    markProcessing(['t1']);
+    await handleTurnError(new Error('boom: model rejected'), TASK_ROUTING, ['t1']);
+
+    const logs = taskLogRows().map((l) => l.text);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain('Run FAILED');
+    expect(logs[0]).toContain('boom: model rejected');
+
+    expect(ackRows()).toEqual([{ message_id: 't1', status: 'failed' }]);
+
+    const chats = getUndeliveredMessages().filter((m) => m.kind === 'chat');
+    expect(chats).toHaveLength(0);
+  });
+
+  it('task turn: acks every message in the batch failed', async () => {
+    markProcessing(['t1', 't2']);
+    await handleTurnError(new Error('x'), TASK_ROUTING, ['t1', 't2']);
+    expect(ackRows()).toEqual([
+      { message_id: 't1', status: 'failed' },
+      { message_id: 't2', status: 'failed' },
+    ]);
+  });
+
+  it('late stream error after a completed run: no spurious FAILED line, ack stays completed', async () => {
+    // processQuery marks the batch completed at the first result event and
+    // keeps the stream open for follow-ups. A provider error AFTER that must
+    // not demote the settled ack or stamp "Run FAILED" on a run that
+    // succeeded (adversarial-review finding #1).
+    markProcessing(['t1']);
+    markCompleted(['t1']);
+
+    await handleTurnError(new Error('stream closed while idle'), TASK_ROUTING, ['t1']);
+
+    expect(ackRows()).toEqual([{ message_id: 't1', status: 'completed' }]);
+    expect(taskLogRows().map((l) => l.text).filter((t) => t.includes('Run FAILED'))).toHaveLength(0);
+  });
+
+  it('markFailed is monotonic and markCompleted cannot resurrect a failed ack', () => {
+    // Pins the ack lattice: processing → failed is terminal, so even if the
+    // loop's `continue` were removed, the fall-through markCompleted could
+    // not silently flip a failed run back to completed (finding #3).
+    markProcessing(['t1']);
+    expect(markFailed('t1')).toBe(true);
+    expect(markFailed('t1')).toBe(false); // already failed — no-op
+
+    markCompleted(['t1']);
+    expect(ackRows()).toEqual([{ message_id: 't1', status: 'failed' }]);
+  });
+
+  it('chat turn: writes routed error chat and leaves acks to the normal completed path', async () => {
+    await handleTurnError(new Error('boom: provider died'), CHAT_ROUTING, ['m1']);
+
+    const chats = getUndeliveredMessages().filter((m) => m.kind === 'chat');
+    expect(chats).toHaveLength(1);
+    expect(chats[0].platform_id).toBe('telegram:111');
+    expect(chats[0].channel_type).toBe('telegram');
+    expect(JSON.parse(chats[0].content).text).toBe('Error: boom: provider died');
+
+    // no ack written here — the loop's markCompleted still runs for chat turns
+    expect(ackRows()).toHaveLength(0);
+    expect(taskLogRows()).toHaveLength(0);
+  });
+
+  it('reports whether it handled the ack (task true, chat false)', async () => {
+    expect(await handleTurnError(new Error('x'), TASK_ROUTING, ['t1'])).toBe(true);
+    expect(await handleTurnError(new Error('x'), CHAT_ROUTING, ['m1'])).toBe(false);
+  });
+
+  it('task run with an error RESULT (isError, not a throw) acks failed and logs Run FAILED', async () => {
+    // Providers can surface non-retryable failures as a result event with
+    // isError (e.g. a 403 billing error) instead of throwing. A task run must
+    // account those as FAILED too, or accounting becomes provider-behavior-
+    // dependent (adversarial-review finding #2).
+    markProcessing(['t1']);
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'result', text: 'Error: 403 billing_error — upstream declined', isError: true };
+    }
+    const query: AgentQuery = { push: () => {}, end: () => {}, events: events(), abort: () => {} };
+
+    await processQuery(query, TASK_ROUTING, ['t1'], 'claude', undefined, 'prompt', undefined);
+
+    const acks = ackRows();
+    expect(acks).toEqual([{ message_id: 't1', status: 'failed' }]);
+    const logs = taskLogRows().map((l) => l.text);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain('Run FAILED');
+    expect(logs[0]).toContain('403 billing_error');
+    // one-door: still no chat delivery from a task session
+    expect(getUndeliveredMessages().filter((m) => m.kind === 'chat')).toHaveLength(0);
+  });
 });
