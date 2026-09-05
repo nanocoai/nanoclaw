@@ -8,13 +8,19 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { startCliServer, stopCliServer } from './socket-server.js';
 
 // Unix socket paths have a small OS limit — keep them short.
+// Each case gets its own directory; they are reclaimed per-test rather than in
+// an afterAll, because nothing here is shared between cases.
+const socketDirs: string[] = [];
 function tmpSocketPath(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-'));
+  socketDirs.push(dir);
   return path.join(dir, 's.sock');
 }
 
 afterEach(async () => {
   await stopCliServer();
+  // After the server is down, so the socket inode is gone before its directory.
+  while (socketDirs.length) fs.rmSync(socketDirs.pop()!, { recursive: true, force: true });
 });
 
 describe('startCliServer single-bind', () => {

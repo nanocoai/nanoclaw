@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +14,29 @@ import {
   type InputMeta,
 } from './skill-apply.js';
 import { parseDirectives, validate } from './skill-directives.js';
+
+/**
+ * Every temp dir this file creates, removed once the file finishes.
+ *
+ * The cases here mkdtemp a skill dir and a project root apiece — some in
+ * `beforeEach`, some at module scope, some inline — and only one block used to
+ * clean up after itself. The rest accumulated in the OS temp dir on every run
+ * (~294 directories per run of this file alone), not reclaimed until a reboot
+ * or the 30-day tmpfiles sweep.
+ *
+ * Cleanup is `afterAll`, not `afterEach`: the module-scope roots below are
+ * built once and shared by the cases that reference them, so per-test removal
+ * would delete a fixture still in use.
+ */
+const tempRoots: string[] = [];
+function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempRoots.push(dir);
+  return dir;
+}
+afterAll(() => {
+  while (tempRoots.length) rmSync(tempRoots.pop()!, { recursive: true, force: true });
+});
 
 // A synthetic skill exercising the fs handlers for real (no network), plus one
 // directive the engine can't handle — to prove it bounces to an agent, not abort.
@@ -57,8 +80,8 @@ const recordingExec = () => {
 };
 
 beforeEach(() => {
-  skillDir = mkdtempSync(join(tmpdir(), 'nc-skill-'));
-  root = mkdtempSync(join(tmpdir(), 'nc-proj-'));
+  skillDir = tempDir('nc-skill-');
+  root = tempDir('nc-proj-');
   mkdirSync(join(skillDir, 'resources'), { recursive: true });
   writeFileSync(join(skillDir, 'SKILL.md'), SKILL);
   writeFileSync(join(skillDir, 'resources/sample.ts'), 'export const sample = true;\n');
@@ -201,8 +224,8 @@ container/skills/demo-formatting/SKILL.md
 
 describe('from-branch copy apply path', () => {
   it('creates the missing dest parent dir before the git-show redirect', async () => {
-    const fskill = mkdtempSync(join(tmpdir(), 'nc-skill-fb-'));
-    const froot = mkdtempSync(join(tmpdir(), 'nc-proj-fb-'));
+    const fskill = tempDir('nc-skill-fb-');
+    const froot = tempDir('nc-proj-fb-');
     writeFileSync(join(fskill, 'SKILL.md'), FROM_BRANCH_SKILL);
     writeFileSync(join(froot, '.env'), '');
     writeFileSync(join(froot, 'package.json'), '{"name":"scratch"}');
@@ -242,8 +265,8 @@ describe('json-merge directive', () => {
   let jroot: string;
   let jskill: string;
   beforeEach(() => {
-    jskill = mkdtempSync(join(tmpdir(), 'nc-skill-'));
-    jroot = mkdtempSync(join(tmpdir(), 'nc-proj-'));
+    jskill = tempDir('nc-skill-');
+    jroot = tempDir('nc-proj-');
     writeFileSync(join(jskill, 'SKILL.md'), JSON_MERGE_SKILL);
     mkdirSync(join(jroot, 'container'), { recursive: true });
     writeFileSync(join(jroot, 'container/cli-tools.json'), '[\n  { "name": "vercel", "version": "52.2.1" }\n]\n');
@@ -336,8 +359,8 @@ describe('append at:<marker>', () => {
   let aroot: string;
   let askill: string;
   beforeEach(() => {
-    askill = mkdtempSync(join(tmpdir(), 'nc-skill-'));
-    aroot = mkdtempSync(join(tmpdir(), 'nc-proj-'));
+    askill = tempDir('nc-skill-');
+    aroot = tempDir('nc-proj-');
     mkdirSync(join(aroot, 'setup'), { recursive: true });
     writeFileSync(join(aroot, 'setup/index.ts'), MARKER_FILE);
   });
@@ -402,8 +425,8 @@ describe('nc:run variable substitution', () => {
   let rroot: string;
   let rskill: string;
   beforeEach(() => {
-    rskill = mkdtempSync(join(tmpdir(), 'nc-skill-'));
-    rroot = mkdtempSync(join(tmpdir(), 'nc-proj-'));
+    rskill = tempDir('nc-skill-');
+    rroot = tempDir('nc-proj-');
     writeFileSync(join(rskill, 'SKILL.md'), RUN_WIRE_SKILL);
     writeFileSync(join(rroot, 'package.json'), '{"name":"scratch"}');
   });
@@ -464,8 +487,8 @@ describe('nc:run capture', () => {
   let croot: string;
   let cskill: string;
   beforeEach(() => {
-    cskill = mkdtempSync(join(tmpdir(), 'nc-skill-'));
-    croot = mkdtempSync(join(tmpdir(), 'nc-proj-'));
+    cskill = tempDir('nc-skill-');
+    croot = tempDir('nc-proj-');
     writeFileSync(join(cskill, 'SKILL.md'), CAPTURE_SKILL);
     writeFileSync(join(croot, 'package.json'), '{"name":"scratch"}');
   });
@@ -525,8 +548,8 @@ describe('nc:run multi-field JSON capture + validate', () => {
   let mroot: string;
   let mskill: string;
   beforeEach(() => {
-    mskill = mkdtempSync(join(tmpdir(), 'nc-multi-skill-'));
-    mroot = mkdtempSync(join(tmpdir(), 'nc-multi-proj-'));
+    mskill = tempDir('nc-multi-skill-');
+    mroot = tempDir('nc-multi-proj-');
     writeFileSync(join(mroot, 'package.json'), '{"name":"scratch"}');
     writeFileSync(join(mroot, '.env'), '');
   });
@@ -594,8 +617,8 @@ describe('nc:operator', () => {
   let oroot: string;
   let oskill: string;
   beforeEach(() => {
-    oskill = mkdtempSync(join(tmpdir(), 'nc-skill-'));
-    oroot = mkdtempSync(join(tmpdir(), 'nc-proj-'));
+    oskill = tempDir('nc-skill-');
+    oroot = tempDir('nc-proj-');
     writeFileSync(join(oroot, 'package.json'), '{"name":"scratch"}');
   });
 
@@ -648,8 +671,8 @@ describe('programmatic apply via inputs', () => {
   let proot: string;
   let pskill: string;
   beforeEach(() => {
-    pskill = mkdtempSync(join(tmpdir(), 'nc-skill-'));
-    proot = mkdtempSync(join(tmpdir(), 'nc-proj-'));
+    pskill = tempDir('nc-skill-');
+    proot = tempDir('nc-proj-');
     writeFileSync(join(proot, 'package.json'), '{"name":"scratch"}');
     writeFileSync(join(proot, '.env'), '');
   });
@@ -761,8 +784,8 @@ IMESSAGE_LOCAL=true
 `;
 
 function modeScratch(): { sdir: string; rdir: string } {
-  const sdir = mkdtempSync(join(tmpdir(), 'nc-when-skill-'));
-  const rdir = mkdtempSync(join(tmpdir(), 'nc-when-proj-'));
+  const sdir = tempDir('nc-when-skill-');
+  const rdir = tempDir('nc-when-proj-');
   writeFileSync(join(sdir, 'SKILL.md'), MODE_SKILL);
   writeFileSync(join(rdir, '.env'), '');
   writeFileSync(join(rdir, 'package.json'), '{"name":"scratch"}');
@@ -820,8 +843,8 @@ DEMO_PLATFORM={{platform_id}}
 `;
 
 function stepScratch(): { sdir: string; rdir: string } {
-  const sdir = mkdtempSync(join(tmpdir(), 'nc-step-skill-'));
-  const rdir = mkdtempSync(join(tmpdir(), 'nc-step-proj-'));
+  const sdir = tempDir('nc-step-skill-');
+  const rdir = tempDir('nc-step-proj-');
   writeFileSync(join(sdir, 'SKILL.md'), STEP_SKILL);
   writeFileSync(join(rdir, '.env'), '');
   writeFileSync(join(rdir, 'package.json'), '{"name":"scratch"}');
@@ -905,8 +928,8 @@ describe('run-health gate (a bounce blocks later side effects)', () => {
   let groot: string;
   let gskill: string;
   beforeEach(() => {
-    gskill = mkdtempSync(join(tmpdir(), 'nc-gate-skill-'));
-    groot = mkdtempSync(join(tmpdir(), 'nc-gate-proj-'));
+    gskill = tempDir('nc-gate-skill-');
+    groot = tempDir('nc-gate-proj-');
     writeFileSync(join(groot, 'package.json'), '{"name":"scratch"}');
     writeFileSync(join(groot, '.env'), '');
   });
@@ -1050,8 +1073,8 @@ describe('nc:run effect:check (precondition gate)', () => {
   let chkSkill: string;
   let chkRoot: string;
   beforeEach(() => {
-    chkSkill = mkdtempSync(join(tmpdir(), 'nc-check-skill-'));
-    chkRoot = mkdtempSync(join(tmpdir(), 'nc-check-proj-'));
+    chkSkill = tempDir('nc-check-skill-');
+    chkRoot = tempDir('nc-check-proj-');
     writeFileSync(join(chkRoot, 'package.json'), '{"name":"scratch"}');
     writeFileSync(join(chkRoot, '.env'), '');
   });
@@ -1128,8 +1151,8 @@ describe('onEvent (core event seam)', () => {
   let eroot: string;
   let eskill: string;
   beforeEach(() => {
-    eskill = mkdtempSync(join(tmpdir(), 'nc-ev-skill-'));
-    eroot = mkdtempSync(join(tmpdir(), 'nc-ev-proj-'));
+    eskill = tempDir('nc-ev-skill-');
+    eroot = tempDir('nc-ev-proj-');
     writeFileSync(join(eroot, '.env'), '');
     writeFileSync(join(eroot, 'package.json'), '{"name":"scratch"}');
   });
@@ -1312,8 +1335,8 @@ describe('firstFailureHint', () => {
   let froot: string;
   let fskill: string;
   beforeEach(() => {
-    fskill = mkdtempSync(join(tmpdir(), 'nc-fh-skill-'));
-    froot = mkdtempSync(join(tmpdir(), 'nc-fh-proj-'));
+    fskill = tempDir('nc-fh-skill-');
+    froot = tempDir('nc-fh-proj-');
     writeFileSync(join(froot, 'package.json'), '{"name":"scratch"}');
     writeFileSync(join(froot, '.env'), '');
   });
@@ -1358,8 +1381,8 @@ describe('nc:prompt normalize at bind + InputMeta declaration', () => {
   let nroot: string;
   let nskill: string;
   beforeEach(() => {
-    nskill = mkdtempSync(join(tmpdir(), 'nc-opts-skill-'));
-    nroot = mkdtempSync(join(tmpdir(), 'nc-opts-proj-'));
+    nskill = tempDir('nc-opts-skill-');
+    nroot = tempDir('nc-opts-proj-');
     writeFileSync(join(nskill, 'SKILL.md'), NORMALIZE_SKILL);
     writeFileSync(join(nroot, '.env'), '');
     writeFileSync(join(nroot, 'package.json'), '{"name":"scratch"}');
@@ -1416,8 +1439,8 @@ describe('resolveInput (core input seam)', () => {
   let iroot: string;
   let iskill: string;
   beforeEach(() => {
-    iskill = mkdtempSync(join(tmpdir(), 'nc-ri-skill-'));
-    iroot = mkdtempSync(join(tmpdir(), 'nc-ri-proj-'));
+    iskill = tempDir('nc-ri-skill-');
+    iroot = tempDir('nc-ri-proj-');
     writeFileSync(join(iroot, '.env'), '');
     writeFileSync(join(iroot, 'package.json'), '{"name":"scratch"}');
   });
@@ -1501,8 +1524,8 @@ describe('validate-at-bind (inputs + resolveInput answers)', () => {
   let vroot: string;
   let vskill: string;
   beforeEach(() => {
-    vskill = mkdtempSync(join(tmpdir(), 'nc-vb-skill-'));
-    vroot = mkdtempSync(join(tmpdir(), 'nc-vb-proj-'));
+    vskill = tempDir('nc-vb-skill-');
+    vroot = tempDir('nc-vb-proj-');
     writeFileSync(join(vskill, 'SKILL.md'), VALIDATE_BIND_SKILL);
     writeFileSync(join(vroot, '.env'), '');
     writeFileSync(join(vroot, 'package.json'), '{"name":"scratch"}');
@@ -1674,8 +1697,8 @@ describe('referenceProse (reference-floor slice)', () => {
   });
 
   it('is carried on ApplyResult.referenceProse through a real apply', async () => {
-    const sdir = mkdtempSync(join(tmpdir(), 'nc-ref-skill-'));
-    const rdir = mkdtempSync(join(tmpdir(), 'nc-ref-proj-'));
+    const sdir = tempDir('nc-ref-skill-');
+    const rdir = tempDir('nc-ref-proj-');
     writeFileSync(join(rdir, 'package.json'), '{"name":"scratch"}');
     writeFileSync(join(rdir, '.env'), '');
     writeFileSync(join(sdir, 'SKILL.md'), REFERENCE_SKILL);
