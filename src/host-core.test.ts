@@ -619,6 +619,57 @@ describe('router', () => {
     expect(rows[0].trigger).toBe(0);
   });
 
+  it('treats a reply to this bot as a mention while other replies only accumulate', async () => {
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    const wake = wakeContainer as unknown as ReturnType<typeof vi.fn>;
+    wake.mockClear();
+
+    const { updateMessagingGroupAgent } = await import('./db/messaging-groups.js');
+    await updateMessagingGroupAgent('mga-1', {
+      engage_mode: 'mention',
+      ignored_message_policy: 'accumulate',
+    });
+
+    const reply = async (id: string, isReplyToBot: boolean) =>
+      routeInbound({
+        channelType: 'discord',
+        platformId: 'chan-123',
+        threadId: null,
+        message: {
+          id,
+          kind: 'chat',
+          content: JSON.stringify({
+            text: `follow-up ${id}`,
+            replyTo: { text: 'quoted message', sender: 'Quoted sender', isReplyToBot },
+          }),
+          timestamp: now(),
+          isMention: false,
+        },
+      });
+
+    await reply('msg-reply-own-bot', true);
+    await reply('msg-reply-human', false);
+    await reply('msg-reply-other-bot', false);
+
+    expect(wake).toHaveBeenCalledTimes(1);
+
+    const session = await findSession('mg-1', null);
+    expect(session).toBeDefined();
+    const db = new Database(inboundDbPath('ag-1', session!.id));
+    const rows = db.prepare('SELECT id, trigger FROM messages_in ORDER BY rowid').all() as Array<{
+      id: string;
+      trigger: number;
+    }>;
+    db.close();
+
+    expect(rows).toEqual([
+      { id: 'msg-reply-own-bot:ag-1', trigger: 1 },
+      { id: 'msg-reply-human:ag-1', trigger: 0 },
+      { id: 'msg-reply-other-bot:ag-1', trigger: 0 },
+    ]);
+  });
+
   it('drops silently when engage fails + ignored_message_policy=drop', async () => {
     const { routeInbound } = await import('./router.js');
     const { wakeContainer } = await import('./container-runner.js');
