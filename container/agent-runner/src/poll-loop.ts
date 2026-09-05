@@ -563,12 +563,12 @@ export async function processQuery(
             // the nudge decision — see turnDelivered.
             suppressDelivery: emitsMidTurnText,
             // "Did anything user-visible go out this turn?" — door
-            // deliveries (midTurnSent) plus any chat row written since the
-            // turn boundary (which also sees MCP send_message calls the
-            // frame-local count can't). When false and the result still
-            // carries content, the wrap-nudge fires so the model re-sends
-            // and the retry streams through the mid-turn door.
-            turnDelivered: emitsMidTurnText ? midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) : undefined,
+            // deliveries (midTurnSent) plus any chat/chat-sdk row written
+            // since the turn boundary (MCP send_message / ask_user_question
+            // the frame-local count can't see). Consulted for every
+            // provider: result-door agents that already replied via tools
+            // must not get a wrap-nudge that coaxes a second copy.
+            turnDelivered: midTurnSent > 0 || chatRowWrittenSince(turnStartSeq),
           });
           const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
@@ -747,15 +747,13 @@ export interface ResultDispatchOptions {
   suppressDelivery?: boolean;
   /**
    * Did anything user-visible go out this turn? True when the mid-turn door
-   * delivered (midTurnSent > 0) OR any chat row landed in outbound.db since
-   * the turn boundary (covers MCP send_message calls the frame-local count
-   * cannot see). Only meaningful with `suppressDelivery`. When false and the
-   * result carries content — wrapped blocks or unwrapped prose — the turn
-   * counts as undelivered and the wrap-nudge fires, so the model re-sends
-   * and the retry streams through the mid-turn door. This is the deliberate
-   * degradation path for streaming-door misses (SDK drift, a destination
-   * appearing only after streaming, a block that never closed): nudge and
-   * retry, never a direct result-door send.
+   * delivered (midTurnSent > 0) OR any chat/chat-sdk row landed in
+   * outbound.db since the turn boundary (covers MCP send_message /
+   * ask_user_question the frame-local count cannot see). Used by both
+   * doors: streaming providers skip a wrap-nudge after a mid-turn send;
+   * result-door providers skip it after a tool send so an unwrapped
+   * self-summary is not coaxed into a duplicate. When false and the result
+   * still carries content, the wrap-nudge fires.
    */
   turnDelivered?: boolean;
 }
@@ -916,17 +914,19 @@ function maxOutboundSeq(): number {
 }
 
 /**
- * Has ANY chat row been written to outbound.db after `afterSeq`? Feeds the
- * result door's nudge decision: unlike the frame-local midTurnSent count,
- * this also sees MCP send_message / send_file deliveries made this turn, so
- * an agent that already replied via tools is not nudged into repeating
- * itself. Fail-open to false: if the lookup breaks, the nudge may fire
- * spuriously (a repeat coax), never silently swallow an undelivered turn.
+ * Has ANY user-visible outbound row been written after `afterSeq`? Feeds the
+ * wrap-nudge decision: unlike the frame-local midTurnSent count, this also
+ * sees MCP send_message / send_file / ask_user_question deliveries made
+ * this turn, so an agent that already replied via tools is not nudged into
+ * repeating itself. Fail-open to false: if the lookup breaks, the nudge may
+ * fire spuriously (a repeat coax), never silently swallow an undelivered turn.
  */
 function chatRowWrittenSince(afterSeq: number): boolean {
   try {
     // ponytail: reuse the existing semantic read; add a cursor operation only if history scans show up in profiles.
-    return getUndeliveredMessages().some((message) => (message.seq ?? 0) > afterSeq && message.kind === 'chat');
+    return getUndeliveredMessages().some(
+      (message) => (message.seq ?? 0) > afterSeq && (message.kind === 'chat' || message.kind === 'chat-sdk'),
+    );
   } catch (err) {
     log(`chatRowWrittenSince failed: ${err instanceof Error ? err.message : String(err)}`);
     return false;
@@ -1062,10 +1062,12 @@ export async function dispatchResultText(
 
   // In a task run, plain final text is the NORMAL ending (it becomes the run
   // log) — never treat it as an undelivered reply or nudge the agent to wrap it.
-  // With suppressDelivery the delivered-this-turn question is answered by
-  // turnDelivered (door deliveries + DB-visible sends like MCP send_message);
-  // otherwise by this dispatch's own send count.
-  const anythingDelivered = options?.suppressDelivery ? options.turnDelivered === true : sent > 0;
+  // Streaming door: turnDelivered (mid-turn blocks + MCP sends). Result door:
+  // this dispatch's own <message> sends plus the same MCP/tool rows, so a
+  // send_message turn that finishes with scratchpad is not wrap-nudged.
+  const anythingDelivered = options?.suppressDelivery
+    ? options.turnDelivered === true
+    : sent > 0 || options?.turnDelivered === true;
   const hasUnwrapped = !routing.taskRun && !anythingDelivered && !!scratchpad;
   if (hasUnwrapped) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);

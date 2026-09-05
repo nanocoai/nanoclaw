@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
-import { getUndeliveredMessages } from './db/messages-out.js';
+import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
@@ -466,6 +466,81 @@ describe('error result with no <message> envelope', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
     expect(pushes).toHaveLength(1);
     expect(pushes[0]).toContain('was not delivered');
+  });
+
+  it('does not wrapping-nudge a result-door turn that already sent via MCP tools', async () => {
+    const pushes: string[] = [];
+
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 'sess-1' };
+      await writeMessageOut({
+        id: 'mcp-1',
+        kind: 'chat',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        content: JSON.stringify({ text: 'already sent via tool' }),
+      });
+      yield { type: 'result', text: 'Welcome flow is live — intro sent.' };
+    }
+
+    await processQuery(
+      {
+        push: (m: string) => {
+          pushes.push(m);
+        },
+        end: () => {},
+        events: events(),
+        abort: () => {},
+      },
+      ERR_ROUTING,
+      ['m1'],
+      'claude',
+      undefined,
+      'prompt',
+      undefined,
+    );
+
+    expect(pushes.filter((p) => p.includes('was not delivered'))).toHaveLength(0);
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0]!.content).text).toBe('already sent via tool');
+  });
+
+  it('does not wrapping-nudge after an ask_user_question card', async () => {
+    const pushes: string[] = [];
+
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 'sess-1' };
+      await writeMessageOut({
+        id: 'q-1',
+        kind: 'chat-sdk',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        content: JSON.stringify({ type: 'ask_question', questionId: 'q-1' }),
+      });
+      yield { type: 'result', text: 'Waiting on the tour pick.' };
+    }
+
+    await processQuery(
+      {
+        push: (m: string) => {
+          pushes.push(m);
+        },
+        end: () => {},
+        events: events(),
+        abort: () => {},
+      },
+      ERR_ROUTING,
+      ['m1'],
+      'claude',
+      undefined,
+      'prompt',
+      undefined,
+    );
+
+    expect(pushes.filter((p) => p.includes('was not delivered'))).toHaveLength(0);
+    expect(getUndeliveredMessages()).toHaveLength(1);
+    expect(getUndeliveredMessages()[0]!.kind).toBe('chat-sdk');
   });
 });
 
