@@ -494,6 +494,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           name: att.name,
           mimeType: att.mimeType,
           size: att.size,
+          url: att.url,
           width: (att as unknown as Record<string, unknown>).width,
           height: (att as unknown as Record<string, unknown>).height,
         };
