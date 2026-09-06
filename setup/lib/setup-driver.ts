@@ -471,3 +471,459 @@ class InputLines {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
+
+export class NdjsonSetupDriver implements SetupDriver {
+  readonly mode = 'ndjson' as const;
+  readonly cancellationSignal: AbortSignal;
+  private input: typeof process.stdin | undefined;
+  private readonly inputLines: InputLines;
+  private readonly abortController = new AbortController();
+  private pending: Pending | undefined;
+  private isCancelled = false;
+  private isTerminal = false;
+  private cancelReason: string | undefined;
+  private inputChain = Promise.resolve();
+  private readonly write: (text: string) => boolean;
+  private readonly onSignal = (): void => this.requestCancellation();
+  private readonly onInputData = (chunk: Buffer | string): void =>
+    this.inputLines.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  private readonly onInputEnd = (): void => {
+    this.inputLines.end();
+    if (!this.isTerminal) this.requestCancellation('stdin_closed');
+  };
+  private readonly onInputError = (): void => this.requestCancellation('stdin_error');
+
+  constructor(
+    readonly operation: DriverOperation,
+    opts: { emitHello?: boolean } = {},
+  ) {
+    this.cancellationSignal = this.abortController.signal;
+    this.write = process.stdout.write.bind(process.stdout);
+    if (opts.emitHello !== false) this.emit({ type: 'hello' });
+    this.inputLines = new InputLines((line) => {
+      this.inputChain = this.inputChain
+        .then(() =>
+          line === null
+            ? this.rejectInput(
+                this.pending?.id,
+                'command_too_large',
+                `Command exceeds the ${MAX_INPUT_LINE_BYTES} byte limit.`,
+              )
+            : this.handleLine(line),
+        )
+        .catch((error: unknown) => {
+          if (error instanceof DriverCancelled || error instanceof DriverTerminalError) return;
+          const message = error instanceof Error ? error.message : String(error);
+          try {
+            this.error('protocol_input_failed', message);
+          } catch (terminal) {
+            if (!(terminal instanceof DriverTerminalError)) throw terminal;
+          }
+        });
+    });
+    this.input = process.stdin;
+    process.stdin.on('data', this.onInputData);
+    process.stdin.on('end', this.onInputEnd);
+    process.stdin.on('error', this.onInputError);
+    process.once('SIGINT', this.onSignal);
+    process.once('SIGTERM', this.onSignal);
+  }
+
+  async prompt(spec: DriverPrompt): Promise<boolean | string> {
+    this.throwIfCancelled();
+    if (
+      !boundedString(spec.message) ||
+      (spec.choices?.length ?? 0) > MAX_COMMAND_ARRAY_LENGTH ||
+      spec.choices?.some(
+        (choice) =>
+          !boundedString(choice.id, 256) ||
+          !boundedString(choice.label) ||
+          (choice.hint !== undefined && !boundedString(choice.hint)),
+      )
+    ) {
+      this.error('presentation_too_large', 'Prompt presentation exceeds protocol limits.');
+    }
+    const prompt = {
+      id: spec.id ?? randomUUID(),
+      kind: spec.kind,
+      message: redactSensitiveValues(spec.message),
+      sensitive: spec.sensitive ?? spec.kind === 'secret',
+      ...(spec.choices
+        ? { choices: spec.choices.map(({ id, label }) => ({ id, label: redactSensitiveValues(label) })) }
+        : {}),
+      ...(spec.default !== undefined && spec.kind !== 'secret' ? { default: spec.default } : {}),
+      ...(spec.validation ? { validation: spec.validation } : {}),
+    };
+    this.emit({ type: 'prompt', prompt });
+    const value = await this.wait(prompt.id, async (command) => {
+      if (command.type !== 'answer' || command.promptId !== prompt.id) return { done: false };
+      const error = validateValue(spec, command.value);
+      if (error) {
+        this.rejectInput(prompt.id, 'invalid_answer', error);
+        return { done: false, rejected: true };
+      }
+      if (spec.kind === 'secret' && typeof command.value === 'string') registerSensitiveValue(command.value);
+      return { done: true, value: command.value };
+    });
+    return typeof value === 'boolean' ? value : String(value);
+  }
+
+  progress(stepId: string, state: ProgressState, label?: string): void {
+    if (!boundedString(stepId, 256) || (label !== undefined && !boundedString(label))) {
+      this.error('presentation_too_large', 'Progress presentation exceeds protocol limits.');
+    }
+    this.emit({ type: 'progress', stepId, state, ...(label ? { label: redactSensitiveValues(label) } : {}) });
+  }
+
+  display(display: DriverDisplay): void {
+    const payload = 'content' in display ? display.content : 'url' in display ? display.url : display.payload;
+    if (
+      !boundedString(display.id, 256) ||
+      !boundedString(payload) ||
+      (display.label !== undefined && !boundedString(display.label))
+    ) {
+      this.error('presentation_too_large', 'Display payload exceeds protocol limits.');
+    }
+    if (display.kind === 'qr' && payload.length > MAX_COMMAND_STRING_BYTES) {
+      this.error('presentation_too_large', 'Display payload exceeds protocol limits.');
+    }
+    if (display.sensitive) {
+      const value = 'content' in display ? display.content : 'url' in display ? display.url : display.payload;
+      registerSensitiveValue(value);
+    }
+    const safeDisplay =
+      !display.sensitive && 'url' in display ? { ...display, url: redactSensitiveValues(display.url) } : display;
+    this.emit(
+      {
+        type: 'display',
+        display: {
+          ...safeDisplay,
+          ...(display.label ? { label: redactSensitiveValues(display.label) } : {}),
+        },
+      },
+      display.sensitive,
+    );
+  }
+
+  clearDisplay(displayId: string): void {
+    if (!boundedString(displayId, 256)) this.error('presentation_too_large', 'Display id exceeds protocol limits.');
+    this.emit({ type: 'clearDisplay', displayId });
+  }
+
+  note(content: string, label?: string): void {
+    this.display({ id: randomUUID(), kind: 'text', content, sensitive: false, ...(label ? { label } : {}) });
+  }
+
+  log(_level: LogLevel, message: string): void {
+    this.note(message);
+  }
+
+  intro(message: string): void {
+    this.note(message);
+  }
+
+  outro(message: string): void {
+    this.note(message);
+  }
+
+  async externalAction(
+    action: ExternalAction,
+    verify: () => boolean | Promise<boolean>,
+  ): Promise<ExternalActionResult> {
+    this.throwIfCancelled();
+    if (!boundedString(action.title) || !boundedString(action.id ?? '', 256)) {
+      this.error('invalid_external_action', 'External action presentation exceeds protocol limits.');
+    }
+    if (action.kind === 'openURL' && new URL(action.url).protocol !== 'https:') {
+      this.error('invalid_external_action', 'openURL actions require an HTTPS URL.');
+    }
+    if (action.kind === 'openURL' && !boundedString(action.url))
+      this.error('invalid_external_action', 'External action URL exceeds protocol limits.');
+    if (action.kind === 'startApplication' && !boundedString(action.application, 256))
+      this.error('invalid_external_action', 'Application name exceeds protocol limits.');
+    if (
+      action.kind === 'systemPermission' &&
+      (action.instructions.length > MAX_COMMAND_ARRAY_LENGTH ||
+        action.instructions.some((instruction) => !boundedString(instruction)))
+    ) {
+      this.error('invalid_external_action', 'Permission instructions exceed protocol limits.');
+    }
+    const withId = { ...action, id: action.id ?? randomUUID() };
+    this.emit({ type: 'externalAction', action: withId });
+    const value = await this.wait(withId.id, async (command) => {
+      if (command.type !== 'externalActionCompleted' || command.actionId !== withId.id) {
+        return { done: false };
+      }
+      if (command.result === 'declined' || command.result === 'unsupported')
+        return { done: true, value: command.result };
+      if (!(await verify())) {
+        this.rejectInput(withId.id, 'postcondition_failed', 'The required postcondition is not satisfied.');
+        return { done: false, rejected: true };
+      }
+      return { done: true, value: 'attempted' };
+    });
+    return value as ExternalActionResult;
+  }
+
+  async waitForUninstall(
+    plan: UninstallPlan,
+    validate: (choices: Map<UninstallGroup, UninstallChoice>) => string | undefined,
+  ): Promise<Map<UninstallGroup, UninstallChoice>> {
+    if (!validUninstallPlan(plan)) {
+      this.error('presentation_too_large', 'Uninstall plan presentation exceeds protocol limits.');
+    }
+    for (const artifact of plan.artifacts) {
+      this.emit({ type: 'uninstallPlanItem', planId: plan.id, artifact });
+    }
+    this.emit({
+      type: 'uninstallPlan',
+      plan: { id: plan.id, groups: plan.groups },
+    });
+    const value = await this.wait(plan.id, async (command) => {
+      if (command.type !== 'applyUninstall' || command.planId !== plan.id) return { done: false };
+      if (!Array.isArray(command.choices)) {
+        this.rejectInput(plan.id, 'invalid_uninstall_choices', 'Expected a choices array.');
+        return { done: false, rejected: true };
+      }
+      const choices = new Map<UninstallGroup, UninstallChoice>();
+      for (const entry of command.choices) {
+        if (!isRecord(entry)) {
+          this.rejectInput(plan.id, 'invalid_uninstall_choices', 'Every choice must be an object.');
+          return { done: false, rejected: true };
+        }
+        const groupId = entry.groupId;
+        const choice = entry.choice;
+        if (!isUninstallGroup(groupId)) {
+          this.rejectInput(plan.id, 'invalid_uninstall_choices', 'Unknown uninstall group.');
+          return { done: false, rejected: true };
+        }
+        if (choice !== 'preserve' && choice !== 'remove') {
+          this.rejectInput(plan.id, 'invalid_uninstall_choices', 'Unknown uninstall choice.');
+          return { done: false, rejected: true };
+        }
+        const group = groupId;
+        if (choices.has(group)) {
+          this.rejectInput(plan.id, 'duplicate_uninstall_group', `Duplicate choice for ${group}.`);
+          return { done: false, rejected: true };
+        }
+        choices.set(group, choice);
+      }
+      if (choices.size !== plan.groups.length || plan.groups.some((group) => !choices.has(group.id))) {
+        this.rejectInput(plan.id, 'incomplete_uninstall_choices', 'Supply exactly one choice for every group.');
+        return { done: false, rejected: true };
+      }
+      const error = validate(choices);
+      if (error) {
+        this.rejectInput(plan.id, 'unsafe_uninstall_choices', error);
+        return { done: false, rejected: true };
+      }
+      return { done: true, value: choices };
+    });
+    if (!(value instanceof Map)) throw new Error('invalid uninstall command result');
+    return value;
+  }
+
+  uninstallAction(result: UninstallActionResult): void {
+    if (!validUninstallResult(result)) {
+      this.error('presentation_too_large', 'Uninstall action presentation exceeds protocol limits.');
+    }
+    this.emit({ type: 'uninstallAction', result });
+  }
+
+  throwIfCancelled(): void {
+    if (this.isCancelled) throw new DriverCancelled(this.cancelReason);
+  }
+
+  error(code: string, message: string, recovery: Recovery[] = [], stepId?: string): never {
+    if (
+      !boundedString(code, 256) ||
+      !boundedString(message) ||
+      (stepId !== undefined && !boundedString(stepId, 256)) ||
+      !validRecovery(recovery)
+    ) {
+      code = 'presentation_too_large';
+      message = 'Error presentation exceeds protocol limits.';
+      recovery = [];
+      stepId = undefined;
+    }
+    this.terminate({
+      type: 'error',
+      code,
+      ...(stepId ? { stepId } : {}),
+      message: redactSensitiveValues(message),
+      recovery,
+    });
+    throw new DriverTerminalError(1);
+  }
+
+  completeSetup(receipt: SetupReceipt): void {
+    this.throwIfCancelled();
+    this.terminate({ type: 'complete', receipt });
+  }
+
+  completeUninstall(receipt: UninstallReceipt): void {
+    this.throwIfCancelled();
+    if (
+      !receipt.results.every(validUninstallResult) ||
+      !receipt.remaining.every(validUninstallArtifact) ||
+      !receipt.checkoutRemoval.blockers.every((blocker) => boundedString(blocker)) ||
+      !boundedString(receipt.completedAt, 256)
+    ) {
+      this.error('presentation_too_large', 'Uninstall receipt presentation exceeds protocol limits.');
+    }
+    for (const artifact of receipt.remaining) {
+      this.emit({ type: 'uninstallReceiptItem', section: 'remaining', artifact });
+    }
+    this.terminate({
+      type: 'complete',
+      receipt: {
+        version: receipt.version,
+        outcome: receipt.outcome,
+        checkoutRemoval: receipt.checkoutRemoval,
+        completedAt: receipt.completedAt,
+      },
+    });
+  }
+
+  cancelled(
+    details: {
+      lastStepId?: string;
+      results?: UninstallActionResult[];
+      remaining?: Artifact[];
+    } = {},
+  ): void {
+    if (this.operation !== 'uninstall') {
+      this.terminate({ type: 'cancelled', ...details });
+      return;
+    }
+    if (
+      (details.results !== undefined && !details.results.every(validUninstallResult)) ||
+      (details.remaining !== undefined && !details.remaining.every(validUninstallArtifact)) ||
+      (details.lastStepId !== undefined && !boundedString(details.lastStepId, 256))
+    ) {
+      this.error('presentation_too_large', 'Uninstall cancellation details exceed protocol limits.');
+    }
+    for (const artifact of details.remaining ?? []) {
+      this.emit({ type: 'uninstallReceiptItem', section: 'remaining', artifact });
+    }
+    this.terminate({
+      type: 'cancelled',
+      ...(details.lastStepId ? { lastStepId: details.lastStepId } : {}),
+    });
+  }
+
+  handoff(): void {
+    this.input?.off('data', this.onInputData);
+    this.input?.off('end', this.onInputEnd);
+    this.input?.off('error', this.onInputError);
+    this.input?.pause();
+    this.input = undefined;
+  }
+
+  close(): void {
+    this.handoff();
+    process.off('SIGINT', this.onSignal);
+    process.off('SIGTERM', this.onSignal);
+  }
+
+  private emit(event: Record<string, unknown>, allowSensitive = false): void {
+    if (this.isTerminal) return;
+    this.writeEvent(event, allowSensitive);
+  }
+
+  private terminate(event: Record<string, unknown>): void {
+    if (this.isTerminal) return;
+    this.isTerminal = true;
+    this.writeEvent(event);
+    this.close();
+  }
+
+  private writeEvent(event: Record<string, unknown>, allowSensitive = false): void {
+    const payload = allowSensitive ? event : (redactProtocolPresentation(event) as Record<string, unknown>);
+    this.write(JSON.stringify({ protocol: DRIVER_PROTOCOL, operation: this.operation, ...payload }) + '\n');
+  }
+
+  private wait(id: string, accept: Pending['accept']): Promise<unknown> {
+    if (this.pending) throw new Error('driver already has a pending item');
+    return new Promise((resolve, reject) => {
+      this.pending = { id, accept, resolve, reject };
+    });
+  }
+
+  private async handleLine(line: string): Promise<void> {
+    if (this.isTerminal) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      this.rejectInput(undefined, 'invalid_json', 'Command must be one JSON object.');
+      return;
+    }
+    const command = parseCommand(parsed, this.operation);
+    if ('error' in command) {
+      const code =
+        isRecord(parsed) && parsed.protocol === DRIVER_PROTOCOL && parsed.operation === this.operation
+          ? typeof parsed.type === 'string' &&
+            !['answer', 'externalActionCompleted', 'applyUninstall', 'cancel'].includes(parsed.type)
+            ? 'unknown_command'
+            : 'invalid_command'
+          : 'wrong_envelope';
+      this.rejectInput(command.itemId, code, command.error);
+      return;
+    }
+    if (command.type === 'cancel') {
+      this.requestCancellation(command.reason);
+      return;
+    }
+    const pending = this.pending;
+    if (!pending) {
+      this.rejectInput(this.commandItemId(command), 'stale_command', 'There is no matching pending item.');
+      return;
+    }
+    const result = await pending.accept(command);
+    if (this.isTerminal || this.isCancelled) return;
+    if (!result.done) {
+      if (!result.rejected) {
+        this.rejectInput(this.commandItemId(command), 'stale_command', 'Command does not match the pending item.');
+      }
+      return;
+    }
+    this.pending = undefined;
+    pending.resolve(result.value);
+  }
+
+  private commandItemId(command: Record<string, unknown>): string | undefined {
+    for (const key of ['promptId', 'actionId', 'planId']) {
+      if (typeof command[key] === 'string') return command[key];
+    }
+    return undefined;
+  }
+
+  private rejectInput(itemId: string | undefined, code: string, message: string): void {
+    this.emit({ type: 'inputRejected', ...(itemId ? { itemId } : {}), code, message });
+  }
+
+  private requestCancellation(reason?: string): void {
+    if (this.isTerminal) return;
+    this.isCancelled = true;
+    this.cancelReason = reason;
+    this.abortController.abort(reason);
+    const pending = this.pending;
+    this.pending = undefined;
+    pending?.reject(new DriverCancelled(this.cancelReason));
+  }
+}
+
+export class DriverTerminalError extends Error {
+  constructor(readonly exitCode: 0 | 1 | 2) {
+    super(`driver terminated with exit ${exitCode}`);
+  }
+}
+
+export function createSetupDriver(operation: DriverOperation): SetupDriver {
+  return process.env.NANOCLAW_PROTOCOL === DRIVER_PROTOCOL
+    ? new NdjsonSetupDriver(operation, {
+        emitHello: process.env.NANOCLAW_DRIVER_SHELL_HELLO !== '1' && process.env.NANOCLAW_DRIVER_CONTINUATION !== '1',
+      })
+    : new TerminalSetupDriver(operation);
+}
