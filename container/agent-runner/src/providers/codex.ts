@@ -1,6 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 
+// This module never imports the runtime contract (provider-contracts/codex.ts):
+// registration is two-step, so it compiles and runs on a core that predates the
+// contract seam. The contract attaches itself through registerProviderContract.
 import { registerProvider } from './provider-registry.js';
 import type {
   AgentProvider,
@@ -11,14 +14,16 @@ import type {
   ProviderOptions,
   QueryInput,
 } from './types.js';
-import { archiveProviderExchange } from './exchange-archive.js';
+import { archiveProviderExchange as archiveProviderExchangeLegacy } from './exchange-archive.js';
 import {
   type AppServer,
+  type CodexConfigPlan,
   type CodexMemorySessionHook,
-  type CodexReasoningEffort,
   type JsonRpcNotification,
   STALE_THREAD_RE,
   attachCodexAutoApproval,
+  codexInferenceSection,
+  codexRuntimeOwnership,
   initializeCodexAppServer,
   interruptCodexTurn,
   killCodexAppServer,
@@ -30,7 +35,6 @@ import {
 } from './codex-app-server.js';
 
 const TURN_TIMEOUT_MS = 10 * 60 * 1000;
-const SUPPORTED_EFFORTS = new Set<CodexReasoningEffort>(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
 export interface CodexRuntimeDeps {
   writeCodexConfigToml: typeof writeCodexConfigToml;
@@ -44,7 +48,25 @@ export interface CodexRuntimeDeps {
   killCodexAppServer: typeof killCodexAppServer;
 }
 
-const defaultCodexRuntimeDeps: CodexRuntimeDeps = {
+/**
+ * Structural mirror of the contract core's `ResolvedRuntimeConfiguration` —
+ * what `createProvider` hands the factory after running the contract's
+ * configuration resolves. Mirrored, not imported: the type lives in
+ * `provider-contracts/registry.ts`, which a pre-contract core does not have.
+ */
+export interface CodexResolvedConfiguration {
+  executionPolicy?: unknown;
+  inference?: unknown;
+  mcpServers?: unknown;
+}
+
+/**
+ * The production runtime deps. Exported as one mutable object so a test can
+ * swap in fakes for a provider that core constructs (createProvider gives the
+ * test no constructor access); every instance built without explicit deps
+ * reads through this object.
+ */
+export const defaultCodexRuntimeDeps: CodexRuntimeDeps = {
   writeCodexConfigToml,
   spawnCodexAppServer,
   attachCodexAutoApproval,
@@ -64,23 +86,14 @@ function classifyError(message: string): string | undefined {
   return undefined;
 }
 
-function normalizeEffort(effort: string | undefined): CodexReasoningEffort | undefined {
-  const normalized = effort?.trim().toLowerCase();
-  if (!normalized) return undefined;
-  if (!SUPPORTED_EFFORTS.has(normalized as CodexReasoningEffort)) {
-    throw new Error(`Unsupported Codex reasoning effort: ${effort}`);
-  }
-  return normalized as CodexReasoningEffort;
-}
-
 export class CodexProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
   // The app-server keeps history server-side; there is no on-disk transcript,
-  // so the provider persists each exchange itself into `conversations/`
-  // (see exchange-archive.ts). The poll-loop reports exchanges through this
-  // hook and does nothing else — archiving is payload code, not runner code.
+  // so each exchange is persisted into `conversations/`. A contract core
+  // replaces this fallback with the contract's afterExchange at the factory
+  // boundary; a pre-contract core calls it directly.
   onExchangeComplete(exchange: ProviderExchange): void {
-    archiveProviderExchange({
+    archiveProviderExchangeLegacy({
       provider: 'codex',
       prompt: exchange.prompt,
       result: exchange.result,
@@ -90,16 +103,32 @@ export class CodexProvider implements AgentProvider {
   }
 
   private readonly mcpServers: Record<string, McpServerConfig>;
-  private readonly model?: string;
-  private readonly effort?: CodexReasoningEffort;
+  private readonly inference: CodexConfigPlan['inference'];
   private readonly runtime: CodexRuntimeDeps;
   private memorySessionHook?: CodexMemorySessionHook;
 
-  constructor(options: ProviderOptions = {}, runtime: CodexRuntimeDeps = defaultCodexRuntimeDeps) {
-    this.mcpServers = options.mcpServers ?? {};
-    this.model = options.model;
+  /**
+   * `configuration` is present on a contract core: core has already run the
+   * contract's inference and MCP resolves and hands the results over, so
+   * they are consumed as-is. Without it (a pre-contract core) the provider
+   * derives the same values itself, exactly as it always did.
+   */
+  constructor(
+    options: ProviderOptions = {},
+    runtime: CodexRuntimeDeps = defaultCodexRuntimeDeps,
+    configuration?: CodexResolvedConfiguration,
+  ) {
     this.runtime = runtime;
-    this.effort = normalizeEffort(options.effort);
+    if (configuration) {
+      this.inference = configuration.inference as CodexConfigPlan['inference'];
+      this.mcpServers = configuration.mcpServers as Record<string, McpServerConfig>;
+    } else {
+      this.mcpServers = options.mcpServers ?? {};
+      // `speed` exists on ProviderOptions only from the contract core on; read
+      // it structurally so this compiles against the older options type too.
+      const { speed } = options as ProviderOptions & { speed?: string };
+      this.inference = codexInferenceSection({ model: options.model, effort: options.effort, speed });
+    }
   }
 
   registerMemorySessionHook(hook: CodexMemorySessionHook): void {
@@ -143,10 +172,12 @@ export class CodexProvider implements AgentProvider {
     const self = this;
 
     async function* gen(): AsyncGenerator<ProviderEvent> {
-      self.runtime.writeCodexConfigToml(self.mcpServers, memorySessionHook, {
-        model: self.model,
-        effort: self.effort,
-      });
+      // On a contract core the contract's beforeQuery has already written
+      // config.toml and hooks.json for this query (see codexRuntimeOwnership);
+      // this direct write is the pre-contract core's path only.
+      if (!codexRuntimeOwnership.contractOwnsRuntimeFiles) {
+        self.runtime.writeCodexConfigToml(self.mcpServers, memorySessionHook, self.inference);
+      }
       const server = self.runtime.spawnCodexAppServer();
       activeServer = server;
       self.runtime.attachCodexAutoApproval(server);
@@ -157,7 +188,7 @@ export class CodexProvider implements AgentProvider {
       try {
         await self.runtime.initializeCodexAppServer(server);
         threadId = await self.runtime.startOrResumeCodexThread(server, threadId, {
-          model: self.model,
+          model: self.inference.model,
           cwd: input.cwd,
           baseInstructions: input.systemContext?.instructions,
         });
@@ -177,8 +208,8 @@ export class CodexProvider implements AgentProvider {
             server,
             threadId,
             text,
-            self.model,
-            self.effort,
+            self.inference.model,
+            self.inference.effort,
             input.cwd,
             (turnId) => {
               activeTurnId = turnId;
@@ -424,4 +455,10 @@ function listGeneratedImages(threadId: string): Set<string> {
   }
 }
 
-registerProvider('codex', (opts) => new CodexProvider(opts));
+// Function-form registration only — the one shape both core generations
+// accept. A contract core passes the resolved configuration as the second
+// argument; a pre-contract core passes nothing there.
+registerProvider(
+  'codex',
+  (opts, configuration?: CodexResolvedConfiguration) => new CodexProvider(opts, defaultCodexRuntimeDeps, configuration),
+);

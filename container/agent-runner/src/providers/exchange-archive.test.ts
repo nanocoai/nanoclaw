@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { archiveProviderExchange } from './exchange-archive.js';
+import { archiveProviderExchange, planProviderExchangeArchive } from './exchange-archive.js';
 
 let tmpDir: string | null = null;
 
@@ -132,5 +132,84 @@ describe('provider exchange archive', () => {
 
     expect(filename).toBeNull();
     expect(fs.readdirSync(conversationsDir)).toHaveLength(0);
+  });
+
+  it('skips empty results before touching an absent or unreadable conversations path', () => {
+    const root = makeTmpDir();
+    const empty = {
+      provider: 'codex',
+      prompt: 'hello',
+      result: '   ',
+      continuation: 'thread-123',
+      status: 'completed',
+    };
+    const absent = path.join(root, 'absent');
+    expect(archiveProviderExchange({ ...empty, conversationsDir: absent })).toBeNull();
+    expect(fs.existsSync(absent)).toBe(false);
+
+    const unreadable = path.join(root, 'not-a-directory');
+    fs.writeFileSync(unreadable, 'blocked');
+    expect(archiveProviderExchange({ ...empty, conversationsDir: unreadable })).toBeNull();
+    expect(fs.readFileSync(unreadable, 'utf-8')).toBe('blocked');
+  });
+
+  it('skips empty results before resolving the default timestamp', () => {
+    const conversationsDir = makeTmpDir();
+    let timestampReads = 0;
+    const options = {
+      conversationsDir,
+      provider: 'codex',
+      prompt: 'hello',
+      result: '   ',
+      continuation: 'thread-123',
+      status: 'completed',
+      get timestamp(): Date {
+        timestampReads++;
+        throw new Error('timestamp must not be read');
+      },
+    };
+
+    expect(archiveProviderExchange(options)).toBeNull();
+    expect(timestampReads).toBe(0);
+    expect(fs.readdirSync(conversationsDir)).toHaveLength(0);
+  });
+
+  it('hands back the thread header separately from the appended exchange', () => {
+    const filename = '2026-06-03-codex-thread-123.md';
+    const plan = planProviderExchangeArchive({
+      provider: 'codex',
+      prompt: 'hello',
+      result: 'world',
+      continuation: 'thread-123',
+      status: 'completed',
+      timestamp: new Date('2026-06-05T12:34:56.789Z'),
+      entries: [filename],
+    });
+
+    // The plan continues the existing thread file and never asks whether that
+    // file is still there: the writer decides whether the header is due.
+    expect(plan?.relativePath).toBe(filename);
+    expect(plan?.headerIfNew).toStartWith('# Codex Conversation\n');
+    expect(plan?.content).not.toContain('# Codex Conversation');
+  });
+
+  it('writes the header through a dangling selected-target symlink', () => {
+    const conversationsDir = makeTmpDir();
+    const filename = '2026-06-03-codex-thread-123.md';
+    const target = path.join(conversationsDir, 'restored.md');
+    fs.symlinkSync('restored.md', path.join(conversationsDir, filename));
+
+    expect(
+      archiveProviderExchange({
+        conversationsDir,
+        provider: 'codex',
+        prompt: 'hello',
+        result: 'world',
+        continuation: 'thread-123',
+        status: 'completed',
+        timestamp: new Date('2026-06-05T12:34:56.789Z'),
+      }),
+    ).toBe(filename);
+    expect(fs.readFileSync(target, 'utf-8')).toStartWith('# Codex Conversation\n');
   });
 });
