@@ -25,23 +25,31 @@ import { extractSlackRawText } from './slack-raw-text.js';
 /**
  * Dedicated bot app on a threaded platform. group threads:true keeps
  * mention-sticky bounded — engagement sticks per-thread, not forever.
- * dm.threads:false is a deliberate policy choice, not a capability limit:
- * Slack users can open sub-threads inside a DM, but by default the agent
- * replies top-level and all DM sub-threads collapse into the one DM session.
- * This declaration owns that judgment (it used to be hardcoded router
- * behavior); operators who want in-thread DM replies override per wiring
- * with `--threads true`.
+ *
+ * dm.threads:true is a capability statement, not a session-model choice:
+ * Slack's DM surface for an assistant-enabled app materializes a thread per
+ * conversation, and the incoming thread_ts IS that conversation's visible
+ * identity in the "Agents & Assistants" panel. A reply delivered with no
+ * thread_ts lands as a brand-new History card instead of in the chat the
+ * user typed in (nanocoai/nanoclaw#3730), so the delivery address must keep
+ * the platform thread id. Session identity is governed independently by
+ * session_mode: a `shared` DM wiring still resolves to one continuous
+ * session (resolveSession ignores threadId under `shared`; the router's
+ * group-only per-thread promotion is short-circuited for is_group=0) — the
+ * thread id now only steers where each reply is rendered. Operators who want
+ * flat top-level DM replies opt out per wiring with `--threads false`.
  *
  * Agent-DM anchors (the settled Slack DM shape) — creation-time stamps, so
  * they apply to wirings/rows created from this declaration onward and never
  * flip existing installs:
- * - dm.sessionMode 'per-thread': Slack's agent-mode DM surface materializes
- *   a thread per conversation, so a new DM wiring roots a session per thread.
+ * - dm.sessionMode 'per-thread': a NEW DM wiring roots a session per
+ *   conversation thread (continuity comes from cross-session backfill).
  *   resolveWiringDefaults derives the threads=1 stamp from this at creation
  *   (per-thread sessions structurally require honored thread ids — no
- *   separate field to declare). The live inherit value dm.threads stays
- *   false, so wirings created earlier (threads column NULL) keep collapsing
- *   DM sub-threads into the one DM session.
+ *   separate field to declare). Wirings created earlier (threads column
+ *   NULL, session_mode 'shared') keep their single continuous session and
+ *   inherit dm.threads:true, so their replies now thread back into the
+ *   conversation the user is looking at instead of scattering.
  * - dm.unknownSenderPolicy 'decline_notify': an unknown DM sender gets a
  *   polite decline and the owner a one-line FYI — no approval card; access
  *   grants stay explicit (`ncl members add`). A deliberate, reviewed default
@@ -51,7 +59,7 @@ export const SLACK_DEFAULTS: ChannelDefaults = {
   dm: {
     engageMode: 'pattern',
     engagePattern: '.',
-    threads: false,
+    threads: true,
     sessionMode: 'per-thread',
     unknownSenderPolicy: 'decline_notify',
   },

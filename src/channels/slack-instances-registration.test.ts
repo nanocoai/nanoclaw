@@ -69,7 +69,7 @@ describe('slack multi-instance registration', () => {
       // would resolve threads:false. Engagement fields ride along.
       expect(defaults.group.threads).toBe(true);
       expect(defaults.group.engageMode).toBe('mention-sticky');
-      expect(defaults.dm).toMatchObject({ engageMode: 'pattern', engagePattern: '.', threads: false });
+      expect(defaults.dm).toMatchObject({ engageMode: 'pattern', engagePattern: '.', threads: true });
       expect(defaults.mentions).toBe('platform');
     }
   });
