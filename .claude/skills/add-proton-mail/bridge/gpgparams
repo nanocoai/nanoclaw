@@ -1,0 +1,6 @@
+%no-protection
+Key-Type: RSA
+Key-Length: 3072
+Name-Real: nanoclaw-bridge
+Expire-Date: 0
+%commit

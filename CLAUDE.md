@@ -123,7 +123,7 @@ Key files: `src/cli/dispatch.ts` (dispatcher + approval handler), `src/cli/crud.
 
 Trunk does not ship any specific channel adapter or non-default agent provider. The codebase is the registry/infra; the actual adapters and providers live on long-lived sibling branches and get copied in by skills:
 
-- **`channels` branch** — Discord, Slack, Telegram, WhatsApp, Teams, Linear, GitHub, iMessage, Webex, Resend, Matrix, Google Chat, WhatsApp Cloud, Signal, WeChat, DeltaChat, Emacs (+ helpers, tests, channel-specific setup steps). Installed via `/add-<channel>` skills.
+- **`channels` branch** — Discord, Slack, Telegram, WhatsApp, Teams, Linear, GitHub, iMessage, Webex, Resend, Matrix, Google Chat, WhatsApp Cloud, Signal, WeChat, DeltaChat, Emacs, Proton Mail (+ helpers, tests, channel-specific setup steps). Installed via `/add-<channel>` skills.
 - **`providers` branch** — OpenCode (and any future non-default agent providers). Installed via `/add-opencode`.
 
 Each `/add-<name>` skill is idempotent: `git fetch origin <branch>` → copy module(s) into the standard paths → append a self-registration import to the relevant barrel → `pnpm install <pkg>@<pinned-version>` → build. Channel skills carry these steps as `nc:` directive fences: setup applies them via the engine (`scripts/skill-apply.ts`), an agent applies the prose — same install either way. See [docs/skill-directives.md](docs/skill-directives.md).
