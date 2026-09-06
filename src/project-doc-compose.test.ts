@@ -24,6 +24,23 @@ const CLAUDE_SPEC: ProjectDocSpec = {
   baseDocPath: path.join('container', 'CLAUDE.md'),
 };
 
+// Composition can replace resident skills. Exercise every shipped instruction
+// body without requiring a capability that this installation removed.
+const residentSkills = fs
+  .readdirSync(path.join(process.cwd(), 'container', 'skills'))
+  .filter((name) => fs.existsSync(path.join(process.cwd(), 'container', 'skills', name, 'instructions.md')))
+  .sort();
+
+function expectResidentProse(doc: string): void {
+  expect(residentSkills.length).toBeGreaterThan(0);
+  for (const name of residentSkills) {
+    expect(doc).toContain(`# NanoClaw Skill: ${name}`);
+    expect(doc).toContain(
+      fs.readFileSync(path.join(process.cwd(), 'container', 'skills', name, 'instructions.md'), 'utf8').trim(),
+    );
+  }
+}
+
 function group(id: string, folder: string): AgentGroup {
   return { id, name: folder, folder, agent_provider: null, created_at: new Date().toISOString() } as AgentGroup;
 }
@@ -93,7 +110,7 @@ describe('composeGroupProjectDoc delivery', () => {
     // here means adding a paragraph to it cannot break this test.
     const read = (...p: string[]): string => fs.readFileSync(path.join(process.cwd(), ...p), 'utf-8').trim();
     expect(doc).toContain(read('container', 'CLAUDE.md'));
-    expect(doc).toContain(read('container', 'skills', 'onecli-gateway', 'instructions.md'));
+    expectResidentProse(doc);
     expect(doc).toContain(read('container', 'agent-runner', 'src', 'mcp-tools', 'cli.instructions.md'));
     expect(doc).toContain(read('container', 'agent-runner', 'src', 'mcp-tools', 'core.instructions.md'));
   });
@@ -188,7 +205,7 @@ describe('composeGroupProjectDoc corrupt skill selection', () => {
 
     const doc = await compose(ag);
 
-    expect(doc).toContain('# NanoClaw Skill: onecli-gateway');
+    expectResidentProse(doc);
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('skill selection'), expect.anything());
   });
 
@@ -196,7 +213,7 @@ describe('composeGroupProjectDoc corrupt skill selection', () => {
     const ag = await seed('ag-substr', 'substr-group');
     await getDb().run(
       'UPDATE container_configs SET skills = ? WHERE agent_group_id = ?',
-      JSON.stringify('xx-onecli-gateway-xx'),
+      JSON.stringify(`xx-${residentSkills[0]}-xx`),
       ag.id,
     );
 
@@ -205,7 +222,7 @@ describe('composeGroupProjectDoc corrupt skill selection', () => {
     // Treated as corrupt and widened to 'all', never as a selection that
     // happens to contain the skill's name as a substring.
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('skill selection'), expect.anything());
-    expect(doc).toContain('# NanoClaw Skill: onecli-gateway');
+    expectResidentProse(doc);
   });
 });
 
@@ -250,11 +267,12 @@ describe('composeGroupProjectDoc skill selection', () => {
   // SKILL.md syncSkillSymlinks did not plant, which is a live contradiction.
   it('omits resident prose for a skill the group did not select', async () => {
     const ag = await seed('ag-skills-off', 'skills-off-group');
-    await updateContainerConfigJson(ag.id, 'skills', ['welcome']);
+    await updateContainerConfigJson(ag.id, 'skills', []);
 
     const doc = await compose(ag);
 
-    expect(doc).not.toContain('# NanoClaw Skill: onecli-gateway');
+    expect(residentSkills.length).toBeGreaterThan(0);
+    for (const name of residentSkills) expect(doc).not.toContain(`# NanoClaw Skill: ${name}`);
     expect(doc).toContain('# NanoClaw Module: core');
   });
 
@@ -263,7 +281,7 @@ describe('composeGroupProjectDoc skill selection', () => {
 
     const doc = await compose(ag);
 
-    expect(doc).toContain('# NanoClaw Skill: onecli-gateway');
+    expectResidentProse(doc);
   });
 });
 
@@ -301,7 +319,7 @@ describe('composeGroupProjectDoc spec', () => {
     });
 
     expect(doc.indexOf('# NanoClaw Runtime Contract')).toBeLessThan(doc.indexOf('# Memory System'));
-    expect(doc.indexOf('# Memory System')).toBeLessThan(doc.indexOf('# NanoClaw Module: agents'));
+    expect(doc.indexOf('# Memory System')).toBeLessThan(doc.indexOf('# NanoClaw Module: core'));
   });
 
   // Tolerated so a partial payload install still spawns, but never silent: an

@@ -90,19 +90,30 @@ function specFrom(mounts: Awaited<ReturnType<typeof composedMounts>>): SessionSp
 
 describe('buildMounts against the policy the drivers enforce', () => {
   it('emits the full mount list', async () => {
-    const paths = (await composedMounts()).map((m) => m.containerPath);
+    const mounts = await composedMounts();
+    const paths = mounts.map((m) => m.containerPath);
     // If this list shrinks, the case below is proving less than it looks.
     expect(paths).toEqual(
       expect.arrayContaining([
         '/workspace',
         '/workspace/agent',
-        '/workspace/agent/container.json',
         '/workspace/agent/plugins',
         '/workspace/agent/CLAUDE.md',
         '/home/node/.claude',
         '/app/src',
       ]),
     );
+    // The config may be projected as a file or as its containing directory.
+    // Either way its original bytes need a separate read-only mount; the
+    // read-write group workspace cannot satisfy that authority boundary.
+    const configMounts = mounts.filter(
+      (mount) =>
+        mount.readonly && (mount.hostPath === path.join(groupDir, 'container.json') || mount.hostPath === groupDir),
+    );
+    expect(configMounts).toHaveLength(1);
+    const configMount = configMounts[0];
+    expect(configMount.containerPath).not.toBe('/workspace/agent');
+    expect(fs.readFileSync(path.join(groupDir, 'container.json'), 'utf8')).toBe('{}');
   });
 
   it('classes every mount for a root it actually lives under', async () => {

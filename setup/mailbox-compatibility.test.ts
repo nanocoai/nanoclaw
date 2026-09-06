@@ -21,7 +21,7 @@ describe('standalone setup mailbox composition', () => {
     },
   );
 
-  it('setup/register.ts loads with an explicitly selected SQLite mailbox fixture', () => {
+  it('setup/register.ts loads and registers the composed mailbox', () => {
     const result = spawnSync(
       process.execPath,
       [
@@ -29,12 +29,15 @@ describe('standalone setup mailbox composition', () => {
         'tsx',
         '--input-type=module',
         '--eval',
-        "const { run } = await import('./setup/register.ts'); const { getAgentMailbox } = await import('./src/mailbox/index.ts'); const { SqliteAgentMailbox } = await import('./src/mailbox/sqlite/index.ts'); const { registerAgentMailbox, resetAgentMailboxForTesting } = await import('./src/mailbox/index.ts'); resetAgentMailboxForTesting(); registerAgentMailbox(() => new SqliteAgentMailbox()); console.log(`${typeof run}:${getAgentMailbox() instanceof SqliteAgentMailbox}`);",
+        "const { run } = await import('./setup/register.ts'); const { getAgentMailbox } = await import('./src/mailbox/index.ts'); const mailbox = getAgentMailbox(); console.log(JSON.stringify({ run: typeof run, methods: ['exists', 'prepare', 'destroy', 'runnerContext', 'runnerEnvironment', 'session'].map(name => typeof mailbox[name]) }));",
       ],
       { cwd: repoRoot, encoding: 'utf8' },
     );
 
     expect(result.status).toBe(0);
-    expect(result.stdout.trim()).toBe('function:true');
+    expect(JSON.parse(result.stdout.trim())).toEqual({
+      run: 'function',
+      methods: Array(6).fill('function'),
+    });
   });
 });

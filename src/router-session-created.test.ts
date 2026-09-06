@@ -11,6 +11,10 @@
 import fs from 'fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { useComposedMailboxFixture } from './mailbox/test-fixture.js';
+
+useComposedMailboxFixture();
+
 import {
   initTestDb,
   closeDb,

@@ -17,6 +17,10 @@ import fs from 'fs';
 import path from 'path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { useComposedMailboxFixture } from '../../mailbox/test-fixture.js';
+
+useComposedMailboxFixture();
+
 import { initTestDb, closeDb, runMigrations, getDb } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
 import { AGENT_ACCESS_SCOPE_WARNING, createNewAgentGroup } from './channel-approval.js';

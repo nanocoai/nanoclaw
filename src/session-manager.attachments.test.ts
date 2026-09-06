@@ -22,6 +22,10 @@ import fs from 'fs';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { useComposedMailboxFixture } from './mailbox/test-fixture.js';
+
+useComposedMailboxFixture();
+
 vi.mock('./config.js', async () => {
   const actual = await vi.importActual<typeof import('./config.js')>('./config.js');
   return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-saveatt-gap' };
