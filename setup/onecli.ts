@@ -103,6 +103,61 @@ function writeEnvOnecliUrl(url: string): void {
   writeEnvVar('ONECLI_URL', url);
 }
 
+/**
+ * Compute the updated contents of ~/.onecli/.env so ONECLI_BIND_HOST matches
+ * the host clients are told to use (api-host/ONECLI_URL). The gateway's
+ * docker-compose.yml publishes ports on `${ONECLI_BIND_HOST:-127.0.0.1}`; if
+ * nothing sets that var (the common case — nothing wires up ~/.onecli/.env
+ * during a fresh install), the gateway binds to loopback while clients,
+ * including agent containers, are configured to reach it on the docker
+ * bridge address. That mismatch makes every agent call fail with
+ * "fetch failed" despite the install reporting success (#2903).
+ *
+ * Returns null when no write is needed (loopback host, or already correct).
+ */
+export function resolveOnecliBindHostEnv(currentEnvContent: string, apiHost: string): string | null {
+  let hostname: string;
+  try {
+    hostname = new URL(apiHost).hostname;
+  } catch {
+    return null;
+  }
+  // Loopback clients need no bridge bind — compose's own 127.0.0.1 default
+  // already matches, and rewriting to 0.0.0.0 would expose the vault publicly.
+  if (hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1') return null;
+
+  const line = `ONECLI_BIND_HOST=${hostname}`;
+  const re = /^ONECLI_BIND_HOST=.*$/m;
+  if (re.test(currentEnvContent)) {
+    if (new RegExp(`^${line}$`, 'm').test(currentEnvContent)) return null;
+    return currentEnvContent.replace(re, line);
+  }
+  return currentEnvContent.trimEnd() + (currentEnvContent ? '\n' : '') + line + '\n';
+}
+
+/**
+ * Reconcile ~/.onecli/.env and the running stack so the gateway actually
+ * binds on the same address the client is configured to reach it at. No-op
+ * when the client targets loopback. Recreating the stack is required — the
+ * compose var is read at container start, not live.
+ */
+function ensureOnecliBindHost(apiHost: string): void {
+  const onecliDir = path.join(os.homedir(), '.onecli');
+  const envFile = path.join(onecliDir, '.env');
+  const current = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf-8') : '';
+  const updated = resolveOnecliBindHostEnv(current, apiHost);
+  if (updated === null) return;
+
+  fs.mkdirSync(onecliDir, { recursive: true });
+  fs.writeFileSync(envFile, updated);
+  log.info('Wrote ONECLI_BIND_HOST to ~/.onecli/.env to match api-host', { apiHost });
+  try {
+    execSync('docker compose up -d', { cwd: onecliDir, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (err) {
+    log.warn('docker compose up -d failed while applying ONECLI_BIND_HOST', { err });
+  }
+}
+
 // The SANCTIONED gateway version: fresh installs pin to it. Upgrading an
 // existing gateway is NOT done here — the gateway is a separate out-of-band
 // component, and the migrator is the user's coding agent following
@@ -439,6 +494,7 @@ export async function run(args: string[]): Promise<void> {
 
   writeEnvOnecliUrl(url);
   log.info('Wrote ONECLI_URL to .env', { url });
+  ensureOnecliBindHost(url);
 
   const healthy = await pollHealth(url, 15000);
   const v1Hint = healthy ? gatewayV1Hint(await verifyGatewayV1(url)) : null;
