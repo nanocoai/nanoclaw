@@ -36,7 +36,15 @@ import {
   registerPostDeliveryHook,
   setDeliveryAdapter,
 } from './delivery.js';
-import { createChannelDeliveryAdapter } from './channels/channel-registry.js';
+import {
+  createChannelDeliveryAdapter,
+  fallbackChannelDefaults,
+  initChannelAdapters,
+  registerChannelAdapter,
+  teardownChannelAdapters,
+} from './channels/channel-registry.js';
+import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
+import { getDeliveryAttempt } from './db/coordination.js';
 import { createDestination } from './modules/agent-to-agent/db/agent-destinations.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import { log } from './log.js';
@@ -737,5 +745,49 @@ describe('deliverSessionMessages — post-delivery hooks', () => {
     const delivered = getDeliveredIds(openInboundDb('ag-1', session.id));
     expect(delivered.has('th-1')).toBe(true);
     expect(delivered.has('th-2')).toBe(true);
+  });
+});
+
+describe('deliverSessionMessages — adapter reports disconnected', () => {
+  it('spends no attempt while the adapter is away; delivers once it is back', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-away');
+
+    let connected = false;
+    let sent = 0;
+    const adapter: ChannelAdapter = {
+      name: 'telegram',
+      channelType: 'telegram',
+      supportsThreads: false,
+      defaults: fallbackChannelDefaults(false),
+      async setup() {},
+      async teardown() {},
+      isConnected: () => connected,
+      async deliver() {
+        sent += 1;
+        return 'pm-1';
+      },
+    };
+    registerChannelAdapter('telegram', { factory: () => adapter, defaults: fallbackChannelDefaults(false) });
+    await initChannelAdapters(() => ({ onInbound: async () => {}, onAction: () => {} }) as unknown as ChannelSetup);
+    setDeliveryAdapter(createChannelDeliveryAdapter());
+    try {
+      for (let i = 0; i < 4; i += 1) await deliverSessionMessages(session);
+      expect(sent).toBe(0);
+      const idle = new Database(inboundDbPath('ag-1', session.id), { readonly: true });
+      expect(idle.prepare('SELECT * FROM delivered WHERE message_out_id = ?').get('out-away')).toBeUndefined();
+      idle.close();
+      expect(await getDeliveryAttempt('out-away')).toBeUndefined();
+
+      connected = true;
+      await deliverSessionMessages(session);
+      expect(sent).toBe(1);
+      expect(
+        await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds().has('out-away')),
+      ).toBe(true);
+    } finally {
+      await teardownChannelAdapters();
+    }
   });
 });
