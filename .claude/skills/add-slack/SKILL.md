@@ -24,6 +24,16 @@ working; that migration is optional).
 
 ## Apply
 
+Installation is the default and configures a real Slack connection. An image
+builder explicitly binds `mode=compose` to install the same channel code,
+dependency and tests without acquiring credentials, writing runtime environment,
+contacting Slack, resolving a DM, or restarting a service. Runtime enrollment
+owns those customer-specific steps after the image exists.
+
+```nc:prompt mode default:install validate:^(install|compose)$
+Use `install` to configure Slack here, or pre-bind `compose` when building the runtime code.
+```
+
 ### 1. Copy the channel payload
 
 Fetch the `channels` branch and copy the payload into place (overwrite — the branch is canonical):
@@ -88,7 +98,7 @@ pnpm exec vitest run src/channels/slack-registration.test.ts src/channels/slack-
 Socket Mode (an outbound WebSocket — no public URL, the right default behind NAT)
 vs webhook delivery (needs a public HTTPS Request URL); the adapter picks Socket
 Mode automatically whenever `SLACK_APP_TOKEN` is set.
-```nc:prompt connection validate:^(socket|webhook|provisioned)$ choices:socket|webhook
+```nc:prompt connection validate:^(socket|webhook|provisioned)$ choices:socket|webhook when:mode=install
 How should Slack deliver events? `socket` (Socket Mode — no public URL, recommended for local or behind-NAT installs) or `webhook` (needs a public HTTPS Request URL).
 ```
 
@@ -120,7 +130,7 @@ Create the Slack app (webhook delivery):
 ```
 
 Store the secrets in `.env` (the app-level token doubles as the Socket Mode switch, the signing secret authenticates webhook requests):
-```nc:prompt bot_token secret validate:^xoxb-
+```nc:prompt bot_token secret validate:^xoxb- when:mode=install
 Paste the Bot User OAuth Token — OAuth & Permissions, starts with `xoxb-`.
 ```
 ```nc:prompt app_token secret validate:^xapp- reuse:SLACK_APP_TOKEN when:connection=socket
@@ -132,7 +142,7 @@ Paste the App-Level Token of the provisioned app (starts with `xapp-`).
 ```nc:prompt signing_secret secret validate:^[a-fA-F0-9]{16,}$ when:connection=webhook
 Paste the Signing Secret — Basic Information.
 ```
-```nc:env-set
+```nc:env-set when:mode=install
 SLACK_BOT_TOKEN={{bot_token}}
 ```
 ```nc:env-set when:connection=socket
@@ -161,17 +171,17 @@ Set up event delivery (needs a public HTTPS URL for port 3000 — ngrok, a Cloud
 ## Resolve your DM channel
 
 Resolve the owner DM address the owner-wiring step needs; validating the token here, before the restart, fast-fails a bad credential.
-```nc:prompt owner_handle validate:^U[A-Z0-9]{8,}$
+```nc:prompt owner_handle validate:^U[A-Z0-9]{8,}$ when:mode=install
 Your Slack member ID (Profile → ⋮ → "Copy member ID"; starts with U).
 ```
 
 `auth.test` confirms the bot token works and captures the bot identity:
-```nc:run capture:connected_as effect:fetch
+```nc:run capture:connected_as effect:fetch when:mode=install
 curl -sf -X POST https://slack.com/api/auth.test -H "Authorization: Bearer {{bot_token}}" | jq -er '"@" + .user + " in " + .team'
 ```
 
 `conversations.open` yields the DM address `slack:<channelId>` (no channel back = the `im:write` scope is missing — add it and reinstall):
-```nc:run capture:platform_id effect:fetch
+```nc:run capture:platform_id effect:fetch when:mode=install
 curl -s -X POST https://slack.com/api/conversations.open -H "Authorization: Bearer {{bot_token}}" -H "Content-Type: application/json" -d '{"users":"{{owner_handle}}"}' | jq -er '"slack:" + .channel.id'
 ```
 
@@ -181,7 +191,7 @@ receiving needs the event path (Socket Mode: live after the restart below; webho
 ## Restart
 
 Restart so the service loads the adapter and secrets; wait for its CLI socket before wiring:
-```nc:run effect:restart
+```nc:run effect:restart when:mode=install
 bash setup/lib/restart.sh
 ```
 

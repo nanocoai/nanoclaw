@@ -161,6 +161,15 @@ export function parseDirectives(markdown: string): Directive[] {
   return out;
 }
 
+/** Authored non-secret defaults never provide a credential acquisition path. */
+export function promptDefault(d: Directive): string | undefined {
+  if (d.attrs.default === undefined) return undefined;
+  if (d.args.includes('secret') || typeof d.attrs.default !== 'string') {
+    throw new Error('prompt default requires a non-secret string value');
+  }
+  return d.attrs.default;
+}
+
 /** The variable a `prompt` binds (the first positional that isn't a flag). */
 export function promptVar(d: Directive): string | undefined {
   return d.args.find((a) => !PROMPT_FLAGS.has(a));
@@ -258,6 +267,7 @@ export function validate(directives: Directive[], ctx?: { chatVersion?: string }
         break;
       }
       case 'prompt': {
+        try { promptDefault(d); } catch { flag(d, 'prompt default requires a non-secret string value'); }
         if (!promptVar(d)) flag(d, 'prompt requires a variable name, e.g. `nc:prompt token`');
         if (d.body.length === 0) flag(d, 'prompt requires a question in its body');
         const flags = typeof d.attrs.flags === 'string' ? d.attrs.flags : undefined;

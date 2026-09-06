@@ -74,13 +74,14 @@ Body: shell command(s), with `{{vars}}` substituted in. **Idempotency: the comma
 
 `validate:<re>` shape-guards each captured value (e.g. `validate:^discord:`); a mismatch bounces to an agent — a command's output has no human to re-prompt, unlike `prompt`.
 
-### `prompt <var> [secret] [validate:<re>] [flags:<re-flags>] [normalize:<how>] [reuse:<ENV_KEY>]`
+### `prompt <var> [secret] [default:<value>] [validate:<re>] [flags:<re-flags>] [normalize:<how>] [reuse:<ENV_KEY>]`
 
 Body: the question to ask. Binds the answer to `{{var}}`. **Idempotency: skip if the var is already satisfied** (via `inputs` or an earlier bind).
 
 - `secret` — consumers must mask the value.
 - `validate:<re>` — a regex enforced **at bind** for **every** value, programmatic `inputs` and interactive answers alike (e.g. `validate:^xoxb-` to require a Slack bot token). A mismatch leaves the var unbound and records a deferred entry — a pipeline passing a malformed value fails loudly. Encode minimum lengths in the regex (`validate:^.{20,}$`).
 - `flags:<re-flags>` — regex flags for `validate` (e.g. `flags:i`).
+- `default:<value>` — an authored non-secret value used only when no input is supplied, before asking a resolver. It undergoes the same normalization and validation as a supplied value. Secret prompts cannot declare a default. An invalid explicit input never falls back to the default.
 - `normalize:trim|rstrip-slash|lower` — a deterministic transform applied at bind, *before* validate, for both `inputs` and interactive answers.
 - `reuse:<ENV_KEY>` — lets a re-run offer an existing `.env` value for a credential a **helper script** owns (written by an `effect:external`, not by `nc:env-set`) — the masked reuse offer that the usual `env-set`→ENV_KEY inference can't see. Consumed by interactive drivers only.
 

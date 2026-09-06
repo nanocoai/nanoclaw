@@ -25,7 +25,7 @@
 import { execSync } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, appendFileSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { parseDirectives, promptVar, type Directive } from './skill-directives.js';
+import { parseDirectives, promptDefault, promptVar, type Directive } from './skill-directives.js';
 
 // What an `nc:prompt` DECLARES about the value it needs — the core seam's input
 // contract, passed to `resolveInput` so a consumer can run its OWN re-ask loop
@@ -216,6 +216,9 @@ export function planSkill(
   const steps: PlanStep[] = self.map(({ d, status, detail }, i) => {
     if (d.kind !== 'prompt') return { n: i + 1, kind: d.kind, line: d.line, status, detail };
     const v = promptVar(d) ?? '?';
+    try {
+      if (promptDefault(d) !== undefined) return { n: i + 1, kind: d.kind, line: d.line, status: 'apply', detail: `${v} — authored default (validated during apply)` };
+    } catch { return { n: i + 1, kind: d.kind, line: d.line, status: 'agent', detail: 'prompt default requires a non-secret string value' }; }
     const tag = `${v}${d.args.includes('secret') ? ' (secret)' : ''}`;
     const cons = consumers.get(v) ?? [];
     const satisfied = cons.length > 0 && cons.every((j) => self[j].status === 'skip');
@@ -893,8 +896,10 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
         // Pre-supplied inputs win OUTRIGHT (fully-programmatic apply) — an
         // invalid `inputs` value never falls through to a second acquisition
         // path (validation below rejects it loudly instead). Otherwise resolve
-        // via `resolveInput`; still undefined ⇒ defer (headless, no answer).
+        // via a non-secret authored default, then `resolveInput`; still undefined ⇒ defer.
+        const fallback = promptDefault(d);
         let val = opts.inputs?.[v];
+        if (val === undefined) val = fallback;
         if (val === undefined) val = await opts.resolveInput?.(v, inputMetaOf(d, secret, validate));
         if (val === undefined) {
           res.deferred.push(v);

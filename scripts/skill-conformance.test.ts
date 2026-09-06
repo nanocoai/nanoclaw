@@ -249,7 +249,7 @@ describe.each(SKILLS)('%s', (name) => {
       ).toBeDefined();
     }
     const unguarded = directives
-      .filter((d) => d.kind === 'prompt' && !isString(d.attrs.when))
+      .filter((d) => d.kind === 'prompt' && !isString(d.attrs.when) && !isString(d.attrs.default))
       .map((d) => promptVar(d))
       .filter(isString);
     for (const sc of fixture?.scenarios ?? []) {

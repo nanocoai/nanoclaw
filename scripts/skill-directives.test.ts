@@ -17,6 +17,7 @@ const directives = parseDirectives(slack);
 describe('skill-directives parser, on the converted add-slack', () => {
   it('extracts every directive in document order — install, credentials, resolve, restart', () => {
     expect(directives.map((d) => d.kind)).toEqual([
+      'prompt', // authored install/compose mode, install by default
       'copy', // step 1: the base channel payload from the channels branch
       'append', // step 2: channel barrel — adapter registration
       'append', // step 2: channel barrel — bot-inbound guard
@@ -112,7 +113,11 @@ describe('skill-directives parser, on the converted add-slack', () => {
   });
 
   it('captures prompts into named vars — credentials secret, the mode and handle not', () => {
-    const prompts = directives.filter((d) => d.kind === 'prompt');
+    const allPrompts = directives.filter((d) => d.kind === 'prompt');
+    expect(promptVar(allPrompts[0])).toBe('mode');
+    expect(allPrompts[0].attrs.default).toBe('install');
+    const prompts = allPrompts.slice(1);
+    expect(prompts[0].attrs.when).toBe('mode=install');
     expect(prompts.map(promptVar)).toEqual(['connection', 'bot_token', 'app_token', 'app_token', 'signing_secret', 'owner_handle']);
     expect(prompts[0].args).not.toContain('secret'); // connection — a mode choice, not a secret
     // The interactive select offers two modes; validate stays wider because

@@ -1,5 +1,5 @@
 {
-  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts — shaped fake values only, never real credentials. Three scenarios cover all when:connection= legs (socket, webhook, provisioned); the auth.test stub answers the connected_as capture and conversations.open answers platform_id. The payload copy/append/dep/build/test steps need no stubs — they run through the stubbed exec.",
+  "notes": "Conformance fixtures for scripts/skill-conformance.test.ts \u2014 shaped fake values only, never real credentials. Three scenarios cover all when:connection= legs (socket, webhook, provisioned); the auth.test stub answers the connected_as capture and conversations.open answers platform_id. The payload copy/append/dep/build/test steps need no stubs \u2014 they run through the stubbed exec. Compose has only an explicit mode and traps are covered by the native composition regression.",
   "scenarios": [
     {
       "name": "socket",
@@ -57,6 +57,12 @@
           "stdout": "slack:D0FAKE"
         }
       ]
+    },
+    {
+      "name": "compose",
+      "inputs": {
+        "mode": "compose"
+      }
     }
   ]
 }
