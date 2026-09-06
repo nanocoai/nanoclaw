@@ -4,6 +4,7 @@
  */
 import { log } from '../src/log.js';
 import { emitStatus } from './status.js';
+import { withSetupLock, launchSlackJob } from './slack-job.js';
 
 const STEPS: Record<string, () => Promise<{ run: (args: string[]) => Promise<void> }>> = {
   timezone: () => import('./timezone.js'),
@@ -63,4 +64,4 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+withSetupLock(async () => { await launchSlackJob(); await main(); }).catch(() => { process.exitCode = 1; });

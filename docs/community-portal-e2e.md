@@ -1,6 +1,6 @@
 # Run NanoClaw with the community portal
 
-Use a fresh exe.dev VM with Docker, Node 22, pnpm 10.34.5 and native build
+Use a fresh exe.dev VM with Docker, Node 22.13 or newer, pnpm 10.34.5 and native build
 prerequisites. Bring your normal agent-provider credentials and access to a
 Slack workspace where you can connect and install the managed app. The VM
 needs no AWS, Vercel, WorkOS server or Slack server credentials.
@@ -28,12 +28,16 @@ listener, separate CLI login or pairing code is required.
 ## Walkthrough
 
 1. Start setup and consent to the Echo offer. After WorkOS login, the dashboard
-   opens with its activation modal. Enable Echo, explore the other perks, and
-   choose **Return to terminal**. Verify the container step actually pulls the
+   opens with its activation modal. Enable Echo. The modal stays open with a success state and
+   **Return to terminal** / **Browse other perks**. Setup starts continuing before
+   either button is clicked. Verify the container step actually pulls the
    pinned Echo image; saving the choice alone does not prove the pull.
 2. Connect Slack through its OAuth flow in the portal. At the Slack setup step,
-   select your workspace and return to the terminal. Complete any required
-   installation approval, start NanoClaw, and get a reply in your Slack chat.
+   select your workspace. The browser goes directly to Slack's workspace
+   installation screen if needed. Submit any admin approval request there; the
+   CLI continues other setup. Once the admin approves, the saved background job
+   installs the same app automatically and the portal updates to **Ready in Slack**.
+   Confirm the agent replies in your Slack chat.
 3. Already-enabled perks should be reused at subsequent setup stages. A skipped
    perk is offered again at its next applicable step. Tavily and Dial show
    **Coming soon** and are skipped by the CLI. No fake keys, credits, numbers,
@@ -46,11 +50,31 @@ listener, separate CLI login or pairing code is required.
    **Devices** should reject its old installation credential.
 
 Revisit a step with `pnpm exec tsx setup/portal.ts --stage echo` or `--stage slack`,
-one at a time. Private state is in `data/community-portal.json`; never share or
-commit it. Keep that file when recovering an interrupted setup. Each checkout
+one at a time. Private state is in `data/community-portal.json` and `data/slack-install.json`;
+never share or commit either file. Keep that file when recovering an interrupted setup. Each checkout
 retains its own installation identity.
 
 The automated suite exercises the service, real cell, storage, CLI bridge and
 browser UI. A completed WorkOS login, Echo image pull and real Slack reply on
 your VM are the remaining operator acceptance checks. No VM or Slack app was
 created by the preparation work.
+
+## Background Slack installation
+
+The detached worker survives closing the initiating terminal. Keep the VM on and
+online. It checks approval at most once a minute for seven days, saves the bot
+credential before acknowledging delivery, and then applies the existing Slack
+channel skill with the captured agent name, operator role and owner ID. There are
+no further input prompts in the worker. Foreground setup and the worker serialize
+checkout changes using a transactional SQLite process lock.
+
+Pending jobs resume on the next `pnpm setup:auto` or setup-step invocation after a
+VM restart. To resume directly, use `pnpm exec tsx setup/portal.ts --stage slack`.
+A failed build or wiring step is shown in the portal; retry that Slack step after
+fixing the reported setup issue. Reuse the saved state. After the seven-day
+approval window expires, review/revoke the old app and start a new installation;
+the worker does not silently create a replacement.
+
+Local automated checks cover the real detached process, a SIGKILL after credential
+persistence, replayed acknowledgement, competing workers and the checkout lock.
+Slack approval and message delivery still require the real-workspace walkthrough.

@@ -12,6 +12,7 @@ import {
 } from './lib/registry-state.js';
 import { SetupClient, writePrivate } from './portal-client.mjs';
 import type { ProvisioningCore } from './channels/slack-auto.js';
+import { readSlackJob } from './slack-job.js';
 
 export type PortalStage = 'echo' | 'slack' | 'perks' | 'tavily' | 'dial';
 export const portalEnabled = () => true;
@@ -37,10 +38,17 @@ export async function beginPortal(stage: PortalStage, name = 'Nano'): Promise<Se
     file: path.join(process.cwd(), 'data/community-portal.json'),
     label: `${os.hostname()} · ${path.basename(process.cwd())}`,
     exclusive: true,
+    autoContinue: true,
   }).initialize();
   try {
+    if (stage === 'slack') {
+      const job = await readSlackJob();
+      if (job?.status === 'complete' && job.app.appId === client.local.slackSetup?.app?.appId) {
+        client.local.slackSetup.status = 'complete'; client.local.slackSetup.app = job.app; await client.save();
+      }
+    }
     if (!await client.available(stage)) { await client.stop(); return null; }
-    if (await client.resumeEnabled(stage, name)) {
+    if ((stage !== 'slack' || client.local.slackSetup?.status === 'complete') && await client.resumeEnabled(stage, name)) {
       p.log.info(`${stage === 'perks' ? 'Partner perks' : stage[0].toUpperCase() + stage.slice(1)} already enabled. Continuing setup.`);
       return client;
     }
@@ -48,7 +56,7 @@ export async function beginPortal(stage: PortalStage, name = 'Nano'): Promise<Se
     const consent = await p.confirm({ message: `Enable ${labels[stage]}? Open the perks dashboard in your browser?`, initialValue: true });
     if (p.isCancel(consent) || !consent) { await client.stop(); p.log.info('Skipped for now. You can enable it later.'); return null; }
     const flow = await client.start(stage, name);
-    p.log.info('Activate your perk in the dashboard. Choose Return to terminal when you are done exploring.');
+    p.log.info('Activate your perk in the dashboard. Setup continues automatically as soon as it is enabled.');
     // Keep the URL unwrapped so headless users can copy it into another browser.
     process.stdout.write(`\n${flow.url}\n\n`);
     openUrl(flow.url);
@@ -111,6 +119,7 @@ export async function runSlackPortal(
         workspaceId: choice.workspaceId,
         name: choice.name,
         status: 'creating',
+        serviceBase: core.readServiceBase?.() || 'https://slack.nanoclaw.dev',
       };
       await client.save();
       try {
@@ -130,25 +139,18 @@ export async function runSlackPortal(
     const app = saved.app;
     if (!app.botToken) {
       await client.complete('awaiting_approval', { appId: app.appId });
-      p.log.info('Finish the app installation approval in the portal. Waiting for Slack…');
-      if (!core.waitForInstall || !core.brokerAppStatus)
-        throw new Error('Update the Slack channel to support browser approval completion.');
-      const result = await core.waitForInstall(token, app.appId, { timeoutMs: 25 * 60_000 });
-      if (!result?.botToken)
-        throw new Error('Slack approval is still pending. The saved app credentials are available for resuming setup.');
-      app.botToken = result.botToken;
-      await client.save();
+      p.log.info('Continue with the workspace installation in the portal. Slack approval will finish in the background.');
     }
+
     const inputs: Record<string, string> = {
       connection: 'provisioned',
-      bot_token: app.botToken,
+      ...(app.botToken ? { bot_token: app.botToken } : {}),
+      __portal_pending: 'slack',
       app_token: app.appToken,
     };
     if (workspace.connected_as && /^[UW][A-Z0-9]{8,}$/.test(workspace.connected_as))
       inputs.owner_handle = workspace.connected_as;
-    saved.status = 'complete';
     await client.save();
-    await client.complete('complete', { appId: app.appId });
     return inputs;
   } finally {
     await client.stop();

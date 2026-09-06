@@ -46,6 +46,7 @@ vi.mock('./portal-client.mjs', () => ({
     async stop() { mock.stop(); }
   },
 }));
+vi.mock('./slack-job.js', () => ({ readSlackJob: vi.fn(async () => null), launchSlackJob: vi.fn(), queueSlackJob: vi.fn() }));
 vi.mock('./lib/browser.js', () => ({ openUrl: mock.open }));
 vi.mock('./install-cred-helper.js', () => ({ installCredentialHelper: mock.helper }));
 vi.mock('./lib/registry-state.js', () => ({
@@ -101,6 +102,7 @@ describe('browser setup handoffs', () => {
     expect(mock.saved.at(-1)?.slackSetup.app.appToken).toBe('xapp-private');
     expect(result).toEqual({
       connection: 'provisioned',
+      __portal_pending: 'slack',
       app_token: 'xapp-private',
       bot_token: 'xoxb-private',
       owner_handle: 'U123456789',
@@ -119,7 +121,9 @@ describe('browser setup handoffs', () => {
     expect(provider.brokerProvision).not.toHaveBeenCalled();
     expect(result.app_token).toBe('xapp-existing');
     expect(mock.complete).toHaveBeenCalledWith('awaiting_approval', { appId: 'A1' });
-    expect(mock.complete).toHaveBeenLastCalledWith('complete', { appId: 'A1' });
+    expect(result.__portal_pending).toBe('slack');
+    expect(provider.waitForInstall).not.toHaveBeenCalled();
+    expect(mock.complete).not.toHaveBeenCalledWith('complete', expect.anything());
   });
   it('never repeats an ambiguous Slack create automatically', async () => {
     mock.local = { ...mock.local, slackSetup: { setupId: 'old', status: 'creating' } };
@@ -196,7 +200,7 @@ describe('browser setup handoffs', () => {
     const { BACK_TO_CHANNEL_SELECTION } = await import('./lib/back-nav.js');
     const exec = vi.fn(() => { throw new Error('The channel skill must not run'); });
     registerChannelPreStep('slack', async () => ({ __portal_skip: 'slack' }));
-    expect(await runChannelSkillWithPreStep('slack', 'User', { agentName: 'Nova', exec })).toBe(BACK_TO_CHANNEL_SELECTION);
+    expect(await runChannelSkillWithPreStep('slack', 'User', { agentName: 'Nova', role: 'owner', exec })).toBe(BACK_TO_CHANNEL_SELECTION);
     expect(exec).not.toHaveBeenCalled();
   });
 

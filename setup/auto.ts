@@ -33,6 +33,7 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { BACK_TO_CHANNEL_SELECTION } from './lib/back-nav.js';
+import { withSetupLock, launchSlackJob, readSlackJob } from './slack-job.js';
 // The pre-step-aware entry point consults each channel's registered wizard
 // extensions (setup/channels/companions.ts) before running its install skill
 // — the wizard itself stays free of channel-specific imports.
@@ -794,7 +795,11 @@ async function main(): Promise<void> {
   phEmit('setup_completed', { duration_ms: Date.now() - RUN_START });
 
   const dmTarget = channelDmLabel(channelChoice);
-  if (wiringPending) {
+  const slackJob = channelChoice === 'slack' ? await readSlackJob() : null;
+  if (slackJob && slackJob.status !== 'complete') {
+    note('Slack is finishing in the background. Follow its progress in the portal; you can use terminal chat now.', 'Slack setup');
+    p.outro(k.green('NanoClaw is ready. Slack will connect when installation finishes.'));
+  } else if (wiringPending) {
     // No welcome DM exists yet — the one remaining action is the last thing
     // on screen, in the same bright framed style as the "go say hi" banner.
     note(
@@ -2032,7 +2037,7 @@ function initProgressionLog(): void {
   });
 }
 
-main().catch((err) => {
+withSetupLock(async () => { await launchSlackJob(); await main(); }).catch((err) => {
   p.log.error(err instanceof Error ? err.message : String(err));
   p.cancel('Setup aborted.');
   process.exit(1);

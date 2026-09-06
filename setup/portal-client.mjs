@@ -3959,6 +3959,10 @@ function openInstall(privateJwk, expectedContext, envelope) {
 
 // device/setup-client.mjs
 var SetupClient = class extends DeviceClient {
+  constructor({ autoContinue = false, ...options }) {
+    super(options);
+    this.autoContinue = autoContinue;
+  }
   async available(stage) {
     const { items } = await this.request("GET", "/api/v1/catalog");
     return items.some((p) => (stage === "perks" ? p.kind !== "account" : p.id === stage) && (p.kind === "account" || p.enabled));
@@ -3988,7 +3992,7 @@ var SetupClient = class extends DeviceClient {
         if (error.status === 401) await this.clearToken();
       }
     }
-    const body = { stage, name, reuseEnabled, installId: this.local.installId, label: this.label, publicKey: this.local.publicKey, wrappingKey: this.local.wrappingPublicKey };
+    const body = { stage, name, reuseEnabled, autoContinue: this.autoContinue, installId: this.local.installId, label: this.label, publicKey: this.local.publicKey, wrappingKey: this.local.wrappingPublicKey };
     try {
       this.flow = await this.request("POST", "/api/v1/setup/start", body);
     } catch (error) {
