@@ -6,6 +6,9 @@ const healthyBase = {
   service: 'running' as const,
   credentials: 'configured',
   registeredGroups: 1,
+  healthStatus: 'healthy' as const,
+  healthCheckoutMatches: true,
+  healthProcessMatches: true,
 };
 
 describe('determineVerifyStatus', () => {
@@ -13,13 +16,13 @@ describe('determineVerifyStatus', () => {
     expect(determineVerifyStatus(healthyBase)).toBe('success');
   });
 
-  it('fails when no agent groups are registered', () => {
+  it('accepts an explicit empty agent-group state', () => {
     expect(
       determineVerifyStatus({
         ...healthyBase,
         registeredGroups: 0,
       }),
-    ).toBe('failed');
+    ).toBe('success');
   });
 
   // Deferred wire (Teams): configured but zero groups is pending operator
@@ -69,5 +72,31 @@ describe('determineVerifyStatus', () => {
         credentials: 'missing',
       }),
     ).toBe('failed');
+  });
+
+  it('fails when structured health is unavailable or from another checkout', () => {
+    expect(determineVerifyStatus({ ...healthyBase, healthStatus: 'unhealthy', healthCheckoutMatches: false })).toBe(
+      'failed',
+    );
+    expect(determineVerifyStatus({ ...healthyBase, healthStatus: 'healthy', healthCheckoutMatches: false })).toBe(
+      'failed',
+    );
+    expect(
+      determineVerifyStatus({
+        ...healthyBase,
+        healthStatus: 'healthy',
+        healthCheckoutMatches: true,
+        healthProcessMatches: true,
+      }),
+    ).toBe('success');
+    expect(
+      determineVerifyStatus({
+        ...healthyBase,
+        healthStatus: 'healthy',
+        healthCheckoutMatches: true,
+        healthProcessMatches: false,
+      }),
+    ).toBe('failed');
+    expect(determineVerifyStatus({ ...healthyBase, healthStatus: undefined as never })).toBe('failed');
   });
 });
