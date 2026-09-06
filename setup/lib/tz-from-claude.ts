@@ -58,7 +58,7 @@ export async function resolveTimezoneViaClaude(input: string): Promise<string | 
     s.stop(`${fitToWidth(`Interpreted as ${resolved}.`, suffix)}${k.dim(suffix)}`);
     return resolved;
   }
-  s.stop(`${fitToWidth("Couldn't interpret that as a timezone.", suffix)}${k.dim(suffix)}`, 1);
+  s.error(`${fitToWidth("Couldn't interpret that as a timezone.", suffix)}${k.dim(suffix)}`);
   return null;
 }
 

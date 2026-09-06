@@ -153,14 +153,14 @@ export const HELP_ESCAPE_SENTINEL = '__NANOCLAW_HELP_ESCAPE__';
  */
 export function validateWithHelpEscape(
   inner?: (value: string) => string | Error | undefined,
-): (value: string) => string | Error | undefined {
-  return (value: string) => {
+): (value: string | undefined) => string | Error | undefined {
+  return (value) => {
     if ((value ?? '').trim() === '?') {
       // Returning undefined lets clack accept the `?` as the "answer". The
       // caller sees a literal "?" and should compare + escape to handoff.
       return undefined;
     }
-    return inner ? inner(value) : undefined;
+    return inner ? inner(value ?? '') : undefined;
   };
 }
 

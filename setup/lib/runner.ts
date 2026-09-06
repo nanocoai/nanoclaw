@@ -321,7 +321,7 @@ export function startSpinner(labels: SpinnerLabels): {
         s.stop(`${k.bold(fitToWidth(msg, suffix))}${k.dim(suffix)}`);
       } else {
         const failMsg = labels.failed ?? labels.running.replace(/…$/, ' failed');
-        s.stop(`${k.bold(fitToWidth(failMsg, suffix))}${k.dim(suffix)}`, 1);
+        s.error(`${k.bold(fitToWidth(failMsg, suffix))}${k.dim(suffix)}`);
         if (transcript) dumpTranscriptOnFailure(transcript);
       }
     },
