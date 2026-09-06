@@ -82,8 +82,17 @@ describe('ClaudeProvider.maybeRotateContinuation', () => {
     expect(provider.maybeRotateContinuation('sess-old', CWD)).toContain('d');
   });
 
-  it('returns null for an unknown session id', () => {
+  // A missing transcript is not "nothing to rotate" — see maybeRotateContinuation
+  // for why resuming into one costs the user's message.
+  it('rotates when the transcript is gone — nothing to archive, nothing to move aside', () => {
     const provider = new ClaudeProvider();
-    expect(provider.maybeRotateContinuation('does-not-exist', CWD)).toBeNull();
+
+    const reason = provider.maybeRotateContinuation('does-not-exist', CWD);
+
+    expect(reason).toContain('missing');
+    // Nothing on disk to summarise, and nothing to leave behind.
+    expect(fs.existsSync(path.join(tmp, 'conversations'))).toBe(false);
+    const dir = path.join(tmp, '.claude', 'projects', PROJECT_DIR);
+    expect(fs.existsSync(dir) ? fs.readdirSync(dir) : []).toHaveLength(0);
   });
 });
