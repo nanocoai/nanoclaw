@@ -127,6 +127,7 @@ export interface ProvisioningCore {
 
 /** Injection seam for tests — the bootstrap never touches git or the loader in a unit test. */
 export interface BootstrapDeps {
+  browserConsent?: boolean;
   root?: string;
   /** Run a shell command at root; returns stdout, throws on failure. */
   exec?: (command: string) => string;
@@ -246,7 +247,10 @@ export async function maybeAutoProvisionSlack(
 
   const needsSignIn = !managerToken && !installToken;
   if (portalEnabled() && !managerToken) {
-    return runSlackPortal(core, agentName, hostVersion(deps.root ?? process.cwd()));
+    const version = hostVersion(deps.root ?? process.cwd());
+    return deps.browserConsent
+      ? runSlackPortal(core, agentName, version, { browserConsent: true })
+      : runSlackPortal(core, agentName, version);
   }
   // Automatic provisioning leads as the default; supplying your own bot
   // token stays available as the explicit, advanced alternative.

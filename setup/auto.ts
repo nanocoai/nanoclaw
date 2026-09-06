@@ -45,7 +45,7 @@ import {
   type ChannelChoice,
 } from './channels/initial-setup.js';
 import { runInheritScript } from './lib/inherit-script.js';
-import { portalEnabled, runImagePortal, runPerksPortal } from './portal.js';
+import { offerPortalReminder, portalEnabled, runImagePortal, runPerksPortal } from './portal.js';
 import { pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
 import { applyProviderSkill } from './providers/install.js';
@@ -518,6 +518,40 @@ async function main(): Promise<void> {
     }
   }
 
+  if (
+    portalEnabled() &&
+    !skip.has('echo-reminder') &&
+    readImageSource() !== 'hardened' &&
+    readAgentImagePin() &&
+    (process.env.NANOCLAW_AGENT_PROVIDER || readEnvKey('DEFAULT_AGENT_PROVIDER') || DEFAULT_AGENT_PROVIDER || 'claude')
+      .trim()
+      .toLowerCase() === 'claude'
+  ) {
+    try {
+      await offerPortalReminder('echo', () =>
+        runImagePortal({
+          browserConsent: true,
+          apply: async () => {
+            const res = await runWindowedStep('container', {
+              running: 'Fetching Echo’s hardened image…',
+              done: 'Hardened sandbox ready.',
+              failed: 'Could not fetch the hardened image.',
+            });
+            if (!res.ok)
+              throw new Error('The hardened image could not be prepared. Your previous image choice has been kept.');
+          },
+        }),
+      );
+      skip.add('echo-reminder');
+    } catch (error) {
+      await fail(
+        'container',
+        'Could not finish Echo setup.',
+        error instanceof Error ? error.message : 'Retry the image setup step.',
+      );
+    }
+  }
+
   if (!skip.has('service')) {
     const res = await runQuietStep('service', {
       running: 'Starting NanoClaw in the background…',
@@ -704,10 +738,6 @@ async function main(): Promise<void> {
       if (result === BACK_TO_CHANNEL_SELECTION) backed = true;
     }
   }
-  // Setup-selected targets are one-run-only. A later setup derives connect
-  // choices from current wirings instead of inheriting an old agent id.
-  delete process.env.NANOCLAW_TEMPLATE_AGENT_ID;
-
   // Deferred wire (Teams): verify passes with zero groups because the
   // platform id only exists after the first DM. Tracked here so the ENDING
   // changes too — the last box must be the one remaining action, not a
@@ -718,6 +748,20 @@ async function main(): Promise<void> {
     await runPerksPortal();
     skip.add('perks');
   }
+  if (
+    portalEnabled() &&
+    !skip.has('slack-reminder') &&
+    !(process.env.SLACK_BOT_TOKEN || readEnvKey('SLACK_BOT_TOKEN'))?.trim()
+  ) {
+    await offerPortalReminder('slack', async () => {
+      const result = await runChannelSkillWithPreStep('slack', await resolveDisplayName(), { browserConsent: true });
+      if (result !== BACK_TO_CHANNEL_SELECTION) channelChoice = 'slack';
+    });
+    skip.add('slack-reminder');
+  }
+  // Keep the chosen agent through the later Slack offer as well. A later run
+  // derives connect choices from current wirings instead of inheriting this id.
+  delete process.env.NANOCLAW_TEMPLATE_AGENT_ID;
   if (!skip.has('verify')) {
     const res = await runQuietStep('verify', {
       running: 'Making sure everything works together…',
@@ -822,7 +866,7 @@ async function main(): Promise<void> {
   const dmTarget = channelDmLabel(channelChoice);
   if (slackStatus === 'awaiting_approval' || slackStatus === 'installing') {
     note(
-      'Slack is finishing in the background. Follow its progress in the portal; you can use terminal chat now.',
+      'Slack is finishing in the background. Once approval and installation finish, your agent will DM you in Slack. Keep this machine online; no return to the terminal is needed while the background job is running. Follow progress in the portal.',
       'Slack setup',
     );
     p.outro(k.green('NanoClaw is ready. Slack will connect when installation finishes.'));

@@ -17,7 +17,12 @@ const mock = vi.hoisted(() => ({
   write: vi.fn(),
   helper: vi.fn(),
   logs: vi.fn(),
-  result: { status: 'approved', id: 'setup-1', choice: { imageSource: 'local', workspaceId: 'T1', name: 'Browser choice' } },
+  request: vi.fn(),
+  result: {
+    status: 'approved',
+    id: 'setup-1',
+    choice: { imageSource: 'local', workspaceId: 'T1', name: 'Browser choice' },
+  },
 }));
 vi.mock('./portal-client.mjs', () => ({
   writePrivate: mock.write,
@@ -27,8 +32,12 @@ vi.mock('./portal-client.mjs', () => ({
     async initialize() {
       return this;
     }
-    async available(...args: any[]) { return mock.available(...args); }
-    async resumeEnabled(...args: any[]) { return mock.resume(...args); }
+    async available(...args: any[]) {
+      return mock.available(...args);
+    }
+    async resumeEnabled(...args: any[]) {
+      return mock.resume(...args);
+    }
     async start() {
       mock.start();
       return { url: 'https://portal.example.test/?setup=test' };
@@ -43,20 +52,35 @@ vi.mock('./portal-client.mjs', () => ({
       return mock.complete(...args);
     }
     async reconcile() {}
-    async stop() { mock.stop(); }
+    async request(...args: any[]) {
+      return mock.request(...args);
+    }
+    async stop() {
+      mock.stop();
+    }
   },
 }));
-vi.mock('./slack-job.js', () => ({ readSlackJob: vi.fn(async () => null), launchSlackJob: vi.fn(), queueSlackJob: vi.fn() }));
+vi.mock('./slack-job.js', () => ({
+  readSlackJob: vi.fn(async () => null),
+  launchSlackJob: vi.fn(),
+  queueSlackJob: vi.fn(),
+}));
 vi.mock('./lib/browser.js', () => ({ openUrl: mock.open }));
 vi.mock('./install-cred-helper.js', () => ({ installCredentialHelper: mock.helper }));
 vi.mock('./lib/registry-state.js', () => ({
   registryAccountPath: () => '/test/account.json',
   registryAuthPath: () => '/test/registry-auth.json',
   readBrokerUrl: () => 'https://registry.example.test',
+  readImageSource: () => 'local',
   writeImageSource: mock.image,
 }));
-vi.mock('@clack/prompts', () => ({ confirm: mock.confirm, isCancel: (v: unknown) => typeof v === 'symbol', log: { info: mock.logs, success: mock.logs, warn: mock.logs } }));
-const { savePortalAccount, runImagePortal, runSlackPortal, runPerksPortal } = await import('./portal.js');
+vi.mock('@clack/prompts', () => ({
+  confirm: mock.confirm,
+  isCancel: (v: unknown) => typeof v === 'symbol',
+  log: { info: mock.logs, success: mock.logs, warn: mock.logs },
+}));
+const { savePortalAccount, runImagePortal, runSlackPortal, runPerksPortal, offerPortalReminder } =
+  await import('./portal.js');
 const core = (extra = {}) =>
   ({
     brokerListWorkspaces: vi.fn(async () => [
@@ -69,7 +93,9 @@ const core = (extra = {}) =>
 describe('browser setup handoffs', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mock.local = { registryAccount: { token: 'test-install', account_id: 'acct-test', registry: 'image.example.test' } };
+    mock.local = {
+      registryAccount: { token: 'test-install', account_id: 'acct-test', registry: 'image.example.test' },
+    };
     mock.helper.mockReturnValue({ onPath: true });
     mock.saved = [];
     mock.login.mockResolvedValue(0);
@@ -77,11 +103,16 @@ describe('browser setup handoffs', () => {
     mock.available.mockResolvedValue(true);
     mock.confirm.mockResolvedValue(true);
     mock.result.status = 'approved';
+    mock.result.choice.imageSource = 'local';
+    mock.request.mockResolvedValue({ activations: { echo: { enabled: false }, slack: { enabled: false } } });
   });
   it('saves the browser credential for the registry helper and applies the image choice without CLI login', async () => {
     await runImagePortal();
     expect(mock.login).not.toHaveBeenCalled();
-    expect(mock.write).toHaveBeenCalledWith('/test/registry-auth.json', expect.objectContaining({ token: 'test-install', broker_url: 'https://registry.example.test' }));
+    expect(mock.write).toHaveBeenCalledWith(
+      '/test/registry-auth.json',
+      expect.objectContaining({ token: 'test-install', broker_url: 'https://registry.example.test' }),
+    );
     expect(mock.image).toHaveBeenCalledExactlyOnceWith('local');
     expect(mock.complete).toHaveBeenCalled();
   });
@@ -110,7 +141,8 @@ describe('browser setup handoffs', () => {
     expect(JSON.stringify(mock.logs.mock.calls)).not.toContain('xapp-private');
   });
   it('resumes a saved app awaiting browser approval without minting another one', async () => {
-    mock.local = { ...mock.local,
+    mock.local = {
+      ...mock.local,
       slackSetup: { setupId: 'setup-1', status: 'received', app: { appId: 'A1', appToken: 'xapp-existing' } },
     };
     const provider = core({
@@ -171,13 +203,14 @@ describe('browser setup handoffs', () => {
   it('offers only the partner still disabled at a later setup point', async () => {
     mock.resume.mockImplementation(async (stage: string) => stage === 'tavily');
     await runPerksPortal();
-    expect(mock.resume.mock.calls.map(call => call[0])).toEqual(['tavily', 'dial']);
+    expect(mock.resume.mock.calls.map((call) => call[0])).toEqual(['tavily', 'dial']);
     expect(mock.confirm).toHaveBeenCalledOnce();
     expect(mock.confirm.mock.calls[0][0].message).toContain('Dial');
     expect(mock.open).toHaveBeenCalledOnce();
   });
   it('returns from the dashboard without a perk or installation credential', async () => {
-    mock.result.status = 'skipped'; mock.local = {};
+    mock.result.status = 'skipped';
+    mock.local = {};
     await runImagePortal();
     expect(mock.image).toHaveBeenCalledWith('local');
     expect(mock.write).not.toHaveBeenCalled();
@@ -187,7 +220,13 @@ describe('browser setup handoffs', () => {
     expect(provider.brokerProvision).not.toHaveBeenCalled();
   });
   it('reuses the same installed Slack agent on a later setup visit', async () => {
-    mock.local.slackSetup = { setupId: 'previous', workspaceId: 'T1', name: 'Browser choice', status: 'complete', app: { appId: 'A1', appToken: 'xapp-existing', botToken: 'xoxb-existing' } };
+    mock.local.slackSetup = {
+      setupId: 'previous',
+      workspaceId: 'T1',
+      name: 'Browser choice',
+      status: 'complete',
+      app: { appId: 'A1', appToken: 'xapp-existing', botToken: 'xoxb-existing' },
+    };
     const provider = core({ brokerAppStatus: vi.fn(async () => ({ status: 'installed' })) });
     const result = await runSlackPortal(provider, 'Nano');
     expect(provider.brokerAppStatus).toHaveBeenCalledWith('test-install', 'A1');
@@ -198,10 +237,114 @@ describe('browser setup handoffs', () => {
     const { registerChannelPreStep } = await import('./channels/companions.js');
     const { runChannelSkillWithPreStep } = await import('./channels/run-channel-skill.js');
     const { BACK_TO_CHANNEL_SELECTION } = await import('./lib/back-nav.js');
-    const exec = vi.fn(() => { throw new Error('The channel skill must not run'); });
+    const exec = vi.fn(() => {
+      throw new Error('The channel skill must not run');
+    });
     registerChannelPreStep('slack', async () => ({ __portal_skip: 'slack' }));
-    expect(await runChannelSkillWithPreStep('slack', 'User', { agentName: 'Nova', role: 'owner', exec })).toBe(BACK_TO_CHANNEL_SELECTION);
+    expect(await runChannelSkillWithPreStep('slack', 'User', { agentName: 'Nova', role: 'owner', exec })).toBe(
+      BACK_TO_CHANNEL_SELECTION,
+    );
     expect(exec).not.toHaveBeenCalled();
   });
 
+  it('offers skipped Echo once at a later milestone and applies the image before completing', async () => {
+    mock.confirm.mockResolvedValueOnce(false);
+    await runImagePortal();
+    mock.confirm.mockResolvedValueOnce(true);
+    mock.result.choice.imageSource = 'hardened';
+    const apply = vi.fn(async () => {
+      expect(mock.complete).not.toHaveBeenCalled();
+      expect(mock.image).toHaveBeenLastCalledWith('hardened');
+    });
+    const enable = vi.fn(() => runImagePortal({ browserConsent: true, apply }));
+    expect(await offerPortalReminder('echo', enable)).toBe(true);
+    expect(mock.confirm).toHaveBeenCalledTimes(2);
+    expect(apply).toHaveBeenCalledOnce();
+    expect(mock.open).toHaveBeenCalledOnce();
+    expect(mock.complete).toHaveBeenCalledOnce();
+    expect(mock.stop.mock.invocationCallOrder[1]).toBeLessThan(enable.mock.invocationCallOrder[0]);
+    expect(await offerPortalReminder('echo', enable)).toBe(false);
+    expect(enable).toHaveBeenCalledOnce();
+  });
+
+  it('persists a declined reminder and never opens the browser or starts installation', async () => {
+    mock.confirm.mockResolvedValue(false);
+    const enable = vi.fn();
+    expect(await offerPortalReminder('slack', enable)).toBe(false);
+    expect(await offerPortalReminder('slack', enable)).toBe(false);
+    expect(mock.local.reminders.slack).toBe(true);
+    expect(mock.confirm).toHaveBeenCalledOnce();
+    expect(mock.open).not.toHaveBeenCalled();
+    expect(enable).not.toHaveBeenCalled();
+  });
+
+  it('does not remind for an enabled account perk or a saved Slack installation', async () => {
+    mock.request.mockResolvedValue({ activations: { echo: { enabled: true } } });
+    const enable = vi.fn();
+    expect(await offerPortalReminder('echo', enable)).toBe(false);
+    mock.local.slackSetup = { status: 'received', app: { appId: 'A1' } };
+    expect(await offerPortalReminder('slack', enable)).toBe(false);
+    expect(mock.confirm).not.toHaveBeenCalled();
+    expect(enable).not.toHaveBeenCalled();
+  });
+
+  it('keeps the working image and leaves the reminder retryable if the late image pull fails', async () => {
+    mock.result.choice.imageSource = 'hardened';
+    const enable = () =>
+      runImagePortal({
+        browserConsent: true,
+        apply: async () => {
+          throw new Error('pull failed');
+        },
+      });
+    await expect(offerPortalReminder('echo', enable)).rejects.toThrow('pull failed');
+    expect(mock.image).toHaveBeenLastCalledWith('local');
+    expect(mock.complete).toHaveBeenCalledExactlyOnceWith('failed');
+    expect(mock.local.reminders?.echo).toBeUndefined();
+    expect(mock.local.reminderPending.echo).toBe(true);
+    mock.request.mockResolvedValue({ activations: { echo: { enabled: true } } });
+    mock.resume.mockResolvedValue(true);
+    const pull = vi.fn();
+    await offerPortalReminder('echo', () => runImagePortal({ browserConsent: true, apply: pull }));
+    expect(mock.confirm).toHaveBeenCalledOnce();
+    expect(pull).toHaveBeenCalledOnce();
+    expect(mock.local.reminderPending.echo).toBeUndefined();
+    expect(mock.local.reminders.echo).toBe(true);
+  });
+
+  it('keeps core setup running when optional perk status is temporarily unavailable', async () => {
+    mock.request.mockRejectedValue(new Error('offline'));
+    const enable = vi.fn();
+    expect(await offerPortalReminder('echo', enable)).toBe(false);
+    expect(mock.confirm).not.toHaveBeenCalled();
+    expect(enable).not.toHaveBeenCalled();
+    expect(mock.local.reminders?.echo).toBeUndefined();
+  });
+
+  it('does not change or pull the image after dismissing the later browser offer', async () => {
+    mock.result.status = 'skipped';
+    const apply = vi.fn();
+    await runImagePortal({ browserConsent: true, apply });
+    expect(mock.image).not.toHaveBeenCalled();
+    expect(apply).not.toHaveBeenCalled();
+    expect(mock.complete).not.toHaveBeenCalled();
+    expect(mock.confirm).not.toHaveBeenCalled();
+  });
+
+  it('passes consent to the Slack handoff once and still queues the saved background job', async () => {
+    const { registerChannelPreStep } = await import('./channels/companions.js');
+    const { runChannelSkillWithPreStep } = await import('./channels/run-channel-skill.js');
+    const { queueSlackJob } = await import('./slack-job.js');
+    const provider = core();
+    registerChannelPreStep('slack', (_name, options) => runSlackPortal(provider, 'Nova', undefined, options));
+    await offerPortalReminder('slack', async () => {
+      await runChannelSkillWithPreStep('slack', 'Operator', { agentName: 'Nova', role: 'owner', browserConsent: true });
+    });
+    expect(mock.confirm).toHaveBeenCalledOnce();
+    expect(mock.open).toHaveBeenCalledOnce();
+    expect(queueSlackJob).toHaveBeenCalledWith(
+      expect.objectContaining({ agentName: 'Nova', role: 'owner', ownerHandle: 'U123456789' }),
+      expect.any(String),
+    );
+  });
 });

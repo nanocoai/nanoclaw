@@ -1,5 +1,7 @@
 import { afterEach, expect, it } from 'vitest';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, execFile, type ChildProcess } from 'node:child_process';
+import { createServer as createSocketServer } from 'node:net';
+import { promisify } from 'node:util';
 import { createServer } from 'node:http';
 import { mkdtemp, readFile, rm, stat, writeFile, symlink } from 'node:fs/promises';
 import path from 'node:path';
@@ -46,6 +48,88 @@ async function stopped(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   await new Promise<void>((resolve) => child.once('exit', () => resolve()));
 }
+
+it('approval two days later finishes the saved app, wires the owner and hands off its welcome without a browser or terminal', async () => {
+  const { root, job } = await fixture();
+  const created = Date.now() - 2 * 86400_000;
+  job.createdAt = new Date(created).toISOString();
+  job.expiresAt = new Date(created + 7 * 86400_000).toISOString();
+  await writePrivate(slackJobFile(root), job);
+  let welcome: any;
+  const server = createSocketServer((socket) => {
+    let line = '';
+    socket.on('data', (chunk) => {
+      line += chunk;
+    });
+    socket.on('end', () => {
+      welcome = JSON.parse(line);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(path.join(root, 'data/cli.sock'), resolve));
+  cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const reports: string[] = [];
+  let polls = 0;
+  await runSlackJob(root, {
+    now: Date.now,
+    sleep: async () => {},
+    report: async (current) => {
+      reports.push(current.status);
+    },
+    receive: async (current, body: any) => {
+      expect(current.app.appId).toBe('A1');
+      if (body.deliveryId) {
+        expect((await readSlackJob(root))?.app.botToken).toBe('xoxb-approved');
+        return {};
+      }
+      if (body.statusOnly) return { status: 'installed' };
+      if (++polls === 1) return { status: 'pending_install' };
+      return { status: 'installed', bot_token: 'xoxb-approved', delivery_id: 'receipt-two-days-later' };
+    },
+    install: async (current) => {
+      expect(current.context).toEqual(job.context);
+      await promisify(execFile)(
+        process.execPath,
+        [
+          '--import',
+          path.resolve('node_modules/tsx/dist/loader.mjs'),
+          path.resolve('scripts/init-first-agent.ts'),
+          '--channel',
+          'slack',
+          '--user-id',
+          current.context.ownerHandle,
+          '--platform-id',
+          'slack:D123456789',
+          '--display-name',
+          current.context.displayName,
+          '--agent-name',
+          current.context.agentName,
+          '--role',
+          current.context.role,
+        ],
+        { cwd: root, timeout: 30_000 },
+      );
+      await until(async () => Boolean(welcome));
+      expect(reports).not.toContain('complete');
+    },
+  });
+  expect((await readSlackJob(root))?.status).toBe('complete');
+  expect(reports.at(-1)).toBe('complete');
+  expect(polls).toBe(2);
+  expect(welcome).toMatchObject({
+    text: expect.stringContaining('run /welcome'),
+    senderId: 'slack:U123456789',
+    sender: 'User',
+    to: { channelType: 'slack', platformId: 'slack:D123456789', instance: 'slack' },
+  });
+  const db = new DatabaseSync(path.join(root, 'data/v2.db'), { readOnly: true });
+  try {
+    expect(db.prepare('SELECT channel_type, platform_id, instance FROM messaging_groups').all()).toEqual([
+      { channel_type: 'slack', platform_id: 'slack:D123456789', instance: 'slack' },
+    ]);
+  } finally {
+    db.close();
+  }
+}, 60_000);
 
 it('survives SIGKILL after durable delivery, retries ACK, serializes with setup and installs once across workers', async () => {
   const { root, job } = await fixture();

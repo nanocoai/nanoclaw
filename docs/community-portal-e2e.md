@@ -85,3 +85,11 @@ NanoClaw service with `SLACK_INSTALL: awaiting_approval` (or `installing`) and
 at that point is expected. Failed or expired jobs still need attention. After
 updating the branch, exit any older setup run and recheck with
 `pnpm exec tsx setup/index.ts --step verify`; it also resumes the saved worker.
+
+## Later offers and Slack approval scope
+
+Before activation, Maybe later, the close button and Escape now skip the waiting CLI step. A success modal can close without cancelling installation. Setup makes one later browser offer for missing Echo (before service start, including the actual image pull) and Slack (before verification, using the same background job). Existing choices and saved apps are reused; unavailable partners are skipped.
+
+The initial saved Slack job waits up to seven days and queues the welcome DM after approval, channel installation and owner wiring. Keep the VM and service running. Closing the terminal/browser is fine; a VM reboot requires a setup invocation to restart the saved job. Completion means the welcome handoff succeeded, not that Slack has acknowledged the agent reply.
+
+Every newly created agent app may need separate admin approval. Agents created later from Slack currently wait five minutes, then park the saved app. After a later approval, ask the existing agent in Slack to “finish setting up <name>”; the app is reused. That runtime path does not yet share the initial installer’s durable background worker.
