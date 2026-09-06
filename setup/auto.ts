@@ -28,6 +28,7 @@ import { randomUUID } from 'crypto';
 import fs from 'fs';
 import * as os from 'os';
 import path from 'path';
+import { fileURLToPath, pathToFileURL } from 'url';
 
 import * as p from '@clack/prompts';
 import k from 'kleur';
@@ -109,6 +110,7 @@ import {
   type TemplateOperation,
 } from './templates.js';
 
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI_AGENT_NAME = 'Terminal Agent';
 const RUN_START = Date.now();
 
@@ -1686,7 +1688,7 @@ async function runCustomEndpointAuth(baseUrl: string, token: string): Promise<vo
 }
 
 function writeEnvLine(key: string, value: string): void {
-  const envFile = path.join(process.cwd(), '.env');
+  const envFile = path.join(PROJECT_ROOT, '.env');
   const content = fs.existsSync(envFile) ? fs.readFileSync(envFile, 'utf-8') : '';
   const re = new RegExp(`^${key}=.*$`, 'm');
   const next = re.test(content)
@@ -1696,7 +1698,7 @@ function writeEnvLine(key: string, value: string): void {
 }
 
 function appendProviderImport(modulePath: string): void {
-  const file = path.join(process.cwd(), 'src', 'providers', 'index.ts');
+  const file = path.join(PROJECT_ROOT, 'src', 'providers', 'index.ts');
   const content = fs.existsSync(file) ? fs.readFileSync(file, 'utf-8') : '';
   const line = `import '${modulePath}';`;
   if (content.includes(line)) return;
@@ -2017,6 +2019,7 @@ function initProgressionLog(): void {
   let commit = '';
   try {
     commit = spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
+      cwd: PROJECT_ROOT,
       encoding: 'utf-8',
     }).stdout.trim();
   } catch {
@@ -2025,6 +2028,7 @@ function initProgressionLog(): void {
   let branch = '';
   try {
     branch = spawnSync('git', ['branch', '--show-current'], {
+      cwd: PROJECT_ROOT,
       encoding: 'utf-8',
     }).stdout.trim();
   } catch {
@@ -2033,7 +2037,7 @@ function initProgressionLog(): void {
   setupLog.reset({
     invocation: 'setup:auto (standalone)',
     user: process.env.USER ?? 'unknown',
-    cwd: process.cwd(),
+    cwd: PROJECT_ROOT,
     branch: branch || 'unknown',
     commit: commit || 'unknown',
   });
