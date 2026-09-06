@@ -158,9 +158,25 @@ describe('session manager', () => {
     expect(files).toHaveLength(1);
     expect(files?.[0]?.filename).toBe('result.txt');
     expect(files?.[0]?.data.toString()).toBe('ok');
+    expect(files?.[0]?.mimeType).toBe('text/plain');
 
     clearOutbox('ag-1', 'sess-test', 'msg-1');
     expect(fs.existsSync(msgOutbox)).toBe(false);
+  });
+
+  it('should tag outbox files with a mime type derived from the extension', () => {
+    initSessionFolder('ag-1', 'sess-test');
+    const msgOutbox = path.join(sessionDir('ag-1', 'sess-test'), 'outbox', 'msg-png');
+    fs.mkdirSync(msgOutbox, { recursive: true });
+    fs.writeFileSync(path.join(msgOutbox, 'chart.png'), 'not-really-a-png');
+    fs.writeFileSync(path.join(msgOutbox, 'blob.weird'), 'unknown');
+
+    const files = readOutboxFiles('ag-1', 'sess-test', 'msg-png', ['chart.png', 'blob.weird']);
+
+    // Without this the Teams adapter falls back to application/octet-stream,
+    // inlines the bytes as a data URI, and the activity is rejected with 400.
+    expect(files?.find((f) => f.filename === 'chart.png')?.mimeType).toBe('image/png');
+    expect(files?.find((f) => f.filename === 'blob.weird')?.mimeType).toBeUndefined();
   });
 
   it('should reject inbound attachment writes through a pre-placed symlinked inbox dir', async () => {

@@ -6,7 +6,7 @@ import { AsyncLocalStorage } from 'async_hooks';
 import fs from 'fs';
 import path from 'path';
 
-import { deriveAttachmentName } from './attachment-naming.js';
+import { deriveAttachmentName, mimeForFilename } from './attachment-naming.js';
 import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
@@ -540,7 +540,11 @@ export function readOutboxFiles(
         log.warn('Rejecting outbox file outside message directory', { messageId, filename });
         continue;
       }
-      files.push({ filename, data: fs.readFileSync(realFilePath) });
+      files.push({
+        filename,
+        data: fs.readFileSync(realFilePath),
+        mimeType: mimeForFilename(filename),
+      });
     } catch {
       log.warn('Outbox file not found', { messageId, filename });
     }

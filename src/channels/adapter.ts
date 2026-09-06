@@ -96,6 +96,20 @@ export interface InboundMessage {
 export interface OutboundFile {
   filename: string;
   data: Buffer;
+  /**
+   * MIME type, derived from the filename extension when we recognize it.
+   *
+   * Load-bearing, not decorative: an adapter that has to declare a content
+   * type has nothing else to go on. The Teams adapter defaults to
+   * `application/octet-stream` and inlines the bytes as a
+   * `data:<contentType>;base64,...` URI, and Teams rejects that activity with
+   * a 400 — so a PNG sent without this never reaches the channel at all.
+   * (Oversize is a *413*, so a 400 here is the content type, not the size.)
+   *
+   * Undefined for extensions we don't recognize; adapters keep their own
+   * fallback for that case.
+   */
+  mimeType?: string;
 }
 
 /** Outbound message from host to adapter. */
