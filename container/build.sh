@@ -131,6 +131,13 @@ if [ -z "${INSTALL_CJK_FONTS:-}" ] && [ -f "../.env" ]; then
 fi
 
 BUILD_ARGS=()
+# Apple Container re-creates its builder VM at a 2 GiB default on every bare
+# `container build`, which OOMs ("Killed ... cannot allocate memory") on the
+# cli-tools layer — and a builder started separately with more memory does not
+# survive the next bare invocation. Pass the memory explicitly every time.
+if [ "$CONTAINER_RUNTIME" = "container" ]; then
+    BUILD_ARGS+=(-m "${CONTAINER_BUILDER_MEM:-8G}")
+fi
 if [ "${INSTALL_CJK_FONTS:-false}" = "true" ]; then
     if [ "$PULL" = "true" ]; then
         # A pulled image ships whatever font set its publisher baked in; this
