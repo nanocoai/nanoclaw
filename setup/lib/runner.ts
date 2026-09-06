@@ -20,6 +20,9 @@ import k from 'kleur';
 import * as setupLog from '../logs.js';
 import { offerClaudeOnFailure } from './claude-handoff.js';
 import { emit as phEmit } from './diagnostics.js';
+import { createSensitiveRedactor, redactSensitiveValues } from './redaction.js';
+import { childEnvWithoutSetupSecrets } from './secret-file.js';
+import type { SetupDriver } from './setup-driver.js';
 import { brandBody, fitToWidth, fmtDuration } from './theme.js';
 
 export type Fields = Record<string, string>;
@@ -115,6 +118,7 @@ export function spawnStep(
   onBlock: (block: Block) => void,
   rawLogPath: string,
   onLine?: (line: string) => void,
+  driver?: SetupDriver,
 ): Promise<StepResult> {
   return new Promise((resolve) => {
     const args = ['exec', 'tsx', 'setup/index.ts', '--step', stepName];
@@ -176,6 +180,7 @@ export function spawnQuiet(
   args: string[],
   rawLogPath: string,
   envOverride?: NodeJS.ProcessEnv,
+  driver?: SetupDriver,
 ): Promise<QuietChildResult> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
@@ -210,18 +215,27 @@ export async function runQuietStep(
   stepName: string,
   labels: SpinnerLabels,
   extra: string[] = [],
+  driver?: SetupDriver,
 ): Promise<StepResult & { rawLog: string; durationMs: number }> {
   const rawLog = setupLog.stepRawLog(stepName);
   const start = Date.now();
+  driver?.throwIfCancelled();
+  driver?.progress(stepName, 'pending', labels.running.replace(/…$/, ''));
   phEmit('step_started', { step: stepName });
-  const result = await runUnderSpinner(labels, () => spawnStep(stepName, extra, () => {}, rawLog));
+  const result = await runUnderSpinner(
+    labels,
+    () => spawnStep(stepName, extra, () => {}, rawLog, undefined, driver),
+    driver,
+    stepName,
+  );
   const durationMs = Date.now() - start;
-  writeStepEntry(stepName, result, durationMs, rawLog);
+  writeStepEntry(stepName, result, durationMs, rawLog, driver?.mode === 'ndjson');
   phEmit('step_completed', {
     step: stepName,
     status: outcomeStatus(result),
     duration_ms: durationMs,
   });
+  driver?.throwIfCancelled();
   return { ...result, rawLog, durationMs };
 }
 
@@ -237,14 +251,17 @@ export async function runQuietChild(
     /** Environment overrides to pass to the child process. */
     env?: NodeJS.ProcessEnv;
   },
+  driver?: SetupDriver,
 ): Promise<QuietChildResult & { rawLog: string; durationMs: number }> {
   const rawLog = setupLog.stepRawLog(logName);
   const start = Date.now();
+  driver?.throwIfCancelled();
+  driver?.progress(logName, 'pending', labels.running.replace(/…$/, ''));
   phEmit('step_started', { step: logName });
-  const result = await runUnderSpinner(labels, () => spawnQuiet(cmd, args, rawLog, opts?.env));
+  const result = await runUnderSpinner(labels, () => spawnQuiet(cmd, args, rawLog, opts?.env, driver), driver, logName);
   const durationMs = Date.now() - start;
 
-  const blockFields = summariseTerminalFields(result.terminal);
+  const blockFields = summariseTerminalFields(result.terminal, driver?.mode === 'ndjson');
   const fields = { ...blockFields, ...(opts?.extraFields ?? {}) };
   const rawStatus = result.terminal?.fields.STATUS;
   const status: 'success' | 'skipped' | 'failed' = !result.ok
@@ -254,6 +271,7 @@ export async function runQuietChild(
       : 'success';
   setupLog.step(logName, status, durationMs, fields, rawLog);
   phEmit('step_completed', { step: logName, status, duration_ms: durationMs });
+  driver?.throwIfCancelled();
   return { ...result, rawLog, durationMs };
 }
 
@@ -265,25 +283,31 @@ function outcomeStatus(result: StepResult): 'success' | 'skipped' | 'failed' {
 }
 
 /** Turn a step's terminal-block fields into a concise progression-log entry. */
-export function writeStepEntry(stepName: string, result: StepResult, durationMs: number, rawLog: string): void {
+export function writeStepEntry(
+  stepName: string,
+  result: StepResult,
+  durationMs: number,
+  rawLog: string,
+  redact = false,
+): void {
   const rawStatus = result.terminal?.fields.STATUS;
   const logStatus: 'success' | 'skipped' | 'failed' = !result.ok
     ? 'failed'
     : rawStatus === 'skipped'
       ? 'skipped'
       : 'success';
-  const fields = summariseTerminalFields(result.terminal);
+  const fields = summariseTerminalFields(result.terminal, redact);
   setupLog.step(stepName, logStatus, durationMs, fields, rawLog);
 }
 
 /** Strip STATUS + LOG (redundant) and any oversize values from the terminal block's fields. */
-export function summariseTerminalFields(block: Block | null): Record<string, string> {
+export function summariseTerminalFields(block: Block | null, redact = false): Record<string, string> {
   if (!block) return {};
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(block.fields)) {
     if (k === 'STATUS' || k === 'LOG') continue;
     if (v.length > 120) continue; // keep it skimmable; full value lives in the raw log
-    out[k] = v;
+    out[k] = redact ? redactSensitiveValues(v) : v;
   }
   return out;
 }
@@ -300,9 +324,24 @@ export function summariseTerminalFields(block: Block | null): Record<string, str
  * done/skipped/failed headline (bold) with the elapsed time (dim); on a failure
  * it also dumps the transcript tail when one is supplied.
  */
-export function startSpinner(labels: SpinnerLabels): {
+export function startSpinner(
+  labels: SpinnerLabels,
+  driver?: SetupDriver,
+  stepId = labels.running
+    .replace(/[^a-z0-9]+/gi, '-')
+    .replace(/^-|-$/g, '')
+    .toLowerCase(),
+): {
   stop: (outcome: { ok: boolean; skipped?: boolean; transcript?: string }) => void;
 } {
+  if (driver?.mode === 'ndjson') {
+    driver.progress(stepId, 'running', labels.running.replace(/…$/, ''));
+    return {
+      stop({ ok, skipped }) {
+        driver.progress(stepId, ok ? 'succeeded' : 'failed');
+      },
+    };
+  }
   const s = p.spinner();
   const start = Date.now();
   s.start(fitToWidth(labels.running, ' (99m 59s)'));
@@ -331,8 +370,10 @@ export function startSpinner(labels: SpinnerLabels): {
 async function runUnderSpinner<T extends { ok: boolean; transcript: string; terminal?: Block | null }>(
   labels: SpinnerLabels,
   work: () => Promise<T>,
+  driver?: SetupDriver,
+  stepId?: string,
 ): Promise<T> {
-  const spinner = startSpinner(labels);
+  const spinner = startSpinner(labels, driver, stepId);
   const result = await work();
   spinner.stop({
     ok: result.ok,
@@ -366,9 +407,33 @@ export function dumpTranscriptOnFailure(transcript: string): void {
  * process.exit. The return type is `Promise<never>`; control-flow
  * narrowing still works after `await`.
  */
-export async function fail(stepName: string, msg: string, hint?: string, rawLogPath?: string): Promise<never> {
+export async function fail(
+  stepName: string,
+  msg: string,
+  hint?: string,
+  rawLogPath?: string,
+  driver?: SetupDriver,
+): Promise<never> {
+  // A signal received during an atomic child/health operation wins over that
+  // operation's failure result: machine cancellation is terminal exit 2.
+  driver?.throwIfCancelled();
   setupLog.abort(stepName, msg);
   phEmit('setup_aborted', { step: stepName, reason: msg });
+  if (driver?.mode === 'ndjson') {
+    driver.progress(stepName, 'failed');
+    driver.error(
+      'step_failed',
+      msg,
+      [
+        {
+          kind: 'manual',
+          title: 'Fix the failed prerequisite and rerun',
+          instructions: [hint ?? 'Inspect logs/setup.log and the matching raw step log.'],
+        },
+      ],
+      stepName,
+    );
+  }
   p.log.error(msg);
   if (hint) p.log.message(k.dim(hint));
   p.log.message(k.dim('Logs: logs/setup.log · Raw: logs/setup-steps/'));
