@@ -50,6 +50,7 @@ import {
   writeImageSource,
 } from '../lib/registry-state.js';
 import { ensureAnswer } from '../lib/runner.js';
+import { portalEnabled, runSlackPortal } from '../portal.js';
 import { wrapForGutter } from '../lib/theme.js';
 
 // Both browser round-trips this file waits on — connecting a workspace, and
@@ -126,6 +127,7 @@ export interface ProvisioningCore {
 
 /** Injection seam for tests — the bootstrap never touches git or the loader in a unit test. */
 export interface BootstrapDeps {
+  browserConsent?: boolean;
   root?: string;
   /** Run a shell command at root; returns stdout, throws on failure. */
   exec?: (command: string) => string;
@@ -241,9 +243,15 @@ export async function maybeAutoProvisionSlack(
   // Offered even when not enrolled yet — signing in is a step of the flow,
   // not a precondition for seeing it. Hidden only when this copy has no way
   // to auto-provision at all.
-  if (!managerToken && !installToken && !loginScriptAvailable()) return undefined;
+  if (!portalEnabled() && !managerToken && !installToken && !loginScriptAvailable()) return undefined;
 
   const needsSignIn = !managerToken && !installToken;
+  if (portalEnabled() && !managerToken) {
+    const version = hostVersion(deps.root ?? process.cwd());
+    return deps.browserConsent
+      ? runSlackPortal(core, agentName, version, { browserConsent: true })
+      : runSlackPortal(core, agentName, version);
+  }
   // Automatic provisioning leads as the default; supplying your own bot
   // token stays available as the explicit, advanced alternative.
   const mode = ensureAnswer(

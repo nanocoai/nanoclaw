@@ -6,6 +6,8 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const state = vi.hoisted(() => ({
+  portalEnabled: vi.fn(() => false),
+  runSlackPortal: vi.fn(),
   account: undefined as { api?: string; token: string } | undefined,
   installToken: undefined as string | undefined,
   selectLabels: [] as string[],
@@ -33,6 +35,8 @@ const state = vi.hoisted(() => ({
     installUrl: '',
   })),
 }));
+
+vi.mock('../portal.js', () => ({ portalEnabled: state.portalEnabled, runSlackPortal: state.runSlackPortal }));
 
 vi.mock('@clack/prompts', () => ({
   note: vi.fn((message: string, title: string) => state.notes.push({ message, title })),
@@ -797,5 +801,24 @@ describe('a workspace that has to approve the install', () => {
     expect(state.confirmThenOpen).not.toHaveBeenCalled();
     expect(result).toMatchObject({ connection: 'provisioned', app_token: 'xapp-test' });
     expect(result).not.toHaveProperty('bot_token');
+  });
+});
+
+
+describe('community portal entry point', () => {
+  it('uses browser setup for an unenrolled installation without legacy login or provisioning', async () => {
+    state.portalEnabled.mockReturnValue(true);
+    state.runSlackPortal.mockResolvedValue({ __portal_skip: 'slack' });
+    const root = track(rootWithModule());
+    const core = fakeCore();
+    state.installToken = undefined;
+    state.runInheritScript.mockClear(); state.brokerProvision.mockClear();
+    try {
+      const result = await maybeAutoProvisionSlack('Nano', { root, importModule: async () => core });
+      expect(result).toEqual({ __portal_skip: 'slack' });
+      expect(state.runSlackPortal).toHaveBeenCalledWith(core, 'Nano', undefined);
+      expect(state.runInheritScript).not.toHaveBeenCalled();
+      expect(state.brokerProvision).not.toHaveBeenCalled();
+    } finally { state.portalEnabled.mockReturnValue(false); }
   });
 });

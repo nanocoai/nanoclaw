@@ -33,6 +33,7 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { BACK_TO_CHANNEL_SELECTION } from './lib/back-nav.js';
+import { withSetupLock, launchSlackJob, readSlackJob, slackJobStatus } from './slack-job.js';
 // The pre-step-aware entry point consults each channel's registered wizard
 // extensions (setup/channels/companions.ts) before running its install skill
 // — the wizard itself stays free of channel-specific imports.
@@ -44,6 +45,7 @@ import {
   type ChannelChoice,
 } from './channels/initial-setup.js';
 import { runInheritScript } from './lib/inherit-script.js';
+import { offerPortalReminder, portalEnabled, runImagePortal, runPerksPortal } from './portal.js';
 import { pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
 import { applyProviderSkill } from './providers/install.js';
@@ -523,6 +525,40 @@ async function main(): Promise<void> {
     }
   }
 
+  if (
+    portalEnabled() &&
+    !skip.has('echo-reminder') &&
+    readImageSource() !== 'hardened' &&
+    readAgentImagePin() &&
+    (process.env.NANOCLAW_AGENT_PROVIDER || readEnvKey('DEFAULT_AGENT_PROVIDER') || DEFAULT_AGENT_PROVIDER || 'claude')
+      .trim()
+      .toLowerCase() === 'claude'
+  ) {
+    try {
+      await offerPortalReminder('echo', () =>
+        runImagePortal({
+          browserConsent: true,
+          apply: async () => {
+            const res = await runWindowedStep('container', {
+              running: 'Fetching Echo’s hardened image…',
+              done: 'Hardened sandbox ready.',
+              failed: 'Could not fetch the hardened image.',
+            });
+            if (!res.ok)
+              throw new Error('The hardened image could not be prepared. Your previous image choice has been kept.');
+          },
+        }),
+      );
+      skip.add('echo-reminder');
+    } catch (error) {
+      await fail(
+        'container',
+        'Could not finish Echo setup.',
+        error instanceof Error ? error.message : 'Retry the image setup step.',
+      );
+    }
+  }
+
   if (!skip.has('service')) {
     const res = await runQuietStep('service', {
       running: 'Starting NanoClaw in the background…',
@@ -709,20 +745,34 @@ async function main(): Promise<void> {
       if (result === BACK_TO_CHANNEL_SELECTION) backed = true;
     }
   }
-  // Setup-selected targets are one-run-only. A later setup derives connect
-  // choices from current wirings instead of inheriting an old agent id.
-  delete process.env.NANOCLAW_TEMPLATE_AGENT_ID;
-
   // Deferred wire (Teams): verify passes with zero groups because the
   // platform id only exists after the first DM. Tracked here so the ENDING
   // changes too — the last box must be the one remaining action, not a
   // premature "your assistant is saying hi" (no welcome DM exists yet).
   let wiringPending = false;
 
+  if (portalEnabled() && !skip.has('perks')) {
+    await runPerksPortal();
+    skip.add('perks');
+  }
+  if (
+    portalEnabled() &&
+    !skip.has('slack-reminder') &&
+    !(process.env.SLACK_BOT_TOKEN || readEnvKey('SLACK_BOT_TOKEN'))?.trim()
+  ) {
+    await offerPortalReminder('slack', async () => {
+      const result = await runChannelSkillWithPreStep('slack', await resolveDisplayName(), { browserConsent: true });
+      if (result !== BACK_TO_CHANNEL_SELECTION) channelChoice = 'slack';
+    });
+    skip.add('slack-reminder');
+  }
+  // Keep the chosen agent through the later Slack offer as well. A later run
+  // derives connect choices from current wirings instead of inheriting this id.
+  delete process.env.NANOCLAW_TEMPLATE_AGENT_ID;
   if (!skip.has('verify')) {
     const res = await runQuietStep('verify', {
       running: 'Making sure everything works together…',
-      done: "Everything's connected.",
+      done: 'NanoClaw is running.',
       failed: 'A few things still need your attention.',
     });
     if (!res.ok) {
@@ -745,7 +795,17 @@ async function main(): Promise<void> {
           ),
         );
       }
-      if (!res.terminal?.fields.CONFIGURED_CHANNELS) {
+      const slackInstall = res.terminal?.fields.SLACK_INSTALL;
+      if (slackInstall === 'failed') {
+        notes.push(
+          '• Slack installation needs attention. Check its progress in the portal, then resume with `pnpm exec tsx setup/portal.ts --stage slack`.',
+        );
+      } else if (slackInstall === 'expired') {
+        notes.push('• Slack approval expired. Review the existing app in the portal before restarting Slack setup.');
+      } else if (
+        !res.terminal?.fields.CONFIGURED_CHANNELS &&
+        !['awaiting_approval', 'installing'].includes(slackInstall ?? '')
+      ) {
         notes.push(
           '• Want to chat from your phone? Add a messaging app with `/add-telegram`, `/add-slack`, or `/add-discord`.',
         );
@@ -795,11 +855,29 @@ async function main(): Promise<void> {
     'Heads up',
   );
 
+  const slackStatus = slackJobStatus(await readSlackJob());
+  if (slackStatus === 'failed' || slackStatus === 'expired') {
+    note(
+      slackStatus === 'expired'
+        ? 'Slack approval expired. Review the existing app in the portal before restarting Slack setup.'
+        : 'Slack installation needs attention. Check its progress in the portal, then resume with `pnpm exec tsx setup/portal.ts --stage slack`.',
+      'Slack setup',
+    );
+    p.outro(k.yellow('NanoClaw is running. Slack needs attention.'));
+    return;
+  }
+
   setupLog.complete(Date.now() - RUN_START);
   phEmit('setup_completed', { duration_ms: Date.now() - RUN_START });
 
   const dmTarget = channelDmLabel(channelChoice);
-  if (wiringPending) {
+  if (slackStatus === 'awaiting_approval' || slackStatus === 'installing') {
+    note(
+      'Slack is finishing in the background. Once approval and installation finish, your agent will DM you in Slack. Keep this machine online; no return to the terminal is needed while the background job is running. Follow progress in the portal.',
+      'Slack setup',
+    );
+    p.outro(k.green('NanoClaw is ready. Slack will connect when installation finishes.'));
+  } else if (wiringPending) {
     // No welcome DM exists yet — the one remaining action is the last thing
     // on screen, in the same bright framed style as the "go say hi" banner.
     note(
@@ -1312,6 +1390,10 @@ async function chooseImageSource(): Promise<void> {
   // whose install then has no image to pull — so don't ask a question whose
   // good answer cannot be honoured.
   if (!readAgentImagePin()) return;
+  if (portalEnabled()) {
+    await runImagePortal();
+    return;
+  }
 
   p.log.message(
     brandBody(
@@ -1425,13 +1507,16 @@ async function askAgentProviderChoice(): Promise<string> {
     })),
   ];
   const preset = process.env.NANOCLAW_AGENT_PROVIDER?.trim().toLowerCase();
-  if (preset) {
-    if (!options.some((option) => option.value === preset)) {
+  // Fresh installs use Claude without another setup prompt. Explicit presets
+  // still win, and an existing non-Claude default keeps its provider picker.
+  const automatic = preset || (DEFAULT_AGENT_PROVIDER === 'claude' ? 'claude' : undefined);
+  if (automatic) {
+    if (!options.some((option) => option.value === automatic)) {
       throw new Error(`NANOCLAW_AGENT_PROVIDER=${preset} is not available in this NanoClaw install`);
     }
-    setupLog.userInput('agent_provider', preset);
-    phEmit('agent_provider_chosen', { provider: preset, preset: true });
-    return preset;
+    setupLog.userInput('agent_provider', automatic);
+    phEmit('agent_provider_chosen', { provider: automatic, preset: Boolean(preset) });
+    return automatic;
   }
   // The pick is persisted as the instance default (DEFAULT_AGENT_PROVIDER), so
   // pre-select the current default — a re-run Enter-through then preserves it
@@ -2019,7 +2104,10 @@ function initProgressionLog(): void {
   });
 }
 
-main().catch((err) => {
+withSetupLock(async () => {
+  await launchSlackJob();
+  await main();
+}).catch((err) => {
   p.log.error(err instanceof Error ? err.message : String(err));
   p.cancel('Setup aborted.');
   process.exit(1);
