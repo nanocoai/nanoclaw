@@ -9,14 +9,15 @@ needs no AWS, Vercel, WorkOS server or Slack server credentials.
 git clone --branch feat/community-portal https://github.com/nanocoai/nanoclaw.git nanoclaw
 cd nanoclaw
 pnpm install --frozen-lockfile
-export NANOCLAW_AGENT_PROVIDER=claude
 pnpm setup:auto
 ```
 
 Clone normally, without `--single-branch` or a shallow clone: channel installation
 fetches the repository's `channels` branch. Do not copy another installation's
 `.env`, `node_modules`, account files or setup journal. The Echo prebuilt image
-path currently supports the Claude provider.
+path currently supports the Claude provider. Fresh setup selects Claude
+automatically. An existing provider choice or explicit `NANOCLAW_AGENT_PROVIDER`
+override is honored.
 
 The portal opens at **https://portal.nanoclaw.dev** by default. The CLI asks
 before opening the browser and prints the link for SSH users to open on their
