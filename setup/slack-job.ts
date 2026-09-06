@@ -1,11 +1,10 @@
-import { spawn, execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFile, mkdir, open } from 'node:fs/promises';
-import { DatabaseSync } from 'node:sqlite';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { writePrivate, SetupClient } from './portal-client.mjs';
+import { writePrivate, SetupClient, processLock, processLockOwner } from './portal-client.mjs';
+export { processLock } from './portal-client.mjs';
 import type { OperatorRole } from './lib/role-prompt.js';
 
 export interface SlackJob {
@@ -47,116 +46,18 @@ export function slackJobStatus(job: SlackJob | null, now = Date.now()): SlackJob
   if (['awaiting_approval', 'installing'].includes(job.status) && !(Date.parse(job.expiresAt) > now)) return 'expired';
   return job.status;
 }
-const alive = (pid: number) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e: any) {
-    return e.code !== 'ESRCH';
-  }
-};
-
-// PID numbers can be reused after a crash or reboot. Compare process birth,
-// including Linux's boot identity, before treating a recorded owner as live.
-function processIdentity(pid: number): string | undefined {
-  try {
-    if (process.platform === 'linux') {
-      const boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
-      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-      return `${boot}:${stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]}`;
-    }
-    return (
-      execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
-        encoding: 'utf8',
-        env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' },
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim() || undefined
-    );
-  } catch {
-    return undefined;
-  }
-}
-type LockOwner = { pid: number; nonce: string; started: string };
-function ownerAlive(owner: LockOwner): boolean {
-  if (!alive(owner.pid)) return false;
-  const current = processIdentity(owner.pid);
-  return !current || !owner.started || current === owner.started;
-}
-
-// SQLite serializes stale-owner recovery and acquisition in one transaction.
-// Checking a PID and unlinking a plain lock file has a race: two recovering
-// workers can otherwise remove a newly acquired lock and both install.
-function lockOwner(file: string): LockOwner | undefined {
-  let db: DatabaseSync | undefined;
-  try {
-    db = new DatabaseSync(file, { readOnly: true });
-    return db.prepare('SELECT pid, nonce, started FROM owner WHERE id = 1').get() as LockOwner | undefined;
-  } catch {
-    return undefined;
-  } finally {
-    db?.close();
-  }
-}
-export async function processLock(file: string): Promise<(() => void) | null> {
-  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  const fd = await open(file, 'a', 0o600);
-  await fd.close();
-  const db = new DatabaseSync(file);
-  db.exec('PRAGMA busy_timeout = 5000');
-  const owner = { pid: process.pid, nonce: randomUUID(), started: processIdentity(process.pid) || '' };
-  try {
-    db.exec(
-      'CREATE TABLE IF NOT EXISTS owner (id INTEGER PRIMARY KEY CHECK (id = 1), pid INTEGER NOT NULL, nonce TEXT NOT NULL, started TEXT NOT NULL)',
-    );
-    db.exec('BEGIN IMMEDIATE');
-    const previous = db.prepare('SELECT pid, nonce, started FROM owner WHERE id = 1').get() as LockOwner | undefined;
-    if (previous && ownerAlive(previous)) {
-      db.exec('COMMIT');
-      db.close();
-      return null;
-    }
-    db.prepare('INSERT OR REPLACE INTO owner (id, pid, nonce, started) VALUES (1, ?, ?, ?)').run(
-      owner.pid,
-      owner.nonce,
-      owner.started,
-    );
-    db.exec('COMMIT');
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      try {
-        db.prepare('DELETE FROM owner WHERE id = 1 AND pid = ? AND nonce = ?').run(owner.pid, owner.nonce);
-      } finally {
-        db.close();
-        process.removeListener('exit', release);
-      }
-    };
-    process.once('exit', release);
-    return release;
-  } catch (error) {
-    try {
-      db.exec('ROLLBACK');
-    } catch {}
-    try {
-      db.close();
-    } catch {}
-    throw error;
-  }
-}
-
 export async function withSetupLock<T>(run: () => Promise<T>, root = process.cwd()): Promise<T> {
   const file = path.join(root, 'data/setup-mutation.lock');
   const inherited = process.env.NANOCLAW_SETUP_LOCK;
   if (inherited) {
     try {
-      const owner = lockOwner(file);
-      if (owner?.nonce === inherited && ownerAlive(owner)) return run();
+      const owner = processLockOwner(file);
+      if (owner?.nonce === inherited) return run();
     } catch {}
   }
   let release: (() => void) | null;
   while (!(release = await processLock(file))) await sleep(1000);
-  process.env.NANOCLAW_SETUP_LOCK = lockOwner(file)!.nonce;
+  process.env.NANOCLAW_SETUP_LOCK = processLockOwner(file)!.nonce;
   try {
     return await run();
   } finally {
@@ -175,6 +76,9 @@ export async function launchSlackJob(root = process.cwd()): Promise<boolean> {
     )
   )
     return false;
+  // The host supervisor may check on every cell update. A healthy owner is
+  // already polling Slack; do not spawn a losing process for each check.
+  if (processLockOwner(`${slackJobFile(root)}.lock`)) return false;
   const env = { ...process.env };
   delete env.NANOCLAW_SETUP_LOCK;
   delete env.NANOCLAW_TEMPLATE_AGENT_ID;

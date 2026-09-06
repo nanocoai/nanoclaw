@@ -44,6 +44,7 @@ function portalClient(): SetupClient {
     file: path.join(process.cwd(), 'data/community-portal.json'),
     label: `${os.hostname()} · ${path.basename(process.cwd())}`,
     exclusive: true,
+    waitForLockMs: 30_000,
     autoContinue: true,
   });
 }

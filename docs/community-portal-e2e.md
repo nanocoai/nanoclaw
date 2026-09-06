@@ -68,8 +68,7 @@ channel skill with the captured agent name, operator role and owner ID. There ar
 no further input prompts in the worker. Foreground setup and the worker serialize
 checkout changes using a transactional SQLite process lock.
 
-Pending jobs resume on the next `pnpm setup:auto` or setup-step invocation after a
-VM restart. To resume directly, use `pnpm exec tsx setup/portal.ts --stage slack`.
+The host service keeps its cell connection open using the saved installation, even when setup and the browser are closed. It supervises the saved worker and resumes pending work automatically after a service or VM restart. Approval checks stay in the existing worker. To retry a failed job explicitly, use `pnpm exec tsx setup/portal.ts --stage slack`.
 A failed build or wiring step is shown in the portal; retry that Slack step after
 fixing the reported setup issue. Reuse the saved state. After the seven-day
 approval window expires, review/revoke the old app and start a new installation;
@@ -90,6 +89,10 @@ updating the branch, exit any older setup run and recheck with
 
 Before activation, Maybe later, the close button and Escape now skip the waiting CLI step. A success modal can close without cancelling installation. Setup makes one later browser offer for missing Echo (before service start, including the actual image pull) and Slack (before verification, using the same background job). Existing choices and saved apps are reused; unavailable partners are skipped.
 
-The initial saved Slack job waits up to seven days and queues the welcome DM after approval, channel installation and owner wiring. Keep the VM and service running. Closing the terminal/browser is fine; a VM reboot requires a setup invocation to restart the saved job. Completion means the welcome handoff succeeded, not that Slack has acknowledged the agent reply.
+The initial saved Slack job waits up to seven days and queues the welcome DM after approval, channel installation and owner wiring. Keep the VM and service running. Closing the terminal/browser is fine; after a VM reboot the host service automatically resumes the saved job. Completion means the welcome handoff succeeded, not that Slack has acknowledged the agent reply.
 
 Every newly created agent app may need separate admin approval. Agents created later from Slack currently wait five minutes, then park the saved app. After a later approval, ask the existing agent in Slack to “finish setting up <name>”; the app is reused. That runtime path does not yet share the initial installer’s durable background worker.
+
+## Device presence
+
+Devices shows the running host as online while its authenticated cell connection is live. The host sends a heartbeat every 20 seconds; a silent connection expires after 65 seconds. Network recovery and ticket renewal reuse the same device and installation IDs. Foreground setup can hold the private journal while the host remains connected; it does not require stopping the service. Older device registrations are retained.

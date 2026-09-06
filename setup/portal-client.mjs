@@ -3219,7 +3219,7 @@ var require_stream = __commonJS({
       };
       duplex._final = function(callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open2() {
+          ws.once("open", function open3() {
             duplex._final(callback);
           });
           return;
@@ -3240,7 +3240,7 @@ var require_stream = __commonJS({
       };
       duplex._write = function(chunk, encoding, callback) {
         if (ws.readyState === ws.CONNECTING) {
-          ws.once("open", function open2() {
+          ws.once("open", function open3() {
             duplex._write(chunk, encoding, callback);
           });
           return;
@@ -3702,10 +3702,107 @@ var require_websocket_server = __commonJS({
 });
 
 // device/client.mjs
-import { generateKeyPairSync, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, open } from "node:fs/promises";
-import { readFileSync, unlinkSync } from "node:fs";
+import { generateKeyPairSync, randomUUID as randomUUID2 } from "node:crypto";
+import { mkdir as mkdir2, readFile, rename, open as open2 } from "node:fs/promises";
+import path2 from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+
+// service/security.mjs
+import { createHash, randomBytes, createPrivateKey, createPublicKey, sign, verify, timingSafeEqual } from "node:crypto";
+var random = (bytes = 24) => randomBytes(bytes).toString("base64url");
+var hash = (value) => createHash("sha256").update(value).digest("hex");
+function proofText(method, path3, body, timestamp, nonce) {
+  return ["nanoclaw-perks-device-v1", method, path3, hash(body), timestamp, nonce].join("\n");
+}
+function deviceProof(privateKey, method, path3, body = "") {
+  const timestamp = String(Date.now()), nonce = random(16);
+  const signature = sign("sha256", Buffer.from(proofText(method, path3, body, timestamp, nonce)), {
+    key: createPrivateKey({ key: privateKey, format: "jwk" }),
+    dsaEncoding: "ieee-p1363"
+  }).toString("base64url");
+  return { "x-device-time": timestamp, "x-device-nonce": nonce, "x-device-proof": signature };
+}
+
+// device/process-lock.mjs
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { mkdir, open } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
+function processIdentity(pid) {
+  try {
+    if (process.platform === "linux") {
+      const boot = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      return `${boot}:${stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]}`;
+    }
+    return execFileSync("ps", ["-p", String(pid), "-o", "lstart="], {
+      encoding: "utf8",
+      env: { ...process.env, TZ: "UTC", LC_ALL: "C" },
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim() || void 0;
+  } catch {
+    return void 0;
+  }
+}
+function ownerAlive(owner) {
+  try {
+    process.kill(owner.pid, 0);
+  } catch (error) {
+    if (error.code === "ESRCH") return false;
+  }
+  const current = processIdentity(owner.pid);
+  return !current || !owner.started || current === owner.started;
+}
+function processLockOwner(file) {
+  let db;
+  try {
+    db = new DatabaseSync(file, { readOnly: true });
+    const owner = db.prepare("SELECT pid, nonce, started FROM owner WHERE id = 1").get();
+    return owner && ownerAlive(owner) ? owner : void 0;
+  } catch {
+    return void 0;
+  } finally {
+    db?.close();
+  }
+}
+async function processLock(file) {
+  await mkdir(path.dirname(file), { recursive: true, mode: 448 });
+  const fd = await open(file, "a", 384);
+  await fd.close();
+  const db = new DatabaseSync(file);
+  db.exec("PRAGMA busy_timeout = 5000");
+  const owner = { pid: process.pid, nonce: randomUUID(), started: processIdentity(process.pid) || "" };
+  try {
+    db.exec("CREATE TABLE IF NOT EXISTS owner (id INTEGER PRIMARY KEY CHECK (id = 1), pid INTEGER NOT NULL, nonce TEXT NOT NULL, started TEXT NOT NULL)");
+    db.exec("BEGIN IMMEDIATE");
+    const previous = db.prepare("SELECT pid, nonce, started FROM owner WHERE id = 1").get();
+    if (previous && ownerAlive(previous)) {
+      db.exec("COMMIT");
+      db.close();
+      return null;
+    }
+    db.prepare("INSERT OR REPLACE INTO owner VALUES (1, ?, ?, ?)").run(owner.pid, owner.nonce, owner.started);
+    db.exec("COMMIT");
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      try {
+        db.prepare("DELETE FROM owner WHERE id = 1 AND pid = ? AND nonce = ?").run(owner.pid, owner.nonce);
+      } finally {
+        db.close();
+        process.removeListener("exit", release);
+      }
+    };
+    process.once("exit", release);
+    return release;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+}
 
 // node_modules/ws/wrapper.mjs
 var import_stream = __toESM(require_stream(), 1);
@@ -3717,21 +3814,93 @@ var import_subprotocol = __toESM(require_subprotocol(), 1);
 var import_websocket = __toESM(require_websocket(), 1);
 var import_websocket_server = __toESM(require_websocket_server(), 1);
 
-// service/security.mjs
-import { createHash, randomBytes, createPrivateKey, createPublicKey, sign, verify, timingSafeEqual } from "node:crypto";
-var random = (bytes = 24) => randomBytes(bytes).toString("base64url");
-var hash = (value) => createHash("sha256").update(value).digest("hex");
-function proofText(method, path2, body, timestamp, nonce) {
-  return ["nanoclaw-perks-device-v1", method, path2, hash(body), timestamp, nonce].join("\n");
-}
-function deviceProof(privateKey, method, path2, body = "") {
-  const timestamp = String(Date.now()), nonce = random(16);
-  const signature = sign("sha256", Buffer.from(proofText(method, path2, body, timestamp, nonce)), {
-    key: createPrivateKey({ key: privateKey, format: "jwk" }),
-    dsaEncoding: "ieee-p1363"
-  }).toString("base64url");
-  return { "x-device-time": timestamp, "x-device-nonce": nonce, "x-device-proof": signature };
-}
+// device/connection.mjs
+var CellConnection = class {
+  constructor({ origin, getTicket, onChange = () => {
+  }, log = () => {
+  }, heartbeatMs = 2e4, timeoutMs = 6e4, retryMs = 1e3, maxRetryMs = 3e4 }) {
+    Object.assign(this, { origin, getTicket, onChange, log, heartbeatMs, timeoutMs, retryMs, maxRetryMs });
+    this.stopped = true;
+    this.connected = false;
+    this.attempt = 0;
+  }
+  start() {
+    if (!this.stopped) return;
+    this.stopped = false;
+    this.abort = new AbortController();
+    this.heartbeat = setInterval(() => {
+      const socket = this.socket;
+      if (socket?.readyState !== import_websocket.default.OPEN) return;
+      if (Date.now() - this.lastPong > this.timeoutMs) {
+        socket.terminate();
+        return;
+      }
+      socket.send("ping");
+    }, this.heartbeatMs);
+    void this.connect();
+  }
+  async connect() {
+    if (this.stopped || this.connecting || this.socket) return;
+    this.connecting = true;
+    try {
+      const { ticket, socketUrl } = await this.getTicket(this.abort.signal);
+      if (this.stopped) return;
+      const url = new URL(socketUrl);
+      if (url.origin !== this.origin.replace(/^http/, "ws") || url.pathname !== "/cell/link" || url.search || url.hash || url.username || url.password) throw new Error("invalid_cell_url");
+      const socket = this.socket = new import_websocket.default(url, ["nc-cell", `ticket.${ticket}`], { handshakeTimeout: 1e4, maxPayload: 512e3, followRedirects: false });
+      socket.on("open", () => {
+        if (this.stopped) {
+          socket.terminate();
+          return;
+        }
+        this.connected = true;
+        this.attempt = 0;
+        this.lastPong = Date.now();
+        this.log({ event: "connected" });
+        this.onChange();
+      });
+      socket.on("message", (raw) => {
+        try {
+          const message = JSON.parse(String(raw));
+          if (message.type === "pong") this.lastPong = Date.now();
+          else if (["snapshot", "perks.changed"].includes(message.type)) this.onChange();
+        } catch {
+        }
+      });
+      socket.on("error", () => {
+      });
+      socket.once("close", () => {
+        if (this.socket !== socket) return;
+        this.socket = void 0;
+        if (this.connected) this.log({ event: "disconnected" });
+        this.connected = false;
+        this.retry();
+      });
+    } catch (error) {
+      if (!this.stopped) {
+        this.log({ event: "connection_retry", code: error.code || "unavailable" });
+        this.retry();
+      }
+    } finally {
+      this.connecting = false;
+    }
+  }
+  retry() {
+    if (this.stopped) return;
+    clearTimeout(this.reconnect);
+    const delay = Math.min(this.maxRetryMs, this.retryMs * 2 ** Math.min(this.attempt++, 5));
+    this.reconnect = setTimeout(() => void this.connect(), delay + Math.random() * delay / 4);
+  }
+  stop() {
+    this.stopped = true;
+    this.abort?.abort();
+    clearInterval(this.heartbeat);
+    clearTimeout(this.reconnect);
+    this.socket?.terminate();
+    this.socket = void 0;
+    this.connected = false;
+  }
+};
 
 // device/client.mjs
 async function readJson(file, fallback = null) {
@@ -3743,9 +3912,9 @@ async function readJson(file, fallback = null) {
   }
 }
 async function writePrivate(file, value) {
-  await mkdir(path.dirname(file), { recursive: true, mode: 448 });
+  await mkdir2(path2.dirname(file), { recursive: true, mode: 448 });
   const temp = `${file}.${random(8)}.tmp`;
-  const output = await open(temp, "wx", 384);
+  const output = await open2(temp, "wx", 384);
   try {
     await output.writeFile(JSON.stringify(value, null, 2));
     await output.sync();
@@ -3753,7 +3922,7 @@ async function writePrivate(file, value) {
     await output.close();
   }
   await rename(temp, file);
-  const directory = await open(path.dirname(file), "r");
+  const directory = await open2(path2.dirname(file), "r");
   try {
     await directory.sync();
   } finally {
@@ -3762,47 +3931,42 @@ async function writePrivate(file, value) {
 }
 var DeviceClient = class {
   constructor({ origin, token, file, label = "NanoClaw installation", log = () => {
-  }, exclusive = false }) {
+  }, exclusive = false, waitForLockMs = 0, signal, existingOnly = false }) {
     const url = new URL(origin);
     if (url.username || url.password || url.search || url.hash || url.pathname !== "/" || url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) throw new Error("Portal origin must use HTTPS, except on loopback.");
-    Object.assign(this, { origin: url.origin, token, file, label, log, exclusive });
+    Object.assign(this, { origin: url.origin, token, file, label, log, exclusive, waitForLockMs, signal, existingOnly });
   }
   async initialize() {
     if (this.exclusive) {
-      await mkdir(path.dirname(this.file), { recursive: true, mode: 448 });
-      const lockFile = `${this.file}.lock`, owner = JSON.stringify({ pid: process.pid, nonce: random(16) });
-      let lock;
-      try {
-        lock = await open(lockFile, "wx", 384);
-      } catch (error) {
-        if (error.code !== "EEXIST") throw error;
-        throw new Error(`Another setup or receiver owns ${lockFile}. Stop it before continuing. After a forced shutdown, verify the recorded PID has exited before removing that lock file.`);
-      }
-      try {
-        await lock.writeFile(owner);
-        await lock.sync();
-      } finally {
-        await lock.close();
-      }
-      this.releaseLock = () => {
-        try {
-          if (readFileSync(lockFile, "utf8") === owner) unlinkSync(lockFile);
-        } catch (error) {
-          if (error.code !== "ENOENT") this.log({ event: "lock_cleanup_failed" });
+      const deadline = Date.now() + this.waitForLockMs;
+      do {
+        const legacy = await readJson(`${this.file}.lock`);
+        let legacyLive = false;
+        if (legacy?.pid) {
+          try {
+            process.kill(legacy.pid, 0);
+            legacyLive = true;
+          } catch (e) {
+            legacyLive = e.code !== "ESRCH";
+          }
         }
-      };
-      process.once("exit", this.releaseLock);
+        if (!legacyLive) this.releaseLock = await processLock(`${this.file}.owner.sqlite`);
+        if (this.releaseLock) break;
+        if (Date.now() >= deadline) throw Object.assign(new Error("Another setup or receiver owns this installation journal. Retry after it finishes."), { code: "journal_busy" });
+        await sleep(100, void 0, { signal: this.signal });
+      } while (true);
     }
     try {
       this.local = await readJson(this.file);
       if (!this.local) {
+        if (this.existingOnly) throw Object.assign(new Error("Installation is not signed in."), { code: "installation_required" });
         const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
         this.local = { privateKey: privateKey.export({ format: "jwk" }), publicKey: publicKey.export({ format: "jwk" }), credentials: {}, operations: {} };
         await this.save();
       }
       if (this.local.origin && this.local.origin !== this.origin) throw new Error("This installation belongs to a different portal. Use a separate state file.");
       this.local.origin = this.origin;
-      this.local.installId ||= randomUUID();
+      this.local.installId ||= randomUUID2();
       if (!this.local.wrappingPrivateKey) {
         const pair = generateKeyPairSync("x25519");
         this.local.wrappingPrivateKey = pair.privateKey.export({ format: "jwk" });
@@ -3819,9 +3983,9 @@ var DeviceClient = class {
   save() {
     return writePrivate(this.file, this.local);
   }
-  async request(method, route, body) {
+  async request(method, route, body, signal = this.signal) {
     const raw = body === void 0 ? "" : JSON.stringify(body);
-    const response = await fetch(`${this.origin}${route}`, { method, headers: { ...this.token ? { authorization: `Bearer ${this.token}` } : {}, "content-type": "application/json", ...deviceProof(this.local.privateKey, method, route, raw) }, ...raw ? { body: raw } : {}, signal: AbortSignal.timeout(25e3), redirect: "error" });
+    const response = await fetch(`${this.origin}${route}`, { method, headers: { ...this.token ? { authorization: `Bearer ${this.token}` } : {}, "content-type": "application/json", ...deviceProof(this.local.privateKey, method, route, raw) }, ...raw ? { body: raw } : {}, signal: AbortSignal.any([AbortSignal.timeout(25e3), ...signal ? [signal] : []]), redirect: "error" });
     const result = await response.json();
     if (!response.ok) {
       const error = new Error(result.message || result.error);
@@ -3878,36 +4042,18 @@ var DeviceClient = class {
       }
       await this.request("POST", `/api/v1/grants/${grant.perk}/ack`, { operationId: credential.operationId, keyId: credential.keyId });
     }
-  }
-  async connect() {
-    if (this.stopped) return;
-    try {
-      const { ticket, socketUrl } = await this.request("POST", "/api/v1/cell-ticket", {});
-      const socket = this.socket = new import_websocket.default(socketUrl, ["nc-cell", `ticket.${ticket}`]);
-      socket.on("open", () => {
-        this.log({ event: "connected", deviceId: this.local.deviceId });
-        void this.reconcile().catch((e) => this.log({ event: "retry", code: e.code || "unavailable" }));
-      });
-      socket.on("message", (raw) => {
-        try {
-          const message = JSON.parse(String(raw));
-          if (["snapshot", "perks.changed"].includes(message.type)) void this.reconcile().catch((e) => this.log({ event: "retry", code: e.code || "unavailable" }));
-        } catch {
-        }
-      });
-      socket.on("error", () => {
-      });
-      socket.once("close", () => {
-        if (!this.stopped) this.reconnectTimer = setTimeout(() => void this.connect(), 1500);
-      });
-    } catch (error) {
-      this.log({ event: "retry", code: error.code || "unavailable" });
-      if (!this.stopped) this.reconnectTimer = setTimeout(() => void this.connect(), 3e3);
-    }
+    return state;
   }
   async run() {
+    if (this.connection) return;
     this.stopped = false;
-    await this.connect();
+    this.connection = new CellConnection({
+      origin: this.origin,
+      getTicket: (signal) => this.request("POST", "/api/v1/cell-ticket", {}, signal),
+      log: this.log,
+      onChange: () => void this.reconcile().catch((e) => this.log({ event: "retry", code: e.code || "unavailable" }))
+    });
+    this.connection.start();
     this.pollTimer = setInterval(() => void this.reconcile().catch((e) => {
       if (["installation_required", "installation_revoked", "invalid_token"].includes(e.code)) {
         this.local.credentials = {};
@@ -3915,21 +4061,16 @@ var DeviceClient = class {
       }
       this.log({ event: "retry", code: e.code || "unavailable" });
     }), 5e3);
-    this.pingTimer = setInterval(() => {
-      if (this.socket?.readyState === 1) this.socket.send("ping");
-    }, 2e4);
   }
   async stop() {
     this.stopped = true;
     clearInterval(this.pollTimer);
-    clearInterval(this.pingTimer);
-    clearTimeout(this.reconnectTimer);
-    this.socket?.close();
+    this.connection?.stop();
+    this.connection = null;
     if (this.syncing) await this.syncing.catch(() => {
     });
     if (this.releaseLock) {
       this.releaseLock();
-      process.removeListener("exit", this.releaseLock);
       this.releaseLock = null;
     }
   }
@@ -4052,6 +4193,11 @@ var SetupClient = class extends DeviceClient {
   }
 };
 export {
+  CellConnection,
+  DeviceClient,
   SetupClient,
+  processLock,
+  processLockOwner,
+  readJson,
   writePrivate
 };
