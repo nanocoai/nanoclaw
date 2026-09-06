@@ -117,6 +117,11 @@ export interface RoutingContext {
    *  delivers from a task session; final-text `<message to>` blocks are inert
    *  and the final text auto-appends to the series run log. */
   taskRun: boolean;
+  /** Series join key of the triggering task row (series_id, falling back to
+   *  the row id for a brand-new series). Stamped into task_log rows so the
+   *  host can append the run log even when the task fired outside a
+   *  system:tasks:<series> session (#3301). Null for non-task batches. */
+  taskSeriesId: string | null;
 }
 
 /**
@@ -129,6 +134,7 @@ export interface RoutingContext {
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
   const first = messages.find((m) => !isSessionEcho(m)) ?? messages[0];
+  const firstTask = messages.find((m) => m.kind === 'task');
   return {
     platformId: first?.platform_id ?? null,
     channelType: first?.channel_type ?? null,
@@ -139,6 +145,13 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     taskRun:
       messages.some((m) => m.kind === 'task') &&
       messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
+    // Series join key for the run log. A task row fired in a CHAT session
+    // (legacy pre-2.1.54 series, or register's onboarding write) has no
+    // system:tasks:<series> thread id for the host to recover the series
+    // from — stamping it here keeps the run log reaching tasks/<id>.md
+    // regardless of where the row fired (#3301). series_id equals the row id
+    // for a brand-new series, so the fallback covers first fires too.
+    taskSeriesId: firstTask ? (firstTask.series_id ?? firstTask.id) : null,
   };
 }
 

@@ -348,15 +348,28 @@ async function deliverMessage(
   // the only delivery path from a task session). Append to the series log,
   // never deliver. The caller marks it delivered so it isn't retried.
   if (msg.kind === 'task_log') {
-    if (session.messaging_group_id === null && isTaskThread(session.thread_id) && session.thread_id) {
-      const series = session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
+    // Series resolution, in order of authority: the session's own
+    // system:tasks:<series> thread id, then the series the runner stamped
+    // into the row (a task that fired in a CHAT session — legacy pre-2.1.54
+    // series, or register's onboarding write — has no task thread id, and
+    // dropping its log recorded runs as if they never happened, #3301).
+    const series =
+      session.messaging_group_id === null && isTaskThread(session.thread_id) && session.thread_id
+        ? session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length)
+        : typeof content.series === 'string' && content.series
+          ? content.series
+          : null;
+    if (series) {
       try {
         await appendRunLog(session.agent_group_id, series, typeof content.text === 'string' ? content.text : '');
       } catch (err) {
-        log.warn('Failed to append task run log', { id: msg.id, sessionId: session.id, err });
+        log.warn('Failed to append task run log', { id: msg.id, sessionId: session.id, series, err });
       }
     } else {
-      log.warn('task_log row outside a task session — ignoring', { id: msg.id, sessionId: session.id });
+      log.warn('task_log row outside a task session and without a series stamp — ignoring', {
+        id: msg.id,
+        sessionId: session.id,
+      });
     }
     return;
   }

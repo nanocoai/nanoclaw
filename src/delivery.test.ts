@@ -599,6 +599,83 @@ describe('deliverSessionMessages — task_log rows (one-door task delivery)', ()
     const delivered = await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds());
     expect(delivered.has('log-1')).toBe(true);
   });
+
+  it('falls back to the runner-stamped series when the row fired in a chat session (#3301)', async () => {
+    // Legacy pre-2.1.54 series (and register's onboarding write) fire task
+    // rows inside ordinary chat sessions, whose thread id carries no series.
+    // The runner stamps `series` into the row content; the host must use it
+    // instead of dropping the log.
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    const db = new Database(outboundDbPath('ag-1', session.id));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, content)
+       VALUES ('log-2', datetime('now'), 'task_log', ?)`,
+    ).run(JSON.stringify({ text: 'reminder sent', series: 'water-plants-9f3c' }));
+    db.close();
+
+    const calls: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_c, _p, _t, _k, content) {
+        calls.push(content);
+        return 'pm';
+      },
+    });
+    await deliverSessionMessages(session);
+
+    expect(calls).toHaveLength(0); // still never a channel delivery
+    const logFile = `${TEST_DIR}/groups/test-agent/tasks/water-plants-9f3c.md`;
+    expect(fs.existsSync(logFile)).toBe(true);
+    expect(fs.readFileSync(logFile, 'utf8')).toContain('reminder sent');
+  });
+
+  it('still ignores a task_log row with neither a task session nor a series stamp', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    const db = new Database(outboundDbPath('ag-1', session.id));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, content)
+       VALUES ('log-3', datetime('now'), 'task_log', ?)`,
+    ).run(JSON.stringify({ text: 'orphan line' }));
+    db.close();
+
+    setDeliveryAdapter({
+      async deliver() {
+        return 'pm';
+      },
+    });
+    await deliverSessionMessages(session);
+
+    const tasksDir = `${TEST_DIR}/groups/test-agent/tasks`;
+    const files = fs.existsSync(tasksDir) ? fs.readdirSync(tasksDir) : [];
+    expect(files.filter((f) => fs.readFileSync(`${tasksDir}/${f}`, 'utf8').includes('orphan line'))).toHaveLength(0);
+  });
+
+  it('rejects a series stamp that fails the filename charset guard', async () => {
+    // appendRunLog's charset guard is the security boundary (path traversal);
+    // a malicious or corrupt stamp must not write outside tasks/.
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+
+    const db = new Database(outboundDbPath('ag-1', session.id));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, content)
+       VALUES ('log-4', datetime('now'), 'task_log', ?)`,
+    ).run(JSON.stringify({ text: 'evil', series: '../../escape' }));
+    db.close();
+
+    setDeliveryAdapter({
+      async deliver() {
+        return 'pm';
+      },
+    });
+    await deliverSessionMessages(session); // must not throw
+
+    expect(fs.existsSync(`${TEST_DIR}/groups/escape.md`)).toBe(false);
+    expect(fs.existsSync(`${TEST_DIR}/escape.md`)).toBe(false);
+  });
 });
 
 describe('deliverSessionMessages — batch preview hooks', () => {
