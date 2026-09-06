@@ -176,6 +176,52 @@ check_build_tools() {
   log "Build tools: $HAS_BUILD_TOOLS"
 }
 
+# Fail-fast with actionable guidance when build tools are missing. pnpm
+# install compiles native modules (better-sqlite3) from source on platforms
+# without a cached prebuild — without gcc/make that fails mid-install with
+# a confusing "node-gyp: ENOENT" error and leaves node_modules half-written.
+# Set NANOCLAW_SKIP_BUILD_TOOLS=1 to bypass this check (for environments
+# where a prebuilt binary is expected to resolve the native dependency).
+require_build_tools_or_exit() {
+  if [ "$HAS_BUILD_TOOLS" = "true" ]; then
+    return
+  fi
+
+  if [ "${NANOCLAW_SKIP_BUILD_TOOLS:-}" = "1" ]; then
+    log "NANOCLAW_SKIP_BUILD_TOOLS=1 — proceeding despite missing build tools"
+    return
+  fi
+
+  echo "" >&2
+  echo "ERROR: build tools not found." >&2
+  case "$PLATFORM" in
+    linux)
+      echo "       gcc and make are required to compile native dependencies (better-sqlite3)." >&2
+      echo "" >&2
+      echo "       Debian/Ubuntu:   sudo apt-get install -y build-essential" >&2
+      echo "       Fedora/RHEL:     sudo dnf groupinstall -y \"Development Tools\"" >&2
+      echo "       Arch:            sudo pacman -S --noconfirm base-devel" >&2
+      echo "       Alpine:          sudo apk add build-base" >&2
+      ;;
+    macos)
+      echo "       Xcode Command Line Tools are required." >&2
+      echo "" >&2
+      echo "       Run: xcode-select --install" >&2
+      ;;
+    *)
+      echo "       A C toolchain (cc / make) is required." >&2
+      ;;
+  esac
+  echo "" >&2
+  echo "       Install the appropriate package, then re-run setup.sh." >&2
+  echo "       To bypass this check (e.g. when a prebuilt binary is available)," >&2
+  echo "       re-run with NANOCLAW_SKIP_BUILD_TOOLS=1 ./setup.sh" >&2
+  echo "" >&2
+
+  log "Exiting: build tools missing (NANOCLAW_SKIP_BUILD_TOOLS not set)"
+  exit 3
+}
+
 # --- Main ---
 
 log "=== Bootstrap started ==="
@@ -200,8 +246,9 @@ if [ "$NODE_OK" = "false" ]; then
     log "install-node.sh failed"
   fi
 fi
-install_deps
 check_build_tools
+require_build_tools_or_exit
+install_deps
 
 # Emit status block
 STATUS="success"
