@@ -38,7 +38,7 @@ async function receive(job: SlackJob, body: object): Promise<Delivery> {
     redirect: 'error',
   });
   if (!response.ok) throw Object.assign(new Error('Slack installation request failed.'), { status: response.status });
-  return response.json();
+  return response.json() as Promise<Delivery>;
 }
 async function install(job: SlackJob): Promise<void> {
   const { runChannelSkill } = await import('./channels/run-channel-skill.js');

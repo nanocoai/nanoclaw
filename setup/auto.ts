@@ -33,7 +33,7 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { BACK_TO_CHANNEL_SELECTION } from './lib/back-nav.js';
-import { withSetupLock, launchSlackJob, readSlackJob } from './slack-job.js';
+import { withSetupLock, launchSlackJob, readSlackJob, slackJobStatus } from './slack-job.js';
 // The pre-step-aware entry point consults each channel's registered wizard
 // extensions (setup/channels/companions.ts) before running its install skill
 // — the wizard itself stays free of channel-specific imports.
@@ -714,11 +714,14 @@ async function main(): Promise<void> {
   // premature "your assistant is saying hi" (no welcome DM exists yet).
   let wiringPending = false;
 
-  if (portalEnabled() && !skip.has('perks')) { await runPerksPortal(); skip.add('perks'); }
+  if (portalEnabled() && !skip.has('perks')) {
+    await runPerksPortal();
+    skip.add('perks');
+  }
   if (!skip.has('verify')) {
     const res = await runQuietStep('verify', {
       running: 'Making sure everything works together…',
-      done: "Everything's connected.",
+      done: 'NanoClaw is running.',
       failed: 'A few things still need your attention.',
     });
     if (!res.ok) {
@@ -741,7 +744,17 @@ async function main(): Promise<void> {
           ),
         );
       }
-      if (!res.terminal?.fields.CONFIGURED_CHANNELS) {
+      const slackInstall = res.terminal?.fields.SLACK_INSTALL;
+      if (slackInstall === 'failed') {
+        notes.push(
+          '• Slack installation needs attention. Check its progress in the portal, then resume with `pnpm exec tsx setup/portal.ts --stage slack`.',
+        );
+      } else if (slackInstall === 'expired') {
+        notes.push('• Slack approval expired. Review the existing app in the portal before restarting Slack setup.');
+      } else if (
+        !res.terminal?.fields.CONFIGURED_CHANNELS &&
+        !['awaiting_approval', 'installing'].includes(slackInstall ?? '')
+      ) {
         notes.push(
           '• Want to chat from your phone? Add a messaging app with `/add-telegram`, `/add-slack`, or `/add-discord`.',
         );
@@ -791,13 +804,27 @@ async function main(): Promise<void> {
     'Heads up',
   );
 
+  const slackStatus = slackJobStatus(await readSlackJob());
+  if (slackStatus === 'failed' || slackStatus === 'expired') {
+    note(
+      slackStatus === 'expired'
+        ? 'Slack approval expired. Review the existing app in the portal before restarting Slack setup.'
+        : 'Slack installation needs attention. Check its progress in the portal, then resume with `pnpm exec tsx setup/portal.ts --stage slack`.',
+      'Slack setup',
+    );
+    p.outro(k.yellow('NanoClaw is running. Slack needs attention.'));
+    return;
+  }
+
   setupLog.complete(Date.now() - RUN_START);
   phEmit('setup_completed', { duration_ms: Date.now() - RUN_START });
 
   const dmTarget = channelDmLabel(channelChoice);
-  const slackJob = channelChoice === 'slack' ? await readSlackJob() : null;
-  if (slackJob && slackJob.status !== 'complete') {
-    note('Slack is finishing in the background. Follow its progress in the portal; you can use terminal chat now.', 'Slack setup');
+  if (slackStatus === 'awaiting_approval' || slackStatus === 'installing') {
+    note(
+      'Slack is finishing in the background. Follow its progress in the portal; you can use terminal chat now.',
+      'Slack setup',
+    );
     p.outro(k.green('NanoClaw is ready. Slack will connect when installation finishes.'));
   } else if (wiringPending) {
     // No welcome DM exists yet — the one remaining action is the last thing
@@ -1094,9 +1121,7 @@ async function chooseTemplate(templates: TemplateEntry[]): Promise<string | unde
 }
 
 type TemplateAgentOutcome = 'none' | 'channel-target' | 'restamped';
-type TemplateSetupOperation =
-  | TemplateOperation
-  | { kind: 'connect'; agentGroupId: string };
+type TemplateSetupOperation = TemplateOperation | { kind: 'connect'; agentGroupId: string };
 
 async function installSelectedTemplateAgent(provider?: string): Promise<TemplateAgentOutcome> {
   const ref = process.env.NANOCLAW_TEMPLATE_PATH?.trim();
@@ -1144,9 +1169,7 @@ async function installSelectedTemplateAgent(provider?: string): Promise<Template
     }
 
     const name =
-      operation.kind === 'create' && agents.length > 0
-        ? await askNewTemplateAgentName(agents, presetName)
-        : presetName;
+      operation.kind === 'create' && agents.length > 0 ? await askNewTemplateAgentName(agents, presetName) : presetName;
 
     p.log.step(
       brandBody(
@@ -1242,11 +1265,13 @@ async function chooseTemplateOperation(
   const options = agents.flatMap((agent) => [
     ...(agent.isWired
       ? []
-      : [{
-          value: { kind: 'connect', agentGroupId: agent.id } as const,
-          label: `Connect "${agent.name}" to a channel`,
-          hint: `groups/${agent.folder} · not connected`,
-        }]),
+      : [
+          {
+            value: { kind: 'connect', agentGroupId: agent.id } as const,
+            label: `Connect "${agent.name}" to a channel`,
+            hint: `groups/${agent.folder} · not connected`,
+          },
+        ]),
     {
       value: { kind: 'restamp', agentGroupId: agent.id } as const,
       label: `Update "${agent.name}" in place`,
@@ -1271,10 +1296,7 @@ async function chooseTemplateOperation(
   return choice.kind === 'cancel' ? undefined : choice;
 }
 
-async function askNewTemplateAgentName(
-  agents: readonly AgentGroup[],
-  initialValue?: string,
-): Promise<string> {
+async function askNewTemplateAgentName(agents: readonly AgentGroup[], initialValue?: string): Promise<string> {
   const answer = ensureAnswer(
     await p.text({
       message: 'Name the new agent',
@@ -1326,7 +1348,10 @@ async function chooseImageSource(): Promise<void> {
   // whose install then has no image to pull — so don't ask a question whose
   // good answer cannot be honoured.
   if (!readAgentImagePin()) return;
-  if (portalEnabled()) { await runImagePortal(); return; }
+  if (portalEnabled()) {
+    await runImagePortal();
+    return;
+  }
 
   p.log.message(
     brandBody(
@@ -2037,7 +2062,10 @@ function initProgressionLog(): void {
   });
 }
 
-withSetupLock(async () => { await launchSlackJob(); await main(); }).catch((err) => {
+withSetupLock(async () => {
+  await launchSlackJob();
+  await main();
+}).catch((err) => {
   p.log.error(err instanceof Error ? err.message : String(err));
   p.cancel('Setup aborted.');
   process.exit(1);

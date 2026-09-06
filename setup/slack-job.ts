@@ -39,6 +39,14 @@ export async function readSlackJob(root = process.cwd()): Promise<SlackJob | nul
     throw e;
   }
 }
+
+/** Public progress only; an abandoned or expired job must not look active. */
+export function slackJobStatus(job: SlackJob | null, now = Date.now()): SlackJob['status'] | undefined {
+  if (!job) return undefined;
+  if (!['awaiting_approval', 'installing', 'complete', 'failed', 'expired'].includes(job.status)) return 'failed';
+  if (['awaiting_approval', 'installing'].includes(job.status) && !(Date.parse(job.expiresAt) > now)) return 'expired';
+  return job.status;
+}
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);

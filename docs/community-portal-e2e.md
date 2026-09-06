@@ -78,3 +78,10 @@ the worker does not silently create a replacement.
 Local automated checks cover the real detached process, a SIGKILL after credential
 persistence, replayed acknowledgement, competing workers and the checkout lock.
 Slack approval and message delivery still require the real-workspace walkthrough.
+
+While approval is pending, final verification reports success for the running
+NanoClaw service with `SLACK_INSTALL: awaiting_approval` (or `installing`) and
+`WIRING: pending_slack_install`. The lack of Slack credentials or a wired group
+at that point is expected. Failed or expired jobs still need attention. After
+updating the branch, exit any older setup run and recheck with
+`pnpm exec tsx setup/index.ts --step verify`; it also resumes the saved worker.
