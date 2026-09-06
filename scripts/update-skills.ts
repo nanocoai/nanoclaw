@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 
 import { applySkill, fullyApplied, type DependencyCommandRequest } from './skill-apply.js';
 import { parseDirectives } from './skill-directives.js';
+import { pinnedBunVersion } from './provider-contract-verifier.js';
 
 export type InstalledSkillKind = 'channel' | 'provider';
 
@@ -49,13 +50,6 @@ function commandAvailable(command: string, cwd: string): boolean {
   } catch {
     return false;
   }
-}
-
-function pinnedBunVersion(root: string): string {
-  const dockerfile = fs.readFileSync(path.join(root, 'container/Dockerfile'), 'utf8');
-  const match = dockerfile.match(/^ARG BUN_VERSION=([^\s#]+)$/m);
-  if (!match) throw new Error('container/Dockerfile does not declare an exact BUN_VERSION');
-  return match[1];
 }
 
 export function portableDependencyCommand(root: string, bunOnHost: boolean, request: DependencyCommandRequest): string {

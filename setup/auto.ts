@@ -47,6 +47,11 @@ import { runInheritScript } from './lib/inherit-script.js';
 import { pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
 import { applyProviderSkill } from './providers/install.js';
+import {
+  getInstallableProviderDescriptor,
+  listInstallableProviderDescriptors,
+  providerImagePolicy,
+} from './providers/skill-descriptor.js';
 // Provider payloads self-register their picker entry + auth on import.
 import './providers/index.js';
 import { brightSelect } from './lib/bright-select.js';
@@ -428,7 +433,8 @@ async function main(): Promise<void> {
     // machine builds. Settle it here: buildContainerImage() below refuses on a
     // pinned install, and reaching that refusal aborts setup with no way out
     // short of re-running it.
-    if (agentProvider !== 'claude' && readImageSource() === 'hardened') {
+    const providerDescriptor = getInstallableProviderDescriptor(agentProvider);
+    if (providerImagePolicy(agentProvider) === 'local-required' && readImageSource() === 'hardened') {
       const leave = ensureAnswer(
         await p.confirm({
           message: `${agentProvider} needs a sandbox image built on this machine. Stop using the pre-built one?`,
@@ -448,14 +454,15 @@ async function main(): Promise<void> {
     }
 
     let providerEntry = getSetupProvider(agentProvider);
-    if (agentProvider !== 'claude' && !providerEntry) {
+    if (!providerEntry) {
       // A non-claude provider picked from the hard-wired list isn't wired in
       // this install yet — install it by applying its `/add-<name>` SKILL.md
       // in-process via the directive engine (channel style, idempotent:
       // self-skips if already installed), rebuild the image (the container step
       // already ran, the CLI manifest just changed), then load the payload's
       // setup module so it self-registers.
-      const skillDir = `.claude/skills/add-${agentProvider}`;
+      if (!providerDescriptor) throw new Error(`No install descriptor for provider '${agentProvider}'`);
+      const skillDir = providerDescriptor.skillDir;
       const s = p.spinner();
       s.start(`Installing ${agentProvider}…`);
       let blockers: string[];
@@ -921,15 +928,6 @@ function sendChatMessage(message: string): Promise<void> {
 
 // ─── auth step (select → branch) ────────────────────────────────────────
 
-// Providers offered for install are hard-wired in trunk — an audited control
-// surface (no branch enumeration that anyone with write access could extend).
-// Codex is the only one offered here; opencode/ollama install via their own
-// /add-* skills. Each is installed by applying its `/add-<name>` SKILL.md
-// in-process via the directive engine.
-const INSTALLABLE_PROVIDERS = [
-  { value: 'codex', label: 'Codex', hint: 'OpenAI — ChatGPT subscription or API key' },
-] as const;
-
 // `pickSavedByPreviousRun`: the .env bridge promoted a pick persisted by a
 // PREVIOUS run. That pick is a default to confirm, not a decision to replay:
 // the operator may be rerunning precisely to change it. In-process presets
@@ -1087,9 +1085,7 @@ async function chooseTemplate(templates: TemplateEntry[]): Promise<string | unde
 }
 
 type TemplateAgentOutcome = 'none' | 'channel-target' | 'restamped';
-type TemplateSetupOperation =
-  | TemplateOperation
-  | { kind: 'connect'; agentGroupId: string };
+type TemplateSetupOperation = TemplateOperation | { kind: 'connect'; agentGroupId: string };
 
 async function installSelectedTemplateAgent(provider?: string): Promise<TemplateAgentOutcome> {
   const ref = process.env.NANOCLAW_TEMPLATE_PATH?.trim();
@@ -1137,9 +1133,7 @@ async function installSelectedTemplateAgent(provider?: string): Promise<Template
     }
 
     const name =
-      operation.kind === 'create' && agents.length > 0
-        ? await askNewTemplateAgentName(agents, presetName)
-        : presetName;
+      operation.kind === 'create' && agents.length > 0 ? await askNewTemplateAgentName(agents, presetName) : presetName;
 
     p.log.step(
       brandBody(
@@ -1235,11 +1229,13 @@ async function chooseTemplateOperation(
   const options = agents.flatMap((agent) => [
     ...(agent.isWired
       ? []
-      : [{
-          value: { kind: 'connect', agentGroupId: agent.id } as const,
-          label: `Connect "${agent.name}" to a channel`,
-          hint: `groups/${agent.folder} · not connected`,
-        }]),
+      : [
+          {
+            value: { kind: 'connect', agentGroupId: agent.id } as const,
+            label: `Connect "${agent.name}" to a channel`,
+            hint: `groups/${agent.folder} · not connected`,
+          },
+        ]),
     {
       value: { kind: 'restamp', agentGroupId: agent.id } as const,
       label: `Update "${agent.name}" in place`,
@@ -1264,10 +1260,7 @@ async function chooseTemplateOperation(
   return choice.kind === 'cancel' ? undefined : choice;
 }
 
-async function askNewTemplateAgentName(
-  agents: readonly AgentGroup[],
-  initialValue?: string,
-): Promise<string> {
+async function askNewTemplateAgentName(agents: readonly AgentGroup[], initialValue?: string): Promise<string> {
   const answer = ensureAnswer(
     await p.text({
       message: 'Name the new agent',
@@ -1305,7 +1298,7 @@ async function chooseImageSource(): Promise<void> {
     DEFAULT_AGENT_PROVIDER ||
     'claude'
   ).toLowerCase();
-  if (plannedProvider !== 'claude') {
+  if (providerImagePolicy(plannedProvider) === 'local-required') {
     p.log.info(
       brandBody(
         `Building the sandbox here — the pre-built image is Claude-only, and ${plannedProvider} needs an image of its own.`,
@@ -1411,9 +1404,7 @@ async function chooseImageSource(): Promise<void> {
 async function askAgentProviderChoice(): Promise<string> {
   const installed = listSetupProviders();
   const installedNames = new Set(installed.map((entry) => entry.value));
-  // Offer the hard-wired installable providers this install hasn't wired yet —
-  // selecting one applies its `/add-<name>` SKILL.md in-process.
-  const available = INSTALLABLE_PROVIDERS.filter((prov) => !installedNames.has(prov.value));
+  const available = listInstallableProviderDescriptors().filter((prov) => !installedNames.has(prov.value));
   // On a pinned install every non-Claude runtime forces a local rebuild — the
   // image bakes /app/node_modules and the CLI manifest, and each changes one.
   // Say so on the option rather than only at the confirm two steps later, so
@@ -1421,7 +1412,9 @@ async function askAgentProviderChoice(): Promise<string> {
   // this install pulls; on a local-build install it is not a trade-off.
   const pinned = readImageSource() === 'hardened';
   const note = (value: string, hint: string): string =>
-    pinned && value !== 'claude' ? `${hint} — ⚠ not in the pre-built image; needs a local build` : hint;
+    pinned && providerImagePolicy(value) === 'local-required'
+      ? `${hint} — ⚠ not in the pre-built image; needs a local build`
+      : hint;
 
   const options = [
     ...installed.map(({ value, label, hint }) => ({ value, label, hint: note(value, hint) })),

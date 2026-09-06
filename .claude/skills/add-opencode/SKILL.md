@@ -1,6 +1,12 @@
 ---
 name: add-opencode
 description: Use OpenCode as an agent provider. OpenRouter, OpenAI, Google, DeepSeek, etc. via OpenCode config — not the Anthropic Agent SDK. Per group via `ncl groups config update --provider opencode`; host passes OPENCODE_* and XDG mount when spawning containers.
+metadata:
+  nanoclaw-provider: opencode
+  nanoclaw-provider-label: OpenCode
+  nanoclaw-provider-hint: Open-source provider router
+  nanoclaw-provider-offered: 'false'
+  nanoclaw-provider-image: local-required
 ---
 
 # OpenCode agent provider
@@ -19,16 +25,20 @@ overwrite every skill-owned provider file with its canonical registry copy:
 ```nc:copy from-branch:providers
 src/providers/opencode.ts
 src/providers/opencode-registration.test.ts
+src/provider-contracts/opencode.ts
 container/agent-runner/src/providers/opencode.ts
 container/agent-runner/src/providers/mcp-to-opencode.ts
 container/agent-runner/src/providers/mcp-to-opencode.test.ts
 container/agent-runner/src/providers/opencode-registration.test.ts
+container/agent-runner/src/providers/opencode.conformance.test.ts
 container/agent-runner/src/providers/opencode.attachments.test.ts
 container/agent-runner/src/providers/opencode.compaction.test.ts
 container/agent-runner/src/providers/opencode.config.test.ts
 container/agent-runner/src/providers/opencode.factory.test.ts
+container/agent-runner/src/providers/opencode.empty-resume.test.ts
 container/agent-runner/src/providers/opencode.memory.test.ts
 container/agent-runner/src/providers/opencode.question.test.ts
+container/agent-runner/src/provider-contracts/opencode.ts
 ```
 
 (`cwd-shim.ts` and its test are deliberately **not** in this payload even though `mcp-to-opencode.ts` imports the shim: trunk ships and owns them — the default provider imports `cwd-shim.ts` — and every path listed here becomes a skill-owned file that removal deletes.)
@@ -38,6 +48,14 @@ container/agent-runner/src/providers/opencode.question.test.ts
 Each barrel gets one line appended at the end — skip if the line is already present.
 
 ```nc:append to:src/providers/index.ts
+import './opencode.js';
+```
+
+```nc:append to:src/provider-contracts/index.ts
+import './opencode.js';
+```
+
+```nc:append to:container/agent-runner/src/provider-contracts/index.ts
 import './opencode.js';
 ```
 
@@ -89,6 +107,10 @@ pnpm exec vitest run src/providers/opencode-registration.test.ts src/opencode-cl
 
 ```nc:run effect:test
 cd container/agent-runner && bun test src/providers/opencode-registration.test.ts
+```
+
+```nc:run effect:test
+pnpm exec tsx scripts/provider-contract-verifier.ts --required-declared opencode
 ```
 
 ```nc:run effect:build

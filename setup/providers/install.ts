@@ -28,8 +28,15 @@
  * failed: a provider install is fully deterministic with no prompts).
  */
 import { execSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 
 import { applySkill, type ApplyResult } from '../../scripts/skill-apply.js';
+import {
+  verifyProviderContracts,
+  type ProviderContractVerification,
+} from '../../scripts/provider-contract-verifier.js';
+import { parseProviderDescriptor } from './skill-descriptor.js';
 
 /** Commands the directive engine emits that the surrounding setup flow owns. */
 function isFlowOwnedCommand(cmd: string): boolean {
@@ -39,6 +46,7 @@ function isFlowOwnedCommand(cmd: string): boolean {
     /container\/build\.sh/.test(cmd) ||
     /\bvitest\b/.test(cmd) ||
     /\bbun\s+test\b/.test(cmd) ||
+    /provider-contract-verifier/.test(cmd) ||
     // The skill's auth step re-invokes `--step provider-auth` — running it from
     // inside the install would recurse. The flow runs runAuth itself.
     /provider-auth/.test(cmd)
@@ -51,6 +59,7 @@ export interface ProviderInstallResult {
   changed: boolean;
   /** Non-deterministic leftovers — non-empty means the install did not fully apply. */
   blockers: string[];
+  verification: ProviderContractVerification;
 }
 
 export async function applyProviderSkill(skillDir: string, projectRoot: string): Promise<ProviderInstallResult> {
@@ -74,9 +83,31 @@ export async function applyProviderSkill(skillDir: string, projectRoot: string):
   });
 
   const blockers = [...result.agentTasks.map((t) => t.reason), ...result.deferred];
+  // Verify in "required-declared" mode: the provider this skill installs must
+  // declare its contract, while any OTHER provider already in this install
+  // that predates the contract (a pre-contract payload) is tolerated. Without
+  // the option the verifier expects zero undeclared providers and would abort
+  // an otherwise-good install over an unrelated legacy payload.
+  const verification =
+    blockers.length === 0
+      ? await verifyProviderContracts(projectRoot, {
+          requiredDeclaredProviders: [installedProviderName(skillDir, projectRoot)],
+        })
+      : { status: 'skipped' as const, checks: [] };
+  if (verification.status === 'failed') blockers.push(verification.error ?? 'Provider contract verification failed');
   return {
     apply: result,
     changed: result.applied.length > 0,
     blockers,
+    verification,
   };
+}
+
+/** The provider a `/add-<name>` skill installs, read from its `nanoclaw-provider` frontmatter. */
+export function installedProviderName(skillDir: string, projectRoot: string): string {
+  const directory = path.basename(skillDir);
+  const markdown = fs.readFileSync(path.join(projectRoot, skillDir, 'SKILL.md'), 'utf-8');
+  const descriptor = parseProviderDescriptor(markdown, directory);
+  if (!descriptor) throw new Error(`${directory}/SKILL.md has no nanoclaw-provider metadata`);
+  return descriptor.value;
 }

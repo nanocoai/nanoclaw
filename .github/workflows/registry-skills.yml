@@ -6,6 +6,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      core_sha:
+        description: Full core commit SHA to promote
+        required: true
+        type: string
+      providers_sha:
+        description: Full providers commit SHA to promote
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -15,10 +24,13 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.skills.outputs.matrix }}
+      core: ${{ steps.refs.outputs.core }}
       channels: ${{ steps.refs.outputs.channels }}
       providers: ${{ steps.refs.outputs.providers }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.core_sha || github.sha }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -27,13 +39,37 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - id: skills
         run: |
-          matrix=$(pnpm exec tsx scripts/test-registry-skills.ts --list)
+          matrix=$(pnpm exec tsx scripts/test-registry-skills.ts --list-available)
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
       - id: refs
+        # Dispatch inputs reach the shell through env, never by direct
+        # interpolation into the script, so a malformed value can only fail
+        # the hex check below — it can never become shell syntax.
+        env:
+          REQUESTED_CORE_SHA: ${{ inputs.core_sha }}
+          REQUESTED_PROVIDERS_SHA: ${{ inputs.providers_sha }}
         run: |
-          git fetch origin channels providers
+          core=$(git rev-parse HEAD)
+          test ${#core} -eq 40
+          requested_core="$REQUESTED_CORE_SHA"
+          if [ -n "$requested_core" ]; then
+            case "$requested_core" in *[!0-9a-fA-F]*|'') exit 1;; esac
+            test ${#requested_core} -eq 40
+          fi
+          providers="$REQUESTED_PROVIDERS_SHA"
+          if [ -n "$providers" ]; then
+            case "$providers" in *[!0-9a-fA-F]*|'') exit 1;; esac
+            test ${#providers} -eq 40
+            git fetch origin "$providers"
+            git cat-file -e "$providers^{commit}"
+          else
+            git fetch origin providers
+            providers=$(git rev-parse origin/providers)
+          fi
+          git fetch origin channels
+          echo "core=$core" >> "$GITHUB_OUTPUT"
           echo "channels=$(git rev-parse origin/channels)" >> "$GITHUB_OUTPUT"
-          echo "providers=$(git rev-parse origin/providers)" >> "$GITHUB_OUTPUT"
+          echo "providers=$providers" >> "$GITHUB_OUTPUT"
 
   test:
     needs: discover
@@ -45,6 +81,8 @@ jobs:
         include: ${{ fromJSON(needs.discover.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.discover.outputs.core }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -60,3 +98,78 @@ jobs:
           REGISTRY_CHANNELS_SHA: ${{ needs.discover.outputs.channels }}
           REGISTRY_PROVIDERS_SHA: ${{ needs.discover.outputs.providers }}
         run: pnpm exec tsx scripts/test-registry-skills.ts "${{ matrix.skill }}"
+
+  combined-providers:
+    needs: discover
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.discover.outputs.core }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.12
+      - run: pnpm install --frozen-lockfile
+      - name: Install, refresh, and verify all providers
+        env:
+          REGISTRY_CHANNELS_SHA: ${{ needs.discover.outputs.channels }}
+          REGISTRY_PROVIDERS_SHA: ${{ needs.discover.outputs.providers }}
+        run: pnpm exec tsx scripts/test-registry-skills.ts --combined-providers
+
+  pre-contract-providers:
+    needs: discover
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.discover.outputs.core }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.12
+      - run: pnpm install --frozen-lockfile
+      - name: Apply pre-contract Codex and OpenCode payloads to current core
+        run: pnpm exec tsx scripts/test-registry-skills.ts --pre-contract-providers
+
+  old-provider-refresh:
+    needs: discover
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.discover.outputs.core }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.12
+      - run: pnpm install --frozen-lockfile
+      - name: Install legacy providers, then refresh them to the current payload
+        env:
+          REGISTRY_CHANNELS_SHA: ${{ needs.discover.outputs.channels }}
+          REGISTRY_PROVIDERS_SHA: ${{ needs.discover.outputs.providers }}
+        run: pnpm exec tsx scripts/test-registry-skills.ts --old-provider-refresh 99283f3e274b2b1dae47b141ac4f11f56ad8eb2d
+
+  provider-promotion:
+    if: always()
+    needs: [test, combined-providers, pre-contract-providers, old-provider-refresh]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every provider composition gate
+        run: |
+          test "${{ needs.test.result }}" = success
+          test "${{ needs.combined-providers.result }}" = success
+          test "${{ needs.pre-contract-providers.result }}" = success
+          test "${{ needs.old-provider-refresh.result }}" = success

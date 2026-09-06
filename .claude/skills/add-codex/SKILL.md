@@ -1,6 +1,12 @@
 ---
 name: add-codex
 description: Use Codex (OpenAI's codex app-server) as a full agent provider — planning, tool orchestration, MCP tools, server-side history, session resume — alongside or instead of Claude. ChatGPT subscription or OpenAI API key, vault-only via OneCLI. Per-group via `ncl groups config update --provider codex`. Distinct from using OpenAI as an MCP tool (where Claude remains the planner).
+metadata:
+  nanoclaw-provider: codex
+  nanoclaw-provider-label: Codex
+  nanoclaw-provider-hint: OpenAI — ChatGPT subscription or API key
+  nanoclaw-provider-offered: 'true'
+  nanoclaw-provider-image: local-required
 ---
 
 # Codex agent provider
@@ -24,8 +30,8 @@ Check whether the payload is already wired (a prior apply, or a trunk that still
 
 - `src/providers/codex.ts` and `src/providers/codex-agents-md.ts`
 - `container/agent-runner/src/providers/codex.ts` and `codex-app-server.ts`
-- `setup/providers/codex.ts`
-- `import './codex.js';` in `src/providers/index.ts`, `container/agent-runner/src/providers/index.ts`, and `setup/providers/index.ts`
+- `setup/providers/codex.ts` and both `provider-contracts/codex.ts` declarations (host and container)
+- `import './codex.js';` in the three provider barrels and both contract barrels
 - an `@openai/codex` entry in `container/cli-tools.json`
 
 ### 1. Fetch and copy the payload
@@ -38,6 +44,7 @@ src/providers/codex-agents-md.ts
 src/providers/codex-registration.test.ts
 src/providers/codex-host-contribution.test.ts
 src/providers/codex-agents-md.test.ts
+src/provider-contracts/codex.ts
 container/agent-runner/src/providers/codex.ts
 container/agent-runner/src/providers/codex-app-server.ts
 container/agent-runner/src/providers/exchange-archive.ts
@@ -46,7 +53,10 @@ container/agent-runner/src/providers/codex-registration.test.ts
 container/agent-runner/src/providers/codex.factory.test.ts
 container/agent-runner/src/providers/codex.turns.test.ts
 container/agent-runner/src/providers/codex-app-server.test.ts
+container/agent-runner/src/providers/codex-contract-parity.test.ts
+container/agent-runner/src/providers/codex.conformance.test.ts
 container/agent-runner/src/providers/codex-cli-tools.test.ts
+container/agent-runner/src/provider-contracts/codex.ts
 setup/providers/codex.ts
 setup/providers/codex.test.ts
 setup/providers/codex-registration.test.ts
@@ -55,14 +65,24 @@ container/AGENTS.md
 
 ### 2. Wire the barrels
 
-Append the self-registration import to each of the three provider barrels (skipped if the line is already present). Each barrel-registration test imports its real barrel and asserts `codex` is registered — they go red the moment a barrel line is missing or drifts.
+Append the self-registration import to each provider and contract barrel (skipped if already present).
 
 ```nc:append to:src/providers/index.ts
 import './codex.js';
 ```
+
+```nc:append to:src/provider-contracts/index.ts
+import './codex.js';
+```
+
+```nc:append to:container/agent-runner/src/provider-contracts/index.ts
+import './codex.js';
+```
+
 ```nc:append to:container/agent-runner/src/providers/index.ts
 import './codex.js';
 ```
+
 ```nc:append to:setup/providers/index.ts
 import './codex.js';
 ```
@@ -88,10 +108,7 @@ pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
 ### 5. Validate
 
 ```nc:run effect:test
-pnpm vitest run src/providers/codex-registration.test.ts src/providers/codex-host-contribution.test.ts src/providers/codex-agents-md.test.ts setup/providers/
-```
-```nc:run effect:test
-cd container/agent-runner && bun test src/providers/
+pnpm exec tsx scripts/provider-contract-verifier.ts --required-declared codex
 ```
 
 The registration tests import only the real barrels — they go red if a barrel line is missing, a barrel fails to evaluate, or the payload is broken.
