@@ -53,6 +53,7 @@ import { getAgentMailbox } from './mailbox/index.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
+import { clearWakeFailures, notifyWakeFailure, recordWakeFailure } from './wake-failure-notify.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
 import './providers/index.js';
@@ -262,9 +263,18 @@ export function wakeContainer(session: Session): Promise<boolean> {
     return existing;
   }
   const promise = spawnContainer(session)
-    .then(() => true)
+    .then(() => {
+      clearWakeFailures(session.id);
+      return true;
+    })
     .catch((err) => {
       log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
+      // A persistent failure streak surfaces ONE rate-limited notice on the
+      // originating channel (#2902) — otherwise a broken gateway/runtime is
+      // indistinguishable from "the agent is ignoring me" for the user.
+      // Fire-and-forget: the notifier never throws, and the wake result
+      // must not wait on channel I/O.
+      if (recordWakeFailure(session.id)) void notifyWakeFailure(session);
       return false;
     })
     .finally(() => {
