@@ -437,18 +437,28 @@ export function uninstallIncomplete(results: readonly Pick<UninstallActionResult
   return results.some((result) => ['failed', 'untouched'].includes(result.outcome));
 }
 
-export function sameOwnershipSelectors(before: Inventory, after: Inventory): boolean {
+export function sameOwnershipSelectors(
+  before: Inventory,
+  after: Inventory,
+  options: { selectorsOnly?: boolean } = {},
+): boolean {
   const beforeIdentity = before.identity;
   const afterIdentity = after.identity;
-  return (
+  const selectors =
     path.resolve(before.projectRoot) === path.resolve(after.projectRoot) &&
     before.slug === after.slug &&
     before.containerRuntime === after.containerRuntime &&
     Boolean(beforeIdentity?.root) &&
     Boolean(afterIdentity?.root) &&
     beforeIdentity?.root === afterIdentity?.root &&
+    beforeIdentity?.containerSelector === afterIdentity?.containerSelector;
+  // The machine rescan compares two scans of its own making and only needs the
+  // selectors to agree. The terminal post-approval gate keeps the full
+  // comparison, including artifact identity resolution and scoped-root equality.
+  if (options.selectorsOnly) return selectors;
+  return (
+    selectors &&
     Object.values(beforeIdentity?.exactPaths ?? {}).every(Boolean) &&
-    beforeIdentity?.containerSelector === afterIdentity?.containerSelector &&
     Object.values(beforeIdentity?.scopedRoots ?? {}).every(Boolean) &&
     JSON.stringify(beforeIdentity?.scopedRoots) === JSON.stringify(afterIdentity?.scopedRoots)
   );
