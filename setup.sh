@@ -48,20 +48,26 @@ detect_platform() {
 
 # --- Node.js check ---
 
+# The ceiling exists because better-sqlite3 11.x cannot build against
+# Node 26 (V8 removed APIs it uses) and ships no prebuilt for it. Raise
+# NODE_MAJOR_MAX only after the better-sqlite3 pin supports the runtime.
+NODE_MAJOR_MIN=22
+NODE_MAJOR_MAX=25
+
 check_node() {
   NODE_OK="false"
   NODE_VERSION="not_found"
   NODE_PATH_FOUND=""
+  NODE_MAJOR=""
 
   if command -v node >/dev/null 2>&1; then
     NODE_VERSION=$(node --version 2>/dev/null | sed 's/^v//')
     NODE_PATH_FOUND=$(command -v node)
-    local major
-    major=$(echo "$NODE_VERSION" | cut -d. -f1)
-    if [ "$major" -ge 22 ] 2>/dev/null; then
+    NODE_MAJOR=$(echo "$NODE_VERSION" | cut -d. -f1)
+    if [ "$NODE_MAJOR" -ge "$NODE_MAJOR_MIN" ] 2>/dev/null && [ "$NODE_MAJOR" -le "$NODE_MAJOR_MAX" ] 2>/dev/null; then
       NODE_OK="true"
     fi
-    log "Node $NODE_VERSION at $NODE_PATH_FOUND (major=$major, ok=$NODE_OK)"
+    log "Node $NODE_VERSION at $NODE_PATH_FOUND (major=$NODE_MAJOR, ok=$NODE_OK)"
   else
     log "Node not found"
   fi
@@ -184,20 +190,29 @@ detect_platform
 
 check_node
 if [ "$NODE_OK" = "false" ]; then
-  log "Node missing or too old — running setup/install-node.sh"
-  echo "Node 22+ not found — installing via setup/install-node.sh"
-  if bash "$PROJECT_ROOT/setup/install-node.sh" 2>&1 | tee -a "$LOG_FILE"; then
-    if [ -x "$HOME/.local/bin/node" ]; then
-      export PATH="$HOME/.local/bin:$PATH"
-    elif [ "$PLATFORM" = "macos" ] && command -v brew >/dev/null 2>&1; then
-      if NODE22_PREFIX="$(brew --prefix node@22 2>/dev/null)"; then
-        export PATH="$NODE22_PREFIX/bin:$PATH"
+  if [ "$NODE_VERSION" = "not_found" ] || [ "${NANOCLAW_NODE_UPGRADE_OK:-0}" = "1" ]; then
+    log "Node missing or upgrade consented — running setup/install-node.sh"
+    echo "Installing Node via setup/install-node.sh"
+    if bash "$PROJECT_ROOT/setup/install-node.sh" 2>&1 | tee -a "$LOG_FILE"; then
+      # install-node.sh exports PATH only inside its own process; re-derive
+      # the new Node's location here so check_node sees it.
+      if [ -x "$HOME/.local/bin/node" ]; then
+        export PATH="$HOME/.local/bin:$PATH"
+      elif [ "$PLATFORM" = "macos" ] && command -v brew >/dev/null 2>&1; then
+        if NODE22_PREFIX="$(brew --prefix node@22 2>/dev/null)"; then
+          export PATH="$NODE22_PREFIX/bin:$PATH"
+        fi
       fi
+      hash -r 2>/dev/null || true
+      check_node
+    else
+      log "install-node.sh failed"
     fi
-    hash -r 2>/dev/null || true
-    check_node
   else
-    log "install-node.sh failed"
+    # install-node.sh refuses to replace an existing Node without consent,
+    # so don't run it just to watch it refuse — name the actual fix.
+    log "Node $NODE_VERSION outside the supported range (need >= $NODE_MAJOR_MIN and <= $NODE_MAJOR_MAX) — leaving the existing install alone"
+    echo "Node $NODE_VERSION is not supported. NanoClaw needs Node $NODE_MAJOR_MIN to $NODE_MAJOR_MAX. Do one of these: (1) Switch to a supported Node. (2) Run bash nanoclaw.sh and accept the Node installation. Then do the setup again."
   fi
 fi
 install_deps
@@ -206,7 +221,13 @@ check_build_tools
 # Emit status block
 STATUS="success"
 if [ "$NODE_OK" = "false" ]; then
-  STATUS="node_missing"
+  if [ "$NODE_VERSION" = "not_found" ]; then
+    STATUS="node_missing"
+  elif [ "$NODE_MAJOR" -gt "$NODE_MAJOR_MAX" ] 2>/dev/null; then
+    STATUS="node_too_new"
+  else
+    STATUS="node_too_old"
+  fi
 elif [ "$DEPS_OK" = "false" ]; then
   STATUS="deps_failed"
 elif [ "$NATIVE_OK" = "false" ]; then
