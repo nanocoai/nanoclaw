@@ -142,3 +142,56 @@ describe('registry refresh end to end', () => {
     expect(report.skills[0].errors.join('\n')).toContain('no structured apply directives');
   });
 });
+
+describe('fork-owned (local) adapters — #3529', () => {
+  it('treats a barrel import with no skill directory as local instead of failing the refresh', async () => {
+    // Case 1 from the issue: an adapter the fork wrote itself. There is no
+    // .claude/skills/add-<name>/ and never will be — the update must not
+    // block on it.
+    const root = temp('nanoclaw-skills-own-adapter-');
+    write(root, 'src/channels/index.ts', "import './cli.js';\nimport './foo.js';\n");
+    write(root, 'src/channels/foo.ts', 'export const local = true;\n');
+
+    const report = await refreshInstalledSkills(root);
+
+    expect(report.success).toBe(true);
+    expect(report.skills).toMatchObject([{ name: 'foo', status: 'local', errors: [] }]);
+  });
+
+  it('honors `refresh: local` frontmatter and never touches the payload', async () => {
+    // Case 2: a skill-installed adapter the fork replaced or patched. The
+    // opt-out must keep the refresh from swapping the registry copy back in.
+    const root = temp('nanoclaw-skills-optout-');
+    write(root, 'src/channels/index.ts', "import './cli.js';\nimport './matrix.js';\n");
+    write(root, 'src/channels/matrix.ts', 'export const replaced = "fork-native";\n');
+    write(
+      root,
+      '.claude/skills/add-matrix/SKILL.md',
+      ['---', 'name: add-matrix', 'refresh: local', '---', '', '# Add Matrix', 'Fork-owned adapter.', ''].join('\n'),
+    );
+
+    const report = await refreshInstalledSkills(root);
+
+    expect(report.success).toBe(true);
+    expect(report.skills).toMatchObject([{ name: 'matrix', status: 'local' }]);
+    expect(fs.readFileSync(path.join(root, 'src/channels/matrix.ts'), 'utf8')).toContain('fork-native');
+  });
+
+  it('only reads the flag from frontmatter, not from prose', async () => {
+    const root = temp('nanoclaw-skills-prose-mention-');
+    write(root, 'src/channels/index.ts', "import './cli.js';\nimport './demo.js';\n");
+    write(
+      root,
+      '.claude/skills/add-demo/SKILL.md',
+      ['---', 'name: add-demo', '---', '', 'Set `refresh: local` to opt out.', ''].join('\n'),
+    );
+
+    const report = await refreshInstalledSkills(root);
+
+    // No frontmatter flag and no directives -> still the structured failure,
+    // now pointing at the opt-out.
+    expect(report.success).toBe(false);
+    expect(report.skills[0]).toMatchObject({ name: 'demo', status: 'failed' });
+    expect(report.skills[0].errors.join('\n')).toContain('refresh: local');
+  });
+});

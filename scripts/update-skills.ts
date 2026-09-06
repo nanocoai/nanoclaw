@@ -18,7 +18,8 @@ export interface SkillRefreshResult {
   name: string;
   skillName: string;
   kind: InstalledSkillKind;
-  status: 'refreshed' | 'failed';
+  /** `local` = deliberately not registry-managed; the refresh touched nothing. */
+  status: 'refreshed' | 'failed' | 'local';
   applied: string[];
   skipped: string[];
   errors: string[];
@@ -79,6 +80,21 @@ function tryGit(root: string, args: string[]): string {
   } catch {
     return '';
   }
+}
+
+/**
+ * `refresh: local` in SKILL.md's YAML frontmatter marks the skill's payload
+ * as fork-owned: the operator replaced or patched the adapter deliberately,
+ * and the registry refresh must leave it alone instead of silently swapping
+ * the registry copy back in (#3529). Only the frontmatter block (between the
+ * leading `---` fences) is consulted, so prose mentioning the phrase can't
+ * trip it.
+ */
+export function isLocalSkill(skillMdPath: string): boolean {
+  const source = fs.readFileSync(skillMdPath, 'utf8');
+  const match = source.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!match) return false;
+  return /^refresh:\s*local\s*$/m.test(match[1]);
 }
 
 function readImports(file: string): string[] {
@@ -154,14 +170,30 @@ export async function refreshInstalledSkills(
 
   for (const skill of selected) {
     const skillDir = path.join(root, '.claude/skills', skill.skillName);
+    const skillMd = path.join(skillDir, 'SKILL.md');
     const errors: string[] = [];
-    if (!fs.existsSync(path.join(skillDir, 'SKILL.md'))) {
-      errors.push(`Missing ${path.relative(root, path.join(skillDir, 'SKILL.md'))}`);
-    } else {
-      const directives = parseDirectives(fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8'));
-      if (directives.length === 0) {
-        errors.push('Skill has no structured apply directives and cannot be refreshed headlessly');
-      }
+    if (!fs.existsSync(skillMd)) {
+      // A barrel import with no skill directory is a LOCAL adapter — code the
+      // fork owns, not registry output that rotted. Treating it as a hard
+      // failure blocked the whole update for forks carrying their own
+      // adapters (#3529); the refresh has nothing to refresh, so report it
+      // and move on.
+      results.push({ ...skill, status: 'local', applied: [], skipped: [], errors: [] });
+      continue;
+    }
+    if (isLocalSkill(skillMd)) {
+      // Explicit opt-out (`refresh: local` frontmatter): the adapter files
+      // are deliberately fork-owned — a replaced upstream adapter, or local
+      // patches the operator wants to keep. Never overwrite them.
+      results.push({ ...skill, status: 'local', applied: [], skipped: [], errors: [] });
+      continue;
+    }
+    const directives = parseDirectives(fs.readFileSync(skillMd, 'utf8'));
+    if (directives.length === 0) {
+      errors.push(
+        'Skill has no structured apply directives and cannot be refreshed headlessly ' +
+          '(mark it `refresh: local` in SKILL.md frontmatter if it is deliberately fork-owned)',
+      );
     }
 
     if (errors.length > 0) {
@@ -209,7 +241,9 @@ export async function refreshInstalledSkills(
   return {
     schema: 'nanoclaw-skill-refresh/v1',
     schemaVersion: 1,
-    success: results.every((result) => result.status === 'refreshed'),
+    // `local` skills are a healthy outcome: deliberately not registry-managed,
+    // nothing was (or should be) refreshed. Only real refresh failures block.
+    success: results.every((result) => result.status !== 'failed'),
     selected: selected.map((skill) => skill.name),
     remotes,
     skills: results,
