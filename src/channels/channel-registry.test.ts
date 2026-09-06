@@ -1,3 +1,7 @@
+import { useSqliteMailboxFixture } from '../mailbox/sqlite/test-fixture.js';
+
+useSqliteMailboxFixture();
+
 /**
  * Tests for the v2 channel adapter registry and integration with host.
  */

@@ -1,3 +1,7 @@
+import { useSqliteMailboxFixture } from './mailbox/sqlite/test-fixture.js';
+
+useSqliteMailboxFixture();
+
 /**
  * Unit tests for the stuck-container decision logic introduced by
  * ACTION-ITEMS item 9. Lives on the pure helper `decideStuckAction` so we

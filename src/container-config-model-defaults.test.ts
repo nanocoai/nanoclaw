@@ -12,10 +12,6 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createAgentGroup } from './db/agent-groups.js';
-import { closeDb, initTestDb } from './db/connection.js';
-import { ensureContainerConfig, getContainerConfig, updateContainerConfigScalars } from './db/container-configs.js';
-import { runMigrations } from './db/migrations/index.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
 
 const GROUP: AgentGroup = {
@@ -54,8 +50,22 @@ const CLEAR = { NANOCLAW_DEFAULT_MODEL: undefined, NANOCLAW_FAST_MODE: undefined
 
 describe('install-wide model defaults', () => {
   let row: ContainerConfigRow;
+  let closeDb: (typeof import('./db/connection.js'))['closeDb'];
+  let updateContainerConfigScalars: (typeof import('./db/container-configs.js'))['updateContainerConfigScalars'];
+  let getContainerConfig: (typeof import('./db/container-configs.js'))['getContainerConfig'];
 
   beforeEach(async () => {
+    // The previous case resets the module graph. Keep the driver, migration
+    // owner and accessors in the same graph, including a lazy composed driver.
+    const connection = await import('./db/connection.js');
+    const { runMigrations } = await import('./db/migrations/index.js');
+    const { createAgentGroup } = await import('./db/agent-groups.js');
+    const configs = await import('./db/container-configs.js');
+    closeDb = connection.closeDb;
+    updateContainerConfigScalars = configs.updateContainerConfigScalars;
+    getContainerConfig = configs.getContainerConfig;
+    const { initTestDb } = connection;
+    const { ensureContainerConfig } = configs;
     await runMigrations(await initTestDb());
     await createAgentGroup(GROUP);
     await ensureContainerConfig(GROUP.id);

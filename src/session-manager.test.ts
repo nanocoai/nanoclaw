@@ -1,3 +1,7 @@
+import { useSqliteMailboxFixture } from './mailbox/sqlite/test-fixture.js';
+
+useSqliteMailboxFixture();
+
 /**
  * Tests for session-manager's direct outbound write path.
  *

@@ -1,3 +1,7 @@
+import { useSqliteMailboxFixture } from '../../mailbox/sqlite/test-fixture.js';
+
+useSqliteMailboxFixture();
+
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

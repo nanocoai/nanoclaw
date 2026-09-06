@@ -1,3 +1,7 @@
+import { useSqliteMailboxFixture } from './mailbox/sqlite/test-fixture.js';
+
+useSqliteMailboxFixture();
+
 /**
  * Delivery attempt counts are read from `delivery_attempts` rows, not process
  * memory — so a host restart no longer resets them. Rows written "by a

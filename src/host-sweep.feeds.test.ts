@@ -16,7 +16,10 @@ vi.mock('./reconcile-session.js', () => ({
 vi.mock('./db/sessions.js', () => ({ getActiveSessions: vi.fn() }));
 vi.mock('./egress-lockdown.js', () => ({ ensureEgressNetwork: vi.fn() }));
 vi.mock('./modules/approvals/index.js', () => ({ sweepAwaitingReasonRejects: vi.fn() }));
-vi.mock('./drivers/index.js', () => ({ peekSessionDriver: vi.fn(() => null) }));
+vi.mock('./drivers/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./drivers/index.js')>()),
+  peekSessionDriver: vi.fn(() => null),
+}));
 
 import { getActiveSessions } from './db/sessions.js';
 import { peekSessionDriver } from './drivers/index.js';

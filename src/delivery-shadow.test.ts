@@ -1,3 +1,7 @@
+import { useSqliteMailboxFixture } from './mailbox/sqlite/test-fixture.js';
+
+useSqliteMailboxFixture();
+
 /**
  * Delivery attempt rows: recorded with the failure, cleared on success or
  * permanent give-up. (Originally written for the shadow phase; the rows are

@@ -9,7 +9,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { SupervisedHandle, SupervisedSnapshot } from './drivers/session-events.js';
 
 const snapshots: SupervisedSnapshot[] = [];
-vi.mock('./drivers/index.js', () => ({
+vi.mock('./drivers/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./drivers/index.js')>()),
   getSessionDriver: () => ({
     listSessions: async () => snapshots,
     capabilities: () => ({}),

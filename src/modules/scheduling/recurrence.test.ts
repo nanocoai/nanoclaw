@@ -1,3 +1,7 @@
+import { useSqliteMailboxFixture } from '../../mailbox/sqlite/test-fixture.js';
+
+useSqliteMailboxFixture();
+
 /**
  * Tests for `handleRecurrence` — specifically the timezone-aware cron
  * interpretation ported from v1 (src/v1/task-scheduler.ts).

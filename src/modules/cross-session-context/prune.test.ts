@@ -1,3 +1,7 @@
+import { useSqliteMailboxFixture } from '../../mailbox/sqlite/test-fixture.js';
+
+useSqliteMailboxFixture();
+
 /**
  * Echo backlog pruner tests: keep-newest logic, age cutoff, and
  * non-echo/non-pending rows staying untouched.

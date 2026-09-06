@@ -21,7 +21,7 @@ describe('standalone setup mailbox composition', () => {
     },
   );
 
-  it('setup/register.ts loads with the default mailbox composition', () => {
+  it('setup/register.ts loads with an explicitly selected SQLite mailbox fixture', () => {
     const result = spawnSync(
       process.execPath,
       [
@@ -29,7 +29,7 @@ describe('standalone setup mailbox composition', () => {
         'tsx',
         '--input-type=module',
         '--eval',
-        "const { run } = await import('./setup/register.ts'); const { getAgentMailbox } = await import('./src/mailbox/index.ts'); const { SqliteAgentMailbox } = await import('./src/mailbox/sqlite/index.ts'); console.log(`${typeof run}:${getAgentMailbox() instanceof SqliteAgentMailbox}`);",
+        "const { run } = await import('./setup/register.ts'); const { getAgentMailbox } = await import('./src/mailbox/index.ts'); const { SqliteAgentMailbox } = await import('./src/mailbox/sqlite/index.ts'); const { registerAgentMailbox, resetAgentMailboxForTesting } = await import('./src/mailbox/index.ts'); resetAgentMailboxForTesting(); registerAgentMailbox(() => new SqliteAgentMailbox()); console.log(`${typeof run}:${getAgentMailbox() instanceof SqliteAgentMailbox}`);",
       ],
       { cwd: repoRoot, encoding: 'utf8' },
     );

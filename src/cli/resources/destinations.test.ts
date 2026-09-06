@@ -1,3 +1,7 @@
+import { useSqliteMailboxFixture } from '../../mailbox/sqlite/test-fixture.js';
+
+useSqliteMailboxFixture();
+
 /**
  * Regression test for #2465 — approval-path `ncl destinations add/remove`
  * must hydrate every active session's `inbound.db` `destinations` table,
