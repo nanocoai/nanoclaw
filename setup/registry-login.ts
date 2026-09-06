@@ -79,6 +79,7 @@ const HOST_ID_FILE = path.join(CONFIG_DIR, 'host-id');
 const MAX_DEVICE_WAIT_MS = 900_000;
 const HTTP_TIMEOUT_MS = 20_000;
 const PROBE_TIMEOUT_MS = 8_000;
+const MAX_HTTP_RESPONSE_BYTES = 256 * 1024;
 /**
  * RFC 8628 §3.5 puts the `slow_down` step at 5 seconds. WorkOS documents a
  * smaller one; the spec's is compliant with both and costs a few seconds of
@@ -213,10 +214,45 @@ interface HttpResult {
   body: Record<string, unknown> | undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+async function readBoundedResponseBody(res: Response): Promise<string> {
+  // A body-less response (204, HEAD, or a minimal test double) has nothing to
+  // bound; `text()` resolves to what little there is.
+  if (!res.body) return res.text();
+  const reader = res.body.getReader();
+  const chunks: Buffer[] = [];
+  let receivedBytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      receivedBytes += value.byteLength;
+      if (receivedBytes > MAX_HTTP_RESPONSE_BYTES) {
+        try {
+          await reader.cancel();
+        } catch {
+          // The size failure below is the useful diagnosis; cancellation is best-effort cleanup.
+        }
+        throw new LoginError(
+          'The authentication service returned more than 256 KiB of data.',
+          'Check the configured registry and identity-provider endpoints, then retry.',
+        );
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, receivedBytes).toString('utf8');
+}
+
 /**
- * Throws only on transport failure — an HTTP error status is data here, because
- * the device grant signals `authorization_pending` as a 400 and that is the
- * normal case, not an exception.
+ * Throws on transport failure or an oversized body. An HTTP error status is
+ * data here, because the device grant signals `authorization_pending` as a 400
+ * and that is the normal case, not an exception.
  */
 async function http(url: string, req: HttpRequest, timeoutMs: number): Promise<HttpResult> {
   const res = await fetch(url, {
@@ -225,11 +261,11 @@ async function http(url: string, req: HttpRequest, timeoutMs: number): Promise<H
     body: req.body,
     signal: AbortSignal.timeout(timeoutMs),
   });
-  const text = await res.text();
+  const text = await readBoundedResponseBody(res);
   let body: Record<string, unknown> | undefined;
   try {
     const parsed: unknown = text ? JSON.parse(text) : undefined;
-    body = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : undefined;
+    body = isRecord(parsed) ? parsed : undefined;
   } catch {
     // A proxy's HTML error page, most likely. The status still tells us enough.
   }
