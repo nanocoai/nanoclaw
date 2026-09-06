@@ -44,6 +44,7 @@ import {
   type ChannelChoice,
 } from './channels/initial-setup.js';
 import { runInheritScript } from './lib/inherit-script.js';
+import { portalEnabled, runImagePortal, runPerksPortal } from './portal.js';
 import { pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
 import { applyProviderSkill } from './providers/install.js';
@@ -712,6 +713,7 @@ async function main(): Promise<void> {
   // premature "your assistant is saying hi" (no welcome DM exists yet).
   let wiringPending = false;
 
+  if (portalEnabled() && !skip.has('perks')) { await runPerksPortal(); skip.add('perks'); }
   if (!skip.has('verify')) {
     const res = await runQuietStep('verify', {
       running: 'Making sure everything works together…',
@@ -1319,6 +1321,7 @@ async function chooseImageSource(): Promise<void> {
   // whose install then has no image to pull — so don't ask a question whose
   // good answer cannot be honoured.
   if (!readAgentImagePin()) return;
+  if (portalEnabled()) { await runImagePortal(); return; }
 
   p.log.message(
     brandBody(

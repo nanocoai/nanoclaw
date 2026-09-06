@@ -24,6 +24,7 @@ const STEPS: Record<string, () => Promise<{ run: (args: string[]) => Promise<voi
   'provider-auth': () => import('./provider-auth.js'),
   'cli-agent': () => import('./cli-agent.js'),
   registry: () => import('./registry.js'),
+  portal: () => import('./portal.js'),
   'registry-reconcile': () => import('./registry-reconcile.js'),
   // >>> nanoclaw:setup-steps
   // <<< nanoclaw:setup-steps

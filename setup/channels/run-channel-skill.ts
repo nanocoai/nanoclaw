@@ -393,6 +393,7 @@ export async function runChannelSkillWithPreStep(
   }
   const agentName = overrides.agentName ?? (await resolveAgentName());
   const preBound = await preStep(agentName);
+  if (preBound?.__portal_skip === 'slack') return BACK_TO_CHANNEL_SELECTION;
   return runChannelSkill(channel, displayName, {
     ...overrides,
     offerBack: false,
