@@ -102,6 +102,170 @@ describe('nanoclaw.sh NDJSON boundary', () => {
     );
   });
 
+  it('keeps cold bootstrap output private and hands frontend stdin to TypeScript', async () => {
+    fs.writeFileSync(
+      path.join(fixtureRoot, 'setup.sh'),
+      '#!/usr/bin/env bash\nif IFS= read -r line; then echo "unexpected-stdin:$line"; else echo stdin-closed; fi\necho bootstrap-private-output\necho "STATUS: success"\n',
+    );
+    const tsx = path.join(fixtureRoot, 'node_modules', '.bin', 'tsx');
+    fs.mkdirSync(path.dirname(tsx), { recursive: true });
+    fs.writeFileSync(
+      tsx,
+      '#!/usr/bin/env bash\nprintf \'{"protocol":"nanoclaw.driver.v1","operation":"setup","type":"prompt","prompt":{"id":"handoff","kind":"confirm","message":"Continue?","sensitive":false}}\\n\'\nIFS= read -r _\nprintf \'{"protocol":"nanoclaw.driver.v1","operation":"setup","type":"complete","completedAt":"2026-01-01T00:00:00.000Z"}\\n\'\n',
+    );
+    fs.chmodSync(tsx, 0o755);
+
+    const child = spawn('bash', [path.join(fixtureRoot, 'nanoclaw.sh'), '--protocol', 'nanoclaw.driver.v1', ...ACKS], {
+      cwd: fixtureRoot,
+      env: driverEnv(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let buffer = '';
+    const result = await collectShell(child, (chunk) => {
+      buffer += chunk;
+      let newline: number;
+      while ((newline = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (line && (JSON.parse(line) as { type: string }).type === 'prompt') {
+          child.stdin?.write(
+            '{"protocol":"nanoclaw.driver.v1","operation":"setup","type":"answer","promptId":"handoff","value":true}\n',
+          );
+        }
+      }
+    });
+
+    const bootstrapLog = path.join(fixtureRoot, 'logs', 'setup-steps', '01-bootstrap.log');
+    expect(
+      result.status,
+      `${result.stderr}\n${result.stdout}\n${fs.existsSync(bootstrapLog) ? fs.readFileSync(bootstrapLog, 'utf8') : ''}`,
+    ).toBe(0);
+    const events = parseEvents(result.stdout);
+    expect(events.filter((event) => event.type === 'hello')).toHaveLength(1);
+    expect(events.some((event) => event.type === 'progress' && event.stepId === 'bootstrap')).toBe(true);
+    expect(events.at(-1)?.type).toBe('complete');
+    expect(result.stdout).not.toContain('bootstrap-private-output');
+    expect(result.stdout).not.toContain('stdin-closed');
+    expect(fs.readFileSync(bootstrapLog, 'utf8')).toContain('stdin-closed\nbootstrap-private-output\nSTATUS: success');
+  });
+
+  it('SIGKILLs a bootstrap grandchild that ignores SIGTERM after its leader exits', async () => {
+    executable('uname', 'echo Linux');
+    executable('awk', 'echo 8192');
+    executable('grep', 'exit 1');
+    executable('id', 'echo 1000');
+    const marker = path.join(fixtureRoot, 'descendant.pid');
+    const stubborn = executable('stubborn', `trap '' TERM\necho $$ > ${JSON.stringify(marker)}\nexec sleep 30`);
+    fs.writeFileSync(
+      path.join(fixtureRoot, 'setup.sh'),
+      `#!/usr/bin/env bash\n${JSON.stringify(stubborn)} &\necho "STATUS: success"\nwait\n`,
+      { mode: 0o755 },
+    );
+    const child = spawn('bash', [path.join(fixtureRoot, 'nanoclaw.sh'), '--protocol', 'nanoclaw.driver.v1', ...ACKS], {
+      cwd: fixtureRoot,
+      env: { ...driverEnv(), PATH: `${path.join(fixtureRoot, 'fake-bin')}:/bin`, NANOCLAW_DISABLE_SETSID: '1' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let buffer = '';
+    let cancelled = false;
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString('utf8');
+      buffer += chunk.toString('utf8');
+      let newline: number;
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (!line) continue;
+        const event = JSON.parse(line) as { type: string; stepId?: string };
+        if (event.type === 'progress' && event.stepId === 'bootstrap' && !cancelled) {
+          cancelled = true;
+          void (async () => {
+            const deadline = Date.now() + 5_000;
+            while (!fs.existsSync(marker) && Date.now() < deadline) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            child.kill('SIGINT');
+          })();
+        }
+      }
+    });
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', resolve);
+    });
+    let pid = 0;
+    try {
+      expect(code, stdout).toBe(2);
+      expect(fs.existsSync(marker)).toBe(true);
+      pid = Number(fs.readFileSync(marker, 'utf8').trim());
+      expect(() => process.kill(pid, 0)).toThrow();
+    } finally {
+      if (pid > 0) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }
+    }
+  }, 15_000);
+
+  it.each(['disconnect', 'cancel'] as const)(
+    'cancels bootstrap when the frontend sends %s',
+    async (mode) => {
+      fs.writeFileSync(path.join(fixtureRoot, 'setup.sh'), '#!/usr/bin/env bash\nexec sleep 30\n');
+      const child = spawn(
+        'bash',
+        [path.join(fixtureRoot, 'nanoclaw.sh'), '--protocol', 'nanoclaw.driver.v1', ...ACKS],
+        { cwd: fixtureRoot, env: driverEnv(), stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      let buffer = '';
+      let sent = false;
+      const result = await collectShell(child, (chunk) => {
+        buffer += chunk;
+        let newline: number;
+        while ((newline = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          if (!line) continue;
+          const event = JSON.parse(line) as { type: string; stepId?: string };
+          if (!sent && event.type === 'progress' && event.stepId === 'bootstrap') {
+            sent = true;
+            if (mode === 'disconnect') child.stdin?.end();
+            else
+              child.stdin?.write(
+                '{"protocol":"nanoclaw.driver.v1","operation":"setup","type":"cancel","reason":"test"}\n',
+              );
+          }
+        }
+      });
+
+      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(2);
+      expect(parseEvents(result.stdout).at(-1)?.type).toBe('cancelled');
+    },
+    10_000,
+  );
+
+  it('requires the bootstrap status postcondition before handing off', async () => {
+    fs.writeFileSync(path.join(fixtureRoot, 'setup.sh'), '#!/usr/bin/env bash\necho "STATUS: deps_failed"\n');
+    const tsx = path.join(fixtureRoot, 'node_modules', '.bin', 'tsx');
+    fs.mkdirSync(path.dirname(tsx), { recursive: true });
+    fs.writeFileSync(tsx, '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+
+    const child = spawn('bash', [path.join(fixtureRoot, 'nanoclaw.sh'), '--protocol', 'nanoclaw.driver.v1', ...ACKS], {
+      cwd: fixtureRoot,
+      env: driverEnv(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const result = await collectShell(child);
+
+    expect(result.status).toBe(1);
+    const events = parseEvents(result.stdout);
+    expect(events.at(-1)?.type).toBe('error');
+    expect(events.at(-1)?.code).toBe('bootstrap_failed');
+    expect(events.some((event) => event.type === 'complete')).toBe(false);
+  });
 
   it.each([
     ['gce_unsupported', 'rerun'],
@@ -258,4 +422,35 @@ describe('nanoclaw.sh NDJSON boundary', () => {
     );
   });
 
+  it.each(['SIGINT', 'SIGTERM'] as const)(
+    'turns a bootstrap %s into cancelled and exit 2',
+    async (signal) => {
+      fs.writeFileSync(path.join(fixtureRoot, 'setup.sh'), '#!/usr/bin/env bash\nexec sleep 30\n');
+      const child = spawn(
+        'bash',
+        [path.join(fixtureRoot, 'nanoclaw.sh'), '--protocol', 'nanoclaw.driver.v1', ...ACKS],
+        { cwd: fixtureRoot, env: driverEnv(), stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      let stdout = '';
+      let signalled = false;
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString('utf8');
+        if (!signalled && stdout.includes('"stepId":"bootstrap"')) {
+          signalled = true;
+          child.kill(signal);
+        }
+      });
+
+      const code = await new Promise<number | null>((resolve, reject) => {
+        child.on('error', reject);
+        child.on('close', resolve);
+      });
+
+      expect(code).toBe(2);
+      const events = parseEvents(stdout);
+      expect(events.filter((event) => event.type === 'hello')).toHaveLength(1);
+      expect(events.at(-1)?.type).toBe('cancelled');
+    },
+    10_000,
+  );
 });
