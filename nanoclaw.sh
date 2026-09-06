@@ -39,9 +39,127 @@ done
 set -- ${_filtered_args[@]+"${_filtered_args[@]}"}
 unset _filtered_args
 
+# Parse the opt-in machine protocol before any output or mutation.
+DRIVER_MODE=false
+DRIVER_OPERATION=setup
+DRIVER_PROTOCOL=""
+DRIVER_PROTOCOL_COUNT=0
+DRIVER_EXPECT_PROTOCOL=false
+for arg in "$@"; do
+  if [ "$DRIVER_EXPECT_PROTOCOL" = true ]; then
+    DRIVER_PROTOCOL="$arg"
+    DRIVER_EXPECT_PROTOCOL=false
+    continue
+  fi
+  case "$arg" in
+    --protocol) DRIVER_PROTOCOL_COUNT=$((DRIVER_PROTOCOL_COUNT + 1)); DRIVER_EXPECT_PROTOCOL=true ;;
+    --protocol=*) DRIVER_PROTOCOL_COUNT=$((DRIVER_PROTOCOL_COUNT + 1)); DRIVER_PROTOCOL="${arg#--protocol=}" ;;
+    --uninstall) DRIVER_OPERATION=uninstall ;;
+  esac
+done
+
+if [ "$DRIVER_EXPECT_PROTOCOL" = true ]; then
+  echo "error: --protocol requires a value" >&2
+  exit 1
+fi
+if [ -n "$DRIVER_PROTOCOL" ] && [ "$DRIVER_PROTOCOL" != "nanoclaw.driver.v1" ]; then
+  echo "error: unsupported protocol '$DRIVER_PROTOCOL'" >&2
+  exit 1
+fi
+if [ "$DRIVER_PROTOCOL_COUNT" -gt 1 ]; then
+  if [ "$DRIVER_PROTOCOL" = "nanoclaw.driver.v1" ]; then
+    printf '{"protocol":"nanoclaw.driver.v1","operation":"%s","type":"hello"}\n' "$DRIVER_OPERATION"
+    printf '{"protocol":"nanoclaw.driver.v1","operation":"%s","type":"error","code":"duplicate_protocol","message":"--protocol may be supplied only once.","recovery":[]}\n' "$DRIVER_OPERATION"
+  else
+    echo "error: --protocol may be supplied only once" >&2
+  fi
+  exit 1
+fi
+
+DRIVER_ARGS=()
+DRIVER_ACKS=""
+if [ "$DRIVER_PROTOCOL" = "nanoclaw.driver.v1" ]; then
+  DRIVER_MODE=true
+  DRIVER_SKIP_NEXT=""
+  for arg in "$@"; do
+    if [ "$DRIVER_SKIP_NEXT" = protocol ]; then DRIVER_SKIP_NEXT=""; continue; fi
+    if [ "$DRIVER_SKIP_NEXT" = ack ]; then
+      case "$arg" in low-memory|gce|root) ;; *)
+        printf '{"protocol":"nanoclaw.driver.v1","operation":"%s","type":"hello"}\n' "$DRIVER_OPERATION"
+        printf '{"protocol":"nanoclaw.driver.v1","operation":"%s","type":"error","code":"invalid_driver_ack","message":"Unknown driver acknowledgement.","recovery":[]}\n' "$DRIVER_OPERATION"
+        exit 1
+      esac
+      DRIVER_ACKS="${DRIVER_ACKS:+${DRIVER_ACKS},}${arg}"
+      DRIVER_SKIP_NEXT=""
+      continue
+    fi
+    case "$arg" in
+      --protocol) DRIVER_SKIP_NEXT=protocol ;;
+      --protocol=*) ;;
+      --driver-ack) DRIVER_SKIP_NEXT=ack ;;
+      --driver-ack=*)
+        ack="${arg#--driver-ack=}"
+        case "$ack" in low-memory|gce|root) DRIVER_ACKS="${DRIVER_ACKS:+${DRIVER_ACKS},}${ack}" ;; *)
+          printf '{"protocol":"nanoclaw.driver.v1","operation":"%s","type":"hello"}\n' "$DRIVER_OPERATION"
+          printf '{"protocol":"nanoclaw.driver.v1","operation":"%s","type":"error","code":"invalid_driver_ack","message":"Unknown driver acknowledgement.","recovery":[]}\n' "$DRIVER_OPERATION"
+          exit 1
+        esac
+        ;;
+      --onecli-api-token|--anthropic-auth-token|--onecli-api-token=*|--anthropic-auth-token=*)
+        printf '{"protocol":"nanoclaw.driver.v1","operation":"%s","type":"hello"}\n' "$DRIVER_OPERATION"
+        printf '{"protocol":"nanoclaw.driver.v1","operation":"%s","type":"error","code":"secret_transport_forbidden","message":"Secret answers must arrive through protocol stdin, not driver arguments.","recovery":[]}\n' "$DRIVER_OPERATION"
+        exit 1
+        ;;
+      *) DRIVER_ARGS+=("$arg") ;;
+    esac
+  done
+  if [ "$DRIVER_SKIP_NEXT" = ack ]; then
+    printf '{"protocol":"nanoclaw.driver.v1","operation":"%s","type":"hello"}\n' "$DRIVER_OPERATION"
+    printf '{"protocol":"nanoclaw.driver.v1","operation":"%s","type":"error","code":"invalid_driver_ack","message":"--driver-ack requires a value.","recovery":[]}\n' "$DRIVER_OPERATION"
+    exit 1
+  fi
+  printf '{"protocol":"nanoclaw.driver.v1","operation":"%s","type":"hello"}\n' "$DRIVER_OPERATION"
+  for arg in ${DRIVER_ARGS[@]+"${DRIVER_ARGS[@]}"}; do
+    if [[ "$arg" =~ [[:cntrl:]] ]]; then
+      printf '{"protocol":"nanoclaw.driver.v1","operation":"%s","type":"error","code":"invalid_arguments","message":"Driver arguments may not contain control characters.","recovery":[]}\n' "$DRIVER_OPERATION"
+      exit 1
+    fi
+  done
+  if [ -n "${NANOCLAW_ONECLI_API_TOKEN:-}" ] || [ -n "${NANOCLAW_ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${NANOCLAW_REGISTRY_ENROLL_CODE:-}" ] || [ -n "${NANOCLAW_REGISTRY_TOKEN:-}" ]; then
+    printf '{"protocol":"nanoclaw.driver.v1","operation":"%s","type":"error","code":"secret_transport_forbidden","message":"Secret answers must arrive through protocol stdin, not the launch environment.","recovery":[]}\n' "$DRIVER_OPERATION"
+    exit 1
+  fi
+  set -- ${DRIVER_ARGS[@]+"${DRIVER_ARGS[@]}"}
+fi
+
+driver_has_ack() { case ",$DRIVER_ACKS," in *,$1,*) return 0 ;; *) return 1 ;; esac; }
+driver_json_string() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '"%s"' "$value"
+}
+driver_recovery_args() {
+  local ack="$1"
+  shift
+  printf '["--protocol","nanoclaw.driver.v1"'
+  for arg in "$@"; do printf ',%s' "$(driver_json_string "$arg")"; done
+  for known in low-memory gce root; do
+    if driver_has_ack "$known"; then printf ',"--driver-ack","%s"' "$known"; fi
+  done
+  printf ',"--driver-ack","%s"]' "$ack"
+}
+
 # ─── --help: show usage without bootstrapping ──────────────────────────
 for arg in "$@"; do
   if [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
+    if [ "$DRIVER_MODE" = true ]; then
+      printf '{"protocol":"nanoclaw.driver.v1","operation":"%s","type":"error","code":"help_requested","message":"Machine mode does not render terminal help.","recovery":[{"kind":"rerun","args":["--help"]}]}\n' "$DRIVER_OPERATION"
+      exit 1
+    fi
     if command -v node >/dev/null 2>&1 && [ -x "$PROJECT_ROOT/node_modules/.bin/tsx" ]; then
       exec "$PROJECT_ROOT/node_modules/.bin/tsx" "$PROJECT_ROOT/setup/auto.ts" "$@"
     fi
@@ -67,7 +185,16 @@ for arg in "$@"; do
     # everything after it as positional args and the flags get dropped.
     # Gate on node (tsx's shebang interpreter) — pnpm isn't used here.
     if command -v node >/dev/null 2>&1 && [ -x "$PROJECT_ROOT/node_modules/.bin/tsx" ]; then
+      if [ "$DRIVER_MODE" = true ]; then
+        export NANOCLAW_PROTOCOL=nanoclaw.driver.v1
+        export NANOCLAW_OPERATION=uninstall
+        export NANOCLAW_DRIVER_SHELL_HELLO=1
+      fi
       exec "$PROJECT_ROOT/node_modules/.bin/tsx" "$PROJECT_ROOT/setup/auto.ts" "$@"
+    fi
+    if [ "$DRIVER_MODE" = true ]; then
+      printf '{"protocol":"nanoclaw.driver.v1","operation":"uninstall","type":"error","code":"runtime_missing","message":"The TypeScript runtime is unavailable; uninstall left everything untouched.","recovery":[{"kind":"manual","title":"Restore the runtime","instructions":["Run bash nanoclaw.sh once without uninstall, then retry."]}]}\n'
+      exit 1
     fi
     export NANOCLAW_PROJECT_ROOT="$PROJECT_ROOT"
     # shellcheck source=setup/lib/install-slug.sh
@@ -97,13 +224,15 @@ LOGS_DIR="$PROJECT_ROOT/logs"
 STEPS_DIR="$LOGS_DIR/setup-steps"
 PROGRESS_LOG="$LOGS_DIR/setup.log"
 
-# Diagnostics: persisted install-id + fire-and-forget emit. Sourced early
-# so `setup_launched` covers dropoff before bootstrap even starts.
+# Diagnostics: persisted install-id + fire-and-forget emit.
 # shellcheck source=setup/lib/diagnostics.sh
 source "$PROJECT_ROOT/setup/lib/diagnostics.sh"
-ph_event setup_launched \
-  platform="$(uname -s | tr 'A-Z' 'a-z')" \
-  is_wsl="$([ -f /proc/version ] && grep -qi 'microsoft\|wsl' /proc/version 2>/dev/null && echo true || echo false)"
+emit_launch_diagnostic() {
+  ph_event setup_launched \
+    platform="$(uname -s | tr 'A-Z' 'a-z')" \
+    is_wsl="$([ -f /proc/version ] && grep -qi 'microsoft\|wsl' /proc/version 2>/dev/null && echo true || echo false)"
+}
+[ "$DRIVER_MODE" = true ] || emit_launch_diagnostic
 
 # ─── log helpers ────────────────────────────────────────────────────────
 
@@ -185,17 +314,39 @@ brand_bold() {
 }
 clear_line() { use_ansi && printf '\r\033[2K' || printf '\n'; }
 
-spinner_start()   { printf '%s  %s…' "$(gray '◒')" "$1"; }
-spinner_update()  { clear_line; printf '%s  %s… %s' "$(gray '◒')" "$1" "$(dim "(${2}s)")"; }
-spinner_success() { clear_line; printf '%s  %s %s\n' "$(gray '◇')" "$1" "$(dim "(${2}s)")"; }
-spinner_failure() { clear_line; printf '%s  %s %s\n' "$(red '✗')"  "$1" "$(dim "(${2}s)")"; }
+spinner_start() {
+  if [ "$DRIVER_MODE" = true ]; then
+    printf '{"protocol":"nanoclaw.driver.v1","operation":"setup","type":"progress","stepId":"bootstrap","state":"running","label":"Installing the basics"}\n'
+  else
+    printf '%s  %s…' "$(gray '◒')" "$1"
+  fi
+}
+spinner_update()  { [ "$DRIVER_MODE" = true ] || { clear_line; printf '%s  %s… %s' "$(gray '◒')" "$1" "$(dim "(${2}s)")"; }; }
+spinner_success() {
+  if [ "$DRIVER_MODE" = true ]; then
+    printf '{"protocol":"nanoclaw.driver.v1","operation":"setup","type":"progress","stepId":"bootstrap","state":"succeeded","label":"Basics ready"}\n'
+  else
+    clear_line; printf '%s  %s %s\n' "$(gray '◇')" "$1" "$(dim "(${2}s)")"
+  fi
+}
+spinner_failure() {
+  if [ "$DRIVER_MODE" = true ]; then
+    printf '{"protocol":"nanoclaw.driver.v1","operation":"setup","type":"progress","stepId":"bootstrap","state":"failed","label":"Installing the basics"}\n'
+  else
+    clear_line; printf '%s  %s %s\n' "$(red '✗')" "$1" "$(dim "(${2}s)")"
+  fi
+}
 
 # ─── fresh-run setup ────────────────────────────────────────────────────
 
-rm -rf "$STEPS_DIR"
-rm -f  "$PROGRESS_LOG"
-mkdir -p "$STEPS_DIR" "$LOGS_DIR"
-write_header
+# Machine preflight failures must not create setup state. Terminal mode keeps
+# its established log timing.
+if [ "$DRIVER_MODE" = false ]; then
+  rm -rf "$STEPS_DIR"
+  rm -f  "$PROGRESS_LOG"
+  mkdir -p "$STEPS_DIR" "$LOGS_DIR"
+  write_header
+fi
 
 # NanoClaw splash — under-the-sea lobster mascot in truecolor braille,
 # with the figlet wordmark and taglines below. Pre-rendered into
@@ -203,7 +354,7 @@ write_header
 # figlet); the bash script just streams the literal frame. clack's intro
 # then carries the "let's get you set up" framing — setup:auto sees
 # NANOCLAW_BOOTSTRAPPED=1 and skips re-printing the wordmark.
-cat "$PROJECT_ROOT/assets/setup-splash.txt"
+[ "$DRIVER_MODE" = true ] || cat "$PROJECT_ROOT/assets/setup-splash.txt"
 
 # ─── pre-flight: minimum hardware specs ────────────────────────────────
 # NanoClaw runs an agent container per session. Below this threshold the
@@ -234,6 +385,13 @@ LOW_MEM=false
 [ "$MEM_MB" -gt 0 ] && [ "$MEM_MB" -lt "$MIN_MEM_MB" ] && LOW_MEM=true
 
 if [ "$LOW_MEM" = true ]; then
+  if [ "$DRIVER_MODE" = true ]; then
+    if ! driver_has_ack low-memory; then
+      DRIVER_RERUN_ARGS=$(driver_recovery_args low-memory ${DRIVER_ARGS[@]+"${DRIVER_ARGS[@]}"})
+      printf '{"protocol":"nanoclaw.driver.v1","operation":"setup","type":"error","code":"low_memory","message":"This machine has less than the recommended 4 GB of memory.","recovery":[{"kind":"rerun","args":%s}]}\n' "$DRIVER_RERUN_ARGS"
+      exit 1
+    fi
+  else
   printf '  %s\n' "$(red 'Warning: this machine likely cannot run NanoClaw.')"
   printf '  %s\n' "$(dim 'NanoClaw recommends a 4 GB+ RAM machine. Below this, the host + agent')"
   printf '  %s\n' "$(dim 'container will run out of memory under most workloads. A stronger')"
@@ -253,6 +411,7 @@ if [ "$LOW_MEM" = true ]; then
       exit 1
       ;;
   esac
+  fi
 fi
 
 # ─── pre-flight: Google Cloud VM warning (Linux) ──────────────────────
@@ -264,6 +423,13 @@ fi
 if [ "$(uname -s)" = "Linux" ] \
   && { grep -qi 'Google' /sys/class/dmi/id/product_name 2>/dev/null \
     || grep -qi 'Google' /sys/class/dmi/id/sys_vendor   2>/dev/null; }; then
+  if [ "$DRIVER_MODE" = true ]; then
+    if ! driver_has_ack gce; then
+      DRIVER_RERUN_ARGS=$(driver_recovery_args gce ${DRIVER_ARGS[@]+"${DRIVER_ARGS[@]}"})
+      printf '{"protocol":"nanoclaw.driver.v1","operation":"setup","type":"error","code":"gce_unsupported","message":"Google Cloud VM detected; NanoClaw is unlikely to run reliably there.","recovery":[{"kind":"rerun","args":%s},{"kind":"manual","title":"Use another provider","instructions":["Move this checkout to a supported non-GCE host, then rerun setup."]}]}\n' "$DRIVER_RERUN_ARGS"
+      exit 1
+    fi
+  else
   printf '  %s\n' "$(red 'Warning: Google Cloud VM detected.')"
   printf '  %s\n' "$(dim 'Google blocks sudo commands, so NanoClaw is unlikely to run successfully on this VM.')"
   printf '  %s\n\n' "$(dim 'If you want to run NanoClaw successfully, switch to a different provider (Hetzner, Hostinger, exe.dev and others..).')"
@@ -280,10 +446,18 @@ if [ "$(uname -s)" = "Linux" ] \
       exit 1
       ;;
   esac
+  fi
 fi
 
 # ─── pre-flight: root user warning (Linux) ────────────────────────────
 if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" -eq 0 ]; then
+  if [ "$DRIVER_MODE" = true ]; then
+    if ! driver_has_ack root; then
+      DRIVER_RERUN_ARGS=$(driver_recovery_args root ${DRIVER_ARGS[@]+"${DRIVER_ARGS[@]}"})
+      printf '{"protocol":"nanoclaw.driver.v1","operation":"setup","type":"error","code":"root_user","message":"Running NanoClaw as root can cause unsafe service and file ownership.","recovery":[{"kind":"rerun","args":%s},{"kind":"manual","title":"Create a regular Linux user","instructions":["Create a non-root user with sudo access.","Log in as that user and rerun setup."]}]}\n' "$DRIVER_RERUN_ARGS"
+      exit 1
+    fi
+  else
   printf '  %s\n' \
     "$(red 'Warning: you are running as root.')"
   printf '  %s\n' \
@@ -313,6 +487,7 @@ if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" -eq 0 ]; then
       exit 1
       ;;
   esac
+  fi
 fi
 
 # ─── pre-flight: Homebrew on macOS ─────────────────────────────────────
@@ -322,6 +497,10 @@ fi
 # before the spinner starts, so the user knows what's about to happen and
 # brew's own interactive sudo/CLT prompts stay readable.
 if [ "$(uname -s)" = "Darwin" ] && ! command -v brew >/dev/null 2>&1; then
+  if [ "$DRIVER_MODE" = true ]; then
+    printf '{"protocol":"nanoclaw.driver.v1","operation":"setup","type":"error","code":"homebrew_required","message":"Homebrew is required before machine setup can continue.","recovery":[{"kind":"manual","title":"Install Homebrew","instructions":["Install Homebrew from https://brew.sh in a terminal.","Rerun the same NanoClaw setup command."]}]}\n'
+    exit 1
+  fi
   printf '  %s\n' \
     "$(dim "Homebrew isn't installed. NanoClaw uses it to install Node and Docker on your Mac.")"
   printf '  %s\n\n' \
@@ -364,6 +543,14 @@ if [ "$(uname -s)" = "Darwin" ] && ! command -v brew >/dev/null 2>&1; then
 fi
 
 # ─── first step: install the basics (Node + pnpm + native modules) ─────
+
+if [ "$DRIVER_MODE" = true ]; then
+  rm -rf "$STEPS_DIR"
+  rm -f  "$PROGRESS_LOG"
+  mkdir -p "$STEPS_DIR" "$LOGS_DIR"
+  write_header
+  emit_launch_diagnostic
+fi
 
 BOOTSTRAP_RAW="${STEPS_DIR}/01-bootstrap.log"
 BOOTSTRAP_LABEL="Installing the basics"
@@ -439,4 +626,10 @@ fi
 # into setup:auto's spinner. exec so signals (Ctrl-C) propagate directly.
 # pnpm forwards arguments after the script name directly. Passing an extra
 # `--` would reach setup:auto and make its parser stop before our flags.
+if [ "$DRIVER_MODE" = true ]; then
+  export NANOCLAW_PROTOCOL=nanoclaw.driver.v1
+  export NANOCLAW_OPERATION=setup
+  export NANOCLAW_DRIVER_SHELL_HELLO=1
+  exec "$PROJECT_ROOT/node_modules/.bin/tsx" "$PROJECT_ROOT/setup/auto.ts" "$@"
+fi
 exec pnpm --silent run setup:auto "$@"
