@@ -3761,7 +3761,7 @@ async function writePrivate(file, value) {
   }
 }
 var DeviceClient = class {
-  constructor({ origin, token, file, label = "Test device", log = () => {
+  constructor({ origin, token, file, label = "NanoClaw installation", log = () => {
   }, exclusive = false }) {
     const url = new URL(origin);
     if (url.username || url.password || url.search || url.hash || url.pathname !== "/" || url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) throw new Error("Portal origin must use HTTPS, except on loopback.");
@@ -3959,6 +3959,10 @@ function openInstall(privateJwk, expectedContext, envelope) {
 
 // device/setup-client.mjs
 var SetupClient = class extends DeviceClient {
+  async available(stage) {
+    const { items } = await this.request("GET", "/api/v1/catalog");
+    return items.some((p) => (stage === "perks" ? p.kind !== "account" : p.id === stage) && (p.kind === "account" || p.enabled));
+  }
   async resumeEnabled(stage, name = "Nano") {
     if (!this.token) return false;
     try {
@@ -4041,9 +4045,6 @@ var SetupClient = class extends DeviceClient {
   }
   async complete(status = "complete", detail = {}) {
     return this.request("POST", `/api/v1/setup/${this.flow.code}/complete`, { status, ...detail });
-  }
-  async demoSlack() {
-    return this.request("POST", `/api/v1/setup/${this.flow.code}/demo-slack`, {});
   }
 };
 export {

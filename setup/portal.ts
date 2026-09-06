@@ -14,8 +14,7 @@ import { SetupClient, writePrivate } from './portal-client.mjs';
 import type { ProvisioningCore } from './channels/slack-auto.js';
 
 export type PortalStage = 'echo' | 'slack' | 'perks' | 'tavily' | 'dial';
-// Enable after the portal is deployed; a loopback origin supports local testing.
-export const portalEnabled = () => Boolean(process.env.NANOCLAW_PORTAL_ORIGIN);
+export const portalEnabled = () => true;
 
 // Save into the existing registry/credential-helper contract after the CLI has
 // durably received its encrypted credential. Each checkout retains its own
@@ -40,6 +39,7 @@ export async function beginPortal(stage: PortalStage, name = 'Nano'): Promise<Se
     exclusive: true,
   }).initialize();
   try {
+    if (!await client.available(stage)) { await client.stop(); return null; }
     if (await client.resumeEnabled(stage, name)) {
       p.log.info(`${stage === 'perks' ? 'Partner perks' : stage[0].toUpperCase() + stage.slice(1)} already enabled. Continuing setup.`);
       return client;

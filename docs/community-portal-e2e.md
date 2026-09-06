@@ -1,62 +1,55 @@
-# Community portal setup test
+# Run NanoClaw with the community portal
 
-This branch adds browser entry points to the NanoClaw setup wizard. WorkOS
-sign-in authenticates the portal and authorizes the waiting installation in
-one flow. Echo and Slack use the real NanoClaw account services. Tavily and
-Dial provide simulated credentials and a fictional phone number; they do not
-create partner accounts, perform searches, or place calls.
-
-Use a fresh VM with Docker, Node 22 and pnpm 10.34.5. Use the Claude provider
-for this walkthrough because this version's prebuilt Echo image supports
-Claude. Bring your normal provider login and a Slack workspace where you can
-connect and install the managed app.
+Use a fresh exe.dev VM with Docker, Node 22, pnpm 10.34.5 and native build
+prerequisites. Bring your normal agent-provider credentials and access to a
+Slack workspace where you can connect and install the managed app. The VM
+needs no AWS, Vercel, WorkOS server or Slack server credentials.
 
 ```sh
-git clone --branch test/community-portal-e2e https://github.com/nanocoai/nanoclaw.git nanoclaw
+git clone --branch feat/community-portal https://github.com/nanocoai/nanoclaw.git nanoclaw
 cd nanoclaw
 pnpm install --frozen-lockfile
-export NANOCLAW_PORTAL_ORIGIN=https://portal.nanoclaw.dev
 export NANOCLAW_AGENT_PROVIDER=claude
 pnpm setup:auto
 ```
 
-Keep the exported portal origin in the terminal session for subsequent setup
-commands. This branch leaves the normal wizard unchanged when it is unset.
-Clone normally, without `--single-branch`, so channel installation can fetch
-its payload from the repository's `channels` branch.
+Clone normally, without `--single-branch` or a shallow clone: channel installation
+fetches the repository's `channels` branch. Do not copy another installation's
+`.env`, `node_modules`, account files or setup journal. The Echo prebuilt image
+path currently supports the Claude provider.
 
-At each relevant setup stage, the CLI checks whether the perk is enabled. If
-it is not, it asks for consent and prints a browser link. Over SSH, open that
-link on your laptop. Sign in, activate the perk in the dashboard modal, then
-enable any others you want. Choose **Return to terminal** to release the
-waiting setup. Later stages reuse already enabled perks.
+The portal opens at **https://portal.nanoclaw.dev** by default. The CLI asks
+before opening the browser and prints the link for SSH users to open on their
+laptop. WorkOS login establishes the browser session and authorizes the
+originating installation through its activation choice. No tunnel, callback
+listener, separate CLI login or pairing code is required.
 
-After setup has delivered the test credentials, check them without printing
-or copying their values:
+## Walkthrough
 
-```sh
-pnpm exec tsx setup/portal-check.ts tavily
-pnpm exec tsx setup/portal-check.ts dial
-```
+1. Start setup and consent to the Echo offer. After WorkOS login, the dashboard
+   opens with its activation modal. Enable Echo, explore the other perks, and
+   choose **Return to terminal**. Verify the container step actually pulls the
+   pinned Echo image; saving the choice alone does not prove the pull.
+2. Connect Slack through its OAuth flow in the portal. At the Slack setup step,
+   select your workspace and return to the terminal. Complete any required
+   installation approval, start NanoClaw, and get a reply in your Slack chat.
+3. Already-enabled perks should be reused at subsequent setup stages. A skipped
+   perk is offered again at its next applicable step. Tavily and Dial show
+   **Coming soon** and are skipped by the CLI. No fake keys, credits, numbers,
+   search results or calls are produced.
+4. Interrupt and resume a setup step. It should reuse the pending request or
+   saved Slack app rather than create duplicates. An ambiguous Slack create is
+   held for recovery because the existing API has no idempotency contract.
+5. Sign out of the browser. Account navigation should disappear immediately,
+   including when the session expires. Signing the installation out from
+   **Devices** should reject its old installation credential.
 
-Each successful check consumes one simulated credit. The output explicitly
-states that no live search or call occurred. The private installation journal
-is `data/community-portal.json`; do not share or commit it.
+Revisit a step with `pnpm exec tsx setup/portal.ts --stage echo` or `--stage slack`,
+one at a time. Private state is in `data/community-portal.json`; never share or
+commit it. Keep that file when recovering an interrupted setup. Each checkout
+retains its own installation identity.
 
-To revisit a specific entry point:
-
-```sh
-pnpm exec tsx setup/portal.ts --stage echo
-pnpm exec tsx setup/portal.ts --stage slack
-pnpm exec tsx setup/portal.ts --stage tavily
-pnpm exec tsx setup/portal.ts --stage dial
-```
-
-Run one setup command at a time per checkout. If interrupted normally, rerun
-the same command to resume the saved request. An enabled perk skips the
-browser prompt. Account-level activation persists across installations, so a
-second VM does not reset the account's activation state.
-
-For the walkthrough, verify an actual Echo image pull and an agent reply in
-Slack. Partner activation alone does not establish those results. Production
-partner integration and agent consumption of partner credentials are deferred.
+The automated suite exercises the service, real cell, storage, CLI bridge and
+browser UI. A completed WorkOS login, Echo image pull and real Slack reply on
+your VM are the remaining operator acceptance checks. No VM or Slack app was
+created by the preparation work.

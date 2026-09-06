@@ -3,6 +3,7 @@ export class SetupClient {
   token: string;
   local: Record<string, any>;
   initialize(): Promise<this>;
+  available(stage: string): Promise<boolean>;
   resumeEnabled(stage: string, name?: string): Promise<boolean>;
   start(stage: string, name?: string): Promise<{ url: string }>;
   wait(): Promise<{ id: string; status: string; choice: { imageSource: 'hardened' | 'local'; workspaceId: string; name: string } }>;

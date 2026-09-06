@@ -8,6 +8,7 @@ const mock = vi.hoisted(() => ({
   open: vi.fn(),
   confirm: vi.fn(),
   resume: vi.fn(),
+  available: vi.fn(),
   start: vi.fn(),
   stop: vi.fn(),
   image: vi.fn(),
@@ -26,6 +27,7 @@ vi.mock('./portal-client.mjs', () => ({
     async initialize() {
       return this;
     }
+    async available(...args: any[]) { return mock.available(...args); }
     async resumeEnabled(...args: any[]) { return mock.resume(...args); }
     async start() {
       mock.start();
@@ -71,6 +73,7 @@ describe('browser setup handoffs', () => {
     mock.saved = [];
     mock.login.mockResolvedValue(0);
     mock.resume.mockResolvedValue(false);
+    mock.available.mockResolvedValue(true);
     mock.confirm.mockResolvedValue(true);
     mock.result.status = 'approved';
   });
@@ -138,6 +141,15 @@ describe('browser setup handoffs', () => {
     expect(await runSlackPortal(provider, 'Nano')).toEqual({ __portal_skip: 'slack' });
     expect(provider.brokerProvision).not.toHaveBeenCalled();
     expect(mock.open).not.toHaveBeenCalled();
+  });
+  it('skips unavailable partners without prompting or creating a handoff', async () => {
+    mock.available.mockResolvedValue(false);
+    await runPerksPortal();
+    expect(mock.confirm).not.toHaveBeenCalled();
+    expect(mock.start).not.toHaveBeenCalled();
+    expect(mock.open).not.toHaveBeenCalled();
+    expect(mock.available.mock.calls).toEqual([['tavily'], ['dial']]);
+    expect(mock.stop).toHaveBeenCalledTimes(2);
   });
   it('opens the browser only after consent', async () => {
     await runImagePortal();
