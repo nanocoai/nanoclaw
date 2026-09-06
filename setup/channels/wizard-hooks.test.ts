@@ -82,9 +82,12 @@ function scratchRoot(prefix: string): string {
   return root;
 }
 
-/** Exec fixture: records commands, answers the channel skill's resolve runs. */
+/** Exec fixture: records rendered commands, answers the channel skill's resolve runs. */
 function makeExec(channel: string, cmds: string[], failOn?: string) {
-  return (c: string): string | void => {
+  return (command: string, args: string[] = []): string | void => {
+    // The skill engine hands bound values separately from the command template,
+    // as double-quoted positional parameters; render them the way a shell would.
+    const c = command.replace(/"?\$\{(\d+)\}"?/g, (_match, index: string) => args[Number(index) - 1] ?? '');
     cmds.push(c);
     if (failOn && c.includes(failOn)) throw new Error(`boom: ${failOn}`);
     if (c.startsWith(`${channel}-resolve-owner`)) return 'U777\n';
@@ -261,7 +264,9 @@ describe('companion skills', () => {
     // and appended barrel imports before failing, and restarting could boot
     // that half-applied state. The operator is told to repair, then restart.
     expect(cmds.filter((c) => c === 'bash setup/lib/restart.sh')).toHaveLength(0);
-    const held = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('Skipping the deferred service restart'));
+    const held = warn.mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.includes('Skipping the deferred service restart'));
     expect(held).toHaveLength(1);
   });
 

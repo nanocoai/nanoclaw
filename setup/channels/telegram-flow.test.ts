@@ -21,6 +21,7 @@ import { describe, expect, it } from 'vitest';
 import { applySkill, fullyApplied, type ApplyResult } from '../../scripts/skill-apply.js';
 import { parseDirectives } from '../../scripts/skill-directives.js';
 
+import { renderedCommand } from '../lib/fixtures/rendered-command.js';
 const SKILL_DIR = path.join(process.cwd(), '.claude/skills/add-telegram');
 const OLD_TOKEN = '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const NEW_TOKEN = '987654321:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
@@ -62,13 +63,15 @@ async function run(
   const envValues: string[] = [];
   const res = await applySkill(SKILL_DIR, root, {
     inputs,
-    exec: (cmd) => {
+    exec: (command, args = []) => {
+      const cmd = renderedCommand(command, args);
       execs.push(cmd);
       if (/^(git|pnpm|bash)\b/.test(cmd)) return '';
       if (cmd.startsWith('curl')) return getMe(cmd);
-      return execFileSync('bash', ['-c', cmd], { cwd: root, encoding: 'utf-8' });
+      return execFileSync('bash', ['-c', command, 'nanoclaw-skill', ...args], { cwd: root, encoding: 'utf-8' });
     },
-    execStream: async (cmd) => {
+    execStream: async (command, args = []) => {
+      const cmd = renderedCommand(command, args);
       steps.push(cmd);
       // set-env itself is trunk code (setup/set-env.ts); only its value
       // pipeline is the skill's own, so that is what runs here.

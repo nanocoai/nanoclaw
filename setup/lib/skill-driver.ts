@@ -12,7 +12,7 @@
  * policy module (scripts/skill-policy.ts): the natural-barrier gate confirm,
  * the URL offer, the prose-derived validation message.
  */
-import { execSync, spawn } from 'node:child_process';
+import { execSync, spawn, spawnSync } from 'node:child_process';
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
@@ -26,6 +26,8 @@ import {
   type ApplyEvent,
   type ApplyResult,
   type InputMeta,
+  type SkillExec,
+  type SkillExecStream,
   type StepOutcome,
 } from '../../scripts/skill-apply.js';
 import { parseDirectives, promptVar } from '../../scripts/skill-directives.js';
@@ -35,7 +37,23 @@ import { isHeadless } from '../platform.js';
 import { emitStatus } from '../status.js';
 import { openUrl } from './browser.js';
 import { isHelpEscape, offerClaudeHandoff, validateWithHelpEscape } from './claude-handoff.js';
+import { redactSensitiveValues, registerSensitiveValue } from './redaction.js';
+import { childEnvWithoutSetupSecrets, withSecretFile } from './secret-file.js';
 import { startSpinner } from './runner.js';
+import { DriverCancelled, type SetupDriver } from './setup-driver.js';
+
+const MAX_MACHINE_EFFECT_OUTPUT_BYTES = 256 * 1024;
+
+function machineEffectOutputLimitError(driver?: SetupDriver): Error {
+  const message = 'A setup command exceeded the 256 KiB machine-output limit.';
+  if (!driver) return new Error(message);
+  try {
+    driver.error('skill_output_limit', message);
+  } catch (error) {
+    return error instanceof Error ? error : new Error(message);
+  }
+  return new Error(message);
+}
 
 /**
  * Build the clack `validate` callback an `nc:prompt` carries — the interactive
@@ -192,6 +210,7 @@ async function reuseFromEnv(
   projectRoot: string,
   alreadyHave: Record<string, string>,
   confirm: (message: string) => Promise<boolean>,
+  showMaskedValue = true,
 ): Promise<Record<string, string>> {
   let md: string;
   try {
@@ -243,9 +262,186 @@ async function reuseFromEnv(
     const shape = promptShape.get(v);
     if (shape?.validate && !new RegExp(shape.validate, shape.flags).test(normalizeValue(existing, shape.normalize)))
       continue;
-    if (await confirm(`Found an existing ${key} (${maskValue(existing)}). Use it?`)) reuse[v] = existing;
+    const existingLabel = showMaskedValue ? ` (${maskValue(existing)})` : '';
+    if (await confirm(`Found an existing ${key}${existingLabel}. Use it?`)) reuse[v] = existing;
   }
   return reuse;
+}
+
+class MachineSecretTransportError extends Error {
+  readonly code = 'secret_transport_unsupported';
+
+  constructor() {
+    super('A secret-valued skill command cannot be transported safely in machine mode.');
+  }
+}
+
+function failMachineSecretTransport(driver?: SetupDriver): never {
+  const message = 'This skill needs a secret transport that machine mode does not support.';
+  if (driver && typeof driver.error === 'function') {
+    return driver.error('secret_transport_unsupported', message, [
+      {
+        kind: 'manual',
+        title: 'Complete this step in a terminal',
+        instructions: ['Run this skill from a terminal, then retry setup.'],
+      },
+    ]);
+  }
+  throw new MachineSecretTransportError();
+}
+
+function isOneCliCommand(command: string): boolean {
+  return /^\s*(?:[^\s;&|]+\/)?onecli(?:\s|$)/.test(command);
+}
+
+function replaceOneCliValue(command: string, argIndex: number): string | undefined {
+  if (!isOneCliCommand(command)) return undefined;
+  const ref = `\\$\\{${argIndex + 1}\\}`;
+  const value = new RegExp(`--value(\\s+)("${ref}"|'${ref}'|'"${ref}"'|${ref})`);
+  const match = value.exec(command);
+  if (!match || match.index === undefined) return undefined;
+  return `${command.slice(0, match.index)}--file${match[0].slice('--value'.length)}${command.slice(match.index + match[0].length)}`;
+}
+
+function oneCliValueArgs(command: string): Set<number> {
+  const indexes = new Set<number>();
+  const value = /--value\s+(?:"\$\{(\d+)\}"|'\$\{(\d+)\}'|'"\$\{(\d+)\}"'|\$\{(\d+)\})/g;
+  let match: RegExpExecArray | null;
+  while ((match = value.exec(command)) !== null) {
+    const index = Number(match[1] ?? match[2] ?? match[3] ?? match[4]);
+    if (Number.isSafeInteger(index) && index > 0) indexes.add(index - 1);
+  }
+  return indexes;
+}
+
+function isCurlCommand(command: string): boolean {
+  return /^\s*(?:[^\s;&|]+\/)?curl(?:\s|$)/.test(command);
+}
+
+function curlSecretCommand(command: string, indexes: number[], configPath: string): string | undefined {
+  if (!isCurlCommand(command)) return undefined;
+  let safeCommand = command;
+  const markers = indexes.map((index) => `__NANOCLAW_SECRET_${index}__`);
+  for (const [position, index] of indexes.entries()) {
+    const reference = `\${${index + 1}}`;
+    if (!safeCommand.includes(reference)) return undefined;
+    safeCommand = safeCommand.replaceAll(reference, markers[position]);
+  }
+
+  const resolveSecrets = indexes.flatMap((index, position) => [`nc_secret_${position}=$(<"\${${index + 1}}")`]);
+  const replaceMarkers = markers.map(
+    (marker, position) =>
+      `  case "$value" in *${marker}*) value="\${value%%${marker}*}$nc_secret_${position}\${value#*${marker}}" ;; esac`,
+  );
+  return [
+    `nc_curl_config=${JSON.stringify(configPath)}`,
+    ...resolveSecrets,
+    'nc_curl_resolve() {',
+    '  local value="$1"',
+    ...replaceMarkers,
+    '  printf %s "$value"',
+    '}',
+    'nc_curl_quote() {',
+    '  local value="$1"',
+    '  value="${value//\\\\/\\\\\\\\}"',
+    '  value="${value//\\"/\\\\\\"}"',
+    '  value="${value//$\'\\n\'/\\n}"',
+    '  value="${value//$\'\\r\'/\\r}"',
+    '  printf %s "$value"',
+    '}',
+    'nc_curl_option() {',
+    '  local value',
+    '  value=$(nc_curl_resolve "$2")',
+    '  printf \'%s = "%s"\\n\' "$1" "$(nc_curl_quote "$value")" >> "$nc_curl_config"',
+    '}',
+    'curl() {',
+    '  : > "$nc_curl_config"',
+    '  while [ "$#" -gt 0 ]; do',
+    '    case "$1" in',
+    '      -s) printf \'silent\\n\' >> "$nc_curl_config" ;;',
+    '      -f) printf \'fail\\n\' >> "$nc_curl_config" ;;',
+    '      -S) printf \'show-error\\n\' >> "$nc_curl_config" ;;',
+    '      -L) printf \'location\\n\' >> "$nc_curl_config" ;;',
+    '      -sf|-fs) printf \'silent\\nfail\\n\' >> "$nc_curl_config" ;;',
+    '      -X|--request|-H|--header|-d|--data|--data-raw|--data-binary|--data-urlencode|--url|--connect-timeout|--max-time)',
+    '        case "$1" in',
+    '          -X|--request) nc_curl_name=request ;;',
+    '          -H|--header) nc_curl_name=header ;;',
+    '          -d|--data|--data-raw|--data-binary) nc_curl_name=data ;;',
+    '          --data-urlencode) nc_curl_name=data-urlencode ;;',
+    '          --url) nc_curl_name=url ;;',
+    '          --connect-timeout) nc_curl_name=connect-timeout ;;',
+    '          --max-time) nc_curl_name=max-time ;;',
+    '        esac',
+    '        shift',
+    '        [ "$#" -gt 0 ] || return 64',
+    '        nc_curl_option "$nc_curl_name" "$1"',
+    '        ;;',
+    '      --) shift; while [ "$#" -gt 0 ]; do nc_curl_option url "$1"; shift; done; break ;;',
+    '      -*) return 64 ;;',
+    '      *) nc_curl_option url "$1" ;;',
+    '    esac',
+    '    shift',
+    '  done',
+    '  command curl --config "$nc_curl_config"',
+    '}',
+    safeCommand,
+  ].join('\n');
+}
+
+async function withMachineSecretTransport<T>(
+  command: string,
+  args: string[],
+  secrets: ReadonlySet<string>,
+  driver: SetupDriver | undefined,
+  run: (command: string, args: string[]) => Promise<T>,
+): Promise<T> {
+  const secretArgs = new Set<number>(oneCliValueArgs(command));
+  args.forEach((value, index) => {
+    if (secrets.has(value)) secretArgs.add(index);
+  });
+  if (secretArgs.size === 0) return run(command, args);
+
+  let safeCommand = command;
+  const indexes = [...secretArgs];
+  const onecli = isOneCliCommand(command);
+  if (onecli) {
+    for (const index of indexes) {
+      const replaced = replaceOneCliValue(safeCommand, index);
+      if (replaced === undefined) failMachineSecretTransport(driver);
+      safeCommand = replaced;
+    }
+  } else if (!isCurlCommand(command)) {
+    failMachineSecretTransport(driver);
+  }
+
+  const pass = async (position: number, currentArgs: string[]): Promise<T> => {
+    if (position === indexes.length) {
+      if (onecli) return run(safeCommand, currentArgs);
+      return withSecretFile('', (configPath) => {
+        const wrapped = curlSecretCommand(safeCommand, indexes, configPath);
+        if (wrapped === undefined) failMachineSecretTransport(driver);
+        return run(wrapped, currentArgs);
+      });
+    }
+    const index = indexes[position];
+    const secret = args[index];
+    if (secret === undefined) failMachineSecretTransport(driver);
+    return withSecretFile(secret, (filePath) => {
+      const nextArgs = [...currentArgs];
+      nextArgs[index] = filePath;
+      return pass(position + 1, nextArgs);
+    });
+  };
+  return pass(0, [...args]);
+}
+
+function machineChildEnv(secrets: ReadonlySet<string>): NodeJS.ProcessEnv {
+  const env = childEnvWithoutSetupSecrets();
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined && [...secrets].some((secret) => value.includes(secret))) delete env[key];
+  }
+  return env;
 }
 
 /**
@@ -267,32 +463,76 @@ async function reuseFromEnv(
  * appended there (level 3, like runner.ts's per-step raw logs) so the silenced
  * noise stays inspectable.
  */
-export function hostExec(projectRoot: string, rawLog?: string): (cmd: string) => Promise<string> {
-  const tee = (cmd: string, stdout: string, stderr: string): void => {
+export function hostExec(
+  projectRoot: string,
+  rawLog?: string,
+  driver?: SetupDriver,
+  secrets: ReadonlySet<string> = new Set<string>(),
+): SkillExec {
+  const tee = (cmd: string, stdout: string, stderr: string, machine: boolean): void => {
     if (!rawLog) return;
-    const body = [stdout, stderr].filter(Boolean).join('');
-    appendFileSync(rawLog, `$ ${cmd}\n${body}${body && !body.endsWith('\n') ? '\n' : ''}\n`);
+    // A capture can mint a credential before the engine knows which field is
+    // sensitive. Machine runs keep that output in memory for capture only.
+    const body = machine ? '' : [stdout, stderr].filter(Boolean).join('');
+    const header = machine ? '$ [machine command omitted]' : `$ ${cmd}`;
+    appendFileSync(rawLog, `${header}\n${body}${body && !body.endsWith('\n') ? '\n' : ''}\n`);
   };
-  return (cmd) =>
+  const run = (cmd: string, args: string[]): Promise<string> =>
     new Promise((resolve, reject) => {
-      const child = spawn('bash', ['-c', cmd], {
+      const machine = driver?.mode === 'ndjson' || process.env.NANOCLAW_PROTOCOL === 'nanoclaw.driver.v1';
+      const baseEnv = machine ? machineChildEnv(secrets) : process.env;
+      const child = spawn('bash', ['-c', cmd, 'nanoclaw-skill', ...args], {
         cwd: projectRoot,
-        env: { ...process.env, PATH: `${join(projectRoot, 'bin')}:${process.env.PATH ?? ''}` },
+        env: { ...baseEnv, PATH: `${join(projectRoot, 'bin')}:${baseEnv.PATH ?? ''}` },
         stdio: ['ignore', 'pipe', 'pipe'],
+        ...(machine ? { detached: true } : {}),
       });
+      const stopGroup = (): void => {
+        if (!machine || !child.pid) return;
+        const processGroupId = child.pid;
+        try {
+          process.kill(-processGroupId, 'SIGTERM');
+        } catch {
+          /* already gone */
+        }
+        setTimeout(() => {
+          try {
+            process.kill(-processGroupId, 'SIGKILL');
+          } catch {
+            /* already gone */
+          }
+        }, 250);
+      };
+      driver?.cancellationSignal?.addEventListener('abort', stopGroup, { once: true });
+      if (driver?.cancellationSignal?.aborted) stopGroup();
       let out = '';
       let err = '';
-      child.stdout.on('data', (c: Buffer) => {
-        out += c.toString('utf8');
-      });
-      child.stderr.on('data', (c: Buffer) => {
-        err += c.toString('utf8');
-      });
+      let outputBytes = 0;
+      let outputLimitExceeded = false;
+      const capture = (chunk: Buffer, stream: 'stdout' | 'stderr'): void => {
+        if (outputLimitExceeded) return;
+        if (machine) {
+          outputBytes += chunk.byteLength;
+          if (outputBytes > MAX_MACHINE_EFFECT_OUTPUT_BYTES) {
+            outputLimitExceeded = true;
+            stopGroup();
+            return;
+          }
+        }
+        if (stream === 'stdout') out += chunk.toString('utf8');
+        else err += chunk.toString('utf8');
+      };
+      child.stdout.on('data', (chunk: Buffer) => capture(chunk, 'stdout'));
+      child.stderr.on('data', (chunk: Buffer) => capture(chunk, 'stderr'));
       child.on('error', reject);
       child.on('close', (code) => {
-        tee(cmd, out, err);
+        driver?.cancellationSignal?.removeEventListener('abort', stopGroup);
+        tee(cmd, out, err, machine);
+        if (driver?.cancellationSignal?.aborted) return reject(new DriverCancelled('cancelled'));
+        if (outputLimitExceeded) return reject(machineEffectOutputLimitError(driver));
         if (code === 0) return resolve(out);
-        const stderr = err.trim();
+        if (machine) return reject(new Error(`exit ${code ?? '?'}: command failed`));
+        const stderr = machine ? redactSensitiveValues(err.trim()) : err.trim();
         const head =
           stderr
             .split('\n')
@@ -301,6 +541,10 @@ export function hostExec(projectRoot: string, rawLog?: string): (cmd: string) =>
         reject(new Error(`exit ${code ?? '?'}: ${head}${stderr ? `\n${stderr}` : ''}`));
       });
     });
+  return (cmd, args = []) => {
+    const machine = driver?.mode === 'ndjson' || process.env.NANOCLAW_PROTOCOL === 'nanoclaw.driver.v1';
+    return machine ? withMachineSecretTransport(cmd, args, secrets, driver, run) : run(cmd, args);
+  };
 }
 
 /**
@@ -311,14 +555,21 @@ export function hostExec(projectRoot: string, rawLog?: string): (cmd: string) =>
  * fields so the engine can `capture:<var>=<FIELD>` them. The block protocol mirrors
  * setup/lib/runner.ts's StatusStream — a step is just a command that emits blocks.
  */
-export function hostExecStream(projectRoot: string): (cmd: string) => Promise<StepOutcome> {
-  return (cmd) =>
-    new Promise((resolve) => {
-      const child = spawn('bash', ['-c', cmd], {
+export function hostExecStream(
+  projectRoot: string,
+  driver?: SetupDriver,
+  secrets: ReadonlySet<string> = new Set<string>(),
+): SkillExecStream {
+  const run = async (cmd: string, args: string[] = []) => {
+    return new Promise<StepOutcome>((resolve, reject) => {
+      const machine = driver?.mode === 'ndjson' || process.env.NANOCLAW_PROTOCOL === 'nanoclaw.driver.v1';
+      const teamsLogin = machine && cmd.includes('/bin/teams" login &&');
+      const baseEnv = machine ? machineChildEnv(secrets) : process.env;
+      const child = spawn('bash', ['-c', cmd, 'nanoclaw-skill', ...args], {
         cwd: projectRoot,
         env: {
-          ...process.env,
-          PATH: `${join(projectRoot, 'bin')}:${process.env.PATH ?? ''}`,
+          ...baseEnv,
+          PATH: `${join(projectRoot, 'bin')}:${baseEnv.PATH ?? ''}`,
           // A step renders curated operator UI (a code card, a QR) — the host
           // logger's info noise doesn't belong on the wizard screen, and it
           // always emits ANSI so it can't be filtered by stream. Warnings and
@@ -330,19 +581,87 @@ export function hostExecStream(projectRoot: string): (cmd: string) => Promise<St
           // there — force color so the child's card matches the parent.
           ...(process.stdout.isTTY ? { FORCE_COLOR: '1' } : {}),
         },
-        stdio: ['inherit', 'pipe', 'pipe'],
+        stdio: [machine ? 'ignore' : 'inherit', 'pipe', 'pipe'],
+        ...(machine ? { detached: true } : {}),
       });
-      const blocks: Array<{ fields: Record<string, string> }> = [];
-      let current: { fields: Record<string, string> } | null = null;
+      const stopGroup = (): void => {
+        if (!machine || !child.pid) return;
+        const processGroupId = child.pid;
+        try {
+          process.kill(-processGroupId, 'SIGTERM');
+        } catch {
+          /* already gone */
+        }
+        setTimeout(() => {
+          try {
+            process.kill(-processGroupId, 'SIGKILL');
+          } catch {
+            /* already gone */
+          }
+        }, 250);
+      };
+      driver?.cancellationSignal?.addEventListener('abort', stopGroup, { once: true });
+      if (driver?.cancellationSignal?.aborted) stopGroup();
+      const blocks: Array<{ type: string; fields: Record<string, string> }> = [];
+      let current: { type: string; fields: Record<string, string> } | null = null;
+      let outputBytes = 0;
+      let outputLimitExceeded = false;
+      const activeDisplayIds = new Set<string>();
+      let teamsAction: Promise<unknown> | undefined;
+      const renderTeamsDeviceLine = (line: string): void => {
+        if (!teamsLogin || !driver) return;
+        const url = line.match(/https:\/\/[^\s]+/)?.[0];
+        if (url && !activeDisplayIds.has('teams-login-url')) {
+          activeDisplayIds.add('teams-login-url');
+          driver.display({
+            id: 'teams-login-url',
+            kind: 'url',
+            url,
+            sensitive: true,
+            label: 'Microsoft device login',
+          });
+          teamsAction = driver
+            .externalAction(
+              { id: 'teams-login-open-url', kind: 'openURL', title: 'Open Microsoft device login', url },
+              () => true,
+            )
+            .catch((error: unknown) => {
+              stopGroup();
+              throw error;
+            });
+        }
+        const code = line.match(/\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b/)?.[0];
+        if (code && !activeDisplayIds.has('teams-login-code')) {
+          activeDisplayIds.add('teams-login-code');
+          driver.display({
+            id: 'teams-login-code',
+            kind: 'code',
+            content: code,
+            sensitive: true,
+            label: 'Microsoft device code',
+          });
+        }
+      };
       let buf = '';
       const onChunk = (chunk: Buffer): void => {
+        if (outputLimitExceeded) return;
+        if (machine) {
+          outputBytes += chunk.byteLength;
+          if (outputBytes > MAX_MACHINE_EFFECT_OUTPUT_BYTES) {
+            outputLimitExceeded = true;
+            stopGroup();
+            return;
+          }
+        }
         buf += chunk.toString('utf8');
         let idx: number;
         while ((idx = buf.indexOf('\n')) !== -1) {
           const line = buf.slice(0, idx);
           buf = buf.slice(idx + 1);
-          if (/^=== NANOCLAW SETUP: \S+ ===/.test(line)) {
-            current = { fields: {} };
+          renderTeamsDeviceLine(line);
+          const start = line.match(/^=== NANOCLAW SETUP: (\S+) ===/);
+          if (start) {
+            current = { type: start[1], fields: {} };
             continue;
           }
           if (line.startsWith('=== END ===')) {
@@ -355,17 +674,35 @@ export function hostExecStream(projectRoot: string): (cmd: string) => Promise<St
             if (c > 0) current.fields[line.slice(0, c).trim()] = line.slice(c + 1).trim();
             continue;
           }
-          process.stdout.write(line + '\n'); // operator-facing line (a QR, a code) — show it live
+          if (driver?.mode !== 'ndjson') process.stdout.write(line + '\n');
         }
       };
       child.stdout.on('data', onChunk);
       child.stderr.on('data', onChunk);
-      child.on('close', (code) => {
+      child.on('error', () => {
+        for (const id of activeDisplayIds) driver?.clearDisplay(id);
+        resolve({ ok: false, fields: {} });
+      });
+      child.on('close', async (code) => {
+        driver?.cancellationSignal?.removeEventListener('abort', stopGroup);
+        if (driver?.cancellationSignal?.aborted) return reject(new DriverCancelled('cancelled'));
+        for (const id of activeDisplayIds) driver?.clearDisplay(id);
+        if (outputLimitExceeded) return reject(machineEffectOutputLimitError(driver));
+        try {
+          await teamsAction;
+        } catch (error) {
+          return reject(error);
+        }
         const terminal = [...blocks].reverse().find((b) => b.fields.STATUS) ?? null;
         const status = terminal?.fields.STATUS;
         resolve({ ok: code === 0 && (status === 'success' || status === 'skipped'), fields: terminal?.fields ?? {} });
       });
     });
+  };
+  return (cmd, args = []) => {
+    const machine = driver?.mode === 'ndjson' || process.env.NANOCLAW_PROTOCOL === 'nanoclaw.driver.v1';
+    return machine ? withMachineSecretTransport(cmd, args, secrets, driver, run) : run(cmd, args);
+  };
 }
 
 // The barrier-confirm wording per gate flavor (§5.1.5). Decline = proceed: the
@@ -481,6 +818,8 @@ export function channelsRemote(projectRoot: string): () => string {
 }
 
 export interface RunSkillOptions {
+  /** Shared setup presentation; omitted by standalone and test consumers. */
+  driver?: SetupDriver;
   projectRoot?: string;
   /** Pre-supplied prompt answers — pass them all for a fully programmatic run. */
   inputs?: Record<string, string>;
@@ -491,9 +830,9 @@ export interface RunSkillOptions {
    */
   resolveInput?: (name: string, meta: InputMeta) => Promise<string | undefined>;
   /** Defaults to `hostExec`. */
-  exec?: (cmd: string) => string | void | Promise<string | void>;
+  exec?: SkillExec;
   /** Defaults to `hostExecStream`. Streaming exec for `nc:run effect:step`. */
-  execStream?: (cmd: string) => Promise<StepOutcome>;
+  execStream?: SkillExecStream;
   /** Defaults to the fork-aware channels-branch resolver. */
   resolveRemote?: (branch: string) => string;
   /** Run effects the caller owns (e.g. `['restart']` when it restarts once). */
@@ -537,13 +876,39 @@ export interface RunSkillOptions {
  */
 export async function runSkill(skillDir: string, opts: RunSkillOptions = {}): Promise<ApplyResult> {
   const projectRoot = opts.projectRoot ?? process.cwd();
-  const confirm = opts.confirm ?? defaultConfirm;
-  const open = opts.openUrl ?? defaultOpenUrl;
+  const confirm =
+    opts.confirm ??
+    (opts.driver
+      ? async (message: string) =>
+          (await opts.driver!.prompt({
+            kind: 'confirm',
+            message,
+            default: true,
+          })) === true
+      : defaultConfirm);
+  const open =
+    opts.openUrl ??
+    (opts.driver?.mode === 'ndjson'
+      ? async (url: string) => {
+          // Browser opens have no NanoClaw-observable postcondition. Keep the
+          // URL in the typed display channel instead of trusting a client's
+          // `attempted` response from an external action.
+          opts.driver!.display({
+            id: `url-${basename(skillDir)}`,
+            kind: 'url',
+            url,
+            label: 'Open this URL',
+            sensitive: false,
+          });
+        }
+      : defaultOpenUrl);
   let inputs = opts.inputs;
   // Offer to reuse credentials already in .env before the engine prompts for them.
   if (opts.reuse) {
-    const reused = await reuseFromEnv(skillDir, projectRoot, inputs ?? {}, confirm);
-    if (Object.keys(reused).length) inputs = { ...inputs, ...reused };
+    const reused = await reuseFromEnv(skillDir, projectRoot, inputs ?? {}, confirm, opts.driver?.mode !== 'ndjson');
+    if (Object.keys(reused).length) {
+      inputs = { ...inputs, ...reused };
+    }
   }
   // The default operator policy derives from the skill document itself
   // (gatePolicy keys on directive lines) — read it once here; the engine reads

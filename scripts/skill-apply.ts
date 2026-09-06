@@ -75,6 +75,9 @@ export interface StepOutcome {
   fields: Record<string, string>;
 }
 
+export type SkillExec = (command: string, args?: string[]) => string | void | Promise<string | void>;
+export type SkillExecStream = (command: string, args?: string[]) => Promise<StepOutcome>;
+
 export type StepStatus = 'skip' | 'apply' | 'needs-input' | 'agent';
 export interface PlanStep {
   n: number;
@@ -294,7 +297,7 @@ export interface ApplyOptions {
   onEvent?: (e: ApplyEvent) => void | Promise<void>;
   // dep/run/branch-fetch; injectable for tests. Returns the command's stdout so
   // a `run capture:<var>` can bind it into a {{var}} (the twin of `prompt`).
-  exec?: (cmd: string) => string | void | Promise<string | void>;
+  exec?: SkillExec;
   // Override dependency commands when the declared package manager is not
   // directly available on the host (for example, run the container's pinned
   // Bun through pnpm dlx during a refresh).
@@ -304,7 +307,7 @@ export interface ApplyOptions {
   // `=== NANOCLAW SETUP: … ===` status blocks, renders them to the operator live,
   // and resolves with the terminal block's fields (bound via capture:<var>=<FIELD>).
   // Absent ⇒ a step directive degrades to an agent (runs the step from the prose).
-  execStream?: (cmd: string) => Promise<StepOutcome>;
+  execStream?: SkillExecStream;
   // Run effects the CALLER owns and will perform itself — those runs are skipped
   // (not executed). e.g. a headless rebuild or a setup that restarts once at the
   // end passes ['restart']; applyProviderSkill passes ['build','test'].
@@ -570,6 +573,50 @@ function substitute(value: string, vars: Map<string, { value: string; secret: bo
   });
 }
 
+/**
+ * Bind prompt values as positional arguments to NanoClaw-authored shell text.
+ * Values never enter the script string. Existing skills place placeholders
+ * bare and inside both quote kinds, so the generated parameter reference must
+ * preserve the authored quote context.
+ */
+function bindShell(
+  value: string,
+  vars: Map<string, { value: string; secret: boolean }>,
+): { command: string; args: string[] } {
+  const args: string[] = [];
+  const command = value.replace(VAR_REF, (_match, name: string, offset: number) => {
+    const variable = vars.get(name);
+    if (!variable) throw new Error(`unresolved {{${name}}}`);
+    args.push(variable.value);
+    const ref = `\${${args.length}}`;
+    const quote = shellQuoteAt(value, offset);
+    if (quote === 'single') return `'"${ref}"'`;
+    if (quote === 'double') return ref;
+    return `"${ref}"`;
+  });
+  return { command, args };
+}
+
+function shellQuoteAt(source: string, end: number): 'none' | 'single' | 'double' {
+  let quote: 'none' | 'single' | 'double' = 'none';
+  for (let i = 0; i < end; i += 1) {
+    const char = source[i];
+    if (quote === 'single') {
+      if (char === "'") quote = 'none';
+    } else if (quote === 'double') {
+      if (char === '\\') i += 1;
+      else if (char === '"') quote = 'none';
+    } else if (char === '\\') {
+      i += 1;
+    } else if (char === "'") {
+      quote = 'single';
+    } else if (char === '"') {
+      quote = 'double';
+    }
+  }
+  return quote;
+}
+
 // A `when:<var>=<value>` guard: the directive applies only when an earlier
 // prompt/capture bound <var> to exactly <value>. Unmet — including the var still
 // unresolved (a deferred prompt) — skips the directive, so a guarded prompt is
@@ -635,8 +682,8 @@ async function applyOne(
   ctx: {
     root: string;
     skillDir: string;
-    exec: (c: string) => string | void | Promise<string | void>;
-    execStream?: (c: string) => Promise<StepOutcome>;
+    exec: SkillExec;
+    execStream?: SkillExecStream;
     resolveRemote: (b: string) => string;
     resolveDependencyCommand?: (request: DependencyCommandRequest) => string;
     vars: Map<string, { value: string; secret: boolean }>;
@@ -730,7 +777,10 @@ async function applyOne(
       // (a restart, a pairing/QR step, a wire) that follow — a broken local
       // config or an un-registered app never reaches a doomed restart/QR.
       if (d.attrs.effect === 'check') {
-        for (const cmd of d.body) await exec(substitute(cmd, vars));
+        for (const cmd of d.body) {
+          const bound = bindShell(cmd, vars);
+          await exec(bound.command, bound.args);
+        }
         break;
       }
       // effect:step runs a long-running, operator-interactive step (a pairing
@@ -741,7 +791,8 @@ async function applyOne(
       if (d.attrs.effect === 'step') {
         if (!ctx.execStream)
           throw new Error('effect:step needs a streaming exec — an agent runs the step from the prose');
-        const { ok, fields } = await ctx.execStream(substitute(d.body.join('\n'), vars));
+        const bound = bindShell(d.body.join('\n'), vars);
+        const { ok, fields } = await ctx.execStream(bound.command, bound.args);
         if (!ok) throw new Error('the step did not complete');
         if (capture) {
           for (const pair of capture.split(',')) {
@@ -757,11 +808,11 @@ async function applyOne(
         break;
       }
       for (const cmd of d.body) {
-        // Interpolate prompted {{vars}} the same way env-set does, so a run can
-        // call `ncl ... {{owner_email}}` to wire from collected input. A command
-        // with no {{...}} (build/test) is returned unchanged; an unresolved var
-        // throws → caught → deferred (the prompt hasn't been answered yet).
-        const out = await exec(substitute(cmd, vars));
+        // Bind prompted {{vars}} as positional arguments, so a run can call
+        // `ncl ... {{owner_email}}` without caller data becoming shell text.
+        // An unresolved var throws → caught → deferred.
+        const bound = bindShell(cmd, vars);
+        const out = await exec(bound.command, bound.args);
         // Last command wins for capture (a capture run should be a single command).
         // bindCapture binds stdout-as-is OR a multi-field JSON spec, and enforces
         // validate:<re> — a mismatch / unparseable JSON throws → bounced to an agent.

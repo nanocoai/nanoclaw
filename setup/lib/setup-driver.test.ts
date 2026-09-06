@@ -9,6 +9,7 @@ const ROOT = process.cwd();
 const TSX_LOADER = import.meta.resolve('tsx');
 const HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-child.ts');
 const CONTINUATION_HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-continuation.ts');
+const TTY_HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-tty.ts');
 const CANCEL_RACE_HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-cancel-race.ts');
 const CHILD_CANCEL_HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-child-cancel.ts');
 const WINDOWED_CANCEL_HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-windowed-cancel.ts');
@@ -196,6 +197,86 @@ describe('NDJSON setup driver child boundary', () => {
     expect(code).toBe(0);
     expect(events.some((event) => event.type === 'inputRejected' && event.code === 'command_too_large')).toBe(true);
     expect(events.at(-1)?.type).toBe('complete');
+  }, 15_000);
+
+  it('renders a TTY-owning device login through machine semantics', async () => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-driver-tty-'));
+    const prefix = path.join(temp, 'global');
+    const fakeBin = path.join(temp, 'bin');
+    const calls = path.join(temp, 'teams.calls');
+    fs.mkdirSync(path.join(prefix, 'bin'), { recursive: true });
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(path.join(fakeBin, 'npm'), '#!/bin/sh\nprintf \'%s\\n\' "$TEST_TEAMS_PREFIX"\n', { mode: 0o755 });
+    fs.writeFileSync(
+      path.join(prefix, 'bin', 'teams'),
+      '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$TEST_TEAMS_CALLS"\nprintf \'Open https://microsoft.com/devicelogin\\nEnter code ABCD-EFGH\\n=== NANOCLAW SETUP: TEAMS-LOGIN ===\\nSTATUS: success\\n=== END ===\\n\'\n',
+      { mode: 0o755 },
+    );
+    try {
+      const child = spawn(process.execPath, ['--import', TSX_LOADER, TTY_HARNESS], {
+        cwd: temp,
+        env: {
+          ...process.env,
+          NANOCLAW_PROTOCOL: 'nanoclaw.driver.v1',
+          PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+          TEST_TEAMS_PREFIX: prefix,
+          TEST_TEAMS_CALLS: calls,
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      const events: Array<Record<string, unknown>> = [];
+      let stdout = '';
+      let stderr = '';
+      let buffer = '';
+      child.stdout.on('data', (chunk: Buffer) => {
+        const text = chunk.toString('utf8');
+        stdout += text;
+        buffer += text;
+        let newline: number;
+        while ((newline = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          if (!line) continue;
+          const event = JSON.parse(line) as Record<string, unknown>;
+          events.push(event);
+          if (event.type === 'externalAction') {
+            const action = event.action as { id: string };
+            child.stdin.write(
+              `${JSON.stringify({ ...envelope, type: 'externalActionCompleted', actionId: action.id, result: 'attempted' })}\n`,
+            );
+          }
+        }
+      });
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf8');
+      });
+      const code = await new Promise<number | null>((resolve, reject) => {
+        child.on('error', reject);
+        child.on('close', resolve);
+      });
+
+      expect(code, `${stdout}\n${stderr}`).toBe(0);
+      expect(stderr).toBe('');
+      expect(events.filter((event) => event.type === 'hello')).toHaveLength(1);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: 'externalAction',
+          action: expect.objectContaining({ kind: 'openURL', url: 'https://microsoft.com/devicelogin' }),
+        }),
+      );
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: 'display',
+          display: expect.objectContaining({ id: 'teams-login-code', content: 'ABCD-EFGH', sensitive: true }),
+        }),
+      );
+      expect(events).toContainEqual(expect.objectContaining({ type: 'clearDisplay', displayId: 'teams-login-url' }));
+      expect(events).toContainEqual(expect.objectContaining({ type: 'clearDisplay', displayId: 'teams-login-code' }));
+      expect(events.at(-1)?.type).toBe('complete');
+      expect(fs.readFileSync(calls, 'utf8')).toContain('login');
+    } finally {
+      fs.rmSync(temp, { recursive: true, force: true });
+    }
   }, 15_000);
 
   it('keeps cancelled terminal when an in-flight postcondition finishes later', async () => {

@@ -8,7 +8,10 @@
         "owner_handle": "owner@example.com"
       },
       "exec": [
-        { "match": "echo \"owner@example.com\"", "stdout": "owner@example.com" }
+        {
+          "match": "echo owner@example.com",
+          "stdout": "owner@example.com"
+        }
       ]
     },
     {
@@ -18,7 +21,10 @@
         "owner_handle": "+15551234567"
       },
       "exec": [
-        { "match": "echo \"+15551234567\"", "stdout": "+15551234567" }
+        {
+          "match": "echo +15551234567",
+          "stdout": "+15551234567"
+        }
       ]
     }
   ]

@@ -53,6 +53,7 @@ import { getChannelPreStep } from './companions.js';
 import { runChannelSkillWithPreStep } from './run-channel-skill.js';
 import { registerTelegramPreStep } from './telegram-pre-step.js';
 
+import { renderedCommand } from '../lib/fixtures/rendered-command.js';
 const originalCwd = process.cwd();
 const roots: string[] = [];
 
@@ -165,13 +166,15 @@ async function runTelegramWizard(root: string) {
   const wired: Array<{ instance?: string }> = [];
   await runChannelSkillWithPreStep('telegram', 'Bob Smith', {
     projectRoot: root,
-    exec: (cmd: string): string => {
+    exec: (command: string, args: string[] = []): string => {
+      const cmd = renderedCommand(command, args);
       execs.push(cmd);
       if (/^(git|pnpm|bash)\b/.test(cmd)) return '';
       if (cmd.startsWith('curl')) return cmd.includes(NEW_TOKEN) ? 'mega_bot' : 'nanoclaw_bot';
-      return execFileSync('bash', ['-c', cmd], { cwd: root, encoding: 'utf-8' });
+      return execFileSync('bash', ['-c', command, 'nanoclaw-skill', ...args], { cwd: root, encoding: 'utf-8' });
     },
-    execStream: async (cmd) => {
+    execStream: async (command, args = []) => {
+      const cmd = renderedCommand(command, args);
       steps.push(cmd);
       return { ok: true, fields: { PLATFORM_ID: 'telegram:555', ADMIN_USER_ID: '555' } };
     },
