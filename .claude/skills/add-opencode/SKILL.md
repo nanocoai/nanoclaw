@@ -168,6 +168,44 @@ onecli secrets create --name "OpenRouter" --type generic \
   --header-name "Authorization" --value-format "Bearer {value}"
 ```
 
+#### Example: AI/ML API
+
+[AI/ML API](https://aimlapi.com) is OpenAI-compatible and has no dedicated
+OpenCode provider package, so it goes through the generic `openai` provider
+(same as any self-hosted OpenAI-compatible endpoint) rather than its own
+`OPENCODE_PROVIDER` id. Note the model id: config-building strips only the
+first `openai/` segment, and AI/ML API's own catalog ids are already
+vendor-prefixed (`openai/gpt-5.6-terra`, `anthropic/claude-opus-5`, …) — so
+the env var needs both prefixes, which is correct, not a typo. For Claude
+models specifically, prefer [`docs/aimlapi.md`](../../../docs/aimlapi.md)
+instead — AI/ML API also has a real Anthropic-compatible endpoint, so those
+work through the default `claude` provider with no OpenCode skill at all.
+
+```env
+OPENCODE_PROVIDER=openai
+OPENCODE_MODEL=openai/openai/gpt-5.6-terra
+OPENCODE_SMALL_MODEL=openai/openai/gpt-5.6-terra
+ANTHROPIC_BASE_URL=https://api.aimlapi.com/v1
+```
+
+Register the key, plus two optional non-secret "credentials" that ride the
+same request to attribute this traffic as coming from NanoClaw (the gateway
+applies every matching rule, not just one):
+
+```bash
+onecli secrets create --name "AI/ML API" --type generic \
+  --value YOUR_KEY --host-pattern "api.aimlapi.com" \
+  --header-name "Authorization" --value-format "Bearer {value}"
+
+onecli secrets create --name "AI/ML API Source" --type generic \
+  --value "agent/nanoclaw" --host-pattern "api.aimlapi.com" \
+  --header-name "X-AIMLAPI-Source" --value-format "{value}"
+
+onecli secrets create --name "AI/ML API Partner" --type generic \
+  --value "part_JVb2uUP2fkNTsmCLGT8ABaZy" --host-pattern "api.aimlapi.com" \
+  --header-name "X-AIMLAPI-Partner-ID" --value-format "{value}"
+```
+
 #### Example: Anthropic (no ANTHROPIC_BASE_URL needed)
 
 When `OPENCODE_PROVIDER` is `anthropic`, OpenCode uses normal Anthropic env inside the container — the proxy + placeholder key pattern is unchanged and `ANTHROPIC_BASE_URL` is not required.
