@@ -165,6 +165,11 @@ class LoginError extends Error {
 
 type LoginMethod = 'device' | 'code' | 'token';
 
+export type RegistryLoginDriverResult =
+  | { kind: 'ready'; method: 'device' | 'code' | 'existing' }
+  | { kind: 'skipped'; reason: 'declined' }
+  | { kind: 'failed'; reason: 'sign-in-failed' };
+
 interface Options {
   interactive: boolean;
   /** Sign in again even when a valid credential is already on disk. */
@@ -1178,6 +1183,37 @@ async function maybeAskEmailConsent(api: string, cred: AccountCredential, curren
   if (optIn) p.log.success("You're on the list.");
 }
 
+async function maybeAskEmailConsentWithDriver(
+  api: string,
+  cred: AccountCredential,
+  current: boolean | null,
+  driver: SetupDriver,
+): Promise<void> {
+  if (current !== null) return;
+  driver.note(CONSENT_LINES.join('\n'));
+  const answer = await driver.prompt({
+    id: 'registry-email-consent',
+    kind: 'confirm',
+    message: 'Email me security and project updates?',
+    default: true,
+  });
+  const optIn = answer === true;
+  try {
+    const res = await http(
+      `${api}/v1/account/preferences`,
+      json({ email_updates: optIn, consent_version: CONSENT_VERSION, source: 'cli' }, cred.token),
+      HTTP_TIMEOUT_MS,
+      driver.cancellationSignal,
+    );
+    if (res.status !== 200) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    throwIfAborted(driver.cancellationSignal);
+    if (optIn) driver.log('warn', "Couldn't record the email preference. Sign in again to retry.");
+    return;
+  }
+  if (optIn) driver.log('success', "You're on the list.");
+}
+
 function reportSuccess(cred: AccountCredential, method: LoginMethod): void {
   // The wizard reports the outcome itself, in its own voice, immediately after
   // we exit. Saying it here too gives the user the same fact twice in two
@@ -1202,6 +1238,121 @@ function reportSkipped(reason: string, detail?: string): void {
   if (detail) console.log(detail);
   process.exitCode = EXIT_SKIPPED;
   emitLoginStatus({ STATUS: 'skipped', REASON: reason });
+}
+
+function finishDriverLogin(driver: SetupDriver, result: RegistryLoginDriverResult): RegistryLoginDriverResult {
+  driver.progress('registry-login', result.kind === 'ready' || result.kind === 'skipped' ? 'succeeded' : 'failed');
+  return result;
+}
+
+/** Registry authentication rendered by either setup driver. */
+export async function runRegistryLoginWithDriver(
+  driver: SetupDriver,
+  options: { force?: boolean; api?: string } = {},
+): Promise<RegistryLoginDriverResult> {
+  const api = resolveApiBase(options.api);
+  const report = (line: string): void => driver.log('info', line.trim());
+
+  try {
+    driver.throwIfCancelled();
+    driver.progress('registry-login', 'running', 'Authenticating with NanoClaw');
+    const stored = await resolveStoredCredential(api, options.force ?? false, driver.cancellationSignal, report);
+    if (stored.kind === 'ready') return finishDriverLogin(driver, { kind: 'ready', method: 'existing' });
+
+    // The scripted and CI route, preserved from the shell entry point this
+    // replaced. No consent prompt on either path: there is nobody to ask, and a
+    // default of "yes" would not be consent.
+    const presetToken = str(process.env[ENV.token]);
+    if (presetToken) {
+      const probe = await probeSession(api, presetToken);
+      if (probe.state !== 'ok') {
+        const why =
+          probe.state === 'unauthorized' ? 'it was rejected' : `the service was unreachable (${probe.reason})`;
+        throw new LoginError(`The token in ${ENV.token} can't be used: ${why}.`);
+      }
+      persistCredential({
+        version: 1,
+        api,
+        account_id: probe.account_id,
+        email: probe.email,
+        token: presetToken,
+        registry: probe.registry,
+        entitlements: probe.entitlements,
+        created_at: new Date().toISOString(),
+      });
+      return finishDriverLogin(driver, { kind: 'ready', method: 'existing' });
+    }
+
+    const presetCode = str(process.env[ENV.enrollCode]);
+    if (presetCode) {
+      const preset = await enroll(
+        api,
+        { method: 'code', code: presetCode, client: clientRecord() },
+        driver.cancellationSignal,
+      );
+      persistCredential(preset.credential);
+      return finishDriverLogin(driver, { kind: 'ready', method: 'code' });
+    }
+
+    const broker = await probeBroker(api, driver.cancellationSignal);
+    if (broker.kind === 'not-a-broker') {
+      return finishDriverLogin(driver, { kind: 'failed', reason: 'sign-in-failed' });
+    }
+
+    if (broker.kind === 'no-idp') driver.note('Browser authentication is not configured for this registry.');
+    const code = await driver.prompt({
+      id: 'registry-enrollment-code',
+      kind: 'secret',
+      message:
+        broker.kind === 'no-idp'
+          ? 'Enrollment code (leave blank to build locally)'
+          : 'Enrollment code (optional, leave blank to sign in with your browser)',
+      sensitive: true,
+      validation: { maxLength: 4096 },
+    });
+
+    let enrollment: EnrollResult;
+    let loginMethod: 'device' | 'code';
+    if (typeof code === 'string' && code.length > 0) {
+      enrollment = await enroll(api, { method: 'code', code, client: clientRecord() }, driver.cancellationSignal);
+      loginMethod = 'code';
+    } else if (broker.kind === 'no-idp') {
+      return finishDriverLogin(driver, { kind: 'skipped', reason: 'declined' });
+    } else {
+      let displayed = false;
+      let deviceResult: Awaited<ReturnType<typeof deviceLogin>>;
+      try {
+        deviceResult = await deviceLogin(
+          api,
+          broker.config,
+          async (device) => {
+            displayed = true;
+            return presentDeviceAuthorization(driver, device);
+          },
+          driver.cancellationSignal,
+        );
+      } finally {
+        if (displayed) {
+          driver.clearDisplay('registry-verification-url');
+          driver.clearDisplay('registry-user-code');
+        }
+      }
+      if (deviceResult.kind === 'skipped') {
+        return finishDriverLogin(driver, { kind: 'skipped', reason: 'declined' });
+      }
+      enrollment = deviceResult.enrollment;
+      loginMethod = 'device';
+    }
+
+    driver.throwIfCancelled();
+    persistCredential(enrollment.credential, report);
+    await maybeAskEmailConsentWithDriver(api, enrollment.credential, enrollment.emailUpdates, driver);
+    return finishDriverLogin(driver, { kind: 'ready', method: loginMethod });
+  } catch (err) {
+    if (err instanceof DriverCancelled || err instanceof DriverTerminalError) throw err;
+    throwIfAborted(driver.cancellationSignal);
+    return finishDriverLogin(driver, { kind: 'failed', reason: 'sign-in-failed' });
+  }
 }
 
 export async function run(argv: string[]): Promise<void> {
