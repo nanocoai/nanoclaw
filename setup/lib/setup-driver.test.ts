@@ -10,6 +10,8 @@ const TSX_LOADER = import.meta.resolve('tsx');
 const HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-child.ts');
 const CONTINUATION_HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-continuation.ts');
 const CANCEL_RACE_HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-cancel-race.ts');
+const CHILD_CANCEL_HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-child-cancel.ts');
+const WINDOWED_CANCEL_HARNESS = path.join(ROOT, 'setup', 'lib', 'fixtures', 'setup-driver-windowed-cancel.ts');
 const envelope = { protocol: 'nanoclaw.driver.v1', operation: 'setup' } as const;
 
 describe('NDJSON setup driver child boundary', () => {
@@ -231,5 +233,138 @@ describe('NDJSON setup driver child boundary', () => {
     expect(events.filter((event) => event.type === 'cancelled')).toHaveLength(1);
     expect(events.at(-1)?.type).toBe('cancelled');
     expect(events.some((event) => event.type === 'inputRejected')).toBe(false);
+  }, 15_000);
+
+  it('SIGKILLs a runner grandchild that ignores SIGTERM after its leader exits', async () => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-driver-child-cancel-'));
+    const marker = path.join(temp, 'child.pid');
+    const child = spawn(process.execPath, ['--import', TSX_LOADER, CHILD_CANCEL_HARNESS], {
+      cwd: ROOT,
+      env: { ...process.env, NANOCLAW_PROTOCOL: 'nanoclaw.driver.v1', NANOCLAW_TEST_CHILD_MARKER: marker },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const events: Array<{ type: string; state?: string }> = [];
+    let buffer = '';
+    let stderr = '';
+    let cancelled = false;
+    child.stdout.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString('utf8');
+      let newline: number;
+      while ((newline = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (!line) continue;
+        const event = JSON.parse(line) as { type: string; state?: string };
+        events.push(event);
+        if (event.type === 'progress' && event.state === 'running' && !cancelled) {
+          cancelled = true;
+          void (async () => {
+            const deadline = Date.now() + 5_000;
+            while (!fs.existsSync(marker) && Date.now() < deadline) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            child.stdin.write(`${JSON.stringify({ ...envelope, type: 'cancel', reason: 'test' })}\n`);
+          })();
+        }
+      }
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8');
+    });
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', resolve);
+    });
+    let pid = 0;
+    try {
+      expect(code, `${JSON.stringify(events)}\n${stderr}`).toBe(2);
+      expect(events.at(-1)?.type).toBe('cancelled');
+      expect(fs.existsSync(marker)).toBe(true);
+      pid = Number(fs.readFileSync(marker, 'utf8').trim());
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(() => process.kill(pid, 0)).toThrow();
+    } finally {
+      if (pid > 0) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }
+      fs.rmSync(temp, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('SIGKILLs a windowed-step grandchild that ignores SIGTERM after its leader exits', async () => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-driver-windowed-cancel-'));
+    const marker = path.join(temp, 'child.pid');
+    const bin = path.join(temp, 'bin');
+    fs.mkdirSync(bin);
+    const stubborn = path.join(bin, 'stubborn');
+    fs.writeFileSync(stubborn, `#!/bin/sh\ntrap '' TERM\necho $$ > ${JSON.stringify(marker)}\nexec sleep 30\n`, {
+      mode: 0o755,
+    });
+    fs.writeFileSync(
+      path.join(bin, 'pnpm'),
+      `#!/bin/sh\n${JSON.stringify(stubborn)} &\nwhile [ ! -s ${JSON.stringify(marker)} ]; do sleep 0.01; done\nprintf '%s\\n' '=== NANOCLAW SETUP: cancel-window ===' 'STATUS: success' '=== END ==='\nwait\n`,
+      { mode: 0o755 },
+    );
+    const child = spawn(process.execPath, ['--import', TSX_LOADER, WINDOWED_CANCEL_HARNESS], {
+      cwd: temp,
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ''}`,
+        NANOCLAW_PROTOCOL: 'nanoclaw.driver.v1',
+        NANOCLAW_NO_DIAGNOSTICS: '1',
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const events: Array<{ type: string; state?: string }> = [];
+    let buffer = '';
+    let cancelled = false;
+    child.stdout.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString('utf8');
+      let newline: number;
+      while ((newline = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (!line) continue;
+        const event = JSON.parse(line) as { type: string; state?: string; stepId?: string };
+        events.push(event);
+        if (event.type === 'progress' && event.state === 'running' && !cancelled) {
+          cancelled = true;
+          void (async () => {
+            const deadline = Date.now() + 5_000;
+            while (!fs.existsSync(marker) && Date.now() < deadline) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            child.stdin.write(`${JSON.stringify({ ...envelope, type: 'cancel', reason: 'test' })}\n`);
+          })();
+        }
+      }
+    });
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', resolve);
+    });
+
+    let pid = 0;
+    try {
+      expect(code).toBe(2);
+      expect(events.at(-1)?.type).toBe('cancelled');
+      expect(fs.existsSync(marker)).toBe(true);
+      pid = Number(fs.readFileSync(marker, 'utf8').trim());
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(() => process.kill(pid, 0)).toThrow();
+    } finally {
+      if (pid > 0) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }
+      fs.rmSync(temp, { recursive: true, force: true });
+    }
   }, 15_000);
 });
