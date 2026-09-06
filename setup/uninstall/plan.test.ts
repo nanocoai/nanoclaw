@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 
 import type { VaultAgent } from './onecli-agents.js';
-import { buildRemovalPlan, type Decisions, type RemovalAction } from './plan.js';
+import { buildRemovalPlan, validateDecisions, type Decisions, type RemovalAction } from './plan.js';
 import type { Inventory, PathItem } from './scan.js';
 
 const item = (p: string, what: string): PathItem => ({ what, where: p, path: p });
@@ -35,7 +35,8 @@ function inventory(overrides: Partial<Inventory> = {}): Inventory {
       item('/proj/dist', 'Build output'),
     ],
     user: [item('/proj/groups', 'Agent memory & files'), item('/proj/store', 'Migrated data store')],
-    onecli: { mine: [], orphans: [], idsKnown: true },
+    envBackups: [],
+    onecli: { mine: [], orphans: [], available: true, idsKnown: true },
     notes: [],
     ...overrides,
   };
@@ -53,8 +54,29 @@ const kinds = (actions: RemovalAction[]) => actions.map((a) => a.kind);
 describe('buildRemovalPlan ordering invariants', () => {
   it('removes .env only via the atomic backup action, never a bare delete', () => {
     const actions = buildRemovalPlan(inventory(), allYes());
+    const backup = actions.find((a) => a.kind === 'backup-env');
+    expect(backup).toEqual(expect.objectContaining({ identityRequired: true }));
     expect(actions.filter((a) => a.kind === 'backup-env')).toHaveLength(1);
     expect(actions.some((a) => a.kind === 'delete-path' && a.item.path === '/proj/.env')).toBe(false);
+  });
+
+  it('attaches exact identities to checkout-owned files while using root identities for directories', () => {
+    const inv = inventory({
+      data: [item('/proj/data', 'Database & conversations'), item('/proj/start-nanoclaw.sh', 'Start script')],
+      identity: {
+        root: 'root',
+        exactPaths: { '/proj/start-nanoclaw.sh': 'file:1' },
+        scopedRoots: { '/proj/data': 'node:1' },
+        containerSelector: 'nanoclaw-install=abcd1234',
+      },
+    });
+    const actions = buildRemovalPlan(inv, allYes());
+    const start = actions.find(
+      (action) => action.kind === 'delete-path' && action.item.path.endsWith('start-nanoclaw.sh'),
+    );
+    const data = actions.find((action) => action.kind === 'delete-path' && action.item.path === '/proj/data');
+    expect(start).toEqual(expect.objectContaining({ expectedIdentity: 'file:1', identityRequired: true }));
+    expect(data).toEqual(expect.objectContaining({ expectedRootIdentity: 'node:1' }));
   });
 
   it('puts the runtime tail strictly last, with node_modules final', () => {
@@ -89,6 +111,12 @@ describe('buildRemovalPlan ordering invariants', () => {
 });
 
 describe('buildRemovalPlan declined groups', () => {
+  it('rejects data or user removal while the service is preserved', () => {
+    expect(validateDecisions({ service: false, data: true, user: false })).toMatch(/cannot be removed/);
+    expect(validateDecisions({ service: false, data: false, user: true })).toMatch(/cannot be removed/);
+    expect(validateDecisions({ service: true, data: true, user: true })).toBeUndefined();
+  });
+
   it('declined data yields no data deletes and no runtime tail', () => {
     const actions = buildRemovalPlan(inventory(), {
       service: true,
