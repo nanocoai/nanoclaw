@@ -72,7 +72,7 @@ export function ensureEgressNetwork(): boolean {
   if (gatewayAttached()) return true;
 
   if (
-    dockerOk(['network', 'connect', '--alias', 'host.docker.internal', EGRESS_NETWORK, ONECLI_GATEWAY_CONTAINER]) &&
+    dockerOk(['network', 'connect', '--alias', 'host.docker.internal', EGRESS_NETWORK, ONECLI_GATEWAY_CONTAINER]) ||
     gatewayAttached()
   ) {
     log.info('Egress lockdown: OneCLI gateway attached', {

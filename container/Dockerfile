@@ -67,7 +67,9 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 # the binary to /usr/local/bin so the non-root `node` user can execute it.
 RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
     install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun && \
-    rm -rf /root/.bun
+    rm -rf /root/.bun && \
+    bun --version | grep -q "${BUN_VERSION}" || (echo "Bun version mismatch" && exit 1)
+
 
 # ---- agent-runner deps -------------------------------------------------------
 # Deps are cached independently of CLI versions. Source is NOT baked in —
