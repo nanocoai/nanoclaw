@@ -16,6 +16,7 @@ import { startHostInstanceLease, stopHostInstanceLease } from './host-instance.j
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { startHostModules, stopHostModules } from './host-lifecycle.js';
 import { routeInbound } from './router.js';
+import { channelInboundHandler } from './channel-inbound.js';
 import { log } from './log.js';
 import { enforceUpgradeTripwire } from './upgrade-state.js';
 
@@ -89,26 +90,7 @@ async function main(): Promise<void> {
   // 3. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
     return {
-      onInbound(platformId, threadId, message) {
-        routeInbound({
-          channelType: adapter.channelType,
-          // The one host-side stamping seam: adapters stay instance-blind,
-          // the host stamps the receiving instance on every inbound event.
-          instance: adapter.instance ?? adapter.channelType,
-          platformId,
-          threadId,
-          message: {
-            id: message.id,
-            kind: message.kind,
-            content: JSON.stringify(message.content),
-            timestamp: message.timestamp,
-            isMention: message.isMention,
-            isGroup: message.isGroup,
-          },
-        }).catch((err) => {
-          log.error('Failed to route inbound message', { channelType: adapter.channelType, err });
-        });
-      },
+      onInbound: channelInboundHandler(adapter),
       onInboundEvent(event) {
         routeInbound(event).catch((err) => {
           log.error('Failed to route inbound event', {
