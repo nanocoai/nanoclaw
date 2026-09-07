@@ -56,6 +56,23 @@ it.each(['throw', 'reject'])('logs a routing %s while returning failure to the a
   expect(log.error).toHaveBeenCalledOnce();
 });
 
+it('observes routing failure when an existing adapter ignores the returned promise', async () => {
+  const error = new Error('mailbox unavailable');
+  vi.mocked(routeInbound).mockRejectedValue(error);
+
+  // Existing adapters may call this without awaiting or attaching a catch.
+  // Vitest also fails this test if the ignored promise becomes unhandled.
+  channelInboundHandler({ channelType: 'test' })('peer', null, message);
+
+  await vi.waitFor(() =>
+    expect(log.error).toHaveBeenCalledWith('Failed to route inbound message', {
+      channelType: 'test',
+      err: error,
+    }),
+  );
+  expect(routeInbound).toHaveBeenCalledWith(expect.objectContaining({ instance: 'test' }));
+});
+
 it('wires the acceptance-preserving handler at the real channel startup boundary', () => {
   const file = ts.createSourceFile('index.ts', fs.readFileSync('src/index.ts', 'utf8'), ts.ScriptTarget.Latest, true);
   const imports = file.statements.filter(ts.isImportDeclaration);
