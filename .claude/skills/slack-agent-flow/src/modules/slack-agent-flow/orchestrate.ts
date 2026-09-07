@@ -456,6 +456,8 @@ interface FlowArgs {
    * N creates with room:'none' followed by one create_room with all of them.
    */
   room?: 'own' | 'none';
+  /** Template ref the agent was stamped from — broker attribution only. */
+  template?: string;
   /** Wait budget for a deferred workspace install. Tests shorten it. */
   installWait?: { intervalMs?: number; timeoutMs?: number };
   /** Extra sink for the pending-install line — the finish script prints it to
@@ -503,6 +505,7 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
     description: args.description,
     allowGuests: args.allowGuests,
     requestedBy: operatorUserId,
+    template: args.template,
     installWait: args.installWait ?? resolveInstallWait(rootDir),
     onInstallPending: async (info) => {
       const text = installPendingText(displayName, info);
@@ -686,11 +689,22 @@ export async function runSlackAgentFlow(args: {
     installWait: args.installWait,
     rootDir: process.cwd(),
     hotStart: true,
-    description: typeof content.instructions === 'string' ? content.instructions.slice(0, 300) : undefined,
+    // Avatar excerpt: instructions on the direct path. An approved TEMPLATED
+    // replay carries instructions:null (the hold never presents the creation
+    // prompt as persona) with the same excerpt in avatar_hint — an identical
+    // slice, so a batch-preview prefetch keyed on (name, excerpt) still
+    // matches (see requestSlackCreateAgentHold in index.ts).
+    description:
+      typeof content.instructions === 'string'
+        ? content.instructions.slice(0, 300)
+        : typeof content.avatar_hint === 'string'
+          ? content.avatar_hint.slice(0, 300)
+          : undefined,
     purpose: typeof content.purpose === 'string' ? content.purpose : undefined,
     allowGuests: content.allow_guests === true,
     originSession: session,
     room: content.room === 'none' ? 'none' : 'own',
+    template: typeof content.template === 'string' && content.template ? content.template : undefined,
   });
 }
 

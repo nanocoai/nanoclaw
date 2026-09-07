@@ -97,7 +97,7 @@ vi.mock('../approvals/index.js', async () => {
 // Registers the wrapped create_agent delivery action — the path under test.
 // Deliberately NOT src/modules/index.ts: the upstream a2a barrel stays unloaded.
 import './index.js';
-import { ensureAgentRoom, finishSlackAgentFlow } from './orchestrate.js';
+import { ensureAgentRoom, finishSlackAgentFlow, runSlackAgentFlow } from './orchestrate.js';
 import { SlackFlowError } from './types.js';
 import { getDeliveryAction } from '../../delivery.js';
 import { log } from '../../log.js';
@@ -453,6 +453,81 @@ describe('slack-aware create_agent — manifest variants', () => {
   });
 });
 
+describe('slack-aware create_agent — template attribution', () => {
+  // The Slack leg is driven directly here: the upstream template branch of
+  // createAgent (host fetch + stamping) is trunk's, and this pins only the
+  // one thing this module owns — content.template reaching the broker.
+  it('a templated create sends the ref to the broker as attribution', async () => {
+    const now = new Date().toISOString();
+    await createAgentGroup({
+      id: 'ag-new',
+      name: 'Research',
+      folder: 'research',
+      agent_provider: null,
+      created_at: now,
+    });
+
+    await runSlackAgentFlow({
+      content: { name: 'Research', instructions: 'dig deep', template: 'sales/sdr', room: 'none' },
+      session: SLACK_SESSION,
+      newAgentGroupId: 'ag-new',
+      slug: 'research',
+    });
+
+    const appBody = JSON.parse(fetchCalls.find((c) => c.url.endsWith('/v1/apps'))!.body) as Record<string, unknown>;
+    expect(appBody.template).toBe('sales/sdr');
+  });
+
+  it('a plain create sends no template field', async () => {
+    await runCreateAgent({ name: 'Research', instructions: 'dig deep' });
+    const appBody = JSON.parse(fetchCalls.find((c) => c.url.endsWith('/v1/apps'))!.body) as Record<string, unknown>;
+    expect(appBody.template).toBeUndefined();
+  });
+
+  it('hold payload carries the template ref through to the approved replay (confined group)', async () => {
+    await updateContainerConfigScalars(SRC_GROUP, { cli_scope: 'group' });
+
+    await runCreateAgent({ name: 'Research', instructions: 'dig deep', template: 'sales/sdr' });
+
+    expect(await getAgentGroupByFolder('research')).toBeUndefined();
+    expect(mockRequestApproval).toHaveBeenCalledTimes(1);
+    const opts = mockRequestApproval.mock.calls[0]![0] as { payload: Record<string, unknown>; question: string };
+    expect(opts.payload).toMatchObject({ name: 'Research', template: 'sales/sdr' });
+    // Trunk's shared payload core: a templated hold never presents the
+    // creation prompt as persona; the avatar excerpt survives separately in
+    // the clearly-non-persona avatar_hint field.
+    expect(opts.payload.instructions).toBeNull();
+    expect(opts.payload.avatar_hint).toBe('dig deep');
+    // Design merge condition: the Slack card (the only card this path shows)
+    // names the template and says fetch-vs-local, same sentence as trunk's.
+    expect(opts.question).toContain('It will be stamped from template "sales/sdr"');
+  });
+
+  it('an approved templated replay derives the avatar from avatar_hint (instructions nulled by the hold)', async () => {
+    const now = new Date().toISOString();
+    await createAgentGroup({
+      id: 'ag-new2',
+      name: 'Research',
+      folder: 'research',
+      agent_provider: null,
+      created_at: now,
+    });
+
+    await runSlackAgentFlow({
+      content: { name: 'Research', instructions: null, avatar_hint: 'dig deep', template: 'sales/sdr', room: 'none' },
+      session: SLACK_SESSION,
+      newAgentGroupId: 'ag-new2',
+      slug: 'research',
+    });
+
+    const avatarBody = JSON.parse(fetchCalls.find((c) => c.url.endsWith('/v1/avatars'))!.body) as Record<
+      string,
+      unknown
+    >;
+    expect(avatarBody.description).toBe('dig deep');
+  });
+});
+
 describe("slack-aware create_agent — room:'none'", () => {
   it('skips the room half entirely: DM only, no MPIM, no a2a entry, no canvas, no intro nudge', async () => {
     mockCreateRoomCanvas.mockResolvedValue('F0CANVAS');
@@ -493,7 +568,8 @@ describe("slack-aware create_agent — room:'none'", () => {
     expect(mockRequestApproval).toHaveBeenCalledTimes(1);
     const opts = mockRequestApproval.mock.calls[0]![0] as { action: string; payload: Record<string, unknown> };
     expect(opts.action).toBe('create_agent');
-    expect(opts.payload).toMatchObject({ name: 'Research', room: 'none' });
+    // A PLAIN hold keeps the persona: only templated holds null instructions.
+    expect(opts.payload).toMatchObject({ name: 'Research', room: 'none', instructions: 'dig deep' });
   });
 });
 
