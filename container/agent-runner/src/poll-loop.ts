@@ -1152,11 +1152,12 @@ export async function autoAppendTaskLog(text: string): Promise<void> {
 async function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): Promise<void> {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-  // Resolve thread_id per-destination from the most recent inbound message
-  // that came from this same channel+platform. In agent-shared sessions,
-  // different destinations have different thread contexts — using a single
-  // routing.threadId would stamp one channel's thread onto another.
-  const destRouting = resolveDestinationThread(channelType, platformId);
+  // Thread per destination: the batch's own thread when the destination is the
+  // channel being answered, else that channel's latest inbound thread. In
+  // agent-shared sessions different destinations have different thread
+  // contexts — stamping routing.threadId on every send would put one channel's
+  // thread onto another.
+  const destRouting = resolveDestinationThread(channelType, platformId, routing);
   await writeMessageOut({
     id: generateId(),
     in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,

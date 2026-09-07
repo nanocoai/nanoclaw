@@ -97,8 +97,8 @@ Rewritten wholesale (DELETE + INSERT in a transaction) by `writeDestinations()` 
 Single-row (`id=1`): the chat this session is bound to. Read by the tools that take no
 destination (`ask_user_question`, `send_card`) and to detect a task session from its
 `system:tasks:<id>` thread id. Not the source of a reply's thread — `thread_id` is null for
-every session that isn't per-thread, so replies resolve their thread from the latest
-`messages_in` row for the channel instead.
+every session that isn't per-thread, so replies resolve their thread from the `messages_in` row
+being answered (falling back to the channel's latest row) instead.
 
 ```sql
 CREATE TABLE session_routing (

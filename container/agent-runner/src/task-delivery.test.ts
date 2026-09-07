@@ -135,6 +135,28 @@ describe('final-output blocks in a task run', () => {
     expect(getUndeliveredMessages()).toHaveLength(1);
   });
 
+  it("threads a chat-session block from the batch being answered, not the channel's latest row", async () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content)
+         VALUES ('in-2', 4, 'chat', ?, 'completed', 'telegram:99', 'telegram', 'T-later', '{}')`,
+      )
+      .run(new Date().toISOString());
+
+    await dispatchResultText('<message to="family">hi</message>', {
+      platformId: 'telegram:99',
+      channelType: 'telegram',
+      threadId: 'T-batch',
+      inReplyTo: 'in-1',
+      taskRun: false,
+    });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBe('T-batch');
+    expect(out[0].in_reply_to).toBe('in-1');
+  });
+
   it('nudges at most once and only when a task result contains inert blocks', () => {
     const blocks = [{ to: 'family', body: 'digest' }];
     expect(shouldNudgeTaskBlocks(true, blocks, false)).toBe(true);

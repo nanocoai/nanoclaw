@@ -147,25 +147,43 @@ describe('send_message / send_file — thread for a channel destination', () => 
     return getUndeliveredMessages().map((m) => m.thread_id);
   }
 
-  it('lands in the thread the latest request arrived in, even when the session has no bound thread', async () => {
+  it('replies in the thread of the message being answered, even when the session has no bound thread', async () => {
     // A shared / agent-shared session (or a DM sub-thread) is bound to the
     // channel with no thread of its own, but the request came in a thread.
+    seedInbound('in-1', 'slack', 'C123', 'T-42');
+    publishInReplyTo('in-1');
+
+    expect(await sendBoth()).toEqual(['T-42', 'T-42']);
+  });
+
+  it('keeps replying to the answered message when a newer message from another thread arrived mid-turn', async () => {
+    seedInbound('in-1', 'slack', 'C123', 'T-1');
+    seedInbound('in-2', 'slack', 'C123', 'T-42');
+    publishInReplyTo('in-1');
+
+    expect(await sendBoth()).toEqual(['T-1', 'T-1']);
+  });
+
+  it("ignores the session's bound thread and falls back to the latest inbound thread out of a batch", async () => {
+    seedBoundThread('slack', 'C123', 'T-bound');
     seedInbound('in-1', 'slack', 'C123', 'T-1');
     seedInbound('in-2', 'slack', 'C123', 'T-42');
 
     expect(await sendBoth()).toEqual(['T-42', 'T-42']);
   });
 
-  it("ignores the session's bound thread, which the old code read", async () => {
-    seedBoundThread('slack', 'C123', 'T-bound');
-    seedInbound('in-1', 'slack', 'C123', 'T-42');
+  it("uses the destination channel's own latest thread when answering a message from another channel", async () => {
+    // agent-shared session: answering discord, sending to slack.
+    seedInbound('in-0', 'slack', 'C123', 'T-9');
+    seedInbound('in-1', 'discord', 'chan-9', 'discord-thread');
+    publishInReplyTo('in-1');
 
-    expect(await sendBoth()).toEqual(['T-42', 'T-42']);
+    expect(await sendBoth()).toEqual(['T-9', 'T-9']);
   });
 
-  it("does not inherit another channel's thread", async () => {
-    // agent-shared session: the latest inbound row is from discord, the send goes to slack.
+  it('sends unthreaded to a channel nothing has arrived from', async () => {
     seedInbound('in-1', 'discord', 'chan-9', 'discord-thread');
+    publishInReplyTo('in-1');
 
     expect(await sendBoth()).toEqual([null, null]);
   });
