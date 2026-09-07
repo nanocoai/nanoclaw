@@ -43,7 +43,7 @@ function publishInReplyTo(id: string, ageMs = 0): void {
 }
 
 /** The session's bound chat/thread, as the host writes it on every wake. */
-function seedBoundThread(channelType: string, platformId: string, threadId: string): void {
+function seedBoundThread(channelType: string, platformId: string, threadId: string | null): void {
   const db = getInboundDb();
   db.exec(`CREATE TABLE IF NOT EXISTS session_routing (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -165,6 +165,8 @@ describe('send_message / send_file — thread for a channel destination', () => 
   it('replies in the thread of the message being answered, even when the session has no bound thread', async () => {
     // A shared / agent-shared session (or a DM sub-thread) is bound to the
     // channel with no thread of its own, but the request came in a thread.
+    // The old code read the bound thread and sent the file to the top level.
+    seedBoundThread('slack', 'C123', null);
     seedInbound('in-1', 'slack', 'C123', 'T-42');
     publishReplyRoute({ inReplyTo: 'in-1', channelType: 'slack', platformId: 'C123', threadId: 'T-42' });
 
