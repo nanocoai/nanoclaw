@@ -587,7 +587,10 @@ registerResource({
       description:
         "Mount a host directory into a group's containers. OPERATOR-ONLY — never runnable from " +
         'inside a container (mounting host paths is a filesystem-access boundary). Requires ' +
-        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <container-path> [--ro].',
+        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <container-path> ' +
+        '[--ro | --rw]. Mounts are read-only by default; --ro states that explicitly. --rw requests read-write, which ' +
+        'is granted only when the matched mount-allowlist root also has `allowReadWrite: true` — otherwise the mount ' +
+        'is still created but forced read-only at spawn time.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -598,17 +601,36 @@ registerResource({
         const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
 
+        // Read-only remains the default: with neither flag, no `readonly` key is
+        // stored, and `validateMount` treats an absent key as a read-only request.
+        // `--rw` is the explicit opt-in that stores `readonly: false` — the only
+        // value the mount-security gate accepts as a read-write *request*, and
+        // still granted only if the matched allowlist root allows read-write.
+        const readWrite = args.rw === true || args.readonly === false;
+        const readOnly = args.ro === true || args.readonly === true;
+        if (readWrite && readOnly) throw new Error('--ro and --rw are mutually exclusive');
+
         const mount: AdditionalMountConfig = {
           hostPath,
           containerPath,
-          ...(args.ro || args.readonly ? { readonly: true } : {}),
+          ...(readWrite ? { readonly: false } : args.ro || args.readonly ? { readonly: true } : {}),
         };
         const existing = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
-        if (!existing.some((m) => m.hostPath === hostPath && m.containerPath === containerPath)) {
-          existing.push(mount);
-          await updateContainerConfigJson(id, 'additional_mounts', existing);
-        }
-        return { added: mount, note: `Run \`ncl groups restart --id ${id}\` for the mount to take effect.` };
+        const at = existing.findIndex((m) => m.hostPath === hostPath && m.containerPath === containerPath);
+        // Re-adding an existing mount used to be a silent no-op that still reported
+        // success. That makes the most likely use of these flags — "I mounted this
+        // read-only, now make it read-write" — restart the group and come back to a
+        // still-read-only mount with nothing to explain why. Update the access mode
+        // in place instead, and say which of the two happened.
+        const updated = at !== -1;
+        if (updated) existing[at] = mount;
+        else existing.push(mount);
+        await updateContainerConfigJson(id, 'additional_mounts', existing);
+        const note = readWrite
+          ? `Read-write requested. It is granted only if the matched mount-allowlist root has \`allowReadWrite: true\`; ` +
+            `otherwise the mount is forced read-only. Run \`ncl groups restart --id ${id}\` to apply.`
+          : `Run \`ncl groups restart --id ${id}\` for the mount to take effect.`;
+        return updated ? { updated: mount, note } : { added: mount, note };
       },
     },
     'config remove-mount': {
