@@ -62,7 +62,7 @@ it('observes routing failure when an existing adapter ignores the returned promi
 
   // Existing adapters may call this without awaiting or attaching a catch.
   // Vitest also fails this test if the ignored promise becomes unhandled.
-  channelInboundHandler({ channelType: 'test' })('peer', null, message);
+  void channelInboundHandler({ channelType: 'test' })('peer', null, message);
 
   await vi.waitFor(() =>
     expect(log.error).toHaveBeenCalledWith('Failed to route inbound message', {
