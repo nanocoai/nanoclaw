@@ -109,3 +109,28 @@ it('wires the acceptance-preserving handler at the real channel startup boundary
   visit(file);
   expect(wired).toBe(true);
 });
+
+it('snapshots caller-owned data before returning the completion promise', async () => {
+  vi.mocked(routeInbound).mockResolvedValue(undefined);
+  const adapter = { channelType: 'test', instance: 'original' };
+  const input = { ...message, content: { text: 'original' } };
+  const completion = channelInboundHandler(adapter)('peer', 'thread', input);
+  input.id = 'changed';
+  input.content.text = 'changed';
+  adapter.instance = 'changed';
+  await completion;
+  expect(routeInbound).toHaveBeenCalledWith({
+    channelType: 'test',
+    instance: 'original',
+    platformId: 'peer',
+    threadId: 'thread',
+    message: {
+      id: 'message',
+      kind: 'chat',
+      content: '{"text":"original"}',
+      timestamp: message.timestamp,
+      isMention: undefined,
+      isGroup: undefined,
+    },
+  });
+});

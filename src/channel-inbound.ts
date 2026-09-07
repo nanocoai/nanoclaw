@@ -8,7 +8,7 @@ export function channelInboundHandler(
   adapter: Pick<ChannelAdapter, 'channelType' | 'instance'>,
 ): ChannelSetup['onInbound'] {
   return (platformId, threadId, message) => {
-    const routed = Promise.resolve().then(() =>
+    const routed = (async () =>
       routeInbound({
         channelType: adapter.channelType,
         instance: adapter.instance ?? adapter.channelType,
@@ -22,8 +22,7 @@ export function channelInboundHandler(
           isMention: message.isMention,
           isGroup: message.isGroup,
         },
-      }),
-    );
+      }))();
     void routed.catch((err) => {
       log.error('Failed to route inbound message', { channelType: adapter.channelType, err });
     });
