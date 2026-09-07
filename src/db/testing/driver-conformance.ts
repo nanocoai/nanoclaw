@@ -130,25 +130,28 @@ export function defineDriverConformance(name: string, factory: DriverConformance
       expect(await db.all<{ id: string }>('SELECT id FROM items')).toEqual([{ id: 'after' }]);
     });
 
-    it('cannot let a timed-out nested continuation roll back the next transaction', async () => {
-      await db.close();
-      db = await factory.create({ watchdogMs: 25 });
-      await db.exec('CREATE TABLE items (id TEXT PRIMARY KEY, value TEXT, n INTEGER NOT NULL)');
+    it('cannot let a nested continuation from a rolled-back transaction roll back the next transaction', async () => {
+      // The stale transaction is rolled back by a thrown error, not by the
+      // watchdog: the watchdog budget is driver-wide, so a budget short enough
+      // to keep this test fast would also govern the next transaction, which
+      // performs real round trips on network drivers. Both paths close the
+      // scope identically; the watchdog's own rollback is covered above.
+      const staleSavepointReady = deferred();
       const releaseStale = deferred();
-      const staleFinished = deferred();
       const currentSavepointReady = deferred();
       const finishCurrent = deferred();
+      let stale!: Promise<void>;
 
-      const timedOut = db.transaction(async () => {
-        try {
-          await db.transaction(async () => {
+      await expect(
+        db.transaction(async () => {
+          stale = db.transaction(async () => {
+            staleSavepointReady.resolve();
             await releaseStale.promise;
           });
-        } finally {
-          staleFinished.resolve();
-        }
-      });
-      await expect(timedOut).rejects.toThrow('watchdog');
+          await staleSavepointReady.promise;
+          throw new Error('outer failure');
+        }),
+      ).rejects.toThrow('outer failure');
 
       const current = db.transaction(async () => {
         await db.run('INSERT INTO items (id, value, n) VALUES (?, ?, ?)', 'current-outer', null, 1);
@@ -160,7 +163,7 @@ export function defineDriverConformance(name: string, factory: DriverConformance
       });
       await currentSavepointReady.promise;
       releaseStale.resolve();
-      await staleFinished.promise;
+      await expect(stale).rejects.toThrow('transaction scope is closed');
       finishCurrent.resolve();
 
       await expect(current).resolves.toBeUndefined();

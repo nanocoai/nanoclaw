@@ -3,6 +3,10 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  # A post-merge run on main, so main itself carries a verdict and not only the
+  # pull requests that fed it. Nothing below reads the pull_request payload.
+  push:
+    branches: [main]
 
 jobs:
   test:
@@ -49,3 +53,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: test "${{ needs.test.result }}" = success
+
+  # The single check the main ruleset will require, in every repo under the same
+  # name. It needs `ci` as well as `test` so the older required context and the
+  # new one cannot disagree. if: always() because a skipped required check is
+  # not a failed one.
+  gate:
+    name: gate
+    if: always()
+    needs: [test, ci]
+    permissions: {}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: every needed job succeeded
+        run: |
+          test "${{ needs.test.result }}" = success
+          test "${{ needs.ci.result }}" = success

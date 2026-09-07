@@ -173,3 +173,26 @@ jobs:
           test "${{ needs.combined-providers.result }}" = success
           test "${{ needs.pre-contract-providers.result }}" = success
           test "${{ needs.old-provider-refresh.result }}" = success
+
+  # The one check the main ruleset will require from this workflow, in the
+  # shape of `gate` in ci.yml. It needs every job above, provider-promotion
+  # included, so the older verdict and this one cannot disagree. if: always()
+  # because a skipped required check is not a failed one. Nothing in this
+  # workflow is conditional on the event: every job runs on pull_request, push
+  # and workflow_dispatch alike, so only `success` passes and a skip fails.
+  registry-gate:
+    name: registry gate
+    if: always()
+    needs: [discover, test, combined-providers, pre-contract-providers, old-provider-refresh, provider-promotion]
+    permissions: {}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: every needed job succeeded
+        run: |
+          test "${{ needs.discover.result }}" = success
+          test "${{ needs.test.result }}" = success
+          test "${{ needs.combined-providers.result }}" = success
+          test "${{ needs.pre-contract-providers.result }}" = success
+          test "${{ needs.old-provider-refresh.result }}" = success
+          test "${{ needs.provider-promotion.result }}" = success
