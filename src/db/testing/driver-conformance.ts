@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { DbDriver } from '../driver.js';
 
@@ -12,6 +12,15 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
     resolve = done;
   });
   return { promise, resolve };
+}
+
+async function waitWhileTransactionPending(ready: Promise<void>, transaction: Promise<void>): Promise<void> {
+  await Promise.race([
+    ready,
+    transaction.then(() => {
+      throw new Error('Transaction completed before the fixture reached its barrier');
+    }),
+  ]);
 }
 
 /** Shared contract that every central DB backend must pass. */
@@ -134,40 +143,64 @@ export function defineDriverConformance(name: string, factory: DriverConformance
       await db.close();
       db = await factory.create({ watchdogMs: 25 });
       await db.exec('CREATE TABLE items (id TEXT PRIMARY KEY, value TEXT, n INTEGER NOT NULL)');
+      const staleEntered = deferred();
       const releaseStale = deferred();
       const staleFinished = deferred();
       const currentSavepointReady = deferred();
       const finishCurrent = deferred();
+      let staleStarted = false;
+      let timedOut: Promise<void> | undefined;
+      let current: Promise<void> | undefined;
 
-      const timedOut = db.transaction(async () => {
-        try {
-          await db.transaction(async () => {
-            await releaseStale.promise;
-          });
-        } finally {
-          staleFinished.resolve();
-        }
-      });
-      await expect(timedOut).rejects.toThrow('watchdog');
-
-      const current = db.transaction(async () => {
-        await db.run('INSERT INTO items (id, value, n) VALUES (?, ?, ?)', 'current-outer', null, 1);
-        await db.transaction(async () => {
-          await db.run('INSERT INTO items (id, value, n) VALUES (?, ?, ?)', 'current-inner', null, 2);
-          currentSavepointReady.resolve();
-          await finishCurrent.promise;
+      // Control the deliberate timeout, not native SQL or event-loop progress.
+      // The next transaction must not race a 25ms wall-clock I/O budget.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        timedOut = db.transaction(async () => {
+          staleStarted = true;
+          try {
+            await db.transaction(async () => {
+              staleEntered.resolve();
+              await releaseStale.promise;
+            });
+          } finally {
+            staleFinished.resolve();
+          }
         });
-      });
-      await currentSavepointReady.promise;
-      releaseStale.resolve();
-      await staleFinished.promise;
-      finishCurrent.resolve();
+        await waitWhileTransactionPending(staleEntered.promise, timedOut);
+        const timeoutAssertion = expect(timedOut).rejects.toThrow('watchdog');
+        await vi.advanceTimersByTimeAsync(25);
+        await timeoutAssertion;
 
-      await expect(current).resolves.toBeUndefined();
-      expect(await db.all<{ id: string }>('SELECT id FROM items ORDER BY n')).toEqual([
-        { id: 'current-outer' },
-        { id: 'current-inner' },
-      ]);
+        current = db.transaction(async () => {
+          await db.run('INSERT INTO items (id, value, n) VALUES (?, ?, ?)', 'current-outer', null, 1);
+          await db.transaction(async () => {
+            await db.run('INSERT INTO items (id, value, n) VALUES (?, ?, ?)', 'current-inner', null, 2);
+            currentSavepointReady.resolve();
+            await finishCurrent.promise;
+          });
+        });
+        await waitWhileTransactionPending(currentSavepointReady.promise, current);
+        releaseStale.resolve();
+        await waitWhileTransactionPending(staleFinished.promise, current);
+        finishCurrent.resolve();
+
+        await expect(current).resolves.toBeUndefined();
+        expect(await db.all<{ id: string }>('SELECT id FROM items ORDER BY n')).toEqual([
+          { id: 'current-outer' },
+          { id: 'current-inner' },
+        ]);
+      } finally {
+        releaseStale.resolve();
+        finishCurrent.resolve();
+        try {
+          await Promise.allSettled([timedOut, current]);
+          // The timed-out promise settles before its escaped callback finishes.
+          if (staleStarted) await staleFinished.promise;
+        } finally {
+          vi.useRealTimers();
+        }
+      }
     });
   });
 }
