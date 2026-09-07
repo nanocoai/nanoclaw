@@ -12,7 +12,7 @@ import path from 'path';
 import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
 import { getCurrentInReplyTo } from '../db/session-state.js';
-import { getSessionRouting } from '../db/session-routing.js';
+import { resolveDestinationThread } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -22,6 +22,22 @@ function log(msg: string): void {
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+const DEFAULT_OUTBOX_DIR = '/workspace/outbox';
+
+/**
+ * Where a sent file is staged for the host to collect.
+ *
+ * NANOCLAW_OUTBOX_DIR is a TEST seam only — it exists so send_file can be
+ * exercised off a real container. The host reads this path by convention
+ * inside the session mount (`readOutboxFiles` in src/session-manager.ts) and
+ * never sets the variable, so overriding it in a live container would stage
+ * files where the host never looks. Read per call so the env, not import
+ * order, decides.
+ */
+function outboxRoot(): string {
+  return process.env.NANOCLAW_OUTBOX_DIR || DEFAULT_OUTBOX_DIR;
 }
 
 function ok(text: string) {
@@ -41,10 +57,9 @@ function destinationList(): string {
 /**
  * Resolve a destination name to routing fields.
  *
- * Look up the explicitly named destination. If it resolves to
- * the same channel the session is bound to, the session's thread_id is
- * preserved so replies land in the correct thread. Otherwise thread_id
- * is null (a cross-destination send starts a new conversation).
+ * A channel destination carries the thread that conversation is currently in,
+ * resolved exactly as the poll loop resolves it for text replies; an agent
+ * destination never carries a thread.
  */
 function resolveRouting(
   to: string,
@@ -52,15 +67,10 @@ function resolveRouting(
   const dest = findByName(to);
   if (!dest) return { error: `Unknown destination "${to}". Known: ${destinationList()}` };
   if (dest.type === 'channel') {
-    // If the destination is the same channel the session is bound to,
-    // preserve the thread_id so replies land in the correct thread.
-    const session = getSessionRouting();
-    const threadId =
-      session.channel_type === dest.channelType && session.platform_id === dest.platformId ? session.thread_id : null;
     return {
       channel_type: dest.channelType!,
       platform_id: dest.platformId!,
-      thread_id: threadId,
+      thread_id: resolveDestinationThread(dest.channelType!, dest.platformId!)?.threadId ?? null,
       resolvedName: to,
     };
   }
@@ -138,7 +148,7 @@ export const sendFile: McpToolDefinition = {
     const id = generateId();
     const filename = (args.filename as string) || path.basename(resolvedPath);
 
-    const outboxDir = path.join('/workspace/outbox', id);
+    const outboxDir = path.join(outboxRoot(), id);
     fs.mkdirSync(outboxDir, { recursive: true });
     fs.copyFileSync(resolvedPath, path.join(outboxDir, filename));
 

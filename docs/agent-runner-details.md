@@ -572,17 +572,20 @@ written by the host) resolves the name to routing fields.
   name: 'send_message',
   params: {
     text: string,    // message content (required)
-    to?: string,     // destination name (e.g. "family", "worker-1").
-                     // Optional when the agent has exactly one destination.
+    to: string,      // destination name (e.g. "family", "worker-1") (required —
+                     // the agent always addresses a destination explicitly)
   }
 }
 ```
 
-Implementation: `resolveRouting(to)` looks up the destination. With no `to`, it defaults to
-the session's own reply routing (`session_routing`); if the destination resolves to the same
-channel the session is bound to, the session's `thread_id` is preserved so the reply lands
-in-thread, otherwise `thread_id` is null. The tool then writes a `messages_out` row with
-`kind: 'chat'` and content `{ text }`, and returns the new `seq` as the message id.
+Implementation: `resolveRouting(to)` looks up the destination. For a channel destination,
+`thread_id` comes from `resolveDestinationThread` (`db/session-routing.ts`) — the most recent
+`messages_in` row from that channel+platform, which carries the thread the conversation is
+currently in. This is the same lookup the poll loop uses for text replies, so both paths
+thread identically; `session_routing.thread_id` is never consulted, since it is null for every
+chat session that isn't per-thread. An agent destination always gets a null `thread_id`. The tool
+then writes a `messages_out` row with `kind: 'chat'` and content `{ text }`, and returns the
+new `seq` as the message id.
 
 #### send_file
 
@@ -593,7 +596,7 @@ Send a file to a named destination (same destination model as `send_message`).
   name: 'send_file',
   params: {
     path: string,          // file path (relative to /workspace/agent/ or absolute) (required)
-    to?: string,           // destination name; optional if the agent has one destination
+    to: string,            // destination name (required)
     text?: string,         // optional accompanying message
     filename?: string,     // display name (default: basename of path)
   }

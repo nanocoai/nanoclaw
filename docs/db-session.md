@@ -94,7 +94,12 @@ Rewritten wholesale (DELETE + INSERT in a transaction) by `writeDestinations()` 
 
 ### 2.4 `session_routing`
 
-Single-row (`id=1`) default routing: where outbound messages go when the agent doesn't specify a destination.
+Single-row (`id=1`): the chat this session is bound to. Read by the container's interactive
+tools (`ask_user_question`, `send_card`, which take no destination) and to detect a task
+session from its canonical `system:tasks:<id>` thread id. Not the source of a reply's thread —
+`thread_id` here is null for every chat session that isn't per-thread, so `send_message` /
+`send_file` and the poll loop's text replies all resolve the thread from the latest
+`messages_in` row for the channel instead.
 
 ```sql
 CREATE TABLE session_routing (

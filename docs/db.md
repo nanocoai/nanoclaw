@@ -113,7 +113,7 @@ These rules are enforced by convention in `src/session-manager.ts` and `containe
 | `messages_in` | inbound | `src/mailbox/sqlite/` | `container/agent-runner/src/mailbox/sqlite/` |
 | `delivered` | inbound | `src/mailbox/sqlite/session-db.ts` (`markDelivered`) | container edit/reaction targeting |
 | `destinations` | inbound | `writeDestinations()` in `src/session-manager.ts` | container routing / ACL |
-| `session_routing` | inbound | `writeSessionRouting()` in `src/session-manager.ts` | container `send_message` defaults |
+| `session_routing` | inbound | `writeSessionRouting()` in `src/session-manager.ts` | container interactive tools, task-session detection |
 | `messages_out` | outbound | `container/agent-runner/src/db/messages-out.ts` | `src/delivery.ts` poll loop |
 | `processing_ack` | outbound | `container/agent-runner/src/db/messages-in.ts` | `src/host-sweep.ts` (`syncProcessingAcks`) |
 | `session_state` | outbound | `container/agent-runner/src/db/session-state.ts` | container on startup |

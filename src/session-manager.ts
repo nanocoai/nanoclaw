@@ -215,8 +215,12 @@ export async function destroySessionMailbox(agentGroupId: string, sessionId: str
 /**
  * Write the current chat/thread routing for a session into its inbound mailbox.
  *
- * The container uses this to preserve thread_id when an explicitly named
- * destination resolves to the conversation this session is bound to.
+ * The container uses this for the tools that take no destination
+ * (`ask_user_question`, `send_card`) and to detect a task session (whose
+ * thread_id is the canonical `system:tasks:<id>`). Reply threads are NOT resolved
+ * from here — thread_id is null for every chat session that isn't per-thread, so
+ * the container resolves a reply's thread from the latest messages_in row for
+ * that channel instead.
  * Derived from session.messaging_group_id → messaging_groups row + session.thread_id.
  *
  * Called on every container wake alongside the agent-to-agent module's

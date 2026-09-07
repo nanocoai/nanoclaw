@@ -110,17 +110,9 @@ describe('explicit outbound destinations', () => {
     expect(out[0].platform_id).toBe('telegram:99');
   });
 
-  it('preserves the current thread for an explicitly named matching destination', async () => {
-    seedDestination('current-chat', 'discord', 'channel:1');
-    seedSessionRouting('discord', 'channel:1', 'thread-7');
-
-    await sendMessage.handler({ to: 'current-chat', text: 'hello' });
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].platform_id).toBe('channel:1');
-    expect(out[0].thread_id).toBe('thread-7');
-  });
+  // Which thread an explicitly named destination lands in is covered in
+  // mcp-tools/core.test.ts: it comes from the latest messages_in row for that
+  // channel, as it does for text replies, not from the session's bound thread.
 });
 
 describe('final-output blocks in a task run', () => {
