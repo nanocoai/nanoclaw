@@ -11,8 +11,8 @@ import path from 'path';
 
 import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
-import { getCurrentInReplyTo } from '../db/session-state.js';
-import { getReplyRoute, resolveDestinationThread } from '../db/session-routing.js';
+import { getCurrentInReplyTo, getCurrentReplyRoute } from '../db/session-state.js';
+import { resolveDestinationThread } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -42,9 +42,9 @@ function destinationList(): string {
  * Resolve a destination name to routing fields.
  *
  * A channel destination is threaded like the poll loop's explicit deliveries:
- * the thread of the message being answered when it came from that channel,
- * else that channel's latest inbound thread. An agent destination never
- * carries a thread.
+ * the thread of the message being answered (the published reply stamp) when it
+ * came from that channel, else that channel's latest inbound thread. An agent
+ * destination never carries a thread.
  */
 function resolveRouting(
   to: string,
@@ -52,12 +52,11 @@ function resolveRouting(
   const dest = findByName(to);
   if (!dest) return { error: `Unknown destination "${to}". Known: ${destinationList()}` };
   if (dest.type === 'channel') {
-    const inReplyTo = getCurrentInReplyTo();
-    const replyingTo = inReplyTo ? getReplyRoute(inReplyTo) : null;
     return {
       channel_type: dest.channelType!,
       platform_id: dest.platformId!,
-      thread_id: resolveDestinationThread(dest.channelType!, dest.platformId!, replyingTo)?.threadId ?? null,
+      thread_id:
+        resolveDestinationThread(dest.channelType!, dest.platformId!, getCurrentReplyRoute())?.threadId ?? null,
       resolvedName: to,
     };
   }

@@ -176,19 +176,6 @@ export class SqliteAgentMailbox implements AgentMailbox {
     return row ? { threadId: row.thread_id, inReplyTo: row.id } : null;
   }
 
-  getInboundRoute(id: string) {
-    const row = getInboundDb()
-      .prepare('SELECT channel_type, platform_id, thread_id FROM messages_in WHERE id = ?')
-      .get(id) as { channel_type: string | null; platform_id: string | null; thread_id: string | null } | undefined;
-    return row
-      ? parseSessionRoutingRecord({
-          channelType: row.channel_type,
-          platformId: row.platform_id,
-          threadId: row.thread_id,
-        })
-      : null;
-  }
-
   getUndeliveredMessages(): OutboundMessage[] {
     return sqliteGetUndeliveredMessages().map(outboundMessage);
   }

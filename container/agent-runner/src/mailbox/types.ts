@@ -53,8 +53,6 @@ export interface MailboxOperations {
   getMessageIdBySeq(sequence: number): string | null;
   getRoutingBySeq(sequence: number): SessionRouting | null;
   getLatestInboundRoute(channelType: string, platformId: string): { threadId: string | null; inReplyTo: string } | null;
-  /** Channel, platform and thread of one inbound message; null when the id is unknown. */
-  getInboundRoute(id: string): SessionRouting | null;
   getUndeliveredMessages(): OutboundMessage[];
   getState(key: string): StateValue | undefined;
   setState(key: string, value: string): void;

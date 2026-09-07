@@ -4,6 +4,7 @@
  * and the thread a send to a channel should land in (`resolveDestinationThread`).
  */
 import { getAgentMailbox } from '../mailbox/index.js';
+import type { ReplyRoute } from './session-state.js';
 
 export interface SessionRouting {
   channel_type: string | null;
@@ -18,28 +19,6 @@ export function getSessionRouting(): SessionRouting {
     platform_id: routing.platformId,
     thread_id: routing.threadId,
   };
-}
-
-/** Where the message being answered came from, plus its id for the a2a return path. */
-export interface ReplyRoute {
-  channelType: string | null;
-  platformId: string | null;
-  threadId: string | null;
-  inReplyTo: string | null;
-}
-
-/**
- * The route of inbound message `id`, or null when it is unknown or the read
- * fails. Never throws.
- */
-export function getReplyRoute(id: string): ReplyRoute | null {
-  try {
-    const route = getAgentMailbox().operations.getInboundRoute(id);
-    return route ? { ...route, inReplyTo: id } : null;
-  } catch (err) {
-    console.error(`[session-routing] getReplyRoute error: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
-  }
 }
 
 /**
@@ -62,7 +41,7 @@ export function getReplyRoute(id: string): ReplyRoute | null {
 export function resolveDestinationThread(
   channelType: string,
   platformId: string,
-  replyingTo?: ReplyRoute | null,
+  replyingTo?: (Omit<ReplyRoute, 'inReplyTo'> & { inReplyTo: string | null }) | null,
 ): { threadId: string | null; inReplyTo: string | null } | null {
   if (replyingTo && replyingTo.channelType === channelType && replyingTo.platformId === platformId) {
     return { threadId: replyingTo.threadId, inReplyTo: replyingTo.inReplyTo };

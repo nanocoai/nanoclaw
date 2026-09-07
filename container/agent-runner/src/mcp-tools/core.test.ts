@@ -16,15 +16,30 @@ import { getUndeliveredMessages } from '../db/messages-out.js';
 import { sendFile, sendMessage } from './core.js';
 
 /**
- * Publish the a2a reply stamp the way the poll loop does: a direct write to
- * session_state in outbound.db. `ageMs` back-dates updated_at to exercise the
- * staleness guard MCP tools apply when reading it.
+ * Publish the reply stamp the way the poll loop does: a direct write to
+ * session_state in outbound.db.
  */
-function publishInReplyTo(id: string, ageMs = 0): void {
+function publishReplyRoute(
+  route: { inReplyTo: string; channelType?: string | null; platformId?: string | null; threadId?: string | null },
+  ageMs = 0,
+): void {
   const updatedAt = new Date(Date.now() - ageMs).toISOString();
   getOutboundDb()
     .prepare('INSERT OR REPLACE INTO session_state (key, value, updated_at) VALUES (?, ?, ?)')
-    .run('current_in_reply_to', id, updatedAt);
+    .run(
+      'current_reply_route',
+      JSON.stringify({
+        inReplyTo: route.inReplyTo,
+        channelType: route.channelType ?? null,
+        platformId: route.platformId ?? null,
+        threadId: route.threadId ?? null,
+      }),
+      updatedAt,
+    );
+}
+
+function publishInReplyTo(id: string, ageMs = 0): void {
+  publishReplyRoute({ inReplyTo: id }, ageMs);
 }
 
 /** The session's bound chat/thread, as the host writes it on every wake. */
@@ -151,7 +166,7 @@ describe('send_message / send_file — thread for a channel destination', () => 
     // A shared / agent-shared session (or a DM sub-thread) is bound to the
     // channel with no thread of its own, but the request came in a thread.
     seedInbound('in-1', 'slack', 'C123', 'T-42');
-    publishInReplyTo('in-1');
+    publishReplyRoute({ inReplyTo: 'in-1', channelType: 'slack', platformId: 'C123', threadId: 'T-42' });
 
     expect(await sendBoth()).toEqual(['T-42', 'T-42']);
   });
@@ -159,7 +174,7 @@ describe('send_message / send_file — thread for a channel destination', () => 
   it('keeps replying to the answered message when a newer message from another thread arrived mid-turn', async () => {
     seedInbound('in-1', 'slack', 'C123', 'T-1');
     seedInbound('in-2', 'slack', 'C123', 'T-42');
-    publishInReplyTo('in-1');
+    publishReplyRoute({ inReplyTo: 'in-1', channelType: 'slack', platformId: 'C123', threadId: 'T-1' });
 
     expect(await sendBoth()).toEqual(['T-1', 'T-1']);
   });
@@ -176,14 +191,14 @@ describe('send_message / send_file — thread for a channel destination', () => 
     // agent-shared session: answering discord, sending to slack.
     seedInbound('in-0', 'slack', 'C123', 'T-9');
     seedInbound('in-1', 'discord', 'chan-9', 'discord-thread');
-    publishInReplyTo('in-1');
+    publishReplyRoute({ inReplyTo: 'in-1', channelType: 'discord', platformId: 'chan-9', threadId: 'discord-thread' });
 
     expect(await sendBoth()).toEqual(['T-9', 'T-9']);
   });
 
   it('sends unthreaded to a channel nothing has arrived from', async () => {
     seedInbound('in-1', 'discord', 'chan-9', 'discord-thread');
-    publishInReplyTo('in-1');
+    publishReplyRoute({ inReplyTo: 'in-1', channelType: 'discord', platformId: 'chan-9', threadId: 'discord-thread' });
 
     expect(await sendBoth()).toEqual([null, null]);
   });

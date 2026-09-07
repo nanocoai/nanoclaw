@@ -13,10 +13,10 @@ import { touchHeartbeat } from './heartbeat.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import {
   clearContinuation,
-  clearCurrentInReplyTo,
+  clearCurrentReplyRoute,
   migrateLegacyContinuation,
   setContinuation,
-  setCurrentInReplyTo,
+  setCurrentReplyRoute,
 } from './db/session-state.js';
 import {
   formatMessages,
@@ -246,7 +246,16 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
-    setCurrentInReplyTo(routing.inReplyTo);
+    setCurrentReplyRoute(
+      routing.inReplyTo
+        ? {
+            inReplyTo: routing.inReplyTo,
+            channelType: routing.channelType,
+            platformId: routing.platformId,
+            threadId: routing.threadId,
+          }
+        : null,
+    );
     // Forward a loop stop to the ACTIVE query. The stream deliberately stays
     // open between turns, so the loop can be parked inside processQuery when
     // config.signal fires; without this, the "stopped" loop's query — and its
@@ -300,7 +309,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       // followed by a "Completed" line that reads like success.
       log(`Errored batch will be acked completed — ${processingIds.length} message(s), no redelivery`);
     } finally {
-      clearCurrentInReplyTo();
+      clearCurrentReplyRoute();
       config.signal?.removeEventListener('abort', abortActiveQuery);
     }
 
