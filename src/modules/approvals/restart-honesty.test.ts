@@ -31,6 +31,7 @@ import {
   type GatewayProvider,
 } from '../../gateway-providers/index.js';
 import type { PendingApproval } from '../../types.js';
+import { log } from '../../log.js';
 import {
   ONECLI_ACTION,
   resolveOneCLIApproval,
@@ -194,6 +195,7 @@ describe('reconnect dedupe', () => {
     startOneCLIApprovalHandler(captureAdapter);
     expect(capturedHandler).not.toBeNull();
 
+    const rearmed = vi.spyOn(log, 'info');
     const decisionPromise = capturedHandler!({
       id: 'req-9',
       expiresAt: iso(120_000),
@@ -202,10 +204,17 @@ describe('reconnect dedupe', () => {
       path: '/send',
       agent: { name: 'Agent' },
     });
-    // Let handleRequest reach the dedupe check before clicking.
-    await vi.waitFor(async () => {
-      expect(await resolveOneCLIApproval('oa-test0001', 'approve')).toBe(true);
-    });
+    // Observe completed re-arming before the one click. Polling the mutating
+    // resolver can consume the durable row before PostgreSQL finishes dedupe.
+    try {
+      await vi.waitFor(() => expect(rearmed).toHaveBeenCalledWith(
+        'Re-armed existing card for redelivered approval request',
+        { approvalId: 'oa-test0001', requestId: 'req-9' },
+      ));
+    } finally {
+      rearmed.mockRestore();
+    }
+    expect(await resolveOneCLIApproval('oa-test0001', 'approve')).toBe(true);
     await expect(decisionPromise).resolves.toBe('approve');
     // No ask_question card was delivered for the redelivery.
     expect(delivered.filter((call) => call.content.includes('ask_question'))).toHaveLength(0);
