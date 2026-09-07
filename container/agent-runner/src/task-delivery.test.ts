@@ -109,10 +109,6 @@ describe('explicit outbound destinations', () => {
     expect(out).toHaveLength(1);
     expect(out[0].platform_id).toBe('telegram:99');
   });
-
-  // Which thread an explicitly named destination lands in is covered in
-  // mcp-tools/core.test.ts: it comes from the latest messages_in row for that
-  // channel, as it does for text replies, not from the session's bound thread.
 });
 
 describe('final-output blocks in a task run', () => {

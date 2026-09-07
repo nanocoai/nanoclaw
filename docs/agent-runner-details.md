@@ -578,14 +578,13 @@ written by the host) resolves the name to routing fields.
 }
 ```
 
-Implementation: `resolveRouting(to)` looks up the destination. For a channel destination,
-`thread_id` comes from `resolveDestinationThread` (`db/session-routing.ts`) — the most recent
-`messages_in` row from that channel+platform, which carries the thread the conversation is
-currently in. This is the same lookup the poll loop uses for text replies, so both paths
-thread identically; `session_routing.thread_id` is never consulted, since it is null for every
-chat session that isn't per-thread. An agent destination always gets a null `thread_id`. The tool
-then writes a `messages_out` row with `kind: 'chat'` and content `{ text }`, and returns the
-new `seq` as the message id.
+Implementation: `resolveRouting(to)` looks up the destination. A channel destination gets its
+`thread_id` from `resolveDestinationThread` (`db/session-routing.ts`): the latest `messages_in`
+row from that channel+platform, i.e. the thread the conversation is currently in. The poll loop
+uses the same lookup for text replies, so both paths thread identically. `session_routing.thread_id`
+is never consulted — it is null for every session that isn't per-thread. An agent destination
+always gets a null `thread_id`. The tool then writes a `messages_out` row with `kind: 'chat'` and
+content `{ text }`, and returns the new `seq` as the message id.
 
 #### send_file
 

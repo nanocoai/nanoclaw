@@ -8,10 +8,8 @@
  * seed it the same way the poll-loop process does (a direct DB write) rather
  * than via any in-memory helper, so they exercise the real process boundary.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test';
 import fs from 'fs';
-import os from 'os';
-import path from 'path';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
@@ -30,15 +28,17 @@ function publishInReplyTo(id: string, ageMs = 0): void {
 }
 
 /** The session's bound chat/thread, as the host writes it on every wake. */
-function seedSessionRouting(channelType: string | null, platformId: string | null, threadId: string | null): void {
+function seedBoundThread(channelType: string, platformId: string, threadId: string): void {
   const db = getInboundDb();
   db.exec(`CREATE TABLE IF NOT EXISTS session_routing (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     channel_type TEXT, platform_id TEXT, thread_id TEXT
   )`);
-  db.prepare(
-    'INSERT OR REPLACE INTO session_routing (id, channel_type, platform_id, thread_id) VALUES (1, ?, ?, ?)',
-  ).run(channelType, platformId, threadId);
+  db.prepare('INSERT INTO session_routing (id, channel_type, platform_id, thread_id) VALUES (1, ?, ?, ?)').run(
+    channelType,
+    platformId,
+    threadId,
+  );
 }
 
 function seedChannelDestination(name: string, channelType: string, platformId: string): void {
@@ -123,87 +123,50 @@ describe('send_message MCP tool — in_reply_to plumbing', () => {
 });
 
 describe('send_message / send_file — thread for a channel destination', () => {
-  let tmp: string;
-  let prevOutbox: string | undefined;
-  let filePath: string;
+  // send_file stages the file under /workspace/outbox, which only exists in a
+  // container. Routing is what's under test, so stub the copy.
+  let fsSpies: Array<{ mockRestore(): void }> = [];
 
   beforeEach(() => {
-    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'core-send-'));
-    prevOutbox = process.env.NANOCLAW_OUTBOX_DIR;
-    process.env.NANOCLAW_OUTBOX_DIR = path.join(tmp, 'outbox');
-    filePath = path.join(tmp, 'report.txt');
-    fs.writeFileSync(filePath, 'report');
     seedChannelDestination('current-chat', 'slack', 'C123');
+    fsSpies = [
+      spyOn(fs, 'existsSync').mockReturnValue(true),
+      spyOn(fs, 'mkdirSync').mockReturnValue(undefined),
+      spyOn(fs, 'copyFileSync').mockReturnValue(undefined),
+    ];
   });
 
   afterEach(() => {
-    if (prevOutbox === undefined) delete process.env.NANOCLAW_OUTBOX_DIR;
-    else process.env.NANOCLAW_OUTBOX_DIR = prevOutbox;
-    fs.rmSync(tmp, { recursive: true, force: true });
+    for (const spy of fsSpies) spy.mockRestore();
   });
 
-  it('send_message lands in the latest thread the channel is in when the session thread is null', async () => {
-    // A shared or agent-shared session (or a DM sub-thread) is bound to the
-    // channel with no thread of its own — but the request came in a thread.
-    seedSessionRouting('slack', 'C123', null);
+  async function sendBoth(): Promise<Array<string | null>> {
+    await sendMessage.handler({ to: 'current-chat', text: 'hello' });
+    const file = (await sendFile.handler({ to: 'current-chat', path: '/tmp/report.txt' })) as { isError?: boolean };
+    expect(file.isError).toBeUndefined();
+    return getUndeliveredMessages().map((m) => m.thread_id);
+  }
+
+  it('lands in the thread the latest request arrived in, even when the session has no bound thread', async () => {
+    // A shared / agent-shared session (or a DM sub-thread) is bound to the
+    // channel with no thread of its own, but the request came in a thread.
     seedInbound('in-1', 'slack', 'C123', 'T-1');
     seedInbound('in-2', 'slack', 'C123', 'T-42');
 
-    await sendMessage.handler({ to: 'current-chat', text: 'hello' });
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].platform_id).toBe('C123');
-    expect(out[0].thread_id).toBe('T-42');
+    expect(await sendBoth()).toEqual(['T-42', 'T-42']);
   });
 
-  it('send_file lands in the thread the request arrived in when the session thread is null', async () => {
-    seedSessionRouting('slack', 'C123', null);
+  it("ignores the session's bound thread, which the old code read", async () => {
+    seedBoundThread('slack', 'C123', 'T-bound');
     seedInbound('in-1', 'slack', 'C123', 'T-42');
 
-    const result = (await sendFile.handler({ to: 'current-chat', path: filePath })) as { isError?: boolean };
-    expect(result.isError).toBeUndefined();
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].platform_id).toBe('C123');
-    expect(out[0].thread_id).toBe('T-42');
+    expect(await sendBoth()).toEqual(['T-42', 'T-42']);
   });
 
-  it("never reads the session's bound thread, which can be stale or null", async () => {
-    // The bound thread is what the tools used to read. Even when it is set, the
-    // conversation's current thread is the one the inbound row carries.
-    seedSessionRouting('slack', 'C123', 'T-bound');
-    seedInbound('in-1', 'slack', 'C123', 'T-42');
-
-    await sendMessage.handler({ to: 'current-chat', text: 'hello' });
-    await sendFile.handler({ to: 'current-chat', path: filePath });
-
-    expect(getUndeliveredMessages().map((m) => m.thread_id)).toEqual(['T-42', 'T-42']);
-  });
-
-  it("does not stamp another channel's thread onto a destination nothing arrived from", async () => {
-    // agent-shared session: the latest inbound row is from discord, the send
-    // goes to slack. Slack has no thread context, so it must not inherit one.
-    seedChannelDestination('other-chat', 'discord', 'chan-9');
-    seedSessionRouting('discord', 'chan-9', null);
+  it("does not inherit another channel's thread", async () => {
+    // agent-shared session: the latest inbound row is from discord, the send goes to slack.
     seedInbound('in-1', 'discord', 'chan-9', 'discord-thread');
 
-    await sendMessage.handler({ to: 'current-chat', text: 'hello' });
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].platform_id).toBe('C123');
-    expect(out[0].thread_id).toBeNull();
-  });
-
-  it('sends unthreaded when nothing has arrived from the channel yet', async () => {
-    // Same as the poll loop's text-reply path: no inbound row, no thread.
-    seedSessionRouting('slack', 'C123', 'T-bound');
-
-    await sendMessage.handler({ to: 'current-chat', text: 'hello' });
-    await sendFile.handler({ to: 'current-chat', path: filePath });
-
-    expect(getUndeliveredMessages().map((m) => m.thread_id)).toEqual([null, null]);
+    expect(await sendBoth()).toEqual([null, null]);
   });
 });

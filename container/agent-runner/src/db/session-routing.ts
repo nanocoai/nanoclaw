@@ -21,20 +21,19 @@ export function getSessionRouting(): SessionRouting {
 }
 
 /**
- * The thread a send to `channelType`+`platformId` should land in: the thread of
- * the most recent inbound row from that channel, plus that row's id for the a2a
+ * The thread a send to `channelType`+`platformId` should land in — the thread
+ * of the latest inbound row from that channel — plus that row's id for the a2a
  * return path.
  *
- * This — not `session_routing.thread_id` — is where a reply's thread comes from.
- * The session's bound thread is null for every chat session that isn't per-thread
- * (shared and agent-shared sessions, DM sub-threads), while a request can arrive
- * in a thread regardless. Shared by the poll loop and the MCP send tools so text
- * replies, `send_message` and `send_file` all thread identically, and resolved
- * per destination so an agent-shared session never stamps one channel's thread
- * onto another.
+ * Reply threads come from here, not from `session_routing.thread_id`: the bound
+ * thread is null for every session that isn't per-thread (shared, agent-shared,
+ * DM sub-threads) even when the request arrived in a thread. Shared by the poll
+ * loop and the send tools so text replies, `send_message` and `send_file` all
+ * thread identically. Resolving per destination also keeps an agent-shared
+ * session from stamping one channel's thread onto another.
  *
- * Returns null when nothing has arrived from that channel yet, or when the read
- * fails; the caller then sends without a thread. Never throws.
+ * Returns null (send unthreaded) when nothing has arrived from that channel or
+ * the read fails. Never throws.
  */
 export function resolveDestinationThread(
   channelType: string,

@@ -94,11 +94,10 @@ Rewritten wholesale (DELETE + INSERT in a transaction) by `writeDestinations()` 
 
 ### 2.4 `session_routing`
 
-Single-row (`id=1`): the chat this session is bound to. Read by the container's interactive
-tools (`ask_user_question`, `send_card`, which take no destination) and to detect a task
-session from its canonical `system:tasks:<id>` thread id. Not the source of a reply's thread —
-`thread_id` here is null for every chat session that isn't per-thread, so `send_message` /
-`send_file` and the poll loop's text replies all resolve the thread from the latest
+Single-row (`id=1`): the chat this session is bound to. Read by the tools that take no
+destination (`ask_user_question`, `send_card`) and to detect a task session from its
+`system:tasks:<id>` thread id. Not the source of a reply's thread — `thread_id` is null for
+every session that isn't per-thread, so replies resolve their thread from the latest
 `messages_in` row for the channel instead.
 
 ```sql

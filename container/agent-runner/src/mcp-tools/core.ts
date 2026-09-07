@@ -24,22 +24,6 @@ function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-const DEFAULT_OUTBOX_DIR = '/workspace/outbox';
-
-/**
- * Where a sent file is staged for the host to collect.
- *
- * NANOCLAW_OUTBOX_DIR is a TEST seam only — it exists so send_file can be
- * exercised off a real container. The host reads this path by convention
- * inside the session mount (`readOutboxFiles` in src/session-manager.ts) and
- * never sets the variable, so overriding it in a live container would stage
- * files where the host never looks. Read per call so the env, not import
- * order, decides.
- */
-function outboxRoot(): string {
-  return process.env.NANOCLAW_OUTBOX_DIR || DEFAULT_OUTBOX_DIR;
-}
-
 function ok(text: string) {
   return { content: [{ type: 'text' as const, text }] };
 }
@@ -57,9 +41,9 @@ function destinationList(): string {
 /**
  * Resolve a destination name to routing fields.
  *
- * A channel destination carries the thread that conversation is currently in,
- * resolved exactly as the poll loop resolves it for text replies; an agent
- * destination never carries a thread.
+ * A channel destination is threaded the same way the poll loop threads text
+ * replies: from the latest inbound row for that channel. An agent destination
+ * never carries a thread.
  */
 function resolveRouting(
   to: string,
@@ -148,7 +132,7 @@ export const sendFile: McpToolDefinition = {
     const id = generateId();
     const filename = (args.filename as string) || path.basename(resolvedPath);
 
-    const outboxDir = path.join(outboxRoot(), id);
+    const outboxDir = path.join('/workspace/outbox', id);
     fs.mkdirSync(outboxDir, { recursive: true });
     fs.copyFileSync(resolvedPath, path.join(outboxDir, filename));
 
