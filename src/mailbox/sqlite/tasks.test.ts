@@ -268,6 +268,61 @@ describe('updateTask', () => {
     db.close();
   });
 
+  it('sets freshSession on a live series without recreating it', () => {
+    const db = freshDb();
+    insertTaskRow(db, {
+      id: 'task-1',
+      seriesId: 'task-1',
+      processAfter: '2999-01-01T00:00:00.000Z',
+      recurrence: '0 9 * * *',
+      content: JSON.stringify({ prompt: 'nightly', script: null, originSessionId: null }),
+    });
+
+    expect(updateTask(db, 'task-1', { freshSession: true })).toBe(1);
+
+    const row = db.prepare('SELECT content FROM messages_in WHERE id = ?').get('task-1') as { content: string };
+    const parsed = JSON.parse(row.content);
+    expect(parsed.freshSession).toBe(true);
+    // Everything else in the envelope survives the merge.
+    expect(parsed.prompt).toBe('nightly');
+  });
+
+  it('clears freshSession when false is passed', () => {
+    const db = freshDb();
+    insertTaskRow(db, {
+      id: 'task-1',
+      seriesId: 'task-1',
+      processAfter: '2999-01-01T00:00:00.000Z',
+      recurrence: '0 9 * * *',
+      content: JSON.stringify({ prompt: 'nightly', freshSession: true }),
+    });
+
+    expect(updateTask(db, 'task-1', { freshSession: false })).toBe(1);
+
+    const row = db.prepare('SELECT content FROM messages_in WHERE id = ?').get('task-1') as { content: string };
+    expect(JSON.parse(row.content).freshSession).toBe(false);
+  });
+
+  it('leaves freshSession alone when the flag is omitted', () => {
+    const db = freshDb();
+    insertTaskRow(db, {
+      id: 'task-1',
+      seriesId: 'task-1',
+      processAfter: '2999-01-01T00:00:00.000Z',
+      recurrence: '0 9 * * *',
+      content: JSON.stringify({ prompt: 'nightly', freshSession: true }),
+    });
+
+    // An unrelated edit must not silently turn a stateless series back into a
+    // resuming one.
+    updateTask(db, 'task-1', { prompt: 'nightly v2' });
+
+    const row = db.prepare('SELECT content FROM messages_in WHERE id = ?').get('task-1') as { content: string };
+    const parsed = JSON.parse(row.content);
+    expect(parsed.prompt).toBe('nightly v2');
+    expect(parsed.freshSession).toBe(true);
+  });
+
   it('returns 0 when no live task matches', () => {
     const db = freshDb();
     insertTaskRow(db, {

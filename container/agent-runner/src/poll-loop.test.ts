@@ -4,7 +4,7 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { processQuery } from './poll-loop.js';
+import { processQuery, shouldStartFreshSession, wantsFreshSession } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 import type { AgentQuery, ProviderEvent } from './providers/types.js';
 
@@ -189,6 +189,60 @@ describe('on_wake filtering', () => {
       .run();
     // Should be returned even on non-first poll (on_wake=0)
     expect(getPendingMessages(false)).toHaveLength(1);
+  });
+});
+
+describe('fresh-session task occurrences', () => {
+  // Opt-in per series (`ncl tasks create --fresh-session`). A recurring
+  // series' session is never closed, so by default every fire resumes — and
+  // re-sends — the previous run's whole conversation.
+  it('is off unless the task content asks for it', () => {
+    insertMessage('m1', 'task', { prompt: 'nightly sweep' });
+    expect(getPendingMessages().every(wantsFreshSession)).toBe(false);
+  });
+
+  it('is on when the task content carries freshSession', () => {
+    insertMessage('m1', 'task', { prompt: 'nightly sweep', freshSession: true });
+    expect(getPendingMessages().some(wantsFreshSession)).toBe(true);
+  });
+
+  it('never fires for a chat message, whatever its content says', () => {
+    insertMessage('m1', 'chat', { sender: 'John', text: 'hi', freshSession: true });
+    expect(getPendingMessages().some(wantsFreshSession)).toBe(false);
+  });
+
+  // These call the real decision function the poll loop uses. An earlier version
+  // asserted `some`/`every` on a local array instead, which tested
+  // Array.prototype and passed identically with the fix reverted.
+  it('does not reset a mixed batch — chat context must survive a co-batched task', () => {
+    insertMessage('m1', 'task', { prompt: 'nightly sweep', freshSession: true });
+    insertMessage('m2', 'chat', { sender: 'John', text: 'what did we decide?' });
+    expect(shouldStartFreshSession(getPendingMessages())).toBe(false);
+  });
+
+  it('resets a batch that is entirely fresh-session task rows', () => {
+    insertMessage('m1', 'task', { prompt: 'sweep a', freshSession: true });
+    insertMessage('m2', 'task', { prompt: 'sweep b', freshSession: true });
+    expect(shouldStartFreshSession(getPendingMessages())).toBe(true);
+  });
+
+  it('does not reset an empty batch', () => {
+    expect(shouldStartFreshSession([])).toBe(false);
+  });
+
+  it('does not reset when the only task row has not opted in', () => {
+    insertMessage('m1', 'task', { prompt: 'nightly sweep' });
+    expect(shouldStartFreshSession(getPendingMessages())).toBe(false);
+  });
+
+  it('tolerates legacy plain-string task content', () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, trigger, on_wake, content)
+         VALUES ('m1', 'task', datetime('now'), 'pending', 1, 0, 'do the thing')`,
+      )
+      .run();
+    expect(getPendingMessages().some(wantsFreshSession)).toBe(false);
   });
 });
 

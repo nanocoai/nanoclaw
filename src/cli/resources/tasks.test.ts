@@ -448,6 +448,87 @@ describe('tasks CLI resource', () => {
     expect(d.created_at).toBeTruthy();
   });
 
+  describe('--fresh-session (stateless occurrences)', () => {
+    async function createWith(args: Record<string, unknown>) {
+      const r = await dispatch(
+        { id: 'fs', command: 'tasks-create', args: { prompt: 'nightly sweep', ...args } },
+        agentCtx('ag-1', 'chat-1'),
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) throw new Error('create failed');
+      const out = r.data as { series_id: string; session_id: string; fresh_session: number };
+      const db = new Database(inboundDbPath('ag-1', out.session_id), { readonly: true });
+      const row = db.prepare("SELECT content FROM messages_in WHERE kind = 'task'").get() as { content: string };
+      db.close();
+      return { out, content: JSON.parse(row.content) as Record<string, unknown> };
+    }
+
+    it('defaults off — an existing install keeps resuming its task session', async () => {
+      const { out, content } = await createWith({ process_after: '2999-01-01T00:00:00Z' });
+      expect(content.freshSession).toBe(false);
+      expect(out.fresh_session).toBe(0);
+    });
+
+    it('persists the flag into task content when asked for', async () => {
+      const { out, content } = await createWith({ process_after: '2999-01-01T00:00:00Z', fresh_session: true });
+      expect(content.freshSession).toBe(true);
+      expect(out.fresh_session).toBe(1);
+    });
+
+    function contentOf(sessionId: string): Record<string, unknown> {
+      const db = new Database(inboundDbPath('ag-1', sessionId), { readonly: true });
+      const row = db.prepare("SELECT content FROM messages_in WHERE kind = 'task'").get() as { content: string };
+      db.close();
+      return JSON.parse(row.content) as Record<string, unknown>;
+    }
+
+    async function update(args: Record<string, unknown>) {
+      const r = await dispatch({ id: 'u', command: 'tasks-update', args }, agentCtx('ag-1', 'chat-1'));
+      expect(r.ok).toBe(true);
+      if (!r.ok) throw new Error(`update failed: ${r.error}`);
+      return r.data as { series_id: string; touched: number; fields: string[] };
+    }
+
+    it('turns a live series stateless in place — no cancel-and-recreate', async () => {
+      const { out } = await createWith({ recurrence: '0 3 * * *' });
+      expect(contentOf(out.session_id).freshSession).toBe(false);
+
+      const res = await update({ id: out.series_id, fresh_session: true });
+      expect(res.series_id).toBe(out.series_id);
+      expect(res.touched).toBe(1);
+      expect(res.fields).toContain('freshSession');
+      expect(contentOf(out.session_id).freshSession).toBe(true);
+    });
+
+    it('turns it back off with an explicit false', async () => {
+      const { out } = await createWith({ recurrence: '0 3 * * *', fresh_session: true });
+      expect(contentOf(out.session_id).freshSession).toBe(true);
+
+      // A value-less --fresh-session means true, so "off" is the explicit
+      // value form the boolean columns already use elsewhere.
+      await update({ id: out.series_id, fresh_session: 'false' });
+      expect(contentOf(out.session_id).freshSession).toBe(false);
+    });
+
+    it('leaves the current setting alone when the flag is omitted', async () => {
+      const { out } = await createWith({ recurrence: '0 3 * * *', fresh_session: true });
+
+      await update({ id: out.series_id, prompt: 'nightly sweep v2' });
+
+      const content = contentOf(out.session_id);
+      expect(content.prompt).toBe('nightly sweep v2');
+      expect(content.freshSession).toBe(true);
+    });
+
+    it('surfaces on get so an operator can see which series are stateless', async () => {
+      const { out } = await createWith({ process_after: '2999-01-01T00:00:00Z', fresh_session: true });
+      const got = await dispatch({ id: 'g', command: 'tasks-get', args: { id: out.series_id } }, agentCtx());
+      expect(got.ok).toBe(true);
+      if (!got.ok) return;
+      expect((got.data as { fresh_session: number }).fresh_session).toBe(1);
+    });
+  });
+
   it('each task gets its own isolated session, and list fans out across them', async () => {
     const a = await dispatch(
       { id: 'r-a', command: 'tasks-create', args: { prompt: 'task A', process_after: '2026-01-15T09:00:00Z' } },
