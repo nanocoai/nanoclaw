@@ -325,11 +325,15 @@ export class ClaudeProvider implements AgentProvider {
         } else if (message.type === 'result') {
           // `result` text exists only on subtype:"success"; error subtypes
           // (e.g. a non-retryable 403 billing_error) carry their message in
-          // `errors[]` instead. Surface either so the poll-loop can deliver a
-          // billing/quota notice to the user rather than dropping the turn.
+          // `errors[]` instead. Keep that actionable notice separate from
+          // model output so the poll-loop can deliver it without scratchpad.
           const m = message as { result?: string; is_error?: boolean; errors?: string[] };
-          const text = m.result ?? (m.errors && m.errors.length > 0 ? m.errors.join('\n') : null);
-          yield { type: 'result', text, isError: m.is_error === true };
+          yield {
+            type: 'result',
+            text: m.result ?? null,
+            isError: m.is_error === true,
+            error: m.errors?.length ? m.errors.join('\n') : undefined,
+          };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'rate_limit_event') {

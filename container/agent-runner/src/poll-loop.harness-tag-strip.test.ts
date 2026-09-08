@@ -89,12 +89,11 @@ describe('stripHarnessTagArtifacts', () => {
   });
 });
 
-// Wiring guards: the sanitizer must be applied at BOTH delivery seams inside
-// the real processQuery path — the <message> block extraction in
-// dispatchResultText (exercised here without mid-turn delivery, where the
-// result is the delivery door; the mid-turn seam has its own sanitization
-// test in poll-loop.midturn.test.ts), and the bare error-result delivery.
-// Removing either call site (not just the helper) goes red here.
+// Delivery boundaries exercised through the real processQuery path:
+// - Wrapped result message bodies are sanitized before delivery.
+// - Bare error-result diagnostics without result.error receive a generic notice.
+// Mid-turn sanitization is covered in poll-loop.midturn.test.ts; provider billing
+// errors are covered separately in providers/claude.errors.test.ts.
 describe('harness tag artifacts stripped from deliveries (wiring)', () => {
   it('sanitizes a <message> block body before it reaches messages_out', async () => {
     getInboundDb()
@@ -117,10 +116,10 @@ describe('harness tag artifacts stripped from deliveries (wiring)', () => {
     expect(pushes).toHaveLength(0);
   });
 
-  it('sanitizes bare error-result text before it reaches messages_out', async () => {
+  it('replaces bare error-result text and artifacts with a safe notice', async () => {
     const { query, pushes } = makeResultQuery({
       type: 'result',
-      text: 'Spending limit reached.\n<dispatch>',
+      text: 'Raw provider diagnostic: transport terminated.\n<dispatch>',
       isError: true,
     });
 
@@ -128,7 +127,7 @@ describe('harness tag artifacts stripped from deliveries (wiring)', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('Spending limit reached.');
+    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
     // No re-wrap nudge — an error result must not re-hammer the gateway.
     expect(pushes).toHaveLength(0);
   });

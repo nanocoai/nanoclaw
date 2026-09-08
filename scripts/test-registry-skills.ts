@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 
-// Applies one branch-backed add-* skill to a disposable checkout and runs only
+// Applies one branch-backed or self-contained provider add-* skill to a disposable checkout and runs only
 // its build/test directives. `--all` is the local equivalent of the CI matrix.
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -143,7 +143,7 @@ function command(cmd: string, cwd: string, quiet = false): string {
   return result.stdout ?? '';
 }
 
-function discover(skillsRoot = SKILLS_ROOT): RegistrySkill[] {
+export function discover(skillsRoot = SKILLS_ROOT): RegistrySkill[] {
   return readdirSync(skillsRoot)
     .filter((name) => name.startsWith('add-'))
     .flatMap((skill) => {
@@ -151,8 +151,10 @@ function discover(skillsRoot = SKILLS_ROOT): RegistrySkill[] {
       const path = join(dir, 'SKILL.md');
       if (!existsSync(path)) return [];
       const markdown = readFileSync(path, 'utf8');
-      if (![...markdown.matchAll(REGISTRY_MENTION)].length) return [];
       const directives = parseDirectives(markdown);
+      const provider = parseProviderDescriptor(markdown, skill)?.value;
+      const localPayload = Boolean(provider) && directives.some((d) => d.kind === 'copy' && !d.attrs['from-branch']);
+      if (![...markdown.matchAll(REGISTRY_MENTION)].length && !localPayload) return [];
       const branches = [
         ...new Set(
           directives
@@ -165,9 +167,9 @@ function discover(skillsRoot = SKILLS_ROOT): RegistrySkill[] {
         {
           skill,
           branches,
-          provider: parseProviderDescriptor(markdown, skill)?.value,
+          provider,
           bun: markdown.includes('container/agent-runner'),
-          executable: branches.length > 0,
+          executable: branches.length > 0 || localPayload,
           dir,
           markdown,
         },
@@ -305,7 +307,7 @@ async function testSkill(
   skipEffects = SKIPPED_EFFECTS,
 ): Promise<void> {
   if (!meta.executable) {
-    throw new Error(`${meta.skill} pulls registry code but has no nc:copy from-branch directive`);
+    throw new Error(`${meta.skill} has no executable nc:copy source`);
   }
 
   const directives = parseDirectives(meta.markdown);
@@ -340,7 +342,7 @@ async function testSkill(
       execStream: async () => ({ ok: true, fields: fixture.stepFields ?? {} }),
     });
 
-  const before = roundTrip && meta.branches.includes('providers') ? snapshot(root) : undefined;
+  const before = roundTrip && (meta.provider || meta.branches.includes('providers')) ? snapshot(root) : undefined;
   const result = await apply();
 
   if (!fullyApplied(result)) {
@@ -513,7 +515,7 @@ async function testAll(skills: RegistrySkill[]): Promise<void> {
   for (const meta of skills) {
     console.log(`\n==> ${meta.skill}`);
     if (!meta.executable) {
-      failures.push(`${meta.skill}: no nc:copy from-branch directive`);
+      failures.push(`${meta.skill}: no executable nc:copy source`);
       console.error(`  FAIL: ${failures.at(-1)}`);
       continue;
     }
@@ -530,7 +532,13 @@ async function testAll(skills: RegistrySkill[]): Promise<void> {
         const scenario = fixture.name ?? String(index + 1);
         if (scenarios.length > 1) console.log(`  scenario: ${scenario}`);
         try {
-          await testSkill(meta, fixture, root, refs, index === 0 && meta.branches.includes('providers'));
+          await testSkill(
+            meta,
+            fixture,
+            root,
+            refs,
+            index === 0 && Boolean(meta.provider || meta.branches.includes('providers')),
+          );
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           throw new Error(`${scenario}: ${message}`);

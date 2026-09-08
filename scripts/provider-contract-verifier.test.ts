@@ -69,7 +69,7 @@ describe('provider contract verifier', () => {
     expect(commands).toContain(
       'pnpm exec vitest run src/provider-contracts src/providers setup/provider-contract.test.ts setup/providers',
     );
-    expect(commands).toContain('pnpm --package=bun@1.3.12 dlx bun test src/provider-contracts src/providers');
+    expect(commands).toContain('pnpm --package=bun@1.3.12 dlx bun run test src/provider-contracts src/providers');
     expect(result.checks.slice(-2)).toEqual(['runtime contract inventory', 'runtime conformance test files']);
   });
 
