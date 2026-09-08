@@ -5,5 +5,6 @@
 //
 // Skills add a new provider by appending one import line below.
 
+import './acp-client.js';
 import './codex.js';
 import './opencode.js';
