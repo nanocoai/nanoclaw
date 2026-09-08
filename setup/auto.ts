@@ -1511,16 +1511,13 @@ async function askAgentProviderChoice(): Promise<string> {
     })),
   ];
   const preset = process.env.NANOCLAW_AGENT_PROVIDER?.trim().toLowerCase();
-  // Fresh installs use Claude without another setup prompt. Explicit presets
-  // still win, and an existing non-Claude default keeps its provider picker.
-  const automatic = preset || (DEFAULT_AGENT_PROVIDER === 'claude' ? 'claude' : undefined);
-  if (automatic) {
-    if (!options.some((option) => option.value === automatic)) {
+  if (preset) {
+    if (!options.some((option) => option.value === preset)) {
       throw new Error(`NANOCLAW_AGENT_PROVIDER=${preset} is not available in this NanoClaw install`);
     }
-    setupLog.userInput('agent_provider', automatic);
-    phEmit('agent_provider_chosen', { provider: automatic, preset: Boolean(preset) });
-    return automatic;
+    setupLog.userInput('agent_provider', preset);
+    phEmit('agent_provider_chosen', { provider: preset, preset: true });
+    return preset;
   }
   // The pick is persisted as the instance default (DEFAULT_AGENT_PROVIDER), so
   // pre-select the current default — a re-run Enter-through then preserves it
