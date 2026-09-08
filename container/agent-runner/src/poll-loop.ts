@@ -411,26 +411,36 @@ export async function processQuery(
   // closes anywhere is the wrap-nudge's job, not the buffer's.
   let midTurnTail = '';
   // Prompt queue for the exchange hook — each result event consumes the
-  // oldest unanswered prompt, except a wrapping-retry result, which answers
-  // the same prompt again. Unused (and unmaintained) when the provider
-  // doesn't implement `onExchangeComplete`.
-  const archivePrompts: string[] = [initialPrompt];
+  // oldest unanswered prompt. Retries append the original user prompt at
+  // their position in the provider input queue.
+  const archivePrompts: string[] = initialPrompt ? [initialPrompt] : [];
   // Where replies go is a property of the TURN, not the query. The query
   // stays open across turns (below), so a message pushed after the previous
   // answer finished is a new turn and replies go to ITS thread; a message
   // pushed while an answer is still streaming waits its turn — the in-flight
   // answer keeps the destination it started with. Pushed routes queue in
-  // push order and advance at each non-retry result, mirroring
+  // push order (including retries) and advance at every result, mirroring
   // archivePrompts. An empty initial prompt (a pre-warmed query) starts idle.
   let answering = initialPrompt !== '';
-  const queuedTurns: RoutingContext[] = [];
-  const adoptTurn = (next: RoutingContext): void => {
-    routing.platformId = next.platformId;
-    routing.channelType = next.channelType;
-    routing.threadId = next.threadId;
-    routing.inReplyTo = next.inReplyTo;
+  type QueuedTurn = {
+    routing: RoutingContext;
+    unwrappedNudged: boolean;
+    taskBlockNudged: boolean;
+  };
+  const queuedTurns: QueuedTurn[] = [];
+  const adoptTurn = (next: QueuedTurn): void => {
+    Object.assign(routing, next.routing);
+    unwrappedNudged = next.unwrappedNudged;
+    taskBlockNudged = next.taskBlockNudged;
     publishReplyRoute(routing);
     answering = true;
+  };
+  // A retry is another provider input, behind any follow-ups already pushed.
+  // Preserve its original route, prompt and retry guards until it is answered.
+  const pushRetry = (prompt: string): void => {
+    query.push(prompt);
+    queuedTurns.push({ routing: { ...routing }, unwrappedNudged, taskBlockNudged });
+    archivePrompts.push(archivePrompts[0] ?? initialPrompt);
   };
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
@@ -519,11 +529,13 @@ export async function processQuery(
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
-        unwrappedNudged = false;
-        taskBlockNudged = false;
         query.push(prompt);
         archivePrompts.push(prompt);
-        const next = extractRouting(keep);
+        const next: QueuedTurn = {
+          routing: extractRouting(keep),
+          unwrappedNudged: false,
+          taskBlockNudged: false,
+        };
         if (answering) queuedTurns.push(next);
         else adoptTurn(next);
         markCompleted(keptIds);
@@ -594,7 +606,6 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
-        let retrying = false;
         if (event.text) {
           const { sent, hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
             midTurnSent,
@@ -639,7 +650,6 @@ export async function processQuery(
             // coaxes a redundant second message (live-observed). It stays in
             // the scratchpad log.
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
-            retrying = willRetryWrapping || willRetryTaskBlocks;
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
@@ -650,7 +660,7 @@ export async function processQuery(
               unwrappedNudged = true;
               const destinations = getAllDestinations();
               const names = destinations.map((d) => d.name).join(', ');
-              query.push(
+              pushRetry(
                 `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
                   `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
                   `Your destinations: ${names}. ` +
@@ -662,12 +672,11 @@ export async function processQuery(
               const names = getAllDestinations()
                 .map((d) => d.name)
                 .join(', ');
-              query.push(buildTaskBlockNudge(taskBlocks, names));
+              pushRetry(buildTaskBlockNudge(taskBlocks, names));
             }
-            // A retry result (wrapping or task-block nudge) answers the SAME
-            // user prompt — keep it queued so the retry archives against it,
-            // not the nudge text.
-            if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
+            // Each result consumes one input; retries carry their original
+            // user prompt at their own position in the FIFO queue.
+            archivePrompts.shift();
           }
         } else archivePrompts.shift();
         // Turn boundary: reset the per-turn sent count after the result's
@@ -682,13 +691,9 @@ export async function processQuery(
         midTurnSent = 0;
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
-        // A retry answers the same prompt again; otherwise the next queued
-        // message (if any) is the turn the provider answers next.
-        if (!retrying) {
-          const next = queuedTurns.shift();
-          if (next) adoptTurn(next);
-          else answering = false;
-        }
+        const next = queuedTurns.shift();
+        if (next) adoptTurn(next);
+        else answering = false;
       }
     }
   } catch (err) {
