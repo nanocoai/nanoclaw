@@ -405,9 +405,8 @@ async function testCombinedProviders(skills: RegistrySkill[]): Promise<void> {
       throw new Error(`update-skills refresh failed: ${JSON.stringify(report)}`);
     }
     const verification = await verifyProviderContracts(root, {
-      // OpenCode retains its existing payload until its contract skill lands.
-      // Every other installed provider must already declare its contract.
-      expectedLegacyProviders: ['opencode'],
+      expectedLegacyProviders: [],
+      requiredDeclaredProviders: expected,
       exec: (cmd, cwd) => command(cmd, cwd),
     });
     if (verification.status !== 'passed') {
