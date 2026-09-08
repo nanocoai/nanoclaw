@@ -112,8 +112,7 @@ describe('codex installs from its hard-wired /add-codex skill in-process', () =>
 
   it('setup owns the shared provider verifier instead of running the skill directive twice', () => {
     const src = read('setup/providers/install.ts');
-    const flowOwned = src.slice(src.indexOf('function isFlowOwnedCommand'), src.indexOf('export interface'));
-    expect(flowOwned).toContain('/provider-contract-verifier/.test(cmd)');
+    expect(src).toContain("skipEffects: ['build', 'test', 'external']");
     expect(src).toContain('verifyProviderContracts');
     expect(src).toContain("verification.status === 'failed'");
     // The installed provider must declare its contract; unrelated pre-contract

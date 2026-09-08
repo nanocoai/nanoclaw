@@ -5,8 +5,9 @@ Before removing code, switch each OpenCode group to an installed provider using
 group. Use `/migrate-memory` first if needed. Do not edit materialized
 `container.json` files or clear database rows directly.
 
-Delete `import './opencode.js';` from these four barrels, leaving other imports:
+Delete `import './opencode.js';` from these five barrels, leaving other imports:
 
+- `setup/providers/index.ts`
 - `src/providers/index.ts`
 - `src/provider-contracts/index.ts`
 - `container/agent-runner/src/providers/index.ts`
@@ -39,12 +40,16 @@ rm -f container/agent-runner/src/providers/opencode-auth.test.ts
 rm -f scripts/opencode-auth-config.test.ts
 rm -f scripts/opencode-auth.test.ts
 rm -f scripts/opencode-auth.ts
+rm -f scripts/opencode-host.ts
+rm -f scripts/opencode-host.test.ts
 rm -f scripts/opencode-model-config.ts
 rm -f scripts/opencode-models.test.ts
 rm -f scripts/opencode-models.ts
 rm -f scripts/opencode-vault.test.ts
 rm -f scripts/opencode-vault.ts
 rm -f scripts/tsconfig.opencode-auth.json
+rm -f setup/providers/opencode.test.ts
+rm -f setup/providers/opencode.ts
 rm -f src/provider-contracts/opencode.ts
 rm -f src/providers/opencode-auth-stub.ts
 rm -f src/providers/opencode-registration.test.ts
@@ -80,7 +85,12 @@ explicitly requests deletion. The fixed credential stub may remain unused.
 Run the host build and runner typecheck, then `./container/build.sh build` to
 remove the baked SDK and CLI from the local image. Restart the NanoClaw host
 using the installation's normal service workflow. Verify that no OpenCode
-import remains in any of the four barrels and neither dependency manifest
+import remains in any of the five barrels and neither dependency manifest
 contains its OpenCode entry. An uninstalled provider fails in the runner; the
 host can first warn and compose default surfaces. Switch affected groups before
 removing the skill.
+
+The host helper is removed with the payload. Remove `data/host-harness/opencode/`
+only if this installation created it and the operator wants its private CLI
+removed. Preserve globally installed OpenCode, native credentials, configuration,
+and conversation history. Existing native OpenCode can still run in this checkout.

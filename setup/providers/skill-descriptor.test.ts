@@ -31,25 +31,21 @@ describe('provider skill descriptors', () => {
       offered: true,
       skillDir: path.join('.claude', 'skills', 'add-codex'),
     });
-    expect(listInstallableProviderDescriptors().map((entry) => entry.value)).toEqual(['codex']);
+    expect(listInstallableProviderDescriptors().map((entry) => entry.value)).toEqual(['codex', 'opencode']);
     expect(providerImagePolicy('CODEX')).toBe('local-required');
     expect(providerImagePolicy('claude')).toBe('hardened-compatible');
     expect(providerImagePolicy('unknown-provider')).toBe('local-required');
   });
 
-  it('offers exactly Codex on trunk and keeps OpenCode out of the setup picker', () => {
-    // The picker (setup/auto.ts askAgentProviderChoice) lists installed setup
-    // providers plus listInstallableProviderDescriptors(). OpenCode is a
-    // skill-only provider: hidden from the offer AND never registered with
-    // setup, so neither source can surface it.
-    expect(listInstallableProviderDescriptors().map((entry) => entry.value)).toEqual(['codex']);
-    const opencode = listProviderDescriptors().find((entry) => entry.value === 'opencode');
-    expect(opencode?.offered).toBe(false);
-    expect(getInstallableProviderDescriptor('opencode')).toBeUndefined();
-
+  it('offers OpenCode through its skill and installs its setup adapter through the barrel', () => {
+    expect(getInstallableProviderDescriptor('opencode')).toMatchObject({
+      value: 'opencode',
+      offered: true,
+      image: 'local-required',
+    });
     const addOpencode = fs.readFileSync(path.join('.claude', 'skills', 'add-opencode', 'SKILL.md'), 'utf-8');
-    expect(addOpencode).not.toMatch(/^```nc:append to:setup\/providers\/index\.ts/m);
-    expect(addOpencode).not.toMatch(/^setup\/providers\/opencode\.ts$/m);
+    expect(addOpencode).toMatch(/^```nc:append to:setup\/providers\/index\.ts/m);
+    expect(addOpencode).toContain('payload/setup/providers/opencode.ts -> setup/providers/opencode.ts');
   });
 
   it('never surfaces a descriptor with offered false in the installable list', () => {
@@ -129,7 +125,9 @@ describe('provider skill descriptors', () => {
       ].join('\n'),
     );
     expect(getInstallableProviderDescriptor('derived', root)?.installSkill).toBe('add-derived');
-    expect(getInstallableProviderDescriptor('derived', root)?.skillDir).toBe(path.join('.claude', 'skills', 'add-derived'));
+    expect(getInstallableProviderDescriptor('derived', root)?.skillDir).toBe(
+      path.join('.claude', 'skills', 'add-derived'),
+    );
   });
 
   it('rejects incomplete provider metadata instead of offering a partial install', () => {

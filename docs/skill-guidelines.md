@@ -6,7 +6,7 @@ The authoritative checklist for writing a NanoClaw skill: the bar that conforman
 
 ## Principles
 
-Every customization is an additive **skill**: not an edit buried in core, but a skill that carries its own code and knows how to install and remove itself. Three principles make a skill *maintainable*; everything else in this document follows from them.
+Every customization is an additive **skill**: not an edit buried in core, but a skill that carries its own code and knows how to install and remove itself. Three principles make a skill _maintainable_; everything else in this document follows from them.
 
 ### 1. Single responsibility
 
@@ -14,14 +14,14 @@ A skill provides one independently useful customization and has one cohesive rea
 
 ### 2. Open for extension, closed for modification
 
-A skill extends NanoClaw through skill-owned files and existing extension points, keeping working core code unchanged whenever possible. When an edit is unavoidable, make the **smallest possible reach-in**. Adding a file or a dependency never breaks on upgrade; reaching into existing code is the only thing that does, so the integration surface *is* the upgrade risk.
+A skill extends NanoClaw through skill-owned files and existing extension points, keeping working core code unchanged whenever possible. When an edit is unavoidable, make the **smallest possible reach-in**. Adding a file or a dependency never breaks on upgrade; reaching into existing code is the only thing that does, so the integration surface _is_ the upgrade risk.
 
 Follows from this:
 
 - **Mostly add.** See the change shapes below, in safety order.
-- **Push logic into skill-owned files** so the core edit is one call, not an inlined block. This shrinks the surface *and* makes the point testable.
+- **Push logic into skill-owned files** so the core edit is one call, not an inlined block. This shrinks the surface _and_ makes the point testable.
 - **Colocated, self-contained** edits over edits in two places.
-- **Use an existing registry or hook when there is one**: appending to a registry is a smaller surface than reaching into code. When none exists, a true code-level edit is fine and first-class. (Whether to *add* a hook because a spot has become a hotspot is the maintainer's call, not the skill's.)
+- **Use an existing registry or hook when there is one**: appending to a registry is a smaller surface than reaching into code. When none exists, a true code-level edit is fine and first-class. (Whether to _add_ a hook because a spot has become a hotspot is the maintainer's call, not the skill's.)
 
 ### 3. A test for every functional integration point
 
@@ -45,8 +45,8 @@ A skill carries everything it needs:
 
 - **Code**: the files it adds. They live in the skill's own folder, or, for large registry-backed skills like channels and providers, on a registry branch the skill fetches from. Apply copies them in.
 - **Apply**: the steps in `SKILL.md`, written as prose an agent can run. Apply must be safe to re-run: upgrades re-run it, and a skill that half-applies twice is a bug.
-- **Remove**: a separate `REMOVE.md` that reverses *every* change apply made: barrel lines deleted (not commented out), every copied file removed including tests, dependencies uninstalled, Dockerfile edits reverted, env lines removed. **REMOVE.md is required exactly when apply leaves anything behind.** A pure instruction-only skill that copies nothing needs none, and an empty one is noise.
-- **Tests**: files that ship with the skill and are copied into the project's test tree on apply, so they run against the *composed* system.
+- **Remove**: a separate `REMOVE.md` that reverses _every_ change apply made: barrel lines deleted (not commented out), every copied file removed including tests, dependencies uninstalled, Dockerfile edits reverted, env lines removed. **REMOVE.md is required exactly when apply leaves anything behind.** A pure instruction-only skill that copies nothing needs none, and an empty one is noise.
+- **Tests**: files that ship with the skill and are copied into the project's test tree on apply, so they run against the _composed_ system.
 - **Recipe entry**: how it composes with the fork's other skills (ordering, dependencies).
 
 ---
@@ -59,7 +59,7 @@ In rough order of safety:
 - **Append to a file**: an import in a barrel, a line in `.env`, an entry at the end of a list.
 - **Edit a value in JSON**: e.g. a `package.json` field.
 - **Add a dependency**, pinned to an exact version.
-- **Insert into existing code (an "integration point")**: the one risky move. Keep it to a line or two that *calls* code living in the skill's own files, never an inlined block of logic. A skill full of these is a smell.
+- **Insert into existing code (an "integration point")**: the one risky move. Keep it to a line or two that _calls_ code living in the skill's own files, never an inlined block of logic. A skill full of these is a smell.
 
 Fetching from a registry branch is **additive, never a merge**. `git fetch origin <branch>` then `git show origin/<branch>:path > path` per file. Never `git merge` a registry branch into an install.
 
@@ -82,13 +82,13 @@ For a fence-carrying skill, conformance means:
 
 A provider install skill (`/add-codex`, `/add-opencode`) also declares how the setup wizard should treat the provider. The declaration lives in the SKILL.md frontmatter under `metadata:` and is parsed by `setup/providers/skill-descriptor.ts`; nothing about the offer is hard-coded in setup. Every key is required once `nanoclaw-provider` is present, and every key is read by setup code:
 
-| Key | Allowed values | Read by |
-|-----|----------------|---------|
-| `nanoclaw-provider` | lowercase kebab-case provider name (`codex`) | descriptor identity; `setup/providers/install.ts` passes it to the contract verifier as the provider that must be declared |
-| `nanoclaw-provider-label` | display text | the provider picker in `setup/auto.ts` (`askAgentProviderChoice`) |
-| `nanoclaw-provider-hint` | display text | the picker's hint column (suffixed "— installs now") |
-| `nanoclaw-provider-offered` | `'true'` \| `'false'` (quoted strings) | `listInstallableProviderDescriptors` — only `'true'` reaches the picker's "installs now" list and `--step provider-auth <name>`. `'false'` marks a skill-only provider that never appears in setup (OpenCode today) |
-| `nanoclaw-provider-image` | `local-required` \| `hardened-compatible` | `providerImagePolicy` — whether picking the provider forces a locally built sandbox image instead of the pre-built one |
+| Key                         | Allowed values                               | Read by                                                                                                                                                                                            |
+| --------------------------- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `nanoclaw-provider`         | lowercase kebab-case provider name (`codex`) | descriptor identity; `setup/providers/install.ts` passes it to the contract verifier as the provider that must be declared                                                                         |
+| `nanoclaw-provider-label`   | display text                                 | the provider picker in `setup/auto.ts` (`askAgentProviderChoice`)                                                                                                                                  |
+| `nanoclaw-provider-hint`    | display text                                 | the picker's hint column (suffixed "— installs now")                                                                                                                                               |
+| `nanoclaw-provider-offered` | `'true'` \| `'false'` (quoted strings)       | `listInstallableProviderDescriptors` — only `'true'` reaches the picker's "installs now" list and `--step provider-auth <name>`. `'false'` marks a skill-only provider that never appears in setup |
+| `nanoclaw-provider-image`   | `local-required` \| `hardened-compatible`    | `providerImagePolicy` — whether picking the provider forces a locally built sandbox image instead of the pre-built one                                                                             |
 
 The skill directory itself is the install skill setup applies in-process (`applyProviderSkill`); there is no key for it, and a leftover `nanoclaw-provider-install-skill` is rejected. `nanoclaw-provider-label` and `nanoclaw-provider-hint` must match the `label`/`hint` of the provider's `setup/providers/<name>.ts` entry once it is installed — the descriptor labels the offer before install, the entry labels it after, and `setup/providers/skill-descriptor.test.ts` fails on drift.
 
@@ -99,6 +99,13 @@ A skill-only provider (`offered: 'false'`) must not copy a `setup/providers/<nam
 **Merge order.** The provider payload branch must carry the files a provider skill copies (including the `provider-contracts/<name>.ts` declarations and the `<name>.conformance.test.ts`) before the trunk change that lists them lands, otherwise `/add-<name>` fails at its copy step; `scripts/test-registry-skills.ts --combined-providers` fails CI when trunk carries provider skills whose payload is not on the registry branch.
 
 ---
+
+### Provider setup help
+
+Provider-owned setup help belongs in the installed setup entry's existing
+`offerFailureAssist` hook. Post-install verification uses `runInstallCheck`.
+A helper that runs before payload installation is an optional setup extension,
+not a requirement of the runtime contract. See [OpenCode host help](provider-host-maintenance.md).
 
 ## Integration points
 
@@ -115,7 +122,8 @@ Lifecycle hooks are operational boundaries: an `onHostStart` error aborts host s
   ```
 
   A static import + call is acceptable too; this is a recommendation, not a mandate.
-- Keep any gating (feature flags, env checks) *inside* the skill's function, so the core edit stays a single call.
+
+- Keep any gating (feature flags, env checks) _inside_ the skill's function, so the core edit stays a single call.
 - When the reach-in lands inside an entangled function, extract a tiny skill-owned helper so the core touch is one line, like `args.push(...mySkillEnvArgs())`, rather than exporting the whole function or inlining the logic.
 
 ---
@@ -137,13 +145,13 @@ For a code-edit integration point, how you test the wiring depends on whether yo
 Two more legs apply when relevant:
 
 - **Build / typecheck** always applies: it catches a renamed symbol, a moved module, a bad signature.
-- **A behavior test of how added code consumes core**, required when the added file reaches into core APIs or data at runtime. When the consumption is a *typed* call into a core API (a Chat SDK adapter calling `createChatSdkBridge`), the build leg already guards it and no separate behavior test is required. The behavior-test requirement targets runtime consumption: core DB state, data shapes, registries.
+- **A behavior test of how added code consumes core**, required when the added file reaches into core APIs or data at runtime. When the consumption is a _typed_ call into a core API (a Chat SDK adapter calling `createChatSdkBridge`), the build leg already guards it and no separate behavior test is required. The behavior-test requirement targets runtime consumption: core DB state, data shapes, registries.
 
 Together these cover deletion, misplacement, drift, and core consumption. Only true runtime-reachability (a call stranded behind a dead branch) needs the heavy option of booting the real entry point, a rare "real run" reserved for critical wiring.
 
 ### Registration reach-ins: behavior, not structural
 
-A registry queryable at runtime gets a **behavior** test: import the real barrel, assert the registry contains the entry. A structural parse only proves the *source line* exists. It stays green when the barrel can't evaluate or the package isn't installed, which is exactly when the thing is actually broken. The behavior test goes red on a deleted barrel line, a barrel that won't evaluate, *and* an uninstalled package (the unmocked import throws), so it covers the dependency integration point for free.
+A registry queryable at runtime gets a **behavior** test: import the real barrel, assert the registry contains the entry. A structural parse only proves the _source line_ exists. It stays green when the barrel can't evaluate or the package isn't installed, which is exactly when the thing is actually broken. The behavior test goes red on a deleted barrel line, a barrel that won't evaluate, _and_ an uninstalled package (the unmocked import throws), so it covers the dependency integration point for free.
 
 Two consequences. First, **don't mock the adapter's package in the shipped test**: that would defeat the dependency check, and the test runs in the composed install where the package is present. Second, the only reason to fall back to a structural parse is an adapter with real import-time side effects (spawns a process, opens a socket, needs creds at load), which is an adapter smell to fix, not a reason to weaken the test. Conformant adapters do all side-effectful work in the factory or `setup()`, never at import.
 
@@ -157,18 +165,18 @@ The test matches the kind of integration point:
 - **Config / container probe** (mounts, Dockerfile, a tool installed in the image): run the change where you can. Spin up a container to confirm a mount or binary. Checking that a line exists in a file is the last resort.
 - **Agentic run** (operational, instruction-only skills): run the workflow with a small model; did it complete?
 - **Patch behavior** (a patch skill that changes core logic): a behavior test of the changed behavior.
-- **Provider (multi-point)**: a non-default agent backend reaches into *two* barrels (host `src/providers/index.ts`; container `container/agent-runner/src/providers/index.ts`), plus Dockerfile edits and a CLI or SDK dependency. Each is a separate way to break, and each needs its own guard. Ship a **barrel-driven registration test per tree** that imports *only* the real barrel and asserts the registry contains the provider. **The trap:** a `*.factory.test.ts` that imports the provider module directly self-registers it and stays green when the barrel line is deleted; that's a unit test, not a registration guard. REMOVE.md must reverse both barrel lines, all copied files in both trees, the dependency, and the Dockerfile edits.
+- **Provider (multi-point)**: a non-default agent backend reaches into _two_ barrels (host `src/providers/index.ts`; container `container/agent-runner/src/providers/index.ts`), plus Dockerfile edits and a CLI or SDK dependency. Each is a separate way to break, and each needs its own guard. Ship a **barrel-driven registration test per tree** that imports _only_ the real barrel and asserts the registry contains the provider. **The trap:** a `*.factory.test.ts` that imports the provider module directly self-registers it and stays green when the barrel line is deleted; that's a unit test, not a registration guard. REMOVE.md must reverse both barrel lines, all copied files in both trees, the dependency, and the Dockerfile edits.
 - **Content / instruction-only** (a reference wiki, a pure workflow): makes no functional reach-in, so it owes no integration test. Conformance is anatomy: idempotent apply, plus REMOVE.md iff apply leaves anything behind.
 
 ### Dependencies are integration points
 
 A skill that installs a package has made a reach-in: the code now assumes it's there. Guard it so a missing package goes red, in order of preference:
 
-1. **An unmocked import in a behavior test**: the test imports real code that imports the package, so a missing package throws. Covers presence *and* exercises the real dependency.
+1. **An unmocked import in a behavior test**: the test imports real code that imports the package, so a missing package throws. Covers presence _and_ exercises the real dependency.
 2. **The build leg**: a typed import of a missing module fails typecheck. The fallback when the package genuinely can't be imported in a test (e.g. it binds a port on import). Only works if the validate step runs the build before or alongside the tests, so verify the order.
 3. **A Dockerfile-installed CLI binary** is the case most often left unguarded: it isn't importable, so neither guard above sees it. Use a **structural test** asserting the Dockerfile `ARG <X>_VERSION=` and install line are present, optionally backed by a `<bin> --version` container probe. Pin the version; reject `latest`.
 
-You do *not* need to test the dependency's own API contract; that's optional external-service coverage.
+You do _not_ need to test the dependency's own API contract; that's optional external-service coverage.
 
 ### When there is genuinely nothing to test in-tree
 
@@ -189,12 +197,12 @@ Each with its fix. These are patterns to remove, not to test around: a drift-pro
 
 1. **A separate VERIFY.md.** Delete it; tests are the verification. Fold any genuinely useful manual smoke check into SKILL.md's next steps.
 2. **REMOVE.md soft-disable** (comments out an import; leaves copied files behind). DELETE the import line and `rm` every file the skill copied.
-3. **REMOVE.md incomplete** (misses env vars, the package uninstall, copied tests). Reverse *every* change; read the env vars from the skill's own credentials section, don't guess.
+3. **REMOVE.md incomplete** (misses env vars, the package uninstall, copied tests). Reverse _every_ change; read the env vars from the skill's own credentials section, don't guess.
 4. **Raw SQL against a core DB** (read or write). Use a core helper or an `ncl` verb; the in-tree query wrapper is the sanctioned last resort. Never the `sqlite3` binary.
 5. **Credential threading** (`-e KEY=…` or a stdin secrets payload into the container). OneCLI gateway only; it injects credentials per request.
 6. **Branch-merge install** (`git merge` of a registry branch or any code branch). Install by additive fetch: `git fetch origin <branch>`, then `git show origin/<branch>:path > path` per file. For an update/reapply workflow, re-run each installed skill's additive apply, never merge.
 7. **Diff-against-past framing** ("earlier versions…", "this is now redundant") and **documenting non-steps** ("no X needed"). Write present-tense DO steps only. A skill reads as a standalone artifact with no memory of its own edits.
-8. **Stale reach-in targets** (an edit aimed at code that no longer exists; a reach-in already shipped in trunk). Verify the target exists *before* instructing the edit; reconcile already-in-trunk ones to a no-op. Before appending to an allowlist or list, check how it's consumed; the entry may already be derived from a registry, making the edit dead.
+8. **Stale reach-in targets** (an edit aimed at code that no longer exists; a reach-in already shipped in trunk). Verify the target exists _before_ instructing the edit; reconcile already-in-trunk ones to a no-op. Before appending to an allowlist or list, check how it's consumed; the entry may already be derived from a registry, making the edit dead.
 9. **Hand-maintained duplicate copies** (a mirror directory kept in sync by hand or sed). Generate the mirror from a single canonical source.
 
 ---

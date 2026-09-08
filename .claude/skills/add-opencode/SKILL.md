@@ -5,7 +5,7 @@ metadata:
   nanoclaw-provider: opencode
   nanoclaw-provider-label: OpenCode
   nanoclaw-provider-hint: Open-source provider router
-  nanoclaw-provider-offered: 'false'
+  nanoclaw-provider-offered: 'true'
   nanoclaw-provider-image: local-required
 ---
 
@@ -13,13 +13,14 @@ metadata:
 
 Install OpenCode as an optional NanoClaw runtime. The payload is included in this
 skill; it needs no separate provider branch. It uses the upstream runtime,
-instructions and host contracts. The host contract remains at
+instructions, host, and setup metadata contracts. The host contract remains at
 version 1; the container owns its non-secret ChatGPT placeholder file.
 
-Apply this skill to install OpenCode, then authenticate with
-`pnpm exec tsx scripts/opencode-auth.ts`. To refresh the runtime, reapply the
-skill in refresh mode after backing up local payload edits. Authentication alone
-leaves installed files and the container image alone. Backend defaults are installation-wide; model and
+OpenCode is offered by the standard setup provider picker. Existing installs can
+add or authenticate it with `pnpm exec tsx setup/index.ts --step provider-auth opencode`.
+To replace an installed payload and update its pins, append `--refresh`; back up
+local payload edits first. Ordinary re-authentication leaves installed files and
+the container image alone. Backend defaults are installation-wide; model and
 reasoning effort can be overridden per group through the existing container
 configuration. Per-group backend/auth selection and structured channel attachment
 transport are separate work.
@@ -31,6 +32,19 @@ step owns image freshness. Model selection does not repeat installation checks.
 A working backend and account are checked separately by sending a real request.
 
 ## Install
+
+After installing this payload, run `pnpm exec tsx scripts/opencode-host.ts --configure`
+for host OpenCode setup, or use `--update` / `--debug` for the corresponding
+operational skill. An existing OpenCode CLI can also run directly in the checkout;
+it discovers `.claude/skills` natively. Host sign-in uses OpenCode's own settings
+and is independent of the container's OneCLI credentials. Installed setup failures
+use the existing provider failure-assist hook, including wizard authentication
+and installation-check failures. Host diagnostic context is model input and may
+remain in native OpenCode history; deleting its private temporary file does not
+erase those records. The helper requires stable OpenCode 1.18.25 or newer with
+`--prompt` and prefers the newest compatible installation it finds.
+Automatic help before payload
+installation is optional and is not part of the runtime contract.
 
 Install and refresh require host contract version 1. The compatibility predicate
 below guards every subsequent step, so an unsupported core receives no partial
@@ -76,19 +90,23 @@ payload/container/agent-runner/src/providers/opencode-auth.test.ts -> container/
 payload/scripts/opencode-auth-config.test.ts -> scripts/opencode-auth-config.test.ts
 payload/scripts/opencode-auth.test.ts -> scripts/opencode-auth.test.ts
 payload/scripts/opencode-auth.ts -> scripts/opencode-auth.ts
+payload/scripts/opencode-host.ts -> scripts/opencode-host.ts
+payload/scripts/opencode-host.test.ts -> scripts/opencode-host.test.ts
 payload/scripts/opencode-model-config.ts -> scripts/opencode-model-config.ts
 payload/scripts/opencode-models.test.ts -> scripts/opencode-models.test.ts
 payload/scripts/opencode-models.ts -> scripts/opencode-models.ts
 payload/scripts/opencode-vault.test.ts -> scripts/opencode-vault.test.ts
 payload/scripts/opencode-vault.ts -> scripts/opencode-vault.ts
 payload/scripts/tsconfig.opencode-auth.json -> scripts/tsconfig.opencode-auth.json
+payload/setup/providers/opencode.test.ts -> setup/providers/opencode.test.ts
+payload/setup/providers/opencode.ts -> setup/providers/opencode.ts
 payload/src/provider-contracts/opencode.ts -> src/provider-contracts/opencode.ts
 payload/src/providers/opencode-auth-stub.ts -> src/providers/opencode-auth-stub.ts
 payload/src/providers/opencode-registration.test.ts -> src/providers/opencode-registration.test.ts
 payload/src/providers/opencode.ts -> src/providers/opencode.ts
 ```
 
-Append `import './opencode.js';` once to each of the four provider and contract
+Append `import './opencode.js';` once to each of the five setup, provider, and contract
 barrels below. Keep all existing imports.
 
 ```nc:append to:src/providers/index.ts when:opencode_core_ready=yes
@@ -104,6 +122,10 @@ import './opencode.js';
 ```
 
 ```nc:append to:container/agent-runner/src/provider-contracts/index.ts when:opencode_core_ready=yes
+import './opencode.js';
+```
+
+```nc:append to:setup/providers/index.ts when:opencode_core_ready=yes
 import './opencode.js';
 ```
 
@@ -137,7 +159,7 @@ cd container/agent-runner && bun run typecheck
 ```
 
 ```nc:run effect:test when:opencode_core_ready=yes
-pnpm exec vitest run src/providers/opencode-registration.test.ts scripts/opencode-auth*.test.ts scripts/opencode-models.test.ts scripts/opencode-vault.test.ts setup/providers
+pnpm exec vitest run src/providers/opencode-registration.test.ts scripts/opencode-auth*.test.ts scripts/opencode-host.test.ts scripts/opencode-models.test.ts scripts/opencode-vault.test.ts setup/providers
 ```
 
 ```nc:run effect:test when:opencode_core_ready=yes
@@ -154,15 +176,17 @@ a published-image installation to locally built images.
 
 ## Authenticate and select a group
 
-After applying the skill and building its local image, run
-`pnpm exec tsx scripts/opencode-auth.ts` from the project root to choose
-authentication. This command leaves installed files and the image alone. Choose
+Run `pnpm exec tsx setup/index.ts --step provider-auth opencode` from the project
+root to install a missing payload and image, then choose authentication. If the
+provider is already installed, this command leaves its files and image alone;
+append `--refresh` only when intentionally replacing its payload and pins. Choose
 ChatGPT sign-in, a local OpenAI-compatible endpoint, OpenRouter, DeepSeek, or a
 supported native backend. Automatic API-key configuration supports OpenAI,
 OpenRouter, DeepSeek, Google, and Anthropic; other native authentication schemes
 require separate integration. The command stores credentials in OneCLI and backend defaults in
-`.env`. The command leaves the instance default unchanged. Select OpenCode for
-each group through the existing group configuration.
+`.env`. The full setup wizard also offers this flow and selects OpenCode for
+new groups only after configuration succeeds. The standalone command leaves the
+instance default unchanged.
 
 For ChatGPT, native OpenCode sign-in runs in a temporary container directory.
 The OAuth credential is translated into OneCLI's supported vault format, and the
