@@ -20,14 +20,10 @@ rm -f container/agent-runner/src/provider-contracts/opencode.ts
 rm -f container/agent-runner/src/providers/mcp-to-opencode.test.ts
 rm -f container/agent-runner/src/providers/mcp-to-opencode.ts
 rm -f container/agent-runner/src/providers/opencode-config.ts
-rm -f container/agent-runner/src/providers/opencode-managed-config/opencode/opencode.json
-rm -f container/agent-runner/src/providers/opencode-managed-config/opencode/.gitignore
-rm -f container/agent-runner/src/providers/opencode-memory-plugin.ts
 rm -f container/agent-runner/src/providers/opencode-memory.ts
 rm -f container/agent-runner/src/providers/opencode-registration.test.ts
 rm -f container/agent-runner/src/providers/opencode-turn.ts
 rm -f container/agent-runner/src/providers/opencode.attachments.test.ts
-rm -f container/agent-runner/src/providers/opencode.compaction.test.ts
 rm -f container/agent-runner/src/providers/opencode.config.test.ts
 rm -f container/agent-runner/src/providers/opencode.conformance.test.ts
 rm -f container/agent-runner/src/providers/opencode.empty-resume.test.ts
@@ -55,17 +51,17 @@ rm -f src/providers/opencode-registration.test.ts
 rm -f src/providers/opencode.ts
 ```
 
-Remove the dedicated generated config tree as well. A native test run against a
-writable checkout may have left ignored dependency files there; none are user
-configuration. This path belongs only to the skill:
+If an older skill version installed the memory plugin and managed config, remove
+those unused skill-owned files too, including ignored generated dependencies:
 
 ```bash
+rm -f container/agent-runner/src/providers/opencode-memory-plugin.ts
+rm -f container/agent-runner/src/providers/opencode.compaction.test.ts
 rm -rf container/agent-runner/src/providers/opencode-managed-config
 ```
 
-Leave the container's normal XDG config home and other tools' settings alone.
-The managed `opencode` symlink lives only in that container's config home and
-disappears with the old container when the group is restarted above.
+Recreating affected containers discards their old managed config symlinks. Leave
+other tools' config and persisted session data alone.
 
 If an older skill version installed `src/opencode-cli-tools.test.ts`, delete
 that legacy skill-owned test as well.

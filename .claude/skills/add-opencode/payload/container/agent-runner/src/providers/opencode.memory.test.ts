@@ -9,22 +9,10 @@ import {
   runMemorySessionHook,
   type OpenCodeMemorySessionHook,
 } from './opencode.js';
-import memoryPlugin from './opencode-memory-plugin.js';
-import { prepareOpenCodeMemory, readOpenCodeMemory } from './opencode-memory.js';
+import { prepareOpenCodeMemory, openCodeInstructionsPath } from './opencode-memory.js';
 
-/**
- * Memory reaches the OpenCode agent through the shared memory session hook —
- * the same command the Claude and Codex providers register — run at the two
- * moments OpenCode rebuilds a context window: a new session, and the awaited
- * compaction hook before native continuation. Never on a resume, never on an ordinary
- * push, and never through the config `instructions` array (OpenCode rereads
- * those files raw on every model request, bypassing the shared renderer's
- * per-file caps and the whole lifecycle).
- *
- * Hermetic: the "hook" is a temp shell script that logs the stdin payload it
- * received and echoes a marker, so these exercise the real spawn/stdin path
- * without invoking the real shared memory renderer.
- */
+// The same registered renderer used by other providers supplies a turn-start
+// snapshot. Native OpenCode rereads its output file during that turn.
 
 const MARKER = '<<memory-block>>';
 
@@ -114,85 +102,30 @@ describe('runMemorySessionHook', () => {
   });
 });
 
-describe('native memory hooks', () => {
-  async function plugin() {
-    return memoryPlugin({}, { directory: dir });
-  }
-  async function system(hooks: Awaited<ReturnType<typeof plugin>>, sessionID = 'ses_test') {
-    const output = { system: [] as string[] };
-    await hooks['experimental.chat.system.transform']({ sessionID }, output);
-    return output.system.join('\n');
-  }
-
-  it('seeds startup once and makes cached memory available to every native model request', async () => {
-    prepareOpenCodeMemory('ses_test', fakeHook(), 'CORE', 'ROUTING', true, dir);
-    const hooks = await plugin();
-    expect(await system(hooks)).toBe(`${MARKER}\n\nCORE\n\nROUTING`);
-    expect(await system(hooks)).toBe(`${MARKER}\n\nCORE\n\nROUTING`);
+describe('rendered turn instructions', () => {
+  it('writes rendered memory, core instructions and delivery wording into one private file', () => {
+    const file = path.join(dir, 'turn.md');
+    prepareOpenCodeMemory(fakeHook(), 'CORE', 'ROUTING', file);
+    expect(fs.readFileSync(file, 'utf8')).toBe(`${MARKER}\n\nCORE\n\nROUTING`);
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
     expect(invocations()).toEqual(['{"hook_event_name":"SessionStart","source":"startup"}']);
   });
 
-  it('reuses persisted memory on a cold resume and refreshes current core instructions', async () => {
-    const hook = fakeHook();
-    prepareOpenCodeMemory('ses_test', hook, 'OLD', 'ROUTING', true, dir);
-    prepareOpenCodeMemory('ses_test', hook, 'CURRENT', 'ROUTING', false, dir);
-    const cold = await plugin();
-    expect(await system(cold)).toBe(`${MARKER}\n\nCURRENT\n\nROUTING`);
-    expect(invocations()).toHaveLength(1);
-  });
-
-  it('refreshes in the awaited compaction hook before native continuation, without another external push', async () => {
-    prepareOpenCodeMemory('ses_test', fakeHook(), 'CORE', 'ROUTING', true, dir);
-    prepareOpenCodeMemory('ses_test', fakeHook({ body: 'FRESH' }), 'CORE', 'ROUTING', false, dir);
-    const hooks = await plugin();
-    await hooks['experimental.session.compacting']({ sessionID: 'ses_test' }, { context: [] });
-    expect(await system(hooks)).toBe('FRESH\n\nCORE\n\nROUTING');
-    expect(invocations()).toEqual([
-      '{"hook_event_name":"SessionStart","source":"startup"}',
-      '{"hook_event_name":"SessionStart","source":"compact"}',
-    ]);
-  });
-
-  it('retains the last snapshot on renderer failure but clears successfully emptied memory', async () => {
-    prepareOpenCodeMemory('ses_test', fakeHook(), 'CORE', '', true, dir);
-    const hooks = await plugin();
-    prepareOpenCodeMemory('ses_test', fakeHook({ exitCode: 1 }), 'CORE', '', false, dir);
-    await hooks['experimental.session.compacting']({ sessionID: 'ses_test' }, { context: [] });
-    expect(await system(hooks)).toContain(MARKER);
-    prepareOpenCodeMemory('ses_test', fakeHook({ body: '' }), 'CORE', '', false, dir);
-    await hooks['experimental.session.compacting']({ sessionID: 'ses_test' }, { context: [] });
-    expect(await system(hooks)).toBe('CORE');
-  });
-
-  it('inherits parent memory for task children and persists child compaction separately', async () => {
-    prepareOpenCodeMemory('ses_test', fakeHook(), 'CORE', 'ROUTING', true, dir);
-    prepareOpenCodeMemory('ses_test', fakeHook({ body: 'CHILD FRESH' }), 'CORE', 'ROUTING', false, dir);
-    const hooks = await memoryPlugin(
-      {
-        client: {
-          session: {
-            get: async ({ path }) => ({ data: { parentID: path.id === 'ses_child' ? 'ses_test' : undefined } }),
-          },
-        },
-      },
-      { directory: dir },
-    );
-    expect(await system(hooks, 'ses_child')).toBe(`${MARKER}\n\nCORE\n\nROUTING`);
-    expect(await system(hooks, 'ses_unrelated')).toBe('');
-    await hooks['experimental.session.compacting']({ sessionID: 'ses_child' }, { context: [] });
-    expect(await system(hooks, 'ses_child')).toContain('CHILD FRESH');
-    expect(readOpenCodeMemory('ses_test', dir)?.memory).toBe(MARKER);
+  it('refreshes the same file on each external turn, including a resumed session', () => {
+    const file = path.join(dir, 'turn.md');
+    prepareOpenCodeMemory(fakeHook(), 'OLD', 'OLD ROUTING', file);
+    prepareOpenCodeMemory(fakeHook({ body: 'FRESH' }), 'CURRENT', 'ROUTING', file);
+    expect(fs.readFileSync(file, 'utf8')).toBe('FRESH\n\nCURRENT\n\nROUTING');
     expect(invocations()).toHaveLength(2);
   });
 
-  it('does not attach session memory to unscoped requests or execute startup on a legacy resume', async () => {
-    prepareOpenCodeMemory('ses_legacy', fakeHook(), 'CORE', '', false, dir);
-    const hooks = await plugin();
-    expect(await system(hooks, 'ses_legacy')).toBe('CORE');
-    const output = { system: [] as string[] };
-    await hooks['experimental.chat.system.transform']({}, output);
-    expect(output.system).toEqual([]);
-    expect(invocations()).toEqual([]);
+  it('keeps current instructions when rendering fails and does not resurrect stale memory', () => {
+    const file = path.join(dir, 'turn.md');
+    prepareOpenCodeMemory(fakeHook(), 'OLD', '', file);
+    prepareOpenCodeMemory(fakeHook({ exitCode: 1 }), 'CURRENT', 'ROUTING', file);
+    expect(fs.readFileSync(file, 'utf8')).toBe('CURRENT\n\nROUTING');
+    prepareOpenCodeMemory(fakeHook({ body: '' }), 'NEW', '', file);
+    expect(fs.readFileSync(file, 'utf8')).toBe('NEW');
   });
 });
 
@@ -213,12 +146,10 @@ describe('OpenCodeProvider memory registration', () => {
 });
 
 describe('buildOpenCodeConfig instructions', () => {
-  it('does NOT load memory files raw through the instructions pipeline', () => {
-    // OpenCode calls instruction.system() on every model request and rereads
-    // each listed file raw. Memory listed here would bypass the shared
-    // renderer's caps and be re-read every request instead of once per context
-    // window; it goes through the memory session hook instead.
+  it('loads the rendered turn file, preserving the shared renderer caps on raw memory', () => {
     const config = buildOpenCodeConfig({});
+    expect(config.instructions).toContain(openCodeInstructionsPath());
+    expect(config).not.toHaveProperty('plugin');
     expect(config.instructions).not.toContain('/workspace/agent/memory/index.md');
     expect(config.instructions).not.toContain('/workspace/agent/memory/system/definition.md');
   });

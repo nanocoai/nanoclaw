@@ -1,4 +1,7 @@
-import { execFileSync, spawn } from 'child_process';
+import { spawn } from 'child_process';
+import { isDeepStrictEqual } from 'node:util';
+import { planSkill } from './skill-apply.js';
+import { parseDirectives } from './skill-directives.js';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -482,117 +485,42 @@ async function promptOpenCodeApiKey(provider: string, baseUrl: string, host: str
   };
 }
 
+/** Check declared installation state; install/refresh verifies contracts and builds the image. */
 export async function checkOpenCodeInstall(): Promise<void> {
-  const required = [
-    'src/providers/opencode.ts',
-    'src/provider-contracts/opencode.ts',
-    'container/agent-runner/src/provider-contracts/opencode.ts',
-    'container/agent-runner/src/providers/opencode.ts',
-    'container/agent-runner/src/providers/opencode-config.ts',
-    'container/agent-runner/src/providers/opencode-managed-config/opencode/opencode.json',
-    'container/agent-runner/src/providers/opencode-managed-config/opencode/.gitignore',
-    'container/agent-runner/src/providers/opencode-auth.ts',
-    'container/agent-runner/src/providers/opencode-turn.ts',
-    'container/agent-runner/src/providers/opencode-memory.ts',
-    'container/agent-runner/src/providers/opencode-memory-plugin.ts',
-    'container/agent-runner/src/providers/mcp-to-opencode.ts',
-    'scripts/opencode-vault.ts',
-  ];
-  for (const file of required) {
-    if (!fs.existsSync(path.join(process.cwd(), file))) throw new Error(`OpenCode payload is missing ${file}`);
-    if (
-      !fs.statSync(path.join(process.cwd(), file)).isFile() ||
-      !fs.readFileSync(path.join(process.cwd(), file), 'utf8').trim()
-    ) {
-      throw new Error(`OpenCode payload is empty or invalid: ${file}. Refresh the provider payload.`);
-    }
-  }
-  const tools = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'container/cli-tools.json'), 'utf8')) as Array<{
-    name: string;
-    version: string;
-    onlyBuilt?: boolean;
-  }>;
-  const cli = tools.find((entry) => entry.name === 'opencode-ai');
-  const runner = JSON.parse(
-    fs.readFileSync(path.join(process.cwd(), 'container/agent-runner/package.json'), 'utf8'),
-  ) as { dependencies?: Record<string, string> };
-  if (runner.dependencies?.['@opencode-ai/sdk'] !== '1.18.25') {
-    throw new Error('OpenCode SDK must be pinned to 1.18.25, matching the CLI');
-  }
-  if (cli?.version !== '1.18.25' || cli.onlyBuilt !== true) {
-    throw new Error('OpenCode CLI must be pinned to 1.18.25 with trusted postinstall enabled');
-  }
-  for (const barrel of [
-    'src/providers/index.ts',
-    'src/provider-contracts/index.ts',
-    'container/agent-runner/src/providers/index.ts',
-    'container/agent-runner/src/provider-contracts/index.ts',
-  ]) {
-    if (!/^\s*import ['"]\.\/opencode\.js['"];?\s*$/m.test(fs.readFileSync(path.join(process.cwd(), barrel), 'utf8'))) {
-      throw new Error(`OpenCode registration is missing from ${barrel}`);
-    }
-  }
-  // A new process validates actual host registration after files are refreshed.
-  const inventory = JSON.parse(
-    execFileSync(process.execPath, ['--import', 'tsx', 'scripts/provider-contract-names.ts'], {
-      cwd: process.cwd(),
-      encoding: 'utf8',
-      stdio: 'pipe',
-      timeout: 30_000,
-    }),
-  ) as { host?: string[]; hostProviders?: string[] };
-  if (![inventory.host, inventory.hostProviders].every((names) => names?.includes('opencode'))) {
-    throw new Error('OpenCode did not register all host and contract surfaces. Refresh the provider payload.');
-  }
+  const root = process.cwd();
+  const skillDir = path.join(root, '.claude/skills/add-opencode');
+  const markdown = fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8');
+  const { steps } = planSkill(skillDir, root);
+  const installation = steps.filter(({ kind }) => ['copy', 'append', 'dep', 'json-merge'].includes(kind));
+  if (!installation.length) throw new Error('OpenCode skill has no installation declarations. Restore SKILL.md.');
+  const pending = installation.find(({ status }) => status !== 'skip');
+  if (pending) throw new Error(`OpenCode installation is incomplete: ${pending.detail}. Refresh the provider skill.`);
 
-  // Exercise the mounted source against the dependencies and CLI in the image
-  // that normal authentication uses. Never pull, install, or rebuild here.
-  let runtime: { providers?: string[]; contracts?: string[]; sdk?: string; cli?: string };
-  try {
-    runtime = JSON.parse(
-      execFileSync(
-        CONTAINER_RUNTIME_BIN,
-        [
-          'run',
-          '--rm',
-          '--pull=never',
-          '--network=none',
-          '--read-only',
-          '--tmpfs',
-          '/tmp',
-          '--env',
-          'HOME=/tmp/opencode-install-check',
-          '--volume',
-          `${path.join(process.cwd(), 'container/agent-runner/src')}:/app/src:ro`,
-          '--workdir',
-          '/app',
-          '--entrypoint',
-          'bun',
-          CONTAINER_IMAGE,
-          '--no-install',
-          '--eval',
-          `import { providerRuntimeNames } from './src/provider-contracts/names.ts';
-       import { createOpencodeClient } from '@opencode-ai/sdk/v2';
-       import { readFileSync } from 'node:fs';
-       import { execFileSync } from 'node:child_process';
-       if (typeof createOpencodeClient !== 'function') throw new Error('OpenCode SDK is unavailable');
-       const sdk = JSON.parse(readFileSync('node_modules/@opencode-ai/sdk/package.json', 'utf8')).version;
-       const cli = execFileSync('opencode', ['--version'], { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-       console.log(JSON.stringify({ ...providerRuntimeNames(), sdk, cli }));`,
-        ],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, maxBuffer: 1024 * 1024 },
-      ),
-    );
-  } catch {
-    throw new Error(
-      'OpenCode could not load its provider, SDK, and CLI in the installed image. Check Docker, refresh the payload, and rebuild the local image before authenticating.',
-    );
-  }
-  if (runtime.sdk !== '1.18.25' || runtime.cli !== '1.18.25') {
-    throw new Error('The OpenCode image must contain CLI and SDK 1.18.25. Rebuild it with ./container/build.sh build.');
-  }
-  if (![runtime.providers, runtime.contracts].every((names) => names?.includes('opencode'))) {
-    throw new Error('OpenCode did not register all runtime and contract surfaces. Refresh the provider payload.');
+  // Install mode preserves existing files and packages. Compare its declared
+  // pins explicitly without maintaining a second version/file inventory here.
+  const readJson = (file: string) => JSON.parse(fs.readFileSync(path.join(root, file), 'utf8'));
+  for (const directive of parseDirectives(markdown)) {
+    if (directive.kind === 'dep') {
+      const manifest = readJson(path.join(String(directive.attrs.cwd ?? ''), 'package.json'));
+      for (const spec of directive.body) {
+        const at = spec.lastIndexOf('@');
+        const name = spec.slice(0, at);
+        const version = spec.slice(at + 1);
+        if ((manifest.dependencies?.[name] ?? manifest.devDependencies?.[name]) !== version) {
+          throw new Error(
+            `OpenCode dependency ${name} must match the skill pin ${version}. Refresh the provider skill.`,
+          );
+        }
+      }
+    } else if (directive.kind === 'json-merge') {
+      const expected = JSON.parse(directive.body.join('\n'));
+      const key = String(directive.attrs.key);
+      const entries = readJson(String(directive.attrs.into)) as Record<string, unknown>[];
+      const installed = entries.find((entry) => entry[key] === expected[key]);
+      if (Object.entries(expected).some(([field, value]) => !isDeepStrictEqual(installed?.[field], value))) {
+        throw new Error(`OpenCode ${expected[key]} does not match its skill declaration. Refresh the provider skill.`);
+      }
+    }
   }
 }
 

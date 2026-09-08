@@ -31,46 +31,35 @@ prompts, and idle-event completion would add ambiguous execution ownership.
 
 ## Memory and native continuation
 
-Injecting memory into the next external prompt misses OpenCode's automatic
-continuation after compaction. Native event handlers are not awaited, so refreshing
-memory from a compaction event would race the next model request.
+Before each external turn, the runner renders memory through the registered
+shared hook and atomically writes it with current core instructions and delivery
+wording to one file under writable XDG data. The write happens under the existing
+turn lock. The file is listed in native `instructions` next to the group's
+`CLAUDE.md` and `CLAUDE.local.md`.
 
-A local native plugin uses the awaited system-transform and session-compacting
-hooks. The provider seeds rendered memory once on a fresh session and updates
-current core instructions and delivery wording before every external turn. The
-plugin supplies that context on each native model request and refreshes rendered
-memory before compaction continues. Private per-session snapshots preserve it
-across server restarts. Children resolve only their actual ancestor's snapshot;
-child compaction writes a separate snapshot. Renderer failures retain the last
-snapshot; successful empty output clears it. Legacy sessions without a snapshot
-receive current core instructions until their next compaction refreshes memory.
+OpenCode 1.18.25 rereads those files on each model step, including native
+continuation after compaction. Task children use the same global configuration
+and inherit the current turn's file. No plugin, native memory hooks, parent walk,
+or per-session snapshot store is needed.
 
-Native system-transform input has a session ID and model, but no invocation
-purpose. The same session-scoped context can therefore reach native title and
-compaction helpers. Task-child inheritance is intentional; unrelated sessions
-cannot read another session's snapshot. Purpose-specific filtering would need
-an upstream hook that exposes that distinction rather than guessing from prompt
-text.
+Memory rendering runs once per external turn, including a resumed session.
+A compaction in the middle of a turn uses that turn's starting memory snapshot;
+the next external turn refreshes it. This freshness tradeoff is intentional.
+A renderer failure logs the problem and keeps current core instructions and
+routing, without retaining a previous turn's stale memory.
 
 ## Offline startup
 
-Container configuration lives in the existing read-only source mount. Before
-server startup, the provider links only the normal XDG config home's `opencode`
-child to that bundled directory. The XDG parent remains writable and retains its
-normal location for shell tools, MCP servers, memory hooks and native helpers.
-An existing matching symlink is reused; any other existing `opencode` path stops
-startup with a preservation instruction. No existing configuration is replaced.
-The host only persists OpenCode's separate XDG data directory; the config link
-is private to the running container and is recreated after replacement.
+The container supplies generated configuration and disables `.opencode` project
+configuration with `OPENCODE_DISABLE_PROJECT_CONFIG`. It declares no plugin and
+uses normal writable native config locations; there is no managed config tree,
+XDG override, or config symlink. Host-native configuration remains separate.
 
-OpenCode follows the link and skips its plugin-authoring dependency installation
-because the target is read-only. The shipped memory plugin uses only local
-modules. The container disables `.opencode` project overrides and gets model,
-permission, and MCP configuration from core. Host-native configuration is separate.
-This avoids adding a package dependency, child-process environment overrides, or
-a new host mount contract. Native tests must mount runner source read-only to
-exercise the same offline behavior; a writable checkout allows OpenCode to
-install its authoring dependencies into the bundled config tree.
+Pinned OpenCode may attempt its own background authoring-dependency install in
+a writable config directory. With no declared plugin, server startup does not
+wait for it. Offline native tests establish that model turns, compaction and
+Task children work without a package-registry response. Existing containers must
+be recreated after refresh to discard config symlinks from the earlier payload.
 
 ## Credentials and installation
 
@@ -95,19 +84,20 @@ and pins; back up local payload edits first. An exact seam-version predicate
 guards every skill mutation during installation and refresh. Removal lists every
 installed file and registration.
 
-The authentication and model commands also require the configured image to be
-available locally. Their offline preflight imports the current mounted runtime
-and SDK inside that image, checks runtime registration, and verifies CLI/SDK
-1.18.25. It uses read-only source and image files with disposable temporary home
-state; it never pulls packages or images, rebuilds, or accesses account credentials.
-This proves that the installed modules and executable load, not that a backend,
-OneCLI grant, or account login works.
+The lightweight authentication check uses the skill planner to detect missing
+copy, append, dependency, or CLI declarations. Since install mode deliberately
+preserves existing files and packages, it separately compares exact dependency
+pins and CLI fields against the same parsed skill declarations. It does not
+maintain another payload inventory or run subprocesses. Existing install/refresh
+contract verification imports and tests the real barrels; the build step owns
+image freshness. Model selection does not repeat installation checks. Declaration
+completeness is not proof that edited source, an image, or an account works.
 
 ## Verification boundaries
 
 Unit and socket tests cover event lifetime, failure reconciliation, cancellation,
-memory inheritance, vault metadata, credential rotation, and installed runtime
-preflight. The optional native test in
+memory inheritance, vault metadata, credential rotation, and installation declaration
+checks. The optional native test in
 `payload/container/agent-runner/src/providers/opencode.native.test.ts` exercises the
 actual pinned executable and SDK against a local model and MCP server, including
 a 65-second tool call. These fixtures prove adapter behavior without establishing

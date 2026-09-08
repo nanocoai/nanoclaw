@@ -384,13 +384,17 @@ describe('ChatGPT credential lifecycle', () => {
   });
 });
 
-describe('OpenCode installation preflight', () => {
+describe('OpenCode installation declarations', () => {
   let root: string;
   let restoreCwd: () => void;
-  const runtime = { providers: ['opencode'], contracts: ['opencode'], sdk: '1.18.25', cli: '1.18.25' };
+  let skillFile: string;
   beforeEach(() => {
+    const skill = path.join(process.cwd(), '.claude/skills/add-opencode');
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-pin-check-'));
-    fs.cpSync(path.join(process.cwd(), '.claude/skills/add-opencode/payload'), root, { recursive: true });
+    skillFile = path.join(root, '.claude/skills/add-opencode/SKILL.md');
+    fs.mkdirSync(path.dirname(skillFile), { recursive: true });
+    fs.copyFileSync(path.join(skill, 'SKILL.md'), skillFile);
+    fs.cpSync(path.join(skill, 'payload'), root, { recursive: true });
     fs.writeFileSync(
       path.join(root, 'container/cli-tools.json'),
       JSON.stringify([{ name: 'opencode-ai', version: '1.18.25', onlyBuilt: true }]),
@@ -404,13 +408,12 @@ describe('OpenCode installation preflight', () => {
       'src/provider-contracts/index.ts',
       'container/agent-runner/src/providers/index.ts',
       'container/agent-runner/src/provider-contracts/index.ts',
+      'setup/providers/index.ts',
     ]) {
+      fs.mkdirSync(path.dirname(path.join(root, barrel)), { recursive: true });
       fs.writeFileSync(path.join(root, barrel), "import './opencode.js';\n");
     }
     proc.execFileSync.mockReset();
-    proc.execFileSync.mockImplementation((command) =>
-      JSON.stringify(command === 'docker' ? runtime : { host: ['opencode'], hostProviders: ['opencode'] }),
-    );
     const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
     restoreCwd = () => cwd.mockRestore();
   });
@@ -420,71 +423,50 @@ describe('OpenCode installation preflight', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it('checks the actual image without network, pulls, installs, writable source, or credential mounts', async () => {
+  it('checks installation declarations without subprocesses or a container image', async () => {
     await expect(checkOpenCodeInstall()).resolves.toBeUndefined();
-    const [command, args, options] = proc.execFileSync.mock.calls.at(-1)!;
-    expect(command).toBe('docker');
-    expect(args).toContain('--pull=never');
-    expect(args).toContain('--network=none');
-    expect(args).toContain('--read-only');
-    expect(args).toContain('--no-install');
-    expect(args[args.indexOf('--volume') + 1]).toBe(`${root}/container/agent-runner/src:/app/src:ro`);
-    expect(args.filter((arg: string) => arg === '--volume')).toHaveLength(1);
-    expect(args).not.toContain('--env-file');
-    expect(args).not.toContain('-e');
-    expect(args.filter((arg: string) => arg === '--env')).toHaveLength(1);
-    expect(args[args.indexOf('--env') + 1]).toBe('HOME=/tmp/opencode-install-check');
-    expect(options.timeout).toBe(30_000);
-    expect(proc.execFileSync).toHaveBeenCalledTimes(2);
+    expect(proc.execFileSync).not.toHaveBeenCalled();
   });
-
-  it('rejects mismatched dependency pins before running the image probe', async () => {
+  it.each(['container/agent-runner/src/providers/opencode-turn.ts', 'src/providers/index.ts'])(
+    'reports a missing declared copy or registration: %s',
+    async (file) => {
+      fs.unlinkSync(path.join(root, file));
+      await expect(checkOpenCodeInstall()).rejects.toThrow('Refresh');
+    },
+  );
+  it('rejects a missing dependency', async () => {
+    fs.writeFileSync(path.join(root, 'container/agent-runner/package.json'), '{}');
+    await expect(checkOpenCodeInstall()).rejects.toThrow('Refresh');
+  });
+  it('rejects an incorrect SDK pin even when the package name is present', async () => {
     fs.writeFileSync(
       path.join(root, 'container/agent-runner/package.json'),
       JSON.stringify({ dependencies: { '@opencode-ai/sdk': '1.4.17' } }),
     );
-    await expect(checkOpenCodeInstall()).rejects.toThrow('SDK must be pinned');
-    expect(proc.execFileSync).not.toHaveBeenCalled();
+    await expect(checkOpenCodeInstall()).rejects.toThrow('pin');
   });
-
-  it.each(['opencode.json', '.gitignore'])('requires the managed %s asset', async (name) => {
-    const asset = `container/agent-runner/src/providers/opencode-managed-config/opencode/${name}`;
-    fs.unlinkSync(path.join(root, asset));
-    await expect(checkOpenCodeInstall()).rejects.toThrow(`OpenCode payload is missing ${asset}`);
-    expect(proc.execFileSync).not.toHaveBeenCalled();
+  it.each([
+    { version: '1.4.17', onlyBuilt: true },
+    { version: '1.18.25', onlyBuilt: false },
+  ])('checks declared CLI fields: %j', async (fields) => {
+    fs.writeFileSync(path.join(root, 'container/cli-tools.json'), JSON.stringify([{ name: 'opencode-ai', ...fields }]));
+    await expect(checkOpenCodeInstall()).rejects.toThrow('declaration');
   });
-
-  it.each(['opencode.ts', 'opencode-turn.ts'])('rejects an empty %s runtime file', async (name) => {
-    fs.writeFileSync(path.join(root, 'container/agent-runner/src/providers', name), '');
-    await expect(checkOpenCodeInstall()).rejects.toThrow('payload is empty or invalid');
-    expect(proc.execFileSync).not.toHaveBeenCalled();
+  it('takes dependency and CLI pins from the skill instead of duplicating version constants', async () => {
+    fs.writeFileSync(skillFile, fs.readFileSync(skillFile, 'utf8').replaceAll('1.18.25', '9.9.9'));
+    fs.writeFileSync(
+      path.join(root, 'container/agent-runner/package.json'),
+      JSON.stringify({ dependencies: { '@opencode-ai/sdk': '9.9.9' } }),
+    );
+    fs.writeFileSync(
+      path.join(root, 'container/cli-tools.json'),
+      JSON.stringify([{ name: 'opencode-ai', version: '9.9.9', onlyBuilt: true, operatorNote: 'preserve' }]),
+    );
+    await expect(checkOpenCodeInstall()).resolves.toBeUndefined();
   });
-
-  it('requires the host barrel registration', async () => {
-    fs.writeFileSync(path.join(root, 'src/providers/index.ts'), '');
-    await expect(checkOpenCodeInstall()).rejects.toThrow('registration is missing');
-  });
-
-  it.each(['providers', 'contracts'])('requires real runtime %s registration', async (field) => {
-    proc.execFileSync.mockReturnValueOnce(JSON.stringify({ host: ['opencode'], hostProviders: ['opencode'] }));
-    proc.execFileSync.mockReturnValueOnce(JSON.stringify({ ...runtime, [field]: [] }));
-    await expect(checkOpenCodeInstall()).rejects.toThrow('runtime and contract surfaces');
-  });
-
-  it.each(['sdk', 'cli'])('checks the image %s version rather than trusting manifest pins', async (field) => {
-    proc.execFileSync.mockReturnValueOnce(JSON.stringify({ host: ['opencode'], hostProviders: ['opencode'] }));
-    proc.execFileSync.mockReturnValueOnce(JSON.stringify({ ...runtime, [field]: '1.4.17' }));
-    await expect(checkOpenCodeInstall()).rejects.toThrow('image must contain CLI and SDK 1.18.25');
-  });
-
-  it('rejects an unusable image without printing subprocess contents or trying a rebuild', async () => {
-    proc.execFileSync.mockImplementation((command) => {
-      if (command === 'docker') throw new Error('private subprocess contents');
-      return JSON.stringify({ host: ['opencode'], hostProviders: ['opencode'] });
-    });
-    const failure = await checkOpenCodeInstall().catch((error: Error) => error.message);
-    expect(failure).toContain('could not load its provider, SDK, and CLI');
-    expect(failure).not.toContain('private');
-    expect(proc.execFileSync).toHaveBeenCalledTimes(2);
+  it.each(['missing', 'empty'])('rejects %s skill instructions', async (mode) => {
+    if (mode === 'missing') fs.unlinkSync(skillFile);
+    else fs.writeFileSync(skillFile, '');
+    await expect(checkOpenCodeInstall()).rejects.toThrow();
   });
 });

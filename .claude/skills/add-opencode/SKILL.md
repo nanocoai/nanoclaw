@@ -24,10 +24,10 @@ reasoning effort can be overridden per group through the existing container
 configuration. Per-group backend/auth selection and structured channel attachment
 transport are separate work.
 
-Authentication and model commands require the configured container image to be
-available locally. An offline check loads the current runtime source with that
-image's SDK and verifies both SDK and CLI at 1.18.25. The check uses disposable
-temporary state and read-only source; it never downloads or rebuilds anything.
+Authentication checks the installed files, registration lines, and exact pins
+against this skill's declarations without launching a subprocess or container.
+Install and refresh run the existing provider contract verification; the build
+step owns image freshness. Model selection does not repeat installation checks.
 A working backend and account are checked separately by sending a real request.
 
 ## Install
@@ -46,19 +46,21 @@ generated native-test files. These are skill-owned files; overwrite them togethe
 when refreshing the skill. Keep the core-owned `cwd-shim.ts`, registries, and
 contract realization files in place.
 
+When refreshing an older installation, remove its unused
+`opencode-memory-plugin.ts`, `opencode.compaction.test.ts`, and dedicated
+`opencode-managed-config` tree from `container/agent-runner/src/providers/`.
+Recreate affected containers after the refresh to discard their old config
+symlinks. Keep other tools' settings and persisted session data.
+
 ```nc:copy when:opencode_core_ready=yes
 payload/container/agent-runner/src/provider-contracts/opencode.ts -> container/agent-runner/src/provider-contracts/opencode.ts
 payload/container/agent-runner/src/providers/mcp-to-opencode.test.ts -> container/agent-runner/src/providers/mcp-to-opencode.test.ts
 payload/container/agent-runner/src/providers/mcp-to-opencode.ts -> container/agent-runner/src/providers/mcp-to-opencode.ts
 payload/container/agent-runner/src/providers/opencode-config.ts -> container/agent-runner/src/providers/opencode-config.ts
-payload/container/agent-runner/src/providers/opencode-managed-config/opencode/opencode.json -> container/agent-runner/src/providers/opencode-managed-config/opencode/opencode.json
-payload/container/agent-runner/src/providers/opencode-managed-config/opencode/.gitignore -> container/agent-runner/src/providers/opencode-managed-config/opencode/.gitignore
-payload/container/agent-runner/src/providers/opencode-memory-plugin.ts -> container/agent-runner/src/providers/opencode-memory-plugin.ts
 payload/container/agent-runner/src/providers/opencode-memory.ts -> container/agent-runner/src/providers/opencode-memory.ts
 payload/container/agent-runner/src/providers/opencode-registration.test.ts -> container/agent-runner/src/providers/opencode-registration.test.ts
 payload/container/agent-runner/src/providers/opencode-turn.ts -> container/agent-runner/src/providers/opencode-turn.ts
 payload/container/agent-runner/src/providers/opencode.attachments.test.ts -> container/agent-runner/src/providers/opencode.attachments.test.ts
-payload/container/agent-runner/src/providers/opencode.compaction.test.ts -> container/agent-runner/src/providers/opencode.compaction.test.ts
 payload/container/agent-runner/src/providers/opencode.config.test.ts -> container/agent-runner/src/providers/opencode.config.test.ts
 payload/container/agent-runner/src/providers/opencode.conformance.test.ts -> container/agent-runner/src/providers/opencode.conformance.test.ts
 payload/container/agent-runner/src/providers/opencode.empty-resume.test.ts -> container/agent-runner/src/providers/opencode.empty-resume.test.ts
@@ -139,7 +141,7 @@ pnpm exec vitest run src/providers/opencode-registration.test.ts scripts/opencod
 ```
 
 ```nc:run effect:test when:opencode_core_ready=yes
-cd container/agent-runner && bun test src/providers/opencode*.test.ts src/providers/mcp-to-opencode.test.ts
+cd container/agent-runner && bun test --isolate src/providers/opencode*.test.ts src/providers/mcp-to-opencode.test.ts
 ```
 
 Build the local image with `./container/build.sh build`. The new SDK dependency
@@ -280,19 +282,18 @@ Put comments on separate lines. These settings affect only OpenCode containers.
   attachment transport remains text-only until that separate feature lands.
 
 Custom model limits and modalities apply only to the main model. MCP servers
-come from the core's resolved runner configuration. Memory is rendered through
-the shared hook on startup and after compaction, and routing reminders reuse
-core wording for ordinary conversations and isolated tasks.
+come from the core's resolved runner configuration. Before each external turn,
+the shared hook renders memory into one instruction file under writable XDG data,
+alongside current core instructions and delivery wording. Native continuation
+after compaction and Task children reread that file. Compaction uses the
+turn-start memory snapshot; the next external turn refreshes it.
 
-The managed container reads configuration from the payload's read-only
-`opencode-managed-config` directory and the generated configuration supplied by
-NanoClaw. It disables `.opencode` project configuration and plugin overrides;
-configure models, permissions, and MCP through NanoClaw's existing surfaces.
-The bundled local memory plugin has no package dependencies. Read-only
-configuration prevents native OpenCode from installing its plugin-authoring
-package at startup, so a fresh container needs no npm registry access. Session
-data, caches, and memory remain writable. This applies only to the container;
-host OpenCode keeps its native configuration and plugin support.
+The container gets model, permission, and MCP configuration from NanoClaw and
+keeps `OPENCODE_DISABLE_PROJECT_CONFIG` enabled. It declares no plugin and uses
+normal writable native config locations. Upstream may attempt a background
+authoring-dependency install, but startup does not wait for it. Offline native
+tests verify turns without registry access. Host OpenCode keeps its native
+configuration and plugin support.
 
 OpenCode keeps one server and continuously read event subscription per container.
 Prompts are serialized and completion comes from the native prompt response plus
@@ -302,16 +303,6 @@ if completion cannot be confirmed within the cleanup bound, the server is stoppe
 and the next query resumes from persisted state. Effective configuration changes
 restart the shared server.
 
-A local native plugin supplies the cached rendered memory and current core
-instructions to every model request, including continuation after compaction.
-It refreshes the memory snapshot in OpenCode's awaited compaction hook. A cold
-resume reuses the persisted snapshot without running the startup hook. Task
-children inherit their parent's context; their own compaction snapshots stay
-separate. Renderer failure retains the last verified snapshot, while successful
-empty output clears it.
-
-Sessions created before this memory snapshot mechanism resume with current core
-instructions. Their rendered memory is refreshed at the next compaction.
 MCP calls allow 330 seconds, covering the core's five-minute human question
 window plus transport overhead. Cancelling a turn cancels its active tool wait;
 a question already posted to chat remains visible.
@@ -320,7 +311,7 @@ For reproducible native integration coverage, download the official OpenCode
 1.18.25 binary and run from `container/agent-runner`:
 
 ```bash
-OPENCODE_TEST_BINARY=/absolute/path/opencode bun test src/providers/opencode.native.test.ts
+OPENCODE_TEST_BINARY=/absolute/path/opencode bun test --isolate src/providers/opencode.native.test.ts
 ```
 
 The test checks the binary version, starts a local model fixture, and exercises

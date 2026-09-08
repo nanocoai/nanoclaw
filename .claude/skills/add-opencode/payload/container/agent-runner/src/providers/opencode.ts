@@ -747,7 +747,6 @@ export class OpenCodeProvider implements AgentProvider {
         ? await self.runtime.getRuntime(self.options, input.cwd)
         : await ensureSharedRuntime(self.options, input.cwd, self.configuration);
       const pump = eventPump(runtime);
-      let first = true;
       try {
         while (!abort.signal.aborted) {
           while (!pending.length && !ended && !abort.signal.aborted) {
@@ -779,16 +778,13 @@ export class OpenCodeProvider implements AgentProvider {
             parts: buildPromptParts(turn.text, turn.attachments),
             prepare: () => {
               prepareOpenCodeMemory(
-                sessionId!,
                 self.memorySessionHook!,
                 input.systemContext?.instructions,
                 buildDeliverySentences(
                   getAllDestinations().map((destination) => destination.name),
                   getTaskSeriesId(),
                 ).join(' '),
-                first && !input.continuation,
               );
-              first = false;
             },
             signal: abort.signal,
             silenceMs: positiveIntegerEnv('OPENCODE_STREAM_SILENCE_MS', DEFAULT_STREAM_SILENCE_MS),

@@ -1,5 +1,5 @@
 import { spawnSync } from 'child_process';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
+import { mkdirSync, renameSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import path from 'path';
 import { randomUUID } from 'crypto';
@@ -8,76 +8,22 @@ function log(message: string): void {
   console.error(`[opencode-memory] ${message}`);
 }
 
-export interface OpenCodeMemorySnapshot {
-  hook: OpenCodeMemorySessionHook;
-  memory: string;
-  instructions: string;
-  reminder: string;
+export function openCodeInstructionsPath(): string {
+  return path.resolve(process.env.XDG_DATA_HOME || path.join(homedir(), '.local', 'share'), 'nanoclaw-instructions.md');
 }
 
-export function openCodeMemoryDirectory(): string {
-  return path.join(process.env.XDG_DATA_HOME || path.join(homedir(), '.local', 'share'), 'nanoclaw-memory');
-}
-
-function snapshotPath(directory: string, sessionId: string): string {
-  if (!/^ses_[A-Za-z0-9_-]+$/.test(sessionId)) throw new Error('Invalid OpenCode memory session id');
-  return path.join(directory, `${sessionId}.json`);
-}
-
-export function readOpenCodeMemory(
-  sessionId: string,
-  directory = openCodeMemoryDirectory(),
-): OpenCodeMemorySnapshot | undefined {
-  try {
-    const parsed = JSON.parse(readFileSync(snapshotPath(directory, sessionId), 'utf8')) as OpenCodeMemorySnapshot;
-    if (
-      typeof parsed.memory !== 'string' ||
-      typeof parsed.instructions !== 'string' ||
-      typeof parsed.reminder !== 'string' ||
-      typeof parsed.hook?.command !== 'string' ||
-      !Array.isArray(parsed.hook.sources)
-    ) {
-      throw new Error('Invalid OpenCode memory snapshot');
-    }
-    return parsed;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw error;
-  }
-}
-
-export function writeOpenCodeMemory(
-  sessionId: string,
-  snapshot: OpenCodeMemorySnapshot,
-  directory = openCodeMemoryDirectory(),
-): void {
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const target = snapshotPath(directory, sessionId);
-  const temporary = `${target}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, JSON.stringify(snapshot), { mode: 0o600, flag: 'wx' });
-  renameSync(temporary, target);
-}
-
-/** Seed once on startup, preserve the rendered snapshot on cold resume. */
+/** Refresh under the turn lock. Native steps and Task children reread this file. */
 export function prepareOpenCodeMemory(
-  sessionId: string,
   hook: OpenCodeMemorySessionHook,
   instructions: string | undefined,
   reminder: string,
-  startup: boolean,
-  directory = openCodeMemoryDirectory(),
+  file = openCodeInstructionsPath(),
 ): void {
-  const prior = startup ? undefined : readOpenCodeMemory(sessionId, directory);
-  writeOpenCodeMemory(
-    sessionId,
-    {
-      hook,
-      instructions: instructions ?? '',
-      reminder,
-      memory: startup ? (runMemorySessionHook(hook, 'startup') ?? '') : (prior?.memory ?? ''),
-    },
-    directory,
-  );
+  const content = [runMemorySessionHook(hook, 'startup'), instructions, reminder].filter(Boolean).join('\n\n');
+  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, content, { mode: 0o600, flag: 'wx' });
+  renameSync(temporary, file);
 }
 
 export interface OpenCodeMemorySessionHook {
@@ -86,29 +32,14 @@ export interface OpenCodeMemorySessionHook {
   readonly sources: readonly string[];
 }
 
-/**
- * The two lifecycle points at which this provider establishes a new context
- * window. `clear` never appears: OpenCode has no in-session clear — a cleared
- * conversation arrives as a fresh session, i.e. `startup`. `resume` never
- * appears either, by contract: memory is not re-injected when an existing
- * session continues.
- */
+/** Sources understood by the shared renderer; turn preparation uses startup. */
 export type OpenCodeMemorySource = 'startup' | 'compact';
 
 /** Matches the `timeout: 10` (seconds) the Claude provider registers for the same command. */
 const MEMORY_HOOK_TIMEOUT_MS = 10_000;
 
-/**
- * Run the registered memory session hook and return what it printed.
- *
- * The hook reads a Claude-style SessionStart payload on stdin and prints the
- * rendered memory section on stdout (`src/memory/hook.ts`), which is where the
- * per-file caps and the "resume gets nothing" rule live. Nothing is capped or
- * rewritten here — whatever the command prints is what gets injected.
- *
- * Fails closed on every failure mode (unregistered, source the registration
- * does not declare, missing command, non-zero exit, timeout, empty stdout):
- * one log line, no injection, never a thrown turn.
+/** Run the registered renderer without duplicating its memory caps. Failures
+ * log and return undefined; successful empty output remains distinguishable.
  */
 export function runMemorySessionHook(
   hook: OpenCodeMemorySessionHook | undefined,

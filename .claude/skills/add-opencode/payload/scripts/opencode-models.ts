@@ -3,7 +3,6 @@ import { pathToFileURL } from 'node:url';
 import * as p from '@clack/prompts';
 import { readEnvFile } from '../src/env.js';
 import { upsertEnvVar } from '../setup/set-env.js';
-import { checkOpenCodeInstall } from './opencode-auth.js';
 import {
   chooseOpenCodeModel,
   discoverLocalModelIds,
@@ -36,7 +35,6 @@ export async function runModelSelection(args: string[]): Promise<void> {
   if (!provider) throw new Error('Configure an OpenCode backend first: pnpm exec tsx scripts/opencode-auth.ts');
   if (!/^[a-z0-9][a-z0-9_-]*$/.test(provider)) throw new Error('Invalid configured OpenCode provider id.');
   if (requested && validateModel(requested, provider)) throw new Error(validateModel(requested, provider));
-  await checkOpenCodeInstall();
   let models: string[] = [];
   if (!requested || refresh) {
     try {

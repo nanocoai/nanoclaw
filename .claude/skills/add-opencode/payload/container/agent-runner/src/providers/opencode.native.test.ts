@@ -1,13 +1,14 @@
 import { it } from 'bun:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createOpencodeClient } from '@opencode-ai/sdk';
 import { createOpencodeClient as createQuestionClient } from '@opencode-ai/sdk/v2';
 import { OpenCodeProvider, setSharedRuntimeDepsForTesting, destroySharedRuntime } from './opencode.js';
 import { buildOpenCodeServerEnv } from './opencode-config.js';
+import { openCodeInstructionsPath } from './opencode-memory.js';
 import { initTestSessionDb, closeSessionDb } from '../mailbox/sqlite/connection.js';
 import { registerAgentMailbox, resetAgentMailboxForTesting } from '../mailbox/index.js';
 import { SqliteAgentMailbox } from '../mailbox/sqlite/index.js';
@@ -20,28 +21,8 @@ it.skipIf(!process.env.OPENCODE_TEST_BINARY)(
     const binary = process.env.OPENCODE_TEST_BINARY!;
     assert.equal(execFileSync(binary, ['--version'], { encoding: 'utf8' }).trim(), '1.18.25');
     const savedDataHome = process.env.XDG_DATA_HOME;
-    const savedConfigHome = process.env.XDG_CONFIG_HOME;
     const root = mkdtempSync(path.join(tmpdir(), 'opencode-native-'));
-    process.env.XDG_CONFIG_HOME = path.join(root, 'tool-config');
     const records: unknown[] = [];
-    // Exercise the inherited environment inside actual native children, including
-    // the compaction hook (startup runs in the runner before the server starts).
-    writeFileSync(
-      path.join(root, 'config-probe.mjs'),
-      `
-import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
-import path from 'node:path';
-const home = process.env.XDG_CONFIG_HOME || path.join(process.env.HOME, '.config');
-let error;
-try {
-  mkdirSync(path.join(home, process.argv[2]), { recursive: true });
-  writeFileSync(path.join(home, process.argv[2], 'proof'), 'writable');
-} catch (failure) { error = failure.code; }
-appendFileSync(${JSON.stringify(path.join(root, 'environment-probes.jsonl'))},
-  JSON.stringify({ child: process.argv[2], home, error }) + String.fromCharCode(10));
-`,
-    );
-
     let scenario = 'basic';
     let mainCalls = 0;
     const seen: Array<{
@@ -122,12 +103,15 @@ appendFileSync(${JSON.stringify(path.join(root, 'environment-probes.jsonl'))},
         }
         if (scenario === 'auto' && mainCalls === 1) {
           writeFileSync(path.join(root, 'memory-source'), 'MEMORY_AFTER_AUTO');
+          // Prove native continuation rereads the configured file, not a cached
+          // system string; normal runtime rendering stays fixed for this turn.
+          appendFileSync(openCodeInstructionsPath(), '\nNATIVE_FILE_REREAD_PROOF');
           return streaming(
             '<message to="fixture">BEFORE_COMPACTION</message>',
             {
               name: 'bash',
               args: {
-                command: `${process.execPath} '${root}/config-probe.mjs' bash && printf native-tool-proof > '${root}/workspace/tool-proof'`,
+                command: `printf native-tool-proof > '${root}/workspace/tool-proof'`,
                 description: 'Write fixture proof',
               },
             },
@@ -172,7 +156,7 @@ appendFileSync(${JSON.stringify(path.join(root, 'environment-probes.jsonl'))},
     writeFileSync(path.join(root, 'memory-source'), 'NATIVE_MEMORY_SNAPSHOT');
     writeFileSync(
       path.join(root, 'hook.sh'),
-      `#!/bin/sh\n${process.execPath} '${root}/config-probe.mjs' hook\ncat >> '${root}/hook-events.log'\nprintf '\\n' >> '${root}/hook-events.log'\ncat '${root}/memory-source'\n`,
+      `#!/bin/sh\ncat >> '${root}/hook-events.log'\nprintf '\\n' >> '${root}/hook-events.log'\ncat '${root}/memory-source'\n`,
     );
     const composedFactory = resetAgentMailboxForTesting();
     initTestSessionDb();
@@ -183,7 +167,6 @@ appendFileSync(${JSON.stringify(path.join(root, 'environment-probes.jsonl'))},
 import { Server } from ${JSON.stringify(import.meta.resolve('@modelcontextprotocol/sdk/server/index.js'))};
 import { StdioServerTransport } from ${JSON.stringify(import.meta.resolve('@modelcontextprotocol/sdk/server/stdio.js'))};
 import { CallToolRequestSchema, ListToolsRequestSchema } from ${JSON.stringify(import.meta.resolve('@modelcontextprotocol/sdk/types.js'))};
-await import('node:child_process').then(({ execFileSync }) => execFileSync(process.execPath, [${JSON.stringify(path.join(root, 'config-probe.mjs'))}, 'mcp']));
 const server = new Server({ name: 'fixture', version: '1' }, { capabilities: { tools: {} } });
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: 'hold', description: 'Wait for the requested milliseconds', inputSchema: { type: 'object', properties: { delay: { type: 'integer' } }, required: ['delay'] } }] }));
 server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
@@ -211,7 +194,7 @@ await server.connect(new StdioServerTransport());
             PATH: process.env.PATH,
             HOME: root,
             XDG_DATA_HOME: process.env.XDG_DATA_HOME,
-            XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+            XDG_CONFIG_HOME: path.join(root, 'config'),
             XDG_CACHE_HOME: path.join(root, 'cache'),
             XDG_STATE_HOME: path.join(root, 'state'),
             OPENCODE_DISABLE_MODELS_FETCH: 'true',
@@ -313,32 +296,25 @@ await server.connect(new StdioServerTransport());
       const autoSession = await run('auto');
       assert.equal(readFileSync(path.join(root, 'workspace/tool-proof'), 'utf8'), 'native-tool-proof');
       assert.ok(seen.some((request) => request.scenario === 'auto' && request.compact));
+      const autoRequests = seen.filter((request) => request.scenario === 'auto' && !request.title && !request.compact);
+      assert.ok(autoRequests.at(-1)?.memory.includes('NATIVE_MEMORY_SNAPSHOT'));
+      assert.ok(!autoRequests.at(-1)?.memory.includes('MEMORY_AFTER_AUTO'), 'Compaction must use turn-start memory');
+      assert.ok(!autoRequests[0].memory.includes('NATIVE_FILE_REREAD_PROOF'));
       assert.ok(
-        seen
-          .filter((request) => request.scenario === 'auto' && !request.title)
-          .at(-1)
-          ?.memory.includes('MEMORY_AFTER_AUTO'),
+        autoRequests.at(-1)?.memory.includes('NATIVE_FILE_REREAD_PROOF'),
+        'Native continuation cached the file',
       );
-      const probes = readFileSync(path.join(root, 'environment-probes.jsonl'), 'utf8')
-        .trim()
-        .split('\n')
-        .map((line) => JSON.parse(line) as { child: string; home: string; error?: string });
-      assert.deepEqual([...new Set(probes.map((probe) => probe.child))].sort(), ['bash', 'hook', 'mcp']);
-      assert.ok(probes.filter((probe) => probe.child === 'hook').length >= 3, 'Missing native compaction hook probe');
-      for (const probe of probes) {
-        assert.equal(probe.home, process.env.XDG_CONFIG_HOME, `${probe.child} changed the inherited config home`);
-        assert.equal(probe.error, undefined, `${probe.child} config write failed`);
-        assert.equal(readFileSync(path.join(probe.home, probe.child, 'proof'), 'utf8'), 'writable');
-      }
-      assert.equal(existsSync(path.join(process.env.XDG_CONFIG_HOME!, 'opencode', 'node_modules')), false);
-      console.log('Native writable config children:', JSON.stringify(probes));
+      assert.ok(autoRequests.at(-1)?.memory.includes('NATIVE_CORE_INSTRUCTIONS'));
       const startupCount = readFileSync(path.join(root, 'hook-events.log'), 'utf8').match(/startup/g)?.length;
       destroySharedRuntime();
       await run('resume', autoSession);
-      assert.equal(readFileSync(path.join(root, 'hook-events.log'), 'utf8').match(/startup/g)?.length, startupCount);
+      assert.equal(
+        readFileSync(path.join(root, 'hook-events.log'), 'utf8').match(/startup/g)?.length,
+        (startupCount ?? 0) + 1,
+      );
       assert.ok(
         seen
-          .filter((request) => request.scenario === 'resume')
+          .filter((request) => request.scenario === 'resume' && !request.title && !request.compact)
           .every((request) => request.memory.includes('MEMORY_AFTER_AUTO')),
       );
       await run('overflow');
@@ -347,8 +323,15 @@ await server.connect(new StdioServerTransport());
         seen
           .filter((request) => request.scenario === 'overflow' && !request.title)
           .at(-1)
+          ?.memory.includes('MEMORY_AFTER_AUTO'),
+      );
+      assert.ok(
+        !seen
+          .filter((request) => request.scenario === 'overflow' && !request.title && !request.compact)
+          .at(-1)
           ?.memory.includes('MEMORY_AFTER_OVERFLOW'),
       );
+      assert.ok(!readFileSync(path.join(root, 'hook-events.log'), 'utf8').includes('compact'));
       await run('child');
       assert.ok(
         seen.some(
@@ -429,8 +412,6 @@ await server.connect(new StdioServerTransport());
       if (composedFactory) registerAgentMailbox(composedFactory);
       if (savedDataHome === undefined) delete process.env.XDG_DATA_HOME;
       else process.env.XDG_DATA_HOME = savedDataHome;
-      if (savedConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
-      else process.env.XDG_CONFIG_HOME = savedConfigHome;
       writeFileSync(path.join(root, 'requests.json'), JSON.stringify(seen, null, 2));
       writeFileSync(path.join(root, 'native.log'), nativeLog);
       console.log('Native evidence:', root);

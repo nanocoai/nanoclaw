@@ -1,10 +1,6 @@
 import { describe, it, expect, afterEach } from 'bun:test';
-import { mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 
 import { buildOpenCodeConfig } from './opencode.js';
-import { buildOpenCodeServerEnv } from './opencode-config.js';
 
 const ENV_KEYS = [
   'OPENCODE_PROVIDER',
@@ -17,63 +13,11 @@ const ENV_KEYS = [
   'OPENCODE_MODEL_INPUT_MODALITIES',
 ] as const;
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
-const configFixtures: string[] = [];
-
-function configFixture(): string {
-  const directory = mkdtempSync(path.join(tmpdir(), 'opencode-config-env-'));
-  configFixtures.push(directory);
-  return directory;
-}
-
 afterEach(() => {
   for (const k of ENV_KEYS) {
     if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
   }
-  for (const directory of configFixtures.splice(0)) rmSync(directory, { recursive: true, force: true });
-});
-
-describe('managed OpenCode config environment', () => {
-  it('keeps the original writable XDG parent and reuses only its managed OpenCode symlink', () => {
-    const directory = configFixture();
-    const environment = { XDG_CONFIG_HOME: directory, HOME: '/unused', PATH: '/fixture/bin' };
-    mkdirSync(path.join(directory, 'gh'));
-    writeFileSync(path.join(directory, 'gh', 'config.yml'), 'existing tool config');
-    const config = { model: 'fixture/model' };
-    const first = buildOpenCodeServerEnv(config, environment);
-    const second = buildOpenCodeServerEnv(config, environment);
-    expect(first).toEqual(second);
-    expect(first.XDG_CONFIG_HOME).toBe(directory);
-    expect(readlinkSync(path.join(directory, 'opencode'))).toBe(first.OPENCODE_CONFIG_DIR);
-    expect(JSON.parse(first.OPENCODE_CONFIG_CONTENT!)).toEqual(config);
-    expect(first.OPENCODE_DISABLE_PROJECT_CONFIG).toBe('true');
-    expect(readFileSync(path.join(directory, 'gh', 'config.yml'), 'utf8')).toBe('existing tool config');
-    expect(environment).toEqual({ XDG_CONFIG_HOME: directory, HOME: '/unused', PATH: '/fixture/bin' });
-  });
-
-  it('uses the normal HOME/.config default when XDG_CONFIG_HOME is absent', () => {
-    const directory = configFixture();
-    const environment = buildOpenCodeServerEnv({}, { HOME: directory });
-    expect(environment.XDG_CONFIG_HOME).toBe(path.join(directory, '.config'));
-    expect(readlinkSync(path.join(directory, '.config', 'opencode'))).toBe(environment.OPENCODE_CONFIG_DIR);
-  });
-
-  it.each(['directory', 'file', 'symlink'])('refuses to replace an existing OpenCode config %s', (kind) => {
-    const directory = configFixture();
-    const target = path.join(directory, 'opencode');
-    if (kind === 'directory') mkdirSync(target);
-    if (kind === 'file') writeFileSync(target, 'existing configuration');
-    if (kind === 'symlink') symlinkSync('/a/different/config', target, 'dir');
-    expect(() => buildOpenCodeServerEnv({}, { XDG_CONFIG_HOME: directory })).toThrow(
-      `cannot use existing configuration at ${target}`,
-    );
-    if (kind === 'directory') {
-      writeFileSync(path.join(target, 'proof'), 'still a directory');
-      expect(readFileSync(path.join(target, 'proof'), 'utf8')).toBe('still a directory');
-    }
-    if (kind === 'file') expect(readFileSync(target, 'utf8')).toBe('existing configuration');
-    if (kind === 'symlink') expect(readlinkSync(target)).toBe('/a/different/config');
-  });
 });
 
 describe('buildOpenCodeConfig provider transport', () => {

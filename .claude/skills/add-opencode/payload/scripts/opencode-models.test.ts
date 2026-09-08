@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const fixture = vi.hoisted(() => ({ exec: vi.fn(), choose: vi.fn(), text: vi.fn(), check: vi.fn() }));
+const fixture = vi.hoisted(() => ({ exec: vi.fn(), choose: vi.fn(), text: vi.fn() }));
 vi.mock('child_process', async (original) => ({
   ...(await original<typeof import('child_process')>()),
   execFileSync: (...args: unknown[]) => fixture.exec(...args),
@@ -14,7 +14,6 @@ vi.mock('@clack/prompts', () => ({
   text: (...args: unknown[]) => fixture.text(...args),
   log: { warn: vi.fn(), success: vi.fn(), info: vi.fn() },
 }));
-vi.mock('./opencode-auth.js', () => ({ checkOpenCodeInstall: () => fixture.check() }));
 import { discoverRuntimeModels, parseRuntimeModels, runtimeModelArgs, validateModel } from './opencode-model-config.js';
 import { runModelSelection } from './opencode-models.js';
 
@@ -136,7 +135,6 @@ describe('default model command', () => {
     await runModelSelection(['--model', 'openai/new-model']);
     expect(contents()).toBe(initial.replace('OPENCODE_MODEL=openai/current', 'OPENCODE_MODEL=openai/new-model'));
     expect(fixture.exec).not.toHaveBeenCalled();
-    expect(fixture.check).toHaveBeenCalledOnce();
   });
   it('keeps current model first even if it is missing from the refreshed catalog', async () => {
     fixture.exec.mockReturnValue(record('openai/new-model'));
@@ -208,14 +206,10 @@ describe('default model command', () => {
     await expect(runModelSelection(['--model', 'openrouter/new-model'])).rejects.toThrow('exported OPENCODE_PROVIDER');
     expect(contents()).toBe(initial);
   });
-  it('requires an existing configured backend and a complete installed payload', async () => {
+  it('requires an existing configured backend', async () => {
     fs.writeFileSync('.env', 'OTHER=keep\n');
     await expect(runModelSelection([])).rejects.toThrow('Configure an OpenCode backend');
     expect(contents()).toBe('OTHER=keep\n');
-    fs.writeFileSync('.env', initial);
-    fixture.check.mockRejectedValue(new Error('mismatched pins'));
-    await expect(runModelSelection(['--model', 'openai/new-model'])).rejects.toThrow('mismatched pins');
-    expect(contents()).toBe(initial);
   });
   it('accepts nested provider model ids and rejects control characters', () => {
     expect(validateModel('openrouter/vendor/model:free', 'openrouter')).toBeUndefined();
