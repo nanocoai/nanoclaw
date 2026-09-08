@@ -42,8 +42,11 @@ import './whatsapp-cloud.js';
 // matrix
 // import './matrix.js';
 
-// webex
+// webex (webhook, via Chat SDK bridge)
 // import './webex.js';
+
+// webex-poll (REST polling, no public URL required)
+import './webex-poll.js';
 
 // imessage
 import './imessage.js';
