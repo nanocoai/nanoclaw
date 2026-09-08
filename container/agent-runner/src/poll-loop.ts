@@ -244,18 +244,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Process the query while concurrently polling for new messages
     const skippedSet = new Set(skipped.map((s) => s.id));
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
-    // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
-    // can stamp it on outbound rows — needed for a2a return-path routing.
-    setCurrentReplyRoute(
-      routing.inReplyTo
-        ? {
-            inReplyTo: routing.inReplyTo,
-            channelType: routing.channelType,
-            platformId: routing.platformId,
-            threadId: routing.threadId,
-          }
-        : null,
-    );
+    // Publish the batch's route so MCP tools (send_message, send_file) thread
+    // replies into the conversation being answered and stamp in_reply_to for
+    // a2a return-path routing. Re-published at every turn boundary inside
+    // processQuery as later messages are answered.
+    publishReplyRoute(routing);
     // Forward a loop stop to the ACTIVE query. The stream deliberately stays
     // open between turns, so the loop can be parked inside processQuery when
     // config.signal fires; without this, the "stopped" loop's query — and its
@@ -422,6 +415,23 @@ export async function processQuery(
   // the same prompt again. Unused (and unmaintained) when the provider
   // doesn't implement `onExchangeComplete`.
   const archivePrompts: string[] = [initialPrompt];
+  // Where replies go is a property of the TURN, not the query. The query
+  // stays open across turns (below), so a message pushed after the previous
+  // answer finished is a new turn and replies go to ITS thread; a message
+  // pushed while an answer is still streaming waits its turn — the in-flight
+  // answer keeps the destination it started with. Pushed routes queue in
+  // push order and advance at each non-retry result, mirroring
+  // archivePrompts. An empty initial prompt (a pre-warmed query) starts idle.
+  let answering = initialPrompt !== '';
+  const queuedTurns: RoutingContext[] = [];
+  const adoptTurn = (next: RoutingContext): void => {
+    routing.platformId = next.platformId;
+    routing.channelType = next.channelType;
+    routing.threadId = next.threadId;
+    routing.inReplyTo = next.inReplyTo;
+    publishReplyRoute(routing);
+    answering = true;
+  };
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -513,6 +523,9 @@ export async function processQuery(
         taskBlockNudged = false;
         query.push(prompt);
         archivePrompts.push(prompt);
+        const next = extractRouting(keep);
+        if (answering) queuedTurns.push(next);
+        else adoptTurn(next);
         markCompleted(keptIds);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
@@ -581,6 +594,7 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        let retrying = false;
         if (event.text) {
           const { sent, hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
             midTurnSent,
@@ -625,6 +639,7 @@ export async function processQuery(
             // coaxes a redundant second message (live-observed). It stays in
             // the scratchpad log.
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+            retrying = willRetryWrapping || willRetryTaskBlocks;
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
@@ -667,6 +682,13 @@ export async function processQuery(
         midTurnSent = 0;
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
+        // A retry answers the same prompt again; otherwise the next queued
+        // message (if any) is the turn the provider answers next.
+        if (!retrying) {
+          const next = queuedTurns.shift();
+          if (next) adoptTurn(next);
+          else answering = false;
+        }
       }
     }
   } catch (err) {
@@ -1176,6 +1198,20 @@ async function sendToDestination(dest: DestinationEntry, body: string, routing: 
     thread_id: destRouting?.threadId ?? null,
     content: JSON.stringify({ text: body }),
   });
+}
+
+/** Publish `routing` as the reply stamp the MCP tools read (null route clears it). */
+function publishReplyRoute(routing: RoutingContext): void {
+  setCurrentReplyRoute(
+    routing.inReplyTo
+      ? {
+          inReplyTo: routing.inReplyTo,
+          channelType: routing.channelType,
+          platformId: routing.platformId,
+          threadId: routing.threadId,
+        }
+      : null,
+  );
 }
 
 function sleep(ms: number): Promise<void> {

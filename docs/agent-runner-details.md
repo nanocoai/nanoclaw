@@ -580,8 +580,8 @@ written by the host) resolves the name to routing fields.
 
 Implementation: `resolveRouting(to)` looks up the destination. A channel destination gets its
 `thread_id` from `resolveDestinationThread` (`db/session-routing.ts`): the thread of the message
-being answered (the reply stamp the poll loop publishes in `session_state` at batch start, next to
-its `in_reply_to`) when that message came from the destination channel; otherwise the latest
+being answered (the reply stamp the poll loop publishes in `session_state` at batch start and again at
+every turn boundary, since the query stays open and later messages are pushed into it) when that message came from the destination channel; otherwise the latest
 `messages_in` row from that channel. The poll loop's `<message to>` deliveries use the same resolver with the batch's routing
 context, so all explicit sends thread identically, and a message arriving mid-turn from another
 thread cannot pull the reply away. `session_routing.thread_id` is never consulted — it is null for
