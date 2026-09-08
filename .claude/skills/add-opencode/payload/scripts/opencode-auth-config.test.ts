@@ -196,6 +196,41 @@ describe('OpenCode auth configuration commit', () => {
       await expect(runOpenCodeAuthStep()).rejects.toThrow(`exported ${name}`);
       expect(fixture.requests).toEqual([]);
       expect(fixture.writes).toEqual([]);
+      expect(fixture.passwords).toBe(0);
+    },
+  );
+  it.each(
+    ['local', 'custom'].flatMap((backend) =>
+      ['OPENCODE_PROVIDER', 'OPENCODE_MODEL', 'OPENCODE_SMALL_MODEL', 'OPENCODE_BASE_URL', 'OPENCODE_AUTH_MODE'].map(
+        (name) => [backend, name],
+      ),
+    ),
+  )(
+    'refuses a %s endpoint exported %s conflict before keys, vault reads, or catalog requests',
+    async (backend, name) => {
+      fixture.backend = backend;
+      vi.stubEnv(name, name.includes('MODEL') ? 'openai/another-model' : 'conflicting-value');
+      await expect(runOpenCodeAuthStep()).rejects.toThrow(`exported ${name}`);
+      expect(fixture.passwords).toBe(0);
+      expect(fixture.requests).toEqual([]);
+      expect(fixture.modelRequests).toEqual([]);
+      expect(fixture.catalogs).toBe(0);
+      expect(fixture.writes).toEqual([]);
+    },
+  );
+  it.each(['local', 'custom'])(
+    'keeps matching exported %s settings without a keyed catalog request',
+    async (backend) => {
+      fixture.backend = backend;
+      vi.stubEnv('OPENCODE_PROVIDER', 'openai');
+      vi.stubEnv('OPENCODE_BASE_URL', fixture.baseUrl);
+      vi.stubEnv('OPENCODE_MODEL', 'openai/fixture');
+      vi.stubEnv('OPENCODE_SMALL_MODEL', 'openai/fixture');
+      vi.stubEnv('OPENCODE_AUTH_MODE', '');
+      await runOpenCodeAuthStep();
+      expect(fixture.modelRequests).toEqual([]);
+      expect(fixture.requests.map((request) => request.method)).toEqual(['GET', 'GET', 'POST']);
+      expect(fixture.writes).toContainEqual(['OPENCODE_MODEL', 'openai/fixture']);
     },
   );
 });

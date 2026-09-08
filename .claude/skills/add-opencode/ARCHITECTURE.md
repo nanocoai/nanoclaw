@@ -22,6 +22,9 @@ otherwise the provider stops its owned server before permitting another turn.
 Completed native errors retain earlier verified text and return one failed
 result, so the core completes the exchange once. Native OpenCode owns retry
 counts; each history page has its own bounded request.
+Raw API diagnostics stay in the error event for logs and never enter result
+text, where response-body markup could be mistaken for a deliverable. The core
+sends a fixed failure notice, including after a partial reply.
 
 This uses the existing SDK and persistence. A new retry queue, parallel native
 prompts, and idle-event completion would add ambiguous execution ownership.
@@ -51,12 +54,23 @@ text.
 
 ## Offline startup
 
-Container configuration lives in the existing read-only source mount, while
-runtime state remains writable. OpenCode skips its plugin-authoring dependency
-installation for that directory, and the shipped memory plugin uses only local
+Container configuration lives in the existing read-only source mount. Before
+server startup, the provider links only the normal XDG config home's `opencode`
+child to that bundled directory. The XDG parent remains writable and retains its
+normal location for shell tools, MCP servers, memory hooks and native helpers.
+An existing matching symlink is reused; any other existing `opencode` path stops
+startup with a preservation instruction. No existing configuration is replaced.
+The host only persists OpenCode's separate XDG data directory; the config link
+is private to the running container and is recreated after replacement.
+
+OpenCode follows the link and skips its plugin-authoring dependency installation
+because the target is read-only. The shipped memory plugin uses only local
 modules. The container disables `.opencode` project overrides and gets model,
 permission, and MCP configuration from core. Host-native configuration is separate.
-This avoids adding a package dependency or a new host mount contract.
+This avoids adding a package dependency, child-process environment overrides, or
+a new host mount contract. Native tests must mount runner source read-only to
+exercise the same offline behavior; a writable checkout allows OpenCode to
+install its authoring dependencies into the bundled config tree.
 
 ## Credentials and installation
 
@@ -69,6 +83,10 @@ secrets, and incompatible credential types stop the flow. Supported API-key prov
 actual header scheme, including Google's `x-goog-api-key`. Unknown schemes require
 an explicit adapter rather than guessing a bearer header. Local keyless endpoints
 need no vault access. Provider defaults are saved only after authentication succeeds.
+Exported setting conflicts are checked before credential prompts or keyed model
+discovery. If a custom endpoint's model is exported, setup offers current/manual
+model selection before credential work. Metadata failures identify mismatched
+field names without exposing their values.
 
 Apply the skill, verify its contracts, and build the local image before running
 the direct authentication or model command. Authentication leaves installed files
@@ -76,6 +94,14 @@ and the image alone. Reapplying the skill in refresh mode replaces its payloads
 and pins; back up local payload edits first. An exact seam-version predicate
 guards every skill mutation during installation and refresh. Removal lists every
 installed file and registration.
+
+The authentication and model commands also require the configured image to be
+available locally. Their offline preflight imports the current mounted runtime
+and SDK inside that image, checks runtime registration, and verifies CLI/SDK
+1.18.25. It uses read-only source and image files with disposable temporary home
+state; it never pulls packages or images, rebuilds, or accesses account credentials.
+This proves that the installed modules and executable load, not that a backend,
+OneCLI grant, or account login works.
 
 ## Verification boundaries
 

@@ -24,6 +24,12 @@ reasoning effort can be overridden per group through the existing container
 configuration. Per-group backend/auth selection and structured channel attachment
 transport are separate work.
 
+Authentication and model commands require the configured container image to be
+available locally. An offline check loads the current runtime source with that
+image's SDK and verifies both SDK and CLI at 1.18.25. The check uses disposable
+temporary state and read-only source; it never downloads or rebuilds anything.
+A working backend and account are checked separately by sending a real request.
+
 ## Install
 
 Install and refresh require host contract version 1. The compatibility predicate
@@ -34,10 +40,11 @@ payload or dependency changes. Update core first if it reports a missing prerequ
 node -e "const fs=require('fs'); const p='src/provider-contracts/registry.ts'; if(fs.existsSync(p) && /PROVIDER_HOST_CONTRACT_SEAM_VERSION = 1/.test(fs.readFileSync(p,'utf8'))) console.log('yes'); else console.log('no')"
 ```
 
-Copy every file under this skill's `payload/` to the matching path at the project
-root. These are skill-owned files; overwrite them together when refreshing the
-skill. Keep the core-owned `cwd-shim.ts`, registries, and contract realization
-files in place.
+Copy only the files listed below from this skill's `payload/` to the matching
+paths at the project root. Do not copy ignored dependency directories or other
+generated native-test files. These are skill-owned files; overwrite them together
+when refreshing the skill. Keep the core-owned `cwd-shim.ts`, registries, and
+contract realization files in place.
 
 ```nc:copy when:opencode_core_ready=yes
 payload/container/agent-runner/src/provider-contracts/opencode.ts -> container/agent-runner/src/provider-contracts/opencode.ts

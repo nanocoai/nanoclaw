@@ -75,22 +75,24 @@ export function findOpenCodeSecret(payload: unknown, descriptor: OpenCodeSecret)
   // that known mistake may be repaired; arbitrary rules belong to the operator.
   const knownKeyMapping =
     !injection || sameInjection(secret.injectionConfig, injection) || sameInjection(secret.injectionConfig, BEARER);
-  if (
-    typeof secret.id !== 'string' ||
-    !secret.id.trim() ||
-    secret.type !== descriptor.type ||
-    secret.hostPattern !== descriptor.hostPattern ||
-    secret.valueSource !== 'inline' ||
-    secret.scope !== 'project' ||
-    secret.pathPattern ||
-    !knownKeyMapping ||
-    (descriptor.authMode && (!isRecord(secret.metadata) || secret.metadata.authMode !== descriptor.authMode))
-  ) {
+  const mismatches = [
+    typeof secret.id !== 'string' || !secret.id.trim() ? 'id' : undefined,
+    secret.type !== descriptor.type ? 'type' : undefined,
+    secret.hostPattern !== descriptor.hostPattern ? 'hostPattern' : undefined,
+    secret.valueSource !== 'inline' ? 'valueSource' : undefined,
+    secret.scope !== 'project' ? 'scope' : undefined,
+    secret.pathPattern ? 'pathPattern' : undefined,
+    !knownKeyMapping ? 'injectionConfig' : undefined,
+    descriptor.authMode && (!isRecord(secret.metadata) || secret.metadata.authMode !== descriptor.authMode)
+      ? 'metadata.authMode'
+      : undefined,
+  ].filter((field) => field !== undefined);
+  if (mismatches.length) {
     throw new Error(
-      `The ${descriptor.name} vault entry has unexpected metadata. Check its scope and configuration in OneCLI.`,
+      `The ${descriptor.name} vault entry has unexpected metadata in: ${mismatches.join(', ')}. Check those fields in OneCLI.`,
     );
   }
-  return secret.id;
+  return secret.id as string;
 }
 
 /** Use this installation's management connection, independently of the global OneCLI CLI configuration. */

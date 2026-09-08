@@ -2,6 +2,9 @@ import type { ProviderOptions } from './types.js';
 import type { ResolvedRuntimeConfiguration, RuntimeInferenceInput } from '../provider-contracts/registry.js';
 import { mcpServersToOpenCodeConfig } from './mcp-to-opencode.js';
 import { fileURLToPath } from 'node:url';
+import { mkdirSync, readlinkSync, symlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
+import path from 'node:path';
 const MODEL_INPUT_MODALITIES = ['text', 'audio', 'image', 'video', 'pdf'] as const;
 const AGENT_DIR = '/workspace/agent';
 
@@ -9,16 +12,39 @@ const AGENT_DIR = '/workspace/agent';
  * Its config directory ships in the existing read-only /app/src mount. OpenCode
  * skips npm dependency installation for read-only config directories, so a fresh
  * container can load the plugin without reaching the package registry. Runtime
- * data, cache and state keep their separate writable XDG locations.
+ * Only OpenCode's child directory is read-only: the inherited XDG config home
+ * stays writable for shell tools, MCP servers, memory hooks and native helpers.
+ * Existing user configuration is never replaced.
  */
 export function buildOpenCodeServerEnv(
   config: Record<string, unknown>,
   environment: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
+  const configHome = environment.XDG_CONFIG_HOME || path.join(environment.HOME || homedir(), '.config');
+  const managed = fileURLToPath(new URL('./opencode-managed-config/opencode', import.meta.url));
+  const configDirectory = path.join(configHome, 'opencode');
+  mkdirSync(configHome, { recursive: true });
+  try {
+    symlinkSync(managed, configDirectory, 'dir');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    let target: string | undefined;
+    try {
+      target = readlinkSync(configDirectory);
+    } catch {
+      // A real directory or file belongs to an existing configuration.
+    }
+    if (target !== managed) {
+      throw new Error(
+        `OpenCode managed runtime cannot use existing configuration at ${configDirectory}; ` +
+          'preserve it and choose a separate writable XDG_CONFIG_HOME for this container.',
+      );
+    }
+  }
   return {
     ...environment,
-    XDG_CONFIG_HOME: fileURLToPath(new URL('./opencode-managed-config/', import.meta.url)),
-    OPENCODE_CONFIG_DIR: fileURLToPath(new URL('./opencode-managed-config/opencode', import.meta.url)),
+    XDG_CONFIG_HOME: configHome,
+    OPENCODE_CONFIG_DIR: managed,
     OPENCODE_DISABLE_PROJECT_CONFIG: 'true',
     OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
   };

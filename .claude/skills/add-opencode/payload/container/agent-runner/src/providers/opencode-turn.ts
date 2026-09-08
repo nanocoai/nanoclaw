@@ -269,10 +269,11 @@ export async function* executeOpenCodeTurn(options: {
       const message = openCodeError(response.data.info.error).message;
       yield { type: 'error', message, retryable: false };
       // One final result preserves completed earlier steps without duplicate
-      // exchange callbacks or an automatic retry of the failed turn. Core
-      // delivers wrapped chat text and logs failed task output;
-      // with no wrapped reply, isError also makes the failure notice deliverable.
-      return { text: [text, message].filter(Boolean).join('\n\n'), isError: true };
+      // exchange callbacks or an automatic retry of the failed turn. Diagnostics
+      // stay in the error event for logs: response bodies may contain message
+      // markup that must never be interpreted as a model-authored deliverable.
+      // Core supplies a fixed failure notice even when no model text survived.
+      return { text, isError: true };
     }
     return { text };
   } finally {

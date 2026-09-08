@@ -45,6 +45,16 @@ function validHttpUrl(value: string): string | undefined {
   return 'Enter an absolute http(s) URL without embedded credentials, query, or fragment.';
 }
 
+function checkExportedDefaults(defaults: Record<string, string | undefined>): void {
+  for (const [name, value] of Object.entries(defaults)) {
+    if (process.env[name] !== undefined && process.env[name] !== (value ?? '')) {
+      throw new Error(
+        `An exported ${name} overrides this selection. Unset it before changing the saved configuration.`,
+      );
+    }
+  }
+}
+
 /** Clack returns undefined when an optional password prompt is submitted blank. */
 export function normalizeOptionalInput(value: string | undefined): string {
   return value?.trim() ?? '';
@@ -348,43 +358,49 @@ export async function runOpenCodeAuthStep(): Promise<void> {
 
   if (!/^[a-z0-9][a-z0-9_-]*$/.test(provider)) throw new Error('Invalid OpenCode provider id.');
 
-  // Guarded model catalogs need the newly entered key before discovery.
-  // Keeping a vaulted key never reads it back into the host setup process.
-  const customCatalog = provider === 'openai' && Boolean(baseUrl);
-  const pendingKey = customCatalog ? await promptOpenCodeApiKey(provider, baseUrl, host) : undefined;
-  let discoveredModels: string[] = [];
-  try {
-    discoveredModels = customCatalog
-      ? pendingKey?.keepExisting
-        ? []
-        : (await discoverLocalModelIds(baseUrl, globalThis.fetch, pendingKey?.key)).map((id) => `${provider}/${id}`)
-      : discoverRuntimeModels(provider, true, backend === 'chatgpt');
-  } catch {
-    p.log.warn(brandBody('Could not list models. Enter a model id manually; no built-in model list is substituted.'));
-  }
-  if (pendingKey?.keepExisting) {
-    p.log.info(
-      brandBody(
-        'Your existing key stays in OneCLI. Enter the model id manually, or rerun setup and enter a key to list models.',
-      ),
-    );
-  }
-  const model = await chooseOpenCodeModel(provider, discoveredModels);
-
   const defaults: Record<string, string | undefined> = {
     OPENCODE_PROVIDER: provider,
-    OPENCODE_MODEL: model,
-    OPENCODE_SMALL_MODEL: model,
     OPENCODE_BASE_URL: baseUrl || 'native',
     OPENCODE_AUTH_MODE: backend === 'chatgpt' ? 'chatgpt' : undefined,
   };
-  for (const [name, value] of Object.entries(defaults)) {
-    if (process.env[name] !== undefined && process.env[name] !== (value ?? '')) {
-      throw new Error(
-        `An exported ${name} overrides this selection. Unset it before changing the saved configuration.`,
+  checkExportedDefaults(defaults);
+
+  // Guarded model catalogs need the newly entered key before discovery.
+  // Keeping a vaulted key never reads it back into the host setup process.
+  const customCatalog = provider === 'openai' && Boolean(baseUrl);
+  const exportedModel = process.env.OPENCODE_MODEL ?? process.env.OPENCODE_SMALL_MODEL;
+  // An exported model restricts the choice. Resolve it without a keyed catalog
+  // so a conflicting selection fails before requesting or transmitting a key.
+  let model =
+    customCatalog && exportedModel !== undefined ? await chooseOpenCodeModel(provider, [], exportedModel) : undefined;
+  if (model !== undefined) {
+    checkExportedDefaults({ OPENCODE_MODEL: model, OPENCODE_SMALL_MODEL: model });
+  }
+  const pendingKey =
+    customCatalog && model === undefined ? await promptOpenCodeApiKey(provider, baseUrl, host) : undefined;
+  if (model === undefined) {
+    let discoveredModels: string[] = [];
+    try {
+      discoveredModels = customCatalog
+        ? pendingKey?.keepExisting
+          ? []
+          : (await discoverLocalModelIds(baseUrl, globalThis.fetch, pendingKey?.key)).map((id) => `${provider}/${id}`)
+        : discoverRuntimeModels(provider, true, backend === 'chatgpt');
+    } catch {
+      p.log.warn(brandBody('Could not list models. Enter a model id manually; no built-in model list is substituted.'));
+    }
+    if (pendingKey?.keepExisting) {
+      p.log.info(
+        brandBody(
+          'Your existing key stays in OneCLI. Enter the model id manually, or rerun setup and enter a key to list models.',
+        ),
       );
     }
+    model = await chooseOpenCodeModel(provider, discoveredModels);
   }
+  defaults.OPENCODE_MODEL = model;
+  defaults.OPENCODE_SMALL_MODEL = model;
+  checkExportedDefaults(defaults);
 
   if (backend === 'chatgpt') {
     await runOpenCodeChatGptAuth(chatGptMethod);
@@ -484,6 +500,12 @@ export async function checkOpenCodeInstall(): Promise<void> {
   ];
   for (const file of required) {
     if (!fs.existsSync(path.join(process.cwd(), file))) throw new Error(`OpenCode payload is missing ${file}`);
+    if (
+      !fs.statSync(path.join(process.cwd(), file)).isFile() ||
+      !fs.readFileSync(path.join(process.cwd(), file), 'utf8').trim()
+    ) {
+      throw new Error(`OpenCode payload is empty or invalid: ${file}. Refresh the provider payload.`);
+    }
   }
   const tools = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'container/cli-tools.json'), 'utf8')) as Array<{
     name: string;
@@ -521,6 +543,56 @@ export async function checkOpenCodeInstall(): Promise<void> {
   ) as { host?: string[]; hostProviders?: string[] };
   if (![inventory.host, inventory.hostProviders].every((names) => names?.includes('opencode'))) {
     throw new Error('OpenCode did not register all host and contract surfaces. Refresh the provider payload.');
+  }
+
+  // Exercise the mounted source against the dependencies and CLI in the image
+  // that normal authentication uses. Never pull, install, or rebuild here.
+  let runtime: { providers?: string[]; contracts?: string[]; sdk?: string; cli?: string };
+  try {
+    runtime = JSON.parse(
+      execFileSync(
+        CONTAINER_RUNTIME_BIN,
+        [
+          'run',
+          '--rm',
+          '--pull=never',
+          '--network=none',
+          '--read-only',
+          '--tmpfs',
+          '/tmp',
+          '--env',
+          'HOME=/tmp/opencode-install-check',
+          '--volume',
+          `${path.join(process.cwd(), 'container/agent-runner/src')}:/app/src:ro`,
+          '--workdir',
+          '/app',
+          '--entrypoint',
+          'bun',
+          CONTAINER_IMAGE,
+          '--no-install',
+          '--eval',
+          `import { providerRuntimeNames } from './src/provider-contracts/names.ts';
+       import { createOpencodeClient } from '@opencode-ai/sdk/v2';
+       import { readFileSync } from 'node:fs';
+       import { execFileSync } from 'node:child_process';
+       if (typeof createOpencodeClient !== 'function') throw new Error('OpenCode SDK is unavailable');
+       const sdk = JSON.parse(readFileSync('node_modules/@opencode-ai/sdk/package.json', 'utf8')).version;
+       const cli = execFileSync('opencode', ['--version'], { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+       console.log(JSON.stringify({ ...providerRuntimeNames(), sdk, cli }));`,
+        ],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000, maxBuffer: 1024 * 1024 },
+      ),
+    );
+  } catch {
+    throw new Error(
+      'OpenCode could not load its provider, SDK, and CLI in the installed image. Check Docker, refresh the payload, and rebuild the local image before authenticating.',
+    );
+  }
+  if (runtime.sdk !== '1.18.25' || runtime.cli !== '1.18.25') {
+    throw new Error('The OpenCode image must contain CLI and SDK 1.18.25. Rebuild it with ./container/build.sh build.');
+  }
+  if (![runtime.providers, runtime.contracts].every((names) => names?.includes('opencode'))) {
+    throw new Error('OpenCode did not register all runtime and contract surfaces. Refresh the provider payload.');
   }
 }
 

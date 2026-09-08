@@ -1,7 +1,7 @@
 import { it } from 'bun:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createOpencodeClient } from '@opencode-ai/sdk';
@@ -20,8 +20,28 @@ it.skipIf(!process.env.OPENCODE_TEST_BINARY)(
     const binary = process.env.OPENCODE_TEST_BINARY!;
     assert.equal(execFileSync(binary, ['--version'], { encoding: 'utf8' }).trim(), '1.18.25');
     const savedDataHome = process.env.XDG_DATA_HOME;
+    const savedConfigHome = process.env.XDG_CONFIG_HOME;
     const root = mkdtempSync(path.join(tmpdir(), 'opencode-native-'));
+    process.env.XDG_CONFIG_HOME = path.join(root, 'tool-config');
     const records: unknown[] = [];
+    // Exercise the inherited environment inside actual native children, including
+    // the compaction hook (startup runs in the runner before the server starts).
+    writeFileSync(
+      path.join(root, 'config-probe.mjs'),
+      `
+import { mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
+import path from 'node:path';
+const home = process.env.XDG_CONFIG_HOME || path.join(process.env.HOME, '.config');
+let error;
+try {
+  mkdirSync(path.join(home, process.argv[2]), { recursive: true });
+  writeFileSync(path.join(home, process.argv[2], 'proof'), 'writable');
+} catch (failure) { error = failure.code; }
+appendFileSync(${JSON.stringify(path.join(root, 'environment-probes.jsonl'))},
+  JSON.stringify({ child: process.argv[2], home, error }) + String.fromCharCode(10));
+`,
+    );
+
     let scenario = 'basic';
     let mainCalls = 0;
     const seen: Array<{
@@ -107,7 +127,7 @@ it.skipIf(!process.env.OPENCODE_TEST_BINARY)(
             {
               name: 'bash',
               args: {
-                command: `printf native-tool-proof > '${root}/workspace/tool-proof'`,
+                command: `${process.execPath} '${root}/config-probe.mjs' bash && printf native-tool-proof > '${root}/workspace/tool-proof'`,
                 description: 'Write fixture proof',
               },
             },
@@ -152,7 +172,7 @@ it.skipIf(!process.env.OPENCODE_TEST_BINARY)(
     writeFileSync(path.join(root, 'memory-source'), 'NATIVE_MEMORY_SNAPSHOT');
     writeFileSync(
       path.join(root, 'hook.sh'),
-      `#!/bin/sh\ncat >> '${root}/hook-events.log'\nprintf '\\n' >> '${root}/hook-events.log'\ncat '${root}/memory-source'\n`,
+      `#!/bin/sh\n${process.execPath} '${root}/config-probe.mjs' hook\ncat >> '${root}/hook-events.log'\nprintf '\\n' >> '${root}/hook-events.log'\ncat '${root}/memory-source'\n`,
     );
     const composedFactory = resetAgentMailboxForTesting();
     initTestSessionDb();
@@ -163,6 +183,7 @@ it.skipIf(!process.env.OPENCODE_TEST_BINARY)(
 import { Server } from ${JSON.stringify(import.meta.resolve('@modelcontextprotocol/sdk/server/index.js'))};
 import { StdioServerTransport } from ${JSON.stringify(import.meta.resolve('@modelcontextprotocol/sdk/server/stdio.js'))};
 import { CallToolRequestSchema, ListToolsRequestSchema } from ${JSON.stringify(import.meta.resolve('@modelcontextprotocol/sdk/types.js'))};
+await import('node:child_process').then(({ execFileSync }) => execFileSync(process.execPath, [${JSON.stringify(path.join(root, 'config-probe.mjs'))}, 'mcp']));
 const server = new Server({ name: 'fixture', version: '1' }, { capabilities: { tools: {} } });
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: 'hold', description: 'Wait for the requested milliseconds', inputSchema: { type: 'object', properties: { delay: { type: 'integer' } }, required: ['delay'] } }] }));
 server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
@@ -190,6 +211,7 @@ await server.connect(new StdioServerTransport());
             PATH: process.env.PATH,
             HOME: root,
             XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+            XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
             XDG_CACHE_HOME: path.join(root, 'cache'),
             XDG_STATE_HOME: path.join(root, 'state'),
             OPENCODE_DISABLE_MODELS_FETCH: 'true',
@@ -264,7 +286,10 @@ await server.connect(new StdioServerTransport());
         const result = final?.text;
         if (name === 'error') {
           assert.equal(final?.isError, true);
-          assert.match(result, /fixture authentication failed/);
+          assert.equal(result, null);
+          assert.ok(
+            output.some((event) => event.type === 'error' && event.message.includes('fixture authentication failed')),
+          );
           assert.equal(output.filter((event) => event.type === 'result').length, 1);
           return output[0].continuation;
         }
@@ -294,6 +319,19 @@ await server.connect(new StdioServerTransport());
           .at(-1)
           ?.memory.includes('MEMORY_AFTER_AUTO'),
       );
+      const probes = readFileSync(path.join(root, 'environment-probes.jsonl'), 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as { child: string; home: string; error?: string });
+      assert.deepEqual([...new Set(probes.map((probe) => probe.child))].sort(), ['bash', 'hook', 'mcp']);
+      assert.ok(probes.filter((probe) => probe.child === 'hook').length >= 3, 'Missing native compaction hook probe');
+      for (const probe of probes) {
+        assert.equal(probe.home, process.env.XDG_CONFIG_HOME, `${probe.child} changed the inherited config home`);
+        assert.equal(probe.error, undefined, `${probe.child} config write failed`);
+        assert.equal(readFileSync(path.join(probe.home, probe.child, 'proof'), 'utf8'), 'writable');
+      }
+      assert.equal(existsSync(path.join(process.env.XDG_CONFIG_HOME!, 'opencode', 'node_modules')), false);
+      console.log('Native writable config children:', JSON.stringify(probes));
       const startupCount = readFileSync(path.join(root, 'hook-events.log'), 'utf8').match(/startup/g)?.length;
       destroySharedRuntime();
       await run('resume', autoSession);
@@ -391,6 +429,8 @@ await server.connect(new StdioServerTransport());
       if (composedFactory) registerAgentMailbox(composedFactory);
       if (savedDataHome === undefined) delete process.env.XDG_DATA_HOME;
       else process.env.XDG_DATA_HOME = savedDataHome;
+      if (savedConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = savedConfigHome;
       writeFileSync(path.join(root, 'requests.json'), JSON.stringify(seen, null, 2));
       writeFileSync(path.join(root, 'native.log'), nativeLog);
       console.log('Native evidence:', root);

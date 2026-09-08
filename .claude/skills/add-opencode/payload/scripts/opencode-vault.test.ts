@@ -141,8 +141,25 @@ describe('OpenCode vault management', () => {
   ])('rejects incompatible metadata before writing: %j', async (change) => {
     const transport = vi.fn(async () => new Response(JSON.stringify([{ ...metadata(), ...change }])));
     const vault = createOpenCodeVault(google, 'http://vault.example', '', transport);
-    await expect(vault.save('replacement-fixture', 'existing-key')).rejects.toThrow('unexpected metadata');
+    await expect(vault.save('replacement-fixture', 'existing-key')).rejects.toThrow(
+      `unexpected metadata in: ${Object.keys(change)[0]}`,
+    );
     expect(transport).toHaveBeenCalledTimes(1);
+  });
+
+  it('names all mismatched fields without exposing their values or the secret response', () => {
+    const entry = {
+      ...metadata(CHATGPT_SECRET),
+      scope: 'private-scope-value',
+      pathPattern: '/private-path-value',
+      metadata: { authMode: 'private-mode-value' },
+      value: 'private-credential-value',
+      preview: 'private-preview-value',
+    };
+    expect(() => findOpenCodeSecret([entry], CHATGPT_SECRET)).toThrow(
+      'unexpected metadata in: scope, pathPattern, metadata.authMode',
+    );
+    expect(() => findOpenCodeSecret([entry], CHATGPT_SECRET)).not.toThrow('private-');
   });
 
   it('refuses duplicates and a changed identity instead of creating another secret', async () => {

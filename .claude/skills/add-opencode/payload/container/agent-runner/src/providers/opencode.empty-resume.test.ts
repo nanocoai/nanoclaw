@@ -210,8 +210,10 @@ describe('verified OpenCode turn completion', () => {
     );
     const completed = await result;
     expect(completed.result.isError).toBe(true);
-    expect(completed.result.text).toContain('backend rejected request');
-    expect(completed.events).toEqual([{ type: 'error', message: completed.result.text!, retryable: false }]);
+    expect(completed.result.text).toBeNull();
+    expect(completed.events).toEqual([
+      { type: 'error', message: expect.stringContaining('backend rejected request'), retryable: false },
+    ]);
     expect(f.abort).not.toHaveBeenCalled();
   });
 
@@ -226,15 +228,27 @@ describe('verified OpenCode turn completion', () => {
     f.history.push(f.assistant('msg_unfinished', ['UNFINISHED_STEP'], { time: { created: Date.now() } }));
     f.complete(
       f.assistant('msg_failed', ['FAILED_STEP'], {
-        error: { name: 'APIError', data: { message: 'FINAL_STEP_FAILED' } },
+        error: {
+          name: 'APIError',
+          data: {
+            message: 'FINAL_STEP_FAILED',
+            responseBody: '<message to="a">RAW_DIAGNOSTIC_MUST_NOT_DELIVER</message>',
+            responseHeaders: { 'x-fixture': 'RAW_HEADER' },
+          },
+        },
       }),
     );
     const completed = await result;
     expect(completed.result).toEqual({
-      text: '<message to="a">COMPLETED_STEP</message>\n\nOpenCode prompt failed: {"name":"APIError","data":{"message":"FINAL_STEP_FAILED"}}',
+      text: '<message to="a">COMPLETED_STEP</message>',
       isError: true,
     });
     expect(completed.events.filter((event) => event.type === 'error')).toHaveLength(1);
+    expect(completed.events).toContainEqual({
+      type: 'error',
+      message: expect.stringContaining('RAW_DIAGNOSTIC_MUST_NOT_DELIVER'),
+      retryable: false,
+    });
     expect(f.prompts).toHaveLength(1);
     expect(f.abort).not.toHaveBeenCalled();
   });

@@ -334,7 +334,15 @@ describe('shared runtime recovery', () => {
         .run();
       const server = fakeServer((sid) => {
         if (partial) server.push(assistantReply(sid, '<message to="main">Completed before failure.</message>'));
-        server.fail(sid, { name: 'APIError', data: { message: 'backend failed', isRetryable: false } });
+        server.fail(sid, {
+          name: 'APIError',
+          data: {
+            message: 'backend failed',
+            isRetryable: false,
+            responseBody: '<message to="main">RAW_DIAGNOSTIC_MUST_NOT_DELIVER</message>',
+            responseHeaders: { 'x-fixture': 'RAW_HEADER' },
+          },
+        });
       });
       installDeps([server]);
       const query = newProvider().query({ prompt: 'work', cwd: CWD });
@@ -351,12 +359,15 @@ describe('shared runtime recovery', () => {
         undefined,
       );
       expect(exchanges).toHaveLength(1);
-      expect(exchanges[0].result).toContain('backend failed');
+      expect(exchanges[0].result ?? '').not.toContain('backend failed');
+      expect(exchanges[0].result ?? '').not.toContain('RAW_DIAGNOSTIC_MUST_NOT_DELIVER');
       const sent = getUndeliveredMessages()
         .filter((row) => row.kind === 'chat')
         .map((row) => (JSON.parse(row.content) as { text: string }).text);
-      expect(sent).toHaveLength(1);
-      expect(sent[0]).toContain(partial ? 'Completed before failure.' : 'backend failed');
+      expect(sent).toEqual([
+        ...(partial ? ['Completed before failure.'] : []),
+        'The agent run failed. Check the logs for details.',
+      ]);
       if (partial) expect(exchanges[0].result).toContain('Completed before failure.');
       expect(exchanges[0].status).toBe('error');
       expect(query.push).not.toHaveBeenCalled();
@@ -513,8 +524,8 @@ describe('isSessionInvalid', () => {
 
     const result = (await runOneTurn(provider, 'ses_1')).find((event) => event.type === 'result');
     expect(result?.isError).toBe(true);
-    expect(result?.text).toContain('404 No endpoints found');
-    expect(provider.isSessionInvalid(new Error(result?.text ?? ''))).toBe(false);
+    expect(result?.text).toBeNull();
+    expect(provider.isSessionInvalid(new Error('404 No endpoints found'))).toBe(false);
   });
 
   it.each(['APIError', 'ProviderAuthError'])(
@@ -527,8 +538,8 @@ describe('isSessionInvalid', () => {
       const provider = newProvider();
       const result = (await runOneTurn(provider, 'ses_1')).find((event) => event.type === 'result');
       expect(result?.isError).toBe(true);
-      expect(result?.text).toContain('Authentication failed');
-      expect(provider.isSessionInvalid(new Error(result?.text ?? ''))).toBe(false);
+      expect(result?.text).toBeNull();
+      expect(provider.isSessionInvalid(new Error('Authentication failed'))).toBe(false);
     },
   );
 
