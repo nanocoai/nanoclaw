@@ -20,6 +20,8 @@ import {
 import {
   formatMessages,
   extractRouting,
+  extractGroupRouting,
+  partitionByThread,
   categorizeMessage,
   isClearCommand,
   isRunnerCommand,
@@ -228,84 +230,105 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
-    // Format messages: passthrough commands get raw text (only if the
-    // provider natively handles slash commands), others get XML.
-    const prompt = formatMessagesWithCommands(keep, nativeSlashCommands, config.providerName);
-
-    log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
-
-    const query = config.provider.query({
-      prompt,
-      continuation,
-      cwd: config.cwd,
-      systemContext: config.systemContext,
-    });
-    // Process the query while concurrently polling for new messages
-    const skippedSet = new Set(skipped.map((s) => s.id));
-    const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
-    // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
-    // can stamp it on outbound rows — needed for a2a return-path routing.
-    setCurrentInReplyTo(routing.inReplyTo);
-    // Forward a loop stop to the ACTIVE query. The stream deliberately stays
-    // open between turns, so the loop can be parked inside processQuery when
-    // config.signal fires; without this, the "stopped" loop's query — and its
-    // 500ms follow-up poller — outlives the stop and keeps polling (and
-    // claiming) messages from whatever inbound DB the process points at. In
-    // tests that leaked one immortal poller per loop-driven test, which could
-    // steal a later test's follow-up message into a dead query.
-    const abortActiveQuery = () => query.abort();
-    if (config.signal?.aborted) abortActiveQuery();
-    else config.signal?.addEventListener('abort', abortActiveQuery, { once: true });
-    try {
-      const result = await processQuery(
-        query,
-        routing,
-        processingIds,
-        config.providerName,
-        config.provider.onExchangeComplete?.bind(config.provider),
-        prompt,
-        continuation,
-        midTurnCompleteDelivery,
-      );
-      if (result.continuation && result.continuation !== continuation) {
-        continuation = result.continuation;
-        setContinuation(config.providerName, continuation);
-      }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      log(`Query error: ${errMsg}`);
-
-      // Stale/corrupt continuation recovery: ask the provider whether
-      // this error means the stored continuation is unusable, and clear
-      // it so the next attempt starts fresh.
-      if (continuation && config.provider.isSessionInvalid(err)) {
-        log(`Stale session detected (${continuation}) — clearing for next retry`);
-        continuation = undefined;
-        clearContinuation(config.providerName);
-      }
-
-      // Write error response so the user knows something went wrong
-      await writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
-      });
-
-      // The batch is still acked completed below (no redelivery). Without
-      // this line the only log trace of the errored turn is "Query error"
-      // followed by a "Completed" line that reads like success.
-      log(`Errored batch will be acked completed — ${processingIds.length} message(s), no redelivery`);
-    } finally {
-      clearCurrentInReplyTo();
-      config.signal?.removeEventListener('abort', abortActiveQuery);
+    // Per-thread invocations (issue #1568): triggers from different threads
+    // in one batch must not share an agent invocation — a single invocation
+    // routes its replies to a single thread, so every other thread would be
+    // silently ignored. One group per trigger thread, processed sequentially
+    // (same continuation, so conversational memory is shared). The common
+    // single-thread batch stays exactly one invocation with the full-batch
+    // routing, as before.
+    const threadGroups = partitionByThread(keep);
+    if (threadGroups.length > 1) {
+      log(`Batch spans ${threadGroups.length} threads — processing one invocation per thread`);
     }
 
-    // Ensure completed even if processQuery ended without a result event
-    // (e.g. stream closed unexpectedly).
-    markCompleted(processingIds);
+    for (const [groupIndex, group] of threadGroups.entries()) {
+      // Loop stop between groups: leave the remaining rows claimed — the
+      // host's processing-claim sweep resets them to pending for redelivery.
+      if (config.signal?.aborted) return;
+
+      const isLastGroup = groupIndex === threadGroups.length - 1;
+      const groupRouting = threadGroups.length === 1 ? routing : extractGroupRouting(group);
+
+      // Format messages: passthrough commands get raw text (only if the
+      // provider natively handles slash commands), others get XML.
+      const prompt = formatMessagesWithCommands(group, nativeSlashCommands, config.providerName);
+
+      log(`Processing ${group.length} message(s), kinds: ${[...new Set(group.map((m) => m.kind))].join(',')}`);
+
+      const query = config.provider.query({
+        prompt,
+        continuation,
+        cwd: config.cwd,
+        systemContext: config.systemContext,
+      });
+      // Process the query while concurrently polling for new messages
+      const processingIds = group.map((m) => m.id);
+      // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
+      // can stamp it on outbound rows — needed for a2a return-path routing.
+      setCurrentInReplyTo(groupRouting.inReplyTo);
+      // Forward a loop stop to the ACTIVE query. The stream deliberately stays
+      // open between turns, so the loop can be parked inside processQuery when
+      // config.signal fires; without this, the "stopped" loop's query — and its
+      // 500ms follow-up poller — outlives the stop and keeps polling (and
+      // claiming) messages from whatever inbound DB the process points at. In
+      // tests that leaked one immortal poller per loop-driven test, which could
+      // steal a later test's follow-up message into a dead query.
+      const abortActiveQuery = () => query.abort();
+      if (config.signal?.aborted) abortActiveQuery();
+      else config.signal?.addEventListener('abort', abortActiveQuery, { once: true });
+      try {
+        const result = await processQuery(
+          query,
+          groupRouting,
+          processingIds,
+          config.providerName,
+          config.provider.onExchangeComplete?.bind(config.provider),
+          prompt,
+          continuation,
+          midTurnCompleteDelivery,
+          !isLastGroup,
+        );
+        if (result.continuation && result.continuation !== continuation) {
+          continuation = result.continuation;
+          setContinuation(config.providerName, continuation);
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        log(`Query error: ${errMsg}`);
+
+        // Stale/corrupt continuation recovery: ask the provider whether
+        // this error means the stored continuation is unusable, and clear
+        // it so the next attempt starts fresh.
+        if (continuation && config.provider.isSessionInvalid(err)) {
+          log(`Stale session detected (${continuation}) — clearing for next retry`);
+          continuation = undefined;
+          clearContinuation(config.providerName);
+        }
+
+        // Write error response so the user knows something went wrong
+        await writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: groupRouting.platformId,
+          channel_type: groupRouting.channelType,
+          thread_id: groupRouting.threadId,
+          content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        });
+
+        // The batch is still acked completed below (no redelivery). Without
+        // this line the only log trace of the errored turn is "Query error"
+        // followed by a "Completed" line that reads like success.
+        log(`Errored batch will be acked completed — ${processingIds.length} message(s), no redelivery`);
+      } finally {
+        clearCurrentInReplyTo();
+        config.signal?.removeEventListener('abort', abortActiveQuery);
+      }
+
+      // Ensure completed even if processQuery ended without a result event
+      // (e.g. stream closed unexpectedly).
+      markCompleted(processingIds);
+    }
     log(`Completed ${ids.length} message(s)`);
   }
 }
@@ -370,6 +393,16 @@ export async function processQuery(
    * delivery-inert and the final result stays the single delivery door.
    */
   midTurnCompleteDelivery = false,
+  /**
+   * End the provider stream once this batch's turn completes (after any
+   * wrap/task-block nudge retry). Used for all but the last of a batch's
+   * per-thread invocation groups (#1568): the outer loop only regains
+   * control when the stream ends, so a non-final group must close its
+   * stream for the next thread's invocation to start. The last group keeps
+   * the stream open for follow-up pushes, exactly as a single-group batch
+   * always has.
+   */
+  endAfterTurn = false,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -498,6 +531,18 @@ export async function processQuery(
 
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
+        // Keep same-channel reply routing aligned with the latest prompt the
+        // agent was handed: a follow-up from another thread of the same
+        // channel moves the reply thread with it (this mirrors the previous
+        // latest-inbound-row resolution in sendToDestination, which now
+        // prefers the invocation's routing — see issue #1568). Follow-ups
+        // from a different channel don't clobber the batch channel; their
+        // replies still resolve per-destination.
+        const followRouting = extractGroupRouting(keep);
+        if (followRouting.channelType === routing.channelType && followRouting.platformId === routing.platformId) {
+          routing.threadId = followRouting.threadId;
+          routing.inReplyTo = followRouting.inReplyTo;
+        }
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
         taskBlockNudged = false;
@@ -571,6 +616,9 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        // Whether this result's turn continues via a nudge retry — an
+        // endAfterTurn stream must survive until the retry's own result.
+        let turnWillRetry = false;
         if (event.text) {
           const { sent, hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
             midTurnSent,
@@ -643,6 +691,7 @@ export async function processQuery(
             // user prompt — keep it queued so the retry archives against it,
             // not the nudge text.
             if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
+            turnWillRetry = willRetryWrapping || willRetryTaskBlocks;
           }
         } else archivePrompts.shift();
         // Turn boundary: reset the per-turn sent count after the result's
@@ -657,6 +706,14 @@ export async function processQuery(
         midTurnSent = 0;
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
+        // Non-final per-thread group: this turn is finished (no retry
+        // pending), so close the stream gracefully — processQuery returns
+        // once the provider drains, and the outer loop starts the next
+        // thread's invocation.
+        if (endAfterTurn && !turnWillRetry) {
+          log('Per-thread turn complete — ending stream so the next thread group can run');
+          query.end();
+        }
       }
     }
   } catch (err) {
@@ -1151,6 +1208,24 @@ export async function autoAppendTaskLog(text: string): Promise<void> {
 async function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): Promise<void> {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
+  // The channel the invocation's batch came from replies to the invocation's
+  // own thread (issue #1568): a batch can be one of several per-thread
+  // groups, and the newest inbound row may belong to a *different* thread's
+  // group — resolving from it would stamp that thread onto this reply.
+  // Follow-ups pushed into a live query keep this fresh by updating
+  // routing.threadId (see the follow-up poller in processQuery).
+  if (channelType === routing.channelType && platformId === routing.platformId) {
+    await writeMessageOut({
+      id: generateId(),
+      in_reply_to: routing.inReplyTo,
+      kind: 'chat',
+      platform_id: platformId,
+      channel_type: channelType,
+      thread_id: routing.threadId,
+      content: JSON.stringify({ text: body }),
+    });
+    return;
+  }
   // Resolve thread_id per-destination from the most recent inbound message
   // that came from this same channel+platform. In agent-shared sessions,
   // different destinations have different thread contexts — using a single

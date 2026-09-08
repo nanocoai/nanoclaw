@@ -179,6 +179,62 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
 }
 
 /**
+ * Split a batch into per-thread invocation groups (issue #1568).
+ *
+ * Trigger messages from different threads must never share one agent
+ * invocation: a single invocation produces replies routed to a single
+ * thread, so every thread but one is silently ignored. Groups are keyed by
+ * the thread_id of the batch's trigger (trigger=1) rows, in first-arrival
+ * order. Non-trigger rows (accumulated context, cross-session echoes) join
+ * their own thread's group when one exists, and otherwise ride along with
+ * the first group so ambient context is still seen exactly once.
+ *
+ * A batch whose triggers all share one thread key (including the null key —
+ * DMs and non-threaded channels) comes back as a single group, preserving
+ * existing behavior. Messages already in the same thread stay batched
+ * together as one invocation.
+ */
+export function partitionByThread(messages: MessageInRow[]): MessageInRow[][] {
+  const keys: Array<string | null> = [];
+  const byKey = new Map<string | null, MessageInRow[]>();
+  for (const msg of messages) {
+    if (msg.trigger !== 1) continue;
+    const key = msg.thread_id ?? null;
+    if (!byKey.has(key)) {
+      byKey.set(key, []);
+      keys.push(key);
+    }
+  }
+  if (keys.length <= 1) return [messages];
+  for (const msg of messages) {
+    const key = msg.thread_id ?? null;
+    const group = byKey.get(key) ?? byKey.get(keys[0])!;
+    group.push(msg);
+  }
+  return keys.map((key) => byKey.get(key)!);
+}
+
+/**
+ * Routing for one per-thread invocation group. Same shape as
+ * `extractRouting`, but the reply target comes from the group's first
+ * non-echo TRIGGER row: the first group also carries stray context rows from
+ * threads that had no trigger, and a context row must never decide where the
+ * group's reply goes.
+ */
+export function extractGroupRouting(group: MessageInRow[]): RoutingContext {
+  const base = extractRouting(group);
+  const firstTrigger = group.find((m) => !isSessionEcho(m) && m.trigger === 1);
+  if (!firstTrigger) return base;
+  return {
+    ...base,
+    platformId: firstTrigger.platform_id ?? null,
+    channelType: firstTrigger.channel_type ?? null,
+    threadId: firstTrigger.thread_id ?? null,
+    inReplyTo: firstTrigger.id ?? null,
+  };
+}
+
+/**
  * Format a batch of messages_in rows into a prompt string.
  *
  * Prepends a `<context timezone="<IANA>" />` header so the agent always knows
