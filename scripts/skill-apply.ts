@@ -646,12 +646,15 @@ async function applyOne(
 ): Promise<void> {
   const { root, skillDir, exec, vars, journal } = ctx;
   switch (d.kind) {
-    case 'copy':
+    case 'copy': {
+      // Install fills gaps; only an explicit refresh replaces existing files.
+      // The block can contain both, so honor selfStatus's per-file decision.
+      const lines = d.body.filter((line) => ctx.mode === 'refresh' || !has(root, destOf(line)));
       if (d.attrs['from-branch']) {
         const b = String(d.attrs['from-branch']);
         const remote = ctx.resolveRemote(b);
         await exec(`git fetch ${remote} ${b}`);
-        for (const l of d.body) {
+        for (const l of lines) {
           // The shell redirect can't create parent directories, and the dest
           // may not exist on trunk (e.g. container skills that live only on
           // the channels branch). Mirror the local-copy path's mkdir.
@@ -659,14 +662,15 @@ async function applyOne(
           await exec(`git show ${remote}/${b}:${srcOf(l)} > ${destOf(l)}`);
         }
       } else {
-        for (const l of d.body) {
+        for (const l of lines) {
           const dst = join(root, destOf(l));
           mkdirSync(dirname(dst), { recursive: true });
           copyFileSync(join(skillDir, srcOf(l)), dst);
         }
       }
-      for (const l of d.body) journal.push({ op: 'wrote', path: destOf(l) });
+      for (const l of lines) journal.push({ op: 'wrote', path: destOf(l) });
       break;
+    }
     case 'append': {
       const to = String(d.attrs.to);
       const marker = typeof d.attrs.at === 'string' ? d.attrs.at : undefined;

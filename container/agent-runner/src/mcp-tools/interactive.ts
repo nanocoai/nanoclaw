@@ -5,6 +5,7 @@
  * with a question card, then polls messages_in for the response.
  */
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
@@ -95,10 +96,6 @@ function err(text: string) {
   return { content: [{ type: 'text' as const, text: `Error: ${text}` }], isError: true };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export const askUserQuestion: McpToolDefinition = {
   tool: {
     name: 'ask_user_question',
@@ -132,7 +129,8 @@ export const askUserQuestion: McpToolDefinition = {
       required: ['title', 'question', 'options'],
     },
   },
-  async handler(args) {
+  async handler(args, context) {
+    if (context?.signal.aborted) return err('Question cancelled');
     const title = args.title as string;
     const question = args.question as string;
     const rawOptions = args.options as unknown[];
@@ -175,6 +173,7 @@ export const askUserQuestion: McpToolDefinition = {
     // Poll for response in inbound.db (host writes the response there)
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
+      if (context?.signal.aborted) return err('Question cancelled');
       const response = findQuestionResponse(questionId);
 
       if (response) {
@@ -186,7 +185,12 @@ export const askUserQuestion: McpToolDefinition = {
         return ok(parsed.selectedOption);
       }
 
-      await sleep(1000);
+      try {
+        await sleep(1000, undefined, { signal: context?.signal });
+      } catch (error) {
+        if (context?.signal.aborted) return err('Question cancelled');
+        throw error;
+      }
     }
 
     log(`ask_user_question timeout: ${questionId}`);

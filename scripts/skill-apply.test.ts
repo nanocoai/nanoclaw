@@ -95,6 +95,33 @@ describe('apply engine lifecycle', () => {
     expect(second.skipped.length).toBeGreaterThanOrEqual(3);
   });
 
+  it('fills missing local payload files without overwriting installed files in the same copy block', async () => {
+    writeFileSync(
+      join(skillDir, 'SKILL.md'),
+      '```nc:copy\nresources/sample.ts -> src/sample.ts\nresources/sample.ts -> src/missing.ts\n```\n',
+    );
+    writeFileSync(join(root, 'src/sample.ts'), '// local customization\n');
+    const result = await applySkill(skillDir, root, {});
+    expect(fullyApplied(result)).toBe(true);
+    expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toBe('// local customization\n');
+    expect(readFileSync(join(root, 'src/missing.ts'), 'utf8')).toBe('export const sample = true;\n');
+    expect(result.journal).toEqual([{ op: 'wrote', path: 'src/missing.ts' }]);
+    await removeSkill(root, result.journal, () => {});
+    expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toBe('// local customization\n');
+    expect(existsSync(join(root, 'src/missing.ts'))).toBe(false);
+  });
+
+  it('fetches only missing registry payload files during install', async () => {
+    writeFileSync(join(skillDir, 'SKILL.md'), '```nc:copy from-branch:providers\nsrc/sample.ts\nsrc/missing.ts\n```\n');
+    writeFileSync(join(root, 'src/sample.ts'), '// local customization\n');
+    const { cmds, exec } = recordingExec();
+    const result = await applySkill(skillDir, root, { exec, resolveRemote: () => 'fixture' });
+    expect(fullyApplied(result)).toBe(true);
+    expect(cmds).toEqual(['git fetch fixture providers', 'git show fixture/providers:src/missing.ts > src/missing.ts']);
+    expect(result.journal).toEqual([{ op: 'wrote', path: 'src/missing.ts' }]);
+    expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toBe('// local customization\n');
+  });
+
   it('refresh mode overwrites an installed payload instead of treating presence as current', async () => {
     await applySkill(skillDir, root, { resolveInput: headless({ token: 'sekret-123' }), exec: () => {} });
     writeFileSync(join(skillDir, 'resources/sample.ts'), 'export const sample = "refreshed";\n');

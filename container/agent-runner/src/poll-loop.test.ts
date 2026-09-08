@@ -6,7 +6,7 @@ import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
-import type { AgentQuery, ProviderEvent } from './providers/types.js';
+import type { AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -220,7 +220,13 @@ describe('origin metadata (from= attribute)', () => {
       .run(name, name, channelType, platformId);
   }
 
-  function insertWithRouting(id: string, kind: string, content: object, channelType: string | null, platformId: string | null): void {
+  function insertWithRouting(
+    id: string,
+    kind: string,
+    content: object,
+    channelType: string | null,
+    platformId: string | null,
+  ): void {
     getInboundDb()
       .prepare(
         `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
@@ -468,6 +474,24 @@ describe('error result with no <message> envelope', () => {
   });
 });
 
+it('delivers completed wrapped text while recording the failed turn exactly once', async () => {
+  getInboundDb()
+    .prepare(
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+     VALUES ('main', 'main', 'channel', 'discord', 'chan-1', NULL)`,
+    )
+    .run();
+  const text = '<message to="main">Completed before failure.</message>\n\nBackend failed.';
+  const { query, pushes } = makeResultQuery({ type: 'result', text, isError: true });
+  const exchanges: ProviderExchange[] = [];
+
+  await processQuery(query, ERR_ROUTING, ['m1'], 'mock', (exchange) => exchanges.push(exchange), 'prompt', undefined);
+
+  expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual(['Completed before failure.']);
+  expect(exchanges).toEqual([{ prompt: 'prompt', result: text, continuation: 'sess-1', status: 'error' }]);
+  expect(pushes).toHaveLength(0);
+});
+
 // --- Task-run turn wiring: the REAL processQuery path (one-door) ---
 // These drive the actual call sites (autoAppendTaskLog at result-handling,
 // shouldNudgeTaskBlocks gating, and follow-up turn reset). Deleting the wiring
@@ -483,13 +507,34 @@ const TASK_ROUTING = {
 
 function taskLogRows(): Array<{ text: string }> {
   return (
-    getOutboundDb()
-      .prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq")
-      .all() as Array<{ content: string }>
+    getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq").all() as Array<{
+      content: string;
+    }>
   ).map((r) => JSON.parse(r.content) as { text: string });
 }
 
 describe('task-run turn wiring (real processQuery)', () => {
+  it('logs a failed task with inert message blocks once and does not retry delivery', async () => {
+    const text = '<message to="main">Completed before failure.</message>\n\nBackend failed.';
+    const { query, pushes } = makeResultQuery({ type: 'result', text, isError: true });
+    const exchanges: ProviderExchange[] = [];
+
+    await processQuery(
+      query,
+      TASK_ROUTING,
+      ['t1'],
+      'mock',
+      (exchange) => exchanges.push(exchange),
+      'prompt',
+      undefined,
+    );
+
+    expect(taskLogRows()).toEqual([{ text: '[undelivered → main] Completed before failure. Backend failed.' }]);
+    expect(getUndeliveredMessages().filter((row) => row.kind === 'chat')).toHaveLength(0);
+    expect(exchanges).toEqual([{ prompt: 'prompt', result: text, continuation: 'sess-1', status: 'error' }]);
+    expect(pushes).toHaveLength(0);
+  });
+
   it('auto-appends the final text as a task_log row', async () => {
     async function* events(): AsyncGenerator<ProviderEvent> {
       yield { type: 'init', continuation: 's1' };

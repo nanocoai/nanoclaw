@@ -587,19 +587,28 @@ export async function processQuery(
             // and the retry streams through the mid-turn door.
             turnDelivered: midTurnCompleteDelivery ? midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) : undefined,
           });
-          const willRetryTaskBlocks = shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
+          // Completed partial output remains deliverable, but an explicit
+          // provider failure must keep its status and never trigger a retry.
+          const willRetryTaskBlocks =
+            event.isError !== true && shouldNudgeTaskBlocks(routing.taskRun, taskBlocks, taskBlockNudged);
           // One-door task delivery: the final text becomes the run log entry
           // while explicit append-log calls remain optional additive notes.
           // Errors included: a failed run's text belongs in its log, not chat.
           // A corrective retry handles delivery only; its result is not a
           // second run summary.
           if (routing.taskRun && !taskBlockNudged) await autoAppendTaskLog(event.text);
-          if (resultBlocks === 0 && event.isError === true && !routing.taskRun) {
-            // Non-retryable error turn (e.g. a 403 billing_error) with no
-            // <message> envelope: deliver the notice instead of dropping it as
-            // scratchpad, and skip the re-wrap nudge — it would just re-hammer
-            // the failing gateway turn after turn.
-            await deliverErrorResult(event.text, routing);
+          const needsErrorNotice =
+            event.isError === true &&
+            !routing.taskRun &&
+            (resultBlocks === 0 || (sent === 0 && !chatRowWrittenSince(turnStartSeq)));
+          if (needsErrorNotice) {
+            // Bare errors are notices even after earlier progress. A wrapped
+            // error with no actual delivery needs a visible failure too, but
+            // must not promote mixed scratchpad/partial text into a new reply.
+            await deliverErrorResult(
+              resultBlocks === 0 ? event.text : 'The agent run failed before it could deliver a reply.',
+              routing,
+            );
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
@@ -614,12 +623,13 @@ export async function processQuery(
             // mid-turn block, the unwrapped tail is a self-summary; nudging
             // coaxes a redundant second message (live-observed). It stays in
             // the scratchpad log.
-            const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+            const willRetryWrapping = event.isError !== true && hasUnwrapped && !unwrappedNudged;
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
-              status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
+              status:
+                event.isError === true ? 'error' : hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
             });
             if (willRetryWrapping) {
               unwrappedNudged = true;
@@ -709,13 +719,13 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
 
 /**
  * Deliver a turn's text straight to the channel the batch arrived on. Used when
- * a turn ends in a provider error (e.g. a non-retryable 403 billing_error) with
- * no <message> envelope: the notice would otherwise be dropped as scratchpad.
+ * a turn ends in a provider error (e.g. a non-retryable 403 billing_error) and
+ * its notice would otherwise be dropped as scratchpad or unseen wrapped text.
  * This is the same user-facing write the outer catch block does, minus the
  * `Error:` prefix — the provider's text is already a user-facing message.
  */
 async function deliverErrorResult(text: string, routing: RoutingContext): Promise<void> {
-  log('Error result with no <message> envelope — delivering to channel');
+  log('Error result notice — delivering to channel');
   await writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,

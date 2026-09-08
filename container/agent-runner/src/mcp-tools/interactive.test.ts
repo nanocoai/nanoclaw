@@ -1,11 +1,45 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
-import { closeSessionDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
+import { closeSessionDb, initTestSessionDb, getInboundDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
-import { LINK_ACTION_SCHEMA, sendCard } from './interactive.js';
+import { findQuestionResponse } from '../db/messages-in.js';
+import { LINK_ACTION_SCHEMA, sendCard, askUserQuestion } from './interactive.js';
 
 beforeEach(() => initTestSessionDb());
 afterEach(() => closeSessionDb());
+
+describe('ask_user_question cancellation', () => {
+  const args = { title: 'Fixture', question: 'Choose', options: ['yes', 'no'] };
+  it('does not publish a question for an already cancelled request', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await askUserQuestion.handler(args, { signal: controller.signal });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('cancelled');
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('stops waiting promptly and never consumes a later response after cancellation', async () => {
+    const controller = new AbortController();
+    const waiting = askUserQuestion.handler(args, { signal: controller.signal });
+    while (!getUndeliveredMessages().length) await Bun.sleep(1);
+    const { questionId } = JSON.parse(getUndeliveredMessages()[0].content);
+    const started = Date.now();
+    controller.abort();
+    const result = await waiting;
+    expect(Date.now() - started).toBeLessThan(250);
+    expect(result.content[0].text).toContain('cancelled');
+    getInboundDb()
+      .prepare('INSERT INTO messages_in (id, kind, timestamp, content) VALUES (?, ?, ?, ?)')
+      .run(
+        'late-question-answer',
+        'chat',
+        new Date().toISOString(),
+        JSON.stringify({ questionId, selectedOption: 'yes' }),
+      );
+    expect(findQuestionResponse(questionId)?.id).toBe('late-question-answer');
+  });
+});
 
 describe('send_card', () => {
   it('tells the agent when callback actions will be dropped', async () => {
