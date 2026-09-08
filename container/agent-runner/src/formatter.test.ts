@@ -13,7 +13,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb } from './mailbox/sqlite/connection.js';
 import { getPendingMessages } from './db/messages-in.js';
-import { formatMessages, stripInternalTags, stripLegacyTaskContract } from './formatter.js';
+import {
+  formatMessages,
+  stripInternalTags,
+  stripLegacyTaskContract,
+  partitionByThread,
+  extractGroupRouting,
+} from './formatter.js';
 import { TIMEZONE, formatLocalTime } from './timezone.js';
 
 beforeEach(() => {
@@ -325,5 +331,109 @@ describe('app_context rendering (Slack agent mode, contract C4)', () => {
     });
     const result = formatMessages(getPendingMessages());
     expect(result).toContain('(viewing: channel C1&lt;&amp;&gt;)');
+  });
+});
+
+describe('partitionByThread (#1568)', () => {
+  function row(id: string, opts?: Partial<import('./db/messages-in.js').MessageInRow>) {
+    return {
+      id,
+      seq: nextSeq++,
+      kind: 'chat' as const,
+      timestamp: new Date().toISOString(),
+      status: 'pending',
+      process_after: null,
+      recurrence: null,
+      series_id: null,
+      tries: 0,
+      trigger: 1,
+      platform_id: 'chan-1',
+      channel_type: 'slack',
+      thread_id: null,
+      content: JSON.stringify({ sender: 'Alice', text: id }),
+      source_session_id: null,
+      on_wake: 0,
+      ...opts,
+    };
+  }
+
+  it('keeps a single-thread batch as one group', () => {
+    const batch = [row('m1', { thread_id: 't1' }), row('m2', { thread_id: 't1' })];
+    const groups = partitionByThread(batch);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].map((m) => m.id)).toEqual(['m1', 'm2']);
+  });
+
+  it('keeps non-threaded messages together under the null key', () => {
+    const batch = [row('m1'), row('m2')];
+    expect(partitionByThread(batch)).toHaveLength(1);
+  });
+
+  it('splits triggers from different threads into separate groups, in arrival order', () => {
+    const batch = [
+      row('a1', { thread_id: 'thread-a' }),
+      row('b1', { thread_id: 'thread-b' }),
+      row('a2', { thread_id: 'thread-a' }),
+    ];
+    const groups = partitionByThread(batch);
+    expect(groups).toHaveLength(2);
+    expect(groups[0].map((m) => m.id)).toEqual(['a1', 'a2']);
+    expect(groups[1].map((m) => m.id)).toEqual(['b1']);
+  });
+
+  it('treats null and threaded triggers as distinct groups', () => {
+    const batch = [row('dm1'), row('t1', { thread_id: 'thread-x' })];
+    const groups = partitionByThread(batch);
+    expect(groups).toHaveLength(2);
+    expect(groups[0][0].id).toBe('dm1');
+    expect(groups[1][0].id).toBe('t1');
+  });
+
+  it('context rows join their own thread group when one exists', () => {
+    const batch = [
+      row('a1', { thread_id: 'thread-a' }),
+      row('ctx-b', { thread_id: 'thread-b', trigger: 0 }),
+      row('b1', { thread_id: 'thread-b' }),
+    ];
+    const groups = partitionByThread(batch);
+    expect(groups).toHaveLength(2);
+    expect(groups[1].map((m) => m.id)).toEqual(['ctx-b', 'b1']);
+  });
+
+  it('stray context with no trigger for its thread rides along with the first group', () => {
+    const batch = [
+      row('a1', { thread_id: 'thread-a' }),
+      row('ctx-c', { thread_id: 'thread-c', trigger: 0 }),
+      row('b1', { thread_id: 'thread-b' }),
+    ];
+    const groups = partitionByThread(batch);
+    expect(groups).toHaveLength(2);
+    expect(groups[0].map((m) => m.id)).toEqual(['a1', 'ctx-c']);
+  });
+
+  it('a batch with no trigger rows stays one group', () => {
+    const batch = [row('c1', { trigger: 0, thread_id: 't1' }), row('c2', { trigger: 0, thread_id: 't2' })];
+    expect(partitionByThread(batch)).toHaveLength(1);
+  });
+
+  it('extractGroupRouting takes reply routing from the first trigger row, not stray context', () => {
+    const group = [
+      row('ctx-c', { thread_id: 'thread-c', trigger: 0 }),
+      row('a1', { thread_id: 'thread-a' }),
+    ];
+    const routing = extractGroupRouting(group);
+    expect(routing.threadId).toBe('thread-a');
+    expect(routing.inReplyTo).toBe('a1');
+    expect(routing.platformId).toBe('chan-1');
+  });
+
+  it('extractGroupRouting ignores session-echo rows when picking the trigger', () => {
+    const group = [
+      row('echo', { channel_type: 'session-echo', thread_id: 'echo-thread' }),
+      row('real', { thread_id: 'thread-r' }),
+    ];
+    const routing = extractGroupRouting(group);
+    expect(routing.threadId).toBe('thread-r');
+    expect(routing.inReplyTo).toBe('real');
   });
 });

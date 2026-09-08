@@ -226,22 +226,28 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
-  it('resolves most recent thread_id when destination has multiple inbound messages', async () => {
-    // Two messages from same destination, different threads
+  it('splits a batch spanning multiple threads into per-thread invocations (#1568)', async () => {
+    // Two trigger messages from the same destination, different threads —
+    // each thread must get its own invocation and its own reply, instead of
+    // one invocation whose single reply lands only in the newest thread.
     insertMessage('m-old', { sender: 'Alice', text: 'old' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-old' });
     insertMessage('m-new', { sender: 'Alice', text: 'new' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-new' });
 
     const provider = new MockProvider({}, () => '<message to="discord-test">reply</message>');
     const controller = new AbortController();
-    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 4000);
 
-    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    await waitFor(() => getUndeliveredMessages().length >= 2, 3000);
     controller.abort();
 
     const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe('thread-new');
-    expect(out[0].in_reply_to).toBe('m-new');
+    expect(out).toHaveLength(2);
+    const oldReply = out.find((m) => m.thread_id === 'thread-old');
+    const newReply = out.find((m) => m.thread_id === 'thread-new');
+    expect(oldReply).toBeDefined();
+    expect(oldReply!.in_reply_to).toBe('m-old');
+    expect(newReply).toBeDefined();
+    expect(newReply!.in_reply_to).toBe('m-new');
 
     await loopPromise.catch(() => {});
   });
