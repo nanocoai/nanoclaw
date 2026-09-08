@@ -79,7 +79,10 @@ export function findOpenCodeSecret(payload: unknown, descriptor: OpenCodeSecret)
     typeof secret.id !== 'string' || !secret.id.trim() ? 'id' : undefined,
     secret.type !== descriptor.type ? 'type' : undefined,
     secret.hostPattern !== descriptor.hostPattern ? 'hostPattern' : undefined,
-    secret.valueSource !== 'inline' ? 'valueSource' : undefined,
+    // Legacy OneCLI responses omitted both source fields and only supported
+    // inline values. Explicit external or unknown sources remain ineligible.
+    secret.valueSource !== undefined && secret.valueSource !== 'inline' ? 'valueSource' : undefined,
+    secret.opRef !== undefined && secret.opRef !== null ? 'opRef' : undefined,
     secret.scope !== 'project' ? 'scope' : undefined,
     secret.pathPattern ? 'pathPattern' : undefined,
     !knownKeyMapping ? 'injectionConfig' : undefined,

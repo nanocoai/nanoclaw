@@ -31,6 +31,52 @@ const metadata = (spec: OpenCodeSecret = google) => ({
 afterEach(() => vi.unstubAllEnvs());
 
 describe('OpenCode vault management', () => {
+  it('reuses an inline credential when a legacy response omits its source', async () => {
+    const transport = vi.fn(
+      async (_url: string, init: RequestInit) =>
+        new Response(
+          JSON.stringify(init.method === 'GET' ? [{ ...metadata(), valueSource: undefined }] : { success: true }),
+        ),
+    );
+    const vault = createOpenCodeVault(google, 'http://vault.example', '', transport);
+    const id = await vault.find();
+    expect(id).toBe('existing-key');
+    await vault.keep(id!);
+    expect(transport.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true);
+    expect(await vault.save('replacement-fixture', id)).toBe(id);
+    const writes = transport.mock.calls.filter(([, init]) => init.method !== 'GET');
+    expect(writes).toEqual([
+      ['http://vault.example/v1/secrets/existing-key', expect.objectContaining({ method: 'PATCH' })],
+    ]);
+  });
+
+  it.each([undefined, 'inline'])('rejects an external vault reference with source %s', async (valueSource) => {
+    const transport = vi.fn(
+      async () => new Response(JSON.stringify([{ ...metadata(), valueSource, opRef: 'op://fixture-vault/item/key' }])),
+    );
+    const vault = createOpenCodeVault(google, 'http://vault.example', '', transport);
+    await expect(vault.save('replacement-fixture', 'existing-key')).rejects.toThrow('unexpected metadata in: opRef');
+    expect(transport.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true);
+  });
+
+  it.each(['keep', 'save'] as const)(
+    'rechecks an omitted source before %s and rejects a newly external credential',
+    async (action) => {
+      for (const change of [{ valueSource: 'onepassword' }, { opRef: 'op://fixture-vault/item/key' }]) {
+        const current: Record<string, unknown> = { ...metadata(), valueSource: undefined };
+        const transport = vi.fn(async (_url: string, _init: RequestInit) => new Response(JSON.stringify([current])));
+        const vault = createOpenCodeVault(google, 'http://vault.example', '', transport);
+        const id = await vault.find();
+        Object.assign(current, change);
+        await expect(action === 'keep' ? vault.keep(id!) : vault.save('replacement-fixture', id)).rejects.toThrow(
+          'unexpected metadata',
+        );
+        expect(transport).toHaveBeenCalledTimes(2);
+        expect(transport.mock.calls.every(([, init]) => init.method === 'GET')).toBe(true);
+      }
+    },
+  );
+
   it('reads the gateway saved after the setup process imported configuration', async () => {
     const cwd = process.cwd();
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-fresh-vault-'));
@@ -134,6 +180,11 @@ describe('OpenCode vault management', () => {
   it.each([
     { scope: 'organization' },
     { valueSource: 'onepassword' },
+    { valueSource: null },
+    { valueSource: '' },
+    { valueSource: 'unknown' },
+    { valueSource: 0 },
+    { opRef: '' },
     { type: 'openai' },
     { hostPattern: '*.googleapis.com' },
     { pathPattern: '/restricted' },
@@ -236,6 +287,7 @@ describe('OpenCode credential host migration', () => {
     { pathPattern: '/restricted' },
     { injectionConfig: { headerName: 'X-Unrelated', valueFormat: '{value}' } },
     { hostPattern: '*.example' },
+    { valueSource: undefined, opRef: 'op://fixture-vault/item/key' },
     { hostPattern: 'old.example/path' },
     { hostPattern: 'old.example:8443' },
   ])('rejects unsafe source metadata before offering a move: %j', async (change) => {
