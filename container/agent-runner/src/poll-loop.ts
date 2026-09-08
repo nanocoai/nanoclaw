@@ -571,8 +571,9 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
-        if (event.text) {
-          const { sent, hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
+        const resultText = event.text ?? '';
+        if (resultText || event.isError === true) {
+          const { hasUnwrapped, taskBlocks } = await dispatchResultText(resultText, routing, {
             midTurnSent,
             // For mid-turn delivery providers the result door NEVER delivers
             // content (error results excepted, below): mid-turn streaming is
@@ -596,22 +597,15 @@ export async function processQuery(
           // Errors included: a failed run's text belongs in its log, not chat.
           // A corrective retry handles delivery only; its result is not a
           // second run summary.
-          if (routing.taskRun && !taskBlockNudged) await autoAppendTaskLog(event.text);
-          const needsErrorNotice =
-            event.isError === true &&
-            !routing.taskRun &&
-            (resultBlocks === 0 || (sent === 0 && !chatRowWrittenSince(turnStartSeq)));
-          if (needsErrorNotice) {
-            // Bare errors are notices even after earlier progress. A wrapped
-            // error with no actual delivery needs a visible failure too, but
-            // must not promote mixed scratchpad/partial text into a new reply.
-            await deliverErrorResult(
-              resultBlocks === 0 ? event.text : 'The agent run failed before it could deliver a reply.',
-              routing,
-            );
+          if (routing.taskRun && !taskBlockNudged) await autoAppendTaskLog(resultText);
+          if (event.isError === true && !routing.taskRun) {
+            // A failed turn needs a visible notice even after a partial reply.
+            // Provider result text may contain private reasoning or raw service
+            // diagnostics; only explicit message blocks use the content door.
+            await deliverErrorResult(routing);
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
-              result: event.text,
+              result: resultText,
               continuation: queryContinuation ?? initialContinuation,
               status: 'error',
             });
@@ -626,7 +620,7 @@ export async function processQuery(
             const willRetryWrapping = event.isError !== true && hasUnwrapped && !unwrappedNudged;
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
-              result: event.text,
+              result: resultText,
               continuation: queryContinuation ?? initialContinuation,
               status:
                 event.isError === true ? 'error' : hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
@@ -717,14 +711,8 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
   }
 }
 
-/**
- * Deliver a turn's text straight to the channel the batch arrived on. Used when
- * a turn ends in a provider error (e.g. a non-retryable 403 billing_error) and
- * its notice would otherwise be dropped as scratchpad or unseen wrapped text.
- * This is the same user-facing write the outer catch block does, minus the
- * `Error:` prefix — the provider's text is already a user-facing message.
- */
-async function deliverErrorResult(text: string, routing: RoutingContext): Promise<void> {
+/** Send a fixed failure notice; provider diagnostics are never channel content. */
+async function deliverErrorResult(routing: RoutingContext): Promise<void> {
   log('Error result notice — delivering to channel');
   await writeMessageOut({
     id: generateId(),
@@ -733,7 +721,7 @@ async function deliverErrorResult(text: string, routing: RoutingContext): Promis
     platform_id: routing.platformId,
     channel_type: routing.channelType,
     thread_id: routing.threadId,
-    content: JSON.stringify({ text: stripHarnessTagArtifacts(text) }),
+    content: JSON.stringify({ text: 'The agent run failed. Check the logs for details.' }),
   });
 }
 

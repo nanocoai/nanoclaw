@@ -448,7 +448,7 @@ it('does not push accumulated-only follow-ups into an active query', async () =>
 });
 
 describe('error result with no <message> envelope', () => {
-  it('delivers a budget/billing error to the triggering channel and does not nudge', async () => {
+  it('delivers a safe failure notice to the triggering channel and does not nudge', async () => {
     const budgetText = 'Spending limit reached. Add your own key at https://example.com/keys';
     const { query, pushes } = makeResultQuery({ type: 'result', text: budgetText, isError: true });
 
@@ -456,10 +456,27 @@ describe('error result with no <message> envelope', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe(budgetText);
+    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
     expect(out[0].platform_id).toBe('chan-1');
     expect(out[0].channel_type).toBe('discord');
     // No re-wrap nudge — an error result must not re-hammer the gateway.
+    expect(pushes).toHaveLength(0);
+  });
+
+  it.each([
+    '<internal>PRIVATE THOUGHTS</internal>\n\nOpenCode prompt failed: {"responseHeaders":{"authorization":"fixture-secret"}}',
+    'Unwrapped private reasoning\n\n{"responseBody":"fixture-secret"}',
+    '',
+  ])('keeps failed-turn scratchpad and diagnostics out of chat: %s', async (text) => {
+    const { query, pushes } = makeResultQuery({ type: 'result', text, isError: true });
+    const exchanges: ProviderExchange[] = [];
+    await processQuery(query, ERR_ROUTING, ['m1'], 'mock', (exchange) => exchanges.push(exchange), 'prompt', undefined);
+    expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
+      'The agent run failed. Check the logs for details.',
+    ]);
+    expect(exchanges).toHaveLength(1);
+    expect(exchanges[0].status).toBe('error');
+    expect(exchanges[0].result).toBe(text);
     expect(pushes).toHaveLength(0);
   });
 
@@ -487,7 +504,10 @@ it('delivers completed wrapped text while recording the failed turn exactly once
 
   await processQuery(query, ERR_ROUTING, ['m1'], 'mock', (exchange) => exchanges.push(exchange), 'prompt', undefined);
 
-  expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual(['Completed before failure.']);
+  expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
+    'Completed before failure.',
+    'The agent run failed. Check the logs for details.',
+  ]);
   expect(exchanges).toEqual([{ prompt: 'prompt', result: text, continuation: 'sess-1', status: 'error' }]);
   expect(pushes).toHaveLength(0);
 });

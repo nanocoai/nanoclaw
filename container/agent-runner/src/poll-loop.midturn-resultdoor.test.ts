@@ -231,7 +231,7 @@ describe('error and interrupted turns', () => {
       true,
     );
 
-    expect(deliveredTexts()).toEqual(['The agent run failed before it could deliver a reply.']);
+    expect(deliveredTexts()).toEqual(['The agent run failed. Check the logs for details.']);
     expect(pushes).toHaveLength(0);
     expect(exchanges).toHaveLength(1);
     expect(exchanges[0].status).toBe('error');
@@ -270,7 +270,7 @@ describe('error and interrupted turns', () => {
       true,
     );
 
-    expect(deliveredTexts()).toEqual(['Sent before failure.']);
+    expect(deliveredTexts()).toEqual(['Sent before failure.', 'The agent run failed. Check the logs for details.']);
     expect(pushes).toHaveLength(0);
     expect(exchanges).toHaveLength(1);
     expect(exchanges[0].status).toBe('error');
@@ -288,7 +288,11 @@ describe('error and interrupted turns', () => {
 
     await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
 
-    expect(deliveredTexts()).toEqual(progress ? ['Progress before failure.', errText] : [errText]);
+    expect(deliveredTexts()).toEqual(
+      progress
+        ? ['Progress before failure.', 'The agent run failed. Check the logs for details.']
+        : ['The agent run failed. Check the logs for details.'],
+    );
     expect(pushes).toHaveLength(0);
   });
 
