@@ -79,7 +79,7 @@ export async function verifyProviderContracts(
       `pnpm exec vitest run src/provider-contracts src/providers setup/provider-contract.test.ts setup/providers${optionalHostTests}`,
     );
     await run('runtime typecheck', 'pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit');
-    await run('runtime provider contract tests', `${bun} test src/provider-contracts src/providers`, runnerRoot);
+    await run('runtime provider contract tests', `${bun} run test src/provider-contracts src/providers`, runnerRoot);
 
     const host = JSON.parse(
       await run('host contract inventory', 'pnpm exec tsx scripts/provider-contract-names.ts'),
@@ -100,7 +100,7 @@ export async function verifyProviderContracts(
     // Every declared runtime contract proves itself from its own
     // providers/<name>.conformance.test.ts — the probe fixtures a contract
     // needs are provider knowledge, so core runs no generic sweep. The
-    // 'runtime provider contract tests' step above (`bun test
+    // 'runtime provider contract tests' step above (`bun run test
     // src/provider-contracts src/providers`) already executed the file;
     // this check is what makes a payload that forgot to ship it fail.
     for (const provider of runtime.contracts) {

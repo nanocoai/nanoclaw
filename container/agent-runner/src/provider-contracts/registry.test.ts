@@ -3,6 +3,8 @@ import os from 'os';
 import path from 'path';
 import { describe, expect, it, spyOn } from 'bun:test';
 
+import '../providers/index.js';
+import './index.js';
 import { registerProvider } from '../providers/provider-registry.js';
 import { readProviderTrace, runProviderAfterExchange, runProviderBeforeQuery } from './realize.js';
 import {
