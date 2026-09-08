@@ -340,6 +340,24 @@ export function appendMediaFailureNote(content: string, failures: string[]): str
   return content ? `${content}\n${note}` : note;
 }
 
+/** Extension → mimetype for documents. Without a real mimetype WhatsApp
+ * labels the file as octet-stream and mobile clients can't open it inline
+ * (shows up as ".bin" on iOS/Android). */
+const DOCUMENT_MIMETYPES: Record<string, string> = {
+  '.pdf': 'application/pdf',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.xls': 'application/vnd.ms-excel',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  '.csv': 'text/csv',
+  '.txt': 'text/plain',
+  '.html': 'text/html',
+  '.htm': 'text/html',
+  '.md': 'text/markdown',
+  '.json': 'application/json',
+  '.zip': 'application/zip',
+};
+
 /** Map file extension to Baileys media message type. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function buildMediaMessage(data: Buffer, filename: string, ext: string, caption?: string): any {
@@ -356,8 +374,11 @@ function buildMediaMessage(data: Buffer, filename: string, ext: string, caption?
   if (audioExts.includes(ext)) {
     return { audio: data, mimetype: `audio/${ext.slice(1) === 'mp3' ? 'mpeg' : ext.slice(1)}` };
   }
-  // Default: send as document
-  return { document: data, fileName: filename, caption, mimetype: 'application/octet-stream' };
+  // Document: map known extensions to real mimetypes so the recipient client
+  // renders them with the correct icon and opens them inline instead of
+  // treating the file as a ".bin" blob.
+  const mimetype = DOCUMENT_MIMETYPES[ext] ?? 'application/octet-stream';
+  return { document: data, fileName: filename, caption, mimetype };
 }
 
 /**
