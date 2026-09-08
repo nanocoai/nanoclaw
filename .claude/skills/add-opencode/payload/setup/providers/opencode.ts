@@ -8,7 +8,6 @@ registerSetupProvider({
     // Setup can refresh this payload after loading the registry. Load the
     // helper only when called, so an earlier static import cannot cache it.
     const auth = await import('../../scripts/opencode-auth.js');
-    await auth.checkOpenCodeInstall();
     await auth.runOpenCodeSetupAuth();
   },
   offerFailureAssist: async (context, projectRoot) => {

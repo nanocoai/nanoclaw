@@ -8,21 +8,20 @@ import './index.js';
 import { getSetupProvider } from './registry.js';
 
 describe('installed OpenCode setup registration', () => {
-  it('loads from the real barrel and authenticates only after its install check', async () => {
+  it('loads the real barrel and keeps authentication separate from installation verification', async () => {
     const entry = getSetupProvider('opencode');
     expect(entry).toMatchObject({ value: 'opencode', label: 'OpenCode', hint: 'Open-source provider router' });
     await entry!.runAuth!();
-    expect(calls.check).toHaveBeenCalledTimes(1);
+    expect(calls.check).not.toHaveBeenCalled();
     expect(calls.auth).toHaveBeenCalledTimes(1);
-    expect(calls.check.mock.invocationCallOrder[0]).toBeLessThan(calls.auth.mock.invocationCallOrder[0]);
     await entry!.runInstallCheck!();
-    expect(calls.check).toHaveBeenCalledTimes(2);
+    expect(calls.check).toHaveBeenCalledTimes(1);
   });
 
-  it('does not authenticate an incomplete installation', async () => {
+  it('reports an installation-check failure without invoking authentication', async () => {
     calls.auth.mockClear();
     calls.check.mockRejectedValueOnce(new Error('incomplete payload'));
-    await expect(getSetupProvider('opencode')!.runAuth!()).rejects.toThrow('incomplete payload');
+    await expect(getSetupProvider('opencode')!.runInstallCheck!()).rejects.toThrow('incomplete payload');
     expect(calls.auth).not.toHaveBeenCalled();
   });
 });
