@@ -8,7 +8,8 @@ import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv
 
 import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
-import { getSessionRouting } from '../db/session-routing.js';
+import { getSessionRouting, resolveDestinationThread } from '../db/session-routing.js';
+import { getCurrentReplyRoute } from '../db/session-state.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -20,8 +21,18 @@ function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+/**
+ * Cards thread like send_message / send_file (see resolveDestinationThread),
+ * except that the bound thread is the last resort where the send tools use
+ * none: it is what a per-thread session should stay in.
+ */
 function routing() {
-  return getSessionRouting();
+  const session = getSessionRouting();
+  const thread =
+    session.channel_type && session.platform_id
+      ? resolveDestinationThread(session.channel_type, session.platform_id, getCurrentReplyRoute())
+      : null;
+  return { ...session, thread_id: thread?.threadId ?? session.thread_id };
 }
 
 /**

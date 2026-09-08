@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
-import { closeSessionDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
+import { closeSessionDb, getInboundDb, getOutboundDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
-import { LINK_ACTION_SCHEMA, sendCard } from './interactive.js';
+import { askUserQuestion, LINK_ACTION_SCHEMA, sendCard } from './interactive.js';
 
 beforeEach(() => initTestSessionDb());
 afterEach(() => closeSessionDb());
@@ -161,5 +161,126 @@ describe('send_card', () => {
     const result = await sendCard.handler({ card: { title: 'Test', description: 'No actions' } });
 
     expect(result.content[0].text).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
+  });
+});
+
+// ── Thread of the chat being answered ──
+// Same rule as send_message / send_file (core.test.ts): the thread of the
+// message being answered, else the chat's latest inbound thread. The bound
+// thread in session_routing is null for every session that isn't per-thread.
+
+function seedBoundThread(channelType: string, platformId: string, threadId: string | null): void {
+  const db = getInboundDb();
+  db.exec(`CREATE TABLE IF NOT EXISTS session_routing (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    channel_type TEXT, platform_id TEXT, thread_id TEXT
+  )`);
+  db.prepare('INSERT INTO session_routing (id, channel_type, platform_id, thread_id) VALUES (1, ?, ?, ?)').run(
+    channelType,
+    platformId,
+    threadId,
+  );
+}
+
+let hostSeq = 0;
+function seedInbound(id: string, channelType: string, platformId: string, threadId: string | null): void {
+  hostSeq += 2;
+  getInboundDb()
+    .prepare(
+      `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content)
+       VALUES (?, ?, 'chat', ?, 'completed', ?, ?, ?, ?)`,
+    )
+    .run(id, hostSeq, new Date().toISOString(), platformId, channelType, threadId, JSON.stringify({ text: 'hi' }));
+}
+
+function publishReplyRoute(route: {
+  inReplyTo: string;
+  channelType: string;
+  platformId: string;
+  threadId: string | null;
+}) {
+  getOutboundDb()
+    .prepare('INSERT OR REPLACE INTO session_state (key, value, updated_at) VALUES (?, ?, ?)')
+    .run('current_reply_route', JSON.stringify(route), new Date().toISOString());
+}
+
+/**
+ * The user's click, as the host writes it into messages_in
+ * (src/modules/interactive/index.ts): the card's own chat and thread.
+ */
+function answerQuestion(questionId: string, threadId: string | null): void {
+  hostSeq += 2;
+  getInboundDb()
+    .prepare(
+      `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content)
+       VALUES (?, ?, 'system', ?, 'pending', 'C123', 'slack', ?, ?)`,
+    )
+    .run(
+      `resp-${questionId}`,
+      hostSeq,
+      new Date().toISOString(),
+      threadId,
+      JSON.stringify({ questionId, selectedOption: 'yes' }),
+    );
+}
+
+/** Both cards' thread_id, question first. */
+async function sendBoth(): Promise<Array<string | null>> {
+  const pending = askUserQuestion.handler({ title: 'T', question: 'Q?', options: ['yes', 'no'], timeout: 10 });
+  while (getUndeliveredMessages().length < 1) await new Promise((r) => setTimeout(r, 10));
+  const question = getUndeliveredMessages()[0];
+  answerQuestion(JSON.parse(question.content).questionId, question.thread_id);
+  expect((await pending).content[0].text).toBe('yes');
+  await sendCard.handler({ card: { title: 'Info' } });
+  return getUndeliveredMessages().map((m) => m.thread_id);
+}
+
+describe('ask_user_question / send_card — thread of the chat being answered', () => {
+  it('lands in the thread of the message being answered, even when the session has no bound thread', async () => {
+    seedBoundThread('slack', 'C123', null);
+    seedInbound('in-1', 'slack', 'C123', 'T-42');
+    publishReplyRoute({ inReplyTo: 'in-1', channelType: 'slack', platformId: 'C123', threadId: 'T-42' });
+
+    expect(await sendBoth()).toEqual(['T-42', 'T-42']);
+  });
+
+  it('stays with the answered message when a newer message from another thread arrived mid-turn', async () => {
+    seedBoundThread('slack', 'C123', null);
+    seedInbound('in-1', 'slack', 'C123', 'T-1');
+    seedInbound('in-2', 'slack', 'C123', 'T-42');
+    publishReplyRoute({ inReplyTo: 'in-1', channelType: 'slack', platformId: 'C123', threadId: 'T-1' });
+
+    expect(await sendBoth()).toEqual(['T-1', 'T-1']);
+  });
+
+  it("falls back to the chat's latest inbound thread out of a batch, not the bound thread", async () => {
+    seedBoundThread('slack', 'C123', 'T-bound');
+    seedInbound('in-1', 'slack', 'C123', 'T-1');
+    seedInbound('in-2', 'slack', 'C123', 'T-42');
+
+    expect(await sendBoth()).toEqual(['T-42', 'T-42']);
+  });
+
+  it('keeps a per-thread session in its own thread', async () => {
+    seedBoundThread('slack', 'C123', 'T-5');
+    seedInbound('in-1', 'slack', 'C123', 'T-5');
+    publishReplyRoute({ inReplyTo: 'in-1', channelType: 'slack', platformId: 'C123', threadId: 'T-5' });
+
+    expect(await sendBoth()).toEqual(['T-5', 'T-5']);
+  });
+
+  it('keeps a per-thread session in its thread when the answered row carries no thread', async () => {
+    // e.g. a host-generated trigger row with a null thread in a per-thread session.
+    seedBoundThread('slack', 'C123', 'T-5');
+    seedInbound('in-1', 'slack', 'C123', null);
+    publishReplyRoute({ inReplyTo: 'in-1', channelType: 'slack', platformId: 'C123', threadId: null });
+
+    expect(await sendBoth()).toEqual(['T-5', 'T-5']);
+  });
+
+  it('keeps the bound thread when nothing has arrived from the chat', async () => {
+    seedBoundThread('slack', 'C123', 'T-bound');
+
+    expect(await sendBoth()).toEqual(['T-bound', 'T-bound']);
   });
 });

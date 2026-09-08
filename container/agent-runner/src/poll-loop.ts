@@ -117,9 +117,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // Clear leftover 'processing' acks from a previous crashed container.
   // This lets the new container re-process those messages.
   clearStaleProcessingAcks();
-  // Same for the reply stamp: a container killed mid-batch never reached the
-  // finally that clears it. Nothing reads it before the first batch publishes
-  // a fresh one, but a dead stamp should not outlive the container it belongs to.
+  // Same for the reply stamp a killed container left behind (see session-state.ts).
   clearCurrentReplyRoute();
 
   let pollCount = 0;
@@ -378,10 +376,8 @@ export async function processQuery(
    */
   midTurnCompleteDelivery = false,
 ): Promise<QueryResult> {
-  // Turn adoption (below) rewrites the routing as later messages are
-  // answered. Work on a copy so the caller's batch routing stays the first
-  // message's: a query error notice is addressed there, not to whichever
-  // follow-up happened to be answered last.
+  // adoptTurn mutates routing in place; copy so the caller's batch routing
+  // (used for the query error notice) stays the first message's.
   routing = { ...routing };
   let queryContinuation: string | undefined;
   let done = false;

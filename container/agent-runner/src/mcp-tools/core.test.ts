@@ -126,7 +126,7 @@ describe('send_message MCP tool — in_reply_to plumbing', () => {
     expect(out[0].in_reply_to).toBeNull();
   });
 
-  it('honors a stamp of any age — a turn may run longer than any fixed limit', async () => {
+  it('honors a stamp of any age — a turn may run longer than any fixed limit (dead stamps are cleared at startup, see turn-routing.test.ts)', async () => {
     publishInReplyTo('inbound-msg-1', 3 * 60 * 60 * 1000); // three hours into the turn
 
     await sendMessage.handler({ to: 'peer', text: 'hello' });

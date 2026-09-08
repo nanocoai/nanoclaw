@@ -611,6 +611,11 @@ Implementation:
 3. Copy the file into that outbox directory
 4. Write a `messages_out` row (`kind: 'chat'`) with content `{ text, files: [filename] }`
 
+`send_card` and `ask_user_question` go to the chat the session is bound to (`session_routing`), threaded like
+`send_message` / `send_file`: `resolveDestinationThread` with the published reply stamp — the
+thread of the message being answered, else the chat's latest `messages_in` thread. The bound
+`thread_id` is the last resort, when that yields no thread (a per-thread session stays in it).
+
 #### send_card
 
 Send a display card and continue without waiting for a response. `send_card`

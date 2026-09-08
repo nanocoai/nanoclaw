@@ -156,7 +156,7 @@ describe('turn routing — a message arriving while the answer is still running'
 });
 
 describe('reply stamp — startup', () => {
-  it('clears a stamp left behind by a killed container, with no age limit on a live one', async () => {
+  it('clears a stamp left behind by a killed container', async () => {
     // A previous container died mid-batch (SIGKILL skips the clearing finally).
     getOutboundDb()
       .prepare('INSERT OR REPLACE INTO session_state (key, value, updated_at) VALUES (?, ?, ?)')
