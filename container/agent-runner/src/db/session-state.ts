@@ -93,16 +93,13 @@ export interface ReplyRoute {
  *
  * This lives in mailbox state because the MCP server runs as a separate stdio
  * subprocess; module state set by the poll loop is invisible to it.
+ *
+ * No age limit: the tools only run inside a query, and every query publishes
+ * (or clears) the stamp before it starts, so a stamp is never older than the
+ * turn it belongs to. A container killed mid-batch (SIGKILL) skips the
+ * clearing finally, so the poll loop clears any leftover at startup instead.
  */
 const REPLY_ROUTE_KEY = 'current_reply_route';
-
-/**
- * Ignore a stamp older than this. The poll loop clears the stamp in a
- * finally, but a container killed mid-batch (SIGKILL) can leave one behind;
- * the guard stops a later out-of-batch read from picking up a dead stamp.
- * Generous so a long-running batch's late sends still stamp correctly.
- */
-const REPLY_ROUTE_MAX_AGE_MS = 30 * 60 * 1000;
 
 export function setCurrentReplyRoute(route: ReplyRoute | null): void {
   if (route === null) {
@@ -120,8 +117,6 @@ export function clearCurrentReplyRoute(): void {
 export function getCurrentReplyRoute(): ReplyRoute | null {
   const row = getAgentMailbox().operations.getState(REPLY_ROUTE_KEY);
   if (!row) return null;
-  const age = Date.now() - new Date(row.updatedAt).getTime();
-  if (!Number.isFinite(age) || age > REPLY_ROUTE_MAX_AGE_MS) return null;
   try {
     const parsed = JSON.parse(row.value) as Partial<ReplyRoute>;
     if (typeof parsed.inReplyTo !== 'string') return null;

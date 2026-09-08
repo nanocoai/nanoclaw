@@ -126,14 +126,14 @@ describe('send_message MCP tool — in_reply_to plumbing', () => {
     expect(out[0].in_reply_to).toBeNull();
   });
 
-  it('ignores a stale stamp left behind by a killed container', async () => {
-    publishInReplyTo('inbound-msg-1', 60 * 60 * 1000); // an hour old
+  it('honors a stamp of any age — a turn may run longer than any fixed limit', async () => {
+    publishInReplyTo('inbound-msg-1', 3 * 60 * 60 * 1000); // three hours into the turn
 
     await sendMessage.handler({ to: 'peer', text: 'hello' });
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(out[0].in_reply_to).toBeNull();
+    expect(out[0].in_reply_to).toBe('inbound-msg-1');
   });
 });
 

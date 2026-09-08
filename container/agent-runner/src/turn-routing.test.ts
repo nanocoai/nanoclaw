@@ -5,7 +5,7 @@
  * the destination it started with.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { initTestSessionDb, closeSessionDb, getInboundDb } from './mailbox/sqlite/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { MockProvider } from './providers/mock.js';
 import { runPollLoop } from './poll-loop.js';
@@ -152,5 +152,33 @@ describe('turn routing — a message arriving while the answer is still running'
       ['done A', 'thread-A', 'm-a'],
       ['done B', 'thread-B', 'm-b'],
     ]);
+  });
+});
+
+describe('reply stamp — startup', () => {
+  it('clears a stamp left behind by a killed container, with no age limit on a live one', async () => {
+    // A previous container died mid-batch (SIGKILL skips the clearing finally).
+    getOutboundDb()
+      .prepare('INSERT OR REPLACE INTO session_state (key, value, updated_at) VALUES (?, ?, ?)')
+      .run(
+        'current_reply_route',
+        JSON.stringify({ inReplyTo: 'dead-1', channelType: 'slack', platformId: 'C123', threadId: 'thread-dead' }),
+        new Date().toISOString(),
+      );
+    expect(getCurrentReplyRoute()?.inReplyTo).toBe('dead-1');
+
+    const provider = new MockProvider({}, () => '<message to="slack-test">answer</message>');
+    const controller = new AbortController();
+    const loop = runPollLoop({
+      provider,
+      providerContract: CONTRACT,
+      providerName: 'mock',
+      cwd: '/tmp',
+      signal: controller.signal,
+    });
+    await waitFor(() => getCurrentReplyRoute() === null, 3000);
+    controller.abort();
+    await loop.catch(() => {});
+    expect(getCurrentReplyRoute()).toBeNull();
   });
 });

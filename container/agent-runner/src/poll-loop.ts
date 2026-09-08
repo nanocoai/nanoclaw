@@ -117,6 +117,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // Clear leftover 'processing' acks from a previous crashed container.
   // This lets the new container re-process those messages.
   clearStaleProcessingAcks();
+  // Same for the reply stamp: a container killed mid-batch never reached the
+  // finally that clears it. Nothing reads it before the first batch publishes
+  // a fresh one, but a dead stamp should not outlive the container it belongs to.
+  clearCurrentReplyRoute();
 
   let pollCount = 0;
   let isFirstPoll = true;
