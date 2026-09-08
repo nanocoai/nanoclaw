@@ -977,11 +977,31 @@ registerChannelAdapter('whatsapp', {
       async setup(hostConfig: ChannelSetup) {
         setupConfig = hostConfig;
 
-        // Connect and wait for first open
+        // Connect and wait for first open, but never longer than
+        // SETUP_TIMEOUT_MS: initChannelAdapters() awaits every adapter's
+        // setup() sequentially, so an unattended QR/pairing wait here (no
+        // `open`, no `close`/loggedOut either) would otherwise hang the
+        // whole host — no other channel connects, no scheduled task fires —
+        // with nothing logged to explain why. Connection continues in the
+        // background past the timeout; resolveFirstOpen/rejectFirstOpen are
+        // nulled out by whichever settles first, so this is a no-op once the
+        // real connection resolves normally.
+        const SETUP_TIMEOUT_MS = 45_000;
         await new Promise<void>((resolve, reject) => {
           resolveFirstOpen = resolve;
           rejectFirstOpen = reject;
           connectSocket().catch(reject);
+          setTimeout(() => {
+            if (resolveFirstOpen) {
+              log.warn(
+                'WhatsApp did not reach connection:open within timeout — continuing host startup, connecting in background',
+                { timeoutMs: SETUP_TIMEOUT_MS },
+              );
+              resolveFirstOpen();
+              resolveFirstOpen = undefined;
+              rejectFirstOpen = undefined;
+            }
+          }, SETUP_TIMEOUT_MS);
         });
 
         log.info('WhatsApp adapter initialized');
