@@ -71,7 +71,7 @@ vi.mock('child_process', async (original) => ({
     throw new Error('catalog unavailable');
   },
 }));
-import { runOpenCodeAuthStep } from './opencode-auth.js';
+import { runOpenCodeAuthStep, runOpenCodeSetupAuth } from './opencode-auth.js';
 
 beforeEach(() => {
   Object.assign(fixture, {
@@ -233,6 +233,12 @@ describe('OpenCode auth configuration commit', () => {
       expect(fixture.writes).toContainEqual(['OPENCODE_MODEL', 'openai/fixture']);
     },
   );
+  it('cannot silently skip authentication when called by setup', async () => {
+    fixture.backend = 'skip';
+    await expect(runOpenCodeSetupAuth()).rejects.toThrow('requires a configured backend');
+    expect(fixture.writes).toEqual([]);
+    expect(fixture.requests).toEqual([]);
+  });
 });
 
 describe('custom endpoint model discovery', () => {

@@ -427,13 +427,14 @@ describe('OpenCode installation declarations', () => {
     await expect(checkOpenCodeInstall()).resolves.toBeUndefined();
     expect(proc.execFileSync).not.toHaveBeenCalled();
   });
-  it.each(['container/agent-runner/src/providers/opencode-turn.ts', 'src/providers/index.ts'])(
-    'reports a missing declared copy or registration: %s',
-    async (file) => {
-      fs.unlinkSync(path.join(root, file));
-      await expect(checkOpenCodeInstall()).rejects.toThrow('Refresh');
-    },
-  );
+  it.each([
+    'container/agent-runner/src/providers/opencode-turn.ts',
+    'src/providers/index.ts',
+    'setup/providers/index.ts',
+  ])('reports a missing declared copy or registration: %s', async (file) => {
+    fs.unlinkSync(path.join(root, file));
+    await expect(checkOpenCodeInstall()).rejects.toThrow('Refresh');
+  });
   it('rejects a missing dependency', async () => {
     fs.writeFileSync(path.join(root, 'container/agent-runner/package.json'), '{}');
     await expect(checkOpenCodeInstall()).rejects.toThrow('Refresh');

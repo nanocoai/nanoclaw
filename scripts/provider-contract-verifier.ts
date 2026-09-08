@@ -71,9 +71,18 @@ export async function verifyProviderContracts(
     await run('host dependencies', 'pnpm install --frozen-lockfile');
     await run('runtime dependencies', `${bun} install --frozen-lockfile`, runnerRoot);
     await run('host build', 'pnpm run build');
-    const optionalHostTests = fs.existsSync(path.join(root, 'src/opencode-cli-tools.test.ts'))
-      ? ' src/opencode-cli-tools.test.ts'
-      : '';
+    const optionalHostTests = [
+      'src/opencode-cli-tools.test.ts',
+      ...(fs.existsSync(path.join(root, 'scripts'))
+        ? fs
+            .readdirSync(path.join(root, 'scripts'))
+            .filter((file) => /^[a-z0-9]+(?:-[a-z0-9]+)*-host\.test\.ts$/.test(file))
+            .map((file) => `scripts/${file}`)
+        : []),
+    ]
+      .filter((file) => fs.existsSync(path.join(root, file)))
+      .map((file) => ` ${file}`)
+      .join('');
     await run(
       'host provider contract tests',
       `pnpm exec vitest run src/provider-contracts src/providers setup/provider-contract.test.ts setup/providers${optionalHostTests}`,

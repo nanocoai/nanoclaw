@@ -1,14 +1,9 @@
 {
-  "notes": "The conformance harness stubs shell execution; this scenario supplies a supported seam response for deterministic footprint checks.",
+  "notes": "The conformance harness stubs shell execution. Real supported/unsupported core checks are covered by setup/providers/install.test.ts.",
   "scenarios": [
     {
       "name": "supported core",
-      "exec": [
-        {
-          "match": "PROVIDER_HOST_CONTRACT_SEAM_VERSION",
-          "stdout": "yes\n"
-        }
-      ]
+      "exec": [{ "match": "PROVIDER_HOST_CONTRACT_SEAM_VERSION", "stdout": "yes\n" }]
     }
   ]
 }

@@ -347,3 +347,28 @@ describe('provider contract verifier', () => {
     });
   });
 });
+
+it('runs installed provider host-helper tests without a separate host-maintenance contract', async () => {
+  const root = fixture();
+  const commands: string[] = [];
+  fs.mkdirSync(path.join(root, 'scripts'));
+  fs.writeFileSync(path.join(root, 'scripts/opencode-host.test.ts'), '');
+  fs.writeFileSync(path.join(root, 'scripts/example$(touch injected)-host.test.ts'), '');
+  const result = await verifyProviderContracts(root, {
+    commandAvailable: () => true,
+    exec: (command) => {
+      commands.push(command);
+      if (command.includes('provider-contract-names.ts'))
+        return JSON.stringify({ host: ['claude'], hostProviders: [], setupProviders: ['claude'] });
+      if (command.includes('src/provider-contracts/names.ts'))
+        return JSON.stringify({ contracts: ['claude'], providers: ['claude'] });
+    },
+  });
+  expect(result.status).toBe('passed');
+  expect(
+    commands.some(
+      (command) => command.startsWith('pnpm exec vitest run ') && command.includes('scripts/opencode-host.test.ts'),
+    ),
+  ).toBe(true);
+  expect(commands.every((command) => !command.includes('$(touch'))).toBe(true);
+});

@@ -1,7 +1,8 @@
-# OpenCode provider execution
+# OpenCode provider execution and setup
 
 The provider targets NanoClaw's host contract seam version 1 and pins the native
-OpenCode CLI and SDK together at 1.18.25. The skill owns its runtime, host, and authentication adapters. The core supplies provider contracts, delivery
+OpenCode CLI and SDK together at 1.18.25. The skill owns its runtime, host, setup,
+and authentication adapters. The core supplies provider contracts, delivery
 wording, the memory renderer, resolved MCP configuration, and container policy.
 
 ## Turn completion
@@ -77,12 +78,15 @@ discovery. If a custom endpoint's model is exported, setup offers current/manual
 model selection before credential work. Metadata failures identify mismatched
 field names without exposing their values.
 
-Apply the skill, verify its contracts, and build the local image before running
-the direct authentication or model command. Authentication leaves installed files
-and the image alone. Reapplying the skill in refresh mode replaces its payloads
-and pins; back up local payload edits first. An exact seam-version predicate
-guards every skill mutation during installation and refresh. Removal lists every
-installed file and registration.
+Fresh setup applies the skill, verifies contracts, builds the local image, and
+then authenticates through a lazily loaded setup adapter. Normal re-authentication
+of an installed provider leaves its files and image alone. Explicit `--refresh`
+replaces skill-owned payloads and pins before verification/build/auth; local
+payload edits must be backed up first.
+An exact seam-version predicate guards all skill mutations during installation
+and refresh. The install flow skips build, test, and external skill effects because
+its caller owns those steps. Missing or mismatched host Bun uses the container's
+pinned version through pnpm. Removal lists every installed file and registration.
 
 The lightweight authentication check uses the skill planner to detect missing
 copy, append, dependency, or CLI declarations. Since install mode deliberately
@@ -96,8 +100,8 @@ completeness is not proof that edited source, an image, or an account works.
 ## Verification boundaries
 
 Unit and socket tests cover event lifetime, failure reconciliation, cancellation,
-memory inheritance, vault metadata, credential rotation, and installation declaration
-checks. The optional native test in
+memory inheritance, vault metadata, credential rotation, setup failure ordering,
+unsupported-core refusal, installation refresh, and declaration checks. The optional native test in
 `payload/container/agent-runner/src/providers/opencode.native.test.ts` exercises the
 actual pinned executable and SDK against a local model and MCP server, including
 a 65-second tool call. These fixtures prove adapter behavior without establishing

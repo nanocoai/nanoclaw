@@ -247,7 +247,7 @@ export async function runOpenCodeAuthCli(args: string[]): Promise<void> {
   );
 }
 
-export async function runOpenCodeAuthStep(): Promise<void> {
+export async function runOpenCodeAuthStep(options: { allowSkip?: boolean } = {}): Promise<void> {
   const backend = answer(
     await brightSelect<Backend>({
       message: 'Which model backend should OpenCode use?',
@@ -269,13 +269,16 @@ export async function runOpenCodeAuthStep(): Promise<void> {
           label: 'Something else',
           hint: 'OpenAI, Google, Anthropic, OpenRouter, or DeepSeek API key',
         },
-        { value: 'skip', label: 'Skip for now', hint: 'configure OpenCode later' },
+        ...(options.allowSkip === false
+          ? []
+          : [{ value: 'skip' as const, label: 'Skip for now', hint: 'configure OpenCode later' }]),
       ],
     }),
   );
   setupLog.userInput('opencode_backend', backend);
 
   if (backend === 'skip') {
+    if (options.allowSkip === false) throw new Error('OpenCode setup requires a configured backend.');
     setupLog.step('auth', 'skipped', 0, { PROVIDER: 'opencode', REASON: 'user-skipped' });
     p.log.warn(brandBody('OpenCode configuration skipped. Re-run /add-opencode before using OpenCode groups.'));
     return;
@@ -483,6 +486,11 @@ async function promptOpenCodeApiKey(provider: string, baseUrl: string, host: str
       }
     },
   };
+}
+
+/** Setup treats a normal return as success and may select this provider as the default. */
+export async function runOpenCodeSetupAuth(): Promise<void> {
+  await runOpenCodeAuthStep({ allowSkip: false });
 }
 
 /** Check declared installation state; install/refresh verifies contracts and builds the image. */
