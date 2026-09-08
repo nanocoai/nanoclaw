@@ -11,230 +11,316 @@ metadata:
 
 # OpenCode agent provider
 
-NanoClaw runs agents in a long-lived **poll loop** inside the container. The backend is selected per agent group by the **`provider`** key in that group's `container.json` (materialized from the `container_configs` table) — set it with `ncl groups config update --provider opencode`. Default is `claude`.
+Install OpenCode as an optional NanoClaw runtime. The payload is included in this
+skill; it needs no separate provider branch. It uses the upstream runtime,
+instructions and host contracts. The host contract remains at
+version 1; the container owns its non-secret ChatGPT placeholder file.
 
-Trunk ships with only the `claude` provider baked in. This skill copies the OpenCode provider files in from the `providers` branch, wires them into the host and container barrels, installs dependencies, and rebuilds the image.
+Apply this skill to install OpenCode, then authenticate with
+`pnpm exec tsx scripts/opencode-auth.ts`. To refresh the runtime, reapply the
+skill in refresh mode after backing up local payload edits. Authentication alone
+leaves installed files and the container image alone. Backend defaults are installation-wide; model and
+reasoning effort can be overridden per group through the existing container
+configuration. Per-group backend/auth selection and structured channel attachment
+transport are separate work.
 
 ## Install
 
-### 1. Copy the provider payload
+Install and refresh require host contract version 1. The compatibility predicate
+below guards every subsequent step, so an unsupported core receives no partial
+payload or dependency changes. Update core first if it reports a missing prerequisite.
 
-Fetch the `providers` branch from the configured remote that carries it, then
-overwrite every skill-owned provider file with its canonical registry copy:
-
-```nc:copy from-branch:providers
-src/providers/opencode.ts
-src/providers/opencode-registration.test.ts
-container/agent-runner/src/providers/opencode.ts
-container/agent-runner/src/providers/mcp-to-opencode.ts
-container/agent-runner/src/providers/mcp-to-opencode.test.ts
-container/agent-runner/src/providers/opencode-registration.test.ts
-container/agent-runner/src/providers/opencode.attachments.test.ts
-container/agent-runner/src/providers/opencode.compaction.test.ts
-container/agent-runner/src/providers/opencode.config.test.ts
-container/agent-runner/src/providers/opencode.factory.test.ts
-container/agent-runner/src/providers/opencode.memory.test.ts
-container/agent-runner/src/providers/opencode.question.test.ts
+```nc:run effect:refresh capture:opencode_core_ready validate:^yes$
+node -e "const fs=require('fs'); const p='src/provider-contracts/registry.ts'; if(fs.existsSync(p) && /PROVIDER_HOST_CONTRACT_SEAM_VERSION = 1/.test(fs.readFileSync(p,'utf8'))) console.log('yes'); else console.log('no')"
 ```
 
-(`cwd-shim.ts` and its test are deliberately **not** in this payload even though `mcp-to-opencode.ts` imports the shim: trunk ships and owns them — the default provider imports `cwd-shim.ts` — and every path listed here becomes a skill-owned file that removal deletes.)
+Copy every file under this skill's `payload/` to the matching path at the project
+root. These are skill-owned files; overwrite them together when refreshing the
+skill. Keep the core-owned `cwd-shim.ts`, registries, and contract realization
+files in place.
 
-### 2. Register the provider in both runtimes
+```nc:copy when:opencode_core_ready=yes
+payload/container/agent-runner/src/provider-contracts/opencode.ts -> container/agent-runner/src/provider-contracts/opencode.ts
+payload/container/agent-runner/src/providers/mcp-to-opencode.test.ts -> container/agent-runner/src/providers/mcp-to-opencode.test.ts
+payload/container/agent-runner/src/providers/mcp-to-opencode.ts -> container/agent-runner/src/providers/mcp-to-opencode.ts
+payload/container/agent-runner/src/providers/opencode-config.ts -> container/agent-runner/src/providers/opencode-config.ts
+payload/container/agent-runner/src/providers/opencode-managed-config/opencode/opencode.json -> container/agent-runner/src/providers/opencode-managed-config/opencode/opencode.json
+payload/container/agent-runner/src/providers/opencode-managed-config/opencode/.gitignore -> container/agent-runner/src/providers/opencode-managed-config/opencode/.gitignore
+payload/container/agent-runner/src/providers/opencode-memory-plugin.ts -> container/agent-runner/src/providers/opencode-memory-plugin.ts
+payload/container/agent-runner/src/providers/opencode-memory.ts -> container/agent-runner/src/providers/opencode-memory.ts
+payload/container/agent-runner/src/providers/opencode-registration.test.ts -> container/agent-runner/src/providers/opencode-registration.test.ts
+payload/container/agent-runner/src/providers/opencode-turn.ts -> container/agent-runner/src/providers/opencode-turn.ts
+payload/container/agent-runner/src/providers/opencode.attachments.test.ts -> container/agent-runner/src/providers/opencode.attachments.test.ts
+payload/container/agent-runner/src/providers/opencode.compaction.test.ts -> container/agent-runner/src/providers/opencode.compaction.test.ts
+payload/container/agent-runner/src/providers/opencode.config.test.ts -> container/agent-runner/src/providers/opencode.config.test.ts
+payload/container/agent-runner/src/providers/opencode.conformance.test.ts -> container/agent-runner/src/providers/opencode.conformance.test.ts
+payload/container/agent-runner/src/providers/opencode.empty-resume.test.ts -> container/agent-runner/src/providers/opencode.empty-resume.test.ts
+payload/container/agent-runner/src/providers/opencode.factory.test.ts -> container/agent-runner/src/providers/opencode.factory.test.ts
+payload/container/agent-runner/src/providers/opencode.memory.test.ts -> container/agent-runner/src/providers/opencode.memory.test.ts
+payload/container/agent-runner/src/providers/opencode.native.test.ts -> container/agent-runner/src/providers/opencode.native.test.ts
+payload/container/agent-runner/src/providers/opencode.question.test.ts -> container/agent-runner/src/providers/opencode.question.test.ts
+payload/container/agent-runner/src/providers/opencode.shared-runtime.test.ts -> container/agent-runner/src/providers/opencode.shared-runtime.test.ts
+payload/container/agent-runner/src/providers/opencode.sse-cleanup.test.ts -> container/agent-runner/src/providers/opencode.sse-cleanup.test.ts
+payload/container/agent-runner/src/providers/opencode.ts -> container/agent-runner/src/providers/opencode.ts
+payload/container/agent-runner/src/providers/opencode-auth.ts -> container/agent-runner/src/providers/opencode-auth.ts
+payload/container/agent-runner/src/providers/opencode-auth.test.ts -> container/agent-runner/src/providers/opencode-auth.test.ts
+payload/scripts/opencode-auth-config.test.ts -> scripts/opencode-auth-config.test.ts
+payload/scripts/opencode-auth.test.ts -> scripts/opencode-auth.test.ts
+payload/scripts/opencode-auth.ts -> scripts/opencode-auth.ts
+payload/scripts/opencode-model-config.ts -> scripts/opencode-model-config.ts
+payload/scripts/opencode-models.test.ts -> scripts/opencode-models.test.ts
+payload/scripts/opencode-models.ts -> scripts/opencode-models.ts
+payload/scripts/opencode-vault.test.ts -> scripts/opencode-vault.test.ts
+payload/scripts/opencode-vault.ts -> scripts/opencode-vault.ts
+payload/scripts/tsconfig.opencode-auth.json -> scripts/tsconfig.opencode-auth.json
+payload/src/provider-contracts/opencode.ts -> src/provider-contracts/opencode.ts
+payload/src/providers/opencode-auth-stub.ts -> src/providers/opencode-auth-stub.ts
+payload/src/providers/opencode-registration.test.ts -> src/providers/opencode-registration.test.ts
+payload/src/providers/opencode.ts -> src/providers/opencode.ts
+```
 
-Each barrel gets one line appended at the end — skip if the line is already present.
+Append `import './opencode.js';` once to each of the four provider and contract
+barrels below. Keep all existing imports.
 
-```nc:append to:src/providers/index.ts
+```nc:append to:src/providers/index.ts when:opencode_core_ready=yes
 import './opencode.js';
 ```
 
-```nc:append to:container/agent-runner/src/providers/index.ts
+```nc:append to:src/provider-contracts/index.ts when:opencode_core_ready=yes
 import './opencode.js';
 ```
 
-### 3. Install the matched SDK and CLI pins
-
-The agent-runner is a separate Bun package tree. Keep its SDK on the same exact
-version as the globally installed `opencode-ai` CLI:
-
-```nc:dep manager:bun cwd:container/agent-runner
-@opencode-ai/sdk@1.4.17
+```nc:append to:container/agent-runner/src/providers/index.ts when:opencode_core_ready=yes
+import './opencode.js';
 ```
 
-```nc:json-merge into:container/cli-tools.json key:name
-{
-  "name": "opencode-ai",
-  "version": "1.4.17"
-}
+```nc:append to:container/agent-runner/src/provider-contracts/index.ts when:opencode_core_ready=yes
+import './opencode.js';
 ```
 
-Do not use `latest`. OpenCode's CLI and SDK have changed their session API in
-lockstep before; mismatched versions can build cleanly and fail at runtime.
+Install the SDK in the runner's Bun package and add the matching CLI manifest
+entry with trusted postinstall enabled. Both pins must remain exactly 1.18.25. When refreshing an existing install,
+replace both old pin entries; presence alone does not establish compatibility.
+This updates the runner package and lockfile; there is no host SDK dependency.
 
-### 4. Install the pin guard
-
-Copy the structural test that asserts the CLI manifest and SDK package stay on
-the same exact version:
-
-```nc:copy
-opencode-cli-tools.test.ts -> src/opencode-cli-tools.test.ts
+```nc:dep manager:bun cwd:container/agent-runner when:opencode_core_ready=yes
+@opencode-ai/sdk@1.18.25
 ```
 
-### 5. Build and validate
+```nc:json-merge into:container/cli-tools.json key:name when:opencode_core_ready=yes
+{"name":"opencode-ai","version":"1.18.25","onlyBuilt":true}
+```
 
-```nc:run effect:build
+Run the host build, runner typecheck, host/auth tests, and all provider tests.
+The tests exercise real barrel registration and the provider-owned contract
+conformance suite. All checks must pass before rebuilding the agent image.
+
+```nc:run effect:build when:opencode_core_ready=yes
 pnpm run build
 ```
 
-```nc:run effect:build
-pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
+```nc:run effect:build when:opencode_core_ready=yes
+pnpm exec tsc -p scripts/tsconfig.opencode-auth.json
 ```
 
-```nc:run effect:test
-pnpm exec vitest run src/providers/opencode-registration.test.ts src/opencode-cli-tools.test.ts
+```nc:run effect:build when:opencode_core_ready=yes
+cd container/agent-runner && bun run typecheck
 ```
 
-```nc:run effect:test
-cd container/agent-runner && bun test src/providers/opencode-registration.test.ts
+```nc:run effect:test when:opencode_core_ready=yes
+pnpm exec vitest run src/providers/opencode-registration.test.ts scripts/opencode-auth*.test.ts scripts/opencode-models.test.ts scripts/opencode-vault.test.ts setup/providers
 ```
 
-```nc:run effect:build
-./container/build.sh
+```nc:run effect:test when:opencode_core_ready=yes
+cd container/agent-runner && bun test src/providers/opencode*.test.ts src/providers/mcp-to-opencode.test.ts
 ```
 
-All checks must be clean before proceeding. The registration tests import the
-real host and container barrels; the pin guard covers the non-importable global
-CLI; the two typechecks cover both runtime API boundaries.
+Build the local image with `./container/build.sh build`. The new SDK dependency
+requires a full local build; a CLI-only overlay cannot supply it. This switches
+a published-image installation to locally built images.
 
-NanoClaw v2 mounts one shared read-only agent-runner source tree. There are no
-per-group source overlays to propagate or repair.
-
-## Configuration
-
-### Host `.env` (typical)
-
-Set model/provider strings in the form OpenCode expects (often `provider/model-id`). **Put comments on their own lines** — a `#` inside a value is kept verbatim and breaks model IDs.
-
-These variables are read **on the host** and passed into the container only when the effective provider is `opencode`. They do not switch the provider by themselves; the group still needs `provider` set to `opencode` (see [Select the provider](#select-the-provider) below).
-
-- `OPENCODE_PROVIDER` — OpenCode provider id, e.g. `openrouter`, `anthropic`, `deepseek`.
-- `OPENCODE_MODEL` — full model id in `provider/model` form, e.g. `deepseek/deepseek-chat`.
-- `OPENCODE_SMALL_MODEL` — optional second model for lighter tasks; defaults to `OPENCODE_MODEL` if unset.
-- `ANTHROPIC_BASE_URL` — **required for non-`anthropic` providers.** The opencode container provider passes this as the `baseURL` for the upstream provider config so requests route through OneCLI's credential proxy or directly to the provider's API. Set it to the provider's API base URL (e.g. `https://api.deepseek.com/v1`, `https://openrouter.ai/api/v1`).
-- `OPENCODE_MODEL_CONTEXT_LIMIT` — optional context window, in tokens, declared for **`OPENCODE_MODEL` only** (not the small model); OpenCode auto-compacts as a session approaches it, and a model its registry does not know resolves to `0` and so never compacts. Anything but a positive integer is logged and treated as unset, which emits no limit and leaves behavior unchanged.
-- `OPENCODE_MODEL_OUTPUT_LIMIT` — optional max output tokens for the same main model, only applied alongside a valid context limit (without one it is logged and ignored). Anything but a positive integer is logged and treated as unset.
-- `OPENCODE_MODEL_INPUT_MODALITIES` — optional comma-separated subset of `text,audio,image,video,pdf`, declared for **`OPENCODE_MODEL` only**. OpenCode drops any file part whose modality the model does not declare, so images and PDFs never reach a registry-unknown custom model unless this is set. Unrecognized entries are logged and skipped; unset declares nothing and leaves behavior unchanged. A distinct `OPENCODE_SMALL_MODEL` never inherits this; it keeps the undeclared-model default regardless.
-
-  Declaring the modality only opens OpenCode's gate. NanoClaw must also pass channel attachments to the provider as structured file parts; until that support is available, attachments remain prompt text.
-
-Credentials: register provider API keys in OneCLI with the matching `--host-pattern` (e.g. `api.deepseek.com`, `openrouter.ai`). OneCLI injects them via `HTTPS_PROXY` in the container — the key never lives in `.env` or the container environment.
-
-After adding a secret, **grant the agent access** — agents in `selective` mode only receive secrets they've been explicitly assigned:
-
-Use the safe merge pattern — `set-secrets` replaces the entire list, so always read first:
-
-```bash
-AGENT_ID=$(onecli agents list | jq -r '.data[] | select(.identifier=="<agentGroupId>") | .id')
-CURRENT=$(onecli agents secrets --id "$AGENT_ID" | jq -r '[.data[]] | join(",")')
-MERGED=$(printf '%s' "$CURRENT,<new-secret-id>" | tr ',' '\n' | sort -u | paste -sd ',' -)
-onecli agents set-secrets --id "$AGENT_ID" --secret-ids "$MERGED"
-onecli agents secrets --id "$AGENT_ID"
+```nc:run effect:build when:opencode_core_ready=yes
+./container/build.sh build
 ```
 
-#### Example: DeepSeek
+## Authenticate and select a group
 
-```env
-OPENCODE_PROVIDER=deepseek
-OPENCODE_MODEL=deepseek/deepseek-chat
-OPENCODE_SMALL_MODEL=deepseek/deepseek-chat
-ANTHROPIC_BASE_URL=https://api.deepseek.com/v1
-```
+After applying the skill and building its local image, run
+`pnpm exec tsx scripts/opencode-auth.ts` from the project root to choose
+authentication. This command leaves installed files and the image alone. Choose
+ChatGPT sign-in, a local OpenAI-compatible endpoint, OpenRouter, DeepSeek, or a
+supported native backend. Automatic API-key configuration supports OpenAI,
+OpenRouter, DeepSeek, Google, and Anthropic; other native authentication schemes
+require separate integration. The command stores credentials in OneCLI and backend defaults in
+`.env`. The command leaves the instance default unchanged. Select OpenCode for
+each group through the existing group configuration.
 
-Register the key:
+For ChatGPT, native OpenCode sign-in runs in a temporary container directory.
+The OAuth credential is translated into OneCLI's supported vault format, and the
+temporary native file is removed. The container initializes fixed
+`onecli-managed` placeholders before every OpenCode server start at
+`$XDG_DATA_HOME/opencode/auth.json`; tokens and account metadata stay in OneCLI.
+API-key mode clears stale OAuth state. Refresh the payload and restart the host
+service and affected containers when updating from the earlier read-only-bind
+candidate; old containers retain their mounts until recreated.
 
-```bash
-onecli secrets create --name "DeepSeek" --type generic \
-  --value YOUR_KEY --host-pattern "api.deepseek.com" \
-  --header-name "Authorization" --value-format "Bearer {value}"
-```
+Before using a group, grant its OneCLI agent access to the chosen secret.
+Read its existing secret assignments first and merge the new secret ID into that
+list: `onecli agents set-secrets` replaces assignments. Verify the result with
+`onecli agents secrets`. Do not put a key in `.env`, command arguments, or the
+container environment.
 
-#### Example: OpenRouter
-
-```env
-OPENCODE_PROVIDER=openrouter
-OPENCODE_MODEL=openrouter/anthropic/claude-sonnet-4
-OPENCODE_SMALL_MODEL=openrouter/anthropic/claude-haiku-4.5
-ANTHROPIC_BASE_URL=https://openrouter.ai/api/v1
-```
-
-Register the key:
-
-```bash
-onecli secrets create --name "OpenRouter" --type generic \
-  --value YOUR_KEY --host-pattern "openrouter.ai" \
-  --header-name "Authorization" --value-format "Bearer {value}"
-```
-
-#### Example: Anthropic (no ANTHROPIC_BASE_URL needed)
-
-When `OPENCODE_PROVIDER` is `anthropic`, OpenCode uses normal Anthropic env inside the container — the proxy + placeholder key pattern is unchanged and `ANTHROPIC_BASE_URL` is not required.
-
-```env
-OPENCODE_PROVIDER=anthropic
-OPENCODE_MODEL=anthropic/claude-sonnet-4-20250514
-OPENCODE_SMALL_MODEL=anthropic/claude-haiku-4-5-20251001
-```
-
-#### OpenCode Zen (`x-api-key`, not Bearer)
-
-Zen's HTTP API (e.g. `POST …/zen/v1/messages`) expects the key in the **`x-api-key`** header. If OneCLI injects **`Authorization: Bearer …`** only, Zen often returns **401 / "Missing API key"** even though the gateway is working.
-
-**Naming:** NanoClaw's **`provider: opencode`** (the `container.json` key, set via `ncl groups config update --provider opencode`) means "run the **OpenCode agent provider**." Separately, **`OPENCODE_PROVIDER=opencode`** in `.env` is OpenCode's **Zen provider id** inside the OpenCode config (see [Zen docs](https://opencode.ai/docs/zen/)).
-
-**Host `.env` (typical Zen shape):**
-
-```env
-OPENCODE_PROVIDER=opencode
-OPENCODE_MODEL=opencode/big-pickle
-OPENCODE_SMALL_MODEL=opencode/big-pickle
-ANTHROPIC_BASE_URL=https://opencode.ai/zen/v1
-```
-
-Use a real Zen model id from the docs; `big-pickle` is one example.
-
-**OneCLI:** register the Zen key with **`x-api-key`**, not Bearer:
-
-```bash
-onecli secrets create --name "OpenCode Zen" --type generic \
-  --value YOUR_ZEN_KEY --host-pattern opencode.ai \
-  --header-name "x-api-key" --value-format "{value}"
-```
-
-### Select the provider
-
-Per group, from the host:
+After installing on a running NanoClaw host, restart its actual host service
+before waking any OpenCode group. This reloads the host provider registration and
+backend settings. On Linux use `systemctl --user restart nanoclaw-v2-<install-slug>.service`
+(or the installation's system service command); on macOS use its normal launchd
+restart workflow. Confirm the service is running, then select and restart the
+test group:
 
 ```bash
 ncl groups config update --id <group-id> --provider opencode
 ncl groups restart --id <group-id>
 ```
 
-`ncl groups config update --provider` writes the `provider` value into the `container_configs` table; the host materializes it into `groups/<folder>/container.json` at spawn time and the in-container runner reads `provider` from there (defaulting to `claude`). The restart picks up the change. Switching is an operator action — run it from the host. Memory does NOT carry over automatically between providers — run `/migrate-memory` to carry it across.
+Send a message and verify a reply, then send a second message to check session
+continuation. The test requires a reachable backend and the correct OneCLI
+secret grant. No provider is switched by the install steps alone. If memory
+needs to move from another provider, follow `/migrate-memory` before switching.
 
-Extra MCP servers still come from **`NANOCLAW_MCP_SERVERS`** / `container_config.mcpServers` on the host; the runner merges them into the same `mcpServers` object passed to **both** Claude and OpenCode providers.
+## Recover a ChatGPT login
 
-## Operational notes
+NanoClaw currently pins OneCLI 1.41.0, which cannot refresh these OAuth tokens
+after expiry because its refresh request omits the required client ID. Use manual
+reauthentication when that happens. Reliable unattended ChatGPT operation requires
+a separately validated gateway refresh fix; upgrading to OneCLI 1.43.1 also
+requires migrating its removed agent-grant API.
 
-- OpenCode keeps a local **`opencode serve`** process and SSE subscription; the provider tears down with **`stream.return`** and **SIGKILL** on the server process on **`abort()`** / shared runtime reset to avoid MCP/zombie hangs.
-- Session continuation uses UUID format (SDK 1.4.x / CLI 1.4.x). Stale sessions are cleared by `isSessionInvalid` on OpenCode-specific error patterns. If you see UUID-related errors after an accidental CLI upgrade, clear `session_state` in `outbound.db` and wipe the `opencode-xdg` directory under the session folder.
-- **`NO_PROXY`** for localhost matters when the OpenCode client talks to `127.0.0.1` inside the container while HTTP(S)\_PROXY is set (e.g. OneCLI).
+The container uses only the fixed sentinel; do not implement token refresh in the provider or copy live
+credentials into a group. A saved credential is not proof that authentication
+still works.
 
-## Next steps
+If a request fails because the login expired or was revoked, run on the host:
 
-The host/container registration tests and the CLI/SDK pin guard verify the
-static wiring. To confirm a live round-trip, switch a test group with
-`ncl groups config update --id <group-id> --provider opencode && ncl groups
-restart --id <group-id>`, register the matching provider key in OneCLI, and
-send a message. A clean exchange returns the model's reply with no `Unknown
-provider: opencode` error and no UUID/session warnings in the logs.
+```bash
+pnpm exec tsx scripts/opencode-auth.ts --reauth
+# For a browser on the host instead of device pairing:
+pnpm exec tsx scripts/opencode-auth.ts --reauth --method browser
+```
 
-To remove this provider, see [REMOVE.md](REMOVE.md).
+This pairs again and updates the existing OneCLI secret ID, preserving its agent
+permissions and all backend/model defaults. It uses NanoClaw's `ONECLI_URL` and
+`ONECLI_API_KEY` management connection. If no credential exists, it creates one;
+grant that new secret to the group as described above. Retry the failed request.
+
+An unavailable vault, duplicate name, or incompatible credential entry stops the
+operation before sign-in. Resolve the gateway/permissions or entry metadata in
+OneCLI and retry; do not delete a credential to force setup to run. Failed
+pairing leaves the old entry intact; failed saves leave defaults unchanged.
+Temporary native credentials are removed after either success or failure.
+
+## Change or refresh the default model
+
+Run `pnpm exec tsx scripts/opencode-models.ts` to keep the current default or
+choose another model without signing in again. This changes only
+`OPENCODE_MODEL`; the small model, endpoint, credentials, and group overrides
+stay as configured. Restart the NanoClaw host and affected groups afterward.
+
+```bash
+pnpm exec tsx scripts/opencode-models.ts --list --refresh
+pnpm exec tsx scripts/opencode-models.ts --model openai/<model-id>
+```
+
+Discovery runs the installed container's `opencode models` command and filters
+for text and tool support, including its ChatGPT-specific filter when selected.
+Only a disposable fixed sentinel is used for that filter; no credentials or host
+OpenCode files are mounted for discovery. `--refresh` fetches the runtime's
+current model catalog; it does not upgrade the CLI or SDK. Account access is checked by a real
+request, not by catalog membership. Standalone host OpenCode is never consulted.
+If discovery is unavailable, keep the existing model or enter an id manually.
+There is no static fallback list. A custom OpenAI-compatible endpoint is queried
+through its own `/models` endpoint; other custom endpoints use manual IDs.
+The configured backend must match the model prefix; changing backends still
+uses the authentication command. Exported defaults take precedence over `.env`,
+so conflicting exported values must be cleared before changing the saved model.
+
+This separate command avoids rerunning authentication merely to change a model,
+and querying the container avoids disagreement with a separately upgraded host
+CLI. New models needing newer runtime support require a matched CLI/SDK update
+and image rebuild. Model changes do not automatically change context limits or
+modalities; adjust any custom overrides to match the new model.
+
+## Backend defaults
+
+The host reads these values from exported environment variables, then `.env`.
+Put comments on separate lines. These settings affect only OpenCode containers.
+
+- `OPENCODE_PROVIDER`: OpenCode backend ID, such as `openai` or `openrouter`.
+- `OPENCODE_MODEL`: default full `provider/model` ID. The group's model wins.
+- `OPENCODE_SMALL_MODEL`: optional separate model for lighter work, using the same backend prefix as `OPENCODE_PROVIDER`.
+- `OPENCODE_BASE_URL`: backend URL, or `native` to use the native endpoint.
+  For an `openai` backend with a custom URL, the runtime uses Chat Completions.
+  An absent setting retains the historical `ANTHROPIC_BASE_URL` fallback for
+  existing installs. The auth command writes this provider-owned setting and
+  preserves Claude's endpoint.
+- `OPENCODE_AUTH_MODE=chatgpt`: initialize the container's non-secret ChatGPT stub. Leave unset for
+  API-key and local endpoints; the auth command handles this when switching.
+- `OPENCODE_MODEL_CONTEXT_LIMIT`: positive token count for the main model.
+- `OPENCODE_MODEL_OUTPUT_LIMIT`: positive output limit, requiring a context limit.
+- `OPENCODE_MODEL_INPUT_MODALITIES`: optional comma-separated main-model input
+  types from `text,audio,image,video,pdf`.
+- `OPENCODE_NATIVE_ATTACHMENT_MAX_COUNT` / `OPENCODE_NATIVE_ATTACHMENT_MAX_BYTES`:
+  optional limits for already-staged structured attachments. Upstream channel
+  attachment transport remains text-only until that separate feature lands.
+
+Custom model limits and modalities apply only to the main model. MCP servers
+come from the core's resolved runner configuration. Memory is rendered through
+the shared hook on startup and after compaction, and routing reminders reuse
+core wording for ordinary conversations and isolated tasks.
+
+The managed container reads configuration from the payload's read-only
+`opencode-managed-config` directory and the generated configuration supplied by
+NanoClaw. It disables `.opencode` project configuration and plugin overrides;
+configure models, permissions, and MCP through NanoClaw's existing surfaces.
+The bundled local memory plugin has no package dependencies. Read-only
+configuration prevents native OpenCode from installing its plugin-authoring
+package at startup, so a fresh container needs no npm registry access. Session
+data, caches, and memory remain writable. This applies only to the container;
+host OpenCode keeps its native configuration and plugin support.
+
+OpenCode keeps one server and continuously read event subscription per container.
+Prompts are serialized and completion comes from the native prompt response plus
+its stored messages. A stale idle event cannot complete a new turn. Failed or
+uncertain turns are never automatically replayed. Aborts stop native execution;
+if completion cannot be confirmed within the cleanup bound, the server is stopped
+and the next query resumes from persisted state. Effective configuration changes
+restart the shared server.
+
+A local native plugin supplies the cached rendered memory and current core
+instructions to every model request, including continuation after compaction.
+It refreshes the memory snapshot in OpenCode's awaited compaction hook. A cold
+resume reuses the persisted snapshot without running the startup hook. Task
+children inherit their parent's context; their own compaction snapshots stay
+separate. Renderer failure retains the last verified snapshot, while successful
+empty output clears it.
+
+Sessions created before this memory snapshot mechanism resume with current core
+instructions. Their rendered memory is refreshed at the next compaction.
+MCP calls allow 330 seconds, covering the core's five-minute human question
+window plus transport overhead. Cancelling a turn cancels its active tool wait;
+a question already posted to chat remains visible.
+
+For reproducible native integration coverage, download the official OpenCode
+1.18.25 binary and run from `container/agent-runner`:
+
+```bash
+OPENCODE_TEST_BINARY=/absolute/path/opencode bun test src/providers/opencode.native.test.ts
+```
+
+The test checks the binary version, starts a local model fixture, and exercises
+native tools, automatic and overflow compaction, cold resume, child memory,
+terminal errors, a 65-second MCP call, and cancellation. It writes its requests
+and server logs to the temporary evidence directory printed at completion.
+It takes about two minutes and requires no account credentials. The ordinary
+test suite skips this check unless `OPENCODE_TEST_BINARY` is set.
+
+To remove the provider, follow [REMOVE.md](REMOVE.md).

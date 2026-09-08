@@ -1,0 +1,14 @@
+{
+  "notes": "The conformance harness stubs shell execution; this scenario supplies a supported seam response for deterministic footprint checks.",
+  "scenarios": [
+    {
+      "name": "supported core",
+      "exec": [
+        {
+          "match": "PROVIDER_HOST_CONTRACT_SEAM_VERSION",
+          "stdout": "yes\n"
+        }
+      ]
+    }
+  ]
+}
