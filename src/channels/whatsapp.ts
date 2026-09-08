@@ -431,6 +431,40 @@ registerChannelAdapter('whatsapp', {
     // Outgoing queue for messages sent while disconnected
     const outgoingQueue: Array<{ jid: string; text: string; mentions?: string[] }> = [];
     let flushing = false;
+    // Reconnection state. `reconnectTimer` is the single pending timer —
+    // tracked so we never schedule a duplicate (multiple disconnect events
+    // during a 440 storm would otherwise stack timers and fight each other)
+    // and so teardown() can cancel a pending attempt that would keep the
+    // event loop alive past process.exit(). `consecutiveFailures` drives
+    // exponential backoff: each failed attempt doubles the next delay,
+    // resetting on success.
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let consecutiveFailures = 0;
+
+    function scheduleReconnect(): void {
+      if (reconnectTimer !== null) {
+        log.debug('Reconnect already scheduled, skipping duplicate');
+        return;
+      }
+      // First attempt: immediate. Subsequent: 5s, 10s, 20s, 40s, capped at 60s.
+      const delayMs =
+        consecutiveFailures === 0
+          ? 0
+          : Math.min(RECONNECT_DELAY_MS * 2 ** (consecutiveFailures - 1), 60_000);
+      log.info('Reconnecting...', { delayMs, consecutiveFailures });
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connectSocket()
+          .then(() => {
+            consecutiveFailures = 0;
+          })
+          .catch((err) => {
+            consecutiveFailures++;
+            log.error('Reconnect failed', { err, consecutiveFailures });
+            scheduleReconnect();
+          });
+      }, delayMs);
+    }
 
     // Sent message cache for retry/re-encrypt requests
     const sentMessageCache = new Map<string, any>();
@@ -726,15 +760,7 @@ registerChannelAdapter('whatsapp', {
           log.info('WhatsApp connection closed', { reason, shouldReconnect, shuttingDown });
 
           if (shouldReconnect) {
-            log.info('Reconnecting...');
-            connectSocket().catch((err) => {
-              log.error('Failed to reconnect, retrying in 5s', { err });
-              setTimeout(() => {
-                connectSocket().catch((err2) => {
-                  log.error('Reconnection retry failed', { err: err2 });
-                });
-              }, RECONNECT_DELAY_MS);
-            });
+            scheduleReconnect();
           } else if (reason === DisconnectReason.loggedOut) {
             // Server-side logout (account unlinked, 401, etc.). Clear auth so
             // the next start prompts for a fresh pair — stale creds would
@@ -1084,7 +1110,26 @@ registerChannelAdapter('whatsapp', {
       async teardown() {
         shuttingDown = true;
         connected = false;
-        sock?.end(undefined);
+        // Cancel any pending reconnect timer. Without this, a timer scheduled
+        // just before teardown will fire after we've torn down — calling
+        // connectSocket() during shutdown, keeping the event loop alive past
+        // process.exit() being called, and ultimately stalling the host's
+        // graceful shutdown until systemd escalates to SIGKILL.
+        if (reconnectTimer !== null) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        // sock.end() / sock.ws.close() send a close-frame and await the
+        // server's ack. During a 440 storm the server doesn't ack, so the
+        // close hangs indefinitely. terminate() drops the underlying TCP
+        // connection without negotiation — which is what we want during
+        // teardown: stop talking, exit promptly.
+        const ws = (sock as unknown as { ws?: { terminate?: () => void } } | undefined)?.ws;
+        if (ws?.terminate) {
+          ws.terminate();
+        } else {
+          sock?.end(undefined);
+        }
         log.info('WhatsApp adapter shut down');
       },
 
