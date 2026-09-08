@@ -42,13 +42,17 @@ export const whatsappCloudRegistration: ChannelRegistration = {
     // (src/channels/whatsapp.ts, also channelType 'whatsapp') — last-write-wins
     // silently kills one channel. The instance key keeps them apart while
     // channelType stays 'whatsapp' (the semantic platform key). See #2911.
-    return createChatSdkBridge({
+    const bridge = createChatSdkBridge({
       adapter: whatsappAdapter,
       instance: 'whatsapp-cloud',
       concurrency: 'concurrent',
       supportsThreads: false,
       defaults: WHATSAPP_CLOUD_DEFAULTS,
     });
+    // Meta shows the indicator for 25 s per call (at Chat SDK 4.32 each call is a live
+    // Graph request that also marks the message read); the host re-fires before it expires.
+    bridge.typingTimeoutMs = 25_000;
+    return bridge;
   },
   defaults: WHATSAPP_CLOUD_DEFAULTS,
 };

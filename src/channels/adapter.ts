@@ -225,6 +225,14 @@ export interface ChannelAdapter {
     status?: string,
     statusKind?: 'auto' | 'agent',
   ): Promise<void>;
+
+  /**
+   * How long, in ms, the platform shows a typing indicator after one `setTyping`
+   * (Telegram ~5 s, WhatsApp Cloud 25 s); undeclared = 5000. The host re-fires it
+   * 20% before it would expire.
+   */
+  typingTimeoutMs?: number;
+
   syncConversations?(): Promise<ConversationInfo[]>;
   resolveChannelName?(platformId: string): Promise<string | null>;
 
