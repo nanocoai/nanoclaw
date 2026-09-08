@@ -46,6 +46,11 @@ export function loadConfig(): RunnerConfig {
   return _config;
 }
 
+/** Inject a config directly — for tests and the context-preview harness. */
+export function setTestConfig(config: RunnerConfig): void {
+  _config = config;
+}
+
 /** Build the runner config from a parsed container.json; missing fields take their defaults. */
 export function runnerConfigFromRaw(raw: Record<string, unknown>): RunnerConfig {
   return {
