@@ -101,6 +101,29 @@ describe('native host OpenCode lifecycle', () => {
     expect(findHostOpenCode(root)).toBeUndefined();
   });
 
+  it('accepts successful stderr-only help after installation and for later launches', async () => {
+    edge.spawnSync.mockImplementation((_binary: string, args: string[]) => ({
+      status: 0,
+      stdout: args[0] === '--help' ? '' : OPENCODE_HOST_INSTALL_VERSION,
+      stderr: args[0] === '--help' ? '      --prompt        prompt to use [string]' : '',
+    }));
+    expect(await hostOpenCode.prepare(root)).toBe('available');
+    const binary = path.join(root, 'data/host-harness/opencode/node_modules/.bin/opencode');
+    expect(findHostOpenCode(root)).toEqual({ binary, version: OPENCODE_HOST_INSTALL_VERSION });
+    expect(await hostOpenCode.launch(root)).toBe('exited');
+    expect(edge.spawn).toHaveBeenLastCalledWith(binary, [], { cwd: root, stdio: 'inherit' });
+  });
+
+  it('rejects failed help commands even when stderr names the maintenance option', () => {
+    touch(path.join(root, 'bin/opencode'));
+    edge.spawnSync.mockImplementation((_binary: string, args: string[]) => ({
+      status: args[0] === '--help' ? 1 : 0,
+      stdout: args[0] === '--help' ? '' : OPENCODE_HOST_INSTALL_VERSION,
+      stderr: args[0] === '--help' ? '      --prompt        prompt to use [string]' : '',
+    }));
+    expect(findHostOpenCode(root)).toBeUndefined();
+  });
+
   it('prefers a newer compatible native installation over the managed copy', () => {
     const native = path.join(root, 'bin/opencode');
     const managed = path.join(root, 'data/host-harness/opencode/node_modules/.bin/opencode');

@@ -37,7 +37,8 @@ function supportsMaintenancePrompt(binary: string, root: string): boolean {
     timeout: 10_000,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  return result.status === 0 && /^\s+--prompt\b/m.test(result.stdout);
+  // The pinned CLI writes successful help to stderr.
+  return result.status === 0 && /^\s+--prompt\b/m.test(`${result.stdout}\n${result.stderr}`);
 }
 
 export function findHostOpenCode(root: string): { binary: string; version: string } | undefined {
