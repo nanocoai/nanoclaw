@@ -497,8 +497,16 @@ async function main(): Promise<void> {
       providerEntry = getSetupProvider(agentProvider);
     }
     if (providerEntry?.runAuth) {
-      await providerEntry.runAuth();
-      await providerEntry.runInstallCheck?.();
+      try {
+        await providerEntry.runAuth();
+        await providerEntry.runInstallCheck?.();
+      } catch (err) {
+        await fail(
+          'auth',
+          `Couldn't authenticate or verify ${agentProvider}.`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
     } else {
       await runAuthStep();
     }

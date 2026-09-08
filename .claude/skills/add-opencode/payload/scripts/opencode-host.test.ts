@@ -12,11 +12,12 @@ const edge = vi.hoisted(() => ({
   nativeHome: '',
   exitCode: 0,
   postinstallExitCode: 0,
+  warn: vi.fn(),
 }));
 vi.mock('@clack/prompts', () => ({
   confirm: edge.confirm,
   isCancel: (v: unknown) => typeof v === 'symbol',
-  log: { info: vi.fn(), warn: vi.fn() },
+  log: { info: vi.fn(), warn: edge.warn },
   note: vi.fn(),
 }));
 vi.mock('child_process', () => ({ spawn: edge.spawn, spawnSync: edge.spawnSync }));
@@ -45,7 +46,10 @@ beforeEach(() => {
   vi.stubEnv('PATH', path.join(root, 'bin'));
   vi.clearAllMocks();
   edge.confirm.mockResolvedValue(true);
-  edge.spawnSync.mockReturnValue({ status: 0, stdout: OPENCODE_HOST_INSTALL_VERSION });
+  edge.spawnSync.mockImplementation((_binary: string, args: string[]) => ({
+    status: 0,
+    stdout: args[0] === '--help' ? '      --prompt        prompt to use [string]' : OPENCODE_HOST_INSTALL_VERSION,
+  }));
   edge.spawn.mockImplementation((binary: string, args: string[]) => {
     if (binary === 'npm' && edge.exitCode === 0) {
       touch(path.join(args[args.indexOf('--prefix') + 1], 'node_modules/.bin/opencode'));
@@ -74,13 +78,44 @@ describe('native host OpenCode lifecycle', () => {
     const config = path.join(edge.nativeHome, '.config/opencode/opencode.json');
     touch(binary, 'existing binary');
     touch(config, '{"model":"user/chosen-model"}');
-    edge.spawnSync.mockReturnValue({ status: 0, stdout: '1.18.26' });
+    edge.spawnSync.mockImplementation((_binary: string, args: string[]) => ({
+      status: 0,
+      stdout: args[0] === '--help' ? '      --prompt        prompt to use [string]' : '1.18.26',
+    }));
     expect(await hostOpenCode.prepare(root)).toBe('available');
     expect(findHostOpenCode(root)).toEqual({ binary, version: '1.18.26' });
     expect(fs.readFileSync(binary, 'utf8')).toBe('existing binary');
     expect(fs.readFileSync(config, 'utf8')).toBe('{"model":"user/chosen-model"}');
     expect(edge.spawn).not.toHaveBeenCalled();
     expect(edge.confirm).not.toHaveBeenCalled();
+  });
+
+  it('rejects an old CLI and one without the maintenance prompt option', () => {
+    touch(path.join(root, 'bin/opencode'));
+    edge.spawnSync.mockReturnValue({ status: 0, stdout: '1.18.24' });
+    expect(findHostOpenCode(root)).toBeUndefined();
+    edge.spawnSync.mockImplementation((_binary: string, args: string[]) => ({
+      status: 0,
+      stdout: args[0] === '--help' ? 'Usage: opencode [project]' : '1.18.25',
+    }));
+    expect(findHostOpenCode(root)).toBeUndefined();
+  });
+
+  it('prefers a newer compatible native installation over the managed copy', () => {
+    const native = path.join(root, 'bin/opencode');
+    const managed = path.join(root, 'data/host-harness/opencode/node_modules/.bin/opencode');
+    touch(native);
+    touch(managed);
+    edge.spawnSync.mockImplementation((binary: string, args: string[]) => ({
+      status: 0,
+      stdout:
+        args[0] === '--help'
+          ? '      --prompt        prompt to use [string]'
+          : binary === native
+            ? '1.19.0'
+            : '1.18.25',
+    }));
+    expect(findHostOpenCode(root)).toEqual({ binary: native, version: '1.19.0' });
   });
 
   it('installs the exact CLI and runs only its native linker inside this checkout', async () => {
@@ -108,11 +143,11 @@ describe('native host OpenCode lifecycle', () => {
     expect(fs.existsSync(path.join(root, 'package.json'))).toBe(false);
   });
 
-  it('treats declined installation, cancellation, and installer failure as unavailable', async () => {
-    for (const value of [false, Symbol('cancel')]) {
-      edge.confirm.mockResolvedValueOnce(value);
-      expect(await hostOpenCode.prepare(root)).toBe('declined');
-    }
+  it('distinguishes declined installation, cancellation, and installer failure', async () => {
+    edge.confirm.mockResolvedValueOnce(false);
+    expect(await hostOpenCode.prepare(root)).toBe('declined');
+    edge.confirm.mockResolvedValueOnce(Symbol('cancel'));
+    expect(await hostOpenCode.prepare(root)).toBe('cancelled');
     expect(edge.spawn).not.toHaveBeenCalled();
     edge.exitCode = 1;
     expect(await hostOpenCode.prepare(root)).toBe('unavailable');
@@ -149,7 +184,7 @@ describe('native host OpenCode lifecycle', () => {
 });
 
 describe('existing setup failure-assist hook', () => {
-  const context = { stepName: 'auth', msg: 'PRIVATE FAILURE DETAIL' };
+  const context = { stepName: 'auth', msg: 'PRIVATE FAILURE DETAIL', hint: 'Authentication callback failed' };
   it('registers and invokes the installed provider hook with private temporary context', async () => {
     await import('../setup/providers/index.js');
     const { getSetupProvider } = await import('../setup/providers/registry.js');
@@ -158,6 +193,7 @@ describe('existing setup failure-assist hook', () => {
     edge.spawn.mockImplementation((_binary: string, args: string[]) => {
       contextFile = JSON.parse(args[1].slice('Read '.length).split(' and follow')[0]);
       expect(fs.readFileSync(contextFile, 'utf8')).toContain('PRIVATE FAILURE DETAIL');
+      expect(fs.readFileSync(contextFile, 'utf8')).toContain('Authentication callback failed');
       expect(fs.statSync(contextFile).mode & 0o777).toBe(0o600);
       expect(fs.statSync(path.dirname(contextFile)).mode & 0o777).toBe(0o700);
       expect(JSON.stringify(args)).not.toContain('PRIVATE FAILURE DETAIL');
@@ -180,10 +216,21 @@ describe('existing setup failure-assist hook', () => {
     });
     expect(await offerOpenCodeFailureAssist(context, root)).toBe('unavailable');
   });
+  it('allows guarded fallback when help was accepted but installing OpenCode was declined', async () => {
+    edge.confirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    expect(await offerOpenCodeFailureAssist(context, root)).toBe('unavailable');
+    expect(edge.spawn).not.toHaveBeenCalled();
+  });
+  it('preserves cancellation at the installation prompt', async () => {
+    edge.confirm.mockResolvedValueOnce(true).mockResolvedValueOnce(Symbol('cancel'));
+    expect(await offerOpenCodeFailureAssist(context, root)).toBe('declined');
+    expect(edge.spawn).not.toHaveBeenCalled();
+  });
   it('does not launch a second assistant after OpenCode runs but exits unsuccessfully', async () => {
     touch(path.join(root, 'bin/opencode'));
     edge.exitCode = 1;
     expect(await offerOpenCodeFailureAssist(context, root)).toBe('launched');
+    expect(edge.warn).toHaveBeenCalledWith(expect.stringContaining('exited unsuccessfully'));
   });
   it('routes standalone update work to the existing update skill', async () => {
     touch(path.join(root, 'bin/opencode'));

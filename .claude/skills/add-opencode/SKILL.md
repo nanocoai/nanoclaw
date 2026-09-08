@@ -38,7 +38,12 @@ for host OpenCode setup, or use `--update` / `--debug` for the corresponding
 operational skill. An existing OpenCode CLI can also run directly in the checkout;
 it discovers `.claude/skills` natively. Host sign-in uses OpenCode's own settings
 and is independent of the container's OneCLI credentials. Installed setup failures
-use the existing provider failure-assist hook. Automatic help before payload
+use the existing provider failure-assist hook, including wizard authentication
+and installation-check failures. Host diagnostic context is model input and may
+remain in native OpenCode history; deleting its private temporary file does not
+erase those records. The helper requires stable OpenCode 1.18.25 or newer with
+`--prompt` and prefers the newest compatible installation it finds.
+Automatic help before payload
 installation is optional and is not part of the runtime contract.
 
 Install and refresh require host contract version 1. The compatibility predicate

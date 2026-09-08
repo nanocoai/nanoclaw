@@ -10,11 +10,16 @@ need. Provider-specific implementation and acceptance fixes remain in the payloa
 ## Host help
 
 After `/add-opencode` copies the payload, the installed setup entry registers
-`offerFailureAssist`. It offers OpenCode, detects an existing CLI or offers the
-pinned local installation, writes a private temporary diagnostic context file,
+`offerFailureAssist`. It offers OpenCode, detects a compatible CLI or offers the
+pinned local installation, writes a temporary diagnostic context file with private filesystem permissions,
 and launches the CLI in the checkout with its native permissions. The context
-file is removed on return. A failed CLI exit does not establish that setup was
-repaired; retry the failed step to verify it. The existing shared dispatcher calls this hook after the provider is selected
+file is removed on return. Its contents become model input when OpenCode reads it
+and may remain in native OpenCode history. Removing the temporary file does not
+erase that history or records held by the configured model provider.
+A failed CLI exit does not establish that setup was repaired; retry the failed
+step to verify it. Declining the installation after accepting help permits the
+existing guarded Claude fallback. Cancelling a prompt or declining the initial
+help offer ends the handoff. The existing shared dispatcher calls this hook after the provider is selected
 and its setup entry is registered. Its guarded Claude fallback is unchanged.
 Explicit `?` help, early failures before registration, and saved-default routing
 retain their existing core behavior; this payload does not extend those paths.
@@ -31,6 +36,9 @@ An existing `opencode` executable can also run directly in the checkout. It
 natively discovers `.claude/skills`, including debugging and update instructions.
 Host credentials and model configuration remain native to OpenCode, independent
 of the container's OneCLI gateway. Existing native settings are preserved.
+The helper requires stable OpenCode 1.18.25 or newer with the `--prompt` option.
+It selects the newest compatible installation it finds, so an older managed copy
+does not shadow a newer native CLI.
 
 Before payload installation, automatic provider help would require an optional
 pointer in setup metadata. This candidate does not add that extension. The
