@@ -378,6 +378,11 @@ export async function processQuery(
    */
   midTurnCompleteDelivery = false,
 ): Promise<QueryResult> {
+  // Turn adoption (below) rewrites the routing as later messages are
+  // answered. Work on a copy so the caller's batch routing stays the first
+  // message's: a query error notice is addressed there, not to whichever
+  // follow-up happened to be answered last.
+  routing = { ...routing };
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;

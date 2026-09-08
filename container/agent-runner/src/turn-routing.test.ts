@@ -182,3 +182,70 @@ describe('reply stamp — startup', () => {
     expect(getCurrentReplyRoute()).toBeNull();
   });
 });
+
+/** Answers turn 1, answers one pushed follow-up, then the stream fails. */
+class FailingAfterFollowUpProvider extends MockProvider {
+  query(_input: QueryInput): AgentQuery {
+    const pending: string[] = [];
+    let waiting: (() => void) | null = null;
+    let aborted = false;
+    const events: AsyncIterable<ProviderEvent> = {
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'init', continuation: 'fail-session' };
+        yield { type: 'text', text: '<message to="slack-test">done A</message>' };
+        yield { type: 'result', text: '<message to="slack-test">done A</message>' };
+        while (!aborted) {
+          if (pending.length > 0) {
+            pending.shift();
+            yield { type: 'text', text: '<message to="slack-test">done B</message>' };
+            yield { type: 'result', text: '<message to="slack-test">done B</message>' };
+            throw new Error('stream broke');
+          }
+          await new Promise<void>((r) => (waiting = r));
+          waiting = null;
+        }
+      },
+    };
+    return {
+      push: (m: string) => {
+        pending.push(m);
+        waiting?.();
+      },
+      end: () => {},
+      abort: () => {
+        aborted = true;
+        waiting?.();
+      },
+      events,
+    };
+  }
+}
+
+describe('turn routing — a query error after later turns', () => {
+  it('addresses the error notice to the batch that opened the query, not the last turn', async () => {
+    insertMessage('m-a', 'first question', 'thread-A');
+    const provider = new FailingAfterFollowUpProvider();
+    const controller = new AbortController();
+    const loop = runPollLoop({
+      provider,
+      providerContract: CONTRACT,
+      providerName: 'mock',
+      cwd: '/tmp',
+      signal: controller.signal,
+    });
+
+    await waitFor(() => getUndeliveredMessages().length >= 1, 3000);
+    await sleep(300); // turn 1 over, query open
+    insertMessage('m-b', 'second question', 'thread-B');
+    await waitFor(() => getUndeliveredMessages().length >= 3, 5000); // done B + error notice
+    controller.abort();
+    await loop.catch(() => {});
+
+    const out = getUndeliveredMessages().map((m) => [JSON.parse(m.content).text, m.thread_id]);
+    expect(out).toEqual([
+      ['done A', 'thread-A'],
+      ['done B', 'thread-B'],
+      ['Error: stream broke', 'thread-A'],
+    ]);
+  });
+});
