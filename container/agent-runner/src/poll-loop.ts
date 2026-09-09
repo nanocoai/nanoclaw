@@ -10,6 +10,7 @@ import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { resolveDestinationThread } from './db/session-routing.js';
 import { touchHeartbeat } from './heartbeat.js';
+import { usageBlockNotice } from './usage-block-notice.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import {
   clearContinuation,
@@ -289,14 +290,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuation(config.providerName);
       }
 
-      // Write error response so the user knows something went wrong
+      // Write error response so the user knows something went wrong. A
+      // spent usage allowance is the one failure we can name in plain words
+      // instead of handing over a problem document.
+      const notice = usageBlockNotice(errMsg);
       await writeMessageOut({
         id: generateId(),
         kind: 'chat',
         platform_id: routing.platformId,
         channel_type: routing.channelType,
         thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        content: JSON.stringify({ text: notice ?? `Error: ${errMsg}` }),
       });
 
       // The batch is still acked completed below (no redelivery). Without
@@ -758,6 +762,10 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  */
 async function deliverErrorResult(text: string, routing: RoutingContext): Promise<void> {
   log('Error result with no <message> envelope — delivering to channel');
+  // The refusal a spent allowance produces is a problem document. Say what
+  // happened instead, and keep the document in the log for whoever debugs it.
+  const notice = usageBlockNotice(text);
+  if (notice) log(`Usage block delivered as a notice — provider text: ${text}`);
   await writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,
@@ -765,7 +773,7 @@ async function deliverErrorResult(text: string, routing: RoutingContext): Promis
     platform_id: routing.platformId,
     channel_type: routing.channelType,
     thread_id: routing.threadId,
-    content: JSON.stringify({ text: stripHarnessTagArtifacts(text) }),
+    content: JSON.stringify({ text: notice ?? stripHarnessTagArtifacts(text) }),
   });
 }
 
