@@ -72,38 +72,46 @@ export function getInboundDb(): Database {
   return _inbound;
 }
 
-/** Outbound DB — container owns this file (sole writer). */
-export function getOutboundDb(): Database {
-  if (!_outbound) {
-    _outbound = new Database(DEFAULT_OUTBOUND_PATH);
-    _outbound.exec('PRAGMA journal_mode = DELETE');
-    _outbound.exec('PRAGMA busy_timeout = 5000');
-    _outbound.exec('PRAGMA foreign_keys = ON');
-    // Lightweight forward-compat: session_state was added after the initial
-    // v2 schema, so older session DBs don't have it. Create it on demand
-    // instead of requiring a formal migration pass. Also handle the case
-    // where an earlier revision of this table existed without updated_at —
-    // ALTER TABLE to add any missing columns.
-    _outbound.exec(`
+/**
+ * Opens and initializes the outbound connection at `path`. Exported (in
+ * addition to `getOutboundDb`, which memoizes this against the container's
+ * single real outbound.db) so tests can open a real on-disk file directly
+ * and exercise the exact opener body — including its PRAGMA order — without
+ * going through the process-wide singleton.
+ */
+export function openOutboundConnection(path: string): Database {
+  const db = new Database(path);
+  // busy_timeout must be set BEFORE journal_mode: switching journal mode
+  // takes an exclusive lock, and a connection that hasn't set busy_timeout
+  // yet fails that lock attempt immediately with SQLITE_BUSY instead of
+  // waiting — observed against a sibling process (e.g. an MCP server) mid
+  // write-transaction on this same file.
+  db.exec('PRAGMA busy_timeout = 5000');
+  db.exec('PRAGMA journal_mode = DELETE');
+  db.exec('PRAGMA foreign_keys = ON');
+  // Lightweight forward-compat: session_state was added after the initial
+  // v2 schema, so older session DBs don't have it. Create it on demand
+  // instead of requiring a formal migration pass. Also handle the case
+  // where an earlier revision of this table existed without updated_at —
+  // ALTER TABLE to add any missing columns.
+  db.exec(`
       CREATE TABLE IF NOT EXISTS session_state (
         key        TEXT PRIMARY KEY,
         value      TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
     `);
-    const cols = new Set(
-      (_outbound.prepare("PRAGMA table_info('session_state')").all() as Array<{ name: string }>).map((c) => c.name),
-    );
-    if (!cols.has('updated_at')) {
-      _outbound.exec(
-        `ALTER TABLE session_state ADD COLUMN updated_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z'`,
-      );
-    }
-    _outbound.exec(`UPDATE session_state SET updated_at = '1970-01-01T00:00:00.000Z' WHERE updated_at = ''`);
-    // container_state: tracks the current tool in flight (if any) so the host
-    // sweep can widen its stuck tolerance when Bash is running with a user-
-    // declared long timeout. Forward-compat for older outbound.db files.
-    _outbound.exec(`
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info('session_state')").all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  if (!cols.has('updated_at')) {
+    db.exec(`ALTER TABLE session_state ADD COLUMN updated_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z'`);
+  }
+  db.exec(`UPDATE session_state SET updated_at = '1970-01-01T00:00:00.000Z' WHERE updated_at = ''`);
+  // container_state: tracks the current tool in flight (if any) so the host
+  // sweep can widen its stuck tolerance when Bash is running with a user-
+  // declared long timeout. Forward-compat for older outbound.db files.
+  db.exec(`
       CREATE TABLE IF NOT EXISTS container_state (
         id                       INTEGER PRIMARY KEY CHECK (id = 1),
         current_tool             TEXT,
@@ -112,6 +120,13 @@ export function getOutboundDb(): Database {
         updated_at               TEXT NOT NULL
       );
     `);
+  return db;
+}
+
+/** Outbound DB — container owns this file (sole writer). */
+export function getOutboundDb(): Database {
+  if (!_outbound) {
+    _outbound = openOutboundConnection(DEFAULT_OUTBOUND_PATH);
   }
   return _outbound;
 }
