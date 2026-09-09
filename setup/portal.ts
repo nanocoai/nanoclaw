@@ -3,7 +3,13 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as p from '@clack/prompts';
 import { openUrl } from './lib/browser.js';
-import { readImageSource, readRegistryAccount, writeImageSource } from './lib/registry-state.js';
+import {
+  clearImageSource,
+  imageSourceDecided,
+  readImageSource,
+  readRegistryAccount,
+  writeImageSource,
+} from './lib/registry-state.js';
 import { LoginError, finishDeviceFlow, startDeviceFlow, type DeviceFlow } from './registry-login.js';
 import {
   SetupClient,
@@ -116,11 +122,22 @@ async function signInThroughPortal(client: SetupClient, stage: PortalStage, name
     `No browser on this machine? Sign in from another device instead:\nCode: ${flow.device.userCode}\n${verificationUri}\n\n`,
   );
   openUrl(setup.url);
+  // Persisting the credential also records "this install pulls", because on
+  // the sign-in driver's own path signing in is the opt-in. Here it is not:
+  // the browser decides the image after this, and `wait()` writes that answer.
+  // Put the question back to where it was, so a run that ends before the
+  // answer (Ctrl-C, an expired link, a crash) neither pulls an image nobody
+  // enabled nor skips the question on the next run.
+  const decided = imageSourceDecided();
+  const prior = readImageSource();
   try {
     await finishDeviceFlow(flow);
   } catch (error) {
     skippedSignIn(error);
     return false;
+  } finally {
+    if (decided) writeImageSource(prior);
+    else clearImageSource();
   }
   const { identity, deviceKey } = await portalIdentity();
   client.identity = identity;

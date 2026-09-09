@@ -13,6 +13,8 @@ const mock = vi.hoisted(() => ({
   start: vi.fn(),
   stop: vi.fn(),
   image: vi.fn(),
+  clear: vi.fn(),
+  decided: false,
   deviceStart: vi.fn(),
   deviceFinish: vi.fn(),
   claim: vi.fn(),
@@ -106,7 +108,9 @@ vi.mock('./registry-login.js', () => ({
 vi.mock('./lib/registry-state.js', () => ({
   readRegistryAccount: mock.account,
   readImageSource: () => 'local',
+  imageSourceDecided: () => mock.decided,
   writeImageSource: mock.image,
+  clearImageSource: mock.clear,
 }));
 vi.mock('@clack/prompts', () => ({
   confirm: mock.confirm,
@@ -170,6 +174,7 @@ describe('browser setup handoffs', () => {
     mock.confirm.mockResolvedValue(true);
     mock.result.status = 'approved';
     mock.result.choice.imageSource = 'local';
+    mock.decided = false;
     mock.request.mockResolvedValue({ activations: { echo: { enabled: false }, slack: { enabled: false } } });
   });
   it('registers the signed-in machine with its device key and applies the image choice without a second sign-in', async () => {
@@ -211,6 +216,23 @@ describe('browser setup handoffs', () => {
     expect(mock.reconcile).toHaveBeenCalledOnce();
     expect(mock.image).toHaveBeenCalledExactlyOnceWith('local');
     expect(mock.complete).toHaveBeenCalledOnce();
+  });
+  it('leaves the image question to the browser: the sign-in must not decide it', async () => {
+    mock.account.mockReturnValue(undefined);
+    await runImagePortal();
+    // Sign-in persisted the credential (and with it "pull"); the question is put
+    // back before the browser answers, and only the answer is written.
+    expect(mock.clear).toHaveBeenCalledOnce();
+    expect(mock.deviceFinish.mock.invocationCallOrder[0]).toBeLessThan(mock.clear.mock.invocationCallOrder[0]);
+    expect(mock.clear.mock.invocationCallOrder[0]).toBeLessThan(mock.image.mock.invocationCallOrder[0]);
+    expect(mock.image).toHaveBeenCalledExactlyOnceWith('local');
+    // An answer given earlier (a re-run of the stage) is restored, not cleared.
+    mock.decided = true;
+    await runImagePortal();
+    expect(mock.clear).toHaveBeenCalledOnce();
+    expect(mock.image).toHaveBeenNthCalledWith(2, 'local');
+    expect(mock.image).toHaveBeenNthCalledWith(3, 'local');
+    expect(mock.image.mock.invocationCallOrder[1]).toBeLessThan(mock.claim.mock.invocationCallOrder[1]);
   });
   it('skips the stage when the device flow is declined, expires, fails to start, or the user declines the offer', async () => {
     mock.account.mockReturnValue(undefined);
