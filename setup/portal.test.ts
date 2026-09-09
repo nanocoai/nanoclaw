@@ -234,6 +234,29 @@ describe('browser setup handoffs', () => {
     expect(mock.image).toHaveBeenNthCalledWith(3, 'local');
     expect(mock.image.mock.invocationCallOrder[1]).toBeLessThan(mock.claim.mock.invocationCallOrder[1]);
   });
+  it('on the first run, completes only once the image is in place, and reopens the question when it is not', async () => {
+    mock.result.choice.imageSource = 'hardened';
+    const apply = vi.fn();
+    await runImagePortal({ apply });
+    expect(mock.image).toHaveBeenCalledExactlyOnceWith('hardened');
+    expect(mock.image.mock.invocationCallOrder[0]).toBeLessThan(apply.mock.invocationCallOrder[0]);
+    expect(apply.mock.invocationCallOrder[0]).toBeLessThan(mock.complete.mock.invocationCallOrder[0]);
+    expect(mock.complete).toHaveBeenCalledExactlyOnceWith();
+    expect(mock.clear).not.toHaveBeenCalled();
+    vi.clearAllMocks();
+    await expect(
+      runImagePortal({
+        apply: async () => {
+          throw new Error('pull failed');
+        },
+      }),
+    ).rejects.toThrow('pull failed');
+    expect(mock.complete).toHaveBeenCalledExactlyOnceWith('failed');
+    // No answer had been recorded before this run, so none is left behind.
+    expect(mock.clear).toHaveBeenCalledOnce();
+    expect(mock.image).toHaveBeenCalledExactlyOnceWith('hardened');
+    expect(mock.image.mock.invocationCallOrder[0]).toBeLessThan(mock.clear.mock.invocationCallOrder[0]);
+  });
   it('skips the stage when the device flow is declined, expires, fails to start, or the user declines the offer', async () => {
     mock.account.mockReturnValue(undefined);
     mock.deviceFinish.mockRejectedValueOnce(
@@ -417,7 +440,7 @@ describe('browser setup handoffs', () => {
       expect(mock.complete).not.toHaveBeenCalled();
       expect(mock.image).toHaveBeenLastCalledWith('hardened');
     });
-    const enable = vi.fn(() => runImagePortal({ browserConsent: true, apply }));
+    const enable = vi.fn(() => runImagePortal({ browserConsent: true, later: true, apply }));
     expect(await offerPortalReminder('echo', enable)).toBe(true);
     expect(mock.confirm).toHaveBeenCalledTimes(2);
     expect(apply).toHaveBeenCalledOnce();
@@ -465,10 +488,12 @@ describe('browser setup handoffs', () => {
   });
 
   it('keeps the working image and leaves the reminder retryable if the late image pull fails', async () => {
+    mock.decided = true;
     mock.result.choice.imageSource = 'hardened';
     const enable = () =>
       runImagePortal({
         browserConsent: true,
+        later: true,
         apply: async () => {
           throw new Error('pull failed');
         },
@@ -481,7 +506,7 @@ describe('browser setup handoffs', () => {
     mock.request.mockResolvedValue({ activations: { echo: { enabled: true } } });
     mock.resume.mockResolvedValue(true);
     const pull = vi.fn();
-    await offerPortalReminder('echo', () => runImagePortal({ browserConsent: true, apply: pull }));
+    await offerPortalReminder('echo', () => runImagePortal({ browserConsent: true, later: true, apply: pull }));
     expect(mock.confirm).toHaveBeenCalledOnce();
     expect(pull).toHaveBeenCalledOnce();
     expect(mock.local.reminderPending.echo).toBeUndefined();
@@ -500,7 +525,7 @@ describe('browser setup handoffs', () => {
   it('does not change or pull the image after dismissing the later browser offer', async () => {
     mock.result.status = 'skipped';
     const apply = vi.fn();
-    await runImagePortal({ browserConsent: true, apply });
+    await runImagePortal({ browserConsent: true, later: true, apply });
     expect(mock.image).not.toHaveBeenCalled();
     expect(apply).not.toHaveBeenCalled();
     expect(mock.complete).not.toHaveBeenCalled();

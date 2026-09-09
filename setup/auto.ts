@@ -258,59 +258,19 @@ async function main(): Promise<void> {
       brandBody(dimWrap('Your assistant lives in its own sandbox. It can only see what you explicitly share.', 4)),
     );
     // Asked before the step runs, because the step is what acts on the answer.
-    await chooseImageSource();
-    p.log.message(
-      brandBody(
-        dimWrap(
-          readImageSource() === 'hardened'
-            ? 'Fetching the hardened image now. It is a large download, so this step takes a few minutes.'
-            : 'The first build pulls a base image and installs a few tools. On a fresh machine this usually takes 3–10 minutes.',
-          4,
-        ),
-      ),
-    );
-    const res = await runWindowedStep('container', {
-      running: "Preparing your assistant's sandbox…",
-      done: 'Sandbox ready.',
-      failed: "Couldn't prepare the sandbox.",
-    });
-    if (!res.ok) {
-      const err = res.terminal?.fields.ERROR;
-      if (err === 'runtime_not_available') {
-        await fail(
-          'container',
-          "Docker isn't available.",
-          'Install Docker Desktop (or start it if already installed), then retry.',
-        );
-      }
-      if (err === 'docker_group_not_active') {
-        await fail(
-          'container',
-          "Docker was just installed but your shell doesn't know yet.",
-          'Log out and back in (or run `newgrp docker` in a new shell), then retry.',
-        );
-      }
-      // The pull path fails for reasons a build never has, and "prune the build
-      // cache" is useless advice for both of them.
-      if (err === 'image_ref_not_configured') {
-        await fail(
-          'container',
-          'This install is set to fetch a pre-built sandbox image, but nothing says which one.',
-          `Set ${AGENT_IMAGE_REF_ENV_KEY} in .env (or add an "${AGENT_IMAGE_PIN}" pin to versions.json), or run \`${REGISTRY_STEP} -- --opt-out\` to build it here instead.`,
-        );
-      }
-      if (err === 'image_pull_failed') {
-        await fail(
-          'container',
-          "Couldn't fetch the sandbox image.",
-          `Check your connection and that authentication finished, then retry — or run \`${REGISTRY_STEP} -- --opt-out\` to build it here instead.`,
-        );
-      }
-      await fail(
-        'container',
-        "Couldn't build the sandbox.",
-        'If Docker has a stale cache, try: `docker builder prune -f`, then retry.',
-      );
+    // On the portal path the stage runs the step itself, so the portal's
+    // record is the outcome on this machine; a failure there surfaces here.
+    let ran = false;
+    try {
+      ran = await chooseImageSource();
+    } catch (error) {
+      const res = (error as { containerStep?: ContainerStepResult }).containerStep;
+      if (res) await failContainerStep(res);
+      throw error;
+    }
+    if (!ran) {
+      const res = await runContainerStep();
+      if (!res.ok) await failContainerStep(res);
     }
     maybeReexecUnderSg();
   }
@@ -538,6 +498,7 @@ async function main(): Promise<void> {
       await offerPortalReminder('echo', () =>
         runImagePortal({
           browserConsent: true,
+          later: true,
           apply: async () => {
             const res = await runWindowedStep('container', {
               running: 'Fetching Echo’s hardened image…',
@@ -1359,10 +1320,11 @@ async function askNewTemplateAgentName(agents: readonly AgentGroup[], initialVal
  * operator would be asked again after already signing in.
  *
  * Returns having done nothing when the question is already settled, which also
- * covers `NANOCLAW_HARDENED_IMAGE=true` passed in by a packaged flow.
+ * covers `NANOCLAW_HARDENED_IMAGE=true` passed in by a packaged flow. Resolves
+ * true when the container step already ran inside the portal stage.
  */
-async function chooseImageSource(): Promise<void> {
-  if (imageSourceDecided()) return;
+async function chooseImageSource(): Promise<boolean> {
+  if (imageSourceDecided()) return false;
 
   // The runtime pick happens later (the auth step), so this is the best signal
   // available: an explicit preset, else the persisted install-wide default.
@@ -1378,17 +1340,26 @@ async function chooseImageSource(): Promise<void> {
         `Building the sandbox here — the pre-built image is Claude-only, and ${plannedProvider} needs an image of its own.`,
       ),
     );
-    return;
+    return false;
   }
 
   // Nothing to fetch unless this copy ships a pinned image reference. Offering
   // the choice anyway would take an account, a sign-in and a token from someone
   // whose install then has no image to pull — so don't ask a question whose
   // good answer cannot be honoured.
-  if (!readAgentImagePin()) return;
+  if (!readAgentImagePin()) return false;
   if (portalEnabled()) {
-    await runImagePortal();
-    return;
+    // The container step runs inside the stage: the portal hears `complete`
+    // only once the chosen image is in place on this machine.
+    let ran = false;
+    await runImagePortal({
+      apply: async () => {
+        ran = true;
+        const res = await runContainerStep();
+        if (!res.ok) throw Object.assign(new Error('The sandbox image could not be prepared.'), { containerStep: res });
+      },
+    });
+    return ran;
   }
 
   p.log.message(
@@ -1438,12 +1409,12 @@ async function chooseImageSource(): Promise<void> {
   phEmit('image_source_chosen', { source: choice });
 
   writeImageSource(choice);
-  if (choice === 'local') return;
+  if (choice === 'local') return false;
 
   if (!loginScriptAvailable()) {
     p.log.warn(brandBody(`This copy of NanoClaw has no ${REGISTRY_LOGIN_SCRIPT} — building the sandbox here instead.`));
     writeImageSource('local');
-    return;
+    return false;
   }
 
   p.log.step(brandBody('Authenticating with NanoClaw…'));
@@ -1472,11 +1443,72 @@ async function chooseImageSource(): Promise<void> {
       ),
     );
     p.log.message(k.dim(`Re-run setup to try again, or check with \`${REGISTRY_STEP} -- --status\`.`));
-    return;
+    return false;
   }
 
   setupLog.step('registry-login', 'interactive', durationMs, {});
   p.log.success(brandBody("Authenticated. Your assistant's sandbox will be fetched, not built."));
+  return false;
+}
+
+type ContainerStepResult = Awaited<ReturnType<typeof runWindowedStep>>;
+
+/** The sandbox image step, announced as a fetch or a build according to the answer. */
+async function runContainerStep(): Promise<ContainerStepResult> {
+  p.log.message(
+    brandBody(
+      dimWrap(
+        readImageSource() === 'hardened'
+          ? 'Fetching the hardened image now. It is a large download, so this step takes a few minutes.'
+          : 'The first build pulls a base image and installs a few tools. On a fresh machine this usually takes 3–10 minutes.',
+        4,
+      ),
+    ),
+  );
+  return runWindowedStep('container', {
+    running: "Preparing your assistant's sandbox…",
+    done: 'Sandbox ready.',
+    failed: "Couldn't prepare the sandbox.",
+  });
+}
+
+async function failContainerStep(res: ContainerStepResult): Promise<void> {
+  const err = res.terminal?.fields.ERROR;
+  if (err === 'runtime_not_available') {
+    await fail(
+      'container',
+      "Docker isn't available.",
+      'Install Docker Desktop (or start it if already installed), then retry.',
+    );
+  }
+  if (err === 'docker_group_not_active') {
+    await fail(
+      'container',
+      "Docker was just installed but your shell doesn't know yet.",
+      'Log out and back in (or run `newgrp docker` in a new shell), then retry.',
+    );
+  }
+  // The pull path fails for reasons a build never has, and "prune the build
+  // cache" is useless advice for both of them.
+  if (err === 'image_ref_not_configured') {
+    await fail(
+      'container',
+      'This install is set to fetch a pre-built sandbox image, but nothing says which one.',
+      `Set ${AGENT_IMAGE_REF_ENV_KEY} in .env (or add an "${AGENT_IMAGE_PIN}" pin to versions.json), or run \`${REGISTRY_STEP} -- --opt-out\` to build it here instead.`,
+    );
+  }
+  if (err === 'image_pull_failed') {
+    await fail(
+      'container',
+      "Couldn't fetch the sandbox image.",
+      `Check your connection and that authentication finished, then retry — or run \`${REGISTRY_STEP} -- --opt-out\` to build it here instead.`,
+    );
+  }
+  await fail(
+    'container',
+    "Couldn't build the sandbox.",
+    'If Docker has a stale cache, try: `docker builder prune -f`, then retry.',
+  );
 }
 
 async function askAgentProviderChoice(): Promise<string> {

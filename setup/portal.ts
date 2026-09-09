@@ -263,25 +263,36 @@ export async function beginPortal(
   }
 }
 
+/**
+ * `apply` puts the chosen image in place (the container step) before the
+ * portal hears `complete`, so what it records is the outcome on this machine,
+ * not the click. `later` marks a repeat offer: a skip then keeps the choice
+ * already made instead of recording a decline.
+ */
 export async function runImagePortal(
-  options: { browserConsent?: boolean; apply?: () => Promise<void> } = {},
+  options: { browserConsent?: boolean; apply?: () => Promise<void>; later?: boolean } = {},
 ): Promise<void> {
+  const decided = imageSourceDecided();
   const previous = readImageSource();
   const client = await beginPortal('echo', 'Nano', options);
   if (!client) {
-    if (!options.apply) writeImageSource('local');
+    if (!options.later) writeImageSource('local');
     return;
   }
   try {
     const result = await client.wait();
     await client.reconcile();
-    if (result.status === 'skipped' && options.apply) return;
+    if (result.status === 'skipped' && options.later) return;
     writeImageSource(result.choice.imageSource || 'local');
     if (result.status !== 'skipped') {
       try {
         await options.apply?.();
       } catch (error) {
-        writeImageSource(previous);
+        // Echo stays enabled on the account; only this machine failed to apply
+        // it. Put the question back so a retry re-enters the stage and reports
+        // the outcome, instead of building on an answer nobody confirmed here.
+        if (decided) writeImageSource(previous);
+        else clearImageSource();
         await client.complete('failed').catch(() => {});
         throw error;
       }
