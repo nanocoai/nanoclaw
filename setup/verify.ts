@@ -85,8 +85,14 @@ export async function run(_args: string[]): Promise<void> {
         // systemctl not available
       }
     }
-  } else {
-    // Check for nohup PID file
+  }
+
+  // Nohup wrapper (setup/service.ts setupNohupFallback). Reached two ways:
+  // no service manager at all, or systemd is PID 1 but the user instance is
+  // unreachable (`systemctl --user` → "Failed to connect to bus") — the case
+  // service.ts already falls back from. Consult the pid file whenever the
+  // manager branch found nothing, so both detectors agree.
+  if (service === 'not_found') {
     const pidFile = path.join(projectRoot, 'nanoclaw.pid');
     if (fs.existsSync(pidFile)) {
       try {
