@@ -1,5 +1,7 @@
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { localDoor, type Door } from '../../code-mode/remote/door.js';
+import { openStream } from '../../code-mode/remote/stream.js';
 import {
   CellLink,
   DeviceClient,
@@ -13,6 +15,7 @@ import {
   readDeviceKey,
   readInstallIdentity,
   readJson,
+  terminalSnapshotOf,
 } from '../../community-portal/index.js';
 import { launchSlackJob, readSlackJob } from '../../community-portal/slack-job.js';
 
@@ -26,6 +29,13 @@ import { launchSlackJob, readSlackJob } from '../../community-portal/slack-job.j
  * bearer routes through a locked DeviceClient; the link dials with a proofed
  * ticket. Cell pushes only trigger a fresh read of locally saved, authorized
  * work: perk credentials and the saved Slack install worker.
+ *
+ * While the loopback door is enabled the link also announces the `ssh` cap
+ * and pipes every `ssh` channel the cell opens into the door from a distinct
+ * loopback source port; the door's state is part of the identity, so
+ * `remote enable|disable` restarts the link and the caps are re-announced.
+ * Every perks snapshot's `terminal` section goes to the door, and the door's
+ * state is reported to the account service every fifteen minutes.
  */
 export interface PortalRuntimeOptions {
   root?: string;
@@ -35,6 +45,9 @@ export interface PortalRuntimeOptions {
   intervalMs?: number;
   /** Test seam: the WebSocket constructor the link dials with. */
   Socket?: LinkSocketConstructor;
+  /** The loopback door; defaults to the journal-backed stand-in. */
+  door?: Door;
+  terminalReportMs?: number;
 }
 
 interface Identity {
@@ -44,9 +57,12 @@ interface Identity {
   installId: string;
   deviceId: string;
   fingerprint: string;
+  /** The door's loopback port while it is enabled. */
+  doorPort?: number;
 }
 
 const RECONCILE_INTERVAL_MS = 60_000;
+export const TERMINAL_REPORT_INTERVAL_MS = 15 * 60_000;
 
 export function startPortalRuntime({
   root = process.cwd(),
@@ -55,6 +71,8 @@ export function startPortalRuntime({
   log = () => {},
   intervalMs = 5000,
   Socket,
+  door = localDoor({ root, log }),
+  terminalReportMs = TERMINAL_REPORT_INTERVAL_MS,
 }: PortalRuntimeOptions = {}): { stop(): Promise<void> } {
   const abort = new AbortController();
   const file = path.join(root, 'data/community-portal.json');
@@ -66,6 +84,7 @@ export function startPortalRuntime({
   let again = false;
   let dirty = true;
   let nextSync = 0;
+  let nextTerminalReport = 0;
   let stopped = false;
   let stopping: Promise<void> | undefined;
   let lastError = '';
@@ -90,6 +109,7 @@ export function startPortalRuntime({
       identity = undefined;
       throw portalError('The device key is missing. Run the portal setup step again.', 'device_key_missing');
     }
+    const doorState = await door.status();
     const current: Identity | undefined =
       local?.deviceId && local.origin && account && key
         ? {
@@ -99,6 +119,7 @@ export function startPortalRuntime({
             installId: account.installId,
             deviceId: local.deviceId,
             fingerprint: key.fingerprint,
+            ...(doorState.enabled && doorState.port !== undefined ? { doorPort: doorState.port } : {}),
           }
         : undefined;
     if (!isDeepStrictEqual(current, identity)) {
@@ -107,6 +128,7 @@ export function startPortalRuntime({
       identity = current;
       rejected = false;
       dirty = true;
+      nextTerminalReport = 0;
       if (current && key) {
         const tickets = new DeviceClient({
           origin: current.origin,
@@ -120,6 +142,8 @@ export function startPortalRuntime({
           dirty = true;
           wake();
         };
+        const linkLog = (event: LinkEvent): void => log({ ...event, deviceId: current.deviceId });
+        const doorPort = current.doorPort;
         link = new CellLink({
           origin: tickets.origin,
           getTicket: async (requestSignal) => {
@@ -130,12 +154,18 @@ export function startPortalRuntime({
               throw error;
             }
           },
-          onSnapshot: changed,
+          onSnapshot: ({ snapshot }) => {
+            door.applyTerminalSnapshot(terminalSnapshotOf(snapshot));
+            changed();
+          },
           onChange: changed,
           onForbidden: () => {
             if (isDeepStrictEqual(identity, current)) rejectIdentity();
           },
-          log: (event) => log({ ...event, deviceId: current.deviceId }),
+          ...(doorPort === undefined
+            ? {}
+            : { ssh: (open, channel) => openStream({ open, channel, doorPort, door, log: linkLog }) }),
+          log: linkLog,
           ...(Socket ? { Socket } : {}),
         });
         link.start();
@@ -179,6 +209,22 @@ export function startPortalRuntime({
       }
       dirty = false;
       await client.reconcile();
+      if (doorState.enabled && Date.now() >= nextTerminalReport) {
+        try {
+          await client.reportTerminal({
+            enabled: true,
+            ...(doorState.hostKey ? { hostKey: doorState.hostKey } : {}),
+            authorizedFingerprints: doorState.authorizedFingerprints,
+          });
+          nextTerminalReport = Date.now() + terminalReportMs;
+          log({ event: 'terminal_reported', deviceId: current.deviceId });
+        } catch (error) {
+          if (denied(error)) throw error;
+          // The service may not carry the route yet; try again with the next reconcile.
+          nextTerminalReport = Date.now() + RECONCILE_INTERVAL_MS;
+          log({ event: 'terminal_report_failed', code: errorCode(error), deviceId: current.deviceId });
+        }
+      }
       nextSync = Date.now() + RECONCILE_INTERVAL_MS;
     } catch (error) {
       if (errorCode(error, '') === 'journal_busy') return;
