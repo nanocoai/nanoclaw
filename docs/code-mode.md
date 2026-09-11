@@ -23,20 +23,66 @@ these Host-only terminal commands through their mailbox.
 
 ## Remote terminal
 
-**Remote attach: not yet wired after the portal client rewrite.**
+Remote terminal access lets an approved SSH key land in a sandbox on this
+Host from another machine. The Host runs a dedicated OpenSSH listener on
+loopback, with its own host key, public keys only, a PTY and nothing else:
+no shell, no forwarding, no password. Reachability over the network arrives
+with the account link work; until then the listener answers only on the
+Host itself (or through a tunnel you run yourself), and every stream that
+reaches it is expected to be relayed by the Host.
 
-The design is an SSH session relayed through the community portal: the Host
-keeps its existing outbound connection to its account cell, runs a dedicated
-OpenSSH listener on loopback with its own host key, and admits only terminal
-keys the account owner authorized in the browser, each pinned to a forced
-command that accepts sandbox creation, listing, and attachment. The private
-key stays on the terminal machine, SSH encrypts the terminal traffic end to
-end, and the terminal pins the Host's key.
+### Enabling
 
-None of that ships in this repository yet: the portal contract carries no
-code-mode routes, and the cell link defines no `ssh` channel kind. Until it
-does, attach locally with `bin/ncl sandboxes attach`, or over your own SSH
-access to the Host.
+```sh
+bin/ncl sandboxes remote enable --name my-machine
+bin/ncl sandboxes remote status
+bin/ncl sandboxes remote disable
+```
+
+The name is a DNS label: 3–32 lowercase letters, digits and single hyphens,
+with a few common words reserved. It becomes this machine's address once the
+link relays terminals, and it names the default sandbox a remote terminal
+lands in. Enabling generates the host key once under `data/door/`, takes the
+first free loopback port in 33022–33121, writes an `sshd_config`, starts the
+listener under the Host, and keeps it running across Host restarts until you
+disable it. Disabling keeps the host key and the approved keys. The Host
+needs an OpenSSH server binary (`sshd`) and `ssh-keygen`; set
+`NANOCLAW_SSHD` if the binary is somewhere unusual.
+
+### Keys and pairing
+
+Every key the listener sees is admitted to exactly one program:
+
+- an approved key lands in a sandbox (next section);
+- an unknown key enters the waiting room, which prints the key's
+  fingerprint, where the connection came from, the time and the approval
+  page, then waits up to ten minutes. Approve it from the Host and the same
+  session continues into the sandbox without reconnecting. Unknown keys are
+  recorded as pending, at most ten per ten minutes; beyond that the listener
+  refuses them.
+
+```sh
+bin/ncl sandboxes remote keys add ~/.ssh/id_ed25519.pub --label laptop
+bin/ncl sandboxes remote keys list
+bin/ncl sandboxes remote keys approve SHA256:…
+bin/ncl sandboxes remote keys revoke SHA256:…
+```
+
+Fingerprints are the `SHA256:…` form `ssh-keygen -lf` prints. A revoked key
+returns to the waiting room on its next connection. The approval page shown
+in the waiting room is `NANOCLAW_TERMINAL_APPROVAL_URL` (default
+`https://portal.nanoclaw.dev/terminals`); approving from the browser arrives
+with the link work, approving from the Host works today.
+
+### Landing
+
+The Host records what each relayed stream is for. A stream for the account
+lands in the default sandbox named after the account, created on first use;
+a stream for a named sandbox attaches that sandbox, waking it if it went
+cold. `ssh <address> ls` prints the sandbox list instead of landing. Detach
+with **Ctrl-b, then d**; the session keeps running. A connection the Host
+did not relay (for example a direct loopback connection) is refused after
+authentication.
 
 ## Connection recovery (design)
 
@@ -58,9 +104,11 @@ access to the Host.
 ## Configuration and dependencies
 
 Code mode uses the existing agent image, Claude Code installation, and mailbox.
-The image adds the distribution's `tmux` package. Remote terminal access, once
-wired, needs an OpenSSH client on the terminal machine and OpenSSH server on
-the receiving Host; it depends only on Node built-ins.
+The image adds the distribution's `tmux` package. Remote terminal access
+needs an OpenSSH client on the terminal machine and the OpenSSH server
+(`sshd`, `ssh-keygen`) on the Host; it depends only on Node built-ins.
+`NANOCLAW_SSHD` names the server binary when it is not on the usual paths;
+`NANOCLAW_TERMINAL_APPROVAL_URL` is the approval page the waiting room shows.
 
 `NANOCLAW_CODE_PERMISSION_MODE` defaults to `auto`. A group's
 `--permission-mode auto|bypass` overrides it; bypass must be explicitly selected.
