@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { localDoor, type Door } from '../../code-mode/remote/door.js';
+import { wireDoor, type Door } from '../../code-mode/remote/door.js';
 import { openStream } from '../../code-mode/remote/stream.js';
 import {
   CellLink,
@@ -33,7 +33,8 @@ import { launchSlackJob, readSlackJob } from '../../community-portal/slack-job.j
  * While the loopback door is enabled the link also announces the `ssh` cap
  * and pipes every `ssh` channel the cell opens into the door from a distinct
  * loopback source port; the door's state is part of the identity, so
- * `remote enable|disable` restarts the link and the caps are re-announced.
+ * `remote enable|disable` restarts the link and the caps are re-announced
+ * (the door's state report wakes the runtime, and a poll catches the rest).
  * Every perks snapshot's `terminal` section goes to the door, and the door's
  * state is reported to the account service every fifteen minutes.
  */
@@ -45,7 +46,7 @@ export interface PortalRuntimeOptions {
   intervalMs?: number;
   /** Test seam: the WebSocket constructor the link dials with. */
   Socket?: LinkSocketConstructor;
-  /** The loopback door; defaults to the journal-backed stand-in. */
+  /** Test seam: the door as the link sees it; the real door is wired by default. */
   door?: Door;
   terminalReportMs?: number;
 }
@@ -71,11 +72,12 @@ export function startPortalRuntime({
   log = () => {},
   intervalMs = 5000,
   Socket,
-  door = localDoor({ root, log }),
+  door: providedDoor,
   terminalReportMs = TERMINAL_REPORT_INTERVAL_MS,
 }: PortalRuntimeOptions = {}): { stop(): Promise<void> } {
   const abort = new AbortController();
   const file = path.join(root, 'data/community-portal.json');
+  const door = providedDoor ?? wireDoor({ root, homeDir, log, onReported: () => wake() });
   let link: CellLink | undefined;
   let identity: Identity | undefined;
   let rejected = false;
@@ -155,7 +157,9 @@ export function startPortalRuntime({
             }
           },
           onSnapshot: ({ snapshot }) => {
-            door.applyTerminalSnapshot(terminalSnapshotOf(snapshot));
+            door
+              .applyTerminalSnapshot(terminalSnapshotOf(snapshot))
+              .catch((error: unknown) => linkLog({ event: 'terminal_snapshot_failed', code: errorCode(error) }));
             changed();
           },
           onChange: changed,

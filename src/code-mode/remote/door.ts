@@ -1,5 +1,5 @@
 /**
- * The seam between the link's stream pipe and the loopback door.
+ * The seam between the account link and the loopback door.
  *
  * The running host needs four things from the door: whether it is enabled
  * and on which loopback port; a place to register what each relayed stream
@@ -7,31 +7,28 @@
  * program a connection lands in reads that port from `SSH_CONNECTION` and
  * asks the door); the reverse of that when the stream ends; and a sink for
  * the `terminal` section of every perks snapshot, which carries the keys the
- * account owner approved or revoked in the browser. This module is that
- * interface plus a stand-in that reads the journal, keeps targets in memory
- * and remembers the last snapshot. The door module supplies the real one:
- * its supervisor answers `status`, its target map takes the registrations,
- * and its key store consumes the snapshot.
+ * account owner approved or revoked in the browser. The door needs three
+ * things from the link, which it calls through its terminal seam: the
+ * account service's answer at enable (the name it confirms or assigns and
+ * the address), the state report on every start and disable, and the
+ * approval code for a key waiting in the waiting room. `wireDoor` connects
+ * both directions. The seam's requests read the checkout's identity from
+ * disk on every call, so they work whether or not the link is up, and fall
+ * back to the door's standalone behaviour on a checkout that is not set up
+ * with the account service.
  */
-import path from 'node:path';
-import { isDeepStrictEqual } from 'node:util';
-import { readJson, type Journal, type LinkLog, type TerminalSnapshot } from '../../community-portal/index.js';
-
-export interface StreamTarget {
-  /** The account name; the default sandbox is named after it. */
-  account: string;
-  /** A named sandbox to attach instead of the account default. */
-  sandbox?: string;
-}
-
-/** What the host keeps per loopback source port while a stream is open. */
-export interface StreamRecord {
-  stream: string;
-  target: StreamTarget;
-  /** The terminal's public address as the relay saw it. */
-  source: { ip: string; port: number };
-  openedAt: string;
-}
+import * as doorModule from '../door/index.js';
+import type { DoorStream } from '../door/index.js';
+import {
+  DeviceClient,
+  readDeviceKey,
+  readInstallIdentity,
+  readJson,
+  reportTerminalState,
+  type Journal,
+  type LinkLog,
+  type TerminalSnapshot,
+} from '../../community-portal/index.js';
 
 export interface DoorStatus {
   enabled: boolean;
@@ -42,58 +39,152 @@ export interface DoorStatus {
   authorizedFingerprints: string[];
 }
 
+/** What the link registers per loopback source port while a stream is open. */
+export type StreamEntry = Omit<DoorStream, 'openedAt'> & { openedAt?: string };
+
 export interface Door {
   status(): Promise<DoorStatus>;
-  registerTarget(port: number, record: StreamRecord): void;
+  registerTarget(port: number, entry: StreamEntry): void;
   unregisterTarget(port: number): void;
-  lookupTarget(port: number): StreamRecord | undefined;
+  lookupTarget(port: number): DoorStream | undefined;
   /** The mirror's `terminal` section on every perks snapshot (undefined when the mirror carries none). */
-  applyTerminalSnapshot(terminal: TerminalSnapshot | undefined): void;
+  applyTerminalSnapshot(terminal: TerminalSnapshot | undefined): Promise<void>;
 }
 
-export interface LocalDoorOptions {
+/** The door module's surface the seam builds on; injectable for tests. */
+export type DoorModule = Pick<
+  typeof doorModule,
+  | 'doorStatus'
+  | 'listDoorKeys'
+  | 'registerTarget'
+  | 'unregisterTarget'
+  | 'lookupTarget'
+  | 'applyTerminalMirror'
+  | 'setTerminalSeam'
+>;
+
+export interface WireDoorOptions {
   root?: string;
+  homeDir?: string;
   log?: LinkLog;
+  /** Runs after every state report, so the link can re-announce its caps without waiting for a poll. */
+  onReported?: () => void;
+  module?: DoorModule;
+  now?: () => number;
 }
+
+/** A snapshot stamped this much before the host's own enable call may still be the service's answer to it. */
+export const MIRROR_SKEW_MS = 30_000;
+/** How long a waiting room may wait for an approval when the service minted no code. */
+export const PENDING_APPROVAL_TTL_MS = 10 * 60_000;
 
 /**
- * The stand-in: enabled and the port come from the journal's `terminal`
- * section, targets live in a map for the life of the process, and the last
- * snapshot is kept so the periodic report can name the honoured keys.
+ * Wire the door to the account link: install the seam and return the door
+ * as the link sees it. Nothing is written until a seam call happens.
  */
-export function localDoor({ root = process.cwd(), log = () => {} }: LocalDoorOptions = {}): Door {
-  const file = path.join(root, 'data/community-portal.json');
-  const targets = new Map<number, StreamRecord>();
-  let terminal: TerminalSnapshot | undefined;
+export function wireDoor({
+  root = process.cwd(),
+  homeDir,
+  log = () => {},
+  onReported = () => {},
+  module = doorModule,
+  now = Date.now,
+}: WireDoorOptions = {}): Door {
+  const file = `${root}/data/community-portal.json`;
+  let lastEnableAt: number | undefined;
+
+  /** A bearer client for the checkout, or undefined while it is not set up with the account service. */
+  async function client(): Promise<DeviceClient | undefined> {
+    const journal = await readJson<Partial<Journal>>(file);
+    if (!journal?.origin || !journal.deviceId) return undefined;
+    const account = await readInstallIdentity({ homeDir });
+    if (!account) return undefined;
+    const deviceKey = readDeviceKey({ homeDir }) ?? undefined;
+    return new DeviceClient({ origin: journal.origin, file, identity: account, deviceKey, log });
+  }
+
+  module.setTerminalSeam({
+    async enable(request) {
+      const portal = await client();
+      if (!portal?.deviceKey) {
+        if (!request.name) {
+          throw new Error(
+            'this checkout is not set up with the account service; pass --name <account-name> to ncl sandboxes remote enable',
+          );
+        }
+        return { name: request.name };
+      }
+      lastEnableAt = now();
+      const result = await portal.terminalEnable({
+        ...(request.name ? { name: request.name } : {}),
+        hostKey: request.hostKey,
+      });
+      return {
+        name: result.name,
+        ...(result.address ? { address: result.address } : {}),
+        ...(result.host ? { host: result.host } : {}),
+        ...(result.previousName ? { previousName: result.previousName } : {}),
+      };
+    },
+    async report(state) {
+      await reportTerminalState(state, { root, homeDir, log, now });
+      onReported();
+    },
+    async pending(request) {
+      const fallback = {
+        url: request.approvalUrl,
+        expiresAt: new Date(Date.parse(request.at) + PENDING_APPROVAL_TTL_MS).toISOString(),
+      };
+      const portal = await client();
+      if (!portal) return fallback;
+      const { fingerprint, keyType, publicKey, source, at } = request;
+      const result = await portal.terminalPending({
+        fingerprint,
+        keyType,
+        publicKey,
+        ...(source ? { source } : {}),
+        at,
+      });
+      return {
+        ...(result.code ? { code: result.code } : {}),
+        url: result.url || fallback.url,
+        expiresAt: result.expiresAt || fallback.expiresAt,
+      };
+    },
+  });
+
   return {
     async status() {
-      const journal = await readJson<Partial<Journal>>(file);
-      const saved = journal?.terminal;
-      const port = saved?.enabled === true && Number.isInteger(saved.doorPort) ? saved.doorPort : undefined;
+      const summary = await module.doorStatus();
+      const store = await module.listDoorKeys();
+      const port = summary.enabled && summary.doorPort ? summary.doorPort : undefined;
       return {
         enabled: port !== undefined,
         ...(port === undefined ? {} : { port }),
-        authorizedFingerprints: terminal?.keys.map((key) => key.fingerprint) ?? [],
+        ...(summary.hostKey ? { hostKey: summary.hostKey } : {}),
+        authorizedFingerprints: [
+          ...new Set([...store.approved.map((key) => key.fingerprint), ...(store.mirror?.fingerprints ?? [])]),
+        ],
       };
     },
-    registerTarget(port, record) {
-      targets.set(port, { ...record, target: { ...record.target }, source: { ...record.source } });
-    },
-    unregisterTarget(port) {
-      targets.delete(port);
-    },
-    lookupTarget(port) {
-      return targets.get(port);
-    },
-    applyTerminalSnapshot(next) {
-      if (isDeepStrictEqual(next, terminal)) return;
-      terminal = next;
-      log({
-        event: 'terminal_snapshot',
-        enabled: next?.enabled ?? false,
-        keys: next?.keys.length ?? 0,
-        pending: next?.pending.length ?? 0,
-      });
+    registerTarget: (port, entry) => module.registerTarget(port, entry),
+    unregisterTarget: (port) => module.unregisterTarget(port),
+    lookupTarget: (port) => module.lookupTarget(port),
+    async applyTerminalSnapshot(terminal) {
+      // A mirror older than this host's own enable call would report the door disabled.
+      const stampedAt = terminal?.updatedAt ? Date.parse(terminal.updatedAt) : NaN;
+      if (lastEnableAt !== undefined && !(stampedAt >= lastEnableAt - MIRROR_SKEW_MS)) {
+        log({ event: 'terminal_snapshot_stale', ...(terminal?.updatedAt ? { updatedAt: terminal.updatedAt } : {}) });
+        return;
+      }
+      await module.applyTerminalMirror(
+        terminal && {
+          enabled: terminal.enabled,
+          ...(terminal.name ? { name: terminal.name } : {}),
+          ...(terminal.previousName ? { previousName: terminal.previousName } : {}),
+          keys: terminal.keys.map((key) => ({ fingerprint: key.fingerprint })),
+        },
+      );
     },
   };
 }

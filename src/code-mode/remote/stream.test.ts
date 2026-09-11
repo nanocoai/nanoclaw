@@ -3,7 +3,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SshChannel, SshOpen } from '../../community-portal/link.js';
 import type { ChannelHandler, Frame } from '../../community-portal/mux.js';
-import { localDoor, type Door } from './door.js';
+import type { DoorStream } from '../door/index.js';
+import type { Door } from './door.js';
 import { CHUNK_BYTES, WINDOW_BYTES, decodeChunk, openStream } from './stream.js';
 
 /**
@@ -83,18 +84,21 @@ function start(doorPort: number, options: Partial<Parameters<typeof openStream>[
 }
 
 beforeEach(() => {
-  const inner = localDoor();
+  // A door as the link sees it, with its targets in memory and every registration recorded in order.
+  const targets = new Map<number, DoorStream>();
   registrations = [];
   door = {
-    ...inner,
-    registerTarget: (port, record) => {
+    status: async () => ({ enabled: true, authorizedFingerprints: [] }),
+    registerTarget: (port, entry) => {
       registrations.push(`register:${port}`);
-      inner.registerTarget(port, record);
+      targets.set(port, { ...entry, openedAt: entry.openedAt ?? 'now' });
     },
     unregisterTarget: (port) => {
       registrations.push(`unregister:${port}`);
-      inner.unregisterTarget(port);
+      targets.delete(port);
     },
+    lookupTarget: (port) => targets.get(port),
+    applyTerminalSnapshot: async () => {},
   };
 });
 

@@ -44,6 +44,8 @@ export interface TerminalSandbox {
 export interface TerminalSnapshot {
   enabled: boolean;
   name?: string;
+  /** Set for a while after a rename in the browser. */
+  previousName?: string;
   address?: string;
   deviceId?: string;
   hostKeyFingerprint?: string;
@@ -78,6 +80,37 @@ export interface TerminalReport {
   enabled: boolean;
   hostKey?: string;
   authorizedFingerprints: string[];
+}
+
+/** Body of `POST /api/v1/terminal/enable`; the name is omitted when the service should assign one. */
+export interface TerminalEnableRequest {
+  name?: string;
+  hostKey: string;
+}
+
+export interface TerminalEnableResult {
+  /** The name the account now carries, assigned or confirmed by the service. */
+  name: string;
+  address?: string;
+  host?: string;
+  hostKeyFingerprint?: string;
+  previousName?: string;
+}
+
+/** Body of `POST /api/v1/terminal/keys/pending`. */
+export interface TerminalPendingRequest {
+  fingerprint: string;
+  keyType: string;
+  publicKey: string;
+  source?: { ip: string; port: number };
+  at: string;
+}
+
+export interface TerminalPendingResult {
+  /** The short code the approval page asks for. */
+  code?: string;
+  url: string;
+  expiresAt: string;
 }
 
 export interface ReportTerminalOptions {
@@ -155,6 +188,7 @@ export function terminalSnapshotOf(snapshot: unknown): TerminalSnapshot | undefi
   return {
     enabled: t.enabled === true,
     ...opt('name', str(t.name)),
+    ...opt('previousName', str(t.previousName)),
     ...opt('address', str(t.address)),
     ...opt('deviceId', str(t.deviceId)),
     ...opt('hostKeyFingerprint', str(t.hostKeyFingerprint)),

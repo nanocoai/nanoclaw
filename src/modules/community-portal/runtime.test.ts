@@ -5,14 +5,18 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { localDoor, type Door } from '../../code-mode/remote/door.js';
+import type { DoorStream } from '../../code-mode/door/index.js';
+import type { Door } from '../../code-mode/remote/door.js';
 import {
   DEVICE_PROOF_HEADER,
   ensureDeviceKey,
+  readJson,
   reportTerminalState,
   verifyDeviceProof,
   writePrivate,
+  type Journal,
   type LinkSocket,
+  type TerminalSnapshot,
 } from '../../community-portal/index.js';
 import { startPortalRuntime } from './runtime.js';
 
@@ -211,13 +215,28 @@ it('announces ssh while the door is enabled, pipes streams into it, forwards the
     operations: {},
     terminal: { enabled: true, name: 'alice', doorPort, updatedAt: 'x' },
   });
-  const applied: unknown[] = [];
-  const inner = localDoor({ root });
+  // A door as the link sees it: enabled and the port from the journal, targets in memory, the last snapshot kept.
+  const applied: (TerminalSnapshot | undefined)[] = [];
+  const targets = new Map<number, DoorStream>();
   const door: Door = {
-    ...inner,
-    applyTerminalSnapshot: (terminal) => {
+    status: async () => {
+      const saved = (await readJson<Partial<Journal>>(journalFile()))?.terminal;
+      const port = saved?.enabled && saved.doorPort ? saved.doorPort : undefined;
+      return {
+        enabled: port !== undefined,
+        ...(port === undefined ? {} : { port }),
+        authorizedFingerprints: applied.at(-1)?.keys.map((key) => key.fingerprint) ?? [],
+      };
+    },
+    registerTarget: (port, entry) => {
+      targets.set(port, { ...entry, openedAt: entry.openedAt ?? 'now' });
+    },
+    unregisterTarget: (port) => {
+      targets.delete(port);
+    },
+    lookupTarget: (port) => targets.get(port),
+    applyTerminalSnapshot: async (terminal) => {
       applied.push(terminal);
-      inner.applyTerminalSnapshot(terminal);
     },
   };
   const runtime = startPortalRuntime({
@@ -269,6 +288,9 @@ it('announces ssh while the door is enabled, pipes streams into it, forwards the
   expect(log).toHaveBeenCalledWith(
     expect.objectContaining({ event: 'stream_open', stream: 's1', account: 'alice', deviceId: DEVICE_ID }),
   );
+  expect([...targets.values()]).toEqual([
+    { stream: 's1', target: { account: 'alice' }, source: { ip: '::1', port: 1 }, openedAt: expect.any(String) },
+  ]);
   // Disabling the door restarts the link without the cap; the open stream is torn down and ssh opens are refused.
   expect(await reportTerminalState({ enabled: false, doorPort }, { root, homeDir: home })).toEqual({
     journaled: true,
@@ -278,6 +300,7 @@ it('announces ssh while the door is enabled, pipes streams into it, forwards the
   await until(() => FakeSocket.instances.length === 2);
   expect(socket.readyState).toBe(3);
   expect(log).toHaveBeenCalledWith(expect.objectContaining({ event: 'stream_closed', stream: 's1', by: 'link' }));
+  expect(targets.size).toBe(0);
   const second = FakeSocket.instances[1];
   second.open();
   expect(JSON.parse(second.sent[0])).toEqual({ v: 1, ch: 0, seq: 1, t: 'hello', leg: 'host', caps: ['perks'] });

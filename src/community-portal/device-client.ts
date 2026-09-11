@@ -6,7 +6,14 @@ import type { InstallIdentity } from './install-identity.js';
 import type { CellTicket, LinkLog } from './link.js';
 import { readJson, writePrivate } from './private-file.js';
 import { processLock } from './process-lock.js';
-import type { JournalTerminal, TerminalReport } from './terminal.js';
+import type {
+  JournalTerminal,
+  TerminalEnableRequest,
+  TerminalEnableResult,
+  TerminalPendingRequest,
+  TerminalPendingResult,
+  TerminalReport,
+} from './terminal.js';
 
 /**
  * A checkout's client for the community portal's HTTP API. Every request
@@ -248,6 +255,16 @@ export class DeviceClient {
   /** The door's state: on every door start, every fifteen minutes while enabled, and on disable. */
   reportTerminal(report: TerminalReport, signal?: AbortSignal): Promise<{ ok: boolean }> {
     return this.call<{ ok: boolean }>('PUT', '/api/v1/terminal/host', { body: report, signal });
+  }
+
+  /** Enable remote access, proved with the device key: the service confirms or assigns the name and the address. */
+  terminalEnable(request: TerminalEnableRequest, signal?: AbortSignal): Promise<TerminalEnableResult> {
+    return this.call<TerminalEnableResult>('POST', '/api/v1/terminal/enable', { body: request, signal, proof: true });
+  }
+
+  /** A key waiting in the door's waiting room: the service records it and mints the approval code. */
+  terminalPending(request: TerminalPendingRequest, signal?: AbortSignal): Promise<TerminalPendingResult> {
+    return this.call<TerminalPendingResult>('POST', '/api/v1/terminal/keys/pending', { body: request, signal });
   }
 
   protected async call<T>(
