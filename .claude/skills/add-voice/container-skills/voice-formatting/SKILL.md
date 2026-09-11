@@ -1,5 +1,5 @@
 ---
-name: live-voice-formatting
+name: voice-formatting
 description: How to write replies that will be spoken aloud on a live voice call through the voice channel. Use whenever the inbound message came from the voice channel (sender handle starts with `voice:`) — the reply is read out by a voice model, not displayed.
 ---
 

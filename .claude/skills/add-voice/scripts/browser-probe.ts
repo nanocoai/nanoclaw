@@ -3,7 +3,7 @@
  * production adapter, with a synthesized caller instead of a microphone and
  * a canned backend instead of a NanoClaw agent.
  *
- *   pnpm exec tsx .claude/skills/add-live-voice/scripts/browser-probe.ts [--port 3210] [--say "…"] [--clip file.wav] [--project <install dir>]
+ *   pnpm exec tsx .claude/skills/add-voice/scripts/browser-probe.ts [--port 3210] [--say "…"] [--clip file.wav] [--project <install dir>]
  *
  * Then open the printed URL in a browser and press Start. The page plays the
  * caller clip into the peer connection's audio track, posts its SDP offer to

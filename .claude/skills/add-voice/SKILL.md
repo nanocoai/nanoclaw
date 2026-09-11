@@ -1,5 +1,5 @@
 ---
-name: add-live-voice
+name: add-voice
 description: Add Live Voice — real-time, full-duplex browser conversations with a NanoClaw agent. Talk naturally and interrupt while the agent speaks. Uses OpenAI GPT-Live-1 for listening and speaking, with the NanoClaw agent handling memory and tools. Use when the user wants live voice calls with an agent. Browser client only today.
 ---
 
@@ -68,7 +68,7 @@ into every agent container; the skill only changes behaviour when a message
 arrives from the `voice` channel:
 
 ```nc:copy
-container-skills/live-voice-formatting/SKILL.md -> container/skills/live-voice-formatting/SKILL.md
+container-skills/voice-formatting/SKILL.md -> container/skills/voice-formatting/SKILL.md
 ```
 
 ### 4. Build
@@ -245,7 +245,7 @@ the adapter would, and reports whether the voice model spoke the answer back.
 It costs a few cents of voice time:
 
 ```bash
-pnpm exec tsx .claude/skills/add-live-voice/scripts/live-probe.ts
+pnpm exec tsx .claude/skills/add-voice/scripts/live-probe.ts
 ```
 
 Every line of the summary should read `yes` (the sideband line reads `n/a`:
@@ -259,7 +259,7 @@ The second probe exercises the production path itself — the adapter, its
 caller and a canned backend reply, so no NanoClaw agent is needed:
 
 ```bash
-pnpm exec tsx .claude/skills/add-live-voice/scripts/browser-probe.ts
+pnpm exec tsx .claude/skills/add-voice/scripts/browser-probe.ts
 ```
 
 Open the printed URL in a browser and press Start. The terminal shows the
@@ -315,7 +315,7 @@ wires the line too.
 **The caller hears the answer twice.** The agent repeated the voice model's own
 words. The transcript marks them as `Assistant:` lines; the formatting skill
 tells the agent not to echo them — check it is present under
-`container/skills/live-voice-formatting/`.
+`container/skills/voice-formatting/`.
 
 **`voice` is missing from `ncl` channel lists.** The factory returned null:
 neither `OPENAI_API_KEY` nor `GPT_LIVE_KEYCHAIN_SERVICE` is in `.env`, or
