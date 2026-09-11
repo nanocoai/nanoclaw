@@ -1,6 +1,6 @@
 /**
- * The browser call page for the gpt-live channel, served by the adapter at
- * `/webhook/gpt-live/call?t=<link token>`.
+ * The browser call page for the voice channel, served by the adapter at
+ * `/webhook/voice/call?t=<link token>`.
  *
  * Plain WebRTC, no framework, no external resources. The page: greets by the
  * wired agent's name (`info` route), captures the microphone, posts its SDP
@@ -21,7 +21,7 @@ export function callPageHtml(): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
-<title>NanoClaw voice</title>
+<title>NanoClaw Live Voice</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%2329b8b6'/%3E%3Crect x='18' y='24' width='6' height='16' rx='3' fill='%230e0953'/%3E%3Crect x='29' y='16' width='6' height='32' rx='3' fill='%230e0953'/%3E%3Crect x='40' y='22' width='6' height='20' rx='3' fill='%230e0953'/%3E%3C/svg%3E">
 <style>
   :root {
@@ -153,7 +153,7 @@ export function callPageHtml(): string {
 <main class="card">
   <div class="brand">
     <div class="logo"><span class="dot" id="dot" aria-hidden="true"></span></div>
-    <h1>NanoClaw voice</h1>
+    <h1>NanoClaw Live Voice</h1>
     <p class="tagline">Talk things through, ask a question, or get something done. Your agent is here.</p>
     <div class="agentline" id="agentline" aria-live="polite"></div>
   </div>
@@ -318,7 +318,7 @@ export function callPageHtml(): string {
       var res = await fetch(new URL('sdp?t=' + encodeURIComponent(token), location.href), { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription.sdp });
       var body = await res.text();
       if (!res.ok) throw new Error(errorText(res.status, body));
-      var named = res.headers.get('x-gpt-live-agent'); if (named) { agentName = safe(named); agentLine.textContent = 'Calling ' + agentName; }
+      var named = res.headers.get('x-voice-agent'); if (named) { agentName = safe(named); agentLine.textContent = 'Calling ' + agentName; }
       await pc.setRemoteDescription({ type: 'answer', sdp: body });
       callBtn.textContent = 'Hang up'; callBtn.className = 'hang'; callBtn.disabled = false;
     } catch (err) {

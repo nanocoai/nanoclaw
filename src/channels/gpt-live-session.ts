@@ -1,5 +1,5 @@
 /**
- * GPT-Live session state machine — the pure half of the gpt-live channel.
+ * GPT-Live session state machine — the pure half of the Live Voice channel.
  *
  * One instance per live voice session. It consumes the server events the
  * sideband WebSocket delivers (transcript deltas, delegation requests,

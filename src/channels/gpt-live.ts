@@ -1,9 +1,9 @@
 /**
- * GPT-Live channel — OpenAI's full-duplex voice model (`gpt-live-1`) as the
+ * Live Voice channel — OpenAI's full-duplex voice model (`gpt-live-1`) as the
  * mouth and ears of a call, with the NanoClaw agent as the brain.
  *
  * Shape: native adapter (no Chat SDK bridge). A *voice line* is one
- * conversation: its platform id is `gpt-live:<line id>`, where the line id is
+ * conversation: its platform id is `voice:<line id>`, where the line id is
  * the first 12 hex characters of the link token's SHA-256 — the router
  * namespaces ids for this channel that way, and the token itself never
  * reaches the database, the logs or the agent's messages. The messaging group
@@ -19,7 +19,7 @@
  *
  * Transports:
  *  - WebRTC (browser), this version: the call page at
- *    `/webhook/gpt-live/call?t=<token>` posts its SDP offer to `…/sdp`; the
+ *    `/webhook/voice/call?t=<token>` posts its SDP offer to `…/sdp`; the
  *    host creates the session, attaches the sideband, and returns the answer.
  *  - SIP (phone), next: OpenAI posts `realtime.call.incoming` to `…/sip`.
  *
@@ -53,7 +53,7 @@ import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { registerWebhookHandler } from '../webhook-server.js';
 
-export const CHANNEL_TYPE = 'gpt-live';
+export const CHANNEL_TYPE = 'voice';
 const DEFAULT_API_BASE = 'https://api.openai.com/v1';
 const DEFAULT_WS_BASE = 'wss://api.openai.com/v1';
 /** Silent "still working" notes to the voice model go out at most this often while a reply is pending. */
@@ -136,7 +136,7 @@ interface LiveCall {
 }
 
 /**
- * The line id for a link token: `gpt-live:` + the first 12 hex characters of
+ * The line id for a link token: `voice:` + the first 12 hex characters of
  * the token's SHA-256. It is the platform id, the sender id and what the logs
  * show; the token itself stays in the adapter's allow-list and the call link.
  */
@@ -306,15 +306,15 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
     res.end(body);
   };
 
-  /** HTTP routes under /webhook/gpt-live/… on the shared webhook server. */
+  /** HTTP routes under /webhook/voice/… on the shared webhook server. */
   const handleHttp = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? '/', 'http://localhost');
-    const route = url.pathname.replace(/^\/webhook\/gpt-live\/?/, '').replace(/\/+$/, '');
+    const route = url.pathname.replace(/^\/webhook\/voice(?:\/|$)/, '').replace(/\/+$/, '');
     const token = url.searchParams.get('t') ?? '';
     try {
       // The shared webhook server has no unregister; after teardown the routes stay reachable
       // and must refuse rather than start sessions for a channel that is no longer running.
-      if (!connected || !setup) return reply(res, 503, 'gpt-live is not running');
+      if (!connected || !setup) return reply(res, 503, 'Live Voice is not running');
       if (req.method === 'GET' && route === 'call') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
         res.end(callPageHtml());
@@ -348,8 +348,8 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
         }
         reply(res, 200, answer, {
           'Content-Type': 'application/sdp',
-          'X-GPT-Live-Session': sessionId,
-          'X-GPT-Live-Agent': agent.name,
+          'X-Voice-Session': sessionId,
+          'X-Voice-Agent': agent.name,
         });
         return;
       }
@@ -398,7 +398,7 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
       registerWebhookHandler(CHANNEL_TYPE, handleHttp);
       connected = true;
       log.info('gpt-live: ready', {
-        callUrl: `${config.publicUrl}/webhook/gpt-live/call?t=<link token>`,
+        callUrl: `${config.publicUrl}/webhook/voice/call?t=<link token>`,
         lines: tokens.size,
         voice: config.voice,
       });

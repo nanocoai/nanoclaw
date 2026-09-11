@@ -1,11 +1,11 @@
 ---
-name: add-gpt-live
-description: Add the GPT-Live channel — OpenAI's full-duplex voice model (gpt-live-1) as the mouth and ears of a browser call, with the NanoClaw agent as the brain. Native adapter, client-delegation mode, no Chat SDK bridge, no new package. Use when the user wants to talk to an agent by voice, give an agent a phone presence, or try GPT-Live-1 with NanoClaw.
+name: add-live-voice
+description: Add Live Voice — real-time, full-duplex browser conversations with a NanoClaw agent. Talk naturally and interrupt while the agent speaks. Uses OpenAI GPT-Live-1 for listening and speaking, with the NanoClaw agent handling memory and tools. Use when the user wants live voice calls with an agent. Browser client only today.
 ---
 
-# Add GPT-Live Channel
+# Add Live Voice
 
-Adds [GPT-Live-1](https://developers.openai.com/api/docs/guides/live) as a
+Adds full-duplex browser conversations using [GPT-Live-1](https://developers.openai.com/api/docs/guides/live) as a
 voice channel. The voice model handles listening and speaking in real time;
 every turn that needs facts, memory, tools or an action is delegated to a
 NanoClaw session, whose reply is spoken back. Native adapter: the host creates
@@ -14,24 +14,21 @@ delegations to inbound messages and agent replies to spoken commentary.
 NanoClaw doesn't ship channels in trunk — this skill copies the adapter and its
 tests in from the `channels` branch.
 
-A **voice line** is one call link, `…/webhook/gpt-live/call?t=<token>`, wired to
+A **voice line** is one call link, `…/webhook/voice/call?t=<token>`, wired to
 one agent group. Every call on the link lands in the same agent session, so the
 agent remembers the previous call. Inside NanoClaw the line goes by a *line id*,
 a hash of the token, so the token itself stays in the link and never reaches the
 database, the logs or the agent. This skill sets up one line for a browser.
-Phone calls over SIP are a later step.
+Browser is the only supported client today. Future push-to-talk can be a mode of
+the same live conversation; recorded asynchronous voice messages are a separate
+capability. Native apps and SIP are future clients, not installed by this skill.
 
 Costs money: OpenAI bills voice sessions at $0.05 per minute, per second, plus
 the agent's own model usage. The link token is the only thing between the
 internet and that bill — treat the link like a password.
 
-## Stack-chan body integration
-
-When combining this channel with a Stack-chan robot, read
-[references/stackchan.md](references/stackchan.md) first. It records the merged
-Autonomous OS motion contract, the existing firmware work, and the missing
-robot audio transport. The browser call remains the implemented voice path;
-this reference does not enable robot movement or audio during skill setup.
+The stable channel identifier and URL prefix are `voice`. The `GPT_LIVE_*`
+settings and adapter module names identify the current voice engine.
 
 ## Apply
 
@@ -68,10 +65,10 @@ import './gpt-live.js';
 Replies on this channel are spoken. Mount the formatting skill so every agent
 answers a call in short plain prose. `container/skills/` is mounted read-only
 into every agent container; the skill only changes behaviour when a message
-arrives from the `gpt-live` channel:
+arrives from the `voice` channel:
 
 ```nc:copy
-container-skills/gpt-live-formatting/SKILL.md -> container/skills/gpt-live-formatting/SKILL.md
+container-skills/live-voice-formatting/SKILL.md -> container/skills/live-voice-formatting/SKILL.md
 ```
 
 ### 4. Build
@@ -94,7 +91,7 @@ pnpm exec vitest run src/channels/gpt-live-registration.test.ts src/channels/gpt
 ```
 
 `gpt-live-registration.test.ts` imports the real channel barrel and asserts the
-registry contains `gpt-live` — it goes red if the import line drifts.
+registry contains `voice` — it goes red if the import line drifts.
 `gpt-live-session.test.ts` covers the delegation bookkeeping (transcript cut,
 chunking, barge-in). `gpt-live-adapter.test.ts` drives the call page and SDP
 routes over HTTP, checks the session is created in client-delegation mode with
@@ -161,7 +158,7 @@ tailscale serve --bg --set-path=/webhook http://127.0.0.1:3000/webhook
 ```
 
 The origin is then `https://<host>.<tailnet>.ts.net` and the call page lives at
-`…/webhook/gpt-live/call?t=<token>`.
+`…/webhook/voice/call?t=<token>`.
 
 ```nc:prompt public_url validate:^https?://\S+$ normalize:rstrip-slash
 What origin can a caller's browser reach this NanoClaw host at? (e.g. http://localhost:3000 or https://nanoclaw.example.ts.net)
@@ -183,7 +180,7 @@ grep -s '^GPT_LIVE_LINK_TOKEN=' .env | cut -d= -f2- | cut -d, -f1 | grep -E '^[0
 GPT_LIVE_LINK_TOKEN={{link_token}}
 ```
 
-The line id is what NanoClaw calls this link (`gpt-live:<line id>`): the first
+The line id is what NanoClaw calls this link (`voice:<line id>`): the first
 twelve hex characters of the token's SHA-256, derived the same way the adapter
 derives it, so the token itself is never written anywhere but `.env`:
 
@@ -228,14 +225,14 @@ channel's DM defaults — every delegated turn engages the agent, and the link
 holder is the line's user:
 
 ```nc:run effect:wire
-ncl messaging-groups list --json | jq -e --arg p "gpt-live:{{line_id}}" '.data[] | select(.platform_id==$p)' >/dev/null || ncl messaging-groups create --channel-type gpt-live --platform-id "gpt-live:{{line_id}}" --name "Voice line" --is-group 0
-ncl wirings create --channel-type gpt-live --platform-id "gpt-live:{{line_id}}" --agent-group "{{agent_folder}}" --session-mode shared
+ncl messaging-groups list --json | jq -e --arg p "voice:{{line_id}}" '.data[] | select(.platform_id==$p)' >/dev/null || ncl messaging-groups create --channel-type voice --platform-id "voice:{{line_id}}" --name "Voice line" --is-group 0
+ncl wirings create --channel-type voice --platform-id "voice:{{line_id}}" --agent-group "{{agent_folder}}" --session-mode shared
 ```
 
 Tell the user where to call from:
 
 ```nc:operator
-The call link is {{public_url}}/webhook/gpt-live/call?t={{link_token}} — keep it private, anyone holding it can talk to {{agent_folder}} on your OpenAI bill. Open it in a browser, allow the microphone, press Call and say hello. Ask something that needs memory ("what did we decide about the launch date?") to see the agent get involved; the page shows captions when the call carries them.
+The call link is {{public_url}}/webhook/voice/call?t={{link_token}} — keep it private, anyone holding it can talk to {{agent_folder}} on your OpenAI bill. Open it in a browser, allow the microphone, press Call and say hello. Ask something that needs memory ("what did we decide about the launch date?") to see the agent get involved; the page shows captions when the call carries them.
 ```
 
 ## Smoke test without a microphone
@@ -248,7 +245,7 @@ the adapter would, and reports whether the voice model spoke the answer back.
 It costs a few cents of voice time:
 
 ```bash
-pnpm exec tsx .claude/skills/add-gpt-live/scripts/live-probe.ts
+pnpm exec tsx .claude/skills/add-live-voice/scripts/live-probe.ts
 ```
 
 Every line of the summary should read `yes` (the sideband line reads `n/a`:
@@ -262,7 +259,7 @@ The second probe exercises the production path itself — the adapter, its
 caller and a canned backend reply, so no NanoClaw agent is needed:
 
 ```bash
-pnpm exec tsx .claude/skills/add-gpt-live/scripts/browser-probe.ts
+pnpm exec tsx .claude/skills/add-live-voice/scripts/browser-probe.ts
 ```
 
 Open the printed URL in a browser and press Start. The terminal shows the
@@ -274,10 +271,8 @@ Callers talk to the voice model; anything needing the agent is handed over and
 the answer is spoken back. Session ids are logged in `logs/nanoclaw.log`; quote
 one if you need OpenAI's help with a call. To add a second line for someone
 else, append another token to `GPT_LIVE_LINK_TOKEN` (comma-separated), restart,
-derive its line id the same way, and wire `gpt-live:<that line id>`.
+derive its line id the same way, and wire `voice:<that line id>`.
 
-Phone calls over SIP are the next step: an inbound trunk pointed at
-`sip:<PROJECT_ID>@sip.api.openai.com;transport=tls` and a public webhook URL.
 To uninstall: see [REMOVE.md](REMOVE.md).
 
 ## Troubleshooting
@@ -320,9 +315,9 @@ wires the line too.
 **The caller hears the answer twice.** The agent repeated the voice model's own
 words. The transcript marks them as `Assistant:` lines; the formatting skill
 tells the agent not to echo them — check it is present under
-`container/skills/gpt-live-formatting/`.
+`container/skills/live-voice-formatting/`.
 
-**`gpt-live` is missing from `ncl` channel lists.** The factory returned null:
+**`voice` is missing from `ncl` channel lists.** The factory returned null:
 neither `OPENAI_API_KEY` nor `GPT_LIVE_KEYCHAIN_SERVICE` is in `.env`, or
 `GPT_LIVE_LINK_TOKEN` is missing. Set them and restart.
 

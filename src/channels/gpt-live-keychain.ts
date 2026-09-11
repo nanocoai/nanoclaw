@@ -1,5 +1,5 @@
 /**
- * Where the gpt-live channel's OpenAI key comes from.
+ * Where the Live Voice channel's OpenAI key comes from.
  *
  * Two sources, checked in order, both read on the host only:
  *  1. `OPENAI_API_KEY` in `.env` — the plain option every channel skill uses.

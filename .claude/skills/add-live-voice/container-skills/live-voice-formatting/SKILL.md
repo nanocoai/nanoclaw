@@ -1,11 +1,11 @@
 ---
-name: gpt-live-formatting
-description: How to write replies that will be spoken aloud on a live voice call through the gpt-live channel. Use whenever the inbound message came from the gpt-live channel (sender handle starts with `gpt-live:`) — the reply is read out by a voice model, not displayed.
+name: live-voice-formatting
+description: How to write replies that will be spoken aloud on a live voice call through the voice channel. Use whenever the inbound message came from the voice channel (sender handle starts with `voice:`) — the reply is read out by a voice model, not displayed.
 ---
 
 # Replies on a voice call
 
-Messages from the `gpt-live` channel are transcripts of a live phone or browser
+Messages from the `voice` channel are transcripts of a live browser
 call. A separate voice model is talking to the caller in real time; it handed
 this turn to you because it needs facts, memory, tools or an action. Whatever
 you reply is read aloud, so write for the ear.

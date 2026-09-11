@@ -1,5 +1,5 @@
 /**
- * Voice-side prompt for the gpt-live channel.
+ * Voice-side prompt for the voice channel.
  *
  * Two prompts exist on a call. The voice model's `instructions` (composed
  * here) say how to talk and *when to delegate*; the backend prompt is the
@@ -63,7 +63,7 @@ export function sessionConfig(agent: VoiceAgent, voice: string): Record<string, 
  */
 export async function resolveWiredAgent(platformId: string, instance?: string): Promise<VoiceAgent | null> {
   try {
-    const mg = await getMessagingGroupByPlatform('gpt-live', platformId, instance);
+    const mg = await getMessagingGroupByPlatform('voice', platformId, instance);
     if (!mg) return null;
     const wirings = await getMessagingGroupAgents(mg.id);
     const first = wirings[0];

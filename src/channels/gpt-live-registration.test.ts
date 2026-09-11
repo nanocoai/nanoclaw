@@ -1,7 +1,7 @@
 /**
- * Integration test for the gpt-live channel's single reach-in: the self-registration
+ * Integration test for the Live Voice channel's single reach-in: the self-registration
  * import in the `src/channels/index.ts` barrel. Importing the barrel runs gpt-live.ts's
- * top-level `registerChannelAdapter('gpt-live', …)`; without the import the channel is
+ * top-level `registerChannelAdapter('voice', …)`; without the import the channel is
  * silently absent.
  *
  * Behavior, not structural: it imports the real barrel and asserts the registry
@@ -19,8 +19,8 @@ import { describe, expect, it } from 'vitest';
 import { getRegisteredChannelNames } from './channel-registry.js';
 import './index.js'; // the real barrel — triggers every channel's self-registration
 
-describe('gpt-live channel registration', () => {
-  it('registers gpt-live via the channel barrel', () => {
-    expect(getRegisteredChannelNames()).toContain('gpt-live');
+describe('Live Voice channel registration', () => {
+  it('registers voice via the channel barrel', () => {
+    expect(getRegisteredChannelNames()).toContain('voice');
   });
 });

@@ -235,7 +235,7 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
     fake = await startFakeOpenAI();
     const webhookPort = await freePort();
     process.env.WEBHOOK_PORT = String(webhookPort);
-    base = `http://127.0.0.1:${webhookPort}/webhook/gpt-live`;
+    base = `http://127.0.0.1:${webhookPort}/webhook/voice`;
     adapter = createGptLiveAdapter({
       apiKey: 'sk-test-key',
       publicUrl: `http://127.0.0.1:${webhookPort}`,
@@ -292,8 +292,8 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
       body: 'v=0\r\noffer',
     });
     expect(res.status).toBe(200);
-    expect(res.headers.get('x-gpt-live-session')).toBe('live_fake1');
-    expect(res.headers.get('x-gpt-live-agent')).toBe('Andy');
+    expect(res.headers.get('x-voice-session')).toBe('live_fake1');
+    expect(res.headers.get('x-voice-agent')).toBe('Andy');
     expect(await res.text()).toBe('v=0\r\nanswer');
 
     expect(fake.sessionCreates).toHaveLength(1);
@@ -325,7 +325,7 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
     await vi.waitFor(() => expect(inbound).toHaveLength(1), { timeout: 5000 });
     const { platformId, threadId, message } = inbound[0];
     expect(platformId).toBe(LINE);
-    expect(LINE).toMatch(/^gpt-live:[0-9a-f]{12}$/);
+    expect(LINE).toMatch(/^voice:[0-9a-f]{12}$/);
     expect(JSON.stringify(message.content)).not.toContain('tok123');
     expect(threadId).toBeNull();
     expect(message.kind).toBe('chat');
@@ -409,7 +409,7 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
       body: 'v=0\r\noffer-b',
     });
     expect(second.status).toBe(200);
-    expect(second.headers.get('x-gpt-live-session')).toBe(winnerId);
+    expect(second.headers.get('x-voice-session')).toBe(winnerId);
 
     const firstRes = await first;
     expect(firstRes.status).toBe(409);

@@ -1,8 +1,8 @@
 /**
- * Smoke test for the gpt-live channel against the real OpenAI Live API,
+ * Smoke test for the Live Voice channel against the real OpenAI Live API,
  * with no microphone and no browser.
  *
- *   pnpm exec tsx .claude/skills/add-gpt-live/scripts/live-probe.ts [--say "…"] [--clip file.wav] [--project <install dir>]
+ *   pnpm exec tsx .claude/skills/add-live-voice/scripts/live-probe.ts [--say "…"] [--clip file.wav] [--project <install dir>]
  *
  * `--project` points at the NanoClaw install whose `.env` holds the key
  * settings (default: the current directory).
@@ -46,7 +46,7 @@ const env = readEnvFile(
 );
 const key = resolveOpenAiKey(env);
 if (!key) {
-  console.log(`No OpenAI key: set OPENAI_API_KEY or GPT_LIVE_KEYCHAIN_SERVICE in ${path.join(projectRoot, '.env')} (see /add-gpt-live).`);
+  console.log(`No OpenAI key: set OPENAI_API_KEY or GPT_LIVE_KEYCHAIN_SERVICE in ${path.join(projectRoot, '.env')} (see /add-live-voice).`);
   process.exit(2);
 }
 console.log(`key source: ${key.source} (value not shown)`);

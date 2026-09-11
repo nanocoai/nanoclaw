@@ -1,9 +1,9 @@
 /**
- * Browser probe for the gpt-live channel: a real WebRTC call through the
+ * Browser probe for the Live Voice channel: a real WebRTC call through the
  * production adapter, with a synthesized caller instead of a microphone and
  * a canned backend instead of a NanoClaw agent.
  *
- *   pnpm exec tsx .claude/skills/add-gpt-live/scripts/browser-probe.ts [--port 3210] [--say "…"] [--clip file.wav] [--project <install dir>]
+ *   pnpm exec tsx .claude/skills/add-live-voice/scripts/browser-probe.ts [--port 3210] [--say "…"] [--clip file.wav] [--project <install dir>]
  *
  * Then open the printed URL in a browser and press Start. The page plays the
  * caller clip into the peer connection's audio track, posts its SDP offer to
@@ -61,7 +61,7 @@ function clipPath(): string {
     process.exit(2);
   }
   const text = arg('--say', 'Hi. What is on my calendar tomorrow?');
-  const dir = path.join(os.tmpdir(), 'nanoclaw-gpt-live-probe');
+  const dir = path.join(os.tmpdir(), 'nanoclaw-live-voice-probe');
   execFileSync('mkdir', ['-p', dir]);
   const aiff = path.join(dir, 'b.aiff');
   const wav = path.join(dir, 'b.wav');
@@ -119,9 +119,9 @@ await adapter.setup({
 });
 
 const PAGE = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>gpt-live browser probe</title>
+<html lang="en"><head><meta charset="utf-8"><title>Live Voice browser probe</title>
 <style>body{font:15px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;max-width:640px;margin:32px auto;padding:0 16px}pre{background:#f4f4f6;padding:12px;border-radius:8px;white-space:pre-wrap;min-height:80px}button{font:inherit;padding:10px 18px;border-radius:999px;border:0;background:#0b5fff;color:#fff;cursor:pointer}</style></head>
-<body><h1>gpt-live browser probe</h1>
+<body><h1>Live Voice browser probe</h1>
 <p>Press Start. A synthesized caller plays into a real WebRTC call through the adapter; watch the terminal for the sideband log.</p>
 <button id="start" type="button">Start</button>
 <pre id="log"></pre><audio id="remote" autoplay playsinline></audio>
@@ -153,8 +153,8 @@ const PAGE = `<!doctype html>
       pc.onconnectionstatechange = function () { log('peer connection: ' + pc.connectionState); };
       var offer = await pc.createOffer(); await pc.setLocalDescription(offer);
       await new Promise(function (r) { if (pc.iceGatheringState === 'complete') return r(); pc.addEventListener('icegatheringstatechange', function () { if (pc.iceGatheringState === 'complete') r(); }); setTimeout(r, 1500); });
-      var res = await fetch('/webhook/gpt-live/sdp?t=' + encodeURIComponent(t), { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription.sdp });
-      log('sdp: HTTP ' + res.status + ' session ' + (res.headers.get('x-gpt-live-session') || '?'));
+      var res = await fetch('/webhook/voice/sdp?t=' + encodeURIComponent(t), { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription.sdp });
+      log('sdp: HTTP ' + res.status + ' session ' + (res.headers.get('x-voice-session') || '?'));
       if (!res.ok) { log(await res.text()); return; }
       var answer = await res.text();
       var fmtp = answer.match(/a=fmtp:[^\\r\\n]*/g) || [];
@@ -167,7 +167,7 @@ const PAGE = `<!doctype html>
 })();
 </script></body></html>`;
 
-registerWebhookHandler('gpt-live-probe', (req, res) => {
+registerWebhookHandler('live-voice-probe', (req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   if (url.pathname.endsWith('/clip.wav')) {
     res.writeHead(200, { 'Content-Type': 'audio/wav', 'Cache-Control': 'no-store' });
@@ -178,4 +178,4 @@ registerWebhookHandler('gpt-live-probe', (req, res) => {
   res.end(PAGE);
 });
 
-console.log(`\nOpen  http://127.0.0.1:${port}/webhook/gpt-live-probe/?t=probe  and press Start. Ctrl-C to stop.\n`);
+console.log(`\nOpen  http://127.0.0.1:${port}/webhook/live-voice-probe/?t=probe  and press Start. Ctrl-C to stop.\n`);

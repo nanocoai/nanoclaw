@@ -1,5 +1,5 @@
 /**
- * Key resolution for the gpt-live channel: `.env` first, then the macOS
+ * Key resolution for the Live Voice channel: `.env` first, then the macOS
  * Keychain item named in `.env`, never both. The Keychain reader is a stub
  * here — the real one shells out to `security`, which a unit test must not.
  */

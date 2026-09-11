@@ -1,6 +1,6 @@
-# Remove GPT-Live Channel
+# Remove Live Voice
 
-Reverses `/add-gpt-live`. Every step is idempotent — safe to re-run, and safe
+Reverses `/add-live-voice`. Every step is idempotent — safe to re-run, and safe
 when only partially installed (skip any step whose target is already absent).
 
 ## 1. Delete the barrel import
@@ -27,7 +27,7 @@ rm -f src/channels/gpt-live.ts src/channels/gpt-live-session.ts src/channels/gpt
 on the next spawn:
 
 ```bash
-rm -rf container/skills/gpt-live-formatting
+rm -rf container/skills/live-voice-formatting
 ```
 
 ## 4. Remove the environment keys

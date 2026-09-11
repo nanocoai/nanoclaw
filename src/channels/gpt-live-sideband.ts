@@ -1,5 +1,5 @@
 /**
- * Server-side sideband for the gpt-live channel.
+ * Server-side sideband for the Live Voice channel.
  *
  * A live voice session's audio flows browser-to-OpenAI (WebRTC) or
  * trunk-to-OpenAI (SIP); the host is not in that path. The sideband is a
