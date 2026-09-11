@@ -151,7 +151,13 @@ export interface MessagingGroupAgent {
   engage_pattern: string | null;
   sender_scope: SenderScope;
   ignored_message_policy: IgnoredMessagePolicy;
-  session_mode: 'shared' | 'per-thread' | 'agent-shared';
+  /**
+   * 'sandbox' routes the wiring into the agent group's coding session (the
+   * `system:sandbox` thread `ncl sandboxes new` lands in) instead of a chat
+   * session of its own — the chat surface bound to a coding session
+   * (src/code-mode/session-channel). Threads never apply to it.
+   */
+  session_mode: 'shared' | 'per-thread' | 'agent-shared' | 'sandbox';
   priority: number;
   /**
    * Per-wiring thread-policy override (migration 019). NULL = inherit the

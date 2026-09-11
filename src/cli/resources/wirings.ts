@@ -28,7 +28,7 @@ const CREATE_ENUMS: Record<string, string[]> = {
   engage_mode: ['pattern', 'mention', 'mention-sticky'],
   sender_scope: ['all', 'known'],
   ignored_message_policy: ['drop', 'accumulate'],
-  session_mode: ['shared', 'per-thread', 'agent-shared'],
+  session_mode: ['shared', 'per-thread', 'agent-shared', 'sandbox'],
 };
 
 async function requireMessagingGroup(id: unknown): Promise<MessagingGroup> {
@@ -105,8 +105,8 @@ registerResource({
       name: 'session_mode',
       type: 'string',
       description:
-        '"shared" — one session per (agent, messaging group). "per-thread" — separate session per thread/topic; requires the wiring to honor thread ids (rejected when its thread policy resolves off — pair with --threads true where the channel context does not honor them). "agent-shared" — one session across all messaging groups wired to this agent. Note: threaded adapters in group chats force per-thread regardless of this setting.',
-      enum: ['shared', 'per-thread', 'agent-shared'],
+        '"shared" — one session per (agent, messaging group). "per-thread" — separate session per thread/topic; requires the wiring to honor thread ids (rejected when its thread policy resolves off — pair with --threads true where the channel context does not honor them). "agent-shared" — one session across all messaging groups wired to this agent. "sandbox" — the agent\'s coding session (code mode): the chat is a surface for that session, never a session of its own. Note: threaded adapters in group chats force per-thread regardless of this setting (except sandbox).',
+      enum: ['shared', 'per-thread', 'agent-shared', 'sandbox'],
       default: 'shared',
       updatable: true,
     },

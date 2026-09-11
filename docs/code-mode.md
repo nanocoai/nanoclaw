@@ -21,6 +21,46 @@ Detach with **Ctrl-b, then d**. Existing groups can use code mode through
 same terminal implementation as sandbox attachment. Agents cannot invoke
 these Host-only terminal commands through their mailbox.
 
+## Chat surface for a coding session
+
+On a Host whose Slack app was set up through the NanoClaw Slack service,
+`bin/ncl sandboxes new` also opens a Slack channel for the new session.
+The service creates the channel, invites the Host's bot, and sends the
+person who connected the workspace a short direct message that the channel
+starts from. Nothing changes for sandboxes created with `--no-channel`, or
+on a Host without such an app, or in a workspace where the service cannot
+open channels yet; the sandbox works the same without one.
+
+What the channel shows:
+
+- **Messages both ways.** A message in the channel is delivered into the
+  coding session like any other chat message; the agent's replies
+  (`ncl outbox send`) come back to the channel. No mention is needed.
+- **Status.** The channel shows the session as working while a turn runs,
+  idle between turns, and suspended when the session container has been
+  retired by the idle lease. It resumes when the next message wakes it.
+- **Changes.** After each completed turn the Host posts the working tree's
+  diff (tracked and new files, at most 200 KB) to the channel's code view.
+- **Stop.** Stopping the session from the channel interrupts the current
+  turn in the terminal. The session stays attached and the channel stays
+  open; the next message from the channel or the terminal resumes it.
+
+The Host mirrors the session by reading a small state file the session's
+hooks write into the workspace, so a session that was attached before the
+Host restarted keeps its channel. Manual checks:
+
+```sh
+bin/ncl sandboxes channel status my-project
+bin/ncl sandboxes channel archive my-project --summary "Shipped the page."
+```
+
+Archiving is always explicit; neither a Stop nor deleting the sandbox
+archives the channel. To try it end to end: create a sandbox, post a
+request in the new channel, watch the status move and the diff view fill
+after the turn, press Stop mid-turn and confirm the terminal shows the
+interrupted turn, then send another message and confirm the session
+resumes. A Host with no managed Slack app skips all of this silently.
+
 ## Remote terminal
 
 Remote terminal access lets an approved SSH key land in a sandbox on this

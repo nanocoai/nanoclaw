@@ -26,7 +26,7 @@ import {
 import { log } from './log.js';
 import { getAgentMailbox, type InboundMessage, type MailboxSession } from './mailbox/index.js';
 import { enqueueSessionReconcile } from './reconcile-feeds.js';
-import type { Session } from './types.js';
+import type { MessagingGroupAgent, Session } from './types.js';
 
 /** Root directory for all session data. */
 export function sessionsBaseDir(): string {
@@ -83,13 +83,16 @@ async function withSessionCreationLock<T>(key: string, fn: () => Promise<T>): Pr
   }
 }
 
+type SessionMode = MessagingGroupAgent['session_mode'];
+
 function sessionCreationKey(
   agentGroupId: string,
   messagingGroupId: string | null,
   threadId: string | null,
-  sessionMode: 'shared' | 'per-thread' | 'agent-shared',
+  sessionMode: SessionMode,
 ): string {
   if (sessionMode === 'agent-shared') return `agent\0${agentGroupId}`;
+  if (sessionMode === 'sandbox') return `system\0${agentGroupId}\0${SANDBOX_SYSTEM_THREAD_ID}`;
   return `route\0${agentGroupId}\0${messagingGroupId ?? ''}\0${sessionMode === 'shared' ? '' : (threadId ?? '')}`;
 }
 
@@ -101,15 +104,20 @@ function sessionCreationKey(
  * - 'per-thread': one session per (messaging group, thread)
  * - 'agent-shared': one session per agent group — all messaging groups
  *   wired with this mode share a single session (e.g. GitHub + Slack)
+ * - 'sandbox': the agent group's coding session (resolveSandboxSession) —
+ *   the wiring is a chat surface for that session, never a session of its
+ *   own; messaging group and thread are ignored
  */
 export async function resolveSession(
   agentGroupId: string,
   messagingGroupId: string | null,
   threadId: string | null,
-  sessionMode: 'shared' | 'per-thread' | 'agent-shared',
+  sessionMode: SessionMode,
 ): Promise<{ session: Session; created: boolean }> {
   const key = sessionCreationKey(agentGroupId, messagingGroupId, threadId, sessionMode);
   return withSessionCreationLock(key, async () => {
+    if (sessionMode === 'sandbox') return resolveSandboxSession(agentGroupId);
+
     // agent-shared: single session per agent group, regardless of messaging group
     if (sessionMode === 'agent-shared') {
       const existing = await findSessionByAgentGroup(agentGroupId);

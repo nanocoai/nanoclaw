@@ -16,6 +16,11 @@
  */
 import { randomUUID } from 'crypto';
 
+import {
+  archiveSandboxChannel,
+  bindSandboxChannel,
+  sandboxChannelStatus,
+} from '../../code-mode/session-channel/index.js';
 import { createAgentGroup, getAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getDb } from '../../db/connection.js';
 import { findAttachableSessions } from '../../db/sessions.js';
@@ -70,6 +75,15 @@ async function generateSandboxName(): Promise<string> {
     suffix++;
   }
   return folder;
+}
+
+/** id-first, then folder — the attach resolution order; the not-found text names the verb. */
+async function resolveSandboxGroup(raw: unknown, verb: string): Promise<AgentGroup> {
+  const id = raw === undefined || raw === null ? '' : String(raw);
+  if (!id) throw new Error(`usage: ncl sandboxes ${verb} <name-or-id>`);
+  const group = (await getAgentGroup(id)) ?? (await getAgentGroupByFolder(id));
+  if (!group) throw new Error(`no sandbox '${id}' — create it: ncl sandboxes new --name ${id}`);
+  return group;
 }
 
 interface SandboxListRow {
@@ -132,10 +146,12 @@ registerResource({
       description:
         'Create a fresh sandbox and land attached to its coding session (host operators only).\n' +
         'Usage: ncl sandboxes new [name] [--name <name>] [--provider <p>] [--permission-mode auto|bypass] ' +
-        '[--timezone <IANA id>] [--no-attach]. The name is the group folder (generated when omitted); ' +
+        '[--timezone <IANA id>] [--no-attach] [--no-channel]. The name is the group folder (generated when omitted); ' +
         'an existing name is refused — attach to it instead. --no-attach creates without handing the ' +
         'terminal over (scripting). Detach later with Ctrl-b then d; the session keeps running until the ' +
-        'idle lease reaps the container — the workspace is durable and re-attach wakes it again.',
+        'idle lease reaps the container — the workspace is durable and re-attach wakes it again. ' +
+        'On a host with a managed Slack app the session also gets a chat channel of its own (status, a diff ' +
+        'view after each turn, messages both ways, Stop); --no-channel skips that.',
       handler: async (args) => {
         // `ncl sandboxes new t1` / `sandbox entry new t1` arrives through the
         // dispatch trailing-positional trim as args.id — the same mechanism
@@ -216,15 +232,70 @@ registerResource({
 
         const { session } = await resolveSandboxSession(id);
 
+        // The chat surface for this session, when the host has a managed
+        // Slack app: opened here, after the session row exists (the channel
+        // wiring routes into it) and before the first wake. Best-effort by
+        // contract — no install, no sign-in, a workspace that cannot do it
+        // yet, or a service that is down all leave a plain sandbox.
+        const skipChannel = args['no-channel'] === true || args.no_channel === true;
+        const channel = skipChannel ? null : await bindSandboxChannel(group);
+
         if (args['no-attach'] === true || args.no_attach === true) {
           return {
             sandbox: folder,
             id,
             sessionId: session.id,
             attach: `ncl sandboxes attach ${folder}`,
+            channel: channel ? { channelId: channel.row.channel_id, created: channel.created } : null,
           };
         }
         return resolveAttachForGroup(group, { wakeWaitMs: NEW_SANDBOX_WAKE_WAIT_MS });
+      },
+    },
+    'channel status': {
+      access: 'open',
+      hostOnly: true,
+      description:
+        "Show the chat channel bound to a sandbox's coding session (host operators only).\n" +
+        'Usage: ncl sandboxes channel status <name-or-id>. Reports the channel id, the status the service ' +
+        'holds (active, processing, suspended, stopped, closed), the last status this host sent, whether ' +
+        'this host process is mirroring it, and the views it carries. A sandbox created with --no-channel, ' +
+        'or on a host without a managed Slack app, has none.',
+      handler: async (args) => {
+        const group = await resolveSandboxGroup(args.id, 'channel status');
+        const status = await sandboxChannelStatus(group);
+        if (!status) return { sandbox: group.folder, channel: null };
+        return status;
+      },
+      formatHuman: (data) => {
+        const d = data as { sandbox: string; channel?: null } & Partial<
+          Awaited<ReturnType<typeof sandboxChannelStatus>> & object
+        >;
+        if (!d.channelId) return `${d.sandbox}: no session channel`;
+        const lines = [
+          `${d.sandbox}: channel ${d.channelId} (${d.title ?? ''})`,
+          `  status:     ${d.status ?? '-'}${d.archivedAt ? ' (archived)' : ''}${d.stoppedAt && !d.archivedAt ? ' (stopped by the user)' : ''}`,
+          `  last sent:  ${d.lastStatusSent ?? '-'}${d.lastStatusAt ? ` at ${d.lastStatusAt}` : ''}`,
+          `  mirrored:   ${d.mirrored ? 'yes' : 'no'}`,
+          `  views:      ${d.views && d.views.length > 0 ? d.views.map((v) => `${v.viewKey} (${v.type})`).join(', ') : '-'}`,
+        ];
+        if (d.serviceError) lines.push(`  service:    ${d.serviceError}`);
+        return lines.join('\n');
+      },
+    },
+    'channel archive': {
+      access: 'open',
+      hostOnly: true,
+      description:
+        "Archive the chat channel bound to a sandbox's coding session (host operators only).\n" +
+        'Usage: ncl sandboxes channel archive <name-or-id> [--summary <text>]. The explicit wrap-up: the ' +
+        'channel closes at the service (with the summary posted first, when given) and this host stops ' +
+        'mirroring it. Nothing else archives a channel — not a Stop, not deleting the sandbox. The sandbox ' +
+        'itself is untouched; a later `sandboxes new` binds a fresh channel.',
+      handler: async (args) => {
+        const group = await resolveSandboxGroup(args.id, 'channel archive');
+        const summary = args.summary === undefined ? undefined : String(args.summary);
+        return archiveSandboxChannel(group, summary ? { summary } : {});
       },
     },
     list: {

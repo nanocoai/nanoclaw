@@ -29,10 +29,26 @@ import {
   writeAgentState,
 } from './agent-state.js';
 import { removeMailboxHooks } from './settings-hooks.js';
+import { TURN_STATE_PATH, writeTurnState } from './turn-stamp.js';
 
 // Env overrides are a test seam — production always runs at the real paths.
 const CONTAINER_JSON_PATH = process.env.NANOCLAW_CONTAINER_JSON || '/workspace/agent/container.json';
 const MAIL_NOTICE = process.env.NANOCLAW_MAIL_NOTICE || MAIL_NOTICE_PATH;
+const TURN_STATE = process.env.NANOCLAW_TURN_STATE || TURN_STATE_PATH;
+
+/**
+ * The host-visible turn stamp (turn-stamp.ts) rides the same three events
+ * that move the agent state between idle and busy. Best-effort: the
+ * workspace mount is the host's to provide, and a stamp that cannot be
+ * written must never cost the agent its real state.
+ */
+function stampTurn(state: 'idle' | 'busy'): void {
+  try {
+    writeTurnState(state, TURN_STATE);
+  } catch {
+    // no workspace mount (or read-only): the mirror simply sees nothing
+  }
+}
 
 /**
  * The hook entries live in per-group settings.json, which SURVIVES a flip
@@ -103,9 +119,11 @@ function main(): void {
     case 'SessionStart':
     case 'Stop':
       writeAgentState({ state: 'idle' }, statePath);
+      stampTurn('idle');
       break;
     case 'UserPromptSubmit':
       writeAgentState({ state: 'busy' }, statePath);
+      stampTurn('busy');
       break;
     case 'PreToolUse': {
       // A declared Bash timeout extends the busy lease through the call —

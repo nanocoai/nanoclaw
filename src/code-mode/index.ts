@@ -6,6 +6,11 @@ import { startCodeBoundaryWatcher, stopCodeBoundaryWatcher } from '../modules/ap
 import { registerMigration } from '../db/migrations/index.js';
 // The remote terminal door registers its own host lifecycle hooks.
 import './door/index.js';
+// The chat surface for a coding session: its own table migration (a new
+// table, independent of the columns below) and the host lifecycle of the
+// mirror behind every bound sandbox. Imports are hoisted, so it registers
+// first; nothing here depends on the order.
+import './session-channel/index.js';
 
 registerMigration({
   version: 1,
