@@ -35,6 +35,7 @@ import {
   updateSessionChannel,
   type SessionChannelRow,
 } from './db.js';
+import type { BotIdentity } from './bot-identity.js';
 import type { SessionChannelCredentials } from './install.js';
 
 /** The chat platform whose channel this is — the one adapter key the wiring names. */
@@ -46,6 +47,12 @@ export interface BindSessionChannelInput {
   client: Pick<SessionChannelClient, 'create'>;
   /** Channel title; defaults to the sandbox name. */
   title?: string;
+  /**
+   * The host's own bot identity for the invite (bot-identity.ts), consulted
+   * only when a channel is actually created. Null or absent: the create goes
+   * without it and the service names the bot from its own record.
+   */
+  resolveBotIdentity?: () => Promise<BotIdentity | null>;
 }
 
 export interface BoundSessionChannel {
@@ -125,10 +132,22 @@ export async function bindSessionChannel(input: BindSessionChannelInput): Promis
   // under a suffixed id — derived from the archive time, so a retry after a
   // crash between create and insert converges on the same channel.
   const sessionId = existing?.archived_at ? `${group.id}.${Date.parse(existing.archived_at).toString(36)}` : group.id;
+  // Belt and braces for the invite: name the bot ourselves when we can.
+  // Resolved only here, on the create path, so the once-per-install lookup
+  // never runs for a sandbox that already has its channel.
+  let identity: BotIdentity | null = null;
+  if (input.resolveBotIdentity) {
+    try {
+      identity = await input.resolveBotIdentity();
+    } catch (err) {
+      log.warn('Session channel: bot identity lookup failed — creating without it', { agentGroupId: group.id, err });
+    }
+  }
   const { channel, created } = await client.create({
     appId: credentials.appId,
     sessionId,
     title,
+    ...(identity ? { botUserId: identity.botUserId, ...(identity.teamId ? { teamId: identity.teamId } : {}) } : {}),
   });
   const mg = await ensureSessionChannelWiring(group.id, channel.channelId, title);
   if (existing) await deleteSessionChannel(group.id);

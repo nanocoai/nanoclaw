@@ -27,6 +27,12 @@ export interface SessionChannelInstall {
   serviceBase: string;
   /** The managed app the service provisioned for this host. */
   appId: string;
+  /**
+   * The app's bot token, when the install delivered one. Used for a single
+   * identity lookup (bot-identity.ts) so the host can name its own bot to
+   * the service; never logged, never sent anywhere but the platform itself.
+   */
+  botToken?: string;
 }
 
 export interface SessionChannelCredentials extends SessionChannelInstall {
@@ -41,12 +47,20 @@ export async function readSessionChannelInstall(root = process.cwd()): Promise<S
   // the service would let into a channel; one still installing does — the
   // create route answers with its own 409 until the install lands.
   if (job && job.app?.appId && !['failed', 'expired'].includes(job.status)) {
-    return { serviceBase: job.serviceBase || DEFAULT_SLACK_SERVICE, appId: job.app.appId };
+    return {
+      serviceBase: job.serviceBase || DEFAULT_SLACK_SERVICE,
+      appId: job.app.appId,
+      ...(job.app.botToken ? { botToken: job.app.botToken } : {}),
+    };
   }
   const journal = await readJson<Journal>(path.join(root, 'data/community-portal.json'));
   const saved = journal?.slackSetup;
   if (saved?.app?.appId) {
-    return { serviceBase: saved.serviceBase || DEFAULT_SLACK_SERVICE, appId: saved.app.appId };
+    return {
+      serviceBase: saved.serviceBase || DEFAULT_SLACK_SERVICE,
+      appId: saved.app.appId,
+      ...(saved.app.botToken ? { botToken: saved.app.botToken } : {}),
+    };
   }
   return null;
 }

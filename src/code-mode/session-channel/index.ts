@@ -24,6 +24,7 @@ import { log } from '../../log.js';
 import { sessionDir } from '../../session-manager.js';
 import type { AgentGroup } from '../../types.js';
 import { bindSessionChannel, type BoundSessionChannel } from './binding.js';
+import { resolveBotIdentity, type BotIdentity } from './bot-identity.js';
 import { isUnavailable, SessionChannelClient, type ChannelRecord } from './client.js';
 import {
   getSessionChannelByGroup,
@@ -46,12 +47,20 @@ export type { SessionChannelRow } from './db.js';
 export interface SessionChannelDeps {
   readCredentials(): Promise<SessionChannelCredentials | null>;
   createClient(credentials: SessionChannelCredentials): SessionChannelClient;
+  /** The host's own bot identity for the channel invite; null when unknown (bot-identity.ts). */
+  resolveBotIdentity(credentials: SessionChannelCredentials): Promise<BotIdentity | null>;
 }
 
 const defaultDeps: SessionChannelDeps = {
   readCredentials: () => readSessionChannelCredentials(),
   createClient: (credentials) =>
     new SessionChannelClient({ serviceBase: credentials.serviceBase, token: credentials.token, timeoutMs: 20_000 }),
+  resolveBotIdentity: (credentials) =>
+    resolveBotIdentity({
+      root: process.cwd(),
+      appId: credentials.appId,
+      ...(credentials.botToken ? { botToken: credentials.botToken } : {}),
+    }),
 };
 
 let deps: SessionChannelDeps = defaultDeps;
@@ -153,6 +162,7 @@ export async function bindSandboxChannel(
       group,
       credentials,
       client: deps.createClient(credentials),
+      resolveBotIdentity: () => deps.resolveBotIdentity(credentials),
       ...(options.title ? { title: options.title } : {}),
     });
     const active = runtime;

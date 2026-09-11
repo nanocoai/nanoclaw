@@ -23,11 +23,13 @@ import '../index.js';
 const GROUP = { id: 'ag-bind-1', name: 'box', folder: 'box' };
 const CREDS = { serviceBase: 'https://slack.example.test', appId: 'A1' };
 
+type CreateInput = { appId: string; sessionId: string; title: string; botUserId?: string; teamId?: string };
+
 function fakeCreate() {
-  const calls: Array<{ appId: string; sessionId: string; title: string }> = [];
+  const calls: CreateInput[] = [];
   let n = 0;
   const client = {
-    create: vi.fn(async (input: { appId: string; sessionId: string; title: string }) => {
+    create: vi.fn(async (input: CreateInput) => {
       calls.push(input);
       n += 1;
       const channel: ChannelRecord = { channelId: `C${n}`, sessionId: input.sessionId, status: 'active' };
@@ -134,5 +136,61 @@ describe('bindSessionChannel', () => {
     await bindSessionChannel({ group: GROUP, credentials: CREDS, client, title: 'Portal work' });
     expect(calls[0].title).toBe('Portal work');
     expect((await getSessionChannelByGroup(GROUP.id))!.title).toBe('Portal work');
+  });
+});
+
+describe('bindSessionChannel — the bot identity on create', () => {
+  it('a resolved identity rides the create as botUserId and teamId', async () => {
+    const { client, calls } = fakeCreate();
+    const resolveBotIdentity = vi.fn(async () => ({ botUserId: 'U0BOT1', teamId: 'T0TEAM1' }));
+    await bindSessionChannel({ group: GROUP, credentials: CREDS, client, resolveBotIdentity });
+    expect(calls).toEqual([
+      { appId: 'A1', sessionId: 'ag-bind-1', title: 'box', botUserId: 'U0BOT1', teamId: 'T0TEAM1' },
+    ]);
+  });
+
+  it('an identity without a workspace sends only the user id', async () => {
+    const { client, calls } = fakeCreate();
+    await bindSessionChannel({
+      group: GROUP,
+      credentials: CREDS,
+      client,
+      resolveBotIdentity: async () => ({ botUserId: 'U0BOT1' }),
+    });
+    expect(calls[0]).toEqual({ appId: 'A1', sessionId: 'ag-bind-1', title: 'box', botUserId: 'U0BOT1' });
+  });
+
+  it('no identity (null) or a failing lookup falls back to the plain create and still binds', async () => {
+    const { client, calls } = fakeCreate();
+    const bound = await bindSessionChannel({
+      group: GROUP,
+      credentials: CREDS,
+      client,
+      resolveBotIdentity: async () => null,
+    });
+    expect(bound.created).toBe(true);
+    expect(calls[0]).toEqual({ appId: 'A1', sessionId: 'ag-bind-1', title: 'box' });
+
+    await updateSessionChannel(GROUP.id, { archived_at: '2026-09-11T12:00:00.000Z' });
+    const rebound = await bindSessionChannel({
+      group: GROUP,
+      credentials: CREDS,
+      client,
+      resolveBotIdentity: async () => {
+        throw new Error('platform down');
+      },
+    });
+    expect(rebound.created).toBe(true);
+    expect(calls[1]).not.toHaveProperty('botUserId');
+    expect((await getSessionChannelByGroup(GROUP.id))!.channel_id).toBe('C2');
+  });
+
+  it('an existing binding is returned without consulting the identity at all', async () => {
+    const { client } = fakeCreate();
+    await bindSessionChannel({ group: GROUP, credentials: CREDS, client });
+    const resolveBotIdentity = vi.fn(async () => ({ botUserId: 'U0BOT1' }));
+    const again = await bindSessionChannel({ group: GROUP, credentials: CREDS, client, resolveBotIdentity });
+    expect(again.created).toBe(false);
+    expect(resolveBotIdentity).not.toHaveBeenCalled();
   });
 });
