@@ -37,6 +37,7 @@ import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, Out
 import { registerChannelAdapter } from './channel-registry.js';
 import { callPageHtml } from './gpt-live-call-page.js';
 import { resolveOpenAiKey } from './gpt-live-keychain.js';
+import { attachSideband, type SidebandSocket } from './gpt-live-sideband.js';
 import { resolveWiredAgent, sessionConfig, type VoiceAgent } from './gpt-live-prompt.js';
 import { GptLiveSession, type DelegationRequest, type LiveClientEvent } from './gpt-live-session.js';
 import { readEnvFile } from '../env.js';
@@ -78,11 +79,7 @@ export interface GptLiveConfig {
   resolveAgent?: (platformId: string) => Promise<VoiceAgent | null>;
 }
 
-/** The socket surface the adapter needs; Node's built-in WebSocket provides it. */
-export interface SidebandSocket {
-  send(data: string): void;
-  close(): void;
-}
+export type { SidebandSocket } from './gpt-live-sideband.js';
 
 interface LiveCall {
   platformId: string;
@@ -151,43 +148,17 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
     log.info('gpt-live: call ended', { platformId: call.platformId, sessionId: call.session.sessionId, reason });
   };
 
-  /**
-   * Attach the server-side sideband to a session and pump its events into
-   * the call's state machine. Resolves once the socket is open.
-   */
+  /** Attach the server-side sideband and pump its events into the call's state machine. */
   const connectSideband = (call: LiveCall): Promise<SidebandSocket> =>
-    new Promise((resolve, reject) => {
-      const url = `${wsBase}/live/sessions/${encodeURIComponent(call.session.sessionId)}/attach`;
-      const ws = new WebSocket(url, { headers: { Authorization: `Bearer ${config.apiKey}` } });
-      let opened = false;
-      ws.addEventListener('open', () => {
-        opened = true;
-        log.info('gpt-live: sideband attached', { sessionId: call.session.sessionId });
-        resolve({ send: (data) => ws.send(data), close: () => ws.close() });
-      });
-      ws.addEventListener('message', (ev: MessageEvent) => {
-        if (typeof ev.data !== 'string') return;
-        let event: { type?: unknown } & Record<string, unknown>;
-        try {
-          event = JSON.parse(ev.data) as { type?: unknown } & Record<string, unknown>;
-        } catch (err) {
-          log.warn('gpt-live: unparseable sideband frame', { sessionId: call.session.sessionId, err });
-          return;
-        }
-        if (typeof event.type !== 'string') return;
-        if (event.type === 'error')
-          log.warn('gpt-live: session error event', { sessionId: call.session.sessionId, error: event.error });
-        call.session.handle({ ...event, type: event.type });
-      });
-      ws.addEventListener('error', () => {
-        if (!opened) reject(new Error('gpt-live: sideband attach failed'));
-        else log.warn('gpt-live: sideband socket error', { sessionId: call.session.sessionId });
-      });
-      ws.addEventListener('close', (ev: { code: number; reason: string }) => {
-        if (!opened) return;
+    attachSideband({
+      wsBase,
+      apiKey: config.apiKey,
+      sessionId: call.session.sessionId,
+      onEvent: (event) => call.session.handle(event),
+      onClose: (code, reason) => {
         // The server closing the sideband means the session is over for us.
-        if (!call.session.isClosed()) call.session.handle({ type: 'session.closed', code: ev.code, reason: ev.reason });
-      });
+        if (!call.session.isClosed()) call.session.handle({ type: 'session.closed', code, reason });
+      },
     });
 
   const openCall = async (token: string, sessionId: string): Promise<LiveCall> => {

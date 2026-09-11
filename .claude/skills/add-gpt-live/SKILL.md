@@ -206,6 +206,24 @@ Tell the user where to call from:
 The call link is {{public_url}}/webhook/gpt-live/call?t={{link_token}} — keep it private, anyone holding it can talk to {{agent_folder}} on your OpenAI bill. Open it in a browser, allow the microphone, press Call and say hello. Ask something that needs memory ("what did we decide about the launch date?") to see the agent get involved; the page shows captions when the call carries them.
 ```
 
+## Smoke test without a microphone
+
+Before the first real call, prove the key, the account, and the delegation
+round trip from the host alone. The probe opens a Live session with the same
+voice prompt the adapter uses, attaches the production sideband, plays a short
+caller question synthesized with macOS `say`, answers the delegation the way
+the adapter would, and reports whether the voice model spoke the answer back.
+It costs a few cents of voice time:
+
+```bash
+pnpm exec tsx .claude/skills/add-gpt-live/scripts/live-probe.ts
+```
+
+Every line of the summary should read `yes`. `session.start rejected` with
+`output_creation_failed` on an account where `gpt-live-1` lists fine means
+the project has no prepaid credits (see Troubleshooting). On Linux pass
+`--clip <mono 16-bit 24 kHz WAV>` instead of relying on `say`.
+
 ## Done
 
 Callers talk to the voice model; anything needing the agent is handed over and
@@ -229,9 +247,17 @@ microphone on `localhost` or HTTPS. Use a tailnet HTTPS URL or a tunnel for
 anything but a local try.
 
 **`Could not start the call: gpt-live: session create failed: 401`.** The key
-in `.env` is wrong or lacks `gpt-live-1` access. `429` means the project's
-concurrent-session limit is reached; `400` usually means the session config
-was rejected — the error text names the field.
+in `.env` is wrong or lacks `gpt-live-1` access. `400` usually means the
+session config was rejected — the error text names the field.
+
+**`429` with `credit_balance_exhausted` or `insufficient_quota`, or the smoke
+test's `session.start` rejected with `output_creation_failed`.** The OpenAI
+project has no prepaid credits. GPT-Live-1 is not free-tier eligible and every
+session is refused until the balance is positive, even though the model lists
+fine and other endpoints answer. Add credits at
+https://platform.openai.com/settings/organization/billing/ and rerun the smoke
+test. A `429` with `rate_limit` in the message is the concurrent-session cap
+instead (25 sessions at tier 1).
 
 **`sideband attach failed`.** The session was created but the host could not
 open the server-side socket. Check outbound WebSocket access from the host
