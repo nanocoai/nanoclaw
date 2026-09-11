@@ -1,0 +1,20 @@
+diff --git a/dist/index.js b/dist/index.js
+index 3360d7352fec0df580a474088205519227cc8be0..d554f290926f4aaf69a1adaf5b2f056a31ca5f4f 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -23,5 +23,5 @@
+ } from "matrix-js-sdk";
+-import { MatrixError } from "matrix-js-sdk/lib/http-api/errors";
+-import { decodeRecoveryKey } from "matrix-js-sdk/lib/crypto-api/recovery-key";
+-import { logger as matrixSDKLogger } from "matrix-js-sdk/lib/logger";
++import { MatrixError } from "matrix-js-sdk/lib/http-api/errors.js";
++import { decodeRecoveryKey } from "matrix-js-sdk/lib/crypto-api/recovery-key.js";
++import { logger as matrixSDKLogger } from "matrix-js-sdk/lib/logger.js";
+ import { marked } from "marked";
+@@ -35,4 +35,4 @@
+ import { MatrixEvent } from "matrix-js-sdk";
+-import { SyncAccumulator } from "matrix-js-sdk/lib/sync-accumulator";
+-import { MemoryStore } from "matrix-js-sdk/lib/store/memory";
++import { SyncAccumulator } from "matrix-js-sdk/lib/sync-accumulator.js";
++import { MemoryStore } from "matrix-js-sdk/lib/store/memory.js";
+ var STORE_VERSION = 1;

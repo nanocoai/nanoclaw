@@ -92,50 +92,52 @@ Add an `atomic_chat` entry alongside `nanoclaw`:
 
 ### Forward host env vars into the container
 
-The env-forwarding logic lives in the copied `src/atomic-chat-env.ts` (`atomicChatEnvArgs()`), so the reach-in into `buildContainerArgs` is a single call.
+The env-forwarding logic lives in the copied `src/atomic-chat-env.ts` (`atomicChatEnv()`), so the reach-in into `composeSessionSpec` is a single spread.
 
 Import it in `src/container-runner.ts` (alongside the other local imports):
 
 ```ts
-import { atomicChatEnvArgs } from './atomic-chat-env.js';
+import { atomicChatEnv } from './atomic-chat-env.js';
 ```
 
-Then, in `buildContainerArgs`, find the `TZ` env line and add the call right after it:
+Then, in `composeSessionSpec`, find the `contributedEnv` literal and spread the helper at the end. The contributed lane — not the composed `env` literal — because `ATOMIC_CHAT_API_KEY` is credential-NAMED and the composed lane's key-name check would refuse the spawn; the contributed lane exempts the name and still refuses credential-shaped values:
 
 ```ts
-  args.push('-e', `TZ=${TIMEZONE}`);
-  args.push(...atomicChatEnvArgs());
+  const contributedEnv: Record<string, string> = {
+    ...(contribution.env ?? {}),
+    ...(gateway.env ?? {}),
+    ...atomicChatEnv(),
+  };
 ```
 
-`atomic-chat-wiring.test.ts` asserts this `args.push(...atomicChatEnvArgs())` call exists inside `buildContainerArgs`.
+`atomic-chat-wiring.test.ts` asserts this `...atomicChatEnv()` spread exists inside `composeSessionSpec`.
 
 ### Surface `[ATOMIC]` log lines at info level
 
-> **Shared block.** This rewrites the `container.stderr` logger, which other local-model tools (e.g. `add-ollama-tool` for `[OLLAMA]`) also edit to surface their own prefix. Touch only the `[ATOMIC]` branch and leave the rest of the block intact, so the edits coexist and removal restores it cleanly.
+> **Shared block.** This rewrites the driver's container-stderr logger, which other local-model tools (e.g. `add-ollama-tool` for `[OLLAMA]`) also edit to surface their own prefix. Touch only the `[ATOMIC]` branch and leave the rest of the block intact, so the edits coexist and removal restores it cleanly.
 
-In the same file, find the stderr logger:
+Container stderr now lands in the Docker driver: in `src/drivers/docker-driver.ts`, inside `DockerHandle.start()`, find the stderr handler:
 
 ```ts
-  container.stderr?.on('data', (data) => {
-    for (const line of data.toString().trim().split('\n')) {
-      if (line) log.debug(line, { container: agentGroup.folder });
-    }
-  });
+    proc.onStderr((line) => {
+      log.debug(line, { container: this.name });
+      this.#stderrTail.push(line);
+      if (this.#stderrTail.length > 10) this.#stderrTail.shift();
+    });
 ```
 
-Replace it with:
+Replace the `log.debug` line with a prefix branch (leave the stderr-tail lines intact — they feed the non-zero-exit warning):
 
 ```ts
-  container.stderr?.on('data', (data) => {
-    for (const line of data.toString().trim().split('\n')) {
-      if (!line) continue;
+    proc.onStderr((line) => {
       if (line.includes('[ATOMIC]')) {
-        log.info(line, { container: agentGroup.folder });
+        log.info(line, { container: this.name });
       } else {
-        log.debug(line, { container: agentGroup.folder });
+        log.debug(line, { container: this.name });
       }
-    }
-  });
+      this.#stderrTail.push(line);
+      if (this.#stderrTail.length > 10) this.#stderrTail.shift();
+    });
 ```
 
 ### Add env-var stubs to `.env.example`
@@ -157,7 +159,7 @@ Append to `.env.example`:
 ```bash
 pnpm run build
 pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
-# Host tree: buildContainerArgs wiring
+# Host tree: composeSessionSpec wiring
 pnpm exec vitest run src/atomic-chat-wiring.test.ts
 # Container tree: index.ts registration
 (cd container/agent-runner && bun test src/atomic-chat-registration.test.ts)
@@ -165,7 +167,7 @@ pnpm exec vitest run src/atomic-chat-wiring.test.ts
 ```
 
 All must be clean before proceeding. The wiring and registration tests confirm the two
-integration points — the `buildContainerArgs` call and the `index.ts` registration — are
+integration points — the `composeSessionSpec` spread and the `index.ts` registration — are
 actually in place; a failure means one drifted. (The MCP server's own request/response
 behavior against Atomic Chat is the author's build-time concern, not part of these tests —
 verify it manually in Phase 4.)

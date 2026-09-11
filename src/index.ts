@@ -4,15 +4,15 @@
  * Thin orchestrator: init DB, run migrations, start channel adapters,
  * start delivery polls, start sweep, handle shutdown.
  */
-import path from 'path';
-
 import { backfillContainerConfigs } from './backfill-container-configs.js';
-import { DATA_DIR } from './config.js';
+import { CENTRAL_DB_PATH } from './config.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from './circuit-breaker.js';
-import { initDb } from './db/connection.js';
+import { adoptRunningSessions } from './container-runner.js';
+import { closeDb, initDb } from './db/connection.js';
 import { runMigrations } from './db/migrations/index.js';
-import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
+import { getSessionDriver } from './drivers/index.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
+import { startHostInstanceLease, stopHostInstanceLease } from './host-instance.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { startHostModules, stopHostModules } from './host-lifecycle.js';
 import { routeInbound } from './router.js';
@@ -43,8 +43,8 @@ async function dispatchResponse(payload: ResponsePayload): Promise<void> {
 // Channel skills uncomment lines in channels/index.ts to enable them.
 import './channels/index.js';
 
-// Modules barrel — default modules (typing, mount-security) ship here; skills
-// append registry-based modules. Imported for side effects (registrations).
+// Modules barrel — imports registration modules, including the singular
+// mailbox composition slot. Imported for side effects.
 import './modules/index.js';
 
 // CLI command barrel — populates the `ncl` registry before the CLI server
@@ -71,18 +71,20 @@ async function main(): Promise<void> {
   enforceUpgradeTripwire();
 
   // 1. Init central DB
-  const dbPath = path.join(DATA_DIR, 'v2.db');
-  const db = initDb(dbPath);
-  runMigrations(db);
-  log.info('Central DB ready', { path: dbPath });
+  const db = await initDb(CENTRAL_DB_PATH, { role: 'host' });
+  await runMigrations(db, undefined, { mode: 'auto' });
+  log.info('Central DB ready', { dialect: db.dialect });
 
   // 1b. Backfill container_configs from legacy container.json files.
   // Idempotent — skips groups that already have a config row.
-  backfillContainerConfigs();
+  if (db.dialect === 'sqlite') await backfillContainerConfigs();
+  else log.info('Skipping local container.json backfill for non-local central DB');
 
-  // 2. Container runtime
-  ensureContainerRuntimeRunning();
-  cleanupOrphans();
+  // 2. Session runtime: prove it is reachable, then reconcile what survived a
+  // restart. Adoption replaces the old reap-everything cleanup — a session that
+  // is still running keeps running, and only true orphans are stopped.
+  await getSessionDriver().ensureReady?.();
+  await adoptRunningSessions();
 
   // 3. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
@@ -152,6 +154,10 @@ async function main(): Promise<void> {
   // actual work begins here, after DB + delivery are ready and before polls.
   await startHostModules({ db, signal: hostAbortController.signal });
 
+  // 5b. Register this host process in durable state and keep its lease fresh
+  // (shadow state — observability across restarts, no behavior reads it).
+  await startHostInstanceLease();
+
   // 6. Start delivery polls
   startActiveDeliveryPoll();
   startSweepDeliveryPoll();
@@ -172,12 +178,15 @@ async function shutdown(signal: string): Promise<void> {
   log.info('Shutdown signal received', { signal });
   hostAbortController.abort();
   await stopHostModules();
+  // Stamp the durable stop before the DB closes below.
+  await stopHostInstanceLease();
   stopDeliveryPolls();
   stopHostSweep();
   await stopCliServer();
   try {
     await teardownChannelAdapters();
   } finally {
+    await closeDb();
     // Always reset on graceful shutdown — even if teardown threw, we got here
     // via SIGTERM/SIGINT, not a crash, so the next start shouldn't be counted
     // as one.
@@ -186,8 +195,8 @@ async function shutdown(signal: string): Promise<void> {
   }
 }
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
 
 main().catch((err) => {
   log.fatal('Startup failed', { err });

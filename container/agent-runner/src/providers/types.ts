@@ -1,15 +1,22 @@
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 
+/**
+ * A speed tier name. The vocabulary is provider-declared (the host validates
+ * `--speed` against the provider's `inference.speedTiers`), so this is an
+ * opaque token here; a provider reacts to the names it declared and ignores
+ * the rest.
+ */
+export type ProviderSpeed = string;
+
 export interface AgentProvider {
   /**
-   * True if the provider's underlying SDK handles slash commands natively and
-   * wants them passed through as raw text. When false, the poll-loop formats
-   * slash commands like any other chat message.
+   * Register shared memory through the provider's native session-start
+   * mechanism. `memory` is the contract's resolved memory capability (core
+   * calls the contract's `memory` function with the hook, or takes its
+   * declared constant, and passes the result); absent for providers without
+   * a contract or without a memory capability.
    */
-  readonly supportsNativeSlashCommands: boolean;
-
-  /** Register shared memory through the provider's native session-start mechanism. */
-  registerMemorySessionHook(hook: MemorySessionHookRegistration): void;
+  registerMemorySessionHook(hook: MemorySessionHookRegistration, memory?: unknown): void;
 
   /**
    * Optional. Called by the poll-loop after each completed exchange (a
@@ -18,7 +25,9 @@ export interface AgentProvider {
    * markdown into the agent's `conversations/` dir); providers that persist
    * and archive their own transcript (e.g. the Claude Agent SDK's `.jsonl`)
    * omit it. Best-effort: the loop catches and logs anything it throws. The
-   * implementation lives with the provider, never in the runner.
+   * Contractless providers implement this directly. For a declared
+   * core-owned archive, the factory replaces it with the core executor while
+   * the provider implementation remains an old-core compatibility fallback.
    */
   onExchangeComplete?(exchange: ProviderExchange): void;
 
@@ -38,7 +47,8 @@ export interface AgentProvider {
    * the continuation and start a fresh session (the provider archives any
    * recoverable summary first); return null to keep resuming.
    *
-   * Guards the cold-resume failure mode: a long-lived hub session accumulates
+   * Provider-internal: only the provider knows its transcript format. This
+   * guards the cold-resume failure mode: a long-lived hub session accumulates
    * days of history — including base64 image blocks the agent Read — and the
    * SDK reloads the whole .jsonl on every resume. Past a threshold the first
    * turn alone can exceed the host's idle ceiling, so the container is killed
@@ -76,6 +86,12 @@ export interface ProviderOptions {
    * through to the underlying SDK. If omitted, the SDK default is used.
    */
   effort?: string;
+  /**
+   * Provider-declared speed tier (`standard` or `fast` for Claude). A provider
+   * maps `fast` onto its own fast serving tier when it has one; `standard`
+   * keeps the provider default; a tier it did not declare never reaches it.
+   */
+  speed?: ProviderSpeed;
 }
 
 export interface QueryInput {
@@ -146,8 +162,21 @@ export type ProviderEvent =
    * dropping it as un-wrapped scratchpad, and to skip the re-wrap nudge.
    */
   | { type: 'result'; text: string | null; isError?: boolean }
+  /**
+   * An assistant text segment emitted mid-turn (e.g. between tool calls).
+   * The SDK's final `result` carries only the LAST assistant text, so a
+   * complete <message to="..."> block composed before a trailing tool call
+   * never reaches the result event. For providers declaring
+   * `textDelivery: 'mid-turn-complete'`, the poll-loop scans these segments for closed
+   * message blocks and delivers them as they are emitted (chat runs only,
+   * with cross-segment assembly of split blocks); the final result never
+   * delivers content — repeats are inert there, and an undelivered turn
+   * gets the wrap-nudge instead.
+   */
+  | { type: 'text'; text: string }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
+  | { type: 'file'; path: string }
   /**
    * Liveness signal. Providers MUST yield this on every underlying SDK
    * event (tool call, thinking, partial message, anything) so the

@@ -4,7 +4,7 @@
  * flow (same capability-not-name rule as the host provider-container registry).
  *
  * `claude` is the built-in default: it has no `runAuth` of its own, which the
- * setup flow reads as "run the standard auth step". A provider payload adds
+ * setup flow reads as "run the standard auth step". Every provider adds
  * itself by shipping a `setup/providers/<name>.ts` with a top-level
  * `registerSetupProvider(...)` call and appending one import line to the
  * `setup/providers/index.ts` barrel — the same shape as the host and container
@@ -36,17 +36,13 @@ export interface SetupProviderEntry {
 
 const registry = new Map<string, SetupProviderEntry>();
 
-registry.set('claude', {
-  value: 'claude',
-  label: 'Claude',
-  hint: 'default — Anthropic subscription or API key',
-});
-
 export function registerSetupProvider(entry: SetupProviderEntry): void {
-  if (registry.has(entry.value)) {
-    throw new Error(`Setup provider already registered: ${entry.value}`);
+  const key = entry.value.toLowerCase();
+  if (entry.value !== key || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(entry.value)) {
+    throw new Error(`Setup provider name must be lowercase kebab-case: '${entry.value}'`);
   }
-  registry.set(entry.value, entry);
+  if (registry.has(key)) throw new Error(`Setup provider already registered: ${key}`);
+  registry.set(key, entry);
 }
 
 export function getSetupProvider(name: string): SetupProviderEntry | undefined {

@@ -50,6 +50,11 @@ jobs:
         run: |
           set -euo pipefail
           read_pin() {
+            # Older long-lived branches may predate versions.json. Treat that
+            # as an empty old pin so the new pin still gets fully verified.
+            if ! git cat-file -e "$1:versions.json" 2>/dev/null; then
+              return 0
+            fi
             # Single-reference form only. A per-platform object is deliberately
             # not auto-bumped: the entries must move together, and a bot that
             # bumps them independently can leave the architectures on bytes

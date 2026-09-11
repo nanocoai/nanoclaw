@@ -11,8 +11,11 @@
  *   - src/modules/mount-security/ → imported directly by container-runner
  *
  * Registry-based modules (installed via /add-<name> skills, pulled from the
- * `modules` branch): append imports below.
+ * `modules` branch): append imports below. The singular mailbox slot is the
+ * exception: skills replace mailbox/compose.ts and leave this import intact.
  */
+import '../mailbox/compose.js';
+
 // Approvals (default tier) must load before self-mod (optional) so the
 // registerApprovalHandler / requestApproval symbols are bound when self-mod
 // registers its handlers at import time.
@@ -21,3 +24,4 @@ import './interactive/index.js';
 import './permissions/index.js';
 import './agent-to-agent/index.js';
 import './self-mod/index.js';
+import './community-portal/index.js';

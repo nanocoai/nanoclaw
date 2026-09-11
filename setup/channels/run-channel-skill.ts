@@ -15,7 +15,8 @@
  * So the wire lives in exactly one place (init-first-agent) and is never
  * duplicated across channel skills.
  */
-import { writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import * as p from '@clack/prompts';
 
@@ -24,10 +25,117 @@ import * as setupLog from '../logs.js';
 import { BACK_TO_CHANNEL_SELECTION, backGate, type ChannelFlowResult } from '../lib/back-nav.js';
 import { askOperatorRole, type OperatorRole } from '../lib/role-prompt.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
-import { runSkill, type RunSkillOptions } from '../lib/skill-driver.js';
+import { hostExec, runSkill, type RunSkillOptions } from '../lib/skill-driver.js';
 import { clearTemplatePick } from '../templates.js';
+import { launchSlackJob, readSlackJob, queueSlackJob } from '../../src/community-portal/slack-job.js';
+import { getChannelPreStep, getCompanionSkills } from './companions.js';
 
 const DEFAULT_AGENT_NAME = 'Nano';
+
+/**
+ * Companion skill directories ship in-tree — `.claude/skills/<name>` on trunk
+ * is their canonical home, and the wizard code that declares a companion
+ * travels in the same tree as the skill it names, so a checkout that carries
+ * this code carries the directory too. There is deliberately no branch-fetch
+ * fallback: the only way to reach false is a tree someone trimmed by hand,
+ * and quietly installing a substitute from elsewhere would paper over exactly
+ * that. The caller warns and skips.
+ */
+export function companionSkillPresent(skill: string, projectRoot: string): boolean {
+  // Key presence on SKILL.md, not the directory: a directory without one
+  // parses as zero directives — "fully applied" while the feature is absent.
+  return existsSync(join(projectRoot, `.claude/skills/${skill}`, 'SKILL.md'));
+}
+
+/**
+ * Apply a channel's declared companion skills (setup/channels/companions.ts)
+ * after its main install skill. Some channel payloads are bigger than the
+ * adapter install itself — capabilities that live in their own skills and
+ * used to be applied by hand, which is exactly how a fresh install ships a
+ * half-working channel. Applying the declared list here makes finishing setup
+ * mean the whole payload actually works.
+ *
+ * Per-skill restarts are skipped and ONE deferred restart runs after all of
+ * them — MANDATORY, and the reason `skipEffects: ['restart']` is safe: the
+ * main channel skill restarts the host BEFORE the companions run, so without
+ * a restart HERE nothing ever reloads after them. That failure mode is
+ * invisible on disk and brutal to diagnose — every file is correct, but the
+ * live process still holds the ESM-cached pre-edit modules.
+ *
+ * A companion that doesn't fully apply degrades, not fails: the channel's
+ * main install still works, so warn with the exact re-apply command instead
+ * of aborting setup.
+ */
+async function applyCompanionSkills(
+  channel: string,
+  projectRoot: string,
+  overrides: ChannelSkillOverrides,
+): Promise<void> {
+  const companions = getCompanionSkills(channel);
+  let applied = false;
+  let degraded = false;
+  for (const skill of companions) {
+    if (!companionSkillPresent(skill, projectRoot)) {
+      degraded = true;
+      p.log.warn(
+        `Companion skill ${skill} is missing from this checkout (.claude/skills/${skill}/SKILL.md). ` +
+          `The ${channel} channel works, but the capability that skill adds is missing until you ` +
+          `restore the directory (git checkout — it ships with this repo) and apply it: ` +
+          `pnpm exec tsx setup/lib/skill-driver.ts .claude/skills/${skill}`,
+      );
+      continue;
+    }
+    const res = await runSkill(`.claude/skills/${skill}`, {
+      projectRoot,
+      exec: overrides.exec,
+      resolveRemote: overrides.resolveRemote,
+      // Skip per-skill restarts; this function performs ONE after all, below.
+      skipEffects: overrides.skipEffects ?? ['restart'],
+      onEvent: overrides.onEvent,
+      confirm: overrides.confirm,
+      openUrl: overrides.openUrl,
+      step: `${channel}-${skill}`,
+    });
+    if (fullyApplied(res)) {
+      applied = true;
+      continue;
+    }
+    degraded = true;
+    // Degraded, not fatal: the main channel install still works. Name the
+    // skill and the exact re-apply command so the warning is actionable.
+    p.log.warn(
+      `Couldn't fully apply companion skill ${skill}. The ${channel} channel works, but the ` +
+        `capability that skill adds stays degraded until you re-apply it: ` +
+        `pnpm exec tsx setup/lib/skill-driver.ts .claude/skills/${skill}`,
+    );
+  }
+
+  if (degraded && overrides.requireCompanions)
+    throw new Error(`The ${channel} companion installation needs attention. Resume its setup step.`);
+  if (!applied) return;
+  if (degraded) {
+    // A half-applied companion may have copied files and appended barrel
+    // imports before failing its build or tests — restarting could boot that
+    // state. The channel itself already works (its own restart ran before the
+    // companions), so hold the deferred restart until the operator repairs.
+    p.log.warn(
+      'Skipping the deferred service restart: a companion skill did not fully apply. ' +
+        'Re-apply it with the command above, then restart: bash setup/lib/restart.sh',
+    );
+    return;
+  }
+  if (overrides.skipEffects?.includes('restart')) return;
+  try {
+    await (overrides.exec ?? hostExec(projectRoot))('bash setup/lib/restart.sh');
+  } catch {
+    p.log.warn(
+      'Applied the companion skills but could not restart the service. Their changes stay ' +
+        'inactive until you restart it: bash setup/lib/restart.sh',
+    );
+    if (overrides.requireCompanions)
+      throw new Error('The Slack service restart needs attention. Resume the Slack setup step.');
+  }
+}
 
 interface WireArgs {
   channel: string;
@@ -39,9 +147,11 @@ interface WireArgs {
   agentGroupId?: string;
   /** Explicit DM engage regex (e.g. WhatsApp shared-mode "@<name> only" self-chat). */
   engagePattern?: string;
+  /** Adapter instance registry key (e.g. telegram-mega) when the skill wired a named bot; unset = default instance. */
+  instance?: string;
 }
 
-async function resolveAgentName(): Promise<string> {
+export async function resolveAgentName(): Promise<string> {
   const preset = process.env.NANOCLAW_AGENT_NAME?.trim();
   if (preset) return preset;
   const answer = ensureAnswer(
@@ -60,15 +170,24 @@ async function initFirstAgent(args: WireArgs): Promise<boolean> {
     'init-first-agent',
     'pnpm',
     [
-      'exec', 'tsx', 'scripts/init-first-agent.ts',
-      '--channel', args.channel,
-      '--user-id', args.userId,
-      '--platform-id', args.platformId,
-      '--display-name', args.displayName,
-      '--agent-name', args.agentName,
-      '--role', args.role,
+      'exec',
+      'tsx',
+      'scripts/init-first-agent.ts',
+      '--channel',
+      args.channel,
+      '--user-id',
+      args.userId,
+      '--platform-id',
+      args.platformId,
+      '--display-name',
+      args.displayName,
+      '--agent-name',
+      args.agentName,
+      '--role',
+      args.role,
       ...(args.agentGroupId ? ['--agent-group-id', args.agentGroupId] : []),
       ...(args.engagePattern ? ['--engage-pattern', args.engagePattern] : []),
+      ...(args.instance ? ['--instance', args.instance] : []),
     ],
     { running: `Wiring ${args.agentName} to your ${args.channel} DMs…`, done: 'Agent wired.' },
     { extraFields: { CHANNEL: args.channel, AGENT_NAME: args.agentName, PLATFORM_ID: args.platformId } },
@@ -77,14 +196,18 @@ async function initFirstAgent(args: WireArgs): Promise<boolean> {
 }
 
 export interface ChannelSkillOverrides extends Partial<RunSkillOptions> {
+  /** A later perk offer already received consent for this browser handoff. */
+  browserConsent?: boolean;
+  /** Background jobs must not report ready after a partial companion install. */
+  requireCompanions?: boolean;
   agentName?: string;
   role?: OperatorRole;
   /** The shared wire; defaults to init-first-agent. Injectable for tests. */
   wire?: (args: WireArgs) => Promise<boolean> | boolean;
   /**
-   * Clears the persisted template pick once the wire consumed the stamped
-   * agent; defaults to the real .env writer (setup/templates.ts). Injectable
-   * so tests never touch the repo's .env.
+   * Clears any persisted template pick after a targeted wire. Modern setup
+   * clears it when the operator chooses an action; this remains idempotent for
+   * re-exec and direct-driver paths. Injectable so tests never touch .env.
    */
   clearTemplatePick?: () => void;
   /**
@@ -130,14 +253,15 @@ export async function runChannelSkill(
   // prompts past the skill run (only a fresh create resolves the wire inputs;
   // a drop-through re-run asks nothing).
   const askLater = overrides.wireIfResolved;
-  let agentName = askLater ? '' : overrides.agentName ?? (await resolveAgentName());
-  let role = askLater ? undefined : overrides.role ?? (await askOperatorRole(channel));
+  let agentName = askLater ? '' : (overrides.agentName ?? (await resolveAgentName()));
+  let role = askLater ? undefined : (overrides.role ?? (await askOperatorRole(channel)));
 
   // Channel-specific: install adapter, collect credentials, resolve the wire
   // inputs. The whole channel-specific procedure lives in the SKILL.md.
   const res = await runSkill(`.claude/skills/add-${channel}`, {
     projectRoot,
     exec: overrides.exec,
+    execStream: overrides.execStream,
     resolveInput: overrides.resolveInput,
     resolveRemote: overrides.resolveRemote,
     // The already-resolved agent name is pre-supplied so a skill that consumes
@@ -172,7 +296,10 @@ export async function runChannelSkill(
       writeFileSync(rawLog, res.agentTasks.map((t) => `## ${t.kind} (line ${t.line})\n${t.reason}\n`).join('\n'));
     }
     for (const t of res.agentTasks) {
-      const lines = t.reason.split('\n').map((l) => l.trim()).filter(Boolean);
+      const lines = t.reason
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
       const more = lines.length > 1 ? ` (+${lines.length - 1} more lines in ${rawLog})` : '';
       p.log.warn(`Needs an agent (${t.kind}): ${lines[0] ?? t.reason}${more}`);
     }
@@ -188,6 +315,11 @@ export async function runChannelSkill(
       rawLog,
     );
   }
+
+  // Declared companion skills: apply the rest of the channel's payload (see
+  // setup/channels/companions.ts). After the main install, so files the
+  // companions edit or import already exist.
+  await applyCompanionSkills(channel, projectRoot, overrides);
 
   // Identity confirmation captured by the skill (e.g. add-slack's auth.test).
   if (res.vars.connected_as) p.log.success(`Connected to ${channel} as ${res.vars.connected_as}.`);
@@ -228,14 +360,84 @@ export async function runChannelSkill(
     role: role!,
     agentGroupId: templateAgentGroupId,
     engagePattern: res.vars.engage_pattern || undefined,
+    instance: res.vars.instance || undefined,
   });
   if (!ok) {
-    await failWith('init-first-agent', `Couldn't finish connecting ${agentName}.`, 'You can retry later with `/init-first-agent`.');
+    await failWith(
+      'init-first-agent',
+      `Couldn't finish connecting ${agentName}.`,
+      'You can retry later with `/init-first-agent`.',
+    );
   }
-  // This wire is the seam that consumes the template pick: only now has the
-  // pick done its job. Clearing earlier (at stamp time) orphans the agent on
-  // a rerun after a failed channel step; never clearing makes every future
-  // setup run re-enter template setup. Pinned by run-channel-skill.test.ts
-  // ("clears the template pick…").
+  // Idempotently clear any legacy/re-exec template pick after the targeted
+  // wire succeeds. Pinned by run-channel-skill.test.ts.
   if (templateAgentGroupId) (overrides.clearTemplatePick ?? clearTemplatePick)();
+}
+
+/**
+ * The wizard's channel entry point: consult the channel's registered
+ * auto-provision pre-step (setup/channels/companions.ts) before its install
+ * skill. No registration ⇒ exactly runChannelSkill — the common case, and
+ * every channel's behavior today.
+ *
+ * With a pre-step, the opening order mirrors runChannelSkill's own: the back
+ * gate first (before any side effect — the pre-step owns prompts of its own),
+ * then the agent name — resolved up front because it doubles as the
+ * provisioned app's name — then the pre-step. Whatever inputs it returns
+ * pre-bind the skill's prompts; undefined means the manual path, and the
+ * skill flow prompts as usual. Explicit `overrides.inputs` win over pre-bound
+ * values.
+ */
+export async function runChannelSkillWithPreStep(
+  channel: string,
+  displayName: string,
+  overrides: ChannelSkillOverrides = {},
+): Promise<ChannelFlowResult> {
+  const preStep = getChannelPreStep(channel);
+  if (!preStep) return runChannelSkill(channel, displayName, overrides);
+
+  if (overrides.offerBack) {
+    const label = channel.charAt(0).toUpperCase() + channel.slice(1);
+    const gate = await (overrides.backGate ?? backGate)(label);
+    if (gate === BACK_TO_CHANNEL_SELECTION) return BACK_TO_CHANNEL_SELECTION;
+  }
+  const agentName = overrides.agentName ?? (await resolveAgentName());
+  const root = overrides.projectRoot ?? process.cwd();
+  if (channel === 'slack') {
+    const pending = await readSlackJob(root);
+    if (pending && ['awaiting_approval', 'installing'].includes(pending.status)) {
+      if (pending.context.agentName !== agentName)
+        throw new Error(
+          `Finish the saved Slack installation for ${pending.context.agentName} before adding another agent in this checkout.`,
+        );
+      await launchSlackJob(root);
+      p.log.info('Your saved Slack installation is continuing in the background. Follow its progress in the portal.');
+      return;
+    }
+  }
+  const role = channel === 'slack' ? (overrides.role ?? (await askOperatorRole(channel))) : overrides.role;
+  const preBound = await (overrides.browserConsent ? preStep(agentName, { browserConsent: true }) : preStep(agentName));
+  if (preBound?.__portal_skip === 'slack') return BACK_TO_CHANNEL_SELECTION;
+  if (preBound?.__portal_pending === 'slack') {
+    if (!preBound.owner_handle) throw new Error('Reconnect Slack in the portal to identify the workspace owner.');
+    await queueSlackJob(
+      {
+        agentName,
+        displayName,
+        role: role!,
+        ownerHandle: preBound.owner_handle,
+        templateAgentId: process.env.NANOCLAW_TEMPLATE_AGENT_ID,
+      },
+      root,
+    );
+    p.log.info('Slack is finishing in the background. You can keep setting up NanoClaw or browse other perks.');
+    return;
+  }
+  return runChannelSkill(channel, displayName, {
+    ...overrides,
+    offerBack: false,
+    agentName,
+    role,
+    inputs: { ...preBound, ...overrides.inputs },
+  });
 }

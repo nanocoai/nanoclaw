@@ -13,9 +13,7 @@ import { ensureAnswer } from './runner.js';
 
 export type OperatorRole = 'owner' | 'admin' | 'member';
 
-export async function askOperatorRole(
-  channelLabel: string,
-): Promise<OperatorRole> {
+export async function askOperatorRole(channelLabel: string): Promise<OperatorRole> {
   const choice = ensureAnswer(
     await brightSelect<OperatorRole>({
       message: `How should this ${channelLabel} account be registered?`,

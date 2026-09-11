@@ -34,9 +34,7 @@ export function claudeCliAvailable(): boolean {
  * resolved zone string on success, or null if the CLI is missing, Claude
  * errored, or the reply wasn't a valid IANA zone.
  */
-export async function resolveTimezoneViaClaude(
-  input: string,
-): Promise<string | null> {
+export async function resolveTimezoneViaClaude(input: string): Promise<string | null> {
   if (!claudeCliAvailable()) return null;
 
   const prompt = buildPrompt(input);
@@ -57,23 +55,16 @@ export async function resolveTimezoneViaClaude(
 
   const resolved = reply ? extractTimezone(reply) : null;
   if (resolved) {
-    s.stop(
-      `${fitToWidth(`Interpreted as ${resolved}.`, suffix)}${k.dim(suffix)}`,
-    );
+    s.stop(`${fitToWidth(`Interpreted as ${resolved}.`, suffix)}${k.dim(suffix)}`);
     return resolved;
   }
-  s.stop(
-    `${fitToWidth("Couldn't interpret that as a timezone.", suffix)}${k.dim(
-      suffix,
-    )}`,
-    1,
-  );
+  s.stop(`${fitToWidth("Couldn't interpret that as a timezone.", suffix)}${k.dim(suffix)}`, 1);
   return null;
 }
 
 function buildPrompt(input: string): string {
   return [
-    'Convert the user\'s description of where they are into a single IANA',
+    "Convert the user's description of where they are into a single IANA",
     'timezone identifier (e.g. "America/New_York", "Europe/London",',
     '"Asia/Jerusalem"). Respond with ONLY the IANA string on a single line,',
     'nothing else — no prose, no quotes, no punctuation. If you cannot',

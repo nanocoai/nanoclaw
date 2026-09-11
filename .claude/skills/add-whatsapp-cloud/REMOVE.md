@@ -18,11 +18,7 @@ rm -f src/channels/whatsapp-cloud.ts src/channels/whatsapp-cloud-registration.te
 
 ## 2. Remove credentials
 
-Remove `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`, and `WHATSAPP_VERIFY_TOKEN` from `.env`, then re-sync to the container:
-
-```bash
-mkdir -p data/env && cp .env data/env/env
-```
+Remove `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_APP_SECRET`, and `WHATSAPP_VERIFY_TOKEN` from `.env`.
 
 ## 3. Remove the package
 
