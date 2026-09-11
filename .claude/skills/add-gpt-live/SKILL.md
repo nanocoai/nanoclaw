@@ -114,12 +114,13 @@ OPENAI_API_KEY={{openai_api_key}}
 ```
 
 **Keychain** — the user adds the item in their own terminal, so the key never
-passes through this setup or their shell history (`-w` with no value prompts
-for it; `-T` lets the `security` tool read it back without a dialog). Tell the
-user:
+passes through this setup or their shell history. The shell reads the key
+with `read -s` rather than `security`'s own hidden prompt, which silently cuts
+input at 128 characters (project keys are longer); `-T` lets the `security`
+tool read the item back without a dialog. Tell the user:
 
 ```nc:operator when:key_source=keychain
-Run this in a terminal and paste the key at the prompt: security add-generic-password -U -s nanoclaw-openai -a "$USER" -T /usr/bin/security -w
+Run this in a terminal, then paste the key at the hidden prompt and press Enter: read -s KEY && security add-generic-password -U -s nanoclaw-openai -a "$USER" -T /usr/bin/security -w "$KEY"; unset KEY
 ```
 ```nc:env-set when:key_source=keychain
 GPT_LIVE_KEYCHAIN_SERVICE=nanoclaw-openai
@@ -281,6 +282,13 @@ tells the agent not to echo them — check it is present under
 **`gpt-live` is missing from `ncl` channel lists.** The factory returned null:
 neither `OPENAI_API_KEY` nor `GPT_LIVE_KEYCHAIN_SERVICE` is in `.env`, or
 `GPT_LIVE_LINK_TOKEN` is missing. Set them and restart.
+
+**`401 Incorrect API key` although the key was just created.** If the item
+was added with `security … -w` and typed at `security`'s own prompt, the key
+was cut at 128 characters (that prompt's limit; project keys are longer).
+Check with `security find-generic-password -s nanoclaw-openai -a "$USER" -w |
+tr -d '\n' | wc -c` — exactly 128 means truncated. Re-add it with the
+`read -s KEY && …` command above.
 
 **`Keychain lookup failed` in the logs.** The item is missing, named
 differently, or stored for another account. `security find-generic-password
