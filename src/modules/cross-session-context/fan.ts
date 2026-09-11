@@ -56,7 +56,7 @@ export function echoRowId(origMessageId: string, targetSessionId: string): strin
   return `${origMessageId}:echo:${targetSessionId}`;
 }
 
-/** Human label for the source conversation, e.g. '#Pixel room' / 'DM with Gavriel'. */
+/** Human label for the source conversation, e.g. '#Pixel room' / 'DM with Alex'. */
 export function buildEchoLabel(
   mg: Pick<MessagingGroup, 'name' | 'platform_id' | 'is_group'>,
   senderName?: string | null,
@@ -139,8 +139,8 @@ interface EchoFanInput {
   senderId: string | null;
 }
 
-function fanEcho(input: EchoFanInput): number {
-  const candidates = getSessionsByAgentGroup(input.agentGroupId);
+async function fanEcho(input: EchoFanInput): Promise<number> {
+  const candidates = await getSessionsByAgentGroup(input.agentGroupId);
   const targets = selectEchoTargets(candidates, input.sourceSessionId, input.sourceMessagingGroupId);
   if (targets.length === 0) return 0;
 
@@ -154,7 +154,7 @@ function fanEcho(input: EchoFanInput): number {
   let written = 0;
   for (const target of targets) {
     try {
-      writeSessionMessage(input.agentGroupId, target.id, {
+      await writeSessionMessage(input.agentGroupId, target.id, {
         id: echoRowId(input.origMessageId, target.id),
         kind: 'chat',
         timestamp: input.timestamp,
@@ -162,7 +162,7 @@ function fanEcho(input: EchoFanInput): number {
         channelType: ECHO_CHANNEL_TYPE,
         threadId: null,
         content,
-        trigger: 0,
+        trigger: false,
         sourceSessionId: input.sourceSessionId,
       });
       written++;
@@ -184,7 +184,7 @@ function fanEcho(input: EchoFanInput): number {
  * sessions. Call ONLY for the engaged (wake) branch — accumulate (trigger=0)
  * writes must never fan (D3). Never throws; returns rows written.
  */
-export function fanInboundMessage(args: {
+export async function fanInboundMessage(args: {
   /** Source session the trigger=1 row was written to. */
   session: Session;
   /** Messaging group the message arrived on (the source surface). */
@@ -196,7 +196,7 @@ export function fanInboundMessage(args: {
   channelType: string;
   content: string;
   timestamp: string;
-}): number {
+}): Promise<number> {
   try {
     const { session, mg } = args;
     if (!CHAT_KINDS.has(args.kind)) return 0;
@@ -208,7 +208,7 @@ export function fanInboundMessage(args: {
     if (!parsed.text) return 0;
     // Targets are always sibling threads of the conversation the message
     // arrived on, so every echo is sibling-flavored.
-    return fanEcho({
+    return await fanEcho({
       agentGroupId: session.agent_group_id,
       sourceSessionId: session.id,
       sourceMessagingGroupId: mg.id,
@@ -237,7 +237,7 @@ export function fanInboundMessage(args: {
  * needed so sibling-instance rows sharing one channel address resolve to the
  * sender's own row, not an arbitrary sibling's. Never throws.
  */
-export function fanOutboundMessage(
+export async function fanOutboundMessage(
   msg: {
     id: string;
     kind: string;
@@ -247,19 +247,19 @@ export function fanOutboundMessage(
   },
   session: Session,
   agentGroup: AgentGroup,
-): number {
+): Promise<number> {
   try {
     if (msg.kind === 'system' || msg.kind === 'task_log') return 0;
     if (!msg.channel_type || !msg.platform_id) return 0;
     if (msg.channel_type === 'agent' || msg.channel_type === ECHO_CHANNEL_TYPE) return 0;
     const isTaskSource = isTaskThread(session.thread_id);
 
-    const originMg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
+    const originMg = session.messaging_group_id ? await getMessagingGroup(session.messaging_group_id) : undefined;
     const mg =
       originMg && originMg.channel_type === msg.channel_type && originMg.platform_id === msg.platform_id
         ? originMg
-        : (getMessagingGroupForOwnDestination(session.agent_group_id, msg.channel_type, msg.platform_id) ??
-          getMessagingGroupByPlatform(msg.channel_type, msg.platform_id));
+        : ((await getMessagingGroupForOwnDestination(session.agent_group_id, msg.channel_type, msg.platform_id)) ??
+          (await getMessagingGroupByPlatform(msg.channel_type, msg.platform_id)));
     if (!mg) return 0;
 
     const parsed = parseContent(msg.content);
@@ -269,7 +269,7 @@ export function fanOutboundMessage(
     // a message the agent posted INTO this conversation from elsewhere (a
     // task run, or a cross-conversation send) gets the delivered flavor.
     const isOriginSend = session.messaging_group_id === mg.id;
-    return fanEcho({
+    return await fanEcho({
       agentGroupId: session.agent_group_id,
       sourceSessionId: session.id,
       sourceMessagingGroupId: mg.id,

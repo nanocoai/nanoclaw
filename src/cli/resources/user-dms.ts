@@ -7,6 +7,7 @@ registerResource({
   description:
     "User DM cache — maps (user, channel_type) to the messaging group used for DM delivery. Populated lazily by ensureUserDm() when the host needs to cold-DM a user (approvals, pairing). For direct-addressable channels (Telegram, WhatsApp) the handle IS the DM chat ID. For resolution-required channels (Discord, Slack) the adapter's openDM resolves it.",
   idColumn: 'user_id',
+  listOrder: 'resolved_at DESC, user_id, channel_type',
   columns: [
     { name: 'user_id', type: 'string', description: 'User this DM route is for.' },
     { name: 'channel_type', type: 'string', description: 'Channel adapter type.' },

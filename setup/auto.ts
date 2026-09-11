@@ -33,11 +33,27 @@ import * as p from '@clack/prompts';
 import k from 'kleur';
 
 import { BACK_TO_CHANNEL_SELECTION } from './lib/back-nav.js';
-import { runChannelSkill } from './channels/run-channel-skill.js';
+import { withSetupLock, launchSlackJob, readSlackJob, slackJobStatus } from '../src/community-portal/slack-job.js';
+// The pre-step-aware entry point consults each channel's registered wizard
+// extensions (setup/channels/companions.ts) before running its install skill
+// — the wizard itself stays free of channel-specific imports.
+import { runChannelSkillWithPreStep } from './channels/run-channel-skill.js';
+import {
+  channelDmLabel,
+  initialChannelOptions,
+  runInitialChannel,
+  type ChannelChoice,
+} from './channels/initial-setup.js';
 import { runInheritScript } from './lib/inherit-script.js';
-import { pingCliAgent, type PingResult } from './lib/agent-ping.js';
+import { offerPortalReminder, portalEnabled, runImagePortal } from './portal.js';
+import { pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
 import { applyProviderSkill } from './providers/install.js';
+import {
+  getInstallableProviderDescriptor,
+  listInstallableProviderDescriptors,
+  providerImagePolicy,
+} from './providers/skill-descriptor.js';
 // Provider payloads self-register their picker entry + auth on import.
 import './providers/index.js';
 import { brightSelect } from './lib/bright-select.js';
@@ -56,12 +72,7 @@ import {
   type ImageSource,
 } from './lib/registry-state.js';
 import { upsertEnvVar } from './set-env.js';
-import {
-  applyToEnv,
-  parseFlags,
-  printHelp,
-  readFromEnv,
-} from './lib/setup-config-parse.js';
+import { applyToEnv, parseFlags, printHelp, readFromEnv } from './lib/setup-config-parse.js';
 import { runAdvancedScreen } from './lib/setup-config-screen.js';
 import { runWindowedStep } from './lib/windowed-runner.js';
 import { runUninstallFlow } from './uninstall/flow.js';
@@ -69,11 +80,22 @@ import { detectExistingInstall } from './uninstall/scan.js';
 import { detectRegisteredGroups, detectExistingDisplayName, readEnvKey } from './environment.js';
 import { pollHealth } from './onecli.js';
 import { getLaunchdLabel, getSystemdUnit } from '../src/install-slug.js';
+import type { AgentGroup } from '../src/types.js';
 import { claudeCliAvailable, resolveTimezoneViaClaude } from './lib/tz-from-claude.js';
 import * as setupLog from './logs.js';
 import { ensureAnswer, fail, runQuietChild, runQuietStep, spawnQuiet } from './lib/runner.js';
 import { emit as phEmit } from './lib/diagnostics.js';
-import { accentGreen, brandBody, brandBold, brandChip, dimWrap, fitToWidth, fmtDuration, note, wrapForGutter } from './lib/theme.js';
+import {
+  accentGreen,
+  brandBody,
+  brandBold,
+  brandChip,
+  dimWrap,
+  fitToWidth,
+  fmtDuration,
+  note,
+  wrapForGutter,
+} from './lib/theme.js';
 import { isValidTimezone } from '../src/timezone.js';
 import { DEFAULT_AGENT_PROVIDER, TEMPLATES_DIR } from '../src/config.js';
 import { SocketTransport } from '../src/cli/socket-client.js';
@@ -83,9 +105,13 @@ import {
   cloneRegistry,
   copyTemplate,
   installTemplateAgent,
+  listTemplateAgents,
   listTemplatesFromDir,
+  validateNewTemplateAgentName,
   type ClonedRegistry,
+  type SetupTemplateAgent,
   type TemplateEntry,
+  type TemplateOperation,
 } from './templates.js';
 
 const CLI_AGENT_NAME = 'Terminal Agent';
@@ -96,8 +122,6 @@ const REGISTRY_STEP = 'pnpm exec tsx setup/index.ts --step registry';
 
 /** `setup/registry-login.sh`'s "nothing was signed in, and that is fine" code. */
 const LOGIN_EXIT_SKIPPED = 2;
-
-type ChannelChoice = 'telegram' | 'discord' | 'whatsapp' | 'signal' | 'teams' | 'slack' | 'imessage' | 'other' | 'skip';
 
 async function main(): Promise<void> {
   // Make sure ~/.local/bin is on PATH for every child process we spawn.
@@ -215,9 +239,8 @@ async function main(): Promise<void> {
 
   // Nothing loads .env into the wizard process — bridge the persisted pick so
   // it survives not just self re-execs (`sg docker`, fail-retry) but full
-  // process restarts. Without this, a run that aborted after the pick leaves a
-  // partial install whose registered groups silently gate the picker off on
-  // rerun, and the pick is lost.
+  // process restarts. Without this, a run that aborted after the pick silently
+  // loses that choice on a full rerun.
   let savedPickBridged = false;
   if (!process.env.NANOCLAW_TEMPLATE_PATH?.trim()) {
     const savedPick = readEnvKey('NANOCLAW_TEMPLATE_PATH')?.trim();
@@ -226,17 +249,14 @@ async function main(): Promise<void> {
       savedPickBridged = true;
     }
   }
-  // Existing installs do not get an unsolicited first-agent picker, but an
-  // explicit --template-path is always honoured.
-  if (
-    !isResume &&
-    (process.env.NANOCLAW_TEMPLATE_PATH?.trim() || !detectRegisteredGroups(process.cwd()))
-  ) {
-    await runTemplateSetup(savedPickBridged);
+  if (!isResume) {
+    await runTemplateSetup(savedPickBridged, await detectRegisteredGroups(process.cwd()));
   }
 
   if (!skip.has('container')) {
-    p.log.message(brandBody(dimWrap('Your assistant lives in its own sandbox. It can only see what you explicitly share.', 4)));
+    p.log.message(
+      brandBody(dimWrap('Your assistant lives in its own sandbox. It can only see what you explicitly share.', 4)),
+    );
     // Asked before the step runs, because the step is what acts on the answer.
     await chooseImageSource();
     p.log.message(
@@ -372,9 +392,7 @@ async function main(): Promise<void> {
       const res = await runQuietStep(
         'onecli',
         {
-          running: reuse
-            ? 'Hooking up to your existing OneCLI…'
-            : "Setting up OneCLI, your agent's vault…",
+          running: reuse ? 'Hooking up to your existing OneCLI…' : "Setting up OneCLI, your agent's vault…",
           done: 'OneCLI vault ready.',
         },
         reuse ? ['--reuse'] : [],
@@ -417,7 +435,8 @@ async function main(): Promise<void> {
     // machine builds. Settle it here: buildContainerImage() below refuses on a
     // pinned install, and reaching that refusal aborts setup with no way out
     // short of re-running it.
-    if (agentProvider !== 'claude' && readImageSource() === 'hardened') {
+    const providerDescriptor = getInstallableProviderDescriptor(agentProvider);
+    if (providerImagePolicy(agentProvider) === 'local-required' && readImageSource() === 'hardened') {
       const leave = ensureAnswer(
         await p.confirm({
           message: `${agentProvider} needs a sandbox image built on this machine. Stop using the pre-built one?`,
@@ -437,14 +456,15 @@ async function main(): Promise<void> {
     }
 
     let providerEntry = getSetupProvider(agentProvider);
-    if (agentProvider !== 'claude' && !providerEntry) {
+    if (!providerEntry) {
       // A non-claude provider picked from the hard-wired list isn't wired in
       // this install yet — install it by applying its `/add-<name>` SKILL.md
       // in-process via the directive engine (channel style, idempotent:
       // self-skips if already installed), rebuild the image (the container step
       // already ran, the CLI manifest just changed), then load the payload's
       // setup module so it self-registers.
-      const skillDir = `.claude/skills/add-${agentProvider}`;
+      if (!providerDescriptor) throw new Error(`No install descriptor for provider '${agentProvider}'`);
+      const skillDir = providerDescriptor.skillDir;
       const s = p.spinner();
       s.start(`Installing ${agentProvider}…`);
       let blockers: string[];
@@ -453,20 +473,12 @@ async function main(): Promise<void> {
       } catch (err) {
         s.stop(`Couldn't install ${agentProvider}.`, 1);
         const message = err instanceof Error ? err.message : String(err);
-        await fail(
-          `add-${agentProvider}`,
-          `Couldn't install ${agentProvider}.`,
-          message,
-        );
+        await fail(`add-${agentProvider}`, `Couldn't install ${agentProvider}.`, message);
         return; // unreachable — fail() exits — but narrows blockers for TS
       }
       if (blockers.length) {
         s.stop(`Couldn't install ${agentProvider}.`, 1);
-        await fail(
-          `add-${agentProvider}`,
-          `Couldn't install ${agentProvider}.`,
-          blockers.join('; '),
-        );
+        await fail(`add-${agentProvider}`, `Couldn't install ${agentProvider}.`, blockers.join('; '));
       }
       s.stop(`${agentProvider} installed.`);
       p.log.info(brandBody('Rebuilding the container image with the new provider…'));
@@ -513,6 +525,40 @@ async function main(): Promise<void> {
     }
   }
 
+  if (
+    portalEnabled() &&
+    !skip.has('echo-reminder') &&
+    readImageSource() !== 'hardened' &&
+    readAgentImagePin() &&
+    (process.env.NANOCLAW_AGENT_PROVIDER || readEnvKey('DEFAULT_AGENT_PROVIDER') || DEFAULT_AGENT_PROVIDER || 'claude')
+      .trim()
+      .toLowerCase() === 'claude'
+  ) {
+    try {
+      await offerPortalReminder('echo', () =>
+        runImagePortal({
+          browserConsent: true,
+          apply: async () => {
+            const res = await runWindowedStep('container', {
+              running: 'Fetching Echo’s hardened image…',
+              done: 'Hardened sandbox ready.',
+              failed: 'Could not fetch the hardened image.',
+            });
+            if (!res.ok)
+              throw new Error('The hardened image could not be prepared. Your previous image choice has been kept.');
+          },
+        }),
+      );
+      skip.add('echo-reminder');
+    } catch (error) {
+      await fail(
+        'container',
+        'Could not finish Echo setup.',
+        error instanceof Error ? error.message : 'Retry the image setup step.',
+      );
+    }
+  }
+
   if (!skip.has('service')) {
     const res = await runQuietStep('service', {
       running: 'Starting NanoClaw in the background…',
@@ -535,13 +581,13 @@ async function main(): Promise<void> {
   async function resolveDisplayName(): Promise<string> {
     if (displayName) return displayName;
     const preset = process.env.NANOCLAW_DISPLAY_NAME?.trim();
-    const existing = detectExistingDisplayName(process.cwd());
+    const existing = await detectExistingDisplayName(process.cwd());
     const fallback = process.env.USER?.trim() || 'Operator';
     displayName = preset || existing || (await askDisplayName(fallback));
     return displayName;
   }
 
-  if (!skip.has('cli-agent') && detectRegisteredGroups(process.cwd())) {
+  if (!skip.has('cli-agent') && (await detectRegisteredGroups(process.cwd()))) {
     skip.add('cli-agent');
     skip.add('first-chat');
   }
@@ -554,7 +600,7 @@ async function main(): Promise<void> {
         running: 'Bringing your assistant online…',
         done: 'Assistant wired up.',
       },
-      ['--display-name', displayName!, '--agent-name', CLI_AGENT_NAME, '--folder', '_ping-test'],
+      ['--display-name', displayName!, '--agent-name', CLI_AGENT_NAME, '--folder', PING_AGENT_FOLDER],
     );
     if (!res.ok) {
       await fail(
@@ -579,7 +625,7 @@ async function main(): Promise<void> {
         const cleanupStart = Date.now();
         const cleanup = await spawnQuiet(
           'pnpm',
-          ['exec', 'tsx', 'scripts/delete-cli-agent.ts', '--folder', '_ping-test'],
+          ['exec', 'tsx', 'scripts/delete-cli-agent.ts', '--folder', PING_AGENT_FOLDER],
           cleanupRawLog,
         );
         setupLog.step(
@@ -618,7 +664,15 @@ async function main(): Promise<void> {
           const createRes = await runQuietChild(
             'create-terminal-agent',
             'pnpm',
-            ['exec', 'tsx', 'scripts/init-cli-agent.ts', '--display-name', displayName!, '--agent-name', terminalAgentName],
+            [
+              'exec',
+              'tsx',
+              'scripts/init-cli-agent.ts',
+              '--display-name',
+              displayName!,
+              '--agent-name',
+              terminalAgentName,
+            ],
             { running: `Creating ${terminalAgentName}…`, done: `${terminalAgentName} is ready.` },
           );
           if (!createRes.ok) {
@@ -652,14 +706,14 @@ async function main(): Promise<void> {
     await runTimezoneStep();
   }
 
-  await installSelectedTemplateAgent(agentProvider);
+  const templateAgentOutcome = await installSelectedTemplateAgent(agentProvider);
 
   // v1 → v2 migration is handled by `bash migrate-v2.sh`, not the setup flow.
   // Users migrating from v1 run that script before (or instead of) setup.
 
   let channelChoice: ChannelChoice = 'skip';
 
-  if (!skip.has('channel')) {
+  if (!skip.has('channel') && templateAgentOutcome !== 'restamped') {
     // Loop so a channel sub-flow can return BACK_TO_CHANNEL_SELECTION on
     // its first prompt and bounce the user back to the chooser without
     // restarting setup. Channels not yet wired with the back option just
@@ -672,28 +726,9 @@ async function main(): Promise<void> {
         await resolveDisplayName();
       }
       let result: void | typeof BACK_TO_CHANNEL_SELECTION;
-      // Every channel now runs through the SKILL.md-driven flow — the whole
-      // connect+wire procedure lives in each add-<channel>/SKILL.md.
-      if (channelChoice === 'telegram') {
-        result = await runChannelSkill('telegram', displayName!, { offerBack: true });
-      } else if (channelChoice === 'discord') {
-        result = await runChannelSkill('discord', displayName!, { offerBack: true });
-      } else if (channelChoice === 'whatsapp') {
-        result = await runChannelSkill('whatsapp', displayName!, { offerBack: true });
-      } else if (channelChoice === 'signal') {
-        result = await runChannelSkill('signal', displayName!, { offerBack: true });
-      } else if (channelChoice === 'teams') {
-        // Fresh create resolves the owner DM proactively and wires inline (the
-        // welcome message reaches the human first); a drop-through re-run
-        // resolves nothing and falls back to the deferred-wire ending.
-        result = await runChannelSkill('teams', displayName!, { wireIfResolved: true, offerBack: true });
-      } else if (channelChoice === 'slack') {
-        result = await runChannelSkill('slack', displayName!, { offerBack: true });
-      } else if (channelChoice === 'imessage') {
-        result = await runChannelSkill('imessage', displayName!, { offerBack: true });
-      } else if (channelChoice === 'other') {
+      if (channelChoice === 'other') {
         result = await askOtherChannelName();
-      } else {
+      } else if (channelChoice === 'skip') {
         p.log.info(
           brandBody(
             wrapForGutter(
@@ -702,21 +737,38 @@ async function main(): Promise<void> {
             ),
           ),
         );
+      } else {
+        // Every installable choice runs through the SKILL.md-driven flow. The
+        // mapping is executable and unit-tested in channels/initial-setup.ts.
+        result = await runInitialChannel(channelChoice, displayName!, runChannelSkillWithPreStep);
       }
       if (result === BACK_TO_CHANNEL_SELECTION) backed = true;
     }
   }
-
   // Deferred wire (Teams): verify passes with zero groups because the
   // platform id only exists after the first DM. Tracked here so the ENDING
   // changes too — the last box must be the one remaining action, not a
   // premature "your assistant is saying hi" (no welcome DM exists yet).
   let wiringPending = false;
 
+  if (
+    portalEnabled() &&
+    !skip.has('slack-reminder') &&
+    !(process.env.SLACK_BOT_TOKEN || readEnvKey('SLACK_BOT_TOKEN'))?.trim()
+  ) {
+    await offerPortalReminder('slack', async () => {
+      const result = await runChannelSkillWithPreStep('slack', await resolveDisplayName(), { browserConsent: true });
+      if (result !== BACK_TO_CHANNEL_SELECTION) channelChoice = 'slack';
+    });
+    skip.add('slack-reminder');
+  }
+  // Keep the chosen agent through the later Slack offer as well. A later run
+  // derives connect choices from current wirings instead of inheriting this id.
+  delete process.env.NANOCLAW_TEMPLATE_AGENT_ID;
   if (!skip.has('verify')) {
     const res = await runQuietStep('verify', {
       running: 'Making sure everything works together…',
-      done: "Everything's connected.",
+      done: 'NanoClaw is running.',
       failed: 'A few things still need your attention.',
     });
     if (!res.ok) {
@@ -739,7 +791,17 @@ async function main(): Promise<void> {
           ),
         );
       }
-      if (!res.terminal?.fields.CONFIGURED_CHANNELS) {
+      const slackInstall = res.terminal?.fields.SLACK_INSTALL;
+      if (slackInstall === 'failed') {
+        notes.push(
+          '• Slack installation needs attention. Check its progress in the portal, then resume with `pnpm exec tsx setup/portal.ts --stage slack`.',
+        );
+      } else if (slackInstall === 'expired') {
+        notes.push('• Slack approval expired. Review the existing app in the portal before restarting Slack setup.');
+      } else if (
+        !res.terminal?.fields.CONFIGURED_CHANNELS &&
+        !['awaiting_approval', 'installing'].includes(slackInstall ?? '')
+      ) {
         notes.push(
           '• Want to chat from your phone? Add a messaging app with `/add-telegram`, `/add-slack`, or `/add-discord`.',
         );
@@ -789,11 +851,29 @@ async function main(): Promise<void> {
     'Heads up',
   );
 
+  const slackStatus = slackJobStatus(await readSlackJob());
+  if (slackStatus === 'failed' || slackStatus === 'expired') {
+    note(
+      slackStatus === 'expired'
+        ? 'Slack approval expired. Review the existing app in the portal before restarting Slack setup.'
+        : 'Slack installation needs attention. Check its progress in the portal, then resume with `pnpm exec tsx setup/portal.ts --stage slack`.',
+      'Slack setup',
+    );
+    p.outro(k.yellow('NanoClaw is running. Slack needs attention.'));
+    return;
+  }
+
   setupLog.complete(Date.now() - RUN_START);
   phEmit('setup_completed', { duration_ms: Date.now() - RUN_START });
 
   const dmTarget = channelDmLabel(channelChoice);
-  if (wiringPending) {
+  if (slackStatus === 'awaiting_approval' || slackStatus === 'installing') {
+    note(
+      'Slack is finishing in the background. Once approval and installation finish, your agent will DM you in Slack. Keep this machine online; no return to the terminal is needed while the background job is running. Follow progress in the portal.',
+      'Slack setup',
+    );
+    p.outro(k.green('NanoClaw is ready. Slack will connect when installation finishes.'));
+  } else if (wiringPending) {
     // No welcome DM exists yet — the one remaining action is the last thing
     // on screen, in the same bright framed style as the "go say hi" banner.
     note(
@@ -810,27 +890,6 @@ async function main(): Promise<void> {
     p.outro(k.green("You're set."));
   } else {
     p.outro(k.green("You're ready! Chat with `pnpm run chat hi`."));
-  }
-}
-
-function channelDmLabel(choice: ChannelChoice): string | null {
-  switch (choice) {
-    case 'telegram':
-      return 'Telegram';
-    case 'discord':
-      return 'Discord DMs';
-    case 'whatsapp':
-      return 'WhatsApp';
-    case 'signal':
-      return 'Signal';
-    case 'teams':
-      return 'Teams';
-    case 'imessage':
-      return 'iMessage';
-    case 'slack':
-      return 'Slack DMs';
-    default:
-      return null;
   }
 }
 
@@ -943,21 +1002,12 @@ function sendChatMessage(message: string): Promise<void> {
 
 // ─── auth step (select → branch) ────────────────────────────────────────
 
-// Providers offered for install are hard-wired in trunk — an audited control
-// surface (no branch enumeration that anyone with write access could extend).
-// Codex is the only one offered here; opencode/ollama install via their own
-// /add-* skills. Each is installed by applying its `/add-<name>` SKILL.md
-// in-process via the directive engine.
-const INSTALLABLE_PROVIDERS = [
-  { value: 'codex', label: 'Codex', hint: 'OpenAI — ChatGPT subscription or API key' },
-] as const;
-
 // `pickSavedByPreviousRun`: the .env bridge promoted a pick persisted by a
 // PREVIOUS run. That pick is a default to confirm, not a decision to replay:
 // the operator may be rerunning precisely to change it. In-process presets
 // (--template-path, the Advanced screen, self re-execs, an exported env var)
 // keep the silent skip.
-async function runTemplateSetup(pickSavedByPreviousRun: boolean): Promise<void> {
+async function runTemplateSetup(pickSavedByPreviousRun: boolean, hasRegisteredAgents: boolean): Promise<void> {
   const preset = process.env.NANOCLAW_TEMPLATE_PATH?.trim();
   if (preset) {
     if (listLocalTemplates().some((template) => template.ref === preset)) {
@@ -994,9 +1044,13 @@ async function runTemplateSetup(pickSavedByPreviousRun: boolean): Promise<void> 
   for (;;) {
     const source = ensureAnswer(
       await brightSelect<'none' | 'library' | 'local'>({
-        message: 'How should we create your first agent?',
+        message: hasRegisteredAgents
+          ? 'Would you like to add or update an agent from a template?'
+          : 'How should we create your first agent?',
         options: [
-          { value: 'none', label: 'Fresh agent', hint: 'recommended — shape it by chatting' },
+          hasRegisteredAgents
+            ? { value: 'none', label: 'No template changes', hint: 'recommended' }
+            : { value: 'none', label: 'Fresh agent', hint: 'recommended — shape it by chatting' },
           { value: 'library', label: 'From the NanoClaw template library', hint: 'prebuilt agents' },
           { value: 'local', label: 'From local templates', hint: 'templates/ in this install' },
         ],
@@ -1104,14 +1158,18 @@ async function chooseTemplate(templates: TemplateEntry[]): Promise<string | unde
   return ref === BACK_TO_TEMPLATE_SOURCE ? undefined : ref;
 }
 
-async function installSelectedTemplateAgent(provider?: string): Promise<void> {
+type TemplateAgentOutcome = 'none' | 'channel-target' | 'restamped';
+type TemplateSetupOperation = TemplateOperation | { kind: 'connect'; agentGroupId: string };
+
+async function installSelectedTemplateAgent(provider?: string): Promise<TemplateAgentOutcome> {
   const ref = process.env.NANOCLAW_TEMPLATE_PATH?.trim();
-  if (!ref || process.env.NANOCLAW_TEMPLATE_AGENT_ID?.trim()) return;
+  if (!ref) return 'none';
+  if (process.env.NANOCLAW_TEMPLATE_AGENT_ID?.trim()) return 'channel-target';
 
   // Only an explicit operator name overrides the template: the CLI's own
   // fallback chain (--name → the manifest's agentName → the folder leaf) must
   // stay reachable through the wizard, or a template's agentName is dead.
-  const name = process.env.NANOCLAW_AGENT_NAME?.trim() || undefined;
+  const presetName = process.env.NANOCLAW_AGENT_NAME?.trim() || undefined;
   const transport = new SocketTransport();
   const runNcl = async (command: string, args: Record<string, unknown>): Promise<unknown> => {
     const response = await transport.sendFrame({ id: randomUUID(), command, args });
@@ -1121,10 +1179,44 @@ async function installSelectedTemplateAgent(provider?: string): Promise<void> {
 
   const start = Date.now();
   phEmit('step_started', { step: 'template-agent' });
-  p.log.step(brandBody(`Installing the "${ref}" template…`));
   try {
+    const agents = await listTemplateAgents(ref, runNcl);
+    const operation = await chooseTemplateOperation(ref, agents);
+    if (!operation) {
+      clearTemplatePick();
+      setupLog.step('template-agent', 'success', Date.now() - start, { ref, cancelled: true });
+      phEmit('step_completed', { step: 'template-agent', status: 'success' });
+      p.log.info('No template changes made.');
+      return 'none';
+    }
+
+    if (operation.kind === 'connect') {
+      const group = agents.find((agent) => agent.id === operation.agentGroupId);
+      if (!group) throw new Error('Selected template agent no longer exists');
+      clearTemplatePick();
+      process.env.NANOCLAW_TEMPLATE_AGENT_ID = group.id;
+      process.env.NANOCLAW_AGENT_NAME = group.name;
+      setupLog.step('template-agent', 'success', Date.now() - start, {
+        ref,
+        agent_group_id: group.id,
+        operation: 'connect',
+      });
+      phEmit('step_completed', { step: 'template-agent', status: 'success' });
+      p.log.success(`Ready to connect agent "${group.name}".`);
+      return 'channel-target';
+    }
+
+    const name =
+      operation.kind === 'create' && agents.length > 0 ? await askNewTemplateAgentName(agents, presetName) : presetName;
+
+    p.log.step(
+      brandBody(
+        operation.kind === 'create' ? `Installing the "${ref}" template…` : `Preparing the "${ref}" template update…`,
+      ),
+    );
     const result = await installTemplateAgent({
       ref,
+      operation,
       name,
       timezone: readEnvKey('TZ') ?? undefined,
       provider,
@@ -1138,7 +1230,7 @@ async function installSelectedTemplateAgent(provider?: string): Promise<void> {
               `Agent "${plan.group.name}" is already stamped from this template. Update it in place? ` +
               `${resets.length} plugin-owned surface${resets.length === 1 ? '' : 's'} will be reset` +
               (customized > 0 ? ` (${customized} with local edits that will be lost)` : '') +
-              '. Memory, chats, and wiring are kept.',
+              '. Provider, memory, chats, and wiring are kept.',
             initialValue: customized === 0,
           }),
         );
@@ -1147,35 +1239,38 @@ async function installSelectedTemplateAgent(provider?: string): Promise<void> {
       },
     });
 
-    if (result.status === 'kept') {
-      process.env.NANOCLAW_TEMPLATE_AGENT_ID = result.group.id;
-      process.env.NANOCLAW_AGENT_NAME = result.group.name;
+    if (result.status === 'cancelled') {
+      clearTemplatePick();
       setupLog.step('template-agent', 'success', Date.now() - start, {
         ref,
-        agent_group_id: result.group.id,
-        kept: true,
+        cancelled: true,
       });
       phEmit('step_completed', { step: 'template-agent', status: 'success' });
-      p.log.success(`Keeping agent "${result.group.name}" as-is — local edits preserved. Wiring it unchanged.`);
-      return;
+      p.log.info('Template update cancelled. The agent was left unchanged.');
+      return 'none';
     }
 
-    // The pick is NOT cleared here: it must survive until the wire that
-    // consumes the stamped agent succeeds (run-channel-skill), or a rerun
-    // after a failed channel step silently wires a fresh vanilla agent while
-    // this one sits orphaned. Contract comment: setup/templates.ts.
-    process.env.NANOCLAW_TEMPLATE_AGENT_ID = result.group.id;
-    process.env.NANOCLAW_AGENT_NAME = result.group.name;
     setupLog.step('template-agent', 'success', Date.now() - start, {
       ref,
       agent_group_id: result.group.id,
     });
     phEmit('step_completed', { step: 'template-agent', status: 'success' });
-    p.log.success(
-      result.status === 'updated'
-        ? `Template agent "${result.group.name}" updated in place.`
-        : `Template agent "${result.group.name}" created.`,
-    );
+    if (result.status === 'updated') {
+      // Restamping preserves wiring, so it has no deferred channel work and
+      // must not make the channel step consume this existing agent as "new".
+      clearTemplatePick();
+      p.log.success(`Template agent "${result.group.name}" updated in place.`);
+      return 'restamped';
+    }
+
+    // The id is intentionally one-run-only. A later setup derives unwired
+    // agents from ncl and offers an explicit Connect action instead of silently
+    // targeting whatever id a previous run left behind.
+    clearTemplatePick();
+    process.env.NANOCLAW_TEMPLATE_AGENT_ID = result.group.id;
+    process.env.NANOCLAW_AGENT_NAME = result.group.name;
+    p.log.success(`Template agent "${result.group.name}" created.`);
+    return 'channel-target';
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     setupLog.step('template-agent', 'failed', Date.now() - start, { ref, error: message });
@@ -1195,7 +1290,62 @@ async function installSelectedTemplateAgent(provider?: string): Promise<void> {
       ].join('\n'),
       'Skipping the template',
     );
+    return 'none';
   }
+}
+
+async function chooseTemplateOperation(
+  ref: string,
+  agents: readonly SetupTemplateAgent[],
+): Promise<TemplateSetupOperation | undefined> {
+  if (agents.length === 0) return { kind: 'create' };
+
+  const options = agents.flatMap((agent) => [
+    ...(agent.isWired
+      ? []
+      : [
+          {
+            value: { kind: 'connect', agentGroupId: agent.id } as const,
+            label: `Connect "${agent.name}" to a channel`,
+            hint: `groups/${agent.folder} · not connected`,
+          },
+        ]),
+    {
+      value: { kind: 'restamp', agentGroupId: agent.id } as const,
+      label: `Update "${agent.name}" in place`,
+      hint: `groups/${agent.folder} · keeps provider, memory, chats, and wiring`,
+    },
+  ]);
+  const choice = ensureAnswer(
+    await brightSelect<TemplateSetupOperation | { kind: 'cancel' }>({
+      message: `The "${ref}" template is already in use. What would you like to do?`,
+      options: [
+        ...options,
+        { value: { kind: 'create' }, label: 'Create another agent' },
+        { value: { kind: 'cancel' }, label: 'Cancel' },
+      ],
+      initialValue: options[0].value,
+    }),
+  ) as TemplateSetupOperation | { kind: 'cancel' };
+  setupLog.userInput(
+    'template_operation',
+    'agentGroupId' in choice ? `${choice.kind}:${choice.agentGroupId}` : choice.kind,
+  );
+  return choice.kind === 'cancel' ? undefined : choice;
+}
+
+async function askNewTemplateAgentName(agents: readonly AgentGroup[], initialValue?: string): Promise<string> {
+  const answer = ensureAnswer(
+    await p.text({
+      message: 'Name the new agent',
+      placeholder: 'e.g. EMEA Sales',
+      ...(initialValue ? { initialValue } : {}),
+      validate: (value) => validateNewTemplateAgentName(value, agents),
+    }),
+  );
+  const name = (answer as string).trim();
+  setupLog.userInput('template_agent_name', name);
+  return name;
 }
 
 /**
@@ -1222,7 +1372,7 @@ async function chooseImageSource(): Promise<void> {
     DEFAULT_AGENT_PROVIDER ||
     'claude'
   ).toLowerCase();
-  if (plannedProvider !== 'claude') {
+  if (providerImagePolicy(plannedProvider) === 'local-required') {
     p.log.info(
       brandBody(
         `Building the sandbox here — the pre-built image is Claude-only, and ${plannedProvider} needs an image of its own.`,
@@ -1236,6 +1386,10 @@ async function chooseImageSource(): Promise<void> {
   // whose install then has no image to pull — so don't ask a question whose
   // good answer cannot be honoured.
   if (!readAgentImagePin()) return;
+  if (portalEnabled()) {
+    await runImagePortal();
+    return;
+  }
 
   p.log.message(
     brandBody(
@@ -1287,11 +1441,7 @@ async function chooseImageSource(): Promise<void> {
   if (choice === 'local') return;
 
   if (!loginScriptAvailable()) {
-    p.log.warn(
-      brandBody(
-        `This copy of NanoClaw has no ${REGISTRY_LOGIN_SCRIPT} — building the sandbox here instead.`,
-      ),
-    );
+    p.log.warn(brandBody(`This copy of NanoClaw has no ${REGISTRY_LOGIN_SCRIPT} — building the sandbox here instead.`));
     writeImageSource('local');
     return;
   }
@@ -1332,9 +1482,7 @@ async function chooseImageSource(): Promise<void> {
 async function askAgentProviderChoice(): Promise<string> {
   const installed = listSetupProviders();
   const installedNames = new Set(installed.map((entry) => entry.value));
-  // Offer the hard-wired installable providers this install hasn't wired yet —
-  // selecting one applies its `/add-<name>` SKILL.md in-process.
-  const available = INSTALLABLE_PROVIDERS.filter((prov) => !installedNames.has(prov.value));
+  const available = listInstallableProviderDescriptors().filter((prov) => !installedNames.has(prov.value));
   // On a pinned install every non-Claude runtime forces a local rebuild — the
   // image bakes /app/node_modules and the CLI manifest, and each changes one.
   // Say so on the option rather than only at the confirm two steps later, so
@@ -1342,7 +1490,9 @@ async function askAgentProviderChoice(): Promise<string> {
   // this install pulls; on a local-build install it is not a trade-off.
   const pinned = readImageSource() === 'hardened';
   const note = (value: string, hint: string): string =>
-    pinned && value !== 'claude' ? `${hint} — ⚠ not in the pre-built image; needs a local build` : hint;
+    pinned && providerImagePolicy(value) === 'local-required'
+      ? `${hint} — ⚠ not in the pre-built image; needs a local build`
+      : hint;
 
   const options = [
     ...installed.map(({ value, label, hint }) => ({ value, label, hint: note(value, hint) })),
@@ -1353,21 +1503,22 @@ async function askAgentProviderChoice(): Promise<string> {
     })),
   ];
   const preset = process.env.NANOCLAW_AGENT_PROVIDER?.trim().toLowerCase();
-  if (preset) {
-    if (!options.some((option) => option.value === preset)) {
+  // Fresh installs use Claude without another setup prompt. Explicit presets
+  // still win, and an existing non-Claude default keeps its provider picker.
+  const automatic = preset || (DEFAULT_AGENT_PROVIDER === 'claude' ? 'claude' : undefined);
+  if (automatic) {
+    if (!options.some((option) => option.value === automatic)) {
       throw new Error(`NANOCLAW_AGENT_PROVIDER=${preset} is not available in this NanoClaw install`);
     }
-    setupLog.userInput('agent_provider', preset);
-    phEmit('agent_provider_chosen', { provider: preset, preset: true });
-    return preset;
+    setupLog.userInput('agent_provider', automatic);
+    phEmit('agent_provider_chosen', { provider: automatic, preset: Boolean(preset) });
+    return automatic;
   }
   // The pick is persisted as the instance default (DEFAULT_AGENT_PROVIDER), so
   // pre-select the current default — a re-run Enter-through then preserves it
   // instead of silently resetting it to claude. Fall back to claude if the
   // persisted default isn't an offered option (e.g. its provider was removed).
-  const currentDefault = options.some((o) => o.value === DEFAULT_AGENT_PROVIDER)
-    ? DEFAULT_AGENT_PROVIDER
-    : 'claude';
+  const currentDefault = options.some((o) => o.value === DEFAULT_AGENT_PROVIDER) ? DEFAULT_AGENT_PROVIDER : 'claude';
   const choice = ensureAnswer(
     await brightSelect<string>({
       message: 'Which agent runtime should power your assistant?',
@@ -1440,11 +1591,7 @@ async function runAuthStep(): Promise<void> {
       return runAuthStep();
     }
     setupLog.step('auth', 'skipped', 0, { REASON: 'user-skipped' });
-    p.log.warn(
-      brandBody(
-        'Claude sign-in skipped. Re-run setup or run `bash nanoclaw.sh` to finish later.',
-      ),
-    );
+    p.log.warn(brandBody('Claude sign-in skipped. Re-run setup or run `bash nanoclaw.sh` to finish later.'));
     return;
   }
 
@@ -1545,19 +1692,12 @@ async function runPasteAuth(method: 'oauth' | 'api'): Promise<void> {
  * Authorization header on the wire — the container only ever sees
  * ANTHROPIC_BASE_URL + a placeholder bearer.
  */
-async function runCustomEndpointAuth(
-  baseUrl: string,
-  token: string,
-): Promise<void> {
+async function runCustomEndpointAuth(baseUrl: string, token: string): Promise<void> {
   let host: string;
   try {
     host = new URL(baseUrl).hostname;
   } catch {
-    await fail(
-      'auth',
-      `Invalid Anthropic base URL: ${baseUrl}`,
-      'Check --anthropic-base-url and retry.',
-    );
+    await fail('auth', `Invalid Anthropic base URL: ${baseUrl}`, 'Check --anthropic-base-url and retry.');
     return;
   }
 
@@ -1770,29 +1910,7 @@ async function askChannelChoice(): Promise<ChannelChoice> {
   const choice = ensureAnswer(
     await brightSelect<ChannelChoice>({
       message: 'Want to chat with your assistant from your phone?',
-      options: [
-        { value: 'telegram', label: 'Yes, connect Telegram', hint: 'recommended' },
-        { value: 'discord', label: 'Yes, connect Discord' },
-        { value: 'whatsapp', label: 'Yes, connect WhatsApp', hint: 'best with a dedicated number' },
-        {
-          value: 'signal',
-          label: 'Yes, connect Signal',
-          hint: 'needs signal-cli installed',
-        },
-        {
-          value: 'imessage',
-          label: 'Yes, connect iMessage',
-          hint: 'local Mac or hosted iMessage (via photon.codes)',
-        },
-        {
-          value: 'slack',
-          label: 'Yes, connect Slack (experimental)',
-          hint: 'needs public URL',
-        },
-        { value: 'teams', label: 'Yes, connect Microsoft Teams', hint: 'complex setup' },
-        { value: 'other', label: 'Other…', hint: 'install via /add-<name> after setup' },
-        { value: 'skip', label: 'Skip for now', hint: "I'll just use the terminal" },
-      ],
+      options: initialChannelOptions(),
     }),
   );
   setupLog.userInput('channel_choice', String(choice));
@@ -1823,7 +1941,10 @@ async function askOtherChannelName(): Promise<void | typeof BACK_TO_CHANNEL_SELE
       placeholder: 'e.g. matrix, github, linear, webex',
     }),
   );
-  const name = (answer as string).trim().toLowerCase().replace(/^\/?(add-)?/, '');
+  const name = (answer as string)
+    .trim()
+    .toLowerCase()
+    .replace(/^\/?(add-)?/, '');
   setupLog.userInput('other_channel', name);
   phEmit('channel_other_named', { channel: name });
   p.log.info(
@@ -1916,7 +2037,10 @@ function maybeReexecUnderSg(): void {
   if (spawnSync('which', ['sg'], { stdio: 'ignore' }).status !== 0) return;
 
   p.log.warn(brandBody('Docker socket not accessible in current group. Re-executing under `sg docker`.'));
-  const existingSkip = (process.env.NANOCLAW_SKIP ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  const existingSkip = (process.env.NANOCLAW_SKIP ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
   const skipList = [...new Set([...existingSkip, ...setupLog.completedStepNames()])].join(',');
   const res = spawnSync('sg', ['docker', '-c', 'pnpm run setup:auto'], {
     stdio: 'inherit',
@@ -1976,7 +2100,10 @@ function initProgressionLog(): void {
   });
 }
 
-main().catch((err) => {
+withSetupLock(async () => {
+  await launchSlackJob();
+  await main();
+}).catch((err) => {
   p.log.error(err instanceof Error ? err.message : String(err));
   p.cancel('Setup aborted.');
   process.exit(1);

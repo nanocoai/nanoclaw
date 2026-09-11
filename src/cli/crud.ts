@@ -9,6 +9,7 @@
 import { randomUUID } from 'crypto';
 
 import { getDb } from '../db/connection.js';
+import { isUniqueViolation } from '../db/errors.js';
 import { renderVerbHelp } from './help-render.js';
 import { register } from './registry.js';
 import type { Access } from './registry.js';
@@ -83,6 +84,9 @@ export interface ResourceDef {
     update?: Access;
     delete?: Access;
   };
+  /** Portable ORDER BY expression for list. Defaults to the first timestamp
+   * column descending, then the resource id for deterministic ties. */
+  listOrder?: string;
   /**
    * Columns forming a natural unique key. When set, generic `create` is
    * idempotent: if a row already matches on these columns it is returned
@@ -111,7 +115,7 @@ export interface ResourceDef {
    * whose column combinations need cross-checks — a partial update must not
    * be able to produce a combination `create` would have rejected.
    */
-  preUpdate?: (updates: Record<string, unknown>, current: Record<string, unknown>) => void;
+  preUpdate?: (updates: Record<string, unknown>, current: Record<string, unknown>) => void | Promise<void>;
   /**
    * Runs after a successful `create` INSERT, with the row that was just
    * written. Used to wire in side effects that the central row alone
@@ -120,7 +124,7 @@ export interface ResourceDef {
    * wiring is added. The hook receives the same `values` object that was
    * inserted, so generated fields like `id` and `created_at` are populated.
    */
-  postCreate?: (row: Record<string, unknown>) => void;
+  postCreate?: (row: Record<string, unknown>) => void | Promise<void>;
   /**
    * Runs AFTER the create transaction has committed, with the row that was
    * written. Use this — not `postCreate` — for side effects that live
@@ -161,18 +165,43 @@ function visibleColumns(def: ResourceDef): string[] {
   return def.columns.map((c) => c.name);
 }
 
+function coerceListFilter(column: ColumnDef, value: unknown): unknown {
+  switch (column.type) {
+    case 'number': {
+      const number = Number(value);
+      if (Number.isNaN(number)) throw new Error(`--${column.name.replace(/_/g, '-')} must be a number`);
+      return number;
+    }
+    case 'boolean':
+      if (value === true || value === 'true' || value === '1' || value === 1) return 1;
+      if (value === false || value === 'false' || value === '0' || value === 0) return 0;
+      throw new Error(`--${column.name.replace(/_/g, '-')} must be true or false`);
+    case 'json':
+      return typeof value === 'string' ? value : JSON.stringify(value);
+    case 'string':
+      return String(value);
+  }
+}
+
+function listOrder(def: ResourceDef): string {
+  if (def.listOrder) return def.listOrder;
+  const timestamp = def.columns.find((column) => column.name.endsWith('_at'))?.name;
+  return timestamp ? `${timestamp} DESC, ${def.idColumn}` : def.idColumn;
+}
+
 function genericList(def: ResourceDef) {
   const cols = visibleColumns(def).join(', ');
-  const filterableNames = new Set(def.columns.filter((c) => !c.generated).map((c) => c.name));
+  const filterableColumns = new Map(def.columns.filter((c) => !c.generated).map((c) => [c.name, c]));
   return async (args: Record<string, unknown>) => {
     const limit = args.limit !== undefined ? Math.max(1, Number(args.limit)) : 200;
     const filters: string[] = [];
     const params: unknown[] = [];
     for (const [k, v] of Object.entries(args)) {
       if (k === 'id' || k === 'limit') continue;
-      if (filterableNames.has(k)) {
+      const column = filterableColumns.get(k);
+      if (column) {
         filters.push(`${k} = ?`);
-        params.push(v);
+        params.push(coerceListFilter(column, v));
       }
     }
     const where = filters.length > 0 ? ` WHERE ${filters.join(' AND ')}` : '';
@@ -180,9 +209,7 @@ function genericList(def: ResourceDef) {
     // Newest first: without an ORDER BY the LIMIT silently hides the most
     // recently inserted rows once a table outgrows it (bit `sessions list`
     // past 200 sessions — a just-created session was invisible).
-    return getDb()
-      .prepare(`SELECT ${cols} FROM ${def.table}${where} ORDER BY rowid DESC LIMIT ?`)
-      .all(...params);
+    return getDb().all(`SELECT ${cols} FROM ${def.table}${where} ORDER BY ${listOrder(def)} LIMIT ?`, ...params);
   };
 }
 
@@ -191,7 +218,7 @@ function genericGet(def: ResourceDef) {
   return async (args: Record<string, unknown>) => {
     const id = args.id as string;
     if (!id) throw new Error(`${def.name} id is required`);
-    const row = getDb().prepare(`SELECT ${cols} FROM ${def.table} WHERE ${def.idColumn} = ?`).get(id);
+    const row = await getDb().get(`SELECT ${cols} FROM ${def.table} WHERE ${def.idColumn} = ?`, id);
     if (!row) throw new Error(`${def.name} not found: ${id}`);
     return row;
   };
@@ -244,12 +271,14 @@ function genericCreate(def: ResourceDef) {
     // Runs after pass 3 so defaultFrom-filled columns (e.g. messaging-groups'
     // `instance`) participate in the match. No new row means postCreate /
     // postCommit are correctly skipped — no new companion rows to create.
-    if (def.naturalKey && def.naturalKey.length > 0) {
-      const where = def.naturalKey.map((c) => `${c} = ?`).join(' AND ');
+    const findNaturalKeyRow = async (): Promise<unknown | undefined> => {
+      if (!def.naturalKey || def.naturalKey.length === 0) return undefined;
+      const where = def.naturalKey.map((c) => `${c} IS NOT DISTINCT FROM ?`).join(' AND ');
       const params = def.naturalKey.map((c) => values[c]);
-      const existing = getDb()
-        .prepare(`SELECT ${visibleColumns(def).join(', ')} FROM ${def.table} WHERE ${where}`)
-        .get(...params);
+      return getDb().get(`SELECT ${visibleColumns(def).join(', ')} FROM ${def.table} WHERE ${where}`, ...params);
+    };
+    if (def.naturalKey && def.naturalKey.length > 0) {
+      const existing = await findNaturalKeyRow();
       if (existing) return existing;
     }
 
@@ -257,15 +286,21 @@ function genericCreate(def: ResourceDef) {
     const placeholders = colNames.map((c) => `@${c}`);
     // Single transaction so a postCreate throw rolls back the parent INSERT —
     // closes the partial-state class this PR exists to fix (#2415, #2389).
-    // better-sqlite3 .transaction() is sync, so `postCreate` is sync too and
-    // must only touch the central DB (it's the atomic companion-row write).
-    // Anything async or outside the central DB — filesystem, session-DB
-    // projection — belongs in `postCommit`, which runs after commit below.
+    // `postCreate` may await central-DB work only. Anything outside the
+    // central DB — filesystem, mailbox projection, adapters, containers, or
+    // network — belongs in `postCommit`, which runs after commit below.
     const db = getDb();
-    db.transaction(() => {
-      db.prepare(`INSERT INTO ${def.table} (${colNames.join(', ')}) VALUES (${placeholders.join(', ')})`).run(values);
-      if (def.postCreate) def.postCreate(values);
-    })();
+    try {
+      await db.transaction(async () => {
+        await db.run(`INSERT INTO ${def.table} (${colNames.join(', ')}) VALUES (${placeholders.join(', ')})`, values);
+        if (def.postCreate) await def.postCreate(values);
+      });
+    } catch (error) {
+      if (!isUniqueViolation(error) || !def.naturalKey?.length) throw error;
+      const raced = await findNaturalKeyRow();
+      if (!raced) throw error;
+      return raced;
+    }
     if (def.postCommit) await def.postCommit(values);
     return values;
   };
@@ -295,22 +330,24 @@ function genericUpdate(def: ResourceDef) {
     }
 
     if (def.preUpdate) {
-      const current = getDb().prepare(`SELECT ${cols} FROM ${def.table} WHERE ${def.idColumn} = ?`).get(id) as
-        | Record<string, unknown>
-        | undefined;
+      const current = await getDb().get<Record<string, unknown>>(
+        `SELECT ${cols} FROM ${def.table} WHERE ${def.idColumn} = ?`,
+        id,
+      );
       if (!current) throw new Error(`${def.name} not found: ${id}`);
-      def.preUpdate(updates, current);
+      await def.preUpdate(updates, current);
     }
 
     const setClause = Object.keys(updates)
       .map((k) => `${k} = @${k}`)
       .join(', ');
-    const result = getDb()
-      .prepare(`UPDATE ${def.table} SET ${setClause} WHERE ${def.idColumn} = @_id`)
-      .run({ ...updates, _id: id });
+    const result = await getDb().run(`UPDATE ${def.table} SET ${setClause} WHERE ${def.idColumn} = @_id`, {
+      ...updates,
+      _id: id,
+    });
     if (result.changes === 0) throw new Error(`${def.name} not found: ${id}`);
 
-    return getDb().prepare(`SELECT ${cols} FROM ${def.table} WHERE ${def.idColumn} = ?`).get(id);
+    return getDb().get(`SELECT ${cols} FROM ${def.table} WHERE ${def.idColumn} = ?`, id);
   };
 }
 
@@ -318,7 +355,7 @@ function genericDelete(def: ResourceDef) {
   return async (args: Record<string, unknown>) => {
     const id = args.id as string;
     if (!id) throw new Error(`${def.name} id is required`);
-    const result = getDb().prepare(`DELETE FROM ${def.table} WHERE ${def.idColumn} = ?`).run(id);
+    const result = await getDb().run(`DELETE FROM ${def.table} WHERE ${def.idColumn} = ?`, id);
     if (result.changes === 0) throw new Error(`${def.name} not found: ${id}`);
     return { deleted: id };
   };
@@ -398,8 +435,8 @@ export function validateArgs(
         if (typeof v === 'string') {
           try {
             out[def.name] = JSON.parse(v);
-          } catch {
-            throw new Error(`${flag} must be valid JSON`);
+          } catch (err) {
+            throw new Error(`${flag} must be valid JSON`, { cause: err });
           }
         }
         break;
@@ -504,7 +541,7 @@ export function registerResource(def: ResourceDef): void {
               } catch (e) {
                 const usage = renderVerbHelp(def, verb);
                 const msg = e instanceof Error ? e.message : String(e);
-                throw new Error(usage ? `${msg}\n\n${usage}` : msg);
+                throw new Error(usage ? `${msg}\n\n${usage}` : msg, { cause: e });
               }
             }
           : (raw) => normalizeArgs(raw),

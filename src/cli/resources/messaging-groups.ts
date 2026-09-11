@@ -102,7 +102,7 @@ registerResource({
           throw new Error('--channel-type, --platform-id and --text are required');
         }
         const instance = (args.instance as string) ?? channelType;
-        const mg = getMessagingGroupByPlatform(channelType, platformId, instance);
+        const mg = await getMessagingGroupByPlatform(channelType, platformId, instance);
         if (!mg) {
           throw new Error(`no messaging group for ${channelType} ${platformId} — create + wire it first`);
         }

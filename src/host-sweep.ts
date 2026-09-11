@@ -1,415 +1,153 @@
 /**
- * Host sweep — periodic maintenance of all session DBs.
+ * Host sweep — the periodic resync over all session mailboxes.
  *
- * Two-DB architecture:
- *   - Reads processing_ack + container_state from outbound.db
- *   - Writes to inbound.db (host-owned) for status updates + recurrence
- *   - Uses heartbeat file mtime for liveness (never polls DB for it)
- *   - Never writes to outbound.db — preserves single-writer-per-file invariant
- *
- * Stuck / idle detection (replaces the old IDLE_TIMEOUT setTimeout + 10-min
- * heartbeat threshold):
- *
- *   If the container isn't running and there are 'processing' rows left over
- *   (e.g. it crashed mid-turn) → reset them to pending with backoff +
- *   tries++. Existing retry machinery does the rest.
- *
- *   If the container IS running:
- *     1. Absolute ceiling: heartbeat age > max(30 min, current_bash_timeout)
- *        → kill. Covers the "alive but silent for 30 min" case. Extended
- *        only while Bash is declared as running longer, honouring the
- *        user's own timeout directive. Kill then resets processing rows.
- *        When no heartbeat file exists yet, falls back to the tracked
- *        container spawn time so a container that goes idle without ever
- *        reaching an SDK event —
- *        and so never writes a heartbeat — still ages out instead of
- *        living forever (see decideStuckAction's grace-period comment).
- *
- *     2. Message-scoped stuck: for each 'processing' row, tolerance =
- *        max(60s, current_bash_timeout_ms_if_Bash_running). If
- *        (claim_age > tolerance) AND (heartbeat_mtime <= status_changed)
- *        → kill + reset this message + tries++. Semantics: "container
- *        claimed a message and went quiet past tolerance since the claim."
+ * The per-session body lives in src/reconcile-session.ts (`reconcileSession`,
+ * the ReconcileFn shape from src/reconcile.ts); execution runs through the
+ * keyed workqueue (src/reconcile-queue.ts). This module owns the resync
+ * floor: every 60s it enqueues the singleton duties and every active
+ * session, then re-arms once the tick's work has drained — so queue loss
+ * costs latency, never correctness, and an explicit enqueue between ticks
+ * can never be lost to a concurrent sweep. The re-exports below keep the
+ * long-standing import surface of this module stable.
  */
-import type Database from 'better-sqlite3';
-import fs from 'fs';
-
+import { INSTALL_SLUG } from './config.js';
 import { ensureEgressNetwork } from './egress-lockdown.js';
-import { getActiveSessions, isTaskThread, updateSession } from './db/sessions.js';
-import { getAgentGroup } from './db/agent-groups.js';
-import {
-  countDueMessages,
-  deleteOrphanProcessingClaims,
-  getContainerState,
-  getMessageForRetry,
-  getProcessingClaims,
-  markMessageFailed,
-  retryWithBackoff,
-  syncProcessingAcks,
-  type ContainerState,
-} from './db/session-db.js';
+import { getActiveSessions } from './db/sessions.js';
+import { peekSessionDriver } from './drivers/index.js';
+import type { SessionWatch } from './drivers/types.js';
 import { log } from './log.js';
-import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
-import { getContainerStartedAtMs, isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
-import type { Session } from './types.js';
+import { registerReconcileEnqueue } from './reconcile-feeds.js';
+import { createReconcileQueue, type InProcessReconcileQueue } from './reconcile-queue.js';
+import { reconcileSession } from './reconcile-session.js';
+import { sessionKey } from './reconcile.js';
 
-/**
- * SQLite TIMESTAMP columns store UTC without a timezone marker. Date.parse
- * treats timezoneless ISO strings as local time, so on non-UTC hosts every
- * timestamp looks (TZ offset) hours stale — leading to spurious kill-claim
- * decisions on freshly-claimed messages. Append "Z" when no zone marker is
- * present so Date.parse interprets the string as UTC.
- */
-export function parseSqliteUtc(s: string): number {
-  return Date.parse(/[zZ]|[+-]\d{2}:?\d{2}$/.test(s) ? s : s + 'Z');
-}
+export {
+  ABSOLUTE_CEILING_MS,
+  CLAIM_STUCK_MS,
+  _resetStuckProcessingRowsForTesting,
+  decideStuckAction,
+  shouldCloseTaskSession,
+  type StuckDecision,
+} from './reconcile-session.js';
 
 const SWEEP_INTERVAL_MS = 60_000;
-// Absolute idle ceiling for a running container. If the heartbeat file hasn't
-// been touched in this long, the container is either stuck or doing genuinely
-// nothing — kill and restart on the next inbound.
-export const ABSOLUTE_CEILING_MS = 30 * 60 * 1000;
-// Stuck tolerance window applied per 'processing' claim — "did we see any
-// signs of life since this message was claimed?"
-export const CLAIM_STUCK_MS = 60 * 1000;
-const MAX_TRIES = 5;
-const BACKOFF_BASE_MS = 5000;
-
-export type StuckDecision =
-  | { action: 'ok' }
-  | { action: 'kill-ceiling'; heartbeatAgeMs: number; ceilingMs: number }
-  | { action: 'kill-claim'; messageId: string; claimAgeMs: number; toleranceMs: number };
-
-/**
- * Pure decision for whether a running container should be killed this sweep
- * tick. Inputs are all deterministic; filesystem + DB reads happen in the
- * caller.
- */
-export function decideStuckAction(args: {
-  now: number;
-  heartbeatMtimeMs: number; // 0 when heartbeat file absent
-  containerStartedAtMs?: number; // fallback when heartbeat file absent
-  containerState: ContainerState | null;
-  claims: Array<{ message_id: string; status_changed: string }>;
-}): StuckDecision {
-  const { now, heartbeatMtimeMs, containerStartedAtMs, containerState, claims } = args;
-  const declaredBashMs = bashTimeoutMs(containerState);
-
-  // Ceiling check prefers the heartbeat file's mtime. A freshly-spawned
-  // container hasn't had any SDK activity yet so no heartbeat file exists —
-  // if we treated that as infinitely stale we'd kill every container within
-  // seconds of spawn. But "no heartbeat file" isn't only a spawn-grace-period
-  // signal: a container can also finish its one turn (or find nothing to do)
-  // without its poll loop ever reaching an SDK event, in which case a
-  // heartbeat file is never created for the rest of that container's life,
-  // and it sits alive-but-idle forever, immune to this check. Falling back
-  // to the container's spawn timestamp gives fresh spawns the same grace
-  // period as before (age starts at ~0) while still aging out a
-  // container that never ticks. Genuinely-dead containers that never wrote a
-  // heartbeat AND have no session record are caught by the separate
-  // "container process not running" cleanup path, not here. If a fresh
-  // container is hanging at the gate (claimed a message but never did
-  // anything) the claim-stuck check below handles it independently of this
-  // fallback.
-  const effectiveHeartbeatMs = heartbeatMtimeMs !== 0 ? heartbeatMtimeMs : (containerStartedAtMs ?? 0);
-  if (effectiveHeartbeatMs !== 0) {
-    const heartbeatAge = now - effectiveHeartbeatMs;
-    const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
-    if (heartbeatAge > ceiling) {
-      return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling };
-    }
-  }
-
-  const tolerance = Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0);
-  for (const claim of claims) {
-    const claimedAt = parseSqliteUtc(claim.status_changed);
-    if (Number.isNaN(claimedAt)) continue;
-    const claimAge = now - claimedAt;
-    if (claimAge <= tolerance) continue;
-    if (heartbeatMtimeMs > claimedAt) continue;
-    return { action: 'kill-claim', messageId: claim.message_id, claimAgeMs: claimAge, toleranceMs: tolerance };
-  }
-
-  return { action: 'ok' };
-}
 
 let running = false;
+let queue: InProcessReconcileQueue | null = null;
+let runtimeWatch: SessionWatch | null = null;
+
+/** Coalesced enqueue for the event feeds; drops harmlessly once stopped. */
+function feedEnqueue(sessionId: string): void {
+  const feedQueue = queue;
+  if (running && feedQueue) feedQueue.add(sessionKey(sessionId));
+}
+
+/**
+ * Reconcile promptly when the runtime reports a session ended: due mail on a
+ * dead session waits one queue turn instead of the next resync tick. Arms
+ * only against a driver that already exists — the sweep never instantiates
+ * one, so suites (and hosts) that never selected a runtime are untouched.
+ * Events are hints (they may drop, duplicate, or reference foreign keys);
+ * the enqueue re-reads truth, so all of that is safe by construction.
+ */
+function armRuntimeWatch(): void {
+  const driver = peekSessionDriver();
+  // Raw test fakes may lack watchSessions; never crash on them.
+  if (!driver || typeof driver.watchSessions !== 'function') return;
+  /* eslint-disable no-catch-all/no-catch-all -- a watch backend that cannot subscribe costs latency (the resync floor covers it), never the boot */
+  try {
+    runtimeWatch = driver.watchSessions(INSTALL_SLUG, (event) => {
+      if (event.kind !== 'terminal' || !event.key.sessionId) return;
+      feedEnqueue(event.key.sessionId);
+    });
+  } catch (err) {
+    log.warn('Runtime watch feed unavailable — the resync floor covers it', { err });
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
+}
 
 export function startHostSweep(): void {
   if (running) return;
   running = true;
-  sweep();
+  queue = createReconcileQueue({
+    reconcile: reconcileSession,
+    singletons: {
+      // Re-heal the egress network so already-running agents keep their
+      // gateway hop if it was detached out-of-band. Best-effort: a heal
+      // failure isn't a leak (agents stay on the internal net), so log and
+      // continue — never surface a throw into queue backoff. No-op when
+      // lockdown is disabled.
+      'singleton:egress-reheal': async () => {
+        try {
+          ensureEgressNetwork();
+        } catch (err) {
+          log.error('Egress lockdown re-heal failed', { err });
+        }
+      },
+      // Finalize any "Reject with reason…" holds whose reply window elapsed
+      // (admin ghosted, or the host restarted mid-capture). Central-DB scan,
+      // once per tick — not per session.
+      // MODULE-HOOK:approvals-reason-sweep:start
+      'singleton:approvals-scan': async () => {
+        try {
+          const { sweepAwaitingReasonRejects } = await import('./modules/approvals/index.js');
+          await sweepAwaitingReasonRejects();
+        } catch (err) {
+          log.error('Reject-with-reason sweep failed', { err });
+        }
+      },
+      // MODULE-HOOK:approvals-reason-sweep:end
+    },
+  });
+  // Event feeds — additive over the resync floor: mail writes and runtime
+  // terminal events land as coalesced enqueues, so behavior only gets
+  // faster, never different, and a lost event costs at most one tick.
+  registerReconcileEnqueue(feedEnqueue);
+  armRuntimeWatch();
+  void sweep();
 }
 
 export function stopHostSweep(): void {
   running = false;
+  registerReconcileEnqueue(null);
+  const stoppingWatch = runtimeWatch;
+  runtimeWatch = null;
+  if (stoppingWatch) {
+    /* eslint-disable no-catch-all/no-catch-all -- a watch backend that is already gone must not block shutdown */
+    try {
+      stoppingWatch.stop();
+    } catch (err) {
+      log.warn('Runtime watch feed stop failed', { err });
+    }
+    /* eslint-enable no-catch-all/no-catch-all */
+  }
+  const stopping = queue;
+  queue = null;
+  if (stopping) void stopping.shutdown();
 }
 
 async function sweep(): Promise<void> {
-  if (!running) return;
+  // Capture the queue for the whole tick: stopHostSweep nulls the module
+  // reference mid-flight, and a stopping queue drops adds harmlessly.
+  const tickQueue = queue;
+  if (!running || !tickQueue) return;
 
-  // Re-heal the egress network so already-running agents keep their gateway hop
-  // if it was detached out-of-band. Best-effort here: a heal failure isn't a
-  // leak (agents stay on the internal net), so log and continue. No-op when
-  // lockdown is disabled.
+  // Tick order matches the loop this replaces: egress re-heal, then every
+  // active session, then the approvals scan — serial through the queue.
+  tickQueue.add('singleton:egress-reheal');
   try {
-    ensureEgressNetwork();
-  } catch (err) {
-    log.error('Egress lockdown re-heal failed', { err });
-  }
-
-  try {
-    const sessions = getActiveSessions();
+    const sessions = await getActiveSessions();
     for (const session of sessions) {
-      await sweepSession(session);
+      tickQueue.add(sessionKey(session.id));
     }
   } catch (err) {
     log.error('Host sweep error', { err });
   }
+  tickQueue.add('singleton:approvals-scan');
 
-  // Finalize any "Reject with reason…" holds whose reply window elapsed (admin
-  // ghosted, or the host restarted mid-capture). Central-DB scan, once per tick
-  // — not per session.
-  // MODULE-HOOK:approvals-reason-sweep:start
-  try {
-    const { sweepAwaitingReasonRejects } = await import('./modules/approvals/index.js');
-    await sweepAwaitingReasonRejects();
-  } catch (err) {
-    log.error('Reject-with-reason sweep failed', { err });
-  }
-  // MODULE-HOOK:approvals-reason-sweep:end
-
-  setTimeout(sweep, SWEEP_INTERVAL_MS);
-}
-
-/** A per-task session with no live tasks and no running container is spent → close it. */
-export function shouldCloseTaskSession(
-  threadId: string | null,
-  containerRunning: boolean,
-  liveTaskCount: number,
-): boolean {
-  return isTaskThread(threadId) && !containerRunning && liveTaskCount === 0;
-}
-
-async function sweepSession(session: Session): Promise<void> {
-  const agentGroup = getAgentGroup(session.agent_group_id);
-  if (!agentGroup) return;
-
-  const inPath = inboundDbPath(agentGroup.id, session.id);
-  if (!fs.existsSync(inPath)) return;
-
-  let inDb: Database.Database;
-  let outDb: Database.Database | null = null;
-  try {
-    inDb = openInboundDb(agentGroup.id, session.id);
-  } catch {
-    return;
-  }
-
-  try {
-    outDb = openOutboundDb(agentGroup.id, session.id);
-  } catch {
-    // outbound.db might not exist yet (container hasn't started)
-  }
-
-  try {
-    // 1. Sync processing_ack → messages_in status
-    if (outDb) {
-      syncProcessingAcks(inDb, outDb);
-    }
-
-    // 2. Wake a container if work is due and nothing is running. Ordered
-    // before the crashed-container cleanup so a fresh container gets a chance
-    // to clean its own orphan processing_ack rows on startup (see
-    // container/agent-runner/src/db/connection.ts). Otherwise the reset path
-    // would keep bumping process_after into the future, dueCount would stay 0,
-    // and the wake would never fire.
-    const dueCount = countDueMessages(inDb);
-    let justWoke = false;
-    if (dueCount > 0 && !isContainerRunning(session.id)) {
-      log.info('Waking container for due messages', { sessionId: session.id, count: dueCount });
-      // wakeContainer never throws — transient spawn failures (OneCLI down,
-      // etc.) return false and leave messages pending for the next tick.
-      await wakeContainer(session);
-      justWoke = true;
-    }
-
-    const alive = isContainerRunning(session.id);
-
-    // 3. Running-container SLA: absolute ceiling + per-claim stuck rules.
-    // Skip on the same iteration that just woke the container — it hasn't
-    // had a chance to clear stale processing_ack rows from a previous crash
-    // yet. Without this grace period, stale claims cause an immediate
-    // spawn-kill loop.
-    if (alive && outDb && !justWoke) {
-      enforceRunningContainerSla(inDb, outDb, session, agentGroup.id);
-    }
-
-    // 4. Crashed-container cleanup: processing rows left behind get retried.
-    // Only fires when wake in step 2 didn't pick up the work (no due messages,
-    // or wake failed). resetStuckProcessingRows itself is idempotent — it
-    // skips messages already scheduled for a future retry.
-    if (!alive && outDb) {
-      resetStuckProcessingRows(inDb, outDb, session, 'container not running');
-    }
-
-    // 5. Recurrence fanout for completed recurring tasks.
-    // MODULE-HOOK:scheduling-recurrence:start
-    const { handleRecurrence } = await import('./modules/scheduling/recurrence.js');
-    await handleRecurrence(inDb, session);
-    // MODULE-HOOK:scheduling-recurrence:end
-
-    // 6. GC spent task sessions. An isolated per-task session with no live task
-    // rows left (one-shot fired, or all cancelled/deleted) and no container
-    // running is dead — close it so it stops being swept and listed. Runs after
-    // recurrence so a just-fired recurring series has already re-armed its next
-    // pending row and is never collected. The per-task log file in the workspace
-    // is the durable history and survives the close.
-    if (isTaskThread(session.thread_id)) {
-      const liveTasks = (
-        inDb
-          .prepare("SELECT COUNT(*) AS c FROM messages_in WHERE kind = 'task' AND status IN ('pending', 'paused')")
-          .get() as { c: number }
-      ).c;
-      if (shouldCloseTaskSession(session.thread_id, isContainerRunning(session.id), liveTasks)) {
-        updateSession(session.id, { status: 'closed' });
-        log.info('Closed spent task session', { sessionId: session.id, threadId: session.thread_id });
-      }
-    }
-
-    // 7. Cross-session echo backlog pruning. Pending trigger=0 'session-echo'
-    // rows have no other TTL — cap them (newest-N per session, plus a hard
-    // age cutoff) so fan-out can never grow inbound.db unboundedly.
-    // MODULE-HOOK:cross-session-echo-prune:start
-    try {
-      const { pruneEchoBacklog } = await import('./modules/cross-session-context/index.js');
-      const pruned = pruneEchoBacklog(inDb);
-      if (pruned > 0) {
-        log.info('Pruned session-echo backlog', { sessionId: session.id, pruned });
-      }
-    } catch (err) {
-      log.error('Echo backlog prune failed', { sessionId: session.id, err });
-    }
-    // MODULE-HOOK:cross-session-echo-prune:end
-  } finally {
-    inDb.close();
-    outDb?.close();
-  }
-}
-
-function heartbeatMtimeMs(agentGroupId: string, sessionId: string): number {
-  const hbPath = heartbeatPath(agentGroupId, sessionId);
-  try {
-    return fs.statSync(hbPath).mtimeMs;
-  } catch {
-    return 0;
-  }
-}
-
-function bashTimeoutMs(state: ContainerState | null): number | null {
-  if (!state || state.current_tool !== 'Bash') return null;
-  return typeof state.tool_declared_timeout_ms === 'number' ? state.tool_declared_timeout_ms : null;
-}
-
-function enforceRunningContainerSla(
-  inDb: Database.Database,
-  outDb: Database.Database,
-  session: Session,
-  agentGroupId: string,
-): void {
-  const decision = decideStuckAction({
-    now: Date.now(),
-    heartbeatMtimeMs: heartbeatMtimeMs(agentGroupId, session.id),
-    containerStartedAtMs: getContainerStartedAtMs(session.id),
-    containerState: getContainerState(outDb),
-    claims: getProcessingClaims(outDb),
-  });
-
-  if (decision.action === 'ok') return;
-
-  if (decision.action === 'kill-ceiling') {
-    log.warn('Killing container past absolute ceiling', {
-      sessionId: session.id,
-      heartbeatAgeMs: decision.heartbeatAgeMs,
-      ceilingMs: decision.ceilingMs,
-    });
-    killContainer(session.id, 'absolute-ceiling');
-    resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling');
-    return;
-  }
-
-  log.warn('Killing container — message claimed then silent', {
-    sessionId: session.id,
-    messageId: decision.messageId,
-    claimAgeMs: decision.claimAgeMs,
-    toleranceMs: decision.toleranceMs,
-  });
-  killContainer(session.id, 'claim-stuck');
-  resetStuckProcessingRows(inDb, outDb, session, 'claim-stuck');
-}
-
-export function _resetStuckProcessingRowsForTesting(
-  inDb: Database.Database,
-  outDb: Database.Database,
-  session: Session,
-  reason: string,
-): void {
-  resetStuckProcessingRows(inDb, outDb, session, reason, outDb);
-}
-
-function resetStuckProcessingRows(
-  inDb: Database.Database,
-  outDb: Database.Database,
-  session: Session,
-  reason: string,
-  writableOutDb?: Database.Database,
-): void {
-  const claims = getProcessingClaims(outDb);
-  const now = Date.now();
-  for (const { message_id } of claims) {
-    const msg = getMessageForRetry(inDb, message_id, 'pending');
-    if (!msg) continue;
-
-    // Already rescheduled for a future retry — don't bump tries again. The
-    // wake path (sweep step 2) will fire when process_after elapses and a
-    // fresh container will clean the orphan claim on startup.
-    if (msg.processAfter && parseSqliteUtc(msg.processAfter) > now) continue;
-
-    if (msg.tries >= MAX_TRIES) {
-      markMessageFailed(inDb, msg.id);
-      log.warn('Message marked as failed after max retries', {
-        messageId: msg.id,
-        sessionId: session.id,
-        reason,
-      });
-    } else {
-      const backoffMs = BACKOFF_BASE_MS * Math.pow(2, msg.tries);
-      const backoffSec = Math.floor(backoffMs / 1000);
-      retryWithBackoff(inDb, msg.id, backoffSec);
-      log.info('Reset stale message with backoff', {
-        messageId: msg.id,
-        tries: msg.tries,
-        backoffMs,
-        reason,
-      });
-    }
-  }
-
-  // Drop the orphan 'processing' rows. Without this, the next sweep tick
-  // would re-read them, see the old status_changed timestamp, conclude the
-  // freshly respawned container is stuck, and SIGKILL it before its
-  // agent-runner has a chance to run clearStaleProcessingAcks() on startup.
-  const ownsDb = !writableOutDb;
-  let useDb: Database.Database | null = writableOutDb ?? null;
-  try {
-    if (!useDb) useDb = openOutboundDbRw(session.agent_group_id, session.id);
-    const cleared = deleteOrphanProcessingClaims(useDb);
-    if (cleared > 0) {
-      log.info('Cleared orphan processing claims', { sessionId: session.id, cleared, reason });
-    }
-  } catch (err) {
-    log.warn('Failed to clear orphan processing claims', { sessionId: session.id, err });
-  } finally {
-    if (ownsDb) useDb?.close();
-  }
+  // The tick ends — and the next one is armed — only after everything this
+  // tick enqueued has run. Delayed backoff retries don't hold the tick open.
+  await tickQueue.idle();
+  if (!running) return;
+  setTimeout(() => void sweep(), SWEEP_INTERVAL_MS);
 }

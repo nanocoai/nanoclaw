@@ -40,4 +40,4 @@ export {
   sessionHistory,
   type HistoryRow,
 } from './history.js';
-export { backfillNewDmSession, BACKFILL_LIMIT } from './backfill.js';
+export { backfillNewSession, BACKFILL_LIMIT } from './backfill.js';

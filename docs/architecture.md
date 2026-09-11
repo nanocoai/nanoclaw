@@ -455,9 +455,9 @@ This is documented as a pattern, not a built-in feature.
     ... working files
 ```
 
-Two directory mounts: session folder at `/workspace`, agent group folder at `/workspace/agent/`. The agent-runner CDs into `/workspace/agent/` to run the agent. Claude SDK writes `.claude/` at `/workspace/.claude/` (root of the workspace).
+Two directory mounts: session folder at `/workspace`, agent group folder at `/workspace/agent/`, plus nested read-only file mounts over the group dir (the composed `CLAUDE.md`, `container.json`). The agent-runner CDs into `/workspace/agent/` to run the agent. Claude SDK writes `.claude/` at `/workspace/.claude/` (root of the workspace).
 
-The runtime is Docker (`src/container-runtime.ts` hardcodes the `docker` binary); nested bind mounts make this layout straightforward. The layout deliberately sticks to directory mounts (no file-level mounts) so it stays portable to runtimes that only support directory mounts.
+The runtime is Docker (`src/container-runtime.ts` hardcodes the `docker` binary); nested bind mounts make this layout straightforward. Directory mounts carry the bulk of the layout, so it stays close to portable for runtimes with weaker file-mount support; the nested file mounts exist to make individual files read-only on top of a read-write dir.
 
 **Cross-mount DB access:** The two files exist precisely so each has a single writer — the
 host writes `inbound.db`, the container writes `outbound.db` — which removes writer
@@ -921,7 +921,7 @@ See [agent-runner-details.md](agent-runner-details.md) for full MCP tool paramet
 
 ### Cards
 
-**Agent-initiated (outbound):** Tool-based. Agent calls `ask_user_question` (interactive card with options) or `send_card` (structured card). Agent-runner writes the card structure to messages_out. Host/adapter handles platform-specific rendering (Slack Block Kit, Discord embeds, Telegram inline keyboard, text fallback).
+**Agent-initiated (outbound):** Tool-based. Agent calls `ask_user_question` for an interactive card with callback options, or `send_card` for a display card with optional URL link buttons. Agent-runner writes the card structure to messages_out. The host/adapter handles platform-specific rendering. `send_card` does not support callback buttons or nested action blocks; each top-level link action requires a non-empty label and a web (http or https) URL. Use `ask_user_question` when a selection must return to the agent.
 
 **Host-initiated (approval cards):** When an action requires approval, the host generates a standardized approval card and sends it to the admin's DM. These are not agent-initiated — the agent doesn't know about the approval step. The card format is fixed (action description + approve/deny buttons).
 
@@ -966,6 +966,26 @@ Pre-scripts: if a task message has a `script` field, run it first. If `wakeAgent
 - System prompt loading from CLAUDE.md files
 - PreCompact hook for transcript archiving (Claude provider)
 - Script execution for task-kind messages
+
+### Host Provider Contract
+
+Each agent provider tells the host, in plain data, what it needs on disk and in the container. This is the *host provider contract* (`src/provider-contracts/`). Claude's declaration is in `claude.ts`; a provider skill adds its own file and one import in `provider-contracts/index.ts`.
+
+A provider declares:
+
+- **Project document** — the file the host composes from every instruction source (for Claude, `CLAUDE.md`) and where it is mounted.
+- **State volumes** — provider-owned directories under `data/v2-sessions/<group>/` (group scope) or the session directory (session scope), with their container path and read/write mode.
+- **Skill backings and views** — where the provider's native skills directory lives and any extra bind mounts of it into the container. Core always keeps the shared-skill symlinks in every backing.
+- **Prepared files** — files core creates or reconciles inside a state volume (for Claude, `settings.json`). They are created with the process default mode; the contract does not pick one.
+
+Rules:
+
+- Contracts name only container paths and directory *names*; host paths are resolved by core. Every declared item is acted on — nothing is descriptive only.
+- The shape is validated when the contract registers, so a malformed provider skill fails when the host loads, not at first spawn.
+- A provider that also has a legacy host adapter (`src/providers/`) still gets that adapter's env passed through; its mounts are ignored because core now realizes the declared surfaces.
+- Mount order is fixed by core, not by the provider: state volumes, then skill views, then the project document.
+- The shipped base document (`container/CLAUDE.md`) is protected from operator mounts by core itself, not by any contract field.
+- A provider name with neither a contract nor an adapter spawns with the default (Claude) surfaces, plus a warning in the host log.
 
 ## Open Questions
 

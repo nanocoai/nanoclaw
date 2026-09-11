@@ -16,7 +16,7 @@ import type { Migration } from './index.js';
 export const migration022: Migration = {
   version: 22,
   name: 'messaging-group-detached-at',
-  up(db) {
-    db.exec(`ALTER TABLE messaging_groups ADD COLUMN detached_at TEXT;`);
+  async up(db) {
+    await db.exec(`ALTER TABLE messaging_groups ADD COLUMN detached_at TEXT;`);
   },
 };

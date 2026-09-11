@@ -41,9 +41,9 @@ export const agentsCreate = defineGuardedAction({
       return false;
     }
   },
-  decide: (input) => {
+  decide: async (input) => {
     if (input.actor.kind !== 'agent') return DENY('create_agent is a container-originated action.');
-    const cliScope = getContainerConfig(input.actor.agentGroupId)?.cli_scope ?? 'group';
+    const cliScope = (await getContainerConfig(input.actor.agentGroupId))?.cli_scope ?? 'group';
     if (cliScope === 'global') {
       // Trusted owner agent group — an approval tap on every sub-agent spawn
       // would be needless friction.
@@ -67,19 +67,19 @@ export const a2aSend = defineGuardedAction({
       return false;
     }
   },
-  decide: (input) => {
+  decide: async (input) => {
     if (input.actor.kind !== 'agent') return DENY('agent-to-agent send requires an agent actor');
     const from = input.actor.agentGroupId;
     const to = input.resource?.to ?? '';
     const isSelf = to === from;
-    if (!isSelf && !hasDestination(from, 'agent', to)) {
+    if (!isSelf && !(await hasDestination(from, 'agent', to))) {
       return DENY(`unauthorized agent-to-agent: ${from} has no destination for ${to}`);
     }
-    if (!getAgentGroup(to)) {
+    if (!(await getAgentGroup(to))) {
       return DENY(`target agent group ${to} not found for message ${String(input.payload.id)}`);
     }
     if (isSelf) return ALLOW('self-send');
-    const policy = getMessagePolicy(from, to);
+    const policy = await getMessagePolicy(from, to);
     if (policy) {
       return HOLD(`a2a message policy ${from}→${to} holds for ${policy.approver}`, policy.approver);
     }

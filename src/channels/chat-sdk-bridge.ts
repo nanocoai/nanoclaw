@@ -25,6 +25,7 @@ import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
+import { INSTANCE_KEY_RE } from './channel-registry.js';
 import { resolveQuestionRender } from './question-render-registry.js';
 
 /** Adapter with optional gateway support (e.g., Discord). */
@@ -205,6 +206,116 @@ export function normalizeDmThreadId(threadId: string, messageId: string): string
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ReplyContextExtractor = (raw: Record<string, any>) => ReplyContext | null;
 
+/**
+ * Recover readable content a platform adapter left only in `message.raw`.
+ *
+ * The bridge drops `raw` before persisting (it can be very large), so anything
+ * the adapter did not project into `Message.toJSON()` is lost at that point.
+ * A platform that carries readable content outside the normal text — Slack
+ * puts pasted tables in `attachments[].blocks[]` — returns it here as text.
+ * Return null when there is nothing to recover.
+ */
+export type RawTextExtractor = (raw: Record<string, unknown>) => string | null;
+
+// ---------------------------------------------------------------------------
+// Membership hook
+// ---------------------------------------------------------------------------
+
+/**
+ * A member joined (or left) a channel/group conversation one of our bridge
+ * instances is in. Forwarded from the Chat SDK's member_joined_channel
+ * dispatch; `left` is reserved for member_left_channel, which the installed
+ * chat core (4.29.0) does NOT dispatch — see the TODO at the
+ * onMemberJoinedChannel registration in setup().
+ */
+export interface MembershipEvent {
+  /** Adapter-instance key of the bridge that saw the event (defaults to the
+   *  platform name for default instances). */
+  instance: string;
+  /** Semantic platform key (`adapter.name`) — the key membership handlers
+   *  are registered under. */
+  channelType: string;
+  channelId: string;
+  userId: string;
+  inviterId?: string;
+  left?: boolean;
+}
+
+export type MembershipHandler = (event: MembershipEvent) => void | Promise<void>;
+
+const membershipHandlers = new Map<string, MembershipHandler>();
+
+/**
+ * Register THE membership handler for a channel type (single registration —
+ * one channel-side module owns it; a second registration for the same
+ * channel type overwrites with a warning, mirroring the router's hook
+ * discipline). The bridge invokes it fire-and-forget for every membership
+ * event on every bridge instance of that channel type; errors are logged,
+ * never thrown into SDK dispatch. With no handler registered the bridge
+ * behaves exactly as before.
+ */
+export function setMembershipHandler(channelType: string, fn: MembershipHandler): void {
+  if (membershipHandlers.has(channelType)) {
+    log.warn('Membership handler overwritten', { channelType });
+  }
+  membershipHandlers.set(channelType, fn);
+}
+
+function dispatchMembership(event: MembershipEvent): void {
+  const handler = membershipHandlers.get(event.channelType);
+  if (!handler) return;
+  try {
+    Promise.resolve(handler(event)).catch((err) =>
+      log.error('Membership handler failed', {
+        channelType: event.channelType,
+        channelId: event.channelId,
+        userId: event.userId,
+        err,
+      }),
+    );
+  } catch (err) {
+    log.error('Membership handler threw', {
+      channelType: event.channelType,
+      channelId: event.channelId,
+      userId: event.userId,
+      err,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Inbound policy registration
+// ---------------------------------------------------------------------------
+
+/**
+ * Wrap of the host's `ChannelSetup`, applied at bridge setup time. Every
+ * inbound dispatch path (onSubscribedMessage / onNewMention / onDirectMessage
+ * / onNewMessage) funnels through the stored setup's `onInbound`, so a policy
+ * that wraps `onInbound` intercepts them all at a single point — e.g. to
+ * drop, re-attribute, or rate-limit bot-authored messages before routing.
+ *
+ * `instanceKey` is the bridge's registry key (`config.instance ??
+ * adapter.name`): the wrap runs once per bridge instance, so policy state
+ * captured in the returned closure is naturally per-instance (= per bot
+ * identity when several bridges share one platform).
+ */
+export type BridgeInboundPolicy = (setup: ChannelSetup, instanceKey: string) => ChannelSetup | Promise<ChannelSetup>;
+
+const bridgeInboundPolicies = new Map<string, BridgeInboundPolicy>();
+
+/**
+ * Register THE inbound policy for a channel type (single registration — the
+ * owning module registers on barrel import; a second registration overwrites
+ * with a warning, mirroring the router's hook discipline). Bridges whose
+ * channel type has no registered policy are unaffected.
+ */
+export function registerBridgeInboundPolicy(channelType: string, wrap: BridgeInboundPolicy): void {
+  if (bridgeInboundPolicies.has(channelType)) {
+    log.warn('Bridge inbound policy overwritten', { channelType });
+  }
+  bridgeInboundPolicies.set(channelType, wrap);
+}
+
 export interface ChatSdkBridgeConfig {
   adapter: Adapter;
   /**
@@ -221,6 +332,12 @@ export interface ChatSdkBridgeConfig {
   botToken?: string;
   /** Platform-specific reply context extraction. */
   extractReplyContext?: ReplyContextExtractor;
+  /**
+   * Recover readable content the platform adapter left only in `message.raw`.
+   * The returned text is appended to the message body and persisted; the raw
+   * provider payload is still dropped.
+   */
+  extractRawText?: RawTextExtractor;
   /**
    * Whether this platform uses threads as the primary conversation unit.
    * See `ChannelAdapter.supportsThreads`. Declared by the calling channel
@@ -319,6 +436,22 @@ export function splitForLimit(text: string, limit: number): string[] {
   return chunks;
 }
 
+/**
+ * Append platform-rescued text to the serialized body, before `raw` is dropped.
+ * No extractor, or nothing recovered, leaves the body byte-identical.
+ */
+export function appendRawText(
+  serialized: Record<string, unknown>,
+  raw: Record<string, unknown>,
+  extract?: RawTextExtractor,
+): void {
+  if (!extract) return;
+  const extra = extract(raw);
+  if (!extra) return;
+  const text = typeof serialized.text === 'string' ? serialized.text : '';
+  serialized.text = text ? `${text}\n\n${extra}` : extra;
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   // The instance name becomes a webhook route segment (the route regex is
@@ -328,7 +461,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   // whitespace-only names, which are config bugs — '' is falsy, so it
   // would skip a truthiness guard, dead-end the webhook route, and
   // collapse the state namespace into the default instance's keyspace.
-  if (config.instance !== undefined && !/^[A-Za-z0-9._-]+$/.test(config.instance)) {
+  if (config.instance !== undefined && !INSTANCE_KEY_RE.test(config.instance)) {
     throw new Error(
       `chat-sdk bridge instance ${JSON.stringify(config.instance)} must be URL-safe: ` +
         `non-empty, only letters, digits, '.', '_' or '-'`,
@@ -377,6 +510,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       serialized.attachments = enriched;
     }
 
+    // Recover platform content the Chat SDK omitted, while raw is still here.
+    if (message.raw) {
+      appendRawText(serialized, message.raw as Record<string, unknown>, config.extractRawText);
+    }
+
     // Extract reply context via platform-specific hook
     if (config.extractReplyContext && message.raw) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -417,7 +555,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     defaults: config.defaults,
 
     async setup(hostConfig: ChannelSetup) {
-      setupConfig = hostConfig;
+      // Apply the registered inbound policy (if any) for this channel type.
+      // Wrapping here — the single point every dispatch path reads back
+      // through — means one policy covers onSubscribedMessage, onNewMention,
+      // onDirectMessage and onNewMessage alike.
+      const inboundPolicy = bridgeInboundPolicies.get(adapter.name);
+      setupConfig = inboundPolicy ? await inboundPolicy(hostConfig, instanceKey) : hostConfig;
 
       // State namespace: ONLY for a named non-default instance. A skill
       // that explicitly names the primary instance after the platform
@@ -514,6 +657,24 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       });
       chat.onAssistantContextChanged(rememberAppContext);
 
+      // Membership events: forwarded to the handler registered for this
+      // channel type (setMembershipHandler); no-op when none is registered.
+      // The chat core dispatches only member_joined_channel;
+      // member_left_channel arrives at the adapter but has no SDK handler
+      // in 4.29.0.
+      // TODO(member-left): when the chat core grows an onMemberLeftChannel
+      // dispatch, register it here and forward with { left: true } — the
+      // MembershipEvent type and dispatchMembership already carry it.
+      chat.onMemberJoinedChannel((event) => {
+        dispatchMembership({
+          instance: instanceKey,
+          channelType: adapter.name,
+          channelId: event.channelId,
+          userId: event.userId,
+          inviterId: event.inviterId,
+        });
+      });
+
       // Handle button clicks (ask_user_question)
       chat.onAction(async (event) => {
         if (!event.actionId.startsWith('ncq:')) return;
@@ -524,7 +685,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const userId = event.user?.userId || '';
 
         // Resolve render metadata BEFORE dispatching onAction (which deletes the row).
-        const render = resolveQuestionRender(questionId);
+        const render = await resolveQuestionRender(questionId);
         // New format: button id/value is an integer index into options (kept
         // short to fit Telegram's 64-byte callback_data cap). Old format:
         // the full value is embedded in actionId/value directly.
@@ -578,7 +739,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           const startedAt = Date.now();
           // Capture the long-running listener promise via waitUntil
           let listenerPromise: Promise<unknown> | undefined;
-          gatewayAdapter.startGatewayListener!(
+          void gatewayAdapter.startGatewayListener!(
             {
               waitUntil: (p: Promise<unknown>) => {
                 listenerPromise = p;
@@ -613,11 +774,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
               }
               setTimeout(startGateway, delayMs);
             };
-            listenerPromise.then(() => reschedule()).catch(reschedule);
+            void listenerPromise.then(() => reschedule()).catch(reschedule);
           });
         };
         startGateway();
         log.info('Gateway listener started', { adapter: adapter.name });
+      } else if ('runtimeMode' in adapter && adapter.runtimeMode === 'polling') {
+        // Polling adapters (Telegram) pull updates themselves; a route here
+        // would only bind the shared webhook port for nothing. Read after
+        // initialize(): the adapter resolves mode 'auto' there.
+        log.info('Polling adapter: no webhook route registered', { adapter: adapter.name });
       } else {
         // Non-gateway adapters (Slack, Teams, GitHub, etc.) — register on the
         // shared webhook server. The handler key stays adapter.name (the
@@ -698,6 +864,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // Display card (send_card MCP tool) — returns immediately, no callback flow.
       // Non-URL actions are dropped: send_card's contract is fire-and-forget, so a
       // callback button would have nowhere to land. URL actions render as link buttons.
+      // The runner filters these against LINK_ACTION_SCHEMA before writing the row;
+      // the checks below still stand because any producer can write this payload.
       if (content.type === 'card' && content.card && typeof content.card === 'object') {
         const cardSpec = content.card as Record<string, unknown>;
         const title = (cardSpec.title as string) || '';
@@ -721,8 +889,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           }
         }
         if (Array.isArray(cardSpec.actions)) {
-          const linkButtons = (cardSpec.actions as Array<Record<string, unknown>>)
-            .filter((a) => typeof a.url === 'string' && a.url && typeof a.label === 'string' && a.label)
+          const linkButtons = (cardSpec.actions as Array<Record<string, unknown> | null | undefined>)
+            .filter(
+              (a): a is Record<string, unknown> =>
+                !!a &&
+                typeof a === 'object' &&
+                typeof a.url === 'string' &&
+                !!a.url &&
+                typeof a.label === 'string' &&
+                !!a.label,
+            )
             .map((a) => {
               const style = a.style;
               const safeStyle: 'primary' | 'danger' | 'default' | undefined =
@@ -910,7 +1086,7 @@ async function handleForwardedEvent(
       const originalEmbeds =
         ((interaction.message as Record<string, unknown>)?.embeds as Array<Record<string, unknown>>) || [];
       const originalDescription = (originalEmbeds[0]?.description as string) || '';
-      const render = questionId ? resolveQuestionRender(questionId) : undefined;
+      const render = questionId ? await resolveQuestionRender(questionId) : undefined;
       // Discord custom_id mirrors the new index-based encoding (see Button
       // construction). Decode back to the real option value for downstream.
       const selectedOption = resolveSelectedOption(render, tail, tail);

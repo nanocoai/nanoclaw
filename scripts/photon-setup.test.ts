@@ -126,7 +126,11 @@ describe('userOptedIn / waitForOptedInUser', () => {
       calls += 1;
       if (calls <= 2) throw new Error('ECONNRESET');
       return new Response(
-        JSON.stringify({ users: [{ id: 'u1', phoneNumber: '+15551234567', assignedPhoneNumber: '+15558887777', meta: { opt_in: true } }] }),
+        JSON.stringify({
+          users: [
+            { id: 'u1', phoneNumber: '+15551234567', assignedPhoneNumber: '+15558887777', meta: { opt_in: true } },
+          ],
+        }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
     }) as typeof fetch;
@@ -163,7 +167,10 @@ describe('userOptedIn / waitForOptedInUser', () => {
 
   it('times out with a re-run hint when the opt-in never lands', async () => {
     const fetchFn = (async () =>
-      new Response(JSON.stringify({ users: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+      new Response(JSON.stringify({ users: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
     await expect(
       waitForOptedInUser(fetchFn, 'https://s.example.com', 'proj', 'secret', '+15551234567', {
         sleepFn: async () => {},
@@ -175,7 +182,10 @@ describe('userOptedIn / waitForOptedInUser', () => {
 
   it('names the assigned line in the timeout message when it is known', async () => {
     const fetchFn = (async () =>
-      new Response(JSON.stringify({ users: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+      new Response(JSON.stringify({ users: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
     await expect(
       waitForOptedInUser(fetchFn, 'https://s.example.com', 'proj', 'secret', '+15551234567', {
         sleepFn: async () => {},
@@ -206,7 +216,9 @@ describe('createUser / ensureUser', () => {
     const fetchFn = (async (_input: string | URL | Request, init?: RequestInit) => {
       body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
       return new Response(
-        JSON.stringify({ user: { id: 'u-new', phoneNumber: '+15551234567', assignedPhoneNumber: '+15558887777', meta: {} } }),
+        JSON.stringify({
+          user: { id: 'u-new', phoneNumber: '+15551234567', assignedPhoneNumber: '+15558887777', meta: {} },
+        }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
     }) as typeof fetch;
@@ -234,7 +246,9 @@ describe('createUser / ensureUser', () => {
       called = true;
       return new Response('{}', { status: 200 });
     }) as typeof fetch;
-    await expect(createUser(fetchFn, 'https://s.example.com', 'proj', 'secret', '5551234567')).rejects.toThrow(/E\.164/);
+    await expect(createUser(fetchFn, 'https://s.example.com', 'proj', 'secret', '5551234567')).rejects.toThrow(
+      /E\.164/,
+    );
     expect(called).toBe(false);
   });
 
@@ -243,7 +257,9 @@ describe('createUser / ensureUser', () => {
     const fetchFn = (async (_input: string | URL | Request, init?: RequestInit) => {
       if ((init?.method || 'GET').toUpperCase() === 'POST') posts += 1;
       return new Response(
-        JSON.stringify({ users: [{ id: 'u-existing', phoneNumber: '+15551234567', assignedPhoneNumber: '+15558887777', meta: {} }] }),
+        JSON.stringify({
+          users: [{ id: 'u-existing', phoneNumber: '+15551234567', assignedPhoneNumber: '+15558887777', meta: {} }],
+        }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
     }) as typeof fetch;
@@ -446,7 +462,11 @@ describe('photon setup flow (mocked API)', () => {
     // The row flips to opted in on the third list poll, as if the operator
     // texted the assigned line while the wizard waited.
     const { fetchFn, calls } = makeMockFetch({ optInAfterListPolls: 2 });
-    const code = await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep);
+    const code = await main(
+      ['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'],
+      fetchFn,
+      noSleep,
+    );
     expect(code).toBe(0);
 
     const env = fs.readFileSync(path.join(tempDir, '.env'), 'utf-8');
@@ -478,7 +498,11 @@ describe('photon setup flow (mocked API)', () => {
 
   it('a registered-but-not-opted-in row is not success — it keeps polling until opt_in lands', async () => {
     const { fetchFn, calls } = makeMockFetch({ optInAfterListPolls: 2, pendingUser: true });
-    const code = await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep);
+    const code = await main(
+      ['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'],
+      fetchFn,
+      noSleep,
+    );
     expect(code).toBe(0);
     expect(calls.filter((c) => c.method === 'GET' && /\/users\/$/.test(c.pathname)).length).toBe(3);
     // An existing row is reused, never duplicated by a second create.
@@ -494,7 +518,9 @@ describe('photon setup flow (mocked API)', () => {
       return true;
     }) as typeof process.stdout.write;
     try {
-      expect(await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep)).toBe(0);
+      expect(
+        await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep),
+      ).toBe(0);
     } finally {
       process.stdout.write = realWrite;
     }
@@ -504,21 +530,31 @@ describe('photon setup flow (mocked API)', () => {
 
   it('does not create a second row when a completed setup is re-run', async () => {
     const { fetchFn, calls } = makeMockFetch({ optInAfterListPolls: 1 });
-    expect(await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep)).toBe(0);
-    expect(await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep)).toBe(0);
+    expect(
+      await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep),
+    ).toBe(0);
+    expect(
+      await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep),
+    ).toBe(0);
     expect(calls.filter((c) => c.method === 'POST' && /\/users\/$/.test(c.pathname)).length).toBe(1);
   });
 
   it('short-circuits an already-opted-in row without waiting', async () => {
     const { fetchFn, calls } = makeMockFetch({ existingUser: true });
-    expect(await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep)).toBe(0);
+    expect(
+      await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep),
+    ).toBe(0);
     // One lookup, no poll loop.
     expect(calls.filter((c) => c.method === 'GET' && /\/users\/$/.test(c.pathname)).length).toBe(1);
   });
 
   it('fails (exit 1) when the opt-in never lands, and never claims success', async () => {
     const { fetchFn, calls } = makeMockFetch();
-    const code = await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep);
+    const code = await main(
+      ['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'],
+      fetchFn,
+      noSleep,
+    );
     expect(code).toBe(1);
     // The row is created once; a never-opted-in row is still not success.
     expect(calls.filter((c) => c.method === 'POST' && /\/users\/$/.test(c.pathname)).length).toBe(1);
@@ -531,7 +567,11 @@ describe('photon setup flow (mocked API)', () => {
 
   it('reuses an existing project + user and skips creation', async () => {
     const { fetchFn, calls } = makeMockFetch({ existingProject: true, existingUser: true });
-    const code = await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep);
+    const code = await main(
+      ['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'],
+      fetchFn,
+      noSleep,
+    );
     expect(code).toBe(0);
 
     const env = fs.readFileSync(path.join(tempDir, '.env'), 'utf-8');
@@ -547,11 +587,19 @@ describe('photon setup flow (mocked API)', () => {
 
   it('reuses a stored device token on a second run (no re-login)', async () => {
     // First run stores the token.
-    await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], makeMockFetch({ existingUser: true }).fetchFn, noSleep);
+    await main(
+      ['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'],
+      makeMockFetch({ existingUser: true }).fetchFn,
+      noSleep,
+    );
 
     // Second run: token is validated + reused, device-code is never requested.
     const { fetchFn, calls } = makeMockFetch({ existingUser: true });
-    const code = await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], fetchFn, noSleep);
+    const code = await main(
+      ['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'],
+      fetchFn,
+      noSleep,
+    );
     expect(code).toBe(0);
     expect(calls.some((c) => c.pathname === '/api/auth/device/code')).toBe(false);
     expect(calls.some((c) => c.pathname === '/api/auth/get-session')).toBe(true);
@@ -559,7 +607,11 @@ describe('photon setup flow (mocked API)', () => {
 
   it('a no-phone re-run preserves the stored phone_number and routing stays green', async () => {
     // First run: full success, phone_number + assigned number stored.
-    await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], makeMockFetch({ existingUser: true }).fetchFn, noSleep);
+    await main(
+      ['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'],
+      makeMockFetch({ existingUser: true }).fetchFn,
+      noSleep,
+    );
 
     // Re-run without --phone: step 4 is skipped, and the merge must not erase
     // what the first run learned.
@@ -575,13 +627,21 @@ describe('photon setup flow (mocked API)', () => {
   it('status probes the API: a stale phone_number with an un-opted-in row is not ready', async () => {
     // Simulate an install configured by the old wizard: local state says
     // "registered", but the live row never got the dashboard opt-in.
-    await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], makeMockFetch({ existingUser: true }).fetchFn, noSleep);
+    await main(
+      ['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'],
+      makeMockFetch({ existingUser: true }).fetchFn,
+      noSleep,
+    );
     const { fetchFn } = makeMockFetch({ optInAfterListPolls: Number.MAX_SAFE_INTEGER, pendingUser: true });
     expect(await main(['status'], fetchFn)).toBe(1);
   });
 
   it('status returns 1 when the routing probe cannot reach the API', async () => {
-    await main(['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'], makeMockFetch({ existingUser: true }).fetchFn, noSleep);
+    await main(
+      ['setup', '--phone', '+15551234567', '--no-browser', '--non-interactive'],
+      makeMockFetch({ existingUser: true }).fetchFn,
+      noSleep,
+    );
     const failFetch = (async () => {
       throw new Error('network down');
     }) as typeof fetch;

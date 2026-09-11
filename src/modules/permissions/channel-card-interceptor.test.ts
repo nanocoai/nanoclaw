@@ -13,7 +13,7 @@
 import fs from 'fs';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 
-import { initTestDb, closeDb, runMigrations } from '../../db/index.js';
+import { initTestDb, closeDb, getDb, runMigrations } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
 import { createMessagingGroup } from '../../db/messaging-groups.js';
 import type { InboundEvent } from '../../channels/adapter.js';
@@ -39,13 +39,12 @@ vi.mock('../../delivery.js', () => ({
 vi.mock('./user-dm.js', () => ({
   ensureUserDm: vi.fn(async (userId: string) => {
     const { getDb } = await import('../../db/connection.js');
-    const row = getDb()
-      .prepare(
-        `SELECT mg.* FROM messaging_groups mg
+    const row = await getDb().get(
+      `SELECT mg.* FROM messaging_groups mg
            JOIN user_dms ud ON ud.messaging_group_id = mg.id
           WHERE ud.user_id = ?`,
-      )
-      .get(userId);
+      userId,
+    );
     return row;
   }),
 }));
@@ -64,14 +63,20 @@ function now() {
 beforeEach(async () => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
-  const db = initTestDb();
-  runMigrations(db);
+  const db = await initTestDb();
+  await runMigrations(db);
 
-  createAgentGroup({ id: 'ag-1', name: 'Andy', folder: 'andy', agent_provider: null, created_at: now() });
+  await createAgentGroup({ id: 'ag-1', name: 'Andy', folder: 'andy', agent_provider: null, created_at: now() });
 
-  upsertUser({ id: 'telegram:owner', kind: 'telegram', display_name: 'Owner', created_at: now() });
-  grantRole({ user_id: 'telegram:owner', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now() });
-  createMessagingGroup({
+  await upsertUser({ id: 'telegram:owner', kind: 'telegram', display_name: 'Owner', created_at: now() });
+  await grantRole({
+    user_id: 'telegram:owner',
+    role: 'owner',
+    agent_group_id: null,
+    granted_by: null,
+    granted_at: now(),
+  });
+  await createMessagingGroup({
     id: 'mg-dm-owner',
     channel_type: 'telegram',
     platform_id: 'dm-owner',
@@ -80,20 +85,23 @@ beforeEach(async () => {
     unknown_sender_policy: 'public',
     created_at: now(),
   });
-  const { getDb } = await import('../../db/connection.js');
-  getDb()
-    .prepare(`INSERT INTO user_dms (user_id, channel_type, messaging_group_id, resolved_at) VALUES (?, ?, ?, ?)`)
-    .run('telegram:owner', 'telegram', 'mg-dm-owner', now());
+  await getDb().run(
+    `INSERT INTO user_dms (user_id, channel_type, messaging_group_id, resolved_at) VALUES (?, ?, ?, ?)`,
+    'telegram:owner',
+    'telegram',
+    'mg-dm-owner',
+    now(),
+  );
 
   deliverMock.mockClear();
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
-function unwiredChannel(id: string, channelType = 'telegram'): MessagingGroup {
+async function unwiredChannel(id: string, channelType = 'telegram'): Promise<MessagingGroup> {
   const mg: MessagingGroup = {
     id,
     channel_type: channelType,
@@ -104,7 +112,7 @@ function unwiredChannel(id: string, channelType = 'telegram'): MessagingGroup {
     unknown_sender_policy: 'request_approval',
     created_at: now(),
   };
-  createMessagingGroup(mg);
+  await createMessagingGroup(mg);
   return mg;
 }
 
@@ -125,8 +133,7 @@ function mention(mg: MessagingGroup): InboundEvent {
 }
 
 async function pendingCount(): Promise<number> {
-  const { getDb } = await import('../../db/connection.js');
-  return (getDb().prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals').get() as { c: number }).c;
+  return (await getDb().get<{ c: number }>('SELECT COUNT(*) AS c FROM pending_channel_approvals'))!.c;
 }
 
 describe('channel-card interceptor seam', () => {
@@ -135,7 +142,7 @@ describe('channel-card interceptor seam', () => {
     const interceptor = vi.fn().mockResolvedValue('handled');
     registerChannelCardInterceptor('telegram', interceptor);
 
-    const mg = unwiredChannel('mg-a');
+    const mg = await unwiredChannel('mg-a');
     const event = mention(mg);
     await requestChannelApproval({ messagingGroupId: mg.id, event });
 
@@ -149,7 +156,7 @@ describe('channel-card interceptor seam', () => {
     const { registerChannelCardInterceptor, requestChannelApproval } = await import('./channel-approval.js');
     registerChannelCardInterceptor('telegram', vi.fn().mockResolvedValue('card'));
 
-    const mg = unwiredChannel('mg-b');
+    const mg = await unwiredChannel('mg-b');
     await requestChannelApproval({ messagingGroupId: mg.id, event: mention(mg) });
 
     expect(deliverMock).toHaveBeenCalledTimes(1);
@@ -162,7 +169,7 @@ describe('channel-card interceptor seam', () => {
     const { registerChannelCardInterceptor, requestChannelApproval } = await import('./channel-approval.js');
     registerChannelCardInterceptor('telegram', vi.fn().mockRejectedValue(new Error('boom')));
 
-    const mg = unwiredChannel('mg-c');
+    const mg = await unwiredChannel('mg-c');
     await requestChannelApproval({ messagingGroupId: mg.id, event: mention(mg) });
 
     expect(deliverMock).toHaveBeenCalledTimes(1);
@@ -174,7 +181,7 @@ describe('channel-card interceptor seam', () => {
     const interceptor = vi.fn().mockResolvedValue('handled');
     registerChannelCardInterceptor('slack', interceptor);
 
-    const mg = unwiredChannel('mg-d'); // telegram
+    const mg = await unwiredChannel('mg-d'); // telegram
     await requestChannelApproval({ messagingGroupId: mg.id, event: mention(mg) });
 
     expect(interceptor).not.toHaveBeenCalled();
@@ -186,7 +193,7 @@ describe('channel-card interceptor seam', () => {
     const interceptor = vi.fn().mockResolvedValue('card');
     registerChannelCardInterceptor('telegram', interceptor);
 
-    const mg = unwiredChannel('mg-e');
+    const mg = await unwiredChannel('mg-e');
     await requestChannelApproval({ messagingGroupId: mg.id, event: mention(mg) });
     await requestChannelApproval({ messagingGroupId: mg.id, event: mention(mg) });
 

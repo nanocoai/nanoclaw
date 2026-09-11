@@ -27,7 +27,7 @@ import { hasAdminPrivilege } from './db/user-roles.js';
 
 export const sendersAdmit = defineGuardedAction({
   action: 'senders.admit',
-  decide: (input) => {
+  decide: async (input) => {
     const policy = input.payload.policy;
     if (policy === 'public') return ALLOW('public messaging group');
     if (policy === 'request_approval') {
@@ -46,14 +46,14 @@ export const sendersAdmit = defineGuardedAction({
 
 export const channelsRegister = defineGuardedAction({
   action: 'channels.register',
-  decide: (input) => {
+  decide: async (input) => {
     if (input.actor.kind !== 'human') return DENY('channel registration resolves via human clicks/replies');
     const questionId = typeof input.payload.questionId === 'string' ? input.payload.questionId : '';
-    const row = getPendingChannelApproval(questionId);
+    const row = await getPendingChannelApproval(questionId);
     if (!row) return DENY(`no pending channel registration for ${questionId || '(missing questionId)'}`);
     if (
       input.actor.userId &&
-      (input.actor.userId === row.approver_user_id || hasAdminPrivilege(input.actor.userId, row.agent_group_id))
+      (input.actor.userId === row.approver_user_id || (await hasAdminPrivilege(input.actor.userId, row.agent_group_id)))
     ) {
       return ALLOW('delivered approver or anchor-group admin');
     }

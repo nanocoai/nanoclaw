@@ -7,7 +7,8 @@ import {
   type AdditionalMountConfig,
   type McpServerConfig,
 } from '../../container-config.js';
-import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
+import { buildAgentGroupImage, killContainer } from '../../container-runner.js';
+import { requestWake } from '../../request-wake.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getDb, hasTable } from '../../db/connection.js';
@@ -18,7 +19,11 @@ import {
   updateContainerConfigScalars,
   updateContainerConfigJson,
 } from '../../db/container-configs.js';
+import { getSessionDriver } from '../../drivers/index.js';
+import { assertValidGroupFolder, groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
+import { getProviderHostContract } from '../../provider-contracts/registry.js';
+import { resolveProviderName } from '../../providers/provider-name.js';
 import { createAgentFromTemplate } from '../../templates/create-agent.js';
 import {
   formatRestampResult,
@@ -49,6 +54,21 @@ function parseTimezoneFlag(value: unknown): string | null | undefined {
   return tz;
 }
 
+/**
+ * `--speed` vocabulary is provider-declared (`inference.speedTiers` on the host
+ * contract). Core only checks membership and stores the name; `""` (clear) is
+ * handled by the caller and never reaches here.
+ */
+function assertDeclaredSpeedTier(speed: string, provider: string): void {
+  const tiers = getProviderHostContract(provider)?.inference?.speedTiers;
+  if (tiers === undefined) {
+    throw new Error(`provider "${provider}" declares no speed tiers; --speed accepts only "" (clear)`);
+  }
+  if (!tiers.includes(speed)) {
+    throw new Error(`--speed "${speed}" is not a speed tier of provider "${provider}" (declared: ${tiers.join(', ')})`);
+  }
+}
+
 /** Deserialize JSON columns for display. */
 function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
   return {
@@ -56,6 +76,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     provider: row.provider,
     model: row.model,
     effort: row.effort,
+    speed: row.speed,
     image_tag: row.image_tag,
     assistant_name: row.assistant_name,
     max_messages_per_prompt: row.max_messages_per_prompt,
@@ -131,7 +152,7 @@ registerResource({
           // --yes), never a duplicate agent. --new opts out; agent callers
           // have --id auto-filled, so they always target their own group.
           if (args.new !== true) {
-            const carriers = args.id ? [] : groupsCarryingPlugin(ref);
+            const carriers = args.id ? [] : await groupsCarryingPlugin(ref);
             if (carriers.length > 1) {
               throw new Error(
                 `${carriers.length} groups already carry this plugin: ` +
@@ -141,13 +162,13 @@ registerResource({
             }
             const targetId = args.id ? String(args.id) : carriers[0]?.id;
             if (targetId) {
-              const result = restampAgentFromTemplate(ref, targetId, { apply: args.yes === true });
+              const result = await restampAgentFromTemplate(ref, targetId, { apply: args.yes === true });
               return result.applied
                 ? result
                 : { ...result, note: `${result.note} Pass --new to stamp a separate agent instead.` };
             }
           }
-          const { group, report } = createAgentFromTemplate(ref, {
+          const { group, report } = await createAgentFromTemplate(ref, {
             name: args.name ? String(args.name) : undefined,
             timezone,
           });
@@ -155,15 +176,30 @@ registerResource({
         }
         const folder = args.folder as string;
         if (!folder) throw new Error('--folder is required');
+        // The template path validates through createAgentFromTemplate; the bare
+        // path used to validate nowhere, minting folders the runtime label
+        // grammar refuses at every spawn.
+        assertValidGroupFolder(folder);
         const name = (args.name as string) ?? folder;
-        const existing = getAgentGroupByFolder(folder);
+        const existing = await getAgentGroupByFolder(folder);
         if (existing) {
-          initGroupFilesystem(existing); // ensure a reused group is fully configured too (idempotent; also repairs a missing workspace folder)
+          await initGroupFilesystem(existing); // ensure a reused group is fully configured too (idempotent; also repairs a missing workspace folder)
           return existing;
+        }
+        // Fresh-create branch only: a folder on disk with no claiming DB row
+        // is deleted-group residue (delete never removes groups/<folder>/) or
+        // an operator-placed dir — minting a new id over it would silently
+        // re-scope the old group's data under a new identity.
+        if (groupFolderExistsOnDisk(folder)) {
+          throw new Error(
+            `group folder 'groups/${folder}' already exists on disk but no agent group claims it — ` +
+              `deleting a group never removes its folder, and creating a new group over it would silently ` +
+              `adopt the old group's data under a new identity. Move or remove the folder, or pick a different --folder.`,
+          );
         }
         const id = `ag-${randomUUID()}`;
         const group: AgentGroup = { id, name, folder, agent_provider: null, created_at: new Date().toISOString() };
-        createAgentGroup(group);
+        await createAgentGroup(group);
         // Provision the workspace folder and the `container_configs` row that
         // `getContainerConfig` and the spawn path require. Without this, a
         // group created via `ncl groups create` would throw "Container config
@@ -174,8 +210,8 @@ registerResource({
         // group via the setup flow. The config row is stamped with the
         // instance default provider (`ensureContainerConfig` inside) — per-group
         // `groups config update --provider` still wins.
-        initGroupFilesystem(group);
-        if (timezone) updateContainerConfigScalars(id, { timezone });
+        await initGroupFilesystem(group);
+        if (timezone) await updateContainerConfigScalars(id, { timezone });
         return getAgentGroupByFolder(folder);
       },
       // The restamp path returns a plan that wants the aligned-lines view;
@@ -190,7 +226,8 @@ registerResource({
       description:
         'Delete an agent group and its dependent rows (sessions, destinations, approvals, role grants, ' +
         'memberships, channel wirings). FK-ordered cascade in a single transaction. ' +
-        'Use --id <group-id>. Out of scope: killing running containers, on-disk cleanup of groups/<folder>/ and data/v2-sessions/<group-id>/.',
+        'Use --id <group-id>. Out of scope: killing running containers, on-disk cleanup of groups/<folder>/ and data/v2-sessions/<group-id>/. ' +
+        'The leftover groups/<folder>/ blocks re-creating a group under the same folder name until it is moved or removed.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -198,18 +235,18 @@ registerResource({
 
         // Verify the group exists before doing anything — preserves the
         // genericDelete behaviour of throwing "not found" for unknown IDs.
-        const exists = db.prepare('SELECT 1 FROM agent_groups WHERE id = ? LIMIT 1').get(id);
+        const exists = await db.get('SELECT 1 FROM agent_groups WHERE id = ? LIMIT 1', id);
         if (!exists) throw new Error(`group not found: ${id}`);
 
-        const hasAgentDestinations = hasTable(db, 'agent_destinations');
-        const hasPendingApprovals = hasTable(db, 'pending_approvals');
+        const hasAgentDestinations = await hasTable(db, 'agent_destinations');
+        const hasPendingApprovals = await hasTable(db, 'pending_approvals');
 
-        // FK-ordered cascade. Single sync transaction — better-sqlite3 rolls
+        // FK-ordered cascade. The async driver transaction rolls
         // back the whole thing if any statement throws (e.g. an FK constraint
         // we missed), so the central DB stays consistent. The `removed` counts
         // are sourced from each DELETE's `changes` so they describe exactly
         // what the transaction did, not a separate pre-flight snapshot.
-        const cascade = db.transaction((groupId: string) => {
+        const removed = await db.transaction(async () => {
           const counts = {
             sessions: 0,
             pending_questions: 0,
@@ -225,48 +262,50 @@ registerResource({
           };
 
           if (hasAgentDestinations) {
-            counts.agent_destinations_owned = db
-              .prepare('DELETE FROM agent_destinations WHERE agent_group_id = ?')
-              .run(groupId).changes;
-            counts.agent_destinations_pointing = db
-              .prepare('DELETE FROM agent_destinations WHERE target_type = ? AND target_id = ?')
-              .run('agent', groupId).changes;
+            counts.agent_destinations_owned = (
+              await db.run('DELETE FROM agent_destinations WHERE agent_group_id = ?', id)
+            ).changes;
+            counts.agent_destinations_pointing = (
+              await db.run('DELETE FROM agent_destinations WHERE target_type = ? AND target_id = ?', 'agent', id)
+            ).changes;
           }
-          counts.pending_questions = db
-            .prepare(
+          counts.pending_questions = (
+            await db.run(
               'DELETE FROM pending_questions WHERE session_id IN (SELECT id FROM sessions WHERE agent_group_id = ?)',
+              id,
             )
-            .run(groupId).changes;
+          ).changes;
           if (hasPendingApprovals) {
-            counts.pending_approvals = db
-              .prepare(
+            counts.pending_approvals = (
+              await db.run(
                 'DELETE FROM pending_approvals WHERE agent_group_id = ? OR session_id IN (SELECT id FROM sessions WHERE agent_group_id = ?)',
+                id,
+                id,
               )
-              .run(groupId, groupId).changes;
+            ).changes;
           }
-          counts.sessions = db.prepare('DELETE FROM sessions WHERE agent_group_id = ?').run(groupId).changes;
-          counts.pending_sender_approvals = db
-            .prepare('DELETE FROM pending_sender_approvals WHERE agent_group_id = ?')
-            .run(groupId).changes;
-          counts.pending_channel_approvals = db
-            .prepare('DELETE FROM pending_channel_approvals WHERE agent_group_id = ?')
-            .run(groupId).changes;
-          counts.messaging_group_agents = db
-            .prepare('DELETE FROM messaging_group_agents WHERE agent_group_id = ?')
-            .run(groupId).changes;
-          counts.agent_group_members = db
-            .prepare('DELETE FROM agent_group_members WHERE agent_group_id = ?')
-            .run(groupId).changes;
-          counts.user_roles = db.prepare('DELETE FROM user_roles WHERE agent_group_id = ?').run(groupId).changes;
+          counts.sessions = (await db.run('DELETE FROM sessions WHERE agent_group_id = ?', id)).changes;
+          counts.pending_sender_approvals = (
+            await db.run('DELETE FROM pending_sender_approvals WHERE agent_group_id = ?', id)
+          ).changes;
+          counts.pending_channel_approvals = (
+            await db.run('DELETE FROM pending_channel_approvals WHERE agent_group_id = ?', id)
+          ).changes;
+          counts.messaging_group_agents = (
+            await db.run('DELETE FROM messaging_group_agents WHERE agent_group_id = ?', id)
+          ).changes;
+          counts.agent_group_members = (
+            await db.run('DELETE FROM agent_group_members WHERE agent_group_id = ?', id)
+          ).changes;
+          counts.user_roles = (await db.run('DELETE FROM user_roles WHERE agent_group_id = ?', id)).changes;
           // migration-014 has ON DELETE CASCADE on container_configs.agent_group_id;
           // the explicit delete here mirrors the other tables and surfaces the count.
-          counts.container_configs = db
-            .prepare('DELETE FROM container_configs WHERE agent_group_id = ?')
-            .run(groupId).changes;
-          db.prepare('DELETE FROM agent_groups WHERE id = ?').run(groupId);
+          counts.container_configs = (
+            await db.run('DELETE FROM container_configs WHERE agent_group_id = ?', id)
+          ).changes;
+          await db.run('DELETE FROM agent_groups WHERE id = ?', id);
           return counts;
         });
-        const removed = cascade(id);
 
         return { deleted: id, removed };
       },
@@ -284,7 +323,20 @@ registerResource({
         const id = (args.id as string) || (ctx.caller === 'agent' ? ctx.agentGroupId : undefined);
         if (!id) throw new Error('--id is required');
         if (args.rebuild) {
-          const configRow = getContainerConfig(id);
+          // Refuse the WHOLE command in the payload (this command exits 0 even
+          // on a nonexistent group id) and restart nothing: the operator asked
+          // for rebuild-then-restart, and restarting after silently skipping
+          // the rebuild would report success for a rebuild that never happened.
+          if (!getSessionDriver().capabilities().imageBuild) {
+            return {
+              restarted: 0,
+              rebuilt: false,
+              error:
+                "the session runtime does not declare the 'imageBuild' capability; " +
+                '--rebuild cannot run here — image changes must be built and imported out of band',
+            };
+          }
+          const configRow = await getContainerConfig(id);
           const hasPackages =
             !!configRow &&
             ((JSON.parse(configRow.packages_apt) as string[]).length > 0 ||
@@ -298,7 +350,7 @@ registerResource({
         // From an agent: scope to the calling session only
         if (ctx.caller === 'agent') {
           if (message) {
-            writeSessionMessage(id, ctx.sessionId, {
+            await writeSessionMessage(id, ctx.sessionId, {
               id: `restart-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
               kind: 'chat',
               timestamp: new Date().toISOString(),
@@ -306,7 +358,7 @@ registerResource({
               channelType: 'agent',
               threadId: null,
               content: JSON.stringify({ text: message, sender: 'system', senderId: 'system' }),
-              onWake: 1,
+              onWake: true,
             });
           }
           killContainer(
@@ -314,8 +366,10 @@ registerResource({
             'restarted via ncl',
             message
               ? () => {
-                  const s = getSession(ctx.sessionId);
-                  if (s) wakeContainer(s);
+                  void (async () => {
+                    const s = await getSession(ctx.sessionId);
+                    if (s) await requestWake(s, 'cli');
+                  })();
                 }
               : undefined,
           );
@@ -323,7 +377,7 @@ registerResource({
         }
 
         // From the host: restart all running containers in the group
-        const count = restartAgentGroupContainers(id, 'restarted via ncl', message);
+        const count = await restartAgentGroupContainers(id, 'restarted via ncl', message);
         return { restarted: count, rebuilt: !!args.rebuild };
       },
     },
@@ -333,7 +387,7 @@ registerResource({
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
-        const row = getContainerConfig(id);
+        const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
         return presentConfig(row);
       },
@@ -342,12 +396,13 @@ registerResource({
       access: 'approval',
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        'Use --id <group-id> and any of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
+        '--speed must be one of the speed tiers the group\'s provider declares (Claude: "standard", "fast"), or "" to follow the install default; a provider that declares none accepts only "". ' +
         '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
-        const row = getContainerConfig(id);
+        const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
 
         const updates: Partial<
@@ -356,6 +411,7 @@ registerResource({
             | 'provider'
             | 'model'
             | 'effort'
+            | 'speed'
             | 'image_tag'
             | 'assistant_name'
             | 'max_messages_per_prompt'
@@ -368,6 +424,14 @@ registerResource({
         if (timezone !== undefined) updates.timezone = timezone;
         if (args.model !== undefined) updates.model = args.model as string;
         if (args.effort !== undefined) updates.effort = args.effort as string;
+        if (args.speed !== undefined) {
+          const speed = args.speed as string;
+          // Validate against the provider the group will actually run on —
+          // the same rule spawn applies, with a `--provider` in this command
+          // taking precedence over the stored one.
+          if (speed !== '') assertDeclaredSpeedTier(speed, resolveProviderName(updates.provider, row.provider));
+          updates.speed = speed || null;
+        }
         if (args.image_tag !== undefined) updates.image_tag = args.image_tag as string;
         if (args.assistant_name !== undefined) updates.assistant_name = args.assistant_name as string;
         if (args.max_messages_per_prompt !== undefined)
@@ -382,13 +446,13 @@ registerResource({
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --speed, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
           );
         }
 
-        updateContainerConfigScalars(id, updates);
+        await updateContainerConfigScalars(id, updates);
 
-        const updated = getContainerConfig(id)!;
+        const updated = (await getContainerConfig(id))!;
         return presentConfig(updated);
       },
     },
@@ -405,7 +469,7 @@ registerResource({
         if (!name) throw new Error('--name is required');
         validateMcpServerName(name);
 
-        const row = getContainerConfig(id);
+        const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
 
         const servers = JSON.parse(row.mcp_servers) as Record<string, McpServerConfig>;
@@ -423,7 +487,7 @@ registerResource({
           env: args.env === undefined ? undefined : JSON.parse(String(args.env)),
           headers: args.headers === undefined ? undefined : JSON.parse(String(args.headers)),
         });
-        updateContainerConfigJson(id, 'mcp_servers', servers);
+        await updateContainerConfigJson(id, 'mcp_servers', servers);
 
         return { added: name, servers };
       },
@@ -438,7 +502,7 @@ registerResource({
         const name = args.name as string;
         if (!name) throw new Error('--name is required');
 
-        const row = getContainerConfig(id);
+        const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
 
         const servers = JSON.parse(row.mcp_servers) as Record<string, McpServerConfig>;
@@ -451,7 +515,7 @@ registerResource({
           );
         }
         delete servers[name];
-        updateContainerConfigJson(id, 'mcp_servers', servers);
+        await updateContainerConfigJson(id, 'mcp_servers', servers);
 
         return { removed: name };
       },
@@ -464,7 +528,7 @@ registerResource({
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
 
-        const row = getContainerConfig(id);
+        const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
 
         const apt = args.apt as string | undefined;
@@ -475,14 +539,14 @@ registerResource({
           const existing = JSON.parse(row.packages_apt) as string[];
           if (!existing.includes(apt)) {
             existing.push(apt);
-            updateContainerConfigJson(id, 'packages_apt', existing);
+            await updateContainerConfigJson(id, 'packages_apt', existing);
           }
         }
         if (npm) {
           const existing = JSON.parse(row.packages_npm) as string[];
           if (!existing.includes(npm)) {
             existing.push(npm);
-            updateContainerConfigJson(id, 'packages_npm', existing);
+            await updateContainerConfigJson(id, 'packages_npm', existing);
           }
         }
 
@@ -500,7 +564,7 @@ registerResource({
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
 
-        const row = getContainerConfig(id);
+        const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
 
         const apt = args.apt as string | undefined;
@@ -510,12 +574,12 @@ registerResource({
         if (apt) {
           const existing = JSON.parse(row.packages_apt) as string[];
           const filtered = existing.filter((p) => p !== apt);
-          updateContainerConfigJson(id, 'packages_apt', filtered);
+          await updateContainerConfigJson(id, 'packages_apt', filtered);
         }
         if (npm) {
           const existing = JSON.parse(row.packages_npm) as string[];
           const filtered = existing.filter((p) => p !== npm);
-          updateContainerConfigJson(id, 'packages_npm', filtered);
+          await updateContainerConfigJson(id, 'packages_npm', filtered);
         }
 
         return {
@@ -538,7 +602,7 @@ registerResource({
         const containerPath = (args.container ?? args['container-path']) as string | undefined;
         if (!hostPath || !containerPath) throw new Error('Provide --host <host-path> and --container <container-path>');
 
-        const row = getContainerConfig(id);
+        const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
 
         const mount: AdditionalMountConfig = {
@@ -549,7 +613,7 @@ registerResource({
         const existing = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
         if (!existing.some((m) => m.hostPath === hostPath && m.containerPath === containerPath)) {
           existing.push(mount);
-          updateContainerConfigJson(id, 'additional_mounts', existing);
+          await updateContainerConfigJson(id, 'additional_mounts', existing);
         }
         return { added: mount, note: `Run \`ncl groups restart --id ${id}\` for the mount to take effect.` };
       },
@@ -567,12 +631,12 @@ registerResource({
         const containerPath = (args.container ?? args['container-path']) as string | undefined;
         if (!hostPath || !containerPath) throw new Error('Provide --host <host-path> and --container <container-path>');
 
-        const row = getContainerConfig(id);
+        const row = await getContainerConfig(id);
         if (!row) throw new Error(`No container config for group: ${id}`);
 
         const existing = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
         const filtered = existing.filter((m) => !(m.hostPath === hostPath && m.containerPath === containerPath));
-        updateContainerConfigJson(id, 'additional_mounts', filtered);
+        await updateContainerConfigJson(id, 'additional_mounts', filtered);
         return { removed: { hostPath, containerPath }, note: `Run \`ncl groups restart --id ${id}\` to apply.` };
       },
     },

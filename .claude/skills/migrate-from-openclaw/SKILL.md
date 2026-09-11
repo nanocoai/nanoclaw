@@ -403,10 +403,12 @@ If OneCLI isn't installed yet, defer this: tell the user that during `/setup`
 (or `/init-onecli`) they'll register the Anthropic credential, and note the
 discovered profile in `migration-state.md` so it isn't lost.
 
-> If the user explicitly wants `.env`-based credentials instead of the OneCLI
-> vault, that's the `/use-native-credential-proxy` opt-out — the one place
-> credentials are read from `.env` and injected into container requests without
-> OneCLI. Only go there if the user asks for it.
+> There is no supported `.env`-credentials opt-out anymore: the session spec's
+> admission rules refuse credential values in container env on every lane, by
+> design (the retired `/use-native-credential-proxy` skill would be denied at
+> every spawn). Credentials go through the OneCLI vault; custom Anthropic
+> endpoints use `ANTHROPIC_BASE_URL` plus the placeholder-token pattern from
+> setup, with the gateway rewriting the header on the wire.
 
 ## Phase 5: Scheduled Tasks
 

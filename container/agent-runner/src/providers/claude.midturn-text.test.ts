@@ -19,7 +19,10 @@ mock.module('@anthropic-ai/claude-agent-sdk', () => ({
     })(),
 }));
 
-const { ClaudeProvider } = await import('./claude.js');
+await import('./index.js');
+await import('../provider-contracts/index.js');
+const { createProvider } = await import('./factory.js');
+const { claudeRuntimeContract } = await import('../provider-contracts/claude.js');
 const { MEMORY_SESSION_HOOK } = await import('../memory/session-hook.js');
 
 let tmp: string;
@@ -38,8 +41,8 @@ afterEach(() => {
 });
 
 describe('assistant text block surfacing', () => {
-  it('declares the emitsMidTurnText capability the poll-loop keys one-door delivery on', () => {
-    expect(new ClaudeProvider({}).emitsMidTurnText).toBe(true);
+  it('declares mid-turn delivery in the runtime contract', () => {
+    expect(claudeRuntimeContract.textDelivery).toBe('mid-turn-complete');
   });
 
   it('yields one text event per assistant message with text, before the result', async () => {
@@ -60,7 +63,7 @@ describe('assistant text block surfacing', () => {
       { type: 'result', subtype: 'success', result: 'final text' },
     );
 
-    const provider = new ClaudeProvider({});
+    const provider = createProvider('claude');
     provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
     const q = provider.query({ prompt: 'hi', cwd: tmp });
 
@@ -85,7 +88,7 @@ describe('assistant text block surfacing', () => {
       { type: 'result', subtype: 'success', result: 'done' },
     );
 
-    const provider = new ClaudeProvider({});
+    const provider = createProvider('claude');
     provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
     const q = provider.query({ prompt: 'hi', cwd: tmp });
 
@@ -115,7 +118,7 @@ describe('assistant text block surfacing', () => {
       { type: 'result', subtype: 'success', result: '<message to="user">The answer is 4.</message>' },
     );
 
-    const provider = new ClaudeProvider({});
+    const provider = createProvider('claude');
     provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
     const q = provider.query({ prompt: 'hi', cwd: tmp });
 
@@ -136,7 +139,7 @@ describe('assistant text block surfacing', () => {
       { type: 'result', subtype: 'success', result: 'closed here</message>' },
     );
 
-    const provider = new ClaudeProvider({});
+    const provider = createProvider('claude');
     provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
     const q = provider.query({ prompt: 'hi', cwd: tmp });
 
@@ -163,7 +166,7 @@ describe('result text is an independent SDK field (divergence surface)', () => {
       { type: 'result', subtype: 'success', result: '<message to="user">only in the result field</message>' },
     );
 
-    const provider = new ClaudeProvider({});
+    const provider = createProvider('claude');
     provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
     const q = provider.query({ prompt: 'hi', cwd: tmp });
 
@@ -183,7 +186,7 @@ describe('result text is an independent SDK field (divergence surface)', () => {
       { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['billing hard-stop'] },
     );
 
-    const provider = new ClaudeProvider({});
+    const provider = createProvider('claude');
     provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
     const q = provider.query({ prompt: 'hi', cwd: tmp });
 
