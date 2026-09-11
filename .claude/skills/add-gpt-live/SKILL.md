@@ -39,6 +39,7 @@ src/channels/gpt-live-session.ts
 src/channels/gpt-live-prompt.ts
 src/channels/gpt-live-call-page.ts
 src/channels/gpt-live-keychain.ts
+src/channels/gpt-live-sideband.ts
 src/channels/gpt-live-session.test.ts
 src/channels/gpt-live-adapter.test.ts
 src/channels/gpt-live-keychain.test.ts
