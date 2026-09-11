@@ -26,10 +26,10 @@ these Host-only terminal commands through their mailbox.
 Remote terminal access lets an approved SSH key land in a sandbox on this
 Host from another machine. The Host runs a dedicated OpenSSH listener on
 loopback, with its own host key, public keys only, a PTY and nothing else:
-no shell, no forwarding, no password. Reachability over the network arrives
-with the account link work; until then the listener answers only on the
-Host itself (or through a tunnel you run yourself), and every stream that
-reaches it is expected to be relayed by the Host.
+no shell, no forwarding, no password. Reachability comes from the account
+link, not from a listener of its own: the Host never listens on the network,
+and every stream that reaches the listener was relayed by the Host (see
+Streams below).
 
 ### Enabling
 
@@ -89,6 +89,23 @@ cold. `ssh <address> ls` prints the sandbox list instead of landing. Detach
 with **Ctrl-b, then d**; the session keeps running. A connection the Host
 did not relay (for example a direct loopback connection) is refused after
 authentication.
+
+### Streams
+
+Remote streams ride the Host's existing outbound link to its account cell.
+While remote access is enabled the link announces the `ssh` capability, and
+every terminal the cell relays arrives as one `ssh` channel: the Host
+connects to the listener on 127.0.0.1 from a distinct loopback source port,
+records which account or sandbox that port is for (the forced command looks
+it up by its client port), and pipes bytes both ways in 16 KiB chunks under
+a 64 KiB per-direction window, acknowledging a chunk only once the listener
+has taken it. The last bytes of a session are acknowledged before the stream
+closes; a dropped link tears every stream down, and the terminal reconnects
+into the same tmux session. Enabling or disabling remote access restarts the
+link so the capability is re-announced, the Host renews its link ticket
+every ten minutes so streams outlive it, and at most eight streams are open
+at once. Approvals made in the browser reach the Host with the account's
+snapshot over the same link.
 
 ## Connection recovery (design)
 
