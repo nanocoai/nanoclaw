@@ -39,7 +39,7 @@ import type http from 'node:http';
 
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
-import { callPageHtml } from './gpt-live-call-page.js';
+import { callPageHtml, type VoiceUiConfig } from './gpt-live-call-page.js';
 import { resolveOpenAiKey } from './gpt-live-keychain.js';
 import { attachSideband, type SidebandSocket } from './gpt-live-sideband.js';
 import { resolveWiredAgent, sessionConfig, type VoiceAgent } from './gpt-live-prompt.js';
@@ -92,6 +92,8 @@ export interface GptLiveConfig {
   onSidebandEvent?: (sessionId: string, event: LiveServerEvent) => void;
   /** Clock, overridable for tests. */
   now?: () => number;
+  /** Look of the browser call page; injected at serve time, no rebuild needed (GPT_LIVE_UI). */
+  ui?: VoiceUiConfig;
 }
 
 export type { SidebandSocket } from './gpt-live-sideband.js';
@@ -317,7 +319,7 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
       if (!connected || !setup) return reply(res, 503, 'Live Voice is not running');
       if (req.method === 'GET' && route === 'call') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-        res.end(callPageHtml());
+        res.end(callPageHtml(config.ui));
         return;
       }
       if (route === 'info') {
@@ -444,6 +446,19 @@ export function createGptLiveAdapter(config: GptLiveConfig): ChannelAdapter {
   };
 }
 
+/** GPT_LIVE_UI is a JSON object; anything unparsable falls back to the page defaults with a warning. */
+export function parseUiConfig(raw: string | undefined): VoiceUiConfig | undefined {
+  if (!raw || !raw.trim()) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as VoiceUiConfig;
+    log.warn('gpt-live: GPT_LIVE_UI must be a JSON object; using the default look');
+  } catch (err) {
+    log.warn('gpt-live: GPT_LIVE_UI is not valid JSON; using the default look', { err });
+  }
+  return undefined;
+}
+
 registerChannelAdapter(CHANNEL_TYPE, {
   factory: () => {
     const env = readEnvFile([
@@ -454,6 +469,7 @@ registerChannelAdapter(CHANNEL_TYPE, {
       'GPT_LIVE_VOICE',
       'GPT_LIVE_LINK_TOKEN',
       'GPT_LIVE_AGENT_NAME',
+      'GPT_LIVE_UI',
     ]);
     const key = resolveOpenAiKey(env);
     if (!key) return null;
@@ -468,6 +484,7 @@ registerChannelAdapter(CHANNEL_TYPE, {
       voice: env.GPT_LIVE_VOICE || 'marin',
       linkTokens: env.GPT_LIVE_LINK_TOKEN.split(','),
       fallbackAgentName: env.GPT_LIVE_AGENT_NAME || 'the assistant',
+      ui: parseUiConfig(env.GPT_LIVE_UI),
     });
   },
   defaults: GPT_LIVE_DEFAULTS,

@@ -49,6 +49,7 @@ src/channels/gpt-live-session.test.ts
 src/channels/gpt-live-adapter.test.ts
 src/channels/gpt-live-keychain.test.ts
 src/channels/gpt-live-registration.test.ts
+src/channels/gpt-live-call-page.test.ts
 ```
 
 ### 2. Register the adapter
@@ -274,6 +275,40 @@ else, append another token to `GPT_LIVE_LINK_TOKEN` (comma-separated), restart,
 derive its line id the same way, and wire `voice:<that line id>`.
 
 To uninstall: see [REMOVE.md](REMOVE.md).
+
+## The call page
+
+The page callers open is a small React app kept under [ui/](ui/) in this skill:
+Teenage Engineering inspired, one screen beside a rail of keys, a dot-matrix
+display that shows the caller's voice in white, thinking in orange and the
+agent's voice in orange, captions that fade in word by word, and three device
+finishes. It ships as one self-contained document inside
+`src/channels/gpt-live-call-page.ts` (generated, do not edit by hand), so the
+host build, the copy list and the routes never change when the look does.
+
+Change the look without a rebuild with one `.env` key holding a JSON object,
+injected into the page when it is served:
+
+```
+GPT_LIVE_UI={"colorway":"field","presence":"matrix","brand":"Casa line"}
+```
+
+| key | values | default |
+| --- | --- | --- |
+| `skin` | `te` (device), `nanoclaw` (card) | `te` |
+| `colorway` | `auto` (follows light/dark), `ivory`, `field`, `rabbit` | `auto` |
+| `layout` | `rail` (screen beside keys), `stack` | `rail` |
+| `presence` | `matrix`, `bars` | `matrix` |
+| `brand` | header name, up to 60 characters | `NanoClaw Voice` |
+| `footer` | footer line; `{agent}` becomes the wired agent's name | `Voice by GPT-Live-1 · answers by {agent}` |
+| `shortcuts` | print `esc` and `space` on the keys (desktop) | `true` |
+| `timestamps` | time into the call on each transcript turn | `true` |
+| `colorwayPicker` | let callers pick a finish from the page | `true` |
+
+Callers can also switch the finish from the three dots under the transcript;
+the choice stays in their browser. To change the components themselves, edit
+`ui/src`, then from `ui/` run `pnpm install --ignore-workspace && pnpm build`;
+the build regenerates the module, and the channel tests check it.
 
 ## Troubleshooting
 

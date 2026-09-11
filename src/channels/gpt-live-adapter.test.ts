@@ -269,7 +269,7 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
     expect(res.headers.get('content-type')).toContain('text/html');
     const html = await res.text();
     expect(html).toContain('RTCPeerConnection');
-    expect(html).toContain("new URL('sdp?t='");
+    expect(html).toMatch(/new URL\(["']sdp\?t=/);
   });
 
   it('refuses an SDP offer without a known link token', async () => {
@@ -458,7 +458,7 @@ describe('gpt-live adapter (fake OpenAI, real webhook server)', () => {
 
   it('the call page hangs up with a keepalive request so a closing tab still reaches the host', async () => {
     const html = await (await fetch(`${base}/call?t=tok123`)).text();
-    expect(html).toContain('keepalive: true');
+    expect(html).toMatch(/keepalive\s*:\s*(true|!0)/);
   });
 
   it('after teardown every route answers 503 and starts nothing', async () => {
