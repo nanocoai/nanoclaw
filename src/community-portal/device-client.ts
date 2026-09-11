@@ -6,6 +6,7 @@ import type { InstallIdentity } from './install-identity.js';
 import type { CellTicket, LinkLog } from './link.js';
 import { readJson, writePrivate } from './private-file.js';
 import { processLock } from './process-lock.js';
+import type { JournalTerminal, TerminalReport } from './terminal.js';
 
 /**
  * A checkout's client for the community portal's HTTP API. Every request
@@ -75,6 +76,8 @@ export interface Journal {
   slackSetup?: SlackSetup;
   reminders?: Partial<Record<string, boolean>>;
   reminderPending?: Partial<Record<string, boolean>>;
+  /** The loopback door's state, written by `remote enable|disable`; read by the running host. */
+  terminal?: JournalTerminal;
 }
 
 export interface DeviceRegistration {
@@ -240,6 +243,11 @@ export class DeviceClient {
   /** A short-lived ticket for the cell link, proved with the device key. */
   ticket(signal?: AbortSignal): Promise<CellTicket> {
     return this.call<CellTicket>('POST', '/api/v1/cell-ticket', { body: {}, signal, proof: true });
+  }
+
+  /** The door's state: on every door start, every fifteen minutes while enabled, and on disable. */
+  reportTerminal(report: TerminalReport, signal?: AbortSignal): Promise<{ ok: boolean }> {
+    return this.call<{ ok: boolean }>('PUT', '/api/v1/terminal/host', { body: report, signal });
   }
 
   protected async call<T>(
